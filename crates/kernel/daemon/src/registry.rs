@@ -70,6 +70,17 @@ pub trait DaemonRegistry: Send + Sync {
     fn plan_quota(&self) -> Option<Arc<dyn hofund_plugin_api::PlanQuota>> {
         None
     }
+
+    /// Subscription plugin ids the registry linked.
+    fn subscription_ids(&self) -> Vec<&'static str> {
+        Vec::new()
+    }
+
+    /// Agent sign-in declaration for subscription `id`.
+    fn agent_sign_in(&self, id: &str) -> Option<hofund_plugin_api::AgentSignIn> {
+        self.subscription(id)
+            .and_then(|factory| factory.spec().agent_sign_in())
+    }
 }
 
 /// Compatibility adapter backed by the compile-time plugin registry.
@@ -131,6 +142,10 @@ impl DaemonRegistry for RegistryAdapter {
 
     fn plan_quota(&self) -> Option<Arc<dyn hofund_plugin_api::PlanQuota>> {
         hofund_plugin_registry::plan_quota()
+    }
+
+    fn subscription_ids(&self) -> Vec<&'static str> {
+        hofund_plugin_registry::subscription_ids()
     }
 }
 

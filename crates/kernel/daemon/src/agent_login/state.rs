@@ -93,11 +93,12 @@ pub fn write(root: &Path, agents: &BTreeMap<String, AgentState>) -> Result<(), D
     })
 }
 
-/// Builds policy from subscription config.
+/// Builds policy from subscription config and the plugin's sign-in flag.
 #[must_use]
 pub fn policy_from_config(
     routing: &str,
     options: &BTreeMap<String, hofund_config::Value>,
+    sign_in_spends: bool,
 ) -> LoginPolicy {
     let bool_opt = |key: &str| {
         options
@@ -108,53 +109,26 @@ pub fn policy_from_config(
         routing: routing.to_owned(),
         keep_login: bool_opt("keep_login"),
         switch_only: bool_opt("switch_only"),
-        sign_in_spends: bool_opt("sign_in_spends"),
+        sign_in_spends,
     }
 }
 
-/// Maps a CLI agent name to a subscription id.
-#[must_use]
-pub fn subscription_for_agent(agent: &str) -> Option<&'static str> {
-    match agent.to_ascii_lowercase().as_str() {
-        "claude" | "claude-code" | "cc" => Some("claude"),
-        "codex" => Some("codex"),
-        _ => None,
-    }
-}
-
-/// Agent home directory from the environment.
+/// Resolves the agent home from a plugin declaration.
 ///
 /// # Errors
 ///
 /// Returns [`DaemonError`] when no home directory can be resolved.
-pub fn agent_home(subscription: &str) -> Result<PathBuf, DaemonError> {
-    match subscription {
-        "claude" => std::env::var("CLAUDE_CONFIG_DIR")
-            .map(PathBuf::from)
-            .or_else(|_| home_join(".claude")),
-        "codex" => std::env::var("CODEX_HOME")
-            .map(PathBuf::from)
-            .or_else(|_| home_join(".codex")),
-        _ => Err(DaemonError::new(format!(
-            "subscription `{subscription}` has no agent sign-in to switch"
-        ))),
+pub fn agent_home(decl: &hofund_plugin_api::AgentSignIn) -> Result<PathBuf, DaemonError> {
+    if let Ok(value) = std::env::var(decl.home_env())
+        && !value.is_empty()
+    {
+        return Ok(PathBuf::from(value));
     }
-}
-
-fn home_join(suffix: &str) -> Result<PathBuf, DaemonError> {
-    let home = std::env::var("HOME")
-        .map_err(|_| DaemonError::new("HOME is not set; pass CLAUDE_CONFIG_DIR or CODEX_HOME"))?;
-    Ok(PathBuf::from(home).join(suffix))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn d27_9_subscription_for_agent_maps_cli_names() {
-        assert_eq!(subscription_for_agent("claude-code"), Some("claude"));
-        assert_eq!(subscription_for_agent("codex"), Some("codex"));
-        assert!(subscription_for_agent("gemini").is_none());
-    }
+    let home = std::env::var("HOME").map_err(|_| {
+        DaemonError::new(format!(
+            "HOME is not set; set {} to the agent directory",
+            decl.home_env()
+        ))
+    })?;
+    Ok(PathBuf::from(home).join(decl.home_dir()))
 }

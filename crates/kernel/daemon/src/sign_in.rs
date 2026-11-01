@@ -330,9 +330,17 @@ async fn sign_out_in(
             "subscription `{id}` has no account `{account}`"
         )));
     };
-    if id == "claude" || id == "codex" {
+    if crate::RegistryAdapter.agent_sign_in(id).is_some() {
         let state_root = entry.host.dirs().state_dir().map_err(show)?;
-        crate::agent_login::switch_before_forget(opened, config, &state_root, id, account).await?;
+        crate::agent_login::switch_before_forget(
+            opened,
+            &crate::RegistryAdapter,
+            config,
+            &state_root,
+            id,
+            account,
+        )
+        .await?;
     }
     entry.host.accounts().remove(target).await.map_err(show)
 }

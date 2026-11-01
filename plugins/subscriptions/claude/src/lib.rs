@@ -13,9 +13,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use hofund_plugin_api::{
-    AccountId, AccountStatus, BinaryName, BodyStream, BuildError, ConfigError, HostContext,
-    ModelList, PipedChild, PluginError, PluginId, QuotaWindow, RawTable, RawValue, Schema,
-    SignInChallenge, SignInCtx, SignInFlow, SignInFlowKind, SignInProof, Subscription,
+    AccountId, AccountStatus, AgentSignIn, BinaryName, BodyStream, BuildError, ConfigError,
+    HostContext, ModelList, PipedChild, PluginError, PluginId, QuotaWindow, RawTable, RawValue,
+    Schema, SignInChallenge, SignInCtx, SignInFlow, SignInFlowKind, SignInProof, Subscription,
     SubscriptionFactory, SubscriptionSpec, UpstreamProvider, ValidConfig,
 };
 use hofund_plugin_sdk::Contribution;
@@ -48,6 +48,14 @@ static SPEC: SubscriptionSpec = SubscriptionSpec::from_static(
     PluginId::from_static("claude"),
     "Claude Code",
     SignInFlowKind::Bridge,
+)
+.with_agent_sign_in(
+    AgentSignIn::new(
+        &["claude", "claude-code", "cc"],
+        "CLAUDE_CONFIG_DIR",
+        ".claude",
+    )
+    .with_sign_in_spends(true),
 );
 
 /// Registers the Claude Code subscription.
@@ -428,6 +436,14 @@ impl Subscription for Claude {
         host: &HostContext,
     ) -> Result<(), PluginError> {
         agent_sign_in::write(account, home, host).await
+    }
+
+    async fn import_accounts(
+        &self,
+        text: &str,
+        host: &HostContext,
+    ) -> Result<Vec<AccountId>, PluginError> {
+        import::store(host, text).await
     }
 }
 

@@ -76,10 +76,10 @@ pub use inbound::{InboundSurface, Method, RouteSpec};
 pub use plan::{PlanCard, PlanQuery, PlanQuota, PlanSupport, PlanWindow};
 pub use records::{
     Account, AccountStatus, AgentActiveProvider, AgentCredential, AgentDescription, AgentFile,
-    AgentRoute, AgentSet, AuthChoice, BinaryName, DeviceFlow, FileKind, ListQuery, MatchNeedle,
-    ModelField, ModelList, ModelSpec, ModelValue, OwnerTest, ProbeQuery, QuotaObservation,
-    QuotaQuery, QuotaWindow, SignInChallenge, SignInCtx, SignInFlow, SignInFlowKind, SignInProof,
-    Slot, SubscriptionSpec, Visible,
+    AgentRoute, AgentSet, AgentSignIn, AuthChoice, BinaryName, DeviceFlow, FileKind, ListQuery,
+    MatchNeedle, ModelField, ModelList, ModelSpec, ModelValue, OwnerTest, ProbeQuery,
+    QuotaObservation, QuotaQuery, QuotaWindow, SignInChallenge, SignInCtx, SignInFlow,
+    SignInFlowKind, SignInProof, Slot, SubscriptionSpec, Visible,
 };
 pub use redaction::{redact_token, safe_url};
 pub use secrecy::SecretString;

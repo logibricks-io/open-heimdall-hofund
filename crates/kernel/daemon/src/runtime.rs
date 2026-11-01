@@ -536,6 +536,7 @@ impl Runtime {
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(subscriptions::ACCOUNT_TICK);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            let mut last_login = tokio::time::Instant::now();
             loop {
                 tokio::select! {
                     _ = interval.tick() => {}
@@ -544,6 +545,12 @@ impl Runtime {
                 runtime.refresh_subscriptions().await;
                 runtime.poll_quotas(tokio::time::Instant::now()).await;
                 runtime.poll_models(tokio::time::Instant::now()).await;
+                if last_login.elapsed() >= crate::agent_login::LOGIN_SWITCH_EVERY {
+                    last_login = tokio::time::Instant::now();
+                    let states = runtime.plan.lock().expect("plan").subscriptions.clone();
+                    let _ =
+                        crate::agent_login::tick_sign_ins(runtime.registry.as_ref(), &states).await;
+                }
             }
         })
     }

@@ -1383,6 +1383,80 @@ impl std::fmt::Debug for SignInProof {
     }
 }
 
+/// Where a subscription writes the agent's own sign-in, and the names the CLI accepts.
+///
+/// The daemon reads this from the plugin spec. It does not name a product.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct AgentSignIn {
+    names: &'static [&'static str],
+    home_env: &'static str,
+    home_dir: &'static str,
+    sign_in_spends: bool,
+}
+
+impl AgentSignIn {
+    /// A declaration. `names` are CLI aliases. `home_env` overrides `home_dir`
+    /// under `HOME` when the variable is set.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `names` is empty or any string is empty.
+    #[must_use]
+    pub const fn new(
+        names: &'static [&'static str],
+        home_env: &'static str,
+        home_dir: &'static str,
+    ) -> Self {
+        assert!(!names.is_empty(), "agent sign-in names are empty");
+        let mut index = 0;
+        while index < names.len() {
+            assert!(!names[index].is_empty(), "agent sign-in name is empty");
+            index += 1;
+        }
+        assert!(!home_env.is_empty(), "agent sign-in home env is empty");
+        assert!(!home_dir.is_empty(), "agent sign-in home dir is empty");
+        Self {
+            names,
+            home_env,
+            home_dir,
+            sign_in_spends: false,
+        }
+    }
+
+    /// The agent's own requests spend the account, so the sign-in stays on the
+    /// account it moved to until that one is spent too.
+    #[must_use]
+    pub const fn with_sign_in_spends(mut self, sign_in_spends: bool) -> Self {
+        self.sign_in_spends = sign_in_spends;
+        self
+    }
+
+    /// CLI names, including short aliases.
+    #[must_use]
+    pub const fn names(&self) -> &'static [&'static str] {
+        self.names
+    }
+
+    /// Environment variable that overrides the home directory.
+    #[must_use]
+    pub const fn home_env(&self) -> &'static str {
+        self.home_env
+    }
+
+    /// Directory under `HOME` when `home_env` is unset.
+    #[must_use]
+    pub const fn home_dir(&self) -> &'static str {
+        self.home_dir
+    }
+
+    /// Whether the sign-in itself spends the allowance.
+    #[must_use]
+    pub const fn sign_in_spends(&self) -> bool {
+        self.sign_in_spends
+    }
+}
+
 /// Static metadata for a subscription plugin.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -1391,6 +1465,7 @@ pub struct SubscriptionSpec {
     display_name: &'static str,
     flow: SignInFlowKind,
     max_accounts: u64,
+    agent_sign_in: Option<AgentSignIn>,
 }
 
 impl SubscriptionSpec {
@@ -1415,7 +1490,15 @@ impl SubscriptionSpec {
             display_name,
             flow,
             max_accounts: 0,
+            agent_sign_in: None,
         }
+    }
+
+    /// Declares that this subscription switches an agent's own sign-in.
+    #[must_use]
+    pub const fn with_agent_sign_in(mut self, agent_sign_in: AgentSignIn) -> Self {
+        self.agent_sign_in = Some(agent_sign_in);
+        self
     }
 
     /// Declares how many accounts may take requests at once. Zero means no
@@ -1453,6 +1536,12 @@ impl SubscriptionSpec {
     #[must_use]
     pub const fn max_accounts(&self) -> u64 {
         self.max_accounts
+    }
+
+    /// Agent sign-in switching, when this subscription owns one.
+    #[must_use]
+    pub const fn agent_sign_in(&self) -> Option<AgentSignIn> {
+        self.agent_sign_in
     }
 }
 

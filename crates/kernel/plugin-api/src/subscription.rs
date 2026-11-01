@@ -236,4 +236,21 @@ pub trait Subscription: Send + Sync + 'static {
             "this subscription does not switch an agent sign-in",
         ))
     }
+
+    /// Imports accounts from an export file. [`PluginErrorKind::Unsupported`](crate::PluginErrorKind)
+    /// means this subscription does not read that file.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when the file is this subscription's format and cannot be stored.
+    async fn import_accounts(
+        &self,
+        text: &str,
+        host: &HostContext,
+    ) -> Result<Vec<AccountId>, PluginError> {
+        let _ = (text, host);
+        Err(PluginError::unsupported(
+            "this subscription does not import accounts from a file",
+        ))
+    }
 }

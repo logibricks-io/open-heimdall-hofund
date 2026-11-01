@@ -106,6 +106,14 @@ AgentSet::const fn file (& self) -> & 'static str
 AgentSet::const fn from_static (file : & 'static str , key : & 'static str , slot : Slot) -> Self
 AgentSet::const fn key (& self) -> & 'static str
 AgentSet::const fn slot (& self) -> & Slot
+AgentSignIn
+AgentSignIn #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
+AgentSignIn::const fn home_dir (& self) -> & 'static str
+AgentSignIn::const fn home_env (& self) -> & 'static str
+AgentSignIn::const fn names (& self) -> & 'static [& 'static str]
+AgentSignIn::const fn new (names : & 'static [& 'static str] , home_env : & 'static str , home_dir : & 'static str ,) -> Self
+AgentSignIn::const fn sign_in_spends (& self) -> bool
+AgentSignIn::const fn with_sign_in_spends (mut self , sign_in_spends : bool) -> Self
 AuthChoice
 AuthChoice #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
 AuthChoice::Bearer
@@ -794,6 +802,7 @@ Subscription::async fn account_status (& self , account : & AccountId , host : &
 Subscription::async fn cancel_sign_in (& self , ctx : & SignInCtx , host : & HostContext) -> Result < () , PluginError >
 Subscription::async fn complete_sign_in (& self , ctx : & SignInCtx , proof : SignInProof , host : & HostContext ,) -> Result < AccountId , PluginError >
 Subscription::async fn health (& self) -> Result < () , PluginError >
+Subscription::async fn import_accounts (& self , text : & str , host : & HostContext ,) -> Result < Vec < AccountId > , PluginError >
 Subscription::async fn list_models (& self , account : & AccountId , host : & HostContext ,) -> Result < ModelList , PluginError >
 Subscription::async fn quota (& self , account : & AccountId , host : & HostContext ,) -> Result < Vec < QuotaWindow > , PluginError >
 Subscription::async fn refresh (& self , account : & AccountId , host : & HostContext) -> Result < () , PluginError >
@@ -811,11 +820,13 @@ SubscriptionFactory::fn spec (& self) -> & 'static SubscriptionSpec
 SubscriptionFactory::fn validate (& self , raw : & RawTable) -> Result < Self :: Config , ConfigError >
 SubscriptionSpec
 SubscriptionSpec #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
+SubscriptionSpec::const fn agent_sign_in (& self) -> Option < AgentSignIn >
 SubscriptionSpec::const fn display_name (& self) -> & 'static str
 SubscriptionSpec::const fn flow (& self) -> SignInFlowKind
 SubscriptionSpec::const fn from_static (plugin : PluginId , display_name : & 'static str , flow : SignInFlowKind ,) -> Self
 SubscriptionSpec::const fn max_accounts (& self) -> u64
 SubscriptionSpec::const fn plugin (& self) -> & PluginId
+SubscriptionSpec::const fn with_agent_sign_in (mut self , agent_sign_in : AgentSignIn) -> Self
 SubscriptionSpec::const fn with_max_accounts (mut self , max_accounts : u64) -> Self
 SurfaceHost
 SurfaceHost #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)

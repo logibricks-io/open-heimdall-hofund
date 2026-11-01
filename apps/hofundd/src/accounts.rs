@@ -1,20 +1,22 @@
-//! `hofundd accounts`: agent sign-in switching.
+//! `hofundd accounts`: agent sign-in switching and account import.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use hofund_daemon::accounts_switch_in;
+use hofund_daemon::{accounts_import_in, accounts_switch_in};
 
 pub(crate) const USAGE: &str = "\
-Usage: hofundd accounts [--config <path>] switch <claude|codex> <next|account>
+Usage: hofundd accounts [--config <path>] switch <agent> <next|account>
+       hofundd accounts [--config <path>] import <file>
 
-The hofund CLI runs these for `hofund accounts`; see `hofund accounts switch --help`.
+The hofund CLI runs these for `hofund accounts`.
 ";
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum AccountsCommand {
     Switch { agent: String, target: String },
+    Import { file: PathBuf },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -51,6 +53,9 @@ pub(crate) fn parse(args: &[OsString]) -> Result<Parsed, String> {
             agent: agent.clone(),
             target: target.clone(),
         },
+        [command, file] if command == "import" => AccountsCommand::Import {
+            file: PathBuf::from(file),
+        },
         _ => return Err(USAGE.to_owned()),
     };
     Ok(Parsed::Run(config, command))
@@ -70,5 +75,41 @@ pub(crate) fn run(config: &Path, command: AccountsCommand) -> ExitCode {
                 }
             }
         }
+        AccountsCommand::Import { file } => match accounts_import_in(config, &file) {
+            Ok(ids) => {
+                println!("imported {} account(s)", ids.len());
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("{error}");
+                ExitCode::FAILURE
+            }
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn d27_11_accounts_import_parses() {
+        let parsed = parse(&[
+            OsString::from("--config"),
+            OsString::from("hofund.toml"),
+            OsString::from("--"),
+            OsString::from("import"),
+            OsString::from("export.json"),
+        ])
+        .expect("parse");
+        assert_eq!(
+            parsed,
+            Parsed::Run(
+                Some(PathBuf::from("hofund.toml")),
+                AccountsCommand::Import {
+                    file: PathBuf::from("export.json"),
+                }
+            )
+        );
     }
 }

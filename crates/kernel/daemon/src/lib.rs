@@ -55,7 +55,7 @@ mod subscriptions;
 mod terminate;
 mod watch;
 
-pub use agent_login::accounts_switch_in;
+pub use agent_login::{accounts_import_in, accounts_switch_in};
 pub use models::{
     Cached, ModelLimits, ModelsHost, Picks, ProbeOutcome, ProviderModels, RefreshTiming,
 };

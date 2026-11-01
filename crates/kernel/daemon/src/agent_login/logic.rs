@@ -47,8 +47,8 @@ pub struct LoginPolicy {
 
 impl LoginPolicy {
     /// Whether the agent should return to the account it moved off once that
-    /// account has room again, as the reference does for Codex through the
-    /// gateway but not for Claude Code sign-in alone.
+    /// account has room again. In-order routing and `keep_login` do. A
+    /// sign-in that spends the account stays on the account it moved to.
     #[must_use]
     pub fn returns_to_first(&self) -> bool {
         if self.keep_login {
@@ -186,8 +186,7 @@ pub fn next_in_order(
 }
 
 /// Whether the active account should move, and where (reference NextLogin,
-/// commit 41b5c0f19). Reserved for the automatic account tick.
-#[allow(dead_code)]
+/// commit 41b5c0f19). The account tick calls this every five minutes.
 pub fn next_login(
     rows: &[LoginRow],
     quotas: &[(String, LoginQuota)],

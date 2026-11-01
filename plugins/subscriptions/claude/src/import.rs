@@ -1,7 +1,6 @@
 //! Importing Claude accounts from external export files.
-#![allow(dead_code)]
 
-use hofund_plugin_api::PluginError;
+use hofund_plugin_api::{AccountId, HostContext, PluginError};
 use hofund_plugin_sdk::json::Value;
 
 /// One account parsed from an export file.
@@ -75,12 +74,9 @@ fn parse_swap_account(entry: &Value) -> Result<ImportedLogin, PluginError> {
     let credentials_text = Value::Object(cred_root).to_string();
     let profile = object
         .get("config")
+        .and_then(|config| config.as_object())
         .and_then(|config| config.get("oauthAccount"))
-        .map(|account| {
-            let mut root = hofund_plugin_sdk::json::Map::new();
-            root.insert("oauthAccount".to_owned(), account.clone());
-            Value::Object(root).to_string()
-        })
+        .map(std::string::ToString::to_string)
         .unwrap_or_default();
     let alias = object
         .get("alias")
@@ -93,6 +89,42 @@ fn parse_swap_account(entry: &Value) -> Result<ImportedLogin, PluginError> {
         profile,
         alias,
     })
+}
+
+/// Stores every account in a swap export.
+///
+/// # Errors
+///
+/// Returns [`PluginError`] when the file is this format and cannot be stored.
+/// A file that is not a swap export is [`PluginErrorKind::Unsupported`](hofund_plugin_api::PluginErrorKind).
+pub async fn store(host: &HostContext, text: &str) -> Result<Vec<AccountId>, PluginError> {
+    let trimmed = text.trim();
+    let Ok(value) = hofund_plugin_sdk::json::from_str::<Value>(trimmed) else {
+        return Err(PluginError::unsupported(
+            "not an account export this subscription reads",
+        ));
+    };
+    let is_swap = value
+        .as_object()
+        .is_some_and(|root| root.get("swapVersion").is_some());
+    if !is_swap {
+        return Err(PluginError::unsupported(
+            "not an account export this subscription reads",
+        ));
+    }
+    let rows = parse_export(trimmed)?;
+    let mut ids = Vec::new();
+    for row in rows {
+        let profile = crate::creds::Profile::parse(&row.profile);
+        let credentials = crate::creds::parse_credentials(&row.credentials)
+            .ok_or_else(|| PluginError::config("an imported account has no credentials"))?;
+        let id = profile.account_id()?;
+        let blob = crate::creds::blob(&credentials, &profile);
+        let account = host.accounts().account(id.clone(), row.email)?;
+        host.accounts().upsert(account, blob.to_secret()).await?;
+        ids.push(id);
+    }
+    Ok(ids)
 }
 
 #[cfg(test)]
