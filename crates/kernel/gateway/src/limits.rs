@@ -629,6 +629,8 @@ mod tests {
         assert_eq!(refusal.status.period, "week");
         assert!(refusal.message().contains("resets at"));
         assert!(refusal.retry_after(now) >= 1);
+        // A reset already past still asks the client to wait one second.
+        assert_eq!(refusal.retry_after(now + chrono::Duration::days(30)), 1);
         assert_eq!(
             binding(std::slice::from_ref(&refusal.status)).expect("binding"),
             refusal.status
@@ -722,5 +724,104 @@ mod tests {
         assert!(budget.reserve(&identity, 40, after).is_err());
         drop(current);
         assert!(budget.reserve(&identity, 40, after).is_ok());
+    }
+
+    fn limit_status(period: &str, reset: i64, tokens: u64, spent: bool) -> LimitStatus {
+        LimitStatus {
+            period: period.to_owned(),
+            days: 0,
+            hours: 0,
+            start: 0,
+            reset,
+            calls: 1,
+            tokens,
+            cost: 0.0,
+            unpriced: 0,
+            in_flight: 0,
+            reserved: 0,
+            reserved_cost: 0.0,
+            token_limit: 100,
+            cost_limit: 0.0,
+            cache_reads: false,
+            tokens_left: 100_u64.saturating_sub(tokens),
+            cost_left: 0.0,
+            spent,
+        }
+    }
+
+    #[test]
+    fn l7_binding_is_the_spent_limit_resetting_last_else_the_fullest() {
+        let day = limit_status("day", 10, 100, true);
+        let week = limit_status("week", 70, 100, true);
+        let month = limit_status("month", 300, 20, false);
+        for order in [
+            vec![day.clone(), week.clone(), month.clone()],
+            vec![month.clone(), week.clone(), day.clone()],
+        ] {
+            assert_eq!(binding(&order).expect("binding").period, "week");
+        }
+        let fuller = limit_status("week", 70, 60, false);
+        for order in [
+            vec![month.clone(), fuller.clone()],
+            vec![fuller.clone(), month.clone()],
+        ] {
+            assert_eq!(binding(&order).expect("binding").period, "week");
+        }
+        assert!(binding(&[]).is_none());
+    }
+
+    #[test]
+    fn l4_estimate_adds_the_mean_output_and_holds_a_shared_window_once() {
+        let (_dir, usage, budget) = fixture();
+        let now = Local
+            .with_ymd_and_hms(2026, 10, 7, 12, 0, 0)
+            .single()
+            .expect("noon");
+        let day = KeyLimit {
+            period: "day".to_owned(),
+            tokens: 1_000,
+            ..KeyLimit::default()
+        };
+        let midnight = day.window(now).start;
+        let cycle = KeyLimit {
+            period: "hours".to_owned(),
+            hours: 24,
+            tokens: 1_000,
+            since: midnight,
+            ..KeyLimit::default()
+        };
+        assert_eq!(cycle.window(now).start, midnight);
+        let identity = identity(vec![day, cycle]);
+        usage
+            .record(&Row {
+                created_unix: midnight,
+                model: "demo".to_owned(),
+                upstream: "member".to_owned(),
+                input_tokens: Some(0),
+                output_tokens: Some(30),
+                latency_ms: 1,
+                status: "200".to_owned(),
+                caller_key_id: "key".to_owned(),
+                caller_key_name: "Busy".to_owned(),
+            })
+            .expect("record");
+        let held = budget
+            .reserve(&identity, 40, now)
+            .expect("reserve")
+            .expect("reservation");
+        let statuses = budget.status(&identity, now).expect("status");
+        for status in &statuses {
+            // 40 bytes / 4 plus a mean output of 30, held once for the shared start.
+            assert_eq!(status.reserved, 40);
+            assert_eq!(status.in_flight, 1);
+        }
+        drop(held);
+    }
+
+    #[test]
+    fn l3_responses_and_chat_inputs_include_cache_reads() {
+        assert!(input_includes_cache(ProtocolId::OPENAI_RESPONSES.as_str()));
+        assert!(input_includes_cache(ProtocolId::OPENAI_CHAT.as_str()));
+        assert!(!input_includes_cache("plain"));
     }
 }

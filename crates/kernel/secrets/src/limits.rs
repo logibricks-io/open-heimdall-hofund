@@ -294,6 +294,14 @@ mod tests {
 
     #[test]
     fn l1_limit_validation_bounds_and_messages() {
+        let longest = KeyLimit {
+            days: MAX_DAYS,
+            ..limit("days")
+        };
+        assert_eq!(
+            longest.validated().expect("ten years").expect("cap").days,
+            MAX_DAYS
+        );
         assert_eq!(
             limit("").validated().expect("default").expect("cap").period,
             "day"
@@ -402,6 +410,31 @@ mod tests {
     #[test]
     fn l2_calendar_cycles_and_reset_windows() {
         let zone = FixedOffset::east_opt(8 * 3600).expect("zone");
+        let december = zone
+            .with_ymd_and_hms(2026, 12, 15, 9, 0, 0)
+            .single()
+            .expect("December");
+        assert_eq!(
+            limit("month").window(december).reset,
+            zone.with_ymd_and_hms(2027, 1, 1, 0, 0, 0)
+                .single()
+                .expect("New Year")
+                .timestamp()
+        );
+        // The clock set back well before a cycle's start keeps the first window.
+        let anchored = KeyLimit {
+            hours: 2,
+            since: december.timestamp(),
+            ..limit("hours")
+        };
+        let early = december - chrono::Duration::hours(5);
+        assert_eq!(
+            anchored.window(early),
+            LimitWindow {
+                start: december.timestamp(),
+                reset: december.timestamp() + 2 * 3_600,
+            }
+        );
         let now = zone
             .with_ymd_and_hms(2026, 10, 4, 23, 0, 0)
             .single()
