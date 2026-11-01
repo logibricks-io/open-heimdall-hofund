@@ -3126,7 +3126,7 @@ mod forwarded_token_tests {
     }
 
     #[test]
-    fn l3_forwarded_cache_details_follow_the_protocol_shape() {
+    fn u1a_10_forwarded_cache_details_follow_the_protocol_shape() {
         let chat = forwarded_details(
             br#"{"usage":{"prompt_tokens":10,"prompt_tokens_details":{"cached_tokens":4}}}"#,
             Some(10),

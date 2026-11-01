@@ -73,3 +73,49 @@ fn u1a_1_old_database_gains_cache_and_reasoning_columns() {
         }
     );
 }
+
+#[test]
+fn u1a_2_summary_totals_aggregate_cache_and_reasoning() {
+    let dir = tempfile::tempdir().expect("dir");
+    let ledger = Ledger::open(&dir.path().join("usage.sqlite")).expect("open");
+    for (at, read, write_5m, write_1h, reasoning) in
+        [(1_i64, 10_i64, 3_i64, 0_i64, 1_i64), (2, 0, 0, 5, 2)]
+    {
+        ledger
+            .record_with_details(
+                &Row {
+                    created_unix: at,
+                    model: "m".to_owned(),
+                    upstream: "up".to_owned(),
+                    input_tokens: Some(1),
+                    output_tokens: Some(1),
+                    latency_ms: 1,
+                    status: "200".to_owned(),
+                    ..Default::default()
+                },
+                None,
+                UsageDetails {
+                    cache_read_tokens: Some(read),
+                    cache_write_tokens: Some(write_5m + write_1h),
+                    cache_write_5m_tokens: Some(write_5m),
+                    cache_write_1h_tokens: Some(write_1h),
+                    reasoning_tokens: Some(reasoning),
+                    ..UsageDetails::default()
+                },
+            )
+            .expect("row");
+    }
+    let (_, totals) = ledger.summary(Some(0), 10).expect("summary");
+    assert_eq!(
+        totals,
+        Totals {
+            requests: 2,
+            input_tokens: 2,
+            output_tokens: 2,
+            cache_read_tokens: 10,
+            cache_write_5m_tokens: 3,
+            cache_write_1h_tokens: 5,
+            reasoning_tokens: 3,
+        }
+    );
+}
