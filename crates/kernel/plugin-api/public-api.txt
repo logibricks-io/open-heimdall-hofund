@@ -799,6 +799,7 @@ Subscription::async fn quota (& self , account : & AccountId , host : & HostCont
 Subscription::async fn refresh (& self , account : & AccountId , host : & HostContext) -> Result < () , PluginError >
 Subscription::async fn shutdown (& self , deadline : Duration) -> Result < () , PluginError >
 Subscription::async fn start_sign_in (& self , ctx : & SignInCtx , host : & HostContext ,) -> Result < SignInChallenge , PluginError >
+Subscription::async fn write_agent_sign_in (& self , account : & AccountId , home : & std :: path :: Path , host : & HostContext ,) -> Result < () , PluginError >
 Subscription::fn flow (& self) -> & SignInFlow
 Subscription::fn id (& self) -> & PluginId
 Subscription::fn upstream (& self , account : & AccountId , host : & HostContext ,) -> Result < Arc < dyn UpstreamProvider > , PluginError >

@@ -219,4 +219,21 @@ pub trait Subscription: Send + Sync + 'static {
         let _ = deadline;
         Ok(())
     }
+
+    /// Writes a stored account into the agent's own sign-in files under `home`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when the account is missing or the write fails.
+    async fn write_agent_sign_in(
+        &self,
+        account: &AccountId,
+        home: &std::path::Path,
+        host: &HostContext,
+    ) -> Result<(), PluginError> {
+        let _ = (account, home, host);
+        Err(PluginError::unsupported(
+            "this subscription does not switch an agent sign-in",
+        ))
+    }
 }

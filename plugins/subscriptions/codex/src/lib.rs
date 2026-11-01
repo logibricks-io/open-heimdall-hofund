@@ -7,6 +7,7 @@
 //! reports become quota observations, and `quota` reads `/wham/usage`.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use hofund_plugin_api::{
@@ -18,6 +19,7 @@ use hofund_plugin_api::{
 use hofund_plugin_sdk::Contribution;
 use hofund_plugin_sdk::oauth::{Pkce, SecretObject, constant_time_eq, new_state};
 
+mod agent_sign_in;
 mod limits;
 mod models;
 mod shape;
@@ -315,6 +317,15 @@ impl Subscription for Codex {
             Arc::clone(&self.endpoints),
             Arc::clone(&self.prompts),
         )))
+    }
+
+    async fn write_agent_sign_in(
+        &self,
+        account: &AccountId,
+        home: &Path,
+        host: &HostContext,
+    ) -> Result<(), PluginError> {
+        agent_sign_in::write(account, home, host).await
     }
 }
 

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Agent sign-in switching for Claude Code and Codex: `hofund accounts switch
+  <claude|codex> next|<account>`, subscription plugin file writes, sign-out
+  handover, and swap-export parsing (D-27).
+
 ### Fixed
 
 - Vendor-timed quota and credit rests now stay in place when a quota reading

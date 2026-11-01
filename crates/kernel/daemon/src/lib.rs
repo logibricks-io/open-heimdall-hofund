@@ -29,6 +29,7 @@ use hofund_secrets::{KeyStore, TokenFile};
 use hofund_usage::Ledger;
 
 mod adapt;
+mod agent_login;
 mod config_ops;
 mod config_write;
 mod control;
@@ -54,6 +55,7 @@ mod subscriptions;
 mod terminate;
 mod watch;
 
+pub use agent_login::accounts_switch_in;
 pub use models::{
     Cached, ModelLimits, ModelsHost, Picks, ProbeOutcome, ProviderModels, RefreshTiming,
 };

@@ -5,6 +5,7 @@
 //! with local control enabled, and turns the termination into the process
 //! exit status. `hofund serve` runs this binary.
 
+mod accounts;
 mod logging;
 mod registry;
 mod subscription;
@@ -28,6 +29,7 @@ hofundd — the hofund daemon
 Usage: hofundd [--config <path>]
        hofundd one-shot [--config <path>]
        hofundd subscription [--config <path>] <command> [<args>...]
+       hofundd accounts [--config <path>] switch <claude|codex> <next|account>
 
 Serves the configuration until a termination signal, with local control
 enabled. Without --config, HOFUND_CONFIG or the per-user default is used.
@@ -57,6 +59,8 @@ enum Command {
     OneShot(Option<PathBuf>),
     SubscriptionHelp,
     Subscription(Option<PathBuf>, subscription::SubscriptionCommand),
+    AccountsHelp,
+    Accounts(Option<PathBuf>, accounts::AccountsCommand),
 }
 
 fn parse(args: &[OsString]) -> Result<Command, String> {
@@ -64,6 +68,12 @@ fn parse(args: &[OsString]) -> Result<Command, String> {
         return Ok(match subscription::parse(&args[1..])? {
             subscription::Parsed::Help => Command::SubscriptionHelp,
             subscription::Parsed::Run(config, command) => Command::Subscription(config, command),
+        });
+    }
+    if args.first().and_then(|word| word.to_str()) == Some("accounts") {
+        return Ok(match accounts::parse(&args[1..])? {
+            accounts::Parsed::Help => Command::AccountsHelp,
+            accounts::Parsed::Run(config, command) => Command::Accounts(config, command),
         });
     }
     let mut config = None;
@@ -123,6 +133,13 @@ fn main() -> ExitCode {
         }
         Ok(Command::Subscription(config, command)) => {
             subscription::run(&config.unwrap_or_else(user_config_path), command)
+        }
+        Ok(Command::AccountsHelp) => {
+            say(TolerantWriter(io::stdout()), accounts::USAGE.trim_end());
+            ExitCode::SUCCESS
+        }
+        Ok(Command::Accounts(config, command)) => {
+            accounts::run(&config.unwrap_or_else(user_config_path), command)
         }
         Err(message) => {
             say(TolerantWriter(io::stderr()), &format!("hofundd: {message}"));
