@@ -29,17 +29,27 @@ pub trait CatalogFetcher: Send + Sync {
 /// One HTTP response from [`CatalogFetcher`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FetchResponse {
+    /// HTTP 304: the cached body is still current.
     NotModified,
-    Ok { body: Vec<u8>, etag: Option<String> },
+    /// HTTP 200 with a body and optional ETag.
+    Ok {
+        /// Response body.
+        body: Vec<u8>,
+        /// ETag header, when present.
+        etag: Option<String>,
+    },
+    /// Any other HTTP status.
     Status(u16),
 }
 
+/// Fetches the catalog into a [`CacheFile`].
 pub struct Syncer {
     cache: CacheFile,
     fetcher: Arc<dyn CatalogFetcher>,
 }
 
 impl Syncer {
+    /// Creates a syncer for one cache file.
     #[must_use]
     pub fn new(cache: CacheFile, fetcher: Arc<dyn CatalogFetcher>) -> Self {
         Self { cache, fetcher }
@@ -59,6 +69,9 @@ impl Syncer {
         let etag = prior.as_ref().and_then(|envelope| envelope.etag.as_deref());
         match self.fetcher.fetch(url, etag) {
             Ok(FetchResponse::NotModified) | Ok(FetchResponse::Status(304)) => {
+                if prior.is_some() {
+                    self.cache.touch()?;
+                }
                 Ok(FetchResult::NotModified)
             }
             Ok(FetchResponse::Status(_)) => Ok(FetchResult::Failed),
@@ -79,12 +92,14 @@ impl Syncer {
         }
     }
 
+    /// Cache file this syncer writes.
     #[must_use]
     pub fn cache(&self) -> &CacheFile {
         &self.cache
     }
 }
 
+/// True when `modified` is missing or older than `max_age`.
 #[must_use]
 pub fn is_stale(modified: Option<SystemTime>, max_age: Duration) -> bool {
     let Some(modified) = modified else {
@@ -93,6 +108,7 @@ pub fn is_stale(modified: Option<SystemTime>, max_age: Duration) -> bool {
     modified.elapsed().map(|age| age > max_age).unwrap_or(true)
 }
 
+/// ETag stored with an envelope.
 #[must_use]
 pub fn envelope_etag(envelope: &CacheEnvelope) -> Option<&str> {
     envelope.etag.as_deref()

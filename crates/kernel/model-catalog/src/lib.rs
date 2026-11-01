@@ -1,5 +1,4 @@
 //! models.dev catalog cache, background refresh, and spec lookup.
-#![allow(missing_docs)]
 
 mod cache;
 mod http;
@@ -78,11 +77,13 @@ impl ModelCatalog {
             .and_then(|guard| guard.as_ref()?.resolve(model).cloned())
     }
 
+    /// Settings this catalog was opened with.
     #[must_use]
     pub fn settings(&self) -> &CatalogSettings {
         &self.settings
     }
 
+    /// Path of the backing cache file.
     #[must_use]
     pub fn cache_path(&self) -> &Path {
         &self.cache.path

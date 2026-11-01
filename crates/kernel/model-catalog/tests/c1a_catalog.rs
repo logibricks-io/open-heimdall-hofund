@@ -5,9 +5,9 @@ use std::sync::{Arc, Mutex};
 use hofund_config::CatalogSettings;
 use hofund_model_catalog::{
     CacheFile, CatalogFetcher, DevCatalog, FetchResponse, FetchResult, ModelCatalog, Syncer,
-    build_index, parse_catalog,
+    build_index, is_stale, parse_catalog,
 };
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 struct MockFetcher {
     responses: Mutex<Vec<Result<FetchResponse, std::io::Error>>>,
@@ -251,7 +251,10 @@ async fn c1a_11_refresh_off_means_no_background_poll() {
     let catalog = ModelCatalog::open(dir.path(), settings, fetcher).expect("open");
     assert!(!catalog.stale());
     let handle = catalog.spawn_background();
-    handle.await.expect("background task exits");
+    tokio::time::timeout(Duration::from_secs(5), handle)
+        .await
+        .expect("background task exits promptly when polling is off")
+        .expect("background task exits");
 }
 
 #[test]
@@ -271,4 +274,161 @@ fn c1a_12_corrupt_cache_falls_back_to_fetch_without_panicking() {
     assert_eq!(catalog.refresh().expect("refresh"), FetchResult::Updated);
     catalog.reload().expect("reload");
     assert!(catalog.resolve("gpt-demo").is_some());
+}
+
+#[derive(Default)]
+struct EtagRecorder {
+    sent: Mutex<Option<Option<String>>>,
+}
+
+impl CatalogFetcher for EtagRecorder {
+    fn fetch(&self, _: &str, if_none_match: Option<&str>) -> Result<FetchResponse, std::io::Error> {
+        *self.sent.lock().unwrap() = Some(if_none_match.map(str::to_owned));
+        Ok(FetchResponse::NotModified)
+    }
+}
+
+#[test]
+fn c1a_13_cached_etag_is_sent_as_if_none_match() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cache = CacheFile::beside_data_root(dir.path());
+    let catalog: DevCatalog = parse_catalog(FIXTURE.as_bytes()).expect("parse");
+    cache.write(Some("v7"), &catalog).expect("seed");
+    let fetcher = Arc::new(EtagRecorder::default());
+    let syncer = Syncer::new(cache, fetcher.clone());
+    syncer.sync("http://example.test/api.json").expect("sync");
+    assert_eq!(*fetcher.sent.lock().unwrap(), Some(Some("v7".to_owned())));
+}
+
+#[test]
+fn c1a_14_staleness_compares_age_against_refresh_interval() {
+    let hour = Duration::from_secs(3600);
+    assert!(is_stale(None, hour));
+    assert!(!is_stale(Some(SystemTime::now()), hour));
+    let old = SystemTime::now() - Duration::from_secs(7200);
+    assert!(is_stale(Some(old), hour));
+}
+
+#[test]
+fn c1a_15_not_modified_marks_cache_fresh_again() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cache = CacheFile::beside_data_root(dir.path());
+    let catalog: DevCatalog = parse_catalog(FIXTURE.as_bytes()).expect("parse");
+    cache.write(Some("v1"), &catalog).expect("seed");
+    let old = SystemTime::now() - Duration::from_secs(7200);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&cache.path)
+        .expect("open")
+        .set_modified(old)
+        .expect("age cache");
+    assert!(is_stale(cache.modified(), Duration::from_secs(3600)));
+    let fetcher = Arc::new(MockFetcher::new(vec![Ok(FetchResponse::NotModified)]));
+    let syncer = Syncer::new(cache.clone(), fetcher);
+    assert_eq!(
+        syncer.sync("http://example.test/api.json").expect("sync"),
+        FetchResult::NotModified
+    );
+    assert!(!is_stale(cache.modified(), Duration::from_secs(3600)));
+}
+
+#[test]
+fn c1a_16_refresh_reloads_indexes_without_explicit_reload() {
+    let fetcher = Arc::new(MockFetcher::new(vec![Ok(FetchResponse::Ok {
+        body: FIXTURE.as_bytes().to_vec(),
+        etag: None,
+    })]));
+    let (_dir, catalog) = temp_catalog(fetcher);
+    assert!(catalog.resolve("gpt-demo").is_none());
+    assert_eq!(catalog.refresh().expect("refresh"), FetchResult::Updated);
+    assert!(catalog.resolve("gpt-demo").is_some());
+}
+
+#[test]
+fn c1a_17_provider_prefixed_lookup_picks_that_provider_then_falls_back_to_bare_id() {
+    let catalog: DevCatalog = parse_catalog(DUPLICATE_ID_FIXTURE.as_bytes()).expect("parse");
+    let index = build_index(&catalog, &CatalogSettings::default());
+    let beta = index.resolve("beta/shared").expect("beta entry");
+    assert_eq!(beta.provider_id, "beta");
+    assert_eq!(beta.spec.context_window, Some(8192));
+    let routed = index.resolve("gateway/shared").expect("bare fallback");
+    assert_eq!(routed.provider_id, "alpha");
+}
+
+fn window_of(limit: &str) -> Option<u32> {
+    let body =
+        format!(r#"{{"p": {{"id": "p", "models": {{"m": {{"id": "m", "limit": {limit}}}}}}}}}"#);
+    let catalog: DevCatalog = parse_catalog(body.as_bytes()).expect("parse");
+    let index = build_index(&catalog, &CatalogSettings::default());
+    index.resolve("m").expect("entry").spec.context_window
+}
+
+#[test]
+fn c1a_18_window_takes_smaller_of_input_and_context_and_ignores_tiny_values() {
+    assert_eq!(
+        window_of(r#"{"context": 50000, "input": 100000}"#),
+        Some(50000)
+    );
+    assert_eq!(
+        window_of(r#"{"context": 128000, "input": 64000}"#),
+        Some(64000)
+    );
+    assert_eq!(window_of(r#"{"context": 1000}"#), None);
+    assert_eq!(window_of(r#"{"context": 2048}"#), Some(2048));
+}
+
+const FAMILY_FIXTURE: &str = r#"{
+  "fam": {
+    "id": "fam",
+    "models": {
+      "base": {
+        "id": "base",
+        "family": "line",
+        "reasoning": true,
+        "release_date": "2025-01-01",
+        "reasoning_options": [{"type": "effort", "values": ["low", "high"]}],
+        "limit": {"context": 8192, "output": 1024}
+      },
+      "next": {
+        "id": "next",
+        "family": "line",
+        "reasoning": true,
+        "release_date": "2025-06-01",
+        "limit": {"context": 8192, "output": 1024}
+      }
+    }
+  }
+}"#;
+
+#[test]
+fn c1a_19_reasoning_model_without_levels_inherits_family_levels() {
+    let catalog: DevCatalog = parse_catalog(FAMILY_FIXTURE.as_bytes()).expect("parse");
+    let index = build_index(&catalog, &CatalogSettings::default());
+    assert_eq!(
+        index.resolve("next").expect("next").spec.reasoning_levels,
+        ["low", "high"]
+    );
+}
+
+#[test]
+fn c1a_20_price_override_replaces_catalog_price() {
+    let catalog: DevCatalog = parse_catalog(FIXTURE.as_bytes()).expect("parse");
+    let settings = hofund_config::load(
+        r#"
+listen = "127.0.0.1:9"
+[[catalog.overrides]]
+model = "gpt-demo"
+price = { input = 1.5, output = 6.0, cache_read = 0.1, cache_write = 2.0 }
+"#,
+    )
+    .expect("config");
+    let index = build_index(&catalog, &settings.catalog);
+    let price = index
+        .resolve("gpt-demo")
+        .expect("entry")
+        .price
+        .clone()
+        .expect("price");
+    assert!((price.input - 1.5).abs() < 1e-9);
+    assert!((price.output - 6.0).abs() < 1e-9);
 }

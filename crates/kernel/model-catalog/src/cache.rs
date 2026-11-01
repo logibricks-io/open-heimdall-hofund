@@ -13,16 +13,21 @@ use crate::parse::{self, CatalogIndex, DevCatalog};
 /// Relative path under the hofund data directory.
 pub const CACHE_FILE: &str = "catalog/models.dev.json";
 
+/// On-disk cache body: the raw catalog plus revalidation metadata.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CacheEnvelope {
+    /// ETag returned with the stored body, sent back as `If-None-Match`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub etag: Option<String>,
+    /// When the body was last written.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub saved_at: Option<DateTime<Utc>>,
+    /// Raw models.dev JSON, kept verbatim so unknown fields survive.
     pub catalog: serde_json::Value,
 }
 
 impl CacheEnvelope {
+    /// Parses the stored JSON, returning `None` when it no longer matches the schema.
     #[must_use]
     pub fn catalog(&self) -> Option<DevCatalog> {
         parse::parse_catalog(
@@ -34,12 +39,15 @@ impl CacheEnvelope {
     }
 }
 
+/// Location of the catalog cache file.
 #[derive(Clone, Debug)]
 pub struct CacheFile {
+    /// Absolute path of the cache file.
     pub path: PathBuf,
 }
 
 impl CacheFile {
+    /// Cache file under the daemon data root.
     #[must_use]
     pub fn beside_data_root(data_root: &Path) -> Self {
         Self {
@@ -77,9 +85,24 @@ impl CacheFile {
         };
         let bytes = serde_json::to_vec(&envelope)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        fs::write(&self.path, bytes)
+        let staging = self.path.with_extension("json.tmp");
+        fs::write(&staging, bytes)?;
+        fs::rename(&staging, &self.path)
     }
 
+    /// Marks the stored body as freshly revalidated without rewriting it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error when the file cannot be opened or its time set.
+    pub fn touch(&self) -> io::Result<()> {
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&self.path)?
+            .set_modified(SystemTime::now())
+    }
+
+    /// Last modification time, or `None` when the file is missing.
     #[must_use]
     pub fn modified(&self) -> Option<SystemTime> {
         fs::metadata(&self.path).ok()?.modified().ok()

@@ -9,8 +9,10 @@ use crate::spec::{LEAST_WINDOW, ModelSpec, Price};
 /// Default catalog URL when no mirror is configured.
 pub const DEFAULT_CATALOG_URL: &str = "https://models.dev/api.json";
 
+/// Parsed models.dev payload, keyed by provider id.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct DevCatalog {
+    /// Providers keyed by models.dev provider id.
     #[serde(flatten)]
     pub providers: BTreeMap<String, DevProvider>,
 }
@@ -184,25 +186,38 @@ pub fn build_index(
     }
 }
 
+/// Lookup indexes built from a catalog plus config overrides.
 #[derive(Clone, Debug)]
 pub struct CatalogIndex {
+    /// Entries keyed by bare model id; the first provider wins.
     pub by_bare_id: BTreeMap<String, ResolvedEntry>,
+    /// Entries keyed by `provider/model`.
     pub by_provider_model: BTreeMap<String, ResolvedEntry>,
 }
 
+/// One model with its resolved spec, price and lifecycle state.
 #[derive(Clone, Debug)]
 pub struct ResolvedEntry {
+    /// models.dev provider id; empty for override-only entries.
     pub provider_id: String,
+    /// Model id inside the provider.
     pub model_id: String,
+    /// Human-readable name.
     pub display_name: String,
+    /// Resolved limits and capabilities.
     pub spec: ModelSpec,
+    /// Price per million tokens, when known.
     pub price: Option<Price>,
+    /// Release date as published, when known.
     pub release_date: Option<String>,
+    /// Marked deprecated upstream.
     pub deprecated: bool,
+    /// Marked retired upstream.
     pub retired: bool,
 }
 
 impl CatalogIndex {
+    /// Resolves `provider/model`, then a bare id, then the bare part of a prefixed id.
     #[must_use]
     pub fn resolve(&self, model: &str) -> Option<&ResolvedEntry> {
         if let Some(entry) = self.by_provider_model.get(model) {
