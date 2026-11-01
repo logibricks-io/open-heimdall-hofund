@@ -1058,6 +1058,7 @@ impl hofund_plugin_host::GatewayBackend for InProcess {
             output: None,
             ttft_ms: None,
             details: hofund_usage::UsageDetails::default(),
+            saw_reasoning: false,
         };
         match router
             .forward_scoped(&call, Some(&route_scope(&self.identity)))
@@ -1267,11 +1268,27 @@ fn forwarded_details(body: &[u8], input: Option<i64>) -> hofund_usage::UsageDeta
         .or_else(|| count("/usage/input_tokens_details/cached_tokens"))
         .or_else(|| count("/usage/cache_read_input_tokens"))
         .or_else(|| count("/usage/cachedContentTokenCount"));
-    let cache_write = count("/usage/cache_creation_input_tokens")
+    let cache_write_total = count("/usage/cache_creation_input_tokens")
         .or_else(|| count("/usage/input_tokens_details/cache_write_tokens"));
+    let five_minute = count("/usage/cache_creation/ephemeral_5m_input_tokens");
+    let one_hour = count("/usage/cache_creation/ephemeral_1h_input_tokens");
+    let to_u64 = |value: Option<i64>| {
+        value
+            .filter(|tokens| *tokens >= 0)
+            .and_then(|tokens| u64::try_from(tokens).ok())
+    };
+    let (cache_write, cache_write_5m, cache_write_1h) = hofund_ir::normalize_cache_write(
+        to_u64(cache_write_total),
+        to_u64(five_minute),
+        to_u64(one_hour),
+    );
+    let reasoning = count("/usage/completion_tokens_details/reasoning_tokens")
+        .or_else(|| count("/usage/output_tokens_details/reasoning_tokens"))
+        .or_else(|| count("/usage/thoughtsTokenCount"));
     let includes_cache = value.pointer("/usage/prompt_tokens").is_some()
         || value.pointer("/usage/input_tokens_details").is_some()
         || value.pointer("/usage/cachedContentTokenCount").is_some();
+    let to_i64 = |value: Option<u64>| value.and_then(|value| i64::try_from(value).ok());
     hofund_usage::UsageDetails {
         uncached_input_tokens: input.map(|input| {
             if includes_cache {
@@ -1281,7 +1298,11 @@ fn forwarded_details(body: &[u8], input: Option<i64>) -> hofund_usage::UsageDeta
             }
         }),
         cache_read_tokens: cache_read,
-        cache_write_tokens: cache_write,
+        cache_write_tokens: to_i64(cache_write),
+        cache_write_5m_tokens: to_i64(cache_write_5m),
+        cache_write_1h_tokens: to_i64(cache_write_1h),
+        reasoning_tokens: reasoning,
+        ..hofund_usage::UsageDetails::default()
     }
 }
 
@@ -2159,7 +2180,12 @@ async fn success(
     match completion {
         Completion::Unary(response) => {
             if let Some(usage) = response.usage.as_ref() {
-                limits::observe_usage(&mut meta, usage, codec.id());
+                limits::observe_usage(
+                    &mut meta,
+                    usage,
+                    codec.id(),
+                    message_saw_reasoning(&response.message),
+                );
             }
             let input = meta.input;
             let output = meta.output;
@@ -2342,6 +2368,7 @@ async fn raw_body(
             phase: 0,
             track: Some(owned),
             member,
+            protocol: codec.id().to_owned(),
         };
         let stream = futures_util::stream::unfold(relay, |mut relay| async move {
             let next = relay.next().await?;
@@ -2373,7 +2400,12 @@ async fn raw_body(
     if let Ok(response) = codec.decode_response(&bytes)
         && let Some(usage) = response.usage.as_ref()
     {
-        limits::observe_usage(&mut meta, usage, codec.id());
+        limits::observe_usage(
+            &mut meta,
+            usage,
+            codec.id(),
+            message_saw_reasoning(&response.message),
+        );
     }
     let (input, output) = codec.response_tokens(&bytes);
     meta.input = input.or(meta.input);
@@ -2503,6 +2535,7 @@ struct UsageMeta {
     output: Option<i64>,
     ttft_ms: Option<i64>,
     details: hofund_usage::UsageDetails,
+    saw_reasoning: bool,
 }
 
 impl UsageMeta {
@@ -2516,6 +2549,7 @@ impl UsageMeta {
             output: None,
             ttft_ms: None,
             details: hofund_usage::UsageDetails::default(),
+            saw_reasoning: false,
         }
     }
 
@@ -2671,6 +2705,7 @@ struct RawRelay<E> {
     phase: u8,
     track: Option<RequestTrack>,
     member: Option<String>,
+    protocol: String,
 }
 
 impl<E> RawRelay<E>
@@ -2696,11 +2731,32 @@ where
 
     fn note_tokens(&mut self) {
         let (input, output) = self.tap.tokens();
-        let (cache_read, cache_write) = self.tap.cache_tokens();
+        let extra = self.tap.supplemental_usage();
         self.meta.input = input.or(self.meta.input);
         self.meta.output = output.or(self.meta.output);
-        self.meta.details.cache_read_tokens = cache_read.or(self.meta.details.cache_read_tokens);
-        self.meta.details.cache_write_tokens = cache_write.or(self.meta.details.cache_write_tokens);
+        if extra.cache_read.is_some() {
+            self.meta.details.cache_read_tokens = extra.cache_read;
+        }
+        if extra.cache_write.is_some() {
+            self.meta.details.cache_write_tokens = extra.cache_write;
+        }
+        if extra.cache_write_5m.is_some() {
+            self.meta.details.cache_write_5m_tokens = extra.cache_write_5m;
+        }
+        if extra.cache_write_1h.is_some() {
+            self.meta.details.cache_write_1h_tokens = extra.cache_write_1h;
+        }
+        if extra.reasoning.is_some() {
+            self.meta.details.reasoning_tokens = extra.reasoning;
+        }
+        if extra.saw_reasoning {
+            self.meta.saw_reasoning = true;
+        }
+        self.meta.details.reasoning_hidden = reasoning_hidden(
+            &self.protocol,
+            self.meta.saw_reasoning || extra.saw_reasoning,
+            extra.reasoning.or(self.meta.details.reasoning_tokens),
+        );
         if let Some(input) = self.meta.input {
             let cached = if self.input_includes_cache {
                 self.meta.details.cache_read_tokens.unwrap_or(0)
@@ -2889,15 +2945,21 @@ fn frame_closed(bytes: &[u8]) -> bool {
 }
 
 fn note_usage(event: &StreamEvent, record: &mut RecordOnEnd) {
+    let saw_reasoning = matches!(event, StreamEvent::ThinkingDelta(_));
     let usage = match event {
         StreamEvent::MessageStart(start) => start.usage.as_ref(),
         StreamEvent::MessageDelta(delta) => delta.usage.as_ref(),
         _ => None,
     };
     let Some(usage) = usage else {
+        if saw_reasoning {
+            record.meta.saw_reasoning = true;
+            record.meta.details.reasoning_hidden =
+                reasoning_hidden(&record.protocol, true, record.meta.details.reasoning_tokens);
+        }
         return;
     };
-    limits::observe_usage(&mut record.meta, usage, &record.protocol);
+    limits::observe_usage(&mut record.meta, usage, &record.protocol, saw_reasoning);
     record.input = record.meta.input;
     record.output = record.meta.output;
 }
@@ -2944,6 +3006,7 @@ fn write_usage(
         caller_key_id: meta.identity.key_id.clone(),
         caller_key_name: meta.identity.key_name.clone(),
         caller_issuer_id: meta.identity.issuer.clone(),
+        ..Default::default()
     };
     let mut details = meta.details;
     if details.uncached_input_tokens.is_none() {
@@ -2954,6 +3017,23 @@ fn write_usage(
 
 fn as_i64(value: Option<u64>) -> Option<i64> {
     value.and_then(|value| i64::try_from(value).ok())
+}
+
+fn reasoning_hidden(protocol: &str, saw_reasoning: bool, counted: Option<i64>) -> bool {
+    if !saw_reasoning {
+        return false;
+    }
+    let counted = counted.unwrap_or(0);
+    counted <= 0
+        || protocol == hofund_plugin_api::ProtocolId::OPENAI_RESPONSES.as_str()
+        || protocol == hofund_plugin_api::ProtocolId::GENERATIVE_LANGUAGE.as_str()
+}
+
+fn message_saw_reasoning(message: &hofund_ir::Message) -> bool {
+    message
+        .content
+        .iter()
+        .any(|part| matches!(part, hofund_ir::ContentPart::Thinking(_)))
 }
 
 fn model_name(bytes: &[u8]) -> String {
@@ -3091,7 +3171,33 @@ mod request_event_tests {
 
 #[cfg(test)]
 mod forwarded_token_tests {
-    use super::{forwarded_details, forwarded_tokens};
+    use super::{forwarded_details, forwarded_tokens, reasoning_hidden};
+
+    #[test]
+    fn u1a_13_forwarded_reasoning_is_read_for_chat_and_responses() {
+        let chat = forwarded_details(
+            br#"{"usage":{"prompt_tokens":3,"completion_tokens_details":{"reasoning_tokens":7}}}"#,
+            Some(3),
+        );
+        assert_eq!(chat.reasoning_tokens, Some(7));
+        let responses = forwarded_details(
+            br#"{"usage":{"input_tokens":3,"output_tokens_details":{"reasoning_tokens":8}}}"#,
+            Some(3),
+        );
+        assert_eq!(responses.reasoning_tokens, Some(8));
+    }
+
+    #[test]
+    fn u1a_14_reasoning_hidden_needs_streamed_reasoning_without_a_count() {
+        let chat = hofund_plugin_api::ProtocolId::OPENAI_CHAT.as_str();
+        let responses = hofund_plugin_api::ProtocolId::OPENAI_RESPONSES.as_str();
+        assert!(!reasoning_hidden(chat, false, None));
+        assert!(!reasoning_hidden(responses, false, Some(0)));
+        assert!(reasoning_hidden(chat, true, None));
+        assert!(reasoning_hidden(chat, true, Some(0)));
+        assert!(!reasoning_hidden(chat, true, Some(5)));
+        assert!(reasoning_hidden(responses, true, Some(5)));
+    }
 
     #[test]
     fn tokens_are_read_from_the_first_field_that_has_a_positive_count() {
@@ -3119,7 +3225,7 @@ mod forwarded_token_tests {
     }
 
     #[test]
-    fn l3_forwarded_cache_details_follow_the_protocol_shape() {
+    fn u1a_10_forwarded_cache_details_follow_the_protocol_shape() {
         let chat = forwarded_details(
             br#"{"usage":{"prompt_tokens":10,"prompt_tokens_details":{"cached_tokens":4}}}"#,
             Some(10),
@@ -3133,6 +3239,15 @@ mod forwarded_token_tests {
         assert_eq!(messages.uncached_input_tokens, Some(10));
         assert_eq!(messages.cache_read_tokens, Some(4));
         assert_eq!(messages.cache_write_tokens, Some(2));
+        assert_eq!(messages.cache_write_5m_tokens, Some(2));
+        assert_eq!(messages.cache_write_1h_tokens, Some(0));
+        let split = forwarded_details(
+            br#"{"usage":{"input_tokens":10,"cache_read_input_tokens":4,"cache_creation_input_tokens":3000,"cache_creation":{"ephemeral_5m_input_tokens":1000,"ephemeral_1h_input_tokens":2000}}}"#,
+            Some(10),
+        );
+        assert_eq!(split.cache_write_tokens, Some(3000));
+        assert_eq!(split.cache_write_5m_tokens, Some(1000));
+        assert_eq!(split.cache_write_1h_tokens, Some(2000));
     }
 }
 

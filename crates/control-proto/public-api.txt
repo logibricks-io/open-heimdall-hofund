@@ -700,6 +700,9 @@ UsageResponse.rows_truncated
 UsageResponse.totals
 UsageResponse.version
 UsageRow #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+UsageRow.cache_read_tokens
+UsageRow.cache_write_1h_tokens
+UsageRow.cache_write_5m_tokens
 UsageRow.caller_issuer_id
 UsageRow.caller_key_id
 UsageRow.caller_key_name
@@ -709,10 +712,16 @@ UsageRow.input_tokens
 UsageRow.model
 UsageRow.output_tokens
 UsageRow.provider
+UsageRow.reasoning_hidden
+UsageRow.reasoning_tokens
 UsageRow.status
 UsageTotals #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+UsageTotals.cache_read_tokens
+UsageTotals.cache_write_1h_tokens
+UsageTotals.cache_write_5m_tokens
 UsageTotals.input_tokens
 UsageTotals.output_tokens
+UsageTotals.reasoning_tokens
 UsageTotals.requests
 const API_VERSION
 const MAX_BOOT_ID_LEN

@@ -38,6 +38,8 @@ expression: pretty_value!(&response)
     "output_tokens": 12,
     "cache_read_tokens": 4,
     "cache_write_tokens": 3,
+    "cache_write_5m_tokens": 3,
+    "cache_write_1h_tokens": 0,
     "extensions": {
       "server_tool_use": {
         "web_search_requests": 1
