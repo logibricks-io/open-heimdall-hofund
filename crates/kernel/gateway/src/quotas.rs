@@ -16,7 +16,7 @@ use hofund_control_proto::{
     ListEnvelope, Quota, QuotaHistory, QuotaHistoryQuery, QuotaQuery, QuotaResponse,
 };
 
-use super::{Inner, bearer, current_token, header_secret, json_response, query_key, reject};
+use super::{Inner, authenticate_request, bearer, header_secret, json_response, query_key};
 
 /// Where the gateway reads quota reports and history from.
 pub trait QuotaSource: Send + Sync {
@@ -141,9 +141,7 @@ fn admit<'a>(
     headers: &HeaderMap,
     uri: &Uri,
 ) -> Result<(&'a dyn QuotaSource, QuotaAccess), Box<Response>> {
-    if let Some(rejected) = reject(&current_token(app), headers, uri, None) {
-        return Err(Box::new(rejected));
-    }
+    authenticate_request(app, headers, uri, None, None)?;
     let Some(source) = app.quota_source.as_deref() else {
         return Err(Box::new(list_failure(
             StatusCode::NOT_FOUND,

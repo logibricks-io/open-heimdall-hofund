@@ -475,6 +475,9 @@ fn continuation_error(error: RouterError) -> PluginError {
         RouterError::Ambiguous { .. } | RouterError::PreviousResponseNotFound { .. } => {
             PluginError::status_error(400, error.to_string())
         }
+        RouterError::ModelScope { .. } | RouterError::AccountScope { .. } => {
+            PluginError::status_error(403, error.to_string())
+        }
         RouterError::Upstream { error, .. } => error,
     }
 }

@@ -182,6 +182,66 @@ FieldIssue.field
 FieldIssue.message
 FieldIssue.reason
 FieldIssue::fn new (field : impl Into < String > , reason : impl Into < String > , message : impl Into < String > ,) -> Self
+GatewayKey #[non_exhaustive] derives(Clone, Default, PartialEq, Serialize, Deserialize)
+GatewayKey.accounts
+GatewayKey.expires
+GatewayKey.id
+GatewayKey.is_default
+GatewayKey.issuer
+GatewayKey.issues
+GatewayKey.limits
+GatewayKey.masked
+GatewayKey.models
+GatewayKey.name
+GatewayKey.off
+GatewayKey.quotas
+GatewayKey.read_only
+GatewayKey.removed
+GatewayKey.secret
+GatewayKeyAction #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (rename_all = "snake_case")]
+GatewayKeyAction::Access
+GatewayKeyAction::Accounts
+GatewayKeyAction::Add
+GatewayKeyAction::Copy
+GatewayKeyAction::Issuer
+GatewayKeyAction::Models
+GatewayKeyAction::Move
+GatewayKeyAction::Off
+GatewayKeyAction::On
+GatewayKeyAction::Quotas
+GatewayKeyAction::Remove
+GatewayKeyAction::Rename
+GatewayKeyAction::Rotate
+GatewayKeyLimit #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Serialize, Deserialize)
+GatewayKeyLimit.cache_reads
+GatewayKeyLimit.cost
+GatewayKeyLimit.days
+GatewayKeyLimit.hours
+GatewayKeyLimit.period
+GatewayKeyLimit.since
+GatewayKeyLimit.tokens
+GatewayKeyRequest #[non_exhaustive] derives(Clone, PartialEq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
+GatewayKeyRequest.accounts
+GatewayKeyRequest.action
+GatewayKeyRequest.id
+GatewayKeyRequest.issues
+GatewayKeyRequest.models
+GatewayKeyRequest.name
+GatewayKeyRequest.place
+GatewayKeyRequest.quotas
+GatewayKeyRequest.read_only
+GatewayKeyRequest.secret
+GatewayKeyRequest.version
+GatewayKeyRequest::fn for_id (mut self , id : impl Into < String >) -> Self
+GatewayKeyRequest::fn new (action : GatewayKeyAction) -> Self
+GatewayKeyResponse #[non_exhaustive] derives(Clone, PartialEq, Serialize, Deserialize)
+GatewayKeyResponse.keys
+GatewayKeyResponse.secret
+GatewayKeyResponse.version
+GatewayKeyRestoreRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
+GatewayKeyRestoreRequest.keys
+GatewayKeyRestoreRequest.version
+GatewayKeyRestoreRequest::fn new (keys : Vec < GatewayKey >) -> Self
 HealthResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
 HealthResponse.api_version
 HealthResponse.daemon_version
@@ -498,6 +558,8 @@ UsageResponse.rows_truncated
 UsageResponse.totals
 UsageResponse.version
 UsageRow #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+UsageRow.caller_key_id
+UsageRow.caller_key_name
 UsageRow.created_at_ms
 UsageRow.duration_ms
 UsageRow.input_tokens

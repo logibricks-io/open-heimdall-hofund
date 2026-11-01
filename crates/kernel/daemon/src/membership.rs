@@ -77,10 +77,12 @@ struct HopSpec {
 struct LiveMember {
     id: MemberId,
     route_id: String,
+    scope_provider: String,
     plugin_id: String,
     preset_id: String,
     protocol: &'static str,
     route: hofund_provider::AttemptRoute,
+    fingerprint: String,
     subscription: bool,
     patience: Option<Duration>,
     kernel: bool,
@@ -431,10 +433,16 @@ impl LiveMember {
         Self {
             id,
             route_id: route_id.to_owned(),
+            scope_provider: if subscription {
+                built.plugin_id.clone()
+            } else {
+                route_id.to_owned()
+            },
             plugin_id: built.plugin_id.clone(),
             preset_id: built.preset_id.clone(),
             protocol: built.protocol,
             route: built.adapter.attempt_route(),
+            fingerprint: built.fingerprint.clone(),
             subscription,
             patience: built.patience,
             kernel: built.kernel,
@@ -458,6 +466,10 @@ impl Member for LiveMember {
         &self.route_id
     }
 
+    fn scope_provider(&self) -> &str {
+        &self.scope_provider
+    }
+
     fn plugin_id(&self) -> &str {
         &self.plugin_id
     }
@@ -468,6 +480,15 @@ impl Member for LiveMember {
 
     fn protocol(&self) -> &str {
         self.protocol
+    }
+
+    fn account_refs(&self) -> Vec<String> {
+        let mut refs = vec![self.id.to_string(), self.fingerprint.clone()];
+        if let Some(account) = self.id.account() {
+            refs.push(account.to_string());
+        }
+        refs.retain(|reference| !reference.is_empty());
+        refs
     }
 
     fn background_probe(&self) -> bool {

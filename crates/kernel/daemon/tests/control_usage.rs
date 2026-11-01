@@ -86,6 +86,8 @@ fn row(created_unix: i64, model: &str, input: Option<i64>, output: Option<i64>) 
         output_tokens: output,
         latency_ms: 7,
         status: "200".to_owned(),
+        caller_key_id: String::new(),
+        caller_key_name: String::new(),
     }
 }
 

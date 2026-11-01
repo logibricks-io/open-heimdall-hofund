@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Named gateway keys (P0-4a): an owner-only caller-key store that keeps each
+  secret readable, as the reference does, so `gateway-key copy` shows a key
+  again; listings carry only a masked form. Default-token migration, CLI and control management, export/restore,
+  constant-time authentication, model and account scopes, and key id/name usage
+  attribution. Limit, read-only, and short-lived-key fields are persisted for
+  their later enforcement phases. See `docs/gateway-keys.md`.
 - Route pools now wait out busy members (P0-3b11). Once every member has
   failed in a way that passes, the pool asks them again: ready members
   first, then those still waiting on a vendor's `Retry-After`, with pauses

@@ -91,6 +91,10 @@ pub struct Row {
     pub latency_ms: i64,
     /// HTTP status, as text.
     pub status: String,
+    /// Authenticated gateway key id, or empty for a legacy caller.
+    pub caller_key_id: String,
+    /// Authenticated gateway key name, or empty for a legacy caller.
+    pub caller_key_name: String,
 }
 
 /// One successful request as routing measurements read it.
@@ -147,11 +151,19 @@ impl Ledger {
                     output_tokens INTEGER,
                     latency_ms INTEGER NOT NULL,
                     status TEXT NOT NULL,
+                    caller_key_id TEXT NOT NULL DEFAULT '',
+                    caller_key_name TEXT NOT NULL DEFAULT '',
                     ttft_ms INTEGER
                 );",
             )
             .map_err(|error| UsageError(error.to_string()))?;
-        ensure_ttft_column(&connection)?;
+        for (column, declaration) in [
+            ("caller_key_id", "TEXT NOT NULL DEFAULT ''"),
+            ("caller_key_name", "TEXT NOT NULL DEFAULT ''"),
+            ("ttft_ms", "INTEGER"),
+        ] {
+            ensure_column(&connection, column, declaration)?;
+        }
         // Routing reads recent rows on every weighed request; the index keeps
         // that read to the window it asks for.
         connection
@@ -187,8 +199,9 @@ impl Ledger {
         connection
             .execute(
                 "INSERT INTO requests (
-                    created_unix, model, upstream, input_tokens, output_tokens, latency_ms, status, ttft_ms
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    created_unix, model, upstream, input_tokens, output_tokens, latency_ms, status,
+                    caller_key_id, caller_key_name, ttft_ms
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 params![
                     row.created_unix,
                     row.model,
@@ -197,6 +210,8 @@ impl Ledger {
                     row.output_tokens,
                     row.latency_ms,
                     row.status,
+                    row.caller_key_id,
+                    row.caller_key_name,
                     ttft_ms,
                 ],
             )
@@ -216,7 +231,8 @@ impl Ledger {
             .map_err(|_| UsageError("usage database lock is poisoned".to_owned()))?;
         let mut statement = connection
             .prepare(
-                "SELECT created_unix, model, upstream, input_tokens, output_tokens, latency_ms, status
+                "SELECT created_unix, model, upstream, input_tokens, output_tokens, latency_ms, status,
+                        caller_key_id, caller_key_name
                  FROM requests ORDER BY id",
             )
             .map_err(|error| UsageError(error.to_string()))?;
@@ -328,7 +344,8 @@ impl Ledger {
             .map_err(|error| UsageError(error.to_string()))?;
         let mut statement = connection
             .prepare(
-                "SELECT created_unix, model, upstream, input_tokens, output_tokens, latency_ms, status
+                "SELECT created_unix, model, upstream, input_tokens, output_tokens, latency_ms, status,
+                        caller_key_id, caller_key_name
                  FROM requests WHERE created_unix >= ?1 ORDER BY id DESC LIMIT ?2",
             )
             .map_err(|error| UsageError(error.to_string()))?;
@@ -352,23 +369,27 @@ impl Ledger {
     }
 }
 
-fn ensure_ttft_column(connection: &Connection) -> Result<(), UsageError> {
+fn ensure_column(
+    connection: &Connection,
+    column: &str,
+    declaration: &str,
+) -> Result<(), UsageError> {
     let mut statement = connection
         .prepare("PRAGMA table_info(requests)")
         .map_err(|error| UsageError(error.to_string()))?;
     let columns = statement
         .query_map([], |row| row.get::<_, String>(1))
-        .map_err(|error| UsageError(error.to_string()))?;
-    let present = columns
-        .collect::<Result<Vec<_>, _>>()
         .map_err(|error| UsageError(error.to_string()))?
-        .iter()
-        .any(|name| name == "ttft_ms");
-    if present {
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| UsageError(error.to_string()))?;
+    if columns.iter().any(|existing| existing == column) {
         return Ok(());
     }
     connection
-        .execute("ALTER TABLE requests ADD COLUMN ttft_ms INTEGER", [])
+        .execute(
+            &format!("ALTER TABLE requests ADD COLUMN {column} {declaration}"),
+            [],
+        )
         .map(|_| ())
         .map_err(|error| UsageError(error.to_string()))
 }
@@ -382,6 +403,8 @@ fn read_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Row> {
         output_tokens: row.get(4)?,
         latency_ms: row.get(5)?,
         status: row.get(6)?,
+        caller_key_id: row.get(7)?,
+        caller_key_name: row.get(8)?,
     })
 }
 
@@ -473,6 +496,8 @@ mod tests {
             output_tokens: output,
             latency_ms: 1,
             status: "200".to_owned(),
+            caller_key_id: String::new(),
+            caller_key_name: String::new(),
         }
     }
 
@@ -580,6 +605,8 @@ mod tests {
                 output_tokens: None,
                 latency_ms: 12,
                 status: "200".to_owned(),
+                caller_key_id: String::new(),
+                caller_key_name: String::new(),
             })
             .expect("insert");
         let rows = ledger.rows().expect("rows");
@@ -595,6 +622,8 @@ mod tests {
                 output_tokens: Some(4),
                 latency_ms: 1,
                 status: "200".to_owned(),
+                caller_key_id: String::new(),
+                caller_key_name: String::new(),
             })
             .expect("second");
         let table = ledger.table().expect("table");
@@ -605,6 +634,40 @@ mod tests {
             "{table}"
         );
         assert!(table.contains("totals  requests=2  in=5  out=4"), "{table}");
+    }
+
+    #[test]
+    fn k5_ledger_adds_key_columns_to_existing_rows() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("usage.sqlite");
+        {
+            let connection = rusqlite::Connection::open(&path).expect("old database");
+            connection
+                .execute_batch(
+                    "CREATE TABLE requests (
+                        id INTEGER PRIMARY KEY,
+                        created_unix INTEGER NOT NULL,
+                        model TEXT NOT NULL,
+                        upstream TEXT NOT NULL,
+                        input_tokens INTEGER,
+                        output_tokens INTEGER,
+                        latency_ms INTEGER NOT NULL,
+                        status TEXT NOT NULL
+                    );
+                    INSERT INTO requests VALUES (1, 1, 'old', 'up', NULL, NULL, 1, '200');",
+                )
+                .expect("old schema");
+        }
+        let ledger = Ledger::open(&path).expect("migrate");
+        let rows = ledger.rows().expect("old row");
+        assert_eq!(rows[0].caller_key_id, "");
+        let mut attributed = row(2, None, None);
+        attributed.caller_key_id = "key-id".to_owned();
+        attributed.caller_key_name = "Key name".to_owned();
+        ledger.record(&attributed).expect("new row");
+        let rows = ledger.rows().expect("rows");
+        assert_eq!(rows[1].caller_key_id, "key-id");
+        assert_eq!(rows[1].caller_key_name, "Key name");
     }
 
     #[test]
@@ -637,6 +700,8 @@ mod tests {
                     output_tokens: Some(7),
                     latency_ms: 120,
                     status: "200".to_owned(),
+                    caller_key_id: String::new(),
+                    caller_key_name: String::new(),
                 },
                 Some(12),
             )

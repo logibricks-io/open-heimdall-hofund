@@ -15,6 +15,7 @@ mod decision;
 mod member;
 mod patience;
 pub mod quota;
+mod scope;
 mod snapshot;
 pub mod strategy;
 
@@ -32,6 +33,7 @@ pub use cooldown::{CooldownCause, CooldownPolicy, Cooldowns, Cooling, PersistedR
 pub use hofund_plugin_api::{Completion, MemberId, PluginError, Request};
 pub use member::{Member, ModelListAnswer};
 pub use patience::WaitHook;
+pub use scope::RouteScope;
 pub use snapshot::Snapshot;
 
 /// Which failures may try the next member.
@@ -168,6 +170,8 @@ pub struct InputCount {
 
 struct Resolved {
     hops: Vec<Hop>,
+    /// Configured route used for model-scope matching.
+    route: String,
     /// Name sent when a hop has no wire model.
     bare: String,
     /// Stable state key for this route pool.
@@ -274,9 +278,23 @@ impl Router {
     /// Model names that have at least one upstream, in order.
     #[must_use]
     pub fn models(&self) -> Vec<String> {
+        self.models_scoped(None)
+    }
+
+    /// Model names with at least one upstream the caller may use.
+    #[must_use]
+    pub fn models_scoped(&self, scope: Option<&RouteScope>) -> Vec<String> {
         self.routes
             .iter()
-            .filter(|(_, route)| !route.hops.is_empty())
+            .filter(|(model, route)| {
+                !route.hops.is_empty()
+                    && scope.is_none_or(|scope| {
+                        route
+                            .hops
+                            .iter()
+                            .any(|hop| scope.allows_hop(model, model, hop))
+                    })
+            })
             .map(|(model, _)| model.clone())
             .collect()
     }
@@ -320,7 +338,24 @@ impl Router {
         inbound_protocol: &str,
         hook: Option<Arc<dyn AttemptHook>>,
     ) -> Result<Routed, RouterError> {
-        self.dispatch_inner(request, inbound_protocol, hook, None)
+        self.dispatch_inner(request, inbound_protocol, None, hook, None)
+            .await
+    }
+
+    /// Dispatches with per-caller scope filtering and optional attempt callbacks.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::dispatch`], or a scope refusal before
+    /// any unauthorized member is contacted.
+    pub async fn dispatch_scoped(
+        &self,
+        request: &Request,
+        inbound_protocol: &str,
+        scope: Option<&RouteScope>,
+        hook: Option<Arc<dyn AttemptHook>>,
+    ) -> Result<Routed, RouterError> {
+        self.dispatch_inner(request, inbound_protocol, scope, hook, None)
             .await
     }
 
@@ -336,7 +371,25 @@ impl Router {
         hook: Option<Arc<dyn AttemptHook>>,
         wait: Option<Arc<dyn WaitHook>>,
     ) -> Result<Routed, RouterError> {
-        self.dispatch_inner(request, inbound_protocol, hook, wait)
+        self.dispatch_inner(request, inbound_protocol, None, hook, wait)
+            .await
+    }
+
+    /// Dispatches with per-caller scope filtering, attempt callbacks, and a
+    /// notification before patience waits.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::dispatch_scoped`].
+    pub async fn dispatch_scoped_with_wait(
+        &self,
+        request: &Request,
+        inbound_protocol: &str,
+        scope: Option<&RouteScope>,
+        hook: Option<Arc<dyn AttemptHook>>,
+        wait: Option<Arc<dyn WaitHook>>,
+    ) -> Result<Routed, RouterError> {
+        self.dispatch_inner(request, inbound_protocol, scope, hook, wait)
             .await
     }
 
@@ -344,11 +397,13 @@ impl Router {
         &self,
         request: &Request,
         inbound_protocol: &str,
+        scope: Option<&RouteScope>,
         hook: Option<Arc<dyn AttemptHook>>,
         wait_hook: Option<Arc<dyn WaitHook>>,
     ) -> Result<Routed, RouterError> {
         let asked = request.model.clone();
         let mut resolved = self.resolve(&asked)?;
+        resolved.hops = scoped_hops(&asked, &resolved, scope)?;
         resolved.hops = self.order_hops(&resolved);
         resolved.spent = self.spent(&resolved);
         DispatchState {
@@ -387,7 +442,22 @@ impl Router {
         request: &Request,
         inbound_protocol: &str,
     ) -> Result<InputCount, RouterError> {
+        self.count_scoped(request, inbound_protocol, None).await
+    }
+
+    /// Counts input using only members the caller may use.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::count`], or a scope refusal.
+    pub async fn count_scoped(
+        &self,
+        request: &Request,
+        inbound_protocol: &str,
+        scope: Option<&RouteScope>,
+    ) -> Result<InputCount, RouterError> {
         let mut resolved = self.resolve(&request.model)?;
+        resolved.hops = scoped_hops(&request.model, &resolved, scope)?;
         resolved.hops = self.order_hops(&resolved);
         let policy = self.policy.clone();
         let mut last = None;
@@ -453,7 +523,21 @@ impl Router {
     /// with the last member's error when none answered, or at once when the
     /// body cannot be built or a member fails in a way that is not retried.
     pub async fn forward(&self, call: &Forward) -> Result<Forwarded, RouterError> {
+        self.forward_scoped(call, None).await
+    }
+
+    /// Forwards using only members the caller may use.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::forward`], or a scope refusal.
+    pub async fn forward_scoped(
+        &self,
+        call: &Forward,
+        scope: Option<&RouteScope>,
+    ) -> Result<Forwarded, RouterError> {
         let mut resolved = self.resolve(call.model())?;
+        resolved.hops = scoped_hops(call.model(), &resolved, scope)?;
         resolved.hops = self.order_hops(&resolved);
         let mut last = None;
         for (index, hop) in resolved.hops.iter().enumerate() {
@@ -580,6 +664,7 @@ impl Router {
         {
             return Ok(Resolved {
                 hops: route.hops.clone(),
+                route: asked.to_owned(),
                 bare: asked.to_owned(),
                 pool: asked.to_owned(),
                 routing: route.routing.clone(),
@@ -628,15 +713,19 @@ impl Router {
     ) -> Result<Resolved, RouterError> {
         match found.len() {
             0 => Err(self.missing(asked)),
-            1 => Ok(Resolved {
-                hops: vec![found.into_iter().next().expect("one hop").1],
-                bare: bare.to_owned(),
-                pool: asked.to_owned(),
-                routing: "smart".to_owned(),
-                patience: None,
-                pool_asked: false,
-                spent: Vec::new(),
-            }),
+            1 => {
+                let (route, hop) = found.into_iter().next().expect("one hop");
+                Ok(Resolved {
+                    hops: vec![hop],
+                    route,
+                    bare: bare.to_owned(),
+                    pool: asked.to_owned(),
+                    routing: "smart".to_owned(),
+                    patience: None,
+                    pool_asked: false,
+                    spent: Vec::new(),
+                })
+            }
             _ => Err(RouterError::Ambiguous {
                 model: asked.to_owned(),
                 candidates: candidates(&found),
@@ -656,6 +745,39 @@ impl Router {
             detail,
         }
     }
+}
+
+fn scoped_hops(
+    asked: &str,
+    resolved: &Resolved,
+    scope: Option<&RouteScope>,
+) -> Result<Vec<Hop>, RouterError> {
+    let Some(scope) = scope else {
+        return Ok(resolved.hops.clone());
+    };
+    let model_hops: Vec<Hop> = resolved
+        .hops
+        .iter()
+        .filter(|hop| scope.allows_model(asked, &resolved.route, hop))
+        .cloned()
+        .collect();
+    if model_hops.is_empty() && !scope.models.is_empty() {
+        return Err(RouterError::ModelScope {
+            model: asked.to_owned(),
+            patterns: scope.models.clone(),
+        });
+    }
+    let account_hops: Vec<Hop> = model_hops
+        .into_iter()
+        .filter(|hop| scope.allows_member(hop.member.as_ref()))
+        .collect();
+    if account_hops.is_empty() && !scope.accounts.is_empty() {
+        return Err(RouterError::AccountScope {
+            model: asked.to_owned(),
+            accounts: scope.accounts.clone(),
+        });
+    }
+    Ok(account_hops)
 }
 
 struct DispatchState {
@@ -936,6 +1058,22 @@ pub enum RouterError {
         model: String,
         /// Route names, when any exist. Empty when the table is empty.
         detail: String,
+    },
+    /// Every candidate is outside the caller's model scope.
+    #[error("gateway key is not allowed to use model `{model}`; allowed models: {}", patterns.join(", "))]
+    ModelScope {
+        /// The requested model.
+        model: String,
+        /// The caller's model patterns.
+        patterns: Vec<String>,
+    },
+    /// Every candidate is outside the caller's account scope.
+    #[error("gateway key is not allowed to use the accounts behind model `{model}`; allowed accounts: {}", accounts.join(", "))]
+    AccountScope {
+        /// The requested model.
+        model: String,
+        /// The caller's account patterns.
+        accounts: Vec<String>,
     },
     /// More than one provider serves this model name.
     #[error("model `{model}` is served by more than one provider: {candidates}")]

@@ -1792,6 +1792,7 @@ dependencies = [
  "hofund-agent",
  "hofund-codec",
  "hofund-config",
+ "hofund-control-client",
  "hofund-control-proto",
  "hofund-daemon",
  "hofund-gateway",
@@ -1860,6 +1861,7 @@ dependencies = [
  "hofund-plugin-api",
  "hofund-plugin-host",
  "hofund-router",
+ "hofund-secrets",
  "hofund-usage",
  "hyper",
  "hyper-util",
@@ -2226,6 +2228,9 @@ name = "hofund-secrets"
 version = "0.1.0"
 dependencies = [
  "getrandom 0.2.17",
+ "serde",
+ "serde_json",
+ "sha2",
  "tempfile",
  "thiserror 2.0.21",
 ]
