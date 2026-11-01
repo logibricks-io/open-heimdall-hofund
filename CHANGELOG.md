@@ -805,6 +805,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- A reasoning item handed to a Responses client is now one summary and no
+  content: a reply item is `{id, type, status, summary}` with an `rs_` id, and
+  a stream announces it with `summary: []` and then sends
+  `response.reasoning_summary_part.added`, `reasoning_summary_text.delta`,
+  `reasoning_summary_text.done` and `reasoning_summary_part.done` instead of
+  `response.reasoning_text.delta`. A sealed item that carries content parts,
+  another vendor's shape, is made into such an item (its text, else its
+  summaries, as the one summary, and no seal), keeping the id its events
+  carried; the upstream's own sealed item still goes back as it came. A
+  Responses reply relayed as it came is put through the same rule line by
+  line, every other byte and sequence number kept (D-20).
 - Dependencies: `tokio-tungstenite` 0.30, `base64` 0.23, and `toml` 1.1 in the
   workspace crates, and the `actions/upload-artifact` v7 and
   `actions/download-artifact` v8 release workflow actions.
