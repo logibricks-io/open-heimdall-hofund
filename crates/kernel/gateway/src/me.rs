@@ -4,8 +4,8 @@ use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::http::{StatusCode, header};
 use axum::response::Response;
-use hofund_secrets::{Identity, KeyLimit};
-use hofund_usage::{CallerTotals, Window, key_limit_window};
+use hofund_secrets::Identity;
+use hofund_usage::{CallerTotals, Window};
 use serde_json::{Value, json};
 
 use super::{Inner, authenticate_request, json_response, readonly, route_scope, text_response};
@@ -93,10 +93,11 @@ fn body(app: &Inner, identity: &Identity) -> Result<Vec<u8>, ()> {
                 .collect();
         }
     }
-    let mut limits = Vec::new();
-    for limit in &identity.limits {
-        limits.push(limit_json(app, identity, limit)?);
-    }
+    // The same status `/v1/hofund/limit` reports, reservations included.
+    let limits = app
+        .budget
+        .status(identity, chrono::Local::now())
+        .map_err(|_| ())?;
     let models = if identity.read_only {
         Vec::new()
     } else {
@@ -130,34 +131,6 @@ fn totals_json(totals: CallerTotals) -> Value {
         "cost": 0.0,
         "unpriced": 0,
     })
-}
-
-fn limit_json(app: &Inner, identity: &Identity, limit: &KeyLimit) -> Result<Value, ()> {
-    let window = key_limit_window(&limit.period, limit.days, limit.hours, limit.since).ok_or(())?;
-    let (totals, _) = app
-        .usage
-        .caller_summary(&identity.key_id, Some(window.start))
-        .map_err(|_| ())?;
-    let tokens = totals.input.saturating_add(totals.output);
-    let tokens_left = limit.tokens.saturating_sub(tokens);
-    let spent = limit.tokens > 0 && tokens >= limit.tokens;
-    Ok(json!({
-        "period": limit.period,
-        "days": limit.days,
-        "hours": limit.hours,
-        "start": window.start_rfc3339,
-        "reset": window.reset_rfc3339,
-        "calls": totals.calls,
-        "tokens": tokens,
-        "cost": 0.0,
-        "unpriced": 0,
-        "tokenLimit": limit.tokens,
-        "costLimit": limit.cost,
-        "cacheReads": limit.cache_reads,
-        "tokensLeft": tokens_left,
-        "costLeft": if limit.cost > 0.0 { limit.cost } else { 0.0 },
-        "spent": spent,
-    }))
 }
 
 fn has_key_query(query: Option<&str>) -> bool {

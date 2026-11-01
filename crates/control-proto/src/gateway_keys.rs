@@ -33,11 +33,15 @@ pub enum GatewayKeyAction {
     Access,
     /// Set whether the key may issue short-lived keys.
     Issuer,
+    /// Set, append, or remove a spending limit.
+    Limit,
+    /// Reset one or all spending-limit windows.
+    ResetLimit,
     /// Return the key's secret again, for copying it.
     Copy,
 }
 
-/// One stored limit description, reserved for the limits phase.
+/// One stored spending-limit description.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct GatewayKeyLimit {
@@ -165,6 +169,12 @@ pub struct GatewayKeyRequest {
     /// Issuer flag.
     #[serde(default)]
     pub issues: bool,
+    /// Limit to set, or `None` to remove one or all limits.
+    #[serde(default)]
+    pub limit: Option<GatewayKeyLimit>,
+    /// Zero-based limit index; one past the last appends.
+    #[serde(default)]
+    pub index: Option<usize>,
 }
 
 impl GatewayKeyRequest {
@@ -183,6 +193,8 @@ impl GatewayKeyRequest {
             quotas: false,
             read_only: false,
             issues: false,
+            limit: None,
+            index: None,
         }
     }
 
@@ -209,6 +221,8 @@ impl fmt::Debug for GatewayKeyRequest {
             .field("quotas", &self.quotas)
             .field("read_only", &self.read_only)
             .field("issues", &self.issues)
+            .field("limit", &self.limit)
+            .field("index", &self.index)
             .finish()
     }
 }

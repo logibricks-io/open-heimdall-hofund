@@ -14,6 +14,7 @@ pub(super) const READ_ONLY_CODE: &str = "gateway_key_read_only";
 const READ_ONLY_PATHS: &[&str] = &[
     "/health",
     "/me",
+    "/v1/hofund/limit",
     "/v1/hofund/me",
     "/v1/hofund/quotas",
     "/v1/hofund/quotas/history",
@@ -76,7 +77,7 @@ fn refusal() -> Response {
         StatusCode::FORBIDDEN,
         serde_json::to_vec(&serde_json::json!({
             "error": {
-                "message": "this gateway key is read-only: it may read hofund's quotas and its own usage (GET /v1/hofund/quotas, /v1/hofund/quotas/history, /v1/hofund/me) and use no model or write. Use a key with full access for that (hofund gateway-key access <id> full)",
+                "message": "this gateway key is read-only: it may read hofund's quotas and its own usage and limits (GET /v1/hofund/quotas, /v1/hofund/quotas/history, /v1/hofund/limit, /v1/hofund/me) and use no model or write. Use a key with full access for that (hofund gateway-key access <id> full)",
                 "type": "permission_error",
                 "code": READ_ONLY_CODE,
             }
@@ -524,6 +525,19 @@ mod tests {
         let info: serde_json::Value = serde_json::from_slice(&body).expect("me json");
         assert_eq!(info["limits"][0]["tokensLeft"], 0);
         assert_eq!(info["limits"][0]["spent"], true);
+        // `/me` reports the very status `/v1/hofund/limit` does
+        let (status, _, body) = request(
+            &app,
+            "GET",
+            "/v1/hofund/limit",
+            Some(&alice.secret),
+            "",
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let limit: serde_json::Value = serde_json::from_slice(&body).expect("limit json");
+        assert_eq!(limit["limits"], info["limits"]);
 
         let (status, headers, body) = request(&app, "GET", "/me", None, "", &[]).await;
         assert_eq!(status, StatusCode::OK);
