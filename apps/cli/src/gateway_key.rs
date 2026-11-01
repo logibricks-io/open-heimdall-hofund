@@ -13,6 +13,7 @@ pub(crate) const HELP: &str = "\
 usage: hofund gateway-key [list] [--json]
        hofund gateway-key add <name> [--key <value> | --key -]
        hofund gateway-key rotate <id>
+       hofund gateway-key copy <id>
        hofund gateway-key rename <id> <name>
        hofund gateway-key on|off|remove <id>
        hofund gateway-key move <id> <place>
@@ -22,9 +23,10 @@ usage: hofund gateway-key [list] [--json]
        hofund gateway-key access <id> [read-only | full]
        hofund gateway-key issuer <id> [on | off]
 
-A generated or rotated secret is printed exactly once. Keys are stored only as
-SHA-256 digests and masked display forms. Model and account scopes take effect
-on the next request; the running gateway rereads the store for every call.
+Add and rotate print the new secret; copy prints a key's secret again. The
+list shows only a masked form. Secrets are kept readable in caller-keys.json,
+which only its owner can read. Model and account scopes take effect on the
+next request; the running gateway rereads the store for every call.
 ";
 
 #[derive(Debug, PartialEq, Eq)]
@@ -37,6 +39,9 @@ pub(crate) enum Command {
         secret: Option<String>,
     },
     Rotate {
+        id: String,
+    },
+    Copy {
         id: String,
     },
     Rename {
@@ -101,6 +106,7 @@ pub(crate) fn parse(
             secret,
         },
         ("rotate", _) => Command::Rotate { id: one("rotate")? },
+        ("copy", _) => Command::Copy { id: one("copy")? },
         ("rename", [id, name]) if !json && secret.is_none() => Command::Rename {
             id: (*id).to_owned(),
             name: (*name).to_owned(),
@@ -224,7 +230,7 @@ pub(crate) async fn run(config: &Path, command: &Command) -> Result<String, Stri
         return Ok(secret);
     }
     Ok(match verb {
-        Verb::Rotate | Verb::Add => unreachable!(),
+        Verb::Rotate | Verb::Add | Verb::Copy => unreachable!(),
         Verb::Rename => "Gateway key renamed".to_owned(),
         Verb::On => "Gateway key enabled".to_owned(),
         Verb::Off => "Gateway key disabled".to_owned(),
@@ -277,6 +283,7 @@ pub(crate) async fn run(config: &Path, command: &Command) -> Result<String, Stri
 enum Verb {
     Add,
     Rotate,
+    Copy,
     Rename,
     On,
     Off,
@@ -298,6 +305,7 @@ fn mutation(command: &Command) -> Result<(GatewayKeyRequest, String, Verb), Stri
             return Ok((request, String::new(), Verb::Add));
         }
         Command::Rotate { id } => (GatewayKeyAction::Rotate, id, Verb::Rotate),
+        Command::Copy { id } => (GatewayKeyAction::Copy, id, Verb::Copy),
         Command::Rename { id, name } => {
             let mut request = GatewayKeyRequest::new(GatewayKeyAction::Rename);
             request.name = name.clone();
@@ -411,7 +419,8 @@ fn account_words(key: &GatewayKey) -> String {
 }
 
 fn list_table(keys: &[GatewayKey]) -> String {
-    let mut out = String::from("ID\tNAME\tSTATUS\tMODELS\tACCOUNTS\tACCESS\tLIMIT\tUNTIL");
+    let mut out =
+        String::from("ID\tNAME\tSTATE\tGATEWAY KEY\tLIMIT\tMODELS\tACCOUNTS\tACCESS\tUNTIL");
     for key in keys {
         let status = if key.off { "disabled" } else { "enabled" };
         let models = held_models(&key.models, &key.accounts);
@@ -442,8 +451,8 @@ fn list_table(keys: &[GatewayKey]) -> String {
             })
             .collect();
         out.push_str(&format!(
-            "\n{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
-            key.id, name, status, models, accounts, access, limit, until
+            "\n{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            key.id, name, status, key.masked, limit, models, accounts, access, until
         ));
     }
     out
@@ -478,6 +487,10 @@ mod tests {
             (
                 words(&["gateway-key", "rotate", "k"]),
                 Command::Rotate { id: "k".to_owned() },
+            ),
+            (
+                words(&["gateway-key", "copy", "k"]),
+                Command::Copy { id: "k".to_owned() },
             ),
             (
                 words(&["gateway-key", "rename", "k", "New"]),
@@ -547,8 +560,15 @@ mod tests {
         key.id = "k".to_owned();
         key.name = "Held".to_owned();
         key.accounts = vec!["primary/a".to_owned()];
+        key.masked = "hofund_key_…abcdef".to_owned();
         let table = list_table(&[key]);
-        assert!(table.starts_with("ID\tNAME\tSTATUS\tMODELS\tACCOUNTS\tACCESS\tLIMIT\tUNTIL"));
+        assert!(
+            table.starts_with(
+                "ID\tNAME\tSTATE\tGATEWAY KEY\tLIMIT\tMODELS\tACCOUNTS\tACCESS\tUNTIL"
+            )
+        );
+        assert!(table.contains("\thofund_key_…abcdef\t"));
+        assert!(parse(&words(&["gateway-key", "copy"]), None, false).is_err());
         assert!(table.contains("primary/*"));
         assert!(table.contains("full"));
         assert!(!table.contains("read-only"));

@@ -182,7 +182,7 @@ FieldIssue.field
 FieldIssue.message
 FieldIssue.reason
 FieldIssue::fn new (field : impl Into < String > , reason : impl Into < String > , message : impl Into < String > ,) -> Self
-GatewayKey #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Serialize, Deserialize)
+GatewayKey #[non_exhaustive] derives(Clone, Default, PartialEq, Serialize, Deserialize)
 GatewayKey.accounts
 GatewayKey.expires
 GatewayKey.id
@@ -197,11 +197,12 @@ GatewayKey.off
 GatewayKey.quotas
 GatewayKey.read_only
 GatewayKey.removed
-GatewayKey.secret_hash
+GatewayKey.secret
 GatewayKeyAction #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (rename_all = "snake_case")]
 GatewayKeyAction::Access
 GatewayKeyAction::Accounts
 GatewayKeyAction::Add
+GatewayKeyAction::Copy
 GatewayKeyAction::Issuer
 GatewayKeyAction::Models
 GatewayKeyAction::Move

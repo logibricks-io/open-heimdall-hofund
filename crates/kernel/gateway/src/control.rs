@@ -211,11 +211,11 @@ pub trait ControlState: Send + Sync {
     ) -> ControlFuture<'_, GatewayKeyResponse> {
         Box::pin(async { Err(unsupported_gateway_keys()) })
     }
-    /// Exports hashed named-key records for backup.
+    /// Exports complete named-key records for backup.
     fn export_gateway_keys(&self) -> ControlFuture<'_, GatewayKeyResponse> {
         Box::pin(async { Err(unsupported_gateway_keys()) })
     }
-    /// Restores hashed named-key records.
+    /// Restores named-key records.
     fn restore_gateway_keys(
         &self,
         _request: GatewayKeyRestoreRequest,

@@ -1,4 +1,9 @@
-//! Named gateway keys, their hashed credentials, and their scopes.
+//! Named gateway keys, their credentials, and their scopes.
+//!
+//! The store keeps each secret readable, as the reference does, so an
+//! administrator can copy a key again after it was made; the file is
+//! written atomically with owner-only permissions, and listings carry only
+//! a masked form.
 
 use std::fs;
 use std::io::ErrorKind;
@@ -36,8 +41,9 @@ pub struct KeyLimit {
     pub since: i64,
 }
 
-/// One named gateway key. Only a SHA-256 digest and a mask of its secret persist.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+/// One named gateway key. The secret persists readable in the owner-only
+/// store file; [`KeyStore::list`] clears it and fills `masked` instead.
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Key {
     /// Stable id, retained when the secret rotates.
@@ -49,9 +55,12 @@ pub struct Key {
     /// Whether this is the default key mirrored by the legacy token file.
     #[serde(rename = "default")]
     pub is_default: bool,
-    /// Lowercase hexadecimal SHA-256 of the secret.
-    pub secret_hash: String,
-    /// Display-only prefix and suffix of the secret.
+    /// The secret a client sends; empty in a listing.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub secret: String,
+    /// Display-only prefix and suffix of the secret, computed for a listing
+    /// and never stored.
+    #[serde(skip_serializing)]
     pub masked: String,
     /// Model patterns allowed for this key.
     pub models: Vec<String>,
@@ -76,6 +85,46 @@ pub struct Key {
 
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+impl std::fmt::Debug for Key {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Key")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("off", &self.off)
+            .field("is_default", &self.is_default)
+            .field(
+                "secret",
+                &if self.secret.is_empty() {
+                    ""
+                } else {
+                    "<redacted>"
+                },
+            )
+            .field("masked", &self.masked)
+            .field("models", &self.models)
+            .field("accounts", &self.accounts)
+            .field("quotas", &self.quotas)
+            .field("read_only", &self.read_only)
+            .field("expires", &self.expires)
+            .field("issuer", &self.issuer)
+            .field("issues", &self.issues)
+            .field("limits", &self.limits)
+            .field("removed", &self.removed)
+            .finish()
+    }
+}
+
+impl Key {
+    /// The record as a listing shows it: the secret cleared, its mask set.
+    #[must_use]
+    pub fn shown(mut self) -> Self {
+        self.masked = mask(&self.secret);
+        self.secret.clear();
+        self
+    }
 }
 
 /// The authenticated caller and the scopes later request phases also consume.
@@ -122,12 +171,12 @@ impl Identity {
     }
 }
 
-/// A key and its plaintext secret, returned only by add and rotate.
+/// A key and its secret, returned by add and rotate.
 #[derive(Clone, PartialEq)]
 pub struct KeyWithSecret {
-    /// Stored key record.
+    /// The key as a listing shows it.
     pub key: Key,
-    /// Plaintext secret to show exactly once.
+    /// The secret to hand the caller.
     pub secret: String,
 }
 
@@ -174,23 +223,38 @@ impl KeyStore {
     }
 
     /// Lists keys in their stored order, migrating the legacy token first.
+    /// A listing never carries a secret, only its mask; [`Self::copy`] is
+    /// the administrator's way to read one again.
     pub fn list(&self) -> Result<Vec<Key>, SecretError> {
         let _guard = self.lock()?;
         let keys = self.load_migrated()?;
-        Ok(keys.into_iter().filter(|key| !key.removed).collect())
+        Ok(keys
+            .into_iter()
+            .filter(|key| !key.removed)
+            .map(Key::shown)
+            .collect())
     }
 
-    /// Authenticates against every stored hash in constant time.
+    /// The secret of the key `id`, for copying it again after it was made
+    /// (`reference: internal/access/access.go` copy-key).
+    pub fn copy(&self, id: &str) -> Result<String, SecretError> {
+        let _guard = self.lock()?;
+        let keys = self.load_migrated()?;
+        let index = find(&keys, id)?;
+        Ok(keys[index].secret.clone())
+    }
+
+    /// Authenticates against every stored secret in constant time.
     pub fn authenticate(&self, secret: &str) -> Result<Option<Identity>, SecretError> {
         if secret.is_empty() {
             return Ok(None);
         }
         let _guard = self.lock()?;
         let keys = self.load_migrated()?;
-        let digest = secret_digest(secret);
         let mut matched = None;
         for (index, key) in keys.iter().enumerate() {
-            if constant_time_eq(digest.as_bytes(), key.secret_hash.as_bytes()) {
+            if !key.secret.is_empty() && constant_time_eq(secret.as_bytes(), key.secret.as_bytes())
+            {
                 matched = Some(index);
             }
         }
@@ -200,17 +264,16 @@ impl KeyStore {
         }))
     }
 
-    /// Whether the secret belongs to any current or removed stored key.
+    /// Whether the secret belongs to any stored key, enabled or not.
     pub fn contains(&self, secret: &str) -> Result<bool, SecretError> {
         if secret.is_empty() {
             return Ok(false);
         }
         let _guard = self.lock()?;
         let keys = self.load_migrated()?;
-        let digest = secret_digest(secret);
-        Ok(keys
-            .iter()
-            .any(|key| constant_time_eq(digest.as_bytes(), key.secret_hash.as_bytes())))
+        Ok(keys.iter().any(|key| {
+            !key.secret.is_empty() && constant_time_eq(secret.as_bytes(), key.secret.as_bytes())
+        }))
     }
 
     /// Whether `id` names an enabled key.
@@ -219,7 +282,7 @@ impl KeyStore {
         let keys = self.load_migrated()?;
         Ok(keys
             .iter()
-            .any(|key| key.id == id && !key.off && !key.removed && !key.secret_hash.is_empty()))
+            .any(|key| key.id == id && !key.off && !key.removed && !key.secret.is_empty()))
     }
 
     /// Adds a key with a generated secret or a caller-supplied one.
@@ -234,13 +297,15 @@ impl KeyStore {
         let key = Key {
             id: random_hex(12)?,
             name,
-            secret_hash: hash_hex(&secret),
-            masked: mask(&secret),
+            secret: secret.clone(),
             ..Key::default()
         };
         keys.push(key.clone());
         self.save(&keys)?;
-        Ok(KeyWithSecret { key, secret })
+        Ok(KeyWithSecret {
+            key: key.shown(),
+            secret,
+        })
     }
 
     /// Rotates a key while retaining its id, name, scopes, and enabled state.
@@ -249,9 +314,8 @@ impl KeyStore {
         let mut keys = self.load_migrated()?;
         let index = find(&keys, id)?;
         let secret = generated_secret()?;
-        keys[index].secret_hash = hash_hex(&secret);
-        keys[index].masked = mask(&secret);
-        let key = keys[index].clone();
+        keys[index].secret.clone_from(&secret);
+        let key = keys[index].clone().shown();
         self.save(&keys)?;
         if key.is_default {
             write_atomic(self.token_file.path(), &secret)?;
@@ -297,6 +361,7 @@ impl KeyStore {
         if is_default {
             keys[index].off = true;
             keys[index].removed = true;
+            keys[index].secret.clear();
         } else {
             keys.remove(index);
         }
@@ -439,13 +504,13 @@ impl KeyStore {
         Ok(())
     }
 
-    /// Exports the complete hashed key records for a backup.
+    /// Exports the complete key records, secrets included, for a backup.
     pub fn export(&self) -> Result<Vec<Key>, SecretError> {
         let _guard = self.lock()?;
         self.load_migrated()
     }
 
-    /// Restores hashed key records atomically.
+    /// Restores key records atomically.
     pub fn restore(&self, keys: &[Key]) -> Result<(), SecretError> {
         let _guard = self.lock()?;
         self.save(keys)
@@ -488,23 +553,24 @@ impl KeyStore {
     fn load_migrated(&self) -> Result<Vec<Key>, SecretError> {
         let mut keys = self.load()?;
         let secret = self.token_file.load_or_create()?;
-        let digest = secret_digest(&secret);
         if keys.iter().any(|key| key.is_default) {
             return Ok(keys);
         }
         if let Some(index) = keys
             .iter()
-            .position(|key| constant_time_eq(digest.as_bytes(), key.secret_hash.as_bytes()))
+            .position(|key| constant_time_eq(secret.as_bytes(), key.secret.as_bytes()))
         {
             keys[index].is_default = true;
         } else {
-            let suffix = hash_hex(&secret)[..24].to_owned();
+            // The id is derived from the token so a retried migration
+            // names the same key (`reference: internal/access/access.go`
+            // legacyLANKey).
+            let suffix = secret_digest(&secret)[..24].to_owned();
             keys.push(Key {
                 id: format!("default-{suffix}"),
                 name: "Sharing".to_owned(),
                 is_default: true,
-                secret_hash: hash_hex(&secret),
-                masked: mask(&secret),
+                secret,
                 ..Key::default()
             });
         }
@@ -742,10 +808,9 @@ fn own_secret(secret: &str, keys: &[Key]) -> Result<String, SecretError> {
             "A key of your own cannot start with hofund_; leave it empty to generate one",
         ));
     }
-    let digest = secret_digest(secret);
     if keys
         .iter()
-        .any(|key| constant_time_eq(digest.as_bytes(), key.secret_hash.as_bytes()))
+        .any(|key| constant_time_eq(secret.as_bytes(), key.secret.as_bytes()))
     {
         return Err(key_error("Another gateway key already has this key"));
     }
@@ -769,10 +834,6 @@ fn secret_digest(secret: &str) -> String {
         .collect()
 }
 
-fn hash_hex(secret: &str) -> String {
-    secret_digest(secret)
-}
-
 fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     let mut difference = left.len() ^ right.len();
     for index in 0..left.len().max(right.len()) {
@@ -784,6 +845,9 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 }
 
 fn mask(secret: &str) -> String {
+    if secret.is_empty() {
+        return String::new();
+    }
     if secret.starts_with(OWN_PREFIX) {
         let prefix = if secret.starts_with(KEY_PREFIX) {
             KEY_PREFIX
@@ -818,10 +882,19 @@ mod tests {
         let (_dir, store) = scratch();
         let added = store.add("Laptop", Some("client-secret-123")).expect("add");
         assert_eq!(added.key.masked, "…-123");
-        assert_ne!(added.secret, added.key.secret_hash);
+        assert!(
+            added.key.secret.is_empty(),
+            "a returned record carries no secret"
+        );
         let path = store.path();
         let text = fs::read_to_string(path).expect("store");
-        assert!(!text.contains("client-secret-123"));
+        let persisted: Vec<serde_json::Value> = serde_json::from_str(&text).expect("json");
+        let laptop = persisted
+            .iter()
+            .find(|key| key["name"] == "Laptop")
+            .expect("persisted");
+        assert_eq!(laptop["secret"], "client-secret-123", "stored readable");
+        assert!(laptop.get("masked").is_none(), "the mask is never stored");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -829,14 +902,24 @@ mod tests {
                 fs::metadata(path).expect("metadata").permissions().mode() & 0o777,
                 0o600
             );
+            fs::set_permissions(path, fs::Permissions::from_mode(0o644)).expect("loosen");
+            store.rename(&added.key.id, "Laptop").expect("rewrite");
+            assert_eq!(
+                fs::metadata(path).expect("metadata").permissions().mode() & 0o777,
+                0o600,
+                "a write leaves the store owner-only again"
+            );
         }
         let with_future = text.replace("\"id\"", "\"future\": true, \"id\"");
         fs::write(path, with_future).expect("future field");
         let loaded = store.list().expect("load");
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded[1].name, "Laptop");
-        store.restore(&loaded).expect("restore");
-        assert_eq!(store.export().expect("export"), loaded);
+        assert!(loaded.iter().all(|key| key.secret.is_empty()));
+        let exported = store.export().expect("export");
+        assert_eq!(exported[1].secret, "client-secret-123");
+        store.restore(&exported).expect("restore");
+        assert_eq!(store.export().expect("export"), exported);
     }
 
     #[test]
@@ -846,7 +929,8 @@ mod tests {
         let keys = store.list().expect("migrate");
         assert_eq!(keys.len(), 1);
         assert!(keys[0].is_default);
-        assert_eq!(keys[0].secret_hash, hash_hex(&token));
+        assert!(keys[0].secret.is_empty());
+        assert_eq!(store.copy(&keys[0].id).expect("copy"), token);
         assert_eq!(store.token_file().read().expect("token"), token);
         let identity = store.authenticate(&token).expect("auth").expect("key");
         assert!(identity.is_default);
@@ -999,14 +1083,15 @@ mod tests {
     }
 
     #[test]
-    fn k13_export_restore_replaces_the_hashed_store() {
+    fn k13_export_restore_replaces_the_whole_store() {
         let (_dir, store) = scratch();
         let added = store.add("Backup", Some("backup-secret-123")).expect("add");
         let exported = store.export().expect("export");
         store.remove(&added.key.id).expect("remove");
         assert_eq!(store.list().expect("list").len(), 1);
         store.restore(&exported).expect("restore");
-        assert_eq!(store.list().expect("list"), exported);
+        assert_eq!(store.export().expect("export"), exported);
+        assert_eq!(store.list().expect("list").len(), 2);
         assert!(
             store
                 .authenticate("backup-secret-123")
@@ -1061,6 +1146,49 @@ mod tests {
         assert!(names.contains(&"Second".to_owned()), "{names:?}");
     }
 
+    #[test]
+    fn k16_a_key_is_copied_again_and_never_listed_or_logged() {
+        let (_dir, store) = scratch();
+        let generated = store.add("Copyable", None).expect("add");
+        let id = generated.key.id.clone();
+        assert_eq!(store.copy(&id).expect("copy"), generated.secret);
+        assert!(
+            generated.key.masked.starts_with(KEY_PREFIX)
+                && generated
+                    .key
+                    .masked
+                    .ends_with(&generated.secret[generated.secret.len() - 6..])
+        );
+        store.set_enabled(&id, false).expect("off");
+        assert_eq!(store.copy(&id).expect("copy while off"), generated.secret);
+        let rotated = store.rotate(&id).expect("rotate");
+        assert_eq!(store.copy(&id).expect("copy rotated"), rotated.secret);
+        assert_ne!(rotated.secret, generated.secret);
+        assert!(store.copy("missing").is_err());
+        let listed = store.list().expect("list");
+        assert!(
+            listed
+                .iter()
+                .all(|key| key.secret.is_empty() && !key.masked.is_empty())
+        );
+        let full = store.export().expect("export");
+        let debug = format!("{full:?} {rotated:?}");
+        assert!(!debug.contains(&rotated.secret), "{debug}");
+        assert!(debug.contains("<redacted>"));
+        let default_id = full
+            .iter()
+            .find(|key| key.is_default)
+            .expect("default")
+            .id
+            .clone();
+        let token = store.token_file().read().expect("token");
+        store.remove(&default_id).expect("remove default");
+        assert!(store.copy(&default_id).is_err());
+        let text = fs::read_to_string(store.path()).expect("store");
+        assert!(!text.contains(&token), "a removed default keeps no secret");
+        assert!(!store.contains(&token).expect("contains"));
+    }
+
     /// Appends a record the way another process would while holding the lock.
     fn store_raw_add(path: &Path, name: &str) {
         let mut keys: Vec<Key> =
@@ -1068,8 +1196,7 @@ mod tests {
         keys.push(Key {
             id: format!("raw-{name}"),
             name: name.to_owned(),
-            secret_hash: hash_hex(name),
-            masked: mask(name),
+            secret: format!("raw-secret-{name}"),
             ..Key::default()
         });
         fs::write(path, serde_json::to_string_pretty(&keys).expect("json")).expect("write");

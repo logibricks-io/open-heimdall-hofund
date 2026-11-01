@@ -58,7 +58,7 @@ stage 1 has merged.
    wireframes, keymap, narrow terminals, color and no-color, accessibility).
    Implementation pull requests follow that design and snapshot-test frames
    with ratatui's `TestBackend`. Rows 11.2, 11.5, 12.3, 12.4, and 15.3.
-9. **Gateway keys.** Hashed, scoped keys, and a LAN allow-list. Rows 10.4
+9. **Gateway keys.** Named, scoped keys, and a LAN allow-list. Rows 10.4
    and 10.5.
 
 Model mapping is pull request #12. Preset endpoints for Chat, Responses, and

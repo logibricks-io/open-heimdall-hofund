@@ -104,14 +104,28 @@ async fn k12_control_api_supports_every_action_and_backup() {
         .change_gateway_key(change(GatewayKeyAction::Rotate))
         .await
         .expect("rotate");
-    assert!(rotated.secret.is_some());
     let listed = client.gateway_keys().await.expect("list");
     let key = listed.keys.iter().find(|key| key.id == id).expect("listed");
     assert_eq!(key.name, "Renamed");
     assert!(key.quotas && key.read_only && key.issues);
-    assert!(key.secret_hash.is_empty());
+    assert!(key.secret.is_empty(), "a listing carries no secret");
+    assert!(!key.masked.is_empty());
+    let rotated_secret = rotated.secret.expect("rotated secret");
+    let copied = client
+        .change_gateway_key(change(GatewayKeyAction::Copy))
+        .await
+        .expect("copy");
+    assert_eq!(copied.secret.as_deref(), Some(rotated_secret.as_str()));
+    assert!(copied.keys.iter().all(|key| key.secret.is_empty()));
+    assert!(!format!("{copied:?}").contains(&rotated_secret));
     let exported = client.export_gateway_keys().await.expect("export");
-    assert!(exported.keys.iter().all(|key| !key.secret_hash.is_empty()));
+    assert!(exported.keys.iter().all(|key| !key.secret.is_empty()));
+    assert!(
+        exported
+            .keys
+            .iter()
+            .any(|key| key.id == id && key.secret == rotated_secret)
+    );
     client
         .change_gateway_key(change(GatewayKeyAction::Remove))
         .await

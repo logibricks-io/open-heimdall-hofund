@@ -33,6 +33,8 @@ pub enum GatewayKeyAction {
     Access,
     /// Set whether the key may issue short-lived keys.
     Issuer,
+    /// Return the key's secret again, for copying it.
+    Copy,
 }
 
 /// One stored limit description, reserved for the limits phase.
@@ -55,8 +57,8 @@ pub struct GatewayKeyLimit {
     pub since: i64,
 }
 
-/// A named-key record. `secret_hash` is populated only in backup responses.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+/// A named-key record. `secret` is populated only in backup responses.
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct GatewayKey {
     /// Stable key id.
@@ -70,9 +72,9 @@ pub struct GatewayKey {
     pub is_default: bool,
     /// Masked secret display form.
     pub masked: String,
-    /// SHA-256 digest, present only in a backup.
+    /// The key's secret, present only in a backup.
     #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub secret_hash: String,
+    pub secret: String,
     /// Model patterns.
     pub models: Vec<String>,
     /// Account patterns.
@@ -96,6 +98,36 @@ pub struct GatewayKey {
 
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+impl fmt::Debug for GatewayKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GatewayKey")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("off", &self.off)
+            .field("is_default", &self.is_default)
+            .field("masked", &self.masked)
+            .field(
+                "secret",
+                &if self.secret.is_empty() {
+                    ""
+                } else {
+                    "<redacted>"
+                },
+            )
+            .field("models", &self.models)
+            .field("accounts", &self.accounts)
+            .field("quotas", &self.quotas)
+            .field("read_only", &self.read_only)
+            .field("expires", &self.expires)
+            .field("issuer", &self.issuer)
+            .field("issues", &self.issues)
+            .field("limits", &self.limits)
+            .field("removed", &self.removed)
+            .finish()
+    }
 }
 
 /// A key-management mutation.
@@ -181,7 +213,8 @@ impl fmt::Debug for GatewayKeyRequest {
     }
 }
 
-/// Key list or mutation response. A new secret is returned exactly once.
+/// Key list or mutation response. A secret is returned only by add, rotate,
+/// and copy.
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct GatewayKeyResponse {
@@ -189,7 +222,7 @@ pub struct GatewayKeyResponse {
     pub version: u32,
     /// Keys in their stored order.
     pub keys: Vec<GatewayKey>,
-    /// Plaintext secret only after add or rotate.
+    /// The secret after add, rotate, or copy.
     pub secret: Option<String>,
 }
 
@@ -214,7 +247,7 @@ impl fmt::Debug for GatewayKeyResponse {
     }
 }
 
-/// Hashed key-store restore input.
+/// Key-store restore input.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 #[serde(deny_unknown_fields)]

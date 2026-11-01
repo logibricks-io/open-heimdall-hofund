@@ -437,12 +437,12 @@ impl Client {
         .await
     }
 
-    /// Exports hashed gateway-key records for backup.
+    /// Exports complete gateway-key records, secrets included, for backup.
     pub async fn export_gateway_keys(&self) -> Result<GatewayKeyResponse, ClientError> {
         self.get("/v1/hofund/gateway-keys/export").await
     }
 
-    /// Restores hashed gateway-key records.
+    /// Restores gateway-key records.
     pub async fn restore_gateway_keys(
         &self,
         request: GatewayKeyRestoreRequest,

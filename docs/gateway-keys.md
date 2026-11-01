@@ -12,25 +12,32 @@ sequence holds an in-process lock and an exclusive file lock on
 authentication, so rotation, disable, removal, and scope edits take effect
 without a restart.
 
-Only a SHA-256 digest and a masked display form of each secret are stored.
-Plaintext secrets are returned once by add and rotate; they cannot be read back
-later. Constant-time digest comparison covers every stored key before a request
-is accepted or refused. Backup exports contain digests, not plaintext secrets.
+Each secret is stored readable, as the reference stores it
+(`reference: internal/access/access.go`), so a key can be copied again after it
+was made: `hofund gateway-key copy <id>` and the control `copy` action return
+it. The store file is the protection: every write leaves it owner-only, even
+one that was loosened by hand. Listings never carry a secret, only a masked form
+(`hofund_key_…` and the last six characters for a generated key, `…` and the
+last four for a key of your own of 12 or more characters). Constant-time
+comparison covers every stored key before a request is accepted or refused.
+`Debug` output of a key record redacts its secret. Backup exports carry the
+secrets, so a restore brings working keys back.
 
 On first load, the existing single token becomes the default sharing key. Its
 secret does not change, so connected agents keep working. `hofund token show`
 still prints that token, and `hofund token rotate` rotates the default key and
 its legacy token-file mirror. The default key cannot be made read-only. Removing
-it leaves a tombstone so migration does not resurrect it.
+it leaves a tombstone, with no secret, so migration does not resurrect it.
 
 ## CLI
 
 ```sh
-hofund gateway-key add "Remote laptop"       # prints the new secret once
+hofund gateway-key add "Remote laptop"       # prints the new secret
 hofund gateway-key add Family --key -       # reads an existing secret from stdin
 hofund gateway-key list
 hofund gateway-key list --json
 hofund gateway-key rotate <id>
+hofund gateway-key copy <id>                 # prints the key's secret again
 hofund gateway-key rename <id> <name>
 hofund gateway-key on <id>
 hofund gateway-key off <id>
@@ -45,7 +52,9 @@ hofund gateway-key access <id> full
 hofund gateway-key issuer <id> on
 ```
 
-The list columns are `ID NAME STATUS MODELS ACCOUNTS ACCESS LIMIT UNTIL`.
+The list columns are `ID NAME STATE GATEWAY KEY LIMIT MODELS ACCOUNTS ACCESS`,
+as in the reference, plus `UNTIL` until expiry joins `STATE` in P0-4d.
+`GATEWAY KEY` is the masked form.
 `models`, `accounts`, `quotas`, `access`, and `issuer` also work without a value
 to show the current setting. Use `access <id> read-only` to store the read-only
 flag; its route enforcement is a later phase.
@@ -84,8 +93,10 @@ The authenticated control plane provides:
 
 - `GET /v1/hofund/gateway-keys`
 - `POST /v1/hofund/gateway-keys` with an `add`, `rotate`, `rename`, `on`, `off`,
-  `remove`, `move`, `models`, `accounts`, `quotas`, `access`, or `issuer` action
-- `GET /v1/hofund/gateway-keys/export` for hashed backup records
+  `remove`, `move`, `models`, `accounts`, `quotas`, `access`, `issuer`, or
+  `copy` action; add, rotate, and copy return the secret
+- `GET /v1/hofund/gateway-keys/export` for complete backup records, secrets
+  included
 - `POST /v1/hofund/gateway-keys/restore` to replace the store from those records
 
 `hofund-control-client` has typed methods for all four endpoints. Secret-bearing

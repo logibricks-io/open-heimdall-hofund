@@ -231,6 +231,9 @@ impl DaemonControl {
                 .keys
                 .set_issuer(&request.id, request.issues)
                 .map_err(key_failure)?,
+            GatewayKeyAction::Copy => {
+                secret = Some(self.keys.copy(&request.id).map_err(key_failure)?);
+            }
             _ => {
                 return Err(ControlError::new(
                     ControlErrorKind::BadRequest,
@@ -619,11 +622,7 @@ fn wire_key(key: hofund_secrets::Key, backup: bool) -> GatewayKey {
     out.off = key.off;
     out.is_default = key.is_default;
     out.masked = key.masked;
-    out.secret_hash = if backup {
-        key.secret_hash
-    } else {
-        String::new()
-    };
+    out.secret = if backup { key.secret } else { String::new() };
     out.models = key.models;
     out.accounts = key.accounts;
     out.quotas = key.quotas;
@@ -654,8 +653,8 @@ fn stored_key(key: GatewayKey) -> hofund_secrets::Key {
         name: key.name,
         off: key.off,
         is_default: key.is_default,
-        secret_hash: key.secret_hash,
-        masked: key.masked,
+        secret: key.secret,
+        masked: String::new(),
         models: key.models,
         accounts: key.accounts,
         quotas: key.quotas,
