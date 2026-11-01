@@ -574,6 +574,9 @@ pub struct Subscription {
     /// Vendor host, client id, and any other plugin setting.
     ///
     /// The empty-string rule is the same as [`Provider::options`].
+    /// Boolean `keep_login` pins the first account as the one the agent
+    /// returns to. Boolean `switch_only` moves only the agent sign-in and
+    /// leaves gateway routing on the account it already chose.
     pub options: BTreeMap<String, Value>,
 }
 

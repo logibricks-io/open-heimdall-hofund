@@ -7,17 +7,19 @@
 //! reports become quota observations, and `quota` reads `/wham/usage`.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use hofund_plugin_api::{
-    AccountId, AccountStatus, BuildError, ConfigError, HostContext, LoopbackSpec, ModelList,
-    PluginError, PluginId, QuotaWindow, RawTable, RedirectHost, Schema, SecretString,
+    AccountId, AccountStatus, AgentSignIn, BuildError, ConfigError, HostContext, LoopbackSpec,
+    ModelList, PluginError, PluginId, QuotaWindow, RawTable, RedirectHost, Schema, SecretString,
     SignInChallenge, SignInCtx, SignInFlow, SignInFlowKind, SignInProof, Subscription,
     SubscriptionFactory, SubscriptionSpec, UpstreamProvider, ValidConfig,
 };
 use hofund_plugin_sdk::Contribution;
 use hofund_plugin_sdk::oauth::{Pkce, SecretObject, constant_time_eq, new_state};
 
+mod agent_sign_in;
 mod limits;
 mod models;
 mod shape;
@@ -49,7 +51,8 @@ static SPEC: SubscriptionSpec = SubscriptionSpec::from_static(
     PluginId::from_static("codex"),
     "ChatGPT (Codex)",
     SignInFlowKind::Pkce,
-);
+)
+.with_agent_sign_in(AgentSignIn::new(&["codex"], "CODEX_HOME", ".codex"));
 
 /// Registers the ChatGPT subscription.
 #[must_use]
@@ -315,6 +318,15 @@ impl Subscription for Codex {
             Arc::clone(&self.endpoints),
             Arc::clone(&self.prompts),
         )))
+    }
+
+    async fn write_agent_sign_in(
+        &self,
+        account: &AccountId,
+        home: &Path,
+        host: &HostContext,
+    ) -> Result<(), PluginError> {
+        agent_sign_in::write(account, home, host).await
     }
 }
 

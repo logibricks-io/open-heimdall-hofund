@@ -50,10 +50,10 @@ pub(crate) type Subscriptions = BTreeMap<String, Arc<SubscriptionState>>;
 
 /// One configured subscription and its current members.
 pub(crate) struct SubscriptionState {
-    config: hofund_config::Subscription,
+    pub(crate) config: hofund_config::Subscription,
     plugin: PluginId,
-    instance: Arc<dyn Subscription>,
-    host: HostContext,
+    pub(crate) instance: Arc<dyn Subscription>,
+    pub(crate) host: HostContext,
     root: PathBuf,
     limits: HttpLimits,
     timeouts: (Duration, Duration),

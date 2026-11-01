@@ -59,6 +59,17 @@ pub trait DaemonRegistry: Send + Sync {
         None
     }
 
+    /// Subscription plugin ids the registry linked.
+    fn subscription_ids(&self) -> Vec<&'static str> {
+        Vec::new()
+    }
+
+    /// Agent sign-in declaration for subscription `id`.
+    fn agent_sign_in(&self, id: &str) -> Option<hofund_plugin_api::AgentSignIn> {
+        self.subscription(id)
+            .and_then(|factory| factory.spec().agent_sign_in())
+    }
+
     /// The linked vendor balance reader. The default links none.
     fn balance_quota(&self) -> Option<Arc<dyn hofund_plugin_api::BalanceQuota>> {
         None
@@ -140,6 +151,10 @@ impl DaemonRegistry for RegistryAdapter {
             hofund_plugin_registry::subscription(id)
                 .map_or(0, |factory| factory.spec().max_accounts())
         })
+    }
+
+    fn subscription_ids(&self) -> Vec<&'static str> {
+        hofund_plugin_registry::subscription_ids()
     }
 }
 

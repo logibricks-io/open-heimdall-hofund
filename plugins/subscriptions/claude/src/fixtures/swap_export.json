@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "swapVersion": "0.29.0-test",
+  "encrypted": false,
+  "accounts": [
+    {
+      "email": "alpha@example.test",
+      "uuid": "11111111-1111-1111-1111-111111111111",
+      "credentials": {
+        "claudeAiOauth": {
+          "accessToken": "access-alpha",
+          "refreshToken": "refresh-alpha",
+          "subscriptionType": "pro"
+        }
+      },
+      "config": {
+        "oauthAccount": {
+          "emailAddress": "alpha@example.test",
+          "accountUuid": "11111111-1111-1111-1111-111111111111"
+        }
+      }
+    },
+    {
+      "email": "beta@example.test",
+      "uuid": "22222222-2222-2222-2222-222222222222",
+      "alias": "work",
+      "credentials": {
+        "claudeAiOauth": {
+          "accessToken": "access-beta",
+          "refreshToken": "refresh-beta",
+          "subscriptionType": "max"
+        }
+      },
+      "config": {
+        "oauthAccount": {
+          "emailAddress": "beta@example.test",
+          "accountUuid": "22222222-2222-2222-2222-222222222222"
+        }
+      }
+    }
+  ]
+}
