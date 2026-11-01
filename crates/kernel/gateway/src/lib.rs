@@ -40,8 +40,8 @@ use endpoints::{
     GENERATIVE_CATCHALL, inject_target, match_count, match_generate, percent_decode, query_key,
 };
 use futures_util::{Stream, StreamExt};
-use hofund_codec::{Codec, StreamEncoder};
-use hofund_ir::{Request as ModelRequest, StreamEvent};
+use hofund_codec::{Codec, StreamEncoder, compacts_in_stream_client};
+use hofund_ir::{Request as ModelRequest, StreamEvent, too_long, words_of};
 use hofund_plugin_api::{
     BodyStream, InboundSurface, Method, PluginError, PluginErrorKind, ProtocolId,
 };
@@ -1218,6 +1218,7 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
         Err(error) => failure(
             app,
             codec.as_ref(),
+            &headers,
             &model_request,
             error,
             started,
@@ -1718,6 +1719,7 @@ async fn raw_body(
 fn failure(
     app: Arc<Inner>,
     codec: &dyn Codec,
+    headers: &HeaderMap,
     request: &ModelRequest,
     error: RouterError,
     started: Instant,
@@ -1755,6 +1757,20 @@ fn failure(
         Some(upstream)
     };
     track.end_with(member, status.as_u16(), None, None);
+    if compacts_in_stream_client(|name| headers.get(name).and_then(|value| value.to_str().ok()))
+        && request.stream
+        && codec.id() == ProtocolId::OPENAI_RESPONSES.as_str()
+        && (status == StatusCode::PAYLOAD_TOO_LARGE
+            || too_long(status.as_u16(), &words_of(&message)))
+    {
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, codec.stream_content_type())
+            .body(Body::from(
+                codec.encode_stream_error(status.as_u16(), &message),
+            ))
+            .unwrap_or_else(|_| text_response(StatusCode::INTERNAL_SERVER_ERROR, "stream"));
+    }
     coded(codec, status, &message)
 }
 

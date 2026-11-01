@@ -11,7 +11,7 @@ use hofund_ir::{
     GenerationParams, ImageDetail, ImagePart, ImageSource, Message, MessageDelta, MessageStart,
     MessageStop, Ping, Request, Response, Role, Stop, StopReason, StreamEvent, TextDelta, TextPart,
     ThinkingDelta, ThinkingPart, Tool, ToolArguments, ToolArgumentsDelta, ToolCallPart, ToolChoice,
-    ToolChoiceMode, ToolResultPart, UnknownEvent, UnknownPart, Usage,
+    ToolChoiceMode, ToolResultPart, UnknownEvent, UnknownPart, Usage, too_long, words_of,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -125,12 +125,40 @@ impl Codec for OpenAiResponses {
     }
 
     fn encode_stream_error(&self, status: u16, message: &str) -> Vec<u8> {
+        let mut out = Vec::new();
+        let overflow = too_long(status, &words_of(message));
+        let byte_cap = status == 413 && !overflow;
+        if status == 413 || overflow {
+            let hint;
+            let message = if byte_cap && !message.contains("request_too_large") {
+                hint = format!("{message} (request_too_large)");
+                hint.as_str()
+            } else {
+                message
+            };
+            let body = serde_json::json!({
+                "type": "response.failed",
+                "response": {
+                    "status": "failed",
+                    "error": {
+                        "code": "context_length_exceeded",
+                        "message": message,
+                    },
+                    "output": [],
+                },
+            });
+            crate::sse::write_event(
+                &mut out,
+                Some("response.failed"),
+                &serde_json::to_string(&body).unwrap_or_else(|_| "{}".to_owned()),
+            );
+            return out;
+        }
         let body = serde_json::json!({
             "type": "error",
             "code": status,
             "message": message,
         });
-        let mut out = Vec::new();
         crate::sse::write_event(
             &mut out,
             Some("error"),
@@ -138,6 +166,39 @@ impl Codec for OpenAiResponses {
         );
         out
     }
+}
+
+/// Lowercased User-Agent or `originator` prefixes of a client that compacts
+/// when a Responses stream reports `context_length_exceeded`.
+pub const STREAM_CLIENT_PREFIXES: [&str; 2] = ["codex", "acp-extension-codex"];
+/// Lowercased User-Agent or `originator` prefix of the plugin host that
+/// forwards that client's window or turn metadata.
+pub const PLUGIN_HOST_PREFIX: &str = "claude code";
+/// Window metadata header that marks the plugin-hosted client.
+pub const STREAM_WINDOW_HEADER: &str = "x-codex-window-id";
+/// Turn metadata header that marks the plugin-hosted client.
+pub const STREAM_TURN_METADATA_HEADER: &str = "x-codex-turn-metadata";
+
+/// Whether request headers name a client that compacts on a Responses stream's
+/// `context_length_exceeded` code.
+#[must_use]
+pub fn compacts_in_stream_client<'a>(header: impl Fn(&str) -> Option<&'a str>) -> bool {
+    let agents: Vec<String> = ["user-agent", "originator"]
+        .into_iter()
+        .filter_map(&header)
+        .map(str::to_lowercase)
+        .collect();
+    if agents.iter().any(|agent| {
+        STREAM_CLIENT_PREFIXES
+            .into_iter()
+            .any(|prefix| agent.starts_with(prefix))
+    }) {
+        return true;
+    }
+    (header(STREAM_WINDOW_HEADER).is_some() || header(STREAM_TURN_METADATA_HEADER).is_some())
+        && agents
+            .iter()
+            .any(|agent| agent.trim().starts_with(PLUGIN_HOST_PREFIX))
 }
 
 fn decode_request(bytes: &[u8]) -> Result<Request, CodecError> {
