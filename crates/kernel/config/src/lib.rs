@@ -1329,12 +1329,12 @@ fn validated_key_protocol(
         let protocol = protocol.trim();
         (!protocol.is_empty()).then(|| protocol.to_owned())
     });
-    if let Some(protocol) = &protocol {
-        if !KEY_PROTOCOLS.contains(&protocol.as_str()) {
-            return Err(ConfigError::Invalid(format!(
-                "provider `{provider}` has unknown key protocol `{protocol}`"
-            )));
-        }
+    if let Some(protocol) = &protocol
+        && !KEY_PROTOCOLS.contains(&protocol.as_str())
+    {
+        return Err(ConfigError::Invalid(format!(
+            "provider `{provider}` has unknown key protocol `{protocol}`"
+        )));
     }
     Ok(protocol)
 }
