@@ -418,6 +418,25 @@ async fn p1_4_08_sse_usage_tail() {
     assert_eq!((rows[0].input_tokens, rows[0].output_tokens), (None, None));
 }
 
+fn vendor_json_speech_usage() -> Result<RawAnswer, PluginError> {
+    streamed_speech(vec![
+        br#"{"audio":"SUQz"}"#.to_vec(),
+        b"\n{\"usage\":{\"input_tokens\":5,\"output_tokens\":7}}\n".to_vec(),
+    ])
+}
+
+#[tokio::test]
+async fn p1_4_13_usage_from_last_line_with_usage_whatever_its_type() {
+    let fixture = fixture(&[("member", None, vendor_json_speech_usage)]);
+    let (status, _) = speech(&fixture).await;
+    assert_eq!(status, StatusCode::OK);
+    let rows = fixture.usage.rows().expect("rows");
+    assert_eq!(
+        (rows[0].input_tokens, rows[0].output_tokens),
+        (Some(5), Some(7))
+    );
+}
+
 #[tokio::test]
 async fn p1_4_09_errors_failover() {
     let fixture = fixture(&[

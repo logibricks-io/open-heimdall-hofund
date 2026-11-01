@@ -1145,6 +1145,10 @@ fn streamed_forward(
                 Some((Ok(chunk.to_vec()), state))
             }
             Some(Err(error)) => {
+                // cut short: the reference counts no tokens for it
+                if let Some(end) = &mut state.end {
+                    end.tail.clear();
+                }
                 state.finish();
                 Some((Err(error), state))
             }
@@ -1161,10 +1165,12 @@ fn speech_tokens(tail: &[u8]) -> (Option<i64>, Option<i64>) {
     for line in tail.split(|byte| *byte == b'\n').rev() {
         let line = line.trim_ascii();
         let line = line.strip_prefix(b"data:").unwrap_or(line).trim_ascii();
-        let Ok(value) = serde_json::from_slice::<serde_json::Value>(line) else {
+        // the last JSON or SSE data line that carries a usage object, as the
+        // reference reads it: a speech.audio.done event or a vendor's JSON
+        if !line.windows(7).any(|window| window == b"\"usage\"") {
             continue;
-        };
-        if value.get("type").and_then(serde_json::Value::as_str) == Some("speech.audio.done") {
+        }
+        if serde_json::from_slice::<serde_json::Value>(line).is_ok() {
             return forwarded_tokens(line);
         }
     }
