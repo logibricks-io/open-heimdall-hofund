@@ -64,16 +64,16 @@ pub trait DaemonRegistry: Send + Sync {
         None
     }
 
-    /// Declared concurrent account limit for upstream factory `id`.
+    /// Accounts an upstream plugin declares may take requests at once.
     fn upstream_max_accounts(&self, id: &str) -> u64 {
-        let _ = id;
-        0
+        self.factory(id)
+            .map_or(0, |factory| factory.spec().max_accounts())
     }
 
-    /// Declared concurrent account limit for subscription factory `id`.
+    /// Accounts a subscription plugin declares may take requests at once.
     fn subscription_max_accounts(&self, id: &str) -> u64 {
-        let _ = id;
-        0
+        self.subscription(id)
+            .map_or(0, |factory| factory.spec().max_accounts())
     }
 }
 
