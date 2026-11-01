@@ -34,6 +34,8 @@ Present:
   Responses, and Messages adapters (`provider`)
 - named smart/order/rotate/usage/pace/weight/free/fast/cheap routing strategies
   and failover before the first stream event (`router`)
+- several upstream API keys per provider, with per-key rests, weights,
+  protocol restrictions, and key management through config, control, and CLI
 - an axum HTTP server (`gateway`), TOML configuration (`config`), a bearer
   token file (`secrets`), SQLite usage rows (`usage`), and the `hofund`
   commands `serve`, `config check`, `token show`, `token rotate`, and `usage`

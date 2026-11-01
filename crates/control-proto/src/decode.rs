@@ -7,10 +7,10 @@ use crate::{
     ConfigApplyRequest, ConfigResponse, ConfigValidateRequest, ConfigValidationResponse,
     ControlError, ControlErrorKind, ErrorEnvelope, EventEnvelope, FieldIssue, GatewayKeyRequest,
     GatewayKeyResponse, GatewayKeyRestoreRequest, HealthResponse, MAX_REQUEST_BODY_BYTES,
-    MAX_RESPONSE_BODY_BYTES, ModelListResponse, PicksResponse, PicksSetRequest,
-    ProviderListResponse, ProviderTestRequest, ProviderTestResponse, QuotaHistoryResponse,
-    QuotaResponse, ReloadRequest, RouteModelListResponse, ShutdownRequest, ShutdownResponse,
-    StatusResponse, TokenRotateRequest, TokenRotateResponse, UsageResponse,
+    MAX_RESPONSE_BODY_BYTES, ModelListResponse, PicksResponse, PicksSetRequest, ProviderKeyRequest,
+    ProviderKeysResponse, ProviderListResponse, ProviderTestRequest, ProviderTestResponse,
+    QuotaHistoryResponse, QuotaResponse, ReloadRequest, RouteModelListResponse, ShutdownRequest,
+    ShutdownResponse, StatusResponse, TokenRotateRequest, TokenRotateResponse, UsageResponse,
 };
 
 mod sealed {
@@ -225,6 +225,7 @@ request!(TokenRotateRequest);
 request!(ShutdownRequest);
 request!(GatewayKeyRequest);
 request!(GatewayKeyRestoreRequest);
+request!(ProviderKeyRequest);
 
 impl sealed::Sealed for ConfigResponse {}
 impl Response for ConfigResponse {
@@ -264,6 +265,7 @@ response!(
     StatusResponse,
     ConfigValidationResponse,
     ProviderListResponse,
+    ProviderKeysResponse,
     ProviderTestResponse,
     ModelListResponse,
     PicksResponse,

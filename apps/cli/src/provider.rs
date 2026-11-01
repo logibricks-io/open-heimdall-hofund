@@ -8,7 +8,8 @@
 use std::path::Path;
 
 use hofund_control_client::hofund_control_proto::{
-    ModelListResponse, PicksResponse, PicksSetRequest, ProviderSummary, ProviderTestRequest,
+    ModelListResponse, PicksResponse, PicksSetRequest, ProviderKeyAction, ProviderKeyRequest,
+    ProviderKeysResponse, ProviderSummary, ProviderTestRequest,
 };
 use hofund_control_client::{Client, ClientError};
 
@@ -33,6 +34,100 @@ pub(crate) async fn list(config: &Path) -> Result<String, String> {
         ));
     }
     Ok(out)
+}
+
+/// `hofund provider keys <id>`.
+pub(crate) async fn keys(config: &Path, id: &str) -> Result<String, String> {
+    let client = client(config).await?;
+    let response = client.provider_keys(id).await.map_err(failure)?;
+    Ok(render_keys(&response))
+}
+
+/// `hofund provider key-add <id> <keys...>`.
+pub(crate) async fn key_add(
+    config: &Path,
+    id: &str,
+    keys: &[String],
+    protocol: &str,
+) -> Result<String, String> {
+    let client = client(config).await?;
+    let mut request = ProviderKeyRequest::new(ProviderKeyAction::Add);
+    request.keys = keys.to_vec();
+    protocol.clone_into(&mut request.protocol);
+    let response = client
+        .change_provider_key(id, request)
+        .await
+        .map_err(failure)?;
+    Ok(render_keys(&response))
+}
+
+/// A key on/off/use/rename/replace/weight/protocol/remove operation.
+pub(crate) async fn key_edit(
+    config: &Path,
+    id: &str,
+    action: ProviderKeyAction,
+    key_id: &str,
+    value: &str,
+) -> Result<String, String> {
+    let client = client(config).await?;
+    let mut request = ProviderKeyRequest::new(action).for_id(key_id);
+    match action {
+        ProviderKeyAction::Rename => request.name = value.to_owned(),
+        ProviderKeyAction::Replace | ProviderKeyAction::RemoveMany => {
+            request.keys = vec![value.to_owned()];
+        }
+        ProviderKeyAction::Weight => {
+            request.weight = value
+                .parse()
+                .map_err(|_| format!("a key's weight is a whole number, not `{value}`"))?;
+        }
+        ProviderKeyAction::Protocol => value.clone_into(&mut request.protocol),
+        _ => {}
+    }
+    let response = client
+        .change_provider_key(id, request)
+        .await
+        .map_err(failure)?;
+    Ok(render_keys(&response))
+}
+
+fn render_keys(response: &ProviderKeysResponse) -> String {
+    let mut out = String::new();
+    if response.removed > 0 {
+        out.push_str(&format!("removed: {}\n", response.removed));
+    }
+    if response.added > 0 || response.already_had > 0 {
+        out.push_str(&format!(
+            "added: {}\nalready had: {}\n",
+            response.added, response.already_had
+        ));
+    }
+    if !response.before.is_empty() {
+        out.push_str(&format!(
+            "before: {}\nafter: {}\n",
+            response.before, response.after
+        ));
+    }
+    out.push_str("id\tname\tmasked\ton\tprotocol\tweight\trest");
+    for key in &response.keys {
+        let rest = key.rest.as_ref().map_or_else(String::new, |rest| {
+            format!(
+                "{} until {} (status {:?})",
+                rest.why, rest.until_ms, rest.status
+            )
+        });
+        out.push_str(&format!(
+            "\n{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            key.id,
+            key.name,
+            key.masked,
+            yes_no(key.on),
+            key.protocol,
+            key.weight,
+            rest
+        ));
+    }
+    out
 }
 
 /// `hofund provider show <id>`: the summary, the cached model list, and the
@@ -509,6 +604,41 @@ mod tests {
             render_routes(&models),
             "model\trouting\nfirst\tweight\nsecond\tsmart"
         );
+    }
+
+    #[test]
+    fn k6_key_table_shows_counts_masks_weights_and_rests() {
+        let mut response =
+            hofund_control_client::hofund_control_proto::ProviderKeysResponse::default();
+        response.added = 2;
+        response.already_had = 1;
+        response.before = "before-id".to_owned();
+        response.after = "after-id".to_owned();
+        let mut key = hofund_control_client::hofund_control_proto::ProviderKey::default();
+        key.id = "key-id".to_owned();
+        key.name = "Team".to_owned();
+        key.masked = "…-key".to_owned();
+        key.on = true;
+        key.protocol = "openai-chat".to_owned();
+        key.weight = 3;
+        let mut rest = hofund_control_client::hofund_control_proto::ProviderKeyRest::default();
+        rest.why = "rate_limit".to_owned();
+        rest.status = Some(429);
+        rest.until_ms = 1234;
+        key.rest = Some(rest);
+        response.keys.push(key);
+        let rendered = super::render_keys(&response);
+        assert!(rendered.contains("added: 2\nalready had: 1"), "{rendered}");
+        assert!(
+            rendered.contains("before: before-id\nafter: after-id"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("key-id\tTeam\t…-key\tyes\topenai-chat\t3"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("rate_limit until 1234"), "{rendered}");
+        assert!(!rendered.contains("secret"), "{rendered}");
     }
 
     #[test]

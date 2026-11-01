@@ -96,7 +96,9 @@ creates a starter file on Start or Open config.
 
 [`examples/hofund.toml`](examples/hofund.toml) is a complete file: two
 `[[providers]]` tables and a `[[routes]]` table whose `upstreams` list is the
-failover order. `api_key` may be a literal or `env:NAME`. Check it in place:
+failover order. `api_key` may be a literal or `env:NAME`. Several keys per
+provider, their routing, and their management commands are covered in
+[docs/provider-keys.md](docs/provider-keys.md). Check the config in place:
 
 ```sh
 hofund config check --config examples/hofund.toml

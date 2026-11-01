@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Provider upstream API keys (K-1): ordered per-key candidates with protocol
+  restrictions, weights, independent rests and credit-ladder persistence, and
+  member-id-based strategies. Added secret-free key listing, bulk add (with an
+  optional protocol), single and bulk remove, on/off, make-first, rename,
+  per-key weight and protocol, and replacement through the config writer,
+  control API, and CLI. Replacement preserves key settings and moves rests.
+  Per-key concurrency, remote allowances, per-key plans, and reserve-key
+  accounts-at-once remain follow-ups. See `docs/provider-keys.md`.
 - Named gateway keys (P0-4a): an owner-only caller-key store that keeps each
   secret readable, as the reference does, so `gateway-key copy` shows a key
   again; listings carry only a masked form. Default-token migration, CLI and control management, export/restore,

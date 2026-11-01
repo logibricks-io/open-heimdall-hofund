@@ -12,11 +12,11 @@ use hofund_control_proto::{
     ConfigApplyRequest, ConfigResponse, ConfigValidateRequest, ConfigValidationResponse,
     ControlError, ErrorEnvelope, EventEnvelope, GatewayKeyRequest, GatewayKeyResponse,
     GatewayKeyRestoreRequest, HealthResponse, MAX_RESPONSE_BODY_BYTES, ModelListResponse,
-    PicksResponse, PicksSetRequest, ProviderListResponse, ProviderTestRequest,
-    ProviderTestResponse, QuotaHistoryQuery, QuotaHistoryResponse, QuotaQuery, QuotaResponse,
-    ReloadRequest, RouteModelListResponse, ShutdownRequest, ShutdownResponse, StatusResponse,
-    TokenRotateRequest, TokenRotateResponse, Topic, UsagePeriod, UsageQuery, UsageResponse,
-    decode_error_envelope, decode_response,
+    PicksResponse, PicksSetRequest, ProviderKeyRequest, ProviderKeysResponse, ProviderListResponse,
+    ProviderTestRequest, ProviderTestResponse, QuotaHistoryQuery, QuotaHistoryResponse, QuotaQuery,
+    QuotaResponse, ReloadRequest, RouteModelListResponse, ShutdownRequest, ShutdownResponse,
+    StatusResponse, TokenRotateRequest, TokenRotateResponse, Topic, UsagePeriod, UsageQuery,
+    UsageResponse, decode_error_envelope, decode_response,
 };
 use http::header;
 use http_body_util::{BodyExt, Full, Limited};
@@ -279,6 +279,26 @@ impl Client {
     /// Lists configured providers.
     pub async fn providers(&self) -> Result<ProviderListResponse, ClientError> {
         self.get("/v1/hofund/providers").await
+    }
+
+    /// Lists a provider's upstream API keys without their secrets.
+    pub async fn provider_keys(&self, id: &str) -> Result<ProviderKeysResponse, ClientError> {
+        self.get(&format!("/v1/hofund/providers/{}/keys", encode_segment(id)))
+            .await
+    }
+
+    /// Changes a provider's upstream API keys.
+    pub async fn change_provider_key(
+        &self,
+        id: &str,
+        request: ProviderKeyRequest,
+    ) -> Result<ProviderKeysResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            &format!("/v1/hofund/providers/{}/keys", encode_segment(id)),
+            Some(json_body(&request)?),
+        )
+        .await
     }
 
     /// Reads a provider's cached models.

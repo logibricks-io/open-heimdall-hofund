@@ -1744,6 +1744,26 @@ fn offline_provider_key_one_shot() {
 }
 
 #[test]
+fn k6_offline_provider_keys_one_shot() {
+    let scratch = Scratch::new("127.0.0.1:0", COMMENTED);
+    let added = scratch.hofund(&["provider", "key-add", "chat", "second-key,provider-key"]);
+    let text = added.ok();
+    assert!(text.contains("added: 1\nalready had: 1"), "{text}");
+    assert!(!text.contains("second-key"), "{text}");
+    let listed = scratch.hofund(&["provider", "keys", "chat"]);
+    let text = listed.ok();
+    assert!(
+        text.contains("id\tname\tmasked\ton\tprotocol\tweight\trest"),
+        "{text}"
+    );
+    assert!(text.contains("…-key"), "{text}");
+    assert!(!text.contains("second-key"), "{text}");
+    let config = scratch.config_text();
+    assert!(config.contains("key = \"second-key\""), "{config}");
+    scratch.assert_no_daemon_state();
+}
+
+#[test]
 fn offline_provider_rm_one_shot() {
     let scratch = Scratch::new("127.0.0.1:0", ROUTED);
     let before = scratch.config_text();

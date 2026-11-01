@@ -223,7 +223,10 @@ impl Runtime {
         let mut fingerprints = HashMap::new();
         let mut owners: HashMap<MemberId, &str> = HashMap::new();
         for (id, provider) in &built {
-            let member = membership::member_id(id);
+            let member = provider
+                .key
+                .as_ref()
+                .map_or_else(|| membership::member_id(id), |key| key.member.clone());
             // Publication rejects two providers that share a member id; check
             // here so the candidate fails before anything is written.
             if let Some(previous) = owners.insert(member.clone(), id) {
@@ -233,7 +236,8 @@ impl Runtime {
             }
             fingerprints.insert(member, provider.fingerprint.clone());
         }
-        let (routes, policy) = route_plan(config, self.models.get().map(AsRef::as_ref));
+        let (routes, policy) =
+            route_plan(config, self.models.get().map(AsRef::as_ref), Some(&built));
         // Publication cannot fail after the file is written: every routed
         // provider must already be built.
         for (model, hops) in &routes {
@@ -245,7 +249,14 @@ impl Runtime {
                         )));
                     }
                     Some(_) => {}
-                    None if !built.contains_key(&hop.provider) => {
+                    None if !built.contains_key(&hop.provider)
+                        && !built.values().any(|candidate| {
+                            candidate.key.as_ref().is_some_and(|key| {
+                                key.provider == hop.provider
+                                    && Some(&key.member) == hop.member_id.as_ref()
+                            })
+                        }) =>
+                    {
                         return Err(DaemonError::new(format!(
                             "route `{model}` names unknown provider `{}`",
                             hop.provider
@@ -268,7 +279,11 @@ impl Runtime {
 
     /// Publishes a prepared candidate and returns the ids of members that were
     /// added, removed, or whose fingerprint changed, sorted.
-    pub(crate) fn publish(&self, candidate: Candidate) -> Result<Vec<String>, DaemonError> {
+    pub(crate) fn publish(
+        &self,
+        candidate: Candidate,
+        key_moves: &[(MemberId, MemberId)],
+    ) -> Result<Vec<String>, DaemonError> {
         let Candidate {
             config,
             built,
@@ -290,13 +305,18 @@ impl Runtime {
         *published = plan;
         drop(published);
         if let Some(host) = self.models.get() {
-            host.replace_instances(instances.iter().map(|(id, instance)| {
-                (
-                    id.clone(),
-                    Arc::clone(&instance.upstream),
-                    instance.base_url.clone(),
-                )
-            }));
+            host.replace_instances(
+                instances
+                    .values()
+                    .filter(|instance| instance.model_list)
+                    .map(|instance| {
+                        (
+                            instance.provider.id.clone(),
+                            Arc::clone(&instance.upstream),
+                            instance.base_url.clone(),
+                        )
+                    }),
+            );
         }
         // Retired instances drop here unless a request still holds them.
         *self.instances.lock().expect("provider instances") = instances;
@@ -304,12 +324,20 @@ impl Runtime {
             sender.send_replace(config);
         }
 
+        let mut previous = self.fingerprints.lock().expect("provider fingerprints");
+        for (was, now) in key_moves {
+            self.cooldowns.move_member(was, now);
+            if previous.remove(was).is_some()
+                && let Some(fingerprint) = fingerprints.get(now)
+            {
+                previous.insert(now.clone(), fingerprint.clone());
+            }
+        }
         // Published routes omit failed members; every configured candidate
         // member must retain its rest regardless of that transient flag.
         let mut members = fingerprints.keys().cloned().collect::<HashSet<_>>();
         members.extend(subscription_members);
         self.cooldowns.retain_members(&members);
-        let mut previous = self.fingerprints.lock().expect("provider fingerprints");
         let mut changed = Vec::new();
         for (id, fingerprint) in &fingerprints {
             match previous.get(id) {
@@ -476,7 +504,7 @@ impl Runtime {
     #[cfg(test)]
     pub(crate) fn publish_candidate(&self, config: &Config) -> Result<Vec<String>, DaemonError> {
         let candidate = self.prepare(config)?;
-        self.publish(candidate)
+        self.publish(candidate, &[])
     }
 
     pub(crate) fn spawn_probes(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
