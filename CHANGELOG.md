@@ -15,6 +15,114 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   constant-time authentication, model and account scopes, and key id/name usage
   attribution. Limit, read-only, and short-lived-key fields are persisted for
   their later enforcement phases. See `docs/gateway-keys.md`.
+- Responses failures caused by a 413 byte cap or a context overflow now emit
+  `response.failed` with code `context_length_exceeded`, allowing the client to
+  compact rather than reconnect (D-1). Codex receives this in its requested
+  stream even when routing fails before the first event; other clients keep
+  their pre-stream HTTP errors, and other protocols are unchanged.
+- Asked-model relabelling is now verified end to end for Chat, Messages,
+  Responses, and Generative Language, streamed and whole, for translated and
+  raw member replies; equal asked/wire names retain dated upstream ids (D-9).
+- Codex passthrough metadata refusals now use one shared parser and
+  byte-preserving editor on both routed Responses calls and Codex backend
+  relays. A 400 `unknown_parameter` retries once per rejected member, omitting
+  that member (or the whole passthrough) on every input item and remembering
+  the refusal per provider instance or upstream base. Repeated, unrelated,
+  and cross-protocol refusals do not trigger this retry (D-10).
+- Messages translation keeps client `cache_control` marks and TTLs, omits
+  marks on thinking blocks, strips complete thought-signature suffixes from
+  call and result ids, and checks required tool choices (D-12). Generative
+  Language `thinkingConfig` now records levels and budgets as request effort,
+  including snake_case fields and dynamic budgets (D-13).
+- Thinking-only refusal handover (P0-3b3 b9, #496): streamed Anthropic
+  Messages, Chat Completions, and Responses requests now try the next member
+  after a refusal or refusal error when only reasoning has been emitted, then
+  splice that member's answer into the same reply. Anthropic blocks are closed
+  and reindexed, Responses start frames are dropped while output and sequence
+  indexes continue, and Chat chunks pass through. Text or tool output commits
+  the stream, last-member and no-output behavior is unchanged, repeated
+  handovers accumulate indexes, and policy refusals do not cool the member.
+- Measurement routing (P0-2b): `smart`, `usage`, `pace`, `fast`, and `cheap`
+  now use live allowance, token, speed, and price measurements. Smart handles
+  allowance tiers, renewals, credit lapse and spending, and per-provider/unit
+  wallets; usage decays tokens by one hour; pace ranks remaining allowance per
+  hour; fast estimates short replies and probes unknown members; cheap compares
+  current catalog and cache-read prices. Streamed replies record first-content
+  latency in the migrated usage ledger, and daemon measurements survive router
+  snapshot replacement. Measurements are read only for strategies that use
+  them, over a bounded window backed by a new `created_unix` ledger index.
+
+- A connection failure while this computer has no network no longer rests
+  route members: unless an upstream answered in the last 15 seconds, the daemon
+  checks for a route out and dials other providers, and an offline verdict
+  passes the failure on without a rest (P0-3b3 b8).
+- Route members now carry the context window their provider's model list
+  gives the model, so a vague 400 or 5xx on a request well past that window
+  (1.2 times) is reported as too long, and after an overflow a member known to
+  be too small is skipped (P0-3b3 b10, #490).
+
+- Quota windows (P0-5a): a kernel quota store keeps each subscription
+  card with its windows, absolute reset times, `runsOutAt`, cached `asOf`
+  fallbacks, deferred reads, and last-served times from the usage ledger,
+  persisted atomically in `quotas.json`, plus a 45-day window history with
+  near-point, flat-run, and cycle sampling. The gateway answers
+  `GET /v1/hofund/quotas` (`kept=1` for no fresh read) and
+  `GET /v1/hofund/quotas/history?days=&provider=&user=` behind the normal
+  gateway key, with a caller scope hook for gateway keys. `hofund quota`
+  prints the table or `--json`, `hofund quota history` the kept readings,
+  and `hofund quota wait` blocks until a subscription or account has
+  allowance again (exit 0, 1 on `--timeout`, 2 for an unknown name, 130 on
+  Ctrl+C). The router reads a per-member allowance view.
+- Code Assist tool schemas are flattened to the accepted plain subset (V-1),
+  including local reference expansion, cycle handling, union folding, boolean
+  schemas, keyword filtering, and array item defaults. Ordinary Generative
+  Language and Vertex requests are unchanged.
+- Automatic vendor request fixes (V-2) now preserve untouched bytes while
+  normalizing DeepSeek and Grok tool patterns, converting selected `oneOf`
+  schemas, adding Kimi/Moonshot enum and reference-target types, renaming the
+  DeepSeek Chat token cap, and dropping locked Kimi/Moonshot/Ark sampling.
+  Selection uses the endpoint host, preset, protocol, and model in
+  `hofund-quirks`, and both kernel and SDK transports apply the same rules.
+- Gemini tool schemas now receive inferred types and have boolean schemas and
+  vendor extension keywords removed (V-3), keyed by model name on Chat,
+  Responses, and Messages routes rather than by provider.
+- Tool root unions fold to object schemas (V-4): always for xAI and Messages,
+  and after a recognized refusal on other upstreams. Each provider remembers
+  the model and retries once folded, then folds later requests immediately.
+- Chat token fields now follow the original request and OpenAI's
+  `max_completion_tokens` convention (V-5). A refusal naming the other field
+  triggers one retry and is remembered per provider for subsequent requests.
+- Single-provider patience and background recovery (P0-3b3): direct provider
+  requests retry busy failures and short rate limits with pauses doubling to 30
+  seconds, bounded by per-provider `patience` (60 seconds by default, at most
+  240 seconds, or `off`). Streaming clients receive SSE comments during waits,
+  disconnects record 499 without another attempt, and terminal failures pass
+  through. Kernel API keys resting after generic outages now answer background
+  model-list probes after 1, 2, 5, then 10 minutes; a response lifts the rest,
+  while a failure within 30 minutes suppresses probes until a real answer.
+- Per-model rests (P0-3b2): model-cooling and unserved-model refusals now rest
+  only the affected member/model pair, with independent rate, generic, and
+  persisted credit ladders. Routing probes are selected per pair, model success
+  clears only that model, and status, usage, and request events expose the
+  model scope. Failure events replace rest deadlines like the reference, while
+  passive observations keep the longer rest.
+- Routing strategy core (P0-2a): route-level `order`, `rotate`, smooth
+  weighted round robin, and free-first ordering, with per-route and per-account
+  weights, manual/catalog/zero-price free detection, and strategy state kept
+  across configuration snapshots. `smart`, `usage`, `pace`, `fast`, and `cheap`
+  are registered and validated at configuration load. Ready members retain
+  strategy order before the single cooling probe, and
+  `hofund routes` prints each route's strategy.
+
+- Credit-rest ladders and persistence (P0-3b1): API-key credit refusals now
+  climb 30 minutes, 2 hours, 8 hours, 24 hours, 3 days, and a repeating 7-day
+  rung after ended rests, with flat retry/soon shapes and named resets capped
+  at 35 days. Key ladder deadlines and rungs persist atomically in `rests.json`.
+  ChatGPT/Codex account 402s use body/header resets, full-window renewal, long
+  retry hints, or five hours, and renewed-window observations lift them. Other
+  subscription accounts stay flat, and generic failures no longer climb while
+  their own rest is active.
+
 - Responses continuation history (P0-1a): `/v1/responses` now resolves
   `previous_response_id` in a caller-scoped, bounded in-memory LRU before
   decoding and routing. Unary and SSE replies are captured without delaying
@@ -711,6 +819,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- A reasoning item handed to a Responses client is now one summary and no
+  content: a reply item is `{id, type, status, summary}` with an `rs_` id, and
+  a stream announces it with `summary: []` and then sends
+  `response.reasoning_summary_part.added`, `reasoning_summary_text.delta`,
+  `reasoning_summary_text.done` and `reasoning_summary_part.done` instead of
+  `response.reasoning_text.delta`. A sealed item that carries content parts,
+  another vendor's shape, is made into such an item (its text, else its
+  summaries, as the one summary, and no seal), keeping the id its events
+  carried; the upstream's own sealed item still goes back as it came. A
+  Responses reply relayed as it came is put through the same rule line by
+  line, every other byte and sequence number kept (D-20).
+- Dependencies: `tokio-tungstenite` 0.30, `base64` 0.23, and `toml` 1.1 in the
+  workspace crates, and the `actions/upload-artifact` v7 and
+  `actions/download-artifact` v8 release workflow actions.
+
 - Failover decisions (P0-3c) follow the reference order: the default
   `failover.statuses` is 401, 402, 403, 404, 408, 429, and 500 to 599; retired
   models, edge blocks, credit, quota, unserved models, refusals, request
@@ -939,6 +1062,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before a short name is rewritten.
 
 ### Fixed
+
+- A shorter failure no longer shortens a longer rest: a 429's one-minute rate
+  rest arriving beside a 402's half-hour credit rest leaves the credit rest in
+  place, and a tie replaces it. A quota or credit rest that was only a guess
+  (the refusal named no time) still gives way to a same-cause refusal whose
+  reset or retry time the vendor names, though it is sooner. A credit
+  refusal whose rest is kept leaves the credit ladder's rung where it was
+  (D-19, ruling R-494b, superseding R-494).
+
+- A relayed stream whose upstream read fails mid-line no longer sends the
+  client a half event. Only ended lines go out as they arrive; the unfinished
+  last line goes out when the stream ends cleanly and is dropped when the read
+  fails, unless it is a whole `data:` line (`[DONE]` or valid JSON) short of
+  its line end. The error event starts on a frame of its own, and a severed
+  Chat Completions stream ends with `data: [DONE]` after it (D-21).
 
 - Goose model picks retain the config's current or legacy layout, remove stale
   flat keys from the current layout, and clear/disconnect by removing only

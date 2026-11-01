@@ -188,6 +188,9 @@ fn fixture() -> Fixture {
         wire_model: Some("wire".to_owned()),
         max_output_tokens: None,
         context_window: None,
+        patience: None,
+        weight: 1,
+        free: false,
     };
     let routes = BTreeMap::from([
         ("demo".to_owned(), vec![hop("primary", "account-a")]),

@@ -6,12 +6,14 @@ use std::time::Duration;
 use hofund_config::Config;
 use hofund_control_proto::{EventPayload, MemberCooledEvent, MemberRecoveredEvent};
 use hofund_plugin_api::MemberId;
+use hofund_router::quota::QuotaStore;
 use hofund_router::{CooldownPolicy, Cooldowns, FailoverPolicy, Snapshot};
 use tokio::sync::watch;
 
 use crate::control_map;
 use crate::events::EventBus;
 use crate::membership::{self, Table};
+use crate::rests::RestStore;
 use crate::subscriptions::{self, QuotaPolls, Subscriptions};
 use crate::{
     Built, DaemonError, DaemonRegistry, Instance, ModelsHost, RouterParts, providers, route_plan,
@@ -21,6 +23,9 @@ use crate::{
 /// Cooldown observer tick. One second keeps cooled/recovered events prompt
 /// without busy-waiting on the book.
 const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(1);
+/// How long a fresh quota report waits on the vendors before answering
+/// what is kept.
+pub(crate) const QUOTA_READ_TIMEOUT: Duration = Duration::from_secs(12);
 
 /// Providers and routes built from a candidate configuration, not yet live.
 pub(crate) struct Candidate {
@@ -46,6 +51,7 @@ struct Plan {
 pub(crate) struct Runtime {
     registry: Arc<dyn DaemonRegistry>,
     cooldowns: Arc<Cooldowns>,
+    rests: Arc<Mutex<RestStore>>,
     fingerprints: Mutex<HashMap<MemberId, String>>,
     path: PathBuf,
     max_idle_per_host: Option<usize>,
@@ -60,6 +66,7 @@ pub(crate) struct Runtime {
     events: OnceLock<Arc<EventBus>>,
     plan: Mutex<Plan>,
     polls: tokio::sync::Mutex<QuotaPolls>,
+    quotas: Arc<QuotaStore>,
     /// Wakes the subscription task after a publication.
     wake: tokio::sync::Notify,
 }
@@ -82,6 +89,7 @@ impl Runtime {
                 CooldownPolicy::default(),
                 Arc::new(|| tokio::time::Instant::now().into_std()),
             )),
+            rests: Arc::new(Mutex::new(RestStore::new(path))),
             fingerprints: Mutex::new(HashMap::new()),
             path: path.to_path_buf(),
             max_idle_per_host,
@@ -92,6 +100,9 @@ impl Runtime {
             events: OnceLock::new(),
             plan: Mutex::new(Plan::default()),
             polls: tokio::sync::Mutex::new(QuotaPolls::default()),
+            quotas: Arc::new(QuotaStore::new(
+                path.parent().unwrap_or_else(|| Path::new(".")),
+            )),
             wake: tokio::sync::Notify::new(),
         })
     }
@@ -125,6 +136,7 @@ impl Runtime {
             &self.registry,
             &subscriptions,
         )?;
+        let configured = fingerprints.keys().cloned().collect::<HashSet<_>>();
         *self.plan.lock().expect("published plan") = Plan {
             built,
             routes,
@@ -133,6 +145,10 @@ impl Runtime {
         };
         *self.fingerprints.lock().expect("provider fingerprints") = fingerprints;
         *self.instances.lock().expect("provider instances") = instances;
+        self.rests
+            .lock()
+            .expect("credit rest store")
+            .load(&self.cooldowns, &configured);
         self.config
             .set(watch::Sender::new(Arc::new(config.clone())))
             .map_err(|_| DaemonError::new("runtime published its first configuration twice"))?;
@@ -141,6 +157,20 @@ impl Runtime {
         })?;
         let owner = table as Arc<dyn std::any::Any + Send + Sync>;
         Ok(snapshot.hold(owner))
+    }
+
+    /// Connects live routing measurements to every published router snapshot.
+    pub(crate) fn attach_measurements(
+        &self,
+        usage: Arc<hofund_usage::Ledger>,
+        models: Arc<ModelsHost>,
+    ) {
+        let measurements =
+            crate::measurements::DaemonMeasurements::new(Arc::clone(&self.quotas), usage, models);
+        self.table
+            .get()
+            .expect("initial snapshot")
+            .set_measurements(Arc::new(measurements));
     }
 
     /// Shares the list and probe host so reloads plan through it and
@@ -203,7 +233,7 @@ impl Runtime {
             }
             fingerprints.insert(member, provider.fingerprint.clone());
         }
-        let (routes, policy) = route_plan(config);
+        let (routes, policy) = route_plan(config, self.models.get().map(AsRef::as_ref));
         // Publication cannot fail after the file is written: every routed
         // provider must already be built.
         for (model, hops) in &routes {
@@ -346,6 +376,10 @@ impl Runtime {
 
     /// Polls quota for each subscription member that is due.
     pub(crate) async fn poll_quotas(&self, now: tokio::time::Instant) -> Vec<MemberId> {
+        self.poll_quotas_with(now, false).await
+    }
+
+    async fn poll_quotas_with(&self, now: tokio::time::Instant, force: bool) -> Vec<MemberId> {
         let current = self
             .plan
             .lock()
@@ -355,8 +389,65 @@ impl Runtime {
         self.polls
             .lock()
             .await
-            .poll(&current, &self.cooldowns, now)
+            .poll(&current, &self.cooldowns, &self.quotas, now, force)
             .await
+    }
+
+    /// Returns the kept report, or reads every subscription first. A fresh
+    /// read gives up after [`QUOTA_READ_TIMEOUT`] and answers what is kept.
+    pub(crate) async fn quota_report(
+        &self,
+        kept: bool,
+    ) -> (
+        Vec<hofund_control_proto::Quota>,
+        Vec<hofund_control_proto::QuotaStanding>,
+    ) {
+        if !kept {
+            let _ = tokio::time::timeout(
+                QUOTA_READ_TIMEOUT,
+                self.poll_quotas_with(tokio::time::Instant::now(), true),
+            )
+            .await;
+        }
+        let order = self.quota_order();
+        let now = self.quotas.now();
+        (
+            self.quotas.report(&order),
+            self.quotas.standings(&order, now),
+        )
+    }
+
+    /// Providers then subscriptions, as configured.
+    fn quota_order(&self) -> Vec<String> {
+        self.config
+            .get()
+            .map(|config| {
+                let config = config.subscribe();
+                let config = config.borrow();
+                config
+                    .providers
+                    .iter()
+                    .map(|provider| provider.id.clone())
+                    .chain(config.subscriptions.iter().map(|entry| entry.id.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The quota store's wall clock.
+    pub(crate) fn quota_now(&self) -> std::time::SystemTime {
+        self.quotas.now()
+    }
+
+    /// Returns sampled history from the shared store.
+    pub(crate) fn quota_histories(
+        &self,
+        days: Option<&str>,
+        provider: Option<&str>,
+        user: Option<&str>,
+    ) -> Vec<hofund_control_proto::QuotaHistory> {
+        self.quotas
+            .histories(days, provider, user, self.quotas.now())
     }
 
     /// Rereads accounts every tick and after each publication, then polls
@@ -388,30 +479,41 @@ impl Runtime {
         self.publish(candidate)
     }
 
+    pub(crate) fn spawn_probes(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
+        let table = self.table.get().expect("initial snapshot").clone();
+        crate::probe::spawn(Arc::clone(&self.cooldowns), move || table.members())
+    }
+
     pub(crate) fn spawn_maintenance(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
         let cooldowns = Arc::clone(&self.cooldowns);
+        let rests = Arc::clone(&self.rests);
         let events = self.events.get().cloned();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(MAINTENANCE_INTERVAL);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            // Last observed cooling revision per member; a rise means cooled.
-            let mut last_revisions: HashMap<MemberId, u64> = HashMap::new();
+            // Last observed cooling revision per member/model; a rise means cooled.
+            let mut last_revisions: HashMap<(MemberId, Option<String>), u64> = HashMap::new();
             loop {
                 interval.tick().await;
                 cooldowns.maintain();
-                let recoveries = cooldowns.drain_recoveries();
+                rests.lock().expect("credit rest store").save(&cooldowns);
+                let recoveries = cooldowns.drain_scoped_recoveries();
                 if let Some(bus) = &events {
-                    for (id, _cause) in &recoveries {
+                    for (id, model, _cause) in &recoveries {
                         let mut event = MemberRecoveredEvent::default();
                         event.member_id = id.to_string();
+                        event.model.clone_from(model);
                         event.ready = true;
                         bus.emit(EventPayload::MemberRecovered(event));
-                        last_revisions.remove(id);
+                        last_revisions.remove(&(id.clone(), model.clone()));
                     }
                     let now = std::time::Instant::now();
-                    for (id, cooling) in cooldowns.entries() {
-                        let revision = cooldowns.revision(&id);
-                        let previous = last_revisions.insert(id.clone(), revision);
+                    for (id, model, cooling) in cooldowns.scoped_entries() {
+                        let revision = model.as_deref().map_or_else(
+                            || cooldowns.revision(&id),
+                            |model| cooldowns.revision_for_model(&id, model),
+                        );
+                        let previous = last_revisions.insert((id.clone(), model.clone()), revision);
                         if previous == Some(revision) {
                             continue;
                         }
@@ -421,6 +523,7 @@ impl Runtime {
                             });
                         let mut event = MemberCooledEvent::default();
                         event.member_id = id.to_string();
+                        event.model = model;
                         event.cause = control_map::cooldown_reason(cooling.cause());
                         event.remaining_ms = remaining;
                         event.retry_after_ms = remaining;

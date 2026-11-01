@@ -11,9 +11,10 @@ use hofund_control_proto::{
     ControlErrorKind, FieldIssue, GatewayKey, GatewayKeyAction, GatewayKeyLimit, GatewayKeyRequest,
     GatewayKeyResponse, GatewayKeyRestoreRequest, HealthResponse, ModelEntry, ModelListResponse,
     PicksResponse, PicksSetRequest, ProviderListResponse, ProviderSummary, ProviderTestRequest,
-    ProviderTestResponse, ProviderTestResult, RouteModel, RouteModelListResponse, ShutdownRequest,
-    ShutdownResponse, ShutdownState, StatusResponse, TokenRotateRequest, TokenRotateResponse,
-    UsagePeriod, UsageQuery, UsageResponse, UsageRow, UsageTotals,
+    ProviderTestResponse, ProviderTestResult, QuotaHistoryQuery, QuotaHistoryResponse, QuotaQuery,
+    QuotaResponse, RouteModel, RouteModelListResponse, ShutdownRequest, ShutdownResponse,
+    ShutdownState, StatusResponse, TokenRotateRequest, TokenRotateResponse, UsagePeriod,
+    UsageQuery, UsageResponse, UsageRow, UsageTotals,
 };
 use hofund_control_proto::{
     ConfigApplyRequest, ConfigResponse, ConfigValidateRequest, ConfigValidationResponse,
@@ -23,6 +24,8 @@ use hofund_gateway::control::{
     ControlFailure, ControlFuture, ControlState, EventSubscription, EventsQuery,
 };
 use hofund_plugin_api::ModelSpec;
+
+use crate::quotas::DaemonQuotas;
 use hofund_router::Cooldowns;
 use hofund_secrets::{KeyLimit, KeyStore};
 use hofund_usage::{Ledger, Window};
@@ -51,6 +54,7 @@ pub(crate) struct DaemonControl {
     shutdown: watch::Sender<bool>,
     events: Arc<EventBus>,
     in_flight: Arc<AtomicU64>,
+    quotas: Option<Arc<DaemonQuotas>>,
 }
 
 impl DaemonControl {
@@ -102,7 +106,14 @@ impl DaemonControl {
             shutdown,
             events: Arc::new(EventBus::new()),
             in_flight: Arc::new(AtomicU64::new(0)),
+            quotas: None,
         }
+    }
+
+    /// Serves `/v1/hofund/quotas` and its history from `quotas`.
+    pub(crate) fn with_quotas(mut self, quotas: Arc<DaemonQuotas>) -> Self {
+        self.quotas = Some(quotas);
+        self
     }
 
     /// Serves `/v1/hofund/events` from `bus`.
@@ -132,6 +143,7 @@ impl DaemonControl {
             snapshot.generation = live.generation;
             snapshot.pending_restart.clone_from(&live.pending_restart);
             snapshot.not_applied.clone_from(&live.not_applied);
+            let rests = cooldowns.scoped_entries();
             snapshot.members = live
                 .config
                 .providers
@@ -141,6 +153,11 @@ impl DaemonControl {
                     let mut member = MemberSummary::default();
                     member.ready = cooldowns.cooling(&id).is_none();
                     member.id = id.to_string();
+                    member.resting_models = rests
+                        .iter()
+                        .filter(|(rest_id, model, _)| *rest_id == id && model.is_some())
+                        .filter_map(|(_, model, _)| model.clone())
+                        .collect();
                     member
                 })
                 .collect();
@@ -343,6 +360,7 @@ impl ControlState for DaemonControl {
 
     fn providers(&self) -> ControlFuture<'_, ProviderListResponse> {
         let mut response = ProviderListResponse::default();
+        let rests = self.cooldowns.scoped_entries();
         response.providers = self
             .config()
             .providers
@@ -350,14 +368,17 @@ impl ControlState for DaemonControl {
             .map(|provider| {
                 let cached = self.models.cached(&provider.id);
                 let planned = self.models.planned(provider);
-                let resting = self
-                    .cooldowns
-                    .cooling(&membership::member_id(&provider.id))
-                    .is_some();
+                let id = membership::member_id(&provider.id);
+                let resting = self.cooldowns.cooling(&id).is_some();
                 let mut summary = ProviderSummary::default();
                 summary.id = provider.id.clone();
                 summary.ready = planned.is_ok() && !resting;
                 summary.model_count = u64::try_from(cached.models.len()).unwrap_or(u64::MAX);
+                summary.resting_models = rests
+                    .iter()
+                    .filter(|(rest_id, model, _)| *rest_id == id && model.is_some())
+                    .filter_map(|(_, model, _)| model.clone())
+                    .collect();
                 if let Ok(planned) = planned {
                     summary.kind = plugin_for(provider, &planned, &self.registry);
                     summary.protocol = protocol_of(planned.wire).to_owned();
@@ -467,6 +488,7 @@ impl ControlState for DaemonControl {
             .map(|route| {
                 let mut model = RouteModel::default();
                 model.id = route.model.clone();
+                model.routing = route.routing.clone();
                 model
             })
             .collect();
@@ -516,6 +538,20 @@ impl ControlState for DaemonControl {
         request: AgentModelRequest,
     ) -> ControlFuture<'_, AgentChangeResponse> {
         Box::pin(async move { self.agents.set_model(id, request).await.map_err(Into::into) })
+    }
+
+    fn quotas(&self, query: QuotaQuery) -> ControlFuture<'_, QuotaResponse> {
+        Box::pin(async move {
+            let quotas = self.quotas.as_ref().ok_or_else(quotas_unavailable)?;
+            Ok::<_, ControlFailure>(quotas.response(&query).await)
+        })
+    }
+
+    fn quota_history(&self, query: QuotaHistoryQuery) -> ControlFuture<'_, QuotaHistoryResponse> {
+        Box::pin(async move {
+            let quotas = self.quotas.as_ref().ok_or_else(quotas_unavailable)?;
+            Ok::<_, ControlFailure>(quotas.history_response(&query))
+        })
     }
 
     fn usage(&self, query: UsageQuery) -> ControlFuture<'_, UsageResponse> {
@@ -842,6 +878,15 @@ fn usage_row(row: hofund_usage::Row) -> UsageRow {
     out.caller_key_id = row.caller_key_id;
     out.caller_key_name = row.caller_key_name;
     out
+}
+
+fn quotas_unavailable() -> ControlFailure {
+    ControlError::new(
+        ControlErrorKind::Unavailable,
+        "quota reports are not served by this daemon",
+        "quotas",
+    )
+    .into()
 }
 
 fn internal(message: String) -> ControlError {

@@ -106,6 +106,59 @@ hofund config check --config examples/hofund.toml
 loads. When it does not, the message starts with that path. `hofund --help`
 and `hofund <command> --help` print that command's usage.
 
+### Routing
+
+A route accepts `routing = "smart"`, `"order"`, `"rotate"`, `"usage"`,
+`"pace"`, `"weight"`, `"free"`, `"fast"`, or `"cheap"`; the default is
+`smart`. `order` keeps the listed order, `rotate` advances a per-route turn,
+`weight` uses smooth weighted round robin, and `free` puts free models first
+in their listed order. Unknown strategy names are configuration errors.
+
+The measurement strategies work as follows:
+
+- `smart` prefers an allowance renewing soon, then expiring credit and larger
+  prepaid balances in the same provider and unit. Members below 90% used come
+  first, then those running low, then spent members, with credit-bearing
+  accounts ahead of other spent accounts. An unknown account that can learn its
+  allowance from a reply gets an initial turn.
+- `usage` puts the least allowance used and then the fewest recently routed
+  tokens first. Use is the highest share across all windows that count the
+  model, credit windows included. Token counts cover every model on a member
+  and have a one-hour half-life.
+- `pace` puts the most remaining allowance per hour until renewal first, with
+  10% near-tie bands and the same allowance tiers as `smart`. The tightest
+  window of a day or longer sets the pace, with a one-hour floor; shorter
+  windows count only when no such window exists.
+- `fast` estimates a 200-token reply from recent time to first token and output
+  tokens per second. Speed has a 20-minute half-life and goes stale after an
+  hour; every fifth eligible request probes an unmeasured member in turn.
+- `cheap` puts the lowest current input-plus-output catalog price first, breaks
+  ties by cache-read price, and leaves unpriced members last. It is accepted
+  only for a multi-upstream route or a subscription account group.
+
+Set a mapped upstream's `weight` to an integer of at least 1. A missing weight
+or an explicit 1 is the default and is not retained as a separate setting.
+Subscription account weights use lower-cased account ids and the same default:
+
+```toml
+[[routes]]
+model = "demo"
+routing = "weight"
+upstreams = [{ provider = "primary", weight = 3 }, "backup"]
+
+# [subscriptions.account_weights]
+# "work@example.com" = 3
+# "backup@example.com" = 1
+```
+
+Set `free = true` on a provider to mark all its models free. Without that
+flag, a cached catalog model's explicit free flag wins; with no such flag, a
+known input/output/cache-read price of zero also makes it free. A route using
+`free` with no free members behaves as `order`.
+
+Ready members always follow the selected strategy before one cooling probe.
+`hofund routes` prints each route model and its strategy name.
+
 ## Architecture
 
 See [docs/architecture.md](docs/architecture.md) for the crate graph, the

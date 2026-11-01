@@ -51,7 +51,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use bytes::Bytes;
 use hofund_codec::{
     AnthropicMessages, Codec, CodecError, Converse, GenerativeLanguage, OpenAiChat,
-    OpenAiResponses, StreamDecoder, UNMAPPED_TOOLS,
+    OpenAiResponses, StreamDecoder, UNMAPPED_TOOLS, refusal_error,
 };
 use hofund_plugin_api::{
     BodyStream, Completion, ContentPart, CountOutcome, CredentialStyle, HttpHandle, PluginError,
@@ -61,8 +61,9 @@ use secrecy::ExposeSecret;
 
 use crate::sigv4::{self, AwsSigner};
 use crate::transport::{
-    Call, HttpResponse, carried_error, is_credit_error, is_quota_error, parse_retry_after_headers,
-    read_body, retry_after_from_body, status_for_error,
+    Call, HttpResponse, carried_error, credit_soon, is_credit_error, is_quota_error,
+    parse_retry_after_headers, read_body, reset_after_from_body, retry_after_from_body,
+    status_for_error,
 };
 
 /// Attempts per call. Only a connect failure is retried.
@@ -119,6 +120,7 @@ enum Method {
 pub struct Target {
     protocol: ProtocolId,
     base_url: String,
+    preset: Option<String>,
     credential: CredentialStyle,
     headers: Vec<(String, String)>,
     quirks: Option<&'static hofund_quirks::Profile>,
@@ -127,6 +129,7 @@ pub struct Target {
     rewrite: Option<Rewrite>,
     method_root: Option<&'static str>,
     unwrap: Option<Unwrap>,
+    state: Arc<hofund_quirks::RequestState>,
     allocation_quota_rate: bool,
 }
 
@@ -138,6 +141,7 @@ impl Target {
         Self {
             protocol,
             base_url: base_url.into(),
+            preset: None,
             credential: CredentialStyle::Bearer,
             headers: Vec::new(),
             quirks: None,
@@ -146,6 +150,7 @@ impl Target {
             rewrite: None,
             method_root: None,
             unwrap: None,
+            state: Arc::new(hofund_quirks::RequestState::default()),
             allocation_quota_rate: false,
         }
     }
@@ -176,6 +181,13 @@ impl Target {
     #[must_use]
     pub fn quirks(mut self, quirks: Option<&'static hofund_quirks::Profile>) -> Self {
         self.quirks = quirks;
+        self
+    }
+
+    /// The catalog preset id used by automatic request fixes.
+    #[must_use]
+    pub fn preset(mut self, preset: Option<String>) -> Self {
+        self.preset = preset;
         self
     }
 
@@ -233,6 +245,7 @@ impl fmt::Debug for Target {
             .debug_struct("Target")
             .field("protocol", &self.protocol.as_str())
             .field("base_url", &self.base_url)
+            .field("preset", &self.preset)
             .field("credential", &self.credential)
             .field("header_names", &names)
             .field("quirks", &self.quirks.is_some())
@@ -241,6 +254,7 @@ impl fmt::Debug for Target {
             .field("rewrite", &self.rewrite.is_some())
             .field("method_root", &self.method_root)
             .field("unwrap", &self.unwrap.is_some())
+            .field("state", &self.state)
             .field("allocation_quota_rate", &self.allocation_quota_rate)
             .finish()
     }
@@ -263,10 +277,43 @@ pub async fn execute(
     request: Request,
     inbound: ProtocolId,
 ) -> Result<Completion, PluginError> {
-    send(http, target, secret, request, inbound)
-        .await?
-        .complete()
-        .await
+    let mut root_retried = false;
+    let mut token_retried = false;
+    loop {
+        let sent = match send(http, target, secret, request.clone(), inbound).await {
+            Ok(sent) => sent,
+            Err(error) if error.status() == Some(400) => {
+                if !root_retried
+                    && hofund_quirks::root_union_refusal(error.message().as_bytes())
+                    && folds_any(&request)
+                {
+                    root_retried = true;
+                    target.state.learn_root_union(&request.model);
+                    continue;
+                }
+                if !token_retried
+                    && target.protocol == ProtocolId::OPENAI_CHAT
+                    && request.params.max_tokens.is_some()
+                    && let Some(wanted) =
+                        hofund_quirks::token_field_wanted(error.message().as_bytes())
+                {
+                    token_retried = true;
+                    target.state.learn_token_field(wanted);
+                    continue;
+                }
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        };
+        return sent.complete().await;
+    }
+}
+
+fn folds_any(request: &Request) -> bool {
+    request.tools.iter().any(|tool| {
+        let mut schema = tool.input_schema.clone();
+        hofund_ir::fold_object_root(&mut schema)
+    })
 }
 
 /// A 2xx response from [`send`] whose body is not read yet.
@@ -919,6 +966,14 @@ fn prepare_body(
     if let Some(profile) = target.quirks {
         hofund_quirks::apply(profile, &mut request);
     }
+    hofund_quirks::apply_before_encode(
+        hofund_quirks::EncodedContext {
+            base_url: &target.base_url,
+            preset: target.preset.as_deref(),
+            protocol: codec.id(),
+        },
+        &mut request,
+    );
     let cross_protocol = codec.id() != inbound.as_str();
     if cross_protocol {
         warn_unmapped(&request);
@@ -928,10 +983,19 @@ fn prepare_body(
     let body = codec
         .encode_request(&request)
         .map_err(|error| PluginError::status_error(400, error.to_string()))?;
-    match prepare {
-        Some(prepare) => prepare(&body).map_err(|error| PluginError::decode(error.to_string())),
-        None => Ok(body),
-    }
+    let body = match prepare {
+        Some(prepare) => prepare(&body).map_err(|error| PluginError::decode(error.to_string()))?,
+        None => body,
+    };
+    Ok(hofund_quirks::apply_encoded_with_state(
+        hofund_quirks::EncodedContext {
+            base_url: &target.base_url,
+            preset: target.preset.as_deref(),
+            protocol: codec.id(),
+        },
+        &target.state,
+        &body,
+    ))
 }
 
 /// `body` after `rewrite`, and the headers the rewrite adds. A body that is
@@ -1002,16 +1066,32 @@ fn endpoint_unsupported(bytes: &[u8]) -> bool {
 }
 
 async fn status_error(response: HttpResponse, allocation_quota_rate: bool) -> PluginError {
-    let (status, retry_after, body) = match read_body(response).await {
+    let (status, retry_after, reset_after, body) = match read_body(response).await {
         Ok(read) => read,
         Err(error) => return error,
     };
-    status_failure(status, retry_after, &body, allocation_quota_rate)
+    status_failure_with_reset(
+        status,
+        retry_after,
+        reset_after,
+        &body,
+        allocation_quota_rate,
+    )
 }
 
 fn status_failure(
     status: u16,
     retry_after: Option<std::time::Duration>,
+    body: &[u8],
+    allocation_quota_rate: bool,
+) -> PluginError {
+    status_failure_with_reset(status, retry_after, None, body, allocation_quota_rate)
+}
+
+fn status_failure_with_reset(
+    status: u16,
+    retry_after: Option<std::time::Duration>,
+    reset_after: Option<std::time::Duration>,
     body: &[u8],
     allocation_quota_rate: bool,
 ) -> PluginError {
@@ -1026,10 +1106,22 @@ fn status_failure(
     } else {
         PluginError::status_error(status, message)
     };
-    match retry_after
+    let credit = error.is_credit();
+    let named_reset = reset_after_from_body(body, std::time::SystemTime::now()).or(reset_after);
+    let error = match named_reset.filter(|_| credit) {
+        Some(after) => error.with_reset_after(after),
+        None => error,
+    };
+    let error = if credit && credit_soon(body) {
+        error.with_credit_soon()
+    } else {
+        error
+    };
+    let retry = retry_after
+        .or_else(|| (!credit).then_some(named_reset).flatten())
         .or_else(|| retry_delay(body))
-        .or_else(|| retry_after_from_body(body))
-    {
+        .or_else(|| retry_after_from_body(body));
+    match retry {
         Some(after) => error.with_retry_after(after),
         None => error,
     }
@@ -1177,6 +1269,7 @@ async fn decoded(
             decoder: codec.stream_decoder(),
             pending: VecDeque::new(),
             finished: false,
+            committed: false,
         };
         return Ok(Completion::Stream(Box::pin(futures_util::stream::unfold(
             events,
@@ -1248,6 +1341,7 @@ struct Events {
     decoder: Box<dyn StreamDecoder>,
     pending: VecDeque<Result<StreamEvent, PluginError>>,
     finished: bool,
+    committed: bool,
 }
 
 impl Events {
@@ -1287,12 +1381,17 @@ impl Events {
     fn take_pending(&mut self) -> Option<Result<StreamEvent, PluginError>> {
         loop {
             let mut item = self.pending.pop_front()?;
-            if let Ok(event) = &item
-                && let Some(error) = failure_of(event)
-            {
-                self.pending.clear();
-                self.finished = true;
-                return Some(Err(error));
+            if let Ok(event) = &item {
+                let refusal = refusal_error(event);
+                if self.committed && refusal {
+                    return Some(item);
+                }
+                if let Some(error) = failure_of(event) {
+                    self.pending.clear();
+                    self.finished = true;
+                    return Some(Err(error));
+                }
+                self.committed |= stream_commits(event);
             }
             if let Ok(event) = &mut item {
                 if matches!(event, StreamEvent::Unknown(_)) {
@@ -1329,13 +1428,18 @@ fn failure_of(event: &StreamEvent) -> Option<PluginError> {
         .unwrap_or_else(|| "upstream stream failed".to_owned());
     let body = serde_json::to_vec(&unknown.payload).unwrap_or_default();
     let status = status_for_error(&body);
-    if is_credit_error(status, &body) {
-        Some(PluginError::credit_status(status, message))
+    let error = if is_credit_error(status, &body) {
+        PluginError::credit_status(status, message)
     } else if is_quota_error(status, &body) {
-        Some(PluginError::quota_status(status, message))
+        PluginError::quota_status(status, message)
     } else {
-        Some(PluginError::status_error(status, message))
-    }
+        PluginError::status_error(status, message)
+    };
+    Some(if refusal_error(event) {
+        error.without_cooldown()
+    } else {
+        error
+    })
 }
 
 fn pointer(value: &serde_json::Value, path: &str) -> Option<String> {
@@ -1489,11 +1593,11 @@ fn is_key_byte(byte: u8) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use hofund_codec::{AnthropicMessages, Codec, GenerativeLanguage};
+    use hofund_codec::{AnthropicMessages, Codec, GenerativeLanguage, OpenAiChat};
     use hofund_plugin_api::{CredentialStyle, PluginErrorKind, ProtocolId, Request, StreamEvent};
 
     use super::{
-        AwsSigner, Method, Path, Target, classify_count, consume_fields, converse_call,
+        AwsSigner, Events, Method, Path, Target, classify_count, consume_fields, converse_call,
         endpoint_unsupported, failure_of, host_header, message_from, omit_max_tokens, path_segment,
         rewritten, route, sigv4, strip_billing_header, url_for,
     };
@@ -1512,6 +1616,25 @@ mod tests {
         AnthropicMessages
             .decode_request(body.to_string().as_bytes())
             .expect("messages request")
+    }
+
+    #[test]
+    fn v2_sdk_transport_applies_deepseek_request_fixes() {
+        let target = Target::new(ProtocolId::OPENAI_CHAT, "https://api.deepseek.com/v1")
+            .preset(Some("deepseek".to_owned()));
+        let request = OpenAiChat
+            .decode_request(br#"{"model":"deepseek-chat","messages":[],"max_tokens":10,"max_completion_tokens":20,"tools":[{"type":"function","function":{"name":"Artifact","parameters":{"pattern":"^[^\\0]*$"}}}]}"#)
+            .expect("request");
+        let body =
+            super::prepare_body(&target, &OpenAiChat, request, None, ProtocolId::OPENAI_CHAT)
+                .expect("body");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("JSON");
+        assert_eq!(body["max_tokens"], 10);
+        assert_eq!(body["max_completion_tokens"], 20);
+        assert_eq!(
+            body["tools"][0]["function"]["parameters"]["pattern"],
+            r"^[^\u0000]*$"
+        );
     }
 
     fn texts(request: &Request) -> Vec<String> {
@@ -1610,6 +1733,38 @@ mod tests {
         assert_eq!(error.kind(), PluginErrorKind::Status);
         assert_eq!(error.status(), Some(502));
         assert_eq!(error.message(), "boom");
+    }
+
+    #[tokio::test]
+    async fn b9_committed_refusal_error_keeps_its_event() {
+        let bytes = concat!(
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"thought\"}}]}\n\n",
+            "data: {\"error\":{\"code\":\"content_filter\",\"message\":\"refused\"}}\n\n"
+        );
+        let mut events = Events {
+            body: hofund_plugin_api::BodyStream::from_bytes(bytes.as_bytes()),
+            decoder: OpenAiChat.stream_decoder(),
+            pending: std::collections::VecDeque::new(),
+            finished: false,
+            committed: false,
+        };
+        assert!(matches!(
+            events.next().await,
+            Some(Ok(StreamEvent::ContentBlockStart(_)))
+        ));
+        assert!(matches!(
+            events.next().await,
+            Some(Ok(StreamEvent::ThinkingDelta(_)))
+        ));
+        assert!(matches!(
+            events.next().await,
+            Some(Ok(StreamEvent::Unknown(_)))
+        ));
+        let event = StreamEvent::Unknown(hofund_ir::UnknownEvent {
+            name: "error".to_owned(),
+            payload: serde_json::json!({"error":{"code":"content_filter"}}),
+        });
+        assert!(!failure_of(&event).expect("refusal").cools());
     }
 
     #[test]

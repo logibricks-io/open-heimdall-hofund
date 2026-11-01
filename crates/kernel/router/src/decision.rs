@@ -12,6 +12,7 @@
 use std::collections::BTreeSet;
 use std::sync::LazyLock;
 
+use hofund_ir::{too_long, words_of};
 use hofund_plugin_api::{PluginError, PluginErrorKind};
 use regex::Regex;
 
@@ -49,6 +50,10 @@ static UNSERVED_WORDS: LazyLock<Regex> = LazyLock::new(|| {
         "(?i)model.{0,80}(not (supported|accessible|available|found|enabled|allowed)|unsupported|does ?n[o']t exist|unknown|invalid)|(no such|unknown|invalid|unsupported) model|model_not_found|\u{6a21}\u{578b}.{0,12}(\u{4e0d}\u{5b58}\u{5728}|\u{4e0d}\u{652f}\u{6301}|\u{65e0}\u{6743}|\u{672a}\u{5f00}\u{901a})",
     )
 });
+
+/// A pooled upstream says only the requested model's credentials cooled down.
+static MODEL_COOLING: LazyLock<Regex> =
+    LazyLock::new(|| re("(?i)credentials for (?:the requested )?model .{0,200}?cooling down"));
 
 /// The model is retired there, though a list may still name it.
 static RETIRED_WORDS: LazyLock<Regex> = LazyLock::new(|| {
@@ -105,30 +110,11 @@ static EDGE_BLOCKED: LazyLock<Regex> = LazyLock::new(|| {
 /// A firewall block, already said in plain words.
 const BLOCKED_HINT: &str = "the provider's network firewall blocked requests from this IP; wait a while, or switch to another network or proxy";
 
-/// The conversation no longer fits the model. The Chinese clauses name the
-/// context, or what was sent (content, input, text, prompt, question,
-/// conversation, message), beside its length, tokens, or character count.
-static TOO_LONG: LazyLock<Regex> = LazyLock::new(|| {
-    re(concat!(
-        "(?i)context_length_exceeded|prompt is too long|input is too long|(exceeds?|exceeded|over|beyond)( the)?( model'?s?)?( maximum)? context|context (length|limit|window) (exceeded|is exceeded)|maximum context length|too many (input |prompt )?tokens|\u{4e0a}\u{4e0b}\u{6587}(\u{957f}\u{5ea6})?(\u{8d85}|\u{8fc7}\u{957f})|\u{8d85}(\u{8fc7}|\u{51fa})(\u{4e86})?(\u{6a21}\u{578b})?(\u{7684})?(\u{6700}\u{5927})?\u{4e0a}\u{4e0b}\u{6587}",
-        "|input token count.*exceeds the maximum|maximum prompt length is [0-9]|reduce the length of the messages|maximum allowed input length|longer than the model'?s context length|available context size|greater than the context length|prompt token count of [0-9,]+ exceeds the limit|context window exceeds limit|exceeded model token limit|configured context size|prompt too long|prompt exceeds max length|context_window_exceeded|exceeded (max |maximum )?context length|range of input length should be|token limit exceeded|input tokens? (count )?(exceeds?|exceeded) (the )?(max(imum)? )?limit",
-        "|(\u{5185}\u{5bb9}|\u{8f93}\u{5165}|\u{6587}\u{672c}|\u{63d0}\u{793a}\u{8bcd}?|prompt|\u{95ee}\u{9898}|\u{5bf9}\u{8bdd}|\u{6d88}\u{606f})(\u{5185}\u{5bb9}|\u{6587}\u{672c})?(\u{957f}\u{5ea6})?\\s*(\u{592a}\u{957f}|\u{8fc7}\u{957f}|\u{8d85}\u{957f})|\u{5b57}\u{6570}(\u{592a}\u{591a}|\u{8fc7}\u{591a})",
-        "|(\u{5185}\u{5bb9}|\u{8f93}\u{5165}|\u{6587}\u{672c}|\u{63d0}\u{793a}\u{8bcd}?|prompt|\u{95ee}\u{9898}|\u{5bf9}\u{8bdd}|\u{6d88}\u{606f})[^\u{ff0c}\u{3002},.;\u{ff1b}!\u{ff01}]{0,12}\u{8d85}(\u{8fc7}|\u{51fa})[^\u{ff0c}\u{3002},.;\u{ff1b}!\u{ff01}]{0,12}(\u{957f}\u{5ea6}|token|\u{4ee4}\u{724c}|\u{5b57}\u{6570})",
-        "|(\u{8f93}\u{5165}|\u{63d0}\u{793a}\u{8bcd}?|prompt)\\s*\u{7684}?\\s*(\u{957f}\u{5ea6}|token|\u{4ee4}\u{724c}|\u{5b57}\u{6570})[^\u{ff0c}\u{3002},.;\u{ff1b}!\u{ff01}]{0,8}\u{8d85}(\u{8fc7}|\u{51fa})",
-    ))
-});
-
-/// A limit on how fast or how much, not on one prompt's size. The Chinese
-/// words are pace, frequent, frequency, throttling, concurrency, per
-/// (second, minute, hour, day), and try again later.
-static PACE_WORDS: LazyLock<Regex> = LazyLock::new(|| {
-    re(
-        "(?i)rate.?limit|per (minute|hour|day)|(?-u:\\b)TP[MD](?-u:\\b)|please wait|try again later|throttl|\u{901f}\u{7387}|\u{9891}\u{7e41}|\u{9891}\u{7387}|\u{9650}\u{6d41}|\u{5e76}\u{53d1}|\u{6bcf}(\u{79d2}|\u{5206}\u{949f}|\u{5c0f}\u{65f6}|\u{5929}|\u{65e5})|\u{7a0d}\u{540e}(\u{518d}\u{8bd5}|\u{91cd}\u{8bd5})",
-    )
-});
-
 /// A vendor usage-policy code.
 static POLICY_CODE: LazyLock<Regex> = LazyLock::new(|| re("^[a-z]+_policy$"));
+
+/// A provider's input, output, image, or video sensitive-content code.
+static SENSITIVE_CODE: LazyLock<Regex> = LazyLock::new(|| re("SensitiveContentDetected$"));
 
 /// Words that hold a prompt to a usage policy.
 static FLAGGED_WORDS: LazyLock<Regex> = LazyLock::new(|| re("(?i)flagged|usage polic"));
@@ -139,6 +125,9 @@ const FILTER_CODES: &[&str] = &[
     "content_filter",
     "content_policy_violation",
     "content_policy_rejected",
+    "sensitive",
+    "data_inspection_failed",
+    "DataInspectionFailed",
     "SAFETY",
     "PROHIBITED_CONTENT",
     "BLOCKLIST",
@@ -248,6 +237,7 @@ pub(crate) fn rests(error: &PluginError) -> bool {
     if too_long(400, message)
         || REFUSED_WORDS.is_match(message)
         || PROTECTION_WORDS.is_match(message)
+        || policy_refusal(message)
         || message.contains(EMPTY_REPLY)
     {
         return false;
@@ -255,6 +245,32 @@ pub(crate) fn rests(error: &PluginError) -> bool {
     error
         .status()
         .is_none_or(|status| status != 413 && !shape_refused(status, message) && !outgrown(error))
+}
+
+/// Whether a refusal says only the requested model's pooled credentials
+/// cooled. The caller scopes it to the model only when the refusal is a rate
+/// limit, exhausted quota, or credit refusal (`reference:
+/// internal/gateway/routing.go:1475-1477`, `modelCooledDown`); a bare
+/// `model_cooldown` code without the sentence rests the member.
+pub(crate) fn model_cooling(error: &PluginError) -> bool {
+    MODEL_COOLING.is_match(&words_of(error.message()))
+}
+
+/// Whether the member does not serve this model, rather than being out of
+/// quota or refused for the request's content (`reference:
+/// internal/gateway/fallback.go:1281-1299`).
+pub(crate) fn model_unserved(error: &PluginError) -> bool {
+    let Some(status) = error.status() else {
+        return false;
+    };
+    if !matches!(status, 400 | 403 | 404 | 422) {
+        return false;
+    }
+    let text = words_of(error.message());
+    UNSERVED_WORDS.is_match(&text)
+        && !QUOTA_WORDS.is_match(&text)
+        && !REFUSED_WORDS.is_match(&text)
+        && !ZDR_CODED.is_match(&text)
 }
 
 /// Tells a vague failure as the request being too long for the model, when
@@ -314,21 +330,6 @@ fn overflowed(status: u16, text: &str) -> bool {
     matches!(status, 400 | 413 | 422) && too_long(status, text)
 }
 
-fn too_long(status: u16, text: &str) -> bool {
-    if !(400..500).contains(&status) || status == 429 {
-        return false;
-    }
-    let lower = text.to_lowercase();
-    if ["max_tokens", "max_output_tokens", "max_completion_tokens"]
-        .into_iter()
-        .any(|word| lower.contains(word))
-        || PACE_WORDS.is_match(text)
-    {
-        return false;
-    }
-    TOO_LONG.is_match(text)
-}
-
 fn shape_refused(status: u16, message: &str) -> bool {
     let text = words_of(message);
     matches!(status, 400 | 422)
@@ -379,33 +380,10 @@ fn policy_refusal(raw: &str) -> bool {
         .unwrap_or_default();
     FILTER_CODES.contains(&code)
         || POLICY_CODE.is_match(code)
+        || SENSITIVE_CODE.is_match(code)
+        || code == "1301" && message.contains("\u{654f}\u{611f}")
         || code == "invalid_prompt" && FLAGGED_WORDS.is_match(message)
         || message.trim() == HIGH_RISK_REFUSAL
-}
-
-/// The text with each string of its JSON appended on its own line, when the
-/// text escapes any as `\u` (`reference: internal/catalog/catalog.go:1653`).
-fn words_of(text: &str) -> String {
-    if !text.contains("\\u") {
-        return text.to_owned();
-    }
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
-        return text.to_owned();
-    };
-    let mut out = text.to_owned();
-    let mut stack = vec![&value];
-    while let Some(value) = stack.pop() {
-        match value {
-            serde_json::Value::String(string) => {
-                out.push('\n');
-                out.push_str(string);
-            }
-            serde_json::Value::Array(items) => stack.extend(items.iter().rev()),
-            serde_json::Value::Object(map) => stack.extend(map.values().rev()),
-            _ => {}
-        }
-    }
-    out
 }
 
 #[cfg(test)]
@@ -486,6 +464,44 @@ mod tests {
     }
 
     #[test]
+    fn v4_google_schema_400_failover_classification() {
+        let schema = r#"{"error":{"code":400,"message":"* GenerateContentRequest.tools[0].function_declarations[17].parameters.properties[batch].items: missing field.\n* GenerateContentRequest.tools[0].function_declarations[18].parameters.properties[items].items: missing field.\n","status":"INVALID_ARGUMENT"}}"#;
+        let error = PluginError::status_error(400, schema);
+        assert!(allows(&error, false, &none()));
+        assert!(asks_next(&error));
+        assert!(!rests(&error));
+        let name = PluginError::status_error(
+            400,
+            r#"{"error":{"code":400,"message":"* GenerateContentRequest.tools[0].function_declarations[2].name: Invalid function name.","status":"INVALID_ARGUMENT"}}"#,
+        );
+        assert!(!asks_next(&name));
+        let contents = PluginError::status_error(
+            400,
+            r#"{"error":{"code":400,"message":"* GenerateContentRequest.contents: contents is not specified\n","status":"INVALID_ARGUMENT"}}"#,
+        );
+        assert!(!asks_next(&contents));
+        let server = PluginError::status_error(500, schema);
+        assert!(!asks_next(&server));
+    }
+
+    #[test]
+    fn b9_sensitive_refusals_do_not_rest_the_member() {
+        for body in [
+            r#"{"error":{"code":"1301","message":"\u654f\u611f content"}}"#,
+            r#"{"error":{"code":"data_inspection_failed"}}"#,
+            r#"{"code":"DataInspectionFailed"}"#,
+            r#"{"error":{"code":"OutputTextSensitiveContentDetected"}}"#,
+        ] {
+            let error = PluginError::status_error(400, body);
+            assert!(policy_refusal(body), "{body}");
+            assert!(!rests(&error), "{body}");
+        }
+        assert!(!policy_refusal(
+            r#"{"error":{"code":"1301","message":"rate limited"}}"#
+        ));
+    }
+
+    #[test]
     fn every_list_compiles() {
         for list in [
             &QUOTA_WORDS,
@@ -500,9 +516,8 @@ mod tests {
             &ZDR_CODED,
             &CUSTOM_TOOL_REFUSAL,
             &EDGE_BLOCKED,
-            &TOO_LONG,
-            &PACE_WORDS,
             &POLICY_CODE,
+            &SENSITIVE_CODE,
             &FLAGGED_WORDS,
         ] {
             assert!(!list.as_str().is_empty());

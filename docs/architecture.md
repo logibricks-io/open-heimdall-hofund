@@ -133,6 +133,7 @@ flowchart BT
   pluginGemini --> pluginApi
   pluginGemini --> pluginSdk
   router --> pluginApi
+  router --> controlProto
   router --> ir
   gateway --> router
   gateway --> codec
@@ -166,7 +167,7 @@ flowchart BT
 ```
 
 The HTTP spine is `ir ← codec ← provider`, then `gateway ← daemon ← cli`.
-`router` depends on `ir` and `plugin-api`, not on `provider`. Read each arrow
+`router` depends on `ir`, `plugin-api`, and `control-proto` (the quota store keeps and reports the wire quota cards), not on `provider`. Read each arrow
 as "depends on". `gateway` depends on `plugin-api` for the raw body and
 `PluginError`. `agent` depends on `config` and `plugin-api`. `daemon`
 depends on `plugin-api` so it can adapt a provider into a router member.
@@ -239,7 +240,7 @@ This table covers normal and build dependencies, including their target-specific
 | `hofund-kit-subscription` | `hofund-plugin-host` |
 | `hofund-kit-agent` | `hofund-agent`, `hofund-plugin-api`, `hofund-plugin-host` |
 | `hofund-provider` | `hofund-codec`, `hofund-ir`, `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-quirks` |
-| `hofund-router` | `hofund-ir`, `hofund-plugin-api` |
+| `hofund-router` | `hofund-control-proto`, `hofund-ir`, `hofund-plugin-api` |
 | `hofund-gateway` | `hofund-codec`, `hofund-control-proto`, `hofund-ir`, `hofund-plugin-api`, `hofund-plugin-host`, `hofund-router`, `hofund-secrets`, `hofund-usage` |
 | `hofund-config` | — |
 | `hofund-control-client` | `hofund-control-proto` |
@@ -335,6 +336,29 @@ The `control-client` and gateway `control-proto` edges landed in L3; the
 | `desktop` | Menu-bar shell at `apps/desktop`. Renders status and calls the daemon and the agent adapters. |
 | `xtask` | Local workspace tasks and the architecture tests. |
 
+## Routing strategies and measurements
+
+`hofund_router::strategy` owns the pure ordering functions and explicit
+per-route rotation, weighted-round, and speed-probe state. The daemon implements
+`Measurements` by reading the shared quota store, successful usage rows, and
+cached model catalogs. Token use has a one-hour half-life. Streamed replies
+record first-content latency beside whole-answer latency; speed uses a
+20-minute half-life and becomes unknown after an hour. Prices remain catalog
+data and are converted from millionths of a dollar to dollars per million
+tokens when a route is weighed. No process-global measurement or routing
+counter exists, and the router does not own the usage ledger. Each strategy
+declares the measurements it reads (`Needs`); allowances are always filled, and
+the ledger is read only for usage or speed, over the last day or hour through
+the `created_unix` index.
+
+Smart uses 90% and 98% allowance tiers, hourly renewal and lapse comparisons,
+and prepaid balances ranked only inside one provider and unit. Usage and pace
+break ties with decayed tokens; pace also uses 10% remaining-per-hour bands.
+Fast estimates a 200-token reply and probes unmeasured members every fifth
+eligible request. Cheap compares input-plus-output price, then cache-read
+price, with unpriced members last. Ready members retain strategy order before
+the single cooling probe.
+
 ## Member cooldowns
 
 `hofund_router::Cooldowns` is the cooldown book: explicit, thread-safe state
@@ -343,13 +367,39 @@ table owns one shared book and injects it into every published `Router`, so
 cooldowns and failure ladders survive `Snapshot::store`. The default policy in
 `crates/kernel/router/src/cooldown.rs` covers generic and rate-limit ladders,
 `Retry-After` hints, quota and credit rests, passive observations, and timed
-panic rests. Non-positive header hints are absent, and positive header hints
-are capped at one hour for every failure cause. A passive observation rests a
-member only when its window is exhausted; its stated reset is capped at eight
-days. New events never shorten a longer active rest. The daemon records call
-and stream outcomes, but counts never record success and cool only on 429 or
-transport-class failures. The router only orders members, putting ready members
-first and retaining the soonest cooling member as a probe.
+panic rests. Generic and rate-limit failures do not climb while their own rest
+is active. An API-key credit refusal climbs 30 minutes, 2 hours, 8 hours,
+24 hours, 3 days, and a repeating 7-day rung after each ended rest; success and
+manual removal restart it. Retry hints and soon/smaller-request wording stay
+flat at 30 minutes, while a named reset wins. Windowed subscription accounts
+use body reset, header reset, full-window reset, a retry hint longer than five
+hours, then five hours; a later renewed-window observation lifts the rest.
+Other subscription accounts stay at 30 minutes. Named credit resets cap at 35
+days, generic/rate/quota header hints cap at one hour, and passive window resets
+cap at eight days. New events never shorten a longer active rest.
+
+Only API-key credit-ladder rests persist. The daemon writes their wall-clock
+deadlines and rungs to `rests.json` beside the configuration through a
+same-directory temporary file and rename, only when the snapshot changes. It
+restores configured members at startup, keeps ended rungs for 35 days, ignores
+corrupt files without failing startup, and lets in-process state win. Rate,
+quota, generic, observation, flat-credit, and subscription rests remain
+in-memory. The daemon records call and stream outcomes, but counts never record
+success and cool only on 429 or transport-class failures.
+
+A failure that says no connection was made (a connect error, or a 502,
+transport, or I/O error naming a refused dial or failed lookup) does not rest
+the member when this computer has no network
+(`crates/kernel/daemon/src/offline.rs`). The network is only checked when no
+upstream answered in the last 15 seconds: the check needs a route out with a
+usable local address, then dials up to three other providers (not the failing
+one, and not hosts on this computer or its local network) for 2 seconds each.
+No connection means offline; with nothing else to dial, a route out counts as
+online. The answer is kept for 5 seconds and one request asks at a time.
+Offline, the next member is still asked, and the last member's failure goes to
+the client, but nobody rests. The router only orders
+members, putting ready members first and retaining the soonest cooling member
+as a probe.
 
 ## Failover decisions
 
@@ -361,7 +411,10 @@ the next member is asked. The order is fixed:
    skipped, and so are members whose known context window is at or below the
    estimated input tokens (a 413 only skips the same model). Members with an
    unknown window are asked. If none is left, the overflow goes back to the
-   client in its own protocol. An overflow never rests the member.
+   client in its own protocol. An overflow never rests the member. A member's
+   window is the context size its provider's model list gives the hop's model
+   (matched without regard to case); a model the list does not size has an
+   unknown window.
 2. The statuses in `failover.statuses` fail over. The default is 401, 402, 403,
    404, 408, 429, and 500 to 599.
 3. Some replies fail over by their body words even with a status not in
@@ -381,7 +434,6 @@ Connect, timeout, and interrupted-body errors follow `failover.connect_errors`.
 
 ## What is intentionally absent
 
-- Routing strategies other than ordered failover.
 - A running process does not reload configuration. The daemon publishes the
   route table as an `ArcSwap` snapshot at startup. A panic in a member
   publishes a snapshot that omits that member. In-flight requests keep the

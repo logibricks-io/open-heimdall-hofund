@@ -321,10 +321,19 @@ pub(super) struct ModelRow {
     web_search: Option<String>,
     #[serde(default)]
     service_tiers: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    free: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    input_price: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    output_price: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cache_read_price: Option<u64>,
 }
 
 impl From<&ModelSpec> for ModelRow {
     fn from(model: &ModelSpec) -> Self {
+        let (input_price, output_price, cache_read_price) = model.prices();
         Self {
             id: model.id().to_owned(),
             display_name: model.display_name().map(str::to_owned),
@@ -340,6 +349,10 @@ impl From<&ModelSpec> for ModelRow {
             efforts: model.efforts().to_vec(),
             web_search: model.web_search().map(str::to_owned),
             service_tiers: model.service_tiers().to_vec(),
+            free: model.free(),
+            input_price,
+            output_price,
+            cache_read_price,
         }
     }
 }
@@ -359,6 +372,16 @@ impl ModelRow {
             .with_decides(self.decides)
             .with_efforts(self.efforts.clone())
             .with_service_tiers(self.service_tiers.clone());
+        let model = match (self.input_price, self.output_price, self.cache_read_price) {
+            (Some(input), Some(output), Some(cache_read)) => {
+                model.with_prices(input, output, cache_read)
+            }
+            _ => model,
+        };
+        let model = match self.free {
+            Some(free) => model.with_free(free),
+            None => model,
+        };
         Some(match &self.web_search {
             Some(search) => model.with_web_search(search),
             None => model,
@@ -609,7 +632,9 @@ mod tests {
             .with_decides(true)
             .with_efforts(vec!["high".to_owned()])
             .with_web_search("native")
-            .with_service_tiers(vec!["flex".to_owned()]);
+            .with_service_tiers(vec!["flex".to_owned()])
+            .with_free(true)
+            .with_prices(0, 0, 0);
         let mut store = StateStore::new(Some(root.to_path_buf()));
         store.update("Primary", |state| {
             state.fetched_at = Some(100);

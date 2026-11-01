@@ -113,6 +113,12 @@ pub(crate) fn provider_error(error: PluginError) -> ProviderError {
     if let Some(after) = error.retry_after() {
         converted = converted.with_retry_after(after);
     }
+    if let Some(after) = error.reset_after() {
+        converted = converted.with_reset_after(after);
+    }
+    if error.credit_soon() {
+        converted = converted.with_credit_soon();
+    }
     converted
 }
 

@@ -5,6 +5,18 @@
 //! profile they were given. Gateway and router code do not read profiles and
 //! do not branch on these ids.
 
+mod encoded;
+mod json;
+mod passthrough;
+mod state;
+
+pub use encoded::{EncodedContext, apply_before_encode, apply_encoded, apply_encoded_with_state};
+pub use passthrough::{refused_passthrough, without_passthrough};
+pub use state::{
+    RequestState, TokenField, fold_encoded, fold_object_roots, root_union_refusal,
+    token_field_wanted, with_token_field,
+};
+
 use hofund_ir::{ContentPart, Request, Role};
 
 /// A named list of request adjustments.

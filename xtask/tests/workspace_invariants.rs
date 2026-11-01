@@ -155,7 +155,7 @@ fn expected_deps(package: &str) -> Option<&'static [&'static str]> {
             "hofund-quirks",
         ],
         "hofund-quirks" => &["hofund-ir"],
-        "hofund-router" => &["hofund-ir", "hofund-plugin-api"],
+        "hofund-router" => &["hofund-control-proto", "hofund-ir", "hofund-plugin-api"],
         "hofund-secrets" => &[],
         "hofund-usage" => &[],
         "xtask" => &[],
@@ -276,6 +276,8 @@ const VENDOR_SCAN_PENDING: &[&str] = &[
     "crates/kernel/plugin-sdk",
     // The Anthropic, OpenAI-compatible, and Generative adapters.
     "crates/kernel/provider",
+    // Host, preset, protocol, and model selection for vendor request fixes.
+    "crates/kernel/quirks",
 ];
 
 /// Repo-relative paths that may mention the upstream project this work was
@@ -875,6 +877,7 @@ fn router_does_not_name_plugin_host_types() {
         "PluginError",
         "PluginErrorKind",
         "QuotaObservation",
+        "QuotaWindow",
         "RawAnswer",
         "RawBody",
         "Request",
@@ -894,7 +897,7 @@ fn router_does_not_name_plugin_host_types() {
     }
     assert!(
         violations.is_empty(),
-        "the router re-exports only PluginError, Request, Completion, and MemberId, and its other plugin-api imports are PluginErrorKind, CountOutcome, BodyStream, QuotaObservation, and the forward types Forward, RawBody, and RawAnswer:\n{}",
+        "the router re-exports only PluginError, Request, Completion, and MemberId, and its other plugin-api imports are PluginErrorKind, CountOutcome, BodyStream, QuotaObservation, QuotaWindow, and the forward types Forward, RawBody, and RawAnswer:\n{}",
         violations.join("\n")
     );
 }

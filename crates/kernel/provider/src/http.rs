@@ -1,13 +1,15 @@
 //! Shared HTTP execution for the protocol adapters.
 
 use std::collections::HashSet;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use futures_util::StreamExt;
 use hofund_codec::{Codec, CodecError, UNMAPPED_TOOLS};
 use hofund_ir::Request;
-use hofund_plugin_sdk::transport::parse_retry_after_headers;
+use hofund_plugin_sdk::transport::{
+    parse_reset_after_headers, parse_retry_after, parse_retry_after_headers,
+};
 use hofund_quirks::Profile;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 
@@ -20,6 +22,17 @@ pub(crate) use crate::stream::{map_body, map_transport, message_from};
 
 pub(crate) fn retry_after(headers: &HeaderMap) -> Option<Duration> {
     parse_retry_after_headers(headers, std::time::SystemTime::now())
+}
+
+fn explicit_retry_after(headers: &HeaderMap) -> Option<Duration> {
+    headers
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| parse_retry_after(value, std::time::SystemTime::now()))
+}
+
+pub(crate) fn reset_after(headers: &HeaderMap) -> Option<Duration> {
+    parse_reset_after_headers(headers, std::time::SystemTime::now())
 }
 
 /// Where an API key is written.
@@ -145,6 +158,9 @@ pub(crate) struct Upstream {
     url: String,
     headers: HeaderMap,
     quirks: Option<&'static Profile>,
+    base_url: String,
+    preset: Option<String>,
+    state: Arc<hofund_quirks::RequestState>,
     allocation_quota_rate: bool,
 }
 
@@ -223,6 +239,9 @@ impl Upstream {
             url,
             headers,
             quirks: endpoint.quirks,
+            base_url: endpoint.base_url,
+            preset: endpoint.preset.clone(),
+            state: Arc::new(hofund_quirks::RequestState::default()),
             allocation_quota_rate: matches!(endpoint.preset.as_deref(), Some("qwen" | "qwen-cn")),
         })
     }
@@ -312,6 +331,14 @@ pub(crate) fn prepare_body(
     if let Some(profile) = upstream.quirks {
         hofund_quirks::apply(profile, &mut request);
     }
+    hofund_quirks::apply_before_encode(
+        hofund_quirks::EncodedContext {
+            base_url: &upstream.base_url,
+            preset: upstream.preset.as_deref(),
+            protocol: codec.id(),
+        },
+        &mut request,
+    );
     let cross_protocol = codec.id() != inbound_protocol;
     if cross_protocol {
         warn_unmapped(&request);
@@ -326,7 +353,15 @@ pub(crate) fn prepare_body(
     if let Some(prepare) = prepare {
         body = prepare(&body).map_err(|error| ProviderError::decode(error.to_string()))?;
     }
-    Ok(body)
+    Ok(hofund_quirks::apply_encoded_with_state(
+        hofund_quirks::EncodedContext {
+            base_url: &upstream.base_url,
+            preset: upstream.preset.as_deref(),
+            protocol: codec.id(),
+        },
+        &upstream.state,
+        &body,
+    ))
 }
 
 pub(crate) async fn post_json(
@@ -519,22 +554,62 @@ async fn send<'a>(
 ) -> Result<Sent<'a>, ProviderError> {
     let cross_protocol = codec.id() != inbound_protocol;
     let streaming = request.stream;
+    let model = request.model.clone();
     let whole = prepare_body(upstream, codec, request, prepare, inbound_protocol)?;
     let shortened = hook.and_then(|hook| hook.prepare(route, &whole));
     let delta = shortened.is_some();
-    let body = shortened.unwrap_or_else(|| whole.clone());
-    let mut response = send_json(upstream, url, body).await?;
-    if !response.status().is_success() {
+    let mut body = shortened.unwrap_or_else(|| whole.clone());
+    let mut response = send_json(upstream, url, body.clone()).await?;
+    let mut root_retried = false;
+    let mut token_retried = false;
+    while !response.status().is_success() {
         let status = response.status();
-        let retry_after = retry_after(response.headers());
+        let retry_after = explicit_retry_after(response.headers());
+        let reset_after = reset_after(response.headers());
         let bytes = response.bytes().await.unwrap_or_default();
+        if status.as_u16() == 400
+            && !cross_protocol
+            && codec.id() == "openai-responses"
+            && let Some(field) = hofund_quirks::refused_passthrough(&bytes)
+        {
+            let (stripped, changed) = hofund_quirks::without_passthrough(&body, &field);
+            if changed && upstream.state.learn_passthrough(&field) {
+                body = stripped;
+                response = send_json(upstream, url, body.clone()).await?;
+                continue;
+            }
+        }
+        if status.as_u16() == 400 && !root_retried && hofund_quirks::root_union_refusal(&bytes) {
+            let (folded, changed) = hofund_quirks::fold_encoded(codec.id(), &body);
+            if changed {
+                root_retried = true;
+                upstream.state.learn_root_union(&model);
+                body = folded;
+                response = send_json(upstream, url, body.clone()).await?;
+                continue;
+            }
+        }
+        if status.as_u16() == 400
+            && codec.id() == "openai-chat"
+            && !token_retried
+            && let Some(wanted) = hofund_quirks::token_field_wanted(&bytes)
+        {
+            let (renamed, changed) = hofund_quirks::with_token_field(&body, wanted);
+            if changed {
+                token_retried = true;
+                upstream.state.learn_token_field(wanted);
+                body = renamed;
+                response = send_json(upstream, url, body.clone()).await?;
+                continue;
+            }
+        }
         let refused = delta
             && matches!(status.as_u16(), 400 | 404 | 422)
             && hook.is_some_and(|hook| {
                 hook.refused(route, status.as_u16(), &bytes[..bytes.len().min(1 << 20)])
             });
         if refused {
-            response = send_json(upstream, url, whole).await?;
+            response = send_json(upstream, url, whole.clone()).await?;
             if !response.status().is_success() {
                 return Err(response_error(response, upstream.allocation_quota_rate).await);
             }
@@ -542,6 +617,7 @@ async fn send<'a>(
             return Err(refusal(
                 status.as_u16(),
                 retry_after,
+                reset_after,
                 &bytes,
                 upstream.allocation_quota_rate,
             ));
@@ -558,9 +634,16 @@ async fn send<'a>(
 
 async fn response_error(response: reqwest::Response, allocation_quota_rate: bool) -> ProviderError {
     let status = response.status();
-    let retry_after = retry_after(response.headers());
+    let retry_after = explicit_retry_after(response.headers());
+    let reset_after = reset_after(response.headers());
     let bytes = response.bytes().await.unwrap_or_default();
-    refusal(status.as_u16(), retry_after, &bytes, allocation_quota_rate)
+    refusal(
+        status.as_u16(),
+        retry_after,
+        reset_after,
+        &bytes,
+        allocation_quota_rate,
+    )
 }
 
 /// The error for an upstream refusal: classified from its words, with the
@@ -568,11 +651,28 @@ async fn response_error(response: reqwest::Response, allocation_quota_rate: bool
 fn refusal(
     status: u16,
     retry_after: Option<Duration>,
+    reset_after: Option<Duration>,
     bytes: &[u8],
     allocation_quota_rate: bool,
 ) -> ProviderError {
     let error = ProviderError::response_for(status, bytes, allocation_quota_rate);
-    match retry_after.or_else(|| hofund_plugin_sdk::transport::retry_after_from_body(bytes)) {
+    let credit = error.is_credit();
+    let named_reset =
+        hofund_plugin_sdk::transport::reset_after_from_body(bytes, std::time::SystemTime::now())
+            .or(reset_after);
+    let error = match named_reset.filter(|_| credit) {
+        Some(after) => error.with_reset_after(after),
+        None => error,
+    };
+    let error = if credit && hofund_plugin_sdk::transport::credit_soon(bytes) {
+        error.with_credit_soon()
+    } else {
+        error
+    };
+    let retry = retry_after
+        .or_else(|| (!credit).then_some(named_reset).flatten())
+        .or_else(|| hofund_plugin_sdk::transport::retry_after_from_body(bytes));
+    match retry {
         Some(after) => error.with_retry_after(after),
         None => error,
     }
@@ -719,15 +819,15 @@ mod tests {
     fn a8_refusal_takes_its_wait_from_headers_then_from_its_words() {
         let body = br#"{"error":{"message":"Rate limit reached. Please try again in 20s."}}"#;
         assert_eq!(
-            super::refusal(429, None, body, false).retry_after(),
+            super::refusal(429, None, None, body, false).retry_after(),
             Some(Duration::from_secs(20))
         );
         assert_eq!(
-            super::refusal(429, Some(Duration::from_secs(5)), body, false).retry_after(),
+            super::refusal(429, Some(Duration::from_secs(5)), None, body, false).retry_after(),
             Some(Duration::from_secs(5))
         );
         assert_eq!(
-            super::refusal(429, None, br#"{"error":"busy"}"#, false).retry_after(),
+            super::refusal(429, None, None, br#"{"error":"busy"}"#, false).retry_after(),
             None
         );
     }
@@ -735,10 +835,10 @@ mod tests {
     #[test]
     fn a4_refusal_reads_an_allocation_quota_as_a_rate_only_when_asked() {
         let body = br#"{"error":{"code":"insufficient_quota","message":"Allocated quota exceeded, please increase your quota limit."}}"#;
-        let rate = super::refusal(429, None, body, true);
+        let rate = super::refusal(429, None, None, body, true);
         assert_eq!(rate.kind, crate::ProviderErrorKind::Status);
         assert!(!rate.is_credit());
-        let plain = super::refusal(429, None, body, false);
+        let plain = super::refusal(429, None, None, body, false);
         assert!(
             plain.is_credit() || plain.kind != crate::ProviderErrorKind::Status,
             "{plain:?}"

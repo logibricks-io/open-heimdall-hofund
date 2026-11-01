@@ -11,6 +11,10 @@ use hofund_plugin_api::{
 
 use crate::{AttemptHook, MemberAttempt};
 
+/// Proof that a member answered a background model-list request.
+#[derive(Clone, Debug)]
+pub struct ModelListAnswer;
+
 /// One upstream the router may call.
 ///
 /// `id` is stable across snapshots. `route_id` is the configured provider id
@@ -38,12 +42,22 @@ pub trait Member: Send + Sync {
         ""
     }
 
+    /// Whether an unknown account can learn its allowance from reply metadata.
+    fn learns_allowance(&self) -> bool {
+        false
+    }
+
     /// Codec id this member speaks. Compared with the inbound protocol.
     fn protocol(&self) -> &str;
 
     /// Stable account ids or provider-key fingerprints usable in account scopes.
     fn account_refs(&self) -> Vec<String> {
         vec![self.id().to_string()]
+    }
+
+    /// Whether a runtime may use this member's model list for rest probes.
+    fn background_probe(&self) -> bool {
+        self.plugin_id().is_empty()
     }
 
     /// Per-attempt facts. Adapters with upstream route metadata override this.
@@ -100,6 +114,17 @@ pub trait Member: Send + Sync {
         Ok(CountOutcome::Unsupported)
     }
 
+    /// Lists models without counting as a real request or changing a rest.
+    ///
+    /// The default is `unsupported`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when the list fails or is not available.
+    async fn list_models(&self) -> Result<ModelListAnswer, PluginError> {
+        Err(PluginError::unsupported("this member has no model list"))
+    }
+
     /// Posts `body` to `path` under the upstream's base URL.
     ///
     /// The default is `unsupported`.
@@ -113,5 +138,21 @@ pub trait Member: Send + Sync {
         Err(PluginError::unsupported(format!(
             "this member does not serve {path}"
         )))
+    }
+
+    /// Posts a body built for `model`, allowing outcome accounting to scope a
+    /// refusal without parsing the body. Existing members need not override it.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::forward`].
+    async fn forward_for_model(
+        &self,
+        path: &str,
+        body: RawBody,
+        model: &str,
+    ) -> Result<RawAnswer, PluginError> {
+        let _ = model;
+        self.forward(path, body).await
     }
 }

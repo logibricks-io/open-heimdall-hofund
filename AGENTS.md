@@ -32,7 +32,8 @@ Present:
   and lossy conversions are in [docs/codecs.md](docs/codecs.md).
 - named quirk profiles (`quirks`) and the `Provider` trait with Chat,
   Responses, and Messages adapters (`provider`)
-- ordered model routes and failover before the first stream event (`router`)
+- named smart/order/rotate/usage/pace/weight/free/fast/cheap routing strategies
+  and failover before the first stream event (`router`)
 - an axum HTTP server (`gateway`), TOML configuration (`config`), a bearer
   token file (`secrets`), SQLite usage rows (`usage`), and the `hofund`
   commands `serve`, `config check`, `token show`, `token rotate`, and `usage`
@@ -51,7 +52,7 @@ The dependency table in `docs/architecture.md` includes the plugin seam.
 Later migration pull requests update that table when they add an edge.
 Not present yet:
 
-- further routing strategies, and i18n language packs
+- routing affinity and i18n language packs
 
 ## Architecture rules
 

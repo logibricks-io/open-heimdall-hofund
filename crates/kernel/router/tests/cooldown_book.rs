@@ -1,10 +1,13 @@
 //! Cooldown ladders, limits, observations, and expiry with a manual clock.
 
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
-use hofund_plugin_api::{MemberKey, PluginId, PresetId, QuotaObservation};
-use hofund_router::{CooldownCause, CooldownPolicy, Cooldowns, MemberId, PluginError};
+use hofund_plugin_api::{AccountId, MemberKey, PluginId, PresetId, QuotaObservation};
+use hofund_router::{
+    CooldownCause, CooldownPolicy, Cooldowns, MemberId, PersistedRest, PluginError,
+};
 
 const MINUTE: u64 = 60;
 const HOUR: u64 = 60 * MINUTE;
@@ -36,6 +39,18 @@ fn remaining(book: &Cooldowns, id: &MemberId, clock: &Mutex<Instant>) -> Duratio
         .duration_since(*clock.lock().expect("clock"))
 }
 
+fn remaining_model(
+    book: &Cooldowns,
+    id: &MemberId,
+    model: &str,
+    clock: &Mutex<Instant>,
+) -> Duration {
+    book.cooling_for_model(id, model)
+        .expect("model cooling")
+        .until()
+        .duration_since(*clock.lock().expect("clock"))
+}
+
 fn observation() -> QuotaObservation {
     QuotaObservation::from_stored(PluginId::from_static("member"))
 }
@@ -50,6 +65,7 @@ fn generic_ladder_doubles_caps_and_success_clears_it() {
         assert_eq!(cooling.cause(), CooldownCause::Failure);
         assert_eq!(cooling.failures(), u32::try_from(index).unwrap() + 1);
         assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(seconds));
+        advance(&clock, seconds + 1);
     }
     book.record_success(&id);
     assert_eq!(book.cooling(&id), None);
@@ -133,6 +149,7 @@ fn rate_limit_uses_retry_hint_and_does_not_stretch_its_ladder() {
         .record_failure(&id, &PluginError::status_error(429, "slow"))
         .expect("cooling");
     assert_eq!(repeated.failures(), 1);
+    // R-494b: the hinted two minutes outlast the one-minute rung and stand.
     assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(120));
     advance(&clock, 121);
     let next = book
@@ -200,22 +217,330 @@ fn quota_and_credit_use_their_own_limits() {
     let credit =
         PluginError::status_error(402, "credit").with_retry_after(Duration::from_secs(2 * HOUR));
     book.record_failure(&id, &credit).expect("credit");
+    assert_eq!(
+        remaining(&book, &id, &clock),
+        Duration::from_secs(30 * MINUTE)
+    );
+}
+
+// D-19, ruling R-494b (supersedes R-494): a shorter failure never shortens a
+// longer rest; a vendor-named time replaces a guessed rest of the same cause
+// (reference: internal/gateway/routing.go:1518-1533,
+// internal/gateway/rest_write_test.go:20-121).
+
+#[test]
+fn d19_shorter_failure_keeps_longer_rest() {
+    let (book, id, clock) = fixture();
+    let credit = book.record_failure(&id, &credit_error()).expect("credit");
+    let applied = book
+        .record_failure(&id, &PluginError::connect("down"))
+        .expect("generic");
+    assert_eq!(applied, credit);
+    assert_eq!(book.cooling(&id), Some(credit));
+    assert_eq!(
+        remaining(&book, &id, &clock),
+        Duration::from_secs(30 * MINUTE)
+    );
+}
+
+#[test]
+fn d19_rate_minute_keeps_credit_rest() {
+    let (book, id, clock) = fixture();
+    book.record_failure(&id, &credit_error()).expect("credit");
+    let rate = PluginError::status_error(429, "Rate limit exceeded")
+        .with_retry_after(Duration::from_secs(1));
+    let applied = book.record_failure(&id, &rate).expect("rate");
+    assert_eq!(applied.cause(), CooldownCause::Credit);
+    assert_eq!(
+        book.cooling(&id).map(|cooling| cooling.cause()),
+        Some(CooldownCause::Credit)
+    );
+    assert_eq!(
+        remaining(&book, &id, &clock),
+        Duration::from_secs(30 * MINUTE)
+    );
+}
+
+#[test]
+fn d19_longer_failure_replaces_shorter_rest() {
+    let (book, id, clock) = fixture();
+    book.record_failure(&id, &credit_error()).expect("credit");
+    let quota = PluginError::quota("empty").with_retry_after(Duration::from_secs(HOUR));
+    let applied = book.record_failure(&id, &quota).expect("quota");
+    assert_eq!(applied.cause(), CooldownCause::Quota);
     assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(HOUR));
 }
 
 #[test]
-fn a_new_failure_never_shortens_a_longer_cooldown() {
+fn d19_equal_deadline_replaces_rest() {
     let (book, id, clock) = fixture();
-    let quota = PluginError::quota("empty").with_retry_after(Duration::from_secs(HOUR));
-    let expected = book.record_failure(&id, &quota).expect("quota");
-    let generic = book
+    book.record_failure(&id, &PluginError::connect("down"))
+        .expect("generic");
+    let applied = book
+        .record_failure(&id, &PluginError::status_error(429, "slow"))
+        .expect("rate");
+    assert_eq!(applied.cause(), CooldownCause::RateLimit);
+    assert_eq!(
+        book.cooling(&id).map(|cooling| cooling.cause()),
+        Some(CooldownCause::RateLimit)
+    );
+    assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(MINUTE));
+}
+
+#[test]
+fn d19_ended_rest_is_replaced_by_shorter_failure() {
+    let (book, id, clock) = fixture();
+    book.record_failure(&id, &credit_error()).expect("credit");
+    advance(&clock, 30 * MINUTE);
+    let applied = book
         .record_failure(&id, &PluginError::connect("down"))
         .expect("generic");
-    assert_eq!(generic.until(), expected.until());
-    assert_eq!(generic.cause(), CooldownCause::Quota);
-    assert_eq!(generic.failures(), expected.failures());
-    assert_eq!(book.cooling(&id), Some(expected));
+    assert_eq!(applied.cause(), CooldownCause::Failure);
+    assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(MINUTE));
+}
+
+#[test]
+fn d19_panic_keeps_longer_rest() {
+    let (book, id, clock) = fixture();
+    let credit = book.record_failure(&id, &credit_error()).expect("credit");
+    let applied = book.record_panic(&id);
+    assert_eq!(applied, credit);
+    assert_eq!(
+        remaining(&book, &id, &clock),
+        Duration::from_secs(30 * MINUTE)
+    );
+}
+
+#[test]
+fn d19_model_generic_failure_keeps_longer_rest() {
+    let (book, id, clock) = fixture();
+    book.record_failure(&id, &credit_error()).expect("credit");
+    let applied = book
+        .record_failure_for_model(&id, "m", &PluginError::connect("down"))
+        .expect("generic");
+    assert_eq!(applied.cause(), CooldownCause::Credit);
+    assert_eq!(
+        remaining(&book, &id, &clock),
+        Duration::from_secs(30 * MINUTE)
+    );
+}
+
+#[test]
+fn d19_kept_rest_keeps_its_cause_for_the_credit_ladder() {
+    let (book, id, clock) = fixture();
+    book.record_failure(&id, &credit_error()).expect("credit");
+    book.record_failure(&id, &PluginError::status_error(429, "slow"))
+        .expect("rate");
+    advance(&clock, 30 * MINUTE);
+    let next = book.record_failure(&id, &credit_error()).expect("credit");
+    assert_eq!(next.failures(), 2);
+    assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(2 * HOUR));
+}
+
+#[test]
+fn d19_named_quota_time_replaces_guess() {
+    let (book, id, clock) = fixture();
+    let guess = book
+        .record_failure(&id, &PluginError::quota("You have hit your usage limit"))
+        .expect("guess");
+    assert_eq!(guess.cause(), CooldownCause::Quota);
+    assert_eq!(
+        remaining(&book, &id, &clock),
+        Duration::from_secs(15 * MINUTE)
+    );
+    let rate = PluginError::status_error(429, "Rate limit exceeded")
+        .with_retry_after(Duration::from_secs(1));
+    let kept = book.record_failure(&id, &rate).expect("rate");
+    assert_eq!(kept.cause(), CooldownCause::Quota);
+    assert_eq!(
+        remaining(&book, &id, &clock),
+        Duration::from_secs(15 * MINUTE)
+    );
+    let named =
+        PluginError::quota("usage_limit_reached").with_retry_after(Duration::from_secs(2 * MINUTE));
+    let applied = book.record_failure(&id, &named).expect("named");
+    assert_eq!(applied.cause(), CooldownCause::Quota);
+    assert_eq!(
+        remaining(&book, &id, &clock),
+        Duration::from_secs(2 * MINUTE)
+    );
+}
+
+#[test]
+fn d19_named_time_of_another_cause_keeps_guess() {
+    let (book, id, clock) = fixture();
+    book.record_failure(&id, &credit_error())
+        .expect("guessed credit");
+    let named =
+        PluginError::quota("usage_limit_reached").with_retry_after(Duration::from_secs(2 * MINUTE));
+    let applied = book.record_failure(&id, &named).expect("named quota");
+    assert_eq!(applied.cause(), CooldownCause::Credit);
+    assert_eq!(
+        remaining(&book, &id, &clock),
+        Duration::from_secs(30 * MINUTE)
+    );
+}
+
+#[test]
+fn d19_named_time_keeps_longer_named_rest() {
+    let (book, id, clock) = fixture();
+    book.record_failure(
+        &id,
+        &PluginError::quota("empty").with_retry_after(Duration::from_secs(HOUR)),
+    )
+    .expect("named hour");
+    let applied = book
+        .record_failure(
+            &id,
+            &PluginError::quota("empty").with_retry_after(Duration::from_secs(2 * MINUTE)),
+        )
+        .expect("named minutes");
+    assert_eq!(applied.cause(), CooldownCause::Quota);
     assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(HOUR));
+}
+
+#[test]
+fn d19_unnamed_shorter_credit_keeps_guessed_rung() {
+    let (book, id, clock) = fixture();
+    book.record_failure(&id, &credit_error())
+        .expect("first rung");
+    advance(&clock, 30 * MINUTE);
+    book.record_failure(&id, &credit_error())
+        .expect("second rung");
+    let soon = credit_error().with_retry_after(Duration::from_secs(MINUTE));
+    let applied = book.record_failure(&id, &soon).expect("flat credit");
+    assert_eq!(applied.failures(), 2);
+    assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(2 * HOUR));
+}
+
+#[test]
+fn d19_kept_rung_keeps_its_place_on_the_ladder() {
+    let (book, id, clock) = fixture();
+    book.record_failure(&id, &credit_error())
+        .expect("first rung");
+    advance(&clock, 30 * MINUTE);
+    book.record_failure(&id, &credit_error())
+        .expect("second rung");
+    let soon = credit_error().with_retry_after(Duration::from_secs(MINUTE));
+    book.record_failure(&id, &soon).expect("kept rung");
+    advance(&clock, 2 * HOUR);
+    let applied = book
+        .record_failure(&id, &credit_error())
+        .expect("third rung");
+    assert_eq!(applied.failures(), 3);
+    assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(8 * HOUR));
+}
+
+#[test]
+fn d19_ladder_rung_does_not_replace_a_longer_flat_guess() {
+    let now = Arc::new(Mutex::new(Instant::now()));
+    let clock = Arc::clone(&now);
+    let mut policy = CooldownPolicy::default();
+    policy.credit = Duration::from_secs(2 * HOUR);
+    let book = Cooldowns::with_clock(policy, Arc::new(move || *clock.lock().expect("clock")));
+    let id = MemberId::from_preset(
+        PresetId::from_static("member"),
+        MemberKey::from_static("row"),
+    );
+    let soon = credit_error().with_retry_after(Duration::from_secs(MINUTE));
+    book.record_failure(&id, &soon).expect("flat guess");
+    let applied = book
+        .record_failure(&id, &credit_error())
+        .expect("first rung");
+    assert_eq!(applied.failures(), 0);
+    assert_eq!(remaining(&book, &id, &now), Duration::from_secs(2 * HOUR));
+}
+
+#[test]
+fn d19_named_credit_reset_replaces_guessed_rung() {
+    let (book, id, clock) = fixture();
+    book.record_failure(&id, &credit_error()).expect("guess");
+    let reset = credit_error().with_reset_after(Duration::from_secs(5 * MINUTE));
+    let applied = book.record_failure(&id, &reset).expect("reset");
+    assert_eq!(applied.cause(), CooldownCause::Credit);
+    assert_eq!(applied.failures(), 0);
+    assert_eq!(
+        remaining(&book, &id, &clock),
+        Duration::from_secs(5 * MINUTE)
+    );
+}
+
+#[test]
+fn d19_named_credit_reset_replaces_flat_credit_guess() {
+    let (book, id, clock) = fixture();
+    let soon = credit_error().with_retry_after(Duration::from_secs(MINUTE));
+    book.record_failure(&id, &soon).expect("flat guess");
+    let reset = credit_error().with_reset_after(Duration::from_secs(5 * MINUTE));
+    book.record_failure(&id, &reset).expect("reset");
+    assert_eq!(
+        remaining(&book, &id, &clock),
+        Duration::from_secs(5 * MINUTE)
+    );
+}
+
+#[test]
+fn d19_named_credit_reset_replaces_subscription_guess() {
+    let (book, _, clock) = fixture();
+    let id = subscription();
+    book.record_failure(&id, &credit_error())
+        .expect("flat guess");
+    assert_eq!(
+        remaining(&book, &id, &clock),
+        Duration::from_secs(30 * MINUTE)
+    );
+    book.configure_credit_window(&id);
+    let reset = credit_error().with_reset_after(Duration::from_secs(5 * MINUTE));
+    book.record_failure(&id, &reset).expect("reset");
+    assert_eq!(
+        remaining(&book, &id, &clock),
+        Duration::from_secs(5 * MINUTE)
+    );
+}
+
+#[test]
+fn d19_windowed_credit_rest_is_not_a_guess() {
+    let (book, id, clock) = windowed();
+    book.record_failure(&id, &credit_error())
+        .expect("window default");
+    assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(5 * HOUR));
+    let reset = credit_error().with_reset_after(Duration::from_secs(5 * MINUTE));
+    book.record_failure(&id, &reset).expect("reset");
+    assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(5 * HOUR));
+}
+
+#[test]
+fn d19_named_reset_keeps_longer_named_credit() {
+    let (book, id, clock) = fixture();
+    book.record_failure(
+        &id,
+        &credit_error().with_reset_after(Duration::from_secs(HOUR)),
+    )
+    .expect("named hour");
+    book.record_failure(
+        &id,
+        &credit_error().with_reset_after(Duration::from_secs(5 * MINUTE)),
+    )
+    .expect("named minutes");
+    assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(HOUR));
+}
+
+#[test]
+fn r494_observation_keeps_longer_rest() {
+    let (book, id, clock) = fixture();
+    let credit = book
+        .record_failure(&id, &PluginError::status_error(402, "out of credit"))
+        .expect("credit");
+    let observed = observation()
+        .with_remaining(0)
+        .with_retry_after(Duration::from_secs(60));
+
+    let applied = book.observe(&id, &observed).expect("observation");
+    assert_eq!(applied, credit);
+    assert_eq!(book.cooling(&id), Some(credit));
+    assert_eq!(
+        remaining(&book, &id, &clock),
+        Duration::from_secs(30 * MINUTE)
+    );
 }
 
 #[test]
@@ -796,6 +1121,8 @@ fn rate_ladder_resets_during_active_non_rate_rest_after_forget() {
     );
     advance(&clock, 32 * MINUTE);
     book.maintain();
+    // R-494b: the rate minute does not shorten the longer quota rest, which
+    // stays the last rest kept, so the rate ladder restarts after it.
     let kept = book
         .record_failure(&id, &PluginError::status_error(429, "slow"))
         .expect("rate failure during quota rest");
@@ -832,4 +1159,926 @@ fn a10_rest_carries_status_and_300_vendor_characters() {
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].1.status(), Some(500));
     assert_eq!(entries[0].1.error(), cooling.error());
+}
+
+fn credit_error() -> PluginError {
+    PluginError::credit_status(402, "out of credit")
+}
+
+fn subscription() -> MemberId {
+    MemberId::from_parts(
+        PluginId::from_static("subscription"),
+        AccountId::from_static("account"),
+    )
+}
+
+fn windowed() -> (Cooldowns, MemberId, Arc<Mutex<Instant>>) {
+    let (book, _, clock) = fixture();
+    let id = subscription();
+    book.configure_credit_window(&id);
+    (book, id, clock)
+}
+
+fn assert_flat_credit(error: PluginError, expected: Duration) {
+    let (book, id, clock) = fixture();
+    for _ in 0..3 {
+        let cooling = book.record_failure(&id, &error).expect("credit rest");
+        assert_eq!(cooling.failures(), 0);
+        assert_eq!(remaining(&book, &id, &clock), expected);
+        advance(&clock, expected.as_secs() + 1);
+    }
+}
+
+#[test]
+fn b1a_credit_ladder_climbs_30m_2h_8h_24h_3d_7d_and_repeats() {
+    let (book, id, clock) = fixture();
+    let rungs = [
+        30 * MINUTE,
+        2 * HOUR,
+        8 * HOUR,
+        DAY,
+        3 * DAY,
+        7 * DAY,
+        7 * DAY,
+    ];
+    for (index, seconds) in rungs.into_iter().enumerate() {
+        let cooling = book.record_failure(&id, &credit_error()).expect("credit");
+        assert_eq!(cooling.failures(), (index + 1).min(6) as u32);
+        assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(seconds));
+        advance(&clock, seconds + 1);
+    }
+}
+
+#[test]
+fn b1b_refused_while_resting_keeps_rung() {
+    let (book, id, clock) = fixture();
+    let first = book.record_failure(&id, &credit_error()).expect("first");
+    let again = book.record_failure(&id, &credit_error()).expect("again");
+    assert_eq!(again.failures(), 1);
+    assert_eq!(again.until(), first.until());
+    advance(&clock, 30 * MINUTE + 1);
+    book.record_failure(&id, &credit_error())
+        .expect("second rung");
+    let until = book.cooling(&id).expect("second rest").until();
+    advance(&clock, MINUTE);
+    let repeated = book.record_failure(&id, &credit_error()).expect("repeat");
+    assert_eq!(repeated.failures(), 2);
+    assert!(repeated.until() > until);
+    assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(2 * HOUR));
+}
+
+#[test]
+fn b1c_refused_after_rest_ended_climbs() {
+    let (book, id, clock) = fixture();
+    book.record_failure(&id, &credit_error()).expect("first");
+    advance(&clock, 30 * MINUTE);
+    let next = book.record_failure(&id, &credit_error()).expect("next");
+    assert_eq!(next.failures(), 2);
+    assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(2 * HOUR));
+}
+
+#[test]
+fn b1d_success_and_manual_clear_restart_ladder() {
+    let (book, id, clock) = fixture();
+    book.record_failure(&id, &credit_error()).expect("first");
+    book.record_success(&id);
+    assert_eq!(
+        book.record_failure(&id, &credit_error())
+            .expect("after success")
+            .failures(),
+        1
+    );
+    advance(&clock, 30 * MINUTE + 1);
+    assert_eq!(
+        book.record_failure(&id, &credit_error())
+            .expect("second rung")
+            .failures(),
+        2
+    );
+    book.remove(&id);
+    assert_eq!(
+        book.record_failure(&id, &credit_error())
+            .expect("after removal")
+            .failures(),
+        1
+    );
+}
+
+#[test]
+fn b1e_retry_after_stays_flat() {
+    assert_flat_credit(
+        credit_error().with_retry_after(Duration::from_secs(2 * HOUR)),
+        Duration::from_secs(30 * MINUTE),
+    );
+}
+
+#[test]
+fn b1e_afford_wording_stays_flat() {
+    for message in [
+        "This request can only afford 12000 tokens",
+        "This request requires more credits, or fewer max_tokens",
+    ] {
+        assert_flat_credit(
+            PluginError::credit_status(402, message).with_credit_soon(),
+            Duration::from_secs(30 * MINUTE),
+        );
+    }
+}
+
+#[test]
+fn b1e_try_again_wording_stays_flat() {
+    assert_flat_credit(
+        PluginError::credit_status(402, "Insufficient balance. Try again in 30 seconds")
+            .with_reset_after(Duration::from_secs(30)),
+        Duration::from_secs(30),
+    );
+}
+
+#[test]
+fn b1e_minutes_later_wording_stays_flat() {
+    assert_flat_credit(
+        PluginError::credit_status(402, "\u{4f59}\u{989d}\u{4e0d}\u{8db3}\u{ff0c}\u{8bf7}\u{5145}\u{503c}\u{540e} 1 \u{5206}\u{949f}\u{540e}\u{91cd}\u{8bd5}")
+            .with_reset_after(Duration::from_secs(MINUTE)),
+        Duration::from_secs(MINUTE),
+    );
+}
+
+#[test]
+fn b1f_named_reset_rests_until_it_capped_35d() {
+    let (book, id, clock) = fixture();
+    let error = credit_error().with_reset_after(Duration::from_secs(40 * DAY));
+    let cooling = book.record_failure(&id, &error).expect("named reset");
+    assert_eq!(cooling.failures(), 0);
+    assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(35 * DAY));
+}
+
+#[test]
+fn b1g_subscription_account_keeps_flat_30m() {
+    let (book, _, clock) = fixture();
+    let id = subscription();
+    for _ in 0..3 {
+        let cooling = book.record_failure(&id, &credit_error()).expect("credit");
+        assert_eq!(cooling.failures(), 0);
+        assert_eq!(
+            remaining(&book, &id, &clock),
+            Duration::from_secs(30 * MINUTE)
+        );
+        advance(&clock, 30 * MINUTE + 1);
+    }
+}
+
+#[test]
+fn b2b_running_rest_continues_after_restore() {
+    let (book, id, clock) = fixture();
+    let wall = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    book.restore_credit(
+        vec![PersistedRest::new(
+            id.to_string(),
+            wall + Duration::from_secs(2 * HOUR),
+            2,
+        )],
+        &HashSet::from([id.clone()]),
+        wall,
+    );
+    let cooling = book.cooling(&id).expect("restored rest");
+    assert_eq!(cooling.failures(), 2);
+    assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(2 * HOUR));
+}
+
+#[test]
+fn b2b_ended_rest_keeps_its_rung() {
+    let (book, id, clock) = fixture();
+    let wall = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    book.restore_credit(
+        vec![PersistedRest::new(
+            id.to_string(),
+            wall - Duration::from_secs(HOUR),
+            3,
+        )],
+        &HashSet::from([id.clone()]),
+        wall,
+    );
+    assert_eq!(book.cooling(&id), None);
+    let next = book
+        .record_failure(&id, &credit_error())
+        .expect("next refusal");
+    assert_eq!(next.failures(), 4);
+    assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(DAY));
+}
+
+#[test]
+fn b2b_rest_ended_more_than_35_days_ago_is_forgotten() {
+    let (book, id, _) = fixture();
+    let wall = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    book.restore_credit(
+        vec![PersistedRest::new(
+            id.to_string(),
+            wall - Duration::from_secs(35 * DAY + 1),
+            5,
+        )],
+        &HashSet::from([id.clone()]),
+        wall,
+    );
+    assert_eq!(book.revision(&id), 0);
+}
+
+#[test]
+fn b2b_member_no_longer_configured_is_dropped() {
+    let (book, id, _) = fixture();
+    let wall = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    book.restore_credit(
+        vec![PersistedRest::new(
+            id.to_string(),
+            wall + Duration::from_secs(HOUR),
+            2,
+        )],
+        &HashSet::new(),
+        wall,
+    );
+    assert_eq!(book.revision(&id), 0);
+}
+
+#[test]
+fn b2b_in_process_state_wins_over_file() {
+    let (book, id, clock) = fixture();
+    book.record_failure(&id, &credit_error())
+        .expect("in process");
+    let wall = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    book.restore_credit(
+        vec![PersistedRest::new(
+            id.to_string(),
+            wall + Duration::from_secs(7 * DAY),
+            6,
+        )],
+        &HashSet::from([id.clone()]),
+        wall,
+    );
+    assert_eq!(book.cooling(&id).expect("in process").failures(), 1);
+    assert_eq!(
+        remaining(&book, &id, &clock),
+        Duration::from_secs(30 * MINUTE)
+    );
+}
+
+#[test]
+fn b2c_only_credit_ladder_persists() {
+    let (book, id, _) = fixture();
+    book.record_failure(&id, &credit_error()).expect("ladder");
+    let flat = member("flat");
+    book.record_failure(
+        &flat,
+        &credit_error().with_retry_after(Duration::from_secs(MINUTE)),
+    );
+    let rate = member("rate");
+    book.record_failure(&rate, &PluginError::status_error(429, "slow"));
+    let quota = member("quota");
+    book.record_failure(&quota, &PluginError::quota("empty"));
+    let account = subscription();
+    book.configure_credit_window(&account);
+    book.record_failure(&account, &credit_error());
+    let snapshot = book.credit_snapshot(SystemTime::now());
+    assert_eq!(snapshot.len(), 1);
+    assert_eq!(snapshot[0].member, id.to_string());
+    assert_eq!(snapshot[0].rung, 1);
+}
+
+#[test]
+fn b3a_credit_reset_named_in_body_wins() {
+    let (book, id, clock) = windowed();
+    book.observe_credit_window(&id, Some(Duration::from_secs(3 * HOUR)), false);
+    let error = credit_error()
+        .with_reset_after(Duration::from_secs(10 * DAY))
+        .with_retry_after(Duration::from_secs(6 * HOUR));
+    book.record_failure(&id, &error).expect("body reset");
+    assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(10 * DAY));
+}
+
+#[test]
+fn b3b_credit_reset_named_in_headers_wins() {
+    let (book, id, clock) = windowed();
+    book.observe_credit_window(&id, Some(Duration::from_secs(3 * HOUR)), false);
+    let error = credit_error()
+        .with_reset_after(Duration::from_secs(2 * DAY))
+        .with_retry_after(Duration::from_secs(6 * HOUR));
+    book.record_failure(&id, &error).expect("header reset");
+    assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(2 * DAY));
+}
+
+#[test]
+fn b3c_full_usage_window_reset_wins_over_retry_and_default() {
+    let (book, id, clock) = windowed();
+    book.observe_credit_window(&id, Some(Duration::from_secs(3 * HOUR)), false);
+    let error = credit_error().with_retry_after(Duration::from_secs(6 * HOUR));
+    book.record_failure(&id, &error).expect("window reset");
+    assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(3 * HOUR));
+}
+
+#[test]
+fn b3d_retry_after_longer_than_default_wins() {
+    let (book, id, clock) = windowed();
+    let error = credit_error().with_retry_after(Duration::from_secs(6 * HOUR));
+    book.record_failure(&id, &error).expect("retry rest");
+    assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(6 * HOUR));
+}
+
+#[test]
+fn b3e_otherwise_credit_rest_defaults_to_five_hours() {
+    let (book, id, clock) = windowed();
+    let error = credit_error().with_retry_after(Duration::from_secs(4 * HOUR));
+    book.record_failure(&id, &error).expect("default rest");
+    assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(5 * HOUR));
+}
+
+#[test]
+fn b3f_later_observation_showing_window_renewed_lifts_rest() {
+    let (book, id, clock) = windowed();
+    book.observe_credit_window(&id, Some(Duration::from_secs(3 * HOUR)), false);
+    book.record_failure(&id, &credit_error())
+        .expect("window rest");
+    assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(3 * HOUR));
+    book.observe_credit_window(&id, None, false);
+    assert_eq!(book.cooling(&id), None);
+    assert_eq!(book.drain_recoveries(), vec![(id, CooldownCause::Credit)]);
+}
+
+#[test]
+fn b3f_reading_with_no_window_ever_full_keeps_rest() {
+    let (book, id, clock) = windowed();
+    book.observe_credit_window(&id, None, false);
+    book.record_failure(&id, &credit_error())
+        .expect("default rest");
+    book.observe_credit_window(&id, None, false);
+    assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(5 * HOUR));
+    assert!(book.drain_recoveries().is_empty());
+}
+
+#[test]
+fn b3f_first_reading_after_rest_does_not_lift() {
+    let (book, id, clock) = windowed();
+    book.record_failure(&id, &credit_error())
+        .expect("default rest");
+    book.observe_credit_window(&id, None, false);
+    book.observe_credit_window(&id, Some(Duration::from_secs(2 * HOUR)), false);
+    assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(5 * HOUR));
+}
+
+#[test]
+fn b3f_same_or_later_window_reset_keeps_rest() {
+    let (book, id, clock) = windowed();
+    book.observe_credit_window(&id, Some(Duration::from_secs(3 * HOUR)), false);
+    book.record_failure(&id, &credit_error())
+        .expect("window rest");
+    advance(&clock, MINUTE);
+    book.observe_credit_window(&id, Some(Duration::from_secs(3 * HOUR - MINUTE)), false);
+    book.observe_credit_window(&id, Some(Duration::from_secs(4 * HOUR)), false);
+    assert_eq!(
+        remaining(&book, &id, &clock),
+        Duration::from_secs(3 * HOUR - MINUTE)
+    );
+    book.observe_credit_window(&id, Some(Duration::from_secs(HOUR)), false);
+    assert_eq!(book.cooling(&id), None);
+}
+
+#[test]
+fn b3f_full_window_without_reset_renews_latest() {
+    let (book, id, clock) = windowed();
+    book.observe_credit_window(&id, Some(Duration::from_secs(3 * HOUR)), false);
+    book.record_failure(&id, &credit_error())
+        .expect("window rest");
+    book.observe_credit_window(&id, Some(Duration::from_secs(HOUR)), true);
+    assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(3 * HOUR));
+    book.observe_credit_window(&id, Some(Duration::from_secs(HOUR)), false);
+    assert_eq!(book.cooling(&id), None);
+}
+
+#[test]
+fn b3f_renewal_lifts_only_a_credit_rest_of_a_windowed_account() {
+    let (book, id, _) = windowed();
+    book.observe_credit_window(&id, Some(Duration::from_secs(3 * HOUR)), false);
+    book.record_failure(&id, &PluginError::status_error(429, "slow"))
+        .expect("rate rest");
+    book.observe_credit_window(&id, None, false);
+    assert!(book.cooling(&id).is_some());
+    let account =
+        MemberId::from_parts(PluginId::from_static("other"), AccountId::from_static("me"));
+    book.observe_credit_window(&account, Some(Duration::from_secs(3 * HOUR)), false);
+    book.record_failure(&account, &credit_error())
+        .expect("flat rest");
+    book.observe_credit_window(&account, None, false);
+    assert!(book.cooling(&account).is_some());
+}
+
+#[test]
+fn b3f_renewal_lifts_a_window_quota_rest_of_a_windowed_account() {
+    let (book, id, _) = windowed();
+    book.observe_credit_window(&id, Some(Duration::from_secs(3 * HOUR)), false);
+    let applied = book
+        .observe(
+            &id,
+            &observation()
+                .with_remaining(0)
+                .with_window_reset(Duration::from_secs(3 * HOUR)),
+        )
+        .expect("window rest");
+    assert_eq!(applied.cause(), CooldownCause::Observed);
+    book.observe_credit_window(&id, None, false);
+    assert_eq!(book.cooling(&id), None);
+    assert_eq!(book.drain_recoveries(), vec![(id, CooldownCause::Observed)]);
+}
+
+#[test]
+fn b4a_generic_no_climb_while_resting() {
+    let (book, id, clock) = fixture();
+    book.record_failure(&id, &PluginError::connect("down"));
+    let again = book
+        .record_failure(&id, &PluginError::connect("down"))
+        .expect("again");
+    assert_eq!(again.failures(), 1);
+    assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(MINUTE));
+}
+
+#[test]
+fn b4b_generic_climbs_after_rest_ended() {
+    let (book, id, clock) = fixture();
+    book.record_failure(&id, &PluginError::connect("down"));
+    advance(&clock, MINUTE);
+    let next = book
+        .record_failure(&id, &PluginError::connect("down"))
+        .expect("next");
+    assert_eq!(next.failures(), 2);
+    assert_eq!(
+        remaining(&book, &id, &clock),
+        Duration::from_secs(2 * MINUTE)
+    );
+}
+
+#[test]
+fn b1c_ended_rung_is_kept_in_memory_past_35_days() {
+    let (book, id, clock) = fixture();
+    book.record_failure(&id, &credit_error()).expect("first");
+    advance(&clock, 36 * DAY);
+    let next = book.record_failure(&id, &credit_error()).expect("next");
+    assert_eq!(next.failures(), 2);
+    assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(2 * HOUR));
+}
+
+#[test]
+fn b2b_rest_of_unconfigured_member_does_not_land_on_another() {
+    let (book, id, _) = fixture();
+    let other = member("other");
+    let wall = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    book.restore_credit(
+        vec![PersistedRest::new(
+            other.to_string(),
+            wall + Duration::from_secs(HOUR),
+            2,
+        )],
+        &HashSet::from([id.clone()]),
+        wall,
+    );
+    assert_eq!(book.cooling(&id), None);
+    assert_eq!(book.revision(&id), 0);
+}
+
+#[test]
+fn b2b_ended_rest_restores_without_a_recovery() {
+    let (book, id, _) = fixture();
+    let wall = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    book.restore_credit(
+        vec![PersistedRest::new(
+            id.to_string(),
+            wall - Duration::from_secs(HOUR),
+            3,
+        )],
+        &HashSet::from([id.clone()]),
+        wall,
+    );
+    assert_eq!(book.cooling(&id), None);
+    assert!(book.drain_recoveries().is_empty());
+}
+
+#[test]
+fn b2b_rung_zero_rest_is_ignored() {
+    let (book, id, _) = fixture();
+    let wall = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    book.restore_credit(
+        vec![PersistedRest::new(
+            id.to_string(),
+            wall + Duration::from_secs(HOUR),
+            0,
+        )],
+        &HashSet::from([id.clone()]),
+        wall,
+    );
+    assert_eq!(book.cooling(&id), None);
+    assert_eq!(book.revision(&id), 0);
+}
+
+#[test]
+fn b2b_restored_rest_is_capped_at_a_week() {
+    let (book, id, clock) = fixture();
+    let wall = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    book.restore_credit(
+        vec![PersistedRest::new(
+            id.to_string(),
+            wall + Duration::from_secs(30 * DAY),
+            6,
+        )],
+        &HashSet::from([id.clone()]),
+        wall,
+    );
+    assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(7 * DAY));
+}
+
+#[test]
+fn b2b_rung_past_the_ladder_is_clamped() {
+    let (book, id, clock) = fixture();
+    let wall = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    book.restore_credit(
+        vec![PersistedRest::new(
+            id.to_string(),
+            wall - Duration::from_secs(HOUR),
+            9,
+        )],
+        &HashSet::from([id.clone()]),
+        wall,
+    );
+    let next = book.record_failure(&id, &credit_error()).expect("next");
+    assert_eq!(next.failures(), 6);
+    assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(7 * DAY));
+}
+
+#[test]
+fn b2c_rest_ended_more_than_35_days_ago_is_not_saved() {
+    let (book, id, clock) = fixture();
+    book.record_failure(&id, &credit_error()).expect("ladder");
+    advance(&clock, 30 * MINUTE + 35 * DAY + MINUTE);
+    assert!(book.credit_snapshot(SystemTime::now()).is_empty());
+    let next = book.record_failure(&id, &credit_error()).expect("next");
+    assert_eq!(next.failures(), 2);
+}
+
+#[test]
+fn b2c_credit_rung_is_not_saved_after_a_later_rate_rest() {
+    let (book, id, clock) = fixture();
+    book.record_failure(&id, &credit_error()).expect("ladder");
+    assert_eq!(book.credit_snapshot(SystemTime::now()).len(), 1);
+    advance(&clock, 30 * MINUTE + 1);
+    book.record_failure(&id, &PluginError::status_error(429, "slow"))
+        .expect("rate rest");
+    assert!(book.credit_snapshot(SystemTime::now()).is_empty());
+}
+
+#[test]
+fn b3f_renewal_lifts_a_quota_refusal_rest_of_a_windowed_account() {
+    let (book, id, _) = windowed();
+    book.observe_credit_window(&id, Some(Duration::from_secs(3 * HOUR)), false);
+    let applied = book
+        .record_failure(&id, &PluginError::quota("empty"))
+        .expect("quota rest");
+    assert_eq!(applied.cause(), CooldownCause::Quota);
+    book.observe_credit_window(&id, None, false);
+    assert_eq!(book.cooling(&id), None);
+    assert_eq!(book.drain_recoveries(), vec![(id, CooldownCause::Quota)]);
+}
+
+#[test]
+fn b3f_renewal_ten_minutes_sooner_lifts_rest() {
+    let (book, id, _) = windowed();
+    book.observe_credit_window(&id, Some(Duration::from_secs(3 * HOUR)), false);
+    book.record_failure(&id, &credit_error())
+        .expect("window rest");
+    book.observe_credit_window(
+        &id,
+        Some(Duration::from_secs(3 * HOUR - 10 * MINUTE)),
+        false,
+    );
+    assert_eq!(book.cooling(&id), None);
+}
+
+#[test]
+fn b2b_running_rest_past_the_ladder_restores_on_the_top_rung() {
+    let (book, id, _) = fixture();
+    let wall = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    book.restore_credit(
+        vec![PersistedRest::new(
+            id.to_string(),
+            wall + Duration::from_secs(HOUR),
+            9,
+        )],
+        &HashSet::from([id.clone()]),
+        wall,
+    );
+    assert_eq!(book.cooling(&id).expect("restored").failures(), 6);
+    assert_eq!(book.credit_snapshot(SystemTime::now())[0].rung, 6);
+}
+
+#[test]
+fn b2b_subscription_account_rest_is_not_restored() {
+    let (book, _, _) = fixture();
+    let account = subscription();
+    let wall = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    book.restore_credit(
+        vec![PersistedRest::new(
+            account.to_string(),
+            wall + Duration::from_secs(HOUR),
+            2,
+        )],
+        &HashSet::from([account.clone()]),
+        wall,
+    );
+    assert_eq!(book.cooling(&account), None);
+    assert_eq!(book.revision(&account), 0);
+}
+
+#[test]
+fn b5a_model_cooldown_rests_only_the_named_or_requested_model() {
+    for (message, seconds) in [
+        (
+            "All credentials for model model-a are cooling down via provider upstream",
+            120,
+        ),
+        (
+            "All credentials for the requested model are cooling down",
+            120,
+        ),
+    ] {
+        let (book, id, clock) = fixture();
+        let error =
+            PluginError::status_error(429, message).with_retry_after(Duration::from_secs(seconds));
+        let cooling = book
+            .record_failure_for_model(&id, "model-a", &error)
+            .expect("model rest");
+        assert_eq!(cooling.cause(), CooldownCause::RateLimit);
+        assert_eq!(cooling.failures(), 1);
+        assert_eq!(
+            remaining_model(&book, &id, "model-a", &clock),
+            Duration::from_secs(seconds)
+        );
+        assert!(book.cooling(&id).is_none());
+        assert!(book.cooling_for_model(&id, "model-b").is_none());
+        let entries = book.scoped_entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].1.as_deref(), Some("model-a"));
+    }
+}
+
+#[test]
+fn b5b_account_cooldown_without_a_model_rests_the_whole_member() {
+    let (book, id, _) = fixture();
+    let error = PluginError::status_error(
+        429,
+        "All credentials are cooling down via provider upstream",
+    );
+    book.record_failure_for_model(&id, "model-a", &error)
+        .expect("member rest");
+    assert!(book.cooling(&id).is_some());
+    assert!(book.cooling_for_model(&id, "model-b").is_some());
+    assert_eq!(book.scoped_entries()[0].1, None);
+}
+
+#[test]
+fn b5c_model_credit_ladder_is_independent_of_the_member_ladder() {
+    let (book, id, clock) = fixture();
+    for rung in 1..=3 {
+        let cooling = book
+            .record_failure(&id, &PluginError::credit_status(402, "out of credit"))
+            .expect("member credit");
+        assert_eq!(cooling.failures(), rung);
+        let seconds = cooling
+            .until()
+            .duration_since(*clock.lock().expect("clock"))
+            .as_secs();
+        advance(&clock, seconds + 1);
+    }
+    let error = PluginError::credit_status(
+        429,
+        "All credentials for model model-a are cooling down (last error: insufficient balance)",
+    );
+    let cooling = book
+        .record_failure_for_model(&id, "model-a", &error)
+        .expect("model credit");
+    assert_eq!(cooling.cause(), CooldownCause::Credit);
+    assert_eq!(cooling.failures(), 1);
+    assert_eq!(
+        remaining_model(&book, &id, "model-a", &clock),
+        Duration::from_secs(30 * MINUTE)
+    );
+    let rests = book.credit_snapshot(SystemTime::now());
+    assert_eq!(rests.len(), 2);
+    assert!(
+        rests
+            .iter()
+            .any(|rest| { rest.model.as_deref() == Some("model-a") && rest.rung == 1 })
+    );
+    assert!(
+        rests
+            .iter()
+            .any(|rest| rest.model.is_none() && rest.rung == 3)
+    );
+}
+
+#[test]
+fn b5d_unserved_model_uses_its_own_generic_ladder() {
+    for status in [400, 403, 404, 422] {
+        let (book, id, clock) = fixture();
+        let error = PluginError::status_error(status, "model model-a is not supported");
+        let first = book
+            .record_failure_for_model(&id, "model-a", &error)
+            .expect("first model rest");
+        assert_eq!(first.cause(), CooldownCause::Failure);
+        assert_eq!(first.failures(), 1);
+        assert_eq!(
+            remaining_model(&book, &id, "model-a", &clock),
+            Duration::from_secs(MINUTE)
+        );
+        assert!(book.cooling(&id).is_none());
+        assert!(book.cooling_for_model(&id, "model-b").is_none());
+        advance(&clock, MINUTE + 1);
+        let next = book
+            .record_failure_for_model(&id, "model-a", &error)
+            .expect("second model rest");
+        assert_eq!(next.failures(), 2);
+        assert_eq!(
+            remaining_model(&book, &id, "model-a", &clock),
+            Duration::from_secs(2 * MINUTE)
+        );
+    }
+}
+
+#[test]
+fn b5f_model_success_and_manual_clear_have_distinct_scopes() {
+    let (book, id, _) = fixture();
+    let error = PluginError::status_error(
+        429,
+        "All credentials for model model-a are cooling down via provider upstream",
+    );
+    book.record_failure_for_model(&id, "model-a", &error)
+        .expect("model-a");
+    book.record_failure_for_model(&id, "model-b", &error)
+        .expect("model-b");
+
+    book.record_success_for_model(&id, "model-a");
+    assert!(book.cooling_for_model(&id, "model-a").is_none());
+    assert!(book.cooling_for_model(&id, "model-b").is_some());
+
+    book.record_failure_for_model(&id, "model-a", &error)
+        .expect("model-a again");
+    book.record_failure(&id, &PluginError::credit_status(402, "out of credit"))
+        .expect("member rest");
+    book.record_success(&id);
+    assert!(book.scoped_entries().is_empty());
+    assert!(book.cooling(&id).is_none());
+    assert!(book.cooling_for_model(&id, "model-a").is_none());
+    assert!(book.cooling_for_model(&id, "model-b").is_none());
+}
+
+#[test]
+fn b5_generic_model_ladder_survives_sibling_answers() {
+    let (book, id, clock) = fixture();
+    let error = PluginError::connect("down");
+    let first = book
+        .record_failure_for_model(&id, "model-a", &error)
+        .expect("first failure");
+    assert_eq!(first.failures(), 1);
+    assert!(book.cooling(&id).is_some());
+    advance(&clock, MINUTE + 1);
+
+    book.record_success_for_model(&id, "model-b");
+    let next = book
+        .record_failure_for_model(&id, "model-a", &error)
+        .expect("second failure");
+    assert_eq!(next.failures(), 2);
+    assert_eq!(
+        remaining_model(&book, &id, "model-a", &clock),
+        Duration::from_secs(2 * MINUTE)
+    );
+    assert!(book.cooling(&id).is_none());
+    assert!(book.cooling_for_model(&id, "model-b").is_none());
+}
+
+#[test]
+fn b5a_bare_model_cooldown_code_rests_the_whole_member() {
+    // Reference modelCooledDown reads the sentence, not the code.
+    let (book, id, _) = fixture();
+    let error = PluginError::status_error(429, r#"{"error":{"code":"model_cooldown"}}"#);
+    book.record_failure_for_model(&id, "model-a", &error)
+        .expect("member rest");
+    assert!(book.cooling(&id).is_some());
+    assert_eq!(book.scoped_entries()[0].1, None);
+}
+
+#[test]
+fn b5a_model_cooling_sentence_on_a_generic_failure_rests_the_member_ladder() {
+    // Only quota, credit, and rate refusals are scoped by the sentence.
+    let (book, id, _) = fixture();
+    let error = PluginError::status_error(
+        503,
+        "All credentials for model model-a are cooling down via provider upstream",
+    );
+    book.record_failure_for_model(&id, "model-a", &error)
+        .expect("generic rest");
+    assert!(book.cooling_for_model(&id, "model-a").is_some());
+    assert!(
+        book.scoped_entries()
+            .iter()
+            .any(|(_, model, _)| model.is_none())
+    );
+}
+
+#[test]
+fn b5a_model_cooling_sentence_on_a_credit_refusal_rests_only_the_model() {
+    let (book, id, _) = fixture();
+    let error = PluginError::credit_status(
+        402,
+        "All credentials for model model-a are cooling down (last error: insufficient balance)",
+    );
+    book.record_failure_for_model(&id, "model-a", &error)
+        .expect("model credit rest");
+    assert!(book.cooling(&id).is_none());
+    assert!(book.cooling_for_model(&id, "model-a").is_some());
+    assert!(book.cooling_for_model(&id, "model-b").is_none());
+}
+
+#[test]
+fn b5f_model_success_reads_the_newest_of_member_and_model_revisions() {
+    let (book, id, _) = fixture();
+    let unserved = PluginError::status_error(404, "model model-a is not supported");
+    book.record_failure_for_model(&id, "model-a", &unserved)
+        .expect("model rest");
+    book.record_failure(&id, &PluginError::status_error(500, "upstream down"))
+        .expect("member rest");
+    let revision = book.revision_for_model(&id, "model-a");
+    book.record_success_for_model_if_unchanged(&id, "model-a", revision);
+    assert!(
+        book.scoped_entries()
+            .iter()
+            .all(|(_, model, _)| model.is_none()),
+        "the model rest clears once its call saw every revision"
+    );
+}
+
+#[test]
+fn b5f_stale_model_success_keeps_a_newer_model_failure() {
+    let (book, id, _) = fixture();
+    book.record_failure(&id, &PluginError::status_error(500, "upstream down"))
+        .expect("member rest");
+    let revision = book.revision_for_model(&id, "model-a");
+    assert_ne!(revision, 0);
+    let unserved = PluginError::status_error(404, "model model-a is not supported");
+    book.record_failure_for_model(&id, "model-a", &unserved)
+        .expect("model rest");
+    book.record_success_for_model_if_unchanged(&id, "model-a", revision);
+    assert!(
+        book.scoped_entries()
+            .iter()
+            .any(|(_, model, _)| model.as_deref() == Some("model-a")),
+        "a success that started before the model failure must not clear it"
+    );
+}
+
+#[test]
+fn b5h_remove_drops_the_member_model_rests_too() {
+    let (book, id, _) = fixture();
+    let unserved = PluginError::status_error(404, "model model-a is not supported");
+    book.record_failure_for_model(&id, "model-a", &unserved)
+        .expect("model rest");
+    book.remove(&id);
+    assert!(book.cooling_for_model(&id, "model-a").is_none());
+    assert!(book.scoped_entries().is_empty());
+}
+
+#[test]
+fn b5b_an_empty_model_name_rests_the_whole_member() {
+    let (book, id, _) = fixture();
+    let unserved = PluginError::status_error(404, "model model-a is not supported");
+    book.record_failure_for_model(&id, "", &unserved)
+        .expect("member rest");
+    assert!(book.cooling(&id).is_some());
+    assert_eq!(book.scoped_entries()[0].1, None);
+}
+
+#[test]
+fn b5e_model_view_reports_the_later_of_member_and_model_rests() {
+    let (book, id, clock) = fixture();
+    let model = PluginError::status_error(
+        429,
+        "All credentials for model model-a are cooling down via provider upstream",
+    )
+    .with_retry_after(Duration::from_secs(300));
+    book.record_failure_for_model(&id, "model-a", &model)
+        .expect("model rest");
+    book.record_failure(
+        &id,
+        &PluginError::status_error(429, "slow down").with_retry_after(Duration::from_secs(90)),
+    )
+    .expect("member rest");
+    assert_eq!(
+        remaining_model(&book, &id, "model-a", &clock),
+        Duration::from_secs(300)
+    );
+    assert_eq!(
+        remaining_model(&book, &id, "model-b", &clock),
+        Duration::from_secs(90)
+    );
 }

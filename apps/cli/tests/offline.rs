@@ -1523,6 +1523,20 @@ fn offline_model_list_one_shot() {
 }
 
 #[test]
+fn offline_routes_one_shot() {
+    let source = ROUTED.replace(
+        "upstreams = [\"chat\"]",
+        "routing = \"rotate\"\nupstreams = [\"chat\"]",
+    );
+    let scratch = Scratch::new("127.0.0.1:0", &source);
+    assert_eq!(
+        scratch.hofund(&["routes"]).ok(),
+        "model\trouting\nm\trotate"
+    );
+    scratch.assert_no_daemon_state();
+}
+
+#[test]
 fn offline_model_show_one_shot() {
     let scratch = Scratch::new("127.0.0.1:0", ROUTED);
     assert_eq!(

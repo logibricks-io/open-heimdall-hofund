@@ -246,6 +246,10 @@ HealthResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize,
 HealthResponse.api_version
 HealthResponse.daemon_version
 HealthResponse.version
+ListEnvelope derives(Clone, Debug, PartialEq, Serialize, Deserialize)
+ListEnvelope.data
+ListEnvelope.object
+ListEnvelope::fn new (data : Vec < T >) -> Self
 ListenSource #[non_exhaustive] derives(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize) # [serde (rename_all = "snake_case")]
 ListenSource::Config
 ListenSource::Environment
@@ -261,15 +265,18 @@ MemberCooledEvent.cause
 MemberCooledEvent.error
 MemberCooledEvent.failures
 MemberCooledEvent.member_id
+MemberCooledEvent.model
 MemberCooledEvent.remaining_ms
 MemberCooledEvent.retry_after_ms
 MemberCooledEvent.status
 MemberRecoveredEvent #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
 MemberRecoveredEvent.member_id
+MemberRecoveredEvent.model
 MemberRecoveredEvent.ready
 MemberSummary #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
 MemberSummary.id
 MemberSummary.ready
+MemberSummary.resting_models
 ModelEntry #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
 ModelEntry.context
 ModelEntry.display_name
@@ -327,6 +334,7 @@ ProviderSummary.kind
 ProviderSummary.model_count
 ProviderSummary.protocol
 ProviderSummary.ready
+ProviderSummary.resting_models
 ProviderTestRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
 ProviderTestRequest.models
 ProviderTestRequest.version
@@ -341,6 +349,90 @@ ProviderTestResult.latency_ms
 ProviderTestResult.model
 ProviderTestResult.ok
 ProviderTestResult.status
+Quota derives(Clone, Debug, Default, PartialEq, Serialize, Deserialize) # [serde (rename_all = "camelCase")]
+Quota.alias
+Quota.as_of
+Quota.balance
+Quota.error
+Quota.kind
+Quota.last
+Quota.last_served_at
+Quota.name
+Quota.plan
+Quota.provider
+Quota.read_at
+Quota.read_deferred
+Quota.renew
+Quota.until
+Quota.user
+Quota.windows
+QuotaHistory derives(Clone, Debug, Default, PartialEq, Serialize, Deserialize)
+QuotaHistory.lines
+QuotaHistory.provider
+QuotaHistory.user
+QuotaHistoryQuery #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq)
+QuotaHistoryQuery.days
+QuotaHistoryQuery.provider
+QuotaHistoryQuery.user
+QuotaHistoryQuery::fn encode (& self) -> String
+QuotaHistoryQuery::fn parse (query : Option < & str >) -> Self
+QuotaHistoryQuery::fn with_days (mut self , days : impl Into < String >) -> Self
+QuotaHistoryQuery::fn with_provider (mut self , provider : impl Into < String >) -> Self
+QuotaHistoryQuery::fn with_user (mut self , user : impl Into < String >) -> Self
+QuotaHistoryResponse derives(Clone, Debug, PartialEq, Serialize, Deserialize)
+QuotaHistoryResponse.data
+QuotaHistoryResponse.version
+QuotaKind derives(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize) # [serde (rename_all = "lowercase")]
+QuotaKind::Balance
+QuotaKind::Plan
+QuotaKind::Subscription
+QuotaKind::Unknown #[serde(other)]
+QuotaKind::fn is_account (self) -> bool
+QuotaLine derives(Clone, Debug, Default, PartialEq, Serialize, Deserialize)
+QuotaLine.name
+QuotaLine.points
+QuotaPoint derives(Clone, Debug, PartialEq, Serialize, Deserialize) # [serde (rename_all = "camelCase")]
+QuotaPoint.at
+QuotaPoint.left
+QuotaPoint.resets_at
+QuotaPoint.start
+QuotaQuery #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq)
+QuotaQuery.kept
+QuotaQuery::fn encode (& self) -> String
+QuotaQuery::fn fresh () -> Self
+QuotaQuery::fn kept () -> Self
+QuotaQuery::fn parse (query : Option < & str >) -> Self
+QuotaResponse derives(Clone, Debug, PartialEq, Serialize, Deserialize)
+QuotaResponse.data
+QuotaResponse.standings
+QuotaResponse.version
+QuotaSpan derives(Clone, Debug, Default, PartialEq, Serialize, Deserialize) # [serde (rename_all = "camelCase")]
+QuotaSpan.amount
+QuotaSpan.balance
+QuotaSpan.display
+QuotaSpan.limit
+QuotaSpan.name
+QuotaSpan.pool
+QuotaSpan.remaining
+QuotaSpan.resets_at
+QuotaSpan.runs_out
+QuotaSpan.runs_out_at
+QuotaSpan.text
+QuotaSpan.unit
+QuotaSpan.unlimited
+QuotaSpan.used
+QuotaStanding #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize) # [serde (rename_all = "camelCase")]
+QuotaStanding.back_at
+QuotaStanding.error
+QuotaStanding.name
+QuotaStanding.provider
+QuotaStanding.readable
+QuotaStanding.used_up
+QuotaStanding.user
+QuotaStanding::fn new (provider : impl Into < String > , user : impl Into < String >) -> Self
+QuotaTime derives(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)
+QuotaTime::fn as_str (& self) -> & str
+QuotaTime::fn new (value : impl Into < String >) -> Self
 ReloadRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
 ReloadRequest.expected_revision
 ReloadRequest.version
@@ -352,6 +444,7 @@ RequestFinishedEvent #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Seri
 RequestFinishedEvent.duration_ms
 RequestFinishedEvent.input_tokens
 RequestFinishedEvent.member
+RequestFinishedEvent.model
 RequestFinishedEvent.output_tokens
 RequestFinishedEvent.request_id
 RequestFinishedEvent.status_class
@@ -378,8 +471,9 @@ ResyncRequiredEvent #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Seria
 ResyncRequiredEvent.cursors
 ResyncRequiredEvent.reason
 ResyncRequiredEvent.topic
-RouteModel #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+RouteModel #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
 RouteModel.id
+RouteModel.routing
 RouteModelListResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
 RouteModelListResponse.models
 RouteModelListResponse.version

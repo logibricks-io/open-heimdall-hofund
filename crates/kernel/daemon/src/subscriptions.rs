@@ -14,12 +14,14 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use hofund_config::{Accounts, Config};
+use hofund_control_proto::{Quota, QuotaKind};
 use hofund_plugin_api::{
-    AccountId, AccountStatus, HostContext, MemberId, PluginErrorKind, PluginId, PluginKind,
-    QuotaObservation, QuotaWindow, RawTable, Subscription, UpstreamProvider,
+    AccountId, AccountStatus, HostContext, MemberId, PluginError, PluginErrorKind, PluginId,
+    PluginKind, QuotaObservation, QuotaWindow, RawTable, Subscription, UpstreamProvider,
 };
 use hofund_plugin_host::HttpLimits;
 use hofund_router::Cooldowns;
+use hofund_router::quota::{QuotaStore, WindowInfo};
 use tokio::time::Instant;
 
 use crate::membership::{self, BuiltProvider, PlannedHop};
@@ -236,6 +238,9 @@ impl SubscriptionState {
         cooldowns: &Arc<Cooldowns>,
     ) -> Result<SubscriptionMember, DaemonError> {
         let id = MemberId::from_parts(self.plugin.clone(), account.clone());
+        if credit_windowed(&self.plugin) {
+            cooldowns.configure_credit_window(&id);
+        }
         let host = hofund_plugin_host::runtime_host_with_observe_for(
             PluginKind::Subscription,
             self.plugin.clone(),
@@ -256,13 +261,16 @@ impl SubscriptionState {
                 plugin_id: self.plugin.as_str().to_owned(),
                 preset_id: String::new(),
                 fingerprint: String::new(),
+                patience: None,
+                kernel: false,
+                base_url: String::new(),
             },
             id,
             upstream,
         })
     }
 
-    async fn quota(&self, account: &AccountId) -> Result<Vec<QuotaWindow>, PluginErrorKind> {
+    async fn quota(&self, account: &AccountId) -> Result<Vec<QuotaWindow>, PluginError> {
         self.instance
             .quota(account, &self.host)
             .await
@@ -275,8 +283,18 @@ impl SubscriptionState {
                         "quota poll failed"
                     );
                 }
-                error.kind()
+                error
             })
+    }
+
+    fn quota_card(&self, account: &AccountId) -> Quota {
+        Quota {
+            provider: self.config.id.clone(),
+            name: self.config.id.clone(),
+            kind: QuotaKind::Subscription,
+            user: account.to_string(),
+            ..Quota::default()
+        }
     }
 }
 
@@ -319,6 +337,10 @@ pub(crate) fn expand(
                     member_id: Some(member.id.clone()),
                     wire_model: hop.wire_model.clone(),
                     max_output_tokens: hop.max_output_tokens,
+                    context_window: hop.context_window,
+                    routing: hop.routing.clone(),
+                    weight: state.config.account_weight(member.account.as_str()),
+                    free: hop.free,
                 });
                 built.entry(key).or_insert(member.built);
             }
@@ -336,6 +358,12 @@ pub(crate) fn member_ids(subscriptions: &Subscriptions) -> HashSet<MemberId> {
         .collect()
 }
 
+/// Whether `plugin`'s accounts rest out of credit until their quota window
+/// renews rather than on the flat subscription rest.
+fn credit_windowed(plugin: &PluginId) -> bool {
+    plugin.as_str() == "codex"
+}
+
 /// Turns polled windows into a cooldown. Only a blocking, model-wide window
 /// with a known limit that is spent cools the member. Returns whether one did.
 pub(crate) fn apply_windows(
@@ -344,6 +372,25 @@ pub(crate) fn apply_windows(
     plugin: &PluginId,
     windows: &[QuotaWindow],
 ) -> bool {
+    let now = SystemTime::now();
+    let full = windows
+        .iter()
+        .filter(|window| {
+            window.blocking()
+                && window.scope_model().is_none()
+                && window.limit().is_some_and(|limit| window.used() >= limit)
+        })
+        .collect::<Vec<_>>();
+    let full_reset = full
+        .iter()
+        .filter_map(|window| {
+            window
+                .resets_at()
+                .and_then(|reset| reset.duration_since(now).ok())
+        })
+        .max();
+    let full_unknown = full.iter().any(|window| window.resets_at().is_none());
+    cooldowns.observe_credit_window(member, full_reset, full_unknown);
     let mut cooled = false;
     for window in windows {
         if !window.blocking() || window.scope_model().is_some() {
@@ -360,7 +407,7 @@ pub(crate) fn apply_windows(
             .with_limit(limit);
         if let Some(after) = window
             .resets_at()
-            .and_then(|reset| reset.duration_since(SystemTime::now()).ok())
+            .and_then(|reset| reset.duration_since(now).ok())
         {
             observation = observation.with_window_reset(after);
         }
@@ -400,17 +447,22 @@ impl QuotaPolls {
         &mut self,
         subscriptions: &Subscriptions,
         cooldowns: &Cooldowns,
+        quotas: &QuotaStore,
         now: Instant,
+        force: bool,
     ) -> Vec<MemberId> {
         let mut live = HashSet::new();
         let mut cooled = Vec::new();
         for state in subscriptions.values() {
             for member in state.members() {
                 live.insert(member.id.clone());
+                let card = state.quota_card(&member.account);
+                quotas.register(card.clone());
                 if self.unsupported.contains(&member.id) {
+                    quotas.record_deferred(card);
                     continue;
                 }
-                if self.next.get(&member.id).is_some_and(|due| *due > now) {
+                if !force && self.next.get(&member.id).is_some_and(|due| *due > now) {
                     continue;
                 }
                 self.round = self.round.wrapping_add(1);
@@ -421,12 +473,34 @@ impl QuotaPolls {
                         if apply_windows(cooldowns, &member.id, &state.plugin, &windows) {
                             cooled.push(member.id.clone());
                         }
+                        quotas.record_success(
+                            card,
+                            windows.iter().map(WindowInfo::from_plugin).collect(),
+                            quotas.now(),
+                        );
                     }
-                    Err(PluginErrorKind::Unsupported) => {
+                    Err(error) if error.kind() == PluginErrorKind::Unsupported => {
                         self.unsupported.insert(member.id.clone());
                         self.next.remove(&member.id);
+                        quotas.record_deferred(card);
                     }
-                    Err(_) => {}
+                    Err(error) => {
+                        let transient = matches!(
+                            error.kind(),
+                            PluginErrorKind::Connect
+                                | PluginErrorKind::Timeout
+                                | PluginErrorKind::Transport
+                                | PluginErrorKind::Interrupted
+                                | PluginErrorKind::Io
+                                | PluginErrorKind::Internal
+                                | PluginErrorKind::Quota
+                        ) || error
+                            .status()
+                            .is_some_and(|status| status == 429 || status >= 500);
+                        let mut failed = card;
+                        failed.error = error.to_string();
+                        quotas.record_failure(failed, transient);
+                    }
                 }
             }
         }
@@ -443,6 +517,7 @@ impl QuotaPolls {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::path::Path;
     use std::sync::Arc;
     use std::time::Duration;
@@ -612,6 +687,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn account_weights_expand_with_stable_member_ids() {
+        let dir = tempfile::tempdir().expect("dir");
+        write_accounts(dir.path(), &[("work", "Work"), ("other", "Other")]);
+        let mut config = config("");
+        config.routes[0].routing = "weight".to_owned();
+        config.subscriptions[0]
+            .account_weights
+            .insert("work".to_owned(), 3);
+        let subscriptions = states(dir.path(), &config);
+        subscriptions
+            .get(PLUGIN)
+            .expect("subscription")
+            .resolve(&cooldowns())
+            .await;
+        let (routes, _) = crate::route_plan(&config, None);
+        let (_, expanded) =
+            super::expand(&BTreeMap::new(), &routes, &subscriptions).expect("expanded routes");
+
+        let work = expanded["demo"]
+            .iter()
+            .find(|hop| hop.member_id.as_ref() == Some(&member("work")))
+            .expect("work hop");
+        let other = expanded["demo"]
+            .iter()
+            .find(|hop| hop.member_id.as_ref() == Some(&member("other")))
+            .expect("other hop");
+        assert_eq!(work.weight, 3);
+        assert_eq!(other.weight, 1);
+        assert_eq!(work.routing, "weight");
+    }
+
+    #[tokio::test]
     async fn member_ids_stable_across_snapshot_swap() {
         let dir = tempfile::tempdir().expect("dir");
         write_accounts(dir.path(), &[("one", "One"), ("two", "Two")]);
@@ -694,7 +801,13 @@ mod tests {
         }
         let mut polls = QuotaPolls::default();
         let cooled = polls
-            .poll(&states, &cooldowns, tokio::time::Instant::now())
+            .poll(
+                &states,
+                &cooldowns,
+                &hofund_router::quota::QuotaStore::in_memory(),
+                tokio::time::Instant::now(),
+                false,
+            )
             .await;
         (cooldowns, polls, cooled, states)
     }
@@ -712,11 +825,51 @@ mod tests {
             "{left:?}"
         );
         let again = polls
-            .poll(&states, &cooldowns, tokio::time::Instant::now())
+            .poll(
+                &states,
+                &cooldowns,
+                &hofund_router::quota::QuotaStore::in_memory(),
+                tokio::time::Instant::now(),
+                false,
+            )
             .await;
         assert!(again.is_empty(), "polled again before the interval");
         let later = tokio::time::Instant::now() + super::QUOTA_POLL * 2;
-        assert_eq!(polls.poll(&states, &cooldowns, later).await.len(), 2);
+        assert_eq!(
+            polls
+                .poll(
+                    &states,
+                    &cooldowns,
+                    &hofund_router::quota::QuotaStore::in_memory(),
+                    later,
+                    false
+                )
+                .await
+                .len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn q3d_kept_report_never_fetches() {
+        let dir = tempfile::tempdir().expect("dir");
+        write_accounts(dir.path(), &[("one", "One"), ("two", "Two")]);
+        let config = config("quota = \"exhausted\"");
+        let (runtime, _snapshot) = runtime(dir.path(), &config);
+        runtime.refresh_subscriptions().await;
+        let (kept, standings) = runtime.quota_report(true).await;
+        assert!(kept.is_empty(), "a kept report asks no vendor: {kept:?}");
+        assert!(standings.is_empty());
+        let (fresh, standings) = runtime.quota_report(false).await;
+        let users: Vec<&str> = fresh.iter().map(|quota| quota.user.as_str()).collect();
+        assert_eq!(users, ["one", "two"]);
+        assert!(
+            standings
+                .iter()
+                .all(|standing| standing.readable && standing.used_up)
+        );
+        let (kept, _) = runtime.quota_report(true).await;
+        assert_eq!(kept.len(), 2, "the fresh readings are kept");
     }
 
     #[tokio::test]
@@ -756,6 +909,108 @@ mod tests {
             .await;
         assert!(cooldowns.cooling(&member("one")).is_some());
         assert!(cooldowns.cooling(&member("two")).is_none());
+    }
+
+    fn full_window(name: &str, reset: Option<Duration>) -> hofund_plugin_api::QuotaWindow {
+        hofund_plugin_api::QuotaWindow::new(
+            name,
+            10,
+            Some(10),
+            reset.map(|after| std::time::SystemTime::now() + after),
+        )
+        .expect("window")
+    }
+
+    fn credit_left(cooldowns: &Cooldowns, id: &MemberId) -> Duration {
+        cooldowns
+            .cooling(id)
+            .expect("cooled")
+            .until()
+            .saturating_duration_since(std::time::Instant::now())
+    }
+
+    #[test]
+    fn credit_rest_uses_latest_full_window_and_lifts_when_it_renews_sooner() {
+        const HOUR: Duration = Duration::from_secs(3600);
+        let cooldowns = cooldowns();
+        let id = member("one");
+        cooldowns.configure_credit_window(&id);
+        let plugin = PluginId::from_static(PLUGIN);
+        let both = [
+            full_window("five-hour", Some(HOUR)),
+            full_window("weekly", Some(3 * HOUR)),
+        ];
+        assert!(super::apply_windows(&cooldowns, &id, &plugin, &both));
+        cooldowns.record_failure(
+            &id,
+            &hofund_plugin_api::PluginError::credit_status(402, "out"),
+        );
+        let left = credit_left(&cooldowns, &id);
+        assert!(left > 3 * HOUR - Duration::from_secs(60), "{left:?}");
+        // The same reading again is not a renewal.
+        super::apply_windows(&cooldowns, &id, &plugin, &both);
+        assert!(credit_left(&cooldowns, &id) > 3 * HOUR - Duration::from_secs(60));
+        // Only the five-hour window is still full: the latest full reset
+        // moved sooner, so the credit rest lifts and only the quota rest stays.
+        super::apply_windows(&cooldowns, &id, &plugin, &both[..1]);
+        let left = credit_left(&cooldowns, &id);
+        assert!(left <= HOUR + Duration::from_secs(1), "{left:?}");
+    }
+
+    #[test]
+    fn credit_rest_waits_for_a_full_window_with_no_reset_to_renew() {
+        const HOUR: Duration = Duration::from_secs(3600);
+        let cooldowns = cooldowns();
+        let id = member("one");
+        cooldowns.configure_credit_window(&id);
+        let plugin = PluginId::from_static(PLUGIN);
+        super::apply_windows(&cooldowns, &id, &plugin, &[full_window("weekly", None)]);
+        cooldowns.record_failure(
+            &id,
+            &hofund_plugin_api::PluginError::credit_status(402, "out"),
+        );
+        assert!(credit_left(&cooldowns, &id) > 5 * HOUR - Duration::from_secs(60));
+        super::apply_windows(
+            &cooldowns,
+            &id,
+            &plugin,
+            &[full_window("weekly", Some(HOUR))],
+        );
+        assert!(cooldowns.cooling(&id).is_none_or(|rest| {
+            rest.until()
+                .saturating_duration_since(std::time::Instant::now())
+                <= HOUR + Duration::from_secs(1)
+        }));
+    }
+
+    #[test]
+    fn credit_rest_ignores_a_window_that_is_not_full() {
+        const HOUR: Duration = Duration::from_secs(3600);
+        let cooldowns = cooldowns();
+        let id = member("one");
+        cooldowns.configure_credit_window(&id);
+        let plugin = PluginId::from_static(PLUGIN);
+        let open = hofund_plugin_api::QuotaWindow::new(
+            "weekly",
+            3,
+            Some(10),
+            Some(std::time::SystemTime::now() + 3 * HOUR),
+        )
+        .expect("window");
+        assert!(!super::apply_windows(&cooldowns, &id, &plugin, &[open]));
+        cooldowns.record_failure(
+            &id,
+            &hofund_plugin_api::PluginError::credit_status(402, "out"),
+        );
+        let left = credit_left(&cooldowns, &id);
+        assert!(left > 5 * HOUR - Duration::from_secs(60), "{left:?}");
+    }
+
+    #[test]
+    fn only_codex_accounts_rest_on_their_window() {
+        assert!(super::credit_windowed(&PluginId::from_static("codex")));
+        assert!(!super::credit_windowed(&PluginId::from_static(PLUGIN)));
+        assert!(!super::credit_windowed(&PluginId::from_static("claude")));
     }
 
     #[test]

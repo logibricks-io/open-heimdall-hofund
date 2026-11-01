@@ -8,11 +8,16 @@
 pub mod control;
 mod endpoints;
 mod prev_response;
+mod quotas;
+mod refusal_handover;
 mod relisten;
 mod responses_ws;
 
 pub use endpoints::{GENERATIVE_LIST, GENERATIVE_STREAM, GENERATIVE_UNARY};
 #[doc(hidden)]
+pub use quotas::{
+    QuotaAccess, QuotaCaller, QuotaScope, QuotaScopeHook, QuotaSource, tell_everything,
+};
 pub use relisten::BindHook;
 pub use relisten::{Relisten, RelistenError};
 
@@ -34,14 +39,14 @@ use axum::routing::{get, post};
 use endpoints::{
     GENERATIVE_CATCHALL, inject_target, match_count, match_generate, percent_decode, query_key,
 };
-use futures_util::{Stream, StreamExt};
-use hofund_codec::{Codec, StreamEncoder};
-use hofund_ir::{Request as ModelRequest, StreamEvent};
+use futures_util::{Stream, StreamExt, TryStreamExt};
+use hofund_codec::{Codec, StreamEncoder, compacts_in_stream_client};
+use hofund_ir::{Request as ModelRequest, StreamEvent, too_long, words_of};
 use hofund_plugin_api::{
     BodyStream, InboundSurface, Method, PluginError, PluginErrorKind, ProtocolId,
 };
 use hofund_plugin_host::HttpBackend;
-use hofund_router::{Completion, RouteScope, RouterError, Snapshot};
+use hofund_router::{Completion, RouteScope, Routed, RouterError, Snapshot, WaitHook};
 use hofund_secrets::{Identity, KeyStore};
 use hofund_usage::{Ledger, Row};
 use thiserror::Error;
@@ -76,6 +81,10 @@ struct Inner {
     /// Shared in-flight counter surfaced on control status and snapshots.
     in_flight: Arc<AtomicU64>,
     sockets: Arc<responses_ws::SocketRegistry>,
+    /// Quota report and history source. Absent until attached.
+    quota_source: Option<Arc<dyn QuotaSource>>,
+    /// What each caller of the quota routes may be told.
+    quota_scope: QuotaScopeHook,
 }
 
 struct TokenState {
@@ -115,6 +124,46 @@ impl fmt::Debug for TokenState {
     }
 }
 
+struct GatewayWait {
+    notice: Mutex<Option<oneshot::Sender<()>>>,
+}
+
+impl GatewayWait {
+    fn channel() -> (Arc<Self>, oneshot::Receiver<()>) {
+        let (sender, receiver) = oneshot::channel();
+        (
+            Arc::new(Self {
+                notice: Mutex::new(Some(sender)),
+            }),
+            receiver,
+        )
+    }
+}
+
+impl WaitHook for GatewayWait {
+    fn waiting(&self) {
+        if let Some(sender) = self
+            .notice
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            let _ = sender.send(());
+        }
+    }
+
+    fn wait(
+        &self,
+        duration: Duration,
+    ) -> Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        Box::pin(tokio::time::sleep(duration))
+    }
+
+    fn now(&self) -> Instant {
+        tokio::time::Instant::now().into_std()
+    }
+}
+
 /// Summary emitted when an authenticated model request begins.
 ///
 /// Carries ids and protocol only. Never headers, bodies, query strings, or
@@ -141,6 +190,8 @@ pub struct RequestEnd {
     pub request_id: String,
     /// Selected upstream route id when known.
     pub member: Option<String>,
+    /// Client-facing model whose call finished.
+    pub model: String,
     /// HTTP status code of the response.
     pub status: u16,
     /// Elapsed milliseconds.
@@ -167,9 +218,12 @@ struct RequestTrack {
     events: Option<Arc<dyn RequestEvents>>,
     in_flight: Arc<AtomicU64>,
     request_id: String,
+    model: String,
     started: Instant,
     active: bool,
     finished: bool,
+    drop_status: u16,
+    cancel_usage: Option<(Arc<Ledger>, UsageMeta)>,
 }
 
 impl RequestTrack {
@@ -184,9 +238,12 @@ impl RequestTrack {
             events,
             in_flight,
             request_id: start.request_id,
+            model: start.route,
             started: Instant::now(),
             active: true,
             finished: false,
+            drop_status: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+            cancel_usage: None,
         }
     }
 
@@ -208,6 +265,11 @@ impl RequestTrack {
         }
     }
 
+    fn client_waiting(&mut self, usage: Arc<Ledger>, request: &ModelRequest, identity: &Identity) {
+        self.drop_status = 499;
+        self.cancel_usage = Some((usage, UsageMeta::new(request, "", self.started, identity)));
+    }
+
     fn end_with(
         &mut self,
         member: Option<String>,
@@ -219,6 +281,7 @@ impl RequestTrack {
         self.finish(RequestEnd {
             request_id: self.request_id.clone(),
             member,
+            model: self.model.clone(),
             status,
             duration_ms,
             input_tokens,
@@ -232,9 +295,12 @@ impl RequestTrack {
             events: self.events.take(),
             in_flight: Arc::clone(&self.in_flight),
             request_id: self.request_id.clone(),
+            model: self.model.clone(),
             started: self.started,
             active: self.active,
             finished: self.finished,
+            drop_status: self.drop_status,
+            cancel_usage: self.cancel_usage.take(),
         };
         self.active = false;
         self.finished = true;
@@ -247,7 +313,13 @@ impl Drop for RequestTrack {
         if !self.finished {
             // Panic, cancellation, or a path that forgot finish: still emit and
             // return the counter to zero.
-            self.end_with(None, StatusCode::INTERNAL_SERVER_ERROR.as_u16(), None, None);
+            let status = self.drop_status;
+            if status == 499
+                && let Some((usage, meta)) = self.cancel_usage.take()
+            {
+                write_usage(&usage, &meta, None, StatusCode::from_u16(499).expect("499"));
+            }
+            self.end_with(None, status, None, None);
         } else {
             self.release();
         }
@@ -376,6 +448,8 @@ impl Gateway {
                 surface_http: None,
                 in_flight: Arc::new(AtomicU64::new(0)),
                 sockets: Arc::new(responses_ws::SocketRegistry::default()),
+                quota_source: None,
+                quota_scope: tell_everything(),
             }),
         }
     }
@@ -426,6 +500,25 @@ impl Gateway {
         let inner = Arc::get_mut(&mut self.inner).expect("gateway is not shared yet");
         inner.request_events = Some(events);
         inner.in_flight = in_flight;
+        self
+    }
+
+    /// Serves `GET /v1/hofund/quotas` and `GET /v1/hofund/quotas/history`
+    /// from `source`, telling every token holder everything until
+    /// [`Self::with_quota_scope`] narrows it. Call before [`Self::bind`].
+    #[must_use]
+    pub fn with_quotas(mut self, source: Arc<dyn QuotaSource>) -> Self {
+        let inner = Arc::get_mut(&mut self.inner).expect("gateway is not shared yet");
+        inner.quota_source = Some(source);
+        self
+    }
+
+    /// Sets what each caller of the quota routes may be told. Has no effect
+    /// unless [`Self::with_quotas`] is also called. Call before [`Self::bind`].
+    #[must_use]
+    pub fn with_quota_scope(mut self, scope: QuotaScopeHook) -> Self {
+        let inner = Arc::get_mut(&mut self.inner).expect("gateway is not shared yet");
+        inner.quota_scope = scope;
         self
     }
 
@@ -709,6 +802,9 @@ impl Drop for Running {
 /// The complete outer request path, also used to replay a socket turn.
 fn request_router(app: &Arc<Inner>) -> axum::Router {
     let mut routes = codec_routes(app);
+    if app.quota_source.is_some() {
+        routes = quotas::routes(routes);
+    }
     if !app.surfaces.is_empty() {
         routes = routes.fallback(dispatch_surface);
     }
@@ -821,6 +917,7 @@ impl hofund_plugin_host::GatewayBackend for InProcess {
             identity: self.identity.clone(),
             input: None,
             output: None,
+            ttft_ms: None,
         };
         match router
             .forward_scoped(&call, Some(&route_scope(&self.identity)))
@@ -1189,16 +1286,39 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
     );
     let router = app.snapshot.load();
     let attempt = ask.as_ref().map(|ask| ask.attempt());
-    match router
-        .dispatch_scoped(
-            &model_request,
-            codec.id(),
-            Some(&route_scope(&identity)),
-            attempt,
-        )
-        .await
-    {
-        Ok(routed) => {
+    let (wait, notice) = GatewayWait::channel();
+    let mut dispatch: DispatchFuture = Box::pin({
+        let request = model_request.clone();
+        let protocol = codec.id().to_owned();
+        let scope = route_scope(&identity);
+        async move {
+            router
+                .dispatch_scoped_with_wait(&request, &protocol, Some(&scope), attempt, Some(wait))
+                .await
+        }
+    });
+    let result = tokio::select! {
+        result = &mut dispatch => result,
+        _ = notice => {
+            track.client_waiting(Arc::clone(&app.usage), &model_request, &identity);
+            if model_request.stream {
+                return held_response(
+                    app,
+                    codec,
+                    model_request,
+                    started,
+                    identity,
+                    track,
+                    capture,
+                    dispatch,
+                );
+            }
+            dispatch.await
+        }
+    };
+    match result {
+        Ok(mut routed) => {
+            let continuation = held_continuation(codec.as_ref(), &model_request, &mut routed);
             success(
                 app,
                 codec,
@@ -1206,6 +1326,7 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
                 &routed.upstream_id,
                 &routed.upstream_model,
                 routed.completion,
+                continuation,
                 started,
                 &identity,
                 &mut track,
@@ -1216,12 +1337,166 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
         Err(error) => failure(
             app,
             codec.as_ref(),
+            &headers,
             &model_request,
             error,
             started,
             &identity,
             &mut track,
         ),
+    }
+}
+
+/// The untried remainder of the route when the stream can still hand over.
+fn held_continuation(
+    codec: &dyn Codec,
+    request: &ModelRequest,
+    routed: &mut Routed,
+) -> Option<hofund_router::RouteContinuation> {
+    (request.stream
+        && matches!(
+            codec.id(),
+            id if id == ProtocolId::ANTHROPIC_MESSAGES.as_str()
+                || id == ProtocolId::OPENAI_CHAT.as_str()
+                || id == ProtocolId::OPENAI_RESPONSES.as_str()
+        ))
+    .then(|| routed.take_continuation())
+    .flatten()
+}
+
+type DispatchFuture =
+    Pin<Box<dyn std::future::Future<Output = Result<Routed, RouterError>> + Send>>;
+type BytesStream = Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>>;
+
+struct HeldResponse {
+    dispatch: Option<DispatchFuture>,
+    app: Arc<Inner>,
+    codec: Arc<dyn Codec>,
+    request: ModelRequest,
+    started: Instant,
+    identity: Identity,
+    track: Option<RequestTrack>,
+    capture: Option<prev_response::Capture>,
+    incoming: Option<BytesStream>,
+    keepalive: Pin<Box<tokio::time::Sleep>>,
+}
+
+fn held_response(
+    app: Arc<Inner>,
+    codec: Arc<dyn Codec>,
+    request: ModelRequest,
+    started: Instant,
+    identity: Identity,
+    track: RequestTrack,
+    capture: Option<prev_response::Capture>,
+    dispatch: DispatchFuture,
+) -> Response {
+    let content_type = codec.stream_content_type();
+    let state = HeldResponse {
+        dispatch: Some(dispatch),
+        app,
+        codec,
+        request,
+        started,
+        identity,
+        track: Some(track),
+        capture,
+        incoming: None,
+        keepalive: Box::pin(tokio::time::sleep(Duration::ZERO)),
+    };
+    let body = futures_util::stream::unfold((state, false), |(mut state, done)| async move {
+        if done {
+            return None;
+        }
+        loop {
+            if let Some(incoming) = state.incoming.as_mut() {
+                if let Some(chunk) = incoming.next().await {
+                    return Some((chunk, (state, false)));
+                }
+                return None;
+            }
+            let dispatch = state.dispatch.as_mut().expect("held dispatch");
+            tokio::select! {
+                () = &mut state.keepalive => {
+                    state.keepalive.as_mut().reset(
+                        tokio::time::Instant::now() + Duration::from_secs(5),
+                    );
+                    return Some((
+                        Ok(Bytes::from_static(b": keepalive\n\n")),
+                        (state, false),
+                    ));
+                }
+                result = dispatch => {
+                    state.dispatch = None;
+                    match result {
+                        Ok(mut routed) => {
+                            let continuation = held_continuation(
+                                state.codec.as_ref(),
+                                &state.request,
+                                &mut routed,
+                            );
+                            let response = success(
+                                Arc::clone(&state.app),
+                                Arc::clone(&state.codec),
+                                &state.request,
+                                &routed.upstream_id,
+                                &routed.upstream_model,
+                                routed.completion,
+                                continuation,
+                                state.started,
+                                &state.identity,
+                                state.track.as_mut().expect("held request track"),
+                                state.capture.take(),
+                            )
+                            .await;
+                            let stream = response
+                                .into_body()
+                                .into_data_stream()
+                                .map_err(std::io::Error::other);
+                            state.incoming = Some(Box::pin(stream));
+                        }
+                        Err(error) => {
+                            let (status, message) = stream_error(&error);
+                            // Only the usage row and the track are kept: the
+                            // reply already went out as a stream, so the error
+                            // goes as a stream error frame whatever the client.
+                            let _ = failure(
+                                Arc::clone(&state.app),
+                                state.codec.as_ref(),
+                                &HeaderMap::new(),
+                                &state.request,
+                                error,
+                                state.started,
+                                &state.identity,
+                                state.track.as_mut().expect("held request track"),
+                            );
+                            let bytes = state
+                                .codec
+                                .encode_stream_error(status.as_u16(), &message);
+                            return Some((Ok(Bytes::from(bytes)), (state, true)));
+                        }
+                    }
+                }
+            }
+        }
+    });
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, content_type)
+        .body(Body::from_stream(body))
+        .unwrap_or_else(|_| text_response(StatusCode::INTERNAL_SERVER_ERROR, "stream"))
+}
+
+fn stream_error(error: &RouterError) -> (StatusCode, String) {
+    match error {
+        RouterError::NoRoute { .. } => (StatusCode::NOT_FOUND, error.to_string()),
+        RouterError::Ambiguous { .. } | RouterError::PreviousResponseNotFound { .. } => {
+            (StatusCode::BAD_REQUEST, error.to_string())
+        }
+        RouterError::ModelScope { .. } | RouterError::AccountScope { .. } => {
+            (StatusCode::FORBIDDEN, error.to_string())
+        }
+        RouterError::Upstream { error, .. } => (status_of(error), error.message().to_owned()),
     }
 }
 
@@ -1460,6 +1735,7 @@ async fn success(
     upstream: &str,
     upstream_model: &str,
     completion: Completion,
+    continuation: Option<hofund_router::RouteContinuation>,
     started: Instant,
     identity: &Identity,
     track: &mut RequestTrack,
@@ -1514,19 +1790,33 @@ async fn success(
                 }
             };
             // Move the track into the stream so finish runs when the body ends.
-            let body = sse_body(
-                events,
-                encoder,
-                RecordOnEnd {
-                    usage: Arc::clone(&app.usage),
-                    meta,
-                    input: None,
-                    output: None,
-                    track: Some(track.take_for_stream()),
-                    member,
-                },
-                Box::new(on_error),
-            );
+            let record = RecordOnEnd {
+                usage: Arc::clone(&app.usage),
+                meta,
+                input: None,
+                output: None,
+                track: Some(track.take_for_stream()),
+                member,
+            };
+            let body: Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>> =
+                if let Some(continuation) = continuation {
+                    Box::pin(refusal_handover::body(
+                        events,
+                        continuation,
+                        Arc::clone(&codec),
+                        request.clone(),
+                        encoder,
+                        record,
+                        Box::new(on_error),
+                    ))
+                } else {
+                    Box::pin(sse_body(
+                        refusal_handover::refusals_fail(events),
+                        encoder,
+                        record,
+                        Box::new(on_error),
+                    ))
+                };
             let body = capture_stream(body, capture);
             Response::builder()
                 .status(StatusCode::OK)
@@ -1535,18 +1825,64 @@ async fn success(
                 .unwrap_or_else(|_| text_response(StatusCode::INTERNAL_SERVER_ERROR, "stream"))
         }
         Completion::Raw(body) => {
-            raw_body(
-                app,
-                codec,
-                request,
-                upstream_model,
-                meta,
-                body,
-                track,
-                member,
-                capture,
-            )
-            .await
+            if let Some(continuation) = continuation {
+                match refusal_handover::events(Completion::Raw(body), &codec, &request.model) {
+                    Err(error) => {
+                        let status = status_of(&error);
+                        write_usage(&app.usage, &meta, None, status);
+                        track.end_with(member, status.as_u16(), None, None);
+                        coded(codec.as_ref(), status, error.message())
+                    }
+                    Ok(events) => {
+                        let encoder = codec.stream_encoder_for(request);
+                        let on_error = {
+                            let codec = Arc::clone(&codec);
+                            move |error: &PluginError| {
+                                codec
+                                    .encode_stream_error(status_of(error).as_u16(), error.message())
+                            }
+                        };
+                        let record = RecordOnEnd {
+                            usage: Arc::clone(&app.usage),
+                            meta,
+                            input: None,
+                            output: None,
+                            track: Some(track.take_for_stream()),
+                            member,
+                        };
+                        let body = refusal_handover::body(
+                            events,
+                            continuation,
+                            Arc::clone(&codec),
+                            request.clone(),
+                            encoder,
+                            record,
+                            Box::new(on_error),
+                        );
+                        let body = capture_stream(body, capture);
+                        Response::builder()
+                            .status(StatusCode::OK)
+                            .header(header::CONTENT_TYPE, codec.stream_content_type())
+                            .body(Body::from_stream(body))
+                            .unwrap_or_else(|_| {
+                                text_response(StatusCode::INTERNAL_SERVER_ERROR, "stream")
+                            })
+                    }
+                }
+            } else {
+                raw_body(
+                    app,
+                    codec,
+                    request,
+                    upstream_model,
+                    meta,
+                    body,
+                    track,
+                    member,
+                    capture,
+                )
+                .await
+            }
         }
         _ => {
             track.end_with(member, StatusCode::BAD_GATEWAY.as_u16(), None, None);
@@ -1578,93 +1914,23 @@ async fn raw_body(
             }
         };
         let owned = track.take_for_stream();
-        let stream = futures_util::stream::unfold(
-            (
-                body,
-                meta,
-                usage,
-                tap,
-                on_error,
-                true,
-                0u8,
-                Some(owned),
-                member,
-            ),
-            |(mut body, mut meta, usage, mut tap, on_error, boundary, phase, mut track, member)| async move {
-                let finish = |meta: &UsageMeta,
-                              usage: &Ledger,
-                              track: &mut Option<RequestTrack>,
-                              member: &Option<String>,
-                              status: StatusCode| {
-                    write_usage(usage, meta, Some((meta.input, meta.output)), status);
-                    if let Some(track) = track.as_mut() {
-                        track.end_with(
-                            member.clone(),
-                            status.as_u16(),
-                            meta.input.and_then(|value| u64::try_from(value).ok()),
-                            meta.output.and_then(|value| u64::try_from(value).ok()),
-                        );
-                    }
-                };
-                if phase == 1 {
-                    finish(&meta, &usage, &mut track, &member, StatusCode::OK);
-                    return None;
-                }
-                if phase == 2 {
-                    return None;
-                }
-                match body.next_chunk().await {
-                    None => {
-                        let tail = tap.finish();
-                        let (input, output) = tap.tokens();
-                        meta.input = input.or(meta.input);
-                        meta.output = output.or(meta.output);
-                        if tail.is_empty() {
-                            finish(&meta, &usage, &mut track, &member, StatusCode::OK);
-                            None
-                        } else {
-                            Some((
-                                Ok::<Bytes, std::io::Error>(Bytes::from(tail)),
-                                (body, meta, usage, tap, on_error, boundary, 1, track, member),
-                            ))
-                        }
-                    }
-                    Some(Err(error)) => {
-                        let mut tail = tap.finish();
-                        let (input, output) = tap.tokens();
-                        meta.input = input.or(meta.input);
-                        meta.output = output.or(meta.output);
-                        finish(&meta, &usage, &mut track, &member, StatusCode::BAD_GATEWAY);
-                        let mut frame = on_error(&error);
-                        if tail.is_empty() && !boundary {
-                            let mut prefixed = b"\n\n".to_vec();
-                            prefixed.extend(frame);
-                            frame = prefixed;
-                        }
-                        tail.extend(frame);
-                        Some((
-                            Ok(Bytes::from(tail)),
-                            (body, meta, usage, tap, on_error, true, 2, track, member),
-                        ))
-                    }
-                    Some(Ok(chunk)) => {
-                        let forwarded = tap.push(&chunk);
-                        let (input, output) = tap.tokens();
-                        meta.input = input.or(meta.input);
-                        meta.output = output.or(meta.output);
-                        let boundary = if forwarded.is_empty() {
-                            boundary
-                        } else {
-                            frame_closed(&forwarded)
-                        };
-                        Some((
-                            Ok(Bytes::from(forwarded)),
-                            (body, meta, usage, tap, on_error, boundary, 0, track, member),
-                        ))
-                    }
-                }
-            },
-        );
+        let relay = RawRelay {
+            body,
+            meta,
+            usage,
+            tap,
+            on_error,
+            severed_end: codec.severed_stream_end(),
+            lines: (content_type == "text/event-stream").then(LineHold::default),
+            sent_tail: Vec::new(),
+            phase: 0,
+            track: Some(owned),
+            member,
+        };
+        let stream = futures_util::stream::unfold(relay, |mut relay| async move {
+            let next = relay.next().await?;
+            Some((Ok::<Bytes, std::io::Error>(next), relay))
+        });
         let stream = capture_stream(stream, capture);
         return Response::builder()
             .status(StatusCode::OK)
@@ -1713,6 +1979,7 @@ async fn raw_body(
 fn failure(
     app: Arc<Inner>,
     codec: &dyn Codec,
+    headers: &HeaderMap,
     request: &ModelRequest,
     error: RouterError,
     started: Instant,
@@ -1758,6 +2025,20 @@ fn failure(
         Some(upstream)
     };
     track.end_with(member, status.as_u16(), None, None);
+    if compacts_in_stream_client(|name| headers.get(name).and_then(|value| value.to_str().ok()))
+        && request.stream
+        && codec.id() == ProtocolId::OPENAI_RESPONSES.as_str()
+        && (status == StatusCode::PAYLOAD_TOO_LARGE
+            || too_long(status.as_u16(), &words_of(&message)))
+    {
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, codec.stream_content_type())
+            .body(Body::from(
+                codec.encode_stream_error(status.as_u16(), &message),
+            ))
+            .unwrap_or_else(|_| text_response(StatusCode::INTERNAL_SERVER_ERROR, "stream"));
+    }
     coded(codec, status, &message)
 }
 
@@ -1776,6 +2057,7 @@ struct UsageMeta {
     identity: Identity,
     input: Option<i64>,
     output: Option<i64>,
+    ttft_ms: Option<i64>,
 }
 
 impl UsageMeta {
@@ -1787,6 +2069,14 @@ impl UsageMeta {
             identity: identity.clone(),
             input: None,
             output: None,
+            ttft_ms: None,
+        }
+    }
+
+    fn note_first_content(&mut self) {
+        if self.ttft_ms.is_none() {
+            self.ttft_ms =
+                Some(i64::try_from(self.started.elapsed().as_millis()).unwrap_or(i64::MAX));
         }
     }
 }
@@ -1884,6 +2174,14 @@ fn sse_body(
                     }
                     Some(Ok(event)) => {
                         note_usage(&event, &mut record.input, &mut record.output);
+                        if matches!(
+                            event,
+                            StreamEvent::TextDelta(_)
+                                | StreamEvent::ThinkingDelta(_)
+                                | StreamEvent::ToolArgumentsDelta(_)
+                        ) {
+                            record.meta.note_first_content();
+                        }
                         match encoder.push(&event) {
                             Ok(bytes) if bytes.is_empty() => {}
                             Ok(bytes) => {
@@ -1903,6 +2201,188 @@ fn sse_body(
             }
         },
     )
+}
+
+/// State of a relayed raw stream.
+struct RawRelay<E> {
+    body: BodyStream,
+    meta: UsageMeta,
+    usage: Arc<Ledger>,
+    tap: Box<dyn hofund_codec::RawTap>,
+    on_error: E,
+    severed_end: &'static [u8],
+    /// Holds an unfinished last line of an event stream. `None` for other
+    /// stream framings.
+    lines: Option<LineHold>,
+    /// The last few bytes the client got, to place an appended event.
+    sent_tail: Vec<u8>,
+    /// 0 relays, 1 records a clean end, 2 is done.
+    phase: u8,
+    track: Option<RequestTrack>,
+    member: Option<String>,
+}
+
+impl<E> RawRelay<E>
+where
+    E: Fn(&PluginError) -> Vec<u8>,
+{
+    fn finish(&mut self, status: StatusCode) {
+        write_usage(
+            &self.usage,
+            &self.meta,
+            Some((self.meta.input, self.meta.output)),
+            status,
+        );
+        if let Some(track) = self.track.as_mut() {
+            track.end_with(
+                self.member.clone(),
+                status.as_u16(),
+                self.meta.input.and_then(|value| u64::try_from(value).ok()),
+                self.meta.output.and_then(|value| u64::try_from(value).ok()),
+            );
+        }
+    }
+
+    fn note_tokens(&mut self) {
+        let (input, output) = self.tap.tokens();
+        self.meta.input = input.or(self.meta.input);
+        self.meta.output = output.or(self.meta.output);
+    }
+
+    /// The next bytes for the client, or `None` when the stream is over.
+    /// An empty chunk is a step that forwarded nothing.
+    async fn next(&mut self) -> Option<Bytes> {
+        match self.phase {
+            1 => {
+                self.phase = 2;
+                self.finish(StatusCode::OK);
+                return None;
+            }
+            2 => return None,
+            _ => {}
+        }
+        match self.body.next_chunk().await {
+            None => {
+                let mut tail = self.tap.finish();
+                self.note_tokens();
+                if let Some(lines) = self.lines.as_mut() {
+                    tail = lines.release(&tail);
+                }
+                if tail.is_empty() {
+                    self.phase = 2;
+                    self.finish(StatusCode::OK);
+                    None
+                } else {
+                    self.phase = 1;
+                    Some(Bytes::from(tail))
+                }
+            }
+            Some(Err(error)) => {
+                let held = self.tap.abandon();
+                self.note_tokens();
+                self.phase = 2;
+                self.finish(StatusCode::BAD_GATEWAY);
+                let mut out = match self.lines.as_mut() {
+                    Some(lines) => lines.drop_half(&held),
+                    None => held,
+                };
+                let before = match (out.is_empty(), self.sent_tail.is_empty()) {
+                    (true, true) => &b""[..],
+                    (true, false) => event_gap(&self.sent_tail),
+                    (false, _) => event_gap(&out),
+                };
+                out.extend_from_slice(before);
+                out.extend((self.on_error)(&error));
+                if self.lines.is_some() {
+                    out.extend_from_slice(self.severed_end);
+                }
+                Some(Bytes::from(out))
+            }
+            Some(Ok(chunk)) => {
+                self.meta.note_first_content();
+                let mut forwarded = self.tap.push(&chunk);
+                self.note_tokens();
+                if let Some(lines) = self.lines.as_mut() {
+                    forwarded = lines.push(&forwarded);
+                }
+                if !forwarded.is_empty() {
+                    let keep = forwarded.len().saturating_sub(4);
+                    self.sent_tail.clear();
+                    self.sent_tail.extend_from_slice(&forwarded[keep..]);
+                }
+                Some(Bytes::from(forwarded))
+            }
+        }
+    }
+}
+
+/// Holds the line an event stream's last read left unfinished.
+///
+/// Only ended lines reach the client as they arrive. The unfinished line
+/// goes out when the stream ends cleanly and is dropped when the read fails,
+/// unless it is a whole `data:` line short of its line end
+/// (`reference: internal/gateway/gateway.go:5709-5760`).
+#[derive(Default)]
+struct LineHold {
+    pending: Vec<u8>,
+}
+
+impl LineHold {
+    /// Adds `bytes` and returns everything up to the last line end.
+    fn push(&mut self, bytes: &[u8]) -> Vec<u8> {
+        self.pending.extend_from_slice(bytes);
+        match self.pending.iter().rposition(|byte| *byte == b'\n') {
+            Some(index) => {
+                let rest = self.pending.split_off(index + 1);
+                std::mem::replace(&mut self.pending, rest)
+            }
+            None => Vec::new(),
+        }
+    }
+
+    /// The held line and `tail`, as they came, for a stream that ended cleanly.
+    fn release(&mut self, tail: &[u8]) -> Vec<u8> {
+        let mut out = std::mem::take(&mut self.pending);
+        out.extend_from_slice(tail);
+        out
+    }
+
+    /// The held bytes and `tail` for a stream whose read failed, without a
+    /// half line no client can parse.
+    fn drop_half(&mut self, tail: &[u8]) -> Vec<u8> {
+        let mut out = self.release(tail);
+        let start = out
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .map_or(0, |index| index + 1);
+        if !whole_data_line(&out[start..]) {
+            out.truncate(start);
+        }
+        out
+    }
+}
+
+/// Whether `line` is a `data:` line whose payload is `[DONE]` or valid JSON.
+fn whole_data_line(line: &[u8]) -> bool {
+    let line = line.trim_ascii();
+    let Some(data) = line.strip_prefix(b"data:") else {
+        return false;
+    };
+    let data = data.trim_ascii();
+    data == b"[DONE]" || serde_json::from_slice::<serde_json::Value>(data).is_ok()
+}
+
+/// What goes between bytes already sent and an appended event: nothing after
+/// a closed frame, a blank line after an ended line, otherwise a line end and
+/// a blank line.
+fn event_gap(bytes: &[u8]) -> &'static [u8] {
+    if frame_closed(bytes) {
+        b""
+    } else if bytes.ends_with(b"\n") || bytes.ends_with(b"\r") {
+        b"\n"
+    } else {
+        b"\n\n"
+    }
 }
 
 fn frame_closed(bytes: &[u8]) -> bool {
@@ -1968,7 +2448,7 @@ fn write_usage(
         caller_key_id: meta.identity.key_id.clone(),
         caller_key_name: meta.identity.key_name.clone(),
     };
-    let _ = usage.record(&row);
+    let _ = usage.record_with_ttft(&row, meta.ttft_ms);
 }
 
 fn as_i64(value: Option<u64>) -> Option<i64> {
@@ -2046,9 +2526,12 @@ mod request_event_tests {
             events: Some(spy.clone() as Arc<dyn RequestEvents>),
             in_flight: Arc::clone(&counter),
             request_id: "r1".into(),
+            model: "demo".into(),
             started: std::time::Instant::now(),
             active: true,
             finished: false,
+            drop_status: 500,
+            cancel_usage: None,
         };
         // Mirror begin's increment (begin also calls started).
         counter.fetch_add(1, Ordering::SeqCst);
@@ -2083,9 +2566,12 @@ mod request_event_tests {
                 events: Some(spy.clone() as Arc<dyn RequestEvents>),
                 in_flight: Arc::clone(&counter),
                 request_id: "r-drop".into(),
+                model: "demo".into(),
                 started: std::time::Instant::now(),
                 active: true,
                 finished: false,
+                drop_status: 500,
+                cancel_usage: None,
             };
             counter.fetch_add(1, Ordering::SeqCst);
             assert_eq!(counter.load(Ordering::SeqCst), 1);
@@ -2125,5 +2611,69 @@ mod forwarded_token_tests {
         assert_eq!(read(r#"{"usage":{"prompt_tokens":-1}}"#), (None, None));
         assert_eq!(read("not json"), (None, None));
         assert_eq!(read("{}"), (None, None));
+    }
+}
+
+#[cfg(test)]
+mod line_hold_tests {
+    use super::{LineHold, event_gap, whole_data_line};
+
+    #[test]
+    fn d21_only_ended_lines_pass_the_hold() {
+        let mut hold = LineHold::default();
+        assert!(hold.push(b"data: {\"a\"").is_empty());
+        assert_eq!(hold.push(b":1}\n\ndata: {"), b"data: {\"a\":1}\n\n");
+        assert_eq!(hold.push(b"}\n"), b"data: {}\n");
+        assert!(hold.push(b"").is_empty());
+    }
+
+    #[test]
+    fn d21_a_clean_end_releases_the_held_line_as_it_came() {
+        let mut hold = LineHold::default();
+        let _ = hold.push(b"data: {\"a\":1}\n\ndata: {\"b\"");
+        assert_eq!(hold.release(b""), b"data: {\"b\"");
+        assert!(hold.release(b"").is_empty());
+    }
+
+    #[test]
+    fn d21_a_failed_read_drops_the_half_line() {
+        let mut hold = LineHold::default();
+        let _ = hold.push(b"event: x\ndata: {\"b\"");
+        assert!(hold.drop_half(b"").is_empty());
+        let mut hold = LineHold::default();
+        assert_eq!(
+            hold.drop_half(b"data: {\"a\":1}\n\ndata: {\"b\""),
+            b"data: {\"a\":1}\n\n"
+        );
+        assert!(hold.release(b"").is_empty());
+    }
+
+    #[test]
+    fn d21_a_whole_data_line_short_of_its_end_is_kept() {
+        let mut hold = LineHold::default();
+        let _ = hold.push(b"data: {\"a\":1}");
+        assert_eq!(hold.drop_half(b""), b"data: {\"a\":1}");
+        let mut hold = LineHold::default();
+        assert_eq!(hold.drop_half(b"data: [DONE]"), b"data: [DONE]");
+    }
+
+    #[test]
+    fn d21_whole_data_line_reads_done_and_json_only() {
+        assert!(whole_data_line(b"data: [DONE]"));
+        assert!(whole_data_line(b"data:{\"a\":1}\r"));
+        assert!(whole_data_line(b"  data: 7 "));
+        assert!(!whole_data_line(b"data: {\"a\":"));
+        assert!(!whole_data_line(b"event: message_stop"));
+        assert!(!whole_data_line(b"{\"a\":1}"));
+        assert!(!whole_data_line(b"[DONE]"));
+        assert!(!whole_data_line(b""));
+    }
+
+    #[test]
+    fn d21_the_gap_before_an_appended_event_closes_the_frame_once() {
+        assert_eq!(event_gap(b"data: {}\n\n"), b"");
+        assert_eq!(event_gap(b"data: {}\n"), b"\n");
+        assert_eq!(event_gap(b"data: {}\r"), b"\n");
+        assert_eq!(event_gap(b"data: {}"), b"\n\n");
     }
 }

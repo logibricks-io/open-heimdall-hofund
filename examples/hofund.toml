@@ -16,6 +16,10 @@ id = "primary"
 protocol = "openai-chat"
 base_url = "http://127.0.0.1:4000/v1"
 api_key = "replace-me"
+# patience is optional. A direct request to this provider waits out busy
+# failures for 60 seconds by default, with pauses doubling to 30 seconds.
+# Set seconds or a duration up to 240 seconds, or "off" to disable retries.
+# patience = 60
 
 # Point base_url at a local mock. A placeholder key must not be paired with
 # a real vendor host, or a check of this file can send traffic.
@@ -101,6 +105,14 @@ api_key = "replace-me-too"
 # base_url = "my-resource"
 # api_key = "env:AZURE_OPENAI_API_KEY"
 
+# Routing defaults to smart. order, rotate, weight, and free are implemented;
+# smart, usage, pace, fast, and cheap currently keep the listed order until
+# P0-2b. cheap is valid only on a multi-upstream or subscription group.
+# Weights are integers of at least 1; omitted and 1 are the default. Provider
+# free = true marks every model free; cached catalog free flags and all-zero
+# prices are used otherwise. Account weights go in [subscriptions.account_weights]
+# with lower-cased account ids as keys. hofund routes prints the strategy names.
 [[routes]]
 model = "demo"
-upstreams = ["primary", "backup"]
+routing = "weight"
+upstreams = [{ provider = "primary", weight = 3 }, "backup"]

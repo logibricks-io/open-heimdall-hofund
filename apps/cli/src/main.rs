@@ -10,6 +10,7 @@ mod gateway_key;
 mod local;
 mod provider;
 mod provider_edit;
+mod quota;
 mod serve;
 mod subscription;
 
@@ -40,6 +41,7 @@ fn main() -> ExitCode {
         }
         Command::TokenShow => finish(local::token_show(&config)),
         Command::Subscription(command) => hand_over(subscription::run(&config, &command)),
+        Command::Quota(command) => quota::run(&config, command),
         other => finish(run_control(&config, other)),
     }
 }
@@ -102,13 +104,15 @@ fn run_control(config: &Path, command: Command) -> Result<String, String> {
             Command::ProviderAutoInclude { id, rules } => {
                 provider_edit::auto_include(config, &id, &rules).await
             }
+            Command::Routes => provider::routes(config).await,
             Command::ModelList => provider::model_list(config).await,
             Command::ModelShow { id } => provider::model_show(config, &id).await,
             Command::Version
             | Command::Help(_)
             | Command::Serve
             | Command::TokenShow
-            | Command::Subscription(_) => Err("not a control command".to_owned()),
+            | Command::Subscription(_)
+            | Command::Quota(_) => Err("not a control command".to_owned()),
         }
     })
 }
@@ -152,6 +156,8 @@ enum Command {
         model: Option<String>,
     },
     Subscription(SubscriptionCommand),
+    /// `quota`, `quota history`, and `quota wait`.
+    Quota(quota::QuotaCommand),
     ProviderList,
     ProviderShow {
         id: String,
@@ -195,6 +201,7 @@ enum Command {
         id: String,
         rules: Vec<String>,
     },
+    Routes,
     ModelList,
     ModelShow {
         id: String,
@@ -229,7 +236,9 @@ enum HelpTopic {
     SubscriptionSignOut,
     SubscriptionRefresh,
     SubscriptionQuota,
+    Quota,
     Provider,
+    Routes,
     Model,
 }
 
@@ -256,6 +265,9 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
                     .next()
                     .ok_or_else(|| "--config needs a path".to_owned())?;
                 config = Some(PathBuf::from(path));
+            }
+            other if words.first() == Some(&"quota") && !matches!(other, "-h" | "--help") => {
+                words.push(other);
             }
             "--dry-run" => dry_run = true,
             "--force" => force = true,
@@ -339,6 +351,10 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
             gateway_key::parse(&words, own_secret.clone(), json)?
                 .expect("gateway-key parser matched"),
         ),
+        ["quota", rest @ ..] => match quota::parse(rest) {
+            quota::QuotaCommand::Help => Command::Help(HelpTopic::Quota),
+            parsed => Command::Quota(parsed),
+        },
         ["subscription", rest @ ..] => match subscription::parse(rest, flags) {
             Some(parsed) => Command::Subscription(parsed?),
             None => return Err(help_text(HelpTopic::Subscription)),
@@ -408,6 +424,7 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
             ));
         }
         ["provider", ..] => return Err(help_text(HelpTopic::Provider)),
+        ["routes"] => Command::Routes,
         ["model", "list"] => Command::ModelList,
         ["model", "show", id] => Command::ModelShow {
             id: (*id).to_owned(),
@@ -501,7 +518,9 @@ fn help_topic(words: &[&str]) -> Result<HelpTopic, String> {
         ["subscription", "refresh", ..] => HelpTopic::SubscriptionRefresh,
         ["subscription", "quota", ..] => HelpTopic::SubscriptionQuota,
         ["subscription", ..] => HelpTopic::Subscription,
+        ["quota", ..] => HelpTopic::Quota,
         ["provider", ..] => HelpTopic::Provider,
+        ["routes", ..] => HelpTopic::Routes,
         ["model", ..] => HelpTopic::Model,
         _ => {
             return Err(format!(
@@ -542,7 +561,9 @@ fn help_text(topic: HelpTopic) -> String {
         HelpTopic::SubscriptionSignOut => subscription::SIGN_OUT_HELP,
         HelpTopic::SubscriptionRefresh => subscription::REFRESH_HELP,
         HelpTopic::SubscriptionQuota => subscription::QUOTA_HELP,
+        HelpTopic::Quota => quota::QUOTA_HELP,
         HelpTopic::Provider => PROVIDER_HELP,
+        HelpTopic::Routes => ROUTES_HELP,
         HelpTopic::Model => MODEL_HELP,
     };
     body.to_owned()
@@ -581,6 +602,9 @@ commands:
   subscription sign-out <id> <account>
   subscription refresh <id> [<account>]
   subscription quota [<id>] [--json]
+  quota [<provider>...] [--json]  print what is left of each subscription
+  quota wait <provider|account> [--timeout <duration>] [--quiet]
+  quota history [<provider|account>...] [--days <n>] [--json]
   provider list                   list providers
   provider show <id>              print a provider, its listed models and picks
   provider test <id> [<model>...] probe a provider's models
@@ -595,6 +619,7 @@ commands:
                                   show or set the model-list refresh
   provider auto-include <id> [<rule>...|none]
                                   show or set the auto-include rules
+  routes                          list route models and routing strategies
   model list                      list the models routes serve
   model show <id>                 print one routed model
 
@@ -813,6 +838,12 @@ renaming a provider is not supported yet. `rm` does not move agents or
 routes off the provider; a route that still names it fails the apply.
 `add` does not fetch the model list; `refresh <id>` does. Without a
 running daemon, the edit applies in one-shot hofundd under the config lock.
+";
+
+const ROUTES_HELP: &str = "\
+usage: hofund routes [--config PATH]
+
+Print each configured route model and its routing strategy.
 ";
 
 const MODEL_HELP: &str = "\
@@ -1223,6 +1254,7 @@ mod tests {
             command(&["provider", "models", "p", "-h"]),
             Ok(Command::Help(HelpTopic::Provider))
         );
+        assert_eq!(command(&["routes"]), Ok(Command::Routes));
         assert_eq!(command(&["model", "list"]), Ok(Command::ModelList));
         assert_eq!(
             command(&["model", "show", "chat/a"]),
@@ -1241,6 +1273,7 @@ mod tests {
         for (topic, needle) in [
             (vec!["provider"], "not both"),
             (vec!["provider", "models"], "three"),
+            (vec!["routes"], "routing strategy"),
             (vec!["model"], "route"),
         ] {
             let help = help_text(help_topic(&topic).expect("topic"));

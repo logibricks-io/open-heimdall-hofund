@@ -224,6 +224,9 @@ pub struct MemberSummary {
     pub id: String,
     /// Whether the member is ready for calls.
     pub ready: bool,
+    /// Models with an active model-specific rest on this member.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resting_models: Vec<String>,
 }
 
 /// Initial snapshot payload.
@@ -347,6 +350,9 @@ impl CooldownReason {
 pub struct MemberCooledEvent {
     /// Stable member id string.
     pub member_id: String,
+    /// Model resting alone, or `None` for a member-wide rest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     /// Stable cooldown reason.
     pub cause: CooldownReason,
     /// Optional upstream retry hint in unsigned milliseconds.
@@ -367,6 +373,7 @@ impl Default for MemberCooledEvent {
     fn default() -> Self {
         Self {
             member_id: String::new(),
+            model: None,
             cause: CooldownReason::Failure,
             retry_after_ms: None,
             remaining_ms: None,
@@ -383,6 +390,9 @@ impl Default for MemberCooledEvent {
 pub struct MemberRecoveredEvent {
     /// Stable member id string.
     pub member_id: String,
+    /// Model that recovered, or `None` for a member-wide recovery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     /// New readiness.
     pub ready: bool,
 }
@@ -442,6 +452,9 @@ pub struct RequestFinishedEvent {
     pub request_id: String,
     /// Selected stable member id when known.
     pub member: Option<String>,
+    /// Client-facing model whose call finished.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model: String,
     /// Coarse response status class.
     pub status_class: StatusClass,
     /// Unsigned elapsed milliseconds.
@@ -457,6 +470,7 @@ impl Default for RequestFinishedEvent {
         Self {
             request_id: String::new(),
             member: None,
+            model: String::new(),
             status_class: StatusClass::Success,
             duration_ms: 0,
             input_tokens: None,

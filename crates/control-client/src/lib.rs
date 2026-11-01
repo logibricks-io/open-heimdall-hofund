@@ -13,9 +13,10 @@ use hofund_control_proto::{
     ControlError, ErrorEnvelope, EventEnvelope, GatewayKeyRequest, GatewayKeyResponse,
     GatewayKeyRestoreRequest, HealthResponse, MAX_RESPONSE_BODY_BYTES, ModelListResponse,
     PicksResponse, PicksSetRequest, ProviderListResponse, ProviderTestRequest,
-    ProviderTestResponse, ReloadRequest, RouteModelListResponse, ShutdownRequest, ShutdownResponse,
-    StatusResponse, TokenRotateRequest, TokenRotateResponse, Topic, UsagePeriod, UsageQuery,
-    UsageResponse, decode_error_envelope, decode_response,
+    ProviderTestResponse, QuotaHistoryQuery, QuotaHistoryResponse, QuotaQuery, QuotaResponse,
+    ReloadRequest, RouteModelListResponse, ShutdownRequest, ShutdownResponse, StatusResponse,
+    TokenRotateRequest, TokenRotateResponse, Topic, UsagePeriod, UsageQuery, UsageResponse,
+    decode_error_envelope, decode_response,
 };
 use http::header;
 use http_body_util::{BodyExt, Full, Limited};
@@ -405,6 +406,31 @@ impl Client {
             Some(json_body(&request)?),
         )
         .await
+    }
+
+    /// Reports what is left of every subscription. A fresh query reads the
+    /// vendors first; a kept one answers from the last readings.
+    pub async fn quotas(&self, query: QuotaQuery) -> Result<QuotaResponse, ClientError> {
+        let query = query.encode();
+        if query.is_empty() {
+            self.get("/v1/hofund/quotas").await
+        } else {
+            self.get(&format!("/v1/hofund/quotas?{query}")).await
+        }
+    }
+
+    /// Reports sampled quota history.
+    pub async fn quota_history(
+        &self,
+        query: QuotaHistoryQuery,
+    ) -> Result<QuotaHistoryResponse, ClientError> {
+        let query = query.encode();
+        if query.is_empty() {
+            self.get("/v1/hofund/quotas/history").await
+        } else {
+            self.get(&format!("/v1/hofund/quotas/history?{query}"))
+                .await
+        }
     }
 
     /// Reports usage for a period.

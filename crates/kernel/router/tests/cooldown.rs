@@ -9,7 +9,10 @@ use hofund_ir::{ContentPart, Message, Request, Response, Role};
 use hofund_plugin_api::{
     CountOutcome, MemberId, MemberKey, PluginError, PluginId, PresetId, QuotaObservation,
 };
-use hofund_router::{Completion, CooldownPolicy, Cooldowns, FailoverPolicy, Member, Router};
+use hofund_router::strategy::{Strategy, StrategyState};
+use hofund_router::{
+    Completion, CooldownPolicy, Cooldowns, FailoverPolicy, Hop, Member, Route, Router,
+};
 
 struct Fake {
     id: &'static str,
@@ -248,6 +251,145 @@ async fn all_cooling_members_reduce_to_the_soonest_probe() {
     );
     let routed = router
         .dispatch(&Request::new("demo"), "inbound")
+        .await
+        .expect("dispatch");
+    assert_eq!(routed.upstream_id, "second");
+    assert_eq!(seen.lock().expect("seen").as_slice(), ["second"]);
+}
+
+#[tokio::test]
+async fn b5e_model_rests_order_each_member_model_pair_independently() {
+    let (book, seen) = fixture();
+    for (id, seconds) in [("first", 300), ("third", 60)] {
+        let error = PluginError::status_error(
+            429,
+            "All credentials for model model-a are cooling down via provider upstream",
+        )
+        .with_retry_after(Duration::from_secs(seconds));
+        book.record_failure_for_model(&member_id(id), "model-a", &error)
+            .expect("model rest");
+    }
+    let members = vec![
+        fake("first", &seen, Behavior::Unary),
+        fake("second", &seen, Behavior::Fail),
+        fake("third", &seen, Behavior::Unary),
+    ];
+    let mut routes = BTreeMap::new();
+    routes.insert("model-a".to_owned(), members.clone());
+    routes.insert("model-b".to_owned(), members);
+    let router = Router::new(routes, FailoverPolicy::default()).with_cooldowns(Arc::clone(&book));
+
+    let routed = router
+        .dispatch(&Request::new("model-a"), "inbound")
+        .await
+        .expect("model-a");
+    assert_eq!(routed.upstream_id, "third");
+    assert_eq!(seen.lock().expect("seen").as_slice(), ["second", "third"]);
+
+    seen.lock().expect("seen").clear();
+    let routed = router
+        .dispatch(&Request::new("model-b"), "inbound")
+        .await
+        .expect("model-b");
+    assert_eq!(routed.upstream_id, "first");
+    assert_eq!(seen.lock().expect("seen").as_slice(), ["first"]);
+}
+
+#[tokio::test]
+async fn a8_ready_members_follow_strategy_then_one_soonest_probe() {
+    let (book, seen) = fixture();
+    cool(&book, "third", 60);
+    let mut hops = vec![
+        Hop::new(fake("first", &seen, Behavior::Fail)),
+        Hop::new(fake("second", &seen, Behavior::Unary)),
+        Hop::new(fake("third", &seen, Behavior::Unary)),
+    ];
+    hops[0].weight = 3;
+    hops[1].weight = 1;
+    hops[2].weight = 4;
+    let router = Router::from_routes(
+        BTreeMap::from([("demo".to_owned(), Route::new(hops).with_routing("weight"))]),
+        FailoverPolicy::default(),
+    )
+    .with_cooldowns(book);
+
+    let routed = router
+        .dispatch(&Request::new("demo"), "inbound")
+        .await
+        .expect("dispatch");
+    assert_eq!(routed.upstream_id, "second");
+    assert_eq!(seen.lock().expect("seen").as_slice(), ["first", "second"]);
+}
+
+#[tokio::test]
+async fn a8_route_strategy_sees_weight_free_and_rest_of_each_member() {
+    let (book, seen) = fixture();
+    cool(&book, "second", 60);
+    let state = Arc::new(StrategyState::with_builtins());
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&captured);
+    let _probe = state.registry().register(
+        "probe",
+        Strategy::new(move |pool, seats, _| {
+            sink.lock().expect("captured").push((
+                pool.to_owned(),
+                seats
+                    .iter()
+                    .map(|seat| (seat.weight, seat.free, seat.resting))
+                    .collect::<Vec<_>>(),
+            ));
+            vec![2, 0, 1]
+        }),
+    );
+    let mut hops = vec![
+        Hop::new(fake("first", &seen, Behavior::Unary)),
+        Hop::new(fake("second", &seen, Behavior::Unary)),
+        Hop::new(fake("third", &seen, Behavior::Unary)),
+    ];
+    hops[0].weight = 3;
+    hops[2].free = true;
+    let router = Router::from_routes(
+        BTreeMap::from([("demo".to_owned(), Route::new(hops).with_routing("probe"))]),
+        FailoverPolicy::default(),
+    )
+    .with_strategies(Arc::clone(&state))
+    .with_cooldowns(book);
+
+    let routed = router
+        .dispatch(&Request::new("demo"), "inbound")
+        .await
+        .expect("dispatch");
+    assert_eq!(routed.upstream_id, "third");
+    assert_eq!(
+        captured.lock().expect("captured").as_slice(),
+        [(
+            "demo".to_owned(),
+            vec![(3, false, false), (1, false, true), (1, true, false)]
+        )]
+    );
+}
+
+#[tokio::test]
+async fn b5e_routing_reads_the_rest_of_the_hop_wire_model() {
+    let (book, seen) = fixture();
+    let error = PluginError::status_error(
+        429,
+        "All credentials for model wire-a are cooling down via provider upstream",
+    )
+    .with_retry_after(Duration::from_secs(300));
+    book.record_failure_for_model(&member_id("first"), "wire-a", &error)
+        .expect("model rest");
+    let mut first = Hop::new(fake("first", &seen, Behavior::Unary));
+    first.wire_model = Some("wire-a".to_owned());
+    let hops = vec![first, Hop::new(fake("second", &seen, Behavior::Unary))];
+    let router = Router::from_routes(
+        BTreeMap::from([("alias".to_owned(), Route::new(hops))]),
+        FailoverPolicy::default(),
+    )
+    .with_cooldowns(book);
+
+    let routed = router
+        .dispatch(&Request::new("alias"), "inbound")
         .await
         .expect("dispatch");
     assert_eq!(routed.upstream_id, "second");

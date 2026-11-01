@@ -116,6 +116,10 @@ async fn state(
         listener,
     ));
     let (shutdown, _) = tokio::sync::watch::channel(false);
+    let quotas = Arc::new(crate::quotas::DaemonQuotas::new(
+        Arc::clone(&runtime),
+        Arc::clone(&usage),
+    ));
     let state: Arc<dyn ControlState> = Arc::new(
         DaemonControl::new(
             path,
@@ -129,6 +133,7 @@ async fn state(
             token_path.clone(),
             shutdown,
         )
+        .with_quotas(quotas)
         .with_events(events),
     );
     Ok((state, token, token_path))

@@ -18,6 +18,7 @@
 
 use std::fmt;
 use std::hash::{BuildHasher, Hasher};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use hofund_plugin_api::{
@@ -216,8 +217,8 @@ impl Call {
     pub async fn send(self, http: &HttpHandle) -> Result<Reply, PluginError> {
         let request = self.request()?;
         let response = http.send(request).await?;
-        let (status, retry_after, body) = read_body(response).await?;
-        classify(status, retry_after, body)
+        let (status, retry_after, reset_after, body) = read_body(response).await?;
+        classify_with_reset(status, retry_after, reset_after, body)
     }
 
     /// Sends the call once and returns the reply whatever its status.
@@ -233,7 +234,7 @@ impl Call {
     pub async fn fetch(self, http: &HttpHandle) -> Result<Reply, PluginError> {
         let request = self.request()?;
         let response = http.send(request).await?;
-        let (status, _, body) = read_body(response).await?;
+        let (status, _, _, body) = read_body(response).await?;
         Ok(Reply { status, body })
     }
 
@@ -291,8 +292,8 @@ impl Call {
         if response.status().as_u16() < 400 {
             return Ok(response);
         }
-        let (status, retry_after, body) = read_body(response).await?;
-        Err(status_failure(status, retry_after, &body))
+        let (status, retry_after, reset_after, body) = read_body(response).await?;
+        Err(status_failure(status, retry_after, reset_after, &body))
     }
 
     /// Like [`Call::open`], but every status comes back unread.
@@ -436,18 +437,33 @@ fn full_jitter(cap: Duration) -> Duration {
     Duration::from_nanos(hasher.finish() % cap_nanos)
 }
 
+#[cfg(test)]
 fn classify(
     status: u16,
     retry_after: Option<Duration>,
     body: Vec<u8>,
 ) -> Result<Reply, PluginError> {
+    classify_with_reset(status, retry_after, None, body)
+}
+
+fn classify_with_reset(
+    status: u16,
+    retry_after: Option<Duration>,
+    reset_after: Option<Duration>,
+    body: Vec<u8>,
+) -> Result<Reply, PluginError> {
     if status >= 400 {
-        return Err(status_failure(status, retry_after, &body));
+        return Err(status_failure(status, retry_after, reset_after, &body));
     }
     Ok(Reply { status, body })
 }
 
-fn status_failure(status: u16, retry_after: Option<Duration>, body: &[u8]) -> PluginError {
+fn status_failure(
+    status: u16,
+    retry_after: Option<Duration>,
+    reset_after: Option<Duration>,
+    body: &[u8],
+) -> PluginError {
     let snippet = String::from_utf8_lossy(body);
     let snippet = snippet.chars().take(STATUS_SNIPPET).collect::<String>();
     let message = if snippet.is_empty() {
@@ -455,6 +471,7 @@ fn status_failure(status: u16, retry_after: Option<Duration>, body: &[u8]) -> Pl
     } else {
         snippet
     };
+    let named_reset = reset_after_from_body(body, std::time::SystemTime::now()).or(reset_after);
     let error = if is_credit_error(status, body) {
         PluginError::credit_status(status, message)
     } else if is_quota_error(status, body) {
@@ -462,7 +479,20 @@ fn status_failure(status: u16, retry_after: Option<Duration>, body: &[u8]) -> Pl
     } else {
         PluginError::status_error(status, message)
     };
-    match retry_after.or_else(|| retry_after_from_body(body)) {
+    let credit = error.is_credit();
+    let error = match named_reset.filter(|_| credit) {
+        Some(after) => error.with_reset_after(after),
+        None => error,
+    };
+    let error = if credit && credit_soon(body) {
+        error.with_credit_soon()
+    } else {
+        error
+    };
+    let retry = retry_after
+        .or_else(|| (!credit).then_some(named_reset).flatten())
+        .or_else(|| retry_after_from_body(body));
+    match retry {
         Some(after) => error.with_retry_after(after),
         None => error,
     }
@@ -550,6 +580,16 @@ pub fn carried_error(body: &[u8], allocation_quota_rate: bool) -> Option<PluginE
         PluginError::quota_status(status, message)
     } else {
         PluginError::status_error(status, message)
+    };
+    let credit = error.is_credit();
+    let error = match reset_after_from_body(body, std::time::SystemTime::now()).filter(|_| credit) {
+        Some(after) => error.with_reset_after(after),
+        None => error,
+    };
+    let error = if credit && credit_soon(body) {
+        error.with_credit_soon()
+    } else {
+        error
     };
     Some(match retry_after_from_body(body) {
         Some(after) => error.with_retry_after(after),
@@ -934,6 +974,64 @@ fn resets_at(text: &str) -> bool {
         && (text.contains("utc") || text.contains("gmt"))
 }
 
+/// Whether a credit refusal says it can pass soon or for a smaller request.
+#[must_use]
+pub fn credit_soon(body: &[u8]) -> bool {
+    static PATTERN: OnceLock<Option<regex::Regex>> = OnceLock::new();
+    PATTERN
+        .get_or_init(|| {
+            regex::Regex::new(
+                r"(?i)openrouter_in_flight_budget|can only afford|fewer max_tokens|(?:try again|retry)(?: after| in)?\s*\d|\d+\s*(?:\x{79d2}|\x{5206}\x{949f}|\x{5c0f}\x{65f6})[\x{540e}\x{5f8c}]",
+            )
+            .ok()
+        })
+        .as_ref()
+        .is_some_and(|pattern| pattern.is_match(&error_text(body)))
+}
+
+/// The reset delay stated in an error body, independent of its headers.
+///
+/// Absolute Unix reset fields and the ten-digit `limit reached|<time>` form
+/// take precedence over delays written in words.
+#[must_use]
+pub fn reset_after_from_body(body: &[u8], now: std::time::SystemTime) -> Option<Duration> {
+    let text = error_text(body);
+    if let Some(index) = text.find("limit reached|") {
+        let tail = &text[index + "limit reached|".len()..];
+        let digits = tail.chars().take(10).collect::<String>();
+        if digits.len() == 10
+            && digits.chars().all(|character| character.is_ascii_digit())
+            && tail
+                .chars()
+                .nth(10)
+                .is_none_or(|next| !next.is_ascii_digit())
+            && let Ok(seconds) = digits.parse::<u64>()
+            && let Some(at) = std::time::UNIX_EPOCH.checked_add(Duration::from_secs(seconds))
+            && let Ok(left) = at.duration_since(now)
+            && let Some(after) = positive(left)
+        {
+            return Some(after);
+        }
+    }
+    if let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) {
+        let error = value.get("error").unwrap_or(&value);
+        if let Some(seconds) = error.get("resets_at").and_then(serde_json::Value::as_u64)
+            && let Some(at) = std::time::UNIX_EPOCH.checked_add(Duration::from_secs(seconds))
+            && let Ok(left) = at.duration_since(now)
+            && let Some(after) = positive(left)
+        {
+            return Some(after);
+        }
+        if let Some(seconds) = error
+            .get("resets_in_seconds")
+            .and_then(serde_json::Value::as_u64)
+        {
+            return positive(Duration::from_secs(seconds));
+        }
+    }
+    retry_after_from_body(body)
+}
+
 /// The retry delay stated in an error body, independent of its headers.
 #[must_use]
 pub fn retry_after_from_body(body: &[u8]) -> Option<Duration> {
@@ -1147,14 +1245,20 @@ fn error_text(body: &[u8]) -> String {
 
 pub(crate) async fn read_body(
     mut response: HttpResponse,
-) -> Result<(u16, Option<Duration>, Vec<u8>), PluginError> {
+) -> Result<(u16, Option<Duration>, Option<Duration>, Vec<u8>), PluginError> {
     let status = response.status().as_u16();
-    let retry_after = parse_retry_after_headers(response.headers(), std::time::SystemTime::now());
+    let now = std::time::SystemTime::now();
+    let retry_after = response
+        .headers()
+        .get(http::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| parse_retry_after(value, now));
+    let reset_after = parse_reset_after_headers(response.headers(), now);
     let mut body = Vec::new();
     while let Some(chunk) = response.body_mut().next_chunk().await {
         body.extend_from_slice(&chunk?);
     }
-    Ok((status, retry_after, body))
+    Ok((status, retry_after, reset_after, body))
 }
 
 /// Parses Retry-After and rate-limit reset headers relative to `now`.
@@ -1174,6 +1278,15 @@ pub fn parse_retry_after_headers(
     {
         return Some(after);
     }
+    parse_reset_after_headers(headers, now)
+}
+
+/// Parses the longest positive `*ratelimit*reset*` header relative to `now`.
+#[must_use]
+pub fn parse_reset_after_headers(
+    headers: &http::HeaderMap,
+    now: std::time::SystemTime,
+) -> Option<Duration> {
     let mut longest = None;
     for name in headers.keys() {
         let name = name.as_str();
@@ -1378,9 +1491,10 @@ mod tests {
     use hofund_plugin_api::{CredentialStyle, HeaderName, PluginErrorKind, SecretString};
 
     use super::{
-        Call, backoff, carried_error, classify, is_allocation_quota_rate,
-        is_context_overflow_error, is_credit_error, is_quota_error, parse_retry_after,
-        parse_retry_after_headers, retries, retry_after_from_body, text_response,
+        Call, backoff, carried_error, classify, classify_with_reset, credit_soon,
+        is_allocation_quota_rate, is_context_overflow_error, is_credit_error, is_quota_error,
+        parse_reset_after_headers, parse_retry_after, parse_retry_after_headers,
+        reset_after_from_body, retries, retry_after_from_body, text_response,
     };
 
     fn secret(value: &str) -> SecretString {
@@ -2043,5 +2157,113 @@ mod tests {
             ),
             Some(Duration::from_secs(9))
         );
+    }
+
+    #[test]
+    fn b1e_credit_soon_matches_each_reference_shape() {
+        for body in [
+            "openrouter_in_flight_budget",
+            "can only afford 12000",
+            "fewer max_tokens",
+            "try again in 30 seconds",
+            "retry after 20s",
+            "1 \u{5206}\u{949f}\u{540e}\u{91cd}\u{8bd5}",
+        ] {
+            assert!(credit_soon(body.as_bytes()), "{body}");
+        }
+        assert!(!credit_soon(b"out of credit"));
+        let error = classify(
+            402,
+            None,
+            br#"{"error":{"message":"Insufficient credits","metadata":{"limit_source":"openrouter_in_flight_budget"}}}"#.to_vec(),
+        )
+        .expect_err("credit");
+        assert!(error.credit_soon());
+    }
+
+    #[test]
+    fn b1e_soon_wording_marks_only_credit_errors() {
+        let error = classify(429, None, b"slow down, try again in 30 seconds".to_vec())
+            .expect_err("rate limit");
+        assert!(!error.is_credit());
+        assert!(!error.credit_soon());
+    }
+
+    #[test]
+    fn b1f_past_absolute_reset_falls_through_to_other_sources() {
+        let now = std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        assert_eq!(
+            reset_after_from_body(b"limit reached|1699999999; try again in 30 seconds", now),
+            Some(Duration::from_secs(30))
+        );
+        assert_eq!(
+            reset_after_from_body(
+                br#"{"error":{"resets_at":1699999999,"resets_in_seconds":45}}"#,
+                now,
+            ),
+            Some(Duration::from_secs(45))
+        );
+    }
+
+    #[test]
+    fn b3a_body_reset_precedes_header_reset() {
+        let error = classify_with_reset(
+            402,
+            None,
+            Some(Duration::from_secs(200)),
+            br#"{"error":{"resets_in_seconds":100}}"#.to_vec(),
+        )
+        .expect_err("credit");
+        assert_eq!(error.reset_after(), Some(Duration::from_secs(100)));
+    }
+
+    #[test]
+    fn b3b_header_reset_is_used_when_body_has_no_reset() {
+        let error = classify_with_reset(
+            402,
+            Some(Duration::from_hours(6)),
+            Some(Duration::from_secs(200)),
+            b"out of credit".to_vec(),
+        )
+        .expect_err("credit");
+        assert_eq!(error.reset_after(), Some(Duration::from_secs(200)));
+        assert_eq!(error.retry_after(), Some(Duration::from_hours(6)));
+        assert_eq!(
+            parse_reset_after_headers(
+                &headers(&[("x-ratelimit-reset-requests", "200s")]),
+                std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+            ),
+            Some(Duration::from_secs(200))
+        );
+    }
+
+    #[test]
+    fn b5a_model_cooldown_preserves_failure_classification() {
+        let rate = classify(
+            429,
+            None,
+            br#"{"error":{"code":"model_cooldown","type":"rate_limit_error"}}"#.to_vec(),
+        )
+        .expect_err("rate");
+        assert_eq!(rate.kind(), PluginErrorKind::Status);
+        assert!(!rate.is_credit());
+
+        let credit = classify(
+            429,
+            None,
+            b"All credentials for model model-a are cooling down (last error: insufficient balance)"
+                .to_vec(),
+        )
+        .expect_err("credit");
+        assert!(credit.is_credit());
+
+        let quota = classify(
+            429,
+            None,
+            b"All credentials for model model-a are cooling down (last error: usage limit reached)"
+                .to_vec(),
+        )
+        .expect_err("quota");
+        assert_eq!(quota.kind(), PluginErrorKind::Quota);
     }
 }

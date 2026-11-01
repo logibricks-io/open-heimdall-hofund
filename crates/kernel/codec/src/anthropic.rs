@@ -120,6 +120,15 @@ fn decode_request(bytes: &[u8]) -> Result<Request, CodecError> {
         Some(value) if !value.is_null() => Some(decode_tool_choice(value)?),
         _ => None,
     };
+    if tools.is_empty()
+        && tool_choice
+            .as_ref()
+            .is_some_and(|choice| choice.mode == ToolChoiceMode::Required)
+    {
+        return Err(CodecError::Unsupported {
+            message: "tool_choice `any` requires at least one tool".to_owned(),
+        });
+    }
     let params = GenerationParams {
         max_tokens: take_u64(&mut object, "max_tokens")?,
         temperature: take_f64(&mut object, "temperature")?,
@@ -130,13 +139,159 @@ fn decode_request(bytes: &[u8]) -> Result<Request, CodecError> {
         ..GenerationParams::default()
     };
     let stream = take_bool(&mut object, "stream")?.unwrap_or(false);
-    Ok(Request::new(model)
+    let mut request = Request::new(model)
         .with_messages(messages)
         .with_tools(tools)
         .with_tool_choice(tool_choice)
         .with_params(params)
         .with_stream(stream)
-        .with_extensions(Extensions::from_map(object)))
+        .with_extensions(Extensions::from_map(object));
+    if invalid_cache_marks(&request) {
+        strip_cache_marks(&mut request);
+    }
+    unsign_calls(&mut request);
+    Ok(request)
+}
+
+fn invalid_cache_marks(request: &Request) -> bool {
+    let mut five_minutes = false;
+    for message in &request.messages {
+        for part in &message.content {
+            if invalid_part_cache(part, &mut five_minutes) {
+                return true;
+            }
+        }
+    }
+    for tool in &request.tools {
+        if invalid_mark(&tool.extensions, &mut five_minutes) {
+            return true;
+        }
+    }
+    false
+}
+
+fn invalid_part_cache(part: &ContentPart, five_minutes: &mut bool) -> bool {
+    if invalid_mark(part_extensions(part), five_minutes) {
+        return true;
+    }
+    match part {
+        ContentPart::ToolResult(part) => part
+            .content
+            .iter()
+            .any(|child| invalid_part_cache(child, five_minutes)),
+        _ => false,
+    }
+}
+
+fn invalid_mark(extensions: &Extensions, five_minutes: &mut bool) -> bool {
+    let Some(mark) = extensions.get("cache_control") else {
+        return false;
+    };
+    let ttl = mark.get("ttl").and_then(Value::as_str).unwrap_or("5m");
+    if *five_minutes && ttl == "1h" {
+        return true;
+    }
+    *five_minutes |= ttl == "5m";
+    false
+}
+
+fn strip_cache_marks(request: &mut Request) {
+    for message in &mut request.messages {
+        message.extensions.remove("cache_control");
+        for part in &mut message.content {
+            strip_part_cache(part);
+        }
+    }
+    for tool in &mut request.tools {
+        tool.extensions.remove("cache_control");
+    }
+}
+
+fn strip_part_cache(part: &mut ContentPart) {
+    match part {
+        ContentPart::Text(part) => part.extensions.remove("cache_control"),
+        ContentPart::Image(part) => part.extensions.remove("cache_control"),
+        ContentPart::ToolCall(part) => part.extensions.remove("cache_control"),
+        ContentPart::ToolResult(part) => {
+            part.extensions.remove("cache_control");
+            for child in &mut part.content {
+                strip_part_cache(child);
+            }
+            None
+        }
+        ContentPart::Thinking(part) => part.extensions.remove("cache_control"),
+        ContentPart::Unknown(part) => part.extensions.remove("cache_control"),
+    };
+}
+
+fn part_extensions(part: &ContentPart) -> &Extensions {
+    match part {
+        ContentPart::Text(part) => &part.extensions,
+        ContentPart::Image(part) => &part.extensions,
+        ContentPart::ToolCall(part) => &part.extensions,
+        ContentPart::ToolResult(part) => &part.extensions,
+        ContentPart::Thinking(part) => &part.extensions,
+        ContentPart::Unknown(part) => &part.extensions,
+    }
+}
+
+fn unsign_calls(request: &mut Request) {
+    for message in &mut request.messages {
+        for part in &mut message.content {
+            let id = match part {
+                ContentPart::ToolCall(part) => &mut part.id,
+                ContentPart::ToolResult(part) => &mut part.id,
+                _ => continue,
+            };
+            if let Some(unsigned) = unsigned_id(id) {
+                *id = unsigned.to_owned();
+            }
+        }
+    }
+}
+
+fn unsigned_id(id: &str) -> Option<&str> {
+    // A mark never starts the id: the search begins after its first character.
+    let mut offset = id.chars().next().map_or(0, char::len_utf8);
+    while let Some(found) = id[offset..].find("__ts") {
+        let at = offset + found;
+        let mut rest = &id[at + "__ts".len()..];
+        offset = at + 1;
+        let raw = rest.starts_with('r');
+        if raw {
+            rest = &rest[1..];
+        }
+        let kept = !raw && rest.starts_with('k');
+        if kept {
+            rest = &rest[1..];
+        }
+        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+        let Some(signature) = rest[digits..].strip_prefix("__") else {
+            continue;
+        };
+        if kept && digits == 0 {
+            // A kept signature's mark always carries its length.
+            continue;
+        }
+        // The first mark decides: a signature cut short is none.
+        if digits > 0 && rest[..digits] != signature.len().to_string() {
+            return None;
+        }
+        if kept {
+            // A kept signature points into a store this gateway does not
+            // hold, so it reads as no signature and the id stays whole.
+            return None;
+        }
+        if signature.is_empty()
+            || !signature
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            return None;
+        }
+        return Some(&id[..at]);
+    }
+    None
 }
 
 /// Cap used when the client, the route, and the quirk profile all omit one.
@@ -578,7 +733,11 @@ fn encode_thinking(object: &mut Object, part: &ThinkingPart) {
             object.insert("signature".to_owned(), Value::String(signature.clone()));
         }
     }
-    part.extensions.merge_into(object);
+    for (key, value) in part.extensions.iter() {
+        if key != "cache_control" {
+            object.entry(key.clone()).or_insert_with(|| value.clone());
+        }
+    }
 }
 
 fn encode_image_source(source: &ImageSource) -> Value {
@@ -659,7 +818,9 @@ fn encode_tool(tool: &Tool) -> Result<Value, CodecError> {
     if let Some(description) = &tool.description {
         object.insert("description".to_owned(), Value::String(description.clone()));
     }
-    object.insert("input_schema".to_owned(), tool.input_schema.clone());
+    let mut input_schema = tool.input_schema.clone();
+    hofund_ir::fold_object_root(&mut input_schema);
+    object.insert("input_schema".to_owned(), input_schema);
     tool.extensions.merge_into(&mut object);
     Ok(Value::Object(object))
 }

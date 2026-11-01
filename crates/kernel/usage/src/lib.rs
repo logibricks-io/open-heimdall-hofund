@@ -97,6 +97,25 @@ pub struct Row {
     pub caller_key_name: String,
 }
 
+/// One successful request as routing measurements read it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RoutingRow {
+    /// Unix seconds when the row was written.
+    pub created_unix: i64,
+    /// Client-facing model id.
+    pub model: String,
+    /// Member id that answered.
+    pub upstream: String,
+    /// Input tokens when reported.
+    pub input_tokens: Option<i64>,
+    /// Output tokens when reported.
+    pub output_tokens: Option<i64>,
+    /// Whole answer duration in milliseconds.
+    pub latency_ms: i64,
+    /// Time to first content in milliseconds, when streamed and measured.
+    pub ttft_ms: Option<i64>,
+}
+
 /// The usage database.
 pub struct Ledger {
     connection: Mutex<Connection>,
@@ -133,24 +152,46 @@ impl Ledger {
                     latency_ms INTEGER NOT NULL,
                     status TEXT NOT NULL,
                     caller_key_id TEXT NOT NULL DEFAULT '',
-                    caller_key_name TEXT NOT NULL DEFAULT ''
+                    caller_key_name TEXT NOT NULL DEFAULT '',
+                    ttft_ms INTEGER
                 );",
             )
             .map_err(|error| UsageError(error.to_string()))?;
-        for column in ["caller_key_id", "caller_key_name"] {
-            ensure_column(&connection, column)?;
+        for (column, declaration) in [
+            ("caller_key_id", "TEXT NOT NULL DEFAULT ''"),
+            ("caller_key_name", "TEXT NOT NULL DEFAULT ''"),
+            ("ttft_ms", "INTEGER"),
+        ] {
+            ensure_column(&connection, column, declaration)?;
         }
+        // Routing reads recent rows on every weighed request; the index keeps
+        // that read to the window it asks for.
+        connection
+            .execute(
+                "CREATE INDEX IF NOT EXISTS requests_created_unix ON requests(created_unix)",
+                [],
+            )
+            .map_err(|error| UsageError(error.to_string()))?;
         Ok(Self {
             connection: Mutex::new(connection),
         })
     }
 
-    /// Inserts `row`.
+    /// Inserts `row` without a first-content measurement.
     ///
     /// # Errors
     ///
     /// Returns [`UsageError`] when the insert fails.
     pub fn record(&self, row: &Row) -> Result<(), UsageError> {
+        self.record_with_ttft(row, None)
+    }
+
+    /// Inserts `row` with an optional first-content latency in milliseconds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UsageError`] when the insert fails.
+    pub fn record_with_ttft(&self, row: &Row, ttft_ms: Option<i64>) -> Result<(), UsageError> {
         let connection = self
             .connection
             .lock()
@@ -159,8 +200,8 @@ impl Ledger {
             .execute(
                 "INSERT INTO requests (
                     created_unix, model, upstream, input_tokens, output_tokens, latency_ms, status,
-                    caller_key_id, caller_key_name
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    caller_key_id, caller_key_name, ttft_ms
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 params![
                     row.created_unix,
                     row.model,
@@ -171,6 +212,7 @@ impl Ledger {
                     row.status,
                     row.caller_key_id,
                     row.caller_key_name,
+                    ttft_ms,
                 ],
             )
             .map(|_| ())
@@ -196,6 +238,66 @@ impl Ledger {
             .map_err(|error| UsageError(error.to_string()))?;
         let rows = statement
             .query_map([], read_row)
+            .map_err(|error| UsageError(error.to_string()))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| UsageError(error.to_string()))
+    }
+
+    /// Each upstream's newest answered request at or after `since`: rows
+    /// with a 2xx status and an upstream, as `(upstream, created_unix)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UsageError`] when the query fails.
+    pub fn last_served(&self, since: i64) -> Result<Vec<(String, i64)>, UsageError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| UsageError("usage database lock is poisoned".to_owned()))?;
+        let mut statement = connection
+            .prepare(
+                "SELECT upstream, MAX(created_unix) FROM requests
+                 WHERE created_unix >= ?1 AND upstream != '' AND status LIKE '2%'
+                 GROUP BY upstream ORDER BY upstream",
+            )
+            .map_err(|error| UsageError(error.to_string()))?;
+        let rows = statement
+            .query_map([since], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(|error| UsageError(error.to_string()))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| UsageError(error.to_string()))
+    }
+
+    /// Successful rows at or after `since`, including routing speed fields.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UsageError`] when the query fails.
+    pub fn routing_rows(&self, since: i64) -> Result<Vec<RoutingRow>, UsageError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| UsageError("usage database lock is poisoned".to_owned()))?;
+        let mut statement = connection
+            .prepare(
+                "SELECT created_unix, model, upstream, input_tokens, output_tokens, latency_ms, ttft_ms
+                 FROM requests
+                 WHERE created_unix >= ?1 AND upstream != '' AND status LIKE '2%'
+                 ORDER BY id",
+            )
+            .map_err(|error| UsageError(error.to_string()))?;
+        let rows = statement
+            .query_map([since], |row| {
+                Ok(RoutingRow {
+                    created_unix: row.get(0)?,
+                    model: row.get(1)?,
+                    upstream: row.get(2)?,
+                    input_tokens: row.get(3)?,
+                    output_tokens: row.get(4)?,
+                    latency_ms: row.get(5)?,
+                    ttft_ms: row.get(6)?,
+                })
+            })
             .map_err(|error| UsageError(error.to_string()))?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|error| UsageError(error.to_string()))
@@ -267,7 +369,11 @@ impl Ledger {
     }
 }
 
-fn ensure_column(connection: &Connection, column: &str) -> Result<(), UsageError> {
+fn ensure_column(
+    connection: &Connection,
+    column: &str,
+    declaration: &str,
+) -> Result<(), UsageError> {
     let mut statement = connection
         .prepare("PRAGMA table_info(requests)")
         .map_err(|error| UsageError(error.to_string()))?;
@@ -281,7 +387,7 @@ fn ensure_column(connection: &Connection, column: &str) -> Result<(), UsageError
     }
     connection
         .execute(
-            &format!("ALTER TABLE requests ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"),
+            &format!("ALTER TABLE requests ADD COLUMN {column} {declaration}"),
             [],
         )
         .map(|_| ())
@@ -393,6 +499,37 @@ mod tests {
             caller_key_id: String::new(),
             caller_key_name: String::new(),
         }
+    }
+
+    #[test]
+    fn q8c_last_served_is_the_newest_answered_row_per_upstream() {
+        let dir = tempfile::tempdir().expect("dir");
+        let ledger = Ledger::open(&dir.path().join("usage.sqlite")).expect("ledger");
+        let served = |at: i64, upstream: &str, status: &str| Row {
+            upstream: upstream.to_owned(),
+            status: status.to_owned(),
+            ..row(at, None, None)
+        };
+        for entry in [
+            served(100, "account:p:a", "200"),
+            served(300, "account:p:a", "201"),
+            served(400, "account:p:a", "429"),
+            served(50, "old", "200"),
+            served(500, "", "200"),
+            served(200, "plain", "200"),
+            served(250, "failed", "500"),
+        ] {
+            ledger.record(&entry).expect("record");
+        }
+        assert_eq!(
+            ledger.last_served(100).expect("served"),
+            [("account:p:a".to_owned(), 300), ("plain".to_owned(), 200)]
+        );
+        assert_eq!(
+            ledger.last_served(0).expect("served").len(),
+            3,
+            "the since bound is inclusive and old rows return"
+        );
     }
 
     #[test]
@@ -531,5 +668,60 @@ mod tests {
         let rows = ledger.rows().expect("rows");
         assert_eq!(rows[1].caller_key_id, "key-id");
         assert_eq!(rows[1].caller_key_name, "Key name");
+    }
+
+    #[test]
+    fn b4c_routing_rows_keep_ttft_and_migrate_an_old_ledger() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("usage.sqlite");
+        rusqlite::Connection::open(&path)
+            .expect("old database")
+            .execute_batch(
+                "CREATE TABLE requests (
+                    id INTEGER PRIMARY KEY,
+                    created_unix INTEGER NOT NULL,
+                    model TEXT NOT NULL,
+                    upstream TEXT NOT NULL,
+                    input_tokens INTEGER,
+                    output_tokens INTEGER,
+                    latency_ms INTEGER NOT NULL,
+                    status TEXT NOT NULL
+                );",
+            )
+            .expect("old schema");
+        let ledger = Ledger::open(&path).expect("migrate");
+        ledger
+            .record_with_ttft(
+                &Row {
+                    created_unix: 10,
+                    model: "demo".to_owned(),
+                    upstream: "primary".to_owned(),
+                    input_tokens: Some(3),
+                    output_tokens: Some(7),
+                    latency_ms: 120,
+                    status: "200".to_owned(),
+                    caller_key_id: String::new(),
+                    caller_key_name: String::new(),
+                },
+                Some(12),
+            )
+            .expect("insert");
+        let rows = ledger.routing_rows(0).expect("routing rows");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].ttft_ms, Some(12));
+        assert_eq!(rows[0].output_tokens, Some(7));
+        assert_eq!(ledger.rows().expect("ordinary rows").len(), 1);
+        // a window after the row reads nothing, and the read uses the index
+        assert!(ledger.routing_rows(11).expect("window").is_empty());
+        drop(ledger);
+        let plan: String = rusqlite::Connection::open(&path)
+            .expect("reopen")
+            .query_row(
+                "EXPLAIN QUERY PLAN SELECT id FROM requests WHERE created_unix >= 11",
+                [],
+                |row| row.get(3),
+            )
+            .expect("plan");
+        assert!(plan.contains("requests_created_unix"), "{plan}");
     }
 }
