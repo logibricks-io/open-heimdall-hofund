@@ -463,3 +463,76 @@ async fn c6h_a_broken_stream_no_longer_counts_as_held() {
     assert_eq!(routed.upstream_id, "first");
     assert_eq!(second_hits.load(Ordering::SeqCst), 0);
 }
+
+#[tokio::test]
+async fn d26_5_dispatch_reserve_takes_over_and_gives_back() {
+    let first_hits = Arc::new(AtomicUsize::new(0));
+    let second_hits = Arc::new(AtomicUsize::new(0));
+    let reserve_hits = Arc::new(AtomicUsize::new(0));
+    let failure = || Err(PluginError::status_error(429, "out"));
+    let first = fake("first", &first_hits, vec![failure(), answer()]);
+    let second = fake("second", &second_hits, vec![failure(), answer()]);
+    let reserve = fake("reserve", &reserve_hits, vec![answer()]);
+    let at_once = [
+        ("preset:first:row", 0),
+        ("preset:second:row", 1),
+        ("preset:reserve:row", 2),
+    ]
+    .into_iter()
+    .map(|(id, rank)| {
+        (
+            id.to_owned(),
+            hofund_router::at_once::AtOnceMember {
+                group: "provider".to_owned(),
+                limit: 2,
+                rank,
+            },
+        )
+    })
+    .collect();
+    let route = Route::new(vec![Hop::new(first), Hop::new(second), Hop::new(reserve)])
+        .with_at_once(at_once)
+        .with_routing("order")
+        .with_stays(Stays::Session);
+    let router = Router::from_routes(
+        BTreeMap::from([("demo".to_owned(), route)]),
+        FailoverPolicy::default(),
+    )
+    .with_affinity(AffinityState::in_memory());
+    assert_eq!(
+        router.route_reserves("demo"),
+        [("preset:reserve:row".to_owned(), 2)]
+    );
+
+    let first_answer = router
+        .dispatch_with_context(
+            &hofund_router::Request::new("demo"),
+            "test",
+            Some(&conversation()),
+            None,
+        )
+        .await
+        .expect("reserve answers after kept members fail");
+    assert_eq!(first_answer.upstream_id, "reserve");
+    assert_eq!(first_answer.affinity_reason.as_deref(), Some("first"));
+    assert_eq!(first_hits.load(Ordering::SeqCst), 1);
+    assert_eq!(second_hits.load(Ordering::SeqCst), 1);
+    assert_eq!(reserve_hits.load(Ordering::SeqCst), 1);
+
+    let next = Conversation::new("demo|session", 2, false);
+    let second_answer = router
+        .dispatch_with_context(
+            &hofund_router::Request::new("demo"),
+            "test",
+            Some(&next),
+            None,
+        )
+        .await
+        .expect("kept member takes the conversation back");
+    assert_eq!(second_answer.upstream_id, "first");
+    assert_eq!(second_answer.affinity_reason.as_deref(), Some("reserve"));
+    assert_eq!(first_hits.load(Ordering::SeqCst), 2);
+    assert_eq!(second_hits.load(Ordering::SeqCst), 1);
+    assert_eq!(reserve_hits.load(Ordering::SeqCst), 1);
+}
+

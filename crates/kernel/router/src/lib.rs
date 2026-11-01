@@ -11,6 +11,7 @@
 
 pub mod affinity;
 mod affinity_reply;
+pub mod at_once;
 mod attempt;
 mod cooldown;
 mod decision;
@@ -150,6 +151,8 @@ impl Hop {
 pub struct Route {
     /// Members in configured order.
     pub hops: Vec<Hop>,
+    /// Accounts-at-once metadata by stable member id.
+    pub at_once: BTreeMap<String, at_once::AtOnceMember>,
     /// Registered routing strategy name.
     pub routing: String,
     /// Conversation affinity for this pool.
@@ -168,6 +171,7 @@ impl Route {
     pub fn new(hops: Vec<Hop>) -> Self {
         Self {
             hops,
+            at_once: BTreeMap::new(),
             routing: "smart".to_owned(),
             stays: affinity::Stays::Auto,
             patience: Some(Duration::from_secs(60)),
@@ -202,6 +206,13 @@ impl Route {
         self.sink = sink;
         self
     }
+
+    /// Sets accounts-at-once metadata by stable member id.
+    #[must_use]
+    pub fn with_at_once(mut self, at_once: BTreeMap<String, at_once::AtOnceMember>) -> Self {
+        self.at_once = at_once;
+        self
+    }
 }
 
 /// A model-to-upstream table.
@@ -229,6 +240,7 @@ pub struct InputCount {
 
 struct Resolved {
     hops: Vec<Hop>,
+    at_once: BTreeMap<String, at_once::AtOnceMember>,
     /// Configured route used for model-scope matching.
     route: String,
     /// Name sent when a hop has no wire model.
@@ -264,6 +276,7 @@ impl Resolved {
 
 struct Ordered {
     hops: Vec<Hop>,
+    reserves: BTreeMap<String, usize>,
     affinity: Option<ReplyRoute>,
 }
 
@@ -278,6 +291,7 @@ struct ReplyRoute {
     turn: u64,
     strict: bool,
     planned: Vec<affinity::Candidate>,
+    reason: &'static str,
 }
 
 impl Router {
@@ -406,6 +420,18 @@ impl Router {
                     })
             })
             .map(|(model, _)| model.clone())
+            .collect()
+    }
+
+    /// Members currently in reserve for `model`, with their at-once limits.
+    #[must_use]
+    pub fn route_reserves(&self, model: &str) -> Vec<(String, usize)> {
+        let Ok(resolved) = self.resolve(model) else {
+            return Vec::new();
+        };
+        self.order_for(&resolved, None)
+            .reserves
+            .into_iter()
             .collect()
     }
 
@@ -799,6 +825,33 @@ impl Router {
         } else {
             ordered
         };
+        let ids = ordered
+            .iter()
+            .map(|hop| hop.member.id().to_string())
+            .collect::<Vec<_>>();
+        let resting = ordered
+            .iter()
+            .map(|hop| {
+                let model = hop.wire_model.as_deref().unwrap_or(&resolved.bare);
+                self.cooldowns.as_ref().is_some_and(|cooldowns| {
+                    cooldowns
+                        .cooling_for_model(hop.member.id(), model)
+                        .is_some()
+                })
+            })
+            .collect::<Vec<_>>();
+        let strategy = (0..ordered.len()).collect::<Vec<_>>();
+        let placement = at_once::place(&resolved.at_once, &ids, &strategy, &resting);
+        let reserves = placement
+            .reserves
+            .iter()
+            .map(|(index, limit)| (ids[*index].clone(), *limit))
+            .collect::<BTreeMap<_, _>>();
+        let ordered = placement
+            .order
+            .into_iter()
+            .map(|index| ordered[index].clone())
+            .collect::<Vec<_>>();
         let group_member = |hop: &Hop| {
             let model = hop.wire_model.as_deref().unwrap_or(&resolved.bare);
             format!("{}/{model}:{}", hop.member.route_id(), hop.effort)
@@ -828,6 +881,7 @@ impl Router {
                         .and_then(|allowance| allowance.fullest(model, now))
                         .map(|window| window.used);
                     let group_member = group_member(hop);
+                    let reserve = reserves.get(&member).copied().unwrap_or(0);
                     affinity::Candidate {
                         member,
                         model: model.to_owned(),
@@ -837,6 +891,7 @@ impl Router {
                                 .cooling_for_model(hop.member.id(), model)
                                 .is_some()
                         }),
+                        reserve,
                         nearly_spent: hop.nearly_spent
                             || used.is_some_and(|used| {
                                 used >= affinity::spent_share_of(&resolved.routing)
@@ -887,6 +942,7 @@ impl Router {
         };
         Ordered {
             hops,
+            reserves,
             affinity: conversation
                 .zip(decision)
                 .map(|(conversation, (decision, planned))| ReplyRoute {
@@ -894,6 +950,7 @@ impl Router {
                     turn: conversation.turn,
                     strict: decision.strict,
                     planned,
+                    reason: decision.reason.as_str(),
                 }),
         }
     }
@@ -1058,6 +1115,7 @@ impl Router {
         {
             return Ok(Resolved {
                 hops: route.hops.clone(),
+                at_once: route.at_once.clone(),
                 route: asked.to_owned(),
                 bare: asked.to_owned(),
                 pool: asked.to_owned(),
@@ -1077,7 +1135,7 @@ impl Router {
                     && (route_model == model || hop.wire_model.as_deref() == Some(model))
             });
             if found.len() == 1
-                && let Some((route_model, primary, stays)) = found.first()
+                && let Some((route_model, primary, stays, _)) = found.first()
                 && let Some(route) = self.routes.get(route_model)
                 && route
                     .hops
@@ -1086,6 +1144,7 @@ impl Router {
             {
                 return Ok(Resolved {
                     hops: route.hops.clone(),
+                    at_once: route.at_once.clone(),
                     route: route_model.clone(),
                     bare: model.to_owned(),
                     pool: asked.to_owned(),
@@ -1097,7 +1156,7 @@ impl Router {
                     spent: Vec::new(),
                 });
             }
-            let patience = found.first().and_then(|(_, hop, _)| hop.patience);
+            let patience = found.first().and_then(|(_, hop, ..)| hop.patience);
             let mut resolved = self.one(asked, model, found)?;
             resolved.patience = patience;
             return Ok(resolved);
@@ -1105,7 +1164,7 @@ impl Router {
         let found = self.matching(|_, hop| hop.wire_model.as_deref() == Some(asked));
         let bare = found
             .first()
-            .and_then(|(_, hop, _)| hop.wire_model.clone())
+            .and_then(|(_, hop, ..)| hop.wire_model.clone())
             .unwrap_or_else(|| asked.to_owned());
         self.one(asked, &bare, found)
     }
@@ -1113,12 +1172,20 @@ impl Router {
     fn matching(
         &self,
         mut pred: impl FnMut(&str, &Hop) -> bool,
-    ) -> Vec<(String, Hop, affinity::Stays)> {
+    ) -> Vec<(String, Hop, affinity::Stays, Option<at_once::AtOnceMember>)> {
         let mut found = Vec::new();
         for (route_model, route) in &self.routes {
             for hop in &route.hops {
                 if pred(route_model, hop) {
-                    found.push((route_model.clone(), hop.clone(), route.stays));
+                    found.push((
+                        route_model.clone(),
+                        hop.clone(),
+                        route.stays,
+                        route
+                            .at_once
+                            .get(hop.member.id().to_string().as_str())
+                            .cloned(),
+                    ));
                 }
             }
         }
@@ -1129,14 +1196,19 @@ impl Router {
         &self,
         asked: &str,
         bare: &str,
-        found: Vec<(String, Hop, affinity::Stays)>,
+        found: Vec<(String, Hop, affinity::Stays, Option<at_once::AtOnceMember>)>,
     ) -> Result<Resolved, RouterError> {
         match found.len() {
             0 => Err(self.missing(asked)),
             1 => {
-                let (route, hop, stays) = found.into_iter().next().expect("one hop");
+                let (route, hop, stays, at_once) = found.into_iter().next().expect("one hop");
+                let at_once = at_once
+                    .map(|member| (hop.member.id().to_string(), member))
+                    .into_iter()
+                    .collect();
                 Ok(Resolved {
                     hops: vec![hop],
+                    at_once,
                     route,
                     bare: bare.to_owned(),
                     pool: asked.to_owned(),
@@ -1246,12 +1318,17 @@ impl DispatchState {
             let mut ending = Ending::Answered;
             if let Some(answered) = self.round(&asking, &mut busy, &mut ending).await? {
                 let next = answered.index + 1;
+                let affinity_reason = self
+                    .affinity
+                    .as_ref()
+                    .map(|affinity| affinity.reason.to_owned());
                 let continuation = (next < self.resolved.hops.len())
                     .then(|| RouteContinuation { state: self, next });
                 return Ok(Routed {
                     upstream_id: answered.upstream_id,
                     upstream_model: answered.upstream_model,
                     completion: answered.completion,
+                    affinity_reason,
                     continuation,
                 });
             }
@@ -1489,6 +1566,8 @@ pub struct Routed {
     /// Model name sent to that provider. The gateway compares it with the
     /// name the client asked for before touching a raw body.
     pub upstream_model: String,
+    /// Why conversation affinity kept or released the previous answerer.
+    pub affinity_reason: Option<String>,
     /// The completion. A stream has produced its first content event, a raw
     /// body its first chunk, or either ended empty. An earlier failure is not returned here.
     pub completion: Completion,
@@ -1611,10 +1690,10 @@ fn apply_wire(request: &mut Request, hop: &Hop, bare: &str) {
     }
 }
 
-fn candidates(found: &[(String, Hop, affinity::Stays)]) -> String {
+fn candidates(found: &[(String, Hop, affinity::Stays, Option<at_once::AtOnceMember>)]) -> String {
     found
         .iter()
-        .map(|(route, hop, _)| format!("{}/{}", hop.member.route_id(), route))
+        .map(|(route, hop, ..)| format!("{}/{}", hop.member.route_id(), route))
         .collect::<Vec<_>>()
         .join(", ")
 }

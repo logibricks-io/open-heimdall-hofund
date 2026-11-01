@@ -493,6 +493,7 @@ RequestFinishedEvent.input_tokens
 RequestFinishedEvent.member
 RequestFinishedEvent.model
 RequestFinishedEvent.output_tokens
+RequestFinishedEvent.reason
 RequestFinishedEvent.request_id
 RequestFinishedEvent.status_class
 RequestStartedEvent #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
@@ -520,11 +521,15 @@ ResyncRequiredEvent.reason
 ResyncRequiredEvent.topic
 RouteModel #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
 RouteModel.id
+RouteModel.reserves
 RouteModel.routing
 RouteModel.stays
 RouteModelListResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
 RouteModelListResponse.models
 RouteModelListResponse.version
+RouteReserve #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+RouteReserve.at_once
+RouteReserve.member
 ShutdownRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
 ShutdownRequest.version
 ShutdownRequest::fn new () -> Self

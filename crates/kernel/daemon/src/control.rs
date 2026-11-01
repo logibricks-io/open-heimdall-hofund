@@ -13,9 +13,9 @@ use hofund_control_proto::{
     PicksResponse, PicksSetRequest, ProviderKeyRequest, ProviderKeysResponse, ProviderListResponse,
     ProviderSummary, ProviderTestRequest, ProviderTestResponse, ProviderTestResult,
     QuotaHistoryQuery, QuotaHistoryResponse, QuotaQuery, QuotaResponse, RouteModel,
-    RouteModelListResponse, ShutdownRequest, ShutdownResponse, ShutdownState, StatusResponse,
-    TokenRotateRequest, TokenRotateResponse, UsagePeriod, UsageQuery, UsageResponse, UsageRow,
-    UsageTotals,
+    RouteModelListResponse, RouteReserve, ShutdownRequest, ShutdownResponse, ShutdownState,
+    StatusResponse, TokenRotateRequest, TokenRotateResponse, UsagePeriod, UsageQuery,
+    UsageResponse, UsageRow, UsageTotals,
 };
 use hofund_control_proto::{
     ConfigApplyRequest, ConfigResponse, ConfigValidateRequest, ConfigValidationResponse,
@@ -47,6 +47,7 @@ pub(crate) struct DaemonControl {
     started_at_ms: u64,
     models: Arc<ModelsHost>,
     ops: Arc<ConfigOps>,
+    router: Option<hofund_router::Snapshot>,
     registry: Arc<dyn DaemonRegistry>,
     cooldowns: Arc<Cooldowns>,
     usage: Arc<Ledger>,
@@ -104,11 +105,18 @@ impl DaemonControl {
             usage,
             keys,
             ops,
+            router: None,
             shutdown,
             events: Arc::new(EventBus::new()),
             in_flight: Arc::new(AtomicU64::new(0)),
             quotas: None,
         }
+    }
+
+    /// Reads live reserve placement from the shared router snapshot.
+    pub(crate) fn with_router(mut self, router: hofund_router::Snapshot) -> Self {
+        self.router = Some(router);
+        self
     }
 
     /// Serves `/v1/hofund/quotas` and its history from `quotas`.
@@ -560,6 +568,19 @@ impl ControlState for DaemonControl {
                 model.stays = super::route_stays(&self.config(), route)
                     .as_str()
                     .to_owned();
+                if let Some(router) = &self.router {
+                    model.reserves = router
+                        .load()
+                        .route_reserves(&route.model)
+                        .into_iter()
+                        .map(|(member, at_once)| {
+                            let mut reserve = RouteReserve::default();
+                            reserve.member = member;
+                            reserve.at_once = u64::try_from(at_once).unwrap_or(u64::MAX);
+                            reserve
+                        })
+                        .collect();
+                }
                 model
             })
             .collect();

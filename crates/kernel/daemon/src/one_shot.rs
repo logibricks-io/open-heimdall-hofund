@@ -133,6 +133,7 @@ async fn state(
             token_path.clone(),
             shutdown,
         )
+        .with_router(snapshot)
         .with_quotas(quotas)
         .with_events(events),
     );

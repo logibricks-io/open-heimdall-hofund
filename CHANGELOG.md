@@ -17,6 +17,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Accounts at once (D-26): optional `at_once` on providers and subscriptions,
+  with plugin `max_accounts` defaults, keeps the first N keys or accounts in
+  configured order taking requests and holds the rest in reserve. Ready members
+  keep their seats in every routing strategy, a resting member hands its seat
+  to the first reserve, and non-strict conversation affinity returns to a kept
+  member with reason `reserve`. Added reserve rows to `hofund routes` and
+  `hofund provider at-once <id> [n|off|default]` for numeric, unlimited, and
+  plugin-default settings. Per-member concurrency-lane guards remain for row
+  4.14. See `docs/provider-keys.md`.
 - Text-to-speech retrieval (P1-4): `POST /v1/audio/speech` and
   `POST /audio/speech` forward OpenAI-shaped JSON through the existing routed
   retrieval seam, changing only the member's model id. Audio, SSE, and vendor
@@ -45,8 +54,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   optional protocol), single and bulk remove, on/off, make-first, rename,
   per-key weight and protocol, and replacement through the config writer,
   control API, and CLI. Replacement preserves key settings and moves rests.
-  Per-key concurrency, remote allowances, per-key plans, and reserve-key
-  accounts-at-once remain follow-ups. See `docs/provider-keys.md`.
+  Per-key concurrency, remote allowances, and per-key plans remain follow-ups.
+  See `docs/provider-keys.md`.
 - Codex compaction parity fixes (D-23): a summary stream that ends before its
   terminal response, including the equivalent 502 error, now produces a
   bounded local summary instead of returning partial text or failing the

@@ -47,6 +47,19 @@ impl DaemonRegistry for LinkedRegistry {
         hofund_plugin_registry::subscription(id)
     }
 
+    fn upstream_max_accounts(&self, id: &str) -> u64 {
+        hofund_plugin_registry::declared_max_accounts("provider", id).unwrap_or_else(|| {
+            hofund_plugin_registry::factory(id).map_or(0, |factory| factory.spec().max_accounts())
+        })
+    }
+
+    fn subscription_max_accounts(&self, id: &str) -> u64 {
+        hofund_plugin_registry::declared_max_accounts("subscription", id).unwrap_or_else(|| {
+            hofund_plugin_registry::subscription(id)
+                .map_or(0, |factory| factory.spec().max_accounts())
+        })
+    }
+
     fn host_plugin(&self, protocol: ProtocolId, host: &str) -> Option<&'static str> {
         hofund_plugin_registry::host_plugin(protocol, host)
     }

@@ -1390,6 +1390,7 @@ pub struct SubscriptionSpec {
     plugin: PluginId,
     display_name: &'static str,
     flow: SignInFlowKind,
+    max_accounts: u64,
 }
 
 impl SubscriptionSpec {
@@ -1413,7 +1414,20 @@ impl SubscriptionSpec {
             plugin,
             display_name,
             flow,
+            max_accounts: 0,
         }
+    }
+
+    /// Declares how many accounts may take requests at once. Zero means no
+    /// plugin default; values above 1000 are capped.
+    #[must_use]
+    pub const fn with_max_accounts(mut self, max_accounts: u64) -> Self {
+        self.max_accounts = if max_accounts > 1000 {
+            1000
+        } else {
+            max_accounts
+        };
+        self
     }
 
     /// The plugin id.
@@ -1433,6 +1447,12 @@ impl SubscriptionSpec {
     #[must_use]
     pub const fn flow(&self) -> SignInFlowKind {
         self.flow
+    }
+
+    /// How many accounts may take requests at once, or zero for no default.
+    #[must_use]
+    pub const fn max_accounts(&self) -> u64 {
+        self.max_accounts
     }
 }
 
