@@ -10,14 +10,14 @@ expression: stable_ids(&encoded)
   "output": [
     {
       "type": "reasoning",
-      "content": [
+      "id": "id_0",
+      "status": "completed",
+      "summary": [
         {
-          "type": "reasoning_text",
+          "type": "summary_text",
           "text": "thinking"
         }
-      ],
-      "id": "id_0",
-      "status": "completed"
+      ]
     },
     {
       "type": "message",
