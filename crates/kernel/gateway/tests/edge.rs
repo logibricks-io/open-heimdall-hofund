@@ -795,6 +795,65 @@ async fn d1h_plugin_agent_without_metadata_keeps_status() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+async fn assert_pre_stream_status(uri: &str, body: &str, status: u16, message: &'static str) {
+    let (app, dir) = protocol_app(vec![failure(
+        "primary",
+        &Arc::new(AtomicUsize::new(0)),
+        EdgeFailure::Status(status, message),
+    )]);
+    let (got, content_type, text) =
+        post_raw_with_agent(app, uri, body, Some(stream_client_ua().as_str())).await;
+    assert_eq!(got.as_u16(), status, "{text}");
+    assert_eq!(content_type, "application/json");
+    assert!(!text.contains("response.failed"), "{text}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn d1i_stream_client_non_stream_request_keeps_status() {
+    assert_pre_stream_status(
+        "/v1/responses",
+        r#"{"model":"demo","input":"hi","stream":false}"#,
+        413,
+        NGINX_413,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn d1j_stream_client_on_another_protocol_keeps_status() {
+    assert_pre_stream_status(
+        "/v1/chat/completions",
+        r#"{"model":"demo","messages":[{"role":"user","content":"hi"}],"stream":true}"#,
+        413,
+        NGINX_413,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn d1k_escaped_overflow_before_stream_start_compacts() {
+    let (app, dir) = protocol_app(vec![failure(
+        "primary",
+        &Arc::new(AtomicUsize::new(0)),
+        EdgeFailure::Status(400, r#"{"error":{"message":"prompt is too\u0020long"}}"#),
+    )]);
+    let (status, content_type, body) = post_raw_with_agent(
+        app,
+        "/v1/responses",
+        r#"{"model":"demo","input":"hi","stream":true}"#,
+        Some(stream_client_ua().as_str()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(content_type, "text/event-stream");
+    assert!(
+        body.contains(r#""code":"context_length_exceeded""#),
+        "{body}"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 async fn call_with(
     app: axum::Router,
     header: &str,
