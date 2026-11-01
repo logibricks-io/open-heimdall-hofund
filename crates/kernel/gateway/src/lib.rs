@@ -8,6 +8,8 @@
 pub mod control;
 mod endpoints;
 mod issue_keys;
+mod oidc;
+mod oidc_keys;
 mod limits;
 mod me;
 mod prev_response;
@@ -56,6 +58,7 @@ use hofund_plugin_api::{
 use hofund_plugin_host::HttpBackend;
 use hofund_router::{Completion, RouteScope, Routed, RouterError, Snapshot, WaitHook};
 use hofund_secrets::{Identity, KeyStore};
+use hofund_secrets::oidc::RuleStore;
 use hofund_usage::{Ledger, Row};
 use thiserror::Error;
 use tokio::net::TcpListener;
@@ -79,6 +82,7 @@ struct Inner {
     snapshot: Snapshot,
     tokens: TokenState,
     keys: Option<Arc<KeyStore>>,
+    oidc_rules: Option<RuleStore>,
     codecs: HashMap<String, Arc<dyn Codec>>,
     usage: Arc<Ledger>,
     budget: limits::Budget,
@@ -463,6 +467,7 @@ impl Gateway {
                 snapshot,
                 tokens: TokenState::new(token, token_file),
                 keys: None,
+                oidc_rules: None,
                 codecs,
                 budget: limits::Budget::new(Arc::clone(&usage)),
                 usage,
@@ -481,9 +486,9 @@ impl Gateway {
     /// Uses the named-key store for authentication and caller scopes.
     #[must_use]
     pub fn with_key_store(mut self, keys: Arc<KeyStore>) -> Self {
-        Arc::get_mut(&mut self.inner)
-            .expect("gateway is not shared yet")
-            .keys = Some(keys);
+        let inner = Arc::get_mut(&mut self.inner).expect("gateway is not shared yet");
+        inner.oidc_rules = Some(RuleStore::beside_token(keys.token_file().path()));
+        inner.keys = Some(keys);
         self
     }
 
@@ -851,7 +856,7 @@ fn request_router(app: &Arc<Inner>) -> axum::Router {
 }
 
 fn request_routes(app: &Arc<Inner>) -> readonly::RouteSet {
-    let mut routes = issue_keys::routes(me::routes(codec_routes(app)));
+    let mut routes = oidc_keys::routes(issue_keys::routes(me::routes(codec_routes(app))));
     if app.quota_source.is_some() {
         routes = quotas::routes(routes);
     }

@@ -22,6 +22,7 @@ usage: hofund gateway-key [list] [--json]
        hofund gateway-key quotas <id> [on | off]
        hofund gateway-key access <id> [read-only | full]
        hofund gateway-key issuer <id> [on | off]
+       hofund gateway-key oidc [list] | add --key <id> --repo owner/name … | remove <rule id>
        hofund gateway-key issue --ttl <duration> [--name <name>] [--models a,b] [--accounts a,b] [--tokens N] [--cost USD] [--read-only] [--from <id>] [--json]
        hofund gateway-key limit <id> [--tokens N --cost USD --per WINDOW --days N --hours N --cache-reads --index N]
        hofund gateway-key reset-limit <id> [N]
@@ -87,6 +88,7 @@ pub(crate) enum Command {
     },
     Limits(crate::gateway_key_limit::Command),
     Issue(crate::gateway_key_issue::Command),
+    Oidc(crate::gateway_key_oidc::Command),
 }
 
 pub(crate) fn parse(
@@ -98,6 +100,9 @@ pub(crate) fn parse(
     let ["gateway-key", rest @ ..] = words else {
         return Ok(None);
     };
+    if let Some(command) = crate::gateway_key_oidc::parse(rest)? {
+        return Ok(Some(Command::Oidc(command)));
+    }
     if let Some(command) = crate::gateway_key_limit::parse(words, &secret, json)? {
         return Ok(Some(Command::Limits(command)));
     }
@@ -197,6 +202,9 @@ fn on_off(value: &str) -> Result<bool, String> {
 }
 
 pub(crate) async fn run(config: &Path, command: &Command) -> Result<String, String> {
+    if let Command::Oidc(oidc) = command {
+        return crate::gateway_key_oidc::run(config, oidc);
+    }
     let client = client(config).await?;
     if let Command::Limits(command) = command {
         return crate::gateway_key_limit::run(&client, command).await;

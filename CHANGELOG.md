@@ -34,6 +34,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reserve/count spend against both keys. Added masked listing, revocation,
   expiry/issuer-refusal 401s on every route, hourly-grace pruning, control and
   CLI issuance, issuer list status, and name-based key on/off.
+- OIDC token exchange for short-lived gateway keys (D-28): trust rules in
+  `oidc-rules.json` and `hofund gateway-key oidc add/list/remove` name an
+  issuer, audience (`hofund-<rule>` by default), claim patterns, backing
+  issuer key, and TTL cap. `POST /v1/hofund/keys/oidc` verifies RS256 tokens
+  (discovery, JWKS cache, exp/nbf/iat skew, single-use `jti`) and issues through
+  the same path as P0-4d keys.
 - Text-to-speech retrieval (P1-4): `POST /v1/audio/speech` and
   `POST /audio/speech` forward OpenAI-shaped JSON through the existing routed
   retrieval seam, changing only the member's model id. Audio, SSE, and vendor
