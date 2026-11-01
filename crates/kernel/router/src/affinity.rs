@@ -375,7 +375,7 @@ impl AffinityState {
             let stick = stick.as_ref().expect("stick exists when candidate matches");
             if candidate.resting {
                 Reason::Resting
-            } else if index > 0 && candidate.nearly_spent {
+            } else if candidate.nearly_spent {
                 Reason::Spent
             } else if mode == Stays::Session {
                 Reason::Session
@@ -820,7 +820,7 @@ mod tests {
     }
 
     #[test]
-    fn c2d_spent_share_is_98_but_100_in_order() {
+    fn c2g_spent_share_is_98_but_100_in_order() {
         assert!((super::spent_share_of("smart") - 98.0).abs() < f64::EPSILON);
         assert!((super::spent_share_of("rotate") - 98.0).abs() < f64::EPSILON);
         assert!((super::spent_share_of("order") - 100.0).abs() < f64::EPSILON);
