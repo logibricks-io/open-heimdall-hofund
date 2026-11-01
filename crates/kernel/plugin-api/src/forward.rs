@@ -1,8 +1,8 @@
 //! Calls the kernel routes by model and forwards to a provider as they are.
 //!
-//! Embeddings, reranking and audio transcription are not chats. The kernel
-//! does not translate them. It picks a member the way it does for a chat,
-//! asks the surface for the body with that member's own model id, and hands
+//! Embeddings, reranking, audio transcription, and text to speech are not
+//! chats. The kernel does not translate them. It picks a member the way it
+//! does for a chat, asks the surface for the body with that member's own model id, and hands
 //! the bytes to the provider.
 
 use std::fmt;
@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 
-use crate::PluginError;
+use crate::{BodyStream, PluginError};
 
 /// The longest path a [`Forward`] may name.
 const PATH_CAP: usize = 128;
@@ -137,23 +137,36 @@ fn valid_path(path: &str) -> bool {
 }
 
 /// A provider's successful answer to a forwarded call.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug)]
 #[non_exhaustive]
 pub struct RawAnswer {
     status: u16,
     content_type: Option<String>,
     body: Bytes,
+    stream: Option<BodyStream>,
 }
 
 impl RawAnswer {
     /// An answer with `status`, the provider's `Content-Type` when it sent
-    /// one, and `body`.
+    /// one, and a buffered `body`.
     #[must_use]
     pub fn new(status: u16, content_type: Option<String>, body: impl Into<Bytes>) -> Self {
         Self {
             status,
             content_type,
             body: body.into(),
+            stream: None,
+        }
+    }
+
+    /// An answer whose body is relayed chunk by chunk.
+    #[must_use]
+    pub fn streaming(status: u16, content_type: Option<String>, body: BodyStream) -> Self {
+        Self {
+            status,
+            content_type,
+            body: Bytes::new(),
+            stream: Some(body),
         }
     }
 
@@ -169,10 +182,24 @@ impl RawAnswer {
         self.content_type.as_deref()
     }
 
-    /// The body, as the provider sent it.
+    /// The buffered body, empty when this is a streaming answer.
     #[must_use]
     pub const fn body(&self) -> &Bytes {
         &self.body
+    }
+
+    /// Whether the body is streamed rather than buffered.
+    #[must_use]
+    pub const fn is_streaming(&self) -> bool {
+        self.stream.is_some()
+    }
+
+    /// The body as a stream, preserving a buffered body as one chunk.
+    #[must_use]
+    pub fn into_body_stream(mut self) -> BodyStream {
+        self.stream
+            .take()
+            .unwrap_or_else(|| BodyStream::from_bytes(self.body))
     }
 }
 

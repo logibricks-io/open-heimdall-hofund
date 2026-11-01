@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Vendor-timed quota and credit rests now stay in place when a quota reading
+  is merely less than full in the same window. They lift early only when a
+  matching window's reset elapsed since the last good reading or moved to a
+  later cycle; failed and empty readings lift nothing. Ordinary renewed-window
+  readings still lift rests whose deadlines were not vendor-named (D-29).
+
 ### Added
 
 - Short-lived gateway keys and issuers (P0-4d): issue keys for 1 minute to
@@ -17,6 +25,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reserve/count spend against both keys. Added masked listing, revocation,
   expiry/issuer-refusal 401s on every route, hourly-grace pruning, control and
   CLI issuance, issuer list status, and name-based key on/off.
+- Text-to-speech retrieval (P1-4): `POST /v1/audio/speech` and
+  `POST /audio/speech` forward OpenAI-shaped JSON through the existing routed
+  retrieval seam, changing only the member's model id. Audio, SSE, and vendor
+  JSON responses stream incrementally with the upstream content type; SSE
+  `speech.audio.done` usage is read from the final 16 KiB, vendor errors and
+  pre-byte failover retain the other retrieval routes' behavior, and recent
+  calls use operation `speech`.
+- Conversation affinity now returns fallback, ordered-group, and stand-in
+  answerers to earlier ready members at the next user turn without crossing
+  tool-loop or strict-stay boundaries (P0-2c2, D-14, D-25). Rotate and
+  whole-session routing spread new conversations by 30-minute least-held
+  counts, including in-flight first requests; subagents follow their leads,
+  emergency fallbacks stay out of rotation while the provider is ready, and
+  effort plus stand-in identity persist compatibly in `affinity.json`.
 - Gateway-key spending limits (P0-4b): up to five token and/or estimated-cost
   caps per key over local calendar windows or absolute N-day/N-hour cycles.
   Cache-aware token sums rebuild from SQLite after restart, in-flight body-size

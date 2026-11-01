@@ -69,6 +69,8 @@ fn make_router(
         free: false,
         cold_after: hofund_router::affinity::CACHE_COLD,
         nearly_spent: false,
+        fallback: false,
+        effort: String::new(),
     };
     let router = Router::from_hops(
         BTreeMap::from([("demo".to_owned(), vec![hop])]),
