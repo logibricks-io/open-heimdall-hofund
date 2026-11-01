@@ -395,3 +395,31 @@ async fn b5e_routing_reads_the_rest_of_the_hop_wire_model() {
     assert_eq!(routed.upstream_id, "second");
     assert_eq!(seen.lock().expect("seen").as_slice(), ["second"]);
 }
+
+#[tokio::test]
+async fn d24_a_model_with_no_provider_rests_alone_and_its_seat_is_passed_over() {
+    let (book, seen) = fixture();
+    let error = PluginError::status_error(
+        400,
+        r#"{"error":{"message":"Model id : lab/demo-flash , has no provider supported"}}"#,
+    );
+    book.record_failure_for_model(&member_id("first"), "wire-a", &error)
+        .expect("model rest");
+    assert!(book.cooling(&member_id("first")).is_none(), "the member does not rest");
+    assert!(book.cooling_for_model(&member_id("first"), "wire-b").is_none());
+    let mut first = Hop::new(fake("first", &seen, Behavior::Unary));
+    first.wire_model = Some("wire-a".to_owned());
+    let hops = vec![first, Hop::new(fake("second", &seen, Behavior::Unary))];
+    let router = Router::from_routes(
+        BTreeMap::from([("alias".to_owned(), Route::new(hops))]),
+        FailoverPolicy::default(),
+    )
+    .with_cooldowns(book);
+
+    let routed = router
+        .dispatch(&Request::new("alias"), "inbound")
+        .await
+        .expect("dispatch");
+    assert_eq!(routed.upstream_id, "second");
+    assert_eq!(seen.lock().expect("seen").as_slice(), ["second"]);
+}

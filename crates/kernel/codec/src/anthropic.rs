@@ -53,6 +53,10 @@ impl Codec for AnthropicMessages {
         encode_stream(events)
     }
 
+    fn stream_end(&self) -> crate::StreamEnd {
+        crate::StreamEnd::Named
+    }
+
     fn stream_decoder(&self) -> Box<dyn StreamDecoder> {
         Box::new(Decoder::default())
     }
