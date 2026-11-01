@@ -2073,6 +2073,16 @@ mod tests {
     }
 
     #[test]
+    fn d3_route_plan_carries_sink_to_provider_hops() {
+        let config = hofund_config::load(
+            "[[providers]]\nid = \"one\"\npreset = \"openai\"\n[[routes]]\nmodel = \"demo\"\nsink = true\nupstreams = [{ provider = \"one\" }]\n",
+        )
+        .expect("config");
+        let (routes, _) = super::route_plan(&config, None, None);
+        assert!(routes["demo"][0].sink);
+    }
+
+    #[test]
     fn k3_candidates_keep_key_order_ids_and_protocol_filters() {
         let config = hofund_config::load(
             "[[providers]]\nid = \"one\"\nprotocol = \"openai-chat\"\nbase_url = \"http://127.0.0.1:9/v1\"\napi_key = \"first\"\nkey_weight = 2\n[[providers.keys]]\nkey = \"off\"\non = false\n[[providers.keys]]\nkey = \"responses\"\nprotocol = \"openai-responses\"\n[[providers.keys]]\nkey = \"last\"\nweight = 3\n[[routes]]\nmodel = \"demo\"\nrouting = \"weight\"\nupstreams = [{ provider = \"one\", weight = 9 }]\n",

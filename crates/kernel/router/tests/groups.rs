@@ -263,6 +263,60 @@ async fn d3_nested_group_sinks_inside_its_own_order() {
 }
 
 #[tokio::test]
+async fn d3_rotate_group_does_not_reorder_by_sink() {
+    let now = Arc::new(Mutex::new(Instant::now()));
+    let clock = Arc::clone(&now);
+    let cooldowns = Arc::new(Cooldowns::with_clock(
+        CooldownPolicy::default(),
+        Arc::new(move || *clock.lock().expect("clock")),
+    ));
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let inner = || unit("group/inner", "rotate", 1, true);
+    let route = Route::new(vec![
+        hop("a", vec![inner(), direct("a", 1)[0].clone()], 1, &seen),
+        hop("b", vec![inner(), direct("b", 1)[0].clone()], 1, &seen),
+    ])
+    .with_routing("order");
+    let router = router(route).with_cooldowns(Arc::clone(&cooldowns));
+    cooldowns.record_failure_for_model(
+        &member_id("a"),
+        "demo",
+        &PluginError::status_error(429, "slow"),
+    );
+    *now.lock().expect("clock") += Duration::from_secs(61);
+
+    dispatch(&router).await;
+    assert_eq!(*seen.lock().expect("seen"), ["a"]);
+}
+
+#[tokio::test]
+async fn d3_server_failure_does_not_sink() {
+    let now = Arc::new(Mutex::new(Instant::now()));
+    let clock = Arc::clone(&now);
+    let cooldowns = Arc::new(Cooldowns::with_clock(
+        CooldownPolicy::default(),
+        Arc::new(move || *clock.lock().expect("clock")),
+    ));
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let route = Route::new(vec![
+        hop("a", direct("a", 1), 1, &seen),
+        hop("b", direct("b", 1), 1, &seen),
+    ])
+    .with_routing("order")
+    .with_sink(true);
+    let router = router(route).with_cooldowns(Arc::clone(&cooldowns));
+    cooldowns.record_failure_for_model(
+        &member_id("a"),
+        "demo",
+        &PluginError::status_error(500, "down"),
+    );
+    *now.lock().expect("clock") += Duration::from_secs(61);
+
+    dispatch(&router).await;
+    assert_eq!(*seen.lock().expect("seen"), ["a"]);
+}
+
+#[tokio::test]
 async fn d4_unserved_routing_uses_listed_order_when_registration_is_removed() {
     let registry = Registry::default();
     let strategies = Arc::new(StrategyState::new(registry.clone()));
@@ -429,6 +483,32 @@ async fn d6_model_list_refresh_reorders_free_route_per_request() {
         free_hop("changed", &changed_models, &changed_reads, &seen),
     ])
     .with_routing("free");
+    let router = router(route);
+
+    dispatch(&router).await;
+    *changed_models.lock().expect("models") = vec![listed(true, false)];
+    dispatch(&router).await;
+    *changed_models.lock().expect("models") = vec![listed(false, true)];
+    dispatch(&router).await;
+
+    assert_eq!(*seen.lock().expect("seen"), ["paid", "changed", "changed"]);
+    assert_eq!(paid_reads.load(Ordering::SeqCst), 3);
+    assert_eq!(changed_reads.load(Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+async fn d6_nested_group_free_flags_refresh_per_request() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let paid_models = Arc::new(Mutex::new(vec![listed(false, false)]));
+    let changed_models = Arc::new(Mutex::new(vec![listed(false, false)]));
+    let paid_reads = Arc::new(AtomicUsize::new(0));
+    let changed_reads = Arc::new(AtomicUsize::new(0));
+    let inner = || unit("group/free", "free", 1, false);
+    let mut paid = free_hop("paid", &paid_models, &paid_reads, &seen);
+    paid.units = vec![inner(), direct("paid", 1)[0].clone()];
+    let mut changed = free_hop("changed", &changed_models, &changed_reads, &seen);
+    changed.units = vec![inner(), direct("changed", 1)[0].clone()];
+    let route = Route::new(vec![paid, changed]).with_routing("order");
     let router = router(route);
 
     dispatch(&router).await;
