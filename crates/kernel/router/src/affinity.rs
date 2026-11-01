@@ -696,11 +696,9 @@ mod tests {
             let current = Arc::clone(&current);
             Arc::new(move || *current.lock().expect("clock"))
         };
-        let state = AffinityState::with_clock(
-            std::env::temp_dir().join(format!("unused-affinity-{}", std::process::id())),
-            clock,
-            Duration::ZERO,
-        );
+        let unused = tempfile::tempdir().expect("temp dir");
+        let state =
+            AffinityState::with_clock(unused.path().join("unused-affinity"), clock, Duration::ZERO);
         state.answered("demo|session", "second", "model", 1, usage(0, 3000));
         let decision = state.order(&conversation(), Stays::Auto, "smart", &candidates());
         assert_eq!(decision.order, [1, 0]);
@@ -762,8 +760,9 @@ mod tests {
             let current = Arc::clone(&current);
             Arc::new(move || *current.lock().expect("clock"))
         };
+        let unused = tempfile::tempdir().expect("temp dir");
         let state = AffinityState::with_clock(
-            std::env::temp_dir().join(format!("unused-hour-affinity-{}", std::process::id())),
+            unused.path().join("unused-hour-affinity"),
             clock,
             Duration::ZERO,
         );

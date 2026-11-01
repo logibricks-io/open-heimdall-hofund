@@ -197,7 +197,7 @@ async fn c2f_nearly_spent_stuck_account_is_bypassed() {
     quotas.record_success(
         Quota {
             provider: "second".to_owned(),
-            kind: QuotaKind::Subscription,
+            kind: QuotaKind::default(),
             user: "acct".to_owned(),
             ..Quota::default()
         },

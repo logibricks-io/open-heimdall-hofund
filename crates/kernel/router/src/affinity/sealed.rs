@@ -225,7 +225,7 @@ mod tests {
                 provider_id: "second".to_owned(),
                 ..MemberAttempt::default()
             },
-            inbound_protocol: "openai-responses".to_owned(),
+            inbound_protocol: "responses".to_owned(),
         }
     }
 
