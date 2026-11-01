@@ -75,8 +75,8 @@ Authentication accepts `Authorization: Bearer <key>`, `x-api-key`,
 disabled, and removed keys receive 401. An expired key receives 401 with its
 expiry and `ask for a new one` on every route, including open routes and
 loopback. Existing loopback behavior is otherwise unchanged: hofund still
-requires a key on loopback. The only keyless exception is the short-lived-key
-management route described below.
+requires a key on loopback. Keyless exceptions are the short-lived-key
+management route and `POST /v1/hofund/keys/oidc` described below.
 
 ## Read-only keys and the key page
 
@@ -158,6 +158,38 @@ The stats and management routes currently available are:
 
 Usage-summary, request-list, concurrency, card, and MCP-inventory routes do not
 have hofund equivalents yet.
+
+## OIDC token exchange
+
+Trust rules live in `oidc-rules.json` beside the gateway-key store. Each rule
+names an HTTPS issuer, a required token audience (default `hofund-<rule id>`),
+claim patterns, the gateway key that may issue short-lived keys, and a maximum
+TTL. Configure them with:
+
+```sh
+hofund gateway-key oidc add --key <issuer-key-id> --repo owner/name \
+  [--owner <owner>] [--ref refs/heads/main] [--environment <name>] \
+  [--claim name=value]… [--ttl 1h] [--issuer URL] [--audience <aud>]
+hofund gateway-key oidc list
+hofund gateway-key oidc remove <rule id>
+```
+
+`POST /v1/hofund/keys/oidc` does not require a gateway key. Send the OIDC token
+as `Authorization: Bearer <token>`. The body may be empty or
+`{"ttl":"30m","models":["provider/model"]}`; requested TTL is capped by the
+rule and by the global short-lived-key limits. On success the response is 201
+with `Cache-Control: no-store` and the same issued-key JSON as
+`POST /v1/hofund/keys`. The gateway verifies RS256 signatures only: it loads
+the issuer discovery document and JWKS over HTTPS, caches keys for one hour,
+refetches on an unknown key id (at most once every ten seconds), applies one
+minute of clock skew to `exp`, `nbf`, and `iat`, and rejects a reused `jti`
+until the token expires. Tokens must match audience and every configured claim
+pattern. Issued keys use the same issue path, clamping, pruning, and issuer
+accounting as keys from P0-4d.
+
+The route is registered on the network listener like other key-management paths.
+Only configured issuers are fetched; a token cannot steer the gateway toward an
+arbitrary URL.
 
 ## Model and account scopes
 

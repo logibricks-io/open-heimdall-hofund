@@ -11,6 +11,7 @@ use thiserror::Error;
 
 mod keys;
 mod limits;
+pub mod oidc;
 pub use keys::*;
 pub use limits::{LimitWindow, MAX_DAYS, MAX_HOURS, MAX_LIMITS};
 
