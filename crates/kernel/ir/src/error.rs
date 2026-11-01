@@ -6,6 +6,9 @@ fn re(pattern: &str) -> Regex {
     Regex::new(pattern).expect("an error word list compiles")
 }
 
+/// The conversation no longer fits the model. The Chinese clauses name the
+/// context, or what was sent (content, input, text, prompt, question,
+/// conversation, message), beside its length, tokens, or character count.
 static TOO_LONG: LazyLock<Regex> = LazyLock::new(|| {
     re(concat!(
         "(?i)context_length_exceeded|prompt is too long|input is too long|(exceeds?|exceeded|over|beyond)( the)?( model'?s?)?( maximum)? context|context (length|limit|window) (exceeded|is exceeded)|maximum context length|too many (input |prompt )?tokens|\u{4e0a}\u{4e0b}\u{6587}(\u{957f}\u{5ea6})?(\u{8d85}|\u{8fc7}\u{957f})|\u{8d85}(\u{8fc7}|\u{51fa})(\u{4e86})?(\u{6a21}\u{578b})?(\u{7684})?(\u{6700}\u{5927})?\u{4e0a}\u{4e0b}\u{6587}",
@@ -16,6 +19,9 @@ static TOO_LONG: LazyLock<Regex> = LazyLock::new(|| {
     ))
 });
 
+/// A limit on how fast or how much, not on one prompt's size. The Chinese
+/// words are pace, frequent, frequency, throttling, concurrency, per
+/// (second, minute, hour, day), and try again later.
 static PACE_WORDS: LazyLock<Regex> = LazyLock::new(|| {
     re(
         "(?i)rate.?limit|per (minute|hour|day)|(?-u:\\b)TP[MD](?-u:\\b)|please wait|try again later|throttl|\u{901f}\u{7387}|\u{9891}\u{7e41}|\u{9891}\u{7387}|\u{9650}\u{6d41}|\u{5e76}\u{53d1}|\u{6bcf}(\u{79d2}|\u{5206}\u{949f}|\u{5c0f}\u{65f6}|\u{5929}|\u{65e5})|\u{7a0d}\u{540e}(\u{518d}\u{8bd5}|\u{91cd}\u{8bd5})",
@@ -40,8 +46,8 @@ pub fn too_long(status: u16, text: &str) -> bool {
     TOO_LONG.is_match(text)
 }
 
-/// Appends each string in a JSON error body to the original text when the body
-/// contains `\u` escapes, so classifiers see both spellings.
+/// The text with each string of its JSON appended on its own line, when the
+/// text escapes any as `\u` (`reference: internal/catalog/catalog.go:1653`).
 #[must_use]
 pub fn words_of(text: &str) -> String {
     if !text.contains("\\u") {
