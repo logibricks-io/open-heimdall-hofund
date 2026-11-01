@@ -90,10 +90,12 @@ pub(crate) enum Command {
 }
 
 pub(crate) fn run(config: &Path, command: &Command) -> Result<String, String> {
-    let token = crate::local::token_file(config);
-    let keys = KeyStore::beside_token(token.path());
+    let loaded = hofund_config::load_path(config)
+        .map_err(|error| format!("{}: {error}", config.display()))?;
+    let token_path = crate::local::beside(config, &loaded.token_file);
+    let keys = KeyStore::beside_token(&token_path);
     keys.list().map_err(|error| error.to_string())?;
-    let rules = RuleStore::beside_token(token.path());
+    let rules = RuleStore::beside_token(&token_path);
     match command {
         Command::List => list(&rules),
         Command::Add(draft) => add(&rules, &keys, draft.clone()),

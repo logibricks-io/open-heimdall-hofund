@@ -4,6 +4,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use tokio::sync::Mutex as AsyncMutex;
+
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use hofund_secrets::oidc::{Rule, RuleStore, claim_pattern_matches};
@@ -22,12 +24,21 @@ static NOW: Mutex<Option<SystemTime>> = Mutex::new(None);
 /// Verified token claims.
 pub type Claims = BTreeMap<String, Value>;
 
+/// Clears JWKS and jti replay caches between tests.
+#[allow(dead_code)]
+pub async fn reset_oidc_verifier_for_tests() {
+    SETS.lock().await.clear();
+    USED.lock().await.clear();
+}
+
 /// Installs a custom GET fetcher for tests.
+#[allow(dead_code)]
 pub fn set_fetch_client_for_tests(fetch: FetchClient) {
     *FETCH.lock().expect("fetch") = Some(fetch);
 }
 
 /// Overrides the clock used for exp, nbf, and iat checks in tests.
+#[allow(dead_code)]
 pub fn set_now_for_tests(now: Option<SystemTime>) {
     *NOW.lock().expect("clock") = now;
 }
@@ -141,7 +152,7 @@ pub async fn match_token(
         }
         if !claim_str(&claims, "jti").is_empty() {
             let jti = claim_str(&claims, "jti");
-            if !first_use(&format!("{iss}\0{jti}"), exp, clock) {
+            if !first_use(&format!("{iss}\0{jti}"), exp, clock).await {
                 return Err(
                     "this token was traded for a key already: ask the issuer for a new one"
                         .to_owned(),
@@ -212,11 +223,11 @@ fn described(claims: &Claims, rules: &[Rule]) -> String {
         .join(", ")
 }
 
-static USED: LazyLock<Mutex<HashMap<String, SystemTime>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+static USED: LazyLock<AsyncMutex<HashMap<String, SystemTime>>> =
+    LazyLock::new(|| AsyncMutex::new(HashMap::new()));
 
-fn first_use(id: &str, until: SystemTime, now: SystemTime) -> bool {
-    let mut used = USED.lock().expect("used jti");
+async fn first_use(id: &str, until: SystemTime, now: SystemTime) -> bool {
+    let mut used = USED.lock().await;
     used.retain(|_, expiry| now < *expiry);
     if used.contains_key(id) {
         return false;
@@ -233,12 +244,12 @@ struct KeySet {
     loading: Option<Arc<()>>,
 }
 
-static SETS: LazyLock<Mutex<HashMap<String, KeySet>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+static SETS: LazyLock<AsyncMutex<HashMap<String, KeySet>>> =
+    LazyLock::new(|| AsyncMutex::new(HashMap::new()));
 
 async fn public_key(issuer: &str, kid: &str) -> Result<Vec<u8>, String> {
     loop {
-        let mut sets = SETS.lock().expect("jwks sets");
+        let mut sets = SETS.lock().await;
         let entry = sets.entry(issuer.to_owned()).or_default();
         let now = clock_now();
         let have = entry.keys.get(kid).cloned();
@@ -275,7 +286,7 @@ async fn public_key(issuer: &str, kid: &str) -> Result<Vec<u8>, String> {
         entry.tried = Some(now);
         drop(sets);
         let fetched_result = fetch_keys(issuer).await;
-        let mut sets = SETS.lock().expect("jwks sets");
+        let mut sets = SETS.lock().await;
         let entry = sets.get_mut(issuer).expect("issuer set");
         if let Ok(ref keys) = fetched_result {
             entry.keys.clone_from(keys);
@@ -354,7 +365,7 @@ async fn fetch_keys(issuer: &str) -> Result<HashMap<String, Vec<u8>>, String> {
     parse_jwks(&body)
 }
 
-fn parse_jwks(body: &[u8]) -> Result<HashMap<String, Vec<u8>>, String> {
+pub(super) fn parse_jwks(body: &[u8]) -> Result<HashMap<String, Vec<u8>>, String> {
     let set: Value = serde_json::from_slice(body).map_err(|error| error.to_string())?;
     let keys = set
         .get("keys")
@@ -390,11 +401,13 @@ fn parse_jwks(body: &[u8]) -> Result<HashMap<String, Vec<u8>>, String> {
         if e.is_empty() || e.len() > 4 {
             continue;
         }
-        let exponent = bytes_to_u32(&e);
-        if n.len() < 256 || exponent < 3 {
+        if bytes_to_u32(&e) < 3 {
             continue;
         }
-        let der = rsa_spki_der(&n, exponent);
+        if modulus_bit_len(&n) < 2048 {
+            continue;
+        }
+        let der = rsa_spki_der(&n, &e);
         out.insert(kid.to_owned(), der);
     }
     if out.is_empty() {
@@ -402,6 +415,15 @@ fn parse_jwks(body: &[u8]) -> Result<HashMap<String, Vec<u8>>, String> {
     } else {
         Ok(out)
     }
+}
+
+fn modulus_bit_len(bytes: &[u8]) -> u32 {
+    let mut bits = u32::try_from(bytes.len()).unwrap_or(0) * 8;
+    if let Some(first) = bytes.first() {
+        let leading = first.leading_zeros();
+        bits -= leading;
+    }
+    bits
 }
 
 fn bytes_to_u32(bytes: &[u8]) -> u32 {
@@ -412,23 +434,11 @@ fn bytes_to_u32(bytes: &[u8]) -> u32 {
     value
 }
 
-fn rsa_spki_der(modulus: &[u8], exponent: u32) -> Vec<u8> {
-    let mut int_mod = modulus.to_vec();
-    if int_mod.first().is_some_and(|byte| *byte & 0x80 != 0) {
-        int_mod.insert(0, 0);
-    }
-    let int_exp = if exponent >= 0x1000000 {
-        let mut bytes = vec![0_u8];
-        bytes.extend_from_slice(&exponent.to_be_bytes());
-        bytes
-    } else if exponent >= 0x10000 {
-        exponent.to_be_bytes()[..4].to_vec()
-    } else if exponent >= 0x100 {
-        exponent.to_be_bytes()[..2].to_vec()
-    } else {
-        vec![exponent as u8]
-    };
-    let seq = der_sequence(&[der_integer(&int_mod).as_slice(), der_integer(&int_exp).as_slice()]);
+fn rsa_spki_der(modulus: &[u8], exponent: &[u8]) -> Vec<u8> {
+    let seq = der_sequence(&[
+        der_integer(modulus).as_slice(),
+        der_integer(exponent).as_slice(),
+    ]);
     let alg = der_sequence(&[der_oid_rsa_encryption().as_slice(), der_null().as_slice()]);
     let bit_string = der_bit_string(&seq);
     der_sequence(&[alg.as_slice(), bit_string.as_slice()])

@@ -28,14 +28,19 @@ struct ExchangeBody {
     models: Vec<String>,
 }
 
-async fn oidc_issue_key(State(app): State<Arc<Inner>>, request: Request) -> Response {
+async fn oidc_issue_key(
+    State(app): State<Arc<Inner>>,
+    request: Request,
+) -> Response {
     let token = bearer(request.headers())
         .map(str::trim)
         .filter(|token| !token.is_empty())
         .map(str::to_owned);
-    let refuse = |why: &str| error(StatusCode::UNAUTHORIZED, why);
     let Some(token) = token else {
-        return refuse("send the OIDC token as Authorization: Bearer <token>");
+        return error(
+            StatusCode::UNAUTHORIZED,
+            "send the OIDC token as Authorization: Bearer <token>",
+        );
     };
     let Some(keys) = &app.keys else {
         return error(
@@ -44,11 +49,14 @@ async fn oidc_issue_key(State(app): State<Arc<Inner>>, request: Request) -> Resp
         );
     };
     let Some(rules) = &app.oidc_rules else {
-        return refuse("no rule takes tokens from this issuer (hofund gateway-key oidc add)");
+        return error(
+            StatusCode::UNAUTHORIZED,
+            "no rule takes tokens from this issuer (hofund gateway-key oidc add)",
+        );
     };
     let (rule, claims) = match match_token(&token, rules).await {
         Ok(matched) => matched,
-        Err(why) => return refuse(&why),
+        Err(why) => return error(StatusCode::UNAUTHORIZED, &why),
     };
     let bytes = match axum::body::to_bytes(request.into_body(), BODY_LIMIT).await {
         Ok(bytes) => bytes,
@@ -103,7 +111,10 @@ async fn oidc_issue_key(State(app): State<Arc<Inner>>, request: Request) -> Resp
             );
             response
         }
-        Err(failure) => error(StatusCode::BAD_REQUEST, &failure.to_string()),
+        Err(failure) => {
+            let message = failure.to_string();
+            error(StatusCode::BAD_REQUEST, &message)
+        }
     }
 }
 
@@ -126,7 +137,7 @@ mod tests {
 
     use super::*;
     use crate::oidc::test_issuer::TestIssuer;
-    use crate::oidc::set_fetch_client_for_tests;
+    use crate::oidc::{reset_oidc_verifier_for_tests, set_fetch_client_for_tests};
     use crate::{Gateway, issue_keys::PeerAddr};
 
     struct Fixture {
@@ -137,7 +148,8 @@ mod tests {
         _dir: tempfile::TempDir,
     }
 
-    fn fixture() -> Fixture {
+    async fn fixture() -> Fixture {
+        reset_oidc_verifier_for_tests().await;
         let dir = tempfile::tempdir().expect("temp dir");
         let store = Arc::new(hofund_secrets::KeyStore::beside_token(
             dir.path().join("hofund.token"),
@@ -196,7 +208,7 @@ mod tests {
 
     #[tokio::test]
     async fn d28_exchange_issues_key_from_remote_without_gateway_key() {
-        let fixture = fixture();
+        let fixture = fixture().await;
         let parent = fixture.store.add("CI", None).expect("parent");
         fixture
             .store

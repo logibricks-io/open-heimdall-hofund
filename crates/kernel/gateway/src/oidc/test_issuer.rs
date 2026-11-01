@@ -7,12 +7,14 @@ use std::sync::{Arc, Mutex};
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use ring::rand::SystemRandom;
-use ring::signature::{KeyPair, RsaKeyPair, RSA_PKCS1_SHA256};
+use ring::signature::{RsaKeyPair, RSA_PKCS1_SHA256};
+use ring::rsa::PublicKeyComponents;
 use serde_json::{Number, Value};
 
 pub struct TestIssuer {
     pub url: String,
     pair: Arc<RsaKeyPair>,
+    spki: Vec<u8>,
     modulus: Vec<u8>,
     exponent: Vec<u8>,
     extra: Mutex<BTreeMap<String, Arc<RsaKeyPair>>>,
@@ -23,11 +25,13 @@ pub struct TestIssuer {
 impl TestIssuer {
     pub fn new() -> Self {
         let pair = Arc::new(generate_key());
-        let (modulus, exponent) = test_rsa_components();
+        let components = PublicKeyComponents::<Vec<u8>>::from(pair.public());
+        let spki = pair.public().as_ref().to_vec();
         Self {
             url: "https://issuer.test".to_owned(),
-            modulus,
-            exponent,
+            spki,
+            modulus: components.n,
+            exponent: components.e,
             pair,
             extra: Mutex::new(BTreeMap::new()),
             fetches: AtomicU32::new(0),
@@ -123,6 +127,10 @@ impl TestIssuer {
         format!("{signed}.{}", URL_SAFE_NO_PAD.encode(signature))
     }
 
+    pub fn spki(&self) -> &[u8] {
+        &self.spki
+    }
+
     pub fn fetch(&self, url: &str) -> Result<Vec<u8>, String> {
         if self.down.load(Ordering::SeqCst) {
             return Err("down".to_owned());
@@ -171,13 +179,4 @@ fn generate_key() -> RsaKeyPair {
     }
     let pkcs8 = STANDARD.decode(body.as_bytes()).expect("pem");
     RsaKeyPair::from_pkcs8(&pkcs8).expect("pair")
-}
-
-fn test_rsa_components() -> (Vec<u8>, Vec<u8>) {
-    let hex = include_str!("test-modulus.hex").trim();
-    let mut modulus = Vec::with_capacity(hex.len() / 2);
-    for index in (0..hex.len()).step_by(2) {
-        modulus.push(u8::from_str_radix(&hex[index..index + 2], 16).expect("hex"));
-    }
-    (modulus, vec![1, 0, 1])
 }

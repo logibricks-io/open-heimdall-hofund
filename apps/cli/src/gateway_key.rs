@@ -392,7 +392,7 @@ fn mutation(command: &Command) -> Result<(GatewayKeyRequest, String, Verb), Stri
             request.issues = issues.unwrap_or(false);
             return Ok((request.for_id(id), id.clone(), Verb::Issuer));
         }
-        Command::List { .. } | Command::Limits(_) | Command::Issue(_) => {
+        Command::List { .. } | Command::Limits(_) | Command::Issue(_) | Command::Oidc(_) => {
             return Err("not a gateway-key mutation".to_owned());
         }
     };

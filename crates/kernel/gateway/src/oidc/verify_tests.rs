@@ -7,7 +7,28 @@ use hofund_secrets::KeyStore;
 use serde_json::{Number, Value};
 
 use super::test_issuer::TestIssuer;
-use super::{claim_str, match_token, oidc_key_name, set_fetch_client_for_tests, set_now_for_tests};
+use super::{claim_str, match_token, oidc_key_name, reset_oidc_verifier_for_tests, set_fetch_client_for_tests, set_now_for_tests};
+use crate::oidc::verify::parse_jwks;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine as _;
+use ring::signature::{UnparsedPublicKey, RSA_PKCS1_2048_8192_SHA256};
+
+#[test]
+fn d28_jwks_spki_verifies_test_issuer_tokens() {
+    let issuer = TestIssuer::new();
+    let jwks = issuer
+        .fetch(&format!("{}/jwks", issuer.url))
+        .expect("jwks");
+    let keys = parse_jwks(&jwks).expect("parse");
+    let der = keys.get("k1").expect("k1");
+    let token = issuer.sign("k1", issuer.claims("hofund-x", &BTreeMap::new()));
+    let parts: Vec<&str> = token.split('.').collect();
+    let signed = format!("{}.{}", parts[0], parts[1]);
+    let sig = URL_SAFE_NO_PAD.decode(parts[2]).expect("sig");
+    let key = UnparsedPublicKey::new(&RSA_PKCS1_2048_8192_SHA256, der.as_slice());
+    key.verify(signed.as_bytes(), &sig)
+        .expect("signature should verify");
+}
 
 fn issuer_key(keys: &KeyStore) -> String {
     let parent = keys.add("CI", None).expect("add");
@@ -15,7 +36,8 @@ fn issuer_key(keys: &KeyStore) -> String {
     parent.key.id
 }
 
-fn fixture() -> (tempfile::TempDir, RuleStore, KeyStore, Arc<TestIssuer>) {
+async fn fixture() -> (tempfile::TempDir, RuleStore, KeyStore, Arc<TestIssuer>) {
+    reset_oidc_verifier_for_tests().await;
     let dir = tempfile::tempdir().expect("temp");
     let token = dir.path().join("hofund.token");
     let keys = KeyStore::beside_token(&token);
@@ -31,7 +53,7 @@ fn fixture() -> (tempfile::TempDir, RuleStore, KeyStore, Arc<TestIssuer>) {
 
 #[tokio::test]
 async fn d28_match_accepts_valid_token_and_refuses_replay() {
-    let (_dir, rules, keys, issuer) = fixture();
+    let (_dir, rules, keys, issuer) = fixture().await;
     let key = issuer_key(&keys);
     let rule = rules
         .add(
@@ -58,7 +80,7 @@ async fn d28_match_accepts_valid_token_and_refuses_replay() {
 
 #[tokio::test]
 async fn d28_match_refuses_each_bad_claim() {
-    let (_dir, rules, keys, issuer) = fixture();
+    let (_dir, rules, keys, issuer) = fixture().await;
     let key = issuer_key(&keys);
     let rule = rules
         .add(
@@ -179,7 +201,7 @@ async fn d28_match_refuses_each_bad_claim() {
 
 #[tokio::test]
 async fn d28_jwks_cache_refetch_and_stale_serving() {
-    let (_dir, rules, keys, issuer) = fixture();
+    let (_dir, rules, keys, issuer) = fixture().await;
     let key = issuer_key(&keys);
     let rule = rules
         .add(
@@ -228,7 +250,7 @@ async fn d28_jwks_cache_refetch_and_stale_serving() {
 
 #[tokio::test]
 async fn d28_unread_keys_refuse_tokens() {
-    let (_dir, rules, keys, issuer) = fixture();
+    let (_dir, rules, keys, issuer) = fixture().await;
     issuer.set_down(true);
     let key = issuer_key(&keys);
     let rule = rules
@@ -253,7 +275,7 @@ async fn d28_unread_keys_refuse_tokens() {
 
 #[tokio::test]
 async fn d28_issuer_without_rule_is_never_fetched() {
-    let (_dir, rules, keys, issuer) = fixture();
+    let (_dir, rules, keys, issuer) = fixture().await;
     let key = issuer_key(&keys);
     let rule = rules
         .add(

@@ -131,7 +131,7 @@ impl RuleStore {
 }
 
 /// Input for [`RuleStore::add`]; id and audience may be filled in by the store.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RuleDraft {
     /// Issuer gateway key id.
     pub key: String,
@@ -246,6 +246,7 @@ fn lock() -> Result<StoreGuard, SecretError> {
 }
 
 struct StoreGuard {
+    #[allow(dead_code)]
     guard: std::sync::MutexGuard<'static, ()>,
 }
 

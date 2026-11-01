@@ -8,7 +8,8 @@ mod verify;
 #[cfg(test)]
 mod verify_tests;
 
-pub use verify::{
-    Claims, clip, match_token, oidc_key_name, set_fetch_client_for_tests, set_now_for_tests,
-};
+pub use verify::{match_token, oidc_key_name};
+
+#[cfg(test)]
+pub use verify::{claim_str, reset_oidc_verifier_for_tests, set_fetch_client_for_tests, set_now_for_tests};
 
