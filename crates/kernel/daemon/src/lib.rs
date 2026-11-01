@@ -42,6 +42,7 @@ mod models;
 mod models_state;
 mod offline;
 mod one_shot;
+mod plans;
 mod probe;
 mod provider_keys;
 mod quotas;
@@ -1019,6 +1020,7 @@ fn providers(
                     name: String::new(),
                     on: true,
                     protocol: None,
+                    plan: None,
                     weight: 1,
                 },
                 id: String::new(),

@@ -487,7 +487,7 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
         }
         [
             "provider",
-            verb @ ("key-rename" | "key-replace" | "key-weight" | "key-protocol"),
+            verb @ ("key-rename" | "key-replace" | "key-weight" | "key-protocol" | "key-plan"),
             id,
             key_id,
             value,
@@ -497,6 +497,7 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
                 "key-rename" => ProviderKeyAction::Rename,
                 "key-replace" => ProviderKeyAction::Replace,
                 "key-weight" => ProviderKeyAction::Weight,
+                "key-plan" => ProviderKeyAction::Plan,
                 _ => ProviderKeyAction::Protocol,
             },
             key_id: (*key_id).to_owned(),
@@ -923,6 +924,7 @@ usage: hofund provider list [--config PATH]
        hofund provider key-replace <id> <key-id> <key> [--config PATH]
        hofund provider key-weight <id> <key-id> <0-1000> [--config PATH]
        hofund provider key-protocol <id> <key-id> <protocol|any> [--config PATH]
+       hofund provider key-plan <id> <key-id> <plan|any> [--config PATH]
        hofund provider rm <id> [--config PATH]
        hofund provider refresh-every <id> [<interval>|off] [--config PATH]
        hofund provider auto-include <id> [<rule>...|none] [--config PATH]
@@ -1373,6 +1375,19 @@ mod tests {
             );
         }
         assert!(command(&["provider", "key-add", "p"]).is_err());
+    }
+
+    #[test]
+    fn p15_key_plan_command_parses() {
+        assert_eq!(
+            command(&["provider", "key-plan", "p", "0123456789", "coding"]),
+            Ok(Command::ProviderKeyEdit {
+                id: "p".to_owned(),
+                action: super::ProviderKeyAction::Plan,
+                key_id: "0123456789".to_owned(),
+                value: "coding".to_owned(),
+            })
+        );
     }
 
     #[test]

@@ -17,6 +17,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Plan allowance windows (P0-5b1): keyed and account-backed readers for Kimi
+  Code, Zhipu and Z.ai, OpenCode Go, Command Code, MiniMax, Ollama Cloud,
+  StepFun, Volcengine Ark, and Tencent Cloud, including monthly windows,
+  counts, reset times, plan terms, and renewal modes. Fresh quota reports feed
+  the cache, history, API, CLI, and per-key routing allowances; failed reads
+  keep previously proven plans, mixed per-key plans select their own sources,
+  and each provider reads at most eight keys at once. Signed-in accounts now
+  refresh model lists after two minutes and hourly thereafter, keeping the
+  last good list on failure.
 - Conversation affinity now returns fallback, ordered-group, and stand-in
   answerers to earlier ready members at the next user turn without crossing
   tool-loop or strict-stay boundaries (P0-2c2, D-14, D-25). Rotate and

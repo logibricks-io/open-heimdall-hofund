@@ -478,7 +478,7 @@ impl UpstreamProvider for Bridged {
 
 fn reject_options(raw: &RawTable, id: &str, protocol: bool) -> Result<(), ConfigError> {
     for key in raw.keys() {
-        if !is_kernel(key, protocol) {
+        if !is_kernel(key, protocol) && !plan_option(raw, key) {
             return Err(
                 ConfigError::new(format!("provider `{id}` has unknown option `{key}`"))
                     .with_path(key),
@@ -491,8 +491,36 @@ fn reject_options(raw: &RawTable, id: &str, protocol: bool) -> Result<(), Config
 fn is_kernel(key: &str, protocol: bool) -> bool {
     matches!(
         key,
-        "id" | "base_url" | "preset" | "api_key" | "credential" | "quirks" | "headers"
+        "id" | "base_url" | "preset" | "api_key" | "credential" | "quirks" | "headers" | "region"
     ) || (protocol && key == "protocol")
+}
+
+fn plan_option(raw: &RawTable, key: &str) -> bool {
+    let Some(RawValue::String(preset)) = raw.get("preset") else {
+        return false;
+    };
+    match key {
+        "access_key_id" | "secret_access_key" => matches!(preset.as_str(), "volcengine" | "tencent-cloud"),
+        "session_token" => matches!(preset.as_str(), "stepfun" | "stepfun-cn"),
+        "organization" | "project" => matches!(preset.as_str(), "zhipu" | "zai"),
+        "plan_quota_url" => matches!(
+            preset.as_str(),
+            "commandcode"
+                | "kimi-code"
+                | "kimi-code-cn"
+                | "minimax"
+                | "minimax-cn"
+                | "ollama-cloud"
+                | "opencode-go"
+                | "stepfun"
+                | "stepfun-cn"
+                | "tencent-cloud"
+                | "volcengine"
+                | "zai"
+                | "zhipu"
+        ),
+        _ => false,
+    }
 }
 
 fn required_id<'a>(raw: &'a RawTable, spec: &UpstreamSpec) -> Result<&'a str, ConfigError> {
@@ -692,15 +720,15 @@ mod tests {
     fn unknown_and_mistyped_options_name_the_provider_and_hide_the_value() {
         let mut openai = raw("primary");
         openai.insert(
-            "secret_access_key",
+            "unknown_secret_option",
             RawValue::String("SENTINEL-OPTION-VALUE".to_owned()),
         );
         let Err(error) = UpstreamFactory::validate(&OpenAiFactory, &openai) else {
-            panic!("aws key was accepted");
+            panic!("unknown option was accepted");
         };
         let text = error.to_string();
         assert!(
-            text.contains("provider `primary` has unknown option `secret_access_key`"),
+            text.contains("provider `primary` has unknown option `unknown_secret_option`"),
             "{text}"
         );
         assert!(!text.contains("SENTINEL-OPTION-VALUE"), "{text}");

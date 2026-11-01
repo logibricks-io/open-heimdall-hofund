@@ -14,7 +14,7 @@ use crate::control_map;
 use crate::events::EventBus;
 use crate::membership::{self, Table};
 use crate::rests::RestStore;
-use crate::subscriptions::{self, QuotaPolls, Subscriptions};
+use crate::subscriptions::{self, ModelPolls, QuotaPolls, Subscriptions};
 use crate::{
     Built, DaemonError, DaemonRegistry, Instance, ModelsHost, RouterParts, providers, route_plan,
     router,
@@ -66,6 +66,7 @@ pub(crate) struct Runtime {
     events: OnceLock<Arc<EventBus>>,
     plan: Mutex<Plan>,
     polls: tokio::sync::Mutex<QuotaPolls>,
+    model_polls: tokio::sync::Mutex<ModelPolls>,
     quotas: Arc<QuotaStore>,
     affinity: hofund_router::affinity::AffinityState,
     /// Wakes the subscription task after a publication.
@@ -101,6 +102,7 @@ impl Runtime {
             events: OnceLock::new(),
             plan: Mutex::new(Plan::default()),
             polls: tokio::sync::Mutex::new(QuotaPolls::default()),
+            model_polls: tokio::sync::Mutex::new(ModelPolls::default()),
             quotas: Arc::new(QuotaStore::new(
                 path.parent().unwrap_or_else(|| Path::new(".")),
             )),
@@ -431,6 +433,21 @@ impl Runtime {
             .await
     }
 
+    /// Refreshes each signed-in account's model list when it is due.
+    pub(crate) async fn poll_models(&self, now: tokio::time::Instant) -> Vec<MemberId> {
+        let current = self
+            .plan
+            .lock()
+            .expect("published plan")
+            .subscriptions
+            .clone();
+        self.model_polls
+            .lock()
+            .await
+            .poll(&current, now)
+            .await
+    }
+
     /// Returns the kept report, or reads every subscription first. A fresh
     /// read gives up after [`QUOTA_READ_TIMEOUT`] and answers what is kept.
     pub(crate) async fn quota_report(
@@ -441,10 +458,24 @@ impl Runtime {
         Vec<hofund_control_proto::QuotaStanding>,
     ) {
         if !kept {
-            let _ = tokio::time::timeout(
-                QUOTA_READ_TIMEOUT,
-                self.poll_quotas_with(tokio::time::Instant::now(), true),
-            )
+            let _ = tokio::time::timeout(QUOTA_READ_TIMEOUT, async {
+                tokio::join!(
+                    self.poll_quotas_with(tokio::time::Instant::now(), true),
+                    async {
+                        if let Some(config) = self.config.get() {
+                            let config = config.subscribe().borrow().clone();
+                            crate::plans::poll(
+                                &config,
+                                &self.path,
+                                self.max_idle_per_host,
+                                &self.registry,
+                                &self.quotas,
+                            )
+                            .await;
+                        }
+                    }
+                )
+            })
             .await;
         }
         let order = self.quota_order();
@@ -470,6 +501,12 @@ impl Runtime {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default()
+    }
+
+    /// The router-facing allowance view of the current quota store.
+    #[cfg(test)]
+    pub(crate) fn quota_allowances(&self) -> Vec<hofund_router::quota::Allowance> {
+        self.quotas.allowances(self.quotas.now())
     }
 
     /// The quota store's wall clock.
@@ -502,6 +539,7 @@ impl Runtime {
                 }
                 runtime.refresh_subscriptions().await;
                 runtime.poll_quotas(tokio::time::Instant::now()).await;
+                runtime.poll_models(tokio::time::Instant::now()).await;
             }
         })
     }

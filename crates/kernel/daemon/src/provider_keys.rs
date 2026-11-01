@@ -154,6 +154,7 @@ pub(crate) fn list(
         listed.masked = masked(&secret);
         listed.on = key.entry.on;
         listed.protocol = key.entry.protocol.unwrap_or_default();
+        listed.plan = key.entry.plan.unwrap_or_default();
         listed.weight = key.entry.weight;
         listed.rest = rest;
         response.keys.push(listed);
@@ -224,6 +225,7 @@ pub(crate) fn mutate(
                         name: String::new(),
                         on: true,
                         protocol: protocol.clone(),
+                        plan: None,
                         weight: 1,
                     },
                     id,
@@ -282,6 +284,11 @@ pub(crate) fn mutate(
             let protocol = key_protocol(&request.protocol)?;
             let index = find(&entries, &request.key_id)?;
             entries[index].entry.protocol = protocol;
+        }
+        ProviderKeyAction::Plan => {
+            let index = find(&entries, &request.key_id)?;
+            let plan = request.plan.trim();
+            entries[index].entry.plan = (!plan.is_empty() && plan != "any").then(|| plan.to_owned());
         }
         ProviderKeyAction::On => {
             let index = find(&entries, &request.key_id)?;

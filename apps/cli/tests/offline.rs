@@ -1753,7 +1753,7 @@ fn k6_offline_provider_keys_one_shot() {
     let listed = scratch.hofund(&["provider", "keys", "chat"]);
     let text = listed.ok();
     assert!(
-        text.contains("id\tname\tmasked\ton\tprotocol\tweight\trest"),
+        text.contains("id\tname\tmasked\ton\tprotocol\tplan\tweight\trest"),
         "{text}"
     );
     assert!(text.contains("…-key"), "{text}");

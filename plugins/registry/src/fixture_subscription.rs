@@ -1,12 +1,13 @@
 //! Test-only subscription fixture for daemon membership and quota polls.
 
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use hofund_plugin_api::{
     AccountId, AccountStatus, BuildError, Completion, ConfigError, DeviceFlow, HostContext,
-    ModelList, PluginError, PluginId, ProtocolId, QuotaWindow, RawTable, RawValue, Request, Schema,
+    ModelList, ModelSpec, PluginError, PluginId, ProtocolId, QuotaWindow, RawTable, RawValue, Request, Schema,
     SignInChallenge, SignInCtx, SignInFlow, SignInFlowKind, SignInProof, Subscription,
     SubscriptionFactory, SubscriptionSpec, UpstreamProvider, ValidConfig,
 };
@@ -23,6 +24,29 @@ static SPEC: SubscriptionSpec = SubscriptionSpec::from_static(
 );
 
 struct FixtureFactory;
+
+static MODEL_CALLS: AtomicUsize = AtomicUsize::new(0);
+static MODEL_FAIL: AtomicBool = AtomicBool::new(false);
+
+/// Number of model-list calls made by the fixture.
+#[doc(hidden)]
+#[must_use]
+pub fn model_calls() -> usize {
+    MODEL_CALLS.load(Ordering::SeqCst)
+}
+
+/// Makes subsequent fixture model-list calls fail or succeed.
+#[doc(hidden)]
+pub fn set_model_fail(fail: bool) {
+    MODEL_FAIL.store(fail, Ordering::SeqCst);
+}
+
+/// Resets the fixture's model-list state.
+#[doc(hidden)]
+pub fn reset_models() {
+    MODEL_CALLS.store(0, Ordering::SeqCst);
+    MODEL_FAIL.store(false, Ordering::SeqCst);
+}
 
 struct FixtureConfig {
     flow: SignInFlow,
@@ -216,7 +240,14 @@ impl Subscription for FixtureSubscription {
         _account: &AccountId,
         _host: &HostContext,
     ) -> Result<ModelList, PluginError> {
-        Ok(ModelList::new(Vec::new(), None))
+        MODEL_CALLS.fetch_add(1, Ordering::SeqCst);
+        if MODEL_FAIL.load(Ordering::SeqCst) {
+            return Err(PluginError::transport("fixture model list failed"));
+        }
+        Ok(ModelList::new(
+            vec![ModelSpec::new("fixture-model", None)?],
+            None,
+        ))
     }
 
     fn upstream(
