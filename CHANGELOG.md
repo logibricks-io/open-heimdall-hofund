@@ -1046,6 +1046,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A shorter failure no longer shortens a longer rest: a 429's one-minute rate
+  rest arriving beside a 402's half-hour credit rest leaves the credit rest in
+  place, and a tie replaces it. A quota or credit rest that was only a guess
+  (the refusal named no time) still gives way to a same-cause refusal whose
+  reset or retry time the vendor names, though it is sooner (D-19, ruling
+  R-494b, superseding R-494).
+
 - A relayed stream whose upstream read fails mid-line no longer sends the
   client a half event. Only ended lines go out as they arrive; the unfinished
   last line goes out when the stream ends cleanly and is dropped when the read

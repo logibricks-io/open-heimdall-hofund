@@ -13,9 +13,11 @@
 //! | Contained panic | Uses the generic failure ladder with [`CooldownCause::Panic`]. |
 //!
 //! Cancelled, unsupported, configuration, internal, unknown future, and other
-//! request-shaped HTTP 4xx errors do not cool a member. A new failure or panic
-//! replaces the current rest, even with an earlier deadline; a passive
-//! observation keeps the longer rest. Idle
+//! request-shaped HTTP 4xx errors do not cool a member. A new failure, panic,
+//! or passive observation keeps whichever rest ends later, so a shorter one
+//! never cuts a longer rest short; a deadline tie replaces it. A quota or
+//! credit rest guessed without a vendor time gives way to a same-cause
+//! failure whose time the vendor named, though it is sooner. Idle
 //! ladder history is forgotten after `rate_forget`; active rests never expire
 //! as idle state. The book holds at most `max_entries` member/model states and
 //! evicts expired entries, then the least-recently-touched idle entry, on
@@ -177,6 +179,9 @@ pub struct Cooling {
     status: Option<u16>,
     error: String,
     background_probe: bool,
+    /// Whether this quota or credit rest is a guess: the refusal named no
+    /// time (reference: internal/gateway/routing.go:1506-1515, `askAt`).
+    guessed: bool,
 }
 
 impl Cooling {
@@ -714,7 +719,7 @@ impl Cooldowns {
             return Self::generic(&mut state, now, &self.policy, CooldownCause::Panic);
         };
         let candidate = Self::generic(state, now, &self.policy, CooldownCause::Panic);
-        let applied = apply(state, candidate);
+        let applied = apply(state, candidate, false);
         drop(book);
         self.emit(&key, &applied, now);
         applied
@@ -925,7 +930,7 @@ impl Cooldowns {
             target.model.is_none() && id.subscription().is_none() && probe_error(error);
         if let Some(state) = book.states.get_mut(&target) {
             state.idle_since = None;
-            apply(state, candidate)
+            apply(state, candidate, false)
         } else {
             candidate
         }
@@ -940,22 +945,24 @@ impl Cooldowns {
         credit: CreditContext,
         background_probe: bool,
     ) -> Cooling {
-        let mut candidate = match failure {
-            Failure::Generic(cause) => Self::generic(state, now, &self.policy, cause),
-            Failure::RateLimit => self.rate_limit(state, now, error.retry_after()),
+        let (mut candidate, named) = match failure {
+            Failure::Generic(cause) => (Self::generic(state, now, &self.policy, cause), false),
+            Failure::RateLimit => (self.rate_limit(state, now, error.retry_after()), false),
             Failure::Quota => {
-                let duration = positive_hint(error.retry_after())
-                    .map_or(self.policy.quota_default, |after| {
-                        after.min(self.policy.retry_after_max)
-                    });
-                cooling(now, duration, CooldownCause::Quota, state.failures)
+                let hint = positive_hint(error.retry_after());
+                let duration = hint.map_or(self.policy.quota_default, |after| {
+                    after.min(self.policy.retry_after_max)
+                });
+                let mut candidate = cooling(now, duration, CooldownCause::Quota, state.failures);
+                candidate.guessed = hint.is_none();
+                (candidate, hint.is_some())
             }
             Failure::Credit => self.credit(state, now, error, credit),
         };
         candidate.status = error.status();
         candidate.error = error.message().trim().chars().take(300).collect();
         candidate.background_probe = background_probe;
-        let applied = apply(state, candidate);
+        let applied = apply(state, candidate, named);
         state.idle_since = None;
         if matches!(failure, Failure::RateLimit) {
             state.rate_until = Some(applied.until);
@@ -972,47 +979,57 @@ impl Cooldowns {
         now: Instant,
         error: &PluginError,
         context: CreditContext,
-    ) -> Cooling {
+    ) -> (Cooling, bool) {
         let reset = positive_hint(error.reset_after()).map(|after| after.min(CREDIT_RESET_MAX));
         let retry = positive_hint(error.retry_after());
-        let (duration, rung, on_ladder) = if context.subscription && !context.windowed {
-            (self.policy.credit, 0, false)
-        } else if let Some(after) = reset {
-            (after, 0, false)
-        } else if context.windowed {
-            let duration = context
-                .window_reset
-                .map(|until| until.saturating_duration_since(now))
-                .filter(|after| !after.is_zero())
-                .unwrap_or_else(|| {
-                    retry
-                        .filter(|after| *after > WINDOWED_CREDIT_DEFAULT)
-                        .unwrap_or(WINDOWED_CREDIT_DEFAULT)
-                });
-            (duration.min(CREDIT_RESET_MAX), 0, false)
-        } else if retry.is_some() || error.credit_soon() {
-            (self.policy.credit, 0, false)
-        } else {
-            let continuing = state.last_cause == Some(CooldownCause::Credit)
-                && state.credit_ladder
-                && state.credit_rung > 0
-                && state.credit_until.is_some();
-            let rung = if continuing {
-                let next = if state.active(now) {
-                    state.credit_rung
-                } else {
-                    state.credit_rung.saturating_add(1)
-                };
-                next.min(u32::try_from(CREDIT_LADDER.len()).unwrap_or(u32::MAX))
+        // `named`: the vendor gave this time (reset or retry hint); `guessed`:
+        // the rest stands in for a time nobody named (reference:
+        // internal/gateway/routing.go:241-262, 1264-1296, 1345).
+        let (duration, rung, on_ladder, named, guessed) =
+            if context.subscription && !context.windowed {
+                (self.policy.credit, 0, false, false, true)
+            } else if let Some(after) = reset {
+                (after, 0, false, true, false)
+            } else if context.windowed {
+                // The window's own time is never a guess. A retry hint chosen
+                // here could only replace a same-cause guess made before the
+                // window was configured, the flat subscription rest, which is
+                // always shorter, so it is not marked named.
+                let duration = context
+                    .window_reset
+                    .map(|until| until.saturating_duration_since(now))
+                    .filter(|after| !after.is_zero())
+                    .unwrap_or_else(|| {
+                        retry
+                            .filter(|after| *after > WINDOWED_CREDIT_DEFAULT)
+                            .unwrap_or(WINDOWED_CREDIT_DEFAULT)
+                    });
+                (duration.min(CREDIT_RESET_MAX), 0, false, false, false)
+            } else if retry.is_some() || error.credit_soon() {
+                (self.policy.credit, 0, false, false, true)
             } else {
-                1
+                let continuing = state.last_cause == Some(CooldownCause::Credit)
+                    && state.credit_ladder
+                    && state.credit_rung > 0
+                    && state.credit_until.is_some();
+                let rung = if continuing {
+                    let next = if state.active(now) {
+                        state.credit_rung
+                    } else {
+                        state.credit_rung.saturating_add(1)
+                    };
+                    next.min(u32::try_from(CREDIT_LADDER.len()).unwrap_or(u32::MAX))
+                } else {
+                    1
+                };
+                let index = usize::try_from(rung - 1).unwrap_or(0);
+                (CREDIT_LADDER[index], rung, true, false, true)
             };
-            let index = usize::try_from(rung - 1).unwrap_or(0);
-            (CREDIT_LADDER[index], rung, true)
-        };
         state.credit_rung = rung;
         state.credit_ladder = on_ladder;
-        cooling(now, duration, CooldownCause::Credit, rung)
+        let mut candidate = cooling(now, duration, CooldownCause::Credit, rung);
+        candidate.guessed = guessed;
+        (candidate, named)
     }
 
     fn entry_for_insert<'a>(
@@ -1348,15 +1365,29 @@ fn cooling(now: Instant, duration: Duration, cause: CooldownCause, failures: u32
         status: None,
         error: String::new(),
         background_probe: false,
+        guessed: false,
     }
 }
 
-/// Failure events replace the deadline, cause, and note, including with a
-/// shorter rest (`reference: internal/gateway/routing.go:1440-1456`).
-fn apply(state: &mut State, candidate: Cooling) -> Cooling {
-    state.cooling = Some(candidate.clone());
-    state.last_cause = Some(candidate.cause);
-    candidate
+/// Failure events keep whichever rest ends later; a candidate ending at the
+/// same instant replaces the current rest, so a shorter failure never
+/// shortens a longer rest (ruling R-494b, superseding R-494). One
+/// exception: a guessed quota or credit rest gives way to a rest of the same
+/// cause whose time the vendor named (`named`), though it is sooner
+/// (`reference: internal/gateway/routing.go:1518-1533`).
+fn apply(state: &mut State, candidate: Cooling, named: bool) -> Cooling {
+    let applied = match &state.cooling {
+        Some(current)
+            if current.until > candidate.until
+                && !(named && current.guessed && current.cause == candidate.cause) =>
+        {
+            current.clone()
+        }
+        _ => candidate,
+    };
+    state.cooling = Some(applied.clone());
+    state.last_cause = Some(applied.cause);
+    applied
 }
 
 /// Passive observations keep whichever rest ends later, with its own cause

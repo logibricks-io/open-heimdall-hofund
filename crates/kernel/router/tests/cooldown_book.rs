@@ -149,7 +149,8 @@ fn rate_limit_uses_retry_hint_and_does_not_stretch_its_ladder() {
         .record_failure(&id, &PluginError::status_error(429, "slow"))
         .expect("cooling");
     assert_eq!(repeated.failures(), 1);
-    assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(60));
+    // R-494b: the hinted two minutes outlast the one-minute rung and stand.
+    assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(120));
     advance(&clock, 121);
     let next = book
         .record_failure(&id, &PluginError::status_error(429, "slow"))
@@ -222,22 +223,267 @@ fn quota_and_credit_use_their_own_limits() {
     );
 }
 
+// D-19, ruling R-494b (supersedes R-494): a shorter failure never shortens a
+// longer rest; a vendor-named time replaces a guessed rest of the same cause
+// (reference: internal/gateway/routing.go:1518-1533,
+// internal/gateway/rest_write_test.go:20-121).
+
 #[test]
-fn r494_new_failure_overwrites_longer_rest() {
+fn d19_shorter_failure_keeps_longer_rest() {
     let (book, id, clock) = fixture();
-    book.record_failure(&id, &PluginError::status_error(402, "out of credit"))
-        .expect("credit");
+    let credit = book.record_failure(&id, &credit_error()).expect("credit");
+    let applied = book
+        .record_failure(&id, &PluginError::connect("down"))
+        .expect("generic");
+    assert_eq!(applied, credit);
+    assert_eq!(book.cooling(&id), Some(credit));
     assert_eq!(
         remaining(&book, &id, &clock),
         Duration::from_secs(30 * MINUTE)
     );
+}
 
-    let generic = book
+#[test]
+fn d19_rate_minute_keeps_credit_rest() {
+    let (book, id, clock) = fixture();
+    book.record_failure(&id, &credit_error()).expect("credit");
+    let rate = PluginError::status_error(429, "Rate limit exceeded")
+        .with_retry_after(Duration::from_secs(1));
+    let applied = book.record_failure(&id, &rate).expect("rate");
+    assert_eq!(applied.cause(), CooldownCause::Credit);
+    assert_eq!(
+        book.cooling(&id).map(|cooling| cooling.cause()),
+        Some(CooldownCause::Credit)
+    );
+    assert_eq!(
+        remaining(&book, &id, &clock),
+        Duration::from_secs(30 * MINUTE)
+    );
+}
+
+#[test]
+fn d19_longer_failure_replaces_shorter_rest() {
+    let (book, id, clock) = fixture();
+    book.record_failure(&id, &credit_error()).expect("credit");
+    let quota = PluginError::quota("empty").with_retry_after(Duration::from_secs(HOUR));
+    let applied = book.record_failure(&id, &quota).expect("quota");
+    assert_eq!(applied.cause(), CooldownCause::Quota);
+    assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(HOUR));
+}
+
+#[test]
+fn d19_equal_deadline_replaces_rest() {
+    let (book, id, clock) = fixture();
+    book.record_failure(&id, &PluginError::connect("down"))
+        .expect("generic");
+    let applied = book
+        .record_failure(&id, &PluginError::status_error(429, "slow"))
+        .expect("rate");
+    assert_eq!(applied.cause(), CooldownCause::RateLimit);
+    assert_eq!(
+        book.cooling(&id).map(|cooling| cooling.cause()),
+        Some(CooldownCause::RateLimit)
+    );
+    assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(MINUTE));
+}
+
+#[test]
+fn d19_ended_rest_is_replaced_by_shorter_failure() {
+    let (book, id, clock) = fixture();
+    book.record_failure(&id, &credit_error()).expect("credit");
+    advance(&clock, 30 * MINUTE);
+    let applied = book
         .record_failure(&id, &PluginError::connect("down"))
         .expect("generic");
-    assert_eq!(generic.cause(), CooldownCause::Failure);
-    assert_eq!(generic.failures(), 1);
+    assert_eq!(applied.cause(), CooldownCause::Failure);
     assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(MINUTE));
+}
+
+#[test]
+fn d19_panic_keeps_longer_rest() {
+    let (book, id, clock) = fixture();
+    let credit = book.record_failure(&id, &credit_error()).expect("credit");
+    let applied = book.record_panic(&id);
+    assert_eq!(applied, credit);
+    assert_eq!(
+        remaining(&book, &id, &clock),
+        Duration::from_secs(30 * MINUTE)
+    );
+}
+
+#[test]
+fn d19_model_generic_failure_keeps_longer_rest() {
+    let (book, id, clock) = fixture();
+    book.record_failure(&id, &credit_error()).expect("credit");
+    let applied = book
+        .record_failure_for_model(&id, "m", &PluginError::connect("down"))
+        .expect("generic");
+    assert_eq!(applied.cause(), CooldownCause::Credit);
+    assert_eq!(
+        remaining(&book, &id, &clock),
+        Duration::from_secs(30 * MINUTE)
+    );
+}
+
+#[test]
+fn d19_kept_rest_keeps_its_cause_for_the_credit_ladder() {
+    let (book, id, clock) = fixture();
+    book.record_failure(&id, &credit_error()).expect("credit");
+    book.record_failure(&id, &PluginError::status_error(429, "slow"))
+        .expect("rate");
+    advance(&clock, 30 * MINUTE);
+    let next = book.record_failure(&id, &credit_error()).expect("credit");
+    assert_eq!(next.failures(), 2);
+    assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(2 * HOUR));
+}
+
+#[test]
+fn d19_named_quota_time_replaces_guess() {
+    let (book, id, clock) = fixture();
+    let guess = book
+        .record_failure(&id, &PluginError::quota("You have hit your usage limit"))
+        .expect("guess");
+    assert_eq!(guess.cause(), CooldownCause::Quota);
+    assert_eq!(
+        remaining(&book, &id, &clock),
+        Duration::from_secs(15 * MINUTE)
+    );
+    let rate = PluginError::status_error(429, "Rate limit exceeded")
+        .with_retry_after(Duration::from_secs(1));
+    let kept = book.record_failure(&id, &rate).expect("rate");
+    assert_eq!(kept.cause(), CooldownCause::Quota);
+    assert_eq!(
+        remaining(&book, &id, &clock),
+        Duration::from_secs(15 * MINUTE)
+    );
+    let named =
+        PluginError::quota("usage_limit_reached").with_retry_after(Duration::from_secs(2 * MINUTE));
+    let applied = book.record_failure(&id, &named).expect("named");
+    assert_eq!(applied.cause(), CooldownCause::Quota);
+    assert_eq!(
+        remaining(&book, &id, &clock),
+        Duration::from_secs(2 * MINUTE)
+    );
+}
+
+#[test]
+fn d19_named_time_of_another_cause_keeps_guess() {
+    let (book, id, clock) = fixture();
+    book.record_failure(&id, &credit_error())
+        .expect("guessed credit");
+    let named =
+        PluginError::quota("usage_limit_reached").with_retry_after(Duration::from_secs(2 * MINUTE));
+    let applied = book.record_failure(&id, &named).expect("named quota");
+    assert_eq!(applied.cause(), CooldownCause::Credit);
+    assert_eq!(
+        remaining(&book, &id, &clock),
+        Duration::from_secs(30 * MINUTE)
+    );
+}
+
+#[test]
+fn d19_named_time_keeps_longer_named_rest() {
+    let (book, id, clock) = fixture();
+    book.record_failure(
+        &id,
+        &PluginError::quota("empty").with_retry_after(Duration::from_secs(HOUR)),
+    )
+    .expect("named hour");
+    let applied = book
+        .record_failure(
+            &id,
+            &PluginError::quota("empty").with_retry_after(Duration::from_secs(2 * MINUTE)),
+        )
+        .expect("named minutes");
+    assert_eq!(applied.cause(), CooldownCause::Quota);
+    assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(HOUR));
+}
+
+#[test]
+fn d19_unnamed_shorter_credit_keeps_guessed_rung() {
+    let (book, id, clock) = fixture();
+    book.record_failure(&id, &credit_error())
+        .expect("first rung");
+    advance(&clock, 30 * MINUTE);
+    book.record_failure(&id, &credit_error())
+        .expect("second rung");
+    let soon = credit_error().with_retry_after(Duration::from_secs(MINUTE));
+    let applied = book.record_failure(&id, &soon).expect("flat credit");
+    assert_eq!(applied.failures(), 2);
+    assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(2 * HOUR));
+}
+
+#[test]
+fn d19_named_credit_reset_replaces_guessed_rung() {
+    let (book, id, clock) = fixture();
+    book.record_failure(&id, &credit_error()).expect("guess");
+    let reset = credit_error().with_reset_after(Duration::from_secs(5 * MINUTE));
+    let applied = book.record_failure(&id, &reset).expect("reset");
+    assert_eq!(applied.cause(), CooldownCause::Credit);
+    assert_eq!(applied.failures(), 0);
+    assert_eq!(
+        remaining(&book, &id, &clock),
+        Duration::from_secs(5 * MINUTE)
+    );
+}
+
+#[test]
+fn d19_named_credit_reset_replaces_flat_credit_guess() {
+    let (book, id, clock) = fixture();
+    let soon = credit_error().with_retry_after(Duration::from_secs(MINUTE));
+    book.record_failure(&id, &soon).expect("flat guess");
+    let reset = credit_error().with_reset_after(Duration::from_secs(5 * MINUTE));
+    book.record_failure(&id, &reset).expect("reset");
+    assert_eq!(
+        remaining(&book, &id, &clock),
+        Duration::from_secs(5 * MINUTE)
+    );
+}
+
+#[test]
+fn d19_named_credit_reset_replaces_subscription_guess() {
+    let (book, _, clock) = fixture();
+    let id = subscription();
+    book.record_failure(&id, &credit_error())
+        .expect("flat guess");
+    assert_eq!(
+        remaining(&book, &id, &clock),
+        Duration::from_secs(30 * MINUTE)
+    );
+    book.configure_credit_window(&id);
+    let reset = credit_error().with_reset_after(Duration::from_secs(5 * MINUTE));
+    book.record_failure(&id, &reset).expect("reset");
+    assert_eq!(
+        remaining(&book, &id, &clock),
+        Duration::from_secs(5 * MINUTE)
+    );
+}
+
+#[test]
+fn d19_windowed_credit_rest_is_not_a_guess() {
+    let (book, id, clock) = windowed();
+    book.record_failure(&id, &credit_error())
+        .expect("window default");
+    assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(5 * HOUR));
+    let reset = credit_error().with_reset_after(Duration::from_secs(5 * MINUTE));
+    book.record_failure(&id, &reset).expect("reset");
+    assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(5 * HOUR));
+}
+
+#[test]
+fn d19_named_reset_keeps_longer_named_credit() {
+    let (book, id, clock) = fixture();
+    book.record_failure(
+        &id,
+        &credit_error().with_reset_after(Duration::from_secs(HOUR)),
+    )
+    .expect("named hour");
+    book.record_failure(
+        &id,
+        &credit_error().with_reset_after(Duration::from_secs(5 * MINUTE)),
+    )
+    .expect("named minutes");
+    assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(HOUR));
 }
 
 #[test]
@@ -837,16 +1083,18 @@ fn rate_ladder_resets_during_active_non_rate_rest_after_forget() {
     );
     advance(&clock, 32 * MINUTE);
     book.maintain();
+    // R-494b: the rate minute does not shorten the longer quota rest, which
+    // stays the last rest kept, so the rate ladder restarts after it.
     let kept = book
         .record_failure(&id, &PluginError::status_error(429, "slow"))
         .expect("rate failure during quota rest");
-    assert_eq!(kept.cause(), CooldownCause::RateLimit);
+    assert_eq!(kept.cause(), CooldownCause::Quota);
     advance(&clock, 29 * MINUTE);
     let next = book
         .record_failure(&id, &PluginError::status_error(429, "slow"))
         .expect("rate failure after quota rest");
     assert_eq!(next.cause(), CooldownCause::RateLimit);
-    assert_eq!(next.failures(), 2);
+    assert_eq!(next.failures(), 1);
 }
 
 #[test]
