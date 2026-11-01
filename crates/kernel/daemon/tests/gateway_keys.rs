@@ -121,6 +121,10 @@ async fn k12_control_api_supports_every_action_and_backup() {
     let exported = client.export_gateway_keys().await.expect("export");
     assert!(exported.keys.iter().all(|key| !key.secret.is_empty()));
     assert!(
+        !format!("{exported:?}").contains(&rotated_secret),
+        "an exported key's Debug output redacts its secret"
+    );
+    assert!(
         exported
             .keys
             .iter()
