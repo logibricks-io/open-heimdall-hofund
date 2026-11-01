@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
-use hofund_plugin_api::{AccountId, MemberKey, PluginId, PresetId, QuotaObservation};
+use hofund_plugin_api::{AccountId, MemberKey, PluginId, PresetId, QuotaObservation, QuotaWindow};
 use hofund_router::{
     CooldownCause, CooldownPolicy, Cooldowns, MemberId, PersistedRest, PluginError,
 };
@@ -53,6 +53,20 @@ fn remaining_model(
 
 fn observation() -> QuotaObservation {
     QuotaObservation::from_stored(PluginId::from_static("member"))
+}
+
+fn window(used: u64, reset: Option<u64>) -> QuotaWindow {
+    named_window("window", used, reset)
+}
+
+fn named_window(name: &str, used: u64, reset: Option<u64>) -> QuotaWindow {
+    QuotaWindow::new(
+        name,
+        used,
+        Some(10),
+        reset.map(|after| SystemTime::now() + Duration::from_secs(after)),
+    )
+    .expect("window")
 }
 
 #[test]
@@ -1445,7 +1459,7 @@ fn b2c_only_credit_ladder_persists() {
 #[test]
 fn b3a_credit_reset_named_in_body_wins() {
     let (book, id, clock) = windowed();
-    book.observe_credit_window(&id, Some(Duration::from_secs(3 * HOUR)), false);
+    book.observe_credit_window(&id, &[window(10, Some(3 * HOUR))]);
     let error = credit_error()
         .with_reset_after(Duration::from_secs(10 * DAY))
         .with_retry_after(Duration::from_secs(6 * HOUR));
@@ -1456,7 +1470,7 @@ fn b3a_credit_reset_named_in_body_wins() {
 #[test]
 fn b3b_credit_reset_named_in_headers_wins() {
     let (book, id, clock) = windowed();
-    book.observe_credit_window(&id, Some(Duration::from_secs(3 * HOUR)), false);
+    book.observe_credit_window(&id, &[window(10, Some(3 * HOUR))]);
     let error = credit_error()
         .with_reset_after(Duration::from_secs(2 * DAY))
         .with_retry_after(Duration::from_secs(6 * HOUR));
@@ -1467,10 +1481,14 @@ fn b3b_credit_reset_named_in_headers_wins() {
 #[test]
 fn b3c_full_usage_window_reset_wins_over_retry_and_default() {
     let (book, id, clock) = windowed();
-    book.observe_credit_window(&id, Some(Duration::from_secs(3 * HOUR)), false);
+    book.observe_credit_window(&id, &[window(10, Some(3 * HOUR))]);
     let error = credit_error().with_retry_after(Duration::from_secs(6 * HOUR));
     book.record_failure(&id, &error).expect("window reset");
-    assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(3 * HOUR));
+    let left = remaining(&book, &id, &clock);
+    assert!(
+        left <= Duration::from_secs(3 * HOUR) && left > Duration::from_secs(3 * HOUR - 1),
+        "{left:?}"
+    );
 }
 
 #[test]
@@ -1492,11 +1510,15 @@ fn b3e_otherwise_credit_rest_defaults_to_five_hours() {
 #[test]
 fn b3f_later_observation_showing_window_renewed_lifts_rest() {
     let (book, id, clock) = windowed();
-    book.observe_credit_window(&id, Some(Duration::from_secs(3 * HOUR)), false);
+    book.observe_credit_window(&id, &[window(10, Some(3 * HOUR))]);
     book.record_failure(&id, &credit_error())
         .expect("window rest");
-    assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(3 * HOUR));
-    book.observe_credit_window(&id, None, false);
+    let left = remaining(&book, &id, &clock);
+    assert!(
+        left <= Duration::from_secs(3 * HOUR) && left > Duration::from_secs(3 * HOUR - 1),
+        "{left:?}"
+    );
+    book.observe_credit_window(&id, &[window(0, None)]);
     assert_eq!(book.cooling(&id), None);
     assert_eq!(book.drain_recoveries(), vec![(id, CooldownCause::Credit)]);
 }
@@ -1504,10 +1526,10 @@ fn b3f_later_observation_showing_window_renewed_lifts_rest() {
 #[test]
 fn b3f_reading_with_no_window_ever_full_keeps_rest() {
     let (book, id, clock) = windowed();
-    book.observe_credit_window(&id, None, false);
+    book.observe_credit_window(&id, &[window(0, None)]);
     book.record_failure(&id, &credit_error())
         .expect("default rest");
-    book.observe_credit_window(&id, None, false);
+    book.observe_credit_window(&id, &[window(0, None)]);
     assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(5 * HOUR));
     assert!(book.drain_recoveries().is_empty());
 }
@@ -1517,61 +1539,70 @@ fn b3f_first_reading_after_rest_does_not_lift() {
     let (book, id, clock) = windowed();
     book.record_failure(&id, &credit_error())
         .expect("default rest");
-    book.observe_credit_window(&id, None, false);
-    book.observe_credit_window(&id, Some(Duration::from_secs(2 * HOUR)), false);
+    book.observe_credit_window(&id, &[window(0, None)]);
+    book.observe_credit_window(&id, &[window(10, Some(2 * HOUR))]);
     assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(5 * HOUR));
 }
 
 #[test]
 fn b3f_same_or_later_window_reset_keeps_rest() {
     let (book, id, clock) = windowed();
-    book.observe_credit_window(&id, Some(Duration::from_secs(3 * HOUR)), false);
+    book.observe_credit_window(&id, &[window(10, Some(3 * HOUR))]);
     book.record_failure(&id, &credit_error())
         .expect("window rest");
     advance(&clock, MINUTE);
-    book.observe_credit_window(&id, Some(Duration::from_secs(3 * HOUR - MINUTE)), false);
-    book.observe_credit_window(&id, Some(Duration::from_secs(4 * HOUR)), false);
-    assert_eq!(
-        remaining(&book, &id, &clock),
-        Duration::from_secs(3 * HOUR - MINUTE)
+    book.observe_credit_window(&id, &[window(10, Some(3 * HOUR - MINUTE))]);
+    book.observe_credit_window(&id, &[window(10, Some(4 * HOUR))]);
+    let left = remaining(&book, &id, &clock);
+    assert!(
+        left <= Duration::from_secs(3 * HOUR - MINUTE)
+            && left > Duration::from_secs(3 * HOUR - MINUTE - 1),
+        "{left:?}"
     );
-    book.observe_credit_window(&id, Some(Duration::from_secs(HOUR)), false);
+    book.observe_credit_window(&id, &[window(10, Some(HOUR))]);
     assert_eq!(book.cooling(&id), None);
 }
 
 #[test]
 fn b3f_full_window_without_reset_renews_latest() {
     let (book, id, clock) = windowed();
-    book.observe_credit_window(&id, Some(Duration::from_secs(3 * HOUR)), false);
+    book.observe_credit_window(&id, &[window(10, Some(3 * HOUR))]);
     book.record_failure(&id, &credit_error())
         .expect("window rest");
-    book.observe_credit_window(&id, Some(Duration::from_secs(HOUR)), true);
-    assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(3 * HOUR));
-    book.observe_credit_window(&id, Some(Duration::from_secs(HOUR)), false);
+    book.observe_credit_window(
+        &id,
+        &[window(10, Some(HOUR)), named_window("unknown", 10, None)],
+    );
+    let left = remaining(&book, &id, &clock);
+    assert!(
+        left <= Duration::from_secs(3 * HOUR) && left > Duration::from_secs(3 * HOUR - 1),
+        "{left:?}"
+    );
+    book.observe_credit_window(&id, &[window(10, Some(HOUR))]);
     assert_eq!(book.cooling(&id), None);
 }
 
 #[test]
 fn b3f_renewal_lifts_only_a_credit_rest_of_a_windowed_account() {
     let (book, id, _) = windowed();
-    book.observe_credit_window(&id, Some(Duration::from_secs(3 * HOUR)), false);
+    book.observe_credit_window(&id, &[window(10, Some(3 * HOUR))]);
     book.record_failure(&id, &PluginError::status_error(429, "slow"))
         .expect("rate rest");
-    book.observe_credit_window(&id, None, false);
+    book.observe_credit_window(&id, &[window(0, None)]);
     assert!(book.cooling(&id).is_some());
     let account =
         MemberId::from_parts(PluginId::from_static("other"), AccountId::from_static("me"));
-    book.observe_credit_window(&account, Some(Duration::from_secs(3 * HOUR)), false);
+    book.observe_credit_window(&account, &[window(10, Some(3 * HOUR))]);
     book.record_failure(&account, &credit_error())
         .expect("flat rest");
-    book.observe_credit_window(&account, None, false);
+    book.observe_credit_window(&account, &[window(0, None)]);
     assert!(book.cooling(&account).is_some());
 }
 
 #[test]
 fn b3f_renewal_lifts_a_window_quota_rest_of_a_windowed_account() {
     let (book, id, _) = windowed();
-    book.observe_credit_window(&id, Some(Duration::from_secs(3 * HOUR)), false);
+    book.observe_credit_window(&id, &[window(10, Some(3 * HOUR))]);
     let applied = book
         .observe(
             &id,
@@ -1581,7 +1612,7 @@ fn b3f_renewal_lifts_a_window_quota_rest_of_a_windowed_account() {
         )
         .expect("window rest");
     assert_eq!(applied.cause(), CooldownCause::Observed);
-    book.observe_credit_window(&id, None, false);
+    book.observe_credit_window(&id, &[window(0, None)]);
     assert_eq!(book.cooling(&id), None);
     assert_eq!(book.drain_recoveries(), vec![(id, CooldownCause::Observed)]);
 }
@@ -1732,12 +1763,12 @@ fn b2c_credit_rung_is_not_saved_after_a_later_rate_rest() {
 #[test]
 fn b3f_renewal_lifts_a_quota_refusal_rest_of_a_windowed_account() {
     let (book, id, _) = windowed();
-    book.observe_credit_window(&id, Some(Duration::from_secs(3 * HOUR)), false);
+    book.observe_credit_window(&id, &[window(10, Some(3 * HOUR))]);
     let applied = book
         .record_failure(&id, &PluginError::quota("empty"))
         .expect("quota rest");
     assert_eq!(applied.cause(), CooldownCause::Quota);
-    book.observe_credit_window(&id, None, false);
+    book.observe_credit_window(&id, &[window(0, None)]);
     assert_eq!(book.cooling(&id), None);
     assert_eq!(book.drain_recoveries(), vec![(id, CooldownCause::Quota)]);
 }
@@ -1745,15 +1776,115 @@ fn b3f_renewal_lifts_a_quota_refusal_rest_of_a_windowed_account() {
 #[test]
 fn b3f_renewal_ten_minutes_sooner_lifts_rest() {
     let (book, id, _) = windowed();
-    book.observe_credit_window(&id, Some(Duration::from_secs(3 * HOUR)), false);
+    book.observe_credit_window(&id, &[window(10, Some(3 * HOUR))]);
     book.record_failure(&id, &credit_error())
         .expect("window rest");
-    book.observe_credit_window(
-        &id,
-        Some(Duration::from_secs(3 * HOUR - 10 * MINUTE)),
-        false,
-    );
+    book.observe_credit_window(&id, &[window(10, Some(3 * HOUR - 10 * MINUTE))]);
     assert_eq!(book.cooling(&id), None);
+}
+
+#[test]
+fn d29_1_less_than_full_reading_with_same_reset_keeps_vendor_timed_rest() {
+    for error in [
+        credit_error().with_reset_after(Duration::from_secs(6 * HOUR)),
+        PluginError::quota("empty").with_retry_after(Duration::from_secs(HOUR)),
+    ] {
+        let (book, id, _) = windowed();
+        let reset = SystemTime::now() + Duration::from_secs(3 * HOUR);
+        let reading =
+            |used| QuotaWindow::new("window", used, Some(10), Some(reset)).expect("window");
+        book.observe_credit_window(&id, &[reading(10)]);
+        book.record_failure(&id, &error).expect("vendor-timed rest");
+        book.observe_credit_window(&id, &[reading(8)]);
+        assert!(book.cooling(&id).is_some(), "{error}");
+        assert!(book.drain_recoveries().is_empty(), "{error}");
+    }
+}
+
+#[test]
+fn d29_6_same_reset_read_a_moment_later_keeps_vendor_timed_rest() {
+    let (book, id, clock) = windowed();
+    let reset = SystemTime::now() + Duration::from_secs(3 * HOUR);
+    let reading = |used| QuotaWindow::new("window", used, Some(10), Some(reset)).expect("window");
+    book.observe_credit_window(&id, &[reading(10)]);
+    book.record_failure(
+        &id,
+        &credit_error().with_reset_after(Duration::from_secs(6 * HOUR)),
+    )
+    .expect("vendor-timed rest");
+    // the monotonic clock runs ahead of the wall clock between readings
+    *clock.lock().expect("clock") += Duration::from_millis(900);
+    book.observe_credit_window(&id, &[reading(8)]);
+    assert!(book.cooling(&id).is_some());
+    assert!(book.drain_recoveries().is_empty());
+}
+
+#[test]
+fn d29_2_reset_moved_to_later_cycle_lifts_vendor_timed_rest() {
+    let (book, id, _) = windowed();
+    book.observe_credit_window(&id, &[window(10, Some(3 * HOUR))]);
+    book.record_failure(
+        &id,
+        &credit_error().with_reset_after(Duration::from_secs(6 * HOUR)),
+    )
+    .expect("vendor-timed rest");
+    book.observe_credit_window(&id, &[window(8, Some(6 * HOUR))]);
+    assert_eq!(book.cooling(&id), None);
+    assert_eq!(book.drain_recoveries(), vec![(id, CooldownCause::Credit)]);
+}
+
+#[test]
+fn d29_3_reset_elapsed_since_last_good_reading_lifts_vendor_timed_rest() {
+    let (book, id, clock) = windowed();
+    book.observe_credit_window(&id, &[window(10, Some(HOUR))]);
+    book.record_failure(
+        &id,
+        &credit_error().with_reset_after(Duration::from_secs(3 * HOUR)),
+    )
+    .expect("vendor-timed rest");
+    advance(&clock, 2 * HOUR);
+    book.observe_credit_window(&id, &[window(8, None)]);
+    assert_eq!(book.cooling(&id), None);
+    assert_eq!(book.drain_recoveries(), vec![(id, CooldownCause::Credit)]);
+}
+
+#[test]
+fn d29_4_empty_reading_never_lifts_or_replaces_last_good_reading() {
+    let (book, id, clock) = windowed();
+    book.observe_credit_window(&id, &[window(10, Some(HOUR))]);
+    book.record_failure(
+        &id,
+        &credit_error().with_reset_after(Duration::from_secs(3 * HOUR)),
+    )
+    .expect("vendor-timed rest");
+    advance(&clock, 30 * MINUTE);
+    book.observe_credit_window(&id, &[]);
+    assert!(book.cooling(&id).is_some());
+    advance(&clock, 40 * MINUTE);
+    book.observe_credit_window(&id, &[window(8, None)]);
+    assert_eq!(book.cooling(&id), None);
+}
+
+#[test]
+fn d29_5_less_than_full_reading_still_lifts_non_vendor_timed_rest() {
+    let (book, id, _) = windowed();
+    book.observe_credit_window(&id, &[window(10, Some(3 * HOUR))]);
+    book.record_failure(&id, &PluginError::quota("empty"))
+        .expect("guessed quota rest");
+    book.observe_credit_window(&id, &[window(8, Some(3 * HOUR))]);
+    assert_eq!(book.cooling(&id), None);
+    assert_eq!(book.drain_recoveries(), vec![(id, CooldownCause::Quota)]);
+
+    let (book, id, _) = windowed();
+    book.observe_credit_window(&id, &[window(10, None)]);
+    book.record_failure(
+        &id,
+        &credit_error().with_retry_after(Duration::from_secs(4 * HOUR)),
+    )
+    .expect("default credit rest");
+    book.observe_credit_window(&id, &[window(8, Some(3 * HOUR))]);
+    assert_eq!(book.cooling(&id), None);
+    assert_eq!(book.drain_recoveries(), vec![(id, CooldownCause::Credit)]);
 }
 
 #[test]
