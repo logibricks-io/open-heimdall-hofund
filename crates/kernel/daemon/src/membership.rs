@@ -19,7 +19,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures_util::{FutureExt, Stream, StreamExt};
 use hofund_plugin_api::{
-    BodyStream, Completion, CountOutcome, MemberId, MemberKey, PluginError, PresetId,
+    BodyStream, Completion, CountOutcome, ListQuery, MemberId, MemberKey, PluginError, PresetId,
     QuotaObservation, RawAnswer, RawBody, Request,
 };
 use hofund_plugin_host::ObserveBackend;
@@ -47,6 +47,8 @@ pub(crate) struct BuiltProvider {
     /// Preset id from configuration. Empty when the provider has no preset.
     pub preset_id: String,
     pub fingerprint: String,
+    pub patience: Option<Duration>,
+    pub kernel: bool,
     /// API root the provider is reached at. Empty when unknown.
     pub base_url: String,
 }
@@ -79,6 +81,8 @@ struct LiveMember {
     protocol: &'static str,
     route: hofund_provider::AttemptRoute,
     subscription: bool,
+    patience: Option<Duration>,
+    kernel: bool,
     failed: Arc<AtomicU64>,
     stack: Cooldown<Guard<ProviderCall>>,
 }
@@ -315,6 +319,17 @@ pub(crate) struct PlannedHop {
 }
 
 impl Table {
+    pub(crate) fn members(&self) -> Vec<Arc<dyn Member>> {
+        let hops = self.hops.lock().expect("membership");
+        let mut members = BTreeMap::new();
+        for spec in hops.values().flatten() {
+            members
+                .entry(spec.member.id.to_string())
+                .or_insert_with(|| Arc::clone(&spec.member) as Arc<dyn Member>);
+        }
+        members.into_values().collect()
+    }
+
     pub(crate) fn replace(
         self: &Arc<Self>,
         built: &BTreeMap<String, BuiltProvider>,
@@ -346,6 +361,7 @@ impl Table {
                         wire_model: spec.wire_model.clone(),
                         max_output_tokens: spec.max_output_tokens,
                         context_window: spec.context_window,
+                        patience: spec.member.patience,
                         weight: spec.weight,
                         free: spec.free,
                     })
@@ -408,6 +424,8 @@ impl LiveMember {
             protocol: built.protocol,
             route: built.adapter.attempt_route(),
             subscription,
+            patience: built.patience,
+            kernel: built.kernel,
             failed,
             stack,
         }
@@ -438,6 +456,10 @@ impl Member for LiveMember {
 
     fn protocol(&self) -> &str {
         self.protocol
+    }
+
+    fn background_probe(&self) -> bool {
+        self.kernel
     }
 
     fn learns_allowance(&self) -> bool {
@@ -496,6 +518,16 @@ impl Member for LiveMember {
             Ok(Out::Forward(_)) => Err(PluginError::internal("member returned an answer")),
             Err(error) => Err(error),
         }
+    }
+
+    async fn list_models(&self) -> Result<hofund_router::ModelListAnswer, PluginError> {
+        self.stack
+            .inner
+            .inner
+            .provider
+            .list_models(&ListQuery::new())
+            .await
+            .map(|_| hofund_router::ModelListAnswer)
     }
 
     async fn forward(&self, path: &str, body: RawBody) -> Result<RawAnswer, PluginError> {
@@ -1125,6 +1157,8 @@ mod tests {
                 plugin_id: "boom".to_owned(),
                 preset_id: String::new(),
                 fingerprint: String::new(),
+                patience: Some(Duration::from_secs(60)),
+                kernel: true,
                 base_url: String::new(),
             },
         );
@@ -1218,6 +1252,8 @@ mod tests {
                 plugin_id: "openai-compat".to_owned(),
                 preset_id: "openai".to_owned(),
                 fingerprint: String::new(),
+                patience: Some(Duration::from_secs(60)),
+                kernel: true,
                 base_url: String::new(),
             },
         );
@@ -1302,6 +1338,8 @@ mod tests {
                 plugin_id: "openai-compat".to_owned(),
                 preset_id: String::new(),
                 fingerprint: String::new(),
+                patience: Some(Duration::from_secs(60)),
+                kernel: true,
                 base_url: String::new(),
             },
         );
@@ -1385,6 +1423,8 @@ mod tests {
                 plugin_id: "openai-compat".to_owned(),
                 preset_id: String::new(),
                 fingerprint: String::new(),
+                patience: Some(Duration::from_secs(60)),
+                kernel: true,
                 base_url: String::new(),
             },
         );
@@ -1438,6 +1478,8 @@ mod tests {
                     plugin_id: "openai-compat".to_owned(),
                     preset_id: String::new(),
                     fingerprint: String::new(),
+                    patience: Some(Duration::from_secs(60)),
+                    kernel: true,
                     base_url: String::new(),
                 },
             );
@@ -1485,6 +1527,8 @@ mod tests {
             plugin_id: id.to_owned(),
             preset_id: String::new(),
             fingerprint: String::new(),
+            patience: Some(Duration::from_secs(60)),
+            kernel: true,
             base_url: String::new(),
         }
     }
