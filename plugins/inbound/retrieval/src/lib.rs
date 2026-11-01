@@ -1,23 +1,24 @@
-//! Embeddings, reranking, and speech to text on the gateway's own address.
+//! Embeddings, reranking, and speech on the gateway's own address.
 //!
-//! `POST /v1/embeddings` and `POST /v1/rerank` take a JSON object that names
-//! a `model`. `POST /v1/audio/transcriptions` and
-//! `POST /v1/audio/translations` take a `multipart/form-data` form with a
+//! `POST /v1/embeddings`, `POST /v1/rerank`, and `POST /v1/audio/speech`
+//! take a JSON object that names a `model`. `POST /v1/audio/transcriptions`
+//! and `POST /v1/audio/translations` take a `multipart/form-data` form with a
 //! file and a `model` field. The kernel routes the model like a chat and
 //! forwards the body to each provider of the model in turn, with the model
 //! set to that provider's own id, posting it to the same path under the
 //! provider's OpenAI-style base URL. A form goes out byte for byte as sent
 //! but for its `model` fields. A provider that serves no such endpoint, is
 //! out of quota, or fails passes the call on to the next. The first answer
-//! comes back as the provider sent it, with its content type.
+//! comes back as the provider sent it, with its content type. Speech audio
+//! and event streams are relayed chunk by chunk.
 
 #![deny(missing_docs)]
 
 mod form;
 
 use hofund_plugin_api::{
-    BodyStream, Forward, GatewayHandle, InboundSurface, Method, PluginError, PluginErrorKind,
-    RawAnswer, RawBody, RouteSpec, SurfaceHost, SurfaceId,
+    Forward, GatewayHandle, InboundSurface, Method, PluginError, PluginErrorKind, RawAnswer,
+    RawBody, RouteSpec, SurfaceHost, SurfaceId,
 };
 use hofund_plugin_sdk::json::{self, Map, Value, json};
 use hofund_plugin_sdk::{Contribution, HttpRequest, HttpResponse, async_trait, text_response};
@@ -32,14 +33,19 @@ const EMBEDDINGS: &str = "/v1/embeddings";
 const RERANK: &str = "/v1/rerank";
 const TRANSCRIPTIONS: &str = "/v1/audio/transcriptions";
 const TRANSLATIONS: &str = "/v1/audio/translations";
+const SPEECH: &str = "/v1/audio/speech";
+const BARE_SPEECH: &str = "/audio/speech";
 const JSON: &str = "application/json";
+const MPEG: &str = "audio/mpeg";
 
 static ID: SurfaceId = SurfaceId::from_static("retrieval");
-static ROUTES: [RouteSpec; 4] = [
+static ROUTES: [RouteSpec; 6] = [
     RouteSpec::from_static(Method::Post, EMBEDDINGS),
     RouteSpec::from_static(Method::Post, RERANK),
     RouteSpec::from_static(Method::Post, TRANSCRIPTIONS),
     RouteSpec::from_static(Method::Post, TRANSLATIONS),
+    RouteSpec::from_static(Method::Post, SPEECH),
+    RouteSpec::from_static(Method::Post, BARE_SPEECH),
 ];
 
 /// The retrieval surface.
@@ -88,6 +94,7 @@ async fn serve(kernel: &dyn Kernel, request: &HttpRequest) -> HttpResponse {
         RERANK => call("/rerank", body),
         TRANSCRIPTIONS => audio_call("/audio/transcriptions", request),
         TRANSLATIONS => audio_call("/audio/translations", request),
+        SPEECH | BARE_SPEECH => call("/audio/speech", body),
         _ => return text_response(404, "404 page not found"),
     };
     let call = match call {
@@ -96,9 +103,14 @@ async fn serve(kernel: &dyn Kernel, request: &HttpRequest) -> HttpResponse {
     };
     match kernel.forward(call).await {
         Ok(answer) => {
+            let fallback = if matches!(path, SPEECH | BARE_SPEECH) {
+                MPEG
+            } else {
+                JSON
+            };
             let mut response = text_response(answer.status(), "");
-            *response.body_mut() = BodyStream::from_bytes(answer.body().clone());
-            set_type(&mut response, answer.content_type().unwrap_or(JSON));
+            set_type(&mut response, answer.content_type().unwrap_or(fallback));
+            *response.body_mut() = answer.into_body_stream();
             response
         }
         Err(error) => failure(&error),

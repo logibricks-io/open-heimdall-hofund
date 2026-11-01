@@ -16,3 +16,11 @@ prefix = "/v1/audio/transcriptions"
 [[route]]
 method = "POST"
 prefix = "/v1/audio/translations"
+
+[[route]]
+method = "POST"
+prefix = "/v1/audio/speech"
+
+[[route]]
+method = "POST"
+prefix = "/audio/speech"

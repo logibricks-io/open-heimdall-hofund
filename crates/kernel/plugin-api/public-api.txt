@@ -609,11 +609,14 @@ QuotaWindow::fn new (name : impl Into < String > , used : u64 , limit : Option <
 QuotaWindow::fn scope_model (& self) -> Option < & str >
 QuotaWindow::fn with_scope_model (mut self , model : impl Into < String >) -> Self
 RawAnswer
-RawAnswer #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
+RawAnswer #[non_exhaustive] derives(Debug)
 RawAnswer::const fn body (& self) -> & Bytes
+RawAnswer::const fn is_streaming (& self) -> bool
 RawAnswer::const fn status (& self) -> u16
 RawAnswer::fn content_type (& self) -> Option < & str >
+RawAnswer::fn into_body_stream (mut self) -> BodyStream
 RawAnswer::fn new (status : u16 , content_type : Option < String > , body : impl Into < Bytes >) -> Self
+RawAnswer::fn streaming (status : u16 , content_type : Option < String > , body : BodyStream) -> Self
 RawBody
 RawBody #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 RawBody::const fn bytes (& self) -> & Bytes
