@@ -456,7 +456,7 @@ fn offline_usage_one_shot() {
     let out = scratch.hofund(&["usage"]);
     assert_eq!(
         out.ok(),
-        "MODEL  UPSTREAM  IN  OUT  LATENCY_MS  STATUS  TIME\ntotals  requests=0  in=0  out=0"
+        "MODEL  UPSTREAM  IN  OUT  LATENCY_MS  STATUS  TIME\ntotals  requests=0  in=0  out=0  cache_read=0  cache_write_5m=0  cache_write_1h=0  reasoning=0"
     );
     scratch.assert_no_daemon_state();
 }

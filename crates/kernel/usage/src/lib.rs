@@ -77,10 +77,18 @@ pub struct Totals {
     pub input_tokens: u64,
     /// Sum of known non-negative output token counts.
     pub output_tokens: u64,
+    /// Sum of cache-read tokens.
+    pub cache_read_tokens: u64,
+    /// Sum of five-minute cache-write tokens.
+    pub cache_write_5m_tokens: u64,
+    /// Sum of one-hour cache-write tokens.
+    pub cache_write_1h_tokens: u64,
+    /// Sum of reasoning tokens reported in usage.
+    pub reasoning_tokens: u64,
 }
 
 /// A stored request.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Row {
     /// Unix seconds when the row was written.
     pub created_unix: i64,
@@ -102,6 +110,16 @@ pub struct Row {
     pub caller_key_name: String,
     /// Issuer of the authenticated key, or empty for a direct caller.
     pub caller_issuer_id: String,
+    /// Cache-read tokens when stored.
+    pub cache_read_tokens: Option<i64>,
+    /// Five-minute cache-write tokens when stored.
+    pub cache_write_5m_tokens: Option<i64>,
+    /// One-hour cache-write tokens when stored.
+    pub cache_write_1h_tokens: Option<i64>,
+    /// Reasoning tokens when stored.
+    pub reasoning_tokens: Option<i64>,
+    /// Whether reasoning streamed without a usage count.
+    pub reasoning_hidden: bool,
 }
 
 /// One successful request as routing measurements read it.
@@ -173,6 +191,10 @@ impl Ledger {
             ("uncached_input_tokens", "INTEGER"),
             ("cache_read_tokens", "INTEGER"),
             ("cache_write_tokens", "INTEGER"),
+            ("cache_write_5m_tokens", "INTEGER"),
+            ("cache_write_1h_tokens", "INTEGER"),
+            ("reasoning_tokens", "INTEGER"),
+            ("reasoning_hidden", "INTEGER NOT NULL DEFAULT 0"),
         ] {
             ensure_column(&connection, column, declaration)?;
         }
@@ -245,7 +267,9 @@ impl Ledger {
         let mut statement = connection
             .prepare(
                 "SELECT created_unix, model, upstream, input_tokens, output_tokens, latency_ms, status,
-                        caller_key_id, caller_key_name, caller_issuer_id
+                        caller_key_id, caller_key_name, caller_issuer_id,
+                        cache_read_tokens, cache_write_5m_tokens, cache_write_1h_tokens,
+                        reasoning_tokens, reasoning_hidden
                  FROM requests ORDER BY id",
             )
             .map_err(|error| UsageError(error.to_string()))?;
@@ -340,17 +364,29 @@ impl Ledger {
             .query_row(
                 "SELECT COUNT(*),
                         COALESCE(SUM(MAX(input_tokens, 0)), 0),
-                        COALESCE(SUM(MAX(output_tokens, 0)), 0)
+                        COALESCE(SUM(MAX(output_tokens, 0)), 0),
+                        COALESCE(SUM(MAX(cache_read_tokens, 0)), 0),
+                        COALESCE(SUM(MAX(cache_write_5m_tokens, 0)), 0),
+                        COALESCE(SUM(MAX(cache_write_1h_tokens, 0)), 0),
+                        COALESCE(SUM(MAX(reasoning_tokens, 0)), 0)
                  FROM requests WHERE created_unix >= ?1",
                 params![since],
                 |row| {
                     let count: i64 = row.get(0)?;
                     let input: i64 = row.get(1)?;
                     let output: i64 = row.get(2)?;
+                    let cache_read: i64 = row.get(3)?;
+                    let cache_write_5m: i64 = row.get(4)?;
+                    let cache_write_1h: i64 = row.get(5)?;
+                    let reasoning: i64 = row.get(6)?;
                     Ok(Totals {
                         requests: u64::try_from(count).unwrap_or(0),
                         input_tokens: u64::try_from(input).unwrap_or(0),
                         output_tokens: u64::try_from(output).unwrap_or(0),
+                        cache_read_tokens: u64::try_from(cache_read).unwrap_or(0),
+                        cache_write_5m_tokens: u64::try_from(cache_write_5m).unwrap_or(0),
+                        cache_write_1h_tokens: u64::try_from(cache_write_1h).unwrap_or(0),
+                        reasoning_tokens: u64::try_from(reasoning).unwrap_or(0),
                     })
                 },
             )
@@ -358,7 +394,9 @@ impl Ledger {
         let mut statement = connection
             .prepare(
                 "SELECT created_unix, model, upstream, input_tokens, output_tokens, latency_ms, status,
-                        caller_key_id, caller_key_name, caller_issuer_id
+                        caller_key_id, caller_key_name, caller_issuer_id,
+                        cache_read_tokens, cache_write_5m_tokens, cache_write_1h_tokens,
+                        reasoning_tokens, reasoning_hidden
                  FROM requests WHERE created_unix >= ?1 ORDER BY id DESC LIMIT ?2",
             )
             .map_err(|error| UsageError(error.to_string()))?;
@@ -419,6 +457,11 @@ fn read_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Row> {
         caller_key_id: row.get(7)?,
         caller_key_name: row.get(8)?,
         caller_issuer_id: row.get(9)?,
+        cache_read_tokens: row.get(10)?,
+        cache_write_5m_tokens: row.get(11)?,
+        cache_write_1h_tokens: row.get(12)?,
+        reasoning_tokens: row.get(13)?,
+        reasoning_hidden: row.get::<_, i64>(14)? != 0,
     })
 }
 
@@ -461,9 +504,19 @@ pub fn format_table(rows: &[Row]) -> String {
     }
     let input: i64 = rows.iter().filter_map(|row| row.input_tokens).sum();
     let output: i64 = rows.iter().filter_map(|row| row.output_tokens).sum();
+    let cache_read: i64 = rows.iter().filter_map(|row| row.cache_read_tokens).sum();
+    let cache_write_5m: i64 = rows
+        .iter()
+        .filter_map(|row| row.cache_write_5m_tokens)
+        .sum();
+    let cache_write_1h: i64 = rows
+        .iter()
+        .filter_map(|row| row.cache_write_1h_tokens)
+        .sum();
+    let reasoning: i64 = rows.iter().filter_map(|row| row.reasoning_tokens).sum();
     out.push_str(&format!(
-        "totals  requests={}  in={input}  out={output}\n",
-        rows.len()
+        "totals  requests={}  in={input}  out={output}  cache_read={cache_read}  cache_write_5m={cache_write_5m}  cache_write_1h={cache_write_1h}  reasoning={reasoning}\n",
+        rows.len(),
     ));
     out
 }
@@ -510,9 +563,7 @@ mod tests {
             output_tokens: output,
             latency_ms: 1,
             status: "200".to_owned(),
-            caller_key_id: String::new(),
-            caller_key_name: String::new(),
-            caller_issuer_id: String::new(),
+            ..Default::default()
         }
     }
 
@@ -594,6 +645,7 @@ mod tests {
                 requests: 3,
                 input_tokens: 1,
                 output_tokens: 5,
+                ..Totals::default()
             }
         );
         let (rows, totals) = ledger.summary(None, 10).expect("all");
@@ -623,6 +675,7 @@ mod tests {
                 caller_key_id: String::new(),
                 caller_key_name: String::new(),
                 caller_issuer_id: String::new(),
+                ..Default::default()
             })
             .expect("insert");
         let rows = ledger.rows().expect("rows");
@@ -641,6 +694,7 @@ mod tests {
                 caller_key_id: String::new(),
                 caller_key_name: String::new(),
                 caller_issuer_id: String::new(),
+                ..Default::default()
             })
             .expect("second");
         let table = ledger.table().expect("table");
@@ -720,6 +774,7 @@ mod tests {
                     caller_key_id: String::new(),
                     caller_key_name: String::new(),
                     caller_issuer_id: String::new(),
+                    ..Default::default()
                 },
                 Some(12),
             )

@@ -44,7 +44,7 @@ pub use stream::{
     SignatureDelta, StreamEvent, TextDelta, ThinkingDelta, ToolArgumentsDelta, UnknownEvent,
 };
 pub use tools::{Tool, ToolChoice, ToolChoiceMode};
-pub use usage::Usage;
+pub use usage::{Usage, normalize_cache_write};
 
 #[cfg(test)]
 mod tests {

@@ -986,6 +986,10 @@ fn usage_response(
     summary.requests = totals.requests;
     summary.input_tokens = totals.input_tokens;
     summary.output_tokens = totals.output_tokens;
+    summary.cache_read_tokens = totals.cache_read_tokens;
+    summary.cache_write_5m_tokens = totals.cache_write_5m_tokens;
+    summary.cache_write_1h_tokens = totals.cache_write_1h_tokens;
+    summary.reasoning_tokens = totals.reasoning_tokens;
     response.totals = summary;
     response
 }
@@ -1008,6 +1012,19 @@ fn usage_row(row: hofund_usage::Row) -> UsageRow {
     out.caller_key_id = row.caller_key_id;
     out.caller_key_name = row.caller_key_name;
     out.caller_issuer_id = row.caller_issuer_id;
+    out.cache_read_tokens = row
+        .cache_read_tokens
+        .map(|tokens| u64::try_from(tokens).unwrap_or(0));
+    out.cache_write_5m_tokens = row
+        .cache_write_5m_tokens
+        .map(|tokens| u64::try_from(tokens).unwrap_or(0));
+    out.cache_write_1h_tokens = row
+        .cache_write_1h_tokens
+        .map(|tokens| u64::try_from(tokens).unwrap_or(0));
+    out.reasoning_tokens = row
+        .reasoning_tokens
+        .map(|tokens| u64::try_from(tokens).unwrap_or(0));
+    out.reasoning_hidden = row.reasoning_hidden;
     out
 }
 

@@ -62,6 +62,7 @@ impl UsageQuery {
 /// One usage row with unsigned wire quantities.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
+#[serde(default)]
 pub struct UsageRow {
     /// Unix milliseconds when the row was recorded.
     pub created_at_ms: u64,
@@ -86,11 +87,27 @@ pub struct UsageRow {
     /// Issuer of the authenticated key, absent in older peers.
     #[serde(default)]
     pub caller_issuer_id: String,
+    /// Cache-read tokens when stored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_tokens: Option<u64>,
+    /// Five-minute cache-write tokens when stored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_5m_tokens: Option<u64>,
+    /// One-hour cache-write tokens when stored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_1h_tokens: Option<u64>,
+    /// Reasoning tokens when stored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_tokens: Option<u64>,
+    /// Reasoning streamed without a separate usage count.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reasoning_hidden: bool,
 }
 
 /// Aggregated usage totals.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
+#[serde(default)]
 pub struct UsageTotals {
     /// Number of requests.
     pub requests: u64,
@@ -98,6 +115,14 @@ pub struct UsageTotals {
     pub input_tokens: u64,
     /// Sum of known output token counts.
     pub output_tokens: u64,
+    /// Sum of cache-read tokens.
+    pub cache_read_tokens: u64,
+    /// Sum of five-minute cache-write tokens.
+    pub cache_write_5m_tokens: u64,
+    /// Sum of one-hour cache-write tokens.
+    pub cache_write_1h_tokens: u64,
+    /// Sum of reasoning tokens.
+    pub reasoning_tokens: u64,
 }
 
 /// Usage response.

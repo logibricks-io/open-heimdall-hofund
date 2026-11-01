@@ -578,12 +578,17 @@ fn decode_tool_choice(value: Value) -> Result<hofund_ir::ToolChoice, CodecError>
 }
 
 fn decode_usage(usage: &mut Map<String, Value>) -> Result<Usage, CodecError> {
+    let reported_write = take_u64(usage, "cacheWriteInputTokens")?;
+    let (cache_write_tokens, cache_write_5m_tokens, cache_write_1h_tokens) =
+        hofund_ir::normalize_cache_write(reported_write, None, None);
     Ok(Usage {
         input_tokens: take_u64(usage, "inputTokens")?,
         output_tokens: take_u64(usage, "outputTokens")?,
         total_tokens: take_u64(usage, "totalTokens")?,
         cache_read_tokens: take_u64(usage, "cacheReadInputTokens")?,
-        cache_write_tokens: take_u64(usage, "cacheWriteInputTokens")?,
+        cache_write_tokens,
+        cache_write_5m_tokens,
+        cache_write_1h_tokens,
         reasoning_tokens: None,
         extensions: Extensions::from_map(std::mem::take(usage)),
     })

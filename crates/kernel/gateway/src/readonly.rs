@@ -463,6 +463,7 @@ mod tests {
                     caller_key_id: key.clone(),
                     caller_key_name: name.to_owned(),
                     caller_issuer_id: String::new(),
+                    ..Default::default()
                 })
                 .expect("usage");
         }
