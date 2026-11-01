@@ -205,6 +205,17 @@ pub trait Codec: Send + Sync {
         out
     }
 
+    /// Bytes that end a relayed stream after [`Codec::encode_stream_error`]
+    /// when the upstream read failed mid-reply.
+    ///
+    /// The default is empty: the error frame is the last event. Chat
+    /// Completions returns `data: [DONE]`, the end a Chat client reads to
+    /// (`reference: internal/gateway/gateway.go:5978-5987`). A stream that
+    /// ended cleanly but short does not get these bytes.
+    fn severed_stream_end(&self) -> &'static [u8] {
+        b""
+    }
+
     /// Encodes an error body in this protocol's JSON shape.
     ///
     /// `status` is the HTTP status the caller will send. The returned bytes are

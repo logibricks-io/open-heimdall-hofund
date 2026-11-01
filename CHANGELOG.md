@@ -1030,6 +1030,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A relayed stream whose upstream read fails mid-line no longer sends the
+  client a half event. Only ended lines go out as they arrive; the unfinished
+  last line goes out when the stream ends cleanly and is dropped when the read
+  fails, unless it is a whole `data:` line (`[DONE]` or valid JSON) short of
+  its line end. The error event starts on a frame of its own, and a severed
+  Chat Completions stream ends with `data: [DONE]` after it (D-21).
+
 - Goose model picks retain the config's current or legacy layout, remove stale
   flat keys from the current layout, and clear/disconnect by removing only
   hofund's active-provider and provider entries; other providers and YAML

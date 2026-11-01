@@ -1582,94 +1582,23 @@ async fn raw_body(
             }
         };
         let owned = track.take_for_stream();
-        let stream = futures_util::stream::unfold(
-            (
-                body,
-                meta,
-                usage,
-                tap,
-                on_error,
-                true,
-                0u8,
-                Some(owned),
-                member,
-            ),
-            |(mut body, mut meta, usage, mut tap, on_error, boundary, phase, mut track, member)| async move {
-                let finish = |meta: &UsageMeta,
-                              usage: &Ledger,
-                              track: &mut Option<RequestTrack>,
-                              member: &Option<String>,
-                              status: StatusCode| {
-                    write_usage(usage, meta, Some((meta.input, meta.output)), status);
-                    if let Some(track) = track.as_mut() {
-                        track.end_with(
-                            member.clone(),
-                            status.as_u16(),
-                            meta.input.and_then(|value| u64::try_from(value).ok()),
-                            meta.output.and_then(|value| u64::try_from(value).ok()),
-                        );
-                    }
-                };
-                if phase == 1 {
-                    finish(&meta, &usage, &mut track, &member, StatusCode::OK);
-                    return None;
-                }
-                if phase == 2 {
-                    return None;
-                }
-                match body.next_chunk().await {
-                    None => {
-                        let tail = tap.finish();
-                        let (input, output) = tap.tokens();
-                        meta.input = input.or(meta.input);
-                        meta.output = output.or(meta.output);
-                        if tail.is_empty() {
-                            finish(&meta, &usage, &mut track, &member, StatusCode::OK);
-                            None
-                        } else {
-                            Some((
-                                Ok::<Bytes, std::io::Error>(Bytes::from(tail)),
-                                (body, meta, usage, tap, on_error, boundary, 1, track, member),
-                            ))
-                        }
-                    }
-                    Some(Err(error)) => {
-                        let mut tail = tap.finish();
-                        let (input, output) = tap.tokens();
-                        meta.input = input.or(meta.input);
-                        meta.output = output.or(meta.output);
-                        finish(&meta, &usage, &mut track, &member, StatusCode::BAD_GATEWAY);
-                        let mut frame = on_error(&error);
-                        if tail.is_empty() && !boundary {
-                            let mut prefixed = b"\n\n".to_vec();
-                            prefixed.extend(frame);
-                            frame = prefixed;
-                        }
-                        tail.extend(frame);
-                        Some((
-                            Ok(Bytes::from(tail)),
-                            (body, meta, usage, tap, on_error, true, 2, track, member),
-                        ))
-                    }
-                    Some(Ok(chunk)) => {
-                        meta.note_first_content();
-                        let forwarded = tap.push(&chunk);
-                        let (input, output) = tap.tokens();
-                        meta.input = input.or(meta.input);
-                        meta.output = output.or(meta.output);
-                        let boundary = if forwarded.is_empty() {
-                            boundary
-                        } else {
-                            frame_closed(&forwarded)
-                        };
-                        Some((
-                            Ok(Bytes::from(forwarded)),
-                            (body, meta, usage, tap, on_error, boundary, 0, track, member),
-                        ))
-                    }
-                }
-            },
-        );
+        let relay = RawRelay {
+            body,
+            meta,
+            usage,
+            tap,
+            on_error,
+            severed_end: codec.severed_stream_end(),
+            lines: (content_type == "text/event-stream").then(LineHold::default),
+            sent_tail: Vec::new(),
+            phase: 0,
+            track: Some(owned),
+            member,
+        };
+        let stream = futures_util::stream::unfold(relay, |mut relay| async move {
+            let next = relay.next().await?;
+            Some((Ok::<Bytes, std::io::Error>(next), relay))
+        });
         let stream = capture_stream(stream, capture);
         return Response::builder()
             .status(StatusCode::OK)
@@ -1917,6 +1846,188 @@ fn sse_body(
     )
 }
 
+/// State of a relayed raw stream.
+struct RawRelay<E> {
+    body: BodyStream,
+    meta: UsageMeta,
+    usage: Arc<Ledger>,
+    tap: Box<dyn hofund_codec::RawTap>,
+    on_error: E,
+    severed_end: &'static [u8],
+    /// Holds an unfinished last line of an event stream. `None` for other
+    /// stream framings.
+    lines: Option<LineHold>,
+    /// The last few bytes the client got, to place an appended event.
+    sent_tail: Vec<u8>,
+    /// 0 relays, 1 records a clean end, 2 is done.
+    phase: u8,
+    track: Option<RequestTrack>,
+    member: Option<String>,
+}
+
+impl<E> RawRelay<E>
+where
+    E: Fn(&PluginError) -> Vec<u8>,
+{
+    fn finish(&mut self, status: StatusCode) {
+        write_usage(
+            &self.usage,
+            &self.meta,
+            Some((self.meta.input, self.meta.output)),
+            status,
+        );
+        if let Some(track) = self.track.as_mut() {
+            track.end_with(
+                self.member.clone(),
+                status.as_u16(),
+                self.meta.input.and_then(|value| u64::try_from(value).ok()),
+                self.meta.output.and_then(|value| u64::try_from(value).ok()),
+            );
+        }
+    }
+
+    fn note_tokens(&mut self) {
+        let (input, output) = self.tap.tokens();
+        self.meta.input = input.or(self.meta.input);
+        self.meta.output = output.or(self.meta.output);
+    }
+
+    /// The next bytes for the client, or `None` when the stream is over.
+    /// An empty chunk is a step that forwarded nothing.
+    async fn next(&mut self) -> Option<Bytes> {
+        match self.phase {
+            1 => {
+                self.phase = 2;
+                self.finish(StatusCode::OK);
+                return None;
+            }
+            2 => return None,
+            _ => {}
+        }
+        match self.body.next_chunk().await {
+            None => {
+                let mut tail = self.tap.finish();
+                self.note_tokens();
+                if let Some(lines) = self.lines.as_mut() {
+                    tail = lines.release(&tail);
+                }
+                if tail.is_empty() {
+                    self.phase = 2;
+                    self.finish(StatusCode::OK);
+                    None
+                } else {
+                    self.phase = 1;
+                    Some(Bytes::from(tail))
+                }
+            }
+            Some(Err(error)) => {
+                let held = self.tap.abandon();
+                self.note_tokens();
+                self.phase = 2;
+                self.finish(StatusCode::BAD_GATEWAY);
+                let mut out = match self.lines.as_mut() {
+                    Some(lines) => lines.drop_half(&held),
+                    None => held,
+                };
+                let before = match (out.is_empty(), self.sent_tail.is_empty()) {
+                    (true, true) => &b""[..],
+                    (true, false) => event_gap(&self.sent_tail),
+                    (false, _) => event_gap(&out),
+                };
+                out.extend_from_slice(before);
+                out.extend((self.on_error)(&error));
+                if self.lines.is_some() {
+                    out.extend_from_slice(self.severed_end);
+                }
+                Some(Bytes::from(out))
+            }
+            Some(Ok(chunk)) => {
+                self.meta.note_first_content();
+                let mut forwarded = self.tap.push(&chunk);
+                self.note_tokens();
+                if let Some(lines) = self.lines.as_mut() {
+                    forwarded = lines.push(&forwarded);
+                }
+                if !forwarded.is_empty() {
+                    let keep = forwarded.len().saturating_sub(4);
+                    self.sent_tail.clear();
+                    self.sent_tail.extend_from_slice(&forwarded[keep..]);
+                }
+                Some(Bytes::from(forwarded))
+            }
+        }
+    }
+}
+
+/// Holds the line an event stream's last read left unfinished.
+///
+/// Only ended lines reach the client as they arrive. The unfinished line
+/// goes out when the stream ends cleanly and is dropped when the read fails,
+/// unless it is a whole `data:` line short of its line end
+/// (`reference: internal/gateway/gateway.go:5709-5760`).
+#[derive(Default)]
+struct LineHold {
+    pending: Vec<u8>,
+}
+
+impl LineHold {
+    /// Adds `bytes` and returns everything up to the last line end.
+    fn push(&mut self, bytes: &[u8]) -> Vec<u8> {
+        self.pending.extend_from_slice(bytes);
+        match self.pending.iter().rposition(|byte| *byte == b'\n') {
+            Some(index) => {
+                let rest = self.pending.split_off(index + 1);
+                std::mem::replace(&mut self.pending, rest)
+            }
+            None => Vec::new(),
+        }
+    }
+
+    /// The held line and `tail`, as they came, for a stream that ended cleanly.
+    fn release(&mut self, tail: &[u8]) -> Vec<u8> {
+        let mut out = std::mem::take(&mut self.pending);
+        out.extend_from_slice(tail);
+        out
+    }
+
+    /// The held bytes and `tail` for a stream whose read failed, without a
+    /// half line no client can parse.
+    fn drop_half(&mut self, tail: &[u8]) -> Vec<u8> {
+        let mut out = self.release(tail);
+        let start = out
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .map_or(0, |index| index + 1);
+        if !whole_data_line(&out[start..]) {
+            out.truncate(start);
+        }
+        out
+    }
+}
+
+/// Whether `line` is a `data:` line whose payload is `[DONE]` or valid JSON.
+fn whole_data_line(line: &[u8]) -> bool {
+    let line = line.trim_ascii();
+    let Some(data) = line.strip_prefix(b"data:") else {
+        return false;
+    };
+    let data = data.trim_ascii();
+    data == b"[DONE]" || serde_json::from_slice::<serde_json::Value>(data).is_ok()
+}
+
+/// What goes between bytes already sent and an appended event: nothing after
+/// a closed frame, a blank line after an ended line, otherwise a line end and
+/// a blank line.
+fn event_gap(bytes: &[u8]) -> &'static [u8] {
+    if frame_closed(bytes) {
+        b""
+    } else if bytes.ends_with(b"\n") || bytes.ends_with(b"\r") {
+        b"\n"
+    } else {
+        b"\n\n"
+    }
+}
+
 fn frame_closed(bytes: &[u8]) -> bool {
     bytes.ends_with(b"\n\n") || bytes.ends_with(b"\r\n\r\n") || bytes.ends_with(b"\r\r")
 }
@@ -2137,5 +2248,67 @@ mod forwarded_token_tests {
         assert_eq!(read(r#"{"usage":{"prompt_tokens":-1}}"#), (None, None));
         assert_eq!(read("not json"), (None, None));
         assert_eq!(read("{}"), (None, None));
+    }
+}
+
+#[cfg(test)]
+mod line_hold_tests {
+    use super::{LineHold, event_gap, whole_data_line};
+
+    #[test]
+    fn d21_only_ended_lines_pass_the_hold() {
+        let mut hold = LineHold::default();
+        assert!(hold.push(b"data: {\"a\"").is_empty());
+        assert_eq!(hold.push(b":1}\n\ndata: {"), b"data: {\"a\":1}\n\n");
+        assert_eq!(hold.push(b"}\n"), b"data: {}\n");
+        assert!(hold.push(b"").is_empty());
+    }
+
+    #[test]
+    fn d21_a_clean_end_releases_the_held_line_as_it_came() {
+        let mut hold = LineHold::default();
+        let _ = hold.push(b"data: {\"a\":1}\n\ndata: {\"b\"");
+        assert_eq!(hold.release(b""), b"data: {\"b\"");
+        assert!(hold.release(b"").is_empty());
+    }
+
+    #[test]
+    fn d21_a_failed_read_drops_the_half_line() {
+        let mut hold = LineHold::default();
+        let _ = hold.push(b"event: x\ndata: {\"b\"");
+        assert!(hold.drop_half(b"").is_empty());
+        let mut hold = LineHold::default();
+        assert_eq!(
+            hold.drop_half(b"data: {\"a\":1}\n\ndata: {\"b\""),
+            b"data: {\"a\":1}\n\n"
+        );
+        assert!(hold.release(b"").is_empty());
+    }
+
+    #[test]
+    fn d21_a_whole_data_line_short_of_its_end_is_kept() {
+        let mut hold = LineHold::default();
+        let _ = hold.push(b"data: {\"a\":1}");
+        assert_eq!(hold.drop_half(b""), b"data: {\"a\":1}");
+        let mut hold = LineHold::default();
+        assert_eq!(hold.drop_half(b"data: [DONE]"), b"data: [DONE]");
+    }
+
+    #[test]
+    fn d21_whole_data_line_reads_done_and_json_only() {
+        assert!(whole_data_line(b"data: [DONE]"));
+        assert!(whole_data_line(b"data:{\"a\":1}\r"));
+        assert!(whole_data_line(b"  data: 7 "));
+        assert!(!whole_data_line(b"data: {\"a\":"));
+        assert!(!whole_data_line(b"event: message_stop"));
+        assert!(!whole_data_line(b""));
+    }
+
+    #[test]
+    fn d21_the_gap_before_an_appended_event_closes_the_frame_once() {
+        assert_eq!(event_gap(b"data: {}\n\n"), b"");
+        assert_eq!(event_gap(b"data: {}\n"), b"\n");
+        assert_eq!(event_gap(b"data: {}\r"), b"\n");
+        assert_eq!(event_gap(b"data: {}"), b"\n\n");
     }
 }
