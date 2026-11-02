@@ -113,9 +113,8 @@ when it matches the account id) with a different refresh token unless the
 import's `expiresAt` is strictly later. The daemon surfaces that as a config
 error; the CLI prints the full reason string.
 
-Claude `/usage` parsing (overage line tolerance, synthetic Extra usage row, and
-Sonnet-only week scope naming) is not implemented yet; `quota()` still returns
-unsupported (see row 3.2).
+Overage handling and Sonnet-only week scopes depend on Claude quota reading,
+which is not implemented yet (`quota()` returns unsupported).
 
 ## Priority suggestion
 
