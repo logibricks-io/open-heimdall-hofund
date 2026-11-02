@@ -117,8 +117,13 @@ fn d34_6_catalog_cap_on_serve_and_off_for_new_codex() {
     assert!(header.is_some());
     let (_, _, header, _) = ask(&gateway, "/v1/codex/models");
     assert!(header.is_some());
-    let (_, _, header, _) = ask(&gateway, "/v1/codex/models?client_version=0.166.0");
+    let (_, _, header, body) = ask(&gateway, "/v1/codex/models?client_version=0.166.0");
     assert_eq!(header, None);
+    let listed: Value = json::from_str(&body).expect("json");
+    assert_eq!(
+        listed["models"].as_array().expect("models").len(),
+        ids.len()
+    );
 }
 
 #[test]
@@ -160,4 +165,30 @@ fn d34_11_cache_row_without_instructions_falls_back_and_adds_no_messages() {
     let value = entry("gpt-6.1-sol", 1, &lookup);
     assert_eq!(value["base_instructions"], "cache base");
     assert!(value.get("model_messages").is_none(), "{value}");
+}
+
+#[test]
+fn d34_12_a_slug_only_matches_at_a_dash_boundary() {
+    let lookup = Lookup::without_cache();
+    assert_eq!(
+        lookup.for_id("gpt-6.1-solar"),
+        ModelInstructions::UnknownPrompt
+    );
+}
+
+#[test]
+fn d34_13_longest_cache_slug_wins_and_its_messages_are_applied() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cached = json!({"models": [
+        {"slug": "gpt-6.1-sol-mini", "base_instructions": "mini base",
+         "model_messages": {"instructions_template": "mini"}},
+        {"slug": "gpt-6.1-sol", "base_instructions": "sol base"}
+    ]});
+    std::fs::write(dir.path().join("models_cache.json"), cached.to_string()).expect("write");
+    set_test_codex_home(Some(dir.path().to_path_buf()));
+    let lookup = Lookup::with_codex_home();
+    set_test_codex_home(None);
+    let value = entry("vendor/gpt-6.1-sol-mini-fast", 1, &lookup);
+    assert_eq!(value["base_instructions"], "mini base");
+    assert_eq!(value["model_messages"]["instructions_template"], "mini");
 }

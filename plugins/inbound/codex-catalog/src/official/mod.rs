@@ -18,8 +18,7 @@ struct BundledEntry {
 
 #[derive(Debug, Default)]
 struct Bundled {
-    /// Longest-prefix matching prefers longer slugs first.
-    by_len: Vec<BundledEntry>,
+    entries: Vec<BundledEntry>,
 }
 
 static BUNDLED: OnceLock<Bundled> = OnceLock::new();
@@ -27,7 +26,7 @@ static BUNDLED: OnceLock<Bundled> = OnceLock::new();
 fn bundled() -> &'static Bundled {
     BUNDLED.get_or_init(|| {
         let value: Value = json::from_str(BUNDLED_JSON).expect("bundled instructions json");
-        let mut by_len = Vec::new();
+        let mut entries = Vec::new();
         for row in value
             .get("entries")
             .and_then(Value::as_array)
@@ -40,13 +39,12 @@ fn bundled() -> &'static Bundled {
             let Some(template) = row.get("instructions_template").and_then(Value::as_str) else {
                 continue;
             };
-            by_len.push(BundledEntry {
+            entries.push(BundledEntry {
                 slug: slug.to_owned(),
                 instructions_template: template.to_owned(),
             });
         }
-        by_len.sort_by_key(|entry| std::cmp::Reverse(entry.slug.len()));
-        Bundled { by_len }
+        Bundled { entries }
     })
 }
 
@@ -152,10 +150,10 @@ impl Lookup {
         {
             return hit;
         }
-        if let Some(entry) = bundled()
-            .by_len
-            .iter()
-            .find(|entry| slug_matches(&entry.slug, slug))
+        let entries = &bundled().entries;
+        if let Some(found) =
+            longest_slug_match(slug, entries.iter().map(|entry| entry.slug.as_str()))
+            && let Some(entry) = entries.iter().find(|entry| entry.slug == found)
         {
             return ModelInstructions::Bundled {
                 base_instructions: entry.instructions_template.clone(),
