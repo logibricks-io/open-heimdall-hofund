@@ -2,6 +2,12 @@ id = "codex"
 display_name = "Codex CLI"
 binary = "codex"
 
+# Product token of the User-Agent or originator.
+client_prefixes = ["codex", "acp-extension-codex"]
+
+# Present on a nested turn even when the user agent names another host.
+nested_turn_headers = ["x-codex-window-id", "x-codex-turn-metadata"]
+
 # The file is ~/.codex/config.toml. CODEX_HOME replaces ~/.codex.
 # Provider ids openai, ollama, and lmstudio are reserved, so the provider id
 # here is hofund.

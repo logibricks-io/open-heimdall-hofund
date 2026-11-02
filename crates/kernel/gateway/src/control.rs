@@ -20,8 +20,9 @@ use axum::routing::{get, post};
 use futures_util::future::BoxFuture;
 use futures_util::stream::{BoxStream, StreamExt};
 use hofund_control_proto::{
-    AgentChangeResponse, AgentConnectRequest, AgentDisconnectRequest, AgentListResponse,
-    AgentModelRequest, AgentPlanRequest, AgentPlanResponse, AgentStatusResponse,
+    AgentChangeResponse, AgentConnectRequest, AgentDisconnectRequest, AgentHiddenSetRequest,
+    AgentListResponse, AgentModelRequest, AgentModelsResponse, AgentPickedOnlyRequest,
+    AgentPlanRequest, AgentPlanResponse, AgentStatusResponse, AgentVisibleSetRequest,
     ConfigApplyRequest, ConfigResponse, ConfigValidateRequest, ConfigValidationResponse,
     ControlError, ControlErrorKind, ErrorEnvelope, GatewayKeyRequest, GatewayKeyResponse,
     GatewayKeyRestoreRequest, HealthResponse, MAX_ID_BYTES, MAX_REQUEST_BODY_BYTES,
@@ -266,6 +267,66 @@ pub trait ControlState: Send + Sync {
         id: String,
         request: AgentModelRequest,
     ) -> ControlFuture<'_, AgentChangeResponse>;
+    /// Lists route models shown and hidden for one agent.
+    fn agent_models(&self, id: String) -> ControlFuture<'_, AgentModelsResponse> {
+        let _ = id;
+        Box::pin(async {
+            Err(ControlError::new(
+                ControlErrorKind::BadRequest,
+                "agent model visibility is not supported by this control state",
+                "control",
+            )
+            .into())
+        })
+    }
+    /// Replaces the visibility names for one agent.
+    fn set_agent_visible(
+        &self,
+        id: String,
+        request: AgentVisibleSetRequest,
+    ) -> ControlFuture<'_, ConfigResponse> {
+        let _ = (id, request);
+        Box::pin(async {
+            Err(ControlError::new(
+                ControlErrorKind::BadRequest,
+                "agent model visibility is not supported by this control state",
+                "control",
+            )
+            .into())
+        })
+    }
+    /// Replaces hidden route ids for one agent.
+    fn set_agent_hidden_models(
+        &self,
+        id: String,
+        request: AgentHiddenSetRequest,
+    ) -> ControlFuture<'_, ConfigResponse> {
+        let _ = (id, request);
+        Box::pin(async {
+            Err(ControlError::new(
+                ControlErrorKind::BadRequest,
+                "agent model visibility is not supported by this control state",
+                "control",
+            )
+            .into())
+        })
+    }
+    /// Toggles picked-only mode for one agent.
+    fn set_agent_picked_only(
+        &self,
+        id: String,
+        request: AgentPickedOnlyRequest,
+    ) -> ControlFuture<'_, ConfigResponse> {
+        let _ = (id, request);
+        Box::pin(async {
+            Err(ControlError::new(
+                ControlErrorKind::BadRequest,
+                "agent model visibility is not supported by this control state",
+                "control",
+            )
+            .into())
+        })
+    }
     /// Reports usage for a period.
     fn usage(&self, query: UsageQuery) -> ControlFuture<'_, UsageResponse>;
     /// Reports what is left of every subscription, with each account's
@@ -472,6 +533,16 @@ impl Control {
             .route("/v1/hofund/agents/{id}/connect", post(connect_agent))
             .route("/v1/hofund/agents/{id}/disconnect", post(disconnect_agent))
             .route("/v1/hofund/agents/{id}/model", post(set_agent_model))
+            .route("/v1/hofund/agents/{id}/models", get(agent_models))
+            .route("/v1/hofund/agents/{id}/visible", post(set_agent_visible))
+            .route(
+                "/v1/hofund/agents/{id}/hidden_models",
+                post(set_agent_hidden_models),
+            )
+            .route(
+                "/v1/hofund/agents/{id}/picked_only",
+                post(set_agent_picked_only),
+            )
             .route("/v1/hofund/usage", get(usage).head(method_not_allowed))
             .route(
                 "/v1/hofund/gateway-keys",
@@ -1013,6 +1084,71 @@ async fn set_agent_model(
         Err(failure) => return failure_response(failure),
     };
     operation_response!(state.control.state.set_agent_model(id, request).await)
+}
+
+async fn agent_models(
+    State(state): State<HttpState>,
+    id: Result<AxumPath<String>, PathRejection>,
+) -> Response {
+    let id = match path_id(id) {
+        Ok(id) => id,
+        Err(failure) => return failure_response(failure),
+    };
+    operation_response!(state.control.state.agent_models(id).await)
+}
+
+async fn set_agent_visible(
+    State(state): State<HttpState>,
+    id: Result<AxumPath<String>, PathRejection>,
+    body: Bytes,
+) -> Response {
+    let id = match path_id(id) {
+        Ok(id) => id,
+        Err(failure) => return failure_response(failure),
+    };
+    let request = match decode_body::<AgentVisibleSetRequest>(&body) {
+        Ok(request) => request,
+        Err(failure) => return failure_response(failure),
+    };
+    operation_response!(state.control.state.set_agent_visible(id, request).await)
+}
+
+async fn set_agent_hidden_models(
+    State(state): State<HttpState>,
+    id: Result<AxumPath<String>, PathRejection>,
+    body: Bytes,
+) -> Response {
+    let id = match path_id(id) {
+        Ok(id) => id,
+        Err(failure) => return failure_response(failure),
+    };
+    let request = match decode_body::<AgentHiddenSetRequest>(&body) {
+        Ok(request) => request,
+        Err(failure) => return failure_response(failure),
+    };
+    operation_response!(
+        state
+            .control
+            .state
+            .set_agent_hidden_models(id, request)
+            .await
+    )
+}
+
+async fn set_agent_picked_only(
+    State(state): State<HttpState>,
+    id: Result<AxumPath<String>, PathRejection>,
+    body: Bytes,
+) -> Response {
+    let id = match path_id(id) {
+        Ok(id) => id,
+        Err(failure) => return failure_response(failure),
+    };
+    let request = match decode_body::<AgentPickedOnlyRequest>(&body) {
+        Ok(request) => request,
+        Err(failure) => return failure_response(failure),
+    };
+    operation_response!(state.control.state.set_agent_picked_only(id, request).await)
 }
 
 async fn usage(

@@ -31,8 +31,8 @@ const REDACTED: &str = "[redacted]";
 /// changes this prefix.
 const PLAN_REVISION_DOMAIN: &[u8] = b"hofund-agent-plan-v1\0";
 
-/// Reads the route model names from the published configuration.
-pub(crate) type RouteSource = Arc<dyn Fn() -> Vec<String> + Send + Sync>;
+/// Reads route model names for an optional agent id and its current model.
+pub(crate) type RouteSource = Arc<dyn Fn(Option<&str>, Option<&str>) -> Vec<String> + Send + Sync>;
 
 /// Reads the gateway URL agents should call. It follows a relisten.
 pub(crate) type BaseUrlSource = Arc<dyn Fn() -> String + Send + Sync>;
@@ -115,11 +115,25 @@ impl AgentOps {
         bus.emit(EventPayload::AgentChanged(event));
     }
 
+    /// The model id `agent` currently selects, when its files name one.
+    pub(crate) async fn configured_model_id(&self, agent: &str) -> Option<String> {
+        let agent = agent.to_owned();
+        self.blocking(move |catalog, session| {
+            let model = find(catalog, &agent)
+                .ok()
+                .and_then(|adapter| adapter.configured_model(session).ok().flatten());
+            Ok(model)
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
     /// The gateway facts for one call, with the routes published and the
     /// address served now.
-    fn parts(&self) -> TargetParts {
+    fn parts(&self, agent: Option<&str>) -> TargetParts {
         let mut parts = self.parts.clone();
-        parts.models = (self.routes)();
+        parts.models = (self.routes)(agent, None);
         parts.base_url = (self.base_url)();
         parts
     }
@@ -195,7 +209,7 @@ impl AgentOps {
     }
 
     pub(crate) async fn status(&self) -> Result<AgentStatusResponse, ControlError> {
-        let parts = self.parts();
+        let parts = self.parts(None);
         self.blocking(move |catalog, session| {
             let token = parts.token()?;
             let target = parts.target(token.clone());
@@ -234,10 +248,14 @@ impl AgentOps {
         request: AgentPlanRequest,
     ) -> Result<AgentPlanResponse, ControlError> {
         let force = known_action(request.action)? == AgentAction::Disconnect && request.force;
-        let parts = self.parts();
+        let parts = self.parts(Some(id.as_str()));
+        let routes = Arc::clone(&self.routes);
         self.blocking(move |catalog, session| {
             let adapter = find(catalog, &id)?;
             let token = parts.token()?;
+            let active = adapter.configured_model(session).ok().flatten();
+            let mut parts = parts;
+            parts.models = routes(Some(&id), active.as_deref());
             let target = parts.target(token.clone());
             let files = read_files(adapter, &token, session)?;
             let mut response = AgentPlanResponse::default();
@@ -268,11 +286,15 @@ impl AgentOps {
         id: String,
         request: AgentConnectRequest,
     ) -> Result<AgentChangeResponse, ControlError> {
-        let parts = self.parts();
+        let parts = self.parts(Some(id.as_str()));
+        let routes = Arc::clone(&self.routes);
         let response = self
             .gated(move |catalog, session| {
                 let adapter = find(catalog, &id)?;
                 let token = parts.token()?;
+                let active = adapter.configured_model(session).ok().flatten();
+                let mut parts = parts;
+                parts.models = routes(Some(&id), active.as_deref());
                 let target = parts.target(token.clone());
                 check_revision(
                     adapter,
@@ -309,7 +331,7 @@ impl AgentOps {
         id: String,
         request: AgentDisconnectRequest,
     ) -> Result<AgentChangeResponse, ControlError> {
-        let parts = self.parts();
+        let parts = self.parts(Some(id.as_str()));
         let response = self
             .gated(move |catalog, session| {
                 let adapter = find(catalog, &id)?;
@@ -352,11 +374,18 @@ impl AgentOps {
         id: String,
         request: AgentModelRequest,
     ) -> Result<AgentChangeResponse, ControlError> {
-        let parts = self.parts();
+        let parts = self.parts(Some(id.as_str()));
+        let routes = Arc::clone(&self.routes);
         let response = self
             .gated(move |catalog, session| {
                 let adapter = find(catalog, &id)?;
                 let token = parts.token()?;
+                let active = request
+                    .model
+                    .clone()
+                    .or_else(|| adapter.configured_model(session).ok().flatten());
+                let mut parts = parts;
+                parts.models = routes(Some(&id), active.as_deref());
                 let target = parts.target(token.clone());
                 let plan = adapter
                     .set_model(session, &target, request.model.as_deref())
@@ -381,7 +410,8 @@ impl AgentOps {
     }
 
     pub(crate) async fn rotate_token(&self) -> Result<TokenRotateResponse, ControlError> {
-        let parts = self.parts();
+        let parts = self.parts(None);
+        let routes = Arc::clone(&self.routes);
         let generation = self.token_generation.clone();
         self.gated(move |catalog, session| {
             let previous_token = parts.token()?;
@@ -408,8 +438,11 @@ impl AgentOps {
                     ))
                 })?;
             generation.send_modify(|value| *value = value.wrapping_add(1));
-            let updated = parts.target(token.clone());
             for adapter in connected {
+                let active = adapter.configured_model(session).ok().flatten();
+                let mut updated_parts = parts.clone();
+                updated_parts.models = routes(Some(adapter.id()), active.as_deref());
+                let updated = updated_parts.target(token.clone());
                 let message = adapter
                     .refresh_token(session, &updated)
                     .err()
@@ -731,7 +764,7 @@ mod tests {
             hofund_plugin_registry::agents(),
             std::path::Path::new("unused.toml"),
             Arc::new(|| "http://127.0.0.1:3425".to_owned()),
-            Arc::new(Vec::new),
+            Arc::new(|_, _| Vec::new()),
             PathBuf::from("unused-token"),
         ));
         let finished = Arc::new(AtomicBool::new(false));

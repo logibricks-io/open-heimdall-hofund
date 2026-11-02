@@ -25,6 +25,10 @@ AgentDisconnectRequest.expected_plan_revision
 AgentDisconnectRequest.force
 AgentDisconnectRequest.version
 AgentDisconnectRequest::fn new (force : bool , expected_plan_revision : Option < String >) -> Self
+AgentHiddenSetRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
+AgentHiddenSetRequest.ids
+AgentHiddenSetRequest.version
+AgentHiddenSetRequest::fn new (ids : Vec < String >) -> Self
 AgentListResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
 AgentListResponse.agents
 AgentListResponse.version
@@ -32,6 +36,15 @@ AgentModelRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Seriali
 AgentModelRequest.model
 AgentModelRequest.version
 AgentModelRequest::fn new (model : Option < String >) -> Self
+AgentModelsResponse #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+AgentModelsResponse.agent
+AgentModelsResponse.hidden
+AgentModelsResponse.shown
+AgentModelsResponse.version
+AgentPickedOnlyRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
+AgentPickedOnlyRequest.only
+AgentPickedOnlyRequest.version
+AgentPickedOnlyRequest::fn new (only : bool) -> Self
 AgentPlanRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
 AgentPlanRequest.action
 AgentPlanRequest.force
@@ -64,6 +77,10 @@ AgentSummary #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Ser
 AgentSummary.display_name
 AgentSummary.id
 AgentSummary.installed
+AgentVisibleSetRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
+AgentVisibleSetRequest.names
+AgentVisibleSetRequest.version
+AgentVisibleSetRequest::fn new (names : Vec < String >) -> Self
 ConfigApplyRequest #[non_exhaustive] derives(Clone, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
 ConfigApplyRequest.expected_revision
 ConfigApplyRequest.text

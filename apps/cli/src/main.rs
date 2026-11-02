@@ -18,6 +18,7 @@ mod provider_edit;
 mod quota;
 mod serve;
 mod subscription;
+mod visible;
 mod warmup;
 
 use std::path::{Path, PathBuf};
@@ -103,7 +104,10 @@ fn run_control(config: &Path, command: Command) -> Result<String, String> {
             }
             Command::GatewayKey(command) => gateway_key::run(config, &command).await,
             Command::ProviderList => provider::list(config).await,
-            Command::Models { model } => models::list(config, model.as_deref()).await,
+            Command::Models { model: Some(token) } => {
+                visible::models_or_agent(config, &token).await
+            }
+            Command::Models { model: None } => models::list(config, None).await,
             Command::ModelsRefresh => models::refresh(config).await,
             Command::ProviderShow { id } => provider::show(config, &id).await,
             Command::ProviderTest { id, models } => provider::test(config, &id, &models).await,
@@ -134,6 +138,16 @@ fn run_control(config: &Path, command: Command) -> Result<String, String> {
             }
             Command::Routes => provider::routes(config).await,
             Command::ModelList => provider::model_list(config).await,
+            Command::Visible {
+                agent,
+                names,
+                only_picked,
+            } => visible::visible(config, &agent, &names, only_picked).await,
+            Command::AgentModels {
+                agent,
+                hide,
+                unhide,
+            } => visible::models(config, &agent, &hide, &unhide).await,
             Command::ModelShow { id } => provider::model_show(config, &id).await,
             Command::Version
             | Command::Help(_)
@@ -262,6 +276,16 @@ enum Command {
     ModelList,
     ModelShow {
         id: String,
+    },
+    Visible {
+        agent: String,
+        names: Vec<String>,
+        only_picked: Option<bool>,
+    },
+    AgentModels {
+        agent: String,
+        hide: Vec<String>,
+        unhide: Vec<String>,
     },
 }
 
@@ -443,8 +467,18 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
         },
         ["models", "refresh"] => Command::ModelsRefresh,
         ["models"] => Command::Models { model: None },
-        ["models", model] => Command::Models {
-            model: Some((*model).to_owned()),
+        ["models", "hide", agent, ids @ ..] if !ids.is_empty() => Command::AgentModels {
+            agent: (*agent).to_owned(),
+            hide: owned(ids),
+            unhide: Vec::new(),
+        },
+        ["models", "unhide", agent, ids @ ..] if !ids.is_empty() => Command::AgentModels {
+            agent: (*agent).to_owned(),
+            hide: Vec::new(),
+            unhide: owned(ids),
+        },
+        ["models", token] => Command::Models {
+            model: Some((*token).to_owned()),
         },
         ["accounts", rest @ ..] => match accounts::parse(rest) {
             Some(parsed) => Command::Accounts(parsed?),
@@ -587,6 +621,21 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
         ["provider", ..] => return Err(help_text(HelpTopic::Provider)),
         ["routes"] => Command::Routes,
         ["model", "list"] => Command::ModelList,
+        ["visible", agent, "--only-picked"] => Command::Visible {
+            agent: (*agent).to_owned(),
+            names: Vec::new(),
+            only_picked: Some(true),
+        },
+        ["visible", agent, "--show-new"] => Command::Visible {
+            agent: (*agent).to_owned(),
+            names: Vec::new(),
+            only_picked: Some(false),
+        },
+        ["visible", agent, names @ ..] => Command::Visible {
+            agent: (*agent).to_owned(),
+            names: owned(names),
+            only_picked: None,
+        },
         ["model", "show", id] => Command::ModelShow {
             id: (*id).to_owned(),
         },
@@ -779,6 +828,7 @@ commands:
   warmup [--json]  last daily warm-up per account
   warmup <subscription>/<account>  run warm-up now
   models [<model>]                show catalog spec and prices for route models
+  models <agent>                  when <agent> is an agent id, list shown and hidden models
   models refresh                  refetch the models.dev catalog cache
   provider list                   list providers
   provider show <id>              print a provider, its listed models and picks
@@ -801,6 +851,11 @@ commands:
   routes                          list route models, routing strategies, and stays modes
   model list                      list the models routes serve
   model show <id>                 print one routed model
+  visible <agent> <names...>|all  narrow an agent's model list, or show every model
+  visible <agent> --only-picked   show only models picked for the agent
+  visible <agent> --show-new      show models added later again
+  models hide|unhide <agent> <ids...>
+                                  take route ids out of an agent's list, or put them back
 
 Commands that read or change runtime state talk to a running daemon. With
 no daemon they run hofundd once for the command, from hofund's directory or
@@ -1383,6 +1438,22 @@ mod tests {
 
     fn command(values: &[&str]) -> Result<Command, String> {
         parse(&words(values)).map(|(_, command)| command)
+    }
+
+    #[test]
+    fn g2_17_models_token_parses_for_runtime_agent_lookup() {
+        assert_eq!(
+            command(&["models", "Claude-Code"]),
+            Ok(Command::Models {
+                model: Some("Claude-Code".to_owned()),
+            })
+        );
+        assert_eq!(
+            command(&["models", "demo-model"]),
+            Ok(Command::Models {
+                model: Some("demo-model".to_owned()),
+            })
+        );
     }
 
     #[test]

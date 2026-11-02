@@ -13,6 +13,14 @@ use std::time::Duration;
 use serde::Deserialize;
 use thiserror::Error;
 
+mod visible;
+
+pub use visible::{
+    AgentModels, CatalogEntry, VisibleCatalog, build_catalog_index, catalog_for_agent,
+    edit_agent_hidden_models, edit_agent_picked_models, edit_agent_picked_only, edit_agent_visible,
+    shows,
+};
+
 /// A validated configuration file.
 ///
 /// [`Debug`] redacts every provider API key, header value, and options value.
@@ -41,6 +49,8 @@ pub struct Config {
     pub routes: Vec<Route>,
     /// Account subscriptions, in file order.
     pub subscriptions: Vec<Subscription>,
+    /// Per-agent model visibility settings.
+    pub agents: AgentModels,
     /// When true, the daemon may read agents' own sign-in files and import
     /// accounts. Set with boolean `discover` under `[subscriptions.options]`.
     pub discover_agent_accounts: bool,
@@ -284,6 +294,8 @@ impl fmt::Display for Stays {
 pub struct Provider {
     /// Stable id used by routes.
     pub id: String,
+    /// Optional visibility family tag.
+    pub family: Option<String>,
     /// Preset id. The daemon fills the endpoint from the preset catalog.
     pub preset: Option<String>,
     /// Codec id, such as `openai-chat`. Absent when the preset has one protocol.
@@ -694,6 +706,8 @@ impl Subscription {
 pub struct Route {
     /// Model name the client sends.
     pub model: String,
+    /// Optional visibility family tag for a routing group.
+    pub family: Option<String>,
     /// Registered member-ordering strategy.
     pub routing: String,
     /// Conversation affinity for this routing group.
@@ -796,6 +810,7 @@ impl fmt::Debug for Config {
             .field("providers", &self.providers)
             .field("routes", &self.routes)
             .field("subscriptions", &self.subscriptions)
+            .field("agents", &self.agents)
             .field("catalog", &self.catalog)
             .field("discover_agent_accounts", &self.discover_agent_accounts)
             .field("warnings", &self.warnings)
@@ -808,6 +823,7 @@ impl fmt::Debug for Provider {
         formatter
             .debug_struct("Provider")
             .field("id", &self.id)
+            .field("family", &self.family)
             .field("preset", &self.preset)
             .field("protocol", &self.protocol)
             .field("base_url", &self.base_url)
@@ -1084,10 +1100,13 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
             .map(|entry| parse_fallback(&provider.id, entry))
             .collect::<Result<Vec<_>, _>>()?;
         let at_once = validated_at_once("provider", &provider.id, provider.at_once)?;
+        let family =
+            visible::validated_family("provider", &provider.id, provider.family.as_deref())?;
         let mut model_list = provider.models;
         model_list.auto_include = auto_include;
         providers.push(Provider {
             id: provider.id,
+            family,
             preset: provider.preset,
             protocol,
             base_url: provider.base_url,
@@ -1214,7 +1233,8 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
             )));
         }
         routes.push(Route {
-            model: route.model,
+            model: route.model.clone(),
+            family: visible::validated_family("route", &route.model, route.family.as_deref())?,
             routing,
             stays,
             stays_explicit,
@@ -1225,6 +1245,7 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
     }
     validate_group_links(&routes)?;
     validate_fallbacks(&providers, &seen, &group_names)?;
+    let agents = visible::agent_models_of(raw.agents)?;
     let catalog = catalog_settings(raw.catalog)?;
     Ok(Config {
         listen,
@@ -1239,6 +1260,7 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
         providers,
         routes,
         subscriptions,
+        agents,
         catalog,
         discover_agent_accounts,
         warnings,
@@ -2034,6 +2056,8 @@ struct RawFile {
     #[serde(default)]
     subscriptions: Vec<RawSubscription>,
     #[serde(default)]
+    agents: visible::RawAgentModels,
+    #[serde(default)]
     catalog: RawCatalog,
 }
 
@@ -2066,6 +2090,8 @@ fn default_statuses() -> BTreeSet<u16> {
 #[serde(deny_unknown_fields)]
 struct RawProvider {
     id: String,
+    #[serde(default)]
+    family: Option<String>,
     #[serde(default)]
     preset: Option<String>,
     /// Accepted for one release, then rewritten to a codec id.
@@ -2219,6 +2245,8 @@ fn default_smart() -> String {
 #[serde(deny_unknown_fields)]
 struct RawRoute {
     model: String,
+    #[serde(default)]
+    family: Option<String>,
     #[serde(default = "default_smart")]
     routing: String,
     #[serde(default)]
