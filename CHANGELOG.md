@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The usage routing strategy no longer sorts pay-as-you-go keys and
+  unread wallets ahead of subscriptions that still have allowance room. In
+  mixed pools it probes learning accounts first, then told shares by use,
+  then shareless seats by wallet balance and recent traffic, then low and
+  spent tiers (D-30).
 - An omitted `[catalog]` table loads the default catalog settings.
 - Vendor-timed quota and credit rests now stay in place when a quota reading
   is merely less than full in the same window. They lift early only when a
