@@ -222,6 +222,8 @@ impl AgentOps {
                 entry.id = status.id().to_owned();
                 entry.state = if status.connected() {
                     AgentState::Connected
+                } else if status.managed() {
+                    AgentState::Drifted
                 } else {
                     AgentState::Disconnected
                 };
