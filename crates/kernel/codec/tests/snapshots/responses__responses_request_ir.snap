@@ -119,6 +119,7 @@ expression: pretty_value!(&request)
     "store": true,
     "metadata": {
       "user": "u1"
-    }
+    },
+    "hofund_responses_wire": true
   }
 }
