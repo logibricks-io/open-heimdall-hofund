@@ -1720,13 +1720,16 @@ dependencies = [
  "chrono",
  "hofund-config",
  "hofund-control-client",
+ "hofund-control-proto",
  "hofund-model-catalog",
  "hofund-secrets",
  "http",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",
  "toml_edit 0.25.17+spec-1.1.0",
+ "wiremock",
 ]
 
 [[package]]
@@ -2246,8 +2249,10 @@ dependencies = [
  "async-trait",
  "bytes",
  "futures-util",
+ "hofund-config",
  "hofund-control-proto",
  "hofund-ir",
+ "hofund-model-catalog",
  "hofund-plugin-api",
  "metrics",
  "regex",

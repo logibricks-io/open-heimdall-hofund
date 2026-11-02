@@ -98,6 +98,10 @@ pub struct CatalogSettings {
     ///
     /// Empty lets the daemon apply its built-in default from quirks data.
     pub reasoning_toggle_providers: Vec<String>,
+    /// Models turned off for every request through hofund (`provider/model`, bare id, or glob).
+    pub disabled: Vec<String>,
+    /// Models forced out of model lists while still routable when named explicitly.
+    pub retired: Vec<String>,
 }
 
 impl Default for CatalogSettings {
@@ -108,6 +112,8 @@ impl Default for CatalogSettings {
             poll: Duration::from_secs(60 * 60),
             overrides: CatalogOverrides::default(),
             reasoning_toggle_providers: Vec::new(),
+            disabled: Vec::new(),
+            retired: Vec::new(),
         }
     }
 }
@@ -161,6 +167,10 @@ pub struct CatalogOverride {
     pub reasoning_levels: Option<Vec<String>>,
     /// Optional list price override.
     pub price: Option<CatalogPriceOverride>,
+    /// When set, forces the model retired for list hiding.
+    pub retired: Option<bool>,
+    /// When set, forces the model deprecated for list hiding.
+    pub deprecated: Option<bool>,
 }
 
 /// Usage reporting currency and custom list prices.
@@ -612,6 +622,64 @@ pub fn edit_at_once(text: &str, id: &str, at_once: Option<u64>) -> Result<String
         table.insert("at_once", value(i64::try_from(limit).unwrap_or(i64::MAX)));
     } else {
         table.remove("at_once");
+    }
+    Ok(document.to_string())
+}
+
+/// Adds and removes `[catalog].disabled` patterns while preserving unrelated TOML.
+///
+/// # Errors
+///
+/// Returns [`ConfigError::Syntax`] when the document is not valid TOML.
+pub fn edit_catalog_disabled(
+    text: &str,
+    add: &[String],
+    remove: &[String],
+) -> Result<String, ConfigError> {
+    use toml_edit::{Array, DocumentMut, Item, Table};
+
+    let mut document = text
+        .parse::<DocumentMut>()
+        .map_err(|error| ConfigError::Syntax(error.to_string()))?;
+    let catalog = document
+        .entry("catalog")
+        .or_insert_with(|| Item::Table(Table::new()))
+        .as_table_mut()
+        .ok_or_else(|| ConfigError::Syntax("catalog is not a table".to_owned()))?;
+    let mut current: Vec<String> = catalog
+        .get("disabled")
+        .and_then(Item::as_array)
+        .map(|array| {
+            array
+                .iter()
+                .filter_map(|item| item.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    for pattern in add {
+        let trimmed = pattern.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if !current
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(trimmed))
+        {
+            current.push(trimmed.to_owned());
+        }
+    }
+    for pattern in remove {
+        let trimmed = pattern.trim();
+        current.retain(|existing| !existing.eq_ignore_ascii_case(trimmed));
+    }
+    if current.is_empty() {
+        catalog.remove("disabled");
+    } else {
+        let mut array = Array::new();
+        for pattern in current {
+            array.push(pattern);
+        }
+        catalog.insert("disabled", Item::Value(array.into()));
     }
     Ok(document.to_string())
 }
@@ -1711,6 +1779,10 @@ struct RawCatalog {
     overrides: Vec<RawCatalogOverride>,
     #[serde(default)]
     reasoning_toggle_providers: Vec<String>,
+    #[serde(default)]
+    disabled: Vec<String>,
+    #[serde(default)]
+    retired: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1729,6 +1801,10 @@ struct RawCatalogOverride {
     reasoning_levels: Option<Vec<String>>,
     #[serde(default)]
     price: Option<RawCatalogPriceOverride>,
+    #[serde(default)]
+    retired: Option<bool>,
+    #[serde(default)]
+    deprecated: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1755,6 +1831,8 @@ impl RawCatalogOverride {
                 cache_read_micros: price_micros(price.cache_read),
                 cache_write_micros: price_micros(price.cache_write),
             }),
+            retired: self.retired,
+            deprecated: self.deprecated,
         })
     }
 }
@@ -1897,7 +1975,27 @@ fn catalog_settings(raw: RawCatalog) -> Result<CatalogSettings, ConfigError> {
         poll,
         overrides: CatalogOverrides { entries },
         reasoning_toggle_providers: raw.reasoning_toggle_providers,
+        disabled: normalize_catalog_patterns(&raw.disabled),
+        retired: normalize_catalog_patterns(&raw.retired),
     })
+}
+
+fn normalize_catalog_patterns(list: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for pattern in list {
+        let trimmed = pattern.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if out
+            .iter()
+            .any(|existing: &String| existing.eq_ignore_ascii_case(trimmed))
+        {
+            continue;
+        }
+        out.push(trimmed.to_owned());
+    }
+    out
 }
 
 fn validate_fallbacks(

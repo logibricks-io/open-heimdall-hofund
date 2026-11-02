@@ -10,16 +10,16 @@ use hofund_control_proto::{
     AgentChangeResponse, AgentConnectRequest, AgentDisconnectRequest, AgentHiddenSetRequest,
     AgentListResponse, AgentModelRequest, AgentModelsResponse, AgentPickedOnlyRequest,
     AgentPlanRequest, AgentPlanResponse, AgentStatusResponse, AgentVisibleSetRequest,
-    ConfigApplyRequest, ConfigResponse, ConfigValidateRequest, ConfigValidationResponse,
-    ControlError, ErrorEnvelope, EventEnvelope, GatewayKeyRequest, GatewayKeyResponse,
-    GatewayKeyRestoreRequest, HealthResponse, MAX_RESPONSE_BODY_BYTES, ModelListResponse,
-    PicksResponse, PicksSetRequest, ProviderKeyRequest, ProviderKeysResponse, ProviderListResponse,
-    ProviderTestRequest, ProviderTestResponse, QuotaHistoryQuery, QuotaHistoryResponse, QuotaQuery,
-    QuotaResponse, ReloadRequest, RouteListResponse, RouteModelListResponse, RouteQuery,
-    SessionRouteResponse, ShutdownRequest, ShutdownResponse, StatusResponse, TokenRotateRequest,
-    TokenRotateResponse, Topic, UnroutedListResponse, UsagePeriod, UsageQuery, UsageResponse,
-    WarmupListResponse, WarmupRunRequest, WarmupRunResponse, decode_error_envelope,
-    decode_response,
+    CatalogDisabledListResponse, CatalogModelRequest, ConfigApplyRequest, ConfigResponse,
+    ConfigValidateRequest, ConfigValidationResponse, ControlError, ErrorEnvelope, EventEnvelope,
+    GatewayKeyRequest, GatewayKeyResponse, GatewayKeyRestoreRequest, HealthResponse,
+    MAX_RESPONSE_BODY_BYTES, ModelListResponse, PicksResponse, PicksSetRequest, ProviderKeyRequest,
+    ProviderKeysResponse, ProviderListResponse, ProviderTestRequest, ProviderTestResponse,
+    QuotaHistoryQuery, QuotaHistoryResponse, QuotaQuery, QuotaResponse, ReloadRequest,
+    RouteListResponse, RouteModelListResponse, RouteQuery, SessionRouteResponse, ShutdownRequest,
+    ShutdownResponse, StatusResponse, TokenRotateRequest, TokenRotateResponse, Topic,
+    UnroutedListResponse, UsagePeriod, UsageQuery, UsageResponse, WarmupListResponse,
+    WarmupRunRequest, WarmupRunResponse, decode_error_envelope, decode_response,
 };
 use http::header;
 use http_body_util::{BodyExt, Full, Limited};
@@ -363,6 +363,32 @@ impl Client {
     /// Lists configured client-facing route models.
     pub async fn route_models(&self) -> Result<RouteModelListResponse, ClientError> {
         self.get("/v1/hofund/models").await
+    }
+
+    /// Adds a model pattern to `[catalog].disabled` through the running daemon.
+    pub async fn disable_catalog_model(
+        &self,
+        model: &str,
+    ) -> Result<CatalogDisabledListResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            "/v1/hofund/models/disable",
+            Some(json_body(&CatalogModelRequest::new(model))?),
+        )
+        .await
+    }
+
+    /// Removes a model pattern from `[catalog].disabled`.
+    pub async fn enable_catalog_model(
+        &self,
+        model: &str,
+    ) -> Result<CatalogDisabledListResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            "/v1/hofund/models/enable",
+            Some(json_body(&CatalogModelRequest::new(model))?),
+        )
+        .await
     }
 
     /// Lists recent routing decisions.
@@ -1154,6 +1180,9 @@ mod route_tests {
                 serde_json::to_vec(&proto::PicksResponse::default())
             }
             "/v1/hofund/models" => serde_json::to_vec(&proto::RouteModelListResponse::default()),
+            "/v1/hofund/models/disable" | "/v1/hofund/models/enable" => {
+                serde_json::to_vec(&proto::CatalogDisabledListResponse::default())
+            }
             "/v1/hofund/agents" => serde_json::to_vec(&proto::AgentListResponse::default()),
             "/v1/hofund/agents/status" => {
                 serde_json::to_vec(&proto::AgentStatusResponse::default())
