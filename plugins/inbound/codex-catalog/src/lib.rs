@@ -10,10 +10,11 @@
 //! None of it opens a socket: the list is the gateway's own, read in
 //! process. The kernel knows no window, effort levels, image support or
 //! service tiers per model yet, so each entry takes text only, offers no
-//! effort level and no tier, and leaves the window to Codex. Codex reads at
-//! most [`MOST`] bytes of a catalog and loads none of it past that, so the
-//! entries that would go past are left out, the last first, and the
-//! `x-hofund-left-out` header says how many.
+//! effort level and no tier, and leaves the window to Codex. Codex before
+//! 0.166.0 reads at most [`MOST`] bytes of a catalog and loads none of it
+//! past that, so entries that would go past are left out, the last first, and
+//! the `x-hofund-left-out` header says how many. From 0.166.0 on, Codex
+//! sends `?client_version=` and reads the whole list; the cap is off then.
 //!
 //! The same surface serves `/backend-api/codex`, for a Codex that keeps its
 //! ChatGPT sign-in: see the `backend` module. It lives here because it lists
@@ -40,9 +41,7 @@ pub fn contribute() -> Contribution {
 /// The most of a catalog Codex reads; past it the whole list fails to load.
 pub const MOST: usize = 1 << 20;
 
-pub use instructions::BASE_INSTRUCTIONS;
-
-mod instructions;
+mod official;
 
 mod backend;
 
@@ -155,25 +154,43 @@ impl Kernel for Host<'_> {
     }
 }
 
-/// Answers `request`. Codex's `?client_version=` changes nothing. The route
-/// matches a deeper path too; Codex asks none, so one is not found.
+/// Answers `request`. The route matches a deeper path too; Codex asks none, so
+/// one is not found.
 async fn serve(kernel: &dyn Kernel, request: &HttpRequest) -> HttpResponse {
     if request.uri().path() != CATALOG_PATH {
         return text_response(404, "404 page not found");
     }
     match ids(kernel).await {
         Ok(ids) => {
-            let (body, left_out) = catalog(&ids);
-            let mut response = json_response(200, body);
-            if left_out > 0
-                && let Ok(value) = left_out.to_string().parse()
-            {
-                response.headers_mut().insert(LEFT_OUT_HEADER, value);
-            }
-            response
+            let cap = !official::reads_whole_catalog(client_version(request));
+            catalog_response(&ids, cap)
         }
         Err(error) => error_response(&error),
     }
+}
+
+/// Builds a catalog HTTP answer for `ids`, capping size when `cap` is set.
+pub(crate) fn catalog_response(ids: &[String], cap: bool) -> HttpResponse {
+    let (body, left_out) = catalog(ids, cap);
+    let mut response = json_response(200, body);
+    if cap
+        && left_out > 0
+        && let Ok(value) = left_out.to_string().parse()
+    {
+        response.headers_mut().insert(LEFT_OUT_HEADER, value);
+    }
+    response
+}
+
+pub(crate) fn client_version(request: &HttpRequest) -> Option<&str> {
+    let query = request.uri().query()?;
+    for pair in query.split('&') {
+        let (key, value) = pair.split_once('=')?;
+        if key == "client_version" {
+            return Some(value);
+        }
+    }
+    None
 }
 
 /// `error` as a JSON reply: its own status when that is a failure, else 502.
@@ -195,13 +212,24 @@ fn json_response(status: u16, body: String) -> HttpResponse {
     response
 }
 
-/// The catalog of `ids`, and how many of them were left out to fit [`MOST`].
-fn catalog(ids: &[String]) -> (String, usize) {
+/// The catalog of `ids`, and how many of them were left out to fit [`MOST`]
+/// when `cap` is true.
+pub(crate) fn catalog(ids: &[String], cap: bool) -> (String, usize) {
+    let lookup = official::Lookup::with_codex_home();
+    let models = ids
+        .iter()
+        .enumerate()
+        .map(|(rank, id)| entry(id, rank + 1, &lookup));
+    capped_models(models, cap)
+}
+
+/// Serializes catalog entries, optionally enforcing [`MOST`].
+pub(crate) fn capped_models(models: impl IntoIterator<Item = Value>, cap: bool) -> (String, usize) {
     let mut out = String::from(HEAD);
     let (mut kept, mut left_out) = (0_usize, 0_usize);
-    for (rank, id) in ids.iter().enumerate() {
-        let entry = entry(id, rank + 1).to_string();
-        if !fits(out.len(), entry.len()) {
+    for model in models {
+        let entry = model.to_string();
+        if cap && !fits(out.len(), entry.len()) {
             left_out += 1;
             continue;
         }
@@ -223,12 +251,11 @@ const fn fits(used: usize, entry: usize) -> bool {
 
 /// The catalog entry of model `id`, ranked `priority` in the picker. Only
 /// fields Codex requires or that change what it does are set.
-fn entry(id: &str, priority: usize) -> Value {
-    json!({
+pub(crate) fn entry(id: &str, priority: usize, lookup: &official::Lookup) -> Value {
+    let mut value = json!({
         "slug": id,
         "display_name": id,
         "description": format!("{id} via hofund"),
-        "base_instructions": BASE_INSTRUCTIONS,
         "default_reasoning_level": null,
         "supported_reasoning_levels": [],
         "shell_type": "unified_exec",
@@ -245,7 +272,9 @@ fn entry(id: &str, priority: usize) -> Value {
         "supports_search_tool": false,
         "supports_parallel_tool_calls": true,
         "supports_reasoning_summaries": false,
-    })
+    });
+    lookup.for_id(id).apply(&mut value);
+    value
 }
 
 /// The ids the gateway's `/v1/models` lists, in its order.
@@ -307,6 +336,9 @@ fn failure_message(body: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod d34_tests;
 
 #[cfg(test)]
 mod backend_tests;

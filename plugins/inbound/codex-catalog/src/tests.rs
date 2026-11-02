@@ -7,9 +7,10 @@ use hofund_plugin_api::{Body, BodyStream, InboundSurface, Method, PluginError};
 use hofund_plugin_sdk::json::{self, Value, json};
 use hofund_plugin_sdk::{HttpRequest, HttpResponse, async_trait, text_response};
 
+use super::official::Lookup;
 use super::{
-    BASE_INSTRUCTIONS, CodexCatalog, HEAD, Kernel, LEFT_OUT_HEADER, LIST_CAP, MOST, TAIL, catalog,
-    failure_message, fits, serve,
+    CodexCatalog, HEAD, Kernel, LEFT_OUT_HEADER, LIST_CAP, MOST, TAIL, catalog, entry,
+    failure_message, fits, official, serve,
 };
 
 /// Runs `future` on this thread. Everything here is ready at once.
@@ -33,7 +34,7 @@ pub(crate) fn block_on<F: Future>(future: F) -> F::Output {
 
 /// The stand-in gateway: answers `/v1/models` with `status` and `body`, or
 /// fails the call with `error`.
-struct Gateway {
+pub(crate) struct Gateway {
     status: u16,
     body: Vec<u8>,
     error: Option<&'static str>,
@@ -41,7 +42,7 @@ struct Gateway {
 }
 
 impl Gateway {
-    fn listing(data: &Value) -> Self {
+    pub(crate) fn listing(data: &Value) -> Self {
         Self::answering(200, json!({"object": "list", "data": data}).to_string())
     }
 
@@ -86,7 +87,7 @@ fn get(path: &str) -> HttpRequest {
 }
 
 /// What `GET path` answers: status, content type, left-out header, and body.
-fn ask(gateway: &Gateway, path: &str) -> (u16, String, Option<String>, String) {
+pub(crate) fn ask(gateway: &Gateway, path: &str) -> (u16, String, Option<String>, String) {
     block_on(async {
         let response = serve(gateway, &get(path)).await;
         let status = response.status().as_u16();
@@ -161,31 +162,9 @@ fn every_model_is_an_entry_codex_loads() {
     assert_eq!(models.len(), 2);
     assert_eq!(models[0]["slug"], "seer");
     assert_eq!(models[0]["priority"], 1);
-    assert_eq!(
-        models[1],
-        json!({
-            "slug": "smith/forge",
-            "display_name": "smith/forge",
-            "description": "smith/forge via hofund",
-            "base_instructions": BASE_INSTRUCTIONS,
-            "default_reasoning_level": null,
-            "supported_reasoning_levels": [],
-            "shell_type": "unified_exec",
-            "visibility": "list",
-            "supported_in_api": true,
-            "priority": 2,
-            "support_verbosity": false,
-            "default_verbosity": null,
-            "apply_patch_tool_type": "freeform",
-            "truncation_policy": {"mode": "tokens", "limit": 10_000},
-            "experimental_supported_tools": [],
-            "input_modalities": ["text"],
-            "service_tiers": [],
-            "supports_search_tool": false,
-            "supports_parallel_tool_calls": true,
-            "supports_reasoning_summaries": false,
-        })
-    );
+    let lookup = Lookup::without_cache();
+    let smith = entry("smith/forge", 2, &lookup);
+    assert_eq!(models[1], smith);
     assert_eq!(
         *gateway.seen.lock().expect("seen"),
         [("GET".to_owned(), "/v1/models".to_owned())]
@@ -193,10 +172,10 @@ fn every_model_is_an_entry_codex_loads() {
 }
 
 #[test]
-fn the_instructions_are_codexs_working_rules() {
-    assert!(BASE_INSTRUCTIONS.len() > 1_000);
-    assert!(BASE_INSTRUCTIONS.contains("apply_patch"));
-    assert!(BASE_INSTRUCTIONS.is_ascii());
+fn seer_gets_unknown_model_prompt() {
+    let lookup = Lookup::without_cache();
+    let seer = entry("seer", 1, &lookup);
+    assert_eq!(seer["base_instructions"], official::UNKNOWN_MODEL_PROMPT);
 }
 
 #[test]
@@ -217,7 +196,7 @@ fn no_models_is_an_empty_catalog() {
 #[test]
 fn a_catalog_past_codexs_limit_leaves_out_the_last() {
     let ids: Vec<String> = (0..600).map(|n| format!("many/model-{n:03}")).collect();
-    let (body, left_out) = catalog(&ids);
+    let (body, left_out) = catalog(&ids, true);
     assert!(body.len() <= MOST, "{}", body.len());
     let models: Value = json::from_str(&body).expect("json");
     let models = models["models"].as_array().expect("models");
@@ -227,7 +206,12 @@ fn a_catalog_past_codexs_limit_leaves_out_the_last() {
     let last = models.len() - 1;
     assert_eq!(models[last]["slug"], format!("many/model-{last:03}"));
     // The first left out would not have fitted.
-    let next = super::entry(&ids[models.len()], models.len() + 1).to_string();
+    let next = entry(
+        &ids[models.len()],
+        models.len() + 1,
+        &Lookup::without_cache(),
+    )
+    .to_string();
     assert!(!fits(body.len() - TAIL.len(), next.len()));
 
     let gateway = Gateway::listing(&Value::Array(
