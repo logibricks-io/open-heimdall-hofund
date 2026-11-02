@@ -859,7 +859,7 @@ fn d36_3_stale_refresh_lock_is_taken_over() {
         Duration::from_millis(50),
         Duration::from_secs(10),
     );
-    let _locks = crate::lock::refresh_locks(&agent_home).expect("take stale");
+    let _locks = block_on(crate::lock::refresh_locks(&agent_home)).expect("take stale");
 }
 
 #[test]
@@ -868,7 +868,7 @@ fn d36_4_refresh_locks_release_in_reverse_order() {
     let agent_home = dir.path().join("claude");
     std::fs::create_dir_all(&agent_home).expect("home");
     {
-        let _locks = crate::lock::refresh_locks(&agent_home).expect("locks");
+        let _locks = block_on(crate::lock::refresh_locks(&agent_home)).expect("locks");
     }
     assert_eq!(crate::lock::take_test_releases(), ["legacy", "refresh"]);
 }
@@ -977,4 +977,76 @@ fn d36_7_switch_waits_for_account_run_mark_then_succeeds() {
     });
     block_on(sub.write_agent_sign_in(&spare, &agent_home, host.context())).expect("write");
     release.join().expect("join");
+}
+
+#[test]
+fn d36_8_concurrent_switches_on_current_thread_do_not_block_each_other() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let dir = tempfile::tempdir().expect("dir");
+    let home_a = dir.path().join("home-a");
+    let home_b = dir.path().join("home-b");
+    std::fs::create_dir_all(&home_a).expect("a");
+    std::fs::create_dir_all(&home_b).expect("b");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let id_a = account_id_from(&["claude", "aaaaaaaa-bbbb-cccc-dddd-111111111111"]);
+    let id_b = account_id_from(&["claude", "bbbbbbbb-cccc-dddd-eeee-222222222222"]);
+    store(&host, &id_a, &signed_in_blob());
+    store(&host, &id_b, &signed_in_blob());
+
+    let lock_path = home_a.join(".oauth_refresh.lock");
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = std::fs::create_dir(&lock_path);
+        let _ = ready_tx.send(());
+        let _ = release_rx.recv();
+        let _ = std::fs::remove_dir(&lock_path);
+    });
+    ready_rx.recv().expect("lock held");
+
+    crate::lock::test_lock_timing(
+        Duration::from_secs(3),
+        Duration::from_secs(60),
+        Duration::from_secs(10),
+    );
+
+    let ctx = host.context().clone();
+    let (b_done_tx, b_done_rx) = mpsc::channel();
+    let results = block_on(async {
+        hofund_kit_subscription::join_all(vec![
+            Box::pin(async {
+                let result = sub.write_agent_sign_in(&id_b, &home_b, &ctx).await;
+                let _ = b_done_tx.send(());
+                let _ = release_tx.send(());
+                result
+            }),
+            Box::pin(sub.write_agent_sign_in(&id_a, &home_a, &ctx)),
+        ])
+        .await
+    });
+    b_done_rx
+        .recv_timeout(Duration::from_millis(800))
+        .expect("second switch finished while the first waited on the lock");
+    results[0].as_ref().expect("switch to home b");
+    results[1].as_ref().expect("switch to home a");
+}
+
+#[test]
+fn d36_14_two_marks_with_same_seq_different_pids_succeed() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let spare = account_id_from(&["claude", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"]);
+    store(&host, &spare, &signed_in_blob());
+    let account_dir = crate::account::account_dir(host.context(), &spare).expect("dir");
+    std::fs::create_dir_all(&account_dir).expect("account dir");
+    crate::run_lock::test_mark_identity(100, 7);
+    let first = crate::run_lock::mark(&spare, host.context()).expect("first mark");
+    crate::run_lock::test_mark_identity(200, 7);
+    let second = crate::run_lock::mark(&spare, host.context()).expect("second mark");
+    drop(first);
+    drop(second);
+    crate::run_lock::clear_test_mark_identity();
 }

@@ -225,7 +225,14 @@ mod tests {
         let dir = tempfile::tempdir().expect("dir");
         let host = host(&dir);
         let id = account_id_from(&["claude", "11111111-2222-3333-4444-555555555555"]);
-        seed_stored(&host, &id, 4000);
+        seed_stored(&host, &id, 1000);
+        let account_dir = crate::account::account_dir(host.context(), &id).expect("dir");
+        std::fs::create_dir_all(&account_dir).expect("account dir");
+        std::fs::write(
+            account_dir.join(crate::creds::CREDENTIALS_FILE),
+            r#"{"claudeAiOauth":{"accessToken":"saved-dir","refreshToken":"rt-saved-dir","expiresAt":5000}}"#,
+        )
+        .expect("account creds");
         let text = r#"{"swapVersion":1,"version":1,"accounts":[{"email":"user@example.test","credentials":{"claudeAiOauth":{"accessToken":"old","refreshToken":"rt-file","expiresAt":2000}},"config":{"oauthAccount":{"accountUuid":"11111111-2222-3333-4444-555555555555"}}}]}"#;
         let error = block_on(store(host.context(), text)).expect_err("older saved");
         assert!(
