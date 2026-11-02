@@ -203,6 +203,7 @@ pub struct ConnectionStatus {
     display_name: &'static str,
     installed: bool,
     connected: bool,
+    managed: bool,
     paths: Vec<PathBuf>,
 }
 
@@ -214,6 +215,7 @@ impl ConnectionStatus {
         display_name: &'static str,
         installed: bool,
         connected: bool,
+        managed: bool,
         paths: Vec<PathBuf>,
     ) -> Self {
         Self {
@@ -221,6 +223,7 @@ impl ConnectionStatus {
             display_name,
             installed,
             connected,
+            managed,
             paths,
         }
     }
@@ -243,10 +246,16 @@ impl ConnectionStatus {
         self.installed
     }
 
-    /// Every declared key equals the target.
+    /// Every declared key equals the target and no external override blocks it.
     #[must_use]
     pub const fn connected(&self) -> bool {
         self.connected
+    }
+
+    /// A connect backup marker is present on at least one managed file.
+    #[must_use]
+    pub const fn managed(&self) -> bool {
+        self.managed
     }
 
     /// Config paths this adapter would read or write.

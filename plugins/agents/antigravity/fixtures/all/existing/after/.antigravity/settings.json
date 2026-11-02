@@ -1,0 +1,13 @@
+{
+  "theme": "dark",
+  "gateway": {
+    "enabled": true,
+    "url": "http://127.0.0.1:3425",
+    "apiKey": "old-token",
+    "wireProtocol": "openai",
+    "caCertPath": "/etc/certs/user.pem"
+  },
+  "models": {
+    "defaultModelId": "route-a"
+  }
+}

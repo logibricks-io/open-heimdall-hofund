@@ -11,6 +11,7 @@ fn production_agent_list_contains_migrated_agents() {
     assert_eq!(
         ids,
         [
+            "antigravity",
             "claude-code",
             "cline",
             "codex",

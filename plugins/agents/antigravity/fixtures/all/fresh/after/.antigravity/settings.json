@@ -1,0 +1,11 @@
+{
+  "gateway": {
+    "enabled": true,
+    "url": "http://127.0.0.1:3425",
+    "apiKey": "test-token",
+    "wireProtocol": "openai"
+  },
+  "models": {
+    "defaultModelId": "route-a"
+  }
+}

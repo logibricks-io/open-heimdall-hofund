@@ -42,6 +42,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Antigravity desktop agent adapter (D-51): `plugins/agents/antigravity/agent.toml`
+  writes Enterprise Gateway settings in `~/.antigravity/settings.json`, reports
+  admin and `AGY_LLM_GATEWAY_URL` overrides through agent status, and detects
+  the app via the backend summary file under `~/.gemini/antigravity/`. Agent
+  descriptions may declare extra detect paths, connect-time key removal, and
+  external gateway status checks.
 - Model catalog visibility (C-1b): `[catalog].disabled` and `[catalog].retired`
   hide models from `/v1/models`, `/v1beta/models`, control route-model lists, and
   `hofund models`; disabled models are refused with HTTP 403 before routing;

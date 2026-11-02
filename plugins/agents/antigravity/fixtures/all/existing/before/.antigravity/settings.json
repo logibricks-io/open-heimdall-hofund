@@ -1,0 +1,14 @@
+{
+  "theme": "dark",
+  "gateway": {
+    "enabled": true,
+    "url": "https://user.example.test",
+    "apiKey": "user-key",
+    "wireProtocol": "openai",
+    "caCertPath": "/etc/certs/user.pem"
+  },
+  "models": {
+    "defaultModelId": "user-model",
+    "list": [{"modelId": "user-model"}]
+  }
+}
