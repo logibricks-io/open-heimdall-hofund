@@ -1627,7 +1627,9 @@ fn is_key_byte(byte: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use hofund_codec::{AnthropicMessages, Codec, GenerativeLanguage, OpenAiChat};
-    use hofund_plugin_api::{CredentialStyle, PluginErrorKind, ProtocolId, Request, StreamEvent};
+    use hofund_plugin_api::{
+        BilledUsage, CredentialStyle, PluginErrorKind, ProtocolId, Request, StreamEvent,
+    };
 
     use super::{
         AwsSigner, Events, Method, Path, Target, classify_count, consume_fields, converse_call,

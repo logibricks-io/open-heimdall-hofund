@@ -25,7 +25,7 @@ pub struct ProviderError {
     credit: bool,
     credit_soon: bool,
     cooldown: bool,
-    billed: Option<hofund_plugin_api::BilledUsage>,
+    billed: Option<Box<hofund_plugin_api::BilledUsage>>,
 }
 
 /// Classification of [`ProviderError`].
@@ -98,6 +98,7 @@ impl ProviderError {
             credit: false,
             credit_soon: false,
             cooldown: true,
+            billed: None,
         }
     }
 
@@ -125,6 +126,7 @@ impl ProviderError {
                 credit: false,
                 credit_soon: false,
                 cooldown: true,
+                billed: None,
             }
         } else {
             Self::status(status, message)
@@ -294,7 +296,7 @@ impl ProviderError {
     #[must_use]
     pub fn with_billed(mut self, billed: hofund_plugin_api::BilledUsage) -> Self {
         if billed.token_bearing() {
-            self.billed = Some(billed);
+            self.billed = Some(Box::new(billed));
         }
         self
     }
@@ -302,7 +304,7 @@ impl ProviderError {
     /// Token counts billed before this try failed, when any were reported.
     #[must_use]
     pub fn billed(&self) -> Option<&hofund_plugin_api::BilledUsage> {
-        self.billed.as_ref()
+        self.billed.as_deref()
     }
 
     fn new(kind: ProviderErrorKind, message: impl Into<String>) -> Self {

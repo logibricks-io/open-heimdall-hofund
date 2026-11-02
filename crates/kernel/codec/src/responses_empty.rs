@@ -174,6 +174,33 @@ pub fn relayed_sse_has_content(sse: &[u8]) -> bool {
     false
 }
 
+/// Whether relayed SSE carries non-Responses payload bytes (plain text or
+/// non-JSON `data:` lines). Those streams must not be read until a terminal
+/// `response.completed` before handing the body to the client.
+#[must_use]
+pub fn relayed_sse_has_opaque_content(sse: &[u8]) -> bool {
+    for line in sse.split(|byte| *byte == b'\n') {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(data) = line.strip_prefix(b"data:") {
+            let data = data.strip_prefix(b" ").unwrap_or(data);
+            if data == b"[DONE]" || data.is_empty() {
+                continue;
+            }
+            if serde_json::from_slice::<Value>(data).is_err() {
+                return true;
+            }
+            continue;
+        }
+        if !line.starts_with(b":") {
+            return true;
+        }
+    }
+    false
+}
+
 fn response_empty_with_zero_usage(response: &Map<String, Value>) -> bool {
     let output_empty = match response.get("output") {
         None => return false,
