@@ -362,11 +362,8 @@ fn summary_refused_for_size(status: u16, body: &[u8]) -> bool {
     if status == 413 {
         return true;
     }
-    if !(400..500).contains(&status) || status == 429 {
-        return false;
-    }
-    let said = said(body);
-    too_long(status, &words_of(&said))
+    // `too_long` already refuses anything outside 4xx and a 429
+    too_long(status, &words_of(&said(body)))
 }
 
 /// What the gateway says ends a stream that broke off after it began.
