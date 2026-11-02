@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use hofund_plugin_api::{Body, BodyStream, PluginError};
+use hofund_plugin_api::{Body, BodyStream, PluginError, too_long, words_of};
 use hofund_plugin_sdk::json::{self, Value, json};
 use hofund_plugin_sdk::{
     HeaderMap, HttpRequest, HttpResponse, refused_passthrough, text_response, without_passthrough,
@@ -22,7 +22,8 @@ use hofund_plugin_sdk::{
 
 use crate::input::{self, sealed};
 use crate::{
-    Kernel, capped_models, client_version, entry, error_response, ids, json_response, official,
+    Kernel, capped_models, client_version, entry, error_response, ids, json_response,
+    listed_models, official,
 };
 
 /// The route prefix Codex's base URL ends with.
@@ -240,30 +241,99 @@ async fn in_process(kernel: &dyn Kernel, request: &HttpRequest) -> HttpResponse 
 /// process, and the summary is answered as the one compaction item of a
 /// Responses stream, which Codex keeps in place of what it summarised.
 async fn summarise(kernel: &dyn Kernel, request: &HttpRequest) -> HttpResponse {
+    match summary_attempt(kernel, request).await {
+        SummaryAttempt::Done(response) => response,
+        SummaryAttempt::SizeRefused => {
+            let Some(body) = input::text_summary_body(request.body().bytes()) else {
+                return local_compaction(
+                    request,
+                    "the conversation could not be trimmed for a text retry",
+                );
+            };
+            let mut retry = local_call(request);
+            *retry.body_mut() = Body::from(body);
+            set(retry.headers_mut(), "accept", "application/json");
+            match summary_attempt(kernel, &retry).await {
+                SummaryAttempt::Done(response) => response,
+                SummaryAttempt::SizeRefused => {
+                    local_compaction(request, "compaction: the text summary retry failed")
+                }
+                SummaryAttempt::PassThrough(status, said) => local_compaction(
+                    request,
+                    &format!(
+                        "compaction: hofund answered the text summary request {status}: {said}"
+                    ),
+                ),
+                SummaryAttempt::Fail { status, said } => {
+                    let why = if let Some(status) = status {
+                        format!(
+                            "compaction: hofund answered the text summary request {status}: {said}"
+                        )
+                    } else {
+                        format!("compaction: {said}")
+                    };
+                    local_compaction(request, &why)
+                }
+            }
+        }
+        SummaryAttempt::PassThrough(status, said) => error(
+            status,
+            &format!("compaction: hofund answered the summary request {status}: {said}"),
+        ),
+        SummaryAttempt::Fail { status, said } => {
+            let status = status.unwrap_or(502);
+            error(status, &said)
+        }
+    }
+}
+
+enum SummaryAttempt {
+    Done(HttpResponse),
+    SizeRefused,
+    PassThrough(u16, String),
+    Fail { status: Option<u16>, said: String },
+}
+
+async fn summary_attempt(kernel: &dyn Kernel, request: &HttpRequest) -> SummaryAttempt {
     let mut call = local_call(request);
     set(call.headers_mut(), "accept", "application/json");
     let response = match kernel.call(call).await {
         Ok(response) => response,
-        Err(failure) => return error_response(&failure),
+        Err(failure) => {
+            return SummaryAttempt::Fail {
+                status: failure.status().filter(|status| *status >= 400),
+                said: failure.message().to_owned(),
+            };
+        }
     };
     let status = response.status().as_u16();
     let Some(body) = read_up_to(response.into_body(), SUMMARY_CAP).await else {
-        return error(502, "compaction: the summary reply could not be read");
+        return SummaryAttempt::Fail {
+            status: Some(502),
+            said: "compaction: the summary reply could not be read".to_owned(),
+        };
     };
     if status >= 400 {
         let said = said(&body);
         if status == 502 && said.ends_with(ENDED_SHORT) {
-            return local_compaction(request, &said);
+            return SummaryAttempt::Done(local_compaction(request, &said));
         }
-        return error(
-            status,
-            &format!("compaction: hofund answered the summary request {status}: {said}"),
-        );
+        if summary_refused_for_size(status, &body) {
+            return SummaryAttempt::SizeRefused;
+        }
+        return SummaryAttempt::PassThrough(status, said);
     }
     let reply = match Reply::of(&body) {
         Ok(reply) => reply,
-        Err(why) if why.ends_with(ENDED_SHORT) => return local_compaction(request, &why),
-        Err(why) => return error(502, &format!("compaction: {why}, so there is no summary")),
+        Err(why) if why.ends_with(ENDED_SHORT) => {
+            return SummaryAttempt::Done(local_compaction(request, &why));
+        }
+        Err(why) => {
+            return SummaryAttempt::Fail {
+                status: Some(502),
+                said: format!("compaction: {why}, so there is no summary"),
+            };
+        }
     };
     if reply.status == "incomplete" {
         let why = reply
@@ -271,20 +341,29 @@ async fn summarise(kernel: &dyn Kernel, request: &HttpRequest) -> HttpResponse {
             .get("reason")
             .and_then(Value::as_str)
             .unwrap_or("unknown");
-        return error(
-            502,
-            &format!("compaction: the summary was cut short ({why}), so there is no summary"),
-        );
+        return SummaryAttempt::Fail {
+            status: Some(502),
+            said: format!("compaction: the summary was cut short ({why}), so there is no summary"),
+        };
     }
     let summary = reply.summary();
     if summary.trim().is_empty() {
         let with = answered_with(&reply.output);
-        return error(
-            502,
-            &format!("compaction: the model wrote no summary{with}"),
-        );
+        return SummaryAttempt::Fail {
+            status: Some(502),
+            said: format!("compaction: the model wrote no summary{with}"),
+        };
     }
-    compaction_stream(&reply.id(), &summary, &reply.usage)
+    SummaryAttempt::Done(compaction_stream(&reply.id(), &summary, &reply.usage))
+}
+
+/// Whether a refused summary request should be retried as plain text.
+fn summary_refused_for_size(status: u16, body: &[u8]) -> bool {
+    if status == 413 {
+        return true;
+    }
+    // `too_long` already refuses anything outside 4xx and a 429
+    too_long(status, &words_of(&said(body)))
 }
 
 /// What the gateway says ends a stream that broke off after it began.
@@ -720,7 +799,7 @@ async fn models(kernel: &dyn Kernel, bases: Bases, request: &HttpRequest) -> Htt
             own = own_models(response.into_body()).await;
         }
     }
-    let ours = ids(kernel).await.unwrap_or_default();
+    let ours = listed_models(kernel).await.unwrap_or_default();
     let after = own
         .iter()
         .filter_map(|model| model.get("priority").and_then(Value::as_u64))
@@ -729,11 +808,11 @@ async fn models(kernel: &dyn Kernel, bases: Bases, request: &HttpRequest) -> Htt
     let cap = !official::reads_whole_catalog(client_version(request));
     let lookup = official::Lookup::with_codex_home();
     let mut all = own;
-    for (rank, id) in ours.iter().enumerate() {
+    for (rank, model) in ours.iter().enumerate() {
         let priority = usize::try_from(after)
             .unwrap_or(usize::MAX)
             .saturating_add(rank + 1);
-        all.push(entry(id, priority, &lookup));
+        all.push(entry(&model.id, priority, &lookup, model.context_window));
     }
     let (body, left_out) = capped_models(all, cap);
     let mut response = json_response(200, body);

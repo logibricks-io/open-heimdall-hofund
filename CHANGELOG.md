@@ -15,6 +15,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Codex summary compaction on `/backend-api/codex` retries once with a
+  plain-text conversation when the in-process summary is refused with HTTP
+  413 or a context-overflow message, then falls back to the existing local
+  no-model summary when the retry fails. The retry body keeps the most recent
+  400000 characters of the conversation; when only the compaction prompt would
+  fit, no retry is sent and the local summary is used (D-39).
+- Codex catalog entries take `context_window` from the gateway's
+  `/v1/models` row when it has one; entries for models with no known window
+  carry `auto_compact_token_limit` (272000 by default) instead, so Codex can
+  auto-compact after overflow either way (D-47).
 - Codex model catalog instructions (D-34): `GET /v1/codex/models` and hofund
   entries on `GET /backend-api/codex/models` take official Codex text from the
   bundled 0.166 catalog, optional `CODEX_HOME/models_cache.json`, or

@@ -1543,3 +1543,170 @@ fn d34_14_the_backend_list_is_capped_only_for_old_codex() {
         ids.len() + 1
     );
 }
+
+fn heavy_compaction_body() -> String {
+    let long_out = "o".repeat(super::input::TOOL_OUTPUT_MAX + 500);
+    let mut input = json!([
+        {"type": "message", "role": "user", "content": [
+            {"type": "input_text", "text": "fix the login bug"},
+            {"type": "input_image", "image_url": "data:image/png;base64,AAAA"},
+        ]},
+        {"type": "function_call_output", "call_id": "call_1", "output": long_out},
+        {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "done"}]},
+    ]);
+    input
+        .as_array_mut()
+        .expect("input")
+        .push(json!({"type": "compaction_trigger"}));
+    json!({"model": "smith/forge", "stream": true, "input": input}).to_string()
+}
+
+fn good_summary_reply(text: &str) -> String {
+    json!({"id": "resp_text", "status": "completed", "output": [
+        {"type": "message", "content": [{"type": "output_text", "text": text}]},
+    ]})
+    .to_string()
+}
+
+#[test]
+fn d39_1_413_then_a_good_text_reply_yields_the_text_summary() {
+    let refuse = json!({"error": {"message": "request entity too large"}}).to_string();
+    let stub = Stub::default()
+        .calling(answer(413, refuse))
+        .calling(answer(200, good_summary_reply("TEXTSUM")));
+    let (status, _, body) = compaction_body(&stub, &heavy_compaction_body());
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(compacted_summary(&body), "TEXTSUM");
+    let called = stub.called();
+    assert_eq!(called.len(), 2);
+    let retry: Value = json::from_slice(&called[1].body).expect("json");
+    let retry_text = retry.to_string();
+    assert!(!retry_text.contains("input_image"), "{retry_text}");
+    assert!(retry_text.contains("tool output truncated"), "{retry_text}");
+    assert!(
+        retry_text.len() <= super::input::TEXT_SUMMARY_CAP + 512,
+        "{}",
+        retry_text.len()
+    );
+}
+
+#[test]
+fn d39_2_overflow_worded_400_then_good_reply() {
+    let refuse =
+        json!({"error": {"message": "Input is too long. Reduce the size of your messages."}})
+            .to_string();
+    let stub = Stub::default()
+        .calling(answer(400, refuse))
+        .calling(answer(200, good_summary_reply("OVERFLOW OK")));
+    let (status, _, body) = compaction_body(&stub, &heavy_compaction_body());
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(compacted_summary(&body), "OVERFLOW OK");
+    assert_eq!(stub.called().len(), 2);
+}
+
+#[test]
+fn d39_3_413_then_413_compacts_locally() {
+    let refuse = json!({"error": {"message": "too big"}}).to_string();
+    let stub = Stub::default()
+        .calling(answer(413, refuse.clone()))
+        .calling(answer(413, refuse));
+    let (status, _, body) = compaction_body(&stub, &heavy_compaction_body());
+    assert_eq!(status, 200, "{body}");
+    let summary = compacted_summary(&body);
+    assert!(summary.contains("without a model"), "{summary}");
+    assert!(summary.contains("fix the login bug"), "{summary}");
+    assert_eq!(stub.called().len(), 2);
+}
+
+#[test]
+fn d39_4_429_and_401_go_back_unchanged_with_no_retry() {
+    for (status, message) in [(429, "slow down"), (401, "bad key")] {
+        let refuse = json!({"error": {"message": message}}).to_string();
+        let stub = Stub::default().calling(answer(status, refuse));
+        let (got, _, body) = compaction_body(&stub, &conversation(true));
+        assert_eq!(got, status, "{body}");
+        assert!(body.contains(message), "{body}");
+        assert_eq!(stub.called().len(), 1, "{status}");
+    }
+}
+
+#[test]
+fn d39_5_an_ended_short_502_still_compacts_locally() {
+    let said = format!("relay: {}", super::backend::ENDED_SHORT);
+    let reply = json!({"error": {"message": said}}).to_string();
+    let stub = Stub::default().calling(answer(502, reply));
+    let (status, _, body) = compaction_body(&stub, &conversation(true));
+    assert_eq!(status, 200, "{body}");
+    let summary = compacted_summary(&body);
+    assert!(summary.contains(super::backend::ENDED_SHORT), "{summary}");
+    assert_eq!(stub.called().len(), 1);
+}
+
+fn long_compaction_body(messages: usize, each: usize) -> String {
+    let mut input: Vec<Value> = (0..messages)
+        .map(|n| {
+            json!({"type": "message", "role": "user", "content": [
+                {"type": "input_text", "text": format!("turn-{n:04} {}", "w".repeat(each))},
+            ]})
+        })
+        .collect();
+    input.push(json!({"type": "compaction_trigger"}));
+    json!({"model": "smith/forge", "stream": true, "input": input}).to_string()
+}
+
+#[test]
+fn d39_6_an_over_cap_transcript_keeps_its_most_recent_part() {
+    let refuse = json!({"error": {"message": "too big"}}).to_string();
+    let stub = Stub::default()
+        .calling(answer(413, refuse))
+        .calling(answer(200, good_summary_reply("RECENT")));
+    let body = long_compaction_body(60, 10_000);
+    assert!(body.len() > super::input::TEXT_SUMMARY_CAP);
+    let (status, _, reply) = compaction_body(&stub, &body);
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(compacted_summary(&reply), "RECENT");
+    let called = stub.called();
+    assert_eq!(called.len(), 2);
+    let retry = String::from_utf8(called[1].body.clone()).expect("utf8");
+    assert!(
+        retry.len() <= super::input::TEXT_SUMMARY_CAP,
+        "{}",
+        retry.len()
+    );
+    assert!(retry.contains("turn-0059"), "the latest turn is kept");
+    assert!(!retry.contains("turn-0000"), "the oldest turn is dropped");
+}
+
+#[test]
+fn d39_7_a_latest_message_over_the_cap_compacts_locally_without_a_retry() {
+    let refuse = json!({"error": {"message": "too big"}}).to_string();
+    let stub = Stub::default().calling(answer(413, refuse));
+    let body = long_compaction_body(1, super::input::TEXT_SUMMARY_CAP + 10);
+    let (status, _, reply) = compaction_body(&stub, &body);
+    assert_eq!(status, 200, "{reply}");
+    let summary = compacted_summary(&reply);
+    assert!(summary.contains("without a model"), "{summary}");
+    assert_eq!(stub.called().len(), 1);
+}
+
+#[test]
+fn d39_8_a_lone_item_over_the_cap_gives_no_text_body() {
+    let body = json!({"model": "m", "input": [
+        {"type": "message", "role": "user", "content": [
+            {"type": "input_text", "text": "w".repeat(super::input::TEXT_SUMMARY_CAP + 10)},
+        ]},
+    ]})
+    .to_string();
+    assert!(super::input::text_summary_body(body.as_bytes()).is_none());
+}
+
+#[test]
+fn d39_9_an_overflow_worded_429_goes_back_unchanged() {
+    let refuse =
+        json!({"error": {"message": "Input is too long. Reduce the size of your messages."}})
+            .to_string();
+    let stub = Stub::default().calling(answer(429, refuse));
+    let (status, _, body) = compaction_body(&stub, &conversation(true));
+    assert_eq!(status, 429, "{body}");
+    assert_eq!(stub.called().len(), 1);
+}
