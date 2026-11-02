@@ -79,6 +79,8 @@ pub struct DevPrice {
     pub cache_read: f64,
     #[serde(default, rename = "cache_write")]
     pub cache_write: f64,
+    #[serde(default, rename = "cache_write_1h")]
+    pub cache_write_1h: Option<f64>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -284,6 +286,7 @@ fn merge_override(entry: &mut ResolvedEntry, patch: Option<&hofund_config::Catal
             output: price.output_micros as f64 / 1_000_000.0,
             cache_read: price.cache_read_micros as f64 / 1_000_000.0,
             cache_write: price.cache_write_micros as f64 / 1_000_000.0,
+            cache_write_1h: 0.0,
         });
     }
     if let Some(name) = &patch.name {
@@ -297,6 +300,7 @@ fn dev_price(price: &DevPrice) -> Price {
         output: price.output,
         cache_read: price.cache_read,
         cache_write: price.cache_write,
+        cache_write_1h: price.cache_write_1h.unwrap_or(0.0),
     }
 }
 

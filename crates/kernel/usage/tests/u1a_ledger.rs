@@ -50,6 +50,7 @@ fn u1a_1_old_database_gains_cache_and_reasoning_columns() {
                 reasoning_hidden: true,
                 ..UsageDetails::default()
             },
+            None,
         )
         .expect("insert");
     let (rows, totals) = ledger
@@ -70,6 +71,8 @@ fn u1a_1_old_database_gains_cache_and_reasoning_columns() {
             cache_write_5m_tokens: 7,
             cache_write_1h_tokens: 0,
             reasoning_tokens: 3,
+            cost_usd: 0.0,
+            unpriced: 2,
         }
     );
 }
@@ -102,6 +105,7 @@ fn u1a_2_summary_totals_aggregate_cache_and_reasoning() {
                     reasoning_tokens: Some(reasoning),
                     ..UsageDetails::default()
                 },
+                None,
             )
             .expect("row");
     }
@@ -116,6 +120,8 @@ fn u1a_2_summary_totals_aggregate_cache_and_reasoning() {
             cache_write_5m_tokens: 3,
             cache_write_1h_tokens: 5,
             reasoning_tokens: 3,
+            cost_usd: 0.0,
+            unpriced: 2,
         }
     );
 }

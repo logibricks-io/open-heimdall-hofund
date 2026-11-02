@@ -838,6 +838,7 @@ impl ControlState for DaemonControl {
 
     fn usage(&self, query: UsageQuery) -> ControlFuture<'_, UsageResponse> {
         let ledger = Arc::clone(&self.usage);
+        let config = self.ops.live().config.clone();
         Box::pin(async move {
             let window = window_of(query.period)?;
             let summary = tokio::task::spawn_blocking(move || {
@@ -846,7 +847,7 @@ impl ControlState for DaemonControl {
             .await
             .map_err(|error| internal(format!("usage query task failed: {error}")))?
             .map_err(|error| internal(format!("usage query failed: {error}")))?;
-            Ok::<_, ControlFailure>(usage_response(query.period, summary))
+            Ok::<_, ControlFailure>(usage_response(query.period, summary, &config))
         })
     }
 
@@ -1137,11 +1138,31 @@ fn window_of(period: UsagePeriod) -> Result<Window, ControlError> {
 fn usage_response(
     period: UsagePeriod,
     (rows, totals): (Vec<hofund_usage::Row>, hofund_usage::Totals),
+    config: &hofund_config::Config,
 ) -> UsageResponse {
     let mut response = UsageResponse::default();
     response.period = period;
     response.rows_truncated = totals.requests > u64::try_from(rows.len()).unwrap_or(u64::MAX);
-    response.rows = rows.into_iter().map(usage_row).collect();
+    let cny_per_usd = config
+        .usage
+        .cny_per_usd
+        .filter(|rate| rate.is_finite() && *rate > 0.0)
+        .unwrap_or(hofund_usage::CnyRate::FALLBACK);
+    let convert = |usd: f64| match config.usage.currency {
+        hofund_config::UsageCurrency::Usd => usd,
+        hofund_config::UsageCurrency::Cny => usd * cny_per_usd,
+    };
+    response.currency = match config.usage.currency {
+        hofund_config::UsageCurrency::Usd => "USD".to_owned(),
+        hofund_config::UsageCurrency::Cny => "CNY".to_owned(),
+    };
+    if config.usage.currency == hofund_config::UsageCurrency::Cny {
+        response.cny_per_usd = Some(cny_per_usd);
+    }
+    response.rows = rows
+        .into_iter()
+        .map(|row| usage_row(row, convert))
+        .collect();
     let mut summary = UsageTotals::default();
     summary.requests = totals.requests;
     summary.input_tokens = totals.input_tokens;
@@ -1150,11 +1171,13 @@ fn usage_response(
     summary.cache_write_5m_tokens = totals.cache_write_5m_tokens;
     summary.cache_write_1h_tokens = totals.cache_write_1h_tokens;
     summary.reasoning_tokens = totals.reasoning_tokens;
+    summary.cost = convert(totals.cost_usd);
+    summary.unpriced = totals.unpriced;
     response.totals = summary;
     response
 }
 
-fn usage_row(row: hofund_usage::Row) -> UsageRow {
+fn usage_row(row: hofund_usage::Row, convert: impl Fn(f64) -> f64 + Copy) -> UsageRow {
     let mut out = UsageRow::default();
     out.created_at_ms = u64::try_from(row.created_unix)
         .unwrap_or(0)
@@ -1185,6 +1208,8 @@ fn usage_row(row: hofund_usage::Row) -> UsageRow {
         .reasoning_tokens
         .map(|tokens| u64::try_from(tokens).unwrap_or(0));
     out.reasoning_hidden = row.reasoning_hidden;
+    out.priced = row.priced;
+    out.cost = row.cost_usd.filter(|_| row.priced).map(convert);
     out
 }
 

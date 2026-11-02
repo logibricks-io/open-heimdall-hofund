@@ -707,40 +707,46 @@ UsagePeriod::Day
 UsagePeriod::Month
 UsagePeriod::Unknown #[serde(other)]
 UsagePeriod::Week
-UsageQuery #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
+UsageQuery #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
 UsageQuery.period
 UsageQuery::fn new (period : UsagePeriod) -> Self
 UsageQuery::fn validate (& self) -> Result < () , ControlError >
-UsageResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+UsageResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Serialize, Deserialize)
+UsageResponse.cny_per_usd
+UsageResponse.currency
 UsageResponse.period
 UsageResponse.rows
 UsageResponse.rows_truncated
 UsageResponse.totals
 UsageResponse.version
-UsageRow #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+UsageRow #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Serialize, Deserialize)
 UsageRow.cache_read_tokens
 UsageRow.cache_write_1h_tokens
 UsageRow.cache_write_5m_tokens
 UsageRow.caller_issuer_id
 UsageRow.caller_key_id
 UsageRow.caller_key_name
+UsageRow.cost
 UsageRow.created_at_ms
 UsageRow.duration_ms
 UsageRow.input_tokens
 UsageRow.model
 UsageRow.output_tokens
+UsageRow.priced
 UsageRow.provider
 UsageRow.reasoning_hidden
 UsageRow.reasoning_tokens
 UsageRow.status
-UsageTotals #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+UsageTotals #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Serialize, Deserialize)
 UsageTotals.cache_read_tokens
 UsageTotals.cache_write_1h_tokens
 UsageTotals.cache_write_5m_tokens
+UsageTotals.cost
 UsageTotals.input_tokens
 UsageTotals.output_tokens
 UsageTotals.reasoning_tokens
 UsageTotals.requests
+UsageTotals.unpriced
 WarmupAccountRow #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize) # [serde (rename_all = "camelCase")]
 WarmupAccountRow.account
 WarmupAccountRow.at_ms

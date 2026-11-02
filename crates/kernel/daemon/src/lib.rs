@@ -50,6 +50,7 @@ mod models_state;
 mod offline;
 mod one_shot;
 mod plans;
+mod pricing;
 mod probe;
 mod provider_keys;
 mod quotas;
@@ -463,6 +464,7 @@ async fn start_inner(
     let snapshot = runtime.initial_snapshot(&config, Some(&mut models_host))?;
     // Subscription members join before the port opens.
     runtime.refresh_subscriptions().await;
+    let models_host = Arc::new(models_host);
     let cooldowns = snapshot
         .load()
         .cooldowns()
@@ -511,7 +513,12 @@ async fn start_inner(
         Arc::clone(&usage),
     ));
     gateway = gateway.with_quotas(Arc::clone(&quotas) as Arc<dyn hofund_gateway::QuotaSource>);
-    gateway = gateway.with_model_catalog(model_catalog);
+    gateway = gateway.with_model_catalog(Arc::clone(&model_catalog));
+    gateway = gateway.with_effective_pricer(Arc::new(pricing::effective_pricer(
+        config.usage.clone(),
+        Arc::clone(&model_catalog),
+        Arc::clone(&models_host),
+    )));
     if let Some(bus) = &control_bus {
         gateway = gateway.with_request_events(
             Arc::new(events::RequestBridge::new(Arc::clone(bus))),
@@ -535,7 +542,6 @@ async fn start_inner(
     if let Some(bus) = &control_bus {
         models_host.attach_events(Arc::clone(bus));
     }
-    let models_host = Arc::new(models_host);
     runtime.attach_measurements(Arc::clone(&usage), Arc::clone(&models_host));
     runtime.attach_models(Arc::clone(&models_host));
     if let Some(bus) = &control_bus {

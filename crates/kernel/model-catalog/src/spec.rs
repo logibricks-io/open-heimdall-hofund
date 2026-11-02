@@ -16,6 +16,9 @@ pub struct Price {
     pub cache_read: f64,
     /// Cache-write tokens.
     pub cache_write: f64,
+    /// One-hour cache-write tokens; zero bills at the five-minute rate.
+    #[serde(default)]
+    pub cache_write_1h: f64,
 }
 
 /// Context, output, vision, and reasoning metadata for routing and listings.

@@ -299,7 +299,7 @@ pub(crate) fn usage_table(response: &UsageResponse) -> String {
     }
     let totals = &response.totals;
     out.push_str(&format!(
-        "totals  requests={}  in={}  out={}  cache_read={}  cache_write_5m={}  cache_write_1h={}  reasoning={}\n",
+        "totals  requests={}  in={}  out={}  cache_read={}  cache_write_5m={}  cache_write_1h={}  reasoning={}  cost={:.4} {}  unpriced={}\n",
         totals.requests,
         totals.input_tokens,
         totals.output_tokens,
@@ -307,6 +307,9 @@ pub(crate) fn usage_table(response: &UsageResponse) -> String {
         totals.cache_write_5m_tokens,
         totals.cache_write_1h_tokens,
         totals.reasoning_tokens,
+        totals.cost,
+        response.currency,
+        totals.unpriced,
     ));
     if response.rows_truncated {
         out.push_str("(older rows omitted; totals cover every request)\n");
@@ -532,7 +535,7 @@ mod tests {
     use hofund_control_client::hofund_control_proto::{UsageResponse, UsageRow};
 
     #[test]
-    fn usage_table_keeps_the_fixed_columns_and_totals() {
+    fn u1b_13_cli_usage_totals_show_cost_currency_and_unpriced() {
         let mut response = UsageResponse::default();
         let mut row = UsageRow::default();
         row.model = "m".to_owned();
@@ -559,7 +562,7 @@ mod tests {
         assert_eq!(
             lines.next(),
             Some(
-                "totals  requests=1  in=3  out=0  cache_read=0  cache_write_5m=0  cache_write_1h=0  reasoning=0"
+                "totals  requests=1  in=3  out=0  cache_read=0  cache_write_5m=0  cache_write_1h=0  reasoning=0  cost=0.0000 USD  unpriced=0"
             )
         );
         assert_eq!(lines.next(), None);
