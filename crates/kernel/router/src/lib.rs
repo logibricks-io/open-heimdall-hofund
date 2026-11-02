@@ -2032,7 +2032,15 @@ async fn accept(completion: Completion) -> Result<Completion, PluginError> {
                             Completion::Raw(BodyStream::from_bytes(Bytes::from(buffered)))
                         });
                     }
-                    Some(Err(error)) => return Err(error),
+                    Some(Err(error)) if buffered.is_empty() => return Err(error),
+                    Some(Err(error)) => {
+                        // a stream severed after some bytes keeps them, then
+                        // carries the error, as an unheld stream would
+                        let head = Bytes::from(std::mem::take(&mut buffered));
+                        return Ok(Completion::Raw(BodyStream::from_stream(
+                            futures_util::stream::iter([Ok(head), Err(error)]),
+                        )));
+                    }
                     Some(Ok(chunk)) => {
                         buffered.extend_from_slice(&chunk);
                         if relayed_sse_empty_without_content(&buffered) {

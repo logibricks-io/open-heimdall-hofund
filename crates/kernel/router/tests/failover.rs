@@ -46,6 +46,7 @@ enum Kind {
     ResponsesCreatedThenPending,
     ResponsesCreatedThenEnd,
     ResponsesNothing,
+    ResponsesPartialThenError,
 }
 
 #[async_trait]
@@ -68,7 +69,8 @@ impl Member for Fake {
             | Kind::ResponsesEmptyThenPending
             | Kind::ResponsesCreatedThenPending
             | Kind::ResponsesCreatedThenEnd
-            | Kind::ResponsesNothing => ProtocolId::OPENAI_RESPONSES.as_str(),
+            | Kind::ResponsesNothing
+            | Kind::ResponsesPartialThenError => ProtocolId::OPENAI_RESPONSES.as_str(),
             _ => "test",
         }
     }
@@ -160,6 +162,12 @@ impl Member for Fake {
                 (),
                 |()| async { None::<(Result<Bytes, PluginError>, ())> },
             )))),
+            Kind::ResponsesPartialThenError => Ok(Completion::Raw(BodyStream::from_stream(
+                stream::iter(vec![
+                    Ok(Bytes::from_static(b"event: response.output_text.delta\n")),
+                    Err(PluginError::status_error(502, "severed")),
+                ]),
+            ))),
             Kind::ResponsesCreatedThenEnd => Ok(Completion::Raw(BodyStream::from_stream(
                 stream::unfold(true, |first| async move {
                     first.then(|| (Ok(Bytes::from_static(RESPONSES_CREATED_SSE)), false))
@@ -1133,5 +1141,24 @@ async fn d37_11_an_upstream_that_sent_nothing_is_not_polled_again() {
         panic!("expected a raw completion");
     };
     assert!(body.next_chunk().await.is_none());
+    assert!(body.next_chunk().await.is_none());
+}
+
+#[tokio::test]
+async fn d37_12_bytes_read_before_a_severed_upstream_are_kept_ahead_of_its_error() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let router = router(vec![fake("only", &hits, Kind::ResponsesPartialThenError)]);
+    let routed = dispatch_responses(&router, "demo").await.expect("routed");
+    let Completion::Raw(mut body) = routed.completion else {
+        panic!("expected a raw completion");
+    };
+    let chunk = body.next_chunk().await.expect("chunk").expect("ok");
+    assert_eq!(chunk.as_ref(), b"event: response.output_text.delta\n");
+    let error = body
+        .next_chunk()
+        .await
+        .expect("error")
+        .expect_err("severed");
+    assert!(error.to_string().contains("severed"), "{error}");
     assert!(body.next_chunk().await.is_none());
 }
