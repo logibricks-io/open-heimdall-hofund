@@ -301,6 +301,9 @@ The `control-client` and gateway `control-proto` edges landed in L3; the
   router must not depend on `tower`.
 - `usage` stays a leaf. `gateway` records one row per request. `usage` does
   not depend on `ir`; cache counters stay on the canonical usage object.
+  Optional CNY display persists FX snapshots as JSON beside the data root
+  (`serde` / `serde_json` only). Integration tests pull `config` and
+  `model-catalog` as dev-dependencies.
   `router` must not own usage.
 - Secret material is resolved by `daemon` (via `secrets`) and passed downward.
   `provider` must not read the secret store itself.
