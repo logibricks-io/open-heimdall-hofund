@@ -23,6 +23,9 @@ pub(crate) const COMPACT_PROMPT: &str = "You are performing a CONTEXT CHECKPOINT
 /// The longest `call_id` the backend takes.
 const CALL_ID_MOST: usize = 64;
 
+/// The longest plain item `id` the backend takes.
+const ID_MOST: usize = 64;
+
 /// The call items whose ids the backend wants with a prefix of their own.
 const CALL_PREFIXES: [(&str, &str); 2] =
     [("tool_search_call", "tsc_"), ("custom_tool_call", "ctc_")];
@@ -131,14 +134,35 @@ const fn plain(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_' || c == '-'
 }
 
-/// Makes item ids plain: each other character becomes `_`. A reasoning
-/// item with such an id was written elsewhere and is dropped.
+/// Makes item ids plain and bounds overlong ones. A reasoning item with such
+/// an id was written elsewhere and is dropped unless the vendor sealed it.
 fn plain_item_ids(items: &mut Vec<Value>) -> bool {
     let before = items.len();
-    items.retain(|item| kind(item) != "reasoning" || text(item, "id").chars().all(plain));
+    items.retain(|item| {
+        if kind(item) != "reasoning" {
+            return true;
+        }
+        let id = text(item, "id");
+        if vendor_reasoning(item) && id.len() > ID_MOST {
+            return true;
+        }
+        id.chars().all(plain) && !foreign_reasoning(item)
+    });
     let mut changed = items.len() != before;
     for item in items.iter_mut() {
         let id = text(item, "id");
+        if id.is_empty() {
+            continue;
+        }
+        if kind(item) == "reasoning" && vendor_reasoning(item) && id.len() > ID_MOST {
+            continue;
+        }
+        if id.len() > ID_MOST {
+            let fixed = bounded_item_id(kind(item), id);
+            item["id"] = Value::String(fixed);
+            changed = true;
+            continue;
+        }
         if id.chars().all(plain) {
             continue;
         }
@@ -147,6 +171,35 @@ fn plain_item_ids(items: &mut Vec<Value>) -> bool {
         changed = true;
     }
     changed
+}
+
+fn vendor_reasoning(item: &Value) -> bool {
+    !foreign_reasoning(item) && !text(item, "encrypted_content").is_empty()
+}
+
+fn item_id_prefix(kind: &str) -> &str {
+    match kind {
+        "message" => "msg_",
+        "reasoning" => "rs_",
+        "compaction" => "cmp_",
+        "function_call" => "fc_",
+        "custom_tool_call" => "ctc_",
+        "tool_search_call" => "tsc_",
+        _ => "item_",
+    }
+}
+
+fn bounded_item_id(kind: &str, id: &str) -> String {
+    let prefix = item_id_prefix(kind);
+    let hash = payload_hash(id.as_bytes());
+    let mut out = format!("{prefix}{hash}");
+    if out.len() > ID_MOST {
+        out.truncate(ID_MOST);
+        while !out.is_empty() && !out.is_char_boundary(out.len()) {
+            out.pop();
+        }
+    }
+    out
 }
 
 /// A user message of `text`.

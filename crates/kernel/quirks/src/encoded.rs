@@ -242,6 +242,10 @@ fn kimi_tool_enum_types(context: EncodedContext<'_>, body: &[u8]) -> Vec<u8> {
             if node.get("type").is_some() {
                 return;
             }
+            if let Some(kind @ ("object" | "array")) = keyword_type(node) {
+                edits.push(json::type_edit(node, format!("\"{kind}\"")));
+                return;
+            }
             let values = if let Some(values) = node.get("enum").and_then(Node::items) {
                 values
             } else if let Some(value) = node.get("const") {
@@ -278,7 +282,7 @@ fn kimi_tool_ref_types(context: EncodedContext<'_>, body: &[u8]) -> Vec<u8> {
             let Some(reference) = node.get("$ref").and_then(Node::text) else {
                 return;
             };
-            let Some(target) = json::local_ref(schema_root, reference) else {
+            let Some(target) = resolve_schema_ref(schema_root, reference) else {
                 return;
             };
             if !untyped_for_kimi(target) {
@@ -527,6 +531,21 @@ fn values_type(values: &[&Node], body: &[u8]) -> Option<&'static str> {
     kind
 }
 
+fn resolve_schema_ref<'a>(root: &'a Node, start: &str) -> Option<&'a Node> {
+    let mut seen = BTreeSet::new();
+    let mut reference = start;
+    loop {
+        if !seen.insert(reference) {
+            return None;
+        }
+        let target = json::local_ref(root, reference)?;
+        let Some(next) = target.get("$ref").and_then(Node::text) else {
+            return Some(target);
+        };
+        reference = next;
+    }
+}
+
 fn untyped_for_kimi(node: &Node) -> bool {
     if node.get("type").is_some() || node.get("anyOf").is_some() {
         return false;
@@ -613,9 +632,32 @@ fn schema_types<'a>(
         return types;
     }
     if let Some(reference) = node.get("$ref").and_then(Node::text) {
-        return json::local_ref(root, reference)
+        return resolve_schema_ref(root, reference)
             .map(|target| schema_types(root, target, body, depth + 1))
             .unwrap_or_default();
+    }
+    for key in ["oneOf", "anyOf", "allOf"] {
+        let Some(branches) = node.get(key).and_then(Node::items) else {
+            continue;
+        };
+        let mut known = false;
+        for branch in branches {
+            let branch_types = schema_types(root, branch, body, depth + 1);
+            if branch_types.is_empty() && key != "allOf" {
+                return BTreeSet::new();
+            }
+            for kind in branch_types {
+                types.insert(kind);
+                known = true;
+            }
+        }
+        if known {
+            return types;
+        }
+    }
+    if let Some(kind @ ("object" | "array")) = keyword_type(node) {
+        types.insert(kind);
+        return types;
     }
     if node.get("enum").and_then(Node::items).is_some() || node.get("const").is_some() {
         let empty = Vec::new();
@@ -653,25 +695,6 @@ fn schema_types<'a>(
             }
         }
         return types;
-    }
-    for key in ["oneOf", "anyOf", "allOf"] {
-        let Some(branches) = node.get(key).and_then(Node::items) else {
-            continue;
-        };
-        let mut known = false;
-        for branch in branches {
-            let branch_types = schema_types(root, branch, body, depth + 1);
-            if branch_types.is_empty() && key != "allOf" {
-                return BTreeSet::new();
-            }
-            for kind in branch_types {
-                types.insert(kind);
-                known = true;
-            }
-        }
-        if known {
-            return types;
-        }
     }
     if let Some(kind) = keyword_type(node) {
         types.insert(kind);
