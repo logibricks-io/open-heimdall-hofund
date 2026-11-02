@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Routing strategy `drain` keeps one pool member until it rests, runs out of
+  allowance without credits, fails over, or leaves the pool, then sticks to the
+  next member in listed order (D-41).
+
 ### Fixed
 
 - Codex summary compaction on `/backend-api/codex` retries once with a
