@@ -129,7 +129,7 @@ fn d34_6_catalog_cap_on_serve_and_off_for_new_codex() {
 #[test]
 fn d34_8_entry_puts_instructions_not_hofund_fallback() {
     let lookup = Lookup::without_cache();
-    let value = entry("gpt-6-astra", 1, &lookup);
+    let value = entry("gpt-6-astra", 1, &lookup, None);
     assert_eq!(value["base_instructions"], bundled_template("gpt-6-astra"));
     assert_ne!(value["base_instructions"], unknown_model_prompt());
 }
@@ -160,9 +160,9 @@ fn d34_11_cache_row_without_instructions_falls_back_and_adds_no_messages() {
     set_test_codex_home(Some(dir.path().to_path_buf()));
     let lookup = Lookup::with_codex_home();
     set_test_codex_home(None);
-    let value = entry("gpt-6-astra", 1, &lookup);
+    let value = entry("gpt-6-astra", 1, &lookup, None);
     assert_eq!(value["base_instructions"], bundled_template("gpt-6-astra"));
-    let value = entry("gpt-6.1-sol", 1, &lookup);
+    let value = entry("gpt-6.1-sol", 1, &lookup, None);
     assert_eq!(value["base_instructions"], "cache base");
     assert!(value.get("model_messages").is_none(), "{value}");
 }
@@ -188,7 +188,7 @@ fn d34_13_longest_cache_slug_wins_and_its_messages_are_applied() {
     set_test_codex_home(Some(dir.path().to_path_buf()));
     let lookup = Lookup::with_codex_home();
     set_test_codex_home(None);
-    let value = entry("vendor/gpt-6.1-sol-mini-fast", 1, &lookup);
+    let value = entry("vendor/gpt-6.1-sol-mini-fast", 1, &lookup, None);
     assert_eq!(value["base_instructions"], "mini base");
     assert_eq!(value["model_messages"]["instructions_template"], "mini");
 }
