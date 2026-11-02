@@ -738,6 +738,7 @@ UsageRow.created_at_ms
 UsageRow.duration_ms
 UsageRow.input_tokens
 UsageRow.model
+UsageRow.outcome
 UsageRow.output_tokens
 UsageRow.priced
 UsageRow.provider

@@ -1157,6 +1157,7 @@ pub(crate) fn into_plugin(error: ProviderError) -> PluginError {
     let credit_soon = error.credit_soon();
     let cooldown = error.cools();
     let status = error.status;
+    let billed = error.billed().cloned();
     let credit_message = credit.then(|| error.message.clone());
     let mut converted = match error.kind {
         ProviderErrorKind::Connect => PluginError::connect(error.message),
@@ -1192,6 +1193,9 @@ pub(crate) fn into_plugin(error: ProviderError) -> PluginError {
     }
     if credit_soon {
         converted = converted.with_credit_soon();
+    }
+    if let Some(billed) = billed {
+        converted = converted.with_billed(billed);
     }
     converted
 }
