@@ -142,6 +142,7 @@ impl Runtime {
             table: OnceLock::new(),
             instances: Mutex::new(HashMap::new()),
             models: OnceLock::new(),
+            model_catalog: OnceLock::new(),
             config: OnceLock::new(),
             events: OnceLock::new(),
             plan: Mutex::new(Plan::default()),
