@@ -1209,10 +1209,7 @@ fn usage_row(row: hofund_usage::Row, convert: impl Fn(f64) -> f64 + Copy) -> Usa
         .map(|tokens| u64::try_from(tokens).unwrap_or(0));
     out.reasoning_hidden = row.reasoning_hidden;
     out.priced = row.priced;
-    out.cost = row
-        .cost_usd
-        .filter(|_| row.priced)
-        .map(convert);
+    out.cost = row.cost_usd.filter(|_| row.priced).map(convert);
     out
 }
 
