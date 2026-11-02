@@ -4,8 +4,8 @@ use hofund_plugin_sdk::json::{self, Value, json};
 
 use super::entry;
 use super::official::{
-    Lookup, ModelInstructions, UNKNOWN_MODEL_PROMPT, is_routing_group, model_slug,
-    reads_whole_catalog, set_test_codex_home,
+    Lookup, ModelInstructions, is_routing_group, model_slug, reads_whole_catalog,
+    set_test_codex_home, unknown_model_prompt,
 };
 use crate::tests::{Gateway, ask};
 
@@ -64,7 +64,7 @@ fn d34_3_unknown_model_and_routing_group_get_prompt_md() {
     ));
     let mut value = json!({"slug": "group/smart"});
     lookup.for_id("group/smart").apply(&mut value);
-    assert_eq!(value["base_instructions"], UNKNOWN_MODEL_PROMPT);
+    assert_eq!(value["base_instructions"], unknown_model_prompt());
 }
 
 #[test]
@@ -131,7 +131,7 @@ fn d34_8_entry_puts_instructions_not_hofund_fallback() {
     let lookup = Lookup::without_cache();
     let value = entry("gpt-6-astra", 1, &lookup);
     assert_eq!(value["base_instructions"], bundled_template("gpt-6-astra"));
-    assert_ne!(value["base_instructions"], UNKNOWN_MODEL_PROMPT);
+    assert_ne!(value["base_instructions"], unknown_model_prompt());
 }
 
 #[test]

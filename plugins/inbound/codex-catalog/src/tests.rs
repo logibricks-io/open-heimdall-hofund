@@ -175,7 +175,7 @@ fn every_model_is_an_entry_codex_loads() {
 fn seer_gets_unknown_model_prompt() {
     let lookup = Lookup::without_cache();
     let seer = entry("seer", 1, &lookup);
-    assert_eq!(seer["base_instructions"], official::UNKNOWN_MODEL_PROMPT);
+    assert_eq!(seer["base_instructions"], official::unknown_model_prompt());
 }
 
 #[test]

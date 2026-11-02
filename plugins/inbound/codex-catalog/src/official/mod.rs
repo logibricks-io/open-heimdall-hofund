@@ -5,8 +5,23 @@ use std::sync::OnceLock;
 
 use hofund_plugin_sdk::json::{self, Value};
 
+/// Codex's `prompt.md`, kept as an ASCII JSON string so the source tree stays
+/// ASCII; the decoded text is byte for byte the upstream file.
+const PROMPT_JSON: &str = include_str!("prompt.json");
+
+static UNKNOWN_MODEL_PROMPT: OnceLock<String> = OnceLock::new();
+
 /// Unknown models and routing groups use Codex's `prompt.md` text.
-pub(crate) const UNKNOWN_MODEL_PROMPT: &str = include_str!("prompt.md");
+pub(crate) fn unknown_model_prompt() -> &'static str {
+    UNKNOWN_MODEL_PROMPT.get_or_init(|| {
+        let value: Value = json::from_str(PROMPT_JSON).expect("bundled prompt json");
+        value
+            .get("prompt")
+            .and_then(Value::as_str)
+            .expect("bundled prompt text")
+            .to_owned()
+    })
+}
 
 const BUNDLED_JSON: &str = include_str!("codex_instructions.json");
 
@@ -112,7 +127,7 @@ impl ModelInstructions {
             Self::UnknownPrompt => {
                 object.insert(
                     "base_instructions".to_owned(),
-                    Value::String(UNKNOWN_MODEL_PROMPT.to_owned()),
+                    Value::String(unknown_model_prompt().to_owned()),
                 );
             }
         }
