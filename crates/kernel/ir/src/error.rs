@@ -13,6 +13,7 @@ static TOO_LONG: LazyLock<Regex> = LazyLock::new(|| {
     re(concat!(
         "(?i)context_length_exceeded|prompt is too long|input is too long|(exceeds?|exceeded|over|beyond)( the)?( model'?s?)?( maximum)? context|context (length|limit|window) (exceeded|is exceeded)|maximum context length|too many (input |prompt )?tokens|\u{4e0a}\u{4e0b}\u{6587}(\u{957f}\u{5ea6})?(\u{8d85}|\u{8fc7}\u{957f})|\u{8d85}(\u{8fc7}|\u{51fa})(\u{4e86})?(\u{6a21}\u{578b})?(\u{7684})?(\u{6700}\u{5927})?\u{4e0a}\u{4e0b}\u{6587}",
         "|input token count.*exceeds the maximum|maximum prompt length is [0-9]|reduce the length of the messages|maximum allowed input length|longer than the model'?s context length|available context size|greater than the context length|prompt token count of [0-9,]+ exceeds the limit|context window exceeds limit|exceeded model token limit|configured context size|prompt too long|prompt exceeds max length|context_window_exceeded|exceeded (max |maximum )?context length|range of input length should be|token limit exceeded|input tokens? (count )?(exceeds?|exceeded) (the )?(max(imum)? )?limit",
+        "|context (window )?(is )?full",
         "|(\u{5185}\u{5bb9}|\u{8f93}\u{5165}|\u{6587}\u{672c}|\u{63d0}\u{793a}\u{8bcd}?|prompt|\u{95ee}\u{9898}|\u{5bf9}\u{8bdd}|\u{6d88}\u{606f})(\u{5185}\u{5bb9}|\u{6587}\u{672c})?(\u{957f}\u{5ea6})?\\s*(\u{592a}\u{957f}|\u{8fc7}\u{957f}|\u{8d85}\u{957f})|\u{5b57}\u{6570}(\u{592a}\u{591a}|\u{8fc7}\u{591a})",
         "|(\u{5185}\u{5bb9}|\u{8f93}\u{5165}|\u{6587}\u{672c}|\u{63d0}\u{793a}\u{8bcd}?|prompt|\u{95ee}\u{9898}|\u{5bf9}\u{8bdd}|\u{6d88}\u{606f})[^\u{ff0c}\u{3002},.;\u{ff1b}!\u{ff01}]{0,12}\u{8d85}(\u{8fc7}|\u{51fa})[^\u{ff0c}\u{3002},.;\u{ff1b}!\u{ff01}]{0,12}(\u{957f}\u{5ea6}|token|\u{4ee4}\u{724c}|\u{5b57}\u{6570})",
         "|(\u{8f93}\u{5165}|\u{63d0}\u{793a}\u{8bcd}?|prompt)\\s*\u{7684}?\\s*(\u{957f}\u{5ea6}|token|\u{4ee4}\u{724c}|\u{5b57}\u{6570})[^\u{ff0c}\u{3002},.;\u{ff1b}!\u{ff01}]{0,8}\u{8d85}(\u{8fc7}|\u{51fa})",
@@ -70,4 +71,36 @@ pub fn words_of(text: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::too_long;
+
+    #[test]
+    fn d33_1_context_window_full_wording_is_overflow() {
+        for message in [
+            "Context window is full. Reduce conversation history, system prompt, or tools. (request id: abc-123)",
+            "Context window is full. Reduce conversation history, system prompt, or tools.",
+            "Input is too long. Reduce the size of your messages.",
+            r#"{"error":{"message":"Context window is full. Reduce conversation history, system prompt, or tools.","type":"invalid_request_error"}}"#,
+            r#"{"type":"error","error":{"message":"Input is too long. Reduce the size of your messages."}}"#,
+        ] {
+            assert!(too_long(400, message), "{message}");
+            assert!(too_long(413, message), "{message}");
+            assert!(too_long(422, message), "{message}");
+            assert!(!too_long(500, message), "{message}");
+        }
+    }
+
+    #[test]
+    fn d33_2_ordinary_bad_requests_are_not_overflow() {
+        for message in [
+            r#"{"error":{"message":"Invalid model: demo"}}"#,
+            r#"{"error":{"message":"The model `demo` does not exist","code":"model_not_found"}}"#,
+            r#"{"error":{"message":"you must provide a messages parameter"}}"#,
+        ] {
+            assert!(!too_long(400, message), "{message}");
+        }
+    }
 }
