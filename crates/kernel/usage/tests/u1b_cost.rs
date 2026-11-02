@@ -4,10 +4,23 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use hofund_config::{ModelPriceOverride, UsageSettings};
-use hofund_model_catalog::{EffectivePricer, ListPriceLookup, ModelCatalog, Price};
-use hofund_usage::{
-    Ledger, Row, RowPricing, TokenPrice, UsageDetails,
+use hofund_model_catalog::{
+    CacheFile, CatalogFetcher, EffectivePricer, FetchResponse, ListPriceLookup, ModelCatalog,
+    Price, parse_catalog,
 };
+use hofund_usage::{Ledger, Row, RowPricing, TokenPrice, UsageDetails};
+
+const DEV_FIXTURE: &str = r#"{
+  "acme": {
+    "id": "acme",
+    "models": {
+      "gpt-demo": {
+        "id": "gpt-demo",
+        "cost": {"input": 2.5, "output": 10.0}
+      }
+    }
+  }
+}"#;
 
 struct StubList;
 
@@ -23,16 +36,47 @@ impl ListPriceLookup for StubList {
     }
 }
 
+struct EmptyList;
+
+impl ListPriceLookup for EmptyList {
+    fn list_price(&self, _provider_id: &str, _model: &str) -> Option<Price> {
+        None
+    }
+}
+
+struct OfflineFetcher;
+
+impl CatalogFetcher for OfflineFetcher {
+    fn fetch(
+        &self,
+        _url: &str,
+        _if_none_match: Option<&str>,
+    ) -> Result<FetchResponse, std::io::Error> {
+        Err(std::io::Error::other("offline"))
+    }
+}
+
+fn seeded_catalog(dir: &std::path::Path) -> Arc<ModelCatalog> {
+    let dev = parse_catalog(DEV_FIXTURE.as_bytes()).expect("fixture");
+    CacheFile::beside_data_root(dir)
+        .write(None, &dev)
+        .expect("seed cache");
+    ModelCatalog::open(
+        dir,
+        hofund_config::CatalogSettings::default(),
+        Arc::new(OfflineFetcher),
+    )
+    .expect("catalog")
+}
+
 fn empty_catalog() -> Arc<ModelCatalog> {
     let dir = tempfile::tempdir().expect("dir");
-    Arc::new(
-        ModelCatalog::open(
-            dir.path(),
-            hofund_config::CatalogSettings::default(),
-            Arc::new(hofund_model_catalog::ReqwestFetcher::new()),
-        )
-        .expect("catalog"),
+    ModelCatalog::open(
+        dir.path(),
+        hofund_config::CatalogSettings::default(),
+        Arc::new(OfflineFetcher),
     )
+    .expect("catalog")
 }
 
 fn pricer(settings: UsageSettings) -> EffectivePricer {
@@ -89,6 +133,17 @@ fn u1b_3_list_price_when_no_custom_entry() {
         .resolve("listed", "alpha", None, false)
         .expect("price");
     assert!((price.input - 1.0).abs() < f64::EPSILON);
+}
+
+#[test]
+fn u1b_12_models_dev_catalog_when_provider_list_missing() {
+    let dir = tempfile::tempdir().expect("dir");
+    let catalog = seeded_catalog(dir.path());
+    let pricer = EffectivePricer::new(UsageSettings::default(), catalog, Arc::new(EmptyList));
+    let price = pricer
+        .resolve("relay", "gpt-demo", None, false)
+        .expect("catalog price");
+    assert!((price.input - 2.5).abs() < f64::EPSILON);
 }
 
 #[test]

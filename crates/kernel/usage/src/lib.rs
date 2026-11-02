@@ -73,7 +73,7 @@ pub fn window_start<Tz: TimeZone>(window: Window, now: DateTime<Tz>) -> Option<i
 }
 
 /// Aggregate counts over every row in a window, independent of any row cap.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Totals {
     /// Number of requests.
     pub requests: u64,
@@ -96,7 +96,7 @@ pub struct Totals {
 }
 
 /// A stored request.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Row {
     /// Unix seconds when the row was written.
     pub created_unix: i64,

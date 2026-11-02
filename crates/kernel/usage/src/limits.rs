@@ -2,7 +2,7 @@
 
 use rusqlite::params;
 
-use super::{Ledger, Row, UsageError};
+use super::{Ledger, Row, RowPricing, UsageError};
 
 /// Token details needed by gateway-key budgets and usage reporting.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -24,7 +24,7 @@ pub struct UsageDetails {
 }
 
 /// One key's forwarded calls and token sums at or after a window start.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct KeyUsage {
     /// Number of forwarded calls.
     pub calls: u64,
@@ -83,7 +83,7 @@ impl Ledger {
                     cache_write_5m_tokens, cache_write_1h_tokens, reasoning_tokens, reasoning_hidden,
                     priced, cost_usd, price_input, price_output, price_cache_read, price_cache_write,
                     price_cache_write_1h
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)",
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
                 params![
                     row.created_unix,
                     row.model,

@@ -19,7 +19,7 @@ use thiserror::Error;
 /// Option keys and header names stay visible. The options table is opaque and
 /// may hold secrets, so values are redacted rather than matched against an
 /// allowlist of safe keys.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq)]
 pub struct Config {
     /// Address the gateway binds.
     pub listen: SocketAddr,
@@ -167,12 +167,15 @@ pub struct UsageSettings {
 /// Currency shown on usage summaries.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum UsageCurrency {
+    /// United States dollars.
     #[default]
     Usd,
+    /// Chinese yuan, converted from stored USD totals.
     Cny,
 }
 
 impl UsageCurrency {
+    /// Wire and config spelling for this currency.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -185,10 +188,15 @@ impl UsageCurrency {
 /// USD per million tokens for a configured usage price override.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModelPriceOverride {
+    /// USD per million uncached input tokens.
     pub input: f64,
+    /// USD per million output tokens.
     pub output: f64,
+    /// USD per million cache-read tokens.
     pub cache_read: f64,
+    /// USD per million five-minute cache-write tokens.
     pub cache_write: f64,
+    /// USD per million one-hour cache-write tokens; absent means bill at the five-minute rate.
     pub cache_write_1h: Option<f64>,
 }
 
@@ -1762,7 +1770,14 @@ struct RawModelPrice {
 }
 
 fn usage_settings(raw: RawUsage) -> Result<UsageSettings, ConfigError> {
-    let currency = match raw.currency.as_deref().unwrap_or("usd").trim().to_ascii_lowercase().as_str() {
+    let currency = match raw
+        .currency
+        .as_deref()
+        .unwrap_or("usd")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
         "usd" => UsageCurrency::Usd,
         "cny" | "rmb" => UsageCurrency::Cny,
         other => {

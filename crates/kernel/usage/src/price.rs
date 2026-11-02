@@ -71,11 +71,11 @@ impl TokenPrice {
         } else {
             self.cache_write
         };
-        (f64::from(input) * self.input
-            + f64::from(output) * self.output
-            + f64::from(cache_read) * self.cache_read
-            + f64::from(cache_write_5m) * self.cache_write
-            + f64::from(cache_write_1h) * hour_rate)
+        (input as f64 * self.input
+            + output as f64 * self.output
+            + cache_read as f64 * self.cache_read
+            + cache_write_5m as f64 * self.cache_write
+            + cache_write_1h as f64 * hour_rate)
             / 1_000_000.0
     }
 
@@ -87,10 +87,7 @@ impl TokenPrice {
         output_tokens: Option<i64>,
         details: UsageDetails,
     ) -> f64 {
-        let input = details
-            .uncached_input_tokens
-            .or(input_tokens)
-            .unwrap_or(0);
+        let input = details.uncached_input_tokens.or(input_tokens).unwrap_or(0);
         let output = output_tokens.unwrap_or(0);
         let cache_read = details.cache_read_tokens.unwrap_or(0);
         let write_5m = details.cache_write_5m_tokens.unwrap_or(0);

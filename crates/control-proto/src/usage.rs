@@ -23,7 +23,7 @@ pub enum UsagePeriod {
 
 /// Query-only usage request. It uses the path version and has no JSON body
 /// version field. Query-string parsing belongs to the HTTP layer.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 #[serde(deny_unknown_fields)]
 pub struct UsageQuery {
@@ -60,7 +60,7 @@ impl UsageQuery {
 }
 
 /// One usage row with unsigned wire quantities.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 #[serde(default)]
 pub struct UsageRow {
@@ -111,7 +111,7 @@ pub struct UsageRow {
 }
 
 /// Aggregated usage totals.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 #[serde(default)]
 pub struct UsageTotals {
@@ -136,7 +136,7 @@ pub struct UsageTotals {
 }
 
 /// Usage response.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct UsageResponse {
     /// Body wire version.

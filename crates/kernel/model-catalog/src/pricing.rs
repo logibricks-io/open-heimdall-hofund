@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use hofund_config::{ModelPriceOverride, UsageSettings};
 
+use crate::ModelCatalog;
 use crate::spec::Price;
-use crate::{ModelCatalog};
 
 const ANY_PROVIDER: &str = "*/";
 
@@ -60,7 +60,12 @@ impl EffectivePricer {
             return Some(price);
         }
         if let Some(price) = self.list.list_price(provider_id, model) {
-            return Some(enrich_from_catalog(self.catalog.as_ref(), provider_id, model, price));
+            return Some(enrich_from_catalog(
+                self.catalog.as_ref(),
+                provider_id,
+                model,
+                price,
+            ));
         }
         if let Some(served) = served.filter(|served| *served != model)
             && let Some(price) = self.list.list_price(provider_id, served)

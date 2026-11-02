@@ -454,3 +454,39 @@ async fn u1b_11_control_usage_summary_includes_cost_and_unpriced() {
     assert!(all.rows[1].cost.is_none());
     support::shutdown(running).await;
 }
+
+#[tokio::test]
+async fn u1b_14_control_usage_converts_totals_to_cny() {
+    use hofund_usage::{RowPricing, TokenPrice, UsageDetails};
+
+    let dir = Scratch::new("cost-cny");
+    let now = now_unix();
+    {
+        let ledger = Ledger::open(&dir.0.join("usage.sqlite")).expect("ledger");
+        ledger
+            .record_with_details(
+                &row(now, "priced", Some(1), Some(1)),
+                None,
+                UsageDetails::default(),
+                Some(RowPricing {
+                    priced: true,
+                    cost_usd: 2.0,
+                    price: TokenPrice {
+                        input: 1.0,
+                        output: 1.0,
+                        cache_read: 0.0,
+                        cache_write: 0.0,
+                        cache_write_1h: 0.0,
+                    },
+                }),
+            )
+            .expect("priced");
+    }
+    let config = format!("{CONFIG}[usage]\ncurrency = \"cny\"\ncny_per_usd = 7.0\n");
+    let running = start_tcp(&dir.0, &config).await;
+    let all = decoded_usage(usage(&running, &dir.0, "").await).await;
+    assert_eq!(all.currency, "CNY");
+    assert!((all.totals.cost - 14.0).abs() < f64::EPSILON);
+    assert_eq!(all.cny_per_usd, Some(7.0));
+    support::shutdown(running).await;
+}

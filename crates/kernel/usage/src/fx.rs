@@ -80,7 +80,11 @@ pub struct Fx {
 impl Fx {
     /// Opens or creates conversion state beside `data_root`.
     #[must_use]
-    pub fn open(data_root: &Path, fixed_cny_per_usd: Option<f64>, fetcher: Option<Arc<dyn RateFetcher>>) -> Self {
+    pub fn open(
+        data_root: &Path,
+        fixed_cny_per_usd: Option<f64>,
+        fetcher: Option<Arc<dyn RateFetcher>>,
+    ) -> Self {
         Self {
             fixed: fixed_cny_per_usd,
             cache_path: data_root.join(".hofund/cache/fxrate.json"),

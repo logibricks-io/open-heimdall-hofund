@@ -47,8 +47,8 @@ mod models_state;
 mod offline;
 mod one_shot;
 mod plans;
-mod probe;
 mod pricing;
+mod probe;
 mod provider_keys;
 mod quotas;
 mod registry;
@@ -490,7 +490,7 @@ async fn start_inner(
         Arc::clone(&usage),
     ));
     gateway = gateway.with_quotas(Arc::clone(&quotas) as Arc<dyn hofund_gateway::QuotaSource>);
-    gateway = gateway.with_model_catalog(model_catalog);
+    gateway = gateway.with_model_catalog(Arc::clone(&model_catalog));
     gateway = gateway.with_effective_pricer(Arc::new(pricing::effective_pricer(
         config.usage.clone(),
         Arc::clone(&model_catalog),

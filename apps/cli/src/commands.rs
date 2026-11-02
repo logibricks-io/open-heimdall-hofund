@@ -535,7 +535,7 @@ mod tests {
     use hofund_control_client::hofund_control_proto::{UsageResponse, UsageRow};
 
     #[test]
-    fn usage_table_keeps_the_fixed_columns_and_totals() {
+    fn u1b_13_cli_usage_totals_show_cost_currency_and_unpriced() {
         let mut response = UsageResponse::default();
         let mut row = UsageRow::default();
         row.model = "m".to_owned();

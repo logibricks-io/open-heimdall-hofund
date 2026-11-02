@@ -286,6 +286,7 @@ fn merge_override(entry: &mut ResolvedEntry, patch: Option<&hofund_config::Catal
             output: price.output_micros as f64 / 1_000_000.0,
             cache_read: price.cache_read_micros as f64 / 1_000_000.0,
             cache_write: price.cache_write_micros as f64 / 1_000_000.0,
+            cache_write_1h: 0.0,
         });
     }
     if let Some(name) = &patch.name {

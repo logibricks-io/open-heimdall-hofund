@@ -353,12 +353,7 @@ impl Drop for RequestTrack {
             if status == 499
                 && let Some((usage, meta)) = self.cancel_usage.take()
             {
-                write_usage_simple(
-                    &usage,
-                    &meta,
-                    None,
-                    StatusCode::from_u16(499).expect("499"),
-                );
+                write_usage_simple(&usage, &meta, None, StatusCode::from_u16(499).expect("499"));
             }
             self.end_with(None, status, None, None);
         } else {
@@ -495,6 +490,7 @@ impl Gateway {
                 quota_scope: tell_everything(),
                 route_trace: None,
                 model_catalog: None,
+                pricer: None,
             }),
         }
     }
@@ -1585,7 +1581,7 @@ fn reserve_for_codec(
         Ok(reservation) => Ok(reservation),
         Err(limits::ReserveFailure::Refused(refusal)) => {
             write_usage_app(
-                app.as_ref(),
+                app,
                 &UsageMeta::new(request, "", &request.model, started, identity),
                 None,
                 StatusCode::TOO_MANY_REQUESTS,
@@ -1594,7 +1590,7 @@ fn reserve_for_codec(
         }
         Err(limits::ReserveFailure::Unavailable) => {
             write_usage_app(
-                app.as_ref(),
+                app,
                 &UsageMeta::new(request, "", &request.model, started, identity),
                 None,
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -1713,12 +1709,13 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
     let model_request = match codec.decode_request(&bytes) {
         Ok(model_request) => model_request,
         Err(error) => {
+            let fallback_model = model_name(&bytes);
             write_usage_app(
                 app.as_ref(),
                 &UsageMeta::new(
-                    &ModelRequest::new(model_name(&bytes)),
+                    &ModelRequest::new(&fallback_model),
                     "",
-                    model_name(&bytes),
+                    &fallback_model,
                     started,
                     &identity,
                 ),
@@ -3276,12 +3273,7 @@ fn write_usage(
             return None;
         }
         let served = (!meta.served_model.is_empty()).then_some(meta.served_model.as_str());
-        let list = pricer.resolve(
-            &meta.upstream,
-            &meta.wire_model,
-            served,
-            provider_free,
-        )?;
+        let list = pricer.resolve(&meta.upstream, &meta.wire_model, served, provider_free)?;
         let token_price = hofund_usage::TokenPrice {
             input: list.input,
             output: list.output,
