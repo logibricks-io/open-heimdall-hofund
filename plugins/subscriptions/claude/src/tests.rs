@@ -851,7 +851,7 @@ fn d36_3_stale_refresh_lock_is_taken_over() {
     std::fs::create_dir_all(&agent_home).expect("home");
     let lock_path = agent_home.join(".oauth_refresh.lock");
     std::fs::create_dir(&lock_path).expect("lock");
-    let file = std::fs::File::open(&lock_path).expect("open");
+    let file = crate::lock::open_dir_for_times(&lock_path).expect("open");
     file.set_modified(SystemTime::now() - Duration::from_secs(120))
         .expect("backdate");
     crate::lock::test_lock_timing(
@@ -1187,4 +1187,24 @@ fn d36_20_mark_file_name_includes_injected_pid_and_seq() {
     );
     drop(mark);
     crate::run_lock::clear_test_mark_identity();
+}
+
+#[test]
+fn d36_21_heartbeat_refreshes_the_lock_directory_time() {
+    use std::time::{Duration, SystemTime};
+
+    let dir = tempfile::tempdir().expect("dir");
+    let lock_path = dir.path().join(".oauth_refresh.lock");
+    std::fs::create_dir(&lock_path).expect("lock");
+    let old = SystemTime::now() - Duration::from_secs(600);
+    crate::lock::open_dir_for_times(&lock_path)
+        .expect("open")
+        .set_modified(old)
+        .expect("backdate");
+    crate::lock::touch_dir(&lock_path);
+    let modified = std::fs::metadata(&lock_path)
+        .expect("meta")
+        .modified()
+        .expect("modified");
+    assert!(modified > old + Duration::from_secs(300), "{modified:?}");
 }

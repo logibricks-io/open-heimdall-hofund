@@ -223,9 +223,28 @@ fn lock_stale(path: &Path, stale: Duration) -> bool {
     modified.elapsed().unwrap_or(Duration::ZERO) > stale
 }
 
-fn touch_dir(path: &Path) {
-    let Ok(file) = std::fs::File::open(path) else {
+pub(crate) fn touch_dir(path: &Path) {
+    let Ok(file) = open_dir_for_times(path) else {
         return;
     };
     let _ = file.set_modified(std::time::SystemTime::now());
+}
+
+/// Opens a lock directory so its modified time can be set. Windows opens a
+/// directory only with backup semantics and needs attribute write access.
+pub(crate) fn open_dir_for_times(path: &Path) -> std::io::Result<std::fs::File> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_WRITE_ATTRIBUTES: u32 = 0x0100;
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        std::fs::OpenOptions::new()
+            .access_mode(FILE_WRITE_ATTRIBUTES)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(path)
+    }
+    #[cfg(not(windows))]
+    {
+        std::fs::File::open(path)
+    }
 }
