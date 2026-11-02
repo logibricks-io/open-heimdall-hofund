@@ -85,7 +85,7 @@ fn d34_4_cache_entry_wins_and_bad_cache_falls_back() {
             model_messages,
         } => {
             assert_eq!(base_instructions, "cache base");
-            assert_eq!(model_messages["extra"], true);
+            assert_eq!(model_messages.expect("model_messages")["extra"], true);
         }
         other => panic!("{other:?}"),
     }
@@ -132,4 +132,32 @@ fn d34_8_entry_puts_instructions_not_hofund_fallback() {
 #[test]
 fn d34_9_model_slug_takes_last_segment() {
     assert_eq!(model_slug("vendor/gpt-6-astra"), "gpt-6-astra");
+}
+
+#[test]
+fn d34_10_client_version_found_after_a_bare_query_pair() {
+    let ids: Vec<String> = (0..600).map(|n| format!("many/model-{n:03}")).collect();
+    let gateway = Gateway::listing(&Value::Array(
+        ids.iter().map(|id| json!({"id": id})).collect(),
+    ));
+    let (_, _, header, _) = ask(&gateway, "/v1/codex/models?flag&client_version=0.166.0");
+    assert_eq!(header, None);
+}
+
+#[test]
+fn d34_11_cache_row_without_instructions_falls_back_and_adds_no_messages() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cached = json!({"models": [
+        {"slug": "gpt-6-astra", "base_instructions": ""},
+        {"slug": "gpt-6.1-sol", "base_instructions": "cache base"}
+    ]});
+    std::fs::write(dir.path().join("models_cache.json"), cached.to_string()).expect("write");
+    set_test_codex_home(Some(dir.path().to_path_buf()));
+    let lookup = Lookup::with_codex_home();
+    set_test_codex_home(None);
+    let value = entry("gpt-6-astra", 1, &lookup);
+    assert_eq!(value["base_instructions"], bundled_template("gpt-6-astra"));
+    let value = entry("gpt-6.1-sol", 1, &lookup);
+    assert_eq!(value["base_instructions"], "cache base");
+    assert!(value.get("model_messages").is_none(), "{value}");
 }

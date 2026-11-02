@@ -82,7 +82,7 @@ pub(crate) enum ModelInstructions {
     /// From the user's Codex home cache: fields copied as sent.
     Cached {
         base_instructions: String,
-        model_messages: Value,
+        model_messages: Option<Value>,
     },
     /// Codex's prompt for an unknown model or a routing group.
     UnknownPrompt,
@@ -107,7 +107,9 @@ impl ModelInstructions {
                     "base_instructions".to_owned(),
                     Value::String(base_instructions),
                 );
-                object.insert("model_messages".to_owned(), model_messages);
+                if let Some(model_messages) = model_messages {
+                    object.insert("model_messages".to_owned(), model_messages);
+                }
             }
             Self::UnknownPrompt => {
                 object.insert(
@@ -170,7 +172,7 @@ struct CacheFile {
 struct CacheRow {
     slug: String,
     base_instructions: String,
-    model_messages: Value,
+    model_messages: Option<Value>,
 }
 
 impl CacheFile {
@@ -198,12 +200,18 @@ impl CacheFile {
             let Some(slug) = row.get("slug").and_then(Value::as_str) else {
                 continue;
             };
-            let base = row
+            let Some(base) = row
                 .get("base_instructions")
                 .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_owned();
-            let model_messages = row.get("model_messages").cloned().unwrap_or(Value::Null);
+                .filter(|text| !text.is_empty())
+                .map(str::to_owned)
+            else {
+                continue;
+            };
+            let model_messages = row
+                .get("model_messages")
+                .filter(|value| !value.is_null())
+                .cloned();
             slugs.push(CacheRow {
                 slug: slug.to_owned(),
                 base_instructions: base,
@@ -218,17 +226,14 @@ impl CacheFile {
 }
 
 fn codex_home() -> Option<PathBuf> {
-    #[cfg(test)]
-    if let Some(home) = test_codex_home() {
-        return Some(home);
+    // Tests never read the real Codex home of the machine they run on.
+    if cfg!(test) {
+        return test_codex_home();
     }
-    if let Ok(home) = std::env::var("CODEX_HOME") {
-        if home.is_empty() {
-            return default_codex_home();
-        }
-        return Some(PathBuf::from(home));
+    match std::env::var("CODEX_HOME") {
+        Ok(home) if !home.is_empty() => Some(PathBuf::from(home)),
+        _ => default_codex_home(),
     }
-    default_codex_home()
 }
 
 fn default_codex_home() -> Option<PathBuf> {
@@ -239,23 +244,29 @@ fn default_codex_home() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod test_home {
+    use std::cell::RefCell;
     use std::path::PathBuf;
-    use std::sync::Mutex;
 
-    static HOME: Mutex<Option<PathBuf>> = Mutex::new(None);
+    // Per thread, so a test that sets a home cannot leak it into another
+    // test running in parallel.
+    thread_local! {
+        static HOME: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+    }
 
     pub(super) fn get() -> Option<PathBuf> {
-        HOME.lock().expect("test codex home").clone()
+        HOME.with(|home| home.borrow().clone())
     }
 
     pub(super) fn set(home: Option<PathBuf>) {
-        *HOME.lock().expect("test codex home") = home;
+        HOME.with(|slot| *slot.borrow_mut() = home);
     }
 }
 
-#[cfg(test)]
 fn test_codex_home() -> Option<PathBuf> {
-    test_home::get()
+    #[cfg(test)]
+    return test_home::get();
+    #[cfg(not(test))]
+    None
 }
 
 #[cfg(test)]

@@ -185,7 +185,9 @@ pub(crate) fn catalog_response(ids: &[String], cap: bool) -> HttpResponse {
 pub(crate) fn client_version(request: &HttpRequest) -> Option<&str> {
     let query = request.uri().query()?;
     for pair in query.split('&') {
-        let (key, value) = pair.split_once('=')?;
+        let Some((key, value)) = pair.split_once('=') else {
+            continue;
+        };
         if key == "client_version" {
             return Some(value);
         }
