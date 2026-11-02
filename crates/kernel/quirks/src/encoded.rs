@@ -655,6 +655,10 @@ fn schema_types<'a>(
             return types;
         }
     }
+    if let Some(kind @ ("object" | "array")) = keyword_type(node) {
+        types.insert(kind);
+        return types;
+    }
     if node.get("enum").and_then(Node::items).is_some() || node.get("const").is_some() {
         let empty = Vec::new();
         let values = node.get("enum").and_then(Node::items).unwrap_or(&empty);

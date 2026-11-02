@@ -183,3 +183,16 @@ fn v3_gemini_named_by_bare_prefix() {
     let body = r#"{"model":"agemini","tools":[{"type":"function","function":{"name":"f","parameters":{"properties":{"any":{}}}}}]}"#;
     assert_eq!(text(apply(body, "openai-chat")), body);
 }
+
+#[test]
+fn d31_7_a_ref_to_an_items_and_enum_target_is_an_array() {
+    let params = r##"{"type":"object","properties":{"v":{"$ref":"#/$defs/L"}},"$defs":{"L":{"items":{"type":"string"},"enum":["a","b"]}}}"##;
+    let body = format!(
+        r#"{{"model":"gemini-3.8-flash","tools":[{{"type":"function","function":{{"name":"t","parameters":{params}}}}}]}}"#
+    );
+    let got = text(apply(&body, "openai-chat"));
+    let value: Value = serde_json::from_str(&got).expect("JSON");
+    let params = &value["tools"][0]["function"]["parameters"];
+    assert_eq!(params["properties"]["v"]["type"], "array", "{got}");
+    assert_eq!(params["$defs"]["L"]["type"], "array", "{got}");
+}
