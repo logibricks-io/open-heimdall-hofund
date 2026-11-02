@@ -774,3 +774,207 @@ fn a3a_25_warmup_timeout_fails_even_when_stdout_has_a_result_line() {
     let error = block_on(sub.daily_warmup(&id, host.context())).expect_err("timeout");
     assert!(error.to_string().contains("did not finish"), "{error}");
 }
+
+#[test]
+fn d36_1_switch_waits_for_refresh_lock_then_succeeds() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let dir = tempfile::tempdir().expect("dir");
+    let agent_home = dir.path().join("claude");
+    std::fs::create_dir_all(&agent_home).expect("home");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let spare = account_id_from(&["claude", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"]);
+    store(&host, &spare, &signed_in_blob());
+    let lock_path = agent_home.join(".oauth_refresh.lock");
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let (start_tx, start_rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = std::fs::create_dir(&lock_path);
+        let _ = ready_tx.send(());
+        let _ = start_rx.recv();
+        let _ = std::fs::remove_dir(&lock_path);
+    });
+    ready_rx.recv().expect("lock held");
+    crate::lock::test_lock_timing(
+        Duration::from_secs(2),
+        Duration::from_secs(60),
+        Duration::from_secs(10),
+    );
+    let write = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(50));
+        let _ = start_tx.send(());
+    });
+    block_on(sub.write_agent_sign_in(&spare, &agent_home, host.context())).expect("write");
+    write.join().expect("join");
+    assert!(agent_home.join(creds::CREDENTIALS_FILE).is_file());
+}
+
+#[test]
+fn d36_2_held_refresh_lock_times_out_with_nothing_written() {
+    use std::time::Duration;
+
+    let dir = tempfile::tempdir().expect("dir");
+    let agent_home = dir.path().join("claude");
+    std::fs::create_dir_all(&agent_home).expect("home");
+    std::fs::write(agent_home.join(creds::CREDENTIALS_FILE), "live").expect("live");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let spare = account_id_from(&["claude", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"]);
+    store(&host, &spare, &signed_in_blob());
+    let lock_path = agent_home.join(".oauth_refresh.lock");
+    let _hold = std::fs::create_dir(&lock_path);
+    crate::lock::test_lock_timing(
+        Duration::from_millis(500),
+        Duration::from_secs(60),
+        Duration::from_secs(10),
+    );
+    let error = block_on(sub.write_agent_sign_in(&spare, &agent_home, host.context()))
+        .expect_err("timeout");
+    assert!(
+        error.to_string().contains("refreshing its sign-in"),
+        "{error}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(agent_home.join(creds::CREDENTIALS_FILE)).expect("read"),
+        "live"
+    );
+}
+
+#[test]
+fn d36_3_stale_refresh_lock_is_taken_over() {
+    use std::time::{Duration, SystemTime};
+
+    let dir = tempfile::tempdir().expect("dir");
+    let agent_home = dir.path().join("claude");
+    std::fs::create_dir_all(&agent_home).expect("home");
+    let lock_path = agent_home.join(".oauth_refresh.lock");
+    std::fs::create_dir(&lock_path).expect("lock");
+    let file = std::fs::File::open(&lock_path).expect("open");
+    file.set_modified(SystemTime::now() - Duration::from_secs(120))
+        .expect("backdate");
+    crate::lock::test_lock_timing(
+        Duration::from_secs(1),
+        Duration::from_millis(50),
+        Duration::from_secs(10),
+    );
+    let _locks = crate::lock::refresh_locks(&agent_home).expect("take stale");
+}
+
+#[test]
+fn d36_4_refresh_locks_release_in_reverse_order() {
+    let dir = tempfile::tempdir().expect("dir");
+    let agent_home = dir.path().join("claude");
+    std::fs::create_dir_all(&agent_home).expect("home");
+    {
+        let _locks = crate::lock::refresh_locks(&agent_home).expect("locks");
+    }
+    assert_eq!(crate::lock::take_test_releases(), ["legacy", "refresh"]);
+}
+
+#[test]
+fn d36_5_switch_waits_for_legacy_realpath_lock_then_succeeds() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let dir = tempfile::tempdir().expect("dir");
+    let agent_home = dir.path().join("claude");
+    std::fs::create_dir_all(&agent_home).expect("home");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let spare = account_id_from(&["claude", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"]);
+    store(&host, &spare, &signed_in_blob());
+    let resolved = std::fs::canonicalize(&agent_home).expect("canonical");
+    let lock_path = PathBuf::from(format!("{}.lock", resolved.display()));
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let (start_tx, start_rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = std::fs::create_dir(&lock_path);
+        let _ = ready_tx.send(());
+        let _ = start_rx.recv();
+        let _ = std::fs::remove_dir(&lock_path);
+    });
+    ready_rx.recv().expect("lock held");
+    crate::lock::test_lock_timing(
+        Duration::from_secs(2),
+        Duration::from_secs(60),
+        Duration::from_secs(10),
+    );
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(50));
+        let _ = start_tx.send(());
+    });
+    block_on(sub.write_agent_sign_in(&spare, &agent_home, host.context())).expect("write");
+    release.join().expect("join");
+}
+
+#[test]
+fn d36_6_switch_waits_for_profile_save_lock_then_succeeds() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let dir = tempfile::tempdir().expect("dir");
+    let agent_home = dir.path().join("claude");
+    std::fs::create_dir_all(&agent_home).expect("home");
+    std::fs::write(agent_home.join(creds::PROFILE_FILE), profile_json()).expect("profile");
+    let profile = std::fs::canonicalize(agent_home.join(creds::PROFILE_FILE)).expect("profile");
+    let lock_path = PathBuf::from(format!("{}.lock", profile.display()));
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let spare = account_id_from(&["claude", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"]);
+    store(&host, &spare, &signed_in_blob());
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let (start_tx, start_rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = std::fs::create_dir(&lock_path);
+        let _ = ready_tx.send(());
+        let _ = start_rx.recv();
+        let _ = std::fs::remove_dir(&lock_path);
+    });
+    ready_rx.recv().expect("lock held");
+    crate::lock::test_lock_timing(
+        Duration::from_secs(2),
+        Duration::from_secs(60),
+        Duration::from_millis(50),
+    );
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(80));
+        let _ = start_tx.send(());
+    });
+    block_on(sub.write_agent_sign_in(&spare, &agent_home, host.context())).expect("write");
+    release.join().expect("join");
+}
+
+#[test]
+fn d36_7_switch_waits_for_account_run_mark_then_succeeds() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let dir = tempfile::tempdir().expect("dir");
+    let agent_home = dir.path().join("claude");
+    std::fs::create_dir_all(&agent_home).expect("home");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let spare = account_id_from(&["claude", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"]);
+    store(&host, &spare, &signed_in_blob());
+    let account_dir = crate::account::account_dir(host.context(), &spare).expect("dir");
+    std::fs::create_dir_all(&account_dir).expect("account dir");
+    let ctx = host.context().clone();
+    let spare_id = spare.clone();
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let (start_tx, start_rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _hold = crate::run_lock::mark(&spare_id, &ctx).expect("mark");
+        let _ = ready_tx.send(());
+        let _ = start_rx.recv();
+    });
+    ready_rx.recv().expect("mark held");
+    crate::run_lock::test_run_wait(Duration::from_secs(2));
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(50));
+        let _ = start_tx.send(());
+    });
+    block_on(sub.write_agent_sign_in(&spare, &agent_home, host.context())).expect("write");
+    release.join().expect("join");
+}
