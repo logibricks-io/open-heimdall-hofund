@@ -11,13 +11,13 @@
 //! under it, so they are safe beside other one-shot processes.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
-use hofund_config::ConfigError;
+use hofund_config::{ConfigError, VisibleCatalog};
 use hofund_gateway::control::{Control, ControlState};
 use hofund_usage::Ledger;
 
-use super::config_ops::{ConfigOps, ModelListener};
+use super::config_ops::{ConfigOps, ConfigOpsRouting, ModelListener};
 use super::control::{self, DaemonControl};
 use super::control_local::{self, ControlRuntime};
 use super::events::EventBus;
@@ -106,14 +106,22 @@ async fn state(
         None,
         fatal,
     );
+    let config = Arc::new(config);
     let ops = Arc::new(ConfigOps::new(
         path,
         control_local::config_lock_fallback(&identity, &control_runtime),
         Arc::clone(&runtime),
         Arc::clone(&events),
-        Arc::new(config),
+        Arc::clone(&config),
         runtime_revision,
-        listener,
+        ConfigOpsRouting {
+            listener,
+            visible_catalog: Arc::new(RwLock::new(VisibleCatalog::build(
+                Arc::clone(&config),
+                &snapshot.load().models(),
+            ))),
+            snapshot: snapshot.clone(),
+        },
     ));
     let (shutdown, _) = tokio::sync::watch::channel(false);
     let quotas = Arc::new(crate::quotas::DaemonQuotas::new(

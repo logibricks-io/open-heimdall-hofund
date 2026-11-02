@@ -1280,6 +1280,7 @@ mod tests {
                 options: BTreeMap::new(),
             }],
             warnings: Vec::new(),
+            agents: Default::default(),
             catalog: CatalogSettings::default(),
             usage: hofund_config::UsageSettings::default(),
             discover_agent_accounts: false,

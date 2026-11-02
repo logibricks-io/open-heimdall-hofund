@@ -3,16 +3,17 @@ use serde_json::error::Category;
 
 use crate::{
     API_VERSION, AgentChangeResponse, AgentConnectRequest, AgentDisconnectRequest,
-    AgentListResponse, AgentModelRequest, AgentPlanRequest, AgentPlanResponse, AgentStatusResponse,
-    ConfigApplyRequest, ConfigResponse, ConfigValidateRequest, ConfigValidationResponse,
-    ControlError, ControlErrorKind, ErrorEnvelope, EventEnvelope, FieldIssue, GatewayKeyRequest,
-    GatewayKeyResponse, GatewayKeyRestoreRequest, HealthResponse, MAX_REQUEST_BODY_BYTES,
-    MAX_RESPONSE_BODY_BYTES, ModelListResponse, PicksResponse, PicksSetRequest, ProviderKeyRequest,
-    ProviderKeysResponse, ProviderListResponse, ProviderTestRequest, ProviderTestResponse,
-    QuotaHistoryResponse, QuotaResponse, ReloadRequest, RouteListResponse, RouteModelListResponse,
-    SessionRouteResponse, ShutdownRequest, ShutdownResponse, StatusResponse, TokenRotateRequest,
-    TokenRotateResponse, UnroutedListResponse, UsageResponse, WarmupListResponse, WarmupRunRequest,
-    WarmupRunResponse,
+    AgentHiddenSetRequest, AgentListResponse, AgentModelRequest, AgentModelsResponse,
+    AgentPickedOnlyRequest, AgentPlanRequest, AgentPlanResponse, AgentStatusResponse,
+    AgentVisibleSetRequest, ConfigApplyRequest, ConfigResponse, ConfigValidateRequest,
+    ConfigValidationResponse, ControlError, ControlErrorKind, ErrorEnvelope, EventEnvelope,
+    FieldIssue, GatewayKeyRequest, GatewayKeyResponse, GatewayKeyRestoreRequest, HealthResponse,
+    MAX_REQUEST_BODY_BYTES, MAX_RESPONSE_BODY_BYTES, ModelListResponse, PicksResponse,
+    PicksSetRequest, ProviderKeyRequest, ProviderKeysResponse, ProviderListResponse,
+    ProviderTestRequest, ProviderTestResponse, QuotaHistoryResponse, QuotaResponse, ReloadRequest,
+    RouteListResponse, RouteModelListResponse, SessionRouteResponse, ShutdownRequest,
+    ShutdownResponse, StatusResponse, TokenRotateRequest, TokenRotateResponse,
+    UnroutedListResponse, UsageResponse, WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
 };
 
 mod sealed {
@@ -223,6 +224,9 @@ request!(AgentPlanRequest, validate);
 request!(AgentConnectRequest, validate);
 request!(AgentDisconnectRequest, validate);
 request!(AgentModelRequest, validate);
+request!(AgentVisibleSetRequest);
+request!(AgentHiddenSetRequest);
+request!(AgentPickedOnlyRequest);
 request!(TokenRotateRequest);
 request!(WarmupRunRequest, validate);
 request!(ShutdownRequest);
@@ -280,6 +284,7 @@ response!(
     AgentStatusResponse,
     AgentPlanResponse,
     AgentChangeResponse,
+    AgentModelsResponse,
     QuotaResponse,
     QuotaHistoryResponse,
     UsageResponse,

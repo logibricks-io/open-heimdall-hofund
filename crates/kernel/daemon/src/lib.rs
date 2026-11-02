@@ -7,11 +7,13 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
+use std::sync::{Arc, RwLock};
 
 use hofund_codec::{AnthropicMessages, Codec, GenerativeLanguage, OpenAiChat, OpenAiResponses};
-use hofund_config::{Config, ConfigError, Fallback, UpstreamTarget, Value, load_path};
+use hofund_config::{
+    Config, ConfigError, Fallback, UpstreamTarget, Value, VisibleCatalog, load_path,
+};
 use hofund_gateway::{GENERATIVE_STREAM, GENERATIVE_UNARY, Gateway};
 use hofund_model_catalog::{ModelCatalog, ReqwestFetcher};
 use hofund_plugin_api::{
@@ -32,6 +34,7 @@ use hofund_usage::Ledger;
 mod account_discovery;
 mod adapt;
 mod agent_login;
+mod agent_visible;
 mod balances;
 mod config_ops;
 mod config_write;
@@ -473,6 +476,24 @@ async fn start_inner(
         .as_ref()
         .map(|_| Arc::new(events::EventBus::new()));
     let in_flight = Arc::new(AtomicU64::new(0));
+    let config = Arc::new(config);
+    let visible_catalog = Arc::new(RwLock::new(VisibleCatalog::build(
+        Arc::clone(&config),
+        &snapshot.load().models(),
+    )));
+    let agent_descriptions = registry.agents();
+    let request_agent: hofund_gateway::RequestAgentHook = Arc::new({
+        let descriptions = agent_descriptions;
+        move |headers, identity| {
+            hofund_agent::request_agent_id(
+                headers
+                    .iter()
+                    .filter_map(|(name, value)| Some((name.as_str(), value.to_str().ok()?))),
+                &identity.key_name,
+                descriptions,
+            )
+        }
+    });
     let route_trace = hofund_router::RouteTraceBook::new();
     let mut gateway = Gateway::with_token_file(
         snapshot.clone(),
@@ -484,7 +505,9 @@ async fn start_inner(
     .with_route_trace(Arc::clone(&route_trace))
     .with_key_store(Arc::clone(&key_store))
     .with_surfaces(registry.surfaces())
-    .with_surface_http(surface_http(&config, max_idle_per_host));
+    .with_surface_http(surface_http(&config, max_idle_per_host))
+    .with_visible_catalog(Arc::clone(&visible_catalog))
+    .with_request_agent(request_agent);
     let quotas = Arc::new(quotas::DaemonQuotas::new(
         Arc::clone(&runtime),
         Arc::clone(&usage),
@@ -524,7 +547,6 @@ async fn start_inner(
     if let Some(bus) = &control_bus {
         runtime.attach_events(Arc::clone(bus));
     }
-    let config = Arc::new(config);
     if let Some(session) = control_session.as_mut() {
         let shutdown_request = tokio::sync::watch::channel(false).0;
         running = running.with_shutdown_request(shutdown_request.clone());
@@ -551,7 +573,11 @@ async fn start_inner(
             Arc::clone(&events),
             Arc::clone(&config),
             runtime_revision,
-            listener,
+            config_ops::ConfigOpsRouting {
+                listener,
+                visible_catalog: Arc::clone(&visible_catalog),
+                snapshot: snapshot.clone(),
+            },
         ));
         if !options.skip_config_watch {
             running = running.with_task(watch::spawn(Arc::clone(&ops), path.to_path_buf()));

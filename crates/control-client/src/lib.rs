@@ -7,8 +7,9 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use hofund_control_proto::{
-    AgentChangeResponse, AgentConnectRequest, AgentDisconnectRequest, AgentListResponse,
-    AgentModelRequest, AgentPlanRequest, AgentPlanResponse, AgentStatusResponse,
+    AgentChangeResponse, AgentConnectRequest, AgentDisconnectRequest, AgentHiddenSetRequest,
+    AgentListResponse, AgentModelRequest, AgentModelsResponse, AgentPickedOnlyRequest,
+    AgentPlanRequest, AgentPlanResponse, AgentStatusResponse, AgentVisibleSetRequest,
     ConfigApplyRequest, ConfigResponse, ConfigValidateRequest, ConfigValidationResponse,
     ControlError, ErrorEnvelope, EventEnvelope, GatewayKeyRequest, GatewayKeyResponse,
     GatewayKeyRestoreRequest, HealthResponse, MAX_RESPONSE_BODY_BYTES, ModelListResponse,
@@ -454,6 +455,54 @@ impl Client {
         self.request(
             http::Method::POST,
             &format!("/v1/hofund/agents/{}/model", encode_segment(id)),
+            Some(json_body(&request)?),
+        )
+        .await
+    }
+
+    /// Lists route models shown and hidden for one agent.
+    pub async fn agent_models(&self, id: &str) -> Result<AgentModelsResponse, ClientError> {
+        self.get(&format!("/v1/hofund/agents/{}/models", encode_segment(id)))
+            .await
+    }
+
+    /// Replaces the visibility names for one agent.
+    pub async fn set_agent_visible(
+        &self,
+        id: &str,
+        request: AgentVisibleSetRequest,
+    ) -> Result<ConfigResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            &format!("/v1/hofund/agents/{}/visible", encode_segment(id)),
+            Some(json_body(&request)?),
+        )
+        .await
+    }
+
+    /// Replaces hidden route ids for one agent.
+    pub async fn set_agent_hidden_models(
+        &self,
+        id: &str,
+        request: AgentHiddenSetRequest,
+    ) -> Result<ConfigResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            &format!("/v1/hofund/agents/{}/hidden_models", encode_segment(id)),
+            Some(json_body(&request)?),
+        )
+        .await
+    }
+
+    /// Toggles picked-only mode for one agent.
+    pub async fn set_agent_picked_only(
+        &self,
+        id: &str,
+        request: AgentPickedOnlyRequest,
+    ) -> Result<ConfigResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            &format!("/v1/hofund/agents/{}/picked_only", encode_segment(id)),
             Some(json_body(&request)?),
         )
         .await

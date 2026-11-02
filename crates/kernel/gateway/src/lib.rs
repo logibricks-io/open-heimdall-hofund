@@ -33,7 +33,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::body::{Body, Bytes};
@@ -51,6 +51,7 @@ use hofund_codec::{
     Codec, EndWatch, SESSION_HEADERS, STREAM_CLIENT_PREFIXES, SUBAGENT_HEADER, StreamEncoder,
     compacts_in_stream_client, conversation_key, turn_in,
 };
+use hofund_config::VisibleCatalog;
 use hofund_ir::{Request as ModelRequest, StreamEvent, too_long, words_of};
 use hofund_plugin_api::{
     BodyStream, InboundSurface, Method, PluginError, PluginErrorKind, ProtocolId,
@@ -72,6 +73,9 @@ const SURFACE_BODY_LIMIT: usize = 32 * 1024 * 1024;
 /// How long a surface call may take: a forwarded transcription of a long
 /// recording takes minutes.
 const SURFACE_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// Resolves the agent id on an authenticated request, when known.
+pub type RequestAgentHook = Arc<dyn Fn(&HeaderMap, &Identity) -> Option<String> + Send + Sync>;
 
 /// The HTTP server and the state it shares across requests.
 pub struct Gateway {
@@ -98,6 +102,10 @@ struct Inner {
     quota_source: Option<Arc<dyn QuotaSource>>,
     /// What each caller of the quota routes may be told.
     quota_scope: QuotaScopeHook,
+    /// Per-agent model visibility catalog, updated on config reload.
+    visible_catalog: Option<Arc<RwLock<VisibleCatalog>>>,
+    /// Optional resolver for the agent behind a model-list request.
+    request_agent: Option<RequestAgentHook>,
     /// Routing decision history for the management API.
     route_trace: Option<Arc<hofund_router::RouteTraceBook>>,
     /// models.dev catalog for `/v1/models` enrichment and routing metadata.
@@ -488,11 +496,61 @@ impl Gateway {
                 sockets: Arc::new(responses_ws::SocketRegistry::default()),
                 quota_source: None,
                 quota_scope: tell_everything(),
+                visible_catalog: None,
+                request_agent: None,
                 route_trace: None,
                 model_catalog: None,
                 pricer: None,
             }),
         }
+    }
+
+    /// Shares the visibility catalog the daemon updates on config reload.
+    #[must_use]
+    pub fn with_visible_catalog(mut self, catalog: Arc<RwLock<VisibleCatalog>>) -> Self {
+        Arc::get_mut(&mut self.inner)
+            .expect("gateway is not shared yet")
+            .visible_catalog = Some(catalog);
+        self
+    }
+
+    /// Sets how the gateway resolves the agent behind a request.
+    #[must_use]
+    pub fn with_request_agent(mut self, hook: RequestAgentHook) -> Self {
+        Arc::get_mut(&mut self.inner)
+            .expect("gateway is not shared yet")
+            .request_agent = Some(hook);
+        self
+    }
+
+    fn filtered_models(
+        app: &Inner,
+        headers: &HeaderMap,
+        identity: &Identity,
+        scoped: Vec<String>,
+    ) -> Vec<String> {
+        let agent = app
+            .request_agent
+            .as_ref()
+            .and_then(|hook| hook(headers, identity));
+        let Some(catalog) = app.visible_catalog.as_ref() else {
+            return scoped;
+        };
+        catalog
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .models_for_agent(&scoped, agent.as_deref(), None)
+            .0
+    }
+
+    #[cfg(test)]
+    pub(crate) fn filtered_models_for_test(
+        &self,
+        headers: &HeaderMap,
+        identity: &Identity,
+        scoped: Vec<String>,
+    ) -> Vec<String> {
+        Self::filtered_models(&self.inner, headers, identity, scoped)
     }
 
     /// Uses the named-key store for authentication and caller scopes.
@@ -1483,10 +1541,12 @@ async fn models(State(app): State<Arc<Inner>>, request: Request) -> Response {
             Ok(identity) => identity,
             Err(response) => return *response,
         };
-    let data: Vec<_> = app
+    let scoped = app
         .snapshot
         .load()
-        .models_scoped(Some(&route_scope(&identity)))
+        .models_scoped(Some(&route_scope(&identity)));
+    let models = Gateway::filtered_models(&app, request.headers(), &identity, scoped);
+    let data: Vec<_> = models
         .into_iter()
         .map(|id| model_list_entry(&app.model_catalog, &id))
         .collect();
@@ -1548,10 +1608,12 @@ async fn generative_models(State(app): State<Arc<Inner>>, request: Request) -> R
             Ok(identity) => identity,
             Err(response) => return *response,
         };
-    let models: Vec<_> = app
+    let scoped = app
         .snapshot
         .load()
-        .models_scoped(Some(&route_scope(&identity)))
+        .models_scoped(Some(&route_scope(&identity)));
+    let models = Gateway::filtered_models(&app, request.headers(), &identity, scoped);
+    let models: Vec<_> = models
         .into_iter()
         .map(|id| {
             serde_json::json!({
@@ -3605,6 +3667,82 @@ mod line_hold_tests {
         assert_eq!(event_gap(b"data: {}\n"), b"\n");
         assert_eq!(event_gap(b"data: {}\r"), b"\n");
         assert_eq!(event_gap(b"data: {}"), b"\n\n");
+    }
+}
+
+#[cfg(test)]
+mod visible_catalog_tests {
+    use std::collections::BTreeMap;
+    use std::sync::{Arc, RwLock};
+
+    use axum::http::HeaderMap;
+    use hofund_config::{VisibleCatalog, load};
+    use hofund_router::{FailoverPolicy, Router, Snapshot};
+    use hofund_secrets::Identity;
+    use hofund_usage::Ledger;
+
+    use super::Gateway;
+
+    fn sample_config() -> Arc<hofund_config::Config> {
+        Arc::new(
+            load(
+                r#"
+listen = "127.0.0.1:3425"
+[[providers]]
+id = "relay"
+family = "relay"
+protocol = "generative-language"
+base_url = "http://127.0.0.1:1"
+api_key = "k"
+[[providers]]
+id = "other"
+protocol = "generative-language"
+base_url = "http://127.0.0.1:2"
+api_key = "k"
+[[routes]]
+model = "relay/a"
+upstreams = ["relay"]
+[[routes]]
+model = "other/b"
+upstreams = ["other"]
+[agents.visible]
+fixture-agent = ["relay"]
+"#,
+            )
+            .expect("config"),
+        )
+    }
+
+    fn base_gateway(catalog: Arc<RwLock<VisibleCatalog>>) -> (Gateway, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let usage = Arc::new(Ledger::open(&dir.path().join("usage.sqlite")).expect("usage"));
+        let gateway = Gateway::new(
+            Snapshot::new(Router::new(BTreeMap::new(), FailoverPolicy::default())),
+            "secret".to_owned(),
+            Default::default(),
+            usage,
+        )
+        .with_visible_catalog(catalog);
+        (gateway, dir)
+    }
+
+    #[test]
+    fn g2_13_gateway_filtered_models_uses_catalog_and_agent_hook() {
+        let config = sample_config();
+        let route_ids = vec!["relay/a".to_owned(), "other/b".to_owned()];
+        let catalog = Arc::new(RwLock::new(VisibleCatalog::build(
+            Arc::clone(&config),
+            &route_ids,
+        )));
+        let headers = HeaderMap::new();
+        let identity = Identity::default();
+        let (gateway, _dir) = base_gateway(Arc::clone(&catalog));
+        let gateway = gateway.with_request_agent(Arc::new(|_, _| Some("fixture-agent".to_owned())));
+        let filtered = gateway.filtered_models_for_test(&headers, &identity, route_ids.clone());
+        assert_eq!(filtered, ["relay/a"]);
+        let (plain, _dir) = base_gateway(catalog);
+        let all = plain.filtered_models_for_test(&headers, &identity, route_ids);
+        assert_eq!(all, ["relay/a", "other/b"]);
     }
 }
 

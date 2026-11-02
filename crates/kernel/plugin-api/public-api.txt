@@ -47,6 +47,7 @@ AgentDescription #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 AgentDescription::const fn active_provider (& self) -> Option < & AgentActiveProvider >
 AgentDescription::const fn binary (& self) -> & 'static str
 AgentDescription::const fn binary_not_go (& self) -> bool
+AgentDescription::const fn client_prefixes (& self) -> & 'static [& 'static str]
 AgentDescription::const fn credential (& self) -> Option < & AgentCredential >
 AgentDescription::const fn display_name (& self) -> & 'static str
 AgentDescription::const fn effort_file (& self) -> Option < & 'static str >
@@ -58,6 +59,8 @@ AgentDescription::const fn model_file (& self) -> Option < & 'static str >
 AgentDescription::const fn model_key (& self) -> Option < & 'static str >
 AgentDescription::const fn model_prefix (& self) -> Option < & 'static str >
 AgentDescription::const fn model_table (& self) -> Option < & 'static str >
+AgentDescription::const fn nested_turn_headers (& self) -> & 'static [& 'static str]
+AgentDescription::const fn request_agent_header (& self) -> Option < & 'static str >
 AgentDescription::const fn requires (& self) -> & 'static [crate :: id :: SurfaceId]
 AgentDescription::const fn restore_model_on_clear (& self) -> bool
 AgentDescription::const fn route (& self) -> AgentRoute
@@ -65,12 +68,15 @@ AgentDescription::const fn sets (& self) -> & 'static [AgentSet]
 AgentDescription::const fn visible (& self) -> Visible
 AgentDescription::const fn with_active_provider (mut self , layout : AgentActiveProvider) -> Self
 AgentDescription::const fn with_binary_not_go (mut self) -> Self
+AgentDescription::const fn with_client_prefixes (mut self , prefixes : & 'static [& 'static str]) -> Self
 AgentDescription::const fn with_credential (mut self , credential : AgentCredential) -> Self
 AgentDescription::const fn with_effort_file (mut self , file : & 'static str) -> Self
 AgentDescription::const fn with_model_file (mut self , file : & 'static str) -> Self
 AgentDescription::const fn with_model_prefix (mut self , prefix : & 'static str) -> Self
 AgentDescription::const fn with_model_restore_on_clear (mut self , restore : bool) -> Self
 AgentDescription::const fn with_model_table (mut self , table : & 'static str) -> Self
+AgentDescription::const fn with_nested_turn_headers (mut self , headers : & 'static [& 'static str]) -> Self
+AgentDescription::const fn with_request_agent_header (mut self , header : & 'static str) -> Self
 AgentFactory
 AgentFactory::Config
 AgentFactory::fn build (& self , cfg : & Self :: Config , host : & HostContext ,) -> Result < Arc < dyn AgentIntegration > , BuildError >

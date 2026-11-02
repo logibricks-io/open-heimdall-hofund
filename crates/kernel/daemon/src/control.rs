@@ -6,8 +6,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use hofund_agent::Session;
 use hofund_config::Config;
 use hofund_control_proto::{
-    AgentChangeResponse, AgentConnectRequest, AgentDisconnectRequest, AgentListResponse,
-    AgentModelRequest, AgentPlanRequest, AgentPlanResponse, AgentStatusResponse, ControlError,
+    AgentChangeResponse, AgentConnectRequest, AgentDisconnectRequest, AgentHiddenSetRequest,
+    AgentListResponse, AgentModelRequest, AgentModelsResponse, AgentPickedOnlyRequest,
+    AgentPlanRequest, AgentPlanResponse, AgentStatusResponse, AgentVisibleSetRequest, ControlError,
     ControlErrorKind, FieldIssue, GatewayKey, GatewayKeyAction, GatewayKeyLimit, GatewayKeyRequest,
     GatewayKeyResponse, GatewayKeyRestoreRequest, HealthResponse, ModelEntry, ModelListResponse,
     PicksResponse, PicksSetRequest, ProviderKeyRequest, ProviderKeysResponse, ProviderListResponse,
@@ -94,14 +95,8 @@ impl DaemonControl {
                     let listener = listener_from.listener();
                     format!("http://{}", listener.running.unwrap_or(listener.effective))
                 }),
-                Arc::new(move || {
-                    routes_from
-                        .live()
-                        .config
-                        .routes
-                        .iter()
-                        .map(|route| route.model.clone())
-                        .collect()
+                Arc::new(move |agent: Option<&str>, active: Option<&str>| {
+                    routes_from.agent_route_models(agent, active)
                 }),
                 token_path,
             ),
@@ -746,6 +741,42 @@ impl ControlState for DaemonControl {
         request: AgentModelRequest,
     ) -> ControlFuture<'_, AgentChangeResponse> {
         Box::pin(async move { self.agents.set_model(id, request).await.map_err(Into::into) })
+    }
+
+    fn agent_models(&self, id: String) -> ControlFuture<'_, AgentModelsResponse> {
+        Box::pin(async move {
+            let active = self.agents.configured_model_id(&id).await;
+            let (shown, hidden) = self.ops.agent_models(Some(&id), active.as_deref());
+            let mut response = AgentModelsResponse::default();
+            response.agent = id;
+            response.shown = shown;
+            response.hidden = hidden;
+            Ok(response)
+        })
+    }
+
+    fn set_agent_visible(
+        &self,
+        id: String,
+        request: AgentVisibleSetRequest,
+    ) -> ControlFuture<'_, ConfigResponse> {
+        Box::pin(async move { self.ops.set_agent_visible(&id, request.names).await })
+    }
+
+    fn set_agent_hidden_models(
+        &self,
+        id: String,
+        request: AgentHiddenSetRequest,
+    ) -> ControlFuture<'_, ConfigResponse> {
+        Box::pin(async move { self.ops.set_agent_hidden_models(&id, request.ids).await })
+    }
+
+    fn set_agent_picked_only(
+        &self,
+        id: String,
+        request: AgentPickedOnlyRequest,
+    ) -> ControlFuture<'_, ConfigResponse> {
+        Box::pin(async move { self.ops.set_agent_picked_only(&id, request.only).await })
     }
 
     fn quotas(&self, query: QuotaQuery) -> ControlFuture<'_, QuotaResponse> {
