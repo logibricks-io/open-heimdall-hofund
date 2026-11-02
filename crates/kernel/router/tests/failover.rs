@@ -43,6 +43,8 @@ enum Kind {
     ResponsesEmptyChunked,
     ChatChunkThenPending,
     ResponsesEmptyThenPending,
+    ResponsesCreatedThenPending,
+    ResponsesCreatedThenEnd,
 }
 
 #[async_trait]
@@ -62,7 +64,9 @@ impl Member for Fake {
             | Kind::ResponsesEmptyWithUsage
             | Kind::ResponsesBareCompleted
             | Kind::ResponsesEmptyChunked
-            | Kind::ResponsesEmptyThenPending => ProtocolId::OPENAI_RESPONSES.as_str(),
+            | Kind::ResponsesEmptyThenPending
+            | Kind::ResponsesCreatedThenPending
+            | Kind::ResponsesCreatedThenEnd => ProtocolId::OPENAI_RESPONSES.as_str(),
             _ => "test",
         }
     }
@@ -144,11 +148,24 @@ impl Member for Fake {
                 stream::iter(vec![Ok(Bytes::from_static(RESPONSES_EMPTY_SSE))])
                     .chain(stream::pending()),
             ))),
+            Kind::ResponsesCreatedThenPending => Ok(Completion::Raw(BodyStream::from_stream(
+                stream::iter(vec![Ok(Bytes::from_static(RESPONSES_CREATED_SSE))])
+                    .chain(stream::pending()),
+            ))),
+            // `unfold` panics if polled again after it ended, as a real
+            // finished body may
+            Kind::ResponsesCreatedThenEnd => Ok(Completion::Raw(BodyStream::from_stream(
+                stream::unfold(true, |first| async move {
+                    first.then(|| (Ok(Bytes::from_static(RESPONSES_CREATED_SSE)), false))
+                }),
+            ))),
         }
     }
 }
 
 const RESPONSES_EMPTY_SSE: &[u8] = b"event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"output\":[]}}\n\nevent: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"output\":[],\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}}\n\n";
+
+const RESPONSES_CREATED_SSE: &[u8] = b"event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"output\":[]}}\n\n";
 
 const RESPONSES_TEXT_SSE: &[u8] = b"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"hi\"}\n\nevent: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}}\n\n";
 
@@ -1067,4 +1084,36 @@ async fn d37_7_non_responses_raw_stream_is_released_after_its_first_event() {
     };
     let chunk = body.next_chunk().await.expect("chunk").expect("bytes");
     assert_eq!(chunk.as_ref(), CHAT_CHUNK_SSE);
+}
+
+#[tokio::test]
+async fn d37_9_lifecycle_events_are_released_when_the_upstream_goes_quiet() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let router = router(vec![fake("only", &hits, Kind::ResponsesCreatedThenPending)]);
+    let routed = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        dispatch_responses(&router, "demo"),
+    )
+    .await
+    .expect("response.created was released while the upstream stayed open")
+    .expect("routed");
+    let Completion::Raw(mut body) = routed.completion else {
+        panic!("expected a raw completion");
+    };
+    let chunk = body.next_chunk().await.expect("chunk").expect("ok");
+    assert_eq!(chunk.as_ref(), RESPONSES_CREATED_SSE);
+}
+
+#[tokio::test]
+async fn d37_10_a_finished_lifecycle_only_upstream_is_not_polled_again() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let router = router(vec![fake("only", &hits, Kind::ResponsesCreatedThenEnd)]);
+    let routed = dispatch_responses(&router, "demo").await.expect("routed");
+    let Completion::Raw(mut body) = routed.completion else {
+        panic!("expected a raw completion");
+    };
+    let chunk = body.next_chunk().await.expect("chunk").expect("ok");
+    assert_eq!(chunk.as_ref(), RESPONSES_CREATED_SSE);
+    assert!(body.next_chunk().await.is_none());
+    assert!(body.next_chunk().await.is_none());
 }

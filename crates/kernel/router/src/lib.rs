@@ -2003,19 +2003,33 @@ async fn accept(completion: Completion) -> Result<Completion, PluginError> {
         Completion::Raw(mut body) => {
             let mut buffered = Vec::new();
             loop {
-                match body.next_chunk().await {
+                // Lifecycle-only events are held only while the next chunk is
+                // already there: an upstream that goes quiet after
+                // `response.created` gets that event released, so the client
+                // learns the response id (and can interrupt) instead of the
+                // turn hanging until the upstream speaks again.
+                let next = if relayed_sse_event_boundary(&buffered) {
+                    match futures_util::FutureExt::now_or_never(body.next_chunk()) {
+                        Some(next) => next,
+                        None => {
+                            let head = Bytes::from(std::mem::take(&mut buffered));
+                            return Ok(Completion::Raw(BodyStream::resume(head, body)));
+                        }
+                    }
+                } else {
+                    body.next_chunk().await
+                };
+                match next {
                     None => {
                         if relayed_sse_empty_without_content(&buffered) {
                             return Err(empty());
                         }
-                        let head = if buffered.is_empty() {
-                            None
+                        // the upstream has ended: hand back only what was read,
+                        // never the finished stream (it must not be polled again)
+                        return Ok(if buffered.is_empty() {
+                            Completion::Raw(BodyStream::from_stream(futures_util::stream::empty()))
                         } else {
-                            Some(Bytes::from(buffered))
-                        };
-                        return Ok(match head {
-                            Some(chunk) => Completion::Raw(BodyStream::resume(chunk, body)),
-                            None => Completion::Raw(body),
+                            Completion::Raw(BodyStream::from_bytes(Bytes::from(buffered)))
                         });
                     }
                     Some(Err(error)) => return Err(error),
