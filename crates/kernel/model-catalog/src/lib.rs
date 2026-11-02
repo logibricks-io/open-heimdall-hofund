@@ -3,6 +3,7 @@
 mod cache;
 mod http;
 mod parse;
+mod pricing;
 mod spec;
 mod sync;
 mod visibility;
@@ -19,6 +20,7 @@ pub use parse::{
     CatalogIndex, DEFAULT_CATALOG_URL, DevCatalog, ResolvedEntry, build_index, is_deprecated,
     parse_catalog,
 };
+pub use pricing::{EffectivePricer, ListPriceLookup};
 pub use spec::{LEAST_WINDOW, ModelSpec, Price};
 pub use sync::{CatalogFetcher, FetchResponse, FetchResult, Syncer, envelope_etag, is_stale};
 pub use visibility::{

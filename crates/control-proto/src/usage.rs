@@ -23,7 +23,7 @@ pub enum UsagePeriod {
 
 /// Query-only usage request. It uses the path version and has no JSON body
 /// version field. Query-string parsing belongs to the HTTP layer.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 #[serde(deny_unknown_fields)]
 pub struct UsageQuery {
@@ -60,7 +60,7 @@ impl UsageQuery {
 }
 
 /// One usage row with unsigned wire quantities.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 #[serde(default)]
 pub struct UsageRow {
@@ -102,10 +102,16 @@ pub struct UsageRow {
     /// Reasoning streamed without a separate usage count.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub reasoning_hidden: bool,
+    /// Stored cost in the response currency when the row was priced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<f64>,
+    /// Whether a list price was stored for this row.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub priced: bool,
 }
 
 /// Aggregated usage totals.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 #[serde(default)]
 pub struct UsageTotals {
@@ -123,10 +129,14 @@ pub struct UsageTotals {
     pub cache_write_1h_tokens: u64,
     /// Sum of reasoning tokens.
     pub reasoning_tokens: u64,
+    /// Sum of stored USD costs for priced rows.
+    pub cost: f64,
+    /// Token-bearing rows with no stored list price.
+    pub unpriced: u64,
 }
 
 /// Usage response.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct UsageResponse {
     /// Body wire version.
@@ -141,6 +151,12 @@ pub struct UsageResponse {
     /// row cap. Absent from older peers, which never truncate.
     #[serde(default)]
     pub rows_truncated: bool,
+    /// Currency code for `totals.cost` (`USD` or `CNY`).
+    #[serde(default = "default_currency")]
+    pub currency: String,
+    /// Yuan per US dollar when `currency` is `CNY`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cny_per_usd: Option<f64>,
 }
 
 impl Default for UsageResponse {
@@ -151,6 +167,12 @@ impl Default for UsageResponse {
             rows: Vec::new(),
             totals: UsageTotals::default(),
             rows_truncated: false,
+            currency: default_currency(),
+            cny_per_usd: None,
         }
     }
+}
+
+fn default_currency() -> String {
+    "USD".to_owned()
 }

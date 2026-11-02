@@ -24,6 +24,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `hofund models disable` / `enable` edit `[catalog].disabled` through the control
   plane when a daemon runs, or the config file offline; models.dev `deprecated`/`retired` status and override flags apply; runtime
   retirements persist under `.hofund/catalog/retired.json` for seven days.
+- Usage cost at effective prices (U-1b, feature-parity row 9.3): each usage row
+  stores the list price and USD cost at write time. Precedence is custom
+  `[usage.prices]`, the provider model list, then models.dev. GET /usage and
+  `hofund usage` report cost, currency, and unpriced counts; optional CNY display
+  uses `usage.cny_per_usd`. See `docs/usage-cost.md`.
 - Per-agent visible model lists (G-2, feature-parity row 5.7): optional
   `family` on providers and routes; `[agents.visible]`, `[agents.hidden_models]`,
   `[agents.picked_models]`, and `[agents.picked_only]` in config; gateway
