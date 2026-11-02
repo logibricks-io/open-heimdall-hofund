@@ -1050,3 +1050,16 @@ fn d36_14_two_marks_with_same_seq_different_pids_succeed() {
     drop(second);
     crate::run_lock::clear_test_mark_identity();
 }
+
+#[test]
+fn d36_16_credentials_write_refuses_a_token_rotated_under_it() {
+    let dir = tempfile::tempdir().expect("dir");
+    let path = dir.path().join(creds::CREDENTIALS_FILE);
+    std::fs::write(&path, ROTATED).expect("live");
+    let error = creds::write_credentials_cas(&path, CREDENTIALS, Some("rt-1"))
+        .expect_err("rotated token must block the write");
+    assert!(error.to_string().contains("refreshed its sign-in"));
+    assert_eq!(std::fs::read_to_string(&path).expect("read"), ROTATED);
+    creds::write_credentials_cas(&path, CREDENTIALS, Some("rt-2")).expect("unchanged token");
+    assert_eq!(std::fs::read_to_string(&path).expect("read"), CREDENTIALS);
+}
