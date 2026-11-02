@@ -66,6 +66,96 @@ fn v2_kimi_tool_enum_types() {
 }
 
 #[test]
+fn d31_1_a_chained_ref_gets_its_type_on_the_terminal_schema() {
+    let schema = r##"{"type":"object","properties":{"x":{"$ref":"#/$defs/A"}},"$defs":{"A":{"$ref":"#/$defs/B","format":"date-time","description":"via A"},"B":{"minimum":0}}}"##;
+    let tools = format!(
+        r#""tools":[{{"type":"function","function":{{"name":"t","parameters":{schema}}}}}]"#
+    );
+    let body = format!(r#"{{"model":"kimi/m",{tools}}}"#);
+    let got = json_body(apply(
+        &body,
+        Some("kimi-code-cn"),
+        "https://api.kimi.com/coding/v1",
+        "openai-chat",
+    ));
+    let params = &got["tools"][0]["function"]["parameters"];
+    assert_eq!(params["$defs"]["B"]["type"], "number");
+    assert!(params["$defs"]["A"].get("type").is_none());
+}
+
+#[test]
+fn d31_2_dangling_and_looping_refs_stay_untyped() {
+    let dangling =
+        r##"{"type":"object","properties":{"x":{"$ref":"#/$defs/missing"}},"$defs":{}}"##;
+    let looping = r##"{"type":"object","properties":{"x":{"$ref":"#/$defs/A"}},"$defs":{"A":{"$ref":"#/$defs/B"},"B":{"$ref":"#/$defs/A"}}}"##;
+    for schema in [dangling, looping] {
+        let tools = format!(
+            r#""tools":[{{"type":"function","function":{{"name":"t","parameters":{schema}}}}}]"#
+        );
+        let body = format!(r#"{{"model":"kimi/m",{tools}}}"#);
+        let got = text(apply(
+            &body,
+            Some("kimi-code-cn"),
+            "https://api.kimi.com/coding/v1",
+            "openai-chat",
+        ));
+        assert!(!got.contains(r#""A":{"type"#), "{got}");
+        assert!(!got.contains(r#""B":{"type"#), "{got}");
+    }
+}
+
+#[test]
+fn d31_3_items_before_enum_makes_an_array() {
+    let schema = r#"{"items":{"type":"string"},"enum":["a","b"]}"#;
+    let tools = format!(
+        r#""tools":[{{"type":"function","function":{{"name":"t","parameters":{schema}}}}}]"#
+    );
+    let body = format!(r#"{{"model":"kimi/m",{tools}}}"#);
+    let got = json_body(apply(
+        &body,
+        Some("kimi-code-cn"),
+        "https://api.kimi.com/coding/v1",
+        "openai-chat",
+    ));
+    assert_eq!(got["tools"][0]["function"]["parameters"]["type"], "array");
+}
+
+#[test]
+fn d31_4_a_defs_target_with_items_and_a_string_enum() {
+    let schema = r##"{"type":"object","properties":{"x":{"$ref":"#/$defs/L"}},"$defs":{"L":{"items":{"type":"string"},"enum":["a","b"]}}}"##;
+    let tools = format!(
+        r#""tools":[{{"type":"function","function":{{"name":"t","parameters":{schema}}}}}]"#
+    );
+    let body = format!(r#"{{"model":"kimi/m",{tools}}}"#);
+    let got = json_body(apply(
+        &body,
+        Some("kimi-code-cn"),
+        "https://api.kimi.com/coding/v1",
+        "openai-chat",
+    ));
+    assert_eq!(
+        got["tools"][0]["function"]["parameters"]["$defs"]["L"]["type"],
+        "array"
+    );
+}
+
+#[test]
+fn d31_5_a_bare_enum_still_gets_a_value_type() {
+    let schema = r#"{"enum":[1,2,3],"minimum":0}"#;
+    let tools = format!(
+        r#""tools":[{{"type":"function","function":{{"name":"t","parameters":{schema}}}}}]"#
+    );
+    let body = format!(r#"{{"model":"kimi/m",{tools}}}"#);
+    let got = json_body(apply(
+        &body,
+        Some("kimi-code-cn"),
+        "https://api.kimi.com/coding/v1",
+        "openai-chat",
+    ));
+    assert_eq!(got["tools"][0]["function"]["parameters"]["type"], "integer");
+}
+
+#[test]
 fn v2_kimi_tool_ref_types() {
     let schema = r##"{"type":"object","properties":{"a":{"$ref":"#/$defs/__schema0"},"b":{"$ref":"#/$defs/__schema1"},"c":{"items":{"$ref":"#/$defs/__schema2"},"type":"array"},"d":{"anyOf":[{"$ref":"#/$defs/P"},{"type":"null"}]},"e":{"$ref":"#/$defs/M"},"f":{"$ref":"#/definitions/D"},"g":{"$ref":"#/$defs/R"},"h":{"$ref":"#/$defs/U"},"i":{"$ref":"#/$defs/S"}},"$defs":{"__schema0":{},"__schema1":{"oneOf":[{"type":"string"},{"type":"number"}]},"__schema2":{"allOf":[{"type":"string"}]},"P":{"properties":{"x":{"type":"string"}}},"M":{"minLength":1},"R":{"oneOf":[{"$ref":"#/$defs/P"},{"$ref":"#/definitions/D"}]},"U":{"anyOf":[{"type":"string"},{"$ref":"#/$defs/U"}]},"S":{"type":"string","enum":["x"]},"V":{"oneOf":[{"type":"string"}]}},"definitions":{"D":{"description":"anything"}}}"##;
     let anything = r#"["string","number","integer","boolean","object","array","null"]"#;

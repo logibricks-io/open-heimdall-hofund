@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mixed pools it probes learning accounts first, then told shares by use,
   then shareless seats by wallet balance and recent traffic, then low and
   spent tiers (D-30).
+- Kimi tool schemas now follow `$ref` chains to the terminal definition
+  before adding `type`, infer array/object shapes before enum values, and
+  leave dangling or cyclic refs untyped (D-31).
 - An omitted `[catalog]` table loads the default catalog settings.
 - Vendor-timed quota and credit rests now stay in place when a quota reading
   is merely less than full in the same window. They lift early only when a
