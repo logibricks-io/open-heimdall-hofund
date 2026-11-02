@@ -6,6 +6,7 @@
 //! do not branch on these ids.
 
 mod encoded;
+mod disjoint_one_of;
 mod json;
 mod passthrough;
 mod state;

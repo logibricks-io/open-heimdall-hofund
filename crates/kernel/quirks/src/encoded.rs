@@ -88,6 +88,8 @@ const BEFORE_TOKEN_FIELD: &[EncodedRule] = &[
 
 const AFTER_TOKEN_FIELD: &[EncodedRule] = &[
     tool_one_of_as_any_of,
+    copilot_gemini_disjoint_one_of,
+    copilot_grok_responses_custom,
     kimi_tool_enum_types,
     kimi_tool_ref_types,
     gemini_tool_types,
@@ -736,6 +738,84 @@ fn schema_type_name(kind: &str) -> Option<&'static str> {
         .find(|candidate| *candidate == kind)
 }
 
+fn copilot_host(base_url: &str) -> bool {
+    let host = host(base_url);
+    host.contains("githubcopilot") || host.starts_with("copilot-api.")
+}
+
+fn copilot_gemini_disjoint_one_of(context: EncodedContext<'_>, body: &[u8]) -> Vec<u8> {
+    if context.protocol != "openai-chat" || !copilot_host(context.base_url) {
+        return body.to_vec();
+    }
+    let Some(root) = json::parse(body) else {
+        return body.to_vec();
+    };
+    let model = root.get("model").and_then(Node::text).unwrap_or_default();
+    if !gemini_named(model) || !contains(body, br#""anyOf""#) {
+        return body.to_vec();
+    }
+    crate::disjoint_one_of::rename_disjoint_any_of(body)
+}
+
+fn copilot_grok_responses_custom(context: EncodedContext<'_>, body: &[u8]) -> Vec<u8> {
+    if context.protocol != "openai-responses" || !copilot_host(context.base_url) {
+        return body.to_vec();
+    }
+    let Some(root) = json::parse(body) else {
+        return body.to_vec();
+    };
+    let model = root.get("model").and_then(Node::text).unwrap_or_default();
+    if !grok_model(model) || !contains(body, br#""custom""#) {
+        return body.to_vec();
+    }
+    grok_custom_tools(body)
+}
+
+fn grok_custom_tools(body: &[u8]) -> Vec<u8> {
+    let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return body.to_vec();
+    };
+    let Some(tools) = value.get_mut("tools").and_then(serde_json::Value::as_array_mut) else {
+        return body.to_vec();
+    };
+    for tool in tools {
+        if tool.get("type").and_then(serde_json::Value::as_str) != Some("custom") {
+            continue;
+        }
+        let name = tool
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let schema = tool
+            .get("input_schema")
+            .cloned()
+            .unwrap_or_else(grok_custom_parameters);
+        tool.as_object_mut().map(|object| {
+            object.insert("type".to_owned(), serde_json::Value::String("function".to_owned()));
+            object.insert(
+                "function".to_owned(),
+                serde_json::json!({
+                    "name": name,
+                    "parameters": schema,
+                }),
+            );
+        });
+    }
+    serde_json::to_vec(&value).unwrap_or_else(|_| body.to_vec())
+}
+
+fn grok_custom_parameters() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "input": {"type": "string"}
+        },
+        "required": ["input"],
+        "additionalProperties": false
+    })
+}
+
 fn host(base_url: &str) -> String {
     let authority = base_url
         .split_once("://")
@@ -768,7 +848,7 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 }
 
 fn gemini_tool_types(context: EncodedContext<'_>, body: &[u8]) -> Vec<u8> {
-    if context.protocol == "generative-language" {
+    if context.protocol == "generative-language" || copilot_host(context.base_url) {
         return body.to_vec();
     }
     let Some(root) = json::parse(body) else {
