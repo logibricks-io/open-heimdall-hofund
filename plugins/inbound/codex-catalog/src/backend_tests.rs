@@ -1688,3 +1688,25 @@ fn d39_7_a_latest_message_over_the_cap_compacts_locally_without_a_retry() {
     assert!(summary.contains("without a model"), "{summary}");
     assert_eq!(stub.called().len(), 1);
 }
+
+#[test]
+fn d39_8_a_lone_item_over_the_cap_gives_no_text_body() {
+    let body = json!({"model": "m", "input": [
+        {"type": "message", "role": "user", "content": [
+            {"type": "input_text", "text": "w".repeat(super::input::TEXT_SUMMARY_CAP + 10)},
+        ]},
+    ]})
+    .to_string();
+    assert!(super::input::text_summary_body(body.as_bytes()).is_none());
+}
+
+#[test]
+fn d39_9_an_overflow_worded_429_goes_back_unchanged() {
+    let refuse =
+        json!({"error": {"message": "Input is too long. Reduce the size of your messages."}})
+            .to_string();
+    let stub = Stub::default().calling(answer(429, refuse));
+    let (status, _, body) = compaction_body(&stub, &conversation(true));
+    assert_eq!(status, 429, "{body}");
+    assert_eq!(stub.called().len(), 1);
+}

@@ -117,3 +117,23 @@ fn d47_4_served_catalog_uses_window_from_the_gateway_list() {
     let (built, _) = catalog(&listed, false);
     assert!(built.contains("\"auto_compact_token_limit\":272000"));
 }
+
+#[test]
+fn d47_5_an_entry_s_own_window_or_lower_limit_is_kept() {
+    let mut own_window = json!({"slug": "a", "context_window": 64_000});
+    super::apply_auto_compact(&mut own_window, Some(200_000));
+    assert_eq!(own_window, json!({"slug": "a", "context_window": 64_000}));
+    super::apply_auto_compact(&mut own_window, None);
+    assert_eq!(own_window, json!({"slug": "a", "context_window": 64_000}));
+
+    let mut lower = json!({"slug": "b", "auto_compact_token_limit": 100_000});
+    super::apply_auto_compact(&mut lower, None);
+    assert_eq!(lower["auto_compact_token_limit"], 100_000);
+
+    let mut higher = json!({"slug": "c", "auto_compact_token_limit": 900_000});
+    super::apply_auto_compact(&mut higher, None);
+    assert_eq!(
+        higher["auto_compact_token_limit"],
+        DEFAULT_AUTO_COMPACT_TOKEN_LIMIT
+    );
+}
