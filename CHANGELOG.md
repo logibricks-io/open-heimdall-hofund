@@ -17,6 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Kimi tool schemas now follow `$ref` chains to the terminal definition
   before adding `type`, infer array/object shapes before enum values, and
   leave dangling or cyclic refs untyped (D-31).
+- Translated Responses encodes fold system and developer text into
+  `instructions`, turn late system lines into user `<system-reminder>`
+  messages, and keep native wire developer items in place. A 400 or 422
+  whose JSON says `Upstream request failed` with type `upstream_error`
+  now counts as a shape refusal for failover without rest (D-32).
 - An omitted `[catalog]` table loads the default catalog settings.
 - Vendor-timed quota and credit rests now stay in place when a quota reading
   is merely less than full in the same window. They lift early only when a

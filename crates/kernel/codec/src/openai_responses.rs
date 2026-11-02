@@ -29,6 +29,8 @@ use crate::{Codec, StreamDecoder, StreamEncoder as StreamEncoderTrait};
 
 const SEALED_ITEM: &str = "sealed_item";
 const RAW_TOOLS: &str = "hofund_responses_tools";
+const WIRE: &str = "hofund_responses_wire";
+const CODEX_DEVELOPER: &str = "hofund_codex_developer_item";
 
 /// Request-extension key whose array names tools this codec did not map.
 ///
@@ -298,6 +300,7 @@ fn decode_request(bytes: &[u8]) -> Result<Request, CodecError> {
     if !named.is_empty() {
         extensions.insert(TOOL_NAMES, Value::Object(named));
     }
+    extensions.insert(WIRE, Value::Bool(true));
     Ok(Request::new(model)
         .with_messages(messages)
         .with_tools(tools)
@@ -348,10 +351,14 @@ fn decode_item(item: Value) -> Result<Option<Message>, CodecError> {
                 _ => Vec::new(),
             };
             let _ = object.remove("status");
+            let mut extensions = Extensions::from_map(object);
+            if role == Role::Developer {
+                extensions.insert(CODEX_DEVELOPER, Value::Bool(true));
+            }
             Ok(Some(Message {
                 role,
                 content,
-                extensions: Extensions::from_map(object),
+                extensions,
             }))
         }
         "function_call" => Ok(Some(decode_function_call(object)?)),
@@ -1057,12 +1064,38 @@ fn merge_assistant_runs(messages: Vec<Message>) -> Vec<Message> {
 }
 
 fn encode_request(request: &Request) -> Result<Vec<u8>, CodecError> {
+    if request.extensions.get(WIRE).is_some() {
+        encode_wire_request(request)
+    } else {
+        encode_translated_request(request)
+    }
+}
+
+fn encode_wire_request(request: &Request) -> Result<Vec<u8>, CodecError> {
     let mut object = Object::new();
     object.insert("model".to_owned(), Value::String(request.model.clone()));
     let (instructions, messages) = split_instructions(&request.messages);
     if let Some(text) = instructions {
         object.insert("instructions".to_owned(), Value::String(text.to_owned()));
     }
+    fill_responses_request(request, &mut object, messages)
+}
+
+fn encode_translated_request(request: &Request) -> Result<Vec<u8>, CodecError> {
+    let mut object = Object::new();
+    object.insert("model".to_owned(), Value::String(request.model.clone()));
+    let (instructions, messages) = fold_translated_messages(&request.messages)?;
+    if let Some(text) = instructions {
+        object.insert("instructions".to_owned(), Value::String(text));
+    }
+    fill_responses_request(request, &mut object, &messages)
+}
+
+fn fill_responses_request(
+    request: &Request,
+    object: &mut Object,
+    messages: &[Message],
+) -> Result<Vec<u8>, CodecError> {
     let tools = ToolMap::new();
     object.insert(
         "input".to_owned(),
@@ -1082,15 +1115,15 @@ fn encode_request(request: &Request) -> Result<Vec<u8>, CodecError> {
     if let Some(choice) = &request.tool_choice {
         object.insert("tool_choice".to_owned(), encode_tool_choice(choice));
     }
-    insert_u64(&mut object, "max_output_tokens", request.params.max_tokens);
-    insert_f64(&mut object, "temperature", request.params.temperature)?;
-    insert_f64(&mut object, "top_p", request.params.top_p)?;
+    insert_u64(object, "max_output_tokens", request.params.max_tokens);
+    insert_f64(object, "temperature", request.params.temperature)?;
+    insert_f64(object, "top_p", request.params.top_p)?;
     if request.stream {
         object.insert("stream".to_owned(), Value::Bool(true));
     }
-    write_responses_effort(&mut object, request);
-    merge_public(&request.extensions, &mut object);
-    to_bytes(&Value::Object(object))
+    write_responses_effort(object, request);
+    merge_public(&request.extensions, object);
+    to_bytes(&Value::Object(std::mem::take(object)))
 }
 
 fn write_responses_effort(object: &mut Object, request: &Request) {
@@ -1135,6 +1168,80 @@ fn split_instructions(messages: &[Message]) -> (Option<&str>, &[Message]) {
     } else {
         (None, messages)
     }
+}
+
+fn fold_translated_messages(
+    messages: &[Message],
+) -> Result<(Option<String>, Vec<Message>), CodecError> {
+    let mut instruction = Vec::new();
+    let mut out = Vec::new();
+    let mut past = false;
+    for message in messages {
+        match message.role {
+            Role::System => {
+                if !past {
+                    append_instruction_text(message, &mut instruction)?;
+                } else {
+                    out.push(system_reminder_user(message)?);
+                }
+            }
+            Role::Developer => {
+                if message.extensions.get(CODEX_DEVELOPER).is_some() {
+                    out.push(message.clone());
+                } else if !past {
+                    append_instruction_text(message, &mut instruction)?;
+                } else {
+                    out.push(message.clone());
+                }
+            }
+            Role::User | Role::Assistant | Role::Tool => {
+                past = true;
+                out.push(message.clone());
+            }
+        }
+    }
+    let instructions = if instruction.is_empty() {
+        None
+    } else {
+        Some(instruction.join("\n\n"))
+    };
+    Ok((instructions, out))
+}
+
+fn append_instruction_text(message: &Message, out: &mut Vec<String>) -> Result<(), CodecError> {
+    let mut parts = Vec::new();
+    for part in &message.content {
+        let ContentPart::Text(text) = part else {
+            return Err(CodecError::Unsupported {
+                message: "translated Responses instructions must be plain text".to_owned(),
+            });
+        };
+        if !text.text.is_empty() {
+            parts.push(text.text.as_str());
+        }
+    }
+    if !parts.is_empty() {
+        out.push(parts.join("\n"));
+    }
+    Ok(())
+}
+
+fn system_reminder_user(message: &Message) -> Result<Message, CodecError> {
+    let mut body = String::new();
+    for part in &message.content {
+        let ContentPart::Text(text) = part else {
+            return Err(CodecError::Unsupported {
+                message: "translated Responses reminders must be plain text".to_owned(),
+            });
+        };
+        body.push_str(&text.text);
+    }
+    let text = format!("<system-reminder>\n{body}\n</system-reminder>");
+    Ok(Message {
+        role: Role::User,
+        content: vec![ContentPart::text(text)],
+        extensions: message.extensions.clone(),
+    })
 }
 
 fn encode_items(messages: &[Message], emit: &Emit<'_>) -> Result<Vec<Value>, CodecError> {

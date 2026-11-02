@@ -352,18 +352,21 @@ fn prepare_upstream_body_stores_nothing_and_closes_calls() {
 }
 
 #[test]
-fn chat_developer_role_survives_responses() {
+fn chat_developer_role_folds_into_responses_instructions() {
     let chat = OpenAiChat
         .decode_request(
             br#"{"model":"m","messages":[{"role":"developer","content":"rules"},{"role":"user","content":"hi"}]}"#,
         )
         .expect("chat");
     let wire = OpenAiResponses.encode_request(&chat).expect("responses");
-    let again = OpenAiResponses.decode_request(&wire).expect("decode");
-    assert_eq!(again.messages[0].role, Role::Developer);
-    let back = OpenAiChat.encode_request(&again).expect("chat encode");
-    let value: serde_json::Value = serde_json::from_slice(&back).expect("json");
-    assert_eq!(value["messages"][0]["role"], "developer");
+    let value: serde_json::Value = serde_json::from_slice(&wire).expect("json");
+    assert_eq!(value["instructions"], "rules");
+    assert_eq!(value["input"][0]["role"], "user");
+    let back = OpenAiChat
+        .encode_request(&OpenAiResponses.decode_request(&wire).expect("decode"))
+        .expect("chat encode");
+    let again: serde_json::Value = serde_json::from_slice(&back).expect("json");
+    assert_eq!(again["messages"][0]["role"], "developer");
 }
 
 #[test]
@@ -1080,4 +1083,67 @@ fn custom_and_namespaced_history_reaches_chat_and_messages() {
     assert_eq!(turns[3]["content"][0]["content"], json!("ok"));
     assert!(!messages_body.to_string().contains("hofund_"));
     assert!(!messages_body.to_string().contains("custom_tool_call"));
+}
+
+#[test]
+fn d32_1_translated_system_and_developer_fold_into_instructions() {
+    let mut request = Request::new("m");
+    request.messages.push({
+        let mut message = Message::new(Role::System);
+        message.content.push(ContentPart::text("base"));
+        message
+    });
+    request.messages.push({
+        let mut message = Message::new(Role::Developer);
+        message.content.push(ContentPart::text("rules"));
+        message
+    });
+    request.messages.push({
+        let mut message = Message::new(Role::User);
+        message.content.push(ContentPart::text("hi"));
+        message
+    });
+    let wire = OpenAiResponses.encode_request(&request).expect("encode");
+    let value: serde_json::Value = serde_json::from_slice(&wire).expect("json");
+    assert_eq!(value["instructions"], "base\n\nrules");
+    assert_eq!(value["input"].as_array().expect("input").len(), 1);
+}
+
+#[test]
+fn d32_2_trailing_system_becomes_a_user_reminder() {
+    let mut request = Request::new("m");
+    request.messages.push({
+        let mut message = Message::new(Role::User);
+        message.content.push(ContentPart::text("hi"));
+        message
+    });
+    request.messages.push({
+        let mut message = Message::new(Role::Assistant);
+        message.content.push(ContentPart::text("yo"));
+        message
+    });
+    request.messages.push({
+        let mut message = Message::new(Role::System);
+        message.content.push(ContentPart::text("remember"));
+        message
+    });
+    let wire = OpenAiResponses.encode_request(&request).expect("encode");
+    let value: serde_json::Value = serde_json::from_slice(&wire).expect("json");
+    assert!(value.get("instructions").is_none());
+    let text = value["input"][2]["content"][0]["text"]
+        .as_str()
+        .expect("text");
+    assert!(text.contains("<system-reminder>"));
+    assert!(text.contains("remember"));
+}
+
+#[test]
+fn d32_3_native_wire_keeps_developer_items_in_input() {
+    let body = br#"{"model":"m","instructions":"codex","input":[{"type":"message","role":"developer","content":[{"type":"input_text","text":"client"}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}"#;
+    let request = OpenAiResponses.decode_request(body).expect("decode");
+    let wire = OpenAiResponses.encode_request(&request).expect("encode");
+    let value: serde_json::Value = serde_json::from_slice(&wire).expect("json");
+    assert_eq!(value["instructions"], "codex");
+    assert_eq!(value["input"][0]["role"], "developer");
+    assert_eq!(value["input"][0]["content"][0]["text"], "client");
 }
