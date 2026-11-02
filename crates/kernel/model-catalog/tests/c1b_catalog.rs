@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use hofund_config::CatalogSettings;
 use hofund_model_catalog::{
-    CatalogVisibility, ModelCatalog, build_index, is_deprecated, listable_route_models,
-    match_patterns, model_names, parse_catalog,
+    CatalogVisibility, ModelCatalog, build_index, glob_match, hop_names, is_deprecated,
+    listable_route_models, match_patterns, model_names, parse_catalog,
 };
 
 struct IdleFetcher;
@@ -122,4 +122,77 @@ fn c1b_8_build_index_marks_retired_from_status() {
     let index = build_index(&catalog, &CatalogSettings::default());
     let entry = index.resolve("old").expect("old");
     assert!(entry.retired);
+}
+
+#[test]
+fn c1b_19_model_names_include_the_last_path_segment() {
+    let names = model_names("", "vendor/m");
+    assert!(names.contains(&"m".to_owned()), "{names:?}");
+}
+
+#[test]
+fn c1b_20_glob_is_case_insensitive_and_question_mark_is_one_byte() {
+    assert!(glob_match("Fresh", "fresh"));
+    assert!(glob_match("gpt-?", "gpt-5"));
+    assert!(!glob_match("gpt-?", "gpt-55"));
+}
+
+#[test]
+fn c1b_21_config_retired_and_disabled_hide_known_routes_from_lists() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let catalog = catalog(dir.path(), CatalogSettings::default());
+    let policy = catalog.visibility();
+    assert!(!policy.hide_route_from_lists("fresh", catalog.as_ref()));
+    policy.replace_settings(CatalogSettings {
+        retired: vec!["fresh".to_owned()],
+        ..Default::default()
+    });
+    assert!(policy.hide_route_from_lists("fresh", catalog.as_ref()));
+    policy.replace_settings(CatalogSettings {
+        disabled: vec!["fresh".to_owned()],
+        ..Default::default()
+    });
+    assert!(policy.hide_route_from_lists("fresh", catalog.as_ref()));
+}
+
+#[test]
+fn c1b_22_config_retired_hides_an_unknown_route() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let catalog = catalog(
+        dir.path(),
+        CatalogSettings {
+            retired: vec!["ghost".to_owned()],
+            ..Default::default()
+        },
+    );
+    let policy = catalog.visibility();
+    assert!(policy.hide_route_from_lists("ghost", catalog.as_ref()));
+    assert!(!policy.hide_route_from_lists("phantom", catalog.as_ref()));
+}
+
+#[test]
+fn c1b_23_hop_names_cover_the_asked_alias() {
+    let names = hop_names("route", "vendor/alias", "p", "wire");
+    assert!(names.contains(&"vendor/alias".to_owned()), "{names:?}");
+    assert!(names.contains(&"alias".to_owned()), "{names:?}");
+}
+
+#[test]
+fn c1b_24_override_retired_flag_marks_the_entry() {
+    let catalog = parse_catalog(FIXTURE.as_bytes()).expect("parse");
+    let settings = hofund_config::load(
+        r#"
+listen = "127.0.0.1:9"
+[[catalog.overrides]]
+model = "fresh"
+retired = true
+[[catalog.overrides]]
+model = "old"
+retired = false
+"#,
+    )
+    .expect("config");
+    let index = build_index(&catalog, &settings.catalog);
+    assert!(index.resolve("fresh").expect("fresh").retired);
+    assert!(!index.resolve("old").expect("old").retired);
 }
