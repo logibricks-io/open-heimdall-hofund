@@ -166,7 +166,7 @@ async fn d38_3_success_clears_overflow_memory() {
         "second",
         &second_hits,
         &order,
-        vec![ok(), overflow_err(), ok()],
+        vec![ok(), Err(PluginError::status_error(500, "busy")), ok()],
     );
     let router = router(first, second, memory);
     let request = large_request(500);
