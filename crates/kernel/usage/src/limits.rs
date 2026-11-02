@@ -138,7 +138,7 @@ impl Ledger {
                         COALESCE(SUM(MAX(cache_read_tokens, 0)), 0),
                         COALESCE(SUM(MAX(cache_write_tokens, 0)), 0),
                         COALESCE(SUM(CASE WHEN priced = 1 THEN cost_usd ELSE 0 END), 0),
-                        COALESCE(SUM(CASE WHEN priced = 0 AND (COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)) > 0 THEN 1 ELSE 0 END), 0)
+                        COALESCE(SUM(CASE WHEN priced = 0 AND (MAX(COALESCE(input_tokens, 0), 0) + MAX(COALESCE(output_tokens, 0), 0)) > 0 THEN 1 ELSE 0 END), 0)
                  FROM requests
                  WHERE (caller_key_id = ?1 OR caller_issuer_id = ?1) AND created_unix >= ?2
                    AND (upstream != '' OR status LIKE '2%')",

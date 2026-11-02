@@ -368,7 +368,7 @@ impl Ledger {
                         COALESCE(SUM(MAX(cache_write_1h_tokens, 0)), 0),
                         COALESCE(SUM(MAX(reasoning_tokens, 0)), 0),
                         COALESCE(SUM(CASE WHEN priced = 1 THEN cost_usd ELSE 0 END), 0),
-                        COALESCE(SUM(CASE WHEN priced = 0 AND (COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)) > 0 THEN 1 ELSE 0 END), 0)
+                        COALESCE(SUM(CASE WHEN priced = 0 AND (MAX(COALESCE(input_tokens, 0), 0) + MAX(COALESCE(output_tokens, 0), 0)) > 0 THEN 1 ELSE 0 END), 0)
                  FROM requests WHERE created_unix >= ?1",
                 params![since],
                 |row| {

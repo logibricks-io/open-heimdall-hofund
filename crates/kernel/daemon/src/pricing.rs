@@ -7,12 +7,16 @@ use hofund_model_catalog::{EffectivePricer, ListPriceLookup, ModelCatalog, Price
 use crate::ModelsHost;
 
 /// Builds the gateway pricer from config, catalog, and cached model lists.
+/// Model families whose one-hour cache write costs twice the input price.
+const DOUBLED_ONE_HOUR: &[&str] = &["claude"];
+
 pub(crate) fn effective_pricer(
     settings: hofund_config::UsageSettings,
     catalog: Arc<ModelCatalog>,
     models: Arc<ModelsHost>,
 ) -> EffectivePricer {
     EffectivePricer::new(settings, catalog, Arc::new(ModelsList { models }))
+        .with_doubled_one_hour_models(DOUBLED_ONE_HOUR.iter().map(|id| (*id).to_owned()).collect())
 }
 
 struct ModelsList {

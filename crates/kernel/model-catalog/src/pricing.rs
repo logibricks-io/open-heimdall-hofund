@@ -20,6 +20,7 @@ pub struct EffectivePricer {
     settings: UsageSettings,
     catalog: Arc<ModelCatalog>,
     list: Arc<dyn ListPriceLookup>,
+    doubled_one_hour: Vec<String>,
 }
 
 impl EffectivePricer {
@@ -34,7 +35,21 @@ impl EffectivePricer {
             settings,
             catalog,
             list,
+            doubled_one_hour: Vec::new(),
         }
+    }
+
+    /// Model id fragments (case-insensitive) whose one-hour cache write
+    /// defaults to twice the input price when only a five-minute write price
+    /// is known. Vendor names stay with the caller.
+    #[must_use]
+    pub fn with_doubled_one_hour_models(mut self, fragments: Vec<String>) -> Self {
+        self.doubled_one_hour = fragments
+            .into_iter()
+            .map(|fragment| fragment.to_ascii_lowercase())
+            .filter(|fragment| !fragment.is_empty())
+            .collect();
+        self
     }
 
     /// Resolves a list price for `provider_id` and `model`, optionally falling
@@ -65,6 +80,7 @@ impl EffectivePricer {
                 provider_id,
                 model,
                 price,
+                &self.doubled_one_hour,
             ));
         }
         if let Some(served) = served.filter(|served| *served != model)
@@ -75,6 +91,7 @@ impl EffectivePricer {
                 provider_id,
                 served,
                 price,
+                &self.doubled_one_hour,
             ));
         }
         if let Some(price) = self.catalog_price(provider_id, model) {
@@ -95,7 +112,7 @@ impl EffectivePricer {
             format!("{ANY_PROVIDER}{model}"),
         ] {
             if let Some(custom) = self.settings.prices.get(&key) {
-                return Some(price_from_override(model, custom));
+                return Some(price_from_override(model, custom, &self.doubled_one_hour));
             }
         }
         None
@@ -109,7 +126,7 @@ impl EffectivePricer {
     }
 }
 
-fn price_from_override(model_id: &str, custom: &ModelPriceOverride) -> Price {
+fn price_from_override(model_id: &str, custom: &ModelPriceOverride, doubled: &[String]) -> Price {
     let mut price = Price {
         input: custom.input,
         output: custom.output,
@@ -117,15 +134,19 @@ fn price_from_override(model_id: &str, custom: &ModelPriceOverride) -> Price {
         cache_write: custom.cache_write,
         cache_write_1h: custom.cache_write_1h.unwrap_or(0.0),
     };
-    one_hour_for(model_id, &mut price);
+    one_hour_for(model_id, &mut price, doubled);
     price
 }
 
-fn one_hour_for(model_id: &str, price: &mut Price) {
+fn one_hour_for(model_id: &str, price: &mut Price, doubled: &[String]) {
     if price.cache_write <= 0.0 || price.cache_write_1h > 0.0 {
         return;
     }
-    if model_id.to_ascii_lowercase().contains("claude") {
+    let model_id = model_id.to_ascii_lowercase();
+    if doubled
+        .iter()
+        .any(|fragment| model_id.contains(fragment.as_str()))
+    {
         price.cache_write_1h = 2.0 * price.input;
     }
 }
@@ -135,6 +156,7 @@ fn enrich_from_catalog(
     provider_id: &str,
     model: &str,
     mut price: Price,
+    doubled: &[String],
 ) -> Price {
     if let Some(entry) = catalog
         .resolve(&format!("{provider_id}/{model}"))
@@ -151,6 +173,6 @@ fn enrich_from_catalog(
             price.cache_read = catalog_price.cache_read;
         }
     }
-    one_hour_for(model, &mut price);
+    one_hour_for(model, &mut price, doubled);
     price
 }

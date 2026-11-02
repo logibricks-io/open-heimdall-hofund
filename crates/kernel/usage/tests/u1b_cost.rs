@@ -307,3 +307,37 @@ fn u1b_10_old_database_gains_cost_columns() {
     assert!(rows[0].priced);
     assert_eq!(rows[0].cost_usd, Some(0.0));
 }
+
+#[test]
+fn u1b_15_one_hour_write_doubles_input_only_for_named_families() {
+    let mut prices = BTreeMap::new();
+    for key in ["relay/famx-large", "relay/other-large"] {
+        prices.insert(
+            key.to_owned(),
+            ModelPriceOverride {
+                input: 3.0,
+                output: 15.0,
+                cache_read: 0.3,
+                cache_write: 3.75,
+                cache_write_1h: None,
+            },
+        );
+    }
+    let settings = UsageSettings {
+        prices,
+        ..UsageSettings::default()
+    };
+    let named = pricer(settings.clone()).with_doubled_one_hour_models(vec!["FamX".to_owned()]);
+    let doubled = named
+        .resolve("relay", "famx-large", None, false)
+        .expect("named");
+    assert!((doubled.cache_write_1h - 6.0).abs() < f64::EPSILON);
+    let other = named
+        .resolve("relay", "other-large", None, false)
+        .expect("other");
+    assert!(other.cache_write_1h.abs() < f64::EPSILON);
+    let plain = pricer(settings)
+        .resolve("relay", "famx-large", None, false)
+        .expect("plain");
+    assert!(plain.cache_write_1h.abs() < f64::EPSILON);
+}
