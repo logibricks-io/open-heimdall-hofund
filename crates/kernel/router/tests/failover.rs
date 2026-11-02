@@ -45,6 +45,7 @@ enum Kind {
     ResponsesEmptyThenPending,
     ResponsesCreatedThenPending,
     ResponsesCreatedThenEnd,
+    ResponsesNothing,
 }
 
 #[async_trait]
@@ -66,7 +67,8 @@ impl Member for Fake {
             | Kind::ResponsesEmptyChunked
             | Kind::ResponsesEmptyThenPending
             | Kind::ResponsesCreatedThenPending
-            | Kind::ResponsesCreatedThenEnd => ProtocolId::OPENAI_RESPONSES.as_str(),
+            | Kind::ResponsesCreatedThenEnd
+            | Kind::ResponsesNothing => ProtocolId::OPENAI_RESPONSES.as_str(),
             _ => "test",
         }
     }
@@ -154,6 +156,10 @@ impl Member for Fake {
             ))),
             // `unfold` panics if polled again after it ended, as a real
             // finished body may
+            Kind::ResponsesNothing => Ok(Completion::Raw(BodyStream::from_stream(stream::unfold(
+                (),
+                |()| async { None::<(Result<Bytes, PluginError>, ())> },
+            )))),
             Kind::ResponsesCreatedThenEnd => Ok(Completion::Raw(BodyStream::from_stream(
                 stream::unfold(true, |first| async move {
                     first.then(|| (Ok(Bytes::from_static(RESPONSES_CREATED_SSE)), false))
@@ -1114,6 +1120,18 @@ async fn d37_10_a_finished_lifecycle_only_upstream_is_not_polled_again() {
     };
     let chunk = body.next_chunk().await.expect("chunk").expect("ok");
     assert_eq!(chunk.as_ref(), RESPONSES_CREATED_SSE);
+    assert!(body.next_chunk().await.is_none());
+    assert!(body.next_chunk().await.is_none());
+}
+
+#[tokio::test]
+async fn d37_11_an_upstream_that_sent_nothing_is_not_polled_again() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let router = router(vec![fake("only", &hits, Kind::ResponsesNothing)]);
+    let routed = dispatch_responses(&router, "demo").await.expect("routed");
+    let Completion::Raw(mut body) = routed.completion else {
+        panic!("expected a raw completion");
+    };
     assert!(body.next_chunk().await.is_none());
     assert!(body.next_chunk().await.is_none());
 }
