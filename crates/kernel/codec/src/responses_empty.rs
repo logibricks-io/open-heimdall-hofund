@@ -201,6 +201,12 @@ pub fn relayed_sse_has_opaque_content(sse: &[u8]) -> bool {
     false
 }
 
+/// Whether `sse` already contains a full SSE event (blank line delimiter).
+#[must_use]
+pub fn relayed_sse_event_boundary(sse: &[u8]) -> bool {
+    sse.windows(2).any(|window| window == b"\n\n")
+}
+
 fn response_empty_with_zero_usage(response: &Map<String, Value>) -> bool {
     let output_empty = match response.get("output") {
         None => return false,

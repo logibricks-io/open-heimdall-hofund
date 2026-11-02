@@ -31,7 +31,7 @@ use bytes::Bytes;
 use futures_util::StreamExt;
 use hofund_codec::responses_empty::{
     EMPTY_REPLY_MESSAGE, decoded_stream_empty, relayed_sse_empty_without_content,
-    relayed_sse_has_content, relayed_sse_has_opaque_content,
+    relayed_sse_event_boundary, relayed_sse_has_content, relayed_sse_has_opaque_content,
 };
 use hofund_control_proto::{RouteTry, SkipReason};
 use hofund_ir::{StreamEvent, estimate_input_tokens};
@@ -2020,14 +2020,15 @@ async fn accept(completion: Completion) -> Result<Completion, PluginError> {
                     Some(Err(error)) => return Err(error),
                     Some(Ok(chunk)) => {
                         buffered.extend_from_slice(&chunk);
+                        if relayed_sse_empty_without_content(&buffered) {
+                            return Err(empty());
+                        }
                         if relayed_sse_has_content(&buffered)
                             || relayed_sse_has_opaque_content(&buffered)
+                            || relayed_sse_event_boundary(&buffered)
                         {
                             let head = Bytes::from(std::mem::take(&mut buffered));
                             return Ok(Completion::Raw(BodyStream::resume(head, body)));
-                        }
-                        if relayed_sse_empty_without_content(&buffered) {
-                            return Err(empty());
                         }
                     }
                 }
