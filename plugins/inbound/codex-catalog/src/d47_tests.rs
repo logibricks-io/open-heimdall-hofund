@@ -27,9 +27,14 @@ fn d47_2_an_entry_with_a_window_is_unchanged() {
         .as_object_mut()
         .expect("object")
         .remove("auto_compact_token_limit");
+    without_limit
+        .as_object_mut()
+        .expect("object")
+        .insert("context_window".to_owned(), json!(200_000));
     let with_window = entry("vendor/windowed", 2, &lookup, Some(200_000));
     assert_eq!(with_window, without_limit);
     assert!(with_window.get("auto_compact_token_limit").is_none());
+    assert_eq!(with_window["context_window"], 200_000);
 }
 
 #[test]
@@ -90,6 +95,7 @@ fn d47_4_served_catalog_uses_window_from_the_gateway_list() {
         .find(|row| row["slug"] == "vendor/windowed")
         .expect("windowed");
     assert!(windowed.get("auto_compact_token_limit").is_none());
+    assert_eq!(windowed["context_window"], 200_000);
     let open = models
         .iter()
         .find(|row| row["slug"] == "vendor/open")

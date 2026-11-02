@@ -296,11 +296,13 @@ pub(crate) fn entry(
 }
 
 fn apply_auto_compact(entry: &mut Value, known_window: Option<u64>) {
-    if known_window.is_some() {
-        return;
-    }
     let object = entry.as_object_mut().expect("catalog entry object");
     if object.contains_key("context_window") {
+        return;
+    }
+    if let Some(window) = known_window {
+        // Codex derives its own auto-compact point from a known window
+        object.insert("context_window".to_owned(), Value::Number(window.into()));
         return;
     }
     if object

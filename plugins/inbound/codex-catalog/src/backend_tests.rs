@@ -1641,3 +1641,50 @@ fn d39_5_an_ended_short_502_still_compacts_locally() {
     assert!(summary.contains(super::backend::ENDED_SHORT), "{summary}");
     assert_eq!(stub.called().len(), 1);
 }
+
+fn long_compaction_body(messages: usize, each: usize) -> String {
+    let mut input: Vec<Value> = (0..messages)
+        .map(|n| {
+            json!({"type": "message", "role": "user", "content": [
+                {"type": "input_text", "text": format!("turn-{n:04} {}", "w".repeat(each))},
+            ]})
+        })
+        .collect();
+    input.push(json!({"type": "compaction_trigger"}));
+    json!({"model": "smith/forge", "stream": true, "input": input}).to_string()
+}
+
+#[test]
+fn d39_6_an_over_cap_transcript_keeps_its_most_recent_part() {
+    let refuse = json!({"error": {"message": "too big"}}).to_string();
+    let stub = Stub::default()
+        .calling(answer(413, refuse))
+        .calling(answer(200, good_summary_reply("RECENT")));
+    let body = long_compaction_body(60, 10_000);
+    assert!(body.len() > super::input::TEXT_SUMMARY_CAP);
+    let (status, _, reply) = compaction_body(&stub, &body);
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(compacted_summary(&reply), "RECENT");
+    let called = stub.called();
+    assert_eq!(called.len(), 2);
+    let retry = String::from_utf8(called[1].body.clone()).expect("utf8");
+    assert!(
+        retry.len() <= super::input::TEXT_SUMMARY_CAP,
+        "{}",
+        retry.len()
+    );
+    assert!(retry.contains("turn-0059"), "the latest turn is kept");
+    assert!(!retry.contains("turn-0000"), "the oldest turn is dropped");
+}
+
+#[test]
+fn d39_7_a_latest_message_over_the_cap_compacts_locally_without_a_retry() {
+    let refuse = json!({"error": {"message": "too big"}}).to_string();
+    let stub = Stub::default().calling(answer(413, refuse));
+    let body = long_compaction_body(1, super::input::TEXT_SUMMARY_CAP + 10);
+    let (status, _, reply) = compaction_body(&stub, &body);
+    assert_eq!(status, 200, "{reply}");
+    let summary = compacted_summary(&reply);
+    assert!(summary.contains("without a model"), "{summary}");
+    assert_eq!(stub.called().len(), 1);
+}
