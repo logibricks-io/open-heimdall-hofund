@@ -528,8 +528,8 @@ fn make_status(
         reset: window.reset,
         calls: usage.calls,
         tokens,
-        cost: 0.0,
-        unpriced: usage.calls,
+        cost: usage.cost_usd,
+        unpriced: usage.unpriced,
         in_flight: held.requests,
         reserved: held.tokens,
         reserved_cost: held.cost,
@@ -537,8 +537,9 @@ fn make_status(
         cost_limit: limit.cost,
         cache_reads: limit.cache_reads,
         tokens_left: limit.tokens.saturating_sub(tokens),
-        cost_left: (limit.cost - 0.0).max(0.0),
-        spent: limit.tokens > 0 && tokens >= limit.tokens,
+        cost_left: (limit.cost - usage.cost_usd).max(0.0),
+        spent: (limit.tokens > 0 && tokens >= limit.tokens)
+            || (limit.cost > 0.0 && usage.cost_usd >= limit.cost),
     }
 }
 
@@ -733,6 +734,7 @@ mod tests {
                     uncached_input_tokens: Some(90),
                     ..UsageDetails::default()
                 },
+                None,
             )
             .expect("record");
         let restarted = Budget::new(usage);
