@@ -25,6 +25,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Context overflow detection treats `context window is full` and the
   matching OpenAI input-length wording as too-long on 400, 413, and 422,
   but not on 5xx (D-33).
+- Codex backend input ids longer than 64 characters are replaced with a
+  deterministic prefixed SHA-256, except vendor-sealed reasoning items
+  (D-35).
 - An omitted `[catalog]` table loads the default catalog settings.
 - Vendor-timed quota and credit rests now stay in place when a quota reading
   is merely less than full in the same window. They lift early only when a

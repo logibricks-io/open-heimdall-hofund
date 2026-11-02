@@ -219,3 +219,56 @@ fn the_rest_of_the_body_keeps_its_order() {
         br#"{"z":1,"input":[{"type":"custom_tool_call","id":"ctc_x"}],"a":2}"#
     );
 }
+
+#[test]
+fn d35_1_sixty_four_char_ids_stay_and_sixty_five_are_bounded() {
+    let ok = "a".repeat(64);
+    let long = format!("{ok}x");
+    let input = json!([{"type": "message", "id": ok, "role": "user", "content": []}]);
+    assert_eq!(backend(&input), None);
+    let input = json!([{"type": "message", "id": long, "role": "user", "content": []}]);
+    let out = backend(&input).expect("changed");
+    assert_eq!(out[0]["id"].as_str().expect("id").len(), 64);
+    assert!(out[0]["id"].as_str().expect("id").starts_with("msg_"));
+}
+
+#[test]
+fn d35_2_bounded_ids_are_deterministic_and_idempotent() {
+    let id = format!("{}tail", "z".repeat(80));
+    let item = json!([{"type": "message", "id": id, "role": "user", "content": []}]);
+    let first = backend(&item).expect("changed")[0]["id"].clone();
+    let again = backend(&item).expect("changed")[0]["id"].clone();
+    assert_eq!(first, again);
+    let raw = json!({"model": "m", "input": item}).to_string();
+    let first = for_backend(raw.as_bytes()).expect("once");
+    let second = for_backend(raw.as_bytes()).expect("again");
+    assert_eq!(first, second);
+}
+
+#[test]
+fn d35_3_ids_with_the_same_start_map_apart() {
+    let shared = "q".repeat(80);
+    let a = format!("{shared}a");
+    let b = format!("{shared}b");
+    let left = backend(&json!([{"type": "message", "id": a, "role": "user", "content": []}]))
+        .expect("a")[0]["id"]
+        .clone();
+    let right = backend(&json!([{"type": "message", "id": b, "role": "user", "content": []}]))
+        .expect("b")[0]["id"]
+        .clone();
+    assert_ne!(left, right);
+}
+
+#[test]
+fn d35_4_vendor_reasoning_keeps_an_overlong_id() {
+    let id = format!("rs_{}", "x".repeat(70));
+    let input = json!([{
+        "type": "reasoning",
+        "id": id,
+        "encrypted_content": SEALED_REASONING,
+        "content": []
+    }]);
+    assert_eq!(backend(&input), None);
+    assert_eq!(input[0]["id"], id);
+    assert_eq!(input[0]["encrypted_content"], SEALED_REASONING);
+}
