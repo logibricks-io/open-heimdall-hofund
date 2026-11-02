@@ -8,10 +8,11 @@ use hofund_config::Config;
 use hofund_control_proto::{
     AgentChangeResponse, AgentConnectRequest, AgentDisconnectRequest, AgentHiddenSetRequest,
     AgentListResponse, AgentModelRequest, AgentModelsResponse, AgentPickedOnlyRequest,
-    AgentPlanRequest, AgentPlanResponse, AgentStatusResponse, AgentVisibleSetRequest, ControlError,
-    ControlErrorKind, FieldIssue, GatewayKey, GatewayKeyAction, GatewayKeyLimit, GatewayKeyRequest,
-    GatewayKeyResponse, GatewayKeyRestoreRequest, HealthResponse, ModelEntry, ModelListResponse,
-    PicksResponse, PicksSetRequest, ProviderKeyRequest, ProviderKeysResponse, ProviderListResponse,
+    AgentPlanRequest, AgentPlanResponse, AgentStatusResponse, AgentVisibleSetRequest,
+    CatalogDisabledListResponse, CatalogModelRequest, ControlError, ControlErrorKind, FieldIssue,
+    GatewayKey, GatewayKeyAction, GatewayKeyLimit, GatewayKeyRequest, GatewayKeyResponse,
+    GatewayKeyRestoreRequest, HealthResponse, ModelEntry, ModelListResponse, PicksResponse,
+    PicksSetRequest, ProviderKeyRequest, ProviderKeysResponse, ProviderListResponse,
     ProviderSummary, ProviderTestRequest, ProviderTestResponse, ProviderTestResult,
     QuotaHistoryQuery, QuotaHistoryResponse, QuotaQuery, QuotaResponse, RouteListResponse,
     RouteModel, RouteModelListResponse, RouteQuery, RouteReserve, SessionRouteResponse,
@@ -600,35 +601,70 @@ impl ControlState for DaemonControl {
     }
 
     fn route_models(&self) -> ControlFuture<'_, RouteModelListResponse> {
-        let mut response = RouteModelListResponse::default();
-        response.models = self
-            .config()
-            .routes
-            .iter()
-            .map(|route| {
-                let mut model = RouteModel::default();
-                model.id = route.model.clone();
-                model.routing = route.routing.clone();
-                model.stays = super::route_stays(&self.config(), route)
-                    .as_str()
-                    .to_owned();
-                if let Some(router) = &self.router {
-                    model.reserves = router
-                        .load()
-                        .route_reserves(&route.model)
-                        .into_iter()
-                        .map(|(member, at_once)| {
-                            let mut reserve = RouteReserve::default();
-                            reserve.member = member;
-                            reserve.at_once = u64::try_from(at_once).unwrap_or(u64::MAX);
-                            reserve
-                        })
-                        .collect();
-                }
-                model
-            })
-            .collect();
-        Box::pin(async move { Ok(response) })
+        let config = self.config();
+        let catalog = self.ops.model_catalog();
+        let router = self.router.clone();
+        Box::pin(async move {
+            let visible: std::collections::BTreeSet<String> =
+                if let Some(catalog) = catalog.as_ref() {
+                    hofund_model_catalog::listable_route_models(
+                        config.routes.iter().map(|route| route.model.clone()),
+                        Some(catalog.as_ref()),
+                        Some(catalog.visibility()),
+                    )
+                    .into_iter()
+                    .collect()
+                } else {
+                    config
+                        .routes
+                        .iter()
+                        .map(|route| route.model.clone())
+                        .collect()
+                };
+            let mut response = RouteModelListResponse::default();
+            response.models = config
+                .routes
+                .iter()
+                .filter(|route| visible.contains(&route.model))
+                .map(|route| {
+                    let mut model = RouteModel::default();
+                    model.id = route.model.clone();
+                    model.routing = route.routing.clone();
+                    model.stays = super::route_stays(&config, route).as_str().to_owned();
+                    if let Some(router) = &router {
+                        model.reserves = router
+                            .load()
+                            .route_reserves(&route.model)
+                            .into_iter()
+                            .map(|(member, at_once)| {
+                                let mut reserve = RouteReserve::default();
+                                reserve.member = member;
+                                reserve.at_once = u64::try_from(at_once).unwrap_or(u64::MAX);
+                                reserve
+                            })
+                            .collect();
+                    }
+                    model
+                })
+                .collect();
+            Ok(response)
+        })
+    }
+
+    fn disable_catalog_model(
+        &self,
+        request: CatalogModelRequest,
+    ) -> ControlFuture<'_, CatalogDisabledListResponse> {
+        let ops = Arc::clone(&self.ops);
+        Box::pin(async move { ops.disable_catalog_model(&request.model).await })
+    }
+
+    fn enable_catalog_model(
+        &self,
+        request: CatalogModelRequest,
+    ) -> ControlFuture<'_, CatalogDisabledListResponse> {
+        let ops = Arc::clone(&self.ops);
+        Box::pin(async move { ops.enable_catalog_model(&request.model).await })
     }
 
     fn route_decisions(&self, query: RouteQuery) -> ControlFuture<'_, RouteListResponse> {

@@ -292,6 +292,7 @@ fn merge_override(entry: &mut ResolvedEntry, patch: Option<&hofund_config::Catal
     if let Some(name) = &patch.name {
         entry.display_name.clone_from(name);
     }
+    crate::visibility::apply_override_status(entry, patch);
 }
 
 fn dev_price(price: &DevPrice) -> Price {
@@ -429,6 +430,8 @@ fn non_empty(value: &str) -> Option<String> {
     }
 }
 
-fn is_deprecated(status: &str) -> bool {
+/// Whether models.dev marks the row deprecated.
+#[must_use]
+pub fn is_deprecated(status: &str) -> bool {
     status.eq_ignore_ascii_case("deprecated")
 }

@@ -109,6 +109,8 @@ fn run_control(config: &Path, command: Command) -> Result<String, String> {
             }
             Command::Models { model: None } => models::list(config, None).await,
             Command::ModelsRefresh => models::refresh(config).await,
+            Command::ModelsDisable { patterns } => models::disable(config, &patterns).await,
+            Command::ModelsEnable { patterns } => models::enable(config, &patterns).await,
             Command::ProviderShow { id } => provider::show(config, &id).await,
             Command::ProviderTest { id, models } => provider::test(config, &id, &models).await,
             Command::ProviderRefresh { id } => provider::refresh(config, &id).await,
@@ -211,6 +213,12 @@ enum Command {
         model: Option<String>,
     },
     ModelsRefresh,
+    ModelsDisable {
+        patterns: Vec<String>,
+    },
+    ModelsEnable {
+        patterns: Vec<String>,
+    },
     ProviderList,
     ProviderShow {
         id: String,
@@ -466,6 +474,12 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
             None => return Err(help_text(HelpTopic::Subscription)),
         },
         ["models", "refresh"] => Command::ModelsRefresh,
+        ["models", "disable", patterns @ ..] => Command::ModelsDisable {
+            patterns: owned(patterns),
+        },
+        ["models", "enable", patterns @ ..] => Command::ModelsEnable {
+            patterns: owned(patterns),
+        },
         ["models"] => Command::Models { model: None },
         ["models", "hide", agent, ids @ ..] if !ids.is_empty() => Command::AgentModels {
             agent: (*agent).to_owned(),
@@ -830,6 +844,8 @@ commands:
   models [<model>]                show catalog spec and prices for route models
   models <agent>                  when <agent> is an agent id, list shown and hidden models
   models refresh                  refetch the models.dev catalog cache
+  models disable <pattern>...     add patterns to [catalog].disabled
+  models enable <pattern>...      remove patterns from [catalog].disabled
   provider list                   list providers
   provider show <id>              print a provider, its listed models and picks
   provider test <id> [<model>...] probe a provider's models

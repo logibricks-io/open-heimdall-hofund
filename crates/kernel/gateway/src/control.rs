@@ -23,16 +23,16 @@ use hofund_control_proto::{
     AgentChangeResponse, AgentConnectRequest, AgentDisconnectRequest, AgentHiddenSetRequest,
     AgentListResponse, AgentModelRequest, AgentModelsResponse, AgentPickedOnlyRequest,
     AgentPlanRequest, AgentPlanResponse, AgentStatusResponse, AgentVisibleSetRequest,
-    ConfigApplyRequest, ConfigResponse, ConfigValidateRequest, ConfigValidationResponse,
-    ControlError, ControlErrorKind, ErrorEnvelope, GatewayKeyRequest, GatewayKeyResponse,
-    GatewayKeyRestoreRequest, HealthResponse, MAX_ID_BYTES, MAX_REQUEST_BODY_BYTES,
-    ModelListResponse, PicksResponse, PicksSetRequest, ProviderKeyRequest, ProviderKeysResponse,
-    ProviderListResponse, ProviderTestRequest, ProviderTestResponse, QuotaHistoryQuery,
-    QuotaHistoryResponse, QuotaQuery, QuotaResponse, ReloadRequest, RouteListResponse,
-    RouteModelListResponse, RouteQuery, SessionRouteResponse, ShutdownRequest, ShutdownResponse,
-    StatusResponse, TokenRotateRequest, TokenRotateResponse, Topic, UnroutedListResponse,
-    UsageQuery, UsageResponse, WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
-    decode_request,
+    CatalogDisabledListResponse, CatalogModelRequest, ConfigApplyRequest, ConfigResponse,
+    ConfigValidateRequest, ConfigValidationResponse, ControlError, ControlErrorKind, ErrorEnvelope,
+    GatewayKeyRequest, GatewayKeyResponse, GatewayKeyRestoreRequest, HealthResponse, MAX_ID_BYTES,
+    MAX_REQUEST_BODY_BYTES, ModelListResponse, PicksResponse, PicksSetRequest, ProviderKeyRequest,
+    ProviderKeysResponse, ProviderListResponse, ProviderTestRequest, ProviderTestResponse,
+    QuotaHistoryQuery, QuotaHistoryResponse, QuotaQuery, QuotaResponse, ReloadRequest,
+    RouteListResponse, RouteModelListResponse, RouteQuery, SessionRouteResponse, ShutdownRequest,
+    ShutdownResponse, StatusResponse, TokenRotateRequest, TokenRotateResponse, Topic,
+    UnroutedListResponse, UsageQuery, UsageResponse, WarmupListResponse, WarmupRunRequest,
+    WarmupRunResponse, decode_request,
 };
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
@@ -200,6 +200,36 @@ pub trait ControlState: Send + Sync {
     fn set_picks(&self, id: String, request: PicksSetRequest) -> ControlFuture<'_, PicksResponse>;
     /// Lists configured client-facing route models.
     fn route_models(&self) -> ControlFuture<'_, RouteModelListResponse>;
+    /// Adds a pattern to `[catalog].disabled` and publishes config.
+    fn disable_catalog_model(
+        &self,
+        request: CatalogModelRequest,
+    ) -> ControlFuture<'_, CatalogDisabledListResponse> {
+        let _ = request;
+        Box::pin(async {
+            Err(ControlError::new(
+                ControlErrorKind::BadRequest,
+                "catalog model disable is not supported by this control state",
+                "control",
+            )
+            .into())
+        })
+    }
+    /// Removes a pattern from `[catalog].disabled` and publishes config.
+    fn enable_catalog_model(
+        &self,
+        request: CatalogModelRequest,
+    ) -> ControlFuture<'_, CatalogDisabledListResponse> {
+        let _ = request;
+        Box::pin(async {
+            Err(ControlError::new(
+                ControlErrorKind::BadRequest,
+                "catalog model enable is not supported by this control state",
+                "control",
+            )
+            .into())
+        })
+    }
     /// Lists recent routing decisions.
     fn route_decisions(&self, query: RouteQuery) -> ControlFuture<'_, RouteListResponse> {
         let _ = query;
@@ -512,6 +542,8 @@ impl Control {
                 "/v1/hofund/models",
                 get(route_models).head(method_not_allowed),
             )
+            .route("/v1/hofund/models/disable", post(disable_catalog_model))
+            .route("/v1/hofund/models/enable", post(enable_catalog_model))
             .route(
                 "/v1/hofund/route",
                 get(route_decisions).head(method_not_allowed),
@@ -988,6 +1020,22 @@ async fn set_picks(
 
 async fn route_models(State(state): State<HttpState>) -> Response {
     operation_response!(state.control.state.route_models().await)
+}
+
+async fn disable_catalog_model(State(state): State<HttpState>, body: Bytes) -> Response {
+    let request = match decode_body::<CatalogModelRequest>(&body) {
+        Ok(request) => request,
+        Err(failure) => return failure_response(failure),
+    };
+    operation_response!(state.control.state.disable_catalog_model(request).await)
+}
+
+async fn enable_catalog_model(State(state): State<HttpState>, body: Bytes) -> Response {
+    let request = match decode_body::<CatalogModelRequest>(&body) {
+        Ok(request) => request,
+        Err(failure) => return failure_response(failure),
+    };
+    operation_response!(state.control.state.enable_catalog_model(request).await)
 }
 
 async fn route_decisions(State(state): State<HttpState>, uri: Uri) -> Response {
