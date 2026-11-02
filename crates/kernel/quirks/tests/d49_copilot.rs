@@ -67,7 +67,10 @@ fn d49_7_copilot_gpt_keeps_custom_tools() {
 #[test]
 fn d49_9_gemini_off_copilot_keeps_any_of() {
     let body = br#"{"model":"gemini-2.5","tools":[{"type":"function","function":{"name":"t","parameters":{"anyOf":[{"type":"object","properties":{"kind":{"type":"string","enum":["a"]}},"required":["kind"],"additionalProperties":false},{"type":"object","properties":{"kind":{"type":"string","enum":["b"]}},"required":["kind"],"additionalProperties":false}]}}}]}"#;
-    for base_url in ["https://openrouter.ai/api/v1", "https://gateway.example.test/v1"] {
+    for base_url in [
+        "https://openrouter.ai/api/v1",
+        "https://gateway.example.test/v1",
+    ] {
         let out = apply_encoded(
             EncodedContext {
                 base_url,
