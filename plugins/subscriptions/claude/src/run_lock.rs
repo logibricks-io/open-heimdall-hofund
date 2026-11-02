@@ -61,20 +61,40 @@ fn mark_process_id() -> u32 {
     mark_process_id_platform()
 }
 
-#[cfg(unix)]
 fn mark_process_id_platform() -> u32 {
-    std::fs::read_link("/proc/self")
-        .ok()
-        .and_then(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str()?.parse().ok())
-        })
-        .unwrap_or(0)
+    static ID: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *ID.get_or_init(|| proc_self_id().unwrap_or_else(process_nonce))
+}
+
+#[cfg(unix)]
+fn proc_self_id() -> Option<u32> {
+    std::fs::read_link("/proc/self").ok().and_then(|path| {
+        path.file_name()
+            .and_then(|name| name.to_str()?.parse().ok())
+            .filter(|id: &u32| *id != 0)
+    })
 }
 
 #[cfg(not(unix))]
-fn mark_process_id_platform() -> u32 {
-    0
+fn proc_self_id() -> Option<u32> {
+    None
+}
+
+/// Fallback when `/proc` is unavailable (macOS, non-unix): a per-process
+/// nonce from the clock and a stack address, so concurrent processes do not
+/// share mark names. Never zero.
+fn process_nonce() -> u32 {
+    use std::hash::{BuildHasher, Hasher};
+    let marker = 0u8;
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    hasher.write_u128(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0),
+    );
+    hasher.write_usize(std::ptr::addr_of!(marker) as usize);
+    (hasher.finish() as u32).max(1)
 }
 
 fn next_mark_seq() -> u64 {
