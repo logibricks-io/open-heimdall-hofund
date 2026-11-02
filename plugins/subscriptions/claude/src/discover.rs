@@ -87,6 +87,42 @@ mod tests {
     }
 
     #[test]
+    fn d36_15_import_rejects_older_than_configured_live_dir() {
+        let dir = scratch("configured-live");
+        let live = dir.path().join("configured-live");
+        write_sign_in_with_expiry(&live, "rt-configured", 8000);
+        crate::cli::test_configured_dir(Some(live));
+        let home = dir.path().join("import-home");
+        write_sign_in_with_expiry(&home, "rt-import", 1000);
+        let host = TestHost::open_for(
+            PluginKind::Subscription,
+            PluginId::from_static("claude"),
+            dir.path(),
+        );
+        let id = account_id_from(&["claude", "11111111-2222-3333-4444-555555555555"]);
+        let stored = SecretObject::new()
+            .with_text(
+                creds::CREDENTIALS,
+                r#"{"claudeAiOauth":{"accessToken":"stored","refreshToken":"rt-stored","expiresAt":500}}"#,
+            )
+            .to_secret();
+        let account = host
+            .context()
+            .accounts()
+            .account(id.clone(), "stored")
+            .expect("account");
+        block_on(host.context().accounts().upsert(account, stored)).expect("upsert");
+        let error =
+            block_on(crate::agent_sign_in::import_live(&home, host.context())).expect_err("older");
+        assert!(
+            error
+                .to_string()
+                .contains(crate::agent_sign_in::IMPORT_EXISTS)
+        );
+        crate::cli::test_configured_dir(None);
+    }
+
+    #[test]
     fn d36_10_discover_import_rejects_older_than_live_sign_in() {
         let dir = scratch("older-live");
         let home = dir.path().join("claude-home");
