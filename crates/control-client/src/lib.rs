@@ -7,8 +7,9 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use hofund_control_proto::{
-    AgentChangeResponse, AgentConnectRequest, AgentDisconnectRequest, AgentListResponse,
-    AgentModelRequest, AgentPlanRequest, AgentPlanResponse, AgentStatusResponse,
+    AgentChangeResponse, AgentConnectRequest, AgentDisconnectRequest, AgentHiddenSetRequest,
+    AgentListResponse, AgentModelRequest, AgentModelsResponse, AgentPickedOnlyRequest,
+    AgentPlanRequest, AgentPlanResponse, AgentStatusResponse, AgentVisibleSetRequest,
     CatalogDisabledListResponse, CatalogModelRequest, ConfigApplyRequest, ConfigResponse,
     ConfigValidateRequest, ConfigValidationResponse, ControlError, ErrorEnvelope, EventEnvelope,
     GatewayKeyRequest, GatewayKeyResponse, GatewayKeyRestoreRequest, HealthResponse,
@@ -17,8 +18,8 @@ use hofund_control_proto::{
     QuotaHistoryQuery, QuotaHistoryResponse, QuotaQuery, QuotaResponse, ReloadRequest,
     RouteListResponse, RouteModelListResponse, RouteQuery, SessionRouteResponse, ShutdownRequest,
     ShutdownResponse, StatusResponse, TokenRotateRequest, TokenRotateResponse, Topic,
-    UnroutedListResponse, UsagePeriod, UsageQuery, UsageResponse, decode_error_envelope,
-    decode_response,
+    UnroutedListResponse, UsagePeriod, UsageQuery, UsageResponse, WarmupListResponse,
+    WarmupRunRequest, WarmupRunResponse, decode_error_envelope, decode_response,
 };
 use http::header;
 use http_body_util::{BodyExt, Full, Limited};
@@ -485,6 +486,54 @@ impl Client {
         .await
     }
 
+    /// Lists route models shown and hidden for one agent.
+    pub async fn agent_models(&self, id: &str) -> Result<AgentModelsResponse, ClientError> {
+        self.get(&format!("/v1/hofund/agents/{}/models", encode_segment(id)))
+            .await
+    }
+
+    /// Replaces the visibility names for one agent.
+    pub async fn set_agent_visible(
+        &self,
+        id: &str,
+        request: AgentVisibleSetRequest,
+    ) -> Result<ConfigResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            &format!("/v1/hofund/agents/{}/visible", encode_segment(id)),
+            Some(json_body(&request)?),
+        )
+        .await
+    }
+
+    /// Replaces hidden route ids for one agent.
+    pub async fn set_agent_hidden_models(
+        &self,
+        id: &str,
+        request: AgentHiddenSetRequest,
+    ) -> Result<ConfigResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            &format!("/v1/hofund/agents/{}/hidden_models", encode_segment(id)),
+            Some(json_body(&request)?),
+        )
+        .await
+    }
+
+    /// Toggles picked-only mode for one agent.
+    pub async fn set_agent_picked_only(
+        &self,
+        id: &str,
+        request: AgentPickedOnlyRequest,
+    ) -> Result<ConfigResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            &format!("/v1/hofund/agents/{}/picked_only", encode_segment(id)),
+            Some(json_body(&request)?),
+        )
+        .await
+    }
+
     /// Reports what is left of every subscription. A fresh query reads the
     /// vendors first; a kept one answers from the last readings.
     pub async fn quotas(&self, query: QuotaQuery) -> Result<QuotaResponse, ClientError> {
@@ -508,6 +557,24 @@ impl Client {
             self.get(&format!("/v1/hofund/quotas/history?{query}"))
                 .await
         }
+    }
+
+    /// Lists last daily warm-up results known to the daemon.
+    pub async fn warmups(&self) -> Result<WarmupListResponse, ClientError> {
+        self.get("/v1/hofund/warmups").await
+    }
+
+    /// Runs daily warm-up for one subscription account now.
+    pub async fn run_warmup(
+        &self,
+        request: WarmupRunRequest,
+    ) -> Result<WarmupRunResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            "/v1/hofund/warmups/run",
+            Some(json_body(&request)?),
+        )
+        .await
     }
 
     /// Reports usage for a period.

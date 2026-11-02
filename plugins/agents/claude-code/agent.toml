@@ -2,6 +2,9 @@ id = "claude-code"
 display_name = "Claude Code"
 binary = "claude"
 
+# A non-empty value is the calling agent's id or binary.
+request_agent_header = "x-claude-code-agent-id"
+
 # The file is ~/.claude/settings.json. On Windows that is
 # %USERPROFILE%\.claude\settings.json. CLAUDE_CONFIG_DIR replaces the .claude
 # directory. The file is strict JSON; comments are a syntax error in current

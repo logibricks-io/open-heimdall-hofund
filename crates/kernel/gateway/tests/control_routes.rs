@@ -14,7 +14,8 @@ use hofund_control_proto::{
     ModelListResponse, PicksResponse, PicksSetRequest, ProviderListResponse, ProviderTestRequest,
     ProviderTestResponse, QuotaHistoryQuery, QuotaHistoryResponse, QuotaQuery, QuotaResponse,
     RouteModelListResponse, ShutdownRequest, ShutdownResponse, StatusResponse, TokenRotateRequest,
-    TokenRotateResponse, UsageQuery, UsageResponse, decode_error_envelope,
+    TokenRotateResponse, UsageQuery, UsageResponse, WarmupListResponse, WarmupRunRequest,
+    WarmupRunResponse, decode_error_envelope,
 };
 use hofund_control_proto::{
     ConfigApplyRequest, ConfigResponse, ConfigValidateRequest, ConfigValidationResponse,
@@ -168,6 +169,17 @@ impl ControlState for FakeControlState {
         ))
     }
 
+    fn warmups(&self) -> ControlFuture<'_, WarmupListResponse> {
+        self.reply("warmups")
+    }
+
+    fn run_warmup(&self, request: WarmupRunRequest) -> ControlFuture<'_, WarmupRunResponse> {
+        self.reply(format!(
+            "run_warmup:{}:{}",
+            request.subscription, request.account
+        ))
+    }
+
     fn usage(&self, query: UsageQuery) -> ControlFuture<'_, UsageResponse> {
         self.reply(format!("usage:{:?}", query.period))
     }
@@ -280,6 +292,12 @@ fn operation_routes() -> Vec<(Method, &'static str, Vec<u8>)> {
             Method::GET,
             "/v1/hofund/quotas/history?days=7&provider=acct&user=Me%40x.io",
             Vec::new(),
+        ),
+        (Method::GET, "/v1/hofund/warmups", Vec::new()),
+        (
+            Method::POST,
+            "/v1/hofund/warmups/run",
+            json!(&WarmupRunRequest::new("acct", "a@x.io")),
         ),
         (
             Method::POST,
@@ -404,6 +422,8 @@ async fn control_routes_success_and_error_envelopes_against_fake_state() {
             "usage:Day",
             "quotas:kept=true",
             "quota_history:Some(\"7\"):Some(\"acct\"):Some(\"Me@x.io\")",
+            "warmups",
+            "run_warmup:acct:a@x.io",
             "rotate_token",
             "shutdown",
             "config",
@@ -856,4 +876,44 @@ async fn next_text(body: &mut axum::body::BodyDataStream) -> Option<String> {
         .await
         .expect("stream progresses")
         .map(|chunk| String::from_utf8(chunk.expect("bytes").to_vec()).expect("utf-8"))
+}
+
+#[tokio::test]
+async fn a3a_11_warmups_control_routes_return_versioned_json() {
+    let state = Arc::new(FakeControlState::default());
+    let router = app(&state);
+    let (status, headers, body) = call(
+        router.clone(),
+        Method::GET,
+        "/v1/hofund/warmups",
+        Vec::new(),
+        true,
+        false,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_no_store(&headers);
+    let list: WarmupListResponse = serde_json::from_slice(&body).expect("warmups JSON");
+    assert_eq!(list.version, API_VERSION);
+
+    let (status, _, body) = call(
+        router,
+        Method::POST,
+        "/v1/hofund/warmups/run",
+        serde_json::to_vec(&WarmupRunRequest::new("acct", "a@x.io")).expect("json"),
+        true,
+        true,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let run: WarmupRunResponse = serde_json::from_slice(&body).expect("run JSON");
+    assert_eq!(run.version, API_VERSION);
+    assert!(
+        state
+            .calls
+            .lock()
+            .expect("calls")
+            .iter()
+            .any(|c| c == "warmups")
+    );
 }

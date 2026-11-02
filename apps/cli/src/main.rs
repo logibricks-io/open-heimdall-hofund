@@ -18,6 +18,8 @@ mod provider_edit;
 mod quota;
 mod serve;
 mod subscription;
+mod visible;
+mod warmup;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -50,6 +52,7 @@ fn main() -> ExitCode {
         Command::Subscription(command) => hand_over(subscription::run(&config, &command)),
         Command::Accounts(command) => hand_over(accounts::run(&config, &command)),
         Command::Quota(command) => quota::run(&config, command),
+        Command::Warmup(command) => warmup::run(&config, command),
         other => finish(run_control(&config, other)),
     }
 }
@@ -101,7 +104,10 @@ fn run_control(config: &Path, command: Command) -> Result<String, String> {
             }
             Command::GatewayKey(command) => gateway_key::run(config, &command).await,
             Command::ProviderList => provider::list(config).await,
-            Command::Models { model } => models::list(config, model.as_deref()).await,
+            Command::Models { model: Some(token) } => {
+                visible::models_or_agent(config, &token).await
+            }
+            Command::Models { model: None } => models::list(config, None).await,
             Command::ModelsRefresh => models::refresh(config).await,
             Command::ModelsDisable { patterns } => models::disable(config, &patterns).await,
             Command::ModelsEnable { patterns } => models::enable(config, &patterns).await,
@@ -134,6 +140,16 @@ fn run_control(config: &Path, command: Command) -> Result<String, String> {
             }
             Command::Routes => provider::routes(config).await,
             Command::ModelList => provider::model_list(config).await,
+            Command::Visible {
+                agent,
+                names,
+                only_picked,
+            } => visible::visible(config, &agent, &names, only_picked).await,
+            Command::AgentModels {
+                agent,
+                hide,
+                unhide,
+            } => visible::models(config, &agent, &hide, &unhide).await,
             Command::ModelShow { id } => provider::model_show(config, &id).await,
             Command::Version
             | Command::Help(_)
@@ -141,6 +157,7 @@ fn run_control(config: &Path, command: Command) -> Result<String, String> {
             | Command::TokenShow
             | Command::Subscription(_)
             | Command::Quota(_)
+            | Command::Warmup(_)
             | Command::Accounts(_) => Err("not a control command".to_owned()),
         }
     })
@@ -189,6 +206,8 @@ enum Command {
     Accounts(AccountsCommand),
     /// `quota`, `quota history`, and `quota wait`.
     Quota(quota::QuotaCommand),
+    /// `warmup` and `warmup <subscription>/<account>`.
+    Warmup(warmup::WarmupCommand),
     /// `models` and `models refresh`.
     Models {
         model: Option<String>,
@@ -266,6 +285,16 @@ enum Command {
     ModelShow {
         id: String,
     },
+    Visible {
+        agent: String,
+        names: Vec<String>,
+        only_picked: Option<bool>,
+    },
+    AgentModels {
+        agent: String,
+        hide: Vec<String>,
+        unhide: Vec<String>,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -297,6 +326,7 @@ enum HelpTopic {
     SubscriptionRefresh,
     SubscriptionQuota,
     Quota,
+    Warmup,
     Provider,
     Routes,
     Model,
@@ -435,6 +465,10 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
             quota::QuotaCommand::Help => Command::Help(HelpTopic::Quota),
             parsed => Command::Quota(parsed),
         },
+        ["warmup", rest @ ..] => match warmup::parse(rest) {
+            warmup::WarmupCommand::Help => Command::Help(HelpTopic::Warmup),
+            parsed => Command::Warmup(parsed),
+        },
         ["subscription", rest @ ..] => match subscription::parse(rest, flags) {
             Some(parsed) => Command::Subscription(parsed?),
             None => return Err(help_text(HelpTopic::Subscription)),
@@ -447,8 +481,18 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
             patterns: owned(patterns),
         },
         ["models"] => Command::Models { model: None },
-        ["models", model] => Command::Models {
-            model: Some((*model).to_owned()),
+        ["models", "hide", agent, ids @ ..] if !ids.is_empty() => Command::AgentModels {
+            agent: (*agent).to_owned(),
+            hide: owned(ids),
+            unhide: Vec::new(),
+        },
+        ["models", "unhide", agent, ids @ ..] if !ids.is_empty() => Command::AgentModels {
+            agent: (*agent).to_owned(),
+            hide: Vec::new(),
+            unhide: owned(ids),
+        },
+        ["models", token] => Command::Models {
+            model: Some((*token).to_owned()),
         },
         ["accounts", rest @ ..] => match accounts::parse(rest) {
             Some(parsed) => Command::Accounts(parsed?),
@@ -591,6 +635,21 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
         ["provider", ..] => return Err(help_text(HelpTopic::Provider)),
         ["routes"] => Command::Routes,
         ["model", "list"] => Command::ModelList,
+        ["visible", agent, "--only-picked"] => Command::Visible {
+            agent: (*agent).to_owned(),
+            names: Vec::new(),
+            only_picked: Some(true),
+        },
+        ["visible", agent, "--show-new"] => Command::Visible {
+            agent: (*agent).to_owned(),
+            names: Vec::new(),
+            only_picked: Some(false),
+        },
+        ["visible", agent, names @ ..] => Command::Visible {
+            agent: (*agent).to_owned(),
+            names: owned(names),
+            only_picked: None,
+        },
         ["model", "show", id] => Command::ModelShow {
             id: (*id).to_owned(),
         },
@@ -692,6 +751,7 @@ fn help_topic(words: &[&str]) -> Result<HelpTopic, String> {
         ["subscription", "quota", ..] => HelpTopic::SubscriptionQuota,
         ["subscription", ..] => HelpTopic::Subscription,
         ["quota", ..] => HelpTopic::Quota,
+        ["warmup", ..] => HelpTopic::Warmup,
         ["provider", ..] => HelpTopic::Provider,
         ["routes", ..] => HelpTopic::Routes,
         ["model", ..] => HelpTopic::Model,
@@ -735,6 +795,7 @@ fn help_text(topic: HelpTopic) -> String {
         HelpTopic::SubscriptionRefresh => subscription::REFRESH_HELP,
         HelpTopic::SubscriptionQuota => subscription::QUOTA_HELP,
         HelpTopic::Quota => quota::QUOTA_HELP,
+        HelpTopic::Warmup => warmup::WARMUP_HELP,
         HelpTopic::Provider => PROVIDER_HELP,
         HelpTopic::Routes => ROUTES_HELP,
         HelpTopic::Model => MODEL_HELP,
@@ -778,7 +839,10 @@ commands:
   quota [<provider>...] [--json]  print what is left of each subscription
   quota wait <provider|account> [--timeout <duration>] [--quiet]
   quota history [<provider|account>...] [--days <n>] [--json]
+  warmup [--json]  last daily warm-up per account
+  warmup <subscription>/<account>  run warm-up now
   models [<model>]                show catalog spec and prices for route models
+  models <agent>                  when <agent> is an agent id, list shown and hidden models
   models refresh                  refetch the models.dev catalog cache
   models disable <pattern>...     add patterns to [catalog].disabled
   models enable <pattern>...      remove patterns from [catalog].disabled
@@ -803,6 +867,11 @@ commands:
   routes                          list route models, routing strategies, and stays modes
   model list                      list the models routes serve
   model show <id>                 print one routed model
+  visible <agent> <names...>|all  narrow an agent's model list, or show every model
+  visible <agent> --only-picked   show only models picked for the agent
+  visible <agent> --show-new      show models added later again
+  models hide|unhide <agent> <ids...>
+                                  take route ids out of an agent's list, or put them back
 
 Commands that read or change runtime state talk to a running daemon. With
 no daemon they run hofundd once for the command, from hofund's directory or
@@ -1385,6 +1454,22 @@ mod tests {
 
     fn command(values: &[&str]) -> Result<Command, String> {
         parse(&words(values)).map(|(_, command)| command)
+    }
+
+    #[test]
+    fn g2_17_models_token_parses_for_runtime_agent_lookup() {
+        assert_eq!(
+            command(&["models", "Claude-Code"]),
+            Ok(Command::Models {
+                model: Some("Claude-Code".to_owned()),
+            })
+        );
+        assert_eq!(
+            command(&["models", "demo-model"]),
+            Ok(Command::Models {
+                model: Some("demo-model".to_owned()),
+            })
+        );
     }
 
     #[test]

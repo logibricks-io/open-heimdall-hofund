@@ -47,6 +47,7 @@ mod redaction;
 pub mod responses_ws;
 mod subscription;
 mod upstream;
+mod warmup;
 
 /// Process-host handshake. A future host compares this string with the plugin
 /// manifest. Stage 1 has no compile-time consumer.
@@ -92,6 +93,7 @@ pub use upstream::{
     BuildContext, CredentialStyle, DynUpstreamFactory, HeaderName, ListKind, UpstreamFactory,
     UpstreamProvider, UpstreamSpec,
 };
+pub use warmup::{WarmupAccountStatus, WarmupOutcome, WarmupRecord};
 
 #[cfg(test)]
 mod tests {

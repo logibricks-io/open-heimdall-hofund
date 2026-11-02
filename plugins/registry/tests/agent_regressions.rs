@@ -2206,3 +2206,35 @@ fn b7_goose_yaml_comments_survive_pick_clear_and_disconnect() {
         assert!(disconnected.contains(comment), "{comment}: {disconnected}");
     }
 }
+
+#[test]
+fn g2_15_shipped_agents_declare_request_hints() {
+    let claude = hofund_plugin_registry::agent("claude-code").expect("claude-code");
+    assert_eq!(
+        claude.request_agent_header(),
+        Some("x-claude-code-agent-id")
+    );
+    assert!(claude.client_prefixes().is_empty());
+    assert!(claude.nested_turn_headers().is_empty());
+
+    let codex = hofund_plugin_registry::agent("codex").expect("codex");
+    assert!(codex.request_agent_header().is_none());
+    assert_eq!(codex.client_prefixes(), ["codex", "acp-extension-codex"]);
+    assert_eq!(
+        codex.nested_turn_headers(),
+        ["x-codex-window-id", "x-codex-turn-metadata"]
+    );
+
+    for agent in hofund_plugin_registry::agents() {
+        let id = agent.id().as_str();
+        if id == "claude-code" || id == "codex" {
+            continue;
+        }
+        assert!(
+            agent.request_agent_header().is_none(),
+            "{id} request header"
+        );
+        assert!(agent.client_prefixes().is_empty(), "{id} prefixes");
+        assert!(agent.nested_turn_headers().is_empty(), "{id} nested");
+    }
+}

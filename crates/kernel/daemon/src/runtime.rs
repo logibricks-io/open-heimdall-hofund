@@ -72,6 +72,7 @@ pub(crate) struct Runtime {
     model_catalog: OnceLock<Arc<hofund_model_catalog::ModelCatalog>>,
     /// Wakes the subscription task after a publication.
     wake: tokio::sync::Notify,
+    warmup: Arc<crate::warmup::WarmupStore>,
 }
 
 impl Candidate {
@@ -114,6 +115,51 @@ impl Runtime {
             ),
             model_catalog: OnceLock::new(),
             wake: tokio::sync::Notify::new(),
+            warmup: Arc::new(crate::warmup::WarmupStore::new(&crate::beside(
+                path, ".hofund",
+            ))),
+        })
+    }
+
+    /// Same as [`Self::new`], but quota and warm-up scheduling read `clock`.
+    #[cfg(test)]
+    pub(crate) fn new_with_quota_clock(
+        registry: Arc<dyn DaemonRegistry>,
+        path: &Path,
+        max_idle_per_host: Option<usize>,
+        clock: Arc<dyn Fn() -> std::time::SystemTime + Send + Sync>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            registry,
+            cooldowns: Arc::new(Cooldowns::with_clock(
+                CooldownPolicy::default(),
+                Arc::new(|| tokio::time::Instant::now().into_std()),
+            )),
+            rests: Arc::new(Mutex::new(RestStore::new(path))),
+            fingerprints: Mutex::new(HashMap::new()),
+            path: path.to_path_buf(),
+            max_idle_per_host,
+            table: OnceLock::new(),
+            instances: Mutex::new(HashMap::new()),
+            models: OnceLock::new(),
+            config: OnceLock::new(),
+            events: OnceLock::new(),
+            plan: Mutex::new(Plan::default()),
+            polls: tokio::sync::Mutex::new(QuotaPolls::default()),
+            model_polls: tokio::sync::Mutex::new(ModelPolls::default()),
+            quotas: Arc::new(QuotaStore::with_clock(
+                path.parent().unwrap_or_else(|| Path::new(".")),
+                clock,
+            )),
+            affinity: hofund_router::affinity::AffinityState::new(
+                path.parent()
+                    .unwrap_or_else(|| Path::new("."))
+                    .join("affinity.json"),
+            ),
+            wake: tokio::sync::Notify::new(),
+            warmup: Arc::new(crate::warmup::WarmupStore::new(&crate::beside(
+                path, ".hofund",
+            ))),
         })
     }
 
@@ -538,7 +584,6 @@ impl Runtime {
     }
 
     /// The router-facing allowance view of the current quota store.
-    #[cfg(test)]
     pub(crate) fn quota_allowances(&self) -> Vec<hofund_router::quota::Allowance> {
         self.quotas.allowances(self.quotas.now())
     }
@@ -546,6 +591,14 @@ impl Runtime {
     /// The quota store's wall clock.
     pub(crate) fn quota_now(&self) -> std::time::SystemTime {
         self.quotas.now()
+    }
+
+    pub(crate) fn warmup(&self) -> &Arc<crate::warmup::WarmupStore> {
+        &self.warmup
+    }
+
+    pub(crate) fn subscription_states(&self) -> Subscriptions {
+        self.plan.lock().expect("plan").subscriptions.clone()
     }
 
     /// Returns sampled history from the shared store.
@@ -587,6 +640,10 @@ impl Runtime {
 
     pub(crate) fn affinity(&self) -> hofund_router::affinity::AffinityState {
         self.affinity.clone()
+    }
+
+    pub(crate) fn cooldowns(&self) -> &Arc<Cooldowns> {
+        &self.cooldowns
     }
 
     #[cfg(test)]

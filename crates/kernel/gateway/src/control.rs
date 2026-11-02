@@ -20,8 +20,9 @@ use axum::routing::{get, post};
 use futures_util::future::BoxFuture;
 use futures_util::stream::{BoxStream, StreamExt};
 use hofund_control_proto::{
-    AgentChangeResponse, AgentConnectRequest, AgentDisconnectRequest, AgentListResponse,
-    AgentModelRequest, AgentPlanRequest, AgentPlanResponse, AgentStatusResponse,
+    AgentChangeResponse, AgentConnectRequest, AgentDisconnectRequest, AgentHiddenSetRequest,
+    AgentListResponse, AgentModelRequest, AgentModelsResponse, AgentPickedOnlyRequest,
+    AgentPlanRequest, AgentPlanResponse, AgentStatusResponse, AgentVisibleSetRequest,
     CatalogDisabledListResponse, CatalogModelRequest, ConfigApplyRequest, ConfigResponse,
     ConfigValidateRequest, ConfigValidationResponse, ControlError, ControlErrorKind, ErrorEnvelope,
     GatewayKeyRequest, GatewayKeyResponse, GatewayKeyRestoreRequest, HealthResponse, MAX_ID_BYTES,
@@ -30,7 +31,8 @@ use hofund_control_proto::{
     QuotaHistoryQuery, QuotaHistoryResponse, QuotaQuery, QuotaResponse, ReloadRequest,
     RouteListResponse, RouteModelListResponse, RouteQuery, SessionRouteResponse, ShutdownRequest,
     ShutdownResponse, StatusResponse, TokenRotateRequest, TokenRotateResponse, Topic,
-    UnroutedListResponse, UsageQuery, UsageResponse, decode_request,
+    UnroutedListResponse, UsageQuery, UsageResponse, WarmupListResponse, WarmupRunRequest,
+    WarmupRunResponse, decode_request,
 };
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
@@ -295,6 +297,66 @@ pub trait ControlState: Send + Sync {
         id: String,
         request: AgentModelRequest,
     ) -> ControlFuture<'_, AgentChangeResponse>;
+    /// Lists route models shown and hidden for one agent.
+    fn agent_models(&self, id: String) -> ControlFuture<'_, AgentModelsResponse> {
+        let _ = id;
+        Box::pin(async {
+            Err(ControlError::new(
+                ControlErrorKind::BadRequest,
+                "agent model visibility is not supported by this control state",
+                "control",
+            )
+            .into())
+        })
+    }
+    /// Replaces the visibility names for one agent.
+    fn set_agent_visible(
+        &self,
+        id: String,
+        request: AgentVisibleSetRequest,
+    ) -> ControlFuture<'_, ConfigResponse> {
+        let _ = (id, request);
+        Box::pin(async {
+            Err(ControlError::new(
+                ControlErrorKind::BadRequest,
+                "agent model visibility is not supported by this control state",
+                "control",
+            )
+            .into())
+        })
+    }
+    /// Replaces hidden route ids for one agent.
+    fn set_agent_hidden_models(
+        &self,
+        id: String,
+        request: AgentHiddenSetRequest,
+    ) -> ControlFuture<'_, ConfigResponse> {
+        let _ = (id, request);
+        Box::pin(async {
+            Err(ControlError::new(
+                ControlErrorKind::BadRequest,
+                "agent model visibility is not supported by this control state",
+                "control",
+            )
+            .into())
+        })
+    }
+    /// Toggles picked-only mode for one agent.
+    fn set_agent_picked_only(
+        &self,
+        id: String,
+        request: AgentPickedOnlyRequest,
+    ) -> ControlFuture<'_, ConfigResponse> {
+        let _ = (id, request);
+        Box::pin(async {
+            Err(ControlError::new(
+                ControlErrorKind::BadRequest,
+                "agent model visibility is not supported by this control state",
+                "control",
+            )
+            .into())
+        })
+    }
     /// Reports usage for a period.
     fn usage(&self, query: UsageQuery) -> ControlFuture<'_, UsageResponse>;
     /// Reports what is left of every subscription, with each account's
@@ -302,6 +364,28 @@ pub trait ControlState: Send + Sync {
     fn quotas(&self, query: QuotaQuery) -> ControlFuture<'_, QuotaResponse>;
     /// Reports sampled quota history.
     fn quota_history(&self, query: QuotaHistoryQuery) -> ControlFuture<'_, QuotaHistoryResponse>;
+    /// Lists last daily warm-up results per subscription account.
+    fn warmups(&self) -> ControlFuture<'_, WarmupListResponse> {
+        Box::pin(async {
+            Err(ControlError::new(
+                ControlErrorKind::BadRequest,
+                "daily warm-up status is not supported by this control state",
+                "control",
+            )
+            .into())
+        })
+    }
+    /// Runs daily warm-up for one subscription account now.
+    fn run_warmup(&self, _request: WarmupRunRequest) -> ControlFuture<'_, WarmupRunResponse> {
+        Box::pin(async {
+            Err(ControlError::new(
+                ControlErrorKind::BadRequest,
+                "daily warm-up is not supported by this control state",
+                "control",
+            )
+            .into())
+        })
+    }
     /// Lists named gateway keys.
     fn gateway_keys(&self) -> ControlFuture<'_, GatewayKeyResponse> {
         Box::pin(async { Err(unsupported_gateway_keys()) })
@@ -481,6 +565,16 @@ impl Control {
             .route("/v1/hofund/agents/{id}/connect", post(connect_agent))
             .route("/v1/hofund/agents/{id}/disconnect", post(disconnect_agent))
             .route("/v1/hofund/agents/{id}/model", post(set_agent_model))
+            .route("/v1/hofund/agents/{id}/models", get(agent_models))
+            .route("/v1/hofund/agents/{id}/visible", post(set_agent_visible))
+            .route(
+                "/v1/hofund/agents/{id}/hidden_models",
+                post(set_agent_hidden_models),
+            )
+            .route(
+                "/v1/hofund/agents/{id}/picked_only",
+                post(set_agent_picked_only),
+            )
             .route("/v1/hofund/usage", get(usage).head(method_not_allowed))
             .route(
                 "/v1/hofund/gateway-keys",
@@ -501,6 +595,8 @@ impl Control {
                 "/v1/hofund/quotas/history",
                 get(quota_history).head(method_not_allowed),
             )
+            .route("/v1/hofund/warmups", get(warmups).head(method_not_allowed))
+            .route("/v1/hofund/warmups/run", post(run_warmup))
             .route("/v1/hofund/token/rotate", post(rotate_token))
             .route("/v1/hofund/shutdown", post(shutdown))
             .route("/v1/hofund/config", get(config).head(method_not_allowed))
@@ -1038,6 +1134,71 @@ async fn set_agent_model(
     operation_response!(state.control.state.set_agent_model(id, request).await)
 }
 
+async fn agent_models(
+    State(state): State<HttpState>,
+    id: Result<AxumPath<String>, PathRejection>,
+) -> Response {
+    let id = match path_id(id) {
+        Ok(id) => id,
+        Err(failure) => return failure_response(failure),
+    };
+    operation_response!(state.control.state.agent_models(id).await)
+}
+
+async fn set_agent_visible(
+    State(state): State<HttpState>,
+    id: Result<AxumPath<String>, PathRejection>,
+    body: Bytes,
+) -> Response {
+    let id = match path_id(id) {
+        Ok(id) => id,
+        Err(failure) => return failure_response(failure),
+    };
+    let request = match decode_body::<AgentVisibleSetRequest>(&body) {
+        Ok(request) => request,
+        Err(failure) => return failure_response(failure),
+    };
+    operation_response!(state.control.state.set_agent_visible(id, request).await)
+}
+
+async fn set_agent_hidden_models(
+    State(state): State<HttpState>,
+    id: Result<AxumPath<String>, PathRejection>,
+    body: Bytes,
+) -> Response {
+    let id = match path_id(id) {
+        Ok(id) => id,
+        Err(failure) => return failure_response(failure),
+    };
+    let request = match decode_body::<AgentHiddenSetRequest>(&body) {
+        Ok(request) => request,
+        Err(failure) => return failure_response(failure),
+    };
+    operation_response!(
+        state
+            .control
+            .state
+            .set_agent_hidden_models(id, request)
+            .await
+    )
+}
+
+async fn set_agent_picked_only(
+    State(state): State<HttpState>,
+    id: Result<AxumPath<String>, PathRejection>,
+    body: Bytes,
+) -> Response {
+    let id = match path_id(id) {
+        Ok(id) => id,
+        Err(failure) => return failure_response(failure),
+    };
+    let request = match decode_body::<AgentPickedOnlyRequest>(&body) {
+        Ok(request) => request,
+        Err(failure) => return failure_response(failure),
+    };
+    operation_response!(state.control.state.set_agent_picked_only(id, request).await)
+}
+
 async fn usage(
     State(state): State<HttpState>,
     uri: Uri,
@@ -1095,6 +1256,18 @@ async fn quotas(State(state): State<HttpState>, uri: Uri) -> Response {
 async fn quota_history(State(state): State<HttpState>, uri: Uri) -> Response {
     let query = QuotaHistoryQuery::parse(uri.query());
     operation_response!(state.control.state.quota_history(query).await)
+}
+
+async fn warmups(State(state): State<HttpState>) -> Response {
+    operation_response!(state.control.state.warmups().await)
+}
+
+async fn run_warmup(State(state): State<HttpState>, body: Bytes) -> Response {
+    let request = match decode_body::<WarmupRunRequest>(&body) {
+        Ok(request) => request,
+        Err(failure) => return failure_response(failure),
+    };
+    operation_response!(state.control.state.run_warmup(request).await)
 }
 
 async fn rotate_token(State(state): State<HttpState>, body: Bytes) -> Response {

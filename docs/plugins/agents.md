@@ -31,6 +31,18 @@ legacy_model = "GOOSE_MODEL"
 
 `binary_not_go = true` says a Go program with the agent's binary name on `PATH` is another tool. Detection then reads the binary's Go build information (without running it) and ignores a Go program. The answer is cached by path, size and modification time. A check that takes longer than one second counts as the agent; the check finishes in the background and its answer is used next time. A config file that exists still detects the agent either way.
 
+## Request identity
+
+The gateway names the calling agent from the request before it filters the model list. Each descriptor may declare how it is recognized. Omitted keys match nothing.
+
+- `request_agent_header` is one header name. A non-empty value is matched against agent ids and binaries, and a match stops the search.
+- `client_prefixes` is a list of product prefixes. The first token of the User-Agent, and then of the `originator` header, is compared with each agent's id, binary, and these prefixes.
+- `nested_turn_headers` is a list of header names. When any of them is present, this agent is selected even if the User-Agent names another agent.
+
+Each entry must be one non-empty token without whitespace, and list entries must be unique ignoring case.
+
+Claude Code sets `request_agent_header = "x-claude-code-agent-id"`. Codex sets `client_prefixes` to `codex` and `acp-extension-codex`, and `nested_turn_headers` to `x-codex-window-id` and `x-codex-turn-metadata`.
+
 ## File locations and `create`
 
 Multiple `[[file]]` tables with the same `id` are ordered location candidates for one logical file. The optional `create` field defaults to `true`. When no candidate exists, the engine chooses the first candidate with `create = true`; an existing candidate is chosen regardless of this field.

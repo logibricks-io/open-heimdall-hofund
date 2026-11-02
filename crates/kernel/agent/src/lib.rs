@@ -59,11 +59,13 @@ mod credential;
 mod edit;
 mod go_binary;
 mod jsonc_edit;
+mod request_agent;
 mod store;
 mod yaml_edit;
 
 pub use catalog::{Catalog, Compiled, catalog, resolve};
 pub use credential::CREDENTIAL_CHANGE_PREFIX;
+pub use request_agent::request_agent_id;
 
 /// The operating system path template selected by a compiled adapter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

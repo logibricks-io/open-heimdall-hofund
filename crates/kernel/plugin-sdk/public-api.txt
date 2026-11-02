@@ -23,6 +23,7 @@ classify::ModelTags::const fn decides (self) -> bool
 classify::ModelTags::const fn draws (self) -> bool
 classify::ModelTags::const fn films (self) -> bool
 classify::fn classify_model (id : & str , kind : & str) -> Option < ModelTags >
+const daily_warmup::TIMES_KEY
 const page::BODY_CAP
 const page::ERROR_RUNES
 const page::LIST_BUDGET
@@ -33,6 +34,8 @@ const probe::PROBE_WAIT
 const probe::STREAM_CAP
 const wire::FORWARD_CAP
 cursor_pages
+daily_warmup::fn normalize_time (text : & str) -> Result < String , & 'static str >
+daily_warmup::fn read_times (raw : & RawTable) -> Result < Vec < String > , ConfigError >
 digest::fn hmac_sha256 (key : & [u8] , data : & [u8]) -> [u8 ; 32]
 digest::fn sha256 (bytes : & [u8]) -> [u8 ; 32]
 form_body
@@ -50,6 +53,7 @@ jwt::RsaSigner::fn from_pem (text : & str) -> Result < Self , KeyError >
 jwt::RsaSigner::fn sign (& self , header : & Value , claims : & Value) -> Result < String , KeyError >
 mod bedrock
 mod classify
+mod daily_warmup
 mod digest
 mod jwt
 mod oauth

@@ -188,6 +188,7 @@ mod tests {
             providers: Vec::new(),
             routes: Vec::new(),
             subscriptions: Vec::new(),
+            agents: Default::default(),
             discover_agent_accounts: discover,
             warnings: Vec::new(),
             catalog: hofund_config::CatalogSettings::default(),
