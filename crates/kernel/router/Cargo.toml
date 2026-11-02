@@ -27,7 +27,6 @@ thiserror = "2.0.21"
 tracing = "0.1.44"
 
 [dev-dependencies]
-hofund-codec = { workspace = true }
 hofund-config = { workspace = true }
 hofund-ir = { workspace = true }
 hofund-model-catalog = { workspace = true }
