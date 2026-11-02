@@ -21,7 +21,9 @@ use hofund_plugin_sdk::{
 };
 
 use crate::input::{self, sealed};
-use crate::{Kernel, entry, error_response, ids, json_response};
+use crate::{
+    Kernel, capped_models, client_version, entry, error_response, ids, json_response, official,
+};
 
 /// The route prefix Codex's base URL ends with.
 pub(crate) const PREFIX: &str = "/backend-api/codex";
@@ -724,14 +726,24 @@ async fn models(kernel: &dyn Kernel, bases: Bases, request: &HttpRequest) -> Htt
         .filter_map(|model| model.get("priority").and_then(Value::as_u64))
         .max()
         .unwrap_or(0);
+    let cap = !official::reads_whole_catalog(client_version(request));
+    let lookup = official::Lookup::with_codex_home();
     let mut all = own;
     for (rank, id) in ours.iter().enumerate() {
         let priority = usize::try_from(after)
             .unwrap_or(usize::MAX)
             .saturating_add(rank + 1);
-        all.push(entry(id, priority));
+        all.push(entry(id, priority, &lookup));
     }
-    json_response(200, json!({"models": all}).to_string())
+    let (body, left_out) = capped_models(all, cap);
+    let mut response = json_response(200, body);
+    if cap
+        && left_out > 0
+        && let Ok(value) = left_out.to_string().parse()
+    {
+        response.headers_mut().insert(crate::LEFT_OUT_HEADER, value);
+    }
+    response
 }
 
 /// The entries of a backend model list, or none when it is not one.

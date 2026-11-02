@@ -597,9 +597,11 @@ is masked identically to text sent in the current request.
 ## Responses items
 
 `instructions` becomes a leading system message. Encode hoists that message
-back to `instructions` only when it is the sole system message, its body is
-one plain text part, and both bags are empty. Otherwise the system message
-stays an input item.
+back to `instructions` only when the request came from the Responses wire
+(`hofund_responses_wire`). Translated encodes fold every leading system and
+developer message into `instructions`; a system message after an assistant
+turn becomes a user `<system-reminder>` item. Native developer input items
+and Codex-marked developer items stay in `input`.
 
 `input` may be a string (one user text message) or an array. Item types:
 

@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Codex model catalog instructions (D-34): `GET /v1/codex/models` and hofund
+  entries on `GET /backend-api/codex/models` take official Codex text from the
+  bundled 0.166 catalog, optional `CODEX_HOME/models_cache.json`, or
+  `prompt.md`, not hofund-written base instructions. The 1 MiB catalog cap
+  applies only when `client_version` is missing or below 0.166.0.
+- The usage routing strategy no longer sorts pay-as-you-go keys and
+  unread wallets ahead of subscriptions that still have allowance room. In
+  mixed pools it probes learning accounts first, then told shares by use,
+  then shareless seats by wallet balance and recent traffic, then low and
+  spent tiers (D-30).
+- Kimi tool schemas now follow `$ref` chains to the terminal definition
+  before adding `type`, infer array/object shapes before enum values, and
+  leave dangling or cyclic refs untyped (D-31).
+- Translated Responses encodes fold system and developer text into
+  `instructions`, turn late system lines into user `<system-reminder>`
+  messages, and keep native wire developer items in place. A 400 or 422
+  whose JSON says `Upstream request failed` with type `upstream_error`
+  now counts as a shape refusal for failover without rest (D-32).
+- Context overflow detection treats `context window is full` and the
+  matching OpenAI input-length wording as too-long on 400, 413, and 422,
+  but not on 5xx (D-33).
+- Codex backend input ids longer than 64 characters are replaced with a
+  deterministic prefixed SHA-256, except vendor-sealed reasoning items
+  (D-35).
 - Responses empty completed turns with explicit empty `output` and zero usage
   fail over to the next route member instead of returning an empty success
   (D-37).

@@ -2000,6 +2000,7 @@ version = "0.1.0"
 dependencies = [
  "hofund-plugin-api",
  "hofund-plugin-sdk",
+ "tempfile",
 ]
 
 [[package]]

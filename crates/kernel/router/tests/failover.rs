@@ -1032,7 +1032,7 @@ async fn d37_6_empty_completed_in_a_later_chunk_still_fails_over() {
 }
 
 #[tokio::test]
-async fn d37_9_empty_completed_fails_over_while_the_upstream_stays_open() {
+async fn d37_8_empty_completed_fails_over_while_the_upstream_stays_open() {
     let first = Arc::new(AtomicUsize::new(0));
     let second = Arc::new(AtomicUsize::new(0));
     let router = router(vec![

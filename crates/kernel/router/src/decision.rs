@@ -196,6 +196,7 @@ pub(crate) fn allows(error: &PluginError, connect_errors: bool, statuses: &BTree
             || UNSERVED_WORDS.is_match(&text)
             || REFUSED_WORDS.is_match(&text)
             || SHAPE_WORDS.is_match(&text)
+            || upstream_shape_refusal(&text)
             || UNSAID_WORDS.is_match(&text)
             || REGION_WORDS.is_match(&text)
             || wrong_endpoint(status, &text))
@@ -335,6 +336,7 @@ fn shape_refused(status: u16, message: &str) -> bool {
     let text = words_of(message);
     matches!(status, 400 | 422)
         && (SHAPE_WORDS.is_match(&text)
+            || upstream_shape_refusal(&text)
             || UNSAID_WORDS.is_match(&text)
             || CUSTOM_TOOL_REFUSAL.is_match(&text)
             || wrong_endpoint(status, &text))
@@ -342,6 +344,11 @@ fn shape_refused(status: u16, message: &str) -> bool {
         && !CREDIT_WORDS.is_match(&text)
         && !UNSERVED_WORDS.is_match(&text)
         && !REFUSED_WORDS.is_match(&text)
+}
+
+fn upstream_shape_refusal(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    lower.contains("upstream request failed") && lower.contains("upstream_error")
 }
 
 fn model_retired(status: u16, raw: &str, text: &str) -> bool {
@@ -393,6 +400,49 @@ mod tests {
 
     fn none() -> BTreeSet<u16> {
         BTreeSet::new()
+    }
+
+    #[test]
+    fn d32_4_upstream_request_failed_on_400_is_shape_and_failover() {
+        let body = r#"{"error":{"message":"Upstream request failed","type":"upstream_error","code":"bad_response_status_code"}}"#;
+        let error = PluginError::status_error(400, body);
+        assert!(asks_next(&error));
+        assert!(allows(&error, false, &none()));
+        assert!(!rests(&error));
+    }
+
+    #[test]
+    fn d32_5_upstream_request_failed_on_401_is_not_shape() {
+        let body = r#"{"error":{"message":"Upstream request failed","type":"upstream_error"}}"#;
+        let error = PluginError::status_error(401, body);
+        assert!(!asks_next(&error));
+    }
+
+    #[test]
+    fn d32_6_insufficient_quota_stays_quota_not_shape() {
+        let error = PluginError::status_error(
+            400,
+            r#"{"error":{"message":"Upstream request failed insufficient_quota","type":"upstream_error"}}"#,
+        );
+        assert!(!asks_next(&error));
+        assert!(allows(&error, false, &none()));
+    }
+
+    #[test]
+    fn d32_7_upstream_request_failed_alone_is_not_shape() {
+        let error = PluginError::status_error(400, "Upstream request failed");
+        assert!(!asks_next(&error));
+        assert!(!allows(&error, false, &none()));
+    }
+
+    #[test]
+    fn d32_8_upstream_error_type_alone_is_not_shape() {
+        let error = PluginError::status_error(
+            400,
+            r#"{"error":{"message":"bad gateway","type":"upstream_error"}}"#,
+        );
+        assert!(!asks_next(&error));
+        assert!(!allows(&error, false, &none()));
     }
 
     #[test]
