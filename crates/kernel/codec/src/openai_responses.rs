@@ -30,7 +30,6 @@ use crate::{Codec, StreamDecoder, StreamEncoder as StreamEncoderTrait};
 const SEALED_ITEM: &str = "sealed_item";
 const RAW_TOOLS: &str = "hofund_responses_tools";
 const WIRE: &str = "hofund_responses_wire";
-const CODEX_DEVELOPER: &str = "hofund_codex_developer_item";
 
 /// Request-extension key whose array names tools this codec did not map.
 ///
@@ -351,14 +350,10 @@ fn decode_item(item: Value) -> Result<Option<Message>, CodecError> {
                 _ => Vec::new(),
             };
             let _ = object.remove("status");
-            let mut extensions = Extensions::from_map(object);
-            if role == Role::Developer {
-                extensions.insert(CODEX_DEVELOPER, Value::Bool(true));
-            }
             Ok(Some(Message {
                 role,
                 content,
-                extensions,
+                extensions: Extensions::from_map(object),
             }))
         }
         "function_call" => Ok(Some(decode_function_call(object)?)),
@@ -1186,9 +1181,7 @@ fn fold_translated_messages(
                 }
             }
             Role::Developer => {
-                if message.extensions.get(CODEX_DEVELOPER).is_some() {
-                    out.push(message.clone());
-                } else if !past {
+                if !past {
                     append_instruction_text(message, &mut instruction)?;
                 } else {
                     out.push(message.clone());

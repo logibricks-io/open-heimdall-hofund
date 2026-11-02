@@ -366,7 +366,9 @@ fn chat_developer_role_folds_into_responses_instructions() {
         .encode_request(&OpenAiResponses.decode_request(&wire).expect("decode"))
         .expect("chat encode");
     let again: serde_json::Value = serde_json::from_slice(&back).expect("json");
-    assert_eq!(again["messages"][0]["role"], "developer");
+    // Folded instructions come back as the system turn they now are.
+    assert_eq!(again["messages"][0]["role"], "system");
+    assert_eq!(again["messages"][0]["content"], "rules");
 }
 
 #[test]
@@ -1146,4 +1148,9 @@ fn d32_3_native_wire_keeps_developer_items_in_input() {
     assert_eq!(value["instructions"], "codex");
     assert_eq!(value["input"][0]["role"], "developer");
     assert_eq!(value["input"][0]["content"][0]["text"], "client");
+    let item = value["input"][0].as_object().expect("item");
+    assert!(
+        item.keys().all(|key| !key.starts_with("hofund_")),
+        "internal marks stay off the wire: {item:?}"
+    );
 }
