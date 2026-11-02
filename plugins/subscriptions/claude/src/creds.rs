@@ -171,6 +171,42 @@ fn non_empty<'a>(object: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
         .filter(|value| !value.is_empty())
 }
 
+/// The refresh token in a credentials file, when present.
+pub(crate) fn refresh_token(text: &str) -> Option<String> {
+    let Value::Object(root) = hofund_plugin_sdk::json::from_str::<Value>(text).ok()? else {
+        return None;
+    };
+    let oauth = root.get("claudeAiOauth")?.as_object()?;
+    non_empty(oauth, "refreshToken").map(str::to_owned)
+}
+
+/// The access-token expiry Claude Code stores, in milliseconds since the epoch.
+pub(crate) fn expires_at(text: &str) -> Option<i64> {
+    let Value::Object(root) = hofund_plugin_sdk::json::from_str::<Value>(text).ok()? else {
+        return None;
+    };
+    let oauth = root.get("claudeAiOauth")?.as_object()?;
+    oauth.get("expiresAt").and_then(Value::as_i64)
+}
+
+/// Writes `text` to `path` only when the file is missing or its refresh token
+/// matches `expected`.
+pub(crate) fn write_credentials_cas(
+    path: &Path,
+    text: &str,
+    expected: Option<&str>,
+) -> Result<(), PluginError> {
+    if let Some(current) = read_capped(path)
+        && let Some(token) = refresh_token(&current)
+        && expected != Some(token.as_str())
+    {
+        return Err(PluginError::auth(
+            "Claude Code refreshed its sign-in while it was being switched; try again",
+        ));
+    }
+    write_private(path, text)
+}
+
 fn read_capped(path: &Path) -> Option<String> {
     let meta = std::fs::metadata(path).ok()?;
     if !meta.is_file() || meta.len() > FILE_CAP {

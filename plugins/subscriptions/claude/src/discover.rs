@@ -35,24 +35,7 @@ pub(crate) async fn import(
             "unknown agent sign-in reference `{reference}`"
         )));
     }
-    let Some(credentials) = creds::read_credentials(home) else {
-        return Err(PluginError::auth(
-            "Claude Code has no readable sign-in in that directory",
-        ));
-    };
-    let profile = Profile::read(home);
-    let id = profile.account_id()?;
-    if host.accounts().secret(&id).await?.is_some() {
-        return Ok(id);
-    }
-    let label = profile
-        .email()
-        .map(str::to_owned)
-        .unwrap_or_else(|| id.to_string());
-    let blob = creds::blob(&credentials, &profile);
-    let account = host.accounts().account(id.clone(), label)?;
-    host.accounts().upsert(account, blob.to_secret()).await?;
-    Ok(id)
+    crate::agent_sign_in::import_live(home, host).await
 }
 
 #[cfg(test)]
@@ -85,6 +68,90 @@ mod tests {
             r#"{"oauthAccount":{"emailAddress":"user@example.test","accountUuid":"11111111-2222-3333-4444-555555555555"}}"#,
         )
         .expect("profile");
+    }
+
+    fn write_sign_in_with_expiry(home: &Path, refresh: &str, expires_at: i64) {
+        fs::create_dir_all(home).expect("home");
+        fs::write(
+            home.join(".credentials.json"),
+            format!(
+                r#"{{"claudeAiOauth":{{"accessToken":"access-example","refreshToken":"{refresh}","expiresAt":{expires_at}}}}}"#
+            ),
+        )
+        .expect("creds");
+        fs::write(
+            home.join(".claude.json"),
+            r#"{"oauthAccount":{"emailAddress":"user@example.test","accountUuid":"11111111-2222-3333-4444-555555555555"}}"#,
+        )
+        .expect("profile");
+    }
+
+    #[test]
+    fn d36_15_import_rejects_older_than_configured_live_dir() {
+        let dir = scratch("configured-live");
+        let live = dir.path().join("configured-live");
+        write_sign_in_with_expiry(&live, "rt-configured", 8000);
+        crate::cli::test_configured_dir(Some(live));
+        let home = dir.path().join("import-home");
+        write_sign_in_with_expiry(&home, "rt-import", 1000);
+        let host = TestHost::open_for(
+            PluginKind::Subscription,
+            PluginId::from_static("claude"),
+            dir.path(),
+        );
+        let id = account_id_from(&["claude", "11111111-2222-3333-4444-555555555555"]);
+        let stored = SecretObject::new()
+            .with_text(
+                creds::CREDENTIALS,
+                r#"{"claudeAiOauth":{"accessToken":"stored","refreshToken":"rt-stored","expiresAt":500}}"#,
+            )
+            .to_secret();
+        let account = host
+            .context()
+            .accounts()
+            .account(id.clone(), "stored")
+            .expect("account");
+        block_on(host.context().accounts().upsert(account, stored)).expect("upsert");
+        let error =
+            block_on(crate::agent_sign_in::import_live(&home, host.context())).expect_err("older");
+        assert!(
+            error
+                .to_string()
+                .contains(crate::agent_sign_in::IMPORT_EXISTS)
+        );
+        crate::cli::test_configured_dir(None);
+    }
+
+    #[test]
+    fn d36_10_discover_import_rejects_older_than_live_sign_in() {
+        let dir = scratch("older-live");
+        let home = dir.path().join("claude-home");
+        write_sign_in_with_expiry(&home, "rt-live", 2000);
+        let host = TestHost::open_for(
+            PluginKind::Subscription,
+            PluginId::from_static("claude"),
+            dir.path(),
+        );
+        let id = account_id_from(&["claude", "11111111-2222-3333-4444-555555555555"]);
+        let stored = SecretObject::new()
+            .with_text(
+                creds::CREDENTIALS,
+                r#"{"claudeAiOauth":{"accessToken":"stored","refreshToken":"rt-stored","expiresAt":3000}}"#,
+            )
+            .to_secret();
+        let account = host
+            .context()
+            .accounts()
+            .account(id.clone(), "stored")
+            .expect("account");
+        block_on(host.context().accounts().upsert(account, stored)).expect("upsert");
+        let error =
+            block_on(crate::agent_sign_in::import_live(&home, host.context())).expect_err("older");
+        assert!(
+            error
+                .to_string()
+                .contains(crate::agent_sign_in::IMPORT_EXISTS)
+        );
     }
 
     #[test]
@@ -126,7 +193,10 @@ mod tests {
         );
         let id = account_id_from(&["claude", "11111111-2222-3333-4444-555555555555"]);
         let marker = SecretObject::new()
-            .with_text("credentials", "marker-unchanged")
+            .with_text(
+                "credentials",
+                r#"{"claudeAiOauth":{"accessToken":"access-example","refreshToken":"refresh-example"}}"#,
+            )
             .to_secret();
         let account = host
             .context()
@@ -139,7 +209,12 @@ mod tests {
             .expect("read")
             .expect("stored");
         let blob = SecretObject::parse(&after).expect("parse");
-        assert_eq!(blob.text("credentials"), Some("marker-unchanged"));
+        assert_eq!(
+            blob.text("credentials"),
+            Some(
+                r#"{"claudeAiOauth":{"accessToken":"access-example","refreshToken":"refresh-example"}}"#
+            )
+        );
     }
 
     #[test]
