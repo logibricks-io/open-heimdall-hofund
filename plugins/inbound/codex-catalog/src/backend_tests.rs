@@ -1515,3 +1515,31 @@ fn d10e_an_unrelated_refusal_is_returned_without_a_retry() {
     assert_eq!((status, body.as_str()), (400, refusal));
     assert_eq!(stub.sent().len(), 1);
 }
+
+#[test]
+fn d34_14_the_backend_list_is_capped_only_for_old_codex() {
+    let ids: Vec<String> = (0..600).map(|n| format!("many/model-{n:03}")).collect();
+    let names: Vec<&str> = ids.iter().map(String::as_str).collect();
+    let own = json!({"models": [{"slug": "gpt-5", "priority": 5}]}).to_string();
+    let count = |target: &str| {
+        let stub = Stub::default()
+            .sending(answer(200, own.clone()))
+            .listing(&names);
+        let (status, _, body) = ask(
+            &stub,
+            request(
+                "GET",
+                target,
+                &[("authorization", "Bearer sk-signed-in")],
+                "",
+            ),
+        );
+        assert_eq!(status, 200, "{target}");
+        slugs(&body).len()
+    };
+    assert!(count("/backend-api/codex/models?client_version=0.150.0") < ids.len() + 1);
+    assert_eq!(
+        count("/backend-api/codex/models?client_version=0.166.0"),
+        ids.len() + 1
+    );
+}

@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Codex model catalog instructions (D-34): `GET /v1/codex/models` and hofund
+  entries on `GET /backend-api/codex/models` take official Codex text from the
+  bundled 0.166 catalog, optional `CODEX_HOME/models_cache.json`, or
+  `prompt.md`, not hofund-written base instructions. The 1 MiB catalog cap
+  applies only when `client_version` is missing or below 0.166.0.
 - The usage routing strategy no longer sorts pay-as-you-go keys and
   unread wallets ahead of subscriptions that still have allowance room. In
   mixed pools it probes learning accounts first, then told shares by use,
