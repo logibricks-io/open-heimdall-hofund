@@ -958,28 +958,21 @@ fn first_usable(seats: &[Seat], from: usize) -> Option<usize> {
     None
 }
 
-/// The seat drain routing asks first. A pool with no usable seat keeps its
-/// remembered choice, so a moment when every member rests does not move it.
+/// The seat drain routing asks first: the first usable seat from the one that
+/// last answered (`record_drain`), wrapping. A pool with no usable seat starts
+/// from the remembered one. Ordering never changes the remembered seat; only
+/// an answer does.
 fn pick_drain(pool: &str, seats: &[Seat], state: &StrategyState) -> usize {
-    let mut pools = state.lock();
-    let from = pools
+    let from = state
+        .lock()
         .drains
         .get(pool)
         .and_then(|key| seats.iter().position(|seat| seat.key == *key))
         .unwrap_or(0);
-    let Some(chosen) = first_usable(seats, from) else {
-        return from;
-    };
-    pools
-        .drains
-        .insert(pool.to_owned(), seats[chosen].key.clone());
-    chosen
+    first_usable(seats, from).unwrap_or(from)
 }
 
 fn drain(pool: &str, seats: &[Seat], state: &StrategyState) -> Vec<usize> {
-    if seats.is_empty() {
-        return Vec::new();
-    }
     let start = pick_drain(pool, seats, state);
     (0..seats.len())
         .map(|offset| (start + offset) % seats.len())
@@ -1766,6 +1759,26 @@ mod tests {
     fn d41_13_drain_orders_an_empty_pool_without_panicking() {
         let state = StrategyState::with_builtins();
         assert!(super::drain("pool", &[], &state).is_empty());
+    }
+
+    #[test]
+    fn d41_16_drain_keeps_a_member_short_of_a_full_allowance() {
+        let state = StrategyState::with_builtins();
+        let mut seats = self::seats(&["a", "b"]);
+        seats[0].used = 99.0;
+        assert_eq!(drain_picks(&state, "pool", &seats, 1), ["a"]);
+    }
+
+    #[test]
+    fn d41_17_ordering_alone_does_not_move_the_drain_choice() {
+        let state = StrategyState::with_builtins();
+        let mut seats = self::seats(&["a", "b", "c"]);
+        seats[0].resting = true;
+        assert_eq!(drain_picks(&state, "pool", &seats, 1), ["b"]);
+        seats[0].resting = false;
+        assert_eq!(drain_picks(&state, "pool", &seats, 1), ["a"]);
+        state.record_drain("pool", "b");
+        assert_eq!(drain_picks(&state, "pool", &seats, 1), ["b"]);
     }
 
     #[test]

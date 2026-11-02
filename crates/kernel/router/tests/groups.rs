@@ -564,3 +564,30 @@ async fn d41_15_drain_inside_a_group_keeps_the_member_that_answered() {
     dispatch(&router).await;
     assert_eq!(*seen.lock().expect("seen"), ["a", "b", "b"]);
 }
+
+#[tokio::test]
+async fn d41_18_drain_sinks_a_rate_limited_member_like_order() {
+    let now = Arc::new(Mutex::new(Instant::now()));
+    let clock = Arc::clone(&now);
+    let cooldowns = Arc::new(Cooldowns::with_clock(
+        CooldownPolicy::default(),
+        Arc::new(move || *clock.lock().expect("clock")),
+    ));
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let route = Route::new(vec![
+        hop("a", direct("a", 1), 1, &seen),
+        hop("b", direct("b", 1), 1, &seen),
+    ])
+    .with_routing("drain")
+    .with_sink(true);
+    let router = router(route).with_cooldowns(Arc::clone(&cooldowns));
+    cooldowns.record_failure_for_model(
+        &member_id("a"),
+        "demo",
+        &PluginError::status_error(429, "slow"),
+    );
+    *now.lock().expect("clock") += Duration::from_secs(61);
+    cooldowns.record_success_for_model(&member_id("a"), "demo");
+    dispatch(&router).await;
+    assert_eq!(*seen.lock().expect("seen"), ["b"]);
+}

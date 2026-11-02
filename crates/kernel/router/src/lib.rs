@@ -1171,7 +1171,7 @@ impl Router {
             .flat_map(|index| groups[index].2.clone())
             .collect::<Vec<_>>();
         if sink
-            && !matches!(routing, "rotate" | "weight" | "drain")
+            && !matches!(routing, "rotate" | "weight")
             && let Some(cooldowns) = &self.cooldowns
         {
             ordered.sort_by_key(|hop| {
