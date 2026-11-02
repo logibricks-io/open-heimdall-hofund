@@ -11,14 +11,34 @@ use crate::account;
 
 const WAIT: Duration = Duration::from_secs(90);
 const POLL: Duration = Duration::from_millis(50);
+const MARK_ATTEMPTS: usize = 64;
 
 static TEST_WAIT: AtomicU64 = AtomicU64::new(0);
 static RUN_SEQ: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(test)]
+thread_local! {
+    static TEST_MARK_PID: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    static TEST_MARK_SEQ: std::cell::Cell<u64> = const { std::cell::Cell::new(u64::MAX) };
+}
 
 /// Overrides the run-lock wait in tests. Zero restores the default.
 #[cfg(test)]
 pub(crate) fn test_run_wait(wait: Duration) {
     TEST_WAIT.store(wait.as_millis() as u64, Ordering::Relaxed);
+}
+
+/// Fixes the next mark file's pid and sequence in tests.
+#[cfg(test)]
+pub(crate) fn test_mark_identity(pid: u32, seq: u64) {
+    TEST_MARK_PID.with(|slot| slot.set(pid));
+    TEST_MARK_SEQ.with(|slot| slot.set(seq));
+}
+
+#[cfg(test)]
+pub(crate) fn clear_test_mark_identity() {
+    TEST_MARK_PID.with(|slot| slot.set(0));
+    TEST_MARK_SEQ.with(|slot| slot.set(u64::MAX));
 }
 
 fn wait_limit() -> Duration {
@@ -30,13 +50,53 @@ fn wait_limit() -> Duration {
     }
 }
 
+fn mark_process_id() -> u32 {
+    #[cfg(test)]
+    {
+        let injected = TEST_MARK_PID.with(|slot| slot.get());
+        if injected != 0 {
+            return injected;
+        }
+    }
+    mark_process_id_platform()
+}
+
+#[cfg(unix)]
+fn mark_process_id_platform() -> u32 {
+    std::fs::read_link("/proc/self")
+        .ok()
+        .and_then(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str()?.parse().ok())
+        })
+        .unwrap_or(0)
+}
+
+#[cfg(not(unix))]
+fn mark_process_id_platform() -> u32 {
+    0
+}
+
+fn next_mark_seq() -> u64 {
+    #[cfg(test)]
+    {
+        let fixed = TEST_MARK_SEQ.with(|slot| slot.get());
+        if fixed != u64::MAX {
+            return fixed;
+        }
+    }
+    RUN_SEQ.fetch_add(1, Ordering::Relaxed)
+}
+
 fn mark_path(dir: &Path) -> PathBuf {
     let parent = dir.parent().unwrap_or_else(|| Path::new("."));
     let name = dir
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("account");
-    parent.join(format!("{name}.run-{}.lock", RUN_SEQ.fetch_add(1, Ordering::Relaxed)))
+    let pid = mark_process_id();
+    let seq = next_mark_seq();
+    parent.join(format!("{name}.run-{pid}-{seq}.lock"))
 }
 
 fn list_marks(dir: &Path) -> Vec<PathBuf> {
@@ -78,11 +138,28 @@ pub(crate) fn mark(account: &AccountId, host: &HostContext) -> Result<RunMark, P
     if let Some(parent) = dir.parent() {
         std::fs::create_dir_all(parent).map_err(|error| PluginError::io(error.to_string()))?;
     }
-    let path = mark_path(&dir);
-    let file = open_lock(&path)?;
-    file.try_lock()
-        .map_err(|error| PluginError::io(error.to_string()))?;
-    Ok(RunMark { path, file })
+    for _ in 0..MARK_ATTEMPTS {
+        let path = mark_path(&dir);
+        let file = open_lock(&path)?;
+        match file.try_lock() {
+            Ok(()) => return Ok(RunMark { path, file }),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                let _ = std::fs::remove_file(&path);
+            }
+            Err(std::fs::TryLockError::Error(error)) => {
+                return Err(PluginError::io(error.to_string()));
+            }
+        }
+    }
+    Err(PluginError::io(
+        "could not create a run mark beside the account directory",
+    ))
+}
+
+enum WaitLockOutcome {
+    Acquired,
+    TimedOut,
+    Gone,
 }
 
 /// Waits until no other process runs Claude Code in the account directory.
@@ -90,22 +167,51 @@ pub(crate) fn mark(account: &AccountId, host: &HostContext) -> Result<RunMark, P
 /// # Errors
 ///
 /// Returns [`PluginError`] when a run is still marked past the wait limit.
-pub(crate) fn wait(account: &AccountId, host: &HostContext) -> Result<(), PluginError> {
+pub(crate) async fn wait(account: &AccountId, host: &HostContext) -> Result<(), PluginError> {
     let dir = account::account_dir(host, account)?;
     let deadline = Instant::now() + wait_limit();
     for mark in list_marks(&dir) {
         let wait = deadline.saturating_duration_since(Instant::now());
-        let started = Instant::now();
         let file = open_lock(&mark)?;
-        if try_wait_lock(&file, wait).is_err() && started.elapsed() >= wait {
-            return Err(PluginError::auth(
-                "Claude Code is still running on this account for hofund (its usage or a warm-up): try again in a moment",
-            ));
+        match wait_for_lock(&file, &mark, wait).await? {
+            WaitLockOutcome::Acquired => {
+                let _ = file.unlock();
+                let _ = std::fs::remove_file(&mark);
+            }
+            WaitLockOutcome::TimedOut => {
+                return Err(PluginError::auth(
+                    "Claude Code is still running on this account for hofund (its usage or a warm-up): try again in a moment",
+                ));
+            }
+            WaitLockOutcome::Gone => {}
         }
-        let _ = file.unlock();
-        let _ = std::fs::remove_file(&mark);
     }
     Ok(())
+}
+
+async fn wait_for_lock(
+    file: &File,
+    mark: &Path,
+    wait: Duration,
+) -> Result<WaitLockOutcome, PluginError> {
+    let started = Instant::now();
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(WaitLockOutcome::Acquired),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                if started.elapsed() >= wait {
+                    return Ok(WaitLockOutcome::TimedOut);
+                }
+                hofund_plugin_sdk::sleep(POLL.min(wait.saturating_sub(started.elapsed()))).await;
+            }
+            Err(std::fs::TryLockError::Error(error)) => {
+                if !mark.exists() {
+                    return Ok(WaitLockOutcome::Gone);
+                }
+                return Err(PluginError::io(error.to_string()));
+            }
+        }
+    }
 }
 
 fn open_lock(path: &Path) -> Result<File, PluginError> {
@@ -119,20 +225,4 @@ fn open_lock(path: &Path) -> Result<File, PluginError> {
     options
         .open(path)
         .map_err(|error| PluginError::io(error.to_string()))
-}
-
-fn try_wait_lock(file: &File, wait: Duration) -> Result<(), ()> {
-    let started = Instant::now();
-    loop {
-        match file.try_lock() {
-            Ok(()) => return Ok(()),
-            Err(std::fs::TryLockError::WouldBlock) => {
-                if started.elapsed() >= wait {
-                    return Err(());
-                }
-                std::thread::sleep(POLL.min(wait.saturating_sub(started.elapsed())));
-            }
-            Err(std::fs::TryLockError::Error(_)) => return Err(()),
-        }
-    }
 }
