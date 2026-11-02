@@ -11,7 +11,6 @@ const TESTDATA: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/codex-rust
 #[test]
 fn d34_7_embedded_instructions_match_testdata() {
     let bundled = include_str!("codex_instructions.json");
-    let prompt: json::Value = json::from_str(include_str!("prompt.json")).expect("prompt json");
     let models_path = PathBuf::from(TESTDATA).join("models.json");
     let prompt_path = PathBuf::from(TESTDATA).join("prompt.json");
     let models: json::Value =
@@ -28,8 +27,7 @@ fn d34_7_embedded_instructions_match_testdata() {
     assert_eq!(got, expected);
     let snapshot: json::Value =
         json::from_slice(&std::fs::read(prompt_path).expect("prompt.json")).expect("json");
-    assert_eq!(prompt["prompt"], snapshot["prompt"]);
-    assert_eq!(prompt["prompt"].as_str(), Some(unknown_model_prompt()));
+    assert_eq!(snapshot["prompt"].as_str(), Some(unknown_model_prompt()));
     // byte for byte the upstream prompt.md (20903 bytes), its non-ASCII kept
     assert_eq!(unknown_model_prompt().len(), 20903);
     assert!(unknown_model_prompt().starts_with("You are a coding agent"));

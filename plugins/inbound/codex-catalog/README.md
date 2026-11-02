@@ -15,7 +15,8 @@ Resolution order for a gateway model id:
    `testdata/codex-rust-v0.166.0/models.json` (`instructions_template` per slug).
    Slugs match Codex 0.166: longest bundled slug whose name equals the model's
    last `/` segment or is a prefix ending at `-`.
-3. **`prompt.md`** (`src/official/prompt.md`) for unknown models and `group/…`
+3. **`prompt.md`** (`src/official/prompt.rs`, an ASCII string literal decoded
+   byte for byte from `testdata/codex-rust-v0.166.0/prompt.json`) for unknown models and `group/…`
    routing routes.
 
 The canonical snapshot lives under `testdata/codex-rust-v0.166.0/` with source
