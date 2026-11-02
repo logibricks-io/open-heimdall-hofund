@@ -17,6 +17,10 @@ const DEV_FIXTURE: &str = r#"{
       "gpt-demo": {
         "id": "gpt-demo",
         "cost": {"input": 2.5, "output": 10.0}
+      },
+      "beta": {
+        "id": "beta",
+        "cost": {"input": 9.0, "output": 9.0, "cache_read": 0.5, "cache_write": 1.25}
       }
     }
   }
@@ -340,4 +344,91 @@ fn u1b_15_one_hour_write_doubles_input_only_for_named_families() {
         .resolve("relay", "famx-large", None, false)
         .expect("plain");
     assert!(plain.cache_write_1h.abs() < f64::EPSILON);
+}
+
+struct ZeroCacheList;
+
+impl ListPriceLookup for ZeroCacheList {
+    fn list_price(&self, provider_id: &str, model: &str) -> Option<Price> {
+        (provider_id == "listed" && model == "beta").then_some(Price {
+            input: 1.0,
+            output: 2.0,
+            cache_read: 0.0,
+            cache_write: 0.0,
+            cache_write_1h: 0.0,
+        })
+    }
+}
+
+#[test]
+fn u1b_16_list_price_takes_missing_cache_rates_from_catalog() {
+    let dir = tempfile::tempdir().expect("dir");
+    let catalog = seeded_catalog(dir.path());
+    let pricer = EffectivePricer::new(UsageSettings::default(), catalog, Arc::new(ZeroCacheList));
+    let price = pricer
+        .resolve("listed", "beta", None, false)
+        .expect("list price");
+    assert!((price.input - 1.0).abs() < f64::EPSILON);
+    assert!((price.cache_read - 0.5).abs() < f64::EPSILON);
+    assert!((price.cache_write - 1.25).abs() < f64::EPSILON);
+}
+
+#[test]
+fn u1b_17_free_provider_costs_nothing_even_with_a_custom_price() {
+    let mut prices = BTreeMap::new();
+    prices.insert(
+        "free/model".to_owned(),
+        ModelPriceOverride {
+            input: 5.0,
+            output: 5.0,
+            cache_read: 0.0,
+            cache_write: 0.0,
+            cache_write_1h: None,
+        },
+    );
+    let price = pricer(UsageSettings {
+        prices,
+        ..UsageSettings::default()
+    })
+    .resolve("free", "model", None, true)
+    .expect("free price");
+    assert!(price.input.abs() < f64::EPSILON);
+    assert!(price.output.abs() < f64::EPSILON);
+}
+
+#[test]
+fn u1b_18_one_hour_writes_are_capped_at_the_write_total() {
+    let price = TokenPrice {
+        input: 0.0,
+        output: 0.0,
+        cache_read: 0.0,
+        cache_write: 1.0,
+        cache_write_1h: 2.0,
+    };
+    let cost = price.cost_split(0, 0, 0, 1_000_000, 3_000_000);
+    assert!((cost - 2.0).abs() < 1e-9);
+}
+
+#[test]
+fn u1b_19_uncached_input_is_billed_instead_of_total_input() {
+    let price = TokenPrice {
+        input: 1.0,
+        output: 0.0,
+        cache_read: 0.0,
+        cache_write: 0.0,
+        cache_write_1h: 0.0,
+    };
+    let details = UsageDetails {
+        uncached_input_tokens: Some(400_000),
+        ..UsageDetails::default()
+    };
+    let cost = price.cost_for_row(Some(1_000_000), None, details);
+    assert!((cost - 0.4).abs() < 1e-9);
+}
+
+#[test]
+fn u1b_20_zero_token_rows_are_not_token_bearing() {
+    assert!(!hofund_usage::token_bearing(Some(0), Some(0)));
+    assert!(!hofund_usage::token_bearing(None, None));
+    assert!(hofund_usage::token_bearing(Some(1), None));
 }
