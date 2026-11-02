@@ -111,14 +111,13 @@ pub fn decoded_stream_empty(events: &[hofund_ir::StreamEvent]) -> bool {
             StreamEvent::MessageStop(_) => saw_terminal = true,
             _ => {}
         }
-        if let StreamEvent::MessageStart(start) = event {
-            if start
+        if let StreamEvent::MessageStart(start) = event
+            && start
                 .usage
                 .as_ref()
                 .is_some_and(|usage| usage.input_tokens.unwrap_or(0) > 0)
-            {
-                saw_content = true;
-            }
+        {
+            saw_content = true;
         }
         if let StreamEvent::Unknown(unknown) = event
             && unknown.name == "response.completed"

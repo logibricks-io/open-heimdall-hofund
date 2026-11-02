@@ -17,9 +17,9 @@ mod prev_response;
 mod quotas;
 mod readonly;
 mod refusal_handover;
-mod usage_handoff;
 mod relisten;
 mod responses_ws;
+mod usage_handoff;
 
 pub use endpoints::{GENERATIVE_LIST, GENERATIVE_STREAM, GENERATIVE_UNARY};
 #[doc(hidden)]
@@ -1842,17 +1842,18 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
     .with_body(bytes.to_vec());
     let router = app.snapshot.load();
     let inner_hook = ask.as_ref().map(|ask| ask.attempt());
-    let attempt: Option<Arc<dyn AttemptHook>> = Some(Arc::new(usage_handoff::UsageHandoffHook::new(
-        usage_handoff::UsageHandoffContext {
-            usage: Arc::clone(&app.usage),
-            model: model_request.model.clone(),
-            caller_key_id: identity.key_id.clone(),
-            caller_key_name: identity.key_name.clone(),
-            caller_issuer_id: identity.issuer.clone(),
-            started,
-        },
-        inner_hook,
-    )));
+    let attempt: Option<Arc<dyn AttemptHook>> =
+        Some(Arc::new(usage_handoff::UsageHandoffHook::new(
+            usage_handoff::UsageHandoffContext {
+                usage: Arc::clone(&app.usage),
+                model: model_request.model.clone(),
+                caller_key_id: identity.key_id.clone(),
+                caller_key_name: identity.key_name.clone(),
+                caller_issuer_id: identity.issuer.clone(),
+                started,
+            },
+            inner_hook,
+        )));
     if let Some(hold) = &unrouted_hold {
         hold.set_asked(&model_request.model);
     }

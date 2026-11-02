@@ -74,7 +74,7 @@ pub struct PluginError {
     credit: bool,
     credit_soon: bool,
     cooldown: bool,
-    billed: Option<BilledUsage>,
+    billed: Option<Box<BilledUsage>>,
     #[source]
     cause: Option<Box<dyn Error + Send + Sync>>,
 }
@@ -233,7 +233,7 @@ impl PluginError {
     #[must_use]
     pub fn with_billed(mut self, billed: BilledUsage) -> Self {
         if billed.token_bearing() {
-            self.billed = Some(billed);
+            self.billed = Some(Box::new(billed));
         }
         self
     }
@@ -241,7 +241,7 @@ impl PluginError {
     /// Token counts billed before this try failed, when any were reported.
     #[must_use]
     pub fn billed(&self) -> Option<&BilledUsage> {
-        self.billed.as_ref()
+        self.billed.as_deref()
     }
 
     /// How the call failed.

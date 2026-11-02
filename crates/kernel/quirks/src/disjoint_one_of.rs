@@ -50,8 +50,13 @@ fn collect_edits(node: &Node, value: &Value, in_schema: bool, edits: &mut Vec<Ed
                     let next_schema = in_schema
                         || matches!(
                             member.key.as_str(),
-                            "parameters" | "input_schema" | "function" | "properties" | "items"
-                                | "$defs" | "definitions"
+                            "parameters"
+                                | "input_schema"
+                                | "function"
+                                | "properties"
+                                | "items"
+                                | "$defs"
+                                | "definitions"
                         );
                     if let Some(child) = child {
                         collect_edits(&member.value, child, next_schema, edits);
@@ -102,7 +107,10 @@ fn scan_branch(value: &Value, info: &mut BranchInfo) {
     if map.contains_key("patternProperties") {
         info.loose = true;
     }
-    if map.keys().any(|key| matches!(key.as_str(), "anyOf" | "oneOf" | "allOf" | "not")) {
+    if map
+        .keys()
+        .any(|key| matches!(key.as_str(), "anyOf" | "oneOf" | "allOf" | "not"))
+    {
         info.loose = true;
     }
     if map.get("additionalProperties").and_then(Value::as_bool) == Some(false)
@@ -218,10 +226,9 @@ mod tests {
 
     #[test]
     fn nullable_union_is_not_disjoint() {
-        let branches: Vec<serde_json::Value> = serde_json::from_str(
-            r#"[{"type":"string","enum":["x"]},{"type":"null"}]"#,
-        )
-        .expect("json");
+        let branches: Vec<serde_json::Value> =
+            serde_json::from_str(r#"[{"type":"string","enum":["x"]},{"type":"null"}]"#)
+                .expect("json");
         assert!(!super::branches_disjoint(&branches));
     }
 }

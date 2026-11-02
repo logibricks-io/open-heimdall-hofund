@@ -775,7 +775,10 @@ fn grok_custom_tools(body: &[u8]) -> Vec<u8> {
     let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(body) else {
         return body.to_vec();
     };
-    let Some(tools) = value.get_mut("tools").and_then(serde_json::Value::as_array_mut) else {
+    let Some(tools) = value
+        .get_mut("tools")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
         return body.to_vec();
     };
     for tool in tools {
@@ -791,8 +794,11 @@ fn grok_custom_tools(body: &[u8]) -> Vec<u8> {
             .get("input_schema")
             .cloned()
             .unwrap_or_else(grok_custom_parameters);
-        tool.as_object_mut().map(|object| {
-            object.insert("type".to_owned(), serde_json::Value::String("function".to_owned()));
+        if let Some(object) = tool.as_object_mut() {
+            object.insert(
+                "type".to_owned(),
+                serde_json::Value::String("function".to_owned()),
+            );
             object.insert(
                 "function".to_owned(),
                 serde_json::json!({
@@ -800,7 +806,7 @@ fn grok_custom_tools(body: &[u8]) -> Vec<u8> {
                     "parameters": schema,
                 }),
             );
-        });
+        }
     }
     serde_json::to_vec(&value).unwrap_or_else(|_| body.to_vec())
 }

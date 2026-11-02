@@ -138,7 +138,12 @@ impl AttemptHook for SealedHook {
         }
     }
 
-    fn failed_handoff(&self, attempt: &Attempt, status: u16, billed: hofund_plugin_api::BilledUsage) {
+    fn failed_handoff(
+        &self,
+        attempt: &Attempt,
+        status: u16,
+        billed: hofund_plugin_api::BilledUsage,
+    ) {
         if let Some(inner) = &self.inner {
             inner.failed_handoff(attempt, status, billed);
         }

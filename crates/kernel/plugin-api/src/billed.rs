@@ -31,9 +31,7 @@ impl BilledUsage {
         merge_i64(&mut self.cache_read_tokens, usage.cache_read_tokens);
         merge_i64(
             &mut self.cache_write_5m_tokens,
-            usage
-                .cache_write_5m_tokens
-                .or(usage.cache_write_tokens),
+            usage.cache_write_5m_tokens.or(usage.cache_write_tokens),
         );
         merge_i64(&mut self.cache_write_1h_tokens, usage.cache_write_1h_tokens);
     }

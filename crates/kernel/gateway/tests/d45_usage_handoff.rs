@@ -179,11 +179,7 @@ async fn d45_1_streamed_billed_failure_writes_handed_on_then_success() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(
-        first.hits(),
-        1,
-        "first hits; status={status} body={body}"
-    );
+    assert_eq!(first.hits(), 1, "first hits; status={status} body={body}");
     assert_eq!(second.hits(), 1, "second hits; body={body}");
     let (rows, totals) = usage.summary(Window::All.since_now(), 10).expect("summary");
     assert_eq!(rows.len(), 2);
