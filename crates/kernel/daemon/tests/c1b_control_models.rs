@@ -224,6 +224,45 @@ async fn c1b_17_control_route_models_hide_retired_and_disabled() {
     with_step("daemon shutdown", running.shutdown()).await;
 }
 
+#[tokio::test]
+async fn c1b_18_control_disable_twice_then_enable_within_timeout() {
+    let _lock = serial().await;
+    let server = MockServer::start().await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let running = start(dir.path(), &base_config(&server)).await;
+    let control = ControlClient::new(&running, dir.path());
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let (status, _) = control
+            .post(
+                "/v1/hofund/models/disable",
+                &CatalogModelRequest::new("routed"),
+            )
+            .await;
+        assert_eq!(status, reqwest::StatusCode::OK);
+        let (status, _) = control
+            .post(
+                "/v1/hofund/models/disable",
+                &CatalogModelRequest::new("live"),
+            )
+            .await;
+        assert_eq!(status, reqwest::StatusCode::OK);
+        let (status, body) = control
+            .post(
+                "/v1/hofund/models/enable",
+                &CatalogModelRequest::new("routed"),
+            )
+            .await;
+        assert_eq!(status, reqwest::StatusCode::OK);
+        let enabled: CatalogDisabledListResponse =
+            decode_response(API_VERSION, &body).expect("enabled list");
+        assert!(!enabled.disabled.iter().any(|row| row == "routed"));
+        assert!(enabled.disabled.iter().any(|row| row == "live"));
+    })
+    .await
+    .expect("control catalog disable/enable deadlocked or stalled");
+    with_step("daemon shutdown", running.shutdown()).await;
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn c1b_14_unix_ipc_disable_catalog_model() {
