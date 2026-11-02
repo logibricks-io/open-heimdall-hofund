@@ -122,18 +122,20 @@ impl LockGuard {
 /// # Errors
 ///
 /// Returns [`PluginError`] when a lock stays held past the wait limit.
-pub(crate) fn refresh_locks(config_dir: &Path) -> Result<RefreshLocks, PluginError> {
+pub(crate) async fn refresh_locks(config_dir: &Path) -> Result<RefreshLocks, PluginError> {
     if !config_dir.is_dir() {
         return Err(PluginError::io(
             "the Claude Code config directory is missing",
         ));
     }
-    let mut refresh = take_lock(&config_dir.join(".oauth_refresh.lock"), refresh_stale())?;
+    let mut refresh = take_lock(&config_dir.join(".oauth_refresh.lock"), refresh_stale()).await?;
     let resolved = std::fs::canonicalize(config_dir).unwrap_or_else(|_| config_dir.to_path_buf());
     let legacy = match take_lock(
         &PathBuf::from(format!("{}.lock", resolved.display())),
         refresh_stale(),
-    ) {
+    )
+    .await
+    {
         Ok(guard) => guard,
         Err(error) => {
             refresh.release();
@@ -148,7 +150,7 @@ pub(crate) fn refresh_locks(config_dir: &Path) -> Result<RefreshLocks, PluginErr
 /// # Errors
 ///
 /// Returns [`PluginError`] when the lock stays held past the wait limit.
-pub(crate) fn config_lock(profile: &Path) -> Result<ConfigLock, PluginError> {
+pub(crate) async fn config_lock(profile: &Path) -> Result<ConfigLock, PluginError> {
     let parent = profile
         .parent()
         .filter(|dir| dir.is_dir())
@@ -162,13 +164,16 @@ pub(crate) fn config_lock(profile: &Path) -> Result<ConfigLock, PluginError> {
     } else {
         base.join(name)
     };
-    Ok(ConfigLock(take_lock(
-        &PathBuf::from(format!("{}.lock", lock_target.display())),
-        config_stale(),
-    )?))
+    Ok(ConfigLock(
+        take_lock(
+            &PathBuf::from(format!("{}.lock", lock_target.display())),
+            config_stale(),
+        )
+        .await?,
+    ))
 }
 
-fn take_lock(path: &Path, stale: Duration) -> Result<LockGuard, PluginError> {
+async fn take_lock(path: &Path, stale: Duration) -> Result<LockGuard, PluginError> {
     let deadline = Instant::now() + wait_limit();
     loop {
         match std::fs::create_dir(path) {
@@ -182,7 +187,7 @@ fn take_lock(path: &Path, stale: Duration) -> Result<LockGuard, PluginError> {
                         "Claude Code is refreshing its sign-in: try again in a moment",
                     ));
                 }
-                std::thread::sleep(POLL);
+                hofund_plugin_sdk::sleep(POLL).await;
             }
             Err(error) => {
                 return Err(PluginError::io(format!(
