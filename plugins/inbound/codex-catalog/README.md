@@ -28,3 +28,20 @@ Codex before **0.166.0** reads at most 1 MiB of `models.json`; older clients
 get `x-hofund-left-out` when entries are trimmed from the end. From **0.166.0**
 on, `?client_version=` disables the cap on both `GET /v1/codex/models` and
 `GET /backend-api/codex/models`.
+
+## Compaction (D-39)
+
+When a hofund model compacts on `/backend-api/codex` and the in-process
+summary request is refused with HTTP 413 or an error whose message matches
+hofund's context-overflow detector, the plugin asks once more with a
+plain-text transcript: no image parts, tool outputs over 4000 characters
+truncated at the head, and the body capped at 400000 characters from the
+most recent items. Any other refusal is unchanged. A failed retry uses the
+same local no-model summary as an ended-short stream.
+
+## Catalog auto-compact (D-47)
+
+Each catalog entry takes `context_window` from the gateway's `/v1/models`
+row when present; those entries are otherwise unchanged. Models with no
+known window get `auto_compact_token_limit` alone (272000; hofund config
+has no separate compaction-threshold knob yet).

@@ -22,7 +22,8 @@ use hofund_plugin_sdk::{
 
 use crate::input::{self, sealed};
 use crate::{
-    Kernel, capped_models, client_version, entry, error_response, ids, json_response, official,
+    Kernel, capped_models, client_version, entry, error_response, ids, json_response,
+    listed_models, official,
 };
 
 /// The route prefix Codex's base URL ends with.
@@ -801,7 +802,7 @@ async fn models(kernel: &dyn Kernel, bases: Bases, request: &HttpRequest) -> Htt
             own = own_models(response.into_body()).await;
         }
     }
-    let ours = ids(kernel).await.unwrap_or_default();
+    let ours = listed_models(kernel).await.unwrap_or_default();
     let after = own
         .iter()
         .filter_map(|model| model.get("priority").and_then(Value::as_u64))
@@ -810,11 +811,11 @@ async fn models(kernel: &dyn Kernel, bases: Bases, request: &HttpRequest) -> Htt
     let cap = !official::reads_whole_catalog(client_version(request));
     let lookup = official::Lookup::with_codex_home();
     let mut all = own;
-    for (rank, id) in ours.iter().enumerate() {
+    for (rank, model) in ours.iter().enumerate() {
         let priority = usize::try_from(after)
             .unwrap_or(usize::MAX)
             .saturating_add(rank + 1);
-        all.push(entry(id, priority, &lookup));
+        all.push(entry(&model.id, priority, &lookup, model.context_window));
     }
     let (body, left_out) = capped_models(all, cap);
     let mut response = json_response(200, body);

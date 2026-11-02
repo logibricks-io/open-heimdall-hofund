@@ -53,6 +53,16 @@ pub const LEFT_OUT_HEADER: &str = "x-hofund-left-out";
 /// How much of the gateway's model list is read.
 const LIST_CAP: usize = 4 * 1024 * 1024;
 
+/// Default auto-compact threshold for catalog models with no known window.
+pub const DEFAULT_AUTO_COMPACT_TOKEN_LIMIT: u64 = 272_000;
+
+/// One model `/v1/models` lists.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ListedModel {
+    pub id: String,
+    pub context_window: Option<u64>,
+}
+
 const CATALOG_PATH: &str = "/v1/codex/models";
 const HEAD: &str = r#"{"models":["#;
 const TAIL: &str = "]}\n";
@@ -160,18 +170,18 @@ async fn serve(kernel: &dyn Kernel, request: &HttpRequest) -> HttpResponse {
     if request.uri().path() != CATALOG_PATH {
         return text_response(404, "404 page not found");
     }
-    match ids(kernel).await {
-        Ok(ids) => {
+    match listed_models(kernel).await {
+        Ok(models) => {
             let cap = !official::reads_whole_catalog(client_version(request));
-            catalog_response(&ids, cap)
+            catalog_response(&models, cap)
         }
         Err(error) => error_response(&error),
     }
 }
 
-/// Builds a catalog HTTP answer for `ids`, capping size when `cap` is set.
-pub(crate) fn catalog_response(ids: &[String], cap: bool) -> HttpResponse {
-    let (body, left_out) = catalog(ids, cap);
+/// Builds a catalog HTTP answer for `models`, capping size when `cap` is set.
+pub(crate) fn catalog_response(models: &[ListedModel], cap: bool) -> HttpResponse {
+    let (body, left_out) = catalog(models, cap);
     let mut response = json_response(200, body);
     if cap
         && left_out > 0
@@ -216,13 +226,13 @@ fn json_response(status: u16, body: String) -> HttpResponse {
 
 /// The catalog of `ids`, and how many of them were left out to fit [`MOST`]
 /// when `cap` is true.
-pub(crate) fn catalog(ids: &[String], cap: bool) -> (String, usize) {
+pub(crate) fn catalog(models: &[ListedModel], cap: bool) -> (String, usize) {
     let lookup = official::Lookup::with_codex_home();
-    let models = ids
+    let entries = models
         .iter()
         .enumerate()
-        .map(|(rank, id)| entry(id, rank + 1, &lookup));
-    capped_models(models, cap)
+        .map(|(rank, model)| entry(&model.id, rank + 1, &lookup, model.context_window));
+    capped_models(entries, cap)
 }
 
 /// Serializes catalog entries, optionally enforcing [`MOST`].
@@ -253,7 +263,12 @@ const fn fits(used: usize, entry: usize) -> bool {
 
 /// The catalog entry of model `id`, ranked `priority` in the picker. Only
 /// fields Codex requires or that change what it does are set.
-pub(crate) fn entry(id: &str, priority: usize, lookup: &official::Lookup) -> Value {
+pub(crate) fn entry(
+    id: &str,
+    priority: usize,
+    lookup: &official::Lookup,
+    context_window: Option<u64>,
+) -> Value {
     let mut value = json!({
         "slug": id,
         "display_name": id,
@@ -276,11 +291,33 @@ pub(crate) fn entry(id: &str, priority: usize, lookup: &official::Lookup) -> Val
         "supports_reasoning_summaries": false,
     });
     lookup.for_id(id).apply(&mut value);
+    apply_auto_compact(&mut value, context_window);
     value
 }
 
+fn apply_auto_compact(entry: &mut Value, known_window: Option<u64>) {
+    if known_window.is_some() {
+        return;
+    }
+    let object = entry.as_object_mut().expect("catalog entry object");
+    if object.contains_key("context_window") {
+        return;
+    }
+    if object
+        .get("auto_compact_token_limit")
+        .and_then(Value::as_u64)
+        .is_some_and(|limit| limit <= DEFAULT_AUTO_COMPACT_TOKEN_LIMIT)
+    {
+        return;
+    }
+    object.insert(
+        "auto_compact_token_limit".to_owned(),
+        Value::Number(DEFAULT_AUTO_COMPACT_TOKEN_LIMIT.into()),
+    );
+}
+
 /// The ids the gateway's `/v1/models` lists, in its order.
-async fn ids(kernel: &dyn Kernel) -> Result<Vec<String>, PluginError> {
+async fn listed_models(kernel: &dyn Kernel) -> Result<Vec<ListedModel>, PluginError> {
     let mut request = HttpRequest::new(Body::empty());
     *request.uri_mut() = "/v1/models"
         .parse()
@@ -298,8 +335,23 @@ async fn ids(kernel: &dyn Kernel) -> Result<Vec<String>, PluginError> {
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .filter_map(|model| model.get("id").and_then(Value::as_str))
-        .map(str::to_owned)
+        .filter_map(|model| {
+            let id = model.get("id").and_then(Value::as_str)?;
+            let context_window = model.get("context_window").and_then(Value::as_u64);
+            Some(ListedModel {
+                id: id.to_owned(),
+                context_window,
+            })
+        })
+        .collect())
+}
+
+/// The ids the gateway's `/v1/models` lists, in its order.
+async fn ids(kernel: &dyn Kernel) -> Result<Vec<String>, PluginError> {
+    Ok(listed_models(kernel)
+        .await?
+        .into_iter()
+        .map(|model| model.id)
         .collect())
 }
 
@@ -335,6 +387,9 @@ fn failure_message(body: &[u8]) -> String {
         text
     }
 }
+
+#[cfg(test)]
+mod d47_tests;
 
 #[cfg(test)]
 mod tests;

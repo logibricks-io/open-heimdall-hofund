@@ -9,7 +9,7 @@ use hofund_plugin_sdk::{HttpRequest, HttpResponse, async_trait, text_response};
 
 use super::official::Lookup;
 use super::{
-    CodexCatalog, HEAD, Kernel, LEFT_OUT_HEADER, LIST_CAP, MOST, TAIL, catalog, entry,
+    CodexCatalog, HEAD, Kernel, LEFT_OUT_HEADER, LIST_CAP, ListedModel, MOST, TAIL, catalog, entry,
     failure_message, fits, official, serve,
 };
 
@@ -163,7 +163,7 @@ fn every_model_is_an_entry_codex_loads() {
     assert_eq!(models[0]["slug"], "seer");
     assert_eq!(models[0]["priority"], 1);
     let lookup = Lookup::without_cache();
-    let smith = entry("smith/forge", 2, &lookup);
+    let smith = entry("smith/forge", 2, &lookup, None);
     assert_eq!(models[1], smith);
     assert_eq!(
         *gateway.seen.lock().expect("seen"),
@@ -174,7 +174,7 @@ fn every_model_is_an_entry_codex_loads() {
 #[test]
 fn seer_gets_unknown_model_prompt() {
     let lookup = Lookup::without_cache();
-    let seer = entry("seer", 1, &lookup);
+    let seer = entry("seer", 1, &lookup, None);
     assert_eq!(seer["base_instructions"], official::unknown_model_prompt());
 }
 
@@ -196,7 +196,14 @@ fn no_models_is_an_empty_catalog() {
 #[test]
 fn a_catalog_past_codexs_limit_leaves_out_the_last() {
     let ids: Vec<String> = (0..600).map(|n| format!("many/model-{n:03}")).collect();
-    let (body, left_out) = catalog(&ids, true);
+    let listed: Vec<ListedModel> = ids
+        .iter()
+        .map(|id| ListedModel {
+            id: id.clone(),
+            context_window: None,
+        })
+        .collect();
+    let (body, left_out) = catalog(&listed, true);
     assert!(body.len() <= MOST, "{}", body.len());
     let models: Value = json::from_str(&body).expect("json");
     let models = models["models"].as_array().expect("models");
@@ -210,6 +217,7 @@ fn a_catalog_past_codexs_limit_leaves_out_the_last() {
         &ids[models.len()],
         models.len() + 1,
         &Lookup::without_cache(),
+        None,
     )
     .to_string();
     assert!(!fits(body.len() - TAIL.len(), next.len()));
