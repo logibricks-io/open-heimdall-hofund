@@ -1063,3 +1063,128 @@ fn d36_16_credentials_write_refuses_a_token_rotated_under_it() {
     creds::write_credentials_cas(&path, CREDENTIALS, Some("rt-2")).expect("unchanged token");
     assert_eq!(std::fs::read_to_string(&path).expect("read"), CREDENTIALS);
 }
+
+#[test]
+fn d36_17_switch_fails_when_run_mark_held_past_wait_limit() {
+    use std::time::Duration;
+
+    let dir = tempfile::tempdir().expect("dir");
+    let agent_home = dir.path().join("claude");
+    std::fs::create_dir_all(&agent_home).expect("home");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let spare = account_id_from(&["claude", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"]);
+    store(&host, &spare, &signed_in_blob());
+    let account_dir = crate::account::account_dir(host.context(), &spare).expect("dir");
+    std::fs::create_dir_all(&account_dir).expect("account dir");
+    let _hold = crate::run_lock::mark(&spare, host.context()).expect("mark");
+    crate::run_lock::test_run_wait(Duration::from_millis(400));
+    let error = block_on(sub.write_agent_sign_in(&spare, &agent_home, host.context()))
+        .expect_err("run mark timeout");
+    crate::run_lock::test_run_wait(Duration::ZERO);
+    assert!(
+        error.to_string().contains("still running on this account"),
+        "{error}"
+    );
+    assert!(
+        !agent_home.join(creds::CREDENTIALS_FILE).exists(),
+        "agent home must not be written"
+    );
+}
+
+#[test]
+fn d36_18_switch_fails_when_profile_save_lock_held_past_wait_limit() {
+    use std::time::Duration;
+
+    let dir = tempfile::tempdir().expect("dir");
+    let agent_home = dir.path().join("claude");
+    std::fs::create_dir_all(&agent_home).expect("home");
+    let profile_path = agent_home.join(creds::PROFILE_FILE);
+    std::fs::write(&profile_path, "before").expect("profile");
+    let lock_target = std::fs::canonicalize(&profile_path).unwrap_or_else(|_| profile_path.clone());
+    let lock_path = PathBuf::from(format!("{}.lock", lock_target.display()));
+    let _hold = std::fs::create_dir(&lock_path);
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let spare = account_id_from(&["claude", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"]);
+    store(&host, &spare, &signed_in_blob());
+    crate::lock::test_lock_timing(
+        Duration::from_millis(400),
+        Duration::from_secs(60),
+        Duration::from_secs(10),
+    );
+    let error = block_on(sub.write_agent_sign_in(&spare, &agent_home, host.context()))
+        .expect_err("profile lock timeout");
+    crate::lock::test_lock_timing(Duration::ZERO, Duration::ZERO, Duration::ZERO);
+    assert!(
+        error.to_string().contains("refreshing its sign-in"),
+        "{error}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&profile_path).expect("read profile"),
+        "before"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn d36_19_switch_fails_when_legacy_realpath_lock_held_past_wait_limit() {
+    use std::os::unix::fs::symlink;
+    use std::time::Duration;
+
+    let dir = tempfile::tempdir().expect("dir");
+    let real_home = dir.path().join("real-claude");
+    std::fs::create_dir_all(&real_home).expect("real home");
+    let agent_home = dir.path().join("claude-link");
+    symlink(&real_home, &agent_home).expect("symlink");
+    let resolved = std::fs::canonicalize(&agent_home).expect("canonical");
+    let legacy_lock = PathBuf::from(format!("{}.lock", resolved.display()));
+    let _hold = std::fs::create_dir(&legacy_lock);
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let spare = account_id_from(&["claude", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"]);
+    store(&host, &spare, &signed_in_blob());
+    crate::lock::test_lock_timing(
+        Duration::from_millis(400),
+        Duration::from_secs(60),
+        Duration::from_secs(10),
+    );
+    let error = block_on(sub.write_agent_sign_in(&spare, &agent_home, host.context()))
+        .expect_err("legacy lock timeout");
+    crate::lock::test_lock_timing(Duration::ZERO, Duration::ZERO, Duration::ZERO);
+    assert!(
+        error.to_string().contains("refreshing its sign-in"),
+        "{error}"
+    );
+    assert!(
+        !agent_home.join(creds::CREDENTIALS_FILE).exists(),
+        "agent home must not be written"
+    );
+}
+
+#[test]
+fn d36_20_mark_file_name_includes_injected_pid_and_seq() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let spare = account_id_from(&["claude", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"]);
+    store(&host, &spare, &signed_in_blob());
+    let account_dir = crate::account::account_dir(host.context(), &spare).expect("dir");
+    std::fs::create_dir_all(&account_dir).expect("account dir");
+    crate::run_lock::test_mark_identity(4242, 9);
+    let account_name = account_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("account dir name");
+    let expected = account_dir
+        .parent()
+        .expect("accounts parent")
+        .join(format!("{account_name}.run-4242-9.lock"));
+    assert!(!expected.exists(), "mark must not exist before mark()");
+    let mark = crate::run_lock::mark(&spare, host.context()).expect("mark");
+    assert!(
+        expected.is_file(),
+        "mark file must be `{expected:?}`, not run-0-9"
+    );
+    drop(mark);
+    crate::run_lock::clear_test_mark_identity();
+}

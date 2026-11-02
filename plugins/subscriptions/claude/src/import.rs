@@ -179,6 +179,55 @@ mod tests {
         block_on(host.context().accounts().upsert(account, blob)).expect("upsert");
     }
 
+    fn seed_stored_refresh_no_expiry(host: &TestHost, id: &hofund_plugin_api::AccountId) {
+        let blob = SecretObject::new()
+            .with_text(
+                creds::CREDENTIALS,
+                r#"{"claudeAiOauth":{"accessToken":"a","refreshToken":"rt-stored"}}"#,
+            )
+            .with_text(
+                creds::PROFILE,
+                r#"{"accountUuid":"11111111-2222-3333-4444-555555555555"}"#,
+            )
+            .to_secret();
+        let account = host
+            .context()
+            .accounts()
+            .account(id.clone(), "user@example.test")
+            .expect("account");
+        block_on(host.context().accounts().upsert(account, blob)).expect("upsert");
+    }
+
+    #[test]
+    fn d36_21_import_rejects_equal_expires_at() {
+        let dir = tempfile::tempdir().expect("dir");
+        let host = host(&dir);
+        let id = account_id_from(&["claude", "11111111-2222-3333-4444-555555555555"]);
+        seed_stored(&host, &id, 2000);
+        let text = r#"{"swapVersion":1,"version":1,"accounts":[{"email":"user@example.test","credentials":{"claudeAiOauth":{"accessToken":"same-time","refreshToken":"rt-file","expiresAt":2000}},"config":{"oauthAccount":{"accountUuid":"11111111-2222-3333-4444-555555555555"}}}]}"#;
+        let error = block_on(store(host.context(), text)).expect_err("equal expiry");
+        assert!(
+            error
+                .to_string()
+                .contains(crate::agent_sign_in::IMPORT_EXISTS)
+        );
+    }
+
+    #[test]
+    fn d36_22_import_rejects_undated_over_refresh_only_stored() {
+        let dir = tempfile::tempdir().expect("dir");
+        let host = host(&dir);
+        let id = account_id_from(&["claude", "11111111-2222-3333-4444-555555555555"]);
+        seed_stored_refresh_no_expiry(&host, &id);
+        let text = r#"{"swapVersion":1,"version":1,"accounts":[{"email":"user@example.test","credentials":{"claudeAiOauth":{"accessToken":"old","refreshToken":"rt-file"}},"config":{"oauthAccount":{"accountUuid":"11111111-2222-3333-4444-555555555555"}}}]}"#;
+        let error = block_on(store(host.context(), text)).expect_err("undated over refresh");
+        assert!(
+            error
+                .to_string()
+                .contains(crate::agent_sign_in::IMPORT_EXISTS)
+        );
+    }
+
     #[test]
     fn d36_10_import_rejects_older_than_stored_sign_in() {
         let dir = tempfile::tempdir().expect("dir");
