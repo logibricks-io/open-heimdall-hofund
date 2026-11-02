@@ -64,6 +64,7 @@ pub(crate) struct Table {
     strategies: Arc<StrategyState>,
     affinity: hofund_router::affinity::AffinityState,
     measurements: Mutex<Option<Arc<dyn Measurements>>>,
+    model_catalog: Mutex<Option<Arc<hofund_model_catalog::ModelCatalog>>>,
     snapshot: Snapshot,
 }
 
@@ -293,6 +294,7 @@ fn build_table(
         strategies,
         affinity,
         measurements: Mutex::new(None),
+        model_catalog: Mutex::new(None),
         snapshot,
     });
     let stored = build_specs(&table, built, routes)?;
@@ -515,7 +517,18 @@ impl Table {
         {
             router = router.with_measurements(measurements);
         }
+        if let Some(catalog) = self.model_catalog.lock().expect("model catalog").as_ref() {
+            let visibility = catalog.visibility().clone();
+            router = router.with_member_skip(Arc::new(move |route, asked, provider, wire| {
+                visibility.hop_disabled(route, asked, provider, wire)
+            }));
+        }
         self.snapshot.store(router);
+    }
+
+    pub(crate) fn set_model_catalog(&self, catalog: Arc<hofund_model_catalog::ModelCatalog>) {
+        *self.model_catalog.lock().expect("model catalog") = Some(catalog);
+        self.publish();
     }
 }
 

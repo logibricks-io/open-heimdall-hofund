@@ -195,7 +195,9 @@ All routes except `GET /health` require authentication. DTO names below are sket
 | `POST /v1/hofund/providers/{id}/models/refresh` | `EmptyRequest` | `ModelListResponse` with refreshed ids and pick changes | CLI `provider models <id>` with no ids, `provider refresh` or `fetch`, desktop refresh |
 | `GET /v1/hofund/providers/{id}/picks` | `EmptyRequest` | `PicksResponse` | CLI and desktop current host-state picks |
 | `PUT /v1/hofund/providers/{id}/picks` | `PicksSetRequest` | `PicksResponse` | CLI `provider models <id> <ids...>` and desktop pick editor |
-| `GET /v1/hofund/models` | `EmptyRequest` | `RouteModelListResponse` | Agent plan and CLI route listing |
+| `GET /v1/hofund/models` | `EmptyRequest` | `RouteModelListResponse` | Agent plan and CLI route listing; omits retired, deprecated, and disabled route models |
+| `POST /v1/hofund/models/disable` | `CatalogModelRequest` with `model` | `CatalogDisabledListResponse` | CLI `models disable`; adds one pattern to `[catalog].disabled` through config apply |
+| `POST /v1/hofund/models/enable` | `CatalogModelRequest` with `model` | `CatalogDisabledListResponse` | CLI `models enable`; removes one pattern through config apply |
 | `GET /v1/hofund/agents` | `EmptyRequest` | `AgentListResponse` | CLI `agent list`, desktop |
 | `GET /v1/hofund/agents/status` | `EmptyRequest` | `AgentStatusResponse` | CLI and desktop agent status |
 | `POST /v1/hofund/agents/{id}/plan` | `AgentPlanRequest` with connect or disconnect and force flag | `AgentPlanResponse` with redacted changes and plan revision | CLI dry-run and desktop confirmation |
