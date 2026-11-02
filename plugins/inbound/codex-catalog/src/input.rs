@@ -247,3 +247,69 @@ fn open_summaries(items: &mut Vec<Value>, hofund: bool) -> (bool, bool) {
     }
     (changed, compact)
 }
+
+/// The most plain-text of a compaction request body may hold.
+pub(crate) const TEXT_SUMMARY_CAP: usize = 400_000;
+
+/// Tool output longer than this in a text retry keeps only the head.
+pub(crate) const TOOL_OUTPUT_MAX: usize = 4000;
+
+const TOOL_TRUNCATED: &str = "\n...[tool output truncated]...\n";
+
+/// A compaction body with images dropped, long tool outputs cut, and the
+/// transcript capped at [`TEXT_SUMMARY_CAP`], or `None` when it is not JSON.
+pub(crate) fn text_summary_body(body: &[u8]) -> Option<Vec<u8>> {
+    let mut value: Value = json::from_slice(body).ok()?;
+    let items = value.get_mut("input").and_then(Value::as_array_mut)?;
+    for item in items.iter_mut() {
+        plain_item(item);
+    }
+    loop {
+        if value.to_string().len() <= TEXT_SUMMARY_CAP {
+            break;
+        }
+        let Some(input) = value.get_mut("input").and_then(Value::as_array_mut) else {
+            break;
+        };
+        if input.is_empty() {
+            break;
+        }
+        input.remove(0);
+    }
+    Some(value.to_string().into_bytes())
+}
+
+fn plain_item(item: &mut Value) {
+    match kind(item) {
+        "function_call_output" | "custom_tool_call_output" => {
+            if let Some(output) = item.get_mut("output") {
+                truncate_output(output);
+            }
+        }
+        "message" => {
+            let Some(parts) = item.get_mut("content").and_then(Value::as_array_mut) else {
+                return;
+            };
+            parts.retain(|part| {
+                part.get("type")
+                    .and_then(Value::as_str)
+                    .is_some_and(|kind| kind != "input_image")
+            });
+        }
+        _ => {}
+    }
+}
+
+fn truncate_output(value: &mut Value) {
+    let Some(text) = value.as_str() else {
+        return;
+    };
+    if text.len() <= TOOL_OUTPUT_MAX {
+        return;
+    }
+    let mut end = TOOL_OUTPUT_MAX;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    *value = Value::String(format!("{}{TOOL_TRUNCATED}", &text[..end]));
+}

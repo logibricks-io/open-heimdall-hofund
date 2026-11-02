@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Codex summary compaction on `/backend-api/codex` retries once with a
+  plain-text conversation when the in-process summary is refused with HTTP
+  413 or a context-overflow message, then falls back to the existing local
+  no-model summary when the retry fails (D-39).
 - Codex model catalog instructions (D-34): `GET /v1/codex/models` and hofund
   entries on `GET /backend-api/codex/models` take official Codex text from the
   bundled 0.166 catalog, optional `CODEX_HOME/models_cache.json`, or
