@@ -111,10 +111,11 @@ and `hofund <command> --help` print that command's usage.
 ### Routing
 
 A route accepts `routing = "smart"`, `"order"`, `"rotate"`, `"usage"`,
-`"pace"`, `"weight"`, `"free"`, `"fast"`, or `"cheap"`; the default is
+`"pace"`, `"weight"`, `"free"`, `"fast"`, `"cheap"`, or `"drain"`; the default is
 `smart`. `order` keeps the listed order, `rotate` advances a per-route turn,
-`weight` uses smooth weighted round robin, and `free` puts free models first
-in their listed order. Unknown strategy names are configuration errors.
+`weight` uses smooth weighted round robin, `free` puts free models first
+in their listed order, and `drain` keeps one member until it is used up or
+unavailable, then moves to the next in listed order. Unknown strategy names are configuration errors.
 
 The measurement strategies work as follows:
 
