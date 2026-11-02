@@ -156,6 +156,25 @@ fn d31_5_a_bare_enum_still_gets_a_value_type() {
 }
 
 #[test]
+fn d31_6_a_ref_target_with_items_only_is_typed_without_enum_in_the_body() {
+    let schema = r##"{"type":"object","properties":{"x":{"$ref":"#/$defs/T"}},"$defs":{"T":{"items":{"type":"string"}}}}"##;
+    let tools = format!(
+        r#""tools":[{{"type":"function","function":{{"name":"t","parameters":{schema}}}}}]"#
+    );
+    let body = format!(r#"{{"model":"kimi/m",{tools}}}"#);
+    let got = json_body(apply(
+        &body,
+        Some("kimi-code-cn"),
+        "https://api.kimi.com/coding/v1",
+        "openai-chat",
+    ));
+    assert_eq!(
+        got["tools"][0]["function"]["parameters"]["$defs"]["T"]["type"],
+        "array"
+    );
+}
+
+#[test]
 fn v2_kimi_tool_ref_types() {
     let schema = r##"{"type":"object","properties":{"a":{"$ref":"#/$defs/__schema0"},"b":{"$ref":"#/$defs/__schema1"},"c":{"items":{"$ref":"#/$defs/__schema2"},"type":"array"},"d":{"anyOf":[{"$ref":"#/$defs/P"},{"type":"null"}]},"e":{"$ref":"#/$defs/M"},"f":{"$ref":"#/definitions/D"},"g":{"$ref":"#/$defs/R"},"h":{"$ref":"#/$defs/U"},"i":{"$ref":"#/$defs/S"}},"$defs":{"__schema0":{},"__schema1":{"oneOf":[{"type":"string"},{"type":"number"}]},"__schema2":{"allOf":[{"type":"string"}]},"P":{"properties":{"x":{"type":"string"}}},"M":{"minLength":1},"R":{"oneOf":[{"$ref":"#/$defs/P"},{"$ref":"#/definitions/D"}]},"U":{"anyOf":[{"type":"string"},{"$ref":"#/$defs/U"}]},"S":{"type":"string","enum":["x"]},"V":{"oneOf":[{"type":"string"}]}},"definitions":{"D":{"description":"anything"}}}"##;
     let anything = r#"["string","number","integer","boolean","object","array","null"]"#;

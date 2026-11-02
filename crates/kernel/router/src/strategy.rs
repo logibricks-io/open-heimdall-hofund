@@ -1365,6 +1365,23 @@ mod tests {
     }
 
     #[test]
+    fn d30_6_a_known_renewal_with_zero_use_beats_a_lower_token_key() {
+        use std::time::{Duration, SystemTime};
+
+        let state = StrategyState::with_builtins();
+        let now = SystemTime::now();
+        let mut renewal = seat("renewal");
+        renewal.account = true;
+        renewal.used = 0.0;
+        renewal.soon = vec![Some(now + Duration::from_secs(2 * 3600))];
+        renewal.tokens = 10.0;
+        let mut key = seat("key");
+        key.account = false;
+        key.tokens = 1.0;
+        assert_eq!(routed(&state, "usage", &[key, renewal]), ["renewal", "key"]);
+    }
+
+    #[test]
     fn b2a_usage_sorts_by_share_then_decayed_tokens() {
         let state = StrategyState::with_builtins();
         let mut seats = self::seats(&["a", "b", "c"]);

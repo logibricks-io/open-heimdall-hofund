@@ -429,6 +429,23 @@ mod tests {
     }
 
     #[test]
+    fn d32_7_upstream_request_failed_alone_is_not_shape() {
+        let error = PluginError::status_error(400, "Upstream request failed");
+        assert!(!asks_next(&error));
+        assert!(!allows(&error, false, &none()));
+    }
+
+    #[test]
+    fn d32_8_upstream_error_type_alone_is_not_shape() {
+        let error = PluginError::status_error(
+            400,
+            r#"{"error":{"message":"bad gateway","type":"upstream_error"}}"#,
+        );
+        assert!(!asks_next(&error));
+        assert!(!allows(&error, false, &none()));
+    }
+
+    #[test]
     fn body_word_classes_fail_over_without_a_listed_status() {
         for (status, message) in [
             (400, "Unknown parameter: tools"),

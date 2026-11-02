@@ -272,3 +272,19 @@ fn d35_4_vendor_reasoning_keeps_an_overlong_id() {
     assert_eq!(input[0]["id"], id);
     assert_eq!(input[0]["encrypted_content"], SEALED_REASONING);
 }
+
+#[test]
+fn d35_5_vendor_reasoning_keeps_an_overlong_non_plain_id() {
+    let id = format!("rs_{}:{}", "a".repeat(60), "b".repeat(10));
+    assert!(id.len() > 64);
+    assert!(id.contains(':'));
+    let input = json!([{
+        "type": "reasoning",
+        "id": id,
+        "encrypted_content": SEALED_REASONING,
+        "content": []
+    }]);
+    assert_eq!(backend(&input), None);
+    assert_eq!(input[0]["id"], id);
+    assert_eq!(input[0]["encrypted_content"], SEALED_REASONING);
+}

@@ -566,9 +566,6 @@ fn untyped_for_kimi(node: &Node) -> bool {
 }
 
 fn kimi_schema_type(root: &Node, node: &Node, body: &[u8]) -> Option<String> {
-    if let Some(kind @ ("object" | "array")) = keyword_type(node) {
-        return Some(format!("\"{kind}\""));
-    }
     if let Some(values) = node.get("enum").and_then(Node::items) {
         return enum_type(values, body);
     }
@@ -657,10 +654,6 @@ fn schema_types<'a>(
         if known {
             return types;
         }
-    }
-    if let Some(kind @ ("object" | "array")) = keyword_type(node) {
-        types.insert(kind);
-        return types;
     }
     if node.get("enum").and_then(Node::items).is_some() || node.get("const").is_some() {
         let empty = Vec::new();
