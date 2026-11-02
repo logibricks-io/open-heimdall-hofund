@@ -1684,6 +1684,16 @@ pub enum Slot {
         /// Another key in the same file from which to take the model.
         from: Option<&'static str>,
     },
+    /// Writes the model key to a visible gateway route.
+    ///
+    /// On connect the value is the only non-empty visible route when there is
+    /// exactly one, or the route already at the key when it names a route.
+    /// A pick writes the chosen route. With `[model]` and `restore_on_clear`,
+    /// clear restores the connect-time value from the backup. The write is
+    /// skipped when there is not exactly one visible route and the key does
+    /// not already name one.
+    #[doc(hidden)]
+    ModelRoute,
     /// Text with gateway values filled in, such as `Bearer {token}`.
     ///
     /// `{origin}`, `{v1}`, and `{token}` are replaced with the gateway
@@ -2026,6 +2036,13 @@ impl Slot {
     #[must_use]
     pub const fn model_if_unset(from: Option<&'static str>) -> Self {
         Self::ModelIfUnset { from }
+    }
+
+    /// A model write that always selects a gateway route on connect.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn model_route() -> Self {
+        Self::ModelRoute
     }
 }
 

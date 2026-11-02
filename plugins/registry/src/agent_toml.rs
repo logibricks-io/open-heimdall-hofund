@@ -131,6 +131,7 @@ pub enum SlotToml {
     Name(String),
     Literal(LiteralSlot),
     ModelIfUnset(ModelIfUnsetSlot),
+    ModelRoute(ModelRouteSlot),
     ModelTier(ModelTierSlot),
     Json(JsonSlot),
     ModelArray(ModelArraySlot),
@@ -249,6 +250,17 @@ pub struct ModelIfUnsetSlot {
 pub struct ModelIfUnset {
     pub from: Option<String>,
 }
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelRouteSlot {
+    #[allow(dead_code)]
+    pub model_route: ModelRoute,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelRoute {}
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -614,6 +626,15 @@ fn validate(
             ));
         }
         validate_slot(&set.slot, source, &field)?;
+        if matches!(&set.slot, SlotToml::ModelRoute(_))
+            && agent.model.as_ref().map(|model| model.key.as_str()) != Some(set.key.as_str())
+        {
+            return Err(error(
+                source,
+                format!("{field}.key"),
+                "model_route must use the model key",
+            ));
+        }
         if matches!(&set.slot, SlotToml::ModelPair(_))
             && agent.model.as_ref().map(|model| model.file.as_str()) != Some(set.file.as_str())
         {
@@ -1566,6 +1587,7 @@ fn render_slot(slot: &SlotToml) -> String {
             "hofund_plugin_api::Slot::model_if_unset({:?})",
             slot.model_if_unset.from
         ),
+        SlotToml::ModelRoute(_) => "hofund_plugin_api::Slot::model_route()".to_owned(),
         SlotToml::ModelTier(slot) => {
             let needle = slot.model_tier.when_model_matches.as_ref().map_or_else(
                 || "None".to_owned(),
@@ -2715,6 +2737,25 @@ key = "effort"
     fn validation_rejects_mixed_candidate_kinds() {
         let candidate = "[[file]]\nid = \"config\"\nkind = \"toml\"\nlinux = \"~/.fixture/config.toml\"\nmacos = \"~/.fixture/config.toml\"\nwindows = \"~/.fixture/config.toml\"\n[model]";
         reject(base().replace("[model]", candidate), "same file id");
+    }
+
+    #[test]
+    fn model_route_slot_parses_and_renders() {
+        reject(
+            base().replace(
+                "slot = { literal = \"value\" }",
+                "slot = { model_route = {} }",
+            ),
+            "model_route must use the model key",
+        );
+        let text = base()
+            .replace("key = \"literal\"", "key = \"model\"")
+            .replace(
+                "slot = { literal = \"value\" }",
+                "slot = { model_route = {} }",
+            );
+        let agent = validate(&text).expect("model route");
+        assert!(render(&agent).1.contains("Slot::model_route()"));
     }
 
     #[test]

@@ -110,6 +110,7 @@ fn d51_2_disconnect_restores_user_gateway_model_and_list() {
             connected["gateway"]["caCertPath"], "/etc/certs/user.pem",
             "{os:?}"
         );
+        assert_eq!(connected["models"]["defaultModelId"], ROUTE, "{os:?}");
         assert_eq!(connected["theme"], "dark", "{os:?}");
         agent.disconnect(&session, false).expect("disconnect");
         let restored = fs::read_to_string(&path).expect("restored");
@@ -148,6 +149,38 @@ fn d51_3_clear_user_model_restores_default_model_and_list() {
         let json = parse_json(&path);
         assert_eq!(json["models"]["defaultModelId"], "user-model");
         assert_eq!(json["models"]["list"][0]["modelId"], "user-model");
+        let _ = fs::remove_dir_all(home);
+    }
+}
+
+#[test]
+fn d51_8_clear_after_explicit_pick_restores_user_default_without_list() {
+    for os in OPERATING_SYSTEMS {
+        let home = scratch("d51-8");
+        let path = settings_path(&home, os);
+        fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+        fs::write(
+            &path,
+            r#"{
+  "gateway": {"enabled": true, "url": "https://user.example.test", "apiKey": "k", "wireProtocol": "openai"},
+  "models": {"defaultModelId": "user-model"}
+}"#,
+        )
+        .expect("seed");
+        let session = Session::new(&home);
+        let agent = adapter(os);
+        agent
+            .apply(&session, &target(BASE, TOKEN))
+            .expect("connect");
+        agent
+            .set_model(&session, &target(BASE, TOKEN), Some(ROUTE))
+            .expect("pick route");
+        agent
+            .set_model(&session, &target(BASE, TOKEN), None)
+            .expect("clear to user model");
+        let json = parse_json(&path);
+        assert_eq!(json["models"]["defaultModelId"], "user-model", "{os:?}");
+        assert!(json["models"].get("list").is_none(), "{os:?}");
         let _ = fs::remove_dir_all(home);
     }
 }

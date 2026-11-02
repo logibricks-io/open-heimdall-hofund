@@ -43,7 +43,7 @@ slot = { literal = "openai" }
 [[set]]
 file = "settings"
 key = "models.defaultModelId"
-slot = { model_if_unset = {} }
+slot = { model_route = {} }
 
 [[remove]]
 file = "settings"

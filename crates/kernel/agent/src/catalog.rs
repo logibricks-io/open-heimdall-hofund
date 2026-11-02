@@ -1479,6 +1479,15 @@ impl Engine {
                 None if matches!(choice, Choice::Clear) && restore_user_model_on_clear => None,
                 _ => model_if_unset(kind, existing, set.key, *from, &models),
             },
+            ApiSlot::ModelRoute => model_route(
+                self.model_prefix,
+                kind,
+                existing,
+                set.key,
+                &models,
+                choice,
+                restore_user_model_on_clear,
+            ),
             ApiSlot::ModelTier {
                 when_model_matches, ..
             } => {
@@ -1647,6 +1656,34 @@ impl AgentAdapter for Compiled {
         target: &GatewayTarget,
     ) -> Result<ConnectionStatus, AgentError> {
         self.engine(session)?.status(session, target)
+    }
+}
+
+fn model_route(
+    prefix: Option<&str>,
+    kind: FileKind,
+    existing: Option<&str>,
+    key: &str,
+    models: &[String],
+    choice: Choice<'_>,
+    restore_user_model_on_clear: bool,
+) -> Option<String> {
+    let prefixed = |id: &str| format!("{}{id}", prefix.unwrap_or(""));
+    match choice {
+        Choice::Set(id) => Some(prefixed(id)),
+        Choice::Clear if restore_user_model_on_clear => None,
+        Choice::Clear => model_if_unset(kind, existing, key, None, models),
+        Choice::Keep => {
+            if let Some(text) = existing
+                && let Some(value) = string_value(kind, text, key)
+                && models
+                    .iter()
+                    .any(|id| *id == value || prefixed(id) == value)
+            {
+                return Some(value);
+            }
+            single_model(models)
+        }
     }
 }
 

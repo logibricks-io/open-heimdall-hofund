@@ -876,12 +876,14 @@ Slot::ModelArray
 Slot::ModelIfUnset
 Slot::ModelMap
 Slot::ModelPair
+Slot::ModelRoute
 Slot::ModelTier
 Slot::Origin
 Slot::Template
 Slot::Token
 Slot::V1
 Slot::const fn model_if_unset (from : Option < & 'static str >) -> Self
+Slot::const fn model_route () -> Self
 SpawnRequest
 SpawnRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 SpawnRequest::fn args (& self) -> & [OsString]

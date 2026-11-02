@@ -90,6 +90,25 @@ may call `Session::with_system_root` so absolute paths such as organisation admi
 resolve under a temporary directory. On model clear, keys listed in `[[remove]]`
 that were restored from the connect backup are not removed again.
 
+## Set slots
+
+Each `[[set]]` row names a file id, a dotted key, and a slot. Gateway-backed slots are allowed only when `route = "gateway"`.
+
+| Slot | TOML shape | Behavior |
+|---|---|---|
+| `origin` | `slot = "origin"` | Gateway origin without `/v1`. |
+| `v1` | `slot = "v1"` | Gateway origin plus `/v1`. |
+| `token` | `slot = "token"` | Gateway bearer token. |
+| `literal` | `slot = { literal = "…" }` | Fixed string. |
+| `template` | `slot = { template = "…" }` | Text with `{origin}`, `{v1}`, and `{token}` filled in. |
+| `model_if_unset` | `slot = { model_if_unset = {} }` or `{ from = "other.key" }` | Writes a model only when the destination key has no non-empty string; otherwise uses `from` or the only visible route. |
+| `model_route` | `slot = { model_route = {} }` | Must use the `[model]` key. On connect writes that key to the only visible route, or keeps a route already there; a pick writes the chosen route. With `restore_on_clear`, clearing a gateway route restores the connect-time value from the backup. |
+| `model_pair` | `slot = { model_pair = { … } }` | Provider key beside the model; see RFC 0001. |
+| `model_tier` | `slot = { model_tier = { … } }` | Tier env mapping from the model or route. |
+| `catalog_models` | `slot = "catalog_models"` | JSON catalog object (JSON files only). |
+| `json` | `slot = { json = "…" }` | Fixed JSON value. |
+| `model_array`, `append`, `model_map` | structured tables | Shared arrays or maps of model entries. |
+
 ### Native stores
 
 The daemon and the desktop app use `hofund_plugin_host::native_credential_store()` (through `hofund_daemon::agent_session()`). It talks to the OS store directly and never starts a child process:
