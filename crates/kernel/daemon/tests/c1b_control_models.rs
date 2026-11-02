@@ -270,7 +270,11 @@ async fn c1b_14_unix_ipc_disable_catalog_model() {
     use std::os::unix::fs::PermissionsExt;
 
     let server = MockServer::start().await;
-    let dir = tempfile::tempdir().expect("tempdir");
+    // A short `/tmp` root keeps the Unix socket path under the macOS limit.
+    let dir = tempfile::Builder::new()
+        .prefix("c1b")
+        .tempdir_in("/tmp")
+        .expect("tempdir");
     let runtime = dir.path().join("runtime");
     std::fs::create_dir_all(&runtime).expect("runtime");
     std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).expect("mode");
