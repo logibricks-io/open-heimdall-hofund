@@ -27,6 +27,8 @@ mod cli;
 mod creds;
 mod discover;
 mod import;
+mod lock;
+mod run_lock;
 
 use creds::{Credentials, Profile};
 

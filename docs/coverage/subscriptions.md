@@ -90,6 +90,32 @@ Left out until a plugin declares agent home and readable credentials (not Keycha
 
 A subscription plugin may also declare that its own sign-in spends the account. That flag lives on the plugin spec, not in config.
 
+### Claude Code agent sign-in switch and import (D-36)
+
+When hofund writes Claude Code's agent home (`hofund accounts switch`, automatic
+`NextLogin`, or `hofund accounts discover --add`), the Claude subscription plugin:
+
+- Waits up to 90 s for cross-process run marks beside the target account's saved
+  config directory (usage refresh, warm-up, keep-alive), then fails with no
+  writes.
+- Takes Claude Code's mkdir refresh locks in order: `.oauth_refresh.lock`, then
+  `<realpath(agent home)>.lock` (stale 60 s, wait 20 s, touch every 2 s while
+  held). Releases them in reverse order.
+- Reads the live credentials only after both refresh locks are held, syncs a
+  rotated pair back into the account store when the refresh token changed, and
+  writes the outgoing account with compare-and-swap on the refresh token.
+- Takes `<realpath(.claude.json)>.lock` (stale 10 s) before rewriting the
+  profile file.
+
+Swap import and agent discover import keep an account when hofund already has a
+usable sign-in (stored secret, saved account directory, or the live agent home
+when it matches the account id) with a different refresh token unless the
+import's `expiresAt` is strictly later. The daemon surfaces that as a config
+error; the CLI prints the full reason string.
+
+Overage handling and Sonnet-only week scopes depend on Claude quota reading,
+which is not implemented yet (`quota()` returns unsupported).
+
 ## Priority suggestion
 
 - P1: codex (ChatGPT via Codex backend), claude bridge, copilot (+GHE), gemini Code Assist. These four built-ins are still in magpie core, and the P1 agents use them.

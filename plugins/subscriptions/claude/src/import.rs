@@ -119,6 +119,23 @@ pub async fn store(host: &HostContext, text: &str) -> Result<Vec<AccountId>, Plu
         let credentials = crate::creds::parse_credentials(&row.credentials)
             .ok_or_else(|| PluginError::config("an imported account has no credentials"))?;
         let id = profile.account_id()?;
+        if let Some(secret) = host.accounts().secret(&id).await? {
+            let blob = hofund_plugin_sdk::oauth::SecretObject::parse(&secret)?;
+            let same_refresh = blob
+                .text(crate::creds::CREDENTIALS)
+                .and_then(crate::creds::refresh_token)
+                .is_some_and(|stored| {
+                    crate::creds::refresh_token(&credentials.text)
+                        .is_some_and(|incoming| incoming == stored)
+                });
+            if same_refresh {
+                ids.push(id);
+                continue;
+            }
+            if crate::agent_sign_in::import_blocked(host, &id, &credentials.text, &profile).await? {
+                return Err(PluginError::config(crate::agent_sign_in::IMPORT_EXISTS));
+            }
+        }
         let blob = crate::creds::blob(&credentials, &profile);
         let account = host.accounts().account(id.clone(), row.email)?;
         host.accounts().upsert(account, blob.to_secret()).await?;
@@ -129,7 +146,150 @@ pub async fn store(host: &HostContext, text: &str) -> Result<Vec<AccountId>, Plu
 
 #[cfg(test)]
 mod tests {
+    use hofund_kit_subscription::{TestHost, block_on};
+    use hofund_plugin_api::{PluginId, PluginKind};
+    use hofund_plugin_sdk::oauth::{SecretObject, account_id_from};
+
     use super::*;
+    use crate::creds;
+
+    fn host(dir: &tempfile::TempDir) -> TestHost {
+        TestHost::open_for(
+            PluginKind::Subscription,
+            PluginId::from_static("claude"),
+            dir.path(),
+        )
+    }
+
+    fn seed_stored(host: &TestHost, id: &hofund_plugin_api::AccountId, expires_at: i64) {
+        let blob = SecretObject::new()
+            .with_text(
+                creds::CREDENTIALS,
+                &format!(
+                    r#"{{"claudeAiOauth":{{"accessToken":"a","refreshToken":"rt-stored","expiresAt":{expires_at}}}}}"#
+                ),
+            )
+            .with_text(creds::PROFILE, r#"{"accountUuid":"11111111-2222-3333-4444-555555555555"}"#)
+            .to_secret();
+        let account = host
+            .context()
+            .accounts()
+            .account(id.clone(), "user@example.test")
+            .expect("account");
+        block_on(host.context().accounts().upsert(account, blob)).expect("upsert");
+    }
+
+    fn seed_stored_refresh_no_expiry(host: &TestHost, id: &hofund_plugin_api::AccountId) {
+        let blob = SecretObject::new()
+            .with_text(
+                creds::CREDENTIALS,
+                r#"{"claudeAiOauth":{"accessToken":"a","refreshToken":"rt-stored"}}"#,
+            )
+            .with_text(
+                creds::PROFILE,
+                r#"{"accountUuid":"11111111-2222-3333-4444-555555555555"}"#,
+            )
+            .to_secret();
+        let account = host
+            .context()
+            .accounts()
+            .account(id.clone(), "user@example.test")
+            .expect("account");
+        block_on(host.context().accounts().upsert(account, blob)).expect("upsert");
+    }
+
+    #[test]
+    fn d36_21_import_rejects_equal_expires_at() {
+        let dir = tempfile::tempdir().expect("dir");
+        let host = host(&dir);
+        let id = account_id_from(&["claude", "11111111-2222-3333-4444-555555555555"]);
+        seed_stored(&host, &id, 2000);
+        let text = r#"{"swapVersion":1,"version":1,"accounts":[{"email":"user@example.test","credentials":{"claudeAiOauth":{"accessToken":"same-time","refreshToken":"rt-file","expiresAt":2000}},"config":{"oauthAccount":{"accountUuid":"11111111-2222-3333-4444-555555555555"}}}]}"#;
+        let error = block_on(store(host.context(), text)).expect_err("equal expiry");
+        assert!(
+            error
+                .to_string()
+                .contains(crate::agent_sign_in::IMPORT_EXISTS)
+        );
+    }
+
+    #[test]
+    fn d36_22_import_rejects_undated_over_refresh_only_stored() {
+        let dir = tempfile::tempdir().expect("dir");
+        let host = host(&dir);
+        let id = account_id_from(&["claude", "11111111-2222-3333-4444-555555555555"]);
+        seed_stored_refresh_no_expiry(&host, &id);
+        let text = r#"{"swapVersion":1,"version":1,"accounts":[{"email":"user@example.test","credentials":{"claudeAiOauth":{"accessToken":"old","refreshToken":"rt-file"}},"config":{"oauthAccount":{"accountUuid":"11111111-2222-3333-4444-555555555555"}}}]}"#;
+        let error = block_on(store(host.context(), text)).expect_err("undated over refresh");
+        assert!(
+            error
+                .to_string()
+                .contains(crate::agent_sign_in::IMPORT_EXISTS)
+        );
+    }
+
+    #[test]
+    fn d36_10_import_rejects_older_than_stored_sign_in() {
+        let dir = tempfile::tempdir().expect("dir");
+        let host = host(&dir);
+        let id = account_id_from(&["claude", "11111111-2222-3333-4444-555555555555"]);
+        seed_stored(&host, &id, 2000);
+        let text = r#"{"swapVersion":1,"version":1,"accounts":[{"email":"user@example.test","credentials":{"claudeAiOauth":{"accessToken":"old","refreshToken":"rt-file","expiresAt":1000}},"config":{"oauthAccount":{"accountUuid":"11111111-2222-3333-4444-555555555555"}}}]}"#;
+        let error = block_on(store(host.context(), text)).expect_err("older");
+        assert!(
+            error
+                .to_string()
+                .contains(crate::agent_sign_in::IMPORT_EXISTS)
+        );
+    }
+
+    #[test]
+    fn d36_11_import_rejects_undated_export_over_usable_sign_in() {
+        let dir = tempfile::tempdir().expect("dir");
+        let host = host(&dir);
+        let id = account_id_from(&["claude", "11111111-2222-3333-4444-555555555555"]);
+        seed_stored(&host, &id, 3000);
+        let text = r#"{"swapVersion":1,"version":1,"accounts":[{"email":"user@example.test","credentials":{"claudeAiOauth":{"accessToken":"old","refreshToken":"rt-file"}},"config":{"oauthAccount":{"accountUuid":"11111111-2222-3333-4444-555555555555"}}}]}"#;
+        let error = block_on(store(host.context(), text)).expect_err("undated");
+        assert!(
+            error
+                .to_string()
+                .contains(crate::agent_sign_in::IMPORT_EXISTS)
+        );
+    }
+
+    #[test]
+    fn d36_12_import_accepts_newer_than_live() {
+        let dir = tempfile::tempdir().expect("dir");
+        let host = host(&dir);
+        let id = account_id_from(&["claude", "11111111-2222-3333-4444-555555555555"]);
+        seed_stored(&host, &id, 1000);
+        let text = r#"{"swapVersion":1,"version":1,"accounts":[{"email":"user@example.test","credentials":{"claudeAiOauth":{"accessToken":"new","refreshToken":"rt-new","expiresAt":5000}},"config":{"oauthAccount":{"accountUuid":"11111111-2222-3333-4444-555555555555"}}}]}"#;
+        let ids = block_on(store(host.context(), text)).expect("import");
+        assert_eq!(ids, [id]);
+    }
+
+    #[test]
+    fn d36_13_import_rejects_older_than_saved_account() {
+        let dir = tempfile::tempdir().expect("dir");
+        let host = host(&dir);
+        let id = account_id_from(&["claude", "11111111-2222-3333-4444-555555555555"]);
+        seed_stored(&host, &id, 1000);
+        let account_dir = crate::account::account_dir(host.context(), &id).expect("dir");
+        std::fs::create_dir_all(&account_dir).expect("account dir");
+        std::fs::write(
+            account_dir.join(crate::creds::CREDENTIALS_FILE),
+            r#"{"claudeAiOauth":{"accessToken":"saved-dir","refreshToken":"rt-saved-dir","expiresAt":5000}}"#,
+        )
+        .expect("account creds");
+        let text = r#"{"swapVersion":1,"version":1,"accounts":[{"email":"user@example.test","credentials":{"claudeAiOauth":{"accessToken":"old","refreshToken":"rt-file","expiresAt":2000}},"config":{"oauthAccount":{"accountUuid":"11111111-2222-3333-4444-555555555555"}}}]}"#;
+        let error = block_on(store(host.context(), text)).expect_err("older saved");
+        assert!(
+            error
+                .to_string()
+                .contains(crate::agent_sign_in::IMPORT_EXISTS)
+        );
+    }
 
     #[test]
     fn d27_4_parse_swap_export_fixture_shape() {
