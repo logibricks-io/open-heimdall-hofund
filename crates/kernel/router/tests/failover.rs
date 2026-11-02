@@ -6,9 +6,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures_util::StreamExt;
-use futures_util::stream;
+use futures_util::{StreamExt, stream};
+use hofund_codec::EMPTY_REPLY_MESSAGE;
 use hofund_ir::{ContentPart, Message, Request, Response, Role, StreamEvent, TextDelta};
+use hofund_plugin_api::ProtocolId;
 use hofund_plugin_api::{BodyStream, MemberId, MemberKey, PluginError, PluginErrorKind, PresetId};
 use hofund_router::{
     Completion, CooldownPolicy, Cooldowns, FailoverPolicy, Member, RouteMeta, RouteTraceBook,
@@ -35,6 +36,17 @@ enum Kind {
     Credit(u16),
     FinishError,
     FinishAfterText,
+    ResponsesEmpty,
+    ResponsesWithText,
+    ResponsesEmptyWithUsage,
+    ResponsesBareCompleted,
+    ResponsesEmptyChunked,
+    ChatChunkThenPending,
+    ResponsesEmptyThenPending,
+    ResponsesCreatedThenPending,
+    ResponsesCreatedThenEnd,
+    ResponsesNothing,
+    ResponsesPartialThenError,
 }
 
 #[async_trait]
@@ -48,7 +60,19 @@ impl Member for Fake {
     }
 
     fn protocol(&self) -> &str {
-        "test"
+        match self.kind {
+            Kind::ResponsesEmpty
+            | Kind::ResponsesWithText
+            | Kind::ResponsesEmptyWithUsage
+            | Kind::ResponsesBareCompleted
+            | Kind::ResponsesEmptyChunked
+            | Kind::ResponsesEmptyThenPending
+            | Kind::ResponsesCreatedThenPending
+            | Kind::ResponsesCreatedThenEnd
+            | Kind::ResponsesNothing
+            | Kind::ResponsesPartialThenError => ProtocolId::OPENAI_RESPONSES.as_str(),
+            _ => "test",
+        }
     }
 
     async fn execute(&self, _request: Request, _inbound: &str) -> Result<Completion, PluginError> {
@@ -98,9 +122,73 @@ impl Member for Fake {
                         .without_cooldown(),
                 ),
             ])))),
+            Kind::ResponsesEmpty => Ok(Completion::Raw(BodyStream::from_bytes(
+                Bytes::from_static(RESPONSES_EMPTY_SSE),
+            ))),
+            Kind::ResponsesWithText => Ok(Completion::Raw(BodyStream::from_bytes(
+                Bytes::from_static(RESPONSES_TEXT_SSE),
+            ))),
+            Kind::ResponsesEmptyWithUsage => Ok(Completion::Raw(BodyStream::from_bytes(
+                Bytes::from_static(RESPONSES_EMPTY_BILLED_SSE),
+            ))),
+            Kind::ResponsesBareCompleted => Ok(Completion::Raw(BodyStream::from_bytes(
+                Bytes::from_static(RESPONSES_BARE_COMPLETED_SSE),
+            ))),
+            Kind::ResponsesEmptyChunked => {
+                let split = RESPONSES_EMPTY_SSE
+                    .windows(2)
+                    .position(|window| window == b"\n\n")
+                    .expect("boundary")
+                    + 2;
+                let (head, tail) = RESPONSES_EMPTY_SSE.split_at(split);
+                Ok(Completion::Raw(BodyStream::from_stream(stream::iter(
+                    vec![Ok(Bytes::from_static(head)), Ok(Bytes::from_static(tail))],
+                ))))
+            }
+            Kind::ChatChunkThenPending => Ok(Completion::Raw(BodyStream::from_stream(
+                stream::iter(vec![Ok(Bytes::from_static(CHAT_CHUNK_SSE))]).chain(stream::pending()),
+            ))),
+            Kind::ResponsesEmptyThenPending => Ok(Completion::Raw(BodyStream::from_stream(
+                stream::iter(vec![Ok(Bytes::from_static(RESPONSES_EMPTY_SSE))])
+                    .chain(stream::pending()),
+            ))),
+            Kind::ResponsesCreatedThenPending => Ok(Completion::Raw(BodyStream::from_stream(
+                stream::iter(vec![Ok(Bytes::from_static(RESPONSES_CREATED_SSE))])
+                    .chain(stream::pending()),
+            ))),
+            // `unfold` panics if polled again after it ended, as a real
+            // finished body may
+            Kind::ResponsesNothing => Ok(Completion::Raw(BodyStream::from_stream(stream::unfold(
+                (),
+                |()| async { None::<(Result<Bytes, PluginError>, ())> },
+            )))),
+            Kind::ResponsesPartialThenError => Ok(Completion::Raw(BodyStream::from_stream(
+                stream::iter(vec![
+                    Ok(Bytes::from_static(b"event: response.output_text.delta\n")),
+                    Err(PluginError::status_error(502, "severed")),
+                ]),
+            ))),
+            Kind::ResponsesCreatedThenEnd => Ok(Completion::Raw(BodyStream::from_stream(
+                stream::unfold(true, |first| async move {
+                    first.then(|| (Ok(Bytes::from_static(RESPONSES_CREATED_SSE)), false))
+                }),
+            ))),
         }
     }
 }
+
+const RESPONSES_EMPTY_SSE: &[u8] = b"event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"output\":[]}}\n\nevent: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"output\":[],\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}}\n\n";
+
+const RESPONSES_CREATED_SSE: &[u8] = b"event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"output\":[]}}\n\n";
+
+const RESPONSES_TEXT_SSE: &[u8] = b"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"hi\"}\n\nevent: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}}\n\n";
+
+const RESPONSES_EMPTY_BILLED_SSE: &[u8] = b"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"output\":[],\"usage\":{\"input_tokens\":4,\"output_tokens\":0}}}\n\n";
+
+const CHAT_CHUNK_SSE: &[u8] =
+    b"data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"}}]}\n\n";
+
+const RESPONSES_BARE_COMPLETED_SSE: &[u8] = b"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n";
 
 fn reply() -> Response {
     let mut message = Message::new(Role::Assistant);
@@ -888,4 +976,189 @@ async fn r1_27_pool_route_records_its_group_on_the_trace() {
         .expect("dispatch");
     let list = book.list(&Default::default());
     assert_eq!(list.decisions[0].group, "demo");
+}
+
+async fn dispatch_responses(
+    router: &Router,
+    model: &str,
+) -> Result<hofund_router::Routed, RouterError> {
+    let request = Request::new(model);
+    router
+        .dispatch(&request, ProtocolId::OPENAI_RESPONSES.as_str())
+        .await
+}
+
+#[tokio::test]
+async fn d37_1_empty_completed_failover_to_second_member() {
+    let first = Arc::new(AtomicUsize::new(0));
+    let second = Arc::new(AtomicUsize::new(0));
+    let router = router(vec![
+        fake("first", &first, Kind::ResponsesEmpty),
+        fake("second", &second, Kind::Unary),
+    ]);
+    let routed = dispatch_responses(&router, "demo").await.expect("failover");
+    assert_eq!(routed.upstream_id, "second");
+    assert_eq!(first.load(Ordering::SeqCst), 1);
+    assert_eq!(second.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn d37_2_completed_with_output_passes() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let router = router(vec![fake("only", &hits, Kind::ResponsesWithText)]);
+    let routed = dispatch_responses(&router, "demo").await.expect("success");
+    assert_eq!(routed.upstream_id, "only");
+    let Completion::Raw(mut body) = routed.completion else {
+        panic!("expected raw relay");
+    };
+    let chunk = body.next_chunk().await.expect("chunk").expect("bytes");
+    assert_eq!(chunk.as_ref(), RESPONSES_TEXT_SSE);
+}
+
+#[tokio::test]
+async fn d37_3_empty_output_with_usage_is_not_empty_reply() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let router = router(vec![fake("only", &hits, Kind::ResponsesEmptyWithUsage)]);
+    let routed = dispatch_responses(&router, "demo").await.expect("success");
+    assert_eq!(routed.upstream_id, "only");
+}
+
+#[tokio::test]
+async fn d37_4_missing_output_and_usage_passes() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let router = router(vec![fake("only", &hits, Kind::ResponsesBareCompleted)]);
+    let routed = dispatch_responses(&router, "demo").await.expect("success");
+    assert_eq!(routed.upstream_id, "only");
+}
+
+#[tokio::test]
+async fn d37_5_empty_reply_error_does_not_imply_account_fault() {
+    let router = router(vec![fake(
+        "only",
+        &Arc::new(AtomicUsize::new(0)),
+        Kind::ResponsesEmpty,
+    )]);
+    let error = match dispatch_responses(&router, "demo").await {
+        Err(RouterError::Upstream { error, .. }) => error,
+        Ok(_) => panic!("expected empty reply failure"),
+        Err(other) => panic!("unexpected error: {other:?}"),
+    };
+    assert_eq!(error.status(), Some(502));
+    assert!(error.message().contains(EMPTY_REPLY_MESSAGE));
+    assert!(!error.cools());
+}
+
+#[tokio::test]
+async fn d37_6_empty_completed_in_a_later_chunk_still_fails_over() {
+    let first = Arc::new(AtomicUsize::new(0));
+    let second = Arc::new(AtomicUsize::new(0));
+    let router = router(vec![
+        fake("first", &first, Kind::ResponsesEmptyChunked),
+        fake("second", &second, Kind::Unary),
+    ]);
+    let routed = dispatch_responses(&router, "demo").await.expect("failover");
+    assert_eq!(routed.upstream_id, "second");
+    assert_eq!(first.load(Ordering::SeqCst), 1);
+    assert_eq!(second.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn d37_8_empty_completed_fails_over_while_the_upstream_stays_open() {
+    let first = Arc::new(AtomicUsize::new(0));
+    let second = Arc::new(AtomicUsize::new(0));
+    let router = router(vec![
+        fake("first", &first, Kind::ResponsesEmptyThenPending),
+        fake("second", &second, Kind::Unary),
+    ]);
+    let routed = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        dispatch_responses(&router, "demo"),
+    )
+    .await
+    .expect("failed over without waiting for the upstream to close")
+    .expect("failover");
+    assert_eq!(routed.upstream_id, "second");
+    assert_eq!(first.load(Ordering::SeqCst), 1);
+    assert_eq!(second.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn d37_7_non_responses_raw_stream_is_released_after_its_first_event() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let router = router(vec![fake("only", &hits, Kind::ChatChunkThenPending)]);
+    let routed = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        dispatch_responses(&router, "demo"),
+    )
+    .await
+    .expect("released without the full body")
+    .expect("success");
+    let Completion::Raw(mut body) = routed.completion else {
+        panic!("expected raw relay");
+    };
+    let chunk = body.next_chunk().await.expect("chunk").expect("bytes");
+    assert_eq!(chunk.as_ref(), CHAT_CHUNK_SSE);
+}
+
+#[tokio::test]
+async fn d37_9_lifecycle_events_are_released_when_the_upstream_goes_quiet() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let router = router(vec![fake("only", &hits, Kind::ResponsesCreatedThenPending)]);
+    let routed = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        dispatch_responses(&router, "demo"),
+    )
+    .await
+    .expect("response.created was released while the upstream stayed open")
+    .expect("routed");
+    let Completion::Raw(mut body) = routed.completion else {
+        panic!("expected a raw completion");
+    };
+    let chunk = body.next_chunk().await.expect("chunk").expect("ok");
+    assert_eq!(chunk.as_ref(), RESPONSES_CREATED_SSE);
+}
+
+#[tokio::test]
+async fn d37_10_a_finished_lifecycle_only_upstream_is_not_polled_again() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let router = router(vec![fake("only", &hits, Kind::ResponsesCreatedThenEnd)]);
+    let routed = dispatch_responses(&router, "demo").await.expect("routed");
+    let Completion::Raw(mut body) = routed.completion else {
+        panic!("expected a raw completion");
+    };
+    let chunk = body.next_chunk().await.expect("chunk").expect("ok");
+    assert_eq!(chunk.as_ref(), RESPONSES_CREATED_SSE);
+    assert!(body.next_chunk().await.is_none());
+    assert!(body.next_chunk().await.is_none());
+}
+
+#[tokio::test]
+async fn d37_11_an_upstream_that_sent_nothing_is_not_polled_again() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let router = router(vec![fake("only", &hits, Kind::ResponsesNothing)]);
+    let routed = dispatch_responses(&router, "demo").await.expect("routed");
+    let Completion::Raw(mut body) = routed.completion else {
+        panic!("expected a raw completion");
+    };
+    assert!(body.next_chunk().await.is_none());
+    assert!(body.next_chunk().await.is_none());
+}
+
+#[tokio::test]
+async fn d37_12_bytes_read_before_a_severed_upstream_are_kept_ahead_of_its_error() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let router = router(vec![fake("only", &hits, Kind::ResponsesPartialThenError)]);
+    let routed = dispatch_responses(&router, "demo").await.expect("routed");
+    let Completion::Raw(mut body) = routed.completion else {
+        panic!("expected a raw completion");
+    };
+    let chunk = body.next_chunk().await.expect("chunk").expect("ok");
+    assert_eq!(chunk.as_ref(), b"event: response.output_text.delta\n");
+    let error = body
+        .next_chunk()
+        .await
+        .expect("error")
+        .expect_err("severed");
+    assert!(error.to_string().contains("severed"), "{error}");
+    assert!(body.next_chunk().await.is_none());
 }

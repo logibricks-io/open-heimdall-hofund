@@ -212,6 +212,15 @@ BalanceWallet::fn name (& self) -> & str
 BalanceWallet::fn new (amount : f64 , unit : impl Into < String >) -> Self
 BalanceWallet::fn unit (& self) -> & str
 BalanceWallet::fn with_name (mut self , name : impl Into < String >) -> Self
+BilledUsage
+BilledUsage derives(Clone, Debug, Default, PartialEq, Eq)
+BilledUsage.cache_read_tokens
+BilledUsage.cache_write_1h_tokens
+BilledUsage.cache_write_5m_tokens
+BilledUsage.input_tokens
+BilledUsage.output_tokens
+BilledUsage::fn merge_usage (& mut self , usage : & Usage)
+BilledUsage::fn token_bearing (& self) -> bool
 BinaryName
 BinaryName #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
 BinaryName::const fn as_str (self) -> & 'static str
@@ -646,6 +655,7 @@ PluginError::const fn status (& self) -> Option < u16 >
 PluginError::const fn with_credit_soon (mut self) -> Self
 PluginError::const fn without_cooldown (mut self) -> Self
 PluginError::fn auth (message : impl Into < String >) -> Self
+PluginError::fn billed (& self) -> Option < & BilledUsage >
 PluginError::fn cancelled (message : impl Into < String >) -> Self
 PluginError::fn cause (& self) -> Option < & (dyn Error + 'static) >
 PluginError::fn config (message : impl Into < String >) -> Self
@@ -662,6 +672,7 @@ PluginError::fn status_error (status : u16 , message : impl Into < String >) -> 
 PluginError::fn timeout (message : impl Into < String >) -> Self
 PluginError::fn transport (message : impl Into < String >) -> Self
 PluginError::fn unsupported (message : impl Into < String >) -> Self
+PluginError::fn with_billed (mut self , billed : BilledUsage) -> Self
 PluginError::fn with_reset_after (mut self , after : Duration) -> Self
 PluginError::fn with_retry_after (mut self , after : Duration) -> Self
 PluginError::fn with_source (mut self , source : impl Error + Send + Sync + 'static) -> Self

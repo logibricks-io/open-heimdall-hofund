@@ -11,6 +11,8 @@ homepage.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+bytes = "1.12.0"
+hofund-codec = { workspace = true }
 hofund-control-proto = { workspace = true }
 hofund-ir = { workspace = true }
 hofund-plugin-api = { workspace = true }

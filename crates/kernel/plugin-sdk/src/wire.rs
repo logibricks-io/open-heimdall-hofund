@@ -54,8 +54,8 @@ use hofund_codec::{
     OpenAiResponses, StreamDecoder, UNMAPPED_TOOLS, refusal_error,
 };
 use hofund_plugin_api::{
-    BodyStream, Completion, ContentPart, CountOutcome, CredentialStyle, HttpHandle, PluginError,
-    ProtocolId, RawAnswer, RawBody, Request, Role, SecretString, StreamEvent,
+    BilledUsage, BodyStream, Completion, ContentPart, CountOutcome, CredentialStyle, HttpHandle,
+    PluginError, ProtocolId, RawAnswer, RawBody, Request, Role, SecretString, StreamEvent,
 };
 use secrecy::ExposeSecret;
 
@@ -1278,6 +1278,7 @@ async fn decoded(
             pending: VecDeque::new(),
             finished: false,
             committed: false,
+            billed: BilledUsage::default(),
         };
         return Ok(Completion::Stream(Box::pin(futures_util::stream::unfold(
             events,
@@ -1350,6 +1351,7 @@ struct Events {
     pending: VecDeque<Result<StreamEvent, PluginError>>,
     finished: bool,
     committed: bool,
+    billed: BilledUsage,
 }
 
 impl Events {
@@ -1397,9 +1399,24 @@ impl Events {
                 if let Some(error) = failure_of(event) {
                     self.pending.clear();
                     self.finished = true;
-                    return Some(Err(error));
+                    return Some(Err(error.with_billed(self.billed.clone())));
                 }
                 self.committed |= stream_commits(event);
+            }
+            if let Ok(event) = &item {
+                match event {
+                    StreamEvent::MessageStart(start) => {
+                        if let Some(usage) = &start.usage {
+                            self.billed.merge_usage(usage);
+                        }
+                    }
+                    StreamEvent::MessageDelta(delta) => {
+                        if let Some(usage) = &delta.usage {
+                            self.billed.merge_usage(usage);
+                        }
+                    }
+                    _ => {}
+                }
             }
             if let Ok(event) = &mut item {
                 if matches!(event, StreamEvent::Unknown(_)) {
@@ -1426,6 +1443,14 @@ fn failure_of(event: &StreamEvent) -> Option<PluginError> {
     let StreamEvent::Unknown(unknown) = event else {
         return None;
     };
+    if unknown.name == "response.completed"
+        && let Some(object) = unknown.payload.as_object()
+        && hofund_codec::responses_empty::completed_event_empty(object)
+    {
+        return Some(
+            PluginError::status_error(502, hofund_codec::EMPTY_REPLY_MESSAGE).without_cooldown(),
+        );
+    }
     let embedded = unknown.name == "data" && unknown.payload.get("error").is_some();
     if unknown.name != "error" && unknown.name != "response.failed" && !embedded {
         return None;
@@ -1602,7 +1627,9 @@ fn is_key_byte(byte: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use hofund_codec::{AnthropicMessages, Codec, GenerativeLanguage, OpenAiChat};
-    use hofund_plugin_api::{CredentialStyle, PluginErrorKind, ProtocolId, Request, StreamEvent};
+    use hofund_plugin_api::{
+        BilledUsage, CredentialStyle, PluginErrorKind, ProtocolId, Request, StreamEvent,
+    };
 
     use super::{
         AwsSigner, Events, Method, Path, Target, classify_count, consume_fields, converse_call,
@@ -1755,6 +1782,7 @@ mod tests {
             pending: std::collections::VecDeque::new(),
             finished: false,
             committed: false,
+            billed: BilledUsage::default(),
         };
         assert!(matches!(
             events.next().await,

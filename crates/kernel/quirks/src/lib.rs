@@ -5,6 +5,7 @@
 //! profile they were given. Gateway and router code do not read profiles and
 //! do not branch on these ids.
 
+mod disjoint_one_of;
 mod encoded;
 mod json;
 mod passthrough;

@@ -27,7 +27,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
+use bytes::Bytes;
 use futures_util::StreamExt;
+use hofund_codec::responses_empty::{
+    EMPTY_REPLY_MESSAGE, decoded_stream_empty, relayed_sse_empty_without_content,
+    relayed_sse_event_boundary, relayed_sse_has_content, relayed_sse_has_opaque_content,
+    relayed_sse_lifecycle_only,
+};
 use hofund_control_proto::{RouteTry, SkipReason};
 use hofund_ir::{StreamEvent, estimate_input_tokens};
 use hofund_plugin_api::{BodyStream, CountOutcome, Forward, PluginErrorKind, RawAnswer};
@@ -1703,6 +1709,16 @@ impl DispatchState {
                         try_status(&error),
                         fail_text(&error),
                     );
+                    if (self.policy.allows(&error) || decision::asks_next(&error))
+                        && let Some(billed) = error.billed().filter(|b| b.token_bearing())
+                        && let Some(hook) = self.hook.as_ref()
+                    {
+                        hook.failed_handoff(
+                            &info,
+                            try_status(&error).unwrap_or(502),
+                            billed.clone(),
+                        );
+                    }
                     if self.policy.allows(&error) {
                         self.note_skip(
                             index as u32,
@@ -1961,6 +1977,7 @@ fn label_model(completion: Completion, model: String) -> Completion {
 }
 
 async fn accept(completion: Completion) -> Result<Completion, PluginError> {
+    let empty = || PluginError::status_error(502, EMPTY_REPLY_MESSAGE).without_cooldown();
     match completion {
         Completion::Stream(mut stream) => {
             let mut held = Vec::new();
@@ -1969,19 +1986,87 @@ async fn accept(completion: Completion) -> Result<Completion, PluginError> {
                 let commits = stream_commits(&event);
                 held.push(event);
                 if commits {
+                    if decoded_stream_empty(&held) {
+                        return Err(empty());
+                    }
                     let head = futures_util::stream::iter(held.into_iter().map(Ok));
                     return Ok(Completion::Stream(Box::pin(head.chain(stream))));
                 }
+            }
+            if decoded_stream_empty(&held) {
+                return Err(empty());
             }
             Ok(Completion::Stream(Box::pin(futures_util::stream::iter(
                 held.into_iter().map(Ok),
             ))))
         }
-        Completion::Raw(mut body) => match body.next_chunk().await {
-            None => Ok(Completion::Raw(body)),
-            Some(Err(error)) => Err(error),
-            Some(Ok(chunk)) => Ok(Completion::Raw(BodyStream::resume(chunk, body))),
-        },
+        Completion::Raw(mut body) => {
+            let mut buffered = Vec::new();
+            loop {
+                // Lifecycle-only events are held only while the next chunk is
+                // already there: an upstream that goes quiet after
+                // `response.created` gets that event released, so the client
+                // learns the response id (and can interrupt) instead of the
+                // turn hanging until the upstream speaks again.
+                let next = if relayed_sse_event_boundary(&buffered) {
+                    match futures_util::FutureExt::now_or_never(body.next_chunk()) {
+                        Some(next) => next,
+                        None => {
+                            let head = Bytes::from(std::mem::take(&mut buffered));
+                            return Ok(Completion::Raw(BodyStream::resume(head, body)));
+                        }
+                    }
+                } else {
+                    body.next_chunk().await
+                };
+                match next {
+                    None => {
+                        if relayed_sse_empty_without_content(&buffered) {
+                            return Err(empty());
+                        }
+                        // the upstream has ended: hand back only what was read,
+                        // never the finished stream (it must not be polled again)
+                        return Ok(if buffered.is_empty() {
+                            Completion::Raw(BodyStream::from_stream(futures_util::stream::empty()))
+                        } else {
+                            Completion::Raw(BodyStream::from_bytes(Bytes::from(buffered)))
+                        });
+                    }
+                    Some(Err(error)) if buffered.is_empty() => return Err(error),
+                    Some(Err(error)) => {
+                        // a stream severed after some bytes keeps them, then
+                        // carries the error, as an unheld stream would
+                        let head = Bytes::from(std::mem::take(&mut buffered));
+                        return Ok(Completion::Raw(BodyStream::from_stream(
+                            futures_util::stream::iter([Ok(head), Err(error)]),
+                        )));
+                    }
+                    Some(Ok(chunk)) => {
+                        buffered.extend_from_slice(&chunk);
+                        if relayed_sse_empty_without_content(&buffered) {
+                            return Err(empty());
+                        }
+                        if relayed_sse_has_content(&buffered)
+                            || relayed_sse_has_opaque_content(&buffered)
+                            || (relayed_sse_event_boundary(&buffered)
+                                && !relayed_sse_lifecycle_only(&buffered))
+                        {
+                            let head = Bytes::from(std::mem::take(&mut buffered));
+                            return Ok(Completion::Raw(BodyStream::resume(head, body)));
+                        }
+                    }
+                }
+            }
+        }
+        Completion::Unary(response) => {
+            if response.usage.as_ref().is_some_and(|usage| {
+                usage.input_tokens.unwrap_or(0) + usage.output_tokens.unwrap_or(0) == 0
+            }) && response.message.content.is_empty()
+            {
+                return Err(empty());
+            }
+            Ok(Completion::Unary(response))
+        }
         other => Ok(other),
     }
 }
