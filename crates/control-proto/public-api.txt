@@ -64,6 +64,13 @@ AgentSummary #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Ser
 AgentSummary.display_name
 AgentSummary.id
 AgentSummary.installed
+CatalogDisabledListResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+CatalogDisabledListResponse.disabled
+CatalogDisabledListResponse.version
+CatalogModelRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
+CatalogModelRequest.model
+CatalogModelRequest.version
+CatalogModelRequest::fn new (model : impl Into < String >) -> Self
 ConfigApplyRequest #[non_exhaustive] derives(Clone, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
 ConfigApplyRequest.expected_revision
 ConfigApplyRequest.text

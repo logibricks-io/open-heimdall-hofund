@@ -179,7 +179,14 @@ fn expected_deps(package: &str) -> Option<&'static [&'static str]> {
 fn expected_dev_deps(package: &str) -> Option<&'static [&'static str]> {
     Some(match package {
         "hofund-agent" => &[],
-        "hofund-cli" => &[],
+        "hofund-cli" => &[
+            "hofund-control-proto",
+            "http",
+            "serde",
+            "serde_json",
+            "tempfile",
+            "tokio",
+        ],
         "hofund-codec" => &[],
         "hofund-config" => &[],
         "hofund-model-catalog" => &[],

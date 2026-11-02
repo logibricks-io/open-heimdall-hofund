@@ -7,10 +7,11 @@ use hofund_agent::Session;
 use hofund_config::Config;
 use hofund_control_proto::{
     AgentChangeResponse, AgentConnectRequest, AgentDisconnectRequest, AgentListResponse,
-    AgentModelRequest, AgentPlanRequest, AgentPlanResponse, AgentStatusResponse, ControlError,
-    ControlErrorKind, FieldIssue, GatewayKey, GatewayKeyAction, GatewayKeyLimit, GatewayKeyRequest,
-    GatewayKeyResponse, GatewayKeyRestoreRequest, HealthResponse, ModelEntry, ModelListResponse,
-    PicksResponse, PicksSetRequest, ProviderKeyRequest, ProviderKeysResponse, ProviderListResponse,
+    AgentModelRequest, AgentPlanRequest, AgentPlanResponse, AgentStatusResponse,
+    CatalogDisabledListResponse, CatalogModelRequest, ControlError, ControlErrorKind, FieldIssue,
+    GatewayKey, GatewayKeyAction, GatewayKeyLimit, GatewayKeyRequest, GatewayKeyResponse,
+    GatewayKeyRestoreRequest, HealthResponse, ModelEntry, ModelListResponse, PicksResponse,
+    PicksSetRequest, ProviderKeyRequest, ProviderKeysResponse, ProviderListResponse,
     ProviderSummary, ProviderTestRequest, ProviderTestResponse, ProviderTestResult,
     QuotaHistoryQuery, QuotaHistoryResponse, QuotaQuery, QuotaResponse, RouteListResponse,
     RouteModel, RouteModelListResponse, RouteQuery, RouteReserve, SessionRouteResponse,
@@ -646,6 +647,22 @@ impl ControlState for DaemonControl {
                 .collect();
             Ok(response)
         })
+    }
+
+    fn disable_catalog_model(
+        &self,
+        request: CatalogModelRequest,
+    ) -> ControlFuture<'_, CatalogDisabledListResponse> {
+        let ops = Arc::clone(&self.ops);
+        Box::pin(async move { ops.disable_catalog_model(&request.model).await })
+    }
+
+    fn enable_catalog_model(
+        &self,
+        request: CatalogModelRequest,
+    ) -> ControlFuture<'_, CatalogDisabledListResponse> {
+        let ops = Arc::clone(&self.ops);
+        Box::pin(async move { ops.enable_catalog_model(&request.model).await })
     }
 
     fn route_decisions(&self, query: RouteQuery) -> ControlFuture<'_, RouteListResponse> {

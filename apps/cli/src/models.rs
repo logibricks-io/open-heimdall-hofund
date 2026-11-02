@@ -6,6 +6,9 @@ use std::sync::Arc;
 use hofund_config::{edit_catalog_disabled, load_path};
 use hofund_model_catalog::{FetchResult, ModelCatalog, ReqwestFetcher};
 
+use crate::commands::failure;
+use crate::connect::{Target, select};
+
 fn data_root(config_path: &Path) -> std::path::PathBuf {
     config_path
         .parent()
@@ -104,8 +107,7 @@ fn write_config(path: &Path, text: &str) -> Result<(), String> {
     std::fs::write(path, text).map_err(|error| format!("{}: {error}", path.display()))
 }
 
-/// Adds models to `[catalog].disabled` in the config file.
-pub fn disable(config_path: &Path, patterns: &[String]) -> Result<String, String> {
+fn disable_offline(config_path: &Path, patterns: &[String]) -> Result<String, String> {
     let text = config_text(config_path)?;
     let updated = edit_catalog_disabled(&text, patterns, &[])
         .map_err(|error| format!("{}: {error}", config_path.display()))?;
@@ -113,8 +115,7 @@ pub fn disable(config_path: &Path, patterns: &[String]) -> Result<String, String
     Ok(format!("disabled: {}", patterns.join(", ")))
 }
 
-/// Removes models from `[catalog].disabled`.
-pub fn enable(config_path: &Path, patterns: &[String]) -> Result<String, String> {
+fn enable_offline(config_path: &Path, patterns: &[String]) -> Result<String, String> {
     let text = config_text(config_path)?;
     let updated = edit_catalog_disabled(&text, &[], patterns)
         .map_err(|error| format!("{}: {error}", config_path.display()))?;
@@ -122,16 +123,48 @@ pub fn enable(config_path: &Path, patterns: &[String]) -> Result<String, String>
     Ok(format!("enabled: {}", patterns.join(", ")))
 }
 
+/// Adds models to `[catalog].disabled` through the daemon when reachable.
+pub async fn disable(config_path: &Path, patterns: &[String]) -> Result<String, String> {
+    match select(config_path).await? {
+        Target::Daemon(client) => {
+            for pattern in patterns {
+                client
+                    .disable_catalog_model(pattern)
+                    .await
+                    .map_err(failure)?;
+            }
+            Ok(format!("disabled: {}", patterns.join(", ")))
+        }
+        Target::NoDaemon => disable_offline(config_path, patterns),
+    }
+}
+
+/// Removes models from `[catalog].disabled`.
+pub async fn enable(config_path: &Path, patterns: &[String]) -> Result<String, String> {
+    match select(config_path).await? {
+        Target::Daemon(client) => {
+            for pattern in patterns {
+                client
+                    .enable_catalog_model(pattern)
+                    .await
+                    .map_err(failure)?;
+            }
+            Ok(format!("enabled: {}", patterns.join(", ")))
+        }
+        Target::NoDaemon => enable_offline(config_path, patterns),
+    }
+}
+
 #[test]
 fn c1b_13_cli_disable_persists_in_config_file() {
     let dir = tempfile::tempdir().expect("tempdir");
     let config = dir.path().join("hofund.toml");
     std::fs::write(&config, "listen = \"127.0.0.1:9\"\n").expect("config");
-    disable(&config, &["demo".to_owned()]).expect("disable");
+    disable_offline(&config, &["demo".to_owned()]).expect("disable");
     let text = std::fs::read_to_string(&config).expect("read");
     assert!(text.contains("[catalog]"));
     assert!(text.contains("\"demo\""));
-    enable(&config, &["demo".to_owned()]).expect("enable");
+    enable_offline(&config, &["demo".to_owned()]).expect("enable");
     let cleared = std::fs::read_to_string(&config).expect("read again");
     assert!(!cleared.contains("\"demo\""));
 }

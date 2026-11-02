@@ -16,9 +16,9 @@ use std::sync::{Arc, RwLock};
 
 use hofund_config::{Config, ConfigError};
 use hofund_control_proto::{
-    ConfigRejectedEvent, ConfigReloadedEvent, ConfigResponse, ConfigValidationResponse,
-    ControlError, ControlErrorKind, EventPayload, FieldIssue, ListenSource,
-    ListenerRelistenFailedEvent, SnapshotPublishedEvent,
+    CatalogDisabledListResponse, ConfigRejectedEvent, ConfigReloadedEvent, ConfigResponse,
+    ConfigValidationResponse, ControlError, ControlErrorKind, EventPayload, FieldIssue,
+    ListenSource, ListenerRelistenFailedEvent, SnapshotPublishedEvent,
 };
 use hofund_gateway::control::ControlFailure;
 use hofund_gateway::{Relisten, RelistenError};
@@ -243,6 +243,45 @@ impl ConfigOps {
         self.apply_with_key_moves(expected, text, Vec::new()).await
     }
 
+    /// Adds one pattern to `[catalog].disabled` and publishes the config.
+    pub(crate) async fn disable_catalog_model(
+        self: &Arc<Self>,
+        model: &str,
+    ) -> Result<CatalogDisabledListResponse, ControlFailure> {
+        self.mutate_catalog_disabled(&[model.trim().to_owned()], &[])
+            .await
+    }
+
+    /// Removes one pattern from `[catalog].disabled` and publishes the config.
+    pub(crate) async fn enable_catalog_model(
+        self: &Arc<Self>,
+        model: &str,
+    ) -> Result<CatalogDisabledListResponse, ControlFailure> {
+        self.mutate_catalog_disabled(&[], &[model.trim().to_owned()])
+            .await
+    }
+
+    async fn mutate_catalog_disabled(
+        self: &Arc<Self>,
+        add: &[String],
+        remove: &[String],
+    ) -> Result<CatalogDisabledListResponse, ControlFailure> {
+        let _gate = self.gate.lock().await;
+        let ops = Arc::clone(self);
+        let add = add.to_vec();
+        let remove = remove.to_vec();
+        let staged = run_blocking(move || {
+            let _lock = ops.lock()?;
+            let (disk_revision, text) = ops.read_disk()?;
+            let updated = hofund_config::edit_catalog_disabled(&text, &add, &remove)
+                .map_err(|error| catalog_disabled_edit_failure(&error, &text))?;
+            ops.apply_with_lock_held(&disk_revision, updated, Vec::new())
+        })
+        .await?;
+        let _ = self.finish(staged).await;
+        Ok(disabled_list_response(&self.live().config.catalog.disabled))
+    }
+
     pub(crate) async fn apply_with_key_moves(
         self: &Arc<Self>,
         expected: &str,
@@ -318,6 +357,16 @@ impl ConfigOps {
         key_moves: Vec<(hofund_plugin_api::MemberId, hofund_plugin_api::MemberId)>,
     ) -> Result<Staged, ControlFailure> {
         let _lock = self.lock()?;
+        self.apply_with_lock_held(expected, text, key_moves)
+    }
+
+    /// Applies a candidate while the sidecar lock is already held.
+    fn apply_with_lock_held(
+        &self,
+        expected: &str,
+        text: String,
+        key_moves: Vec<(hofund_plugin_api::MemberId, hofund_plugin_api::MemberId)>,
+    ) -> Result<Staged, ControlFailure> {
         let (disk_revision, _) = self.read_disk()?;
         if disk_revision != expected {
             return Err(stale_revision());
@@ -467,6 +516,20 @@ fn response(live: &LiveConfig, disk_revision: String, text: String) -> ConfigRes
     response.pending_restart.clone_from(&live.pending_restart);
     response.not_applied.clone_from(&live.not_applied);
     response
+}
+
+fn disabled_list_response(patterns: &[String]) -> CatalogDisabledListResponse {
+    let mut response = CatalogDisabledListResponse::default();
+    response.disabled = patterns.to_vec();
+    response
+}
+
+fn catalog_disabled_edit_failure(error: &ConfigError, text: &str) -> ControlFailure {
+    invalid(vec![FieldIssue::new(
+        "catalog.disabled",
+        "edit_failed",
+        scrub(&error.to_string(), text),
+    )])
 }
 
 async fn run_blocking<T: Send + 'static>(
@@ -980,5 +1043,36 @@ mod tests {
         let text = format!("api_key = \"{SECRET}\"\nid = \"short\"\n");
         let scrubbed = super::scrub(&format!("bad key {SECRET} for short"), &text);
         assert_eq!(scrubbed, "bad key [redacted] for short");
+    }
+
+    #[tokio::test]
+    async fn c1b_18_mutate_catalog_disabled_twice_then_enable_within_timeout() {
+        use std::time::Duration;
+
+        let fixture = fixture(&document(""));
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let first = fixture
+                .ops
+                .disable_catalog_model("demo-a")
+                .await
+                .unwrap_or_else(|failure| panic!("first disable: {}", failure.error.message));
+            assert!(first.disabled.iter().any(|p| p == "demo-a"));
+            let second = fixture
+                .ops
+                .disable_catalog_model("demo-b")
+                .await
+                .unwrap_or_else(|failure| panic!("second disable: {}", failure.error.message));
+            assert!(second.disabled.iter().any(|p| p == "demo-a"));
+            assert!(second.disabled.iter().any(|p| p == "demo-b"));
+            let restored = fixture
+                .ops
+                .enable_catalog_model("demo-a")
+                .await
+                .unwrap_or_else(|failure| panic!("enable: {}", failure.error.message));
+            assert!(!restored.disabled.iter().any(|p| p == "demo-a"));
+            assert!(restored.disabled.iter().any(|p| p == "demo-b"));
+        })
+        .await
+        .expect("catalog disable/enable deadlocked or stalled");
     }
 }
