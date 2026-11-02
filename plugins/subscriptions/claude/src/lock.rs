@@ -1,7 +1,6 @@
 //! Claude Code's mkdir refresh locks and the profile save lock.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use hofund_plugin_api::PluginError;
@@ -17,21 +16,32 @@ const REFRESH_STALE: Duration = Duration::from_secs(60);
 /// Stale time for the profile save lock.
 const CONFIG_STALE: Duration = Duration::from_secs(10);
 
-static TEST_WAIT: AtomicU64 = AtomicU64::new(0);
-static TEST_REFRESH_STALE: AtomicU64 = AtomicU64::new(0);
-static TEST_CONFIG_STALE: AtomicU64 = AtomicU64::new(0);
-
 #[cfg(test)]
 thread_local! {
+    /// Test overrides for the wait, refresh stale and config stale times, in
+    /// milliseconds; zero keeps the default. Kept per thread so tests running
+    /// in parallel cannot change each other's timing (the lock code reads it
+    /// on the caller's thread).
+    static TEST_TIMING: std::cell::Cell<[u64; 3]> = const { std::cell::Cell::new([0; 3]) };
     static TEST_RELEASES: std::cell::RefCell<Vec<&'static str>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Overrides lock wait and stale durations in tests. Zero restores defaults.
 #[cfg(test)]
 pub(crate) fn test_lock_timing(wait: Duration, refresh_stale: Duration, config_stale: Duration) {
-    TEST_WAIT.store(wait.as_millis() as u64, Ordering::Relaxed);
-    TEST_REFRESH_STALE.store(refresh_stale.as_millis() as u64, Ordering::Relaxed);
-    TEST_CONFIG_STALE.store(config_stale.as_millis() as u64, Ordering::Relaxed);
+    let ms = |d: Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
+    TEST_TIMING.with(|t| t.set([ms(wait), ms(refresh_stale), ms(config_stale)]));
+}
+
+/// The test override at `index` in milliseconds, or zero when there is none.
+#[cfg(test)]
+fn test_override(index: usize) -> u64 {
+    TEST_TIMING.with(|t| t.get()[index])
+}
+
+#[cfg(not(test))]
+fn test_override(_index: usize) -> u64 {
+    0
 }
 
 #[cfg(test)]
@@ -45,7 +55,7 @@ fn record_release(label: &'static str) {
 }
 
 fn wait_limit() -> Duration {
-    let ms = TEST_WAIT.load(Ordering::Relaxed);
+    let ms = test_override(0);
     if ms == 0 {
         WAIT
     } else {
@@ -54,7 +64,7 @@ fn wait_limit() -> Duration {
 }
 
 fn refresh_stale() -> Duration {
-    let ms = TEST_REFRESH_STALE.load(Ordering::Relaxed);
+    let ms = test_override(1);
     if ms == 0 {
         REFRESH_STALE
     } else {
@@ -63,7 +73,7 @@ fn refresh_stale() -> Duration {
 }
 
 fn config_stale() -> Duration {
-    let ms = TEST_CONFIG_STALE.load(Ordering::Relaxed);
+    let ms = test_override(2);
     if ms == 0 {
         CONFIG_STALE
     } else {
