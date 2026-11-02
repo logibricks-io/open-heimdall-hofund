@@ -102,6 +102,15 @@ fn d51_2_disconnect_restores_user_gateway_model_and_list() {
         agent
             .apply(&session, &target(BASE, TOKEN))
             .expect("connect");
+        let connected = parse_json(&path);
+        assert!(connected["models"].get("list").is_none(), "{os:?}");
+        assert_eq!(connected["gateway"]["url"], BASE, "{os:?}");
+        assert_eq!(connected["gateway"]["apiKey"], TOKEN, "{os:?}");
+        assert_eq!(
+            connected["gateway"]["caCertPath"], "/etc/certs/user.pem",
+            "{os:?}"
+        );
+        assert_eq!(connected["theme"], "dark", "{os:?}");
         agent.disconnect(&session, false).expect("disconnect");
         let restored = fs::read_to_string(&path).expect("restored");
         let expected: Value = serde_json::from_str(original).expect("original json");
