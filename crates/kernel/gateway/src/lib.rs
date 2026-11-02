@@ -1150,7 +1150,7 @@ impl hofund_plugin_host::GatewayBackend for InProcess {
         if let Some((status, message)) =
             model_list::disabled_refusal(&app.model_catalog, call.model())
         {
-            write_usage(&app.usage, &usage(""), None, status);
+            write_usage_simple(&app.usage, &usage(""), None, status);
             track.end_with(None, status.as_u16(), None, None);
             return Err(PluginError::status_error(status.as_u16(), message));
         }
@@ -1811,9 +1811,9 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
     if let Some((status, message)) =
         model_list::disabled_refusal(&app.model_catalog, &model_request.model)
     {
-        write_usage(
+        write_usage_simple(
             &app.usage,
-            &UsageMeta::new(&model_request, "", started, &identity),
+            &UsageMeta::new(&model_request, "", &model_request.model, started, &identity),
             None,
             status,
         );
