@@ -11,6 +11,8 @@ homepage.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+bytes = "1.12.0"
+hofund-codec = { workspace = true }
 hofund-control-proto = { workspace = true }
 hofund-ir = { workspace = true }
 hofund-plugin-api = { workspace = true }
@@ -25,6 +27,7 @@ thiserror = "2.0.21"
 tracing = "0.1.44"
 
 [dev-dependencies]
+hofund-codec = { workspace = true }
 hofund-config = { workspace = true }
 hofund-ir = { workspace = true }
 hofund-model-catalog = { workspace = true }

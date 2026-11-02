@@ -245,7 +245,7 @@ This table covers normal and build dependencies, including their target-specific
 | `hofund-kit-subscription` | `hofund-plugin-host` |
 | `hofund-kit-agent` | `hofund-agent`, `hofund-plugin-api`, `hofund-plugin-host` |
 | `hofund-provider` | `hofund-codec`, `hofund-ir`, `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-quirks` |
-| `hofund-router` | `hofund-control-proto`, `hofund-ir`, `hofund-plugin-api` |
+| `hofund-router` | `hofund-codec`, `hofund-control-proto`, `hofund-ir`, `hofund-plugin-api` |
 | `hofund-gateway` | `hofund-codec`, `hofund-config`, `hofund-control-proto`, `hofund-ir`, `hofund-model-catalog`, `hofund-plugin-api`, `hofund-plugin-host`, `hofund-router`, `hofund-secrets`, `hofund-usage` |
 | `hofund-config` | — |
 | `hofund-model-catalog` | `hofund-config` |

@@ -2249,6 +2249,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "futures-util",
+ "hofund-codec",
  "hofund-config",
  "hofund-control-proto",
  "hofund-ir",

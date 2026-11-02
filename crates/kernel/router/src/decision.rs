@@ -17,7 +17,7 @@ use hofund_plugin_api::{PluginError, PluginErrorKind};
 use regex::Regex;
 
 /// The words a model that generated nothing is told with.
-const EMPTY_REPLY: &str = "an empty reply (the model answered nothing; try again)";
+const EMPTY_REPLY: &str = hofund_codec::EMPTY_REPLY_MESSAGE;
 
 /// How far past a model's window an estimate must go to be taken as too long.
 const UNSAID_MARGIN: f64 = 1.2;

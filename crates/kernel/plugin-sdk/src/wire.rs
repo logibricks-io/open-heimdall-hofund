@@ -1426,6 +1426,14 @@ fn failure_of(event: &StreamEvent) -> Option<PluginError> {
     let StreamEvent::Unknown(unknown) = event else {
         return None;
     };
+    if unknown.name == "response.completed"
+        && let Some(object) = unknown.payload.as_object()
+        && hofund_codec::responses_empty::completed_event_empty(object)
+    {
+        return Some(
+            PluginError::status_error(502, hofund_codec::EMPTY_REPLY_MESSAGE).without_cooldown(),
+        );
+    }
     let embedded = unknown.name == "data" && unknown.payload.get("error").is_some();
     if unknown.name != "error" && unknown.name != "response.failed" && !embedded {
         return None;

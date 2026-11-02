@@ -27,7 +27,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
+use bytes::Bytes;
 use futures_util::StreamExt;
+use hofund_codec::responses_empty::{
+    EMPTY_REPLY_MESSAGE, decoded_stream_empty, relayed_sse_empty_without_content,
+    relayed_sse_has_content,
+};
 use hofund_control_proto::{RouteTry, SkipReason};
 use hofund_ir::{StreamEvent, estimate_input_tokens};
 use hofund_plugin_api::{BodyStream, CountOutcome, Forward, PluginErrorKind, RawAnswer};
@@ -1961,6 +1966,7 @@ fn label_model(completion: Completion, model: String) -> Completion {
 }
 
 async fn accept(completion: Completion) -> Result<Completion, PluginError> {
+    let empty = || PluginError::status_error(502, EMPTY_REPLY_MESSAGE).without_cooldown();
     match completion {
         Completion::Stream(mut stream) => {
             let mut held = Vec::new();
@@ -1969,19 +1975,61 @@ async fn accept(completion: Completion) -> Result<Completion, PluginError> {
                 let commits = stream_commits(&event);
                 held.push(event);
                 if commits {
+                    if decoded_stream_empty(&held) {
+                        return Err(empty());
+                    }
                     let head = futures_util::stream::iter(held.into_iter().map(Ok));
                     return Ok(Completion::Stream(Box::pin(head.chain(stream))));
                 }
+            }
+            if decoded_stream_empty(&held) {
+                return Err(empty());
             }
             Ok(Completion::Stream(Box::pin(futures_util::stream::iter(
                 held.into_iter().map(Ok),
             ))))
         }
-        Completion::Raw(mut body) => match body.next_chunk().await {
-            None => Ok(Completion::Raw(body)),
-            Some(Err(error)) => Err(error),
-            Some(Ok(chunk)) => Ok(Completion::Raw(BodyStream::resume(chunk, body))),
-        },
+        Completion::Raw(mut body) => {
+            let mut buffered = Vec::new();
+            loop {
+                match body.next_chunk().await {
+                    None => {
+                        if relayed_sse_empty_without_content(&buffered) {
+                            return Err(empty());
+                        }
+                        let head = if buffered.is_empty() {
+                            None
+                        } else {
+                            Some(Bytes::from(buffered))
+                        };
+                        return Ok(match head {
+                            Some(chunk) => Completion::Raw(BodyStream::resume(chunk, body)),
+                            None => Completion::Raw(body),
+                        });
+                    }
+                    Some(Err(error)) => return Err(error),
+                    Some(Ok(chunk)) => {
+                        buffered.extend_from_slice(&chunk);
+                        if relayed_sse_has_content(&buffered) {
+                            let head = Bytes::from(std::mem::take(&mut buffered));
+                            return Ok(Completion::Raw(BodyStream::resume(head, body)));
+                        }
+                        if relayed_sse_empty_without_content(&buffered) {
+                            return Err(empty());
+                        }
+                    }
+                }
+            }
+        }
+        Completion::Unary(response) => {
+            if response.usage.as_ref().is_some_and(|usage| {
+                usage.input_tokens.unwrap_or(0) + usage.output_tokens.unwrap_or(0) == 0
+            }) && response.message.content.is_empty()
+            {
+                return Err(empty());
+            }
+            Ok(Completion::Unary(response))
+        }
         other => Ok(other),
     }
 }

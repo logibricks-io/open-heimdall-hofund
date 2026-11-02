@@ -2699,6 +2699,18 @@ async fn raw_body(
             codec.id(),
             message_saw_reasoning(&response.message),
         );
+    } else if codec.id() == ProtocolId::OPENAI_RESPONSES.as_str()
+        && let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes)
+        && let Some(object) = value.as_object()
+        && hofund_codec::responses_empty::response_body_empty(object)
+    {
+        write_usage_app(app.as_ref(), &meta, None, StatusCode::BAD_GATEWAY);
+        track.end_with(member, StatusCode::BAD_GATEWAY.as_u16(), None, None);
+        return coded(
+            codec.as_ref(),
+            StatusCode::BAD_GATEWAY,
+            hofund_codec::EMPTY_REPLY_MESSAGE,
+        );
     }
     let (input, output) = codec.response_tokens(&bytes);
     meta.input = input.or(meta.input);
