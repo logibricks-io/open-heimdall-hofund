@@ -526,3 +526,68 @@ async fn d6_nested_group_free_flags_refresh_per_request() {
     assert_eq!(paid_reads.load(Ordering::SeqCst), 3);
     assert_eq!(changed_reads.load(Ordering::SeqCst), 3);
 }
+
+#[tokio::test]
+async fn d41_14_drain_keeps_the_member_that_answered_after_failover() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let route = Route::new(vec![
+        hop_failing("a", direct("a", 1), 1, &seen, true),
+        hop("b", direct("b", 1), 1, &seen),
+        hop("c", direct("c", 1), 1, &seen),
+    ])
+    .with_routing("drain");
+    let router = router(route);
+    dispatch(&router).await;
+    dispatch(&router).await;
+    dispatch(&router).await;
+    assert_eq!(*seen.lock().expect("seen"), ["a", "b", "b", "b"]);
+}
+
+#[tokio::test]
+async fn d41_15_drain_inside_a_group_keeps_the_member_that_answered() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let inner = || unit("group/inner", "drain", 1, false);
+    let route = Route::new(vec![
+        hop_failing(
+            "a",
+            vec![inner(), direct("a", 1)[0].clone()],
+            1,
+            &seen,
+            true,
+        ),
+        hop("b", vec![inner(), direct("b", 1)[0].clone()], 1, &seen),
+        hop("c", vec![inner(), direct("c", 1)[0].clone()], 1, &seen),
+    ])
+    .with_routing("order");
+    let router = router(route);
+    dispatch(&router).await;
+    dispatch(&router).await;
+    assert_eq!(*seen.lock().expect("seen"), ["a", "b", "b"]);
+}
+
+#[tokio::test]
+async fn d41_18_drain_sinks_a_rate_limited_member_like_order() {
+    let now = Arc::new(Mutex::new(Instant::now()));
+    let clock = Arc::clone(&now);
+    let cooldowns = Arc::new(Cooldowns::with_clock(
+        CooldownPolicy::default(),
+        Arc::new(move || *clock.lock().expect("clock")),
+    ));
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let route = Route::new(vec![
+        hop("a", direct("a", 1), 1, &seen),
+        hop("b", direct("b", 1), 1, &seen),
+    ])
+    .with_routing("drain")
+    .with_sink(true);
+    let router = router(route).with_cooldowns(Arc::clone(&cooldowns));
+    cooldowns.record_failure_for_model(
+        &member_id("a"),
+        "demo",
+        &PluginError::status_error(429, "slow"),
+    );
+    *now.lock().expect("clock") += Duration::from_secs(61);
+    cooldowns.record_success_for_model(&member_id("a"), "demo");
+    dispatch(&router).await;
+    assert_eq!(*seen.lock().expect("seen"), ["b"]);
+}

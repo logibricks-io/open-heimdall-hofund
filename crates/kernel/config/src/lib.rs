@@ -1591,8 +1591,8 @@ fn normalized_account_weights(
     Ok(weights)
 }
 
-const ROUTING_NAMES: [&str; 9] = [
-    "smart", "order", "rotate", "usage", "pace", "weight", "free", "fast", "cheap",
+const ROUTING_NAMES: [&str; 10] = [
+    "smart", "order", "rotate", "usage", "pace", "weight", "free", "fast", "cheap", "drain",
 ];
 
 fn validated_routing_name(kind: &str, id: &str, routing: &str) -> Result<(), ConfigError> {
@@ -2830,7 +2830,7 @@ mod tests {
     #[test]
     fn a2_routing_names_validate_and_cheap_requires_a_group() {
         for name in [
-            "smart", "order", "rotate", "usage", "pace", "weight", "free", "fast", "cheap",
+            "smart", "order", "rotate", "usage", "pace", "weight", "free", "fast", "cheap", "drain",
         ] {
             let config = load(&format!(
                 "[[providers]]\nid = \"one\"\npreset = \"openai\"\n[[providers]]\nid = \"two\"\npreset = \"openai\"\n[[routes]]\nmodel = \"demo\"\nrouting = \"{name}\"\nupstreams = [\"one\", \"two\"]\n"
@@ -2852,6 +2852,20 @@ mod tests {
             "[[subscriptions]]\nid = \"codex\"\naccounts = \"*\"\n[[routes]]\nmodel = \"demo\"\nrouting = \"cheap\"\nupstreams = [{ subscription = \"codex\" }]\n",
         )
         .expect("a subscription is an account group");
+    }
+
+    #[test]
+    fn d41_11_routing_accepts_drain_and_rejects_unknown() {
+        let config = load(
+            "[[providers]]\nid = \"one\"\npreset = \"openai\"\n[[providers]]\nid = \"two\"\npreset = \"openai\"\n[[routes]]\nmodel = \"demo\"\nrouting = \"drain\"\nupstreams = [\"one\", \"two\"]\n",
+        )
+        .expect("drain routing");
+        assert_eq!(config.routes[0].routing, "drain");
+        let error = load(
+            "[[providers]]\nid = \"one\"\npreset = \"openai\"\n[[routes]]\nmodel = \"demo\"\nrouting = \"no-such-strategy\"\nupstreams = [\"one\"]\n",
+        )
+        .expect_err("unknown routing");
+        assert!(error.to_string().contains("unknown routing"), "{error}");
     }
 
     #[test]
