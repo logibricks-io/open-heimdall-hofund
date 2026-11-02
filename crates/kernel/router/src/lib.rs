@@ -1708,6 +1708,16 @@ impl DispatchState {
                         try_status(&error),
                         fail_text(&error),
                     );
+                    if (self.policy.allows(&error) || decision::asks_next(&error))
+                        && let Some(billed) = error.billed().filter(|b| b.token_bearing())
+                        && let Some(hook) = self.hook.as_ref()
+                    {
+                        hook.failed_handoff(
+                            &info,
+                            try_status(&error).unwrap_or(502),
+                            billed.clone(),
+                        );
+                    }
                     if self.policy.allows(&error) {
                         self.note_skip(
                             index as u32,

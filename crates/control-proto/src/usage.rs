@@ -108,6 +108,9 @@ pub struct UsageRow {
     /// Whether a list price was stored for this row.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub priced: bool,
+    /// Row kind for handed-off, refusal, or turned-away tries; empty for ordinary rows.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub outcome: String,
 }
 
 /// Aggregated usage totals.

@@ -12,6 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Responses empty completed turns with explicit empty `output` and zero usage
   fail over to the next route member instead of returning an empty success
   (D-37).
+- Billed tokens on a failed try that is handed to another member or account
+  are kept on the failed try and written as a `handed_on` usage row when the
+  next try starts; request totals count the tokens but not an extra request
+  (D-45).
 - An omitted `[catalog]` table loads the default catalog settings.
 - Vendor-timed quota and credit rests now stay in place when a quota reading
   is merely less than full in the same window. They lift early only when a

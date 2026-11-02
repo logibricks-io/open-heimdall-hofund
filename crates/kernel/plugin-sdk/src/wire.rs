@@ -54,8 +54,8 @@ use hofund_codec::{
     OpenAiResponses, StreamDecoder, UNMAPPED_TOOLS, refusal_error,
 };
 use hofund_plugin_api::{
-    BodyStream, Completion, ContentPart, CountOutcome, CredentialStyle, HttpHandle, PluginError,
-    ProtocolId, RawAnswer, RawBody, Request, Role, SecretString, StreamEvent,
+    BilledUsage, BodyStream, Completion, ContentPart, CountOutcome, CredentialStyle, HttpHandle,
+    PluginError, ProtocolId, RawAnswer, RawBody, Request, Role, SecretString, StreamEvent,
 };
 use secrecy::ExposeSecret;
 
@@ -1278,6 +1278,7 @@ async fn decoded(
             pending: VecDeque::new(),
             finished: false,
             committed: false,
+            billed: BilledUsage::default(),
         };
         return Ok(Completion::Stream(Box::pin(futures_util::stream::unfold(
             events,
@@ -1350,6 +1351,7 @@ struct Events {
     pending: VecDeque<Result<StreamEvent, PluginError>>,
     finished: bool,
     committed: bool,
+    billed: BilledUsage,
 }
 
 impl Events {
@@ -1397,9 +1399,24 @@ impl Events {
                 if let Some(error) = failure_of(event) {
                     self.pending.clear();
                     self.finished = true;
-                    return Some(Err(error));
+                    return Some(Err(error.with_billed(self.billed.clone())));
                 }
                 self.committed |= stream_commits(event);
+            }
+            if let Ok(event) = &item {
+                match event {
+                    StreamEvent::MessageStart(start) => {
+                        if let Some(usage) = &start.usage {
+                            self.billed.merge_usage(usage);
+                        }
+                    }
+                    StreamEvent::MessageDelta(delta) => {
+                        if let Some(usage) = &delta.usage {
+                            self.billed.merge_usage(usage);
+                        }
+                    }
+                    _ => {}
+                }
             }
             if let Ok(event) = &mut item {
                 if matches!(event, StreamEvent::Unknown(_)) {
@@ -1763,6 +1780,7 @@ mod tests {
             pending: std::collections::VecDeque::new(),
             finished: false,
             committed: false,
+            billed: BilledUsage::default(),
         };
         assert!(matches!(
             events.next().await,

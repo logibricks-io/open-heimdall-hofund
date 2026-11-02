@@ -17,6 +17,7 @@ mod prev_response;
 mod quotas;
 mod readonly;
 mod refusal_handover;
+mod usage_handoff;
 mod relisten;
 mod responses_ws;
 
@@ -58,7 +59,7 @@ use hofund_plugin_api::{
     BodyStream, InboundSurface, Method, PluginError, PluginErrorKind, ProtocolId,
 };
 use hofund_plugin_host::HttpBackend;
-use hofund_router::{Completion, RouteScope, Routed, RouterError, Snapshot, WaitHook};
+use hofund_router::{AttemptHook, Completion, RouteScope, Routed, RouterError, Snapshot, WaitHook};
 use hofund_secrets::oidc::RuleStore;
 use hofund_secrets::{Identity, KeyStore};
 use hofund_usage::{Ledger, Row};
@@ -1840,7 +1841,18 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
     )
     .with_body(bytes.to_vec());
     let router = app.snapshot.load();
-    let attempt = ask.as_ref().map(|ask| ask.attempt());
+    let inner_hook = ask.as_ref().map(|ask| ask.attempt());
+    let attempt: Option<Arc<dyn AttemptHook>> = Some(Arc::new(usage_handoff::UsageHandoffHook::new(
+        usage_handoff::UsageHandoffContext {
+            usage: Arc::clone(&app.usage),
+            model: model_request.model.clone(),
+            caller_key_id: identity.key_id.clone(),
+            caller_key_name: identity.key_name.clone(),
+            caller_issuer_id: identity.issuer.clone(),
+            started,
+        },
+        inner_hook,
+    )));
     if let Some(hold) = &unrouted_hold {
         hold.set_asked(&model_request.model);
     }

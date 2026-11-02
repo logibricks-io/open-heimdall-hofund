@@ -1193,6 +1193,9 @@ pub(crate) fn into_plugin(error: ProviderError) -> PluginError {
     if credit_soon {
         converted = converted.with_credit_soon();
     }
+    if let Some(billed) = error.billed() {
+        converted = converted.with_billed(billed.clone());
+    }
     converted
 }
 

@@ -39,6 +39,7 @@ mod inbound;
 pub mod kernel;
 
 mod balance;
+mod billed;
 #[cfg(not(feature = "kernel"))]
 mod kernel;
 mod plan;
@@ -61,6 +62,7 @@ pub use agent::{
 pub use balance::{
     BalanceCard, BalancePart, BalanceQuery, BalanceQuota, BalanceSupport, BalanceWallet,
 };
+pub use billed::BilledUsage;
 pub use body::{Body, BodyStream};
 pub use completion::{Completion, CountOutcome, PROBE_CAP, ProbeReport};
 pub use config::{BuildError, ConfigError, RawTable, RawValue, Schema, ValidConfig};

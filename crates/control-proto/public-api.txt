@@ -740,6 +740,7 @@ UsageRow.input_tokens
 UsageRow.model
 UsageRow.output_tokens
 UsageRow.priced
+UsageRow.outcome
 UsageRow.provider
 UsageRow.reasoning_hidden
 UsageRow.reasoning_tokens
