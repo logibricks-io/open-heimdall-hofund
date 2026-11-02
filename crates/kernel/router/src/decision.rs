@@ -332,6 +332,18 @@ fn overflowed(status: u16, text: &str) -> bool {
     matches!(status, 400 | 413 | 422) && too_long(status, text)
 }
 
+/// Whether an upstream refusal should be remembered as a context overflow for
+/// later ordering. Payload-too-large responses are excluded.
+pub(crate) fn context_overflow_memory(error: &PluginError) -> bool {
+    let Some(status) = error.status() else {
+        return false;
+    };
+    if status == 413 || status == 429 || !(400..500).contains(&status) {
+        return false;
+    }
+    too_long(status, &words_of(error.message()))
+}
+
 fn shape_refused(status: u16, message: &str) -> bool {
     let text = words_of(message);
     matches!(status, 400 | 422)
