@@ -39,6 +39,7 @@ pub(crate) async fn refresh(
     account: &AccountId,
 ) -> Result<(), PluginError> {
     let lease = host.accounts().lease(account, LEASE_WAIT).await?;
+    let _run = crate::run_lock::mark(account, host)?;
     let blob = SecretObject::parse(lease.secret())?;
     if blob.flag(creds::LAPSED) {
         return Err(PluginError::auth(creds::LAPSED_REASON));
@@ -109,6 +110,7 @@ pub(crate) async fn warmup(
     account: &AccountId,
 ) -> Result<(), PluginError> {
     let lease = host.accounts().lease(account, LEASE_WAIT).await?;
+    let _run = crate::run_lock::mark(account, host)?;
     let blob = SecretObject::parse(lease.secret())?;
     if blob.flag(creds::LAPSED) {
         return Err(PluginError::auth(creds::LAPSED_REASON));

@@ -14,6 +14,31 @@ pub(crate) const STATUS_ARGS: [&str; 3] = ["auth", "status", "--json"];
 /// Where Claude Code keeps its sign-in and settings.
 pub(crate) const CONFIG_DIR_VAR: &str = "CLAUDE_CONFIG_DIR";
 
+/// The configured agent home when `CLAUDE_CONFIG_DIR` is set.
+pub(crate) fn configured_dir() -> Option<std::path::PathBuf> {
+    #[cfg(test)]
+    {
+        if let Some(path) = TEST_CONFIGURED_DIR.with(|slot| slot.borrow().clone()) {
+            return Some(path);
+        }
+    }
+    std::env::var(CONFIG_DIR_VAR)
+        .ok()
+        .map(std::path::PathBuf::from)
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_CONFIGURED_DIR: std::cell::RefCell<Option<std::path::PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Overrides [`configured_dir`] in this test thread. `None` restores the environment lookup.
+#[cfg(test)]
+pub(crate) fn test_configured_dir(path: Option<std::path::PathBuf>) {
+    TEST_CONFIGURED_DIR.with(|slot| *slot.borrow_mut() = path);
+}
+
 /// How much of a printed line an error quotes.
 const LINE_CAP: usize = 200;
 
