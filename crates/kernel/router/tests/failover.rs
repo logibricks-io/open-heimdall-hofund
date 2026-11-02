@@ -40,6 +40,8 @@ enum Kind {
     ResponsesWithText,
     ResponsesEmptyWithUsage,
     ResponsesBareCompleted,
+    ResponsesEmptyChunked,
+    ChatChunkThenPending,
 }
 
 #[async_trait]
@@ -57,7 +59,8 @@ impl Member for Fake {
             Kind::ResponsesEmpty
             | Kind::ResponsesWithText
             | Kind::ResponsesEmptyWithUsage
-            | Kind::ResponsesBareCompleted => ProtocolId::OPENAI_RESPONSES.as_str(),
+            | Kind::ResponsesBareCompleted
+            | Kind::ResponsesEmptyChunked => ProtocolId::OPENAI_RESPONSES.as_str(),
             _ => "test",
         }
     }
@@ -121,6 +124,20 @@ impl Member for Fake {
             Kind::ResponsesBareCompleted => Ok(Completion::Raw(BodyStream::from_bytes(
                 Bytes::from_static(RESPONSES_BARE_COMPLETED_SSE),
             ))),
+            Kind::ResponsesEmptyChunked => {
+                let split = RESPONSES_EMPTY_SSE
+                    .windows(2)
+                    .position(|window| window == b"\n\n")
+                    .expect("boundary")
+                    + 2;
+                let (head, tail) = RESPONSES_EMPTY_SSE.split_at(split);
+                Ok(Completion::Raw(BodyStream::from_stream(stream::iter(
+                    vec![Ok(Bytes::from_static(head)), Ok(Bytes::from_static(tail))],
+                ))))
+            }
+            Kind::ChatChunkThenPending => Ok(Completion::Raw(BodyStream::from_stream(
+                stream::iter(vec![Ok(Bytes::from_static(CHAT_CHUNK_SSE))]).chain(stream::pending()),
+            ))),
         }
     }
 }
@@ -130,6 +147,9 @@ const RESPONSES_EMPTY_SSE: &[u8] = b"event: response.created\ndata: {\"type\":\"
 const RESPONSES_TEXT_SSE: &[u8] = b"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"hi\"}\n\nevent: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}}\n\n";
 
 const RESPONSES_EMPTY_BILLED_SSE: &[u8] = b"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"output\":[],\"usage\":{\"input_tokens\":4,\"output_tokens\":0}}}\n\n";
+
+const CHAT_CHUNK_SSE: &[u8] =
+    b"data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"}}]}\n\n";
 
 const RESPONSES_BARE_COMPLETED_SSE: &[u8] = b"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n";
 
@@ -989,4 +1009,36 @@ async fn d37_5_empty_reply_error_does_not_imply_account_fault() {
     assert_eq!(error.status(), Some(502));
     assert!(error.message().contains(EMPTY_REPLY_MESSAGE));
     assert!(!error.cools());
+}
+
+#[tokio::test]
+async fn d37_6_empty_completed_in_a_later_chunk_still_fails_over() {
+    let first = Arc::new(AtomicUsize::new(0));
+    let second = Arc::new(AtomicUsize::new(0));
+    let router = router(vec![
+        fake("first", &first, Kind::ResponsesEmptyChunked),
+        fake("second", &second, Kind::Unary),
+    ]);
+    let routed = dispatch_responses(&router, "demo").await.expect("failover");
+    assert_eq!(routed.upstream_id, "second");
+    assert_eq!(first.load(Ordering::SeqCst), 1);
+    assert_eq!(second.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn d37_7_non_responses_raw_stream_is_released_after_its_first_event() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let router = router(vec![fake("only", &hits, Kind::ChatChunkThenPending)]);
+    let routed = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        dispatch_responses(&router, "demo"),
+    )
+    .await
+    .expect("released without the full body")
+    .expect("success");
+    let Completion::Raw(mut body) = routed.completion else {
+        panic!("expected raw relay");
+    };
+    let chunk = body.next_chunk().await.expect("chunk").expect("bytes");
+    assert_eq!(chunk.as_ref(), CHAT_CHUNK_SSE);
 }

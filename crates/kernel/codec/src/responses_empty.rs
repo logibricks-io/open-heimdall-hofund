@@ -194,9 +194,14 @@ pub fn relayed_sse_has_opaque_content(sse: &[u8]) -> bool {
             }
             continue;
         }
-        if !line.starts_with(b":") {
-            return true;
+        if line.starts_with(b":")
+            || line.starts_with(b"event:")
+            || line.starts_with(b"id:")
+            || line.starts_with(b"retry:")
+        {
+            continue;
         }
+        return true;
     }
     false
 }
@@ -205,6 +210,37 @@ pub fn relayed_sse_has_opaque_content(sse: &[u8]) -> bool {
 #[must_use]
 pub fn relayed_sse_event_boundary(sse: &[u8]) -> bool {
     sse.windows(2).any(|window| window == b"\n\n")
+}
+
+/// Whether every `data:` event in `sse` so far is a Responses lifecycle event
+/// (a JSON object whose `type` starts with `response.`), with at least one.
+///
+/// Such a stream is still held after an event boundary, so an empty
+/// `response.completed` arriving in a later chunk can still fail over.
+#[must_use]
+pub fn relayed_sse_lifecycle_only(sse: &[u8]) -> bool {
+    let mut saw = false;
+    for line in sse.split(|byte| *byte == b'\n') {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        let Some(data) = line.strip_prefix(b"data:") else {
+            continue;
+        };
+        let data = data.strip_prefix(b" ").unwrap_or(data);
+        if data == b"[DONE]" || data.is_empty() {
+            continue;
+        }
+        let lifecycle = serde_json::from_slice::<Value>(data).is_ok_and(|value| {
+            value
+                .get("type")
+                .and_then(Value::as_str)
+                .is_some_and(|kind| kind.starts_with("response."))
+        });
+        if !lifecycle {
+            return false;
+        }
+        saw = true;
+    }
+    saw
 }
 
 fn response_empty_with_zero_usage(response: &Map<String, Value>) -> bool {
@@ -340,5 +376,29 @@ mod tests {
             "data: {\"type\":\"response.completed\",\"response\":{\"output\":[],\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}}\n\n",
         );
         assert!(relayed_sse_empty_without_content(sse.as_bytes()));
+    }
+
+    #[test]
+    fn d37_7_lifecycle_only_holds_responses_and_releases_others() {
+        let created = "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"output\":[]}}\n\n";
+        assert!(super::relayed_sse_lifecycle_only(created.as_bytes()));
+        let chat = "data: {\"object\":\"chat.completion.chunk\",\"choices\":[]}\n\n";
+        assert!(!super::relayed_sse_lifecycle_only(chat.as_bytes()));
+        let messages = "event: message_start\ndata: {\"type\":\"message_start\"}\n\n";
+        assert!(!super::relayed_sse_lifecycle_only(messages.as_bytes()));
+        let mixed = format!("{created}{chat}");
+        assert!(!super::relayed_sse_lifecycle_only(mixed.as_bytes()));
+        assert!(!super::relayed_sse_lifecycle_only(b": ping\n\n"));
+        assert!(!super::relayed_sse_lifecycle_only(b""));
+    }
+
+    #[test]
+    fn d37_8_sse_fields_are_not_opaque() {
+        let sse = "event: response.created\nid: 1\nretry: 10\n: ping\ndata: {\"type\":\"response.created\"}\n\n";
+        assert!(!super::relayed_sse_has_opaque_content(sse.as_bytes()));
+        assert!(super::relayed_sse_has_opaque_content(
+            b"data: plain words\n\n"
+        ));
+        assert!(super::relayed_sse_has_opaque_content(b"hello there"));
     }
 }
