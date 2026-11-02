@@ -70,9 +70,6 @@ fn collect_edits(node: &Node, value: &Value, in_schema: bool, edits: &mut Vec<Ed
 
 fn branches_disjoint(branches: &[Value]) -> bool {
     let parsed: Vec<BranchInfo> = branches.iter().map(parse_branch).collect();
-    if parsed.iter().any(|branch| branch.nullable) {
-        return false;
-    }
     for left in 0..parsed.len() {
         for right in left + 1..parsed.len() {
             if !pair_disjoint(&parsed[left], &parsed[right]) {
@@ -222,6 +219,20 @@ mod tests {
         let body = br#"{"parameters":{"anyOf":[{"type":"string"},{"type":"integer"}]}}"#;
         let out = rename_disjoint_any_of(body);
         assert!(out.windows(7).any(|w| w == br#""anyOf""#));
+    }
+
+    #[test]
+    fn d49_8_enum_disjoint_but_loose_branch_stays_any_of() {
+        for extra in [
+            r#""patternProperties":{"^x":{"type":"string"}}"#,
+            r#""not":{"required":["other"]}"#,
+        ] {
+            let body = format!(
+                r#"{{"parameters":{{"anyOf":[{{"type":"object","properties":{{"kind":{{"type":"string","enum":["a"]}}}},"required":["kind"],{extra}}},{{"type":"object","properties":{{"kind":{{"type":"string","enum":["b"]}}}},"required":["kind"]}}]}}}}"#
+            );
+            let out = rename_disjoint_any_of(body.as_bytes());
+            assert_eq!(out, body.as_bytes(), "{extra}");
+        }
     }
 
     #[test]

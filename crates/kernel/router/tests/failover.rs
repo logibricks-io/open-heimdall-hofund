@@ -42,6 +42,7 @@ enum Kind {
     ResponsesBareCompleted,
     ResponsesEmptyChunked,
     ChatChunkThenPending,
+    ResponsesEmptyThenPending,
 }
 
 #[async_trait]
@@ -60,7 +61,8 @@ impl Member for Fake {
             | Kind::ResponsesWithText
             | Kind::ResponsesEmptyWithUsage
             | Kind::ResponsesBareCompleted
-            | Kind::ResponsesEmptyChunked => ProtocolId::OPENAI_RESPONSES.as_str(),
+            | Kind::ResponsesEmptyChunked
+            | Kind::ResponsesEmptyThenPending => ProtocolId::OPENAI_RESPONSES.as_str(),
             _ => "test",
         }
     }
@@ -137,6 +139,10 @@ impl Member for Fake {
             }
             Kind::ChatChunkThenPending => Ok(Completion::Raw(BodyStream::from_stream(
                 stream::iter(vec![Ok(Bytes::from_static(CHAT_CHUNK_SSE))]).chain(stream::pending()),
+            ))),
+            Kind::ResponsesEmptyThenPending => Ok(Completion::Raw(BodyStream::from_stream(
+                stream::iter(vec![Ok(Bytes::from_static(RESPONSES_EMPTY_SSE))])
+                    .chain(stream::pending()),
             ))),
         }
     }
@@ -1020,6 +1026,26 @@ async fn d37_6_empty_completed_in_a_later_chunk_still_fails_over() {
         fake("second", &second, Kind::Unary),
     ]);
     let routed = dispatch_responses(&router, "demo").await.expect("failover");
+    assert_eq!(routed.upstream_id, "second");
+    assert_eq!(first.load(Ordering::SeqCst), 1);
+    assert_eq!(second.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn d37_9_empty_completed_fails_over_while_the_upstream_stays_open() {
+    let first = Arc::new(AtomicUsize::new(0));
+    let second = Arc::new(AtomicUsize::new(0));
+    let router = router(vec![
+        fake("first", &first, Kind::ResponsesEmptyThenPending),
+        fake("second", &second, Kind::Unary),
+    ]);
+    let routed = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        dispatch_responses(&router, "demo"),
+    )
+    .await
+    .expect("failed over without waiting for the upstream to close")
+    .expect("failover");
     assert_eq!(routed.upstream_id, "second");
     assert_eq!(first.load(Ordering::SeqCst), 1);
     assert_eq!(second.load(Ordering::SeqCst), 1);

@@ -63,3 +63,39 @@ fn d49_7_copilot_gpt_keeps_custom_tools() {
     );
     assert_eq!(out, body);
 }
+
+#[test]
+fn d49_9_gemini_off_copilot_keeps_any_of() {
+    let body = br#"{"model":"gemini-2.5","tools":[{"type":"function","function":{"name":"t","parameters":{"anyOf":[{"type":"object","properties":{"kind":{"type":"string","enum":["a"]}},"required":["kind"],"additionalProperties":false},{"type":"object","properties":{"kind":{"type":"string","enum":["b"]}},"required":["kind"],"additionalProperties":false}]}}}]}"#;
+    for base_url in ["https://openrouter.ai/api/v1", "https://gateway.example.test/v1"] {
+        let out = apply_encoded(
+            EncodedContext {
+                base_url,
+                preset: None,
+                protocol: "openai-chat",
+            },
+            body,
+        );
+        assert!(
+            !out.windows(7).any(|window| window == br#""oneOf""#),
+            "{base_url}"
+        );
+    }
+}
+
+#[test]
+fn d49_10_grok_off_copilot_keeps_custom_tools() {
+    let body = br#"{"model":"grok-3","tools":[{"type":"custom","name":"apply_patch","input_schema":{"type":"object"}}]}"#;
+    for base_url in ["https://api.x.ai/v1", "https://gateway.example.test/v1"] {
+        let out = apply_encoded(
+            EncodedContext {
+                base_url,
+                preset: None,
+                protocol: "openai-responses",
+            },
+            body,
+        );
+        let value: serde_json::Value = serde_json::from_slice(&out).expect("json");
+        assert_eq!(value["tools"][0]["type"], "custom", "{base_url}");
+    }
+}
