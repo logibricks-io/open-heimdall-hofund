@@ -663,7 +663,35 @@ fn by_left(seats: &[Seat], tokens_first: bool) -> Vec<usize> {
     places
 }
 
+fn told_share(seat: &Seat) -> bool {
+    seat.used > 0.0 || seat.soon.iter().any(|deadline| deadline.is_some())
+}
+
+fn mixed_told_and_shareless(seats: &[Seat]) -> bool {
+    let mut told = false;
+    let mut shareless = false;
+    for seat in seats {
+        if told_share(seat) {
+            told = true;
+        } else {
+            shareless = true;
+        }
+        if told && shareless {
+            return true;
+        }
+    }
+    false
+}
+
 fn least_used(_: &str, seats: &[Seat], _: &StrategyState) -> Vec<usize> {
+    if mixed_told_and_shareless(seats) {
+        least_used_mixed(seats)
+    } else {
+        least_used_by_share(seats)
+    }
+}
+
+fn least_used_by_share(seats: &[Seat]) -> Vec<usize> {
     let left = by_left(seats, true);
     let mut order = identity(seats.len());
     order.sort_by(|a, b| {
@@ -681,6 +709,46 @@ fn least_used(_: &str, seats: &[Seat], _: &StrategyState) -> Vec<usize> {
             .then_with(|| a.tokens.total_cmp(&b.tokens))
     });
     order
+}
+
+fn least_used_mixed(seats: &[Seat]) -> Vec<usize> {
+    let left = by_left(seats, true);
+    let mut learning = Vec::new();
+    let mut told_room = Vec::new();
+    let mut shareless_room = Vec::new();
+    let mut low = Vec::new();
+    let mut spent = Vec::new();
+    for (index, seat) in seats.iter().enumerate() {
+        match tier(seat.used) {
+            2 => spent.push(index),
+            1 => low.push(index),
+            _ if seat.learns => learning.push(index),
+            _ if told_share(seat) => told_room.push(index),
+            _ => shareless_room.push(index),
+        }
+    }
+    learning.sort_by(|a, b| seats[*b].learns.cmp(&seats[*a].learns));
+    told_room.sort_by(|a, b| {
+        seats[*a]
+            .used
+            .total_cmp(&seats[*b].used)
+            .then_with(|| left[*a].cmp(&left[*b]))
+            .then_with(|| seats[*a].tokens.total_cmp(&seats[*b].tokens))
+    });
+    shareless_room.sort_by(|a, b| {
+        left[*a]
+            .cmp(&left[*b])
+            .then_with(|| seats[*a].tokens.total_cmp(&seats[*b].tokens))
+    });
+    low.sort_by(|a, b| seats[*a].used.total_cmp(&seats[*b].used));
+    spent.sort_by(|a, b| spent_before(&seats[*a], &seats[*b]));
+    learning
+        .into_iter()
+        .chain(told_room)
+        .chain(shareless_room)
+        .chain(low)
+        .chain(spent)
+        .collect()
 }
 
 fn weekly_pace(_: &str, seats: &[Seat], _: &StrategyState) -> Vec<usize> {
@@ -1218,6 +1286,99 @@ mod tests {
                 .then_some(SystemTime::UNIX_EPOCH + Duration::from_secs(lapse * 3600 + 10));
         }
         assert_eq!(routed(&state, "smart", &seats), ["sooner", "later", "none"]);
+    }
+
+    #[test]
+    fn d30_1_a_key_sits_behind_subscriptions_with_room() {
+        let state = StrategyState::with_builtins();
+        let mut seats = self::seats(&["key", "sub-a", "sub-b"]);
+        seats[0].account = false;
+        seats[1].account = true;
+        seats[1].used = 25.0;
+        seats[2].account = true;
+        seats[2].used = 40.0;
+        assert_eq!(routed(&state, "usage", &seats), ["sub-a", "sub-b", "key"]);
+    }
+
+    #[test]
+    fn d30_2_a_wallet_sits_behind_told_share_and_before_a_key() {
+        let state = StrategyState::with_builtins();
+        let mut wallet = seat("wallet");
+        wallet.account = true;
+        wallet.known = true;
+        wallet.left = 500.0;
+        wallet.left_in = "demo\0credits".to_owned();
+        let mut sub = seat("sub");
+        sub.account = true;
+        sub.used = 15.0;
+        let mut key = seat("key");
+        key.account = false;
+        assert_eq!(
+            routed(&state, "usage", &[wallet, sub, key]),
+            ["sub", "wallet", "key"]
+        );
+    }
+
+    #[test]
+    fn d30_3_keys_precede_low_and_spent_subscriptions() {
+        let state = StrategyState::with_builtins();
+        let mut key = seat("key");
+        key.account = false;
+        let mut low = seat("low");
+        low.account = true;
+        low.used = 91.0;
+        let mut spent = seat("spent");
+        spent.account = true;
+        spent.used = 99.0;
+        assert_eq!(
+            routed(&state, "usage", &[spent, low, key]),
+            ["key", "low", "spent"]
+        );
+    }
+
+    #[test]
+    fn d30_4_a_learning_account_goes_first() {
+        let state = StrategyState::with_builtins();
+        let mut learner = seat("learner");
+        learner.account = true;
+        learner.learns = true;
+        let mut sub = seat("sub");
+        sub.account = true;
+        sub.used = 5.0;
+        let mut key = seat("key");
+        key.account = false;
+        assert_eq!(
+            routed(&state, "usage", &[key, sub, learner]),
+            ["learner", "sub", "key"]
+        );
+    }
+
+    #[test]
+    fn d30_5_told_shares_still_order_by_use() {
+        let state = StrategyState::with_builtins();
+        let mut seats = self::seats(&["heavy", "light"]);
+        seats[0].account = true;
+        seats[0].used = 60.0;
+        seats[1].account = true;
+        seats[1].used = 10.0;
+        assert_eq!(routed(&state, "usage", &seats), ["light", "heavy"]);
+    }
+
+    #[test]
+    fn d30_6_a_known_renewal_with_zero_use_beats_a_lower_token_key() {
+        use std::time::{Duration, SystemTime};
+
+        let state = StrategyState::with_builtins();
+        let now = SystemTime::now();
+        let mut renewal = seat("renewal");
+        renewal.account = true;
+        renewal.used = 0.0;
+        renewal.soon = vec![Some(now + Duration::from_secs(2 * 3600))];
+        renewal.tokens = 10.0;
+        let mut key = seat("key");
+        key.account = false;
+        key.tokens = 1.0;
+        assert_eq!(routed(&state, "usage", &[key, renewal]), ["renewal", "key"]);
     }
 
     #[test]
