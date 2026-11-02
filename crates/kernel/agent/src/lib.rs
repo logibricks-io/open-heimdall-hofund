@@ -63,7 +63,7 @@ mod request_agent;
 mod store;
 mod yaml_edit;
 
-pub use catalog::{Catalog, Compiled, catalog, resolve};
+pub use catalog::{Catalog, Compiled, catalog, resolve, resolve_agent_path};
 pub use credential::CREDENTIAL_CHANGE_PREFIX;
 pub use request_agent::request_agent_id;
 
@@ -111,6 +111,7 @@ pub struct Session {
     codex_home: Option<PathBuf>,
     gemini_cli_home: Option<PathBuf>,
     xdg_config_home: Option<PathBuf>,
+    system_root: Option<PathBuf>,
     credential_store: Option<Arc<dyn CredentialStore>>,
 }
 
@@ -125,6 +126,7 @@ impl std::fmt::Debug for Session {
             .field("codex_home", &self.codex_home)
             .field("gemini_cli_home", &self.gemini_cli_home)
             .field("xdg_config_home", &self.xdg_config_home)
+            .field("system_root", &self.system_root)
             .field("credential_store", &self.credential_store.is_some())
             .finish()
     }
@@ -143,6 +145,7 @@ impl Session {
             codex_home: None,
             gemini_cli_home: None,
             xdg_config_home: None,
+            system_root: None,
             credential_store: None,
         }
     }
@@ -275,6 +278,19 @@ impl Session {
         let path = path.into();
         self.set_env(OsStr::new("XDG_CONFIG_HOME"), path.as_os_str());
         self
+    }
+
+    /// Resolves absolute agent paths (organisation admin files and detection
+    /// paths) under `root` instead of the filesystem root. Tests use this; it
+    /// is never read from the environment.
+    #[must_use]
+    pub fn with_system_root(mut self, root: impl Into<PathBuf>) -> Self {
+        self.system_root = Some(root.into());
+        self
+    }
+
+    pub(crate) fn system_root(&self) -> Option<&std::path::Path> {
+        self.system_root.as_deref()
     }
 
     /// Uses `store` for agents that read hofund's key from the OS credential

@@ -49,6 +49,7 @@ AgentDescription::const fn binary (& self) -> & 'static str
 AgentDescription::const fn binary_not_go (& self) -> bool
 AgentDescription::const fn client_prefixes (& self) -> & 'static [& 'static str]
 AgentDescription::const fn credential (& self) -> Option < & AgentCredential >
+AgentDescription::const fn detect_paths (& self) -> & 'static [AgentPath]
 AgentDescription::const fn display_name (& self) -> & 'static str
 AgentDescription::const fn effort_file (& self) -> Option < & 'static str >
 AgentDescription::const fn effort_key (& self) -> Option < & 'static str >
@@ -60,23 +61,28 @@ AgentDescription::const fn model_key (& self) -> Option < & 'static str >
 AgentDescription::const fn model_prefix (& self) -> Option < & 'static str >
 AgentDescription::const fn model_table (& self) -> Option < & 'static str >
 AgentDescription::const fn nested_turn_headers (& self) -> & 'static [& 'static str]
+AgentDescription::const fn remove (& self) -> & 'static [AgentRemove]
 AgentDescription::const fn request_agent_header (& self) -> Option < & 'static str >
 AgentDescription::const fn requires (& self) -> & 'static [crate :: id :: SurfaceId]
 AgentDescription::const fn restore_model_on_clear (& self) -> bool
 AgentDescription::const fn route (& self) -> AgentRoute
 AgentDescription::const fn sets (& self) -> & 'static [AgentSet]
+AgentDescription::const fn status_checks (& self) -> & 'static [AgentStatusCheck]
 AgentDescription::const fn visible (& self) -> Visible
 AgentDescription::const fn with_active_provider (mut self , layout : AgentActiveProvider) -> Self
 AgentDescription::const fn with_binary_not_go (mut self) -> Self
 AgentDescription::const fn with_client_prefixes (mut self , prefixes : & 'static [& 'static str]) -> Self
 AgentDescription::const fn with_credential (mut self , credential : AgentCredential) -> Self
+AgentDescription::const fn with_detect_paths (mut self , paths : & 'static [AgentPath]) -> Self
 AgentDescription::const fn with_effort_file (mut self , file : & 'static str) -> Self
 AgentDescription::const fn with_model_file (mut self , file : & 'static str) -> Self
 AgentDescription::const fn with_model_prefix (mut self , prefix : & 'static str) -> Self
 AgentDescription::const fn with_model_restore_on_clear (mut self , restore : bool) -> Self
 AgentDescription::const fn with_model_table (mut self , table : & 'static str) -> Self
 AgentDescription::const fn with_nested_turn_headers (mut self , headers : & 'static [& 'static str]) -> Self
+AgentDescription::const fn with_remove (mut self , remove : & 'static [AgentRemove]) -> Self
 AgentDescription::const fn with_request_agent_header (mut self , header : & 'static str) -> Self
+AgentDescription::const fn with_status_checks (mut self , checks : & 'static [AgentStatusCheck]) -> Self
 AgentFactory
 AgentFactory::Config
 AgentFactory::fn build (& self , cfg : & Self :: Config , host : & HostContext ,) -> Result < Arc < dyn AgentIntegration > , BuildError >
@@ -102,6 +108,17 @@ AgentIntegration
 AgentIntegration::fn custom_write (& self , ctx : & WriteCtx , target : & GatewayTarget ,) -> Result < Option < Plan > , PluginError >
 AgentIntegration::fn description (& self) -> & 'static AgentDescription
 AgentIntegration::fn import_providers (& self , ctx : & ImportCtx) -> Result < Vec < ImportedProvider > , PluginError >
+AgentPath
+AgentPath #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
+AgentPath::const fn from_static (linux : & 'static str , macos : & 'static str , windows : & 'static str ,) -> Self
+AgentPath::const fn linux (& self) -> & 'static str
+AgentPath::const fn macos (& self) -> & 'static str
+AgentPath::const fn windows (& self) -> & 'static str
+AgentRemove
+AgentRemove #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
+AgentRemove::const fn file (& self) -> & 'static str
+AgentRemove::const fn from_static (file : & 'static str , key : & 'static str) -> Self
+AgentRemove::const fn key (& self) -> & 'static str
 AgentRoute
 AgentRoute #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
 AgentRoute::Gateway
@@ -120,6 +137,10 @@ AgentSignIn::const fn names (& self) -> & 'static [& 'static str]
 AgentSignIn::const fn new (names : & 'static [& 'static str] , home_env : & 'static str , home_dir : & 'static str ,) -> Self
 AgentSignIn::const fn sign_in_spends (& self) -> bool
 AgentSignIn::const fn with_sign_in_spends (mut self , sign_in_spends : bool) -> Self
+AgentStatusCheck
+AgentStatusCheck #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
+AgentStatusCheck::AdminGateway
+AgentStatusCheck::EnvGatewayUrl
 AuthChoice
 AuthChoice #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
 AuthChoice::Bearer
@@ -241,7 +262,8 @@ ConnectionStatus::const fn connected (& self) -> bool
 ConnectionStatus::const fn display_name (& self) -> & 'static str
 ConnectionStatus::const fn id (& self) -> & 'static str
 ConnectionStatus::const fn installed (& self) -> bool
-ConnectionStatus::fn new (id : & 'static str , display_name : & 'static str , installed : bool , connected : bool , paths : Vec < PathBuf > ,) -> Self
+ConnectionStatus::const fn managed (& self) -> bool
+ConnectionStatus::fn new (id : & 'static str , display_name : & 'static str , installed : bool , connected : bool , managed : bool , paths : Vec < PathBuf > ,) -> Self
 ConnectionStatus::fn paths (& self) -> & [PathBuf]
 ContentPart
 CountOutcome
@@ -854,12 +876,14 @@ Slot::ModelArray
 Slot::ModelIfUnset
 Slot::ModelMap
 Slot::ModelPair
+Slot::ModelRoute
 Slot::ModelTier
 Slot::Origin
 Slot::Template
 Slot::Token
 Slot::V1
 Slot::const fn model_if_unset (from : Option < & 'static str >) -> Self
+Slot::const fn model_route () -> Self
 SpawnRequest
 SpawnRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 SpawnRequest::fn args (& self) -> & [OsString]

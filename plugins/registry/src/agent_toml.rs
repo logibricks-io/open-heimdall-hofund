@@ -37,6 +37,38 @@ pub struct AgentToml {
     /// Headers that name this agent even when the user agent names another.
     #[serde(default)]
     pub nested_turn_headers: Vec<String>,
+    #[serde(default, rename = "detect")]
+    pub detect: Vec<DetectToml>,
+    #[serde(default, rename = "remove")]
+    pub remove: Vec<RemoveToml>,
+    #[serde(default, rename = "status")]
+    pub status: Vec<StatusToml>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DetectToml {
+    pub linux: String,
+    pub macos: String,
+    pub windows: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemoveToml {
+    pub file: String,
+    pub key: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StatusToml {
+    pub kind: String,
+    pub linux: Option<String>,
+    pub macos: Option<String>,
+    pub windows: Option<String>,
+    pub url_key: Option<String>,
+    pub name: Option<String>,
 }
 
 /// The model kept under a provider the agent names in one key, with an older
@@ -99,6 +131,7 @@ pub enum SlotToml {
     Name(String),
     Literal(LiteralSlot),
     ModelIfUnset(ModelIfUnsetSlot),
+    ModelRoute(ModelRouteSlot),
     ModelTier(ModelTierSlot),
     Json(JsonSlot),
     ModelArray(ModelArraySlot),
@@ -217,6 +250,17 @@ pub struct ModelIfUnsetSlot {
 pub struct ModelIfUnset {
     pub from: Option<String>,
 }
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelRouteSlot {
+    #[allow(dead_code)]
+    pub model_route: ModelRoute,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelRoute {}
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -582,6 +626,15 @@ fn validate(
             ));
         }
         validate_slot(&set.slot, source, &field)?;
+        if matches!(&set.slot, SlotToml::ModelRoute(_))
+            && agent.model.as_ref().map(|model| model.key.as_str()) != Some(set.key.as_str())
+        {
+            return Err(error(
+                source,
+                format!("{field}.key"),
+                "model_route must use the model key",
+            ));
+        }
         if matches!(&set.slot, SlotToml::ModelPair(_))
             && agent.model.as_ref().map(|model| model.file.as_str()) != Some(set.file.as_str())
         {
@@ -655,6 +708,119 @@ fn validate(
                 format!("{field}.file"),
                 format!("references unknown file id `{file}`"),
             ));
+        }
+    }
+    for (index, remove) in agent.remove.iter().enumerate() {
+        let field = format!("remove[{index}]");
+        if remove.file.is_empty() || remove.key.is_empty() {
+            return Err(error(source, field, "file and key must not be empty"));
+        }
+        if !file_ids.contains(remove.file.as_str()) {
+            return Err(error(
+                source,
+                format!("{field}.file"),
+                format!("references unknown file id `{}`", remove.file),
+            ));
+        }
+        valid_key(&remove.key, source, &format!("{field}.key"))?;
+        let kind = file_kinds
+            .get(remove.file.as_str())
+            .copied()
+            .unwrap_or("json");
+        if kind != "json" {
+            return Err(error(
+                source,
+                field,
+                "remove is only supported on JSON files",
+            ));
+        }
+    }
+    for (index, detect) in agent.detect.iter().enumerate() {
+        let field = format!("detect[{index}]");
+        for (name, path) in [
+            ("linux", &detect.linux),
+            ("macos", &detect.macos),
+            ("windows", &detect.windows),
+        ] {
+            if !valid_agent_path(path) {
+                return Err(error(
+                    source,
+                    format!("{field}.{name}"),
+                    "invalid path template",
+                ));
+            }
+        }
+    }
+    for (index, check) in agent.status.iter().enumerate() {
+        let field = format!("status[{index}]");
+        match check.kind.as_str() {
+            "admin_gateway" => {
+                for (name, path) in [
+                    ("linux", check.linux.as_deref()),
+                    ("macos", check.macos.as_deref()),
+                    ("windows", check.windows.as_deref()),
+                ] {
+                    let Some(path) = path else {
+                        return Err(error(
+                            source,
+                            format!("{field}.{name}"),
+                            "admin_gateway requires linux, macos, and windows paths",
+                        ));
+                    };
+                    if !valid_agent_path(path) {
+                        return Err(error(
+                            source,
+                            format!("{field}.{name}"),
+                            "invalid path template",
+                        ));
+                    }
+                }
+                let Some(url_key) = &check.url_key else {
+                    return Err(error(
+                        source,
+                        format!("{field}.url_key"),
+                        "admin_gateway requires url_key",
+                    ));
+                };
+                valid_key(url_key, source, &format!("{field}.url_key"))?;
+                if check.name.is_some() {
+                    return Err(error(
+                        source,
+                        format!("{field}.name"),
+                        "admin_gateway must not set name",
+                    ));
+                }
+            }
+            "env_gateway_url" => {
+                let Some(name) = &check.name else {
+                    return Err(error(
+                        source,
+                        format!("{field}.name"),
+                        "env_gateway_url requires name",
+                    ));
+                };
+                if !valid_env_name(name) {
+                    return Err(error(
+                        source,
+                        format!("{field}.name"),
+                        "invalid environment variable name",
+                    ));
+                }
+                if check.url_key.is_some()
+                    || check.linux.is_some()
+                    || check.macos.is_some()
+                    || check.windows.is_some()
+                {
+                    return Err(error(source, field, "env_gateway_url must only set name"));
+                }
+            }
+            _ => {
+                return Err(error(
+                    source,
+                    format!("{field}.kind"),
+                    "unknown kind; expected admin_gateway or env_gateway_url",
+                ));
+            }
         }
     }
     validate_request_hints(agent, source)?;
@@ -1139,6 +1305,10 @@ fn valid_id(id: &str) -> bool {
 }
 
 fn valid_path(path: &str) -> bool {
+    valid_home_path(path)
+}
+
+fn valid_home_path(path: &str) -> bool {
     if path.contains('\\') {
         return false;
     }
@@ -1153,6 +1323,34 @@ fn valid_path(path: &str) -> bool {
                 && segment.as_bytes()[0].is_ascii_alphabetic()
                 && segment.as_bytes()[1] == b':')
     })
+}
+
+fn valid_agent_path(path: &str) -> bool {
+    if valid_home_path(path) {
+        return true;
+    }
+    if path.starts_with('/') && !path.contains('\\') {
+        return !path
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .any(|segment| segment == "..");
+    }
+    if path.starts_with('%') {
+        let Some((var, rest)) = path.split_once('/') else {
+            return false;
+        };
+        let var = var.trim_end_matches('%');
+        if !var.starts_with('%') || var.len() <= 2 {
+            return false;
+        }
+        let name = &var[1..];
+        return valid_env_name(name)
+            && !rest.is_empty()
+            && !rest
+                .split('/')
+                .any(|segment| segment.is_empty() || segment == "..");
+    }
+    false
 }
 
 fn valid_env_name(name: &str) -> bool {
@@ -1259,6 +1457,55 @@ pub fn render(agent: &AgentToml) -> (String, String) {
             agent.nested_turn_headers
         ));
     }
+    let detect_name = format!("{static_name}_DETECT");
+    if !agent.detect.is_empty() {
+        output.push_str(&format!(
+            "static {detect_name}: &[hofund_plugin_api::AgentPath] = &[\n"
+        ));
+        for detect in &agent.detect {
+            output.push_str(&format!(
+                "    hofund_plugin_api::AgentPath::from_static({:?}, {:?}, {:?}),\n",
+                detect.linux, detect.macos, detect.windows,
+            ));
+        }
+        output.push_str("];\n");
+    }
+    let remove_name = format!("{static_name}_REMOVE");
+    if !agent.remove.is_empty() {
+        output.push_str(&format!(
+            "static {remove_name}: &[hofund_plugin_api::AgentRemove] = &[\n"
+        ));
+        for remove in &agent.remove {
+            output.push_str(&format!(
+                "    hofund_plugin_api::AgentRemove::from_static({:?}, {:?}),\n",
+                remove.file, remove.key,
+            ));
+        }
+        output.push_str("];\n");
+    }
+    let status_name = format!("{static_name}_STATUS");
+    if !agent.status.is_empty() {
+        output.push_str(&format!(
+            "static {status_name}: &[hofund_plugin_api::AgentStatusCheck] = &[\n"
+        ));
+        for check in &agent.status {
+            match check.kind.as_str() {
+                "admin_gateway" => output.push_str(&format!(
+                    "    hofund_plugin_api::AgentStatusCheck::AdminGateway {{ path: hofund_plugin_api::AgentPath::from_static({:?}, {:?}, {:?}), url_key: {:?} }},\n",
+                    check.linux.as_deref().expect("validated"),
+                    check.macos.as_deref().expect("validated"),
+                    check.windows.as_deref().expect("validated"),
+                    check.url_key.as_deref().expect("validated"),
+                )),
+                "env_gateway_url" => output.push_str(&format!(
+                    "    hofund_plugin_api::AgentStatusCheck::EnvGatewayUrl {{ name: {:?} }},\n",
+                    check.name.as_deref().expect("validated"),
+                )),
+                _ => unreachable!("validated status kind"),
+            }
+        }
+        output.push_str("];\n");
+    }
     output.push_str(&format!(
         "static {static_name}: hofund_plugin_api::AgentDescription = hofund_plugin_api::AgentDescription::from_static(hofund_plugin_api::PluginId::from_static({:?}), {:?}, {:?}, {files_name}, {sets_name}, {:?}, {:?}, {visible}, hofund_plugin_api::AgentRoute::{route}, {requires_name})",
         agent.id,
@@ -1310,6 +1557,15 @@ pub fn render(agent: &AgentToml) -> (String, String) {
     if !agent.nested_turn_headers.is_empty() {
         output.push_str(&format!(".with_nested_turn_headers({nested_name})"));
     }
+    if !agent.detect.is_empty() {
+        output.push_str(&format!(".with_detect_paths({detect_name})"));
+    }
+    if !agent.remove.is_empty() {
+        output.push_str(&format!(".with_remove({remove_name})"));
+    }
+    if !agent.status.is_empty() {
+        output.push_str(&format!(".with_status_checks({status_name})"));
+    }
     output.push_str(";\n");
     (static_name, output)
 }
@@ -1331,6 +1587,7 @@ fn render_slot(slot: &SlotToml) -> String {
             "hofund_plugin_api::Slot::model_if_unset({:?})",
             slot.model_if_unset.from
         ),
+        SlotToml::ModelRoute(_) => "hofund_plugin_api::Slot::model_route()".to_owned(),
         SlotToml::ModelTier(slot) => {
             let needle = slot.model_tier.when_model_matches.as_ref().map_or_else(
                 || "None".to_owned(),
@@ -2480,6 +2737,25 @@ key = "effort"
     fn validation_rejects_mixed_candidate_kinds() {
         let candidate = "[[file]]\nid = \"config\"\nkind = \"toml\"\nlinux = \"~/.fixture/config.toml\"\nmacos = \"~/.fixture/config.toml\"\nwindows = \"~/.fixture/config.toml\"\n[model]";
         reject(base().replace("[model]", candidate), "same file id");
+    }
+
+    #[test]
+    fn model_route_slot_parses_and_renders() {
+        reject(
+            base().replace(
+                "slot = { literal = \"value\" }",
+                "slot = { model_route = {} }",
+            ),
+            "model_route must use the model key",
+        );
+        let text = base()
+            .replace("key = \"literal\"", "key = \"model\"")
+            .replace(
+                "slot = { literal = \"value\" }",
+                "slot = { model_route = {} }",
+            );
+        let agent = validate(&text).expect("model route");
+        assert!(render(&agent).1.contains("Slot::model_route()"));
     }
 
     #[test]

@@ -1,0 +1,66 @@
+id = "antigravity"
+display_name = "Antigravity"
+binary = "antigravity"
+binary_not_go = true
+
+# User settings: ~/.antigravity/settings.json on every OS. Enterprise gateway
+# wiring is documented at
+# https://docs.cloud.google.com/gemini/enterprise/docs/ai-developer-tools/connect-enterprise-gateway
+[[file]]
+id = "settings"
+kind = "json"
+linux = "~/.antigravity/settings.json"
+macos = "~/.antigravity/settings.json"
+windows = "~/.antigravity/settings.json"
+
+# The desktop backend writes this protobuf summary file; the IDE and CLI share
+# ~/.antigravity but do not write it.
+[[detect]]
+linux = "~/.gemini/antigravity/agyhub_summaries_proto.pb"
+macos = "~/.gemini/antigravity/agyhub_summaries_proto.pb"
+windows = "~/.gemini/antigravity/agyhub_summaries_proto.pb"
+
+[[set]]
+file = "settings"
+key = "gateway.enabled"
+slot = { json = "true" }
+
+[[set]]
+file = "settings"
+key = "gateway.url"
+slot = "origin"
+
+[[set]]
+file = "settings"
+key = "gateway.apiKey"
+slot = "token"
+
+[[set]]
+file = "settings"
+key = "gateway.wireProtocol"
+slot = { literal = "openai" }
+
+[[set]]
+file = "settings"
+key = "models.defaultModelId"
+slot = { model_route = {} }
+
+[[remove]]
+file = "settings"
+key = "models.list"
+
+[[status]]
+kind = "admin_gateway"
+linux = "/etc/antigravity/admin_settings.json"
+macos = "/Library/Application Support/Antigravity/admin_settings.json"
+windows = "%PROGRAMDATA%/Antigravity/admin_settings.json"
+url_key = "gateway.url"
+
+[[status]]
+kind = "env_gateway_url"
+name = "AGY_LLM_GATEWAY_URL"
+
+[model]
+file = "settings"
+key = "models.defaultModelId"
+restore_on_clear = true

@@ -8,8 +8,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use hofund_plugin_api::{
-    AgentActiveProvider, AgentCredential, AgentDescription, AgentFile, AgentRoute,
-    FileKind as ApiFileKind, ModelField, ModelValue, Slot as ApiSlot, Visible,
+    AgentActiveProvider, AgentCredential, AgentDescription, AgentFile, AgentPath, AgentRemove,
+    AgentRoute, AgentStatusCheck, FileKind as ApiFileKind, ModelField, ModelValue, Slot as ApiSlot,
+    Visible,
 };
 
 use crate::credential::EngineCredential;
@@ -195,6 +196,62 @@ pub fn resolve(file: &AgentFile, os: TargetOs, session: &Session) -> PathBuf {
         .fold(root, |path, segment| path.join(segment))
 }
 
+/// Resolves a detection or status path template.
+#[must_use]
+pub fn resolve_agent_path(path: &AgentPath, os: TargetOs, session: &Session) -> PathBuf {
+    let template = match os {
+        TargetOs::Linux => path.linux(),
+        TargetOs::Macos => path.macos(),
+        TargetOs::Windows => path.windows(),
+    };
+    expand_agent_path(template, session)
+}
+
+fn expand_agent_path(template: &str, session: &Session) -> PathBuf {
+    if template.starts_with('/') {
+        if let Some(root) = session.system_root() {
+            return template
+                .trim_start_matches('/')
+                .split('/')
+                .filter(|segment| !segment.is_empty())
+                .fold(PathBuf::from(root), |path, segment| path.join(segment));
+        }
+        return template
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .fold(PathBuf::from("/"), |path, segment| path.join(segment));
+    }
+    if let Some(inner) = template.strip_prefix('%') {
+        let Some((var, rest)) = inner.split_once('/') else {
+            return session.home.clone();
+        };
+        let var = var.strip_suffix('%').unwrap_or(var);
+        let root = session
+            .env(var)
+            .or_else(|| {
+                if var.eq_ignore_ascii_case("ProgramData") {
+                    session.env("PROGRAMDATA")
+                } else {
+                    None
+                }
+            })
+            .map(PathBuf::from)
+            .unwrap_or_else(|| session.home.clone());
+        return rest
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .fold(root, |path, segment| path.join(segment));
+    }
+    let remainder = template
+        .strip_prefix("~")
+        .unwrap_or(template)
+        .trim_start_matches('/');
+    remainder
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .fold(session.home.clone(), |path, segment| path.join(segment))
+}
+
 struct EngineLocation {
     file: &'static str,
     path: PathBuf,
@@ -212,6 +269,7 @@ struct Engine {
     id: &'static str,
     display_name: &'static str,
     binary: &'static str,
+    os: TargetOs,
     locations: Vec<EngineLocation>,
     sets: Vec<EngineSet>,
     model: Option<ModelKey>,
@@ -222,6 +280,9 @@ struct Engine {
     credential_store: Option<Arc<dyn CredentialStore>>,
     active_provider: Option<AgentActiveProvider>,
     binary_not_go: bool,
+    detect_paths: &'static [AgentPath],
+    remove: &'static [AgentRemove],
+    status_checks: &'static [AgentStatusCheck],
 }
 
 /// What an apply does with the agent's model setting.
@@ -305,6 +366,7 @@ impl Engine {
             id: description.id().as_str(),
             display_name: description.display_name(),
             binary: description.binary(),
+            os,
             locations,
             sets,
             model,
@@ -315,6 +377,9 @@ impl Engine {
             credential_store: session.credential_store().cloned(),
             active_provider: description.active_provider().copied(),
             binary_not_go: description.binary_not_go(),
+            detect_paths: description.detect_paths(),
+            remove: description.remove(),
+            status_checks: description.status_checks(),
         })
     }
 
@@ -339,6 +404,19 @@ impl Engine {
     }
 
     fn detect(&self, session: &Session) -> bool {
+        if !self.detect_paths.is_empty() {
+            if self
+                .detect_paths
+                .iter()
+                .any(|path| resolve_agent_path(path, self.os, session).is_file())
+            {
+                return true;
+            }
+            let Some(binary) = binary_on_path(session, self.binary) else {
+                return false;
+            };
+            return !self.binary_not_go || go_binary::not_go_program(&binary);
+        }
         if self
             .locations
             .iter()
@@ -512,7 +590,40 @@ impl Engine {
                 _ => None,
             };
             let base = stripped.as_deref().or(text);
-            let mut assignments = self.assignments_for(&sets, kind, target, base, choice);
+            let clearing_gateway_route = matches!(choice, Choice::Clear)
+                && model.as_ref().is_some_and(|model| {
+                    text.is_some_and(|content| {
+                        string_at(kind, content, model.key)
+                            .ok()
+                            .flatten()
+                            .is_some_and(|value| self.gateway_model(target, &value))
+                    })
+                });
+            let restore_user_model_on_clear = matches!(choice, Choice::Clear)
+                && model.as_ref().is_some_and(|model| {
+                    model.restore_on_clear
+                        && clearing_gateway_route
+                        && read_optional(&sibling_bak(&path))
+                            .ok()
+                            .flatten()
+                            .is_some_and(|backup| {
+                                let Ok(backup) = utf8(&path, &backup) else {
+                                    return false;
+                                };
+                                let Ok(Some(value)) = get(kind, backup, model.key) else {
+                                    return false;
+                                };
+                                !value.is_empty() && !self.gateway_model(target, &value)
+                            })
+                });
+            let mut assignments = self.assignments_for(
+                &sets,
+                kind,
+                target,
+                base,
+                choice,
+                restore_user_model_on_clear,
+            );
             if let (Choice::Set(id), Some(model)) = (choice, model)
                 && !assignments
                     .iter()
@@ -529,6 +640,12 @@ impl Engine {
                 .iter()
                 .filter(|set| self.remove_with_models(set, target))
                 .map(|set| set.key)
+                .chain(
+                    self.remove
+                        .iter()
+                        .filter(|entry| entry.file() == file)
+                        .map(|entry| entry.key()),
+                )
                 .collect();
             // A file nothing is written to is left as it is: a missing one
             // stays missing, so a settings file that holds only the model key
@@ -540,8 +657,9 @@ impl Engine {
             {
                 continue;
             }
-            // Clear renders over the original text so the keys it keeps stay
-            // in place, then drops the model keys no set wrote back.
+            // Clear renders over the stripped text when model keys were removed
+            // first; other choices use the live file. Formatting still follows
+            // the live file, which is what disconnect merge expects.
             let mut after =
                 render(kind, text, &assignments).map_err(|error| annotate(&path, error))?;
             if let (Choice::Clear, Some(model)) = (choice, model) {
@@ -551,8 +669,23 @@ impl Engine {
                     .filter(|key| !assignments.iter().any(|assignment| assignment.key == *key))
                     .collect();
                 // Model and pair keys go back to the picks the user had before connect.
-                let picked =
+                let mut picked =
                     self.picked_before(&path, kind, &leftover, target, utf8(&path, &after)?)?;
+                if let Some(backup) = read_optional(&sibling_bak(&path))? {
+                    let backup = utf8(&path, &backup)?;
+                    for entry in self.remove.iter().filter(|entry| entry.file() == file) {
+                        if let Some(value) = get(kind, backup, entry.key())
+                            .map_err(|error| annotate(&path, error))?
+                        {
+                            picked.push(Assignment {
+                                key: entry.key(),
+                                raw_json: typed(kind, backup, entry.key(), &value),
+                                shared: None,
+                                value,
+                            });
+                        }
+                    }
+                }
                 // A key inside a restored pair came back with it.
                 let leftover: Vec<&'static str> = leftover
                     .into_iter()
@@ -572,8 +705,21 @@ impl Engine {
                     .map_err(|error| annotate(&path, error))?;
             }
             if !removed.is_empty() {
-                after = remove_keys(kind, utf8(&path, &after)?, &removed)
-                    .map_err(|error| annotate(&path, error))?;
+                let keys: Vec<&str> = removed
+                    .iter()
+                    .copied()
+                    .filter(|key| {
+                        !(matches!(choice, Choice::Clear)
+                            && self
+                                .remove
+                                .iter()
+                                .any(|entry| entry.file() == file && entry.key() == *key))
+                    })
+                    .collect();
+                if !keys.is_empty() {
+                    after = remove_keys(kind, utf8(&path, &after)?, &keys)
+                        .map_err(|error| annotate(&path, error))?;
+                }
             }
             let pinned = match model {
                 Some(model) => self.pinned(&path, kind, text, &after, model, choice)?,
@@ -626,7 +772,7 @@ impl Engine {
                         shared: None,
                     });
                     assignments.extend(
-                        self.assignments_for(sets, kind, target, text, choice)
+                        self.assignments_for(sets, kind, target, text, choice, false)
                             .into_iter()
                             .filter(|assignment| assignment.key != layout.key()),
                     );
@@ -877,7 +1023,7 @@ impl Engine {
                 // Apply leaves a file missing when it would write nothing
                 // there, such as a settings file holding only the model key.
                 connected = !sets.iter().any(|set| {
-                    self.slot_value(set, kind, target, None, Choice::Keep)
+                    self.slot_value(set, kind, target, None, Choice::Keep, false)
                         .is_some()
                 });
                 continue;
@@ -894,7 +1040,8 @@ impl Engine {
                     }
                     continue;
                 }
-                let Some(expected) = self.slot_value(set, kind, target, Some(text), Choice::Keep)
+                let Some(expected) =
+                    self.slot_value(set, kind, target, Some(text), Choice::Keep, false)
                 else {
                     continue;
                 };
@@ -939,13 +1086,59 @@ impl Engine {
         if connected && let Some(credential) = self.credential()? {
             connected = credential.connected(target)?;
         }
+        if connected && self.status_blocked(session, target) {
+            connected = false;
+        }
+        let managed = self
+            .locations
+            .iter()
+            .any(|location| marker_present(&location.path));
         Ok(ConnectionStatus::new(
             self.id,
             self.display_name,
             self.detect(session),
             connected,
+            managed,
             paths,
         ))
+    }
+
+    fn status_blocked(&self, session: &Session, target: &GatewayTarget) -> bool {
+        let expected = origin(target.base_url());
+        for check in self.status_checks {
+            match check {
+                AgentStatusCheck::AdminGateway { path, url_key } => {
+                    let path = resolve_agent_path(path, self.os, session);
+                    let Some(bytes) = read_optional(&path).ok().flatten() else {
+                        continue;
+                    };
+                    let Ok(text) = utf8(&path, &bytes) else {
+                        return true;
+                    };
+                    let Ok(url) = string_at(FileKind::Json, text, url_key) else {
+                        return true;
+                    };
+                    let Some(url) = url else {
+                        continue;
+                    };
+                    let held = url.trim().trim_end_matches('/');
+                    if !held.is_empty() && held != expected {
+                        return true;
+                    }
+                }
+                AgentStatusCheck::EnvGatewayUrl { name } => {
+                    let Some(value) = session.env(name).and_then(|value| value.to_str()) else {
+                        continue;
+                    };
+                    let held = value.trim().trim_end_matches('/');
+                    if !held.is_empty() && held != expected {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
     }
 
     fn disconnect(&self, session: &Session, force: bool) -> Result<DisconnectOutcome, AgentError> {
@@ -1010,8 +1203,14 @@ impl Engine {
                 continue;
             };
             let text = utf8(&chosen.path, &before)?;
-            let mut assignments =
-                self.assignments_for(&token_sets, chosen.kind, target, Some(text), Choice::Keep);
+            let mut assignments = self.assignments_for(
+                &token_sets,
+                chosen.kind,
+                target,
+                Some(text),
+                Choice::Keep,
+                false,
+            );
             for set in &token_sets {
                 if assignments
                     .iter()
@@ -1170,10 +1369,18 @@ impl Engine {
         target: &GatewayTarget,
         existing: Option<&str>,
         choice: Choice<'_>,
+        restore_user_model_on_clear: bool,
     ) -> Vec<Assignment> {
         sets.iter()
             .filter_map(|set| {
-                let value = self.slot_value(set, kind, target, existing, choice)?;
+                let value = self.slot_value(
+                    set,
+                    kind,
+                    target,
+                    existing,
+                    choice,
+                    restore_user_model_on_clear,
+                )?;
                 Some(Assignment {
                     key: set.key,
                     value,
@@ -1200,6 +1407,7 @@ impl Engine {
         target: &GatewayTarget,
         existing: Option<&str>,
         choice: Choice<'_>,
+        restore_user_model_on_clear: bool,
     ) -> Option<String> {
         let models = self.models(target);
         let chosen = match choice {
@@ -1241,7 +1449,14 @@ impl Engine {
                                     && owner.key == model.key
                                     && !matches!(owner.slot, ApiSlot::ModelPair { .. })
                             })?;
-                            self.slot_value(owner, kind, target, existing, choice)?
+                            self.slot_value(
+                                owner,
+                                kind,
+                                target,
+                                existing,
+                                choice,
+                                restore_user_model_on_clear,
+                            )?
                         }
                     };
                     if !models
@@ -1261,8 +1476,18 @@ impl Engine {
                 Some(id) if self.model.is_some_and(|model| model.key == set.key) => {
                     Some(self.prefixed(id))
                 }
+                None if matches!(choice, Choice::Clear) && restore_user_model_on_clear => None,
                 _ => model_if_unset(kind, existing, set.key, *from, &models),
             },
+            ApiSlot::ModelRoute => model_route(
+                self.model_prefix,
+                kind,
+                existing,
+                set.key,
+                &models,
+                choice,
+                restore_user_model_on_clear,
+            ),
             ApiSlot::ModelTier {
                 when_model_matches, ..
             } => {
@@ -1431,6 +1656,34 @@ impl AgentAdapter for Compiled {
         target: &GatewayTarget,
     ) -> Result<ConnectionStatus, AgentError> {
         self.engine(session)?.status(session, target)
+    }
+}
+
+fn model_route(
+    prefix: Option<&str>,
+    kind: FileKind,
+    existing: Option<&str>,
+    key: &str,
+    models: &[String],
+    choice: Choice<'_>,
+    restore_user_model_on_clear: bool,
+) -> Option<String> {
+    let prefixed = |id: &str| format!("{}{id}", prefix.unwrap_or(""));
+    match choice {
+        Choice::Set(id) => Some(prefixed(id)),
+        Choice::Clear if restore_user_model_on_clear => None,
+        Choice::Clear => model_if_unset(kind, existing, key, None, models),
+        Choice::Keep => {
+            if let Some(text) = existing
+                && let Some(value) = string_value(kind, text, key)
+                && models
+                    .iter()
+                    .any(|id| *id == value || prefixed(id) == value)
+            {
+                return Some(value);
+            }
+            single_model(models)
+        }
     }
 }
 

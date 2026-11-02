@@ -1684,6 +1684,16 @@ pub enum Slot {
         /// Another key in the same file from which to take the model.
         from: Option<&'static str>,
     },
+    /// Writes the model key to a visible gateway route.
+    ///
+    /// On connect the value is the only non-empty visible route when there is
+    /// exactly one, or the route already at the key when it names a route.
+    /// A pick writes the chosen route. With `[model]` and `restore_on_clear`,
+    /// clear restores the connect-time value from the backup. The write is
+    /// skipped when there is not exactly one visible route and the key does
+    /// not already name one.
+    #[doc(hidden)]
+    ModelRoute,
     /// Text with gateway values filled in, such as `Bearer {token}`.
     ///
     /// `{origin}`, `{v1}`, and `{token}` are replaced with the gateway
@@ -2027,6 +2037,13 @@ impl Slot {
     pub const fn model_if_unset(from: Option<&'static str>) -> Self {
         Self::ModelIfUnset { from }
     }
+
+    /// A model write that always selects a gateway route on connect.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn model_route() -> Self {
+        Self::ModelRoute
+    }
 }
 
 /// How many models an agent file lists.
@@ -2209,6 +2226,104 @@ impl AgentFile {
     }
 }
 
+/// An OS-specific path template for detection or status checks.
+///
+/// Templates start with `~` for paths under the session home, with `/` for
+/// absolute Unix paths, or with `%NAME%/` for a Windows environment root.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct AgentPath {
+    linux: &'static str,
+    macos: &'static str,
+    windows: &'static str,
+}
+
+impl AgentPath {
+    /// Path templates for each operating system.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn from_static(
+        linux: &'static str,
+        macos: &'static str,
+        windows: &'static str,
+    ) -> Self {
+        Self {
+            linux,
+            macos,
+            windows,
+        }
+    }
+
+    /// The template for Linux.
+    #[must_use]
+    pub const fn linux(&self) -> &'static str {
+        self.linux
+    }
+
+    /// The template for macOS.
+    #[must_use]
+    pub const fn macos(&self) -> &'static str {
+        self.macos
+    }
+
+    /// The template for Windows.
+    #[must_use]
+    pub const fn windows(&self) -> &'static str {
+        self.windows
+    }
+}
+
+/// A key removed on connect and restored from the connect backup on disconnect
+/// or when the user clears a hofund route model.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct AgentRemove {
+    file: &'static str,
+    key: &'static str,
+}
+
+impl AgentRemove {
+    /// A removed key. Generated code calls this.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn from_static(file: &'static str, key: &'static str) -> Self {
+        assert!(!file.is_empty(), "remove file is empty");
+        assert!(!key.is_empty(), "remove key is empty");
+        Self { file, key }
+    }
+
+    /// Logical file id.
+    #[must_use]
+    pub const fn file(&self) -> &'static str {
+        self.file
+    }
+
+    /// Dotted key removed on connect.
+    #[must_use]
+    pub const fn key(&self) -> &'static str {
+        self.key
+    }
+}
+
+/// An external setting that prevents the agent from reaching the gateway even
+/// when managed files match.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AgentStatusCheck {
+    /// An organisation admin file sets a gateway URL.
+    AdminGateway {
+        /// Admin file location per OS.
+        path: AgentPath,
+        /// Dotted JSON key holding the gateway root URL.
+        url_key: &'static str,
+    },
+    /// An environment variable overrides the gateway root.
+    EnvGatewayUrl {
+        /// Environment variable name.
+        name: &'static str,
+    },
+}
+
 /// One key a description writes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -2281,6 +2396,9 @@ pub struct AgentDescription {
     client_prefixes: &'static [&'static str],
     /// Headers that name this agent even when the user agent names another.
     nested_turn_headers: &'static [&'static str],
+    detect_paths: &'static [AgentPath],
+    remove: &'static [AgentRemove],
+    status_checks: &'static [AgentStatusCheck],
 }
 
 /// An agent that names the provider it uses in one key and keeps each
@@ -2525,7 +2643,34 @@ impl AgentDescription {
             request_agent_header: None,
             client_prefixes: &[],
             nested_turn_headers: &[],
+            detect_paths: &[],
+            remove: &[],
+            status_checks: &[],
         }
+    }
+
+    /// Extra paths whose presence means the agent is installed.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn with_detect_paths(mut self, paths: &'static [AgentPath]) -> Self {
+        self.detect_paths = paths;
+        self
+    }
+
+    /// Keys dropped on connect and restored from the connect backup later.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn with_remove(mut self, remove: &'static [AgentRemove]) -> Self {
+        self.remove = remove;
+        self
+    }
+
+    /// External overrides reported through status as not connected.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn with_status_checks(mut self, checks: &'static [AgentStatusCheck]) -> Self {
+        self.status_checks = checks;
+        self
     }
 
     /// Header whose value is the calling agent's id.
@@ -2752,6 +2897,24 @@ impl AgentDescription {
     #[must_use]
     pub const fn nested_turn_headers(&self) -> &'static [&'static str] {
         self.nested_turn_headers
+    }
+
+    /// Extra install-detection paths.
+    #[must_use]
+    pub const fn detect_paths(&self) -> &'static [AgentPath] {
+        self.detect_paths
+    }
+
+    /// Keys removed on connect.
+    #[must_use]
+    pub const fn remove(&self) -> &'static [AgentRemove] {
+        self.remove
+    }
+
+    /// External gateway overrides checked by status.
+    #[must_use]
+    pub const fn status_checks(&self) -> &'static [AgentStatusCheck] {
+        self.status_checks
     }
 }
 
