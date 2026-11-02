@@ -82,8 +82,8 @@ impl Ledger {
                     uncached_input_tokens, cache_read_tokens, cache_write_tokens,
                     cache_write_5m_tokens, cache_write_1h_tokens, reasoning_tokens, reasoning_hidden,
                     priced, cost_usd, price_input, price_output, price_cache_read, price_cache_write,
-                    price_cache_write_1h
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
+                    price_cache_write_1h, outcome
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)",
                 params![
                     row.created_unix,
                     row.model,
@@ -112,6 +112,7 @@ impl Ledger {
                     pricing
                         .filter(|pricing| pricing.priced)
                         .map(|pricing| pricing.price.cache_write_1h),
+                    row.outcome,
                 ],
             )
             .map(|_| ())
@@ -132,7 +133,7 @@ impl Ledger {
             .map_err(|_| UsageError("usage database lock is poisoned".to_owned()))?;
         connection
             .query_row(
-                "SELECT COUNT(*),
+                "SELECT COUNT(CASE WHEN outcome NOT IN ('handed_on', 'refusal', 'turned_away') OR outcome = '' THEN 1 END),
                         COALESCE(SUM(MAX(COALESCE(uncached_input_tokens, input_tokens), 0)), 0),
                         COALESCE(SUM(MAX(output_tokens, 0)), 0),
                         COALESCE(SUM(MAX(cache_read_tokens, 0)), 0),

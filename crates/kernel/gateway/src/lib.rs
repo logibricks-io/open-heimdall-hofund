@@ -19,6 +19,7 @@ mod readonly;
 mod refusal_handover;
 mod relisten;
 mod responses_ws;
+mod usage_handoff;
 
 pub use endpoints::{GENERATIVE_LIST, GENERATIVE_STREAM, GENERATIVE_UNARY};
 #[doc(hidden)]
@@ -58,7 +59,7 @@ use hofund_plugin_api::{
     BodyStream, InboundSurface, Method, PluginError, PluginErrorKind, ProtocolId,
 };
 use hofund_plugin_host::HttpBackend;
-use hofund_router::{Completion, RouteScope, Routed, RouterError, Snapshot, WaitHook};
+use hofund_router::{AttemptHook, Completion, RouteScope, Routed, RouterError, Snapshot, WaitHook};
 use hofund_secrets::oidc::RuleStore;
 use hofund_secrets::{Identity, KeyStore};
 use hofund_usage::{Ledger, Row};
@@ -1840,7 +1841,19 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
     )
     .with_body(bytes.to_vec());
     let router = app.snapshot.load();
-    let attempt = ask.as_ref().map(|ask| ask.attempt());
+    let inner_hook = ask.as_ref().map(|ask| ask.attempt());
+    let attempt: Option<Arc<dyn AttemptHook>> =
+        Some(Arc::new(usage_handoff::UsageHandoffHook::new(
+            usage_handoff::UsageHandoffContext {
+                usage: Arc::clone(&app.usage),
+                model: model_request.model.clone(),
+                caller_key_id: identity.key_id.clone(),
+                caller_key_name: identity.key_name.clone(),
+                caller_issuer_id: identity.issuer.clone(),
+                started,
+            },
+            inner_hook,
+        )));
     if let Some(hold) = &unrouted_hold {
         hold.set_asked(&model_request.model);
     }
@@ -2698,6 +2711,18 @@ async fn raw_body(
             usage,
             codec.id(),
             message_saw_reasoning(&response.message),
+        );
+    } else if codec.id() == ProtocolId::OPENAI_RESPONSES.as_str()
+        && let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes)
+        && let Some(object) = value.as_object()
+        && hofund_codec::responses_empty::response_body_empty(object)
+    {
+        write_usage_app(app.as_ref(), &meta, None, StatusCode::BAD_GATEWAY);
+        track.end_with(member, StatusCode::BAD_GATEWAY.as_u16(), None, None);
+        return coded(
+            codec.as_ref(),
+            StatusCode::BAD_GATEWAY,
+            hofund_codec::EMPTY_REPLY_MESSAGE,
         );
     }
     let (input, output) = codec.response_tokens(&bytes);

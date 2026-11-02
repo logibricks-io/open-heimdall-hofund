@@ -78,4 +78,14 @@ pub trait AttemptHook: Send + Sync {
     fn answered(&self, attempt: &Attempt) {
         let _ = attempt;
     }
+
+    /// Records a failed try that billed tokens and will be handed to another try.
+    fn failed_handoff(
+        &self,
+        attempt: &Attempt,
+        status: u16,
+        billed: hofund_plugin_api::BilledUsage,
+    ) {
+        let _ = (attempt, status, billed);
+    }
 }

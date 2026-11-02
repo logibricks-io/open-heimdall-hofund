@@ -4,6 +4,8 @@ use std::error::Error;
 use std::fmt;
 use std::time::Duration;
 
+use crate::BilledUsage;
+
 /// Why a plugin call failed.
 ///
 /// The router matches this with a wildcard arm, so a new variant does not
@@ -72,6 +74,7 @@ pub struct PluginError {
     credit: bool,
     credit_soon: bool,
     cooldown: bool,
+    billed: Option<Box<BilledUsage>>,
     #[source]
     cause: Option<Box<dyn Error + Send + Sync>>,
 }
@@ -87,6 +90,7 @@ impl PluginError {
             credit: false,
             credit_soon: false,
             cooldown: true,
+            billed: None,
             cause: None,
         }
     }
@@ -223,6 +227,21 @@ impl PluginError {
     pub const fn without_cooldown(mut self) -> Self {
         self.cooldown = false;
         self
+    }
+
+    /// Attaches token counts already billed on this failed try.
+    #[must_use]
+    pub fn with_billed(mut self, billed: BilledUsage) -> Self {
+        if billed.token_bearing() {
+            self.billed = Some(Box::new(billed));
+        }
+        self
+    }
+
+    /// Token counts billed before this try failed, when any were reported.
+    #[must_use]
+    pub fn billed(&self) -> Option<&BilledUsage> {
+        self.billed.as_deref()
     }
 
     /// How the call failed.
