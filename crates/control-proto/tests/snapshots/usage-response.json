@@ -22,7 +22,10 @@
     "cache_read_tokens": 0,
     "cache_write_5m_tokens": 0,
     "cache_write_1h_tokens": 0,
-    "reasoning_tokens": 0
+    "reasoning_tokens": 0,
+    "cost": 0.0,
+    "unpriced": 0
   },
-  "rows_truncated": false
+  "rows_truncated": false,
+  "currency": "USD"
 }
