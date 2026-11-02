@@ -671,8 +671,6 @@ impl Router {
         let ordered = self.order_for(&resolved, conversation);
         resolved.hops = ordered.hops;
         if let Some(conversation) = conversation {
-            self.overflow
-                .prepare_request(&conversation.key, input_tokens);
             resolved.hops =
                 self.overflow
                     .demote_hops(&conversation.key, input_tokens, resolved.hops);

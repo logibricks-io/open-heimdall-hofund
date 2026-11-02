@@ -333,15 +333,12 @@ fn overflowed(status: u16, text: &str) -> bool {
 }
 
 /// Whether an upstream refusal should be remembered as a context overflow for
-/// later ordering. Payload-too-large responses are excluded.
+/// later ordering. Payload-too-large responses are excluded; `too_long`
+/// already rejects statuses outside 4xx and 429.
 pub(crate) fn context_overflow_memory(error: &PluginError) -> bool {
-    let Some(status) = error.status() else {
-        return false;
-    };
-    if status == 413 || status == 429 || !(400..500).contains(&status) {
-        return false;
-    }
-    too_long(status, &words_of(error.message()))
+    error
+        .status()
+        .is_some_and(|status| status != 413 && too_long(status, &words_of(error.message())))
 }
 
 fn shape_refused(status: u16, message: &str) -> bool {
@@ -516,6 +513,28 @@ mod tests {
             "demo",
             "primary",
         )
+    }
+
+    #[test]
+    fn d38_13_only_worded_4xx_overflows_other_than_413_are_remembered() {
+        let worded = "prompt is too long";
+        for (status, message, remembered) in [
+            (400, worded, true),
+            (422, worded, true),
+            (413, worded, false),
+            (429, worded, false),
+            (500, worded, false),
+            (400, "invalid tool schema", false),
+        ] {
+            assert_eq!(
+                super::context_overflow_memory(&PluginError::status_error(status, message)),
+                remembered,
+                "{status} {message}"
+            );
+        }
+        assert!(!super::context_overflow_memory(&PluginError::transport(
+            worded
+        )));
     }
 
     #[test]
