@@ -72,6 +72,15 @@ pub fn window_start<Tz: TimeZone>(window: Window, now: DateTime<Tz>) -> Option<i
     Some(start.timestamp())
 }
 
+/// Outcome marker for a try handed to another member after billing tokens.
+pub const OUTCOME_HANDED_ON: &str = "handed_on";
+
+/// Whether a row counts toward request totals.
+#[must_use]
+pub fn counts_as_request(outcome: &str) -> bool {
+    !matches!(outcome, OUTCOME_HANDED_ON | "refusal" | "turned_away")
+}
+
 /// Aggregate counts over every row in a window, independent of any row cap.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Totals {
@@ -134,6 +143,8 @@ pub struct Row {
     pub cost_usd: Option<f64>,
     /// List price per million tokens stored on the row.
     pub price: Option<TokenPrice>,
+    /// Row kind for handed-off, refusal, or turned-away tries; empty for ordinary rows.
+    pub outcome: String,
 }
 
 /// One successful request as routing measurements read it.
@@ -216,6 +227,7 @@ impl Ledger {
             ("price_cache_read", "REAL"),
             ("price_cache_write", "REAL"),
             ("price_cache_write_1h", "REAL"),
+            ("outcome", "TEXT NOT NULL DEFAULT ''"),
         ] {
             ensure_column(&connection, column, declaration)?;
         }
@@ -267,7 +279,7 @@ impl Ledger {
                         cache_read_tokens, cache_write_5m_tokens, cache_write_1h_tokens,
                         reasoning_tokens, reasoning_hidden,
                         priced, cost_usd, price_input, price_output, price_cache_read,
-                        price_cache_write, price_cache_write_1h
+                        price_cache_write, price_cache_write_1h, outcome
                  FROM requests ORDER BY id",
             )
             .map_err(|error| UsageError(error.to_string()))?;
@@ -360,7 +372,7 @@ impl Ledger {
             .map_err(|_| UsageError("usage database lock is poisoned".to_owned()))?;
         let totals = connection
             .query_row(
-                "SELECT COUNT(*),
+                "SELECT COUNT(CASE WHEN outcome NOT IN ('handed_on', 'refusal', 'turned_away') OR outcome = '' THEN 1 END),
                         COALESCE(SUM(MAX(input_tokens, 0)), 0),
                         COALESCE(SUM(MAX(output_tokens, 0)), 0),
                         COALESCE(SUM(MAX(cache_read_tokens, 0)), 0),
@@ -402,7 +414,7 @@ impl Ledger {
                         cache_read_tokens, cache_write_5m_tokens, cache_write_1h_tokens,
                         reasoning_tokens, reasoning_hidden,
                         priced, cost_usd, price_input, price_output, price_cache_read,
-                        price_cache_write, price_cache_write_1h
+                        price_cache_write, price_cache_write_1h, outcome
                  FROM requests WHERE created_unix >= ?1 ORDER BY id DESC LIMIT ?2",
             )
             .map_err(|error| UsageError(error.to_string()))?;
@@ -471,6 +483,7 @@ fn read_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Row> {
         priced: row.get::<_, i64>(15)? != 0,
         cost_usd: row.get(16)?,
         price: read_price(row, 17)?,
+        outcome: row.get(22)?,
     })
 }
 

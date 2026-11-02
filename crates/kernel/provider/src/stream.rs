@@ -11,6 +11,7 @@ use bytes::Bytes;
 use futures_util::Stream;
 use hofund_codec::{StreamDecoder, refusal_error};
 use hofund_ir::StreamEvent;
+use hofund_plugin_api::BilledUsage;
 use reqwest::Error as ReqwestError;
 
 use crate::error::ProviderError;
@@ -21,6 +22,7 @@ pub(crate) struct SseEvents {
     pending: VecDeque<Result<StreamEvent, ProviderError>>,
     finished: bool,
     committed: bool,
+    billed: BilledUsage,
     /// Drop extension bags, and raw events this decoder does not model, when
     /// the client protocol and the upstream protocol differ.
     strip: bool,
@@ -38,8 +40,29 @@ impl SseEvents {
             pending: VecDeque::new(),
             finished: false,
             committed: false,
+            billed: BilledUsage::default(),
             strip,
         }
+    }
+
+    fn note_usage(&mut self, event: &StreamEvent) {
+        match event {
+            StreamEvent::MessageStart(start) => {
+                if let Some(usage) = &start.usage {
+                    self.billed.merge_usage(usage);
+                }
+            }
+            StreamEvent::MessageDelta(delta) => {
+                if let Some(usage) = &delta.usage {
+                    self.billed.merge_usage(usage);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn attach_billed(&self, error: ProviderError) -> ProviderError {
+        error.with_billed(self.billed.clone())
     }
 
     fn take_pending(&mut self) -> Option<Result<StreamEvent, ProviderError>> {
@@ -53,9 +76,12 @@ impl SseEvents {
                 if let Some(error) = failure_of(event) {
                     self.pending.clear();
                     self.finished = true;
-                    return Some(Err(error));
+                    return Some(Err(self.attach_billed(error)));
                 }
                 self.committed |= stream_commits(event);
+            }
+            if let Ok(event) = &item {
+                self.note_usage(event);
             }
             if self.strip
                 && let Ok(event) = &mut item
@@ -136,6 +162,14 @@ pub(crate) fn failure_of(event: &StreamEvent) -> Option<ProviderError> {
     let StreamEvent::Unknown(unknown) = event else {
         return None;
     };
+    if unknown.name == "response.completed"
+        && let Some(object) = unknown.payload.as_object()
+        && hofund_codec::responses_empty::completed_event_empty(object)
+    {
+        return Some(
+            ProviderError::status(502, hofund_codec::EMPTY_REPLY_MESSAGE).without_cooldown(),
+        );
+    }
     let embedded = unknown.name == "data" && unknown.payload.get("error").is_some();
     if unknown.name != "error" && unknown.name != "response.failed" && !embedded {
         return None;

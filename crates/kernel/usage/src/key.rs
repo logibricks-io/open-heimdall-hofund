@@ -42,7 +42,7 @@ impl Ledger {
             .map_err(|_| UsageError("usage database lock is poisoned".to_owned()))?;
         let totals = connection
             .query_row(
-                "SELECT COUNT(*),
+                "SELECT COUNT(CASE WHEN outcome NOT IN ('handed_on', 'refusal', 'turned_away') OR outcome = '' THEN 1 END),
                         COALESCE(SUM(CASE WHEN status NOT LIKE '2%' THEN 1 ELSE 0 END), 0),
                         COALESCE(SUM(MAX(input_tokens, 0)), 0),
                         COALESCE(SUM(MAX(output_tokens, 0)), 0)
