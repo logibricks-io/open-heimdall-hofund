@@ -186,6 +186,25 @@ fn d51_8_clear_after_explicit_pick_restores_user_default_without_list() {
 }
 
 #[test]
+fn d51_9_explicit_pick_among_several_routes_writes_that_route() {
+    const OTHER: &str = "route-b";
+    for os in OPERATING_SYSTEMS {
+        let home = scratch("d51-9");
+        let path = settings_path(&home, os);
+        let session = Session::new(&home);
+        let agent = adapter(os);
+        let routes = GatewayTarget::new(BASE, TOKEN, vec![ROUTE.to_owned(), OTHER.to_owned()]);
+        agent.apply(&session, &routes).expect("connect");
+        agent
+            .set_model(&session, &routes, Some(OTHER))
+            .expect("pick second route");
+        let json = parse_json(&path);
+        assert_eq!(json["models"]["defaultModelId"], OTHER, "{os:?}");
+        let _ = fs::remove_dir_all(home);
+    }
+}
+
+#[test]
 fn d51_4_reapply_keeps_user_gateway_keys_and_updates_moved_url() {
     for os in OPERATING_SYSTEMS {
         let home = scratch("d51-4");
