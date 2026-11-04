@@ -10,7 +10,7 @@ use hofund_plugin_api::{
 };
 use hofund_plugin_sdk::oauth::{SecretObject, account_id_from};
 
-use crate::{Endpoints, factory_with_endpoints, tokens};
+use crate::{Endpoints, auth, factory_with_endpoints, tokens};
 
 const SESSION: &str = "0123456789abcdef0123456789abcdef";
 #[cfg(not(windows))]
@@ -378,14 +378,123 @@ fn a2a_40_browser_sign_in_cancel_during_poll() {
         sub.start_sign_in(&ctx(), host.context())
             .await
             .expect("start");
-        host.http().enqueue_response(404, &[], b"");
-        sub.cancel_sign_in(&ctx(), host.context())
-            .await
-            .expect("cancel");
-        let error = sub
-            .complete_sign_in(&ctx(), SignInProof::Await, host.context())
-            .await
-            .expect_err("cancelled");
-        assert_eq!(error.kind(), PluginErrorKind::Config);
+        for _ in 0..30 {
+            host.http().enqueue_response(404, &[], b"");
+        }
     });
+    let ctx = ctx();
+    let host_ctx = host.context().clone();
+    let sub_thread = Arc::clone(&sub);
+    let finish = std::thread::spawn(move || {
+        block_on(sub_thread.complete_sign_in(&ctx, SignInProof::Await, &host_ctx))
+    });
+    while !host
+        .http()
+        .calls()
+        .iter()
+        .any(|call| call.uri().contains("/auth/poll"))
+    {
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    block_on(sub.cancel_sign_in(&ctx(), host.context())).expect("cancel");
+    let result = finish.join().expect("thread");
+    let error = result.expect_err("cancelled");
+    assert_eq!(error.kind(), PluginErrorKind::Config);
+    assert!(error.to_string().contains("cancelled"));
+}
+
+#[test]
+fn a2a_41_agent_quota_spawns_status_when_token_near_expiry() {
+    let dir = tempfile::tempdir().expect("dir");
+    let agent_home = dir.path().join("agent");
+    let near = jwt("quota-near@example.test", 100);
+    write_auth(&agent_home.join("auth.json"), &near);
+    let host = host(&dir);
+    let sub = subscription_with_agent_home(&host, Some(agent_home));
+    host.process().script_piped(PipedScript::new().line("ok"));
+    let id = account_id_from(&["cursor", "quota-near@example.test"]);
+    let blob = tokens::blob_agent("quota-near@example.test", None);
+    let account = host
+        .context()
+        .accounts()
+        .account(id.clone(), "quota-near@example.test")
+        .expect("account");
+    block_on(host.context().accounts().upsert(account, blob.to_secret())).expect("upsert");
+    let period_url = endpoints().dashboard("GetCurrentPeriodUsage");
+    host.http().enqueue_response(
+        200,
+        &[("content-type", "application/json")],
+        br#"{"billingCycleEnd":"1792833042000","planUsage":{"autoPercentUsed":1,"apiPercentUsed":2,"totalPercentUsed":3}}"#,
+    );
+    let windows = block_on(sub.quota(&id, host.context())).expect("quota");
+    assert_eq!(windows.len(), 3);
+    assert!(
+        !host.process().programs().is_empty(),
+        "agent quota must spawn cursor-agent status when auth.json is near expiry"
+    );
+    let calls = host.http().calls();
+    assert!(calls.iter().any(|call| call.uri().contains(&period_url)));
+}
+
+#[test]
+fn a2a_42_list_models_spawn_uses_isolated_models_dir() {
+    let dir = tempfile::tempdir().expect("dir");
+    let override_home = dir.path().join("daemon-cursor-home");
+    auth::set_test_config_dir(Some(override_home.clone()));
+    struct Restore;
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            auth::set_test_config_dir(None);
+        }
+    }
+    let _restore = Restore;
+
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let token = jwt("models@example.test", 4_000_000_000);
+    let id = account_id_from(&["cursor", "models@example.test"]);
+    let blob = tokens::blob_oauth(
+        &hofund_plugin_api::SecretString::from(token),
+        &hofund_plugin_api::SecretString::from("none"),
+        4_000_000_000_000,
+        "models@example.test",
+        None,
+    );
+    let account = host
+        .context()
+        .accounts()
+        .account(id.clone(), "models@example.test")
+        .expect("account");
+    block_on(host.context().accounts().upsert(account, blob.to_secret())).expect("upsert");
+    host.process()
+        .script_piped(PipedScript::new().line(MODELS_FIXTURE.trim()));
+    let list = block_on(sub.list_models(&id, host.context())).expect("models");
+    assert!(!list.models().is_empty());
+    let label = id
+        .to_string()
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+        .collect::<String>();
+    let models_dir = host
+        .context()
+        .dirs()
+        .state_dir()
+        .expect("state")
+        .join("cursor-models")
+        .join(label);
+    let spawn = host
+        .process()
+        .piped_spawns()
+        .into_iter()
+        .next()
+        .expect("models spawn");
+    assert_eq!(
+        spawn.env_var("CURSOR_CONFIG_DIR"),
+        Some(models_dir.as_os_str())
+    );
+    assert_eq!(spawn.cwd, models_dir);
+    assert_ne!(
+        spawn.env_var("CURSOR_CONFIG_DIR"),
+        Some(override_home.as_os_str())
+    );
 }

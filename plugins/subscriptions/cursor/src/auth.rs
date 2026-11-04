@@ -2,6 +2,9 @@
 
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
+use std::cell::RefCell;
+
 use hofund_plugin_api::PluginError;
 use hofund_plugin_sdk::json::Value;
 
@@ -60,10 +63,33 @@ fn home_dir() -> PathBuf {
 
 /// Directory from `CURSOR_CONFIG_DIR`, when set.
 pub(crate) fn configured_dir() -> Option<PathBuf> {
-    std::env::var("CURSOR_CONFIG_DIR")
-        .ok()
-        .map(|value| value.trim().into())
-        .filter(|path: &PathBuf| !path.as_os_str().is_empty())
+    test_config_dir().or_else(|| {
+        std::env::var("CURSOR_CONFIG_DIR")
+            .ok()
+            .map(|value| value.trim().into())
+            .filter(|path: &PathBuf| !path.as_os_str().is_empty())
+    })
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_CONFIG_DIR: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn test_config_dir() -> Option<PathBuf> {
+    TEST_CONFIG_DIR.with(|cell| cell.borrow().clone())
+}
+
+/// Simulates `CURSOR_CONFIG_DIR` in the daemon environment during tests.
+#[cfg(test)]
+pub(crate) fn set_test_config_dir(dir: Option<PathBuf>) {
+    TEST_CONFIG_DIR.with(|cell| *cell.borrow_mut() = dir);
+}
+
+#[cfg(not(test))]
+fn test_config_dir() -> Option<PathBuf> {
+    None
 }
 
 /// Reads `accessToken` from `path`, when the file is small enough.

@@ -171,12 +171,13 @@ fn a2a_18_refresh_rotates_tokens() {
 #[test]
 fn a2a_19_model_feed_parse_and_list() {
     let feed = json!({
-        "recommended": [{"id": "anthropic/claude-sonnet-5.5"}],
         "free": [{"id": "cline-free/deepseek-v4.1-flash"}],
+        "clinePass": [{"id": "cline-pass/mimo-v2.6-flash"}],
     });
     let models = parse_feed(&feed);
     assert_eq!(models.len(), 2);
-    assert!(models[1].free);
+    assert!(models[0].free);
+    assert!(models[1].pass);
 
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);

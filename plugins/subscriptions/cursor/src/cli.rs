@@ -116,13 +116,10 @@ pub(crate) fn request(
     args: &[&str],
     dir: &Path,
 ) -> Result<SpawnRequest, PluginError> {
-    let mut env = vec![(
+    let env = vec![(
         OsString::from("CURSOR_CONFIG_DIR"),
         dir.as_os_str().to_owned(),
     )];
-    if let Some(configured) = auth::configured_dir() {
-        env[0].1 = configured.into_os_string();
-    }
     SpawnRequest::new(program, args.iter().map(OsString::from).collect(), env, dir)
 }
 

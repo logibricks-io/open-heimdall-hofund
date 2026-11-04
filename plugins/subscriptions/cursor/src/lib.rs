@@ -307,7 +307,7 @@ impl Subscription for Cursor {
             &self.endpoints,
             account,
             self.agent_home(),
-            None,
+            self.program().ok(),
             &self.keychain,
         )
         .await?;
@@ -321,16 +321,16 @@ impl Subscription for Cursor {
         account: &AccountId,
         host: &HostContext,
     ) -> Result<ModelList, PluginError> {
+        let program = self.program()?;
         let token = session::access_token(
             host,
             &self.endpoints,
             account,
             self.agent_home(),
-            None,
+            Some(program.clone()),
             &self.keychain,
         )
         .await?;
-        let program = self.program()?;
         let models_dir = host
             .dirs()
             .state_dir()?

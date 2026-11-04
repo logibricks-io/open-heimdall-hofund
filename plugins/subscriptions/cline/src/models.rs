@@ -1,4 +1,4 @@
-//! Cline model feeds: recommended models and optional cloud catalog.
+//! Cline model feed from `/ai/cline/recommended-models`.
 
 use hofund_plugin_api::{HostContext, ModelList, ModelSpec, PluginError};
 use hofund_plugin_sdk::json::Value;
@@ -27,7 +27,7 @@ pub(crate) fn parse_feed(value: &Value) -> Vec<FeedModel> {
     };
     let mut by_id: std::collections::BTreeMap<String, FeedModel> =
         std::collections::BTreeMap::new();
-    for group in ["recommended", "free", "clinePass"] {
+    for group in ["free", "clinePass"] {
         let free = group == "free";
         let pass = group == "clinePass";
         let Some(list) = payload.get(group).and_then(Value::as_array) else {
@@ -150,7 +150,7 @@ pub(crate) fn prettify(id: &str) -> String {
         .join(" ")
 }
 
-/// Fetches recommended models and merges optional cloud catalog entries.
+/// Fetches ClinePass and free models from the recommended-models feed.
 pub(crate) async fn list(
     host: &HostContext,
     endpoints: &Endpoints,
@@ -168,10 +168,7 @@ pub(crate) async fn list(
         false,
     )
     .await?;
-    let mut models = parse_feed(&rec_body);
-    if let Ok(cloud) = fetch_cloud(host, endpoints).await {
-        merge_cloud(&mut models, cloud);
-    }
+    let models = parse_feed(&rec_body);
     if models.is_empty() {
         return Err(PluginError::config(
             "Cline returned no models for this account",
@@ -184,65 +181,6 @@ pub(crate) async fn list(
     Ok(ModelList::new(specs?, None).with_source_url(url))
 }
 
-async fn fetch_cloud(
-    host: &HostContext,
-    endpoints: &Endpoints,
-) -> Result<Vec<FeedModel>, PluginError> {
-    let value = api::get(host, endpoints, "/ai/cline/models", None, false).await?;
-    let empty = Vec::new();
-    let list = match &value {
-        Value::Array(items) => items,
-        Value::Object(map) => map.get("data").and_then(Value::as_array).unwrap_or(&empty),
-        _ => &empty,
-    };
-    Ok(list.iter().filter_map(cloud_entry).collect())
-}
-
-fn cloud_entry(entry: &Value) -> Option<FeedModel> {
-    let id = entry.get("id").and_then(Value::as_str)?.trim();
-    if id.is_empty() {
-        return None;
-    }
-    let given = ["display_name", "displayName", "name"]
-        .iter()
-        .find_map(|key| entry.get(*key).and_then(Value::as_str))
-        .map(str::trim)
-        .filter(|text| !text.is_empty())
-        .map(str::to_owned);
-    let last = id.split('/').next_back().unwrap_or(id);
-    let name = given
-        .filter(|name| name != id && name != last)
-        .unwrap_or_else(|| prettify(id));
-    let context = ["context_length", "context"]
-        .iter()
-        .find_map(|key| entry.get(*key))
-        .and_then(|v| v.as_u64().or_else(|| v.as_f64().map(|n| n as u64)));
-    Some(FeedModel {
-        id: id.to_owned(),
-        name,
-        free: false,
-        pass: id.starts_with("cline-pass/"),
-        context,
-    })
-}
-
-fn merge_cloud(models: &mut Vec<FeedModel>, cloud: Vec<FeedModel>) {
-    let sizes: std::collections::HashMap<_, _> = cloud.iter().map(|m| (m.id.clone(), m)).collect();
-    for model in models.iter_mut() {
-        if let Some(c) = sizes.get(&model.id)
-            && model.context.is_none()
-        {
-            model.context = c.context;
-        }
-    }
-    let seen: std::collections::HashSet<_> = models.iter().map(|m| m.id.clone()).collect();
-    for c in cloud {
-        if !seen.contains(&c.id) {
-            models.push(c);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -251,7 +189,6 @@ mod tests {
     #[test]
     fn parse_feed_merges_free_mark() {
         let payload = json!({
-            "recommended": [{"id": "anthropic/claude-sonnet-5.5"}],
             "free": [{"id": "anthropic/claude-sonnet-5.5"}],
             "clinePass": [{"id": "cline-pass/mimo-v2.6-flash"}],
         });
