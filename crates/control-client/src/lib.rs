@@ -15,14 +15,15 @@ use hofund_control_proto::{
     ConfigValidationResponse, ControlError, ErrorEnvelope, EventEnvelope, GatewayKeyRequest,
     GatewayKeyResponse, GatewayKeyRestoreRequest, HealthResponse, MAX_RESPONSE_BODY_BYTES,
     ModelListResponse, PicksResponse, PicksSetRequest, ProviderKeyRequest, ProviderKeysResponse,
-    ProviderListResponse, ProviderSpendCapRequest, ProviderSpendCapsResponse, ProviderTestRequest,
-    ProviderTestResponse, QuotaAlertsResponse, QuotaAlertsSetRequest, QuotaAlertsSetResponse,
-    QuotaCreditsModesResponse, QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryQuery,
-    QuotaHistoryResponse, QuotaQuery, QuotaResponse, ReloadRequest, RouteListResponse,
-    RouteModelListResponse, RouteQuery, SessionRouteResponse, ShutdownRequest, ShutdownResponse,
-    StatusResponse, TokenRotateRequest, TokenRotateResponse, Topic, UnroutedListResponse,
-    UsagePeriod, UsageQuery, UsageResponse, WarmupListResponse, WarmupRunRequest,
-    WarmupRunResponse, decode_error_envelope, decode_response,
+    ProviderListResponse, ProviderRenameRequest, ProviderRenameResponse, ProviderSpendCapRequest,
+    ProviderSpendCapsResponse, ProviderTestRequest, ProviderTestResponse, QuotaAlertsResponse,
+    QuotaAlertsSetRequest, QuotaAlertsSetResponse, QuotaCreditsModesResponse,
+    QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryQuery, QuotaHistoryResponse,
+    QuotaQuery, QuotaResponse, ReloadRequest, RouteListResponse, RouteModelListResponse,
+    RouteQuery, SessionRouteResponse, ShutdownRequest, ShutdownResponse, StatusResponse,
+    TokenRotateRequest, TokenRotateResponse, Topic, UnroutedListResponse, UsagePeriod, UsageQuery,
+    UsageResponse, WarmupListResponse, WarmupRunRequest, WarmupRunResponse, decode_error_envelope,
+    decode_response,
 };
 use http::header;
 use http_body_util::{BodyExt, Full, Limited};
@@ -385,6 +386,20 @@ impl Client {
             http::Method::PUT,
             &format!("/v1/hofund/providers/{}/picks", encode_segment(id)),
             Some(json_body(&request)?),
+        )
+        .await
+    }
+
+    /// Renames a provider and every reference to it.
+    pub async fn rename_provider(
+        &self,
+        id: &str,
+        new_id: &str,
+    ) -> Result<ProviderRenameResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            &format!("/v1/hofund/providers/{}/rename", encode_segment(id)),
+            Some(json_body(&ProviderRenameRequest::new(new_id))?),
         )
         .await
     }
