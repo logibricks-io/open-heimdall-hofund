@@ -599,8 +599,9 @@ async fn a3b_16_runner_error_marks_day_no_intraday_retry() {
     let fixture = fixture(true).await;
     let runner = RecordingRunner {
         outcomes: Arc::new(Mutex::new(vec![
-            Err("vendor refused".to_owned()),
+            // `pop` takes from the end: the error runs first.
             Ok(CheckinResult::new(CheckinOutcome::Claimed, "")),
+            Err("vendor refused".to_owned()),
         ])),
     };
     tick_with_runner(

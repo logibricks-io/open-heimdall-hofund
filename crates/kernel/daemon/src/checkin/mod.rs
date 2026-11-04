@@ -365,27 +365,18 @@ pub(crate) async fn run_now(
         ));
     }
     let account_id = AccountId::try_from(account).map_err(|error| error.to_string())?;
-    if !state
-        .members()
-        .iter()
-        .any(|member| member.account == account_id)
-    {
-        return Err(format!(
-            "account `{account}` is not on subscription `{subscription}`"
-        ));
-    }
-    let now = runtime.quota_now();
-    if !account_ready(state, &account_id).await {
-        return Err("account is not signed in".to_owned());
-    }
-    let zone = local_offset(now);
-    let day = local_day_key(now, zone);
     let member_id = state
         .members()
         .iter()
         .find(|member| member.account == account_id)
         .map(|member| member.id.to_string())
         .ok_or_else(|| format!("account `{account}` is not on subscription `{subscription}`"))?;
+    let now = runtime.quota_now();
+    if !account_ready(state, &account_id).await {
+        return Err("account is not signed in".to_owned());
+    }
+    let zone = local_offset(now);
+    let day = local_day_key(now, zone);
     match run_checkin(state, &account_id).await {
         Ok(result) => {
             let record = CheckinRecord::from_result(now, &result);
