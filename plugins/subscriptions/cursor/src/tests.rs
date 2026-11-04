@@ -85,7 +85,7 @@ fn write_auth(path: &Path, token: &str) {
 }
 
 #[test]
-fn a2a_22_import_auth_json_adds_account() {
+fn a2a_28_import_auth_json_adds_account() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
     let sub = subscription(&host);
@@ -105,7 +105,7 @@ fn a2a_22_import_auth_json_adds_account() {
 }
 
 #[test]
-fn a2a_23_discover_lists_without_secrets() {
+fn a2a_29_discover_lists_without_secrets() {
     let dir = tempfile::tempdir().expect("dir");
     let agent_home = dir.path().join("cursor-home");
     let token = jwt("discover@example.test", 4_000_000_000);
@@ -117,7 +117,7 @@ fn a2a_23_discover_lists_without_secrets() {
 }
 
 #[test]
-fn a2a_24_model_list_collapses_fixture() {
+fn a2a_30_model_list_collapses_fixture() {
     let list = crate::models::model_list(MODELS_FIXTURE).expect("models");
     let ids: Vec<_> = list.models().iter().map(|m| m.id()).collect();
     assert!(ids.contains(&"grok-4.7"));
@@ -125,7 +125,7 @@ fn a2a_24_model_list_collapses_fixture() {
 }
 
 #[test]
-fn a2a_25_refresh_runs_status_when_token_near_expiry() {
+fn a2a_31_refresh_runs_status_when_token_near_expiry() {
     let dir = tempfile::tempdir().expect("dir");
     let agent_home = dir.path().join("agent");
     let near = jwt("refresh@example.test", 100);
@@ -149,7 +149,7 @@ fn a2a_25_refresh_runs_status_when_token_near_expiry() {
 }
 
 #[test]
-fn a2a_26_quota_parses_period_fixture() {
+fn a2a_32_quota_parses_period_fixture() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
     let sub = subscription(&host);
@@ -181,7 +181,7 @@ fn a2a_26_quota_parses_period_fixture() {
 }
 
 #[test]
-fn a2a_27_browser_sign_in_poll_mock() {
+fn a2a_33_browser_sign_in_poll_mock() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
     let sub = subscription(&host);
@@ -233,7 +233,7 @@ fn a2a_27_browser_sign_in_poll_mock() {
 }
 
 #[test]
-fn a2a_28_errors_never_echo_access_token() {
+fn a2a_34_errors_never_echo_access_token() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
     let sub = subscription(&host);
@@ -244,7 +244,7 @@ fn a2a_28_errors_never_echo_access_token() {
 }
 
 #[test]
-fn a2a_29_oauth_refresh_when_near_expiry() {
+fn a2a_35_oauth_refresh_when_near_expiry() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
     let sub = subscription(&host);
@@ -285,7 +285,7 @@ fn a2a_29_oauth_refresh_when_near_expiry() {
 }
 
 #[test]
-fn a2a_30_effort_suffix_stripped_from_name() {
+fn a2a_36_effort_suffix_stripped_from_name() {
     let list = crate::models::model_list(MODELS_FIXTURE).expect("models");
     let grok = list
         .models()
@@ -296,13 +296,13 @@ fn a2a_30_effort_suffix_stripped_from_name() {
 }
 
 #[test]
-fn a2a_31_remove_words_does_not_panic_on_short_names() {
+fn a2a_37_remove_words_does_not_panic_on_short_names() {
     let list = crate::models::model_list("auto - Auto (default)\n").expect("models");
     assert_eq!(list.models().len(), 1);
 }
 
 #[test]
-fn a2a_32_reimport_keeps_stored_refresh_token() {
+fn a2a_38_reimport_keeps_stored_refresh_token() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
     let sub = subscription(&host);
@@ -333,4 +333,59 @@ fn a2a_32_reimport_keeps_stored_refresh_token() {
             .map(|t| hofund_plugin_sdk::oauth::secret_text(&t).to_owned()),
         Some("stored-refresh".to_owned())
     );
+}
+
+#[test]
+fn a2a_39_agent_quota_reads_auth_json_without_spawning_agent() {
+    let dir = tempfile::tempdir().expect("dir");
+    let agent_home = dir.path().join("agent");
+    let token = jwt("agent-quota@example.test", 4_000_000_000);
+    write_auth(&agent_home.join("auth.json"), &token);
+    let host = host(&dir);
+    let sub = subscription_with_agent_home(&host, Some(agent_home));
+    let id = account_id_from(&["cursor", "agent-quota@example.test"]);
+    let blob = tokens::blob_agent("agent-quota@example.test", None);
+    let account = host
+        .context()
+        .accounts()
+        .account(id.clone(), "agent-quota@example.test")
+        .expect("account");
+    block_on(host.context().accounts().upsert(account, blob.to_secret())).expect("upsert");
+    let period_url = endpoints().dashboard("GetCurrentPeriodUsage");
+    host.http().enqueue_response(
+        200,
+        &[("content-type", "application/json")],
+        br#"{"billingCycleEnd":"1792833042000","planUsage":{"autoPercentUsed":1,"apiPercentUsed":2,"totalPercentUsed":3}}"#,
+    );
+    let windows = block_on(sub.quota(&id, host.context())).expect("quota");
+    assert_eq!(windows.len(), 3);
+    assert!(
+        host.process().programs().is_empty(),
+        "agent quota must not spawn cursor-agent when auth.json is fresh"
+    );
+    let calls = host.http().calls();
+    assert!(calls.iter().any(|call| call.uri().contains(&period_url)));
+}
+
+#[test]
+fn a2a_40_browser_sign_in_cancel_during_poll() {
+    use hofund_plugin_api::PluginErrorKind;
+
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    block_on(async {
+        sub.start_sign_in(&ctx(), host.context())
+            .await
+            .expect("start");
+        host.http().enqueue_response(404, &[], b"");
+        sub.cancel_sign_in(&ctx(), host.context())
+            .await
+            .expect("cancel");
+        let error = sub
+            .complete_sign_in(&ctx(), SignInProof::Await, host.context())
+            .await
+            .expect_err("cancelled");
+        assert_eq!(error.kind(), PluginErrorKind::Config);
+    });
 }

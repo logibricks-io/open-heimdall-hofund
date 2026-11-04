@@ -76,6 +76,11 @@ async fn commit(host: &HostContext, account: &AccountId, home: &str) -> Result<(
         }
         creds::ReadError::Missing(reason) => PluginError::auth(reason),
     })?;
+    if creds::account_id(&credential) != *account {
+        return Err(PluginError::auth(
+            "the CLI home is now signed in to a different account",
+        ));
+    }
     let Some(secret) = host.accounts().secret(account).await? else {
         return Err(PluginError::auth(
             "no Grok Build sign-in is stored for this account",

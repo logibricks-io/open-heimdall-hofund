@@ -10,17 +10,6 @@ pub(crate) const ACCESS_FIELD: &str = "accessToken";
 
 const FILE_CAP: u64 = 256 * 1024;
 
-/// Agent config directory from `CURSOR_CONFIG_DIR` or the resolved CLI config dir.
-pub(crate) fn config_dir(agent_home: &Path) -> PathBuf {
-    if let Some(dir) = configured_dir() {
-        return dir;
-    }
-    if agent_home.as_os_str().is_empty() {
-        return cli_config_dir();
-    }
-    agent_home.to_path_buf()
-}
-
 /// `auth.json` under the agent home or platform default.
 pub(crate) fn auth_path(agent_home: &Path) -> PathBuf {
     agent_home.join("auth.json")

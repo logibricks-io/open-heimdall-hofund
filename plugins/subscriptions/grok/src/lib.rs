@@ -19,7 +19,6 @@ use hofund_plugin_api::{
 };
 use hofund_plugin_sdk::Contribution;
 
-mod agent_sign_in;
 mod cli;
 mod creds;
 mod discover;
@@ -649,15 +648,6 @@ impl Subscription for Grok {
             self.x_search,
             self.program_fn(),
         )))
-    }
-
-    async fn write_agent_sign_in(
-        &self,
-        account: &AccountId,
-        home: &Path,
-        host: &HostContext,
-    ) -> Result<(), PluginError> {
-        agent_sign_in::write(account, home, host).await
     }
 
     async fn discover_agent_sign_in(

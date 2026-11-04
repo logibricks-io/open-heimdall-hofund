@@ -14,7 +14,7 @@ fn host(dir: &tempfile::TempDir) -> TestHost {
 }
 
 #[test]
-fn a2a_20_contributes_one_pkce_subscription() {
+fn a2a_26_contributes_one_pkce_subscription() {
     let contribution = crate::contribute();
     assert!(contribution.upstreams().is_empty());
     let [factory] = contribution.subscriptions() else {
@@ -33,7 +33,7 @@ fn a2a_20_contributes_one_pkce_subscription() {
 }
 
 #[test]
-fn a2a_21_unknown_account_needs_sign_in() {
+fn a2a_27_unknown_account_needs_sign_in() {
     let contribution = crate::contribute();
     let factory = &contribution.subscriptions()[0];
     let dir = tempfile::tempdir().expect("dir");

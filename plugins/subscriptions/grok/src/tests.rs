@@ -92,7 +92,7 @@ fn seed(
 }
 
 #[test]
-fn a2a_2_discover_import_fixture_and_reimport() {
+fn a2a_3_discover_import_fixture_and_reimport() {
     let dir = tempfile::tempdir().expect("dir");
     let home = dir.path().join("grok-home");
     write_auth(
@@ -126,7 +126,7 @@ fn a2a_2_discover_import_fixture_and_reimport() {
 }
 
 #[test]
-fn a2a_3_refresh_on_expiry_runs_grok_models_with_home() {
+fn a2a_4_refresh_on_expiry_runs_grok_models_with_home() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
     let sub = subscription(&host);
@@ -176,7 +176,7 @@ fn a2a_3_refresh_on_expiry_runs_grok_models_with_home() {
 }
 
 #[test]
-fn a2a_4_model_list_parsing() {
+fn a2a_5_model_list_parsing() {
     let body = br#"{"data":[{"id":"grok-4.7","name":"Grok 4.7","api_backend":"responses","context_window":256000,"context_windows":[256000,500000],"reasoning_efforts":[{"value":"high"},{"value":"low"}]}]}"#;
     let models = crate::models::parse_list(body).expect("parse");
     assert_eq!(models.len(), 2);
@@ -185,7 +185,7 @@ fn a2a_4_model_list_parsing() {
 }
 
 #[test]
-fn a2a_5_upstream_round_trip_with_recording_http() {
+fn a2a_6_upstream_round_trip_with_recording_http() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
     let sub = subscription(&host);
@@ -211,7 +211,7 @@ fn a2a_5_upstream_round_trip_with_recording_http() {
 }
 
 #[test]
-fn a2a_6_usage_parsing() {
+fn a2a_7_usage_parsing() {
     let body = br#"{"config":{"creditUsagePercent":42.5,"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","end":"2099-06-01T00:00:00Z"},"onDemandCap":{"val":10},"onDemandUsed":{"val":2.5}}}"#;
     let windows = quota::windows(body).expect("windows");
     assert_eq!(windows.len(), 2);
@@ -222,7 +222,7 @@ fn a2a_6_usage_parsing() {
 }
 
 #[test]
-fn a2a_7_secrets_not_in_stored_debug_or_auth_errors() {
+fn a2a_8_secrets_not_in_stored_debug_or_auth_errors() {
     let dir = tempfile::tempdir().expect("dir");
     let home = dir.path().join("grok-home");
     write_auth(
@@ -256,7 +256,7 @@ fn a2a_7_secrets_not_in_stored_debug_or_auth_errors() {
 }
 
 #[test]
-fn a2a_8_shape_rewrites_agent_message_and_tools() {
+fn a2a_9_shape_rewrites_agent_message_and_tools() {
     let mut body: Map<String, Value> = json!({
         "tools": [{"type":"custom_tool","name":"drop-me"}],
         "input": [{
@@ -280,7 +280,7 @@ fn a2a_8_shape_rewrites_agent_message_and_tools() {
 }
 
 #[test]
-fn a2a_9_near_margin_account_stays_ready() {
+fn a2a_10_near_margin_account_stays_ready() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
     let home = dir.path().join("account-home");
@@ -301,7 +301,7 @@ fn a2a_9_near_margin_account_stays_ready() {
 }
 
 #[test]
-fn a2a_10_sign_in_start_complete_and_cancel() {
+fn a2a_11_sign_in_start_complete_and_cancel() {
     let dir = tempfile::tempdir().expect("dir");
     let test_host = host(&dir);
     let grok_home = test_host
@@ -363,7 +363,7 @@ fn a2a_10_sign_in_start_complete_and_cancel() {
 }
 
 #[test]
-fn a2a_11_missing_expiry_skips_grok_models_on_refresh() {
+fn a2a_12_missing_expiry_skips_grok_models_on_refresh() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
     let sub = subscription(&host);
@@ -398,7 +398,7 @@ fn a2a_11_missing_expiry_skips_grok_models_on_refresh() {
 }
 
 #[test]
-fn a2a_12_refresh_margin_uses_strictly_after_boundary() {
+fn a2a_13_refresh_margin_uses_strictly_after_boundary() {
     let margin = creds::REFRESH_MARGIN;
     let margin_ms = margin.as_millis() as u64;
     let now = std::time::UNIX_EPOCH + std::time::Duration::from_millis(1_000_000);
@@ -409,5 +409,40 @@ fn a2a_12_refresh_margin_uses_strictly_after_boundary() {
     assert!(
         !creds::expires_after(now, 1_000_000 + margin_ms, margin),
         "exactly at the margin should not count as fresh"
+    );
+}
+
+#[test]
+fn a2a_14_commit_rejects_mismatched_cli_home() {
+    use hofund_plugin_api::PluginErrorKind;
+
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let home = dir.path().join("account-home");
+    let id = seed(&host, &home, "token-old", "1970-01-01T00:01:00.000000000Z");
+    write_auth(
+        &home,
+        "token-new",
+        "other@example.test",
+        "2099-01-01T00:00:00.000000000Z",
+    );
+    host.process()
+        .script_piped(PipedScript::new().exits(|_| vec![]));
+    let error = block_on(sub.refresh(&id, host.context())).expect_err("mismatch");
+    assert_eq!(error.kind(), PluginErrorKind::Auth);
+    assert!(
+        error
+            .to_string()
+            .contains("signed in to a different account")
+    );
+    let secret = block_on(host.context().accounts().secret(&id))
+        .expect("read")
+        .expect("stored");
+    let blob = SecretObject::parse(&secret).expect("blob");
+    assert_eq!(
+        blob.secret("access_token")
+            .map(|token| hofund_plugin_sdk::oauth::secret_text(&token).to_owned()),
+        Some("token-old".to_owned())
     );
 }

@@ -182,17 +182,40 @@ impl Subscription for Cursor {
                 "Cursor sign-in finishes once the browser has signed in",
             ));
         };
-        let Some(pending) = self
-            .pending
+        let session = ctx.session().to_string();
+        let pending = {
+            let guard = self
+                .pending
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let Some(pending) = guard.get(&session) else {
+                return Err(PluginError::config(
+                    "no Cursor sign-in is in progress for this session",
+                ));
+            };
+            pending.clone()
+        };
+        let blob = match sign_in::finish(host, &self.endpoints, &pending, || {
+            self.pending
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains_key(&session)
+        })
+        .await
+        {
+            Ok(blob) => blob,
+            Err(error) => {
+                self.pending
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(&session);
+                return Err(error);
+            }
+        };
+        self.pending
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(ctx.session())
-        else {
-            return Err(PluginError::config(
-                "no Cursor sign-in is in progress for this session",
-            ));
-        };
-        let blob = sign_in::finish(host, &self.endpoints, &pending).await?;
+            .remove(&session);
         let access = blob
             .secret(tokens::ACCESS)
             .ok_or_else(|| PluginError::auth("Cursor sent back no access token"))?;
@@ -339,15 +362,6 @@ impl Subscription for Cursor {
         Err(PluginError::unsupported(
             "requests through Cursor's agent API are not served yet",
         ))
-    }
-
-    async fn write_agent_sign_in(
-        &self,
-        account: &AccountId,
-        home: &Path,
-        host: &HostContext,
-    ) -> Result<(), PluginError> {
-        agent_sign_in::write(account, home, host, &self.endpoints).await
     }
 
     async fn import_accounts(

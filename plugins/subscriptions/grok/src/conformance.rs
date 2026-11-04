@@ -56,7 +56,7 @@ fn a2a_1_contributes_one_bridge_subscription() {
 }
 
 #[test]
-fn a2a_1_unknown_account_needs_sign_in_and_sends_nothing() {
+fn a2a_2_unknown_account_needs_sign_in_and_sends_nothing() {
     let contribution = crate::contribute();
     let factory = &contribution.subscriptions()[0];
     let dir = tempfile::tempdir().expect("dir");

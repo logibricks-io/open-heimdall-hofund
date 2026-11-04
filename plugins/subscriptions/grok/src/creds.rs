@@ -4,7 +4,7 @@ use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use hofund_plugin_api::{AccountId, HostContext, PluginError, SecretString};
-use hofund_plugin_sdk::json::{Map, Value};
+use hofund_plugin_sdk::json::Value;
 use hofund_plugin_sdk::oauth::{SecretObject, account_id_from, unverified_claims};
 
 /// How long before expiry the CLI should renew the token.
@@ -304,60 +304,4 @@ fn parse_rfc3339_ms(text: &str) -> Option<u64> {
 fn token_subject(token: &str) -> Option<String> {
     let claims = unverified_claims(&SecretString::from(token.to_owned())).ok()?;
     claims.get("sub").and_then(Value::as_str).map(str::to_owned)
-}
-
-/// Writes auth.json for agent sign-in switching.
-pub(crate) fn write_auth(home: &Path, stored: &Stored) -> Result<(), PluginError> {
-    let scope = "https://auth.x.ai::b1a00492-073a-47ea-816f-4c329264a828";
-    let mut entry = Map::new();
-    entry.insert(
-        "key".to_owned(),
-        Value::String(hofund_plugin_sdk::oauth::secret_text(&stored.credential.key).to_owned()),
-    );
-    if !stored.credential.email.is_empty() {
-        entry.insert(
-            "email".to_owned(),
-            Value::String(stored.credential.email.clone()),
-        );
-    }
-    entry.insert(
-        "expires_at".to_owned(),
-        Value::String(expires_rfc3339(stored.credential.expires_ms)),
-    );
-    let mut root = Map::new();
-    root.insert(scope.to_owned(), Value::Object(entry));
-    let text = Value::Object(root).to_string();
-    std::fs::create_dir_all(home)
-        .map_err(|_| PluginError::io("cannot create the Grok home directory"))?;
-    write_private(&home.join("auth.json"), text.as_bytes())
-}
-
-fn expires_rfc3339(expires_ms: u64) -> String {
-    let duration = Duration::from_millis(expires_ms);
-    let time = UNIX_EPOCH + duration;
-    hofund_plugin_sdk::time::format_rfc3339(time)
-}
-
-fn write_private(path: &Path, bytes: &[u8]) -> Result<(), PluginError> {
-    #[cfg(unix)]
-    {
-        use std::io::Write as _;
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(path)
-            .map_err(|_| PluginError::io("cannot write auth.json"))?;
-        file.set_permissions(std::fs::Permissions::from_mode(0o600))
-            .map_err(|_| PluginError::io("cannot restrict auth.json"))?;
-        file.write_all(bytes)
-            .map_err(|_| PluginError::io("cannot write auth.json"))?;
-    }
-    #[cfg(not(unix))]
-    {
-        std::fs::write(path, bytes).map_err(|_| PluginError::io("cannot write auth.json"))?;
-    }
-    Ok(())
 }

@@ -101,7 +101,7 @@ fn seed_oauth(host: &TestHost) -> AccountId {
 }
 
 #[test]
-fn a2a_12_device_sign_in_polls_workos_then_registers() {
+fn a2a_17_device_sign_in_polls_workos_then_registers() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
     let sub = subscription(&host);
@@ -128,7 +128,7 @@ fn a2a_12_device_sign_in_polls_workos_then_registers() {
 }
 
 #[test]
-fn a2a_13_refresh_rotates_tokens() {
+fn a2a_18_refresh_rotates_tokens() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
     let id = seed_oauth(&host);
@@ -169,7 +169,7 @@ fn a2a_13_refresh_rotates_tokens() {
 }
 
 #[test]
-fn a2a_14_model_feed_parse_and_list() {
+fn a2a_19_model_feed_parse_and_list() {
     let feed = json!({
         "recommended": [{"id": "anthropic/claude-sonnet-5.5"}],
         "free": [{"id": "cline-free/deepseek-v4.1-flash"}],
@@ -192,7 +192,7 @@ fn a2a_14_model_feed_parse_and_list() {
 }
 
 #[test]
-fn a2a_15_usage_parse_limits_and_balance() {
+fn a2a_20_usage_parse_limits_and_balance() {
     let limits = json!({"limits": [{"type": "five_hour", "percentUsed": 25.0}]});
     let windows = limit_windows(Some(&limits));
     assert_eq!(windows.len(), 1);
@@ -206,7 +206,7 @@ fn a2a_15_usage_parse_limits_and_balance() {
 }
 
 #[test]
-fn a2a_16_chat_upstream_round_trip() {
+fn a2a_21_chat_upstream_round_trip() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
     let id = seed_oauth(&host);
@@ -245,7 +245,7 @@ fn a2a_16_chat_upstream_round_trip() {
 }
 
 #[test]
-fn a2a_17_no_secrets_in_errors() {
+fn a2a_22_no_secrets_in_errors() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
     let id = seed_oauth(&host);
@@ -268,7 +268,7 @@ fn a2a_17_no_secrets_in_errors() {
 }
 
 #[test]
-fn a2a_18_api_key_sign_in_stores_api_auth() {
+fn a2a_23_api_key_sign_in_stores_api_auth() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
     let sub = subscription(&host);
@@ -292,7 +292,7 @@ fn a2a_18_api_key_sign_in_stores_api_auth() {
 }
 
 #[test]
-fn a2a_19_default_expiry_ms_uses_host_clock() {
+fn a2a_24_default_expiry_ms_uses_host_clock() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
     let now = host
@@ -313,7 +313,7 @@ fn a2a_19_default_expiry_ms_uses_host_clock() {
 }
 
 #[test]
-fn a2a_20_invalid_json_400_does_not_set_lapsed() {
+fn a2a_25_invalid_json_400_does_not_set_lapsed() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
     let id = seed_oauth(&host);

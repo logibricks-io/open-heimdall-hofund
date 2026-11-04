@@ -12,6 +12,7 @@ use crate::endpoints::Endpoints;
 use crate::tokens;
 
 /// Poll state kept until sign-in completes.
+#[derive(Clone)]
 pub(crate) struct BrowserPending {
     pub verifier: SecretString,
     pub uuid: String,
@@ -34,6 +35,7 @@ pub(crate) async fn finish(
     host: &HostContext,
     endpoints: &Endpoints,
     pending: &BrowserPending,
+    alive: impl Fn() -> bool,
 ) -> Result<SecretObject, PluginError> {
     let poll_url = endpoints.auth_poll(
         &pending.uuid,
@@ -41,6 +43,9 @@ pub(crate) async fn finish(
     );
     let mut errors = 0_u32;
     for round in 0..150_u32 {
+        if !alive() {
+            return Err(PluginError::config("Cursor sign-in was cancelled"));
+        }
         let wait = Duration::from_millis(
             (1000.0 * 1.2_f64.powi(i32::try_from(round).unwrap_or(0))).min(10_000.0) as u64,
         );

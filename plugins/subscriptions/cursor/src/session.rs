@@ -1,6 +1,6 @@
 //! Resolving the access token for an account.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use crate::cli::{self, KeychainCache};
@@ -13,7 +13,7 @@ pub(crate) async fn access_token(
     endpoints: &crate::endpoints::Endpoints,
     account: &AccountId,
     agent_home: &Path,
-    program: Option<&Path>,
+    program: Option<PathBuf>,
     keychain: &Mutex<KeychainCache>,
 ) -> Result<SecretString, PluginError> {
     let secret = host
@@ -23,12 +23,7 @@ pub(crate) async fn access_token(
         .ok_or_else(|| PluginError::auth("no Cursor sign-in is stored for this account"))?;
     let blob = tokens::parse_blob(&secret)?;
     if is_agent(&blob) {
-        let program = program.ok_or_else(|| {
-            PluginError::config(
-                "cursor-agent is not installed: it is not on PATH; install it or set `command`",
-            )
-        })?;
-        return agent_token(host, agent_home, program, keychain).await;
+        return agent_token(host, agent_home, program.as_deref(), keychain).await;
     }
     let access = blob
         .secret(tokens::ACCESS)
@@ -52,7 +47,7 @@ pub(crate) async fn access_token(
 async fn agent_token(
     host: &HostContext,
     agent_home: &Path,
-    program: &Path,
+    program: Option<&Path>,
     keychain: &Mutex<KeychainCache>,
 ) -> Result<SecretString, PluginError> {
     let now = host.clock().now();
@@ -60,6 +55,11 @@ async fn agent_token(
         .await?
         .unwrap_or_default();
     if token.is_empty() || tokens::near_expiry(now, tokens::jwt_expiry_ms(&token)) {
+        let program = program.ok_or_else(|| {
+            PluginError::config(
+                "cursor-agent is not installed: it is not on PATH; install it or set `command`",
+            )
+        })?;
         crate::refresh::agent_status(host, program, agent_home).await?;
         token = cli::live_access(host, agent_home, true, keychain)
             .await?
