@@ -6,7 +6,7 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use hofund_plugin_api::{AccountId, AgentSignIn, HostContext, PluginError, SecretString};
 use hofund_plugin_sdk::json::{self, Value};
-use hofund_plugin_sdk::oauth::{SecretObject, account_id_from, secret_text};
+use hofund_plugin_sdk::oauth::{SecretObject, account_id_from, same_secret, secret_text};
 use hofund_plugin_sdk::time::parse_rfc3339;
 
 fn hash_hex(data: &[u8]) -> String {
@@ -63,6 +63,15 @@ impl Stored {
 
     pub(crate) fn fresh_at(&self, now: std::time::SystemTime) -> bool {
         match self.credential.expires_at {
+            None => true,
+            Some(at) => at > now + REFRESH_MARGIN,
+        }
+    }
+}
+
+impl Credential {
+    pub(crate) fn fresh_at(&self, now: std::time::SystemTime) -> bool {
+        match self.expires_at {
             None => true,
             Some(at) => at > now + REFRESH_MARGIN,
         }
@@ -440,6 +449,55 @@ pub(crate) fn write_token_file(path: &Path, credential: &Credential) -> Result<(
     let body =
         json::to_vec(&object).map_err(|_| PluginError::io("cannot encode the Kiro token file"))?;
     write_atomic(path, &body)
+}
+
+/// Writes only access, refresh, and expiry back to the IDE token file when it
+/// still holds the refresh token that was used for refresh (compare-and-swap).
+pub(crate) fn write_token_refresh_fields(
+    path: &Path,
+    access: &SecretString,
+    refresh: &SecretString,
+    expires_at: Option<std::time::SystemTime>,
+    refresh_used: &SecretString,
+) -> Result<(), PluginError> {
+    let Some(on_disk) = refresh_token_in_object(path) else {
+        return Ok(());
+    };
+    if !same_secret(&on_disk, refresh_used) {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        private_dir(parent)?;
+    }
+    let expires = expires_at
+        .and_then(|at| at.duration_since(UNIX_EPOCH).ok())
+        .map(|d| hofund_plugin_sdk::time::format_rfc3339(UNIX_EPOCH + d))
+        .unwrap_or_default();
+    let mut object = read_existing_object(path);
+    if let Value::Object(map) = &mut object {
+        map.insert(
+            "accessToken".to_owned(),
+            Value::String(secret_text(access).to_owned()),
+        );
+        map.insert(
+            "refreshToken".to_owned(),
+            Value::String(secret_text(refresh).to_owned()),
+        );
+        map.insert("expiresAt".to_owned(), Value::String(expires));
+    }
+    let body =
+        json::to_vec(&object).map_err(|_| PluginError::io("cannot encode the Kiro token file"))?;
+    write_atomic(path, &body)
+}
+
+fn refresh_token_in_object(path: &Path) -> Option<SecretString> {
+    let object = read_existing_object(path);
+    object
+        .get("refreshToken")
+        .or_else(|| object.get("refresh_token"))
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+        .map(|text| SecretString::from(text.to_owned()))
 }
 
 impl Credential {

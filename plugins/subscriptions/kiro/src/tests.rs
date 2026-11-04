@@ -397,6 +397,59 @@ fn a2b_41_idc_token_file_parsing_and_refresh() {
 }
 
 #[test]
+fn a2b_43_refresh_adopts_ide_account_without_overwriting_token_file() {
+    let dir = tempfile::tempdir().expect("dir");
+    let cache = dir.path().join("cache");
+    std::fs::create_dir_all(&cache).expect("dir");
+    write_token(
+        &cache,
+        "hofund-access-a",
+        "hofund-refresh-a",
+        "1970-01-01T00:00:01Z",
+    );
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let home = dir.path().join("seed-home");
+    let token_path = cache.join(TOKEN_FILE);
+    let mut credential = creds::read_token_file(&token_path).expect("read");
+    credential.ide_token_path = token_path.to_string_lossy().into_owned();
+    let id = creds::account_id_for_home(&home, &credential);
+    block_on(async {
+        host.context()
+            .accounts()
+            .upsert(
+                host.context()
+                    .accounts()
+                    .account(id.clone(), "k@example.test".to_owned())
+                    .expect("account"),
+                creds::secret_blob(&credential).to_secret(),
+            )
+            .await
+            .expect("upsert");
+    });
+    write_token(
+        &cache,
+        "ide-access-b",
+        "ide-refresh-b",
+        "2099-01-01T00:00:00Z",
+    );
+    block_on(sub.refresh(&id, host.context())).expect("refresh");
+    assert!(host.http().calls().is_empty());
+    let on_disk = std::fs::read_to_string(&token_path).expect("read");
+    assert!(on_disk.contains("ide-access-b"));
+    assert!(on_disk.contains("ide-refresh-b"));
+    assert!(!on_disk.contains("hofund-access-a"));
+    let secret = block_on(host.context().accounts().secret(&id))
+        .expect("read")
+        .expect("stored");
+    let parsed = SecretObject::parse(&secret).expect("blob");
+    assert_eq!(
+        parsed.secret("access_token").as_ref().map(secret_text),
+        Some("ide-access-b")
+    );
+}
+
+#[test]
 fn a2b_32_usage_url_includes_profile_and_eu_region() {
     let endpoints = Endpoints::default();
     let url = endpoints.usage_url(

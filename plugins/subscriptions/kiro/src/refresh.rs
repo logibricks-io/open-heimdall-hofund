@@ -52,16 +52,46 @@ pub(crate) async fn refresh_stale(
     if !same_secret(&current_refresh, &stored.credential.refresh) {
         return Ok(());
     }
-    let root =
-        if method_is(&stored.credential.method, "idc") && !stored.credential.client_id.is_empty() {
-            refresh_idc(host, stored).await?
-        } else if method_is(&stored.credential.method, "external-idp") {
-            return Err(PluginError::config(
-                "Kiro external-idp refresh is not implemented offline",
-            ));
-        } else {
-            refresh_social(host, stored, endpoints).await?
-        };
+    let mut credential = stored.credential.clone();
+    let mut refresh_used = credential.refresh.clone();
+    if !credential.ide_token_path.is_empty() {
+        let path = std::path::Path::new(&credential.ide_token_path);
+        if let Ok(on_disk) = creds::read_token_file(path)
+            && !same_secret(&on_disk.refresh, &credential.refresh)
+        {
+            let now = host.clock().now();
+            if on_disk.fresh_at(now) {
+                credential.access = on_disk.access;
+                credential.refresh = on_disk.refresh;
+                credential.expires_at = on_disk.expires_at;
+                credential.profile_arn = on_disk.profile_arn;
+                credential.region = on_disk.region;
+                if on_disk.label != "Kiro" {
+                    credential.label = on_disk.label;
+                }
+                lease
+                    .commit(
+                        Some(credential.label.clone()),
+                        creds::secret_blob(&credential).to_secret(),
+                    )
+                    .await?;
+                return Ok(());
+            }
+            if !secret_text(&on_disk.refresh).is_empty() {
+                refresh_used = on_disk.refresh.clone();
+                credential.refresh = refresh_used.clone();
+            }
+        }
+    }
+    let root = if method_is(&credential.method, "idc") && !credential.client_id.is_empty() {
+        refresh_idc(host, &credential).await?
+    } else if method_is(&credential.method, "external-idp") {
+        return Err(PluginError::config(
+            "Kiro external-idp refresh is not implemented offline",
+        ));
+    } else {
+        refresh_social(host, &credential, endpoints).await?
+    };
     let access = root
         .get("accessToken")
         .or_else(|| root.get("access_token"))
@@ -74,7 +104,7 @@ pub(crate) async fn refresh_stale(
         .and_then(Value::as_str)
         .filter(|t| !t.is_empty())
         .map(SecretString::from)
-        .unwrap_or_else(|| stored.credential.refresh.clone());
+        .unwrap_or_else(|| credential.refresh.clone());
     let expires_in = root
         .get("expiresIn")
         .or_else(|| root.get("expires_in"))
@@ -83,8 +113,7 @@ pub(crate) async fn refresh_stale(
     let profile = root
         .get("profileArn")
         .and_then(Value::as_str)
-        .unwrap_or(stored.credential.profile_arn.as_str());
-    let mut credential = stored.credential.clone();
+        .unwrap_or(credential.profile_arn.as_str());
     credential.access = SecretString::from(access.to_owned());
     credential.refresh = refresh;
     credential.profile_arn = profile.to_owned();
@@ -100,18 +129,24 @@ pub(crate) async fn refresh_stale(
         .await?;
     if !credential.ide_token_path.is_empty() {
         let path = std::path::Path::new(&credential.ide_token_path);
-        let _ = creds::write_token_file(path, &credential);
+        let _ = creds::write_token_refresh_fields(
+            path,
+            &credential.access,
+            &credential.refresh,
+            credential.expires_at,
+            &refresh_used,
+        );
     }
     Ok(())
 }
 
 async fn refresh_social(
     host: &HostContext,
-    stored: &Stored,
+    credential: &creds::Credential,
     endpoints: &Endpoints,
 ) -> Result<Value, PluginError> {
-    let url = endpoints.refresh_url(&stored.credential.region);
-    let body = json::json!({"refreshToken": secret_text(&stored.credential.refresh)});
+    let url = endpoints.refresh_url(&credential.region);
+    let body = json::json!({"refreshToken": secret_text(&credential.refresh)});
     let reply = Call::post(url)
         .header("content-type", "application/json")
         .header("accept", "application/json")
@@ -122,15 +157,15 @@ async fn refresh_social(
     refresh_status(reply.status(), reply.body())
 }
 
-async fn refresh_idc(host: &HostContext, stored: &Stored) -> Result<Value, PluginError> {
-    let url = format!(
-        "https://oidc.{}.amazonaws.com/token",
-        stored.credential.region
-    );
+async fn refresh_idc(
+    host: &HostContext,
+    credential: &creds::Credential,
+) -> Result<Value, PluginError> {
+    let url = format!("https://oidc.{}.amazonaws.com/token", credential.region);
     let body = json::json!({
-        "clientId": stored.credential.client_id,
-        "clientSecret": secret_text(&stored.credential.client_secret),
-        "refreshToken": secret_text(&stored.credential.refresh),
+        "clientId": credential.client_id,
+        "clientSecret": secret_text(&credential.client_secret),
+        "refreshToken": secret_text(&credential.refresh),
         "grantType": "refresh_token",
     });
     let reply = Call::post(url)
