@@ -21,6 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that demands it is retried once with filled thinking and remembers the model
   (D-65).
 
+- Serial group walks share a 540-second budget; exhausted walks return HTTP 504
+  naming the budget and do not rest the cut member (D-69).
+
 - Refused Anthropic beta headers are retried once without the named betas and
   omitted on later requests to that provider (D-64).
 
