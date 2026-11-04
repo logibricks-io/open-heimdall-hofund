@@ -563,6 +563,7 @@ async fn send<'a>(
     let mut root_retried = false;
     let mut token_retried = false;
     let mut replacement_retried = false;
+    let mut beta_retried = false;
     while !response.status().is_success() {
         let status = response.status();
         let retry_after = explicit_retry_after(response.headers());
@@ -603,6 +604,17 @@ async fn send<'a>(
                 response = send_json(upstream, url, body.clone()).await?;
                 continue;
             }
+        }
+        if !beta_retried
+            && matches!(status.as_u16(), 400 | 422)
+            && codec.id() == "anthropic-messages"
+            && let Some(stripped) =
+                hofund_quirks::retry_without_refused_betas(&upstream.state, &whole, &bytes)
+        {
+            beta_retried = true;
+            body = stripped;
+            response = send_json(upstream, url, body.clone()).await?;
+            continue;
         }
         if !replacement_retried
             && matches!(status.as_u16(), 400 | 404 | 422)

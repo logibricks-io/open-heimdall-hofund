@@ -5,12 +5,14 @@
 //! profile they were given. Gateway and router code do not read profiles and
 //! do not branch on these ids.
 
+mod betas;
 mod disjoint_one_of;
 mod encoded;
 mod json;
 mod passthrough;
 mod state;
 
+pub use betas::{apply_learned_betas, named_refused_betas, retry_without_refused_betas};
 pub use encoded::{EncodedContext, apply_before_encode, apply_encoded, apply_encoded_with_state};
 pub use passthrough::{refused_passthrough, without_passthrough};
 pub use state::{

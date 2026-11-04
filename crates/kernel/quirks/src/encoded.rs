@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 
 use hofund_ir::Request;
 
+use crate::betas::apply_learned_betas;
 use crate::json::{self, Edit, Kind, Node};
 use crate::state::{RequestState, fold_object_roots, wanted_token_field, with_token_field};
 
@@ -65,7 +66,8 @@ pub fn apply_encoded_with_state(
         .unwrap_or_default();
     let (body, _) = state.strip_passthrough(context.protocol, body);
     let (body, _) = fold_object_roots(context.base_url, context.protocol, &model, state, &body);
-    apply_rules(context, state, &body)
+    let body = apply_rules(context, state, &body);
+    apply_learned_betas(state, &body)
 }
 
 fn chat_token_field(context: EncodedContext<'_>, state: &RequestState, body: &[u8]) -> Vec<u8> {

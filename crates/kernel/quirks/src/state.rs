@@ -13,6 +13,7 @@ pub struct RequestState {
     root_unions: Mutex<BTreeSet<String>>,
     token_field: Mutex<Option<TokenField>>,
     passthrough: Mutex<BTreeSet<String>>,
+    refused_betas: Mutex<BTreeSet<String>>,
 }
 
 /// The Chat Completions reply-length field.
@@ -66,6 +67,23 @@ impl RequestState {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(field.to_owned())
+    }
+
+    /// Remembers a refused Anthropic beta and reports whether it is new.
+    pub fn learn_beta(&self, beta: &str) -> bool {
+        self.refused_betas
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(beta.to_owned())
+    }
+
+    /// Whether a beta may still be sent to this provider.
+    pub fn fits_beta(&self, beta: &str) -> bool {
+        !self
+            .refused_betas
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(beta)
     }
 
     pub(crate) fn strip_passthrough(&self, protocol: &str, body: &[u8]) -> (Vec<u8>, bool) {

@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Refused Anthropic beta headers are retried once without the named betas and
+  omitted on later requests to that provider (D-64).
+
 - Tencent Cloud Token Plan preset regions use `tokenhub.tencentmaas.com` plan
   endpoints; saved providers with the old LKEAP plan bases migrate on load (D-53).
 
