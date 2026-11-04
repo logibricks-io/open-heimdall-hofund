@@ -39,8 +39,9 @@ impl KiroUpstream {
         request: Request,
         _inbound: ProtocolId,
     ) -> Result<Completion, PluginError> {
-        let region = stored.credential.region.as_str();
-        let base = self.endpoints.chat_base(region);
+        let base = self
+            .endpoints
+            .chat_base(&stored.credential.profile_arn, &stored.credential.region);
         let url = format!("{base}/generateAssistantResponse");
         let body = kiro_body::encode(&request, &stored.credential)?;
         let mut call = Call::post(url)
@@ -111,11 +112,7 @@ impl UpstreamProvider for KiroUpstream {
                 "Kiro upstream only serves Anthropic Messages on this path",
             ));
         }
-        if request.stream {
-            return Err(PluginError::config(
-                "Kiro upstream does not stream on this path yet",
-            ));
-        }
+        kiro_body::reject_unsupported(&request)?;
         let stored = self.stored().await?;
         self.send(&stored, request, inbound).await
     }

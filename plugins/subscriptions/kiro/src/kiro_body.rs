@@ -5,7 +5,34 @@ use hofund_plugin_sdk::json::{self, Value};
 
 use crate::creds::Credential;
 
+pub(crate) fn reject_unsupported(request: &Request) -> Result<(), PluginError> {
+    if request.stream {
+        return Err(PluginError::config(
+            "Kiro upstream does not stream on this path yet",
+        ));
+    }
+    if !request.tools.is_empty() || request.tool_choice.is_some() {
+        return Err(PluginError::config(
+            "Kiro upstream accepts text-only requests without tools",
+        ));
+    }
+    for message in &request.messages {
+        for part in &message.content {
+            match part {
+                ContentPart::ToolCall(_) | ContentPart::ToolResult(_) | ContentPart::Image(_) => {
+                    return Err(PluginError::config(
+                        "Kiro upstream accepts text-only requests without tools or images",
+                    ));
+                }
+                ContentPart::Text(_) | ContentPart::Thinking(_) | ContentPart::Unknown(_) => {}
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn encode(request: &Request, credential: &Credential) -> Result<Vec<u8>, PluginError> {
+    reject_unsupported(request)?;
     let mut system = String::new();
     let mut turns: Vec<Value> = Vec::new();
     for message in &request.messages {

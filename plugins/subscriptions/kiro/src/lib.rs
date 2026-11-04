@@ -31,7 +31,7 @@ static SPEC: SubscriptionSpec = SubscriptionSpec::from_static(
 )
 .with_agent_sign_in(AgentSignIn::new(
     &["kiro-cli", "kiro"],
-    "HOME",
+    "KIRO_IDE_CACHE",
     ".aws/sso/cache",
 ));
 
@@ -53,18 +53,23 @@ pub struct Endpoints {
 }
 
 impl Endpoints {
-    pub(crate) fn chat_base(&self, region: &str) -> String {
-        self.runtime.replace("{region}", region)
+    pub(crate) fn chat_base(&self, profile_arn: &str, signed_in_region: &str) -> String {
+        self.runtime.replace(
+            "{region}",
+            &creds::kiro_region(profile_arn, signed_in_region),
+        )
     }
 
     pub(crate) fn refresh_url(&self, region: &str) -> String {
         self.refresh.replace("{region}", region)
     }
 
-    pub(crate) fn usage_url(&self, region: &str) -> String {
+    pub(crate) fn usage_url(&self, profile_arn: &str, signed_in_region: &str) -> String {
+        let region = creds::kiro_region(profile_arn, signed_in_region);
+        let base = self.management.replace("{region}", &region);
         format!(
-            "{}/GetUsageLimits?origin=KIRO_CLI&resourceType=CREDIT&isEmailRequired=true",
-            self.management.replace("{region}", region)
+            "{base}/Get-Usage-Limits?origin=KIRO_CLI&profileArn={}&resourceType=CREDIT&isEmailRequired=true",
+            creds::percent_encode_query(profile_arn)
         )
     }
 }
@@ -197,8 +202,11 @@ impl Subscription for Kiro {
                 "no Kiro sign-in is in progress for this session",
             ));
         };
+        let home = path
+            .parent()
+            .ok_or_else(|| PluginError::config("Kiro token file has no parent directory"))?;
         let credential = creds::read_token_file(&path)?;
-        discover::store(&credential, host).await
+        discover::store(home, &credential, host).await
     }
 
     async fn cancel_sign_in(
@@ -246,7 +254,9 @@ impl Subscription for Kiro {
         host: &HostContext,
     ) -> Result<Vec<QuotaWindow>, PluginError> {
         let stored = refresh::ensure_fresh(host, account, Arc::clone(&self.endpoints)).await?;
-        let url = self.endpoints.usage_url(&stored.credential.region);
+        let url = self
+            .endpoints
+            .usage_url(&stored.credential.profile_arn, &stored.credential.region);
         let reply = hofund_plugin_sdk::Call::get(url)
             .sensitive_header(
                 "authorization",

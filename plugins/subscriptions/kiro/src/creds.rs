@@ -4,8 +4,8 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
 
-use hofund_plugin_api::{AccountId, HostContext, PluginError, SecretString};
-use hofund_plugin_sdk::json::Value;
+use hofund_plugin_api::{AccountId, AgentSignIn, HostContext, PluginError, SecretString};
+use hofund_plugin_sdk::json::{self, Value};
 use hofund_plugin_sdk::oauth::{SecretObject, account_id_from, secret_text};
 use hofund_plugin_sdk::time::parse_rfc3339;
 
@@ -30,8 +30,10 @@ pub(crate) struct Credential {
     pub profile_arn: String,
     pub label: String,
     pub method: String,
+    pub provider: String,
     pub client_id: String,
     pub client_secret: SecretString,
+    pub client_id_hash: String,
     pub token_url: String,
 }
 
@@ -78,10 +80,12 @@ pub(crate) fn parse_secret(secret: &SecretString) -> Result<Stored, PluginError>
         .unwrap_or("Kiro")
         .to_owned();
     let method = blob.text("method").unwrap_or("social").to_owned();
+    let provider = blob.text("provider").unwrap_or("").to_owned();
     let client_id = blob.text("client_id").unwrap_or("").to_owned();
     let client_secret = blob
         .secret("client_secret")
         .unwrap_or_else(|| SecretString::from(String::new()));
+    let client_id_hash = blob.text("client_id_hash").unwrap_or("").to_owned();
     let token_url = blob.text("token_url").unwrap_or("").to_owned();
     let expires_at = blob.number("expires_at").and_then(|secs| {
         if secs == 0 {
@@ -99,8 +103,10 @@ pub(crate) fn parse_secret(secret: &SecretString) -> Result<Stored, PluginError>
             profile_arn,
             label,
             method,
+            provider,
             client_id,
             client_secret,
+            client_id_hash,
             token_url,
         },
     })
@@ -115,8 +121,10 @@ pub(crate) fn secret_blob(credential: &Credential) -> SecretObject {
         .with_text("profile_arn", &credential.profile_arn)
         .with_text("label", &credential.label)
         .with_text("method", &credential.method)
+        .with_text("provider", &credential.provider)
         .with_text("client_id", &credential.client_id)
         .with_secret("client_secret", &credential.client_secret)
+        .with_text("client_id_hash", &credential.client_id_hash)
         .with_text("token_url", &credential.token_url);
     if let Some(at) = credential
         .expires_at
@@ -127,27 +135,48 @@ pub(crate) fn secret_blob(credential: &Credential) -> SecretObject {
     blob
 }
 
-pub(crate) fn account_id(credential: &Credential) -> AccountId {
-    if credential.label.eq_ignore_ascii_case("kiro") {
-        return account_id_from(&[
-            "kiro",
-            "key",
-            &hash_hex(secret_text(&credential.access).as_bytes()),
-        ]);
+pub(crate) fn agent_account_id(home: &Path) -> AccountId {
+    account_id_from(&[
+        "kiro",
+        "agent",
+        &hash_hex(home.to_string_lossy().as_bytes()),
+    ])
+}
+
+pub(crate) fn account_id_for_home(home: &Path, credential: &Credential) -> AccountId {
+    let _ = credential;
+    agent_account_id(home)
+}
+
+const IDE_AGENT: AgentSignIn =
+    AgentSignIn::new(&["kiro-cli", "kiro"], "KIRO_IDE_CACHE", ".aws/sso/cache");
+
+/// Resolves the agent home directory the same way the daemon does for [`AgentSignIn`].
+pub(crate) fn resolve_agent_home(decl: &AgentSignIn) -> Result<PathBuf, PluginError> {
+    let home_env = std::env::var(decl.home_env()).ok();
+    let home = std::env::var("HOME").ok();
+    resolve_agent_home_from(home_env.as_deref(), home.as_deref(), decl)
+}
+
+pub(crate) fn resolve_agent_home_from(
+    home_env: Option<&str>,
+    home: Option<&str>,
+    decl: &AgentSignIn,
+) -> Result<PathBuf, PluginError> {
+    if let Some(value) = home_env.filter(|text| !text.is_empty()) {
+        return Ok(PathBuf::from(value));
     }
-    account_id_from(&["kiro", &credential.label.to_ascii_lowercase()])
+    let home = home
+        .ok_or_else(|| PluginError::io("HOME is not set; set KIRO_IDE_CACHE to the IDE cache"))?;
+    Ok(PathBuf::from(home).join(decl.home_dir()))
+}
+
+pub(crate) fn default_cache_dir() -> PathBuf {
+    resolve_agent_home(&IDE_AGENT).unwrap_or_else(|_| PathBuf::from(".aws/sso/cache"))
 }
 
 pub(crate) fn discover_token_path() -> PathBuf {
-    std::env::var("HOME")
-        .map(|home| {
-            PathBuf::from(home)
-                .join(".aws")
-                .join("sso")
-                .join("cache")
-                .join(TOKEN_FILE)
-        })
-        .unwrap_or_else(|_| PathBuf::from(TOKEN_FILE))
+    default_cache_dir().join(TOKEN_FILE)
 }
 
 pub(crate) fn token_path_in_home(home: &Path) -> PathBuf {
@@ -162,12 +191,13 @@ pub(crate) fn read_token_file(path: &Path) -> Result<Credential, PluginError> {
     }
     let text = std::fs::read_to_string(path)
         .map_err(|_| PluginError::auth("Kiro token file could not be read"))?;
-    parse_token_json(&text)
+    let cache_dir = path.parent().unwrap_or_else(|| Path::new("."));
+    parse_token_json(&text, cache_dir)
 }
 
-pub(crate) fn parse_token_json(text: &str) -> Result<Credential, PluginError> {
-    let root: Value = hofund_plugin_sdk::json::from_str(text)
-        .map_err(|_| PluginError::decode("Kiro token file is not JSON"))?;
+pub(crate) fn parse_token_json(text: &str, cache_dir: &Path) -> Result<Credential, PluginError> {
+    let root: Value =
+        json::from_str(text).map_err(|_| PluginError::decode("Kiro token file is not JSON"))?;
     let access = field_secret(&root, &["accessToken", "access_token"])?;
     let refresh = field_secret(&root, &["refreshToken", "refresh_token"])
         .unwrap_or_else(|_| SecretString::from(String::new()));
@@ -188,24 +218,48 @@ pub(crate) fn parse_token_json(text: &str) -> Result<Credential, PluginError> {
         .and_then(Value::as_str)
         .map(str::to_owned)
         .unwrap_or_else(|| "Kiro".to_owned());
-    let method = root
-        .get("authMethod")
+    let auth_method = root.get("authMethod").and_then(Value::as_str).unwrap_or("");
+    let provider = root
+        .get("provider")
         .and_then(Value::as_str)
-        .map(str::to_owned)
-        .unwrap_or_else(|| "social".to_owned());
-    let client_id = root
+        .unwrap_or("")
+        .to_owned();
+    let client_id_hash = root
+        .get("clientIdHash")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    let mut client_id = root
         .get("clientId")
         .or_else(|| root.get("client_id"))
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_owned();
-    let client_secret = root
+    let mut client_secret = root
         .get("clientSecret")
         .or_else(|| root.get("client_secret"))
         .and_then(Value::as_str)
         .filter(|text| !text.is_empty())
         .map(|text| SecretString::from(text.to_owned()))
         .unwrap_or_else(|| SecretString::from(String::new()));
+    if client_id.is_empty()
+        && !client_id_hash.is_empty()
+        && let Some((id, secret)) = read_registration(cache_dir, &client_id_hash)?
+    {
+        client_id = id;
+        client_secret = secret;
+    }
+    let method = if auth_method.eq_ignore_ascii_case("social") || client_id.is_empty() {
+        "social".to_owned()
+    } else if auth_method.eq_ignore_ascii_case("idc") {
+        "idc".to_owned()
+    } else if auth_method.eq_ignore_ascii_case("external-idp") {
+        "external-idp".to_owned()
+    } else if auth_method.eq_ignore_ascii_case("apikey") {
+        "apikey".to_owned()
+    } else {
+        "social".to_owned()
+    };
     let token_url = root
         .get("tokenUrl")
         .or_else(|| root.get("token_url"))
@@ -225,9 +279,38 @@ pub(crate) fn parse_token_json(text: &str) -> Result<Credential, PluginError> {
         profile_arn,
         label,
         method,
+        provider,
         client_id,
         client_secret,
+        client_id_hash,
         token_url,
+    })
+}
+
+fn read_registration(
+    cache_dir: &Path,
+    hash: &str,
+) -> Result<Option<(String, SecretString)>, PluginError> {
+    let path = cache_dir.join(format!("{hash}.json"));
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(_) => return Ok(None),
+    };
+    let root: Value = json::from_str(&text)
+        .map_err(|_| PluginError::decode("Kiro client registration is not JSON"))?;
+    let id = root
+        .get("clientId")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let secret = root
+        .get("clientSecret")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(|value| SecretString::from(value.to_owned()));
+    Ok(match (id, secret) {
+        (Some(id), Some(secret)) => Some((id, secret)),
+        _ => None,
     })
 }
 
@@ -244,6 +327,30 @@ fn field_secret(root: &Value, keys: &[&str]) -> Result<SecretString, PluginError
     Err(PluginError::auth("Kiro token file has no access token"))
 }
 
+pub(crate) fn kiro_region(profile_arn: &str, signed_in_region: &str) -> String {
+    let parts: Vec<&str> = profile_arn.split(':').collect();
+    if parts.len() > 4 && !parts[3].is_empty() {
+        return parts[3].to_owned();
+    }
+    if signed_in_region.starts_with("eu-") {
+        return "eu-central-1".to_owned();
+    }
+    "us-east-1".to_owned()
+}
+
+pub(crate) fn percent_encode_query(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char);
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
 pub(crate) fn write_token_file(path: &Path, credential: &Credential) -> Result<(), PluginError> {
     if let Some(parent) = path.parent() {
         private_dir(parent)?;
@@ -253,21 +360,80 @@ pub(crate) fn write_token_file(path: &Path, credential: &Credential) -> Result<(
         .and_then(|at| at.duration_since(UNIX_EPOCH).ok())
         .map(|d| hofund_plugin_sdk::time::format_rfc3339(UNIX_EPOCH + d))
         .unwrap_or_default();
-    let email = if credential.label == "Kiro" {
-        String::new()
-    } else {
-        credential.label.clone()
-    };
-    let body = format!(
-        "{{\"accessToken\":\"{}\",\"refreshToken\":\"{}\",\"expiresAt\":\"{}\",\"region\":\"{}\",\"profileArn\":\"{}\",\"email\":\"{}\"}}\n",
-        escape_json(secret_text(&credential.access)),
-        escape_json(secret_text(&credential.refresh)),
-        escape_json(&expires),
-        escape_json(&credential.region),
-        escape_json(&credential.profile_arn),
-        escape_json(&email),
-    );
-    write_private(path, &body)
+    let mut object = read_existing_object(path);
+    if let Value::Object(map) = &mut object {
+        map.insert(
+            "accessToken".to_owned(),
+            Value::String(secret_text(&credential.access).to_owned()),
+        );
+        map.insert(
+            "refreshToken".to_owned(),
+            Value::String(secret_text(&credential.refresh).to_owned()),
+        );
+        map.insert("expiresAt".to_owned(), Value::String(expires));
+        map.insert(
+            "region".to_owned(),
+            Value::String(credential.region.clone()),
+        );
+        map.insert(
+            "profileArn".to_owned(),
+            Value::String(credential.profile_arn.clone()),
+        );
+        if !credential.auth_method_field().is_empty() {
+            map.insert(
+                "authMethod".to_owned(),
+                Value::String(credential.auth_method_field()),
+            );
+        }
+        if !credential.provider.is_empty() {
+            map.insert(
+                "provider".to_owned(),
+                Value::String(credential.provider.clone()),
+            );
+        }
+        if !credential.client_id_hash.is_empty() {
+            map.insert(
+                "clientIdHash".to_owned(),
+                Value::String(credential.client_id_hash.clone()),
+            );
+        }
+        if !credential.client_id.is_empty() {
+            map.insert(
+                "clientId".to_owned(),
+                Value::String(credential.client_id.clone()),
+            );
+        }
+        if !secret_text(&credential.client_secret).is_empty() {
+            map.insert(
+                "clientSecret".to_owned(),
+                Value::String(secret_text(&credential.client_secret).to_owned()),
+            );
+        }
+        if credential.label != "Kiro" {
+            map.insert("email".to_owned(), Value::String(credential.label.clone()));
+        }
+    }
+    let body =
+        json::to_vec(&object).map_err(|_| PluginError::io("cannot encode the Kiro token file"))?;
+    write_atomic(path, &body)
+}
+
+impl Credential {
+    fn auth_method_field(&self) -> String {
+        match self.method.as_str() {
+            "idc" => "IdC".to_owned(),
+            "external-idp" => "external-idp".to_owned(),
+            "apikey" => "apikey".to_owned(),
+            _ => "social".to_owned(),
+        }
+    }
+}
+
+fn read_existing_object(path: &Path) -> Value {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| json::from_str(&text).ok())
+        .unwrap_or_else(|| Value::Object(json::Map::new()))
 }
 
 fn private_dir(dir: &Path) -> Result<(), PluginError> {
@@ -282,26 +448,40 @@ fn private_dir(dir: &Path) -> Result<(), PluginError> {
     Ok(())
 }
 
-fn write_private(path: &Path, text: &str) -> Result<(), PluginError> {
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
+fn write_atomic(path: &Path, text: &[u8]) -> Result<(), PluginError> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
     {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
+        private_dir(parent)?;
     }
+    let mut temporary_name = path
+        .file_name()
+        .map_or_else(|| std::ffi::OsString::from("kiro.tmp"), ToOwned::to_owned);
+    temporary_name.push(".tmp");
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let temporary = parent.join(temporary_name);
     let failed = |_| PluginError::io("cannot write the Kiro token file");
-    let mut file = options.open(path).map_err(failed)?;
-    #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        file.set_permissions(std::fs::Permissions::from_mode(0o600))
-            .map_err(failed)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temporary).map_err(failed)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))
+                .map_err(failed)?;
+        }
+        file.write_all(text).map_err(failed)?;
+        file.sync_all().map_err(failed)?;
     }
-    file.write_all(text.as_bytes()).map_err(failed)?;
-    file.sync_all().map_err(failed)
-}
-
-fn escape_json(text: &str) -> String {
-    text.replace('\\', "\\\\").replace('"', "\\\"")
+    std::fs::rename(&temporary, path).map_err(failed)
 }

@@ -13,7 +13,7 @@ pub(crate) fn list(home: &Path) -> Result<Vec<DiscoveredAgentAccount>, PluginErr
     let Ok(credential) = creds::read_token_file(&path) else {
         return Ok(Vec::new());
     };
-    let id = creds::account_id(&credential);
+    let id = creds::account_id_for_home(home, &credential);
     let row = DiscoveredAgentAccount::new(id, credential.label.clone(), REFERENCE)?;
     Ok(vec![row])
 }
@@ -30,14 +30,15 @@ pub(crate) async fn import(
     }
     let path = creds::token_path_in_home(home);
     let credential = creds::read_token_file(&path)?;
-    store(&credential, host).await
+    store(home, &credential, host).await
 }
 
 pub(crate) async fn store(
+    home: &Path,
     credential: &Credential,
     host: &HostContext,
 ) -> Result<AccountId, PluginError> {
-    let id = creds::account_id(credential);
+    let id = creds::account_id_for_home(home, credential);
     let account = host
         .accounts()
         .account(id.clone(), credential.label.clone())?;

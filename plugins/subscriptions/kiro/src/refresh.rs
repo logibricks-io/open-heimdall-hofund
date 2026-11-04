@@ -13,6 +13,10 @@ use crate::creds::{self, Stored};
 
 const LEASE_WAIT: Duration = Duration::from_secs(30);
 
+fn method_is(method: &str, tag: &str) -> bool {
+    method.eq_ignore_ascii_case(tag)
+}
+
 pub(crate) async fn ensure_fresh(
     host: &HostContext,
     account: &AccountId,
@@ -32,7 +36,7 @@ pub(crate) async fn refresh_stale(
     stored: &Stored,
     endpoints: &Endpoints,
 ) -> Result<(), PluginError> {
-    if stored.credential.method == "apikey" {
+    if method_is(&stored.credential.method, "apikey") {
         return Ok(());
     }
     if secret_text(&stored.credential.refresh).is_empty() {
@@ -48,20 +52,16 @@ pub(crate) async fn refresh_stale(
     if !same_secret(&current_refresh, &stored.credential.refresh) {
         return Ok(());
     }
-    let root = match stored.credential.method.as_str() {
-        "social" => refresh_social(host, stored, endpoints).await?,
-        "idc" => refresh_idc(host, stored).await?,
-        "external-idp" => {
+    let root =
+        if method_is(&stored.credential.method, "idc") && !stored.credential.client_id.is_empty() {
+            refresh_idc(host, stored).await?
+        } else if method_is(&stored.credential.method, "external-idp") {
             return Err(PluginError::config(
                 "Kiro external-idp refresh is not implemented offline",
             ));
-        }
-        other => {
-            return Err(PluginError::config(format!(
-                "Kiro sign-in method `{other}` cannot be refreshed here",
-            )));
-        }
-    };
+        } else {
+            refresh_social(host, stored, endpoints).await?
+        };
     let access = root
         .get("accessToken")
         .or_else(|| root.get("access_token"))
@@ -119,11 +119,6 @@ async fn refresh_social(
 }
 
 async fn refresh_idc(host: &HostContext, stored: &Stored) -> Result<Value, PluginError> {
-    if stored.credential.client_id.is_empty() {
-        return Err(PluginError::auth(
-            "Kiro IdC sign-in is missing client credentials; sign in again",
-        ));
-    }
     let url = format!(
         "https://oidc.{}.amazonaws.com/token",
         stored.credential.region

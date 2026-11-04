@@ -5,13 +5,13 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use hofund_kit_subscription::{TestHost, block_on};
 use hofund_plugin_api::{
-    AccountId, PluginId, PluginKind, ProbeQuery, ProtocolId, RawTable, SecretString, Subscription,
-    SubscriptionFactory,
+    AccountId, AgentSignIn, ContentPart, Message, PluginId, PluginKind, ProbeQuery, ProtocolId,
+    RawTable, Request, Role, SecretString, Subscription, SubscriptionFactory,
 };
 use hofund_plugin_sdk::oauth::{SecretObject, secret_text};
 
 use crate::creds::{self, Credential, TOKEN_FILE};
-use crate::{Endpoints, KiroConfig, discover, factory_with_endpoints};
+use crate::{Endpoints, KiroConfig, discover, factory_with_endpoints, kiro_stream};
 
 fn host(dir: &tempfile::TempDir) -> TestHost {
     TestHost::open_for(
@@ -38,7 +38,14 @@ fn write_token(dir: &std::path::Path, access: &str, refresh: &str, exp: &str) {
     .expect("write");
 }
 
-fn seed(host: &TestHost, access: &str, refresh: &str, exp: &str, label: &str) -> AccountId {
+fn seed(
+    host: &TestHost,
+    home: &std::path::Path,
+    access: &str,
+    refresh: &str,
+    exp: &str,
+    label: &str,
+) -> AccountId {
     let expires_at = hofund_plugin_sdk::time::parse_rfc3339(exp)
         .or_else(|| Some(UNIX_EPOCH + Duration::from_secs(1)));
     let credential = Credential {
@@ -49,11 +56,13 @@ fn seed(host: &TestHost, access: &str, refresh: &str, exp: &str, label: &str) ->
         profile_arn: "arn:aws:codewhisperer:us-east-1:1:profile/P".to_owned(),
         label: label.to_owned(),
         method: "social".to_owned(),
+        provider: String::new(),
         client_id: String::new(),
         client_secret: SecretString::from(String::new()),
+        client_id_hash: String::new(),
         token_url: String::new(),
     };
-    let id = creds::account_id(&credential);
+    let id = creds::account_id_for_home(home, &credential);
     block_on(async {
         let accounts = host.context().accounts();
         let account = accounts
@@ -98,8 +107,10 @@ fn a2b_22_refresh_on_expiry_posts_to_refresh_url() {
     let sub = factory_with_endpoints(endpoints.clone())
         .build(&KiroConfig, host.context())
         .expect("build");
+    let home = dir.path().join("seed-home");
     let id = seed(
         &host,
+        &home,
         "old-access",
         "kiro-refresh-1",
         "1970-01-01T00:00:01Z",
@@ -143,8 +154,10 @@ fn a2b_24_upstream_round_trip_with_recording_http() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
     host.http().enqueue(br#"{"content":"ok"}"#.to_vec());
+    let home = dir.path().join("seed-home");
     let id = seed(
         &host,
+        &home,
         "kiro-access-up",
         "kiro-refresh",
         "2099-01-01T00:00:00Z",
@@ -194,8 +207,10 @@ fn a2b_26_secrets_not_in_debug_or_errors() {
         profile_arn: String::new(),
         label: "k@example.test".to_owned(),
         method: "social".to_owned(),
+        provider: String::new(),
         client_id: String::new(),
         client_secret: SecretString::from(String::new()),
+        client_id_hash: String::new(),
         token_url: String::new(),
     };
     assert!(!format!("{credential:?}").contains(token));
@@ -208,8 +223,10 @@ fn a2b_27_agent_sign_in_writes_token_file() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
     let sub = subscription(&host);
+    let home = dir.path().join("seed-home");
     let id = seed(
         &host,
+        &home,
         "agent-access",
         "agent-refresh",
         "2099-01-01T00:00:00Z",
@@ -223,7 +240,7 @@ fn a2b_27_agent_sign_in_writes_token_file() {
 }
 
 #[test]
-fn a2b_28_reimport_replaces_stored_access_token() {
+fn a2b_29_reimport_replaces_stored_access_token() {
     let dir = tempfile::tempdir().expect("dir");
     let home = dir.path().join("cache");
     std::fs::create_dir_all(&home).expect("dir");
@@ -255,4 +272,136 @@ fn a2b_28_reimport_replaces_stored_access_token() {
             .as_deref(),
         Some("kiro-access-v2")
     );
+}
+
+#[test]
+fn a2b_30_agent_home_resolution_matches_daemon_rule() {
+    let decl = AgentSignIn::new(&["kiro-cli", "kiro"], "KIRO_IDE_CACHE", ".aws/sso/cache");
+    assert_eq!(decl.home_env(), "KIRO_IDE_CACHE");
+    let override_home =
+        creds::resolve_agent_home_from(Some("/tmp/kiro-cache-override"), Some("/ignored"), &decl)
+            .expect("override");
+    assert_eq!(
+        override_home,
+        std::path::PathBuf::from("/tmp/kiro-cache-override")
+    );
+    let default_home =
+        creds::resolve_agent_home_from(None, Some("/tmp/kiro-test-home"), &decl).expect("default");
+    assert_eq!(
+        default_home,
+        std::path::PathBuf::from("/tmp/kiro-test-home/.aws/sso/cache")
+    );
+}
+
+#[test]
+fn a2b_31_idc_refresh_posts_to_oidc_token() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let endpoints = Endpoints::default();
+    let sub = factory_with_endpoints(endpoints.clone())
+        .build(&KiroConfig, host.context())
+        .expect("build");
+    let home = dir.path().join("seed-home");
+    let credential = Credential {
+        access: SecretString::from("old-access".to_owned()),
+        refresh: SecretString::from("idc-refresh".to_owned()),
+        expires_at: Some(UNIX_EPOCH + Duration::from_secs(1)),
+        region: "us-east-1".to_owned(),
+        profile_arn: "arn:aws:codewhisperer:us-east-1:1:profile/P".to_owned(),
+        label: "Kiro".to_owned(),
+        method: "idc".to_owned(),
+        provider: "BuilderId".to_owned(),
+        client_id: "idc-client".to_owned(),
+        client_secret: SecretString::from("idc-secret".to_owned()),
+        client_id_hash: String::new(),
+        token_url: String::new(),
+    };
+    let id = creds::account_id_for_home(&home, &credential);
+    block_on(async {
+        host.context()
+            .accounts()
+            .upsert(
+                host.context()
+                    .accounts()
+                    .account(id.clone(), "Kiro".to_owned())
+                    .expect("account"),
+                creds::secret_blob(&credential).to_secret(),
+            )
+            .await
+            .expect("upsert");
+    });
+    host.http().enqueue(
+        br#"{"accessToken":"new-idc","refreshToken":"new-idc-r","expiresIn":3600}"#.to_vec(),
+    );
+    block_on(sub.refresh(&id, host.context())).expect("refresh");
+    let calls = host.http().calls();
+    let call = calls.last().expect("call");
+    assert!(call.uri().contains("oidc.us-east-1.amazonaws.com/token"));
+}
+
+#[test]
+fn a2b_32_usage_url_includes_profile_and_eu_region() {
+    let endpoints = Endpoints::default();
+    let url = endpoints.usage_url(
+        "arn:aws:codewhisperer:eu-central-1:1:profile/P",
+        "eu-west-1",
+    );
+    assert!(url.contains("Get-Usage-Limits"));
+    assert!(url.contains("profileArn="));
+    assert!(url.contains("management.eu-central-1.kiro.dev"));
+}
+
+#[test]
+fn a2b_33_event_stream_joins_multiple_frames() {
+    let frame1 = br#"{"content":"hel"}"#;
+    let frame2 = br#"{"content":"lo"}"#;
+    let mut body = Vec::new();
+    for payload in [frame1.as_slice(), frame2.as_slice()] {
+        let headers = b"\x0b:event-type\x07\x00\x16assistantResponseEvent";
+        let total = 12 + headers.len() + payload.len() + 4;
+        body.extend_from_slice(&(total as u32).to_be_bytes());
+        body.extend_from_slice(&(headers.len() as u32).to_be_bytes());
+        body.extend_from_slice(&[0, 0, 0, 0]);
+        body.extend_from_slice(headers);
+        body.extend_from_slice(payload);
+        body.extend_from_slice(&[0, 0, 0, 0]);
+    }
+    assert_eq!(kiro_stream::assistant_text(&body).expect("text"), "hello");
+}
+
+#[test]
+fn a2b_34_history_and_system_prompt_are_encoded() {
+    let mut sys = Message::new(Role::System);
+    sys.content.push(ContentPart::text("sys-rule"));
+    let mut user1 = Message::new(Role::User);
+    user1.content.push(ContentPart::text("first"));
+    let mut assistant = Message::new(Role::Assistant);
+    assistant.content.push(ContentPart::text("mid"));
+    let mut user2 = Message::new(Role::User);
+    user2.content.push(ContentPart::text("last"));
+    let request =
+        Request::new("claude-sonnet-4.5").with_messages(vec![sys, user1, assistant, user2]);
+    let credential = Credential {
+        access: SecretString::from("a".to_owned()),
+        refresh: SecretString::from("r".to_owned()),
+        expires_at: None,
+        region: "us-east-1".to_owned(),
+        profile_arn: "arn:aws:codewhisperer:us-east-1:1:profile/P".to_owned(),
+        label: "Kiro".to_owned(),
+        method: "social".to_owned(),
+        provider: String::new(),
+        client_id: String::new(),
+        client_secret: SecretString::from(String::new()),
+        client_id_hash: String::new(),
+        token_url: String::new(),
+    };
+    let encoded = crate::kiro_body::encode(&request, &credential).expect("encode");
+    let body = std::str::from_utf8(&encoded).expect("utf8");
+    assert!(body.contains("history"));
+    assert!(body.contains("assistantResponseMessage"));
+    assert!(body.contains("sys-rule"));
+    assert!(body.contains("last"));
+    let mut streaming = request.clone();
+    streaming.stream = true;
+    assert!(crate::kiro_body::reject_unsupported(&streaming).is_err());
 }
