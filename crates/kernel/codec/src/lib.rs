@@ -9,6 +9,7 @@
 //! vendor capability gaps belong in `quirks`.
 
 mod anthropic;
+pub mod citation_tidy;
 mod conversation;
 mod converse;
 mod custom_input;
@@ -16,6 +17,7 @@ mod error;
 mod eventstream;
 mod generative;
 mod jsonutil;
+pub mod namespace_tidy;
 mod openai_chat;
 mod openai_responses;
 mod opening;

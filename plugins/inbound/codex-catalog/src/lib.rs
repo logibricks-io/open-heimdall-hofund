@@ -47,6 +47,8 @@ mod backend;
 
 mod input;
 
+mod account_refusal;
+
 /// The header that says how many models were left out to fit [`MOST`].
 pub const LEFT_OUT_HEADER: &str = "x-hofund-left-out";
 
@@ -132,6 +134,10 @@ trait Kernel: Send + Sync {
         request: HttpRequest,
         within: Option<Duration>,
     ) -> Result<HttpResponse, PluginError>;
+
+    /// Routed model ids to try after a ChatGPT sign-in Codex backend relay
+    /// refusal, from the configured provider's `fallback` list.
+    fn codex_relay_fallbacks(&self) -> &[String];
 }
 
 /// The kernel as the surface host gives it.
@@ -161,6 +167,10 @@ impl Kernel for Host<'_> {
                     Err(PluginError::timeout("the upstream did not answer in time"))
                 }),
         }
+    }
+
+    fn codex_relay_fallbacks(&self) -> &[String] {
+        self.0.codex_relay_fallbacks()
     }
 }
 
@@ -404,3 +414,6 @@ mod backend_tests;
 
 #[cfg(test)]
 mod input_tests;
+
+#[cfg(test)]
+mod account_refusal_tests;

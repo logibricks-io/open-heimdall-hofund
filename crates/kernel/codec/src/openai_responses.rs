@@ -128,25 +128,37 @@ impl Codec for OpenAiResponses {
     /// The model-name tap, then reasoning items another vendor wrote with
     /// their text in them made into one summary with no content and no seal.
     fn raw_tap(&self, client_model: &str, upstream_model: &str) -> Box<dyn crate::RawTap> {
-        Box::new(crate::reasoning_tidy::ReasoningTap::new(Box::new(
+        let reasoning = crate::reasoning_tidy::ReasoningTap::new(Box::new(
             crate::passthrough::DecoderTap::new(
                 self.stream_decoder(),
                 self.model_paths(),
                 client_model,
                 upstream_model,
             ),
-        )))
+        ));
+        if client_model.contains('/') {
+            Box::new(crate::namespace_tidy::NamespaceTap::new(Box::new(
+                reasoning,
+            )))
+        } else {
+            Box::new(reasoning)
+        }
     }
 
     /// The model-name splice, then reasoning items another vendor wrote with
     /// their text in them made into one summary with no content and no seal.
     fn rewrite_model(&self, bytes: &[u8], client_model: &str, upstream_model: &str) -> Vec<u8> {
-        crate::reasoning_tidy::tidy_whole(crate::passthrough::rewrite_all(
+        let bytes = crate::reasoning_tidy::tidy_whole(crate::passthrough::rewrite_all(
             bytes,
             self.model_paths(),
             client_model,
             upstream_model,
-        ))
+        ));
+        if client_model.contains('/') {
+            crate::namespace_tidy::tidy_whole(bytes)
+        } else {
+            bytes
+        }
     }
 
     fn encode_stream_failure(&self, status: u16, message: &str) -> Vec<u8> {

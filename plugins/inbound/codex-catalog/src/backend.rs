@@ -20,6 +20,7 @@ use hofund_plugin_sdk::{
     HeaderMap, HttpRequest, HttpResponse, refused_passthrough, text_response, without_passthrough,
 };
 
+use crate::account_refusal;
 use crate::input::{self, sealed};
 use crate::{
     Kernel, capped_models, client_version, entry, error_response, ids, json_response,
@@ -747,6 +748,7 @@ async fn relay(
     let base = base_for(bases, request.headers(), rest);
     let turn =
         matches!(rest, "/responses" | "/responses/compact") && request.method().as_str() == "POST";
+    let compact = rest == "/responses/compact";
     if turn && let Some(body) = state.strip(base, request.body().bytes()) {
         *request.body_mut() = Body::from(body);
     }
@@ -760,7 +762,47 @@ async fn relay(
             Ok(response) => response,
             Err(failure) => return error_response(&failure),
         };
-        if !turn || response.status().as_u16() != 400 {
+        let status = response.status().as_u16();
+        let fallbacks = kernel.codex_relay_fallbacks();
+        if turn
+            && !compact
+            && !api_key(request.headers())
+            && rest == "/responses"
+            && !fallbacks.is_empty()
+        {
+            let stream = relay_reply_is_stream(response.headers());
+            let likely = stream || matches!(status, 403 | 429 | 529) || status >= 500;
+            if likely {
+                let (parts, body) = response.into_parts();
+                let bytes = read_up_to(body, REFUSAL_CAP).await.unwrap_or_default();
+                if account_refusal::codex_account_refusal(status, &parts.headers, &bytes, stream) {
+                    for model in fallbacks {
+                        let Some(rewritten) =
+                            account_refusal::with_model(request.body().bytes(), model)
+                        else {
+                            continue;
+                        };
+                        let (body, compaction) = input::for_hofund(&rewritten);
+                        if compaction {
+                            continue;
+                        }
+                        let mut retry = HttpRequest::new(Body::from(body.unwrap_or(rewritten)));
+                        *retry.method_mut() = request.method().clone();
+                        *retry.uri_mut() = request.uri().clone();
+                        *retry.headers_mut() = request.headers().clone();
+                        let answer = in_process(kernel, &retry).await;
+                        if answer.status().is_success() {
+                            return answer;
+                        }
+                    }
+                }
+                return restore_relay_response(
+                    HttpResponse::from_parts(parts, BodyStream::from_bytes(bytes)),
+                    &tool_back,
+                );
+            }
+        }
+        if !turn || status != 400 {
             return restore_relay_response(response, &tool_back);
         }
         let (parts, body) = response.into_parts();
