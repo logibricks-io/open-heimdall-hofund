@@ -252,6 +252,38 @@ BuildError
 BuildError #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Error)
 BuildError::fn message (& self) -> & str
 BuildError::fn new (message : impl Into < String >) -> Self
+CheckinAccountStatus
+CheckinAccountStatus #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
+CheckinAccountStatus::fn account (& self) -> & AccountId
+CheckinAccountStatus::fn last (& self) -> Option < & CheckinRecord >
+CheckinAccountStatus::fn new (subscription : impl Into < String > , account : AccountId) -> Self
+CheckinAccountStatus::fn set_last (& mut self , record : CheckinRecord)
+CheckinAccountStatus::fn subscription (& self) -> & str
+CheckinOutcome
+CheckinOutcome #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
+CheckinOutcome::Captcha
+CheckinOutcome::Claimed
+CheckinOutcome::Done
+CheckinOutcome::Failed
+CheckinOutcome::Inactive
+CheckinOutcome::Ineligible
+CheckinOutcome::const fn as_str (self) -> & 'static str
+CheckinOutcome::const fn settles_day (self) -> bool
+CheckinRecord
+CheckinRecord #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
+CheckinRecord::const fn at (& self) -> SystemTime
+CheckinRecord::const fn outcome (& self) -> CheckinOutcome
+CheckinRecord::fn detail (& self) -> & str
+CheckinRecord::fn from_result (at : SystemTime , result : & CheckinResult) -> Self
+CheckinRecord::fn new (at : SystemTime , outcome : CheckinOutcome , detail : impl Into < String >) -> Self
+CheckinResult
+CheckinResult #[non_exhaustive] derives(Clone, Debug, PartialEq)
+CheckinResult::const fn credit (& self) -> f64
+CheckinResult::const fn outcome (& self) -> CheckinOutcome
+CheckinResult::const fn streak (& self) -> i32
+CheckinResult::fn message (& self) -> & str
+CheckinResult::fn new (outcome : CheckinOutcome , message : impl Into < String >) -> Self
+CheckinResult::fn with_rewards (mut self , credit : f64 , streak : i32) -> Self
 ClockHandle
 ClockHandle #[non_exhaustive] derives(Clone)
 ClockHandle::fn monotonic (& self) -> Duration
@@ -912,6 +944,7 @@ Subscription
 Subscription::async fn account_status (& self , account : & AccountId , host : & HostContext ,) -> Result < AccountStatus , PluginError >
 Subscription::async fn cancel_sign_in (& self , ctx : & SignInCtx , host : & HostContext) -> Result < () , PluginError >
 Subscription::async fn complete_sign_in (& self , ctx : & SignInCtx , proof : SignInProof , host : & HostContext ,) -> Result < AccountId , PluginError >
+Subscription::async fn daily_checkin (& self , account : & AccountId , host : & HostContext ,) -> Result < crate :: CheckinResult , PluginError >
 Subscription::async fn daily_warmup (& self , account : & AccountId , host : & HostContext ,) -> Result < () , PluginError >
 Subscription::async fn discover_agent_sign_in (& self , home : & std :: path :: Path ,) -> Result < Vec < crate :: DiscoveredAgentAccount > , PluginError >
 Subscription::async fn health (& self) -> Result < () , PluginError >
@@ -935,6 +968,7 @@ SubscriptionFactory::fn validate (& self , raw : & RawTable) -> Result < Self ::
 SubscriptionSpec
 SubscriptionSpec #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 SubscriptionSpec::const fn agent_sign_in (& self) -> Option < AgentSignIn >
+SubscriptionSpec::const fn daily_checkin (& self) -> bool
 SubscriptionSpec::const fn daily_warmup (& self) -> bool
 SubscriptionSpec::const fn display_name (& self) -> & 'static str
 SubscriptionSpec::const fn flow (& self) -> SignInFlowKind
@@ -942,6 +976,7 @@ SubscriptionSpec::const fn from_static (plugin : PluginId , display_name : & 'st
 SubscriptionSpec::const fn max_accounts (& self) -> u64
 SubscriptionSpec::const fn plugin (& self) -> & PluginId
 SubscriptionSpec::const fn with_agent_sign_in (mut self , agent_sign_in : AgentSignIn) -> Self
+SubscriptionSpec::const fn with_daily_checkin (mut self , daily_checkin : bool) -> Self
 SubscriptionSpec::const fn with_daily_warmup (mut self , daily_warmup : bool) -> Self
 SubscriptionSpec::const fn with_max_accounts (mut self , max_accounts : u64) -> Self
 SurfaceHost

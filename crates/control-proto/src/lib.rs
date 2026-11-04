@@ -4,6 +4,7 @@
 //! and use unknown enum fallbacks so older clients can read newer peers.
 
 mod agents;
+mod checkins;
 mod common;
 mod config;
 mod decode;
@@ -27,6 +28,7 @@ mod version;
 mod warmups;
 
 pub use agents::*;
+pub use checkins::*;
 pub use common::*;
 pub use config::*;
 pub use decode::*;

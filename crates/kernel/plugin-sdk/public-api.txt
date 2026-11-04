@@ -30,6 +30,7 @@ codex_tool_names::fn codex_tool_names_body (body : & [u8]) -> Vec < u8 >
 codex_tool_names::fn codex_tool_names_object (object : & mut Map < String , Value >) -> bool
 codex_tool_names::fn declared_tool_names (body : & [u8]) -> Vec < String >
 codex_tool_names::fn restore_tool_names (value : & mut Value , back : & BTreeMap < String , String >)
+const daily_checkin::ENABLED_KEY
 const daily_warmup::TIMES_KEY
 const page::BODY_CAP
 const page::ERROR_RUNES
@@ -41,6 +42,7 @@ const probe::PROBE_WAIT
 const probe::STREAM_CAP
 const wire::FORWARD_CAP
 cursor_pages
+daily_checkin::fn read_enabled (raw : & RawTable) -> Result < bool , ConfigError >
 daily_warmup::fn normalize_time (text : & str) -> Result < String , & 'static str >
 daily_warmup::fn read_times (raw : & RawTable) -> Result < Vec < String > , ConfigError >
 digest::fn hmac_sha256 (key : & [u8] , data : & [u8]) -> [u8 ; 32]
@@ -59,8 +61,10 @@ jwt::RsaSigner
 jwt::RsaSigner::fn from_pem (text : & str) -> Result < Self , KeyError >
 jwt::RsaSigner::fn sign (& self , header : & Value , claims : & Value) -> Result < String , KeyError >
 mod bedrock
+mod checkin
 mod classify
 mod codex_tool_names
+mod daily_checkin
 mod daily_warmup
 mod digest
 mod jwt

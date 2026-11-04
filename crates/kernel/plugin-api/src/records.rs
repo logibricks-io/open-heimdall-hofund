@@ -1527,6 +1527,7 @@ pub struct SubscriptionSpec {
     max_accounts: u64,
     agent_sign_in: Option<AgentSignIn>,
     daily_warmup: bool,
+    daily_checkin: bool,
 }
 
 impl SubscriptionSpec {
@@ -1553,6 +1554,7 @@ impl SubscriptionSpec {
             max_accounts: 0,
             agent_sign_in: None,
             daily_warmup: false,
+            daily_checkin: false,
         }
     }
 
@@ -1579,6 +1581,13 @@ impl SubscriptionSpec {
     #[must_use]
     pub const fn with_daily_warmup(mut self, daily_warmup: bool) -> Self {
         self.daily_warmup = daily_warmup;
+        self
+    }
+
+    /// Declares that this subscription can run daily check-in requests.
+    #[must_use]
+    pub const fn with_daily_checkin(mut self, daily_checkin: bool) -> Self {
+        self.daily_checkin = daily_checkin;
         self
     }
 
@@ -1617,6 +1626,12 @@ impl SubscriptionSpec {
     #[must_use]
     pub const fn daily_warmup(&self) -> bool {
         self.daily_warmup
+    }
+
+    /// Whether daily check-in is implemented for this subscription.
+    #[must_use]
+    pub const fn daily_checkin(&self) -> bool {
+        self.daily_checkin
     }
 }
 
