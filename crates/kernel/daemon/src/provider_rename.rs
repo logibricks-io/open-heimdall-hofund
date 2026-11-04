@@ -11,10 +11,33 @@ use hofund_gateway::control::ControlFailure;
 use hofund_plugin_api::{AgentDescription, MemberId};
 use hofund_secrets::KeyStore;
 
+use std::sync::Mutex;
+
 use crate::config_ops::ConfigOps;
 use crate::membership;
 use crate::models::ModelsHost;
 use crate::provider_keys;
+
+/// Injected failure point for integration tests (`g3_9`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderRenameFailAfter {
+    /// Fail while rewriting gateway key scopes.
+    Keys,
+    /// Fail while rewriting agent configuration.
+    Agents,
+}
+
+static FAIL_AFTER: Mutex<Option<ProviderRenameFailAfter>> = Mutex::new(None);
+
+/// Sets a one-shot failure injection for [`rename_provider`].
+#[doc(hidden)]
+pub fn set_rename_fail_after(step: Option<ProviderRenameFailAfter>) {
+    *FAIL_AFTER.lock().expect("rename fail hook") = step;
+}
+
+fn fail_after(step: ProviderRenameFailAfter) -> bool {
+    *FAIL_AFTER.lock().expect("rename fail hook") == Some(step)
+}
 
 struct Backups {
     config: String,
@@ -76,6 +99,13 @@ pub(crate) async fn rename_provider(
         let _ = restore_config(ops, &backups).await;
         return Err(internal_failure(error.to_string()));
     }
+    if fail_after(ProviderRenameFailAfter::Keys) {
+        let _ = models.rename_provider(&to, &from);
+        let _ = restore_config(ops, &backups).await;
+        return Err(internal_failure(
+            "injected provider-rename keys failure".to_owned(),
+        ));
+    }
     if let Err(error) = keys.replace_provider(&from, &to) {
         let _ = models.rename_provider(&to, &from);
         let _ = restore_config(ops, &backups).await;
@@ -85,6 +115,11 @@ pub(crate) async fn rename_provider(
         let from = from.clone();
         let to = to.clone();
         move || -> Result<Vec<String>, ControlFailure> {
+            if fail_after(ProviderRenameFailAfter::Agents) {
+                return Err(internal_failure(
+                    "injected provider-rename agents failure".to_owned(),
+                ));
+            }
             let catalog = hofund_agent::catalog(descriptions)
                 .map_err(|error| internal_failure(error.to_string()))?;
             let session = crate::agent_session();

@@ -168,14 +168,16 @@ impl StateStore {
         let root = self.root.clone().expect("root is Some");
         let captured =
             self.exclusive(from, |store| -> Result<Option<ProviderState>, StateError> {
+                let old_path = state_path(&root, from);
+                if !old_path.is_file() {
+                    store.states.remove(from);
+                    return Ok(None);
+                }
                 store.load(from);
                 let Some(state) = store.states.remove(from) else {
                     return Ok(None);
                 };
-                let old_path = state_path(&root, from);
-                if old_path.is_file() {
-                    std::fs::remove_file(&old_path).map_err(StateError::Save)?;
-                }
+                std::fs::remove_file(&old_path).map_err(StateError::Save)?;
                 Ok(Some(state))
             })??;
         let Some(mut state) = captured else {
@@ -961,5 +963,46 @@ mod tests {
         let saved = store.try_update("p", |state| state.picks = vec!["a".to_owned()]);
         assert!(matches!(saved, Err(StateError::Lock(_))), "{saved:?}");
         assert!(!state_path(&root, "p").exists());
+    }
+
+    #[test]
+    fn g3_6_rename_provider_moves_persisted_state_and_in_memory_no_op_without_state() {
+        let root = temp_root("rename-provider");
+        let mut store = StateStore::new(Some(root.to_path_buf()));
+        let model = ModelSpec::new("picked-model", None).expect("model");
+        store.update("chat", |state| {
+            state.picks = vec!["picked-model".to_owned()];
+            state.list = rows(std::slice::from_ref(&model));
+        });
+        let chat_path = state_path(&root, "chat");
+        assert!(chat_path.is_file(), "seed state file");
+
+        store
+            .rename_provider("chat", "team")
+            .expect("persisted rename");
+        assert!(!chat_path.is_file(), "old state file removed");
+        let team_path = state_path(&root, "team");
+        assert!(team_path.is_file(), "new state file written");
+
+        let mut reloaded = StateStore::new(Some(root.to_path_buf()));
+        let team = reloaded.get("team");
+        assert_eq!(team.picks, ["picked-model"]);
+        assert_eq!(team.id, "team");
+        assert_eq!(reloaded.get("chat"), &ProviderState::new("chat"));
+
+        let mut memory = StateStore::new(None);
+        memory.update("from", |state| {
+            state.picks = vec!["keep".to_owned()];
+        });
+        memory.rename_provider("from", "to").expect("memory rename");
+        assert_eq!(memory.get("to").picks, ["keep"]);
+        assert_eq!(memory.get("from"), &ProviderState::new("from"));
+
+        let noop = temp_root("rename-noop");
+        let mut noop_store = StateStore::new(Some(noop.to_path_buf()));
+        noop_store
+            .rename_provider("ghost", "nowhere")
+            .expect("missing source is a no-op");
+        assert!(!state_path(&noop, "nowhere").exists());
     }
 }

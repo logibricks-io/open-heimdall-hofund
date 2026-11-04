@@ -1289,4 +1289,56 @@ mod tests {
         });
         fs::write(path, serde_json::to_string_pretty(&keys).expect("json")).expect("write");
     }
+
+    #[test]
+    fn g3_7_replace_provider_rewrites_scopes_and_skips_unrelated_patterns() {
+        let (_dir, store) = scratch();
+        let mut keys = store.export().expect("export");
+        keys[0].models = vec![
+            "chat/model-a".to_owned(),
+            "chat".to_owned(),
+            "abc/extra".to_owned(),
+            "ab".to_owned(),
+            "other/x".to_owned(),
+        ];
+        keys[0].accounts = vec![
+            "chat/account".to_owned(),
+            "chat".to_owned(),
+            "abc/nested".to_owned(),
+            "other/y".to_owned(),
+        ];
+        store.restore(&keys).expect("seed scopes");
+        let path = store.path();
+        let before = fs::read_to_string(path).expect("store before");
+
+        store.replace_provider("chat", "team").expect("rename");
+
+        let key = store.list().expect("list")[0].clone();
+        assert_eq!(
+            key.models,
+            [
+                "team/model-a".to_owned(),
+                "team".to_owned(),
+                "abc/extra".to_owned(),
+                "ab".to_owned(),
+                "other/x".to_owned(),
+            ]
+        );
+        assert_eq!(
+            key.accounts,
+            [
+                "team/account".to_owned(),
+                "team".to_owned(),
+                "abc/nested".to_owned(),
+                "other/y".to_owned(),
+            ]
+        );
+        assert_ne!(fs::read_to_string(path).expect("store after"), before);
+
+        let unchanged = fs::read_to_string(path).expect("store stable");
+        store.replace_provider("ghost", "missing").expect("noop");
+        assert_eq!(fs::read_to_string(path).expect("store still"), unchanged);
+        store.replace_provider("chat", "chat").expect("identity");
+        assert_eq!(fs::read_to_string(path).expect("store still"), unchanged);
+    }
 }

@@ -77,6 +77,8 @@ pub use agent_login::{accounts_import_in, accounts_switch_in};
 pub use models::{
     Cached, ModelLimits, ModelsHost, Picks, ProbeOutcome, ProviderModels, RefreshTiming,
 };
+#[doc(hidden)]
+pub use provider_rename::{ProviderRenameFailAfter, set_rename_fail_after};
 pub use registry::{CompiledPreset, DaemonRegistry, RegistryAdapter};
 pub use sign_in::{
     AccountListing, INTERRUPTED_EXIT, QuotaLine, QuotaListing, SIGN_IN_DEADLINE, SignInError,
