@@ -21,6 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   TOML credentials, agent-scoped account ids, and the stored Devin API base;
   re-import always upserts secrets; token files are written mode `0600`.
 
+- A-2b review round 3: Kiro accumulates event-stream chunks and sends
+  conversation history; social versus IdC refresh routing; Factory quota and
+  refresh honor per-account region; Devin bridge sign-in uses stable account ids
+  and `/v1/chat/completions`; plugin-api public surface snapshot refreshed.
+
 - ChatGPT (Codex) subscription sign-in by device code (`--site device`): ask
   for a code, poll until it is entered on another machine, trade at the
   device callback redirect (D-58).
