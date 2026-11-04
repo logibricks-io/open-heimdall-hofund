@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Tencent Cloud Token Plan preset regions use `tokenhub.tencentmaas.com` plan
+  endpoints; saved providers with the old LKEAP plan bases migrate on load (D-53).
+
 - Routing strategy `drain` keeps one pool member until it rests, runs out of
   allowance without credits, fails over, or leaves the pool, then sticks to the
   next member in listed order (D-41).

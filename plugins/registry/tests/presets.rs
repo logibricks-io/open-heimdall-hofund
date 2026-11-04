@@ -436,7 +436,7 @@ fn default_selection_skips_unserved_wires() {
     assert_eq!(selected.wire, Wire::Messages);
     assert_eq!(
         selected.base_url,
-        "https://api.lkeap.cloud.tencent.com/plan/anthropic"
+        "https://tokenhub.tencentmaas.com/plan/anthropic"
     );
 }
 

@@ -13,6 +13,7 @@ use std::time::Duration;
 use serde::Deserialize;
 use thiserror::Error;
 
+mod migrate;
 mod visible;
 
 pub use visible::{
@@ -1161,7 +1162,8 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
         .filter_map(|route| route.model.strip_prefix("group/").map(str::to_owned))
         .collect::<BTreeSet<_>>();
     let mut providers = Vec::new();
-    for provider in raw.providers {
+    for mut provider in raw.providers {
+        migrate::migrate_provider_base_url(provider.preset.as_deref(), &mut provider.base_url);
         if provider.id.is_empty() {
             return Err(ConfigError::Invalid("a provider id is empty".to_owned()));
         }
