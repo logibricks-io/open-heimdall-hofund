@@ -7,9 +7,9 @@
   "payload": {
     "event": "quota_alert",
     "data": {
-      "title": "Codex · work",
+      "title": "Sub · work",
       "body": "Weekly: 85% used",
-      "provider": "codex",
+      "provider": "sub",
       "window": "Weekly"
     }
   }

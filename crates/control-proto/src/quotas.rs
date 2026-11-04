@@ -627,7 +627,7 @@ impl QuotaAlertsSetRequest {
             ));
         }
         if let Some(bal) = self.balance_alert
-            && bal < 0.0
+            && (bal < 0.0 || !bal.is_finite())
         {
             return Err(ControlError::new(
                 ControlErrorKind::BadRequest,

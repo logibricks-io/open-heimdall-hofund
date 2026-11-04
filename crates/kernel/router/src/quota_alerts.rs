@@ -472,13 +472,17 @@ mod tests {
         windows: Vec<WindowInfo>,
         balance: &str,
     ) -> (Quota, Vec<WindowInfo>) {
-        let mut quota = Quota::default();
-        quota.provider = provider.to_owned();
-        quota.name = provider.to_owned();
-        quota.user = user.to_owned();
-        quota.balance = balance.to_owned();
-        quota.windows = windows.iter().map(|info| info.span.clone()).collect();
-        (quota, windows)
+        (
+            Quota {
+                provider: provider.to_owned(),
+                name: provider.to_owned(),
+                user: user.to_owned(),
+                balance: balance.to_owned(),
+                windows: windows.iter().map(|info| info.span.clone()).collect(),
+                ..Quota::default()
+            },
+            windows,
+        )
     }
 
     fn window(
@@ -517,7 +521,7 @@ mod tests {
         let now = UNIX_EPOCH + Duration::from_secs(1_000);
         let reset = now + Duration::from_secs(3600);
         let cards = vec![card(
-            "codex",
+            "sub",
             "a@x.io",
             vec![window("Weekly", 85.0, Some(reset), true)],
             "",
@@ -529,7 +533,7 @@ mod tests {
         assert!(second.is_empty());
         let new_run = reset + Duration::from_secs(601);
         let cards = vec![card(
-            "codex",
+            "sub",
             "a@x.io",
             vec![window("Weekly", 85.0, Some(new_run), true)],
             "",
@@ -542,7 +546,7 @@ mod tests {
     fn al1_4_set_aside_windows_are_excluded() {
         let now = UNIX_EPOCH + Duration::from_secs(1_000);
         let cards = vec![card(
-            "codex",
+            "sub",
             "a@x.io",
             vec![window("On demand", 95.0, None, false)],
             "",
@@ -578,8 +582,8 @@ mod tests {
     #[test]
     fn al1_7_alert_text_masks_account_in_title() {
         let alert = super::QuotaAlert {
-            provider: "codex".to_owned(),
-            name: "Codex".to_owned(),
+            provider: "sub".to_owned(),
+            name: "Sub".to_owned(),
             user: "secret@example.test".to_owned(),
             alias: String::new(),
             window: "Weekly".to_owned(),

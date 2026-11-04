@@ -465,9 +465,9 @@ fn json_snapshots_round_trip() {
     event_snapshot(
         "quota-alert-event",
         EventPayload::QuotaAlert(dto!(QuotaAlertEvent,
-            title: "Codex · work".to_owned(),
+            title: "Sub · work".to_owned(),
             body: "Weekly: 85% used".to_owned(),
-            provider: "codex".to_owned(),
+            provider: "sub".to_owned(),
             window: "Weekly".to_owned(),
         )),
     );
