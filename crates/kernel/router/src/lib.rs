@@ -1005,10 +1005,10 @@ impl Router {
                         .as_ref()
                         .map(|store| store.mode_for_member(&member))
                         .unwrap_or_default();
-                    let on_credits = allowance.is_some_and(|entry| {
-                        credits_mode::on_credits_spending(entry, model, now)
-                            && mode != credits_mode::CreditsMode::Off
-                    });
+                    // Off never takes First/Last credit seats; those branches
+                    // already require First/Last mode, so no Off gate here.
+                    let on_credits = allowance
+                        .is_some_and(|entry| credits_mode::on_credits_spending(entry, model, now));
                     let used = allowance
                         .and_then(|entry| entry.fullest(model, now))
                         .map(|window| window.used);
