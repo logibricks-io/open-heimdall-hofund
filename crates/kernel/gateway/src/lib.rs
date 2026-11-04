@@ -41,7 +41,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::body::{Body, Bytes};
 use axum::extract::{Request, State};
-use axum::http::{HeaderMap, StatusCode, Uri, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri, header};
 
 use axum::response::Response;
 use axum::routing::{get, post};
@@ -1165,6 +1165,7 @@ impl hofund_plugin_host::GatewayBackend for InProcess {
                 let status =
                     StatusCode::from_u16(answer.status()).unwrap_or(StatusCode::BAD_GATEWAY);
                 let mut meta = usage(&forwarded.upstream_id);
+                meta.provider_key_id = forwarded.provider_key_id.clone();
                 if answer.is_streaming() {
                     return Ok(streamed_forward(
                         answer,
@@ -1200,6 +1201,9 @@ impl hofund_plugin_host::GatewayBackend for InProcess {
                     ),
                     RouterError::ModelScope { .. } | RouterError::AccountScope { .. } => {
                         (String::new(), PluginError::status_error(403, scope_message))
+                    }
+                    RouterError::SpendCapReached { retry_after } => {
+                        (String::new(), spend_cap_plugin_error(retry_after))
                     }
                     RouterError::Upstream { upstream_id, error }
                         if error.kind() == PluginErrorKind::Unsupported =>
@@ -1979,6 +1983,7 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
                 &model_request,
                 &routed.upstream_id,
                 &routed.upstream_model,
+                &routed.provider_key_id,
                 routed.completion,
                 continuation,
                 routed.affinity_reason,
@@ -2098,6 +2103,7 @@ fn held_response(
                                 &state.request,
                                 &routed.upstream_id,
                                 &routed.upstream_model,
+                                &routed.provider_key_id,
                                 routed.completion,
                                 continuation,
                                 routed.affinity_reason,
@@ -2154,6 +2160,10 @@ fn stream_error(error: &RouterError) -> (StatusCode, String) {
         RouterError::ModelScope { .. } | RouterError::AccountScope { .. } => {
             (StatusCode::FORBIDDEN, error.to_string())
         }
+        RouterError::SpendCapReached { .. } => (
+            StatusCode::TOO_MANY_REQUESTS,
+            "spend cap reached".to_owned(),
+        ),
         RouterError::Upstream { error, .. } => (status_of(error), broken_off(error)),
     }
 }
@@ -2211,6 +2221,9 @@ async fn count_tokens(
                 }
                 RouterError::ModelScope { .. } | RouterError::AccountScope { .. } => {
                     (StatusCode::FORBIDDEN, scope_error(&error, &identity))
+                }
+                RouterError::SpendCapReached { retry_after } => {
+                    return spend_cap_response(codec.as_ref(), *retry_after);
                 }
                 RouterError::Upstream { error, .. } => {
                     (status_of(error), error.message().to_owned())
@@ -2517,6 +2530,7 @@ async fn success(
     request: &ModelRequest,
     upstream: &str,
     upstream_model: &str,
+    provider_key_id: &str,
     completion: Completion,
     continuation: Option<hofund_router::RouteContinuation>,
     affinity_reason: Option<String>,
@@ -2527,6 +2541,7 @@ async fn success(
 ) -> Response {
     track.reason = affinity_reason;
     let mut meta = UsageMeta::new(request, upstream, upstream_model, started, identity);
+    meta.provider_key_id = provider_key_id.to_owned();
     let member = Some(upstream.to_owned());
     let capture = prev_response::ReplyCapture::new(capture);
     match completion {
@@ -2835,6 +2850,9 @@ fn failure(
             String::new(),
             scope_error(&error, identity),
         ),
+        RouterError::SpendCapReached { retry_after } => {
+            return spend_cap_response(codec, *retry_after);
+        }
         RouterError::Upstream { upstream_id, error } => (
             status_of(error),
             upstream_id.clone(),
@@ -2886,6 +2904,14 @@ fn broken_off(error: &PluginError) -> String {
     }
 }
 
+pub(crate) fn spend_cap_plugin_error(retry_after: Option<u64>) -> PluginError {
+    let mut error = PluginError::status_error(429, "spend cap reached");
+    if let Some(secs) = retry_after {
+        error = error.with_retry_after(Duration::from_secs(secs));
+    }
+    error
+}
+
 fn status_of(error: &PluginError) -> StatusCode {
     let code = match error.kind() {
         PluginErrorKind::Status => error.status().unwrap_or(502),
@@ -2897,6 +2923,7 @@ fn status_of(error: &PluginError) -> StatusCode {
 struct UsageMeta {
     model: String,
     upstream: String,
+    provider_key_id: String,
     wire_model: String,
     served_model: String,
     started: Instant,
@@ -2919,6 +2946,7 @@ impl UsageMeta {
         Self {
             model: request.model.clone(),
             upstream: upstream.to_owned(),
+            provider_key_id: String::new(),
             wire_model: wire_model.to_owned(),
             served_model: String::new(),
             started,
@@ -3423,6 +3451,7 @@ fn write_usage(
         caller_key_id: meta.identity.key_id.clone(),
         caller_key_name: meta.identity.key_name.clone(),
         caller_issuer_id: meta.identity.issuer.clone(),
+        provider_key_id: meta.provider_key_id.clone(),
         ..Default::default()
     };
     let mut details = meta.details;
@@ -3497,6 +3526,20 @@ fn model_name(bytes: &[u8]) -> String {
                 .map(str::to_owned)
         })
         .unwrap_or_default()
+}
+
+fn spend_cap_response(codec: &dyn Codec, retry_after: Option<u64>) -> Response {
+    let mut builder = Response::builder()
+        .status(StatusCode::TOO_MANY_REQUESTS)
+        .header(header::CONTENT_TYPE, "application/json");
+    if let Some(secs) = retry_after
+        && let Ok(value) = HeaderValue::from_str(&secs.to_string())
+    {
+        builder = builder.header(header::RETRY_AFTER, value);
+    }
+    builder
+        .body(Body::from(codec.encode_error(429, "spend cap reached")))
+        .unwrap_or_else(|_| text_response(StatusCode::INTERNAL_SERVER_ERROR, "response"))
 }
 
 fn coded(codec: &dyn Codec, status: StatusCode, message: &str) -> Response {

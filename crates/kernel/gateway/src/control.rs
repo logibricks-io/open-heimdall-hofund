@@ -185,6 +185,35 @@ pub trait ControlState: Send + Sync {
             .into())
         })
     }
+    /// Lists provider key spend caps.
+    fn provider_spend_caps(
+        &self,
+        _id: String,
+    ) -> ControlFuture<'_, hofund_control_proto::ProviderSpendCapsResponse> {
+        Box::pin(async {
+            Err(ControlError::new(
+                ControlErrorKind::BadRequest,
+                "provider spend caps are not supported by this control state",
+                "control",
+            )
+            .into())
+        })
+    }
+    /// Sets or clears one provider key spend cap.
+    fn change_provider_spend_cap(
+        &self,
+        _id: String,
+        _request: hofund_control_proto::ProviderSpendCapRequest,
+    ) -> ControlFuture<'_, hofund_control_proto::ProviderSpendCapsResponse> {
+        Box::pin(async {
+            Err(ControlError::new(
+                ControlErrorKind::BadRequest,
+                "provider spend caps are not supported by this control state",
+                "control",
+            )
+            .into())
+        })
+    }
     /// Reads a provider's cached models.
     fn provider_models(&self, id: String) -> ControlFuture<'_, ModelListResponse>;
     /// Refreshes a provider's models.
@@ -574,6 +603,12 @@ impl Control {
                 "/v1/hofund/providers/{id}/keys",
                 get(provider_keys)
                     .post(change_provider_key)
+                    .head(method_not_allowed),
+            )
+            .route(
+                "/v1/hofund/providers/{id}/spend-caps",
+                get(provider_spend_caps)
+                    .post(change_provider_spend_cap)
                     .head(method_not_allowed),
             )
             .route(
@@ -1007,6 +1042,39 @@ async fn change_provider_key(
         Err(failure) => return failure_response(failure),
     };
     operation_response!(state.control.state.change_provider_key(id, request).await)
+}
+
+async fn provider_spend_caps(
+    State(state): State<HttpState>,
+    id: Result<AxumPath<String>, PathRejection>,
+) -> Response {
+    let id = match path_id(id) {
+        Ok(id) => id,
+        Err(failure) => return failure_response(failure),
+    };
+    operation_response!(state.control.state.provider_spend_caps(id).await)
+}
+
+async fn change_provider_spend_cap(
+    State(state): State<HttpState>,
+    id: Result<AxumPath<String>, PathRejection>,
+    body: Bytes,
+) -> Response {
+    let id = match path_id(id) {
+        Ok(id) => id,
+        Err(failure) => return failure_response(failure),
+    };
+    let request = match decode_body::<hofund_control_proto::ProviderSpendCapRequest>(&body) {
+        Ok(request) => request,
+        Err(failure) => return failure_response(failure),
+    };
+    operation_response!(
+        state
+            .control
+            .state
+            .change_provider_spend_cap(id, request)
+            .await
+    )
 }
 
 async fn provider_models(

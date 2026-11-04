@@ -13,6 +13,7 @@ use hofund_control_proto::{
     GatewayKey, GatewayKeyAction, GatewayKeyLimit, GatewayKeyRequest, GatewayKeyResponse,
     GatewayKeyRestoreRequest, HealthResponse, ModelEntry, ModelListResponse, PicksResponse,
     PicksSetRequest, ProviderKeyRequest, ProviderKeysResponse, ProviderListResponse,
+    ProviderSpendCap, ProviderSpendCapPeriod, ProviderSpendCapRequest, ProviderSpendCapsResponse,
     ProviderSummary, ProviderTestRequest, ProviderTestResponse, ProviderTestResult,
     QuotaAlertsResponse, QuotaAlertsSetRequest, QuotaAlertsSetResponse, QuotaCreditsModesResponse,
     QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryQuery, QuotaHistoryResponse,
@@ -509,6 +510,99 @@ impl ControlState for DaemonControl {
             response.before = mutation.before;
             response.after = mutation.after;
             Ok(response)
+        })
+    }
+
+    fn provider_spend_caps(&self, id: String) -> ControlFuture<'_, ProviderSpendCapsResponse> {
+        Box::pin(async move {
+            self.provider_exists(&id)?;
+            let runtime = self.runtime.as_ref().ok_or_else(|| {
+                ControlFailure::from(ControlError::new(
+                    ControlErrorKind::BadRequest,
+                    "spend caps require a running daemon",
+                    "control",
+                ))
+            })?;
+            let config = self.config();
+            let provider = config
+                .providers
+                .iter()
+                .find(|provider| provider.id == id)
+                .expect("provider existence checked");
+            let store = runtime.spend_caps();
+            Ok(render_spend_caps(id, provider, &self.usage, store.as_ref()))
+        })
+    }
+
+    fn change_provider_spend_cap(
+        &self,
+        id: String,
+        request: ProviderSpendCapRequest,
+    ) -> ControlFuture<'_, ProviderSpendCapsResponse> {
+        Box::pin(async move {
+            self.provider_exists(&id)?;
+            if self
+                .config()
+                .subscriptions
+                .iter()
+                .any(|entry| entry.id == id)
+            {
+                return Err(ControlFailure::from(ControlError::new(
+                    ControlErrorKind::Unprocessable,
+                    "subscription accounts do not use provider key spend caps",
+                    "control",
+                )));
+            }
+            let Some(runtime) = self.runtime.as_ref() else {
+                return Err(ControlFailure::from(ControlError::new(
+                    ControlErrorKind::BadRequest,
+                    "spend caps require a running daemon",
+                    "control",
+                )));
+            };
+            let store = runtime.spend_caps();
+            let config = self.config();
+            let provider = config
+                .providers
+                .iter()
+                .find(|provider| provider.id == id)
+                .expect("provider existence checked");
+            super::spend_caps::ensure_key_exists(provider, &request.key_id).map_err(|message| {
+                ControlFailure::from(ControlError::new(
+                    ControlErrorKind::Unprocessable,
+                    message,
+                    "control",
+                ))
+            })?;
+            if request.cap.trim().is_empty() {
+                store.clear_key(&id, &request.key_id).map_err(|message| {
+                    ControlFailure::from(ControlError::new(
+                        ControlErrorKind::Unprocessable,
+                        message,
+                        "control",
+                    ))
+                })?;
+            } else {
+                let parsed =
+                    super::spend_caps::parse_spend_cap(&request.cap).map_err(|message| {
+                        ControlFailure::from(ControlError::new(
+                            ControlErrorKind::Unprocessable,
+                            message,
+                            "control",
+                        ))
+                    })?;
+                store
+                    .set_key_spend_cap(&id, &request.key_id, parsed)
+                    .map_err(|message| {
+                        ControlFailure::from(ControlError::new(
+                            ControlErrorKind::Unprocessable,
+                            message,
+                            "control",
+                        ))
+                    })?;
+            }
+            runtime.republish_spend_caps(&config.providers);
+            Ok(render_spend_caps(id, provider, &self.usage, store.as_ref()))
         })
     }
 
@@ -1346,6 +1440,44 @@ const fn outcome_name(outcome: WarmupOutcome) -> &'static str {
         WarmupOutcome::Skipped => "skipped",
         WarmupOutcome::Failed => "failed",
         _ => "failed",
+    }
+}
+
+fn render_spend_caps(
+    provider_id: String,
+    _provider: &hofund_config::Provider,
+    usage: &Ledger,
+    store: &crate::spend_caps::SpendCapStore,
+) -> ProviderSpendCapsResponse {
+    let caps = store
+        .list()
+        .into_iter()
+        .filter(|cap| cap.provider == provider_id)
+        .map(|cap| {
+            let period = match cap.period {
+                crate::spend_caps::StoredPeriod::Day => hofund_usage::SpendCapPeriod::Day,
+                crate::spend_caps::StoredPeriod::Month => hofund_usage::SpendCapPeriod::Month,
+                crate::spend_caps::StoredPeriod::Total => hofund_usage::SpendCapPeriod::Total,
+            };
+            let since = hofund_usage::spend_cap_since(period, cap.set_at);
+            let spent_usd = usage.provider_key_cost(&cap.key_id, since).unwrap_or(0.0);
+            ProviderSpendCap {
+                provider: cap.provider,
+                key_id: cap.key_id,
+                usd: cap.usd,
+                period: match cap.period {
+                    crate::spend_caps::StoredPeriod::Day => ProviderSpendCapPeriod::Day,
+                    crate::spend_caps::StoredPeriod::Month => ProviderSpendCapPeriod::Month,
+                    crate::spend_caps::StoredPeriod::Total => ProviderSpendCapPeriod::Total,
+                },
+                set_at: cap.set_at,
+                spent_usd,
+            }
+        })
+        .collect();
+    ProviderSpendCapsResponse {
+        version: hofund_control_proto::API_VERSION,
+        caps,
     }
 }
 

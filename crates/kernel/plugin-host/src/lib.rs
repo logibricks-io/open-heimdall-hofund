@@ -347,6 +347,20 @@ impl TestHost {
     /// Panics when the account file cannot be created.
     #[must_use]
     pub fn open_for(kind: PluginKind, plugin: PluginId, root: impl Into<PathBuf>) -> Self {
+        Self::open_for_with_monotonic(kind, plugin, root, Duration::ZERO)
+    }
+
+    /// Like [`Self::open_for`], with monotonic time driven by Tokio's clock.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the account file cannot be created.
+    #[must_use]
+    pub fn open_for_with_tokio_monotonic(
+        kind: PluginKind,
+        plugin: PluginId,
+        root: impl Into<PathBuf>,
+    ) -> Self {
         let root = root.into();
         let http = Arc::new(RecordingHttp::default());
         let secrets = Arc::new(RecordingSecrets::default());
@@ -365,7 +379,59 @@ impl TestHost {
             Arc::clone(&http) as Arc<dyn HttpBackend>,
             Arc::clone(&secrets) as Arc<dyn SecretsBackend>,
             Arc::new(accounts),
-            Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH)),
+            Arc::new(TokioMonotonicClock::default()),
+            Arc::clone(&scheduler) as Arc<dyn SchedulerBackend>,
+            Arc::clone(&process) as Arc<dyn ProcessBackend>,
+            Arc::new(RootDirs {
+                root,
+                #[cfg(test)]
+                _guard: None,
+            }),
+            Arc::clone(&observe) as Arc<dyn ObserveBackend>,
+        )
+        .with_loopback(Arc::clone(&loopback) as Arc<dyn LoopbackBackend>);
+        Self {
+            context,
+            http,
+            secrets,
+            scheduler,
+            process,
+            observe,
+            loopback,
+        }
+    }
+
+    /// Like [`Self::open_for`], with a fixed monotonic clock reading.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the account file cannot be created.
+    #[must_use]
+    pub fn open_for_with_monotonic(
+        kind: PluginKind,
+        plugin: PluginId,
+        root: impl Into<PathBuf>,
+        monotonic: Duration,
+    ) -> Self {
+        let root = root.into();
+        let http = Arc::new(RecordingHttp::default());
+        let secrets = Arc::new(RecordingSecrets::default());
+        let scheduler = Arc::new(RecordingScheduler::default());
+        let process = Arc::new(RecordingProcess::default());
+        let observe = Arc::new(RecordingObserve::default());
+        let loopback = Arc::new(LoopbackRegistry::new());
+        let accounts = AccountStore::open_with_backend(
+            root.join("accounts.json"),
+            Arc::new(account_secrets::MemoryAccountSecrets::default()),
+        )
+        .expect("test host account file");
+        let context = host_context_for(
+            kind,
+            plugin,
+            Arc::clone(&http) as Arc<dyn HttpBackend>,
+            Arc::clone(&secrets) as Arc<dyn SecretsBackend>,
+            Arc::new(accounts),
+            Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH).with_monotonic(monotonic)),
             Arc::clone(&scheduler) as Arc<dyn SchedulerBackend>,
             Arc::clone(&process) as Arc<dyn ProcessBackend>,
             Arc::new(RootDirs {
@@ -488,6 +554,31 @@ impl ClockBackend for FixedClock {
 
     fn monotonic(&self) -> Duration {
         self.monotonic
+    }
+}
+
+/// Monotonic time follows Tokio's clock. Paused tests advance it with
+/// [`tokio::time::advance`].
+#[derive(Clone, Debug)]
+pub struct TokioMonotonicClock {
+    start: tokio::time::Instant,
+}
+
+impl Default for TokioMonotonicClock {
+    fn default() -> Self {
+        Self {
+            start: tokio::time::Instant::now(),
+        }
+    }
+}
+
+impl ClockBackend for TokioMonotonicClock {
+    fn now(&self) -> SystemTime {
+        SystemTime::UNIX_EPOCH + self.monotonic()
+    }
+
+    fn monotonic(&self) -> Duration {
+        self.start.elapsed()
     }
 }
 
