@@ -14,6 +14,7 @@ mod gateway_key_limit;
 mod gateway_key_oidc;
 mod local;
 mod models;
+mod profile;
 mod provider;
 mod provider_edit;
 mod quota;
@@ -94,6 +95,11 @@ fn run_control(config: &Path, command: Command) -> Result<String, String> {
                 .await
                 .map(|table| table.trim_end_matches('\n').to_owned()),
             Command::AgentList => commands::agent_list(config).await,
+            Command::ProfileList => profile::list(config).await,
+            Command::ProfileShow { name } => profile::show(config, &name).await,
+            Command::ProfileSave { name } => profile::save(config, &name).await,
+            Command::ProfileSwitch { name } => profile::switch(config, &name).await,
+            Command::ProfileDelete { name } => profile::delete(config, &name).await,
             Command::AgentConnect { name, dry_run } => {
                 commands::agent_connect(config, &name, dry_run).await
             }
@@ -211,6 +217,19 @@ enum Command {
     AgentSet {
         name: String,
         model: Option<String>,
+    },
+    ProfileList,
+    ProfileShow {
+        name: String,
+    },
+    ProfileSave {
+        name: String,
+    },
+    ProfileSwitch {
+        name: String,
+    },
+    ProfileDelete {
+        name: String,
     },
     Subscription(SubscriptionCommand),
     Accounts(AccountsCommand),
@@ -487,6 +506,19 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
             model: agent_model(pairs)?,
         },
         ["agent", "set", ..] => return Err(help_text(HelpTopic::AgentSet)),
+        ["profile", "list"] => Command::ProfileList,
+        ["profile", "show", name] => Command::ProfileShow {
+            name: (*name).to_owned(),
+        },
+        ["profile", "save", name] => Command::ProfileSave {
+            name: (*name).to_owned(),
+        },
+        ["profile", "switch", name] => Command::ProfileSwitch {
+            name: (*name).to_owned(),
+        },
+        ["profile", "delete", name] | ["profile", "rm", name] => Command::ProfileDelete {
+            name: (*name).to_owned(),
+        },
         ["gateway-key", ..] => Command::GatewayKey(
             gateway_key::parse(&words, own_secret.clone(), json, read_only)?
                 .expect("gateway-key parser matched"),

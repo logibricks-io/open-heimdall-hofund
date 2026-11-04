@@ -27,15 +27,17 @@ use hofund_control_proto::{
     CheckinRunResponse, ConfigApplyRequest, ConfigResponse, ConfigValidateRequest,
     ConfigValidationResponse, ControlError, ControlErrorKind, ErrorEnvelope, GatewayKeyRequest,
     GatewayKeyResponse, GatewayKeyRestoreRequest, HealthResponse, MAX_ID_BYTES,
-    MAX_REQUEST_BODY_BYTES, ModelListResponse, PicksResponse, PicksSetRequest, ProviderKeyRequest,
-    ProviderKeysResponse, ProviderListResponse, ProviderRenameRequest, ProviderRenameResponse,
-    ProviderTestRequest, ProviderTestResponse, QuotaAlertsResponse, QuotaAlertsSetRequest,
-    QuotaAlertsSetResponse, QuotaCreditsModesResponse, QuotaCreditsSetRequest,
-    QuotaCreditsSetResponse, QuotaHistoryQuery, QuotaHistoryResponse, QuotaQuery, QuotaResponse,
-    ReloadRequest, RouteListResponse, RouteModelListResponse, RouteQuery, SessionRouteResponse,
-    ShutdownRequest, ShutdownResponse, StatusResponse, TokenRotateRequest, TokenRotateResponse,
-    Topic, UnroutedListResponse, UsageQuery, UsageResponse, WarmupListResponse, WarmupRunRequest,
-    WarmupRunResponse, decode_request,
+    MAX_REQUEST_BODY_BYTES, ModelListResponse, PicksResponse, PicksSetRequest,
+    ProfileDeleteRequest, ProfileDetailResponse, ProfileListResponse, ProfileSaveRequest,
+    ProfileSwitchRequest, ProfileSwitchResponse, ProviderKeyRequest, ProviderKeysResponse,
+    ProviderListResponse, ProviderRenameRequest, ProviderRenameResponse, ProviderTestRequest,
+    ProviderTestResponse, QuotaAlertsResponse, QuotaAlertsSetRequest, QuotaAlertsSetResponse,
+    QuotaCreditsModesResponse, QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryQuery,
+    QuotaHistoryResponse, QuotaQuery, QuotaResponse, ReloadRequest, RouteListResponse,
+    RouteModelListResponse, RouteQuery, SessionRouteResponse, ShutdownRequest, ShutdownResponse,
+    StatusResponse, TokenRotateRequest, TokenRotateResponse, Topic, UnroutedListResponse,
+    UsageQuery, UsageResponse, WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
+    decode_request,
 };
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
@@ -318,6 +320,70 @@ pub trait ControlState: Send + Sync {
     }
     /// Lists known agents.
     fn agents(&self) -> ControlFuture<'_, AgentListResponse>;
+    /// Lists named agent setting profiles.
+    fn profiles(&self) -> ControlFuture<'_, ProfileListResponse> {
+        Box::pin(async {
+            Err(ControlError::new(
+                ControlErrorKind::BadRequest,
+                "profiles are not supported by this control state",
+                "control",
+            )
+            .into())
+        })
+    }
+    /// Reads one named profile.
+    fn profile_detail(&self, _name: String) -> ControlFuture<'_, ProfileDetailResponse> {
+        Box::pin(async {
+            Err(ControlError::new(
+                ControlErrorKind::BadRequest,
+                "profiles are not supported by this control state",
+                "control",
+            )
+            .into())
+        })
+    }
+    /// Saves a named profile.
+    fn save_profile(
+        &self,
+        _request: ProfileSaveRequest,
+    ) -> ControlFuture<'_, ProfileDetailResponse> {
+        Box::pin(async {
+            Err(ControlError::new(
+                ControlErrorKind::BadRequest,
+                "profiles are not supported by this control state",
+                "control",
+            )
+            .into())
+        })
+    }
+    /// Applies a named profile to detected agents.
+    fn switch_profile(
+        &self,
+        _request: ProfileSwitchRequest,
+    ) -> ControlFuture<'_, ProfileSwitchResponse> {
+        Box::pin(async {
+            Err(ControlError::new(
+                ControlErrorKind::BadRequest,
+                "profiles are not supported by this control state",
+                "control",
+            )
+            .into())
+        })
+    }
+    /// Deletes a named profile.
+    fn delete_profile(
+        &self,
+        _request: ProfileDeleteRequest,
+    ) -> ControlFuture<'_, ProfileListResponse> {
+        Box::pin(async {
+            Err(ControlError::new(
+                ControlErrorKind::BadRequest,
+                "profiles are not supported by this control state",
+                "control",
+            )
+            .into())
+        })
+    }
     /// Reports agent connection states.
     fn agent_status(&self) -> ControlFuture<'_, AgentStatusResponse>;
     /// Plans an agent lifecycle change.
@@ -701,6 +767,16 @@ impl Control {
                 "/v1/hofund/agents/{id}/picked_only",
                 post(set_agent_picked_only),
             )
+            .route(
+                "/v1/hofund/profiles",
+                get(list_profiles).head(method_not_allowed),
+            )
+            .route(
+                "/v1/hofund/profiles/{name}",
+                get(show_profile).delete(delete_profile),
+            )
+            .route("/v1/hofund/profiles/save", post(save_profile))
+            .route("/v1/hofund/profiles/switch", post(switch_profile))
             .route("/v1/hofund/usage", get(usage).head(method_not_allowed))
             .route(
                 "/v1/hofund/gateway-keys",
@@ -1390,6 +1466,54 @@ async fn set_agent_picked_only(
         Err(failure) => return failure_response(failure),
     };
     operation_response!(state.control.state.set_agent_picked_only(id, request).await)
+}
+
+async fn list_profiles(State(state): State<HttpState>) -> Response {
+    operation_response!(state.control.state.profiles().await)
+}
+
+async fn show_profile(
+    State(state): State<HttpState>,
+    name: Result<AxumPath<String>, PathRejection>,
+) -> Response {
+    let name = match path_id(name) {
+        Ok(name) => name,
+        Err(failure) => return failure_response(failure),
+    };
+    operation_response!(state.control.state.profile_detail(name).await)
+}
+
+async fn save_profile(State(state): State<HttpState>, body: Bytes) -> Response {
+    let request = match decode_body::<ProfileSaveRequest>(&body) {
+        Ok(request) => request,
+        Err(failure) => return failure_response(failure),
+    };
+    operation_response!(state.control.state.save_profile(request).await)
+}
+
+async fn switch_profile(State(state): State<HttpState>, body: Bytes) -> Response {
+    let request = match decode_body::<ProfileSwitchRequest>(&body) {
+        Ok(request) => request,
+        Err(failure) => return failure_response(failure),
+    };
+    operation_response!(state.control.state.switch_profile(request).await)
+}
+
+async fn delete_profile(
+    State(state): State<HttpState>,
+    name: Result<AxumPath<String>, PathRejection>,
+) -> Response {
+    let name = match path_id(name) {
+        Ok(name) => name,
+        Err(failure) => return failure_response(failure),
+    };
+    operation_response!(
+        state
+            .control
+            .state
+            .delete_profile(ProfileDeleteRequest::new(name))
+            .await
+    )
 }
 
 async fn usage(
