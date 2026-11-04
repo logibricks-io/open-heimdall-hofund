@@ -7,9 +7,9 @@ use hofund_plugin_sdk::Call;
 use hofund_plugin_sdk::json::{self, Value};
 use hofund_plugin_sdk::oauth::secret_text;
 
+use crate::APP_VERSION;
 use crate::session::Stored;
 use crate::team;
-use crate::APP_VERSION;
 
 pub(crate) async fn read(
     host: &HostContext,
