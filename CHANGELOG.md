@@ -21,6 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Message thread continuations on `/v1/messages` are refused with HTTP 400 so
   clients resend full conversation history (D-63).
 
+- Quota and usage alerts: `hofund quota alert`, daemon `quota_alert` control
+  events, and `GET/POST /v1/hofund/quotas/alerts(/settings)` (AL-1).
+
 - Relayed native Responses replies mark namespaced `function_call` items with
   empty `encrypted_function_args` when the upstream omitted the field, so Codex
   V2 treats collaboration tasks as plain text (D-67).
