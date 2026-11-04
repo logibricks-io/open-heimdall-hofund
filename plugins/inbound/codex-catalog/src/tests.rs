@@ -78,6 +78,10 @@ impl Kernel for Gateway {
     ) -> Result<HttpResponse, PluginError> {
         Err(PluginError::unsupported("the catalog sends nothing out"))
     }
+
+    fn codex_relay_fallbacks(&self) -> &[String] {
+        &[]
+    }
 }
 
 fn get(path: &str) -> HttpRequest {
