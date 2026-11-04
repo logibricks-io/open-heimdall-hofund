@@ -11,18 +11,6 @@ use crate::Endpoints;
 use crate::creds::Stored;
 use crate::refresh;
 
-pub(crate) fn fallback_models(site: crate::creds::Site) -> ModelList {
-    let rows = match site {
-        crate::creds::Site::China => &["ultimate", "performance", "efficient", "lite"][..],
-        crate::creds::Site::Global => &["ultimate", "fast", "qfmodel", "dfmodel", "auto"][..],
-    };
-    let models = rows
-        .iter()
-        .filter_map(|id| ModelSpec::new(*id, Some((*id).to_owned())).ok())
-        .collect();
-    ModelList::new(models, None)
-}
-
 pub(crate) async fn list(
     host: &HostContext,
     endpoints: Arc<Endpoints>,
@@ -40,13 +28,16 @@ pub(crate) async fn list(
         .header("Accept", "application/json")
         .fetch(host.http())
         .await?;
-    if reply.status() == 404 || reply.status() == 501 {
-        return Ok(fallback_models(stored.credential.site));
+    match reply.status() {
+        200..=299 => parse_list(reply.body()),
+        401 => Err(PluginError::auth(
+            "Qoder refused the sign-in while listing models",
+        )),
+        status => Err(PluginError::status_error(
+            status,
+            "Qoder did not return a model list",
+        )),
     }
-    if !(200..300).contains(&reply.status()) {
-        return Ok(fallback_models(stored.credential.site));
-    }
-    parse_list(reply.body()).or_else(|_| Ok(fallback_models(stored.credential.site)))
 }
 
 pub(crate) fn parse_list(body: &[u8]) -> Result<ModelList, PluginError> {

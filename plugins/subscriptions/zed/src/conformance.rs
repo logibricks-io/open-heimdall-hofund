@@ -46,6 +46,7 @@ fn a2c_13_unknown_account_needs_sign_in() {
     assert!(matches!(status, AccountStatus::NeedsSignIn { .. }));
     let query = ProbeQuery::new(ProtocolId::OPENAI_RESPONSES, "claude-sonnet-4").expect("query");
     let upstream = built.upstream(&account, host.context()).expect("upstream");
-    let probe = block_on(upstream.probe(&query)).expect_err("auth");
-    assert_eq!(probe.kind(), PluginErrorKind::Auth);
+    let probe = block_on(upstream.probe(&query)).expect_err("unsupported");
+    assert_eq!(probe.kind(), PluginErrorKind::Unsupported);
+    assert!(host.http().calls().is_empty());
 }

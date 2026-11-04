@@ -4,14 +4,13 @@ use std::sync::Arc;
 
 use hofund_kit_subscription::{TestHost, block_on};
 use hofund_plugin_api::{
-    AccountId, PluginId, PluginKind, ProbeQuery, ProtocolId, RawTable, SecretString, Subscription,
-    SubscriptionFactory,
+    AccountId, PluginErrorKind, PluginId, PluginKind, ProbeQuery, ProtocolId, RawTable,
+    SecretString, Subscription, SubscriptionFactory,
 };
 use hofund_plugin_sdk::json;
 use hofund_plugin_sdk::oauth::{SecretObject, secret_text};
 
 use crate::creds::{self, Credential, Site, Stored};
-use crate::discover::{self, REFERENCE};
 use crate::models;
 use crate::quota;
 use crate::{Endpoints, factory_with_endpoints};
@@ -74,25 +73,26 @@ fn seed_with_expiry(host: &TestHost, expires_at: i64) -> AccountId {
 }
 
 #[test]
-fn a2c_3_discover_import_fixture_credentials() {
+fn a2c_3_import_fixture_credentials() {
     let dir = tempfile::tempdir().expect("dir");
-    let home = dir.path().join("agent").join(".qoder");
-    std::fs::create_dir_all(&home).expect("dir");
-    std::fs::copy(
-        concat!(env!("CARGO_MANIFEST_DIR"), "/src/fixtures/credential.json"),
-        home.join(creds::CREDENTIAL_FILE),
-    )
-    .expect("copy");
-    let rows = discover::list(&home).expect("list");
-    assert_eq!(rows.len(), 1);
     let host = host(&dir);
-    let id = block_on(discover::import(&home, REFERENCE, host.context())).expect("import");
-    let secret = block_on(host.context().accounts().secret(&id))
+    let text = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/fixtures/credential.json"
+    ))
+    .expect("read");
+    let sub = subscription(&host);
+    let ids = block_on(sub.import_accounts(&text, host.context())).expect("import");
+    assert_eq!(ids.len(), 1);
+    let secret = block_on(host.context().accounts().secret(&ids[0]))
         .expect("read")
         .expect("stored");
-    let blob = SecretObject::parse(&secret).expect("blob");
     assert_eq!(
-        blob.secret("access_token").as_ref().map(secret_text),
+        SecretObject::parse(&secret)
+            .expect("blob")
+            .secret("access_token")
+            .as_ref()
+            .map(secret_text),
         Some("qoder-access-fixture-token")
     );
 }
@@ -129,9 +129,49 @@ fn a2c_4_refresh_on_expiry() {
 }
 
 #[test]
+fn a2c_4b_upstream_401_forces_refresh_on_fresh_token() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_with_expiry(&host, 4_000_000_000_000);
+    host.http().enqueue_response(401, &[], Vec::new());
+    host.http().enqueue(
+        json::json!({
+            "token": "qoder-access-after-401",
+            "refresh_token": "qoder-refresh-after-401",
+            "expires_at": 4_000_000_000_001_i64
+        })
+        .to_string()
+        .into_bytes(),
+    );
+    host.http().enqueue(
+        br#"{"id":"chatcmpl-1","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"ok"}}]}"#,
+    );
+    let upstream = subscription(&host)
+        .upstream(&id, host.context())
+        .expect("upstream");
+    let query = ProbeQuery::new(ProtocolId::OPENAI_CHAT, "qfmodel").expect("query");
+    block_on(upstream.probe(&query)).expect("probe after refresh");
+    let calls = host.http().calls();
+    assert_eq!(calls.len(), 3);
+    assert!(calls[0].uri().contains("/chat/completions"));
+    assert!(calls[1].uri().contains("/jobToken/refresh"));
+    assert!(calls[2].uri().contains("/chat/completions"));
+}
+
+#[test]
 fn a2c_5_model_list_parsing() {
     let list = models::parse_list(include_bytes!("fixtures/models.json")).expect("parse");
     assert!(list.models().iter().any(|model| model.id() == "qfmodel"));
+}
+
+#[test]
+fn a2c_5b_model_list_401_is_auth() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_with_expiry(&host, 4_000_000_000_000);
+    host.http().enqueue_response(401, &[], Vec::new());
+    let err = block_on(subscription(&host).list_models(&id, host.context())).expect_err("401");
+    assert_eq!(err.kind(), PluginErrorKind::Auth);
 }
 
 #[test]
@@ -162,9 +202,8 @@ fn a2c_7_quota_windows() {
 #[test]
 fn a2c_8_secrets_not_in_error_strings() {
     let key = "qoder-secret-key-xyzzy";
-    let path = std::path::Path::new("/nonexistent/qoder/credential.json");
-    let error = creds::read_file(path).expect_err("missing");
-    let text = error.to_string();
+    let bad = creds::parse_json("not json").expect_err("bad");
+    let text = bad.to_string();
     assert!(!text.contains(key));
     let credential = Credential {
         uid: "u".to_owned(),
@@ -197,4 +236,17 @@ fn a2c_9_daily_checkin_uses_bearer() {
         .enqueue(br#"{"status":"CLAIMED","benefit":{"amount":100}}"#);
     let result = block_on(subscription(&host).daily_checkin(&id, host.context())).expect("checkin");
     assert_eq!(result.outcome(), hofund_plugin_api::CheckinOutcome::Claimed);
+}
+
+#[test]
+fn a2c_account_id_uses_uid() {
+    let text = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/fixtures/credential.json"
+    ))
+    .expect("read");
+    let mut credential = creds::parse_json(&text).expect("parse");
+    let id = creds::account_id(&credential);
+    credential.email = "someone-else@example.test".to_owned();
+    assert_eq!(id, creds::account_id(&credential));
 }

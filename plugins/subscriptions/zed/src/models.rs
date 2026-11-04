@@ -65,7 +65,11 @@ fn build_list(items: &[Value]) -> Result<ModelList, PluginError> {
         let Some(id) = id else {
             continue;
         };
-        let name = map.get("name").and_then(Value::as_str).unwrap_or(id);
+        let name = map
+            .get("name")
+            .or_else(|| map.get("display_name"))
+            .and_then(Value::as_str)
+            .unwrap_or(id);
         if let Ok(spec) = ModelSpec::new(id, Some(name.to_owned())) {
             models.push(spec);
         }

@@ -1,12 +1,11 @@
 //! Qoder subscription plugin.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use hofund_plugin_api::{
-    AccountId, AccountStatus, AgentSignIn, BuildError, ConfigError, HostContext, ModelList,
-    PluginError, PluginId, QuotaWindow, RawTable, Schema, SignInChallenge, SignInCtx, SignInFlow,
+    AccountId, AccountStatus, BuildError, ConfigError, HostContext, ModelList, PluginError,
+    PluginId, QuotaWindow, RawTable, Schema, SignInChallenge, SignInCtx, SignInFlow,
     SignInFlowKind, SignInProof, Subscription, SubscriptionFactory, SubscriptionSpec,
     UpstreamProvider, ValidConfig,
 };
@@ -14,7 +13,7 @@ use hofund_plugin_sdk::Contribution;
 
 mod checkin;
 mod creds;
-mod discover;
+mod import;
 mod models;
 mod quota;
 mod refresh;
@@ -25,12 +24,7 @@ static SPEC: SubscriptionSpec = SubscriptionSpec::from_static(
     "Qoder",
     SignInFlowKind::Bridge,
 )
-.with_daily_checkin(true)
-.with_agent_sign_in(AgentSignIn::new(
-    &["qoder", creds::CN_SITE],
-    "QODER_CONFIG_DIR",
-    ".qoder",
-));
+.with_daily_checkin(true);
 
 /// Registers the Qoder subscription.
 #[must_use]
@@ -135,16 +129,7 @@ impl SubscriptionFactory for QoderFactory {
 struct Qoder {
     endpoints: Arc<Endpoints>,
     flow: SignInFlow,
-    pending: Mutex<HashMap<String, PathBuf>>,
-}
-
-impl Qoder {
-    fn take_pending(&self, session: &str) -> Option<PathBuf> {
-        self.pending
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(session)
-    }
+    pending: Mutex<HashMap<String, ()>>,
 }
 
 #[hofund_plugin_sdk::async_trait]
@@ -162,42 +147,24 @@ impl Subscription for Qoder {
         ctx: &SignInCtx,
         _host: &HostContext,
     ) -> Result<SignInChallenge, PluginError> {
-        drop(self.take_pending(ctx.session()));
-        let path = default_credential_path()?;
-        creds::read_file(&path).map_err(|error| {
-            PluginError::auth(format!(
-                "Qoder is not signed in at {}; {}",
-                path.display(),
-                error.message()
-            ))
-        })?;
         self.pending
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(ctx.session().to_owned(), path);
-        SignInChallenge::instructions(
-            "Qoder credentials are on this machine; confirm to import them.",
-        )
+            .remove(ctx.session());
+        Err(PluginError::unsupported(
+            "import a Qoder credential export with `hofund subscription import`",
+        ))
     }
 
     async fn complete_sign_in(
         &self,
-        ctx: &SignInCtx,
-        proof: SignInProof,
-        host: &HostContext,
+        _ctx: &SignInCtx,
+        _proof: SignInProof,
+        _host: &HostContext,
     ) -> Result<AccountId, PluginError> {
-        let SignInProof::Await = proof else {
-            return Err(PluginError::config(
-                "Qoder sign-in completes once the credential file is imported",
-            ));
-        };
-        let Some(path) = self.take_pending(ctx.session()) else {
-            return Err(PluginError::config(
-                "no Qoder sign-in is in progress for this session",
-            ));
-        };
-        let credential = creds::read_file(&path)?;
-        discover::store(&credential, host).await
+        Err(PluginError::unsupported(
+            "import a Qoder credential export with `hofund subscription import`",
+        ))
     }
 
     async fn cancel_sign_in(
@@ -205,7 +172,11 @@ impl Subscription for Qoder {
         ctx: &SignInCtx,
         _host: &HostContext,
     ) -> Result<(), PluginError> {
-        let _ = self.take_pending(ctx.session());
+        let _ = self
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(ctx.session());
         Ok(())
     }
 
@@ -293,33 +264,13 @@ impl Subscription for Qoder {
         checkin::run(account, host).await
     }
 
-    async fn discover_agent_sign_in(
+    async fn import_accounts(
         &self,
-        home: &Path,
-    ) -> Result<Vec<hofund_plugin_api::DiscoveredAgentAccount>, PluginError> {
-        discover::list(home)
-    }
-
-    async fn import_agent_sign_in(
-        &self,
-        home: &Path,
-        reference: &str,
+        text: &str,
         host: &HostContext,
-    ) -> Result<AccountId, PluginError> {
-        discover::import(home, reference, host).await
+    ) -> Result<Vec<AccountId>, PluginError> {
+        import::import_accounts(host, text).await
     }
-}
-
-fn default_credential_path() -> Result<PathBuf, PluginError> {
-    if let Ok(dir) = std::env::var("QODER_CONFIG_DIR") {
-        return Ok(PathBuf::from(dir).join(creds::CREDENTIAL_FILE));
-    }
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .map_err(|_| PluginError::io("cannot resolve the user home for sign-in"))?;
-    Ok(PathBuf::from(home)
-        .join(".qoder")
-        .join(creds::CREDENTIAL_FILE))
 }
 
 #[cfg(test)]

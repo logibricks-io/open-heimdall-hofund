@@ -7,9 +7,13 @@ pub fn transform_map(root: &mut Map<String, Value>) {
     if root.contains_key("messages") {
         return;
     }
-    let Some(Value::Array(input)) = root.remove("input") else {
+    let Some(input_value) = root.get("input").cloned() else {
         return;
     };
+    let Value::Array(input) = input_value else {
+        return;
+    };
+    root.remove("input");
     let mut dirty = false;
     let mut kept = Vec::new();
     for item in input {
@@ -117,6 +121,34 @@ fn flat_call(map: &mut Map<String, Value>) -> bool {
     true
 }
 
+fn flatten_namespace(ns: &Map<String, Value>) -> Vec<Value> {
+    let space = ns.get("name").and_then(Value::as_str).unwrap_or("");
+    let Some(Value::Array(nested)) = ns.get("tools") else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for tool in nested {
+        let Some(mut map) = tool.as_object().cloned() else {
+            continue;
+        };
+        if map.get("type").and_then(Value::as_str) != Some("function") {
+            continue;
+        }
+        let Some(name) = map
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|n| !n.is_empty())
+        else {
+            continue;
+        };
+        if !space.is_empty() {
+            map.insert("name".to_owned(), Value::String(format!("{space}__{name}")));
+        }
+        out.push(Value::Object(map));
+    }
+    out
+}
+
 fn filter_tools(root: &mut Map<String, Value>, dirty: &mut bool) {
     let Some(Value::Array(tools)) = root.get("tools").cloned() else {
         return;
@@ -130,6 +162,7 @@ fn filter_tools(root: &mut Map<String, Value>, dirty: &mut bool) {
         match map.get("type").and_then(Value::as_str) {
             Some("function") | Some("custom") => out.push(tool),
             Some("namespace") => {
+                out.extend(flatten_namespace(map));
                 *dirty = true;
             }
             _ => *dirty = true,

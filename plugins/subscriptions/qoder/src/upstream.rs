@@ -29,7 +29,7 @@ impl QoderUpstream {
 
     async fn stored(&self, force: bool) -> Result<Stored, PluginError> {
         if force {
-            refresh::run(&self.host, Arc::clone(&self.endpoints), &self.account).await?;
+            refresh::force(&self.host, Arc::clone(&self.endpoints), &self.account).await?;
         }
         refresh::ensure_fresh(&self.host, Arc::clone(&self.endpoints), &self.account).await
     }

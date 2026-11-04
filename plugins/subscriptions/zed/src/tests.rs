@@ -4,13 +4,13 @@ use std::sync::Arc;
 
 use hofund_kit_subscription::{TestHost, block_on};
 use hofund_plugin_api::{
-    AccountId, PluginId, PluginKind, ProbeQuery, ProtocolId, RawTable, SecretString, Subscription,
-    SubscriptionFactory,
+    AccountId, PluginErrorKind, PluginId, PluginKind, ProbeQuery, ProtocolId, RawTable,
+    SecretString, Subscription, SubscriptionFactory,
 };
 use hofund_plugin_sdk::oauth::{SecretObject, secret_text};
 
+use crate::body;
 use crate::creds::{self, Credential};
-use crate::discover::{self, REFERENCE};
 use crate::models;
 use crate::{Endpoints, factory_with_endpoints};
 
@@ -63,20 +63,17 @@ fn seed(host: &TestHost) -> AccountId {
 }
 
 #[test]
-fn a2c_14_discover_import_fixture_credentials() {
+fn a2c_14_import_fixture_credentials() {
     let dir = tempfile::tempdir().expect("dir");
-    let home = dir.path().join("zed-home");
-    std::fs::create_dir_all(&home).expect("dir");
-    std::fs::copy(
-        concat!(env!("CARGO_MANIFEST_DIR"), "/src/fixtures/credential.json"),
-        home.join(creds::CREDENTIAL_FILE),
-    )
-    .expect("copy");
-    let rows = discover::list(&home).expect("list");
-    assert_eq!(rows.len(), 1);
     let host = host(&dir);
-    let id = block_on(discover::import(&home, REFERENCE, host.context())).expect("import");
-    let secret = block_on(host.context().accounts().secret(&id))
+    let text = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/fixtures/credential.json"
+    ))
+    .expect("read");
+    let ids = block_on(subscription(&host).import_accounts(&text, host.context())).expect("import");
+    assert_eq!(ids.len(), 1);
+    let secret = block_on(host.context().accounts().secret(&ids[0]))
         .expect("read")
         .expect("stored");
     assert_eq!(
@@ -106,20 +103,24 @@ fn a2c_16_model_list_parsing() {
 }
 
 #[test]
-fn a2c_17_upstream_round_trip() {
+fn a2c_16b_model_list_display_name() {
+    let body = br#"{"models":[{"id":"m1","display_name":"Pretty"}]}"#;
+    let list = models::parse_list(body).expect("parse");
+    assert_eq!(list.models()[0].display_name(), Some("Pretty"));
+}
+
+#[test]
+fn a2c_17_upstream_is_unsupported() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
     let id = seed(&host);
-    host.http().enqueue(br#"{"token":"model-token-1"}"#);
-    host.http()
-        .enqueue(br#"{"id":"resp-1","object":"response","output":[]}"#);
     let upstream = subscription(&host)
         .upstream(&id, host.context())
         .expect("upstream");
     let query = ProbeQuery::new(ProtocolId::OPENAI_RESPONSES, "claude-sonnet-4").expect("query");
-    block_on(upstream.probe(&query)).expect("probe");
-    assert_eq!(host.http().calls().len(), 2);
-    assert!(host.http().calls()[1].uri().contains("/completions"));
+    let err = block_on(upstream.probe(&query)).expect_err("unsupported");
+    assert_eq!(err.kind(), PluginErrorKind::Unsupported);
+    assert!(host.http().calls().is_empty());
 }
 
 #[test]
@@ -140,9 +141,23 @@ fn a2c_18_secrets_not_in_debug() {
 
 #[test]
 fn a2c_19_body_rewrites_developer_role() {
-    let out = crate::body::transform(
-        br#"{"input":[{"type":"message","role":"developer","content":"hi"}]}"#,
-    );
+    let out =
+        body::transform(br#"{"input":[{"type":"message","role":"developer","content":"hi"}]}"#);
     let text = std::str::from_utf8(&out).expect("utf8");
     assert!(text.contains("system"));
+}
+
+#[test]
+fn a2c_19b_body_keeps_string_input() {
+    let body = br#"{"input":"plain prompt","model":"m"}"#;
+    let out = body::transform(body);
+    assert_eq!(out, body);
+}
+
+#[test]
+fn a2c_19c_body_flattens_namespace_tools() {
+    let body = br#"{"input":[],"tools":[{"type":"namespace","name":"nico","tools":[{"type":"function","name":"ping","parameters":{"type":"object"}}]}]}"#;
+    let out = body::transform(body);
+    let text = std::str::from_utf8(&out).expect("utf8");
+    assert!(text.contains("nico__ping"));
 }

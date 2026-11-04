@@ -7,7 +7,6 @@ use hofund_plugin_sdk::json::{self, Value};
 use hofund_plugin_sdk::oauth::{SecretObject, account_id_from};
 
 pub(crate) const REFRESH_MARGIN: Duration = Duration::from_secs(5 * 60);
-pub(crate) const CREDENTIAL_FILE: &str = "credential.json";
 pub(crate) const CN_SITE: &str = "qoder-cn";
 
 /// Which Qoder deployment an account uses.
@@ -133,8 +132,7 @@ pub(crate) fn secret_blob(credential: &Credential) -> SecretObject {
 }
 
 pub(crate) fn account_id(credential: &Credential) -> AccountId {
-    let who = label(credential);
-    account_id_from(&[credential.site.plugin_id(), &who])
+    account_id_from(&[credential.site.plugin_id(), &credential.uid])
 }
 
 pub(crate) fn label(credential: &Credential) -> String {
@@ -145,18 +143,6 @@ pub(crate) fn label(credential: &Credential) -> String {
     } else {
         credential.uid.clone()
     }
-}
-
-pub(crate) fn read_file(path: &std::path::Path) -> Result<Credential, PluginError> {
-    let text = std::fs::read_to_string(path).map_err(|error| {
-        PluginError::auth(format!("{} can't be read ({error})", path.display()))
-    })?;
-    parse_json(&text).map_err(|error| {
-        PluginError::auth(format!(
-            "{} does not hold a Qoder credential ({error})",
-            path.display()
-        ))
-    })
 }
 
 pub(crate) fn parse_json(text: &str) -> Result<Credential, PluginError> {
@@ -209,8 +195,4 @@ fn json_number_i64(value: &Value) -> Option<i64> {
         .as_i64()
         .or_else(|| value.as_u64().map(|n| n as i64))
         .or_else(|| value.as_f64().map(|n| n as i64))
-}
-
-pub(crate) fn credential_path(home: &std::path::Path) -> std::path::PathBuf {
-    home.join(CREDENTIAL_FILE)
 }

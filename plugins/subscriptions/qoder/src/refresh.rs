@@ -35,6 +35,16 @@ pub(crate) async fn run(
     Ok(())
 }
 
+/// Renews the job token even when the access token is not near expiry (401 retry).
+pub(crate) async fn force(
+    host: &HostContext,
+    endpoints: Arc<Endpoints>,
+    account: &AccountId,
+) -> Result<(), PluginError> {
+    let stored = Stored::load(host, account).await?;
+    refresh_stale(host, endpoints, account, &stored).await
+}
+
 async fn refresh_stale(
     host: &HostContext,
     endpoints: Arc<Endpoints>,
@@ -97,7 +107,7 @@ async fn refresh_stale(
     let expires = root
         .get("expires_at")
         .and_then(|value| value.as_i64().or_else(|| value.as_f64().map(|n| n as i64)))
-        .unwrap_or(stored.credential.expires_at);
+        .unwrap_or_else(|| default_expires_at(host));
     let mut credential = stored.credential.clone();
     credential.token = SecretString::from(access.to_owned());
     credential.refresh_token = SecretString::from(refresh.to_owned());
@@ -109,4 +119,11 @@ async fn refresh_stale(
         )
         .await?;
     Ok(())
+}
+
+fn default_expires_at(host: &HostContext) -> i64 {
+    let Ok(now) = host.clock().now().duration_since(std::time::UNIX_EPOCH) else {
+        return 0;
+    };
+    now.as_millis() as i64 + 3_600_000
 }

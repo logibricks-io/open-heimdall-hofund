@@ -4,8 +4,6 @@ use hofund_plugin_api::{AccountId, HostContext, PluginError, SecretString};
 use hofund_plugin_sdk::json::{self, Value};
 use hofund_plugin_sdk::oauth::{SecretObject, account_id_from, secret_text};
 
-pub(crate) const CREDENTIAL_FILE: &str = "credential.json";
-
 #[derive(Clone, Debug)]
 pub(crate) struct Credential {
     pub user_id: String,
@@ -83,8 +81,7 @@ pub(crate) fn secret_blob(credential: &Credential) -> SecretObject {
 }
 
 pub(crate) fn account_id(credential: &Credential) -> AccountId {
-    let who = label(credential);
-    account_id_from(&["zed", &who])
+    account_id_from(&["zed", &credential.user_id])
 }
 
 pub(crate) fn label(credential: &Credential) -> String {
@@ -95,13 +92,6 @@ pub(crate) fn label(credential: &Credential) -> String {
     } else {
         credential.user_id.clone()
     }
-}
-
-pub(crate) fn read_file(path: &std::path::Path) -> Result<Credential, PluginError> {
-    let text = std::fs::read_to_string(path).map_err(|error| {
-        PluginError::auth(format!("{} can't be read ({error})", path.display()))
-    })?;
-    parse_json(&text)
 }
 
 pub(crate) fn parse_json(text: &str) -> Result<Credential, PluginError> {
@@ -139,11 +129,6 @@ fn optional(map: &json::Map<String, Value>, key: &str) -> String {
         .unwrap_or("")
         .to_owned()
 }
-
-pub(crate) fn credential_path(home: &std::path::Path) -> std::path::PathBuf {
-    home.join(CREDENTIAL_FILE)
-}
-
 pub(crate) fn auth_header(credential: &Credential) -> String {
     format!("{} {}", credential.user_id, secret_text(&credential.access))
 }
