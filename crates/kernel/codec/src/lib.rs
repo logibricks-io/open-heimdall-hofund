@@ -218,10 +218,10 @@ pub trait Codec: Send + Sync {
     ///
     /// The frame is each protocol's own mid-reply failure
     /// (`reference: internal/gateway/gateway.go:6008-6034`). The default is
-    /// [`Codec::encode_stream_error`] with status 502, which is already that
+    /// [`Codec::encode_stream_error`] with the given status, which is already that
     /// shape for Messages. Chat, Responses, and Generative Language override it.
-    fn encode_stream_failure(&self, message: &str) -> Vec<u8> {
-        self.encode_stream_error(502, message)
+    fn encode_stream_failure(&self, status: u16, message: &str) -> Vec<u8> {
+        self.encode_stream_error(status, message)
     }
 
     /// How a relayed event stream in this protocol says it reached its last

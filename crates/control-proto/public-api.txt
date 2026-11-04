@@ -147,6 +147,7 @@ CooldownReason #[non_exhaustive] derives(Clone, Copy, Debug, Default, PartialEq,
 CooldownReason::Credit
 CooldownReason::Failure
 CooldownReason::Observed
+CooldownReason::Overload
 CooldownReason::Panic
 CooldownReason::Quota
 CooldownReason::RateLimit

@@ -323,6 +323,8 @@ pub enum CooldownReason {
     Observed,
     /// Contained member panic.
     Panic,
+    /// Vendor overload on the requested model.
+    Overload,
     /// A newer peer supplied an unknown reason.
     #[serde(other)]
     Unknown,
@@ -339,6 +341,7 @@ impl CooldownReason {
             Self::Credit => "credit",
             Self::Observed => "observed",
             Self::Panic => "panic",
+            Self::Overload => "overload",
             Self::Unknown => "unknown",
         }
     }

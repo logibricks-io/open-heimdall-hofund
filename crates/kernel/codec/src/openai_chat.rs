@@ -104,7 +104,7 @@ impl Codec for OpenAiChat {
         b"data: [DONE]\n\n"
     }
 
-    fn encode_stream_failure(&self, message: &str) -> Vec<u8> {
+    fn encode_stream_failure(&self, _status: u16, message: &str) -> Vec<u8> {
         let body = serde_json::json!({"error": {"message": message, "type": "api_error"}});
         crate::sse::data_frame(body.to_string().as_bytes())
     }

@@ -73,9 +73,21 @@ pub fn words_of(text: &str) -> String {
     out
 }
 
+/// Whether an upstream failure is the vendor too busy for the request: HTTP
+/// 529, or a 5xx whose message says overloaded. Rate limits and 4xx are not
+/// overloads even when the text mentions busy servers.
+#[must_use]
+pub fn vendor_overloaded(status: u16, message: &str) -> bool {
+    status == 529
+        || (status >= 500
+            && words_of(message)
+                .to_ascii_lowercase()
+                .contains("overloaded"))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::too_long;
+    use super::{too_long, vendor_overloaded};
 
     #[test]
     fn d33_1_context_window_full_wording_is_overflow() {
@@ -101,6 +113,25 @@ mod tests {
             r#"{"error":{"message":"you must provide a messages parameter"}}"#,
         ] {
             assert!(!too_long(400, message), "{message}");
+        }
+    }
+
+    #[test]
+    fn d52_said_overloaded_matches_reference_table() {
+        let cases = [
+            (529, "busy", true),
+            (503, "The model is overloaded", true),
+            (503, "Service Unavailable", false),
+            (502, "connect", false),
+            (429, "overloaded", false),
+            (400, "overloaded", false),
+        ];
+        for (status, message, want) in cases {
+            assert_eq!(
+                vendor_overloaded(status, message),
+                want,
+                "status={status} message={message:?}"
+            );
         }
     }
 }

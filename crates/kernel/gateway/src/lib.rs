@@ -2654,7 +2654,7 @@ async fn raw_body(
         let tap = codec.raw_tap(&request.model, upstream_model);
         let on_error = {
             let codec = Arc::clone(&codec);
-            move |message: &str| codec.encode_stream_failure(message)
+            move |status: u16, message: &str| codec.encode_stream_failure(status, message)
         };
         let owned = track.take_for_stream();
         let event_stream = content_type == "text/event-stream";
@@ -3040,7 +3040,7 @@ struct RawRelay<E> {
 
 impl<E> RawRelay<E>
 where
-    E: Fn(&str) -> Vec<u8>,
+    E: Fn(u16, &str) -> Vec<u8>,
 {
     fn finish(&mut self, status: StatusCode) {
         write_usage_simple(
@@ -3115,7 +3115,7 @@ where
             Some(member) => format!("{member}: {ENDED_SHORT}"),
             None => ENDED_SHORT.to_owned(),
         };
-        out.extend((self.on_error)(&message));
+        out.extend((self.on_error)(502, &message));
         Bytes::from(out)
     }
 
@@ -3168,7 +3168,10 @@ where
                     (false, _) => event_gap(&out),
                 };
                 out.extend_from_slice(before);
-                out.extend((self.on_error)(&broken_off(&error)));
+                out.extend((self.on_error)(
+                    error.status().unwrap_or(502),
+                    &broken_off(&error),
+                ));
                 if self.lines.is_some() {
                     out.extend_from_slice(self.severed_end);
                 }
