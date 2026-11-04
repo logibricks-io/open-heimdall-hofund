@@ -17,6 +17,7 @@ mod cooldown;
 pub mod credits_mode;
 mod decision;
 mod member;
+mod overflow_memory;
 mod patience;
 pub mod quota;
 mod scope;
@@ -44,6 +45,7 @@ pub use attempt::{Attempt, AttemptError, AttemptHook, MemberAttempt};
 pub use cooldown::{CooldownCause, CooldownPolicy, Cooldowns, Cooling, PersistedRest};
 pub use hofund_plugin_api::{Completion, MemberId, PluginError, Request};
 pub use member::{Member, ModelListAnswer};
+pub use overflow_memory::OverflowMemory;
 pub use patience::WaitHook;
 pub use scope::RouteScope;
 pub use snapshot::Snapshot;
@@ -243,6 +245,7 @@ pub struct Router {
     strategies: Arc<strategy::StrategyState>,
     affinity: affinity::AffinityState,
     sealed: affinity::sealed::SealedState,
+    overflow: OverflowMemory,
     measurements: Option<Arc<dyn strategy::Measurements>>,
     member_skip: Option<MemberSkipFn>,
 }
@@ -365,6 +368,7 @@ impl Router {
             strategies: Arc::new(strategy::StrategyState::with_builtins()),
             affinity: affinity::AffinityState::in_memory(),
             sealed: affinity::sealed::SealedState::default(),
+            overflow: OverflowMemory::in_memory(),
             measurements: None,
             member_skip: None,
         }
@@ -389,6 +393,13 @@ impl Router {
     pub fn with_affinity(mut self, affinity: affinity::AffinityState) -> Self {
         self.sealed = affinity.sealed();
         self.affinity = affinity;
+        self
+    }
+
+    /// Shares overflow memory with later snapshots of this route table.
+    #[must_use]
+    pub fn with_overflow_memory(mut self, overflow: OverflowMemory) -> Self {
+        self.overflow = overflow;
         self
     }
 
@@ -679,8 +690,14 @@ impl Router {
         resolved.hops = scoped_hops(&asked, &resolved, scope)?;
         resolved.hops = self.without_skipped_hops(&asked, &resolved);
         self.refresh_free(&mut resolved).await;
+        let input_tokens = estimate_input_tokens(request);
         let ordered = self.order_for(&resolved, conversation);
         resolved.hops = ordered.hops;
+        if let Some(conversation) = conversation {
+            resolved.hops =
+                self.overflow
+                    .demote_hops(&conversation.key, input_tokens, resolved.hops);
+        }
         resolved.spent = self.spent(&resolved);
         if let Some(trace) = trace.as_mut() {
             trace.set_routing(&resolved.routing);
@@ -714,7 +731,7 @@ impl Router {
             hook,
             resolved,
             policy: self.policy.clone(),
-            input_tokens: estimate_input_tokens(request),
+            input_tokens,
             last: None,
             refused_providers: BTreeSet::new(),
             outgrown: Vec::new(),
@@ -723,6 +740,7 @@ impl Router {
             wait_hook,
             affinity: ordered.affinity,
             affinity_state: self.affinity.clone(),
+            overflow_memory: self.overflow.clone(),
             cooldowns: self.cooldowns.clone(),
             trace,
             strategies: Arc::clone(&self.strategies),
@@ -1500,6 +1518,7 @@ struct DispatchState {
     /// Where an answer's stick is recorded, when the request has a conversation.
     affinity: Option<ReplyRoute>,
     affinity_state: affinity::AffinityState,
+    overflow_memory: OverflowMemory,
     cooldowns: Option<Arc<Cooldowns>>,
     trace: Option<RouteTraceHandle>,
     strategies: Arc<strategy::StrategyState>,
@@ -1711,6 +1730,10 @@ impl DispatchState {
                     if let Some(hook) = self.hook.as_ref() {
                         hook.answered(&info);
                     }
+                    if let Some(affinity) = &self.affinity {
+                        let member = hop.member.id().to_string();
+                        self.overflow_memory.clear(&affinity.key, &member);
+                    }
                     let member_id = hop.member.id().to_string();
                     for pool_move in &self.drain_moves {
                         if let Some((_, key)) = pool_move
@@ -1783,6 +1806,7 @@ impl DispatchState {
                 }
                 Err(error) => {
                     let upstream_id = hop.member.route_id().to_owned();
+                    let record_overflow = decision::context_overflow_memory(&error);
                     let inferred = decision::too_long_unsaid(
                         &error,
                         self.input_tokens,
@@ -1796,6 +1820,13 @@ impl DispatchState {
                         // member not known to be too small may hold it.
                         if error.status() != Some(413) {
                             self.needs_room = Some(self.input_tokens);
+                        }
+                        if record_overflow && let Some(affinity) = &self.affinity {
+                            self.overflow_memory.record(
+                                &affinity.key,
+                                &hop.member.id().to_string(),
+                                self.input_tokens,
+                            );
                         }
                         self.outgrown.push((upstream_id.clone(), upstream_model));
                         self.last = Some((upstream_id, error));
