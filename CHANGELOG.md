@@ -16,6 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   turns through the first user-owned message, stripping `cache_control` before
   hashing (D-54).
 
+- Named gateway keys may call user routing groups only when scope lists
+  `group/<id>` or `group/*`; `/v1/models` hides groups the key cannot use (D-55).
+
 - Routing strategy `drain` keeps one pool member until it rests, runs out of
   allowance without credits, fails over, or leaves the pool, then sticks to the
   next member in listed order (D-41).

@@ -47,7 +47,7 @@ pub use hofund_plugin_api::{Completion, MemberId, PluginError, Request};
 pub use member::{Member, ModelListAnswer};
 pub use overflow_memory::OverflowMemory;
 pub use patience::WaitHook;
-pub use scope::RouteScope;
+pub use scope::{RouteScope, model_allowed};
 pub use snapshot::Snapshot;
 pub use view::{
     RouteMeta, RouteTraceBook, RouteTraceHandle, TRACE_KEEP, TraceNow, UNROUTED_MOST,

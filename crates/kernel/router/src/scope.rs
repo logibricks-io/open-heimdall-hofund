@@ -24,14 +24,14 @@ impl RouteScope {
         if self.models.is_empty() {
             return true;
         }
+        if route.starts_with("group/") {
+            return model_allowed(&self.models, route) || model_allowed(&self.models, "group/*");
+        }
         let provider = hop.member.scope_provider();
         let mut candidates = vec![
             format!("{provider}/{route}"),
             format!("{provider}/{}", hop.wire_model.as_deref().unwrap_or(asked)),
         ];
-        if asked == route && route.starts_with("group/") {
-            candidates.push(route.to_owned());
-        }
         if asked.contains('/') {
             candidates.push(asked.to_owned());
         }
