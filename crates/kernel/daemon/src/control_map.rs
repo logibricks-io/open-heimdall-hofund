@@ -58,6 +58,7 @@ pub fn cooldown_reason(cause: CooldownCause) -> CooldownReason {
         CooldownCause::Credit => CooldownReason::Credit,
         CooldownCause::Observed => CooldownReason::Observed,
         CooldownCause::Panic => CooldownReason::Panic,
+        CooldownCause::Overload => CooldownReason::Overload,
         _ => CooldownReason::Unknown,
     }
 }

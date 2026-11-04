@@ -149,13 +149,18 @@ impl Codec for OpenAiResponses {
         ))
     }
 
-    fn encode_stream_failure(&self, message: &str) -> Vec<u8> {
+    fn encode_stream_failure(&self, status: u16, message: &str) -> Vec<u8> {
+        let code = if hofund_ir::vendor_overloaded(status, message) {
+            "server_is_overloaded"
+        } else {
+            "server_error"
+        };
         let body = serde_json::json!({
             "type": "response.failed",
             "response": {
                 "object": "response",
                 "status": "failed",
-                "error": {"code": "server_error", "message": message},
+                "error": {"code": code, "message": message},
             },
         });
         let mut out = Vec::new();
@@ -188,6 +193,22 @@ impl Codec for OpenAiResponses {
                         "message": message,
                     },
                     "output": [],
+                },
+            });
+            crate::sse::write_event(
+                &mut out,
+                Some("response.failed"),
+                &serde_json::to_string(&body).unwrap_or_else(|_| "{}".to_owned()),
+            );
+            return out;
+        }
+        if hofund_ir::vendor_overloaded(status, message) {
+            let body = serde_json::json!({
+                "type": "response.failed",
+                "response": {
+                    "object": "response",
+                    "status": "failed",
+                    "error": {"code": "server_is_overloaded", "message": message},
                 },
             });
             crate::sse::write_event(
@@ -3157,5 +3178,38 @@ mod tests {
         let value: serde_json::Value = serde_json::from_slice(&body).expect("json");
         assert_eq!(value["error"]["type"], "rate_limit_error");
         assert_eq!(value["error"]["message"], "slow down");
+    }
+
+    #[test]
+    fn d52_7_stream_failure_and_error_codes_for_overload() {
+        let codec = OpenAiResponses;
+        let overloaded =
+            codec.encode_stream_failure(529, r#"{"error":{"code":"server_is_overloaded"}}"#);
+        let value = parse_failed(&overloaded);
+        assert_eq!(value["response"]["error"]["code"], "server_is_overloaded");
+
+        let generic = codec.encode_stream_failure(502, "bad gateway");
+        let value = parse_failed(&generic);
+        assert_eq!(value["response"]["error"]["code"], "server_error");
+
+        let overflow = codec.encode_stream_error(400, "context_length_exceeded");
+        let value = parse_failed(&overflow);
+        assert_eq!(
+            value["response"]["error"]["code"],
+            "context_length_exceeded"
+        );
+
+        let stream = codec.encode_stream_error(503, "The model is overloaded");
+        let value = parse_failed(&stream);
+        assert_eq!(value["response"]["error"]["code"], "server_is_overloaded");
+    }
+
+    fn parse_failed(bytes: &[u8]) -> serde_json::Value {
+        let text = std::str::from_utf8(bytes).expect("utf8");
+        let data = text
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .expect("data line");
+        serde_json::from_str(data).expect("json")
     }
 }

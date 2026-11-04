@@ -2053,16 +2053,20 @@ mod tests {
 
     #[test]
     fn stream_error_frames_match_the_protocol() {
-        let responses = String::from_utf8(OpenAiResponses.encode_stream_error(502, "overloaded"))
+        let responses = String::from_utf8(OpenAiResponses.encode_stream_error(502, "bad gateway"))
             .expect("utf-8");
         assert!(responses.starts_with("event: error\ndata: "), "{responses}");
         assert!(responses.contains("\"type\":\"error\""), "{responses}");
         assert!(responses.contains("\"code\":502"), "{responses}");
         assert!(
-            responses.contains("\"message\":\"overloaded\""),
+            responses.contains("\"message\":\"bad gateway\""),
             "{responses}"
         );
         assert!(responses.ends_with("\n\n"), "{responses}");
+
+        let overloaded =
+            String::from_utf8(OpenAiResponses.encode_stream_error(502, "overloaded")).expect("utf-8");
+        assert!(overloaded.contains("server_is_overloaded"), "{overloaded}");
 
         let chat = String::from_utf8(OpenAiChat.encode_stream_error(500, "nope")).expect("utf-8");
         assert!(chat.starts_with("data: {\"error\":"), "{chat}");
@@ -2195,11 +2199,11 @@ mod tests {
     fn d22_stream_failure_frames_match_the_protocol() {
         let text = |bytes: Vec<u8>| String::from_utf8(bytes).expect("utf-8");
         assert_eq!(
-            text(OpenAiChat.encode_stream_failure("cut")),
+            text(OpenAiChat.encode_stream_failure(502, "cut")),
             "data: {\"error\":{\"message\":\"cut\",\"type\":\"api_error\"}}\n\n"
         );
         assert_eq!(
-            text(OpenAiResponses.encode_stream_failure("cut")),
+            text(OpenAiResponses.encode_stream_failure(502, "cut")),
             concat!(
                 "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":",
                 "{\"object\":\"response\",\"status\":\"failed\",\"error\":",
@@ -2207,11 +2211,11 @@ mod tests {
             )
         );
         assert_eq!(
-            text(GenerativeLanguage.encode_stream_failure("cut")),
+            text(GenerativeLanguage.encode_stream_failure(502, "cut")),
             "data: {\"error\":{\"code\":502,\"message\":\"cut\",\"status\":\"UNAVAILABLE\"}}\n\n"
         );
         assert_eq!(
-            text(AnthropicMessages.encode_stream_failure("cut")),
+            text(AnthropicMessages.encode_stream_failure(502, "cut")),
             "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"cut\"}}\n\n"
         );
     }
