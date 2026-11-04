@@ -741,7 +741,9 @@ impl ProcessBackend for StdProcess {
 
 /// One HTTP call the recording client saw.
 ///
-/// Header values are not stored. [`RecordedRequest::sensitive_headers`] is the
+/// Header values are not stored for sensitive headers.
+/// [`RecordedRequest::headers`] holds the rest for tests.
+/// [`RecordedRequest::sensitive_headers`] is the
 /// names of headers the caller marked sensitive.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -749,6 +751,7 @@ pub struct RecordedRequest {
     method: String,
     uri: String,
     body: Vec<u8>,
+    headers: Vec<(String, String)>,
     sensitive_headers: Vec<String>,
 }
 
@@ -769,6 +772,21 @@ impl RecordedRequest {
     #[must_use]
     pub fn body(&self) -> &[u8] {
         &self.body
+    }
+
+    /// Non-sensitive request headers, sorted by name.
+    #[must_use]
+    pub fn headers(&self) -> &[(String, String)] {
+        &self.headers
+    }
+
+    /// One non-sensitive header value, compared case-insensitively on the name.
+    #[must_use]
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
     }
 
     /// Sensitive header names, sorted. Values are not recorded.
@@ -846,16 +864,21 @@ impl RecordingHttp {
 
 fn recorded(request: &HttpRequest<Body>) -> RecordedRequest {
     let mut sensitive_headers = Vec::new();
+    let mut headers = Vec::new();
     for (name, value) in request.headers() {
         if value.is_sensitive() {
             sensitive_headers.push(name.as_str().to_owned());
+        } else if let Ok(text) = value.to_str() {
+            headers.push((name.as_str().to_owned(), text.to_owned()));
         }
     }
     sensitive_headers.sort();
+    headers.sort_by(|left, right| left.0.cmp(&right.0));
     RecordedRequest {
         method: request.method().to_string(),
         uri: request.uri().to_string(),
         body: request.body().bytes().to_vec(),
+        headers,
         sensitive_headers,
     }
 }

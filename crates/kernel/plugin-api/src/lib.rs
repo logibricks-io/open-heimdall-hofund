@@ -70,7 +70,10 @@ pub use completion::{Completion, CountOutcome, PROBE_CAP, ProbeReport};
 pub use config::{BuildError, ConfigError, RawTable, RawValue, Schema, ValidConfig};
 pub use error::{PluginError, PluginErrorKind};
 pub use forward::{Forward, RawAnswer, RawBody};
-pub use hofund_ir::{ContentPart, Request, Response, Role, StreamEvent, too_long, words_of};
+pub use hofund_ir::{
+    ContentPart, Message, Request, Response, Role, Stop, StopReason, StreamEvent, too_long,
+    words_of,
+};
 pub use host::{
     AccountLease, AccountsHandle, AuthResult, BindBlocked, ClockHandle, DirHandle, GatewayHandle,
     HostContext, HttpHandle, Job, JobId, JobSpec, LOOPBACK_CANCEL_PATH, LoopbackBinding,
