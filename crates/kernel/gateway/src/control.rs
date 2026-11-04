@@ -30,13 +30,14 @@ use hofund_control_proto::{
     MAX_REQUEST_BODY_BYTES, ModelListResponse, PicksResponse, PicksSetRequest,
     ProfileDeleteRequest, ProfileDetailResponse, ProfileListResponse, ProfileSaveRequest,
     ProfileSwitchRequest, ProfileSwitchResponse, ProviderKeyRequest, ProviderKeysResponse,
-    ProviderListResponse, ProviderTestRequest, ProviderTestResponse, QuotaAlertsResponse,
-    QuotaAlertsSetRequest, QuotaAlertsSetResponse, QuotaCreditsModesResponse,
-    QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryQuery, QuotaHistoryResponse,
-    QuotaQuery, QuotaResponse, ReloadRequest, RouteListResponse, RouteModelListResponse,
-    RouteQuery, SessionRouteResponse, ShutdownRequest, ShutdownResponse, StatusResponse,
-    TokenRotateRequest, TokenRotateResponse, Topic, UnroutedListResponse, UsageQuery,
-    UsageResponse, WarmupListResponse, WarmupRunRequest, WarmupRunResponse, decode_request,
+    ProviderListResponse, ProviderRenameRequest, ProviderRenameResponse, ProviderTestRequest,
+    ProviderTestResponse, QuotaAlertsResponse, QuotaAlertsSetRequest, QuotaAlertsSetResponse,
+    QuotaCreditsModesResponse, QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryQuery,
+    QuotaHistoryResponse, QuotaQuery, QuotaResponse, ReloadRequest, RouteListResponse,
+    RouteModelListResponse, RouteQuery, SessionRouteResponse, ShutdownRequest, ShutdownResponse,
+    StatusResponse, TokenRotateRequest, TokenRotateResponse, Topic, UnroutedListResponse,
+    UsageQuery, UsageResponse, WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
+    decode_request,
 };
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
@@ -231,6 +232,21 @@ pub trait ControlState: Send + Sync {
     fn picks(&self, id: String) -> ControlFuture<'_, PicksResponse>;
     /// Replaces or edits a provider's model picks.
     fn set_picks(&self, id: String, request: PicksSetRequest) -> ControlFuture<'_, PicksResponse>;
+    /// Renames a provider and every reference to it.
+    fn rename_provider(
+        &self,
+        _id: String,
+        _request: ProviderRenameRequest,
+    ) -> ControlFuture<'_, ProviderRenameResponse> {
+        Box::pin(async {
+            Err(ControlError::new(
+                ControlErrorKind::BadRequest,
+                "provider rename is not supported by this control state",
+                "control",
+            )
+            .into())
+        })
+    }
     /// Lists configured client-facing route models.
     fn route_models(&self) -> ControlFuture<'_, RouteModelListResponse>;
     /// Adds a pattern to `[catalog].disabled` and publishes config.
@@ -713,6 +729,7 @@ impl Control {
                 "/v1/hofund/providers/{id}/picks",
                 get(picks).put(set_picks).head(method_not_allowed),
             )
+            .route("/v1/hofund/providers/{id}/rename", post(rename_provider))
             .route(
                 "/v1/hofund/models",
                 get(route_models).head(method_not_allowed),
@@ -1252,6 +1269,22 @@ async fn set_picks(
         Err(failure) => return failure_response(failure),
     };
     operation_response!(state.control.state.set_picks(id, request).await)
+}
+
+async fn rename_provider(
+    State(state): State<HttpState>,
+    id: Result<AxumPath<String>, PathRejection>,
+    body: Bytes,
+) -> Response {
+    let id = match path_id(id) {
+        Ok(id) => id,
+        Err(failure) => return failure_response(failure),
+    };
+    let request = match decode_body::<ProviderRenameRequest>(&body) {
+        Ok(request) => request,
+        Err(failure) => return failure_response(failure),
+    };
+    operation_response!(state.control.state.rename_provider(id, request).await)
 }
 
 async fn route_models(State(state): State<HttpState>) -> Response {

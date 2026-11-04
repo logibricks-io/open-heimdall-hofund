@@ -12,13 +12,14 @@ use crate::{
     HealthResponse, MAX_REQUEST_BODY_BYTES, MAX_RESPONSE_BODY_BYTES, ModelListResponse,
     PicksResponse, PicksSetRequest, ProfileDeleteRequest, ProfileDetailResponse,
     ProfileListResponse, ProfileSaveRequest, ProfileSwitchRequest, ProfileSwitchResponse,
-    ProviderKeyRequest, ProviderKeysResponse, ProviderListResponse, ProviderSpendCapRequest,
-    ProviderSpendCapsResponse, ProviderTestRequest, ProviderTestResponse, QuotaAlertsResponse,
-    QuotaAlertsSetRequest, QuotaAlertsSetResponse, QuotaCreditsModesResponse,
-    QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryResponse, QuotaResponse,
-    ReloadRequest, RouteListResponse, RouteModelListResponse, SessionRouteResponse,
-    ShutdownRequest, ShutdownResponse, StatusResponse, TokenRotateRequest, TokenRotateResponse,
-    UnroutedListResponse, UsageResponse, WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
+    ProviderKeyRequest, ProviderKeysResponse, ProviderListResponse, ProviderRenameRequest,
+    ProviderRenameResponse, ProviderSpendCapRequest, ProviderSpendCapsResponse,
+    ProviderTestRequest, ProviderTestResponse, QuotaAlertsResponse, QuotaAlertsSetRequest,
+    QuotaAlertsSetResponse, QuotaCreditsModesResponse, QuotaCreditsSetRequest,
+    QuotaCreditsSetResponse, QuotaHistoryResponse, QuotaResponse, ReloadRequest, RouteListResponse,
+    RouteModelListResponse, SessionRouteResponse, ShutdownRequest, ShutdownResponse,
+    StatusResponse, TokenRotateRequest, TokenRotateResponse, UnroutedListResponse, UsageResponse,
+    WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
 };
 
 mod sealed {
@@ -225,6 +226,7 @@ request!(ConfigApplyRequest, validate);
 request!(ReloadRequest, validate);
 request!(ProviderTestRequest, validate);
 request!(PicksSetRequest, validate);
+request!(ProviderRenameRequest);
 request!(AgentPlanRequest, validate);
 request!(AgentConnectRequest, validate);
 request!(AgentDisconnectRequest, validate);
@@ -296,6 +298,7 @@ response!(
     StatusResponse,
     ConfigValidationResponse,
     ProviderListResponse,
+    ProviderRenameResponse,
     ProviderKeysResponse,
     ProviderSpendCapsResponse,
     ProviderTestResponse,

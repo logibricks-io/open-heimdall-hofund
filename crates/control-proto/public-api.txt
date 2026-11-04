@@ -466,6 +466,16 @@ ProviderKeysResponse.version
 ProviderListResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
 ProviderListResponse.providers
 ProviderListResponse.version
+ProviderRenameRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
+ProviderRenameRequest.new_id
+ProviderRenameRequest.version
+ProviderRenameRequest::fn new (new_id : impl Into < String >) -> Self
+ProviderRenameResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+ProviderRenameResponse.agents
+ProviderRenameResponse.disk_revision
+ProviderRenameResponse.from
+ProviderRenameResponse.to
+ProviderRenameResponse.version
 ProviderSpendCap derives(Clone, Debug, PartialEq, Serialize, Deserialize)
 ProviderSpendCap.key_id
 ProviderSpendCap.period

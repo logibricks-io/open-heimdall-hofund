@@ -15,16 +15,16 @@ use hofund_control_proto::{
     GatewayKeyRestoreRequest, HealthResponse, ModelEntry, ModelListResponse, PicksResponse,
     PicksSetRequest, ProfileDeleteRequest, ProfileDetailResponse, ProfileListResponse,
     ProfileSaveRequest, ProfileSwitchRequest, ProfileSwitchResponse, ProviderKeyRequest,
-    ProviderKeysResponse, ProviderListResponse, ProviderSpendCap, ProviderSpendCapPeriod,
-    ProviderSpendCapRequest, ProviderSpendCapsResponse, ProviderSummary, ProviderTestRequest,
-    ProviderTestResponse, ProviderTestResult, QuotaAlertsResponse, QuotaAlertsSetRequest,
-    QuotaAlertsSetResponse, QuotaCreditsModesResponse, QuotaCreditsSetRequest,
-    QuotaCreditsSetResponse, QuotaHistoryQuery, QuotaHistoryResponse, QuotaQuery, QuotaResponse,
-    RouteListResponse, RouteModel, RouteModelListResponse, RouteQuery, RouteReserve,
-    SessionRouteResponse, ShutdownRequest, ShutdownResponse, ShutdownState, StatusResponse,
-    TokenRotateRequest, TokenRotateResponse, UnroutedListResponse, UsageBreakdownBy,
-    UsageBreakdownGroup, UsagePeriod, UsageQuery, UsageResponse, UsageRow, UsageTotals,
-    WarmupAccountRow, WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
+    ProviderKeysResponse, ProviderListResponse, ProviderRenameRequest, ProviderRenameResponse,
+    ProviderSpendCap, ProviderSpendCapPeriod, ProviderSpendCapRequest, ProviderSpendCapsResponse,
+    ProviderSummary, ProviderTestRequest, ProviderTestResponse, ProviderTestResult,
+    QuotaAlertsResponse, QuotaAlertsSetRequest, QuotaAlertsSetResponse, QuotaCreditsModesResponse,
+    QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryQuery, QuotaHistoryResponse,
+    QuotaQuery, QuotaResponse, RouteListResponse, RouteModel, RouteModelListResponse, RouteQuery,
+    RouteReserve, SessionRouteResponse, ShutdownRequest, ShutdownResponse, ShutdownState,
+    StatusResponse, TokenRotateRequest, TokenRotateResponse, UnroutedListResponse,
+    UsageBreakdownBy, UsageBreakdownGroup, UsagePeriod, UsageQuery, UsageResponse, UsageRow,
+    UsageTotals, WarmupAccountRow, WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
 };
 use hofund_control_proto::{
     ConfigApplyRequest, ConfigResponse, ConfigValidateRequest, ConfigValidationResponse,
@@ -701,6 +701,33 @@ impl ControlState for DaemonControl {
             })
             .map(|(picks, revision)| picks_response(&picks, revision));
         Box::pin(async move { result })
+    }
+
+    fn rename_provider(
+        &self,
+        id: String,
+        request: ProviderRenameRequest,
+    ) -> ControlFuture<'_, ProviderRenameResponse> {
+        Box::pin(async move {
+            self.provider_exists(&id)?;
+            let new_id = request.new_id.trim();
+            if new_id.is_empty() {
+                return Err(ControlFailure::from(ControlError::new(
+                    ControlErrorKind::Unprocessable,
+                    "a provider's new id must not be empty",
+                    "control",
+                )));
+            }
+            super::provider_rename::rename_provider(
+                &self.ops,
+                &self.models,
+                &self.keys,
+                self.registry.agents(),
+                &id,
+                new_id,
+            )
+            .await
+        })
     }
 
     fn route_models(&self) -> ControlFuture<'_, RouteModelListResponse> {

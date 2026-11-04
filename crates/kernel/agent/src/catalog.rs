@@ -90,6 +90,34 @@ impl Catalog {
             .find(|adapter| adapter.id() == name)
     }
 
+    /// Moves every detected agent off models spelled with `from/` to `to/`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentError`] when a managed file cannot be parsed or written.
+    pub fn rename_provider_refs(
+        &self,
+        session: &Session,
+        from: &str,
+        to: &str,
+    ) -> Result<Vec<String>, AgentError> {
+        let from = from.trim().to_ascii_lowercase();
+        let to = to.trim().to_ascii_lowercase();
+        if from == to {
+            return Ok(Vec::new());
+        }
+        let mut moved = Vec::new();
+        for adapter in &self.adapters {
+            if !adapter.detect(session) {
+                continue;
+            }
+            if adapter.rename_provider_refs(session, &from, &to)? {
+                moved.push(adapter.id().to_owned());
+            }
+        }
+        Ok(moved)
+    }
+
     pub(crate) fn profile_snapshot(&self, session: &Session) -> Result<ProfileFields, AgentError> {
         let mut fields = ProfileFields::new();
         for description in self.descriptions {
@@ -635,6 +663,72 @@ impl Engine {
             )));
         }
         self.apply_with(target, Choice::Set(id))
+    }
+
+    fn rename_provider_refs(
+        &self,
+        session: &Session,
+        from: &str,
+        to: &str,
+    ) -> Result<bool, AgentError> {
+        if !self.detect(session) {
+            return Ok(false);
+        }
+        let mut changed = false;
+        for chosen in self.chosen()? {
+            let Some(before) = read_optional(&chosen.path)? else {
+                continue;
+            };
+            let text = utf8(&chosen.path, &before)?;
+            let mut assignments = Vec::new();
+            if let Some(model) = self.model
+                && let Some(value) = get(chosen.kind, text, model.key)?
+                && let Some(updated) =
+                    rewrite_provider_model_value(&value, from, to, self.model_prefix)
+            {
+                assignments.push(Assignment {
+                    key: model.key,
+                    value: updated,
+                    raw_json: false,
+                    shared: None,
+                });
+            }
+            for set in &self.sets {
+                if chosen.file != set.file {
+                    continue;
+                }
+                if let Some(value) = get(chosen.kind, text, set.key)?
+                    && let Some(updated) =
+                        rewrite_provider_model_value(&value, from, to, self.model_prefix)
+                {
+                    assignments.push(Assignment {
+                        key: set.key,
+                        value: updated,
+                        raw_json: false,
+                        shared: None,
+                    });
+                }
+            }
+            if let Some(layout) = self.active_provider
+                && let Some(provider) = string_at(chosen.kind, text, layout.key())?
+                && provider.eq_ignore_ascii_case(from)
+            {
+                assignments.push(Assignment {
+                    key: layout.key(),
+                    value: to.to_owned(),
+                    raw_json: false,
+                    shared: None,
+                });
+            }
+            if assignments.is_empty() {
+                continue;
+            }
+            backup_once(&chosen.path)?;
+            let after = render(chosen.kind, Some(text), &assignments)?;
+            write_atomic(&chosen.path, &after)?;
+            changed = true;
+        }
+        Ok(changed)
     }
 
     /// Clears the route pick. A connected agent is re-applied so the snapshot
@@ -1901,6 +1995,16 @@ impl AgentAdapter for Compiled {
         self.engine(session)?.set_model(target, model)
     }
 
+    fn rename_provider_refs(
+        &self,
+        session: &Session,
+        from: &str,
+        to: &str,
+    ) -> Result<bool, AgentError> {
+        self.engine(session)?
+            .rename_provider_refs(session, from, to)
+    }
+
     fn configured_model(&self, session: &Session) -> Result<Option<String>, AgentError> {
         self.engine(session)?.configured_model()
     }
@@ -1916,6 +2020,25 @@ impl AgentAdapter for Compiled {
     ) -> Result<ConnectionStatus, AgentError> {
         self.engine(session)?.status(session, target)
     }
+}
+
+fn rewrite_provider_model_value(
+    value: &str,
+    from: &str,
+    to: &str,
+    prefix: Option<&str>,
+) -> Option<String> {
+    let renamed = hofund_config::renamed_ref(value, from, to);
+    if renamed != value {
+        return Some(renamed);
+    }
+    let prefix = prefix?;
+    let plain = value.strip_prefix(prefix)?;
+    let renamed = hofund_config::renamed_ref(plain, from, to);
+    if renamed == plain {
+        return None;
+    }
+    Some(format!("{prefix}{renamed}"))
 }
 
 fn model_route(
