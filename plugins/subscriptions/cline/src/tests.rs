@@ -360,7 +360,7 @@ fn prettify_names_models() {
 }
 
 #[test]
-fn a2a_43_client_headers_identify_as_cline_desktop() {
+fn a2a_44_client_headers_identify_as_cline_desktop() {
     let headers = crate::client::headers(Some("task-1"));
     let get = |name: &str| {
         headers
