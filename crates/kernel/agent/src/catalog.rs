@@ -263,6 +263,7 @@ struct EngineSet {
     file: &'static str,
     key: &'static str,
     slot: ApiSlot,
+    providers_table: Option<bool>,
 }
 
 struct Engine {
@@ -346,6 +347,7 @@ impl Engine {
                 file: set.file(),
                 key: set.key(),
                 slot: set.slot().clone(),
+                providers_table: set.providers_table(),
             })
             .collect();
         let model_file = description.model_file().or_else(|| {
@@ -1029,7 +1031,10 @@ impl Engine {
                 continue;
             };
             let text = utf8(&path, &bytes)?;
-            for set in sets {
+            for set in sets
+                .iter()
+                .filter(|set| self.set_applies(set, kind, Some(text)))
+            {
                 if self.remove_with_models(set, target) {
                     if get(kind, text, set.key)
                         .map_err(|error| annotate(&path, error))?
@@ -1362,6 +1367,16 @@ impl Engine {
         creator.or(fallback)
     }
 
+    fn set_applies(&self, set: &EngineSet, kind: FileKind, existing: Option<&str>) -> bool {
+        let Some(want_table) = set.providers_table else {
+            return true;
+        };
+        let has_table = existing
+            .and_then(|text| get(kind, text, "providers").ok().flatten())
+            .is_some();
+        want_table == has_table
+    }
+
     fn assignments_for(
         &self,
         sets: &[&EngineSet],
@@ -1372,6 +1387,7 @@ impl Engine {
         restore_user_model_on_clear: bool,
     ) -> Vec<Assignment> {
         sets.iter()
+            .filter(|set| self.set_applies(set, kind, existing))
             .filter_map(|set| {
                 let value = self.slot_value(
                     set,

@@ -17,6 +17,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Tencent Cloud Token Plan preset regions use `tokenhub.tencentmaas.com` plan
+  endpoints; saved providers with the old LKEAP plan bases migrate on load (D-53).
+
+- Conversation ids without a session header hash agent-authored opening user
+  turns through the first user-owned message, stripping `cache_control` before
+  hashing (D-54).
+
+- Named gateway keys may call user routing groups only when scope lists
+  `group/<id>` or `group/*`; `/v1/models` hides groups the key cannot use (D-55).
+
+- OpenCode agent connect writes `providers.hofund` when the config already uses
+  the OpenCode 2 `providers` table; legacy `provider`-only configs stay on the
+  old shape (D-56).
+
 - Routing strategy `drain` keeps one pool member until it rests, runs out of
   allowance without credits, fails over, or leaves the pool, then sticks to the
   next member in listed order (D-41).

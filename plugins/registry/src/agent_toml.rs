@@ -123,6 +123,7 @@ pub struct SetToml {
     pub file: String,
     pub key: String,
     pub slot: SlotToml,
+    pub when_providers_table: Option<bool>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -1418,11 +1419,15 @@ pub fn render(agent: &AgentToml) -> (String, String) {
     ));
     for set in &agent.sets {
         output.push_str(&format!(
-            "    hofund_plugin_api::AgentSet::from_static({:?}, {:?}, {}),\n",
+            "    hofund_plugin_api::AgentSet::from_static({:?}, {:?}, {})",
             set.file,
             set.key,
             render_slot(&set.slot),
         ));
+        if let Some(table) = set.when_providers_table {
+            output.push_str(&format!(".with_providers_table(Some({table}))"));
+        }
+        output.push_str(",\n");
     }
     output.push_str("];\n");
     output.push_str(&format!(

@@ -2331,6 +2331,9 @@ pub struct AgentSet {
     file: &'static str,
     key: &'static str,
     slot: Slot,
+    /// When `Some(true)`, apply only if the config already has a top-level
+    /// `providers` object. When `Some(false)`, apply only when it does not.
+    providers_table: Option<bool>,
 }
 
 impl AgentSet {
@@ -2346,7 +2349,20 @@ impl AgentSet {
             !file.is_empty() && !key.is_empty(),
             "agent set file and key are required"
         );
-        Self { file, key, slot }
+        Self {
+            file,
+            key,
+            slot,
+            providers_table: None,
+        }
+    }
+
+    /// Limits this set to legacy `provider.*` or OpenCode 2 `providers.*` layouts.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn with_providers_table(mut self, providers_table: Option<bool>) -> Self {
+        self.providers_table = providers_table;
+        self
     }
 
     /// The file id this set writes.
@@ -2365,6 +2381,12 @@ impl AgentSet {
     #[must_use]
     pub const fn slot(&self) -> &Slot {
         &self.slot
+    }
+
+    /// Whether this set targets the legacy `provider` table or the v2 `providers` table.
+    #[must_use]
+    pub const fn providers_table(&self) -> Option<bool> {
+        self.providers_table
     }
 }
 

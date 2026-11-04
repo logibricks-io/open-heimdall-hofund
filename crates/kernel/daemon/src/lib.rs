@@ -2485,7 +2485,7 @@ mod tests {
             (
                 "protocol = \"anthropic-messages\"\n",
                 hofund_provider::Wire::Messages,
-                "https://api.lkeap.cloud.tencent.com/plan/anthropic",
+                "https://tokenhub.tencentmaas.com/plan/anthropic",
                 "anthropic",
             ),
             (

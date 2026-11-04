@@ -597,9 +597,9 @@ const ROWS: &[Row] = &[
         kind: "vendor",
         catalog: "",
         note: "Token Plan - pay as you go",
-        chat: "https://api.lkeap.cloud.tencent.com/plan/v3",
-        responses: "",
-        anthropic: "https://api.lkeap.cloud.tencent.com/plan/anthropic",
+        chat: "https://tokenhub.tencentmaas.com/plan/v3",
+        responses: "https://tokenhub.tencentmaas.com/plan/v3",
+        anthropic: "https://tokenhub.tencentmaas.com/plan/anthropic",
         website: "https://cloud.tencent.com/document/product/1823/130060",
         keys_url: "https://console.cloud.tencent.com/tokenhub/tokenplan",
     },
@@ -809,6 +809,7 @@ const BAIDU_QIANFAN_MODELS: &[&str] = &[
 ];
 
 const TENCENT_PLAN_MODELS: &[&str] = &[
+    "auto",
     "tc-code-latest",
     "glm-5.3",
     "glm-5.3-flash",
@@ -817,12 +818,20 @@ const TENCENT_PLAN_MODELS: &[&str] = &[
     "glm-5",
     "kimi-k3",
     "kimi-k2.7-code",
+    "kimi-k2.7-code-highspeed",
+    "kimi-k2.6",
     "deepseek-v4-pro-202606",
     "deepseek-v4-flash-202605",
+    "deepseek-v4.1-flash",
+    "deepseek-v4-pro",
+    "deepseek-v4-pro-0813",
+    "deepseek-v4-flash-0731",
     "minimax-m3",
     "minimax-m2.7",
     "hy4-preview",
     "hy3",
+    "mimo-v2.6-pro",
+    "mimo-v2.6-flash",
 ];
 
 const TENCENT_ENTERPRISE_MODELS: &[&str] = &[
@@ -1329,8 +1338,9 @@ const BATCH_DETAILS: &[(&str, Details)] = &[
                 Region {
                     id: "plan",
                     name: "Plan - China",
-                    chat: "https://api.lkeap.cloud.tencent.com/plan/v3",
-                    anthropic: "https://api.lkeap.cloud.tencent.com/plan/anthropic",
+                    chat: "https://tokenhub.tencentmaas.com/plan/v3",
+                    responses: "https://tokenhub.tencentmaas.com/plan/v3",
+                    anthropic: "https://tokenhub.tencentmaas.com/plan/anthropic",
                     website: "https://cloud.tencent.com/document/product/1823/130060",
                     keys_url: "https://console.cloud.tencent.com/tokenhub/tokenplan",
                     models: Some(TENCENT_PLAN_MODELS),
