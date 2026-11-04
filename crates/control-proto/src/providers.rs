@@ -343,3 +343,53 @@ fn validate_ids(field: &str, ids: &[String]) -> Result<(), ControlError> {
     }
     Ok(())
 }
+
+/// Provider rename request body.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+#[serde(deny_unknown_fields)]
+pub struct ProviderRenameRequest {
+    /// Body wire version.
+    pub version: u32,
+    /// New provider id.
+    pub new_id: String,
+}
+
+impl ProviderRenameRequest {
+    /// Constructs a rename request.
+    #[must_use]
+    pub fn new(new_id: impl Into<String>) -> Self {
+        Self {
+            version: API_VERSION,
+            new_id: new_id.into(),
+        }
+    }
+}
+
+/// Provider rename outcome.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct ProviderRenameResponse {
+    /// Body wire version.
+    pub version: u32,
+    /// Previous provider id.
+    pub from: String,
+    /// New provider id.
+    pub to: String,
+    /// Config revision after the rename.
+    pub disk_revision: String,
+    /// Agent ids whose model references were rewritten.
+    pub agents: Vec<String>,
+}
+
+impl Default for ProviderRenameResponse {
+    fn default() -> Self {
+        Self {
+            version: API_VERSION,
+            from: String::new(),
+            to: String::new(),
+            disk_revision: String::new(),
+            agents: Vec::new(),
+        }
+    }
+}

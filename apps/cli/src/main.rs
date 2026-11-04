@@ -1796,8 +1796,11 @@ mod tests {
         );
         assert!(command(&["provider", "set", "p"]).is_err());
         assert_eq!(
-            command(&["provider", "set", "p", "models=a", "id=q"]),
-            Err(crate::provider_edit::RENAME_UNSUPPORTED.to_owned())
+            command(&["provider", "set", "p", "models=a", "id=q"]).expect("set"),
+            Command::ProviderSet {
+                id: "p".to_owned(),
+                pairs: pairs(&["models=a", "id=q"], "set").expect("pairs"),
+            }
         );
         assert_eq!(
             command(&["provider", "key", "p", "sk"]),

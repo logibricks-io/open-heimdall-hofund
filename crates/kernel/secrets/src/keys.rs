@@ -510,6 +510,42 @@ impl KeyStore {
         Ok(moved)
     }
 
+    /// Rewrites provider-scoped model and account patterns after a provider id change.
+    pub fn replace_provider(&self, from: &str, to: &str) -> Result<(), SecretError> {
+        if from == to {
+            return Ok(());
+        }
+        let _guard = self.lock()?;
+        let mut keys = self.load_migrated()?;
+        let from_prefix = format!("{from}/");
+        let to_prefix = format!("{to}/");
+        let mut changed = false;
+        for key in &mut keys {
+            for model in &mut key.models {
+                if let Some(rest) = model.strip_prefix(&from_prefix) {
+                    *model = format!("{to_prefix}{rest}");
+                    changed = true;
+                } else if model.eq_ignore_ascii_case(from) {
+                    *model = to.to_owned();
+                    changed = true;
+                }
+            }
+            for account in &mut key.accounts {
+                if let Some(rest) = account.strip_prefix(&from_prefix) {
+                    *account = format!("{to_prefix}{rest}");
+                    changed = true;
+                } else if account.eq_ignore_ascii_case(from) {
+                    *account = to.to_owned();
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.save(&keys)?;
+        }
+        Ok(())
+    }
+
     /// Rewrites exact model ids after a model move; wildcard patterns stay unchanged.
     pub fn move_model(&self, from: &str, to: &str) -> Result<(), SecretError> {
         let _guard = self.lock()?;
@@ -1252,5 +1288,57 @@ mod tests {
             ..Key::default()
         });
         fs::write(path, serde_json::to_string_pretty(&keys).expect("json")).expect("write");
+    }
+
+    #[test]
+    fn g3_7_replace_provider_rewrites_scopes_and_skips_unrelated_patterns() {
+        let (_dir, store) = scratch();
+        let mut keys = store.export().expect("export");
+        keys[0].models = vec![
+            "chat/model-a".to_owned(),
+            "chat".to_owned(),
+            "abc/extra".to_owned(),
+            "ab".to_owned(),
+            "other/x".to_owned(),
+        ];
+        keys[0].accounts = vec![
+            "chat/account".to_owned(),
+            "chat".to_owned(),
+            "abc/nested".to_owned(),
+            "other/y".to_owned(),
+        ];
+        store.restore(&keys).expect("seed scopes");
+        let path = store.path();
+        let before = fs::read_to_string(path).expect("store before");
+
+        store.replace_provider("chat", "team").expect("rename");
+
+        let key = store.list().expect("list")[0].clone();
+        assert_eq!(
+            key.models,
+            [
+                "team/model-a".to_owned(),
+                "team".to_owned(),
+                "abc/extra".to_owned(),
+                "ab".to_owned(),
+                "other/x".to_owned(),
+            ]
+        );
+        assert_eq!(
+            key.accounts,
+            [
+                "team/account".to_owned(),
+                "team".to_owned(),
+                "abc/nested".to_owned(),
+                "other/y".to_owned(),
+            ]
+        );
+        assert_ne!(fs::read_to_string(path).expect("store after"), before);
+
+        let unchanged = fs::read_to_string(path).expect("store stable");
+        store.replace_provider("ghost", "missing").expect("noop");
+        assert_eq!(fs::read_to_string(path).expect("store still"), unchanged);
+        store.replace_provider("chat", "chat").expect("identity");
+        assert_eq!(fs::read_to_string(path).expect("store still"), unchanged);
     }
 }
