@@ -65,18 +65,6 @@ fn device_auth_body() -> Vec<u8> {
     .into_bytes()
 }
 
-fn register_body() -> Vec<u8> {
-    json!({
-        "accessToken": "factory-access-1",
-        "refreshToken": "factory-refresh-1",
-        "expiresAt": "2030-01-01T00:00:00Z",
-        "email": "user@factory.test",
-        "userId": "uid-1"
-    })
-    .to_string()
-    .into_bytes()
-}
-
 fn seed_oauth(host: &TestHost) -> AccountId {
     let id = AccountId::from_static("a-0000000000000001");
     let blob = SecretObject::new()
@@ -112,10 +100,14 @@ fn a2b_12_device_sign_in_polls_workos_then_registers() {
     assert_eq!(user_code, "WDJB-MJHT");
 
     host.http().enqueue(
-        br#"{"access_token":"wo-access","refresh_token":"wo-refresh","token_type":"Bearer"}"#
+        br#"{"access_token":"wo-access","refresh_token":"wo-refresh","token_type":"Bearer","expires_in":3600}"#
             .to_vec(),
     );
-    host.http().enqueue(register_body());
+    host.http().enqueue(
+        json!({"email": "user@factory.test", "userId": "uid-1", "orgId": "org-1", "region": "eu"})
+            .to_string()
+            .into_bytes(),
+    );
     let id = block_on(sub.complete_sign_in(&ctx(), SignInProof::Await, host.context()))
         .expect("complete");
     let blob = block_on(host.context().accounts().secret(&id))
@@ -124,21 +116,24 @@ fn a2b_12_device_sign_in_polls_workos_then_registers() {
     let parsed = SecretObject::parse(&blob).expect("blob");
     assert_eq!(parsed.text("auth_type"), Some("oauth"));
     assert!(parsed.secret("refresh_token").is_some());
+    assert_eq!(parsed.text("region"), Some("eu"));
+    assert_eq!(parsed.text("active_organization_id"), Some("org-1"));
+    let calls = host.http().calls();
+    assert!(
+        calls
+            .iter()
+            .any(|call| call.uri().contains("/api/cli/whoami"))
+    );
 }
 
 #[test]
-fn a2b_13_refresh_rotates_tokens() {
+fn a2b_13_refresh_rotates_tokens_via_workos() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
     let id = seed_oauth(&host);
     host.http().enqueue(
-        json!({
-            "accessToken": "factory-access-2",
-            "refreshToken": "factory-refresh-2",
-            "expiresAt": "2031-01-01T00:00:00Z"
-        })
-        .to_string()
-        .into_bytes(),
+        br#"{"access_token":"factory-access-2","refresh_token":"factory-refresh-2","expires_in":3600,"token_type":"Bearer"}"#
+            .to_vec(),
     );
     block_on(tokens::refresh_for_test(
         host.context().clone(),
@@ -158,6 +153,12 @@ fn a2b_13_refresh_rotates_tokens() {
     assert_eq!(
         parsed.secret("refresh_token").as_ref().map(secret_text),
         Some("factory-refresh-2")
+    );
+    assert!(
+        host.http()
+            .calls()
+            .last()
+            .is_some_and(|call| { call.uri().contains("workos.test/authenticate") })
     );
 }
 
@@ -206,9 +207,11 @@ fn a2b_16_chat_upstream_round_trip() {
     let query = ProbeQuery::new(ProtocolId::OPENAI_CHAT, "claude-sonnet-5-5").expect("query");
     block_on(upstream.probe(&query)).expect("probe");
     let calls = host.http().calls();
-    assert!(calls.iter().any(
-        |call| call.uri().contains("/api/llm/c/v1") && call.uri().contains("chat/completions")
-    ));
+    assert!(
+        calls
+            .iter()
+            .any(|call| call.uri().contains("/api/llm/a/v1") && call.uri().contains("messages"))
+    );
     assert!(calls.iter().any(|call| {
         call.sensitive_headers()
             .contains(&"authorization".to_owned())

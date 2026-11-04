@@ -1,4 +1,4 @@
-//! Factory chat completions as an OpenAI Chat upstream.
+//! Factory chat upstream routed per model wire.
 
 use std::sync::Arc;
 
@@ -10,6 +10,7 @@ use hofund_plugin_sdk::wire::{self, Target};
 
 use crate::Endpoints;
 use crate::client;
+use crate::models;
 use crate::tokens::{self, Bearer};
 
 pub(crate) struct FactoryUpstream {
@@ -37,10 +38,15 @@ impl FactoryUpstream {
         request: Request,
         inbound: ProtocolId,
     ) -> Result<Completion, PluginError> {
+        let (wire, path) = models::wire_target(&request.model);
         let api_base = self.endpoints.api_base_for_region(bearer.region.as_deref());
-        let target = Target::new(ProtocolId::OPENAI_CHAT, format!("{api_base}/api/llm/c/v1"))
+        let mut headers = client::chat_headers();
+        if let Some(org) = &bearer.active_org {
+            headers.push(("x-factory-org-id".to_owned(), org.clone()));
+        }
+        let target = Target::new(wire, format!("{api_base}{path}"))
             .credential(CredentialStyle::Bearer)
-            .headers(client::chat_headers());
+            .headers(headers);
         wire::execute(
             self.host.http(),
             &target,

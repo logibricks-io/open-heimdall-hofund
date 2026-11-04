@@ -272,6 +272,7 @@ impl Subscription for Factory {
             self.endpoints.api_base_for_region(bearer.region.as_deref()),
             "/api/billing/limits",
             Some(&bearer.token),
+            bearer.active_org.as_deref(),
             true,
         )
         .await;

@@ -17,6 +17,8 @@ const STANDARD: [WindowSpec; 3] = [
 fn pool_windows(
     pool: Option<&Value>,
     prefix: &str,
+    core: bool,
+    extra_funded: bool,
     out: &mut Vec<QuotaWindow>,
 ) -> Result<(), PluginError> {
     let Some(Value::Object(map)) = pool else {
@@ -43,8 +45,9 @@ fn pool_windows(
         } else {
             format!("{prefix}{}", spec.name)
         };
+        let blocking = !core && !extra_funded;
         let window = QuotaWindow::new(name, used.min(100), Some(100), resets)?;
-        out.push(window.with_blocking(true));
+        out.push(window.with_blocking(blocking));
     }
     Ok(())
 }
@@ -60,18 +63,34 @@ fn window_end(value: Option<&Value>) -> Option<std::time::SystemTime> {
     None
 }
 
+fn extra_funded(value: &Value) -> bool {
+    value
+        .get("extraUsageAllowed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        && value
+            .get("extraUsageBalanceCents")
+            .and_then(Value::as_f64)
+            .is_some_and(|cents| cents > 0.0)
+}
+
 /// Parses Factory billing limits into quota windows.
 pub(crate) fn windows_from_limits(value: &Value) -> Result<Vec<QuotaWindow>, PluginError> {
     let limits = value.get("limits").unwrap_or(value);
+    let funded = extra_funded(value);
     let mut out = Vec::new();
     pool_windows(
         limits.get("standard").or_else(|| limits.get("Standard")),
         "",
+        false,
+        funded,
         &mut out,
     )?;
     pool_windows(
         limits.get("core").or_else(|| limits.get("Core")),
         "Droid Core · ",
+        true,
+        funded,
         &mut out,
     )?;
     if let Some(extra) = value
@@ -110,7 +129,38 @@ mod tests {
         assert_eq!(windows.len(), 2);
         assert_eq!(windows[0].name(), "5 hours");
         assert_eq!(windows[0].used(), 50);
+        assert!(windows[0].blocking());
         assert_eq!(windows[1].name(), "30 days");
         assert_eq!(windows[1].used(), 10);
+    }
+
+    #[test]
+    fn a2b_31_core_windows_do_not_block() {
+        let limits = json!({
+            "limits": {
+                "core": {
+                    "fiveHour": {"usedPercent": 100.0, "windowEnd": "2030-01-01T00:00:00Z"},
+                }
+            }
+        });
+        let windows = windows_from_limits(&limits).expect("windows");
+        assert_eq!(windows.len(), 1);
+        assert!(!windows[0].blocking());
+    }
+
+    #[test]
+    fn a2b_32_extra_usage_makes_standard_non_blocking() {
+        let limits = json!({
+            "extraUsageAllowed": true,
+            "extraUsageBalanceCents": 500.0,
+            "limits": {
+                "standard": {
+                    "fiveHour": {"usedPercent": 100.0, "windowEnd": "2030-01-01T00:00:00Z"},
+                }
+            }
+        });
+        let windows = windows_from_limits(&limits).expect("windows");
+        assert_eq!(windows.len(), 2);
+        assert!(!windows[0].blocking());
     }
 }

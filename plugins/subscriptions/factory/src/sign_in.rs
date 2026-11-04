@@ -3,13 +3,13 @@
 use hofund_plugin_api::{AccountId, HostContext, PluginError, SecretString};
 use hofund_plugin_sdk::Call;
 use hofund_plugin_sdk::form_body;
-use hofund_plugin_sdk::json::{self, Value};
+use hofund_plugin_sdk::json::Value;
 use hofund_plugin_sdk::oauth::device::{self, DeviceStart};
 use hofund_plugin_sdk::oauth::secret_text;
 use hofund_plugin_sdk::oauth::{SecretObject, account_id_from};
 
 use crate::api;
-use crate::tokens::{self, AuthKind, parse_register};
+use crate::tokens::{self, AuthKind};
 use crate::{Endpoints, WORKOS_CLIENT_ID};
 
 /// A device authorization waiting for approval.
@@ -64,7 +64,7 @@ pub(crate) fn verification_page(pending: &DevicePending) -> String {
         .unwrap_or_else(|| pending.start.verification_uri().to_owned())
 }
 
-/// Polls WorkOS, registers with Factory, and returns stored credentials.
+/// Polls WorkOS, enriches with Factory whoami, and returns stored credentials.
 pub(crate) async fn device_finish(
     host: &HostContext,
     endpoints: &Endpoints,
@@ -81,62 +81,53 @@ pub(crate) async fn device_finish(
             .fetch(http)
     })
     .await?;
-    register_workos(host, endpoints, set.access(), set.refresh()).await
+    let refresh = set
+        .refresh()
+        .cloned()
+        .ok_or_else(|| PluginError::auth("WorkOS sent back no refresh token"))?;
+    store_workos_pair(host, endpoints, set.access().clone(), refresh).await
 }
 
-async fn register_workos(
+async fn store_workos_pair(
     host: &HostContext,
     endpoints: &Endpoints,
-    access: &SecretString,
-    refresh: Option<&SecretString>,
+    access: SecretString,
+    refresh: SecretString,
 ) -> Result<SignedIn, PluginError> {
-    let refresh_text = refresh.map(secret_text).unwrap_or("");
-    let body = json::json!({
-        "accessToken": secret_text(access),
-        "refreshToken": refresh_text,
-    });
-    let data = api::post_json(
-        host,
-        endpoints.api_base(),
-        "/api/v1/auth/register",
-        &body,
-        None,
-        false,
-    )
-    .await?;
-    let parsed = parse_register(&data, refresh, host.clock().now())?;
-    store_signed_in(parsed)
-}
-
-fn store_signed_in(parsed: tokens::ParsedAuth) -> Result<SignedIn, PluginError> {
-    let label = parsed
-        .email
+    let who = api::whoami(host, endpoints.api_base(), &access, None).await?;
+    let email = first_string(&who, &["email"]);
+    let uid = first_string(&who, &["userId"]);
+    let region = first_string(&who, &["region"]);
+    let active_org = first_string(&who, &["orgId"]);
+    let label = email
         .clone()
-        .or_else(|| parsed.name.clone())
-        .unwrap_or_else(|| parsed.uid.clone().unwrap_or_else(|| "Factory".to_owned()));
-    let key = parsed
-        .account_id
+        .or(uid.clone())
+        .unwrap_or_else(|| "Factory".to_owned());
+    let key = email
         .clone()
-        .or(parsed.email.clone())
-        .or(parsed.uid.clone())
+        .or(uid.clone())
         .unwrap_or_else(|| label.clone());
     let id = account_id_from(&["factory", &key.to_ascii_lowercase()]);
+    let expires_ms = tokens::expires_ms_from_access(&access, host.clock().now());
     let mut blob = SecretObject::new()
         .with_number("v", 1)
         .with_text("auth_type", AuthKind::Oauth.as_str())
-        .with_secret("access_token", &parsed.access)
-        .with_secret("refresh_token", &parsed.refresh)
-        .with_number("expires_ms", parsed.expires_ms);
-    if let Some(uid) = parsed.uid {
-        blob = blob.with_text("uid", &uid);
+        .with_secret("access_token", &access)
+        .with_secret("refresh_token", &refresh)
+        .with_number("expires_ms", expires_ms)
+        .with_text("account_id", &key);
+    if let Some(ref addr) = email {
+        blob = blob.with_text("email", addr);
     }
-    if let Some(email) = parsed.email {
-        blob = blob.with_text("email", &email);
+    if let Some(ref user) = uid {
+        blob = blob.with_text("uid", user);
     }
-    if let Some(name) = parsed.name {
-        blob = blob.with_text("name", &name);
+    if let Some(ref reg) = region {
+        blob = blob.with_text("region", reg);
     }
-    blob = blob.with_text("account_id", &key);
+    if let Some(ref org) = active_org {
+        blob = blob.with_text("active_organization_id", org);
+    }
     Ok(SignedIn {
         id,
         label,
@@ -158,17 +149,11 @@ pub(crate) async fn import_api_key(
         return Err(PluginError::auth("Factory API keys start with fk-"));
     }
     let key = SecretString::from(trimmed.to_owned());
-    let who = api::get(
-        host,
-        endpoints.api_base(),
-        "/api/cli/whoami",
-        Some(&key),
-        true,
-    )
-    .await?;
+    let who = api::whoami(host, endpoints.api_base(), &key, None).await?;
     let email = first_string(&who, &["email"]);
     let uid = first_string(&who, &["userId"]);
     let region = first_string(&who, &["region"]);
+    let active_org = first_string(&who, &["orgId"]);
     let label = email
         .clone()
         .or(uid.clone())
@@ -191,6 +176,9 @@ pub(crate) async fn import_api_key(
     }
     if let Some(ref reg) = region {
         blob = blob.with_text("region", reg);
+    }
+    if let Some(ref org) = active_org {
+        blob = blob.with_text("active_organization_id", org);
     }
     Ok(SignedIn {
         id,

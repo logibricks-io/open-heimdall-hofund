@@ -1,6 +1,6 @@
 //! Factory model catalog from the reference Droid registry.
 
-use hofund_plugin_api::{ModelList, ModelSpec, PluginError};
+use hofund_plugin_api::{ModelList, ModelSpec, PluginError, ProtocolId};
 
 const MODELS: &[(&str, &str)] = &[
     ("claude-fable-5.1", "Fable 5.1"),
@@ -23,4 +23,19 @@ pub(crate) fn catalog() -> Result<ModelList, PluginError> {
         .map(|(id, name)| ModelSpec::new(*id, Some((*name).to_owned())))
         .collect();
     Ok(ModelList::new(specs?, None))
+}
+
+/// Wire protocol and LLM base path suffix for one catalog model.
+#[must_use]
+pub(crate) fn wire_target(model: &str) -> (ProtocolId, &'static str) {
+    if model.starts_with("claude-") {
+        return (ProtocolId::ANTHROPIC_MESSAGES, "/api/llm/a/v1");
+    }
+    if model.starts_with("gpt-") || model.starts_with("grok-") {
+        return (ProtocolId::OPENAI_RESPONSES, "/api/llm/r/v1");
+    }
+    if model.starts_with("gemini-") {
+        return (ProtocolId::GENERATIVE_LANGUAGE, "/api/llm/g/v1");
+    }
+    (ProtocolId::OPENAI_CHAT, "/api/llm/c/v1")
 }

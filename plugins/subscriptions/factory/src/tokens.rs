@@ -2,13 +2,17 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use hofund_plugin_api::{AccountId, HostContext, PluginError, PluginErrorKind, SecretString};
-use hofund_plugin_sdk::json::{self, Value};
+use hofund_plugin_api::{AccountId, HostContext, PluginError, SecretString};
+use hofund_plugin_sdk::Call;
+use hofund_plugin_sdk::form_body;
+use hofund_plugin_sdk::json::Value;
 use hofund_plugin_sdk::oauth::secret_text;
-use hofund_plugin_sdk::oauth::{SecretObject, detached, same_secret};
-use hofund_plugin_sdk::time::parse_rfc3339;
+use hofund_plugin_sdk::oauth::{
+    SecretObject, detached, parse_token_set, same_secret, token_error, unverified_claims,
+};
 
 use crate::Endpoints;
+use crate::WORKOS_CLIENT_ID;
 use crate::api;
 
 /// How long before expiry an OAuth access token is refreshed.
@@ -50,22 +54,28 @@ impl AuthKind {
     }
 }
 
-/// Parsed token pair from register or refresh.
-pub(crate) struct ParsedAuth {
-    pub(crate) access: SecretString,
-    pub(crate) refresh: SecretString,
-    pub(crate) expires_ms: u64,
-    pub(crate) uid: Option<String>,
-    pub(crate) email: Option<String>,
-    pub(crate) name: Option<String>,
-    pub(crate) account_id: Option<String>,
-}
-
-/// Bearer token and metadata for outbound calls.
 #[derive(Debug)]
 pub(crate) struct Bearer {
     pub(crate) token: SecretString,
     pub(crate) region: Option<String>,
+    pub(crate) active_org: Option<String>,
+}
+
+fn bearer_from_blob(blob: &SecretObject) -> Result<Bearer, PluginError> {
+    Ok(Bearer {
+        token: bearer_of(blob)?,
+        region: blob.text("region").map(str::to_owned),
+        active_org: blob.text("active_organization_id").map(str::to_owned),
+    })
+}
+
+pub(crate) fn expires_ms_from_access(access: &SecretString, now: SystemTime) -> u64 {
+    if let Ok(claims) = unverified_claims(access)
+        && let Some(exp) = claims.get("exp").and_then(Value::as_u64)
+    {
+        return exp.saturating_mul(1000);
+    }
+    default_expiry_ms(now)
 }
 
 fn stored(secret: &SecretString) -> Result<SecretObject, PluginError> {
@@ -140,16 +150,10 @@ pub(crate) async fn bearer(
         .ok_or_else(|| PluginError::auth("no Factory sign-in is stored for this account"))?;
     let blob = stored(&secret)?;
     if kind(&blob) == AuthKind::Api {
-        return Ok(Bearer {
-            token: bearer_of(&blob)?,
-            region: blob.text("region").map(str::to_owned),
-        });
+        return bearer_from_blob(&blob);
     }
     if !needs_refresh(&blob, host.clock().now()) {
-        return Ok(Bearer {
-            token: bearer_of(&blob)?,
-            region: blob.text("region").map(str::to_owned),
-        });
+        return bearer_from_blob(&blob);
     }
     let access = blob
         .secret("access_token")
@@ -190,68 +194,81 @@ async fn refresh_oauth(
     let lease = host.accounts().lease(&account, LEASE_WAIT).await?;
     let blob = stored(lease.secret())?;
     if kind(&blob) == AuthKind::Api {
-        return Ok(Bearer {
-            token: bearer_of(&blob)?,
-            region: blob.text("region").map(str::to_owned),
-        });
+        return bearer_from_blob(&blob);
     }
     let current = blob
         .secret("access_token")
         .ok_or_else(|| PluginError::auth("the stored Factory sign-in has no access token"))?;
     if !same_secret(&current, &stale) {
-        return Ok(Bearer {
-            token: bearer_of(&blob)?,
-            region: blob.text("region").map(str::to_owned),
-        });
+        return bearer_from_blob(&blob);
     }
     let refresh_token = blob
         .secret("refresh_token")
         .ok_or_else(|| PluginError::auth("the stored Factory sign-in has no refresh token"))?;
-    let body = json::json!({
-        "refreshToken": secret_text(&refresh_token),
-        "grantType": "refresh_token",
-    });
+    let url = endpoints.workos_token.trim_end_matches('/').to_owned();
+    let form = form_body(&[
+        ("grant_type", "refresh_token"),
+        ("client_id", WORKOS_CLIENT_ID),
+        ("refresh_token", secret_text(&refresh_token)),
+    ]);
+    let reply = match Call::post(url)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .header("accept", "application/json")
+        .bytes(form)
+        .fetch(host.http())
+        .await
+    {
+        Ok(reply) => reply,
+        Err(_error)
+            if !expired(&blob, host.clock().now())
+                && ms_remaining(&blob, host.clock().now()) > RETRYABLE_GRACE =>
+        {
+            return bearer_from_blob(&blob);
+        }
+        Err(error) => return Err(error),
+    };
+    if api::sign_in_lapsed(reply.status()) {
+        let error = token_error(reply.status(), reply.body());
+        lease
+            .commit(None, blob.with_flag(LAPSED, true).to_secret())
+            .await?;
+        return Err(error);
+    }
+    if !(200..300).contains(&reply.status()) {
+        if !expired(&blob, host.clock().now())
+            && ms_remaining(&blob, host.clock().now()) > RETRYABLE_GRACE
+        {
+            return bearer_from_blob(&blob);
+        }
+        return Err(PluginError::status_error(
+            reply.status(),
+            "WorkOS did not refresh the Factory sign-in",
+        ));
+    }
+    let set = parse_token_set(reply.body(), host.clock().now())
+        .map_err(|err| PluginError::auth(err.to_string()))?
+        .or_refresh(Some(&refresh_token));
+    let access = set.access().clone();
+    let refresh = set
+        .refresh()
+        .cloned()
+        .unwrap_or_else(|| refresh_token.clone());
+    let expires_ms = set
+        .expires_at()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or_else(|| expires_ms_from_access(&access, host.clock().now()));
     let region = blob.text("region").map(str::to_owned);
-    let api_base = endpoints.api_base_for_region(region.as_deref());
-    let reply =
-        match api::post_json(&host, api_base, "/api/v1/auth/refresh", &body, None, true).await {
-            Ok(data) => data,
-            Err(error) if error.kind() == PluginErrorKind::Auth => {
-                lease
-                    .commit(None, blob.with_flag(LAPSED, true).to_secret())
-                    .await?;
-                return Err(error);
-            }
-            Err(_error)
-                if !expired(&blob, host.clock().now())
-                    && ms_remaining(&blob, host.clock().now()) > RETRYABLE_GRACE =>
-            {
-                return Ok(Bearer {
-                    token: bearer_of(&blob)?,
-                    region: blob.text("region").map(str::to_owned),
-                });
-            }
-            Err(error) => return Err(error),
-        };
-    let parsed = parse_register(&reply, Some(&refresh_token), host.clock().now())?;
-    let region = blob.text("region").map(str::to_owned);
-    let mut next = blob
-        .with_secret("access_token", &parsed.access)
-        .with_secret("refresh_token", &parsed.refresh)
-        .with_number("expires_ms", parsed.expires_ms);
-    if let Some(uid) = parsed.uid {
-        next = next.with_text("uid", &uid);
-    }
-    if let Some(email) = parsed.email {
-        next = next.with_text("email", &email);
-    }
-    if let Some(name) = parsed.name {
-        next = next.with_text("name", &name);
-    }
+    let active_org = blob.text("active_organization_id").map(str::to_owned);
+    let next = blob
+        .with_secret("access_token", &access)
+        .with_secret("refresh_token", &refresh)
+        .with_number("expires_ms", expires_ms);
     lease.commit(None, next.to_secret()).await?;
     Ok(Bearer {
-        token: parsed.access.clone(),
+        token: access,
         region,
+        active_org,
     })
 }
 
@@ -264,72 +281,6 @@ fn ms_remaining(blob: &SecretObject, now: SystemTime) -> Duration {
         return Duration::ZERO;
     };
     at.duration_since(now).unwrap_or(Duration::ZERO)
-}
-
-/// Reads Factory's register or refresh answer.
-pub(crate) fn parse_register(
-    data: &Value,
-    fallback_refresh: Option<&SecretString>,
-    now: SystemTime,
-) -> Result<ParsedAuth, PluginError> {
-    let access = data
-        .get("accessToken")
-        .and_then(Value::as_str)
-        .filter(|text| !text.is_empty())
-        .ok_or_else(|| PluginError::decode("Factory sent back no access token"))?;
-    let refresh = data
-        .get("refreshToken")
-        .and_then(Value::as_str)
-        .filter(|text| !text.is_empty())
-        .map(SecretString::from)
-        .or_else(|| fallback_refresh.cloned())
-        .ok_or_else(|| PluginError::decode("Factory sent back no refresh token"))?;
-    let uid = data
-        .get("userId")
-        .or_else(|| data.get("userInfo").and_then(|ui| ui.get("userId")))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|text| !text.is_empty())
-        .map(str::to_owned);
-    let email = data
-        .get("email")
-        .or_else(|| data.get("userInfo").and_then(|ui| ui.get("email")))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|text| !text.is_empty())
-        .map(str::to_owned);
-    let name = data
-        .get("userInfo")
-        .and_then(|ui| ui.get("name"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|text| !text.is_empty())
-        .map(str::to_owned);
-    let account_id = email.clone().or(uid.clone());
-    let expires_ms = expires_at_ms(data.get("expiresAt"), now);
-    Ok(ParsedAuth {
-        access: SecretString::from(access.to_owned()),
-        refresh,
-        expires_ms,
-        uid,
-        email,
-        name,
-        account_id,
-    })
-}
-
-fn expires_at_ms(value: Option<&Value>, now: SystemTime) -> u64 {
-    match value {
-        Some(Value::String(text)) => parse_rfc3339(text)
-            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or_else(|| default_expiry_ms(now)),
-        Some(Value::Number(number)) => number
-            .as_u64()
-            .or_else(|| number.as_f64().map(|n| n as u64))
-            .unwrap_or_else(|| default_expiry_ms(now)),
-        _ => default_expiry_ms(now),
-    }
 }
 
 fn default_expiry_ms(now: SystemTime) -> u64 {

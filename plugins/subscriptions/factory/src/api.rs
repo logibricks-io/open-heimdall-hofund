@@ -15,22 +15,57 @@ fn join_url(base: &str, path: &str) -> String {
     format!("{}{path}", base.trim_end_matches('/'))
 }
 
+fn apply_headers(
+    mut call: Call,
+    bearer: Option<&SecretString>,
+    org_id: Option<&str>,
+    whoami_extended: bool,
+) -> Result<Call, PluginError> {
+    for (name, value) in client::headers() {
+        call = call.header(name, value);
+    }
+    if whoami_extended {
+        call = call.header("x-factory-whoami-extended", "true");
+    }
+    if let Some(org) = org_id.filter(|text| !text.is_empty()) {
+        call = call.header("x-factory-org-id", org);
+    }
+    if let Some(token) = bearer {
+        call = call.bearer(token)?;
+    }
+    Ok(call)
+}
+
+/// GET `/api/cli/whoami` with Factory client headers.
+pub(crate) async fn whoami(
+    host: &HostContext,
+    api_base: &str,
+    bearer: &SecretString,
+    org_id: Option<&str>,
+) -> Result<Value, PluginError> {
+    get(
+        host,
+        api_base,
+        "/api/cli/whoami",
+        Some(bearer),
+        org_id,
+        true,
+    )
+    .await
+}
+
 /// GET one Factory path with client headers and optional bearer.
 pub(crate) async fn get(
     host: &HostContext,
     api_base: &str,
     path: &str,
     bearer: Option<&SecretString>,
+    org_id: Option<&str>,
     lapsed: bool,
 ) -> Result<Value, PluginError> {
     let url = join_url(api_base, path);
-    let mut call = Call::get(url);
-    for (name, value) in client::headers() {
-        call = call.header(name, value);
-    }
-    if let Some(token) = bearer {
-        call = call.bearer(token)?;
-    }
+    let whoami = path == "/api/cli/whoami";
+    let call = apply_headers(Call::get(url), bearer, org_id, whoami)?;
     let reply = call.fetch(host.http()).await?;
     let status = reply.status();
     let body = reply.body();
@@ -49,26 +84,27 @@ pub(crate) async fn get(
 }
 
 /// POST JSON to one Factory path.
+#[allow(dead_code)]
 pub(crate) async fn post_json(
     host: &HostContext,
     api_base: &str,
     path: &str,
     body: &Value,
     bearer: Option<&SecretString>,
+    org_id: Option<&str>,
     lapsed: bool,
 ) -> Result<Value, PluginError> {
     let url = join_url(api_base, path);
     let payload = json::to_vec(body)
         .map_err(|_| PluginError::decode("Factory request body could not be encoded"))?;
-    let mut call = Call::post(url)
-        .header("content-type", "application/json")
-        .bytes(payload);
-    for (name, value) in client::headers() {
-        call = call.header(name, value);
-    }
-    if let Some(token) = bearer {
-        call = call.bearer(token)?;
-    }
+    let call = apply_headers(
+        Call::post(url)
+            .header("content-type", "application/json")
+            .bytes(payload),
+        bearer,
+        org_id,
+        false,
+    )?;
     let reply = call.fetch(host.http()).await?;
     let status = reply.status();
     let raw = reply.body();
