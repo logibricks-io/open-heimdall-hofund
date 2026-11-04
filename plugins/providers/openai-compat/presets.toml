@@ -255,6 +255,17 @@ website = "https://lmstudio.ai"
 no_key = true
 
 [[preset]]
+id = "longcat"
+name = "LongCat"
+kind = "vendor"
+catalog = "longcat"
+chat = "https://api.longcat.chat/openai/v1"
+responses = "https://api.longcat.chat/openai/v1"
+anthropic = "https://api.longcat.chat/anthropic"
+website = "https://longcat.chat/platform/docs/zh/api-docs"
+keys_url = "https://longcat.chat/platform/api_keys"
+
+[[preset]]
 id = "minimax"
 name = "MiniMax"
 kind = "vendor"

@@ -12,6 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Codex ChatGPT backend rewrites tool names outside `^[a-zA-Z0-9_.-]+$` for
   upstream acceptance and maps them back in replies (D-57).
 
+- LongCat vendor preset with OpenAI and Anthropic bases on api.longcat.chat (D-60).
+
 ### Fixed
 
 - Vendor overload (HTTP 529 or a 5xx whose message says overloaded) rests
