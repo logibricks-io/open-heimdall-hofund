@@ -81,8 +81,12 @@ impl Ledger {
                 format!("COALESCE(NULLIF(TRIM(client_agent), ''), {unknown})"),
             ),
             BreakdownDimension::ProviderKey => (
-                format!("CASE WHEN provider_key_id = '' THEN {no_provider} ELSE provider_key_id END"),
-                format!("CASE WHEN provider_key_id = '' THEN {no_provider} ELSE provider_key_id END"),
+                format!(
+                    "CASE WHEN provider_key_id = '' THEN {no_provider} ELSE provider_key_id END"
+                ),
+                format!(
+                    "CASE WHEN provider_key_id = '' THEN {no_provider} ELSE provider_key_id END"
+                ),
             ),
             BreakdownDimension::GatewayKey => (
                 format!("CASE WHEN caller_key_id = '' THEN {no_gateway} ELSE caller_key_id END"),
@@ -112,34 +116,33 @@ impl Ledger {
             .map_err(|error| UsageError(error.to_string()))?;
         let rows = statement
             .query_map([since], |row| {
-                    let id: String = row.get(0)?;
-                    let label_hint: String = row.get(1)?;
-                    let requests: i64 = row.get(2)?;
-                    let input: i64 = row.get(3)?;
-                    let output: i64 = row.get(4)?;
-                    let cache_read: i64 = row.get(5)?;
-                    let cache_write_5m: i64 = row.get(6)?;
-                    let cache_write_1h: i64 = row.get(7)?;
-                    let reasoning: i64 = row.get(8)?;
-                    let cost: f64 = row.get(9)?;
-                    let unpriced: i64 = row.get(10)?;
-                    Ok((
-                        id,
-                        label_hint,
-                        Totals {
-                            requests: u64::try_from(requests).unwrap_or(0),
-                            input_tokens: u64::try_from(input).unwrap_or(0),
-                            output_tokens: u64::try_from(output).unwrap_or(0),
-                            cache_read_tokens: u64::try_from(cache_read).unwrap_or(0),
-                            cache_write_5m_tokens: u64::try_from(cache_write_5m).unwrap_or(0),
-                            cache_write_1h_tokens: u64::try_from(cache_write_1h).unwrap_or(0),
-                            reasoning_tokens: u64::try_from(reasoning).unwrap_or(0),
-                            cost_usd: cost,
-                            unpriced: u64::try_from(unpriced).unwrap_or(0),
-                        },
-                    ))
-                },
-            )
+                let id: String = row.get(0)?;
+                let label_hint: String = row.get(1)?;
+                let requests: i64 = row.get(2)?;
+                let input: i64 = row.get(3)?;
+                let output: i64 = row.get(4)?;
+                let cache_read: i64 = row.get(5)?;
+                let cache_write_5m: i64 = row.get(6)?;
+                let cache_write_1h: i64 = row.get(7)?;
+                let reasoning: i64 = row.get(8)?;
+                let cost: f64 = row.get(9)?;
+                let unpriced: i64 = row.get(10)?;
+                Ok((
+                    id,
+                    label_hint,
+                    Totals {
+                        requests: u64::try_from(requests).unwrap_or(0),
+                        input_tokens: u64::try_from(input).unwrap_or(0),
+                        output_tokens: u64::try_from(output).unwrap_or(0),
+                        cache_read_tokens: u64::try_from(cache_read).unwrap_or(0),
+                        cache_write_5m_tokens: u64::try_from(cache_write_5m).unwrap_or(0),
+                        cache_write_1h_tokens: u64::try_from(cache_write_1h).unwrap_or(0),
+                        reasoning_tokens: u64::try_from(reasoning).unwrap_or(0),
+                        cost_usd: cost,
+                        unpriced: u64::try_from(unpriced).unwrap_or(0),
+                    },
+                ))
+            })
             .map_err(|error| UsageError(error.to_string()))?;
         let mut groups = Vec::new();
         for row in rows {
@@ -306,6 +309,44 @@ mod tests {
             .breakdown(None, BreakdownDimension::Agent)
             .expect("breakdown");
         assert_eq!(groups[0].totals.requests, 0);
+    }
+
+    #[test]
+    fn u1c_16_breakdown_cost_ignores_unpriced_row_cost() {
+        let dir = tempfile::tempdir().expect("dir");
+        let ledger = Ledger::open(&dir.path().join("u.sqlite")).expect("open");
+        let price = TokenPrice {
+            input: 1.0,
+            output: 1.0,
+            cache_read: 0.0,
+            cache_write: 0.0,
+            cache_write_1h: 0.0,
+        };
+        let mut row = base_row();
+        row.client_agent = "mixed".to_owned();
+        for (priced, cost_usd) in [(true, 1.0), (false, 2.0)] {
+            ledger
+                .record_with_details(
+                    &row,
+                    None,
+                    UsageDetails::default(),
+                    Some(RowPricing {
+                        priced,
+                        cost_usd,
+                        price,
+                    }),
+                )
+                .expect("record");
+        }
+        let groups = ledger
+            .breakdown(None, BreakdownDimension::Agent)
+            .expect("groups");
+        let mixed = groups
+            .iter()
+            .find(|group| group.id == "mixed")
+            .expect("mixed group");
+        assert!((mixed.totals.cost_usd - 1.0).abs() < f64::EPSILON);
+        assert_eq!(mixed.totals.unpriced, 1);
     }
 
     #[test]

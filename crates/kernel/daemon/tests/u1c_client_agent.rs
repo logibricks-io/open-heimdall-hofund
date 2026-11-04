@@ -2,12 +2,12 @@
 
 use std::sync::Arc;
 
-use axum::http::HeaderMap;
 use hofund_agent::request_agent_id;
 use hofund_plugin_api::{AgentDescription, AgentRoute, PluginId, Visible};
 use hofund_router::{FailoverPolicy, Router, Snapshot};
 use hofund_secrets::Identity;
 use hofund_usage::{Ledger, UNKNOWN_CLIENT_AGENT};
+use reqwest::header::HeaderMap;
 
 const fn description(id: &'static str, binary: &'static str) -> AgentDescription {
     AgentDescription::from_static(
