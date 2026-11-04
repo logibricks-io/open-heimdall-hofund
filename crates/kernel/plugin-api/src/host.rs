@@ -952,6 +952,7 @@ pub struct SurfaceHost {
     auth: AuthResult,
     gateway: GatewayHandle,
     http: Option<HttpHandle>,
+    codex_relay_fallbacks: Arc<[String]>,
 }
 
 impl SurfaceHost {
@@ -965,6 +966,7 @@ impl SurfaceHost {
         auth: AuthResult,
         gateway: Option<Arc<dyn GatewayBackend>>,
         http: Option<Arc<dyn HttpBackend>>,
+        codex_relay_fallbacks: Arc<[String]>,
     ) -> Self {
         Self {
             members,
@@ -972,6 +974,7 @@ impl SurfaceHost {
             auth,
             gateway: GatewayHandle { inner: gateway },
             http: http.map(|inner| HttpHandle { inner }),
+            codex_relay_fallbacks,
         }
     }
 
@@ -1008,6 +1011,13 @@ impl SurfaceHost {
     #[must_use]
     pub const fn http(&self) -> Option<&HttpHandle> {
         self.http.as_ref()
+    }
+
+    /// Routed model ids to try after a `ChatGPT` sign-in Codex backend relay
+    /// refusal, from the configured provider's `fallback` list.
+    #[must_use]
+    pub fn codex_relay_fallbacks(&self) -> &[String] {
+        &self.codex_relay_fallbacks
     }
 }
 

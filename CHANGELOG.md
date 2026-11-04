@@ -28,11 +28,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Message thread continuations on `/v1/messages` are refused with HTTP 400 so
   clients resend full conversation history (D-63).
 
+- Relayed native Responses replies mark namespaced `function_call` items with
+  empty `encrypted_function_args` when the upstream omitted the field, so Codex
+  V2 treats collaboration tasks as plain text (D-67).
+
+- Codex ChatGPT backend relay falls back through the configured `codex`
+  provider's `fallback` list on account quota, credit, rate, or overload
+  refusals (D-68).
+
 ### Fixed
 
 - Provider key spend caps use the key fingerprint carried by the serving
   member, including a provider with one key. Usage rows record that id, and
   routing skips a capped key before failover (D-61).
+- Relayed Responses `url_citation` and `container_file_citation` annotations
+  without `start_index`/`end_index` are dropped on relay, and poisoned Codex
+  thread history is healed on the way to the ChatGPT backend (D-66).
 
 - Vendor overload (HTTP 529 or a 5xx whose message says overloaded) rests
   only the requested model on that member for 30 seconds, or for
@@ -41,6 +52,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `server_is_overloaded` instead of `server_error` for those failures (D-52).
 
 ### Added
+
+- Missing reasoning on tool turns fails over to the next route member; a member
+  that demands it is retried once with filled thinking and remembers the model
+  (D-65).
+
+- Serial group walks share a 540-second budget; exhausted walks return HTTP 504
+  naming the budget and do not rest the cut member (D-69).
+
+- Foreign UUID-signed thinking blocks are stripped before Anthropic Messages
+  requests to Claude hosts so cross-member failover does not hit invalid
+  signature errors (D-70).
+
+- Refused Anthropic beta headers are retried once without the named betas and
+  omitted on later requests to that provider (D-64).
 
 - Tencent Cloud Token Plan preset regions use `tokenhub.tencentmaas.com` plan
   endpoints; saved providers with the old LKEAP plan bases migrate on load (D-53).
