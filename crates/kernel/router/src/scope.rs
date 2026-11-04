@@ -25,7 +25,7 @@ impl RouteScope {
             return true;
         }
         if route.starts_with("group/") {
-            return model_allowed(&self.models, route) || model_allowed(&self.models, "group/*");
+            return model_allowed(&self.models, route);
         }
         let provider = hop.member.scope_provider();
         let mut candidates = vec![
