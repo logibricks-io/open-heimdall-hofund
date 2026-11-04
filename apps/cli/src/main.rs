@@ -128,6 +128,13 @@ fn run_control(config: &Path, command: Command) -> Result<String, String> {
                 key_id,
                 value,
             } => provider::key_edit(config, &id, action, &key_id, &value).await,
+            Command::ProviderSpendCapList { id } => provider::spend_cap_list(config, &id).await,
+            Command::ProviderSpendCapSet { id, key_id, cap } => {
+                provider::spend_cap_set(config, &id, &key_id, &cap).await
+            }
+            Command::ProviderSpendCapOff { id, key_id } => {
+                provider::spend_cap_off(config, &id, &key_id).await
+            }
             Command::ProviderRemove { id } => provider_edit::remove(config, &id).await,
             Command::ProviderAtOnce { id, value } => {
                 provider_edit::at_once(config, &id, value.as_deref()).await
@@ -263,6 +270,18 @@ enum Command {
         action: ProviderKeyAction,
         key_id: String,
         value: String,
+    },
+    ProviderSpendCapList {
+        id: String,
+    },
+    ProviderSpendCapSet {
+        id: String,
+        key_id: String,
+        cap: String,
+    },
+    ProviderSpendCapOff {
+        id: String,
+        key_id: String,
     },
     /// `provider rm`, `remove`, and `delete`.
     ProviderRemove {
@@ -609,6 +628,18 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
             key_id: (*key_id).to_owned(),
             value: (*value).to_owned(),
         },
+        ["provider", "spend-cap", "list", id] => Command::ProviderSpendCapList {
+            id: (*id).to_owned(),
+        },
+        ["provider", "spend-cap", "set", id, key_id, cap] => Command::ProviderSpendCapSet {
+            id: (*id).to_owned(),
+            key_id: (*key_id).to_owned(),
+            cap: (*cap).to_owned(),
+        },
+        ["provider", "spend-cap", "off", id, key_id] => Command::ProviderSpendCapOff {
+            id: (*id).to_owned(),
+            key_id: (*key_id).to_owned(),
+        },
         ["provider", "rm" | "remove" | "delete", id] => Command::ProviderRemove {
             id: (*id).to_owned(),
         },
@@ -669,7 +700,8 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
         );
     if (subscription_flags || json_elsewhere) && !matches!(command, Command::Subscription(_)) {
         return Err(
-            "--json, --host, --label, and --site are only valid with subscription commands".to_owned(),
+            "--json, --host, --label, and --site are only valid with subscription commands"
+                .to_owned(),
         );
     }
     if own_secret.is_some() && !matches!(command, Command::GatewayKey(_)) {

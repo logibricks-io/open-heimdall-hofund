@@ -15,10 +15,14 @@ mod fx;
 mod key;
 mod limits;
 mod price;
+mod spent;
 pub use fx::{CnyRate, DisplayCurrency, Fx, RateFetcher};
 pub use key::{CallerModel, CallerTotals};
 pub use limits::{KeyUsage, UsageDetails};
 pub use price::{RowPricing, TokenPrice, token_bearing};
+pub use spent::{
+    KeySpent, SpendCapPeriod, provider_key_id_from_upstream, spend_cap_retry_after, spend_cap_since,
+};
 
 /// A reporting window over the ledger.
 ///
@@ -145,6 +149,8 @@ pub struct Row {
     pub price: Option<TokenPrice>,
     /// Row kind for handed-off, refusal, or turned-away tries; empty for ordinary rows.
     pub outcome: String,
+    /// Five-byte API-key fingerprint when the upstream route names one.
+    pub provider_key_id: String,
 }
 
 /// One successful request as routing measurements read it.
@@ -228,6 +234,7 @@ impl Ledger {
             ("price_cache_write", "REAL"),
             ("price_cache_write_1h", "REAL"),
             ("outcome", "TEXT NOT NULL DEFAULT ''"),
+            ("provider_key_id", "TEXT NOT NULL DEFAULT ''"),
         ] {
             ensure_column(&connection, column, declaration)?;
         }
@@ -279,7 +286,7 @@ impl Ledger {
                         cache_read_tokens, cache_write_5m_tokens, cache_write_1h_tokens,
                         reasoning_tokens, reasoning_hidden,
                         priced, cost_usd, price_input, price_output, price_cache_read,
-                        price_cache_write, price_cache_write_1h, outcome
+                        price_cache_write, price_cache_write_1h, outcome, provider_key_id
                  FROM requests ORDER BY id",
             )
             .map_err(|error| UsageError(error.to_string()))?;
@@ -414,7 +421,7 @@ impl Ledger {
                         cache_read_tokens, cache_write_5m_tokens, cache_write_1h_tokens,
                         reasoning_tokens, reasoning_hidden,
                         priced, cost_usd, price_input, price_output, price_cache_read,
-                        price_cache_write, price_cache_write_1h, outcome
+                        price_cache_write, price_cache_write_1h, outcome, provider_key_id
                  FROM requests WHERE created_unix >= ?1 ORDER BY id DESC LIMIT ?2",
             )
             .map_err(|error| UsageError(error.to_string()))?;
@@ -484,7 +491,34 @@ fn read_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Row> {
         cost_usd: row.get(16)?,
         price: read_price(row, 17)?,
         outcome: row.get(22)?,
+        provider_key_id: row.get(23)?,
     })
+}
+
+impl Ledger {
+    /// Sum of stored USD for one provider key at or after `since`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UsageError`] when the query fails.
+    pub fn provider_key_cost(&self, provider_key_id: &str, since: i64) -> Result<f64, UsageError> {
+        if provider_key_id.is_empty() {
+            return Ok(0.0);
+        }
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| UsageError("usage database lock is poisoned".to_owned()))?;
+        connection
+            .query_row(
+                "SELECT COALESCE(SUM(CASE WHEN priced = 1 THEN cost_usd ELSE 0 END), 0)
+                 FROM requests
+                 WHERE provider_key_id = ?1 AND created_unix >= ?2",
+                params![provider_key_id, since],
+                |row| row.get(0),
+            )
+            .map_err(|error| UsageError(error.to_string()))
+    }
 }
 
 fn read_price(row: &rusqlite::Row<'_>, start: usize) -> rusqlite::Result<Option<TokenPrice>> {

@@ -478,6 +478,7 @@ fn continuation_error(error: RouterError) -> PluginError {
         RouterError::ModelScope { .. } | RouterError::AccountScope { .. } => {
             PluginError::status_error(403, error.to_string())
         }
+        RouterError::SpendCapReached { retry_after } => crate::spend_cap_plugin_error(retry_after),
         RouterError::Upstream { error, .. } => error,
     }
 }

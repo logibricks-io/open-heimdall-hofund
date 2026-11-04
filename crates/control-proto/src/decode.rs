@@ -10,12 +10,12 @@ use crate::{
     ControlErrorKind, ErrorEnvelope, EventEnvelope, FieldIssue, GatewayKeyRequest,
     GatewayKeyResponse, GatewayKeyRestoreRequest, HealthResponse, MAX_REQUEST_BODY_BYTES,
     MAX_RESPONSE_BODY_BYTES, ModelListResponse, PicksResponse, PicksSetRequest, ProviderKeyRequest,
-    ProviderKeysResponse, ProviderListResponse, ProviderTestRequest, ProviderTestResponse,
-    QuotaCreditsModesResponse, QuotaCreditsSetRequest, QuotaCreditsSetResponse,
-    QuotaHistoryResponse, QuotaResponse, ReloadRequest, RouteListResponse, RouteModelListResponse,
-    SessionRouteResponse, ShutdownRequest, ShutdownResponse, StatusResponse, TokenRotateRequest,
-    TokenRotateResponse, UnroutedListResponse, UsageResponse, WarmupListResponse, WarmupRunRequest,
-    WarmupRunResponse,
+    ProviderKeysResponse, ProviderListResponse, ProviderSpendCapRequest, ProviderSpendCapsResponse,
+    ProviderTestRequest, ProviderTestResponse, QuotaCreditsModesResponse, QuotaCreditsSetRequest,
+    QuotaCreditsSetResponse, QuotaHistoryResponse, QuotaResponse, ReloadRequest, RouteListResponse,
+    RouteModelListResponse, SessionRouteResponse, ShutdownRequest, ShutdownResponse,
+    StatusResponse, TokenRotateRequest, TokenRotateResponse, UnroutedListResponse, UsageResponse,
+    WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
 };
 
 mod sealed {
@@ -237,6 +237,7 @@ request!(ShutdownRequest);
 request!(GatewayKeyRequest);
 request!(GatewayKeyRestoreRequest);
 request!(ProviderKeyRequest);
+request!(ProviderSpendCapRequest);
 
 impl sealed::Sealed for ConfigResponse {}
 impl Response for ConfigResponse {
@@ -288,6 +289,7 @@ response!(
     ConfigValidationResponse,
     ProviderListResponse,
     ProviderKeysResponse,
+    ProviderSpendCapsResponse,
     ProviderTestResponse,
     ModelListResponse,
     PicksResponse,

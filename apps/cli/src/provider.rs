@@ -9,7 +9,8 @@ use std::path::Path;
 
 use hofund_control_client::hofund_control_proto::{
     ModelListResponse, PicksResponse, PicksSetRequest, ProviderKeyAction, ProviderKeyRequest,
-    ProviderKeysResponse, ProviderSummary, ProviderTestRequest,
+    ProviderKeysResponse, ProviderSpendCapRequest, ProviderSpendCapsResponse, ProviderSummary,
+    ProviderTestRequest,
 };
 use hofund_control_client::{Client, ClientError};
 
@@ -90,6 +91,58 @@ pub(crate) async fn key_edit(
         .await
         .map_err(failure)?;
     Ok(render_keys(&response))
+}
+
+/// `hofund provider spend-cap list <id>`.
+pub(crate) async fn spend_cap_list(config: &Path, id: &str) -> Result<String, String> {
+    let client = client(config).await?;
+    let response = client.provider_spend_caps(id).await.map_err(failure)?;
+    Ok(render_spend_caps(&response))
+}
+
+/// `hofund provider spend-cap set <id> <key-id> <amount/period>`.
+pub(crate) async fn spend_cap_set(
+    config: &Path,
+    id: &str,
+    key_id: &str,
+    cap: &str,
+) -> Result<String, String> {
+    let client = client(config).await?;
+    let request = {
+        let mut request = ProviderSpendCapRequest::for_id(key_id);
+        request.cap = cap.to_owned();
+        request
+    };
+    let response = client
+        .change_provider_spend_cap(id, request)
+        .await
+        .map_err(failure)?;
+    Ok(render_spend_caps(&response))
+}
+
+/// `hofund provider spend-cap off <id> <key-id>`.
+pub(crate) async fn spend_cap_off(config: &Path, id: &str, key_id: &str) -> Result<String, String> {
+    let client = client(config).await?;
+    let response = client
+        .change_provider_spend_cap(id, ProviderSpendCapRequest::for_id(key_id))
+        .await
+        .map_err(failure)?;
+    Ok(render_spend_caps(&response))
+}
+
+fn render_spend_caps(response: &ProviderSpendCapsResponse) -> String {
+    if response.caps.is_empty() {
+        return "no spend caps\n".to_owned();
+    }
+    let mut out = String::from("key_id\tperiod\tusd\tspent_usd\tset_at");
+    for cap in &response.caps {
+        out.push_str(&format!(
+            "\n{}\t{}\t{:.4}\t{:.4}\t{}",
+            cap.key_id, cap.period, cap.usd, cap.spent_usd, cap.set_at
+        ));
+    }
+    out.push('\n');
+    out
 }
 
 fn render_keys(response: &ProviderKeysResponse) -> String {

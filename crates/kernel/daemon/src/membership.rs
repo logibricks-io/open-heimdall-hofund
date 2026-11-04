@@ -67,6 +67,7 @@ pub(crate) struct Table {
     overflow: hofund_router::OverflowMemory,
     measurements: Mutex<Option<Arc<dyn Measurements>>>,
     model_catalog: Mutex<Option<Arc<hofund_model_catalog::ModelCatalog>>>,
+    spend_cap_gate: Mutex<Option<Arc<crate::spend_caps::SpendCapGate>>>,
     snapshot: Snapshot,
 }
 
@@ -309,6 +310,7 @@ fn build_table(
         overflow: hofund_router::OverflowMemory::in_memory(),
         measurements: Mutex::new(None),
         model_catalog: Mutex::new(None),
+        spend_cap_gate: Mutex::new(None),
         snapshot,
     });
     let stored = build_specs(&table, built, routes)?;
@@ -455,6 +457,11 @@ impl Table {
         Ok(())
     }
 
+    pub(crate) fn set_spend_cap_gate(&self, gate: Arc<crate::spend_caps::SpendCapGate>) {
+        *self.spend_cap_gate.lock().expect("spend cap gate") = Some(gate);
+        self.publish();
+    }
+
     pub(crate) fn set_measurements(&self, measurements: Arc<dyn Measurements>) {
         *self.measurements.lock().expect("measurements") = Some(measurements);
         self.publish();
@@ -537,8 +544,40 @@ impl Table {
         }
         if let Some(catalog) = self.model_catalog.lock().expect("model catalog").as_ref() {
             let visibility = catalog.visibility().clone();
-            router = router.with_member_skip(Arc::new(move |route, asked, provider, wire| {
-                visibility.hop_disabled(route, asked, provider, wire)
+            let gate = self.spend_cap_gate.lock().expect("spend cap gate").clone();
+            let skip_gate = gate.clone();
+            router =
+                router.with_member_skip(Arc::new(move |route, asked, provider, wire, route_id| {
+                    visibility.hop_disabled(route, asked, provider, wire)
+                        || skip_gate
+                            .as_ref()
+                            .is_some_and(|gate| gate.skip_route(route_id))
+                }));
+            if let Some(gate) = gate {
+                let exhausted = Arc::clone(&gate);
+                router =
+                    router.with_spend_cap_exhausted(Arc::new(move |route_ids: &[String]| {
+                        let refs: Vec<&str> = route_ids.iter().map(String::as_str).collect();
+                        if exhausted.all_routes_capped(refs.iter().copied()) {
+                            Some(exhausted.retry_after_for_routes(&refs))
+                        } else {
+                            None
+                        }
+                    }));
+            }
+        } else if let Some(gate) = self.spend_cap_gate.lock().expect("spend cap gate").clone() {
+            router = router.with_member_skip(Arc::new({
+                let gate = Arc::clone(&gate);
+                move |_route, _asked, _provider, _wire, route_id| gate.skip_route(route_id)
+            }));
+            let exhausted = Arc::clone(&gate);
+            router = router.with_spend_cap_exhausted(Arc::new(move |route_ids: &[String]| {
+                let refs: Vec<&str> = route_ids.iter().map(String::as_str).collect();
+                if exhausted.all_routes_capped(refs.iter().copied()) {
+                    Some(exhausted.retry_after_for_routes(&refs))
+                } else {
+                    None
+                }
             }));
         }
         self.snapshot.store(router);

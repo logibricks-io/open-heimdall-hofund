@@ -943,6 +943,7 @@ mod tests {
         let options = SignInOptions {
             host: Some("corp.example.test".to_owned()),
             label: Some("work".to_owned()),
+            site: None,
         };
         let ctx = sign_in_ctx(&PluginId::from_static(PLUGIN), &options).expect("ctx");
         assert_eq!(ctx.option("host"), Some("corp.example.test"));

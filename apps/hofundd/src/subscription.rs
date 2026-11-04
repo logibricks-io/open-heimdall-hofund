@@ -154,12 +154,13 @@ pub(crate) fn run(config: &Path, command: SubscriptionCommand) -> ExitCode {
                 print!("{}", list_table(&listings));
             }
         }),
-        SubscriptionCommand::SignIn { id, host, label, site } => {
-            let options = SignInOptions {
-                host,
-                label,
-                site,
-            };
+        SubscriptionCommand::SignIn {
+            id,
+            host,
+            label,
+            site,
+        } => {
+            let options = SignInOptions { host, label, site };
             return match subscription_sign_in(config, &id, &options) {
                 Ok(account) => {
                     println!("{id}: signed in as {account}");

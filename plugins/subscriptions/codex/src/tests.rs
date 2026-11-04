@@ -1655,7 +1655,10 @@ fn d58_1_device_sign_in_polls_then_trades_the_callback_code() {
     assert_eq!(verification_url, "https://auth.test/codex/device");
     let start = &host.http().calls()[0];
     assert_eq!(start.method(), "POST");
-    assert_eq!(start.uri(), "https://auth.test/api/accounts/deviceauth/usercode");
+    assert_eq!(
+        start.uri(),
+        "https://auth.test/api/accounts/deviceauth/usercode"
+    );
     assert_eq!(start.sensitive_headers(), ["user-agent".to_owned()]);
 
     host.http().enqueue_response(403, &[], device_forbidden());
@@ -1663,12 +1666,8 @@ fn d58_1_device_sign_in_polls_then_trades_the_callback_code() {
     host.http().enqueue(device_trade());
     host.http().enqueue(device_oauth_tokens());
 
-    let id = block_on(sub.complete_sign_in(
-        &device_ctx(),
-        SignInProof::Await,
-        host.context(),
-    ))
-    .expect("signed in");
+    let id = block_on(sub.complete_sign_in(&device_ctx(), SignInProof::Await, host.context()))
+        .expect("signed in");
     assert_eq!(id, account_id_from(&["sub-dc", "acct-dc"]));
     let trade = &host.http().calls()[4];
     assert_eq!(trade.uri(), TOKEN_URL);
@@ -1686,9 +1685,11 @@ fn d58_2_cancel_before_entering_the_code_leaves_no_account() {
     host.http().enqueue(device_usercode());
     let _ = block_on(sub.start_sign_in(&device_ctx(), host.context())).expect("start");
     block_on(sub.cancel_sign_in(&device_ctx(), host.context())).expect("cancel");
-    assert!(block_on(host.context().accounts().list())
-        .expect("list")
-        .is_empty());
+    assert!(
+        block_on(host.context().accounts().list())
+            .expect("list")
+            .is_empty()
+    );
     assert_eq!(host.http().calls().len(), 1, "no token trade");
 }
 
@@ -1697,14 +1698,11 @@ fn d58_3_usercode_404_points_to_browser_sign_in() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
     let sub = subscription(&host);
-    host.http().enqueue_response(404, &[], b"not found".to_vec());
+    host.http()
+        .enqueue_response(404, &[], b"not found".to_vec());
     let error = block_on(sub.start_sign_in(&device_ctx(), host.context())).expect_err("off");
     assert_eq!(error.kind(), PluginErrorKind::Auth);
-    assert!(
-        error.to_string().contains("browser sign-in"),
-        "{}",
-        error
-    );
+    assert!(error.to_string().contains("browser sign-in"), "{}", error);
 }
 
 #[test]

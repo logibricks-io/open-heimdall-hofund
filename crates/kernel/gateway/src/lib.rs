@@ -41,7 +41,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::body::{Body, Bytes};
 use axum::extract::{Request, State};
-use axum::http::{HeaderMap, StatusCode, Uri, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri, header};
 
 use axum::response::Response;
 use axum::routing::{get, post};
@@ -1201,6 +1201,9 @@ impl hofund_plugin_host::GatewayBackend for InProcess {
                     RouterError::ModelScope { .. } | RouterError::AccountScope { .. } => {
                         (String::new(), PluginError::status_error(403, scope_message))
                     }
+                    RouterError::SpendCapReached { retry_after } => {
+                        (String::new(), spend_cap_plugin_error(retry_after))
+                    }
                     RouterError::Upstream { upstream_id, error }
                         if error.kind() == PluginErrorKind::Unsupported =>
                     {
@@ -2135,6 +2138,10 @@ fn stream_error(error: &RouterError) -> (StatusCode, String) {
         RouterError::ModelScope { .. } | RouterError::AccountScope { .. } => {
             (StatusCode::FORBIDDEN, error.to_string())
         }
+        RouterError::SpendCapReached { .. } => (
+            StatusCode::TOO_MANY_REQUESTS,
+            "spend cap reached".to_owned(),
+        ),
         RouterError::Upstream { error, .. } => (status_of(error), broken_off(error)),
     }
 }
@@ -2192,6 +2199,9 @@ async fn count_tokens(
                 }
                 RouterError::ModelScope { .. } | RouterError::AccountScope { .. } => {
                     (StatusCode::FORBIDDEN, scope_error(&error, &identity))
+                }
+                RouterError::SpendCapReached { retry_after } => {
+                    return spend_cap_response(codec.as_ref(), *retry_after);
                 }
                 RouterError::Upstream { error, .. } => {
                     (status_of(error), error.message().to_owned())
@@ -2816,6 +2826,9 @@ fn failure(
             String::new(),
             scope_error(&error, identity),
         ),
+        RouterError::SpendCapReached { retry_after } => {
+            return spend_cap_response(codec, *retry_after);
+        }
         RouterError::Upstream { upstream_id, error } => (
             status_of(error),
             upstream_id.clone(),
@@ -2865,6 +2878,14 @@ fn broken_off(error: &PluginError) -> String {
     } else {
         message.to_owned()
     }
+}
+
+pub(crate) fn spend_cap_plugin_error(retry_after: Option<u64>) -> PluginError {
+    let mut error = PluginError::status_error(429, "spend cap reached");
+    if let Some(secs) = retry_after {
+        error = error.with_retry_after(Duration::from_secs(secs));
+    }
+    error
 }
 
 fn status_of(error: &PluginError) -> StatusCode {
@@ -3404,6 +3425,7 @@ fn write_usage(
         caller_key_id: meta.identity.key_id.clone(),
         caller_key_name: meta.identity.key_name.clone(),
         caller_issuer_id: meta.identity.issuer.clone(),
+        provider_key_id: hofund_usage::provider_key_id_from_upstream(&meta.upstream),
         ..Default::default()
     };
     let mut details = meta.details;
@@ -3478,6 +3500,20 @@ fn model_name(bytes: &[u8]) -> String {
                 .map(str::to_owned)
         })
         .unwrap_or_default()
+}
+
+fn spend_cap_response(codec: &dyn Codec, retry_after: Option<u64>) -> Response {
+    let mut builder = Response::builder()
+        .status(StatusCode::TOO_MANY_REQUESTS)
+        .header(header::CONTENT_TYPE, "application/json");
+    if let Some(secs) = retry_after
+        && let Ok(value) = HeaderValue::from_str(&secs.to_string())
+    {
+        builder = builder.header(header::RETRY_AFTER, value);
+    }
+    builder
+        .body(Body::from(codec.encode_error(429, "spend cap reached")))
+        .unwrap_or_else(|_| text_response(StatusCode::INTERNAL_SERVER_ERROR, "response"))
 }
 
 fn coded(codec: &dyn Codec, status: StatusCode, message: &str) -> Response {

@@ -56,7 +56,12 @@ pub use view::{
 };
 
 /// Returns `true` when a hop should be skipped (for example a disabled model).
-pub type MemberSkipFn = Arc<dyn Fn(&str, &str, &str, &str) -> bool + Send + Sync>;
+/// The last argument is the member's configured route id (including `#key`).
+pub type MemberSkipFn = Arc<dyn Fn(&str, &str, &str, &str, &str) -> bool + Send + Sync>;
+
+/// When every candidate hop was removed and each is spend-capped, returns
+/// `Some(retry_after)` with `None` inside for a lifetime cap.
+pub type SpendCapExhaustedFn = Arc<dyn Fn(&[String]) -> Option<Option<u64>> + Send + Sync>;
 
 /// Which failures may try the next member.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -248,6 +253,7 @@ pub struct Router {
     overflow: OverflowMemory,
     measurements: Option<Arc<dyn strategy::Measurements>>,
     member_skip: Option<MemberSkipFn>,
+    spend_cap_exhausted: Option<SpendCapExhaustedFn>,
 }
 
 /// A counted input.
@@ -371,6 +377,7 @@ impl Router {
             overflow: OverflowMemory::in_memory(),
             measurements: None,
             member_skip: None,
+            spend_cap_exhausted: None,
         }
     }
 
@@ -431,6 +438,13 @@ impl Router {
         self
     }
 
+    /// Maps an all-candidates-spend-capped refusal to a retry hint.
+    #[must_use]
+    pub fn with_spend_cap_exhausted(mut self, exhausted: SpendCapExhaustedFn) -> Self {
+        self.spend_cap_exhausted = Some(exhausted);
+        self
+    }
+
     fn without_skipped_hops(&self, asked: &str, resolved: &Resolved) -> Vec<Hop> {
         let Some(skip) = &self.member_skip else {
             return resolved.hops.clone();
@@ -441,7 +455,8 @@ impl Router {
             .filter(|hop| {
                 let provider = hop.member.scope_provider();
                 let wire = hop.wire_model.as_deref().unwrap_or(&resolved.bare);
-                !skip(&resolved.route, asked, provider, wire)
+                let route_id = hop.member.route_id();
+                !skip(&resolved.route, asked, provider, wire, route_id)
             })
             .cloned()
             .collect()
@@ -688,7 +703,20 @@ impl Router {
         let asked = request.model.clone();
         let mut resolved = self.resolve(&asked)?;
         resolved.hops = scoped_hops(&asked, &resolved, scope)?;
+        let before_skip = resolved.hops.clone();
         resolved.hops = self.without_skipped_hops(&asked, &resolved);
+        if resolved.hops.is_empty()
+            && !before_skip.is_empty()
+            && let Some(exhausted) = &self.spend_cap_exhausted
+        {
+            let route_ids: Vec<String> = before_skip
+                .iter()
+                .map(|hop| hop.member.route_id().to_owned())
+                .collect();
+            if let Some(retry_after) = exhausted(&route_ids) {
+                return Err(RouterError::SpendCapReached { retry_after });
+            }
+        }
         self.refresh_free(&mut resolved).await;
         let input_tokens = estimate_input_tokens(request);
         let ordered = self.order_for(&resolved, conversation);
@@ -2042,6 +2070,12 @@ pub enum RouterError {
         upstream_id: String,
         /// Its error.
         error: PluginError,
+    },
+    /// Every candidate key for the model reached its spend cap.
+    #[error("spend cap reached")]
+    SpendCapReached {
+        /// Seconds until the next period reset, when known.
+        retry_after: Option<u64>,
     },
 }
 

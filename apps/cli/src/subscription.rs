@@ -104,7 +104,12 @@ pub fn daemon_args(config: &Path, command: &SubscriptionCommand) -> Vec<OsString
                 flags.push("--json");
             }
         }
-        SubscriptionCommand::SignIn { id, host, label, site } => {
+        SubscriptionCommand::SignIn {
+            id,
+            host,
+            label,
+            site,
+        } => {
             words.extend(["sign-in", id.as_str()]);
             if let Some(host) = host {
                 flags.extend(["--host", host.as_str()]);

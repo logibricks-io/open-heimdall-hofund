@@ -412,6 +412,25 @@ ProviderKeysResponse.version
 ProviderListResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
 ProviderListResponse.providers
 ProviderListResponse.version
+ProviderSpendCap derives(Clone, Debug, PartialEq, Serialize, Deserialize)
+ProviderSpendCap.key_id
+ProviderSpendCap.period
+ProviderSpendCap.provider
+ProviderSpendCap.set_at
+ProviderSpendCap.spent_usd
+ProviderSpendCap.usd
+ProviderSpendCapPeriod derives(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (rename_all = "lowercase")]
+ProviderSpendCapPeriod::Day
+ProviderSpendCapPeriod::Month
+ProviderSpendCapPeriod::Total
+ProviderSpendCapRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
+ProviderSpendCapRequest.cap
+ProviderSpendCapRequest.key_id
+ProviderSpendCapRequest.version
+ProviderSpendCapRequest::fn for_id (key_id : impl Into < String >) -> Self
+ProviderSpendCapsResponse derives(Clone, Debug, PartialEq, Serialize, Deserialize)
+ProviderSpendCapsResponse.caps
+ProviderSpendCapsResponse.version
 ProviderSummary #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
 ProviderSummary.id
 ProviderSummary.kind

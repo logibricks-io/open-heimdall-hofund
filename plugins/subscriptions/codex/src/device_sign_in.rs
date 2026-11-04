@@ -9,8 +9,8 @@ use hofund_plugin_sdk::json::{self, Map, Value};
 use hofund_plugin_sdk::{Call, sleep};
 
 use crate::sign_in;
-use crate::{CLIENT_ID, CODEX_VERSION};
 use crate::upstream;
+use crate::{CLIENT_ID, CODEX_VERSION};
 
 /// Sign-in context option selecting the device-code flow.
 pub(crate) const SITE_OPTION: &str = "site";
@@ -183,10 +183,7 @@ fn field(object: &Map<String, Value>, name: &str) -> Result<String, PluginError>
         .ok_or_else(|| PluginError::decode(format!("ChatGPT's sign-in code has no {name}")))
 }
 
-fn field_secret(
-    object: &Map<String, Value>,
-    name: &str,
-) -> Result<SecretString, PluginError> {
+fn field_secret(object: &Map<String, Value>, name: &str) -> Result<SecretString, PluginError> {
     field(object, name).map(SecretString::from)
 }
 

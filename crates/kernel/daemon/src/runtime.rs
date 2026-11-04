@@ -75,6 +75,9 @@ pub(crate) struct Runtime {
     /// Wakes the subscription task after a publication.
     wake: tokio::sync::Notify,
     warmup: Arc<crate::warmup::WarmupStore>,
+    spend_caps: Arc<crate::spend_caps::SpendCapStore>,
+    spend_gate: Mutex<Option<Arc<crate::spend_caps::SpendCapGate>>>,
+    key_spent: Mutex<Option<Arc<hofund_usage::KeySpent>>>,
 }
 
 impl Candidate {
@@ -123,6 +126,9 @@ impl Runtime {
             warmup: Arc::new(crate::warmup::WarmupStore::new(&crate::beside(
                 path, ".hofund",
             ))),
+            spend_caps: Arc::new(crate::spend_caps::SpendCapStore::new(path)),
+            spend_gate: Mutex::new(None),
+            key_spent: Mutex::new(None),
         })
     }
 
@@ -169,7 +175,49 @@ impl Runtime {
             warmup: Arc::new(crate::warmup::WarmupStore::new(&crate::beside(
                 path, ".hofund",
             ))),
+            spend_caps: Arc::new(crate::spend_caps::SpendCapStore::new(path)),
+            spend_gate: Mutex::new(None),
+            key_spent: Mutex::new(None),
         })
+    }
+
+    pub(crate) fn spend_caps(&self) -> Arc<crate::spend_caps::SpendCapStore> {
+        Arc::clone(&self.spend_caps)
+    }
+
+    pub(crate) fn attach_spend_caps(
+        &self,
+        usage: Arc<hofund_usage::Ledger>,
+        providers: &[hofund_config::Provider],
+    ) {
+        self.spend_caps.load();
+        let spent = Arc::new(hofund_usage::KeySpent::new(usage));
+        let gate = Arc::new(crate::spend_caps::SpendCapGate::new(
+            Arc::clone(&self.spend_caps),
+            Arc::clone(&spent),
+        ));
+        gate.refresh(providers);
+        *self.key_spent.lock().expect("key spent") = Some(spent);
+        *self.spend_gate.lock().expect("spend gate") = Some(Arc::clone(&gate));
+        self.table
+            .get()
+            .expect("initial snapshot")
+            .set_spend_cap_gate(gate);
+    }
+
+    fn refresh_spend_gate(&self, providers: &[hofund_config::Provider]) {
+        if let Some(gate) = self.spend_gate.lock().expect("spend gate").clone() {
+            gate.refresh(providers);
+        }
+    }
+
+    pub(crate) fn republish_spend_caps(&self, providers: &[hofund_config::Provider]) {
+        self.refresh_spend_gate(providers);
+        if let Some(gate) = self.spend_gate.lock().expect("spend gate").clone()
+            && let Some(table) = self.table.get()
+        {
+            table.set_spend_cap_gate(gate);
+        }
     }
 
     pub(crate) fn attach_model_catalog(&self, catalog: Arc<hofund_model_catalog::ModelCatalog>) {
@@ -432,8 +480,9 @@ impl Runtime {
         // Retired instances drop here unless a request still holds them.
         *self.instances.lock().expect("provider instances") = instances;
         if let Some(sender) = self.config.get() {
-            sender.send_replace(config);
+            sender.send_replace(Arc::clone(&config));
         }
+        self.refresh_spend_gate(&config.providers);
 
         let mut previous = self.fingerprints.lock().expect("provider fingerprints");
         for (was, now) in key_moves {

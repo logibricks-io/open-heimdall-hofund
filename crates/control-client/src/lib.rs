@@ -14,13 +14,13 @@ use hofund_control_proto::{
     ConfigValidateRequest, ConfigValidationResponse, ControlError, ErrorEnvelope, EventEnvelope,
     GatewayKeyRequest, GatewayKeyResponse, GatewayKeyRestoreRequest, HealthResponse,
     MAX_RESPONSE_BODY_BYTES, ModelListResponse, PicksResponse, PicksSetRequest, ProviderKeyRequest,
-    ProviderKeysResponse, ProviderListResponse, ProviderTestRequest, ProviderTestResponse,
-    QuotaCreditsModesResponse, QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryQuery,
-    QuotaHistoryResponse, QuotaQuery, QuotaResponse, ReloadRequest, RouteListResponse,
-    RouteModelListResponse, RouteQuery, SessionRouteResponse, ShutdownRequest, ShutdownResponse,
-    StatusResponse, TokenRotateRequest, TokenRotateResponse, Topic, UnroutedListResponse,
-    UsagePeriod, UsageQuery, UsageResponse, WarmupListResponse, WarmupRunRequest,
-    WarmupRunResponse, decode_error_envelope, decode_response,
+    ProviderKeysResponse, ProviderListResponse, ProviderSpendCapRequest, ProviderSpendCapsResponse,
+    ProviderTestRequest, ProviderTestResponse, QuotaCreditsModesResponse, QuotaCreditsSetRequest,
+    QuotaCreditsSetResponse, QuotaHistoryQuery, QuotaHistoryResponse, QuotaQuery, QuotaResponse,
+    ReloadRequest, RouteListResponse, RouteModelListResponse, RouteQuery, SessionRouteResponse,
+    ShutdownRequest, ShutdownResponse, StatusResponse, TokenRotateRequest, TokenRotateResponse,
+    Topic, UnroutedListResponse, UsagePeriod, UsageQuery, UsageResponse, WarmupListResponse,
+    WarmupRunRequest, WarmupRunResponse, decode_error_envelope, decode_response,
 };
 use http::header;
 use http_body_util::{BodyExt, Full, Limited};
@@ -300,6 +300,32 @@ impl Client {
         self.request(
             http::Method::POST,
             &format!("/v1/hofund/providers/{}/keys", encode_segment(id)),
+            Some(json_body(&request)?),
+        )
+        .await
+    }
+
+    /// Lists provider key spend caps.
+    pub async fn provider_spend_caps(
+        &self,
+        id: &str,
+    ) -> Result<ProviderSpendCapsResponse, ClientError> {
+        self.get(&format!(
+            "/v1/hofund/providers/{}/spend-caps",
+            encode_segment(id)
+        ))
+        .await
+    }
+
+    /// Sets or clears one provider key spend cap.
+    pub async fn change_provider_spend_cap(
+        &self,
+        id: &str,
+        request: ProviderSpendCapRequest,
+    ) -> Result<ProviderSpendCapsResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            &format!("/v1/hofund/providers/{}/spend-caps", encode_segment(id)),
             Some(json_body(&request)?),
         )
         .await

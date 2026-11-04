@@ -194,22 +194,15 @@ impl Subscription for Codex {
         host: &HostContext,
     ) -> Result<SignInChallenge, PluginError> {
         if ctx.option(device_sign_in::SITE_OPTION) == Some(device_sign_in::DEVICE_SITE) {
-            let pending = device_sign_in::start(
-                host,
-                &self.endpoints.device_issuer,
-                &self.endpoints.token,
-            )
-            .await?;
+            let pending =
+                device_sign_in::start(host, &self.endpoints.device_issuer, &self.endpoints.token)
+                    .await?;
             let page = device_sign_in::device_page(&pending.issuer);
-            let challenge =
-                SignInChallenge::device_code(pending.user_code.clone(), page.clone())?;
+            let challenge = SignInChallenge::device_code(pending.user_code.clone(), page.clone())?;
             self.pending
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .insert(
-                    ctx.session().to_owned(),
-                    Pending::Device(pending),
-                );
+                .insert(ctx.session().to_owned(), Pending::Device(pending));
             return Ok(challenge);
         }
         let pkce = Pkce::generate()?;
@@ -288,14 +281,9 @@ impl Subscription for Codex {
                         "the sign-in callback does not belong to this sign-in",
                     ));
                 }
-                let signed_in = sign_in::exchange(
-                    host,
-                    &self.endpoints.token,
-                    &code,
-                    &verifier,
-                    &redirect_uri,
-                )
-                .await?;
+                let signed_in =
+                    sign_in::exchange(host, &self.endpoints.token, &code, &verifier, &redirect_uri)
+                        .await?;
                 let account = host
                     .accounts()
                     .account(signed_in.id.clone(), signed_in.label)?;
