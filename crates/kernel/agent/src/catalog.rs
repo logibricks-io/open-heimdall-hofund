@@ -3,7 +3,7 @@
 //! Paths and keys were checked against each tool's own docs on 2026-10-24.
 //! The citations sit on each shipped description.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -18,6 +18,7 @@ use crate::edit::{
     Assignment, FileKind, Shared, get, is_empty_document, is_empty_json, owned_part, remove_keys,
     render, string_at, strip_owned,
 };
+use crate::profile::{ProfileFields, profile_field_included, profile_field_rank};
 use crate::store::{
     backup_once, clear_markers, created_here, delete_verified, marker_present, read_optional,
     remove_empty_parents, revert_path, unified_diff, write_atomic, write_verified,
@@ -71,6 +72,7 @@ const BUILTIN_ORDER: [&str; 4] = ["claude-code", "codex", "gemini-cli", "opencod
 /// Compiled adapters in catalog order.
 pub struct Catalog {
     adapters: Vec<Box<dyn AgentAdapter>>,
+    descriptions: &'static [&'static AgentDescription],
 }
 
 impl Catalog {
@@ -87,6 +89,108 @@ impl Catalog {
             .into_iter()
             .find(|adapter| adapter.id() == name)
     }
+
+    pub(crate) fn profile_snapshot(&self, session: &Session) -> Result<ProfileFields, AgentError> {
+        let mut fields = ProfileFields::new();
+        for description in self.descriptions {
+            let engine = Engine::compiled(description, TargetOs::current(), session)?;
+            if !engine.detect(session) {
+                continue;
+            }
+            fields.extend(engine.profile_snapshot_fields()?);
+        }
+        Ok(fields)
+    }
+
+    pub(crate) fn profile_apply(
+        &self,
+        session: &Session,
+        wanted: &ProfileFields,
+        notes: &mut Vec<String>,
+    ) -> Result<crate::ApplyOutcome, AgentError> {
+        let mut keys: Vec<String> = wanted.keys().cloned().collect();
+        keys.sort_by(|left, right| {
+            profile_field_rank(left)
+                .cmp(&profile_field_rank(right))
+                .then_with(|| left.cmp(right))
+        });
+        let mut engines: BTreeMap<String, Engine> = BTreeMap::new();
+        for description in self.descriptions {
+            let id = description.id().as_str();
+            let engine = Engine::compiled(description, TargetOs::current(), session)?;
+            if engine.detect(session) {
+                engines.insert(id.to_owned(), engine);
+            }
+        }
+        let mut touched = Vec::<PathBuf>::new();
+        let mut changed = 0_usize;
+        for full_key in keys {
+            let Some((agent_id, field_key)) = split_profile_key(&full_key) else {
+                continue;
+            };
+            let Some(engine) = engines.get(agent_id) else {
+                notes.push(format!("skipped `{agent_id}`: not installed"));
+                continue;
+            };
+            let Some(value) = wanted.get(&full_key) else {
+                continue;
+            };
+            if engine.set_for_key(field_key).is_none() {
+                notes.push(format!("skipped `{full_key}`: unknown field"));
+                continue;
+            }
+            match engine.apply_profile_field(field_key, value) {
+                Ok(Some(path)) => {
+                    if !touched.iter().any(|seen| seen == &path) {
+                        touched.push(path);
+                    }
+                    changed += 1;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    for path in touched.iter().rev() {
+                        let _ = revert_path(path);
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        Ok(crate::ApplyOutcome { changed })
+    }
+
+    pub(crate) fn profile_in_use(
+        &self,
+        session: &Session,
+        wanted: &ProfileFields,
+    ) -> Result<bool, AgentError> {
+        let current = self.profile_snapshot(session)?;
+        let mut engines: BTreeMap<String, Engine> = BTreeMap::new();
+        for description in self.descriptions {
+            let id = description.id().as_str();
+            let engine = Engine::compiled(description, TargetOs::current(), session)?;
+            if engine.detect(session) {
+                engines.insert(id.to_owned(), engine);
+            }
+        }
+        let mut compared = false;
+        for (full_key, value) in wanted {
+            let Some((agent_id, field_key)) = split_profile_key(full_key) else {
+                continue;
+            };
+            let Some(engine) = engines.get(agent_id) else {
+                continue;
+            };
+            if engine.set_for_key(field_key).is_none() {
+                continue;
+            }
+            compared = true;
+            let held = current.get(full_key).cloned().unwrap_or_default();
+            if held != *value {
+                return Ok(false);
+            }
+        }
+        Ok(compared)
+    }
 }
 
 /// Composes compiled adapters in CLI order and rejects duplicate ids.
@@ -101,6 +205,32 @@ impl Catalog {
 /// built-in has no compiled description.
 pub fn catalog(compiled: &'static [&'static AgentDescription]) -> Result<Catalog, AgentError> {
     compose(compiled, builtin_adapter)
+}
+
+/// Builds a catalog from exactly the compiled descriptions given, without
+/// requiring the four built-in agents. Tests and scratch catalogs use this.
+///
+/// # Errors
+///
+/// Returns an error when two compiled descriptions share an id.
+pub fn catalog_from(compiled: &'static [&'static AgentDescription]) -> Result<Catalog, AgentError> {
+    let mut ids = BTreeSet::new();
+    for description in compiled {
+        if !ids.insert(description.id().as_str().to_owned()) {
+            return Err(AgentError::message(format!(
+                "agent id `{}` collides with another catalog entry",
+                description.id().as_str()
+            )));
+        }
+    }
+    let adapters = compiled
+        .iter()
+        .map(|description| Box::new(Compiled::new(description)) as Box<dyn AgentAdapter>)
+        .collect();
+    Ok(Catalog {
+        adapters,
+        descriptions: compiled,
+    })
 }
 
 fn compose(
@@ -139,7 +269,10 @@ fn compose(
     {
         composed.push(Box::new(Compiled::new(description)));
     }
-    Ok(Catalog { adapters: composed })
+    Ok(Catalog {
+        adapters: composed,
+        descriptions: compiled,
+    })
 }
 
 fn builtin_adapter(_id: &str) -> Option<Box<dyn AgentAdapter>> {
@@ -1598,6 +1731,116 @@ impl Engine {
             .any(|set| set.file == file && set.key == model.key);
         (model.file == file && !owned).then_some(model.key)
     }
+
+    fn profile_snapshot_fields(&self) -> Result<ProfileFields, AgentError> {
+        let mut fields = ProfileFields::new();
+        for chosen in self.chosen()? {
+            let text = match read_optional(&chosen.path)? {
+                Some(bytes) => Some(utf8(&chosen.path, &bytes)?.to_owned()),
+                None => None,
+            };
+            for set in chosen.sets {
+                if !self.set_applies(set, chosen.kind, text.as_deref()) {
+                    continue;
+                }
+                let full_key = format!("{}.{}", self.id, set.key);
+                let value = match &text {
+                    Some(content) => get(chosen.kind, content, set.key)
+                        .map_err(|error| annotate(&chosen.path, error))?
+                        .unwrap_or_default(),
+                    None => String::new(),
+                };
+                if !profile_field_included(&set.slot, &full_key, &value) {
+                    continue;
+                }
+                fields.insert(full_key, value);
+            }
+        }
+        Ok(fields)
+    }
+
+    fn set_for_key(&self, field_key: &str) -> Option<&EngineSet> {
+        self.sets.iter().find(|set| set.key == field_key)
+    }
+
+    fn apply_profile_field(
+        &self,
+        field_key: &str,
+        wanted: &str,
+    ) -> Result<Option<PathBuf>, AgentError> {
+        let Some(set) = self.set_for_key(field_key) else {
+            return Ok(None);
+        };
+        if matches!(set.slot, ApiSlot::Token) {
+            return Ok(None);
+        }
+        let full_key = format!("{}.{}", self.id, set.key);
+        if is_profile_secret_field(&full_key, wanted) {
+            return Ok(None);
+        }
+        let chosen = self
+            .chosen()?
+            .into_iter()
+            .find(|chosen| chosen.file == set.file)
+            .ok_or_else(|| AgentError::message(format!("`{}` has no config location", set.file)))?;
+        let before = read_optional(&chosen.path)?;
+        let text = before
+            .as_ref()
+            .map(|bytes| utf8(&chosen.path, bytes))
+            .transpose()?;
+        if !self.set_applies(set, chosen.kind, text) {
+            return Ok(None);
+        }
+        let current = match text {
+            Some(content) => get(chosen.kind, content, set.key)
+                .map_err(|error| annotate(&chosen.path, error))?
+                .unwrap_or_default(),
+            None => String::new(),
+        };
+        if current == wanted {
+            return Ok(None);
+        }
+        backup_once(&chosen.path)?;
+        let after = if wanted.is_empty() {
+            let original = text.unwrap_or("");
+            remove_keys(chosen.kind, original, &[set.key])
+                .map_err(|error| annotate(&chosen.path, error))?
+        } else {
+            let assignment = Assignment {
+                key: set.key,
+                value: wanted.to_owned(),
+                raw_json: profile_assignment_raw_json(&set.slot),
+                shared: shared_of(&set.slot),
+            };
+            render(chosen.kind, text, std::slice::from_ref(&assignment))
+                .map_err(|error| annotate(&chosen.path, error))?
+        };
+        write_atomic(&chosen.path, &after)?;
+        Ok(Some(chosen.path))
+    }
+}
+
+fn split_profile_key(full_key: &str) -> Option<(&str, &str)> {
+    let index = full_key.rfind('.')?;
+    let (agent, field) = full_key.split_at(index);
+    Some((agent, &field[1..]))
+}
+
+fn is_profile_secret_field(full_key: &str, value: &str) -> bool {
+    crate::is_profile_secret(full_key, value)
+}
+
+fn profile_assignment_raw_json(slot: &ApiSlot) -> bool {
+    matches!(
+        slot,
+        ApiSlot::Json(_)
+            | ApiSlot::JsonWithModels(_)
+            | ApiSlot::CatalogModels
+            | ApiSlot::ModelArray { .. }
+            | ApiSlot::Append { .. }
+            | ApiSlot::ModelMap { .. }
+            | ApiSlot::ModelPair { json: true, .. }
+    )
 }
 
 struct Chosen<'a> {

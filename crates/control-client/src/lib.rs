@@ -13,15 +13,17 @@ use hofund_control_proto::{
     CatalogDisabledListResponse, CatalogModelRequest, ConfigApplyRequest, ConfigResponse,
     ConfigValidateRequest, ConfigValidationResponse, ControlError, ErrorEnvelope, EventEnvelope,
     GatewayKeyRequest, GatewayKeyResponse, GatewayKeyRestoreRequest, HealthResponse,
-    MAX_RESPONSE_BODY_BYTES, ModelListResponse, PicksResponse, PicksSetRequest, ProviderKeyRequest,
-    ProviderKeysResponse, ProviderListResponse, ProviderSpendCapRequest, ProviderSpendCapsResponse,
-    ProviderTestRequest, ProviderTestResponse, QuotaAlertsResponse, QuotaAlertsSetRequest,
-    QuotaAlertsSetResponse, QuotaCreditsModesResponse, QuotaCreditsSetRequest,
-    QuotaCreditsSetResponse, QuotaHistoryQuery, QuotaHistoryResponse, QuotaQuery, QuotaResponse,
-    ReloadRequest, RouteListResponse, RouteModelListResponse, RouteQuery, SessionRouteResponse,
-    ShutdownRequest, ShutdownResponse, StatusResponse, TokenRotateRequest, TokenRotateResponse,
-    Topic, UnroutedListResponse, UsagePeriod, UsageQuery, UsageResponse, WarmupListResponse,
-    WarmupRunRequest, WarmupRunResponse, decode_error_envelope, decode_response,
+    MAX_RESPONSE_BODY_BYTES, ModelListResponse, PicksResponse, PicksSetRequest,
+    ProfileDetailResponse, ProfileListResponse, ProfileSaveRequest, ProfileSwitchRequest,
+    ProfileSwitchResponse, ProviderKeyRequest, ProviderKeysResponse, ProviderListResponse,
+    ProviderSpendCapRequest, ProviderSpendCapsResponse, ProviderTestRequest, ProviderTestResponse,
+    QuotaAlertsResponse, QuotaAlertsSetRequest, QuotaAlertsSetResponse, QuotaCreditsModesResponse,
+    QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryQuery, QuotaHistoryResponse,
+    QuotaQuery, QuotaResponse, ReloadRequest, RouteListResponse, RouteModelListResponse,
+    RouteQuery, SessionRouteResponse, ShutdownRequest, ShutdownResponse, StatusResponse,
+    TokenRotateRequest, TokenRotateResponse, Topic, UnroutedListResponse, UsagePeriod, UsageQuery,
+    UsageResponse, WarmupListResponse, WarmupRunRequest, WarmupRunResponse, decode_error_envelope,
+    decode_response,
 };
 use http::header;
 use http_body_util::{BodyExt, Full, Limited};
@@ -451,6 +453,47 @@ impl Client {
     /// Lists known agents.
     pub async fn agents(&self) -> Result<AgentListResponse, ClientError> {
         self.get("/v1/hofund/agents").await
+    }
+
+    /// Lists named agent setting profiles.
+    pub async fn profiles(&self) -> Result<ProfileListResponse, ClientError> {
+        self.get("/v1/hofund/profiles").await
+    }
+
+    /// Reads one named profile.
+    pub async fn profile_detail(&self, name: &str) -> Result<ProfileDetailResponse, ClientError> {
+        self.get(&format!("/v1/hofund/profiles/{}", encode_segment(name)))
+            .await
+    }
+
+    /// Saves a profile from the current agent settings.
+    pub async fn save_profile(&self, name: &str) -> Result<ProfileDetailResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            "/v1/hofund/profiles/save",
+            Some(json_body(&ProfileSaveRequest::from_current(name))?),
+        )
+        .await
+    }
+
+    /// Applies a named profile to detected agents.
+    pub async fn switch_profile(&self, name: &str) -> Result<ProfileSwitchResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            "/v1/hofund/profiles/switch",
+            Some(json_body(&ProfileSwitchRequest::new(name))?),
+        )
+        .await
+    }
+
+    /// Deletes a named profile.
+    pub async fn delete_profile(&self, name: &str) -> Result<ProfileListResponse, ClientError> {
+        self.request(
+            http::Method::DELETE,
+            &format!("/v1/hofund/profiles/{}", encode_segment(name)),
+            None,
+        )
+        .await
     }
 
     /// Reports agent connection states.

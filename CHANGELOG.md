@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Provider API key spend caps in USD (day, month, or total), persisted in
   `.hofund/spend-caps.json`, enforced in routing with fallback to other keys
   and a 429 when every key is capped (D-61).
+- Named agent setting profiles saved as diff-friendly TOML under
+  `.hofund/profiles.toml`, with list/show/save/switch/delete via CLI and
+  `/v1/hofund/profiles/*` control routes (G-1).
 
 - Codex ChatGPT backend rewrites tool names outside `^[a-zA-Z0-9_.-]+$` for
   upstream acceptance and maps them back in replies (D-57).

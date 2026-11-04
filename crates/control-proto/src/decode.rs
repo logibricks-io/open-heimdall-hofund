@@ -9,14 +9,16 @@ use crate::{
     ConfigResponse, ConfigValidateRequest, ConfigValidationResponse, ControlError,
     ControlErrorKind, ErrorEnvelope, EventEnvelope, FieldIssue, GatewayKeyRequest,
     GatewayKeyResponse, GatewayKeyRestoreRequest, HealthResponse, MAX_REQUEST_BODY_BYTES,
-    MAX_RESPONSE_BODY_BYTES, ModelListResponse, PicksResponse, PicksSetRequest, ProviderKeyRequest,
-    ProviderKeysResponse, ProviderListResponse, ProviderSpendCapRequest, ProviderSpendCapsResponse,
-    ProviderTestRequest, ProviderTestResponse, QuotaAlertsResponse, QuotaAlertsSetRequest,
-    QuotaAlertsSetResponse, QuotaCreditsModesResponse, QuotaCreditsSetRequest,
-    QuotaCreditsSetResponse, QuotaHistoryResponse, QuotaResponse, ReloadRequest, RouteListResponse,
-    RouteModelListResponse, SessionRouteResponse, ShutdownRequest, ShutdownResponse,
-    StatusResponse, TokenRotateRequest, TokenRotateResponse, UnroutedListResponse, UsageResponse,
-    WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
+    MAX_RESPONSE_BODY_BYTES, ModelListResponse, PicksResponse, PicksSetRequest,
+    ProfileDeleteRequest, ProfileDetailResponse, ProfileListResponse, ProfileSaveRequest,
+    ProfileSwitchRequest, ProfileSwitchResponse, ProviderKeyRequest, ProviderKeysResponse,
+    ProviderListResponse, ProviderSpendCapRequest, ProviderSpendCapsResponse, ProviderTestRequest,
+    ProviderTestResponse, QuotaAlertsResponse, QuotaAlertsSetRequest, QuotaAlertsSetResponse,
+    QuotaCreditsModesResponse, QuotaCreditsSetRequest, QuotaCreditsSetResponse,
+    QuotaHistoryResponse, QuotaResponse, ReloadRequest, RouteListResponse, RouteModelListResponse,
+    SessionRouteResponse, ShutdownRequest, ShutdownResponse, StatusResponse, TokenRotateRequest,
+    TokenRotateResponse, UnroutedListResponse, UsageResponse, WarmupListResponse, WarmupRunRequest,
+    WarmupRunResponse,
 };
 
 mod sealed {
@@ -240,6 +242,9 @@ request!(GatewayKeyRequest);
 request!(GatewayKeyRestoreRequest);
 request!(ProviderKeyRequest);
 request!(ProviderSpendCapRequest);
+request!(ProfileSaveRequest, validate);
+request!(ProfileSwitchRequest, validate);
+request!(ProfileDeleteRequest, validate);
 
 impl sealed::Sealed for ConfigResponse {}
 impl Response for ConfigResponse {
@@ -316,6 +321,9 @@ response!(
     QuotaCreditsSetResponse,
     QuotaAlertsResponse,
     QuotaAlertsSetResponse,
+    ProfileListResponse,
+    ProfileDetailResponse,
+    ProfileSwitchResponse,
 );
 
 #[cfg(test)]

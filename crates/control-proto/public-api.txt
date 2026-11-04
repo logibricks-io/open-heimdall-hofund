@@ -364,6 +364,40 @@ PicksSetRequest::fn replace (expected_picks_revision : impl Into < String > , id
 PlannedChange #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
 PlannedChange.diff
 PlannedChange.path
+ProfileDeleteRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
+ProfileDeleteRequest.name
+ProfileDeleteRequest.version
+ProfileDeleteRequest::fn new (name : impl Into < String >) -> Self
+ProfileDeleteRequest::fn validate (& self) -> Result < () , ControlError >
+ProfileDetailResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+ProfileDetailResponse.fields
+ProfileDetailResponse.in_use
+ProfileDetailResponse.name
+ProfileDetailResponse.version
+ProfileListResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+ProfileListResponse.profiles
+ProfileListResponse.version
+ProfileSaveRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
+ProfileSaveRequest.fields
+ProfileSaveRequest.from_current
+ProfileSaveRequest.name
+ProfileSaveRequest.version
+ProfileSaveRequest::fn from_current (name : impl Into < String >) -> Self
+ProfileSaveRequest::fn validate (& self) -> Result < () , ControlError >
+ProfileSummary #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+ProfileSummary.in_use
+ProfileSummary.name
+ProfileSwitchRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
+ProfileSwitchRequest.name
+ProfileSwitchRequest.version
+ProfileSwitchRequest::fn new (name : impl Into < String >) -> Self
+ProfileSwitchRequest::fn validate (& self) -> Result < () , ControlError >
+ProfileSwitchResponse #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+ProfileSwitchResponse.changed
+ProfileSwitchResponse.notes
+ProfileSwitchResponse.version
+ProfileSwitchResponse.warnings
+ProfileSwitchResponse::fn new (changed : u64) -> Self
 ProviderKey #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
 ProviderKey.id
 ProviderKey.masked
