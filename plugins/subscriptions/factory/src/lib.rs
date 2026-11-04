@@ -235,6 +235,9 @@ impl Subscription for Factory {
                         "the stored Factory sign-in has no refresh token",
                     ));
                 }
+                if tokens::oauth_needs_renewal(&blob, host.clock().now()) {
+                    return Ok(needs_sign_in("the Factory sign-in is due for renewal"));
+                }
             }
         }
         Ok(AccountStatus::Ready)

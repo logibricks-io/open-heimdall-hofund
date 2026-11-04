@@ -152,7 +152,7 @@ pub(crate) async fn bearer(
         .secret("access_token")
         .ok_or_else(|| PluginError::auth("the stored Factory sign-in has no access token"))?;
     let job = refresh_oauth(host.clone(), endpoints.clone(), account.clone(), access);
-    detached(host.scheduler(), "cline-refresh", job).await
+    detached(host.scheduler(), "factory-refresh", job).await
 }
 
 /// Explicit refresh for the subscription `refresh` hook.
@@ -224,7 +224,7 @@ async fn refresh_oauth(
         }
         Err(error) => return Err(error),
     };
-    let parsed = parse_register(&reply, Some(&refresh_token))?;
+    let parsed = parse_register(&reply, Some(&refresh_token), host.clock().now())?;
     let mut next = blob
         .with_secret("access_token", &parsed.access)
         .with_secret("refresh_token", &parsed.refresh)
@@ -255,10 +255,16 @@ fn ms_remaining(blob: &SecretObject, now: SystemTime) -> Duration {
     at.duration_since(now).unwrap_or(Duration::ZERO)
 }
 
+/// Whether an OAuth blob is past expiry or inside the refresh margin.
+pub(crate) fn oauth_needs_renewal(blob: &SecretObject, now: SystemTime) -> bool {
+    needs_refresh(blob, now)
+}
+
 /// Reads Factory's register or refresh answer.
 pub(crate) fn parse_register(
     data: &Value,
     fallback_refresh: Option<&SecretString>,
+    now: SystemTime,
 ) -> Result<ParsedAuth, PluginError> {
     let access = data
         .get("accessToken")
@@ -292,7 +298,7 @@ pub(crate) fn parse_register(
         .filter(|text| !text.is_empty())
         .map(str::to_owned);
     let account_id = email.clone().or(uid.clone());
-    let expires_ms = expires_at_ms(data.get("expiresAt"));
+    let expires_ms = expires_at_ms(data.get("expiresAt"), now);
     Ok(ParsedAuth {
         access: SecretString::from(access.to_owned()),
         refresh,
@@ -304,23 +310,22 @@ pub(crate) fn parse_register(
     })
 }
 
-fn expires_at_ms(value: Option<&Value>) -> u64 {
+fn expires_at_ms(value: Option<&Value>, now: SystemTime) -> u64 {
     match value {
         Some(Value::String(text)) => parse_rfc3339(text)
             .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
             .map(|d| d.as_millis() as u64)
-            .unwrap_or_else(default_expiry_ms),
+            .unwrap_or_else(|| default_expiry_ms(now)),
         Some(Value::Number(number)) => number
             .as_u64()
             .or_else(|| number.as_f64().map(|n| n as u64))
-            .unwrap_or_else(default_expiry_ms),
-        _ => default_expiry_ms(),
+            .unwrap_or_else(|| default_expiry_ms(now)),
+        _ => default_expiry_ms(now),
     }
 }
 
-fn default_expiry_ms() -> u64 {
-    UNIX_EPOCH
-        .checked_add(Duration::from_secs(3600))
+fn default_expiry_ms(now: SystemTime) -> u64 {
+    now.checked_add(Duration::from_secs(3600))
         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)

@@ -173,7 +173,9 @@ pub(crate) async fn list(
         merge_cloud(&mut models, cloud);
     }
     if models.is_empty() {
-        models = default_models();
+        return Err(PluginError::config(
+            "Factory returned no models from its recommended feed",
+        ));
     }
     let specs: Result<Vec<_>, _> = models
         .iter()
@@ -239,24 +241,6 @@ fn merge_cloud(models: &mut Vec<FeedModel>, cloud: Vec<FeedModel>) {
             models.push(c);
         }
     }
-}
-
-fn default_models() -> Vec<FeedModel> {
-    [
-        "anthropic/claude-sonnet-5.5",
-        "anthropic/claude-opus-5.5",
-        "openai/gpt-6-astra",
-        "cline-free/deepseek-v4.1-flash",
-    ]
-    .into_iter()
-    .map(|id| FeedModel {
-        id: id.to_owned(),
-        name: prettify(id),
-        free: id.starts_with("cline-free/"),
-        pass: id.starts_with("cline-pass/"),
-        context: None,
-    })
-    .collect()
 }
 
 #[cfg(test)]

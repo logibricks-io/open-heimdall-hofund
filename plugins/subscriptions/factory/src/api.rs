@@ -20,11 +20,10 @@ pub(crate) fn decode_data(body: &[u8]) -> Result<Value, PluginError> {
     if let Some(success) = object.get("success").and_then(Value::as_bool)
         && !success
     {
-        let detail = object
-            .get("error")
-            .and_then(Value::as_str)
-            .unwrap_or("Factory refused the request");
-        return Err(PluginError::status_error(502, detail));
+        return Err(PluginError::status_error(
+            502,
+            "Factory refused the request",
+        ));
     }
     if object.contains_key("data") {
         return Ok(object.get("data").cloned().unwrap_or(Value::Null));

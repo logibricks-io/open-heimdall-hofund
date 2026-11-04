@@ -96,7 +96,7 @@ async fn register_workos(
         "refreshToken": refresh_text,
     });
     let data = api::post_json(host, endpoints, "/auth/register", &body, None, false).await?;
-    let parsed = parse_register(&data, refresh)?;
+    let parsed = parse_register(&data, refresh, host.clock().now())?;
     store_signed_in(parsed)
 }
 
