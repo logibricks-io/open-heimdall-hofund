@@ -7,8 +7,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use hofund_control_proto::{
-    API_VERSION, ControlErrorKind, ShutdownResponse, ShutdownState, StatusResponse, UsagePeriod,
-    UsageResponse, decode_error_envelope, decode_response,
+    API_VERSION, ControlErrorKind, ShutdownResponse, ShutdownState, StatusResponse,
+    UsageBreakdownBy, UsagePeriod, UsageResponse, decode_error_envelope, decode_response,
 };
 use hofund_daemon::{ControlRuntime, Running, StartOptions, start_with_options};
 use hofund_usage::{Ledger, Row};
@@ -488,5 +488,30 @@ async fn u1b_14_control_usage_converts_totals_to_cny() {
     assert_eq!(all.currency, "CNY");
     assert!((all.totals.cost - 14.0).abs() < f64::EPSILON);
     assert_eq!(all.cny_per_usd, Some(7.0));
+    support::shutdown(running).await;
+}
+
+#[tokio::test]
+async fn u1c_12_control_usage_breakdown_by_agent() {
+    let dir = Scratch::new("breakdown-agent");
+    let now = now_unix();
+    {
+        let ledger = Ledger::open(&dir.0.join("usage.sqlite")).expect("ledger");
+        let mut first = row(now, "m", Some(10), Some(5));
+        first.client_agent = "fixture-agent".to_owned();
+        ledger.record(&first).expect("first");
+        let mut second = row(now, "m", Some(1), Some(1));
+        second.client_agent = "other-agent".to_owned();
+        ledger.record(&second).expect("second");
+    }
+    let running = start_tcp(&dir.0, CONFIG).await;
+    let body = decoded_usage(usage(&running, &dir.0, "?period=all&by=agent").await).await;
+    assert_eq!(body.breakdown_by, Some(UsageBreakdownBy::Agent));
+    assert_eq!(body.breakdown.len(), 2);
+    assert_eq!(body.breakdown[0].id, "fixture-agent");
+    assert_eq!(body.breakdown[0].requests, 1);
+    assert_eq!(body.breakdown[0].input_tokens, 10);
+    let bad = usage(&running, &dir.0, "?period=all&by=not-a-dimension").await;
+    assert_eq!(bad.status(), reqwest::StatusCode::BAD_REQUEST);
     support::shutdown(running).await;
 }

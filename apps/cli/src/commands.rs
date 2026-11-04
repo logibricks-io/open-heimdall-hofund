@@ -12,7 +12,7 @@ use std::time::Duration;
 use hofund_control_client::hofund_control_proto::{
     AgentAction, AgentConnectRequest, AgentDisconnectRequest, AgentModelRequest, AgentPlanRequest,
     AgentState, ConfigApplyRequest, ConfigValidateRequest, FieldIssue, ReloadRequest, RouteQuery,
-    ShutdownRequest, TokenRotateRequest, UsagePeriod, UsageQuery, UsageResponse,
+    ShutdownRequest, TokenRotateRequest, UsageBreakdownBy, UsagePeriod, UsageQuery, UsageResponse,
 };
 use hofund_control_client::{Client, ClientError, probe_model_health, resolve_config_id};
 
@@ -211,13 +211,18 @@ pub(crate) async fn healthcheck(config: &Path) -> Result<String, String> {
 }
 
 /// `hofund usage`: the usage table with local times and a totals line.
-pub(crate) async fn usage(config: &Path) -> Result<String, String> {
+pub(crate) async fn usage(config: &Path, by: Option<UsageBreakdownBy>) -> Result<String, String> {
     let client = client(config).await?;
-    let response = client
-        .usage(UsageQuery::new(UsagePeriod::All))
-        .await
-        .map_err(failure)?;
-    Ok(usage_table(&response))
+    let query = match by {
+        Some(by) => UsageQuery::with_breakdown(UsagePeriod::All, by),
+        None => UsageQuery::new(UsagePeriod::All),
+    };
+    let response = client.usage(query).await.map_err(failure)?;
+    if response.breakdown_by.is_some() {
+        Ok(usage_breakdown_table(&response))
+    } else {
+        Ok(usage_table(&response))
+    }
 }
 
 /// `hofund route`: the latest routing decisions from the daemon trace.
@@ -314,6 +319,52 @@ pub(crate) fn usage_table(response: &UsageResponse) -> String {
     if response.rows_truncated {
         out.push_str("(older rows omitted; totals cover every request)\n");
     }
+    out
+}
+
+/// Renders grouped totals when the client asked for a breakdown dimension.
+pub(crate) fn usage_breakdown_table(response: &UsageResponse) -> String {
+    let by = response
+        .breakdown_by
+        .map(|dimension| dimension.as_query_value())
+        .unwrap_or("unknown");
+    let header = ["ID", "LABEL", "REQUESTS", "IN", "OUT", "COST", "UNPRICED"];
+    let body: Vec<[String; 7]> = response
+        .breakdown
+        .iter()
+        .map(|group| {
+            [
+                group.id.clone(),
+                group.label.clone(),
+                group.requests.to_string(),
+                group.input_tokens.to_string(),
+                group.output_tokens.to_string(),
+                format!("{:.4} {}", group.cost, response.currency),
+                group.unpriced.to_string(),
+            ]
+        })
+        .collect();
+    let mut widths = header.map(str::len);
+    for cells in &body {
+        for (width, cell) in widths.iter_mut().zip(cells) {
+            *width = (*width).max(cell.len());
+        }
+    }
+    let mut out = format!("breakdown by {by}\n");
+    push_line(&mut out, &header.map(str::to_owned), &widths);
+    for cells in body {
+        push_line(&mut out, &cells, &widths);
+    }
+    let totals = &response.totals;
+    out.push_str(&format!(
+        "totals  requests={}  in={}  out={}  cost={:.4} {}  unpriced={}\n",
+        totals.requests,
+        totals.input_tokens,
+        totals.output_tokens,
+        totals.cost,
+        response.currency,
+        totals.unpriced,
+    ));
     out
 }
 
@@ -531,8 +582,10 @@ pub(crate) async fn token_rotate(config: &Path) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{opencode_models_note, tokens, usage_table};
-    use hofund_control_client::hofund_control_proto::{UsageResponse, UsageRow};
+    use super::{opencode_models_note, tokens, usage_breakdown_table, usage_table};
+    use hofund_control_client::hofund_control_proto::{
+        UsageBreakdownBy, UsageBreakdownGroup, UsageResponse, UsageRow,
+    };
 
     #[test]
     fn u1b_13_cli_usage_totals_show_cost_currency_and_unpriced() {
@@ -570,6 +623,32 @@ mod tests {
         assert!(usage_table(&response).contains("older rows omitted"));
         assert_eq!(tokens(None), "-");
         assert_eq!(tokens(Some(0)), "0");
+    }
+
+    #[test]
+    fn u1c_14_cli_usage_breakdown_table_renders_groups() {
+        let mut response = UsageResponse::default();
+        response.breakdown_by = Some(UsageBreakdownBy::ProviderKey);
+        let mut group = UsageBreakdownGroup::default();
+        group.id = "aabbccddee".to_owned();
+        group.label = "…ddee".to_owned();
+        group.requests = 2;
+        group.input_tokens = 30;
+        group.output_tokens = 4;
+        group.cost = 1.25;
+        group.unpriced = 1;
+        response.breakdown.push(group);
+        response.totals.requests = 2;
+        response.totals.input_tokens = 30;
+        response.totals.output_tokens = 4;
+        response.totals.cost = 1.25;
+        response.totals.unpriced = 1;
+        let table = usage_breakdown_table(&response);
+        assert!(table.starts_with("breakdown by provider-key\n"));
+        assert!(table.contains("aabbccddee"));
+        assert!(table.contains("…ddee"));
+        assert!(table.contains("totals  requests=2"));
+        assert!(table.contains("cost=1.2500 USD"));
     }
 
     #[test]

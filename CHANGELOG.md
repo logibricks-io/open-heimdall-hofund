@@ -180,6 +180,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `[usage.prices]`, the provider model list, then models.dev. GET /usage and
   `hofund usage` report cost, currency, and unpriced counts; optional CNY display
   uses `usage.cny_per_usd`. See `docs/usage-cost.md`.
+- Usage attribution (U-1c, feature-parity row 9.5): gateway requests store a
+  detected client agent on each usage row; GET /usage and `hofund usage` accept
+  `by=agent`, `provider-key`, or `gateway-key` for grouped request, token, cost,
+  and unpriced totals (provider key labels are masked).
 - Per-agent visible model lists (G-2, feature-parity row 5.7): optional
   `family` on providers and routes; `[agents.visible]`, `[agents.hidden_models]`,
   `[agents.picked_models]`, and `[agents.picked_only]` in config; gateway

@@ -1,3 +1,4 @@
+//! Usage reporting period and breakdown dimensions.
 use serde::{Deserialize, Serialize};
 
 use crate::{API_VERSION, ControlError, ControlErrorKind, FieldIssue};
@@ -21,6 +22,56 @@ pub enum UsagePeriod {
     Unknown,
 }
 
+/// Usage breakdown dimension for grouped reports.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+#[serde(rename_all = "kebab-case")]
+pub enum UsageBreakdownBy {
+    /// Group by detected client agent.
+    Agent,
+    /// Group by provider API key fingerprint.
+    ProviderKey,
+    /// Group by authenticated gateway key.
+    GatewayKey,
+    /// A newer peer supplied an unknown breakdown.
+    #[serde(other)]
+    Unknown,
+}
+
+impl UsageBreakdownBy {
+    /// Query-string token for this dimension.
+    #[must_use]
+    pub const fn as_query_value(self) -> &'static str {
+        match self {
+            Self::Agent => "agent",
+            Self::ProviderKey => "provider-key",
+            Self::GatewayKey => "gateway-key",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// One group's totals in a usage breakdown.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
+#[serde(default)]
+pub struct UsageBreakdownGroup {
+    /// Stable group id.
+    pub id: String,
+    /// Display label (masked for provider keys).
+    pub label: String,
+    /// Request count in the group.
+    pub requests: u64,
+    /// Sum of input tokens.
+    pub input_tokens: u64,
+    /// Sum of output tokens.
+    pub output_tokens: u64,
+    /// Sum of stored costs in the response currency.
+    pub cost: f64,
+    /// Token-bearing rows without a stored list price.
+    pub unpriced: u64,
+}
+
 /// Query-only usage request. It uses the path version and has no JSON body
 /// version field. Query-string parsing belongs to the HTTP layer.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -29,33 +80,52 @@ pub enum UsagePeriod {
 pub struct UsageQuery {
     /// Requested reporting period.
     pub period: UsagePeriod,
+    /// When set, the response includes a grouped breakdown instead of only rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by: Option<UsageBreakdownBy>,
 }
 
 impl UsageQuery {
     /// Constructs a usage query.
     #[must_use]
     pub fn new(period: UsagePeriod) -> Self {
-        Self { period }
+        Self { period, by: None }
     }
 
-    /// Rejects a period this version does not understand. The HTTP layer must
-    /// call this after parsing the query string, so a typo cannot silently
-    /// widen or narrow the report.
+    /// Constructs a usage query with a breakdown dimension.
+    #[must_use]
+    pub fn with_breakdown(period: UsagePeriod, by: UsageBreakdownBy) -> Self {
+        Self {
+            period,
+            by: Some(by),
+        }
+    }
+
+    /// Rejects unknown query values. The HTTP layer must call this after
+    /// parsing the query string.
     ///
     /// # Errors
     ///
     /// Returns a `BadRequest` error with an `unknown_variant` detail for
-    /// [`UsagePeriod::Unknown`].
+    /// unrecognized period or breakdown values.
     pub fn validate(&self) -> Result<(), ControlError> {
-        if self.period != UsagePeriod::Unknown {
-            return Ok(());
+        if self.period == UsagePeriod::Unknown {
+            let message = "unknown usage period; expected day, week, month, or all";
+            let mut error = ControlError::new(ControlErrorKind::BadRequest, message, "validate");
+            error
+                .details
+                .push(FieldIssue::new("period", "unknown_variant", message));
+            return Err(error);
         }
-        let message = "unknown usage period; expected day, week, month, or all";
-        let mut error = ControlError::new(ControlErrorKind::BadRequest, message, "validate");
-        error
-            .details
-            .push(FieldIssue::new("period", "unknown_variant", message));
-        Err(error)
+        if self.by == Some(UsageBreakdownBy::Unknown) {
+            let message = "unknown usage breakdown; expected agent, provider-key, or gateway-key";
+            let mut error = ControlError::new(ControlErrorKind::BadRequest, message, "validate");
+            error
+                .details
+                .push(FieldIssue::new("by", "unknown_variant", message));
+            return Err(error);
+        }
+        Ok(())
     }
 }
 
@@ -111,6 +181,9 @@ pub struct UsageRow {
     /// Row kind for handed-off, refusal, or turned-away tries; empty for ordinary rows.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub outcome: String,
+    /// Detected client agent id, absent in older peers.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub client_agent: String,
 }
 
 /// Aggregated usage totals.
@@ -160,6 +233,12 @@ pub struct UsageResponse {
     /// Yuan per US dollar when `currency` is `CNY`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cny_per_usd: Option<f64>,
+    /// Breakdown dimension when the client asked for grouped totals.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub breakdown_by: Option<UsageBreakdownBy>,
+    /// Grouped totals when `breakdown_by` is set.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub breakdown: Vec<UsageBreakdownGroup>,
 }
 
 impl Default for UsageResponse {
@@ -172,10 +251,27 @@ impl Default for UsageResponse {
             rows_truncated: false,
             currency: default_currency(),
             cny_per_usd: None,
+            breakdown_by: None,
+            breakdown: Vec::new(),
         }
     }
 }
 
 fn default_currency() -> String {
     "USD".to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{UsageBreakdownBy, UsagePeriod, UsageQuery};
+
+    #[test]
+    fn u1c_15_usage_query_validate_rejects_unknown_breakdown() {
+        let query = UsageQuery {
+            period: UsagePeriod::All,
+            by: Some(UsageBreakdownBy::Unknown),
+        };
+        let error = query.validate().expect_err("unknown by");
+        assert!(error.message.contains("provider-key"));
+    }
 }
