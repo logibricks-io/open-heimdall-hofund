@@ -72,15 +72,18 @@ impl CheckinStore {
     }
 
     fn set_day(&self, member: &str, day: &str) {
-        self.persisted
-            .lock()
-            .expect("checkin persisted")
-            .daily
-            .insert(member.to_owned(), day.to_owned());
-        let _ = write_persisted(
-            &self.path,
-            &self.persisted.lock().expect("checkin persisted"),
-        );
+        let snapshot = {
+            let mut persisted = self.persisted.lock().expect("checkin persisted");
+            persisted.daily.insert(member.to_owned(), day.to_owned());
+            persisted.clone()
+        };
+        if let Err(error) = write_persisted(&self.path, &snapshot) {
+            warn!(
+                path = %self.path.display(),
+                error = %error,
+                "failed to persist daily check-in state"
+            );
+        }
     }
 
     fn record(&self, row: CheckinAccountStatus) {
@@ -114,7 +117,10 @@ fn write_persisted(path: &Path, data: &Persisted) -> Result<(), std::io::Error> 
         std::fs::create_dir_all(parent)?;
     }
     let bytes = serde_json::to_vec(data).expect("checkin state serializes");
-    std::fs::write(path, bytes)
+    let temp = path.with_extension("json.tmp");
+    std::fs::write(&temp, bytes)?;
+    std::fs::rename(temp, path)?;
+    Ok(())
 }
 
 pub(crate) fn enabled_from_options(options: &BTreeMap<String, Value>) -> Result<bool, String> {
@@ -222,9 +228,15 @@ pub(crate) async fn tick_with_runner(
         if !account_ready(&candidate.state, &candidate.member.account).await {
             continue;
         }
-        let result = runner
-            .run(&candidate.state, &candidate.member.account)
-            .await;
+        let result = match tokio::time::timeout(
+            RUN_TIMEOUT,
+            runner.run(&candidate.state, &candidate.member.account),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err("check-in timed out".to_owned()),
+        };
         match result {
             Ok(outcome) => {
                 let record = CheckinRecord::from_result(now, &outcome);
@@ -452,5 +464,24 @@ mod tests {
     fn a3b_5_checkin_scheduling_is_isolated_from_routing() {
         let zone = local_offset(UNIX_EPOCH);
         let _ = local_day_key(UNIX_EPOCH, zone);
+    }
+
+    #[test]
+    fn a3b_12_stale_temp_or_corrupt_state_file_does_not_panic() {
+        let dir = tempfile::tempdir().expect("temp");
+        let path = dir.path().join("daily-checkin.json");
+        std::fs::write(&path, b"{not json").expect("corrupt");
+        std::fs::write(
+            path.with_extension("json.tmp"),
+            br#"{"daily":{"x/y":"2020-01-01"}}"#,
+        )
+        .expect("stale temp");
+        let store = CheckinStore::new(dir.path());
+        assert!(store.last_day("x/y").is_empty());
+        store.set_day("member/a-0000000000000001", "2026-11-04");
+        let store2 = CheckinStore::new(dir.path());
+        assert_eq!(store2.last_day("member/a-0000000000000001"), "2026-11-04");
+        let on_disk = std::fs::read_to_string(&path).expect("state file");
+        assert!(on_disk.contains("2026-11-04"));
     }
 }

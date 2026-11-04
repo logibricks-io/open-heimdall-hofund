@@ -14,7 +14,7 @@ use hofund_plugin_api::{
 use hofund_plugin_api::{ProtocolId, Request};
 use hofund_plugin_sdk::daily_checkin::ENABLED_KEY;
 
-use crate::checkin::{CheckinRunner, tick_with_runner};
+use crate::checkin::{CheckinRunner, list_statuses, tick_with_runner};
 use crate::registry::{DaemonRegistry, RegistryAdapter};
 use crate::runtime::Runtime;
 
@@ -393,4 +393,130 @@ async fn a3b_6_manual_run_now_checks_one_account() {
     .await
     .expect("manual check-in");
     assert_eq!(record.outcome(), CheckinOutcome::Failed);
+}
+
+struct SlowRunner;
+
+#[async_trait::async_trait]
+impl CheckinRunner for SlowRunner {
+    async fn run(
+        &self,
+        _state: &crate::subscriptions::SubscriptionState,
+        _account: &AccountId,
+    ) -> Result<CheckinResult, String> {
+        tokio::time::sleep(Duration::from_secs(3600)).await;
+        Ok(CheckinResult::new(CheckinOutcome::Claimed, ""))
+    }
+}
+
+#[tokio::test]
+async fn a3b_13_vendor_error_records_status_marks_day_without_routing() {
+    let fixture = fixture(true).await;
+    let account_id = AccountId::try_from(ACCOUNT).expect("id");
+    let state = fixture
+        .runtime
+        .subscription_states()
+        .get(PLUGIN)
+        .expect("subscription")
+        .clone();
+    let runner = RecordingRunner {
+        outcomes: Arc::new(Mutex::new(vec![Err("vendor refused".to_owned())])),
+    };
+    tick_with_runner(
+        &fixture.runtime,
+        &fixture.store,
+        fixture.registry.as_ref(),
+        &runner,
+    )
+    .await;
+    let rows = list_statuses(
+        &fixture.runtime,
+        fixture.registry.as_ref(),
+        fixture.store.as_ref(),
+    );
+    let row = rows
+        .iter()
+        .find(|row| row.account().as_str() == ACCOUNT)
+        .expect("status row");
+    let record = row.last().expect("last check-in");
+    assert_eq!(record.outcome(), CheckinOutcome::Failed);
+    assert_eq!(record.detail(), "vendor refused");
+    assert!(
+        matches!(
+            state
+                .instance()
+                .account_status(&account_id, state.host())
+                .await,
+            Ok(AccountStatus::Ready)
+        ),
+        "check-in failure must not change account readiness for routing"
+    );
+    tick_with_runner(
+        &fixture.runtime,
+        &fixture.store,
+        fixture.registry.as_ref(),
+        &RecordingRunner {
+            outcomes: Arc::new(Mutex::new(vec![Ok(CheckinResult::new(
+                CheckinOutcome::Claimed,
+                "",
+            ))])),
+        },
+    )
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a3b_13_tick_timeout_records_status_marks_day_without_routing() {
+    let fixture = fixture(true).await;
+    let account_id = AccountId::try_from(ACCOUNT).expect("id");
+    let state = fixture
+        .runtime
+        .subscription_states()
+        .get(PLUGIN)
+        .expect("subscription")
+        .clone();
+    let tick = tokio::spawn({
+        let runtime = Arc::clone(&fixture.runtime);
+        let store = Arc::clone(&fixture.store);
+        let registry = Arc::clone(&fixture.registry);
+        async move {
+            tick_with_runner(&runtime, &store, registry.as_ref(), &SlowRunner).await;
+        }
+    });
+    tokio::time::advance(Duration::from_secs(2 * 60 + 1)).await;
+    tick.await.expect("tick");
+    let rows = list_statuses(
+        &fixture.runtime,
+        fixture.registry.as_ref(),
+        fixture.store.as_ref(),
+    );
+    let row = rows
+        .iter()
+        .find(|row| row.account().as_str() == ACCOUNT)
+        .expect("status row");
+    let record = row.last().expect("last check-in");
+    assert_eq!(record.outcome(), CheckinOutcome::Failed);
+    assert_eq!(record.detail(), "check-in timed out");
+    assert!(
+        matches!(
+            state
+                .instance()
+                .account_status(&account_id, state.host())
+                .await,
+            Ok(AccountStatus::Ready)
+        ),
+        "check-in timeout must not change account readiness for routing"
+    );
+    tick_with_runner(
+        &fixture.runtime,
+        &fixture.store,
+        fixture.registry.as_ref(),
+        &RecordingRunner {
+            outcomes: Arc::new(Mutex::new(vec![Ok(CheckinResult::new(
+                CheckinOutcome::Claimed,
+                "",
+            ))])),
+        },
+    )
+    .await;
 }
