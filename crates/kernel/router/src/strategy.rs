@@ -2,6 +2,8 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
+
+use crate::credits_mode::CreditsMode;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
@@ -36,6 +38,10 @@ pub struct Seat {
     pub free: bool,
     /// Whether the account may spend credits past its allowance.
     pub credits: bool,
+    /// Operator credits mode; default is `on`.
+    pub credits_mode: CreditsMode,
+    /// Whether the account is past blocking allowance on credits now.
+    pub on_credits: bool,
     /// Recent time to first token, in milliseconds; zero when unknown.
     pub ttft: f64,
     /// Recent output tokens per second; zero when unknown.
@@ -70,6 +76,8 @@ impl Seat {
             tokens: 0.0,
             free: false,
             credits: false,
+            credits_mode: CreditsMode::default(),
+            on_credits: false,
             ttft: 0.0,
             tps: 0.0,
             left: 0.0,

@@ -14,6 +14,7 @@ mod affinity_reply;
 pub mod at_once;
 mod attempt;
 mod cooldown;
+pub mod credits_mode;
 mod decision;
 mod member;
 mod patience;
@@ -238,6 +239,7 @@ pub struct Router {
     policy: FailoverPolicy,
     cooldowns: Option<Arc<Cooldowns>>,
     quotas: Option<Arc<quota::QuotaStore>>,
+    credits_modes: Option<Arc<credits_mode::CreditsModeStore>>,
     strategies: Arc<strategy::StrategyState>,
     affinity: affinity::AffinityState,
     sealed: affinity::sealed::SealedState,
@@ -352,6 +354,7 @@ impl Router {
             policy,
             cooldowns: None,
             quotas: None,
+            credits_modes: None,
             strategies: Arc::new(strategy::StrategyState::with_builtins()),
             affinity: affinity::AffinityState::in_memory(),
             sealed: affinity::sealed::SealedState::default(),
@@ -364,6 +367,13 @@ impl Router {
     #[must_use]
     pub fn with_quotas(mut self, quotas: Arc<quota::QuotaStore>) -> Self {
         self.quotas = Some(quotas);
+        self
+    }
+
+    /// Shares operator credits modes with later snapshots of this route table.
+    #[must_use]
+    pub fn with_credits_modes(mut self, modes: Arc<credits_mode::CreditsModeStore>) -> Self {
+        self.credits_modes = Some(modes);
         self
     }
 
@@ -980,10 +990,18 @@ impl Router {
                 .map(|hop| {
                     let model = hop.wire_model.as_deref().unwrap_or(&resolved.bare);
                     let member = hop.member.id().to_string();
-                    let used = allowances
-                        .iter()
-                        .find(|allowance| allowance.member == member)
-                        .and_then(|allowance| allowance.fullest(model, now))
+                    let allowance = allowances.iter().find(|entry| entry.member == member);
+                    let mode = self
+                        .credits_modes
+                        .as_ref()
+                        .map(|store| store.mode_for_member(&member))
+                        .unwrap_or_default();
+                    let on_credits = allowance.is_some_and(|entry| {
+                        credits_mode::on_credits_spending(entry, model, now)
+                            && mode != credits_mode::CreditsMode::Off
+                    });
+                    let used = allowance
+                        .and_then(|entry| entry.fullest(model, now))
                         .map(|window| window.used);
                     let group_member = group_member(hop);
                     let reserve = reserves.get(&member).copied().unwrap_or(0);
@@ -1000,7 +1018,8 @@ impl Router {
                         nearly_spent: hop.nearly_spent
                             || used.is_some_and(|used| {
                                 used >= affinity::spent_share_of(&resolved.routing)
-                            }),
+                            })
+                            || (mode == credits_mode::CreditsMode::Last && on_credits),
                         low_allowance: used.is_some_and(|used| used >= 90.0),
                         fallback: hop.fallback,
                         aside: false,
@@ -1038,13 +1057,14 @@ impl Router {
                 }
             }
         }
-        let hops = if strict {
+        let mut hops = if strict {
             ordered
         } else if let Some(cooldowns) = &self.cooldowns {
             order_hops(ordered, cooldowns, &resolved.bare)
         } else {
             ordered
         };
+        self.reorder_last_on_credits(&mut hops, resolved);
         Ordered {
             hops,
             reserves,
@@ -1129,11 +1149,14 @@ impl Router {
             seat.key.clone_from(key);
             seat.weight = *weight;
         }
-        let order = if groups.len() < 2 {
+        let mut order = if groups.len() < 2 {
             (0..groups.len()).collect()
         } else {
             self.strategies.order(routing, pool, &seats)
         };
+        if groups.len() > 1 {
+            credits_mode::adjust_order(&mut order, &seats);
+        }
         if groups.len() > 1 && routing == "weight" {
             rounds.push(RoundMove {
                 pool: pool.to_owned(),
@@ -1210,6 +1233,43 @@ impl Router {
             );
         }
         seats
+    }
+
+    fn reorder_last_on_credits(&self, hops: &mut Vec<Hop>, resolved: &Resolved) {
+        if hops.len() < 2 {
+            return;
+        }
+        let Some(modes) = &self.credits_modes else {
+            return;
+        };
+        let now = SystemTime::now();
+        let allowances = self
+            .quotas
+            .as_ref()
+            .map(|quotas| quotas.allowances(now))
+            .unwrap_or_default();
+        let mut front = Vec::with_capacity(hops.len());
+        let mut back = Vec::new();
+        for hop in hops.drain(..) {
+            let model = hop.wire_model.as_deref().unwrap_or(&resolved.bare);
+            let member = hop.member.id().to_string();
+            let demote = modes.mode_for_member(&member) == credits_mode::CreditsMode::Last
+                && allowances.iter().any(|allowance| {
+                    allowance.member == member
+                        && credits_mode::on_credits_spending(allowance, model, now)
+                });
+            if demote {
+                back.push(hop);
+            } else {
+                front.push(hop);
+            }
+        }
+        if back.is_empty() {
+            *hops = front;
+            return;
+        }
+        front.extend(back);
+        *hops = front;
     }
 
     fn resolve(&self, asked: &str) -> Result<Resolved, RouterError> {

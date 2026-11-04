@@ -60,6 +60,7 @@ pub(crate) struct Table {
     policy: Mutex<FailoverPolicy>,
     cooldowns: Arc<Cooldowns>,
     quotas: Option<Arc<hofund_router::quota::QuotaStore>>,
+    credits_modes: Option<Arc<hofund_router::credits_mode::CreditsModeStore>>,
     offline: Arc<Offline>,
     strategies: Arc<StrategyState>,
     affinity: hofund_router::affinity::AffinityState,
@@ -224,6 +225,7 @@ pub(crate) fn open_checking(
         network,
         hofund_router::affinity::AffinityState::in_memory(),
         None,
+        None,
     )?;
     let snapshot = table.snapshot.clone();
     let owner = Arc::clone(&table) as Arc<dyn std::any::Any + Send + Sync>;
@@ -244,6 +246,7 @@ pub(crate) fn open_with_table(
         cooldowns,
         hofund_router::affinity::AffinityState::in_memory(),
         None,
+        None,
     )
 }
 
@@ -254,6 +257,7 @@ pub(crate) fn open_with_table_and_affinity(
     cooldowns: Arc<Cooldowns>,
     affinity: hofund_router::affinity::AffinityState,
     quotas: Option<Arc<hofund_router::quota::QuotaStore>>,
+    credits_modes: Option<Arc<hofund_router::credits_mode::CreditsModeStore>>,
 ) -> Result<(Snapshot, Arc<Table>), DaemonError> {
     let table = build_table(
         built,
@@ -263,10 +267,12 @@ pub(crate) fn open_with_table_and_affinity(
         Arc::new(SystemNetwork),
         affinity,
         quotas,
+        credits_modes,
     )?;
     Ok((table.snapshot.clone(), table))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_table(
     built: &BTreeMap<String, BuiltProvider>,
     routes: BTreeMap<String, Vec<PlannedHop>>,
@@ -275,21 +281,27 @@ fn build_table(
     network: Arc<dyn NetworkCheck>,
     affinity: hofund_router::affinity::AffinityState,
     quotas: Option<Arc<hofund_router::quota::QuotaStore>>,
+    credits_modes: Option<Arc<hofund_router::credits_mode::CreditsModeStore>>,
 ) -> Result<Arc<Table>, DaemonError> {
     let strategies = Arc::new(StrategyState::with_builtins());
     let snapshot = Router::from_hops(BTreeMap::new(), policy.clone())
         .with_strategies(Arc::clone(&strategies))
         .with_cooldowns(Arc::clone(&cooldowns))
         .with_affinity(affinity.clone());
-    let snapshot = Snapshot::new(match &quotas {
-        Some(quotas) => snapshot.with_quotas(Arc::clone(quotas)),
-        None => snapshot,
+    let snapshot = Snapshot::new(match (&quotas, &credits_modes) {
+        (Some(quotas), Some(modes)) => snapshot
+            .with_quotas(Arc::clone(quotas))
+            .with_credits_modes(Arc::clone(modes)),
+        (Some(quotas), None) => snapshot.with_quotas(Arc::clone(quotas)),
+        (None, Some(modes)) => snapshot.with_credits_modes(Arc::clone(modes)),
+        (None, None) => snapshot,
     });
     let table = Arc::new(Table {
         hops: Mutex::new(BTreeMap::new()),
         policy: Mutex::new(policy),
         cooldowns,
         quotas,
+        credits_modes,
         offline: Arc::new(Offline::new(network)),
         strategies,
         affinity,
@@ -507,6 +519,9 @@ impl Table {
             .with_affinity(self.affinity.clone());
         if let Some(quotas) = &self.quotas {
             router = router.with_quotas(Arc::clone(quotas));
+        }
+        if let Some(modes) = &self.credits_modes {
+            router = router.with_credits_modes(Arc::clone(modes));
         }
         if let Some(measurements) = self
             .measurements

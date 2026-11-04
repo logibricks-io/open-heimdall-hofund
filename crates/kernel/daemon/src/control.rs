@@ -14,11 +14,12 @@ use hofund_control_proto::{
     GatewayKeyRestoreRequest, HealthResponse, ModelEntry, ModelListResponse, PicksResponse,
     PicksSetRequest, ProviderKeyRequest, ProviderKeysResponse, ProviderListResponse,
     ProviderSummary, ProviderTestRequest, ProviderTestResponse, ProviderTestResult,
-    QuotaHistoryQuery, QuotaHistoryResponse, QuotaQuery, QuotaResponse, RouteListResponse,
-    RouteModel, RouteModelListResponse, RouteQuery, RouteReserve, SessionRouteResponse,
-    ShutdownRequest, ShutdownResponse, ShutdownState, StatusResponse, TokenRotateRequest,
-    TokenRotateResponse, UnroutedListResponse, UsagePeriod, UsageQuery, UsageResponse, UsageRow,
-    UsageTotals, WarmupAccountRow, WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
+    QuotaCreditsModesResponse, QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryQuery,
+    QuotaHistoryResponse, QuotaQuery, QuotaResponse, RouteListResponse, RouteModel,
+    RouteModelListResponse, RouteQuery, RouteReserve, SessionRouteResponse, ShutdownRequest,
+    ShutdownResponse, ShutdownState, StatusResponse, TokenRotateRequest, TokenRotateResponse,
+    UnroutedListResponse, UsagePeriod, UsageQuery, UsageResponse, UsageRow, UsageTotals,
+    WarmupAccountRow, WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
 };
 use hofund_control_proto::{
     ConfigApplyRequest, ConfigResponse, ConfigValidateRequest, ConfigValidationResponse,
@@ -826,6 +827,29 @@ impl ControlState for DaemonControl {
         Box::pin(async move {
             let quotas = self.quotas.as_ref().ok_or_else(quotas_unavailable)?;
             Ok::<_, ControlFailure>(quotas.history_response(&query))
+        })
+    }
+
+    fn quota_credits_modes(&self) -> ControlFuture<'_, QuotaCreditsModesResponse> {
+        let runtime = self.runtime.clone();
+        Box::pin(async move {
+            let Some(runtime) = runtime else {
+                return Err(internal("quota credits modes are not available".to_owned()).into());
+            };
+            Ok(crate::credits_modes::list(runtime.credits_modes()))
+        })
+    }
+
+    fn set_quota_credits(
+        &self,
+        request: QuotaCreditsSetRequest,
+    ) -> ControlFuture<'_, QuotaCreditsSetResponse> {
+        let runtime = self.runtime.clone();
+        Box::pin(async move {
+            let Some(runtime) = runtime else {
+                return Err(internal("quota credits settings are not available".to_owned()).into());
+            };
+            crate::credits_modes::set(&runtime, runtime.credits_modes(), request).await
         })
     }
 
