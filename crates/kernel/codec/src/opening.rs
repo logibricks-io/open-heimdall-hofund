@@ -306,4 +306,18 @@ mod tests {
         );
         assert_eq!(plain, marked);
     }
+
+    #[test]
+    fn d54_5_tool_result_ends_the_opening() {
+        let env = serde_json::to_string(OPENING_ENV).expect("env");
+        let env_only =
+            hashed_id(format!(r#"{{"messages":[{{"role":"user","content":{env}}}]}}"#).as_bytes());
+        let with_result = hashed_id(
+            format!(
+                r#"{{"messages":[{{"role":"user","content":{env}}},{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"t1","content":"ok"}}]}},{{"role":"user","content":"asked"}}]}}"#
+            )
+            .as_bytes(),
+        );
+        assert_eq!(env_only, with_result);
+    }
 }

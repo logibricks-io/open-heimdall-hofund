@@ -65,4 +65,16 @@ mod tests {
             "https://api.lkeap.cloud.tencent.com/v1"
         );
     }
+
+    #[test]
+    fn d53_5_load_rewrites_preset_backed_tencent_plan_base() {
+        let config = load(
+            "[[providers]]\nid = \"tc\"\npreset = \"tencent-cloud\"\nprotocol = \"openai-chat\"\nbase_url = \"https://api.lkeap.cloud.tencent.com/plan/v3\"\napi_key = \"key\"\n",
+        )
+        .expect("load");
+        assert_eq!(
+            config.providers[0].base_url,
+            "https://tokenhub.tencentmaas.com/plan/v3"
+        );
+    }
 }

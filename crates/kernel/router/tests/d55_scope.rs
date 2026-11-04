@@ -217,3 +217,13 @@ async fn d55_7_bare_name_resolves_model_route_before_group() {
         .expect("count");
     assert_eq!(*picked.lock().expect("lock"), Some("model-route"));
 }
+
+#[test]
+fn d55_8_group_wildcard_scope_allows_any_group() {
+    let scope = RouteScope {
+        models: vec!["group/*".to_owned()],
+        accounts: Vec::new(),
+    };
+    let member = hop("primary", "demo");
+    assert!(scope.allows_model("group/only-38", "group/only-38", &member));
+}
