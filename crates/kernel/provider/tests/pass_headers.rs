@@ -86,6 +86,22 @@ fn d62_3_overrides_fixed_header() {
 }
 
 #[test]
+fn d62_5_listed_header_not_sent_by_client_adds_nothing() {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        reqwest::header::HeaderName::from_static("x-fixed"),
+        reqwest::header::HeaderValue::from_static("stay"),
+    );
+    let client = BTreeMap::new();
+    pass_headers::apply(&["x-missing".to_owned()], &client, &mut headers);
+    assert_eq!(
+        headers.get("x-fixed").and_then(|value| value.to_str().ok()),
+        Some("stay")
+    );
+    assert!(!headers.contains_key("x-missing"));
+}
+
+#[test]
 fn d62_4_forbidden_names_rejected_at_load() {
     assert!(hofund_config::pass_headers::validated("p", vec!["Authorization".to_owned()]).is_err());
 }
