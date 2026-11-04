@@ -788,13 +788,15 @@ fn relay_reply_is_stream(headers: &HeaderMap) -> bool {
         .is_some_and(|value| value.starts_with("text/event-stream"))
 }
 
-fn restore_relay_response(
+pub(crate) fn restore_relay_response(
     mut response: HttpResponse,
     back: &BTreeMap<String, String>,
 ) -> HttpResponse {
     if back.is_empty() {
         return response;
     }
+    // The restored body can differ in length from the upstream's.
+    response.headers_mut().remove("content-length");
     let stream = relay_reply_is_stream(response.headers());
     let body = std::mem::replace(
         response.body_mut(),

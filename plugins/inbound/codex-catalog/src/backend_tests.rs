@@ -1833,3 +1833,20 @@ fn d39_9_an_overflow_worded_429_goes_back_unchanged() {
     assert_eq!(status, 429, "{body}");
     assert_eq!(stub.called().len(), 1);
 }
+
+#[test]
+fn d57_8_restored_relay_reply_drops_stale_content_length() {
+    let mut back = std::collections::BTreeMap::new();
+    back.insert("search_web_0123abcd".to_owned(), "search:web".to_owned());
+    let mut kept = text_response(200, "{}");
+    kept.headers_mut()
+        .insert("content-length", "2".parse().expect("header"));
+    let kept = super::backend::restore_relay_response(kept, &std::collections::BTreeMap::new());
+    assert!(kept.headers().contains_key("content-length"));
+    let mut restored = text_response(200, "{}");
+    restored
+        .headers_mut()
+        .insert("content-length", "2".parse().expect("header"));
+    let restored = super::backend::restore_relay_response(restored, &back);
+    assert!(!restored.headers().contains_key("content-length"));
+}
