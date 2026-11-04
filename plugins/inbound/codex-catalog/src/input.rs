@@ -40,11 +40,13 @@ pub(crate) fn sealed(summary: &str) -> String {
 /// `None` when it goes as it came.
 pub(crate) fn for_backend(body: &[u8]) -> Option<Vec<u8>> {
     let mut value = json::from_slice::<Value>(body).ok()?;
-    let items = value.get_mut("input").and_then(Value::as_array_mut)?;
+    let object = value.as_object_mut()?;
+    let items = object.get_mut("input").and_then(Value::as_array_mut)?;
     let mut changed = call_item_ids(items);
     changed |= bound_call_ids(items);
     changed |= plain_item_ids(items);
     changed |= open_summaries(items, false).0;
+    changed |= hofund_plugin_sdk::codex_tool_names::codex_tool_names_object(object);
     changed.then(|| value.to_string().into_bytes())
 }
 
