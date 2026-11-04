@@ -27,6 +27,14 @@ pub trait Member: Send + Sync {
     /// Configured provider id. Usage rows and route errors use this text.
     fn route_id(&self) -> &str;
 
+    /// Fingerprint of the provider API key that serves this member.
+    ///
+    /// Empty when the member is not backed by a provider key. The text is the
+    /// same id `hofund provider keys` shows, including a provider with one key.
+    fn provider_key_id(&self) -> &str {
+        ""
+    }
+
     /// Provider id used in model and account scopes. Account members override it.
     fn scope_provider(&self) -> &str {
         self.route_id()

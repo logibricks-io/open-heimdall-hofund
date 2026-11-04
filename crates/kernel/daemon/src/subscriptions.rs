@@ -271,6 +271,7 @@ impl SubscriptionState {
                 kernel: false,
                 base_url: String::new(),
                 key: None,
+                key_id: String::new(),
             },
             id,
             upstream,

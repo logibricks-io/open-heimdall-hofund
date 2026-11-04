@@ -379,6 +379,7 @@ impl State {
                     match result {
                         Ok(mut routed) => {
                             self.record.meta.upstream = routed.upstream_id.clone();
+                            self.record.meta.provider_key_id = routed.provider_key_id.clone();
                             self.record.member = Some(routed.upstream_id.clone());
                             self.continuation = routed.take_continuation();
                             match events(routed.completion, &self.codec, &self.request.model) {
@@ -478,6 +479,7 @@ fn continuation_error(error: RouterError) -> PluginError {
         RouterError::ModelScope { .. } | RouterError::AccountScope { .. } => {
             PluginError::status_error(403, error.to_string())
         }
+        RouterError::SpendCapReached { retry_after } => crate::spend_cap_plugin_error(retry_after),
         RouterError::Upstream { error, .. } => error,
     }
 }

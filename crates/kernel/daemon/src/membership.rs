@@ -53,6 +53,9 @@ pub(crate) struct BuiltProvider {
     pub base_url: String,
     /// Per-key identity when the provider has several enabled keys.
     pub key: Option<crate::provider_keys::KeyMember>,
+    /// Fingerprint of this member's API key, including a provider with one key.
+    /// Empty when the provider has no key.
+    pub key_id: String,
 }
 
 pub(crate) struct Table {
@@ -67,6 +70,7 @@ pub(crate) struct Table {
     overflow: hofund_router::OverflowMemory,
     measurements: Mutex<Option<Arc<dyn Measurements>>>,
     model_catalog: Mutex<Option<Arc<hofund_model_catalog::ModelCatalog>>>,
+    spend_cap_gate: Mutex<Option<Arc<crate::spend_caps::SpendCapGate>>>,
     snapshot: Snapshot,
 }
 
@@ -97,6 +101,7 @@ struct LiveMember {
     protocol: &'static str,
     route: hofund_provider::AttemptRoute,
     fingerprint: String,
+    provider_key_id: String,
     subscription: bool,
     patience: Option<Duration>,
     kernel: bool,
@@ -309,6 +314,7 @@ fn build_table(
         overflow: hofund_router::OverflowMemory::in_memory(),
         measurements: Mutex::new(None),
         model_catalog: Mutex::new(None),
+        spend_cap_gate: Mutex::new(None),
         snapshot,
     });
     let stored = build_specs(&table, built, routes)?;
@@ -455,6 +461,11 @@ impl Table {
         Ok(())
     }
 
+    pub(crate) fn set_spend_cap_gate(&self, gate: Arc<crate::spend_caps::SpendCapGate>) {
+        *self.spend_cap_gate.lock().expect("spend cap gate") = Some(gate);
+        self.publish();
+    }
+
     pub(crate) fn set_measurements(&self, measurements: Arc<dyn Measurements>) {
         *self.measurements.lock().expect("measurements") = Some(measurements);
         self.publish();
@@ -537,9 +548,34 @@ impl Table {
         }
         if let Some(catalog) = self.model_catalog.lock().expect("model catalog").as_ref() {
             let visibility = catalog.visibility().clone();
-            router = router.with_member_skip(Arc::new(move |route, asked, provider, wire| {
-                visibility.hop_disabled(route, asked, provider, wire)
+            let gate = self.spend_cap_gate.lock().expect("spend cap gate").clone();
+            let skip_gate = gate.clone();
+            router =
+                router.with_member_skip(Arc::new(move |route, asked, provider, wire, key_id| {
+                    visibility.hop_disabled(route, asked, provider, wire)
+                        || skip_gate
+                            .as_ref()
+                            .is_some_and(|gate| gate.skip_key(provider, key_id))
+                }));
+            if let Some(gate) = gate {
+                let exhausted = Arc::clone(&gate);
+                router = router.with_spend_cap_exhausted(Arc::new(
+                    move |candidates: &[hofund_router::SpendCapCandidate]| {
+                        spend_cap_exhausted(&exhausted, candidates)
+                    },
+                ));
+            }
+        } else if let Some(gate) = self.spend_cap_gate.lock().expect("spend cap gate").clone() {
+            router = router.with_member_skip(Arc::new({
+                let gate = Arc::clone(&gate);
+                move |_route, _asked, provider, _wire, key_id| gate.skip_key(provider, key_id)
             }));
+            let exhausted = Arc::clone(&gate);
+            router = router.with_spend_cap_exhausted(Arc::new(
+                move |candidates: &[hofund_router::SpendCapCandidate]| {
+                    spend_cap_exhausted(&exhausted, candidates)
+                },
+            ));
         }
         self.snapshot.store(router);
     }
@@ -548,6 +584,33 @@ impl Table {
         *self.model_catalog.lock().expect("model catalog") = Some(catalog);
         self.publish();
     }
+}
+
+fn spend_cap_exhausted(
+    gate: &crate::spend_caps::SpendCapGate,
+    candidates: &[hofund_router::SpendCapCandidate],
+) -> Option<Option<u64>> {
+    let pairs: Vec<(&str, &str)> = candidates
+        .iter()
+        .map(|hop| (hop.provider.as_str(), hop.key_id.as_str()))
+        .collect();
+    if gate.all_keys_capped(pairs.iter().copied()) {
+        Some(gate.retry_after_for_keys(&pairs))
+    } else {
+        None
+    }
+}
+
+fn key_fingerprint(built: &BuiltProvider) -> String {
+    if let Some(key) = &built.key
+        && let Some(member_key) = key.member.member_key()
+    {
+        let text = member_key.as_str();
+        if text != "default" {
+            return text.to_owned();
+        }
+    }
+    built.key_id.clone()
 }
 
 impl LiveMember {
@@ -592,6 +655,7 @@ impl LiveMember {
             protocol: built.protocol,
             route: built.adapter.attempt_route(),
             fingerprint: built.fingerprint.clone(),
+            provider_key_id: key_fingerprint(built),
             subscription,
             patience: built.patience,
             kernel: built.kernel,
@@ -613,6 +677,10 @@ impl Member for LiveMember {
 
     fn route_id(&self) -> &str {
         &self.route_id
+    }
+
+    fn provider_key_id(&self) -> &str {
+        &self.provider_key_id
     }
 
     fn scope_provider(&self) -> &str {
@@ -1372,6 +1440,7 @@ mod tests {
                 kernel: true,
                 base_url: String::new(),
                 key: None,
+                key_id: String::new(),
             },
         );
         let mut routes = BTreeMap::new();
@@ -1476,6 +1545,7 @@ mod tests {
                 kernel: true,
                 base_url: String::new(),
                 key: None,
+                key_id: String::new(),
             },
         );
         let mut routes = BTreeMap::new();
@@ -1571,6 +1641,7 @@ mod tests {
                 kernel: true,
                 base_url: String::new(),
                 key: None,
+                key_id: String::new(),
             },
         );
         let mut routes = BTreeMap::new();
@@ -1665,6 +1736,7 @@ mod tests {
                 kernel: true,
                 base_url: String::new(),
                 key: None,
+                key_id: String::new(),
             },
         );
         let mut routes = BTreeMap::new();
@@ -1729,6 +1801,7 @@ mod tests {
                     kernel: true,
                     base_url: String::new(),
                     key: None,
+                    key_id: String::new(),
                 },
             );
         }
@@ -1795,6 +1868,7 @@ mod tests {
             kernel: true,
             base_url: String::new(),
             key: None,
+            key_id: String::new(),
         }
     }
 
@@ -2111,6 +2185,7 @@ mod tests {
             weight,
             rank,
         });
+        built.key_id = key.to_owned();
         built
     }
 

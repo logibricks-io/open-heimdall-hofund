@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- ChatGPT (Codex) subscription sign-in by device code (`--site device`): ask
+  for a code, poll until it is entered on another machine, trade at the
+  device callback redirect (D-58).
+- Provider API key spend caps in USD (day, month, or total), persisted in
+  `.hofund/spend-caps.json`, enforced in routing with fallback to other keys
+  and a 429 when every key is capped (D-61).
+
 - Codex ChatGPT backend rewrites tool names outside `^[a-zA-Z0-9_.-]+$` for
   upstream acceptance and maps them back in replies (D-57).
 
@@ -40,6 +47,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Provider key spend caps use the key fingerprint carried by the serving
+  member, including a provider with one key. Usage rows record that id, and
+  routing skips a capped key before failover (D-61).
 - Relayed Responses `url_citation` and `container_file_citation` annotations
   without `start_index`/`end_index` are dropped on relay, and poisoned Codex
   thread history is healed on the way to the ChatGPT backend (D-66).

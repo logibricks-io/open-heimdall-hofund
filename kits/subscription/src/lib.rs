@@ -14,6 +14,23 @@ pub use hofund_plugin_host::{
     RecordingSecrets, TestHost, test_host,
 };
 
+/// Runs `future` on a paused Tokio clock so tests can [`advance_time`].
+///
+/// # Panics
+///
+/// Panics when the runtime cannot be built.
+pub fn block_on_paused<T>(future: impl Future<Output = T>) -> T {
+    block_on(async {
+        tokio::time::pause();
+        future.await
+    })
+}
+
+/// Advances the paused Tokio clock used by [`block_on_paused`].
+pub async fn advance_time(duration: std::time::Duration) {
+    tokio::time::advance(duration).await;
+}
+
 /// Drives `future` on a current-thread runtime.
 ///
 /// Timers and sockets work, and one-shot jobs the plugin starts run on this

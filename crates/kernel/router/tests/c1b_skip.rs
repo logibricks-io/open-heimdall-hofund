@@ -65,7 +65,7 @@ async fn c1b_12_router_skips_disabled_member_hop() {
     let skip = {
         let visibility = visibility.clone();
         Arc::new(
-            move |route: &str, asked: &str, provider: &str, wire: &str| {
+            move |route: &str, asked: &str, provider: &str, wire: &str, _key_id: &str| {
                 visibility.hop_disabled(route, asked, provider, wire)
             },
         )

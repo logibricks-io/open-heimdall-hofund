@@ -17,6 +17,7 @@ pub enum SubscriptionCommand {
         id: String,
         host: Option<String>,
         label: Option<String>,
+        site: Option<String>,
     },
     /// `subscription sign-out <id> <account>`
     SignOut { id: String, account: String },
@@ -32,6 +33,7 @@ pub struct SubscriptionFlags {
     pub json: bool,
     pub host: Option<String>,
     pub label: Option<String>,
+    pub site: Option<String>,
 }
 
 /// Parses the words after `subscription`. `None` means the words name no
@@ -47,6 +49,7 @@ pub fn parse(
             id: owned(id),
             host: flags.host.clone(),
             label: flags.label.clone(),
+            site: flags.site.clone(),
         },
         ["sign-out", id, account] => SubscriptionCommand::SignOut {
             id: owned(id),
@@ -80,9 +83,9 @@ pub fn parse(
             "--json is only valid with subscription list and subscription quota".to_owned(),
         ));
     }
-    if (flags.host.is_some() || flags.label.is_some()) && !signs_in {
+    if (flags.host.is_some() || flags.label.is_some() || flags.site.is_some()) && !signs_in {
         return Some(Err(
-            "--host and --label are only valid with subscription sign-in".to_owned(),
+            "--host, --label, and --site are only valid with subscription sign-in".to_owned(),
         ));
     }
     Some(Ok(command))
@@ -101,13 +104,21 @@ pub fn daemon_args(config: &Path, command: &SubscriptionCommand) -> Vec<OsString
                 flags.push("--json");
             }
         }
-        SubscriptionCommand::SignIn { id, host, label } => {
+        SubscriptionCommand::SignIn {
+            id,
+            host,
+            label,
+            site,
+        } => {
             words.extend(["sign-in", id.as_str()]);
             if let Some(host) = host {
                 flags.extend(["--host", host.as_str()]);
             }
             if let Some(label) = label {
                 flags.extend(["--label", label.as_str()]);
+            }
+            if let Some(site) = site {
+                flags.extend(["--site", site.as_str()]);
             }
         }
         SubscriptionCommand::SignOut { id, account } => {
@@ -231,6 +242,7 @@ mod tests {
                     id: id(),
                     host: None,
                     label: None,
+                    site: None,
                 },
                 expect(&["--", "sign-in", "s"]),
             ),
@@ -239,6 +251,7 @@ mod tests {
                     id: id(),
                     host: Some("h".to_owned()),
                     label: Some("l".to_owned()),
+                    site: None,
                 },
                 expect(&["--host", "h", "--label", "l", "--", "sign-in", "s"]),
             ),
