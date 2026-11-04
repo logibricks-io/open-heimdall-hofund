@@ -302,9 +302,6 @@ impl SpendCapGate {
 
     /// Whether the key `key_id` on `provider` is at or past its cap.
     pub(crate) fn skip_key(&self, provider: &str, key_id: &str) -> bool {
-        if provider.is_empty() || key_id.is_empty() {
-            return false;
-        }
         let routes = self.routes.lock().expect("routes");
         let Some(spec) = routes.get(&(provider.to_owned(), key_id.to_owned())) else {
             return false;
@@ -370,7 +367,53 @@ pub(crate) fn ensure_key_exists(provider: &Provider, key_id: &str) -> Result<Res
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use hofund_config::load_path;
+    use hofund_usage::{KeySpent, Ledger};
+
     use super::*;
+    use crate::provider_keys::key_id;
+
+    #[test]
+    fn d61_11_unreadable_spend_total_does_not_skip_key() {
+        let root = tempfile::tempdir().expect("dir");
+        let config_path = root.path().join("hofund.toml");
+        let secret = "spend-cap-read-fail-secret";
+        std::fs::write(
+            &config_path,
+            format!(
+                "[[providers]]\n\
+                 id = \"primary\"\n\
+                 protocol = \"openai-chat\"\n\
+                 base_url = \"http://example\"\n\
+                 api_key = \"{secret}\"\n"
+            ),
+        )
+        .expect("config");
+        let kid = key_id(secret);
+        let store = Arc::new(SpendCapStore::new(&config_path));
+        store
+            .set_key_spend_cap(
+                "primary",
+                &kid,
+                ParsedSpendCap {
+                    usd: 1.0,
+                    period: SpendCapPeriod::Total,
+                },
+            )
+            .expect("set cap");
+        let usage = root.path().join("usage.sqlite");
+        let ledger = Arc::new(Ledger::open(&usage).expect("ledger"));
+        let gate = SpendCapGate::new(Arc::clone(&store), Arc::new(KeySpent::new(ledger)));
+        let config = load_path(&config_path).expect("load");
+        gate.refresh(&config.providers);
+        std::fs::write(&usage, b"not a database").expect("corrupt");
+        assert!(
+            !gate.skip_key("primary", &kid),
+            "fail open when the spend total cannot be read"
+        );
+    }
 
     #[test]
     fn d61_3_parse_spend_cap_accepts_day_month_total() {

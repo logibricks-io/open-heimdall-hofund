@@ -5,7 +5,9 @@ use std::sync::Arc;
 use std::task::Poll;
 use std::time::{Duration, UNIX_EPOCH};
 
-use hofund_kit_subscription::{TestHost, block_on, join_all, poll_once, yield_times};
+use hofund_kit_subscription::{
+    TestHost, advance_time, block_on, block_on_paused, join_all, poll_once, yield_times,
+};
 use hofund_plugin_api::{
     AccountId, AccountStatus, Completion, PluginErrorKind, PluginId, PluginKind, ProbeQuery,
     ProtocolId, RawTable, Request, SecretString, SignInChallenge, SignInCtx, SignInProof,
@@ -16,7 +18,7 @@ use hofund_plugin_sdk::oauth::{Pkce, SecretObject, account_id_from, same_secret}
 use crate::tokens::{self, Need};
 use crate::upstream::{self, CodexUpstream};
 use crate::{Endpoints, factory_with_endpoints, sign_in};
-use crate::{models, shape};
+use crate::{device_sign_in, models, shape};
 use hofund_plugin_sdk::json::{self, Value, json};
 
 const SESSION: &str = "0123456789abcdef0123456789abcdef";
@@ -1732,4 +1734,65 @@ fn d58_5_device_sign_in_rejects_a_callback_proof() {
     ))
     .expect_err("wrong proof");
     assert_eq!(error.kind(), PluginErrorKind::Config);
+}
+
+#[test]
+fn d58_6_device_sign_in_stops_after_five_poll_transport_misses() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    host.http().enqueue(device_usercode());
+    for _ in 0..5 {
+        host.http().enqueue_connect("reset");
+    }
+    block_on(sub.start_sign_in(&device_ctx(), host.context())).expect("start");
+    let error = block_on(sub.complete_sign_in(&device_ctx(), SignInProof::Await, host.context()))
+        .expect_err("connect");
+    assert_eq!(error.kind(), PluginErrorKind::Connect);
+    assert!(
+        error.to_string().contains("couldn't ask ChatGPT"),
+        "{error}"
+    );
+}
+
+fn device_usercode_long_interval() -> Vec<u8> {
+    br#"{"device_auth_id":"deviceauth_6ae9","user_code":"WG0E-J29UL","interval":"900"}"#.to_vec()
+}
+
+#[test]
+fn d58_7_expired_deadline_does_not_poll_after_device_wait() {
+    let dir = tempfile::tempdir().expect("dir");
+    block_on_paused(async {
+        let host =
+            TestHost::open_for_with_tokio_monotonic(PluginKind::Subscription, plugin(), dir.path());
+        let sub = subscription(&host);
+        host.http().enqueue(device_usercode_long_interval());
+        sub.start_sign_in(&device_ctx(), host.context())
+            .await
+            .expect("start");
+        let ctx = device_ctx();
+        let mut finish =
+            std::pin::pin!(sub.complete_sign_in(&ctx, SignInProof::Await, host.context()));
+        loop {
+            match poll_once(finish.as_mut()) {
+                Poll::Ready(Ok(_)) => panic!("expected expiry, not success"),
+                Poll::Ready(Err(error)) => {
+                    assert_eq!(error.kind(), PluginErrorKind::Auth);
+                    assert!(error.to_string().contains("expired"), "{error}");
+                    assert_eq!(
+                        host.http().calls().len(),
+                        1,
+                        "the poll interval elapsed before any token poll"
+                    );
+                    return;
+                }
+                Poll::Pending => {
+                    if host.http().calls().len() == 1 {
+                        advance_time(device_sign_in::DEVICE_WAIT).await;
+                    }
+                    yield_times(1).await;
+                }
+            }
+        }
+    });
 }

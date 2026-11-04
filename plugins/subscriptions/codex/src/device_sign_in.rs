@@ -101,9 +101,6 @@ pub(crate) async fn finish(
     let interval = pending.interval;
     let mut misses = 0_u32;
     loop {
-        if clock.monotonic() >= deadline {
-            return Err(PluginError::auth("the code expired; start again"));
-        }
         sleep(interval).await;
         if clock.monotonic() >= deadline {
             return Err(PluginError::auth("the code expired; start again"));
