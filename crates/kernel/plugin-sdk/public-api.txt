@@ -69,6 +69,7 @@ mod codex_tool_names
 mod daily_checkin
 mod daily_warmup
 mod digest
+mod enc_v1
 mod jwt
 mod oauth
 mod page
