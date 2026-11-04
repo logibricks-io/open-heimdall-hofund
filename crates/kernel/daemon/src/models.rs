@@ -545,6 +545,14 @@ impl ModelsHost {
         });
     }
 
+    /// Moves host model state when a provider id changes.
+    pub(crate) fn rename_provider(&self, from: &str, to: &str) -> Result<(), super::DaemonError> {
+        let mut store = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        store
+            .rename_provider(from, to)
+            .map_err(|error| super::DaemonError::new(error.to_string()))
+    }
+
     /// Reads cached models without building a provider or contacting an upstream.
     #[must_use]
     pub fn cached(&self, provider_id: &str) -> Cached {

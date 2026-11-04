@@ -148,6 +148,46 @@ impl StateStore {
         saved
     }
 
+    /// Moves persisted state from one provider id to another under each id's lock.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StateError`] when a lock or file operation fails.
+    pub(super) fn rename_provider(&mut self, from: &str, to: &str) -> Result<(), StateError> {
+        if from == to {
+            return Ok(());
+        }
+        if self.root.is_none() {
+            if let Some(state) = self.states.remove(from) {
+                let mut moved = state;
+                moved.id.clone_from(&to.to_owned());
+                self.states.insert(to.to_owned(), moved);
+            }
+            return Ok(());
+        };
+        let root = self.root.clone().expect("root is Some");
+        let captured =
+            self.exclusive(from, |store| -> Result<Option<ProviderState>, StateError> {
+                store.load(from);
+                let Some(state) = store.states.remove(from) else {
+                    return Ok(None);
+                };
+                let old_path = state_path(&root, from);
+                if old_path.is_file() {
+                    std::fs::remove_file(&old_path).map_err(StateError::Save)?;
+                }
+                Ok(Some(state))
+            })??;
+        let Some(mut state) = captured else {
+            return Ok(());
+        };
+        state.id.clone_from(&to.to_owned());
+        self.exclusive(to, |store| {
+            store.states.insert(to.to_owned(), state);
+            store.save(to)
+        })?
+    }
+
     fn load(&mut self, id: &str) {
         if self.states.contains_key(id) {
             return;

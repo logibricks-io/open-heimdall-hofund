@@ -55,6 +55,7 @@ mod plans;
 mod pricing;
 mod probe;
 mod provider_keys;
+mod provider_rename;
 mod quota_alerts;
 mod quotas;
 mod registry;
