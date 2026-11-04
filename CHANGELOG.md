@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - LongCat vendor preset with OpenAI and Anthropic bases on api.longcat.chat (D-60).
 
+- Per-provider `pass_headers` forwards listed client request header names to that
+  provider only, overriding fixed `headers` of the same name; forbidden names are
+  rejected at config load (D-62).
+
 ### Fixed
 
 - Vendor overload (HTTP 529 or a 5xx whose message says overloaded) rests
