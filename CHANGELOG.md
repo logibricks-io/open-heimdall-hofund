@@ -14,6 +14,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it, model listing, chat upstream, Factory billing limits, and deterministic
   `a2b_*` tests (A-2b, feature-parity row 3.5 partial).
 
+### Changed
+
+- A-2b fix round: Factory upstream and quota match the reference billing API;
+  Kiro uses `generateAssistantResponse` with event-stream decode; Devin uses
+  TOML credentials, agent-scoped account ids, and the stored Devin API base;
+  re-import always upserts secrets; token files are written mode `0600`.
+
 - ChatGPT (Codex) subscription sign-in by device code (`--site device`): ask
   for a code, poll until it is entered on another machine, trade at the
   device callback redirect (D-58).

@@ -261,6 +261,17 @@ Official references, checked 2026-10-25:
 | --- | --- | --- | --- | --- |
 | Deployment list | `GET {root}/deployments?api-version=2022-12-01` with `api-key` and no bearer token. A refusal or an empty list tries `{base}/models`. The id is the deployment name. Non-chat ids are dropped. A failure tells the user to type the names. The list is not filtered by status. Pages follow `has_more` and `last_id`. | Adopt the two URLs, the header, and the id. | The `azure` plugin (`plugins/providers/azure`) does that against the v1 root from `azure_base`, for preset `azure` and for a custom Chat or Responses base on an Azure host. Extra headers replace a header of the same name. The gateway does not call it on a schedule (row 2.9). Verified with mocks only. CI run 40178604119 on `73656ae` executed the tests. | The data-plane list is the one an `api-key` can still read. The v1 model list is only the deployments' ids when each deployment is named after its model, so it stays the fallback. |
 
+## Devin, Kiro, and Factory subscription plugins
+
+Read from yetone/magpie `internal/provider/{devin,kiro,factory}.go` and agent
+sign-in paths in `internal/agent/{devin,droid}.go`.
+
+| Subsystem | magpie approach | Verdict | hofund approach | Rationale |
+| --- | --- | --- | --- | --- |
+| Devin sign-in and upstream | One CLI `credentials.toml` under XDG data; chat uses the Devin API base from the file; models come from `devin models list`. | Adopt paths and API base; leave live CLI listing to the user environment | `hofund-plugin-subscription-devin` imports TOML via the `toml` crate, writes atomically at mode `0600`, uses agent-home ids stable across key rotation, and sends OpenAI chat to the stored `devin_api`. `list_models` errors until the CLI is available. No quota or online auth verification. | Typed secrets, injectable host, and no fake model cache. |
+| Kiro sign-in and upstream | IDE or CLI tokens under `~/.aws/sso/cache`; social refresh; chat is `POST …/generateAssistantResponse` with AWS event-stream replies, not Anthropic `/v1/messages`. | Adopt refresh lease and stream path; defer IdC/Builder OIDC refresh | `hofund-plugin-subscription-kiro` refreshes with a lease, keeps the prior refresh token when the reply omits one, treats missing expiry as not stale, and decodes JSON or event-stream text into IR. IdC and Builder ID OIDC flows are not implemented offline. | Matches the reference wire without copying another vendor's Messages URL. |
+| Factory sign-in, chat, and quota | `api.factory.ai`, API keys via `/api/cli/whoami`, OAuth refresh, OpenAI chat on `/api/llm/c/v1`, limits from `GET /api/billing/limits`. | Adopt | `hofund-plugin-subscription-factory` uses the Factory host, WorkOS device sign-in in tests, API-key and OAuth refresh with lease, static model catalog, regional LLM base, and percent windows from billing limits. | Removes mistaken third-party API shapes; lapsed is 401/403 only. |
+
 ## Not in this version
 
 Sessions are not compared here yet. Add a row when that subsystem is built.
