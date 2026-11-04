@@ -12,6 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Tencent Cloud Token Plan preset regions use `tokenhub.tencentmaas.com` plan
   endpoints; saved providers with the old LKEAP plan bases migrate on load (D-53).
 
+- Conversation ids without a session header hash agent-authored opening user
+  turns through the first user-owned message, stripping `cache_control` before
+  hashing (D-54).
+
 - Routing strategy `drain` keeps one pool member until it rests, runs out of
   allowance without credits, fails over, or leaves the pool, then sticks to the
   next member in listed order (D-41).

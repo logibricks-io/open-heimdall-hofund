@@ -18,6 +18,7 @@ mod generative;
 mod jsonutil;
 mod openai_chat;
 mod openai_responses;
+mod opening;
 mod passthrough;
 mod reasoning_tidy;
 mod refusal;

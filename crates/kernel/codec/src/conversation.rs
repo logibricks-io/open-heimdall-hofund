@@ -1,8 +1,7 @@
 //! Conversation identity and turn boundaries shared by routing.
 
+use crate::opening::hashed_id;
 use hofund_ir::{ContentPart, Request, Role};
-use serde_json::Value;
-use sha2::{Digest, Sha256};
 
 /// Client headers that name a conversation, in precedence order.
 pub const SESSION_HEADERS: &[&str] = &[
@@ -48,51 +47,6 @@ fn header<'a>(headers: &[(&str, &'a str)], name: &str) -> Option<&'a str> {
         .iter()
         .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
         .map(|(_, value)| *value)
-}
-
-fn hashed_id(body: &[u8]) -> String {
-    let parsed = serde_json::from_slice::<Value>(body).ok();
-    let object = parsed.as_ref().and_then(Value::as_object);
-    let messages = object
-        .and_then(|object| object.get("messages"))
-        .and_then(Value::as_array);
-    let contents = object
-        .and_then(|object| object.get("contents"))
-        .and_then(Value::as_array);
-    let input = object.and_then(|object| object.get("input"));
-    let input_items = input.and_then(Value::as_array);
-    let gemini =
-        messages.is_none_or(Vec::is_empty) && contents.is_some_and(|items| !items.is_empty());
-    let items = if gemini {
-        contents
-    } else if messages.is_some_and(|items| !items.is_empty()) {
-        messages
-    } else {
-        input_items
-    };
-    let first = items
-        .and_then(|items| {
-            items
-                .iter()
-                .find(|item| {
-                    let role = item.get("role").and_then(Value::as_str);
-                    role == Some("user") || (gemini && role.is_none())
-                })
-                .or_else(|| items.first())
-        })
-        .or(input);
-    let bytes = first.map_or_else(
-        || body.to_vec(),
-        |value| serde_json::to_vec(value).unwrap_or_else(|_| body.to_vec()),
-    );
-    let digest = Sha256::digest(&bytes);
-    format!(
-        "hofund-{}",
-        digest[..12]
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>()
-    )
 }
 
 fn truncate(value: &str, maximum: usize) -> &str {
