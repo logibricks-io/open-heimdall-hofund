@@ -138,4 +138,18 @@ mod tests {
         let out = without_foreign_thinking("https://api.anthropic.com", "anthropic-messages", body);
         assert_eq!(out, body);
     }
+
+    #[test]
+    fn d70_5_uuid_with_an_extra_char_stays() {
+        let body = br#"{"model":"claude-sonnet-4-20250514","messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"x","signature":"550e8400-e29b-41d4-a716-446655440000a"}]}]}"#;
+        let out = without_foreign_thinking("https://api.anthropic.com", "anthropic-messages", body);
+        assert_eq!(out, body);
+    }
+
+    #[test]
+    fn d70_6_non_thinking_block_with_uuid_signature_stays() {
+        let body = br#"{"model":"claude-sonnet-4-20250514","messages":[{"role":"assistant","content":[{"type":"text","text":"x","signature":"550e8400-e29b-41d4-a716-446655440000"}]}]}"#;
+        let out = without_foreign_thinking("https://api.anthropic.com", "anthropic-messages", body);
+        assert_eq!(out, body);
+    }
 }

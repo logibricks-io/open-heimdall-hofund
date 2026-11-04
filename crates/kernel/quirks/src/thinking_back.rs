@@ -229,4 +229,10 @@ mod tests {
             fill_thinking_back("anthropic-messages", chat)
         );
     }
+
+    #[test]
+    fn d65_10_passed_back_needs_a_named_field() {
+        assert!(!thinking_back_refusal("the token must be passed back"));
+        assert!(!thinking_back_refusal("reasoning_content is unsupported"));
+    }
 }
