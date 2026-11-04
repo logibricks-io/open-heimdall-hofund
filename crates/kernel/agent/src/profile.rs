@@ -107,7 +107,21 @@ fn secret_value(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::profile_field_rank;
+    use super::{ApiSlot, profile_field_included, profile_field_rank};
+
+    #[test]
+    fn g1_17_token_slot_excluded_even_with_plain_name_and_value() {
+        assert!(!profile_field_included(
+            &ApiSlot::Token,
+            "agent.label",
+            "plain"
+        ));
+        assert!(profile_field_included(
+            &ApiSlot::Origin,
+            "agent.label",
+            "plain"
+        ));
+    }
 
     #[test]
     fn g1_11_profile_field_rank_orders_provider_before_model() {
