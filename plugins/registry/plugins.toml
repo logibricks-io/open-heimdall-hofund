@@ -151,3 +151,10 @@ kind = "inbound"
 path = "plugins/inbound/retrieval"
 package = "hofund-plugin-retrieval"
 feature = "retrieval"
+
+[[plugin]]
+id = "zcode"
+kind = "subscription"
+path = "plugins/subscriptions/zcode"
+package = "hofund-plugin-subscription-zcode"
+feature = "zcode"

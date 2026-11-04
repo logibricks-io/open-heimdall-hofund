@@ -19,6 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Factory per-model wires), Factory billing limits, agent-home resolution for
   Kiro via `KIRO_IDE_CACHE`, atomic credential writes, and deterministic
   `a2b_*` tests (A-2b, feature-parity row 3.5 partial).
+- Z Code subscription plugin (`hofund-plugin-subscription-zcode`): agent
+  `credentials.json` import with AES-GCM decryption, zcode.z.ai device sign-in,
+  team plan key resolution, GLM model list and package-reset quota, Anthropic
+  Messages upstream on Z.ai or BigModel plan bases, and deterministic `a2d_*`
+  tests (A-2d, feature-parity row 3.5 partial).
 
 - ChatGPT (Codex) subscription sign-in by device code (`--site device`): ask
   for a code, poll until it is entered on another machine, trade at the

@@ -2116,6 +2116,7 @@ dependencies = [
  "hofund-plugin-subscription-gemini",
  "hofund-plugin-subscription-grok",
  "hofund-plugin-subscription-kiro",
+ "hofund-plugin-subscription-zcode",
  "hofund-provider",
  "hofund-quirks",
  "serde",
@@ -2274,6 +2275,16 @@ dependencies = [
 
 [[package]]
 name = "hofund-plugin-subscription-kiro"
+version = "0.1.0"
+dependencies = [
+ "hofund-kit-subscription",
+ "hofund-plugin-api",
+ "hofund-plugin-sdk",
+ "tempfile",
+]
+
+[[package]]
+name = "hofund-plugin-subscription-zcode"
 version = "0.1.0"
 dependencies = [
  "hofund-kit-subscription",
