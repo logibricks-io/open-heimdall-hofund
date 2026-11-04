@@ -163,12 +163,17 @@ enum Pending {
         home: PathBuf,
         #[allow(dead_code)]
         child: PipedChild,
-        stdout: hofund_plugin_api::BodyStream,
-        last: String,
+        pump: Arc<Mutex<LoginPump>>,
+        cancelled: Arc<std::sync::atomic::AtomicBool>,
     },
     Current {
         home: PathBuf,
     },
+}
+
+struct LoginPump {
+    stdout: Option<hofund_plugin_api::BodyStream>,
+    last: String,
 }
 
 struct Grok {
@@ -199,6 +204,16 @@ impl Grok {
 
 fn sign_in_dir(host: &HostContext, ctx: &SignInCtx) -> Result<PathBuf, PluginError> {
     Ok(host.dirs().state_dir()?.join("signin").join(ctx.session()))
+}
+
+fn grok_account_home(host: &HostContext, session: &str) -> Result<PathBuf, PluginError> {
+    Ok(host.dirs().state_dir()?.join("grok-homes").join(session))
+}
+
+fn remove_dir_if_under(dir: &Path, root: &Path) {
+    if dir.starts_with(root) {
+        remove_dir(dir);
+    }
 }
 
 fn remove_dir(dir: &Path) {
@@ -250,37 +265,101 @@ async fn start_login(
         Pending::Login {
             home,
             child,
-            stdout,
-            last,
+            pump: Arc::new(Mutex::new(LoginPump {
+                stdout: Some(stdout),
+                last,
+            })),
+            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         },
         link,
     ))
 }
 
-async fn finish_login(pending: &mut Pending) -> Result<(PathBuf, creds::Credential), PluginError> {
-    let Pending::Login {
-        home, stdout, last, ..
-    } = pending
-    else {
-        return Err(PluginError::config(
-            "Grok Build sign-in is not waiting on the CLI",
-        ));
-    };
-    let _ = hofund_plugin_sdk::timeout(LOGIN_WAIT, cli::drain(stdout, last)).await;
-    let credential = creds::read_sync(home).map_err(|error| match error {
-        creds::ReadError::Torn(reason) => PluginError::auth(format!(
-            "Grok Build finished, but its sign-in couldn't be read ({reason})"
-        )),
-        creds::ReadError::Missing(reason) => {
-            PluginError::auth(format!("Grok Build did not leave a sign-in: {reason}"))
+async fn finish_login(grok: &Grok, session: &str) -> Result<(), PluginError> {
+    use std::sync::atomic::Ordering;
+    let deadline = LOGIN_WAIT;
+    let finished = hofund_plugin_sdk::timeout(deadline, async {
+        loop {
+            let pump = {
+                let guard = grok
+                    .pending
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let Some(Pending::Login {
+                    pump, cancelled, ..
+                }) = guard.get(session)
+                else {
+                    return Err(PluginError::config(
+                        "Grok Build sign-in was cancelled before the CLI finished",
+                    ));
+                };
+                if cancelled.load(Ordering::Relaxed) {
+                    return Err(PluginError::config(
+                        "Grok Build sign-in was cancelled before the CLI finished",
+                    ));
+                }
+                Arc::clone(pump)
+            };
+            let done = {
+                let (mut stdout, mut last) = {
+                    let mut state = pump
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let Some(stdout) = state.stdout.take() else {
+                        return Err(PluginError::config(
+                            "Grok Build sign-in was cancelled before the CLI finished",
+                        ));
+                    };
+                    (stdout, std::mem::take(&mut state.last))
+                };
+                let finished = cli::drain_once(&mut stdout, &mut last).await;
+                let mut state = pump
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                state.last = last;
+                if !finished {
+                    state.stdout = Some(stdout);
+                }
+                finished
+            };
+            if done {
+                let home = {
+                    let guard = grok
+                        .pending
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let Some(Pending::Login { home, .. }) = guard.get(session) else {
+                        return Err(PluginError::config(
+                            "Grok Build sign-in was cancelled before the CLI finished",
+                        ));
+                    };
+                    home.clone()
+                };
+                let credential = creds::read_sync(&home).map_err(|error| match error {
+                    creds::ReadError::Torn(reason) => PluginError::auth(format!(
+                        "Grok Build finished, but its sign-in couldn't be read ({reason})"
+                    )),
+                    creds::ReadError::Missing(reason) => {
+                        PluginError::auth(format!("Grok Build did not leave a sign-in: {reason}"))
+                    }
+                })?;
+                if credential.who.is_empty() {
+                    return Err(PluginError::auth(
+                        "Grok Build left a sign-in that names no account",
+                    ));
+                }
+                return Ok(());
+            }
         }
-    })?;
-    if credential.who.is_empty() {
-        return Err(PluginError::auth(
-            "Grok Build left a sign-in that names no account",
-        ));
+    })
+    .await;
+    match finished {
+        Some(Ok(())) => Ok(()),
+        Some(Err(error)) => Err(error),
+        None => Err(PluginError::timeout(
+            "Grok Build sign-in did not finish before the time limit",
+        )),
     }
-    Ok((home.clone(), credential))
 }
 
 #[hofund_plugin_sdk::async_trait]
@@ -326,16 +405,20 @@ impl Subscription for Grok {
         remove_dir(&session_dir);
         let own_home = creds::read_sync(&default_cli_home()).is_ok();
         let home = if own_home {
-            session_dir.clone()
+            grok_account_home(host, ctx.session())?
         } else {
             default_cli_home()
         };
+        if own_home {
+            remove_dir(&home);
+        }
         let (pending, link) = match start_login(host, program, home.clone()).await {
             Ok(started) => started,
             Err(error) => {
                 if own_home {
-                    remove_dir(&session_dir);
+                    remove_dir(&home);
                 }
+                remove_dir(&session_dir);
                 return Err(error);
             }
         };
@@ -360,19 +443,40 @@ impl Subscription for Grok {
         proof: SignInProof,
         host: &HostContext,
     ) -> Result<AccountId, PluginError> {
-        let Some(mut pending) = self.take_pending(ctx.session()) else {
-            return Err(PluginError::config(
-                "no Grok Build sign-in is in progress for this session",
-            ));
-        };
+        let session = ctx.session();
         let SignInProof::Await = proof else {
             return Err(PluginError::config(
                 "Grok Build sign-in completes once the CLI finishes or the current sign-in is imported",
             ));
         };
-        let (home, credential) = match &mut pending {
+        if !self
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains_key(session)
+        {
+            return Err(PluginError::config(
+                "no Grok Build sign-in is in progress for this session",
+            ));
+        }
+        {
+            let needs_wait = self
+                .pending
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(session)
+                .is_some_and(|pending| matches!(pending, Pending::Login { .. }));
+            if needs_wait {
+                finish_login(self, session).await?;
+            }
+        }
+        let Some(pending) = self.take_pending(session) else {
+            return Err(PluginError::config(
+                "Grok Build sign-in was cancelled before it could finish",
+            ));
+        };
+        let (home, credential) = match pending {
             Pending::Current { home } => {
-                let home = home.clone();
                 let credential = creds::read_sync(&home).map_err(|error| {
                     PluginError::auth(format!(
                         "Grok Build has no readable sign-in in {}: {}",
@@ -380,9 +484,28 @@ impl Subscription for Grok {
                         error.message()
                     ))
                 })?;
+                if credential.who.is_empty() {
+                    return Err(PluginError::auth(
+                        "Grok Build is signed in but names no account",
+                    ));
+                }
                 (home, credential)
             }
-            Pending::Login { .. } => finish_login(&mut pending).await?,
+            Pending::Login { home, .. } => {
+                let credential = creds::read_sync(&home).map_err(|error| {
+                    PluginError::auth(format!(
+                        "Grok Build has no readable sign-in in {}: {}",
+                        home.display(),
+                        error.message()
+                    ))
+                })?;
+                if credential.who.is_empty() {
+                    return Err(PluginError::auth(
+                        "Grok Build left a sign-in that names no account",
+                    ));
+                }
+                (home, credential)
+            }
         };
         let id = creds::account_id(&credential);
         let label = if !credential.email.is_empty() {
@@ -393,22 +516,26 @@ impl Subscription for Grok {
         let secret = creds::secret_blob(&home, &credential).to_secret();
         let account = host.accounts().account(id.clone(), label)?;
         host.accounts().upsert(account, secret).await?;
-        if let Pending::Login { home, .. } = &pending
-            && let Ok(state) = host.dirs().state_dir()
-            && home.starts_with(state)
-        {
-            remove_dir(home);
-        }
         Ok(id)
     }
 
     async fn cancel_sign_in(&self, ctx: &SignInCtx, host: &HostContext) -> Result<(), PluginError> {
         if let Some(pending) = self.take_pending(ctx.session()) {
-            if let Pending::Login { home, .. } = pending {
-                remove_dir(&home);
+            if let Pending::Login {
+                home, cancelled, ..
+            } = &pending
+            {
+                cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+                if let Ok(state) = host.dirs().state_dir() {
+                    remove_dir_if_under(home, &state.join("signin"));
+                    remove_dir_if_under(home, &state.join("grok-homes"));
+                }
             }
-        } else if let Ok(dir) = sign_in_dir(host, ctx) {
-            remove_dir(&dir);
+            drop(pending);
+        } else if let Ok(dir) = sign_in_dir(host, ctx)
+            && let Ok(state) = host.dirs().state_dir()
+        {
+            remove_dir_if_under(&dir, &state.join("signin"));
         }
         Ok(())
     }
@@ -419,9 +546,9 @@ impl Subscription for Grok {
         host: &HostContext,
     ) -> Result<AccountStatus, PluginError> {
         match creds::Stored::load(host, account).await {
-            Ok(stored) if stored.fresh_at(host.clock().now()) => Ok(AccountStatus::Ready),
+            Ok(stored) if stored.ready_at(host.clock().now()) => Ok(AccountStatus::Ready),
             Ok(_) => Ok(AccountStatus::NeedsSignIn {
-                reason: "the Grok Build sign-in is due for renewal".to_owned(),
+                reason: "the Grok Build sign-in has expired".to_owned(),
             }),
             Err(error) if error.kind() == hofund_plugin_api::PluginErrorKind::Auth => {
                 Ok(AccountStatus::NeedsSignIn {

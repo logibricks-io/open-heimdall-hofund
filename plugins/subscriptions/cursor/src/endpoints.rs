@@ -36,6 +36,10 @@ impl Endpoints {
         )
     }
 
+    pub(crate) fn oauth_refresh(&self) -> String {
+        format!("{}/auth/refresh", self.api.trim_end_matches('/'))
+    }
+
     pub(crate) fn dashboard(&self, method: &str) -> String {
         format!(
             "{}/aiserver.v1.DashboardService/{method}",

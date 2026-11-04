@@ -1,8 +1,8 @@
 //! Running cursor-agent and reading macOS keychain tokens.
 
+use std::cell::RefCell;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use hofund_plugin_api::{BodyStream, HostContext, PluginError, SpawnRequest};
@@ -21,14 +21,16 @@ pub(crate) const MODELS_WAIT: Duration = Duration::from_secs(30);
 /// How long a keychain read is reused.
 const KEYCHAIN_TTL: Duration = Duration::from_secs(10);
 
-static KEYCHAIN: Mutex<KeychainCache> = Mutex::new(KeychainCache {
-    token: String::new(),
-    read_at: None,
-});
-
 struct KeychainCache {
     token: String,
     read_at: Option<Instant>,
+}
+
+thread_local! {
+    static KEYCHAIN: RefCell<KeychainCache> = const { RefCell::new(KeychainCache {
+        token: String::new(),
+        read_at: None,
+    }) };
 }
 
 /// Whether macOS keychain reads are skipped (tests or `HOFUND_CURSOR_SKIP_KEYCHAIN`).
@@ -47,12 +49,16 @@ pub(crate) async fn keychain_token(host: &HostContext, fresh: bool) -> Result<St
         return Ok(String::new());
     }
     {
-        let cache = KEYCHAIN.lock().unwrap_or_else(|poison| poison.into_inner());
-        if !fresh
-            && let Some(at) = cache.read_at
-            && at.elapsed() < KEYCHAIN_TTL
-        {
-            return Ok(cache.token.clone());
+        if !fresh {
+            let (read_at, token) = KEYCHAIN.with(|slot| {
+                let cache = slot.borrow();
+                (cache.read_at, cache.token.clone())
+            });
+            if let Some(at) = read_at
+                && at.elapsed() < KEYCHAIN_TTL
+            {
+                return Ok(token);
+            }
         }
     }
     let request = SpawnRequest::new(
@@ -79,10 +85,12 @@ pub(crate) async fn keychain_token(host: &HostContext, fresh: bool) -> Result<St
         .trim()
         .to_owned();
     drop(child);
-    let mut cache = KEYCHAIN.lock().unwrap_or_else(|poison| poison.into_inner());
-    cache.read_at = Some(Instant::now());
-    cache.token = token;
-    Ok(cache.token.clone())
+    KEYCHAIN.with(|slot| {
+        let mut cache = slot.borrow_mut();
+        cache.read_at = Some(Instant::now());
+        cache.token = token.clone();
+    });
+    Ok(token)
 }
 
 /// Live access token: keychain on macOS, else auth.json.
@@ -148,6 +156,24 @@ fn skip_keychain_override() -> bool {
 }
 
 #[cfg(test)]
+fn skip_keychain_override() -> bool {
+    test_only::skip()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_ansi;
+
+    #[test]
+    fn strips_ansi_colour_codes() {
+        assert_eq!(
+            strip_ansi("\u{1b}[4mhttps://example.test/x\u{1b}[24m"),
+            "https://example.test/x"
+        );
+    }
+}
+
+#[cfg(test)]
 mod test_only {
     use std::cell::RefCell;
 
@@ -165,11 +191,25 @@ mod test_only {
 }
 
 #[cfg(test)]
-fn skip_keychain_override() -> bool {
-    test_only::skip()
+pub(crate) fn test_skip_keychain(skip: bool) {
+    test_only::set_skip(skip);
 }
 
 #[cfg(test)]
-pub(crate) fn test_skip_keychain(skip: bool) {
-    test_only::set_skip(skip);
+#[allow(clippy::while_let_on_iterator)]
+fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' {
+            while let Some(next) = chars.next() {
+                if next.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+            continue;
+        }
+        out.push(ch);
+    }
+    out
 }

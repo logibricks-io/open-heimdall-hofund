@@ -20,11 +20,9 @@ pub(crate) fn decode_data(body: &[u8]) -> Result<Value, PluginError> {
     if let Some(success) = object.get("success").and_then(Value::as_bool)
         && !success
     {
-        let detail = object
-            .get("error")
-            .and_then(Value::as_str)
-            .unwrap_or("Cline refused the request");
-        return Err(PluginError::status_error(502, detail));
+        return Err(PluginError::auth(
+            "Cline refused the stored sign-in; sign in to Cline again",
+        ));
     }
     if object.contains_key("data") {
         return Ok(object.get("data").cloned().unwrap_or(Value::Null));
@@ -44,10 +42,21 @@ pub(crate) fn sign_in_lapsed(status: u16, body: &[u8]) -> bool {
 }
 
 fn body_lapsed(body: &[u8]) -> bool {
-    let text = String::from_utf8_lossy(body).to_ascii_lowercase();
-    ["invalid", "expired", "revoked", "unauthorized"]
-        .iter()
-        .any(|word| text.contains(word))
+    let Ok(value) = json::from_slice::<Value>(body) else {
+        return false;
+    };
+    let Some(code) = value
+        .get("error")
+        .or_else(|| value.get("code"))
+        .and_then(Value::as_str)
+        .map(str::to_ascii_lowercase)
+    else {
+        return false;
+    };
+    matches!(
+        code.as_str(),
+        "invalid_grant" | "invalid_token" | "expired_token" | "token_expired" | "unauthorized"
+    )
 }
 
 /// GET one Cline path with client headers and optional bearer.

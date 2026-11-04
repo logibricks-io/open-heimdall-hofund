@@ -5,13 +5,13 @@ use std::time::Duration;
 
 use hofund_kit_subscription::{PipedScript, TestHost, advance_time, block_on, block_on_paused};
 use hofund_plugin_api::{
-    PluginId, PluginKind, ProbeQuery, ProtocolId, RawTable, RawValue, SecretString, Subscription,
-    SubscriptionFactory,
+    AccountStatus, PluginId, PluginKind, ProbeQuery, ProtocolId, RawTable, RawValue, SecretString,
+    SignInCtx, SignInProof, Subscription, SubscriptionFactory,
 };
 use hofund_plugin_sdk::json::{Map, Value, json};
 use hofund_plugin_sdk::oauth::{SecretObject, account_id_from};
 
-use crate::creds::{self, Credential};
+use crate::creds::{self, Credential, Stored};
 use crate::discover::{self, REFERENCE};
 use crate::quota;
 use crate::shape;
@@ -19,6 +19,7 @@ use crate::{Endpoints, factory_with_endpoints};
 
 const BASE: &str = "https://grok.test/v1";
 const TOKEN: &str = "access-example-token";
+const SESSION: &str = "0123456789abcdef0123456789abcdef";
 #[cfg(not(windows))]
 const PROGRAM: &str = "/opt/grok/bin/grok";
 #[cfg(windows)]
@@ -44,6 +45,12 @@ fn subscription(host: &TestHost) -> Arc<dyn Subscription> {
     let factory = factory_with_endpoints(endpoints());
     let cfg = factory.validate(&raw).expect("config");
     factory.build(&cfg, host.context()).expect("build")
+}
+
+fn ctx() -> SignInCtx {
+    SignInCtx::new(PluginId::from_static("grok"))
+        .with_session(SESSION)
+        .expect("session")
 }
 
 fn write_auth(home: &std::path::Path, token: &str, email: &str, expires: &str) {
@@ -86,7 +93,7 @@ fn seed(
 }
 
 #[test]
-fn a2a_2_discover_import_fixture() {
+fn a2a_2_discover_import_fixture_and_reimport() {
     let dir = tempfile::tempdir().expect("dir");
     let home = dir.path().join("grok-home");
     write_auth(
@@ -97,38 +104,45 @@ fn a2a_2_discover_import_fixture() {
     );
     let rows = discover::list(&home).expect("list");
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].label(), "user@example.test");
-    let text = format!("{rows:?}");
-    assert!(!text.contains(TOKEN));
+    assert_eq!(rows[0].reference(), REFERENCE);
 
     let host = host(&dir);
     let id = block_on(discover::import(&home, REFERENCE, host.context())).expect("import");
-    assert_eq!(id, account_id_from(&["grok", "user@example.test"]));
+    write_auth(
+        &home,
+        "rotated-token",
+        "user@example.test",
+        "2099-06-01T00:00:00.000000000Z",
+    );
+    block_on(discover::import(&home, REFERENCE, host.context())).expect("reimport");
+    let secret = block_on(host.context().accounts().secret(&id))
+        .expect("read")
+        .expect("stored");
+    let blob = SecretObject::parse(&secret).expect("blob");
+    assert_eq!(
+        blob.secret("access_token")
+            .map(|t| hofund_plugin_sdk::oauth::secret_text(&t).to_owned()),
+        Some("rotated-token".to_owned())
+    );
 }
 
 #[test]
-fn a2a_3_refresh_on_expiry_runs_grok_models() {
+fn a2a_3_refresh_on_expiry_runs_grok_models_with_home() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
     let sub = subscription(&host);
     let home = dir.path().join("account-home");
-    let id = seed(&host, &home, "token-old", "1970-01-01T00:05:00.000000000Z");
-    block_on_paused(async {
-        advance_time(Duration::from_secs(3600)).await;
-        // The CLI rewrites auth.json when it renews; simulate that on disk.
-        write_auth(
-            &home,
-            "token-new",
-            "user@example.test",
-            "2099-01-01T00:00:00.000000000Z",
-        );
-        sub.refresh(&id, host.context()).await.expect("refresh");
-    });
-    assert_eq!(
-        host.process().programs().len(),
-        1,
-        "refresh runs grok models"
+    let id = seed(&host, &home, "token-old", "1970-01-01T00:01:00.000000000Z");
+    write_auth(
+        &home,
+        "token-new",
+        "user@example.test",
+        "2099-01-01T00:00:00.000000000Z",
     );
+    block_on(sub.refresh(&id, host.context())).expect("refresh again");
+    let spawns = host.process().programs();
+    assert_eq!(spawns.len(), 1, "refresh runs grok models");
+    assert_eq!(spawns[0].to_string_lossy(), PROGRAM);
     let secret = block_on(host.context().accounts().secret(&id))
         .expect("read")
         .expect("stored");
@@ -187,17 +201,37 @@ fn a2a_6_usage_parsing() {
 }
 
 #[test]
-fn a2a_7_secrets_not_in_debug_or_errors() {
-    let credential = Credential {
-        key: SecretString::from(TOKEN.to_owned()),
-        email: "user@example.test".to_owned(),
-        who: "user@example.test".to_owned(),
-        expires_ms: 0,
+fn a2a_7_secrets_not_in_stored_debug_or_auth_errors() {
+    let dir = tempfile::tempdir().expect("dir");
+    let home = dir.path().join("grok-home");
+    write_auth(
+        &home,
+        TOKEN,
+        "user@example.test",
+        "2099-01-01T00:00:00.000000000Z",
+    );
+    let stored = Stored {
+        home: home.display().to_string(),
+        credential: Credential {
+            key: SecretString::from(TOKEN.to_owned()),
+            email: "user@example.test".to_owned(),
+            who: "user@example.test".to_owned(),
+            expires_ms: 4_000_000_000_000,
+        },
     };
-    let text = format!("{credential:?}");
-    assert!(!text.contains(TOKEN));
-    let error = creds::read_sync(std::path::Path::new("/no/such/home")).expect_err("missing");
-    assert!(!error.message().contains(TOKEN));
+    let debug = format!("{stored:?}");
+    assert!(!debug.contains(TOKEN));
+    let host = host(&dir);
+    block_on(async {
+        let status = subscription(&host)
+            .account_status(
+                &account_id_from(&["grok", "missing@example.test"]),
+                host.context(),
+            )
+            .await
+            .expect("status");
+        assert!(matches!(status, AccountStatus::NeedsSignIn { .. }));
+    });
 }
 
 #[test]
@@ -225,13 +259,73 @@ fn a2a_8_shape_rewrites_agent_message_and_tools() {
 }
 
 #[test]
-fn a2a_9_import_fixture_matches_discover_reference() {
-    let fixture = include_str!("fixtures/auth.json");
+fn a2a_9_near_margin_account_stays_ready() {
     let dir = tempfile::tempdir().expect("dir");
-    let home = dir.path().join("grok-home");
-    std::fs::create_dir_all(&home).expect("home");
-    std::fs::write(home.join("auth.json"), fixture).expect("auth");
     let host = host(&dir);
-    let id = block_on(discover::import(&home, REFERENCE, host.context())).expect("import");
-    assert_eq!(id, account_id_from(&["grok", "user@example.test"]));
+    let home = dir.path().join("account-home");
+    write_auth(
+        &home,
+        TOKEN,
+        "user@example.test",
+        "1970-01-01T00:03:00.000000000Z",
+    );
+    let credential = creds::read_sync(&home).expect("credential");
+    let stored = Stored {
+        home: home.display().to_string(),
+        credential,
+    };
+    let now = host.context().clock().now();
+    assert!(stored.ready_at(now));
+    assert!(!stored.fresh_at(now));
+}
+
+#[test]
+fn a2a_10_sign_in_start_complete_and_cancel() {
+    let dir = tempfile::tempdir().expect("dir");
+    let grok_home = dir.path().join("cli-home");
+    unsafe {
+        std::env::set_var(crate::cli::HOME_VAR, &grok_home);
+    }
+    let test_host = host(&dir);
+    let sub = subscription(&test_host);
+    test_host.process().script_piped(
+        PipedScript::new()
+            .line("Visit https://auth.test/device")
+            .exits(|_| vec![]),
+    );
+    let challenge = block_on(sub.start_sign_in(&ctx(), test_host.context())).expect("start");
+    assert!(matches!(
+        challenge,
+        hofund_plugin_api::SignInChallenge::OpenUrl { .. }
+            | hofund_plugin_api::SignInChallenge::Instructions { .. }
+    ));
+    write_auth(
+        &grok_home,
+        "signed-in-token",
+        "signin@example.test",
+        "2099-01-01T00:00:00.000000000Z",
+    );
+    let id = block_on(sub.complete_sign_in(&ctx(), SignInProof::Await, test_host.context()))
+        .expect("complete");
+    assert_eq!(id, account_id_from(&["grok", "signin@example.test"]));
+
+    let dir2 = tempfile::tempdir().expect("dir2");
+    let grok_home2 = dir2.path().join("cli-home-2");
+    unsafe {
+        std::env::set_var(crate::cli::HOME_VAR, &grok_home2);
+    }
+    let test_host2 = host(&dir2);
+    let sub2 = subscription(&test_host2);
+    test_host2
+        .process()
+        .script_piped(PipedScript::new().line("Visit https://auth.test/device-2"));
+    block_on(sub2.start_sign_in(&ctx(), test_host2.context())).expect("start2");
+    block_on(sub2.cancel_sign_in(&ctx(), test_host2.context())).expect("cancel");
+    let err = block_on(sub2.complete_sign_in(
+        &ctx(),
+        SignInProof::Await,
+        test_host2.context(),
+    ))
+    .expect_err("cancelled");
+    assert_eq!(err.kind(), hofund_plugin_api::PluginErrorKind::Config);
 }

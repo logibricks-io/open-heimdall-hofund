@@ -15,13 +15,21 @@ pub(crate) async fn store(host: &HostContext, text: &str) -> Result<Vec<AccountI
     let (label, id) = tokens::jwt_identity(&access)
         .ok_or_else(|| PluginError::auth("the access token does not name an account"))?;
     if host.accounts().secret(&id).await?.is_some() {
+        let access_secret = hofund_plugin_api::SecretString::from(access.clone());
+        let refresh_secret = hofund_plugin_api::SecretString::from("none");
+        let expires = tokens::jwt_expiry_ms(&access)
+            .unwrap_or_else(|| tokens::unix_ms(host.clock().now()) as u64 + 30 * 24 * 3600 * 1000);
+        let blob = tokens::blob_oauth(&access_secret, &refresh_secret, expires, &label, None);
+        let account = host.accounts().account(id.clone(), label)?;
+        host.accounts().upsert(account, blob.to_secret()).await?;
         return Ok(vec![id]);
     }
     let access_secret = hofund_plugin_api::SecretString::from(access.clone());
     let refresh = tokens::blob_oauth(
         &access_secret,
         &hofund_plugin_api::SecretString::from("none"),
-        tokens::jwt_expiry_ms(&access).unwrap_or(0),
+        tokens::jwt_expiry_ms(&access)
+            .unwrap_or_else(|| tokens::unix_ms(host.clock().now()) as u64 + 30 * 24 * 3600 * 1000),
         &label,
         None,
     );

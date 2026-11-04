@@ -3,7 +3,7 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use hofund_plugin_api::{AccountId, PluginError, SecretString};
-use hofund_plugin_sdk::oauth::{SecretObject, account_id_from, unverified_claims};
+use hofund_plugin_sdk::oauth::{SecretObject, account_id_from, secret_text, unverified_claims};
 
 /// Refresh marker: token is read from cursor-agent each time.
 pub(crate) const AGENT_MARK: &str = "cursor-agent";
@@ -55,6 +55,14 @@ pub(crate) fn is_agent(blob: &SecretObject) -> bool {
 
 pub(crate) fn expires_ms(blob: &SecretObject) -> Option<u64> {
     blob.number(EXPIRES_MS)
+}
+
+pub(crate) fn effective_expires_ms(blob: &SecretObject) -> Option<u64> {
+    if let Some(ms) = expires_ms(blob).filter(|ms| *ms > 0) {
+        return Some(ms);
+    }
+    blob.secret(ACCESS)
+        .and_then(|token| jwt_expiry_ms(secret_text(&token)))
 }
 
 pub(crate) fn jwt_expiry_ms(token: &str) -> Option<u64> {

@@ -215,13 +215,25 @@ impl Subscription for Cursor {
                 reason: "the stored Cursor sign-in is unreadable".to_owned(),
             });
         };
-        if tokens::is_agent(&blob) || blob.secret(tokens::ACCESS).is_some() {
-            Ok(AccountStatus::Ready)
-        } else {
-            Ok(AccountStatus::NeedsSignIn {
-                reason: "the stored Cursor sign-in has no access token".to_owned(),
-            })
+        if tokens::is_agent(&blob) {
+            return Ok(AccountStatus::Ready);
         }
+        if blob.secret(tokens::ACCESS).is_none() {
+            return Ok(AccountStatus::NeedsSignIn {
+                reason: "the stored Cursor sign-in has no access token".to_owned(),
+            });
+        }
+        let now = host.clock().now();
+        if let Some(ms) = tokens::effective_expires_ms(&blob) {
+            let expires =
+                tokens::ms_from_now(std::time::UNIX_EPOCH, i64::try_from(ms).unwrap_or(i64::MAX));
+            if now >= expires {
+                return Ok(AccountStatus::NeedsSignIn {
+                    reason: "the Cursor sign-in has expired".to_owned(),
+                });
+            }
+        }
+        Ok(AccountStatus::Ready)
     }
 
     async fn refresh(&self, account: &AccountId, host: &HostContext) -> Result<(), PluginError> {
@@ -236,10 +248,7 @@ impl Subscription for Cursor {
             let home = auth::default_agent_home();
             refresh::agent_status(host, &program, &home).await
         } else {
-            let access = blob.secret(tokens::ACCESS).ok_or_else(|| {
-                PluginError::auth("the stored Cursor sign-in has no access token")
-            })?;
-            refresh::oauth_check(host, account, &access).await
+            refresh::oauth_check(host, &self.endpoints, account).await
         }
     }
 
@@ -248,9 +257,11 @@ impl Subscription for Cursor {
         account: &AccountId,
         host: &HostContext,
     ) -> Result<Vec<QuotaWindow>, PluginError> {
-        let program = self.program()?;
         let agent_home = auth::default_agent_home();
-        let token = session::access_token(host, account, &agent_home, &program).await?;
+        let program = self.program()?;
+        let token =
+            session::access_token(host, &self.endpoints, account, &agent_home, Some(&program))
+                .await?;
         let body =
             connect::unary(host, &self.endpoints, "GetCurrentPeriodUsage", &token, "{}").await?;
         quota::period_windows(&body)
@@ -261,16 +272,26 @@ impl Subscription for Cursor {
         account: &AccountId,
         host: &HostContext,
     ) -> Result<ModelList, PluginError> {
-        let program = self.program()?;
         let agent_home = auth::default_agent_home();
-        let _token = session::access_token(host, account, &agent_home, &program).await?;
+        let token =
+            session::access_token(host, &self.endpoints, account, &agent_home, None).await?;
+        let config = auth::config_dir(&agent_home);
+        auth::write_auth_file(&config, hofund_plugin_sdk::oauth::secret_text(&token))?;
+        let program = self.program()?;
         let request = cli::request(&program, &["models"], &agent_home)?;
         let child = host.spawn_process().spawn_piped(&request).await?;
         let mut stdout = child.stdout()?;
-        let text = hofund_plugin_sdk::timeout(cli::MODELS_WAIT, cli::collect(&mut stdout, 8 << 20))
-            .await
-            .flatten()
-            .unwrap_or_default();
+        let text =
+            match hofund_plugin_sdk::timeout(cli::MODELS_WAIT, cli::collect(&mut stdout, 8 << 20))
+                .await
+            {
+                Some(Some(text)) if !text.trim().is_empty() => text,
+                _ => {
+                    return Err(PluginError::config(
+                        "cursor-agent did not return a model list",
+                    ));
+                }
+            };
         models::model_list(&text)
     }
 

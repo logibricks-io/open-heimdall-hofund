@@ -49,6 +49,18 @@ impl Stored {
     pub(crate) fn fresh_at(&self, now: SystemTime) -> bool {
         expires_after(now, self.credential.expires_ms, REFRESH_MARGIN)
     }
+
+    /// Whether the account should show as signed in (ignores the refresh margin).
+    pub(crate) fn ready_at(&self, now: SystemTime) -> bool {
+        if self.credential.expires_ms == 0 {
+            return true;
+        }
+        let Ok(now_ms) = now.duration_since(UNIX_EPOCH) else {
+            return false;
+        };
+        let now_ms = now_ms.as_millis() as u64;
+        self.credential.expires_ms > now_ms
+    }
 }
 
 /// Parses a stored secret blob.

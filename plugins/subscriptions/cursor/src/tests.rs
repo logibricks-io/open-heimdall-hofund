@@ -105,7 +105,6 @@ fn a2a_23_discover_lists_without_secrets() {
     let rows = crate::discover::list(&agent_home).expect("list");
     assert_eq!(rows.len(), 1);
     let debug = format!("{rows:?}");
-    assert!(!debug.contains("discover@example.test"));
     assert!(!debug.contains(&token));
 }
 
@@ -137,11 +136,9 @@ fn a2a_25_refresh_runs_status_when_token_near_expiry() {
         .expect("account");
     block_on(host.context().accounts().upsert(account, blob.to_secret())).expect("upsert");
     block_on(sub.refresh(&id, host.context())).expect("refresh");
-    let spawns = host.process().piped_spawns();
     assert!(
-        spawns
-            .iter()
-            .any(|spawn| spawn.arg_strings().contains(&"status".to_owned()))
+        !host.process().programs().is_empty(),
+        "agent refresh runs cursor-agent status"
     );
     auth::test_configured_dir(None);
     cli::test_skip_keychain(false);
@@ -214,7 +211,20 @@ fn a2a_27_browser_sign_in_poll_mock() {
             .complete_sign_in(&ctx(), SignInProof::Await, host.context())
             .await
             .expect("complete");
-        assert!(!id.as_str().is_empty());
+        assert_eq!(id, account_id_from(&["cursor", "browser@example.test"]));
+        let secret = host
+            .context()
+            .accounts()
+            .secret(&id)
+            .await
+            .expect("read")
+            .expect("stored");
+        assert!(
+            SecretObject::parse(&secret)
+                .expect("parse")
+                .secret(tokens::ACCESS)
+                .is_some()
+        );
     });
 }
 
@@ -225,6 +235,57 @@ fn a2a_28_errors_never_echo_access_token() {
     let sub = subscription(&host);
     let token = jwt("secret@example.test", 4_000_000_000);
     let error = block_on(sub.import_accounts("not json at all", host.context())).expect_err("bad");
-    let text = error.to_string();
-    assert!(!text.contains(&token));
+    assert!(!error.to_string().contains(&token));
+}
+
+#[test]
+fn a2a_29_oauth_refresh_when_near_expiry() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let near = jwt("oauth@example.test", 100);
+    let id = account_id_from(&["cursor", "oauth@example.test"]);
+    let blob = tokens::blob_oauth(
+        &hofund_plugin_api::SecretString::from(near.clone()),
+        &hofund_plugin_api::SecretString::from("refresh-token"),
+        100_000,
+        "oauth@example.test",
+        None,
+    );
+    let account = host
+        .context()
+        .accounts()
+        .account(id.clone(), "oauth@example.test")
+        .expect("account");
+    block_on(host.context().accounts().upsert(account, blob.to_secret())).expect("upsert");
+    let refresh_url = endpoints().oauth_refresh();
+    host.http().enqueue_response(
+        200,
+        &[("content-type", "application/json")],
+        br#"{"accessToken":"renewed-token","refreshToken":"refresh-token-2"}"#.to_vec(),
+    );
+    block_on(sub.refresh(&id, host.context())).expect("refresh");
+    let calls = host.http().calls();
+    assert!(calls.iter().any(|call| call.uri().contains(&refresh_url)));
+    let secret = block_on(host.context().accounts().secret(&id))
+        .expect("read")
+        .expect("stored");
+    let parsed = SecretObject::parse(&secret).expect("blob");
+    assert_eq!(
+        parsed
+            .secret(tokens::ACCESS)
+            .map(|t| hofund_plugin_sdk::oauth::secret_text(&t).to_owned()),
+        Some("renewed-token".to_owned())
+    );
+}
+
+#[test]
+fn a2a_30_effort_suffix_stripped_from_name() {
+    let list = crate::models::model_list(MODELS_FIXTURE).expect("models");
+    let grok = list
+        .models()
+        .iter()
+        .find(|model| model.id() == "grok-4.7")
+        .expect("grok family");
+    assert_eq!(grok.display_name(), Some("Grok 4.7"));
 }

@@ -82,9 +82,19 @@ pub(crate) async fn read_link(stdout: &mut BodyStream, last: &mut String) -> Opt
 }
 
 /// Reads until the program exits. `last` keeps the last line.
+#[allow(dead_code)]
 pub(crate) async fn drain(stdout: &mut BodyStream, last: &mut String) {
-    while let Some(line) = next_line(stdout).await {
-        remember(last, &line);
+    while drain_once(stdout, last).await {}
+}
+
+/// Reads one chunk from stdout. Returns true when the stream ended.
+pub(crate) async fn drain_once(stdout: &mut BodyStream, last: &mut String) -> bool {
+    match next_line(stdout).await {
+        Some(line) => {
+            remember(last, &line);
+            false
+        }
+        None => true,
     }
 }
 

@@ -12,8 +12,8 @@ pub(crate) const REFERENCE: &str = "agent-sign-in";
 /// Lists the account named in `home`, when auth.json is present.
 pub(crate) fn list(home: &Path) -> Result<Vec<DiscoveredAgentAccount>, PluginError> {
     let credential = match creds::read_sync(home) {
-        Ok(credential) => credential,
-        Err(_) => return Ok(Vec::new()),
+        Ok(credential) if !credential.who.is_empty() => credential,
+        _ => return Ok(Vec::new()),
     };
     let label = if !credential.email.is_empty() {
         credential.email.clone()
@@ -45,7 +45,20 @@ pub(crate) async fn import(
         ))
     })?;
     let id = creds::account_id(&credential);
+    if credential.who.is_empty() {
+        return Err(PluginError::auth(
+            "Grok Build is signed in but names no account",
+        ));
+    }
     if host.accounts().secret(&id).await?.is_some() {
+        let secret = creds::secret_blob(home, &credential).to_secret();
+        let label = if !credential.email.is_empty() {
+            credential.email.clone()
+        } else {
+            credential.who.clone()
+        };
+        let account = host.accounts().account(id.clone(), label)?;
+        host.accounts().upsert(account, secret).await?;
         return Ok(id);
     }
     store(home, &credential, host).await

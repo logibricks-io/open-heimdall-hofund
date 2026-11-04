@@ -17,7 +17,7 @@ pub(crate) async fn unary(
     let reply = Call::post(url)
         .header("content-type", "application/json")
         .header("connect-protocol-version", "1")
-        .header(
+        .sensitive_header(
             "authorization",
             format!("Bearer {}", hofund_plugin_sdk::oauth::secret_text(token)),
         )

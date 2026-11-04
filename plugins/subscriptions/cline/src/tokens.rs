@@ -224,7 +224,7 @@ async fn refresh_oauth(
         }
         Err(error) => return Err(error),
     };
-    let parsed = parse_register(&reply, Some(&refresh_token))?;
+    let parsed = parse_register(&host, &reply, Some(&refresh_token))?;
     let mut next = blob
         .with_secret("access_token", &parsed.access)
         .with_secret("refresh_token", &parsed.refresh)
@@ -257,6 +257,7 @@ fn ms_remaining(blob: &SecretObject, now: SystemTime) -> Duration {
 
 /// Reads Cline's register or refresh answer.
 pub(crate) fn parse_register(
+    host: &HostContext,
     data: &Value,
     fallback_refresh: Option<&SecretString>,
 ) -> Result<ParsedAuth, PluginError> {
@@ -292,7 +293,7 @@ pub(crate) fn parse_register(
         .filter(|text| !text.is_empty())
         .map(str::to_owned);
     let account_id = email.clone().or(uid.clone());
-    let expires_ms = expires_at_ms(data.get("expiresAt"));
+    let expires_ms = expires_at_ms(host, data.get("expiresAt"));
     Ok(ParsedAuth {
         access: SecretString::from(access.to_owned()),
         refresh,
@@ -304,25 +305,37 @@ pub(crate) fn parse_register(
     })
 }
 
-fn expires_at_ms(value: Option<&Value>) -> u64 {
+fn expires_at_ms(host: &HostContext, value: Option<&Value>) -> u64 {
     match value {
         Some(Value::String(text)) => parse_rfc3339(text)
             .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
             .map(|d| d.as_millis() as u64)
-            .unwrap_or_else(default_expiry_ms),
-        Some(Value::Number(number)) => number
-            .as_u64()
-            .or_else(|| number.as_f64().map(|n| n as u64))
-            .unwrap_or_else(default_expiry_ms),
-        _ => default_expiry_ms(),
+            .unwrap_or_else(|| default_expiry_ms(host)),
+        Some(Value::Number(number)) => {
+            let raw = number
+                .as_u64()
+                .or_else(|| number.as_f64().map(|n| n as u64))
+                .unwrap_or_else(|| default_expiry_ms(host));
+            normalize_epoch_ms(raw)
+        }
+        _ => default_expiry_ms(host),
     }
 }
 
-fn default_expiry_ms() -> u64 {
-    UNIX_EPOCH
+fn normalize_epoch_ms(raw: u64) -> u64 {
+    if raw > 0 && raw < 1_000_000_000_000 {
+        raw.saturating_mul(1000)
+    } else {
+        raw
+    }
+}
+
+fn default_expiry_ms(host: &HostContext) -> u64 {
+    host.clock()
+        .now()
         .checked_add(Duration::from_secs(3600))
-        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map(|d| d.as_millis() as u64)
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis() as u64)
         .unwrap_or(0)
 }
 

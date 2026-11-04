@@ -9,9 +9,10 @@ use hofund_plugin_api::{AccountId, HostContext, PluginError, SecretString};
 /// Returns a bearer token for API calls.
 pub(crate) async fn access_token(
     host: &HostContext,
+    endpoints: &crate::endpoints::Endpoints,
     account: &AccountId,
     agent_home: &Path,
-    program: &Path,
+    program: Option<&Path>,
 ) -> Result<SecretString, PluginError> {
     let secret = host
         .accounts()
@@ -20,14 +21,28 @@ pub(crate) async fn access_token(
         .ok_or_else(|| PluginError::auth("no Cursor sign-in is stored for this account"))?;
     let blob = tokens::parse_blob(&secret)?;
     if is_agent(&blob) {
+        let program = program.ok_or_else(|| {
+            PluginError::config(
+                "cursor-agent is not installed: it is not on PATH; install it or set `command`",
+            )
+        })?;
         return agent_token(host, agent_home, program).await;
     }
     let access = blob
         .secret(tokens::ACCESS)
         .ok_or_else(|| PluginError::auth("the stored Cursor sign-in has no access token"))?;
     let now = host.clock().now();
-    if tokens::near_expiry(now, tokens::expires_ms(&blob)) {
-        crate::refresh::oauth_check(host, account, &access).await?;
+    if tokens::near_expiry(now, tokens::effective_expires_ms(&blob)) {
+        crate::refresh::oauth_check(host, endpoints, account).await?;
+        let secret = host
+            .accounts()
+            .secret(account)
+            .await?
+            .ok_or_else(|| PluginError::auth("no Cursor sign-in is stored for this account"))?;
+        let blob = tokens::parse_blob(&secret)?;
+        return blob
+            .secret(tokens::ACCESS)
+            .ok_or_else(|| PluginError::auth("the stored Cursor sign-in has no access token"));
     }
     Ok(access)
 }

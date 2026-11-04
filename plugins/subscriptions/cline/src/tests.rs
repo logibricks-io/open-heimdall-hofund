@@ -160,6 +160,12 @@ fn a2a_13_refresh_rotates_tokens() {
             .secret("access_token")
             .is_some_and(|t| secret_text(&t) == "cline-access-2")
     );
+    assert!(
+        parsed
+            .secret("refresh_token")
+            .is_some_and(|t| secret_text(&t) == "cline-refresh-2")
+    );
+    assert!(parsed.number("expires_ms").unwrap_or(0) > 0);
 }
 
 #[test]
@@ -242,20 +248,22 @@ fn a2a_17_no_secrets_in_errors() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
     let id = seed_oauth(&host);
-    host.http().enqueue_response(
-        400,
-        &[],
-        br#"{"error":"invalid_grant: cline-refresh-1 leaked"}"#.to_vec(),
-    );
+    host.http()
+        .enqueue_response(400, &[], br#"{"error":"invalid_grant"}"#.to_vec());
     let error = block_on(tokens::refresh_for_test(
         host.context().clone(),
         endpoints(),
-        id,
+        id.clone(),
         secret("cline-access-1"),
     ))
     .expect_err("refresh");
     assert!(!error.message().contains("cline-refresh-1"));
     assert_eq!(error.kind(), PluginErrorKind::Auth);
+    let blob = block_on(host.context().accounts().secret(&id))
+        .expect("read")
+        .expect("stored");
+    let parsed = SecretObject::parse(&blob).expect("blob");
+    assert!(parsed.flag(tokens::LAPSED));
 }
 
 #[test]
@@ -280,6 +288,65 @@ fn a2a_18_api_key_sign_in_stores_api_auth() {
     let parsed = SecretObject::parse(&blob).expect("blob");
     assert_eq!(parsed.text("auth_type"), Some("api"));
     assert!(parsed.secret("api_key").is_some());
+}
+
+#[test]
+fn a2a_19_default_expiry_ms_uses_host_clock() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let now = host
+        .context()
+        .clock()
+        .now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("epoch")
+        .as_millis() as u64;
+    let parsed = tokens::parse_register(
+        host.context(),
+        &json!({"accessToken": "tok", "refreshToken": "rt"}),
+        None,
+    )
+    .expect("parse");
+    assert!(parsed.expires_ms >= now + 3_500_000);
+    assert!(parsed.expires_ms <= now + 3_700_000);
+}
+
+#[test]
+fn a2a_20_invalid_json_400_does_not_set_lapsed() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_oauth(&host);
+    block_on(async {
+        let accounts = host.context().accounts();
+        let secret = accounts.secret(&id).await.expect("read").expect("stored");
+        let blob = SecretObject::parse(&secret).expect("blob");
+        let updated = blob.with_number("expires_ms", 1);
+        let account = accounts
+            .account(id.clone(), "user@cline.test")
+            .expect("account");
+        accounts
+            .upsert(account, updated.to_secret())
+            .await
+            .expect("upsert");
+    });
+    host.http()
+        .enqueue_response(400, &[], br#"{"error":"invalid JSON payload"}"#.to_vec());
+    let error = block_on(tokens::refresh_for_test(
+        host.context().clone(),
+        endpoints(),
+        id.clone(),
+        secret("cline-access-1"),
+    ))
+    .expect_err("refresh");
+    assert_ne!(error.kind(), PluginErrorKind::Auth);
+    let blob = block_on(host.context().accounts().secret(&id))
+        .expect("read")
+        .expect("stored");
+    assert!(
+        !SecretObject::parse(&blob)
+            .expect("blob")
+            .flag(tokens::LAPSED)
+    );
 }
 
 #[test]

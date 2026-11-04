@@ -113,8 +113,12 @@ fn credits_window(value: &Value) -> Result<Option<QuotaWindow>, PluginError> {
         return Ok(None);
     };
     let display = format!("{} / {}", compact_number(amount), compact_number(total));
-    let window = QuotaWindow::new("Credits", used_pct.min(100), Some(100), None)?;
-    let _ = display;
+    let window = QuotaWindow::new(
+        format!("Credits: {display}"),
+        used_pct.min(100),
+        Some(100),
+        None,
+    )?;
     Ok(Some(window))
 }
 

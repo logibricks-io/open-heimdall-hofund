@@ -11,7 +11,7 @@ use hofund_plugin_sdk::wire::{self, Target};
 
 use crate::Endpoints;
 use crate::client;
-use crate::tokens::{self, Bearer};
+use crate::tokens::{self, AuthKind, Bearer};
 
 pub(crate) struct ClineUpstream {
     account: AccountId,
@@ -30,6 +30,17 @@ impl ClineUpstream {
 
     async fn bearer(&self) -> Result<Bearer, PluginError> {
         tokens::bearer(&self.host, &self.endpoints, &self.account).await
+    }
+
+    async fn auth_kind(&self) -> Result<AuthKind, PluginError> {
+        let secret = self
+            .host
+            .accounts()
+            .secret(&self.account)
+            .await?
+            .ok_or_else(|| PluginError::auth("no Cline sign-in is stored for this account"))?;
+        let blob = hofund_plugin_sdk::oauth::SecretObject::parse(&secret)?;
+        Ok(tokens::kind(&blob))
     }
 
     async fn send(
@@ -61,8 +72,9 @@ impl UpstreamProvider for ClineUpstream {
         inbound: ProtocolId,
     ) -> Result<Completion, PluginError> {
         let bearer = self.bearer().await?;
+        let kind = self.auth_kind().await?;
         match self.send(&bearer, request.clone(), inbound).await {
-            Err(error) if error.status() == Some(401) => {
+            Err(error) if error.status() == Some(401) && kind == AuthKind::Oauth => {
                 tokens::refresh_account(&self.host, &self.endpoints, &self.account).await?;
                 let renewed = self.bearer().await?;
                 self.send(&renewed, request, inbound).await

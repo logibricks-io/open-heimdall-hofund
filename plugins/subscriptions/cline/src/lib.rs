@@ -179,13 +179,27 @@ impl Subscription for Cline {
                 Ok(signed_in.id)
             }
             SignInProof::Await => {
-                let Some(pending) = self.take_pending(ctx.session()) else {
-                    return Err(PluginError::config(
-                        "no Cline sign-in is in progress for this session",
-                    ));
+                let session = ctx.session().to_string();
+                let device = {
+                    let guard = self
+                        .pending
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let Some(pending) = guard.get(&session) else {
+                        return Err(PluginError::config(
+                            "no Cline sign-in is in progress for this session",
+                        ));
+                    };
+                    pending.device.clone()
                 };
-                let signed_in =
-                    sign_in::device_finish(host, &self.endpoints, &pending.device).await?;
+                let signed_in = sign_in::device_finish(host, &self.endpoints, &device, || {
+                    self.pending
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .contains_key(&session)
+                })
+                .await?;
+                let _ = self.take_pending(&session);
                 let account = host
                     .accounts()
                     .account(signed_in.id.clone(), signed_in.label)?;
@@ -283,7 +297,7 @@ impl Subscription for Cline {
             if let Some(balance) = usage.balance {
                 windows.push(quota::balance_window(&balance)?);
             } else {
-                return Err(PluginError::auth(
+                return Err(PluginError::config(
                     "Cline reported neither plan limits nor a balance",
                 ));
             }

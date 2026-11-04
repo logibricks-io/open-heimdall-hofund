@@ -173,7 +173,9 @@ pub(crate) async fn list(
         merge_cloud(&mut models, cloud);
     }
     if models.is_empty() {
-        models = default_models();
+        return Err(PluginError::config(
+            "Cline returned no models for this account",
+        ));
     }
     let specs: Result<Vec<_>, _> = models
         .iter()
@@ -241,6 +243,7 @@ fn merge_cloud(models: &mut Vec<FeedModel>, cloud: Vec<FeedModel>) {
     }
 }
 
+#[allow(dead_code)]
 fn default_models() -> Vec<FeedModel> {
     [
         "anthropic/claude-sonnet-5.5",

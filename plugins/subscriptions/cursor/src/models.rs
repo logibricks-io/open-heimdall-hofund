@@ -267,7 +267,7 @@ fn remove_words(name: &str, words: &str) -> String {
     }
     let name_words: Vec<_> = name.split_whitespace().collect();
     let strip: Vec<_> = words.split_whitespace().collect();
-    for start in 0..name_words.len().saturating_sub(strip.len()) {
+    for start in 0..=name_words.len().saturating_sub(strip.len()) {
         if name_words[start..start + strip.len()] == strip[..] {
             let mut out = name_words[..start].to_vec();
             out.extend_from_slice(&name_words[start + strip.len()..]);

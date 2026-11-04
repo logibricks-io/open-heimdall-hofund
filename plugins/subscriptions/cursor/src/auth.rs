@@ -17,18 +17,6 @@ pub(crate) fn config_dir(agent_home: &Path) -> PathBuf {
 
 /// `auth.json` for cursor-agent on this OS.
 pub(crate) fn auth_path(agent_home: &Path) -> PathBuf {
-    if cfg!(target_os = "linux") && configured_dir().is_none() {
-        let base = std::env::var("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| home_dir().join(".config"));
-        return base.join("cursor").join("auth.json");
-    }
-    if cfg!(target_os = "windows") {
-        let base = std::env::var("APPDATA")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| home_dir().join("AppData").join("Roaming"));
-        return base.join("Cursor").join("auth.json");
-    }
     config_dir(agent_home).join("auth.json")
 }
 

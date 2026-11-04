@@ -13,6 +13,7 @@ use crate::tokens::{self, AuthKind, parse_register};
 use crate::{Endpoints, WORKOS_CLIENT_ID};
 
 /// A device authorization waiting for approval.
+#[derive(Clone)]
 pub(crate) struct DevicePending {
     pub(crate) start: DeviceStart,
 }
@@ -69,16 +70,21 @@ pub(crate) async fn device_finish(
     host: &HostContext,
     endpoints: &Endpoints,
     pending: &DevicePending,
+    alive: impl Fn() -> bool,
 ) -> Result<SignedIn, PluginError> {
     let token_url = workos_token_url(endpoints);
     let start = &pending.start;
     let http = host.http();
-    let set = device::poll(host.clock(), start, || {
+    let set = device::poll(host.clock(), start, || async {
+        if !alive() {
+            return Err(PluginError::config("Cline sign-in was cancelled"));
+        }
         Call::post(token_url.clone())
             .header("content-type", "application/x-www-form-urlencoded")
             .header("accept", "application/json")
             .bytes(device::device_code_form(WORKOS_CLIENT_ID, start))
             .fetch(http)
+            .await
     })
     .await?;
     register_workos(host, endpoints, set.access(), set.refresh()).await
@@ -96,7 +102,7 @@ async fn register_workos(
         "refreshToken": refresh_text,
     });
     let data = api::post_json(host, endpoints, "/auth/register", &body, None, false).await?;
-    let parsed = parse_register(&data, refresh)?;
+    let parsed = parse_register(host, &data, refresh)?;
     store_signed_in(parsed)
 }
 

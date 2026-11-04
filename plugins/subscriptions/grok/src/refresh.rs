@@ -2,11 +2,16 @@
 
 use std::path::PathBuf;
 
+use std::time::Duration;
+
 use hofund_plugin_api::{AccountId, HostContext, PluginError};
 use hofund_plugin_sdk::oauth::{SecretObject, same_secret};
+use hofund_plugin_sdk::timeout;
 
 use crate::cli;
 use crate::creds::{self, Stored};
+
+const MODELS_WAIT: Duration = Duration::from_secs(120);
 
 /// Runs `grok models` when the token is within the refresh margin, then
 /// re-reads auth.json and updates the stored secret when the token changed.
@@ -45,7 +50,16 @@ async fn renew(host: &HostContext, program: PathBuf, stored: &Stored) -> Result<
     let home = PathBuf::from(&stored.home);
     let request = cli::request(&program, &cli::MODELS_ARGS, &home)?;
     let child = host.spawn_process().spawn(&request).await?;
-    let code = host.spawn_process().wait(child).await?;
+    let wait = host.spawn_process().wait(child);
+    let code = match timeout(MODELS_WAIT, wait).await {
+        Some(Ok(code)) => code,
+        Some(Err(error)) => return Err(error),
+        None => {
+            return Err(PluginError::timeout(
+                "Grok Build did not finish renewing the sign-in with `grok models` in time",
+            ));
+        }
+    };
     if code != 0 {
         return Err(PluginError::auth(
             "Grok Build could not renew the sign-in with `grok models`",
