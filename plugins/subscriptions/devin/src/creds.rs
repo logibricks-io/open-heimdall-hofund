@@ -1,12 +1,12 @@
 //! Devin CLI credentials.toml and stored account secrets.
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use hofund_plugin_api::{AccountId, HostContext, PluginError, SecretString};
 use hofund_plugin_sdk::oauth::{SecretObject, account_id_from, secret_text};
-use serde::Deserialize;
-use sha2::{Digest, Sha256};
 
 const FILE_CAP: u64 = 64 * 1024;
 
@@ -82,32 +82,103 @@ pub(crate) fn account_id(credential: &Credential) -> AccountId {
 }
 
 pub(crate) fn agent_account_id(home: &Path) -> AccountId {
-    let mut hasher = Sha256::new();
-    hasher.update(home.to_string_lossy().as_bytes());
-    let digest = hasher.finalize();
-    account_id_from(&["devin", "agent", &hex::encode(&digest[..8])])
+    account_id_from(&[
+        "devin",
+        "agent",
+        &hash_hex(home.to_string_lossy().as_bytes()),
+    ])
 }
 
+#[allow(dead_code)]
 pub(crate) fn cli_account_id() -> AccountId {
     account_id_from(&["devin", "cli"])
 }
 
 fn stable_key(key: &SecretString) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(secret_text(key).as_bytes());
-    let digest = hasher.finalize();
-    hex::encode(&digest[..8])
+    hash_hex(secret_text(key).as_bytes())
+}
+
+fn hash_hex(data: &[u8]) -> String {
+    let mut hasher = DefaultHasher::new();
+    data.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
 }
 
 fn default_label(key: &SecretString) -> String {
     format!("Devin {}", &stable_key(key)[..8])
 }
 
-#[derive(Deserialize)]
-struct DevinCredentialsFile {
-    windsurf_api_key: String,
-    api_server_url: Option<String>,
-    devin_api_url: Option<String>,
+pub(crate) fn parse_credentials_toml(text: &str) -> Result<Credential, PluginError> {
+    let mut windsurf_api_key = None;
+    let mut api_server_url = None;
+    let mut devin_api_url = None;
+    for line in text.lines() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        let value = parse_toml_value(value.trim())?;
+        match key {
+            "windsurf_api_key" => windsurf_api_key = Some(value),
+            "api_server_url" => api_server_url = Some(value),
+            "devin_api_url" => devin_api_url = Some(value),
+            _ => {}
+        }
+    }
+    let key = windsurf_api_key
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| PluginError::auth("Devin credentials file has no windsurf_api_key"))?;
+    let api_server = api_server_url
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "https://server.codeium.com".to_owned());
+    let devin_api = devin_api_url
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "https://api.devin.ai".to_owned());
+    let key = SecretString::from(key.to_owned());
+    Ok(Credential {
+        label: default_label(&key),
+        key,
+        api_server,
+        devin_api,
+    })
+}
+
+fn parse_toml_value(raw: &str) -> Result<String, PluginError> {
+    if raw.starts_with('"') {
+        if !raw.ends_with('"') || raw.len() < 2 {
+            return Err(PluginError::decode(
+                "Devin credentials file has an unterminated string",
+            ));
+        }
+        return Ok(unescape_toml_string(&raw[1..raw.len() - 1]));
+    }
+    Ok(raw.to_owned())
+}
+
+fn unescape_toml_string(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            match chars.next() {
+                Some('"') => out.push('"'),
+                Some('\\') => out.push('\\'),
+                Some('n') => out.push('\n'),
+                Some(other) => {
+                    out.push('\\');
+                    out.push(other);
+                }
+                None => out.push('\\'),
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
 }
 
 pub(crate) fn read_credentials(path: &Path) -> Result<Credential, PluginError> {
@@ -121,33 +192,6 @@ pub(crate) fn read_credentials(path: &Path) -> Result<Credential, PluginError> {
     let text = std::fs::read_to_string(path)
         .map_err(|_| PluginError::auth("Devin credentials file could not be read"))?;
     parse_credentials_toml(&text)
-}
-
-pub(crate) fn parse_credentials_toml(text: &str) -> Result<Credential, PluginError> {
-    let file: DevinCredentialsFile = toml::from_str(text).map_err(|error| {
-        PluginError::decode(format!("Devin credentials file is not valid TOML: {error}"))
-    })?;
-    let key = file.windsurf_api_key.trim();
-    if key.is_empty() {
-        return Err(PluginError::auth(
-            "Devin credentials file has no windsurf_api_key",
-        ));
-    }
-    let api_server = file
-        .api_server_url
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "https://server.codeium.com".to_owned());
-    let devin_api = file
-        .devin_api_url
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "https://api.devin.ai".to_owned());
-    let key = SecretString::from(key.to_owned());
-    Ok(Credential {
-        label: default_label(&key),
-        key,
-        api_server,
-        devin_api,
-    })
 }
 
 pub(crate) fn default_credentials_path() -> Result<PathBuf, PluginError> {

@@ -68,7 +68,7 @@ fn a2b_3_discover_import_fixture_credentials() {
         .expect("stored");
     let blob = SecretObject::parse(&secret).expect("blob");
     assert_eq!(
-        blob.secret("api_key").as_ref().map(secret_text).as_deref(),
+        blob.secret("api_key").as_ref().map(secret_text),
         Some("devin-import-key-1")
     );
 }
@@ -106,7 +106,7 @@ fn a2b_6_upstream_round_trip_with_recording_http() {
     block_on(upstream.execute(request, ProtocolId::OPENAI_CHAT)).expect("execute");
     let calls = host.http().calls();
     let call = calls.last().expect("call");
-    assert!(call.uri().contains("api.devin.test"));
+    assert!(call.uri().contains("api.devin.test/v1/chat/completions"));
     assert!(
         call.sensitive_headers()
             .contains(&"authorization".to_owned())
@@ -170,8 +170,7 @@ fn a2b_28_reimport_replaces_stored_key() {
             .expect("blob")
             .secret("api_key")
             .as_ref()
-            .map(secret_text)
-            .as_deref(),
+            .map(secret_text),
         Some("devin-key-v2")
     );
 }

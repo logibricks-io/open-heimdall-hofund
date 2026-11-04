@@ -29,8 +29,8 @@ impl DevinUpstream {
         request: Request,
         inbound: ProtocolId,
     ) -> Result<Completion, PluginError> {
-        let base = stored.credential.devin_api.trim_end_matches('/').to_owned();
-        let target = Target::new(ProtocolId::OPENAI_CHAT, base)
+        let base = stored.credential.devin_api.trim_end_matches('/');
+        let target = Target::new(ProtocolId::OPENAI_CHAT, format!("{base}/v1"))
             .credential(CredentialStyle::Bearer)
             .headers(vec![(
                 "authorization".to_owned(),

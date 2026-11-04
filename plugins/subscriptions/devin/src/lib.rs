@@ -15,7 +15,6 @@ use hofund_plugin_sdk::Contribution;
 mod agent_sign_in;
 mod creds;
 mod discover;
-#[cfg(test)]
 mod models;
 mod upstream;
 
@@ -144,7 +143,7 @@ impl Subscription for Devin {
             ));
         };
         let credential = creds::read_credentials(&path)?;
-        discover::store(&credential, host, creds::cli_account_id()).await
+        discover::store(&credential, host, creds::account_id(&credential)).await
     }
 
     async fn cancel_sign_in(
@@ -172,7 +171,8 @@ impl Subscription for Devin {
         }
     }
 
-    async fn refresh(&self, _account: &AccountId, _host: &HostContext) -> Result<(), PluginError> {
+    async fn refresh(&self, account: &AccountId, host: &HostContext) -> Result<(), PluginError> {
+        creds::Stored::load(host, account).await?;
         Ok(())
     }
 

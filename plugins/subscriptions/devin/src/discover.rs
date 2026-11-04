@@ -39,11 +39,7 @@ fn credentials_path(home: &Path) -> std::path::PathBuf {
     if direct.is_file() {
         return direct;
     }
-    let nested = creds::agent_credentials_path(home);
-    if nested.is_file() {
-        return nested;
-    }
-    creds::default_credentials_path().unwrap_or(nested)
+    creds::agent_credentials_path(home)
 }
 
 pub(crate) async fn store(

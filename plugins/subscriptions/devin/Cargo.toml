@@ -1,6 +1,6 @@
 [package]
 name = "hofund-plugin-subscription-devin"
-description = "Devin subscription: import the CLI credentials, list models, and serve the chat upstream."
+description = "Devin subscription: import CLI credentials and serve chat on the stored Devin API base."
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
@@ -11,12 +11,8 @@ homepage.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-hex = "0.4.3"
 hofund-plugin-api = { workspace = true }
 hofund-plugin-sdk = { workspace = true }
-serde = { version = "1.0.219", features = ["derive"] }
-sha2 = { workspace = true }
-toml = "1.1.8"
 
 [dev-dependencies]
 hofund-kit-subscription = { workspace = true }
