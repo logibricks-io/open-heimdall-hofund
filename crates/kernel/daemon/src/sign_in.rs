@@ -100,6 +100,8 @@ pub struct SignInOptions {
     pub host: Option<String>,
     /// Account label to store.
     pub label: Option<String>,
+    /// Sign-in site, such as `device` for ChatGPT device codes.
+    pub site: Option<String>,
 }
 
 /// One configured subscription and its accounts.
@@ -531,6 +533,9 @@ fn sign_in_ctx(plugin: &PluginId, options: &SignInOptions) -> Result<SignInCtx, 
     }
     if let Some(label) = &options.label {
         ctx = ctx.with_option("label", label.as_str()).map_err(failed)?;
+    }
+    if let Some(site) = &options.site {
+        ctx = ctx.with_option("site", site.as_str()).map_err(failed)?;
     }
     Ok(ctx)
 }

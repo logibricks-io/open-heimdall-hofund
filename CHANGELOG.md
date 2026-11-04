@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- ChatGPT (Codex) subscription sign-in by device code (`--site device`): ask
+  for a code, poll until it is entered on another machine, trade at the
+  device callback redirect (D-58).
+
 - Codex ChatGPT backend rewrites tool names outside `^[a-zA-Z0-9_.-]+$` for
   upstream acceptance and maps them back in replies (D-57).
 

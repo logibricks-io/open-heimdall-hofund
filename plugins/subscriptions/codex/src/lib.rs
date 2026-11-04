@@ -20,6 +20,7 @@ use hofund_plugin_sdk::Contribution;
 use hofund_plugin_sdk::oauth::{Pkce, SecretObject, constant_time_eq, new_state};
 
 mod agent_sign_in;
+mod device_sign_in;
 mod discover;
 mod limits;
 mod models;
@@ -71,6 +72,8 @@ pub struct Endpoints {
     pub authorize: String,
     /// The OAuth token endpoint.
     pub token: String,
+    /// The device-sign-in issuer (`auth.openai.com` APIs).
+    pub device_issuer: String,
     /// The Codex backend base; requests go to `{base}/responses`.
     pub base: String,
     /// The loopback port, or `None` for one the system picks.
@@ -82,6 +85,7 @@ impl Default for Endpoints {
         Self {
             authorize: "https://auth.openai.com/oauth/authorize".to_owned(),
             token: "https://auth.openai.com/oauth/token".to_owned(),
+            device_issuer: "https://auth.openai.com".to_owned(),
             base: "https://chatgpt.com/backend-api/codex".to_owned(),
             port: Some(LOOPBACK_PORT),
         }
@@ -146,11 +150,14 @@ impl SubscriptionFactory for CodexFactory {
     }
 }
 
-/// A browser sign-in waiting for its callback.
-struct Pending {
-    verifier: SecretString,
-    state: String,
-    redirect_uri: String,
+/// A sign-in waiting for its callback or device approval.
+enum Pending {
+    Browser {
+        verifier: SecretString,
+        state: String,
+        redirect_uri: String,
+    },
+    Device(device_sign_in::DevicePending),
 }
 
 struct Codex {
@@ -186,6 +193,25 @@ impl Subscription for Codex {
         ctx: &SignInCtx,
         host: &HostContext,
     ) -> Result<SignInChallenge, PluginError> {
+        if ctx.option(device_sign_in::SITE_OPTION) == Some(device_sign_in::DEVICE_SITE) {
+            let pending = device_sign_in::start(
+                host,
+                &self.endpoints.device_issuer,
+                &self.endpoints.token,
+            )
+            .await?;
+            let page = device_sign_in::device_page(&pending.issuer);
+            let challenge =
+                SignInChallenge::device_code(pending.user_code.clone(), page.clone())?;
+            self.pending
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(
+                    ctx.session().to_owned(),
+                    Pending::Device(pending),
+                );
+            return Ok(challenge);
+        }
         let pkce = Pkce::generate()?;
         let state = new_state()?;
         let spec = match self.endpoints.port {
@@ -212,7 +238,7 @@ impl Subscription for Codex {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(
                 ctx.session().to_owned(),
-                Pending {
+                Pending::Browser {
                     verifier: pkce.verifier,
                     state,
                     redirect_uri,
@@ -227,36 +253,56 @@ impl Subscription for Codex {
         proof: SignInProof,
         host: &HostContext,
     ) -> Result<AccountId, PluginError> {
-        let pending = self.take_pending(ctx.session());
-        host.loopback().release(ctx);
-        let Some(pending) = pending else {
+        let Some(pending) = self.take_pending(ctx.session()) else {
             return Err(PluginError::config(
                 "no ChatGPT sign-in is in progress for this session",
             ));
         };
-        let SignInProof::Callback { code, state } = proof else {
-            return Err(PluginError::config(
-                "ChatGPT sign-in completes from the browser callback",
-            ));
-        };
-        if !constant_time_eq(state.as_bytes(), pending.state.as_bytes()) {
-            return Err(PluginError::auth(
-                "the sign-in callback does not belong to this sign-in",
-            ));
+        match pending {
+            Pending::Device(device) => {
+                let SignInProof::Await = proof else {
+                    return Err(PluginError::config(
+                        "ChatGPT device sign-in completes once the code is entered on ChatGPT",
+                    ));
+                };
+                let signed_in = device_sign_in::finish(host, &device).await?;
+                let account = host
+                    .accounts()
+                    .account(signed_in.id.clone(), signed_in.label)?;
+                host.accounts().upsert(account, signed_in.secret).await?;
+                return Ok(signed_in.id);
+            }
+            Pending::Browser {
+                verifier,
+                state: pending_state,
+                redirect_uri,
+            } => {
+                host.loopback().release(ctx);
+                let SignInProof::Callback { code, state } = proof else {
+                    return Err(PluginError::config(
+                        "ChatGPT sign-in completes from the browser callback",
+                    ));
+                };
+                if !constant_time_eq(state.as_bytes(), pending_state.as_bytes()) {
+                    return Err(PluginError::auth(
+                        "the sign-in callback does not belong to this sign-in",
+                    ));
+                }
+                let signed_in = sign_in::exchange(
+                    host,
+                    &self.endpoints.token,
+                    &code,
+                    &verifier,
+                    &redirect_uri,
+                )
+                .await?;
+                let account = host
+                    .accounts()
+                    .account(signed_in.id.clone(), signed_in.label)?;
+                host.accounts().upsert(account, signed_in.secret).await?;
+                Ok(signed_in.id)
+            }
         }
-        let signed_in = sign_in::exchange(
-            host,
-            &self.endpoints.token,
-            &code,
-            &pending.verifier,
-            &pending.redirect_uri,
-        )
-        .await?;
-        let account = host
-            .accounts()
-            .account(signed_in.id.clone(), signed_in.label)?;
-        host.accounts().upsert(account, signed_in.secret).await?;
-        Ok(signed_in.id)
     }
 
     async fn cancel_sign_in(&self, ctx: &SignInCtx, host: &HostContext) -> Result<(), PluginError> {

@@ -35,6 +35,7 @@ pub(crate) enum SubscriptionCommand {
         id: String,
         host: Option<String>,
         label: Option<String>,
+        site: Option<String>,
     },
     /// `sign-out <id> <account>`
     SignOut { id: String, account: String },
@@ -63,6 +64,7 @@ pub(crate) fn parse(args: &[OsString]) -> Result<Parsed, String> {
     let mut json = false;
     let mut host = None;
     let mut label = None;
+    let mut site = None;
     let mut words: Vec<String> = Vec::new();
     let mut operands_only = false;
     let mut args = args.iter();
@@ -94,6 +96,7 @@ pub(crate) fn parse(args: &[OsString]) -> Result<Parsed, String> {
             "--json" => json = true,
             "--host" => host = Some(value("--host")?),
             "--label" => label = Some(value("--label")?),
+            "--site" => site = Some(value("--site")?),
             flag if flag.starts_with('-') => return Err(format!("unknown flag `{flag}`")),
             word => words.push(word.to_owned()),
         }
@@ -106,6 +109,7 @@ pub(crate) fn parse(args: &[OsString]) -> Result<Parsed, String> {
             id: owned(id),
             host: host.take(),
             label: label.take(),
+            site: site.take(),
         },
         ["sign-out", id, account] => SubscriptionCommand::SignOut {
             id: owned(id),
@@ -133,8 +137,8 @@ pub(crate) fn parse(args: &[OsString]) -> Result<Parsed, String> {
     if json && !takes_json {
         return Err("--json is only valid with list and quota".to_owned());
     }
-    if host.is_some() || label.is_some() {
-        return Err("--host and --label are only valid with sign-in".to_owned());
+    if host.is_some() || label.is_some() || site.is_some() {
+        return Err("--host, --label, and --site are only valid with sign-in".to_owned());
     }
     Ok(Parsed::Run(config, command))
 }
@@ -150,8 +154,12 @@ pub(crate) fn run(config: &Path, command: SubscriptionCommand) -> ExitCode {
                 print!("{}", list_table(&listings));
             }
         }),
-        SubscriptionCommand::SignIn { id, host, label } => {
-            let options = SignInOptions { host, label };
+        SubscriptionCommand::SignIn { id, host, label, site } => {
+            let options = SignInOptions {
+                host,
+                label,
+                site,
+            };
             return match subscription_sign_in(config, &id, &options) {
                 Ok(account) => {
                     println!("{id}: signed in as {account}");
@@ -371,6 +379,7 @@ mod tests {
                     id: "s".to_owned(),
                     host: Some("h".to_owned()),
                     label: Some("l".to_owned()),
+                    site: None,
                 }
             ))
         );
@@ -433,6 +442,7 @@ mod tests {
                     id: "-s".to_owned(),
                     host: None,
                     label: Some("l".to_owned()),
+                    site: None,
                 }
             ))
         );
@@ -456,11 +466,11 @@ mod tests {
         );
         assert_eq!(
             parsed(&["list", "--host", "h"]),
-            Err("--host and --label are only valid with sign-in".to_owned())
+            Err("--host, --label, and --site are only valid with sign-in".to_owned())
         );
         assert_eq!(
             parsed(&["quota", "--label", "l"]),
-            Err("--host and --label are only valid with sign-in".to_owned())
+            Err("--host, --label, and --site are only valid with sign-in".to_owned())
         );
         assert_eq!(
             parsed(&["list", "--config", "a", "--config", "b"]),

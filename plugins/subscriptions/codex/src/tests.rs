@@ -11,7 +11,7 @@ use hofund_plugin_api::{
     ProtocolId, RawTable, Request, SecretString, SignInChallenge, SignInCtx, SignInProof,
     Subscription, SubscriptionFactory, UpstreamProvider,
 };
-use hofund_plugin_sdk::oauth::{Pkce, SecretObject, same_secret};
+use hofund_plugin_sdk::oauth::{Pkce, SecretObject, account_id_from, same_secret};
 
 use crate::tokens::{self, Need};
 use crate::upstream::{self, CodexUpstream};
@@ -27,6 +27,7 @@ fn endpoints() -> Endpoints {
     Endpoints {
         authorize: "https://auth.test/oauth/authorize".to_owned(),
         token: TOKEN_URL.to_owned(),
+        device_issuer: "https://auth.test".to_owned(),
         base: BASE.to_owned(),
         port: None,
     }
@@ -1611,4 +1612,126 @@ fn a3a_9_codex_warmup_posts_one_minimal_responses_call() {
             .any(|call| call.uri() == responses),
         "expected one responses POST"
     );
+}
+
+fn device_ctx() -> SignInCtx {
+    ctx()
+        .with_option("site", "device")
+        .expect("device site option")
+}
+
+fn device_usercode() -> Vec<u8> {
+    br#"{"device_auth_id":"deviceauth_6ae9","user_code":"WG0E-J29UL","interval":"0"}"#.to_vec()
+}
+
+fn device_forbidden() -> Vec<u8> {
+    br#"{"error":{"message":"not yet","code":"deviceauth_authorization_unknown"}}"#.to_vec()
+}
+
+fn device_trade() -> Vec<u8> {
+    br#"{"authorization_code":"dc","code_verifier":"ver-dc"}"#.to_vec()
+}
+
+fn device_oauth_tokens() -> Vec<u8> {
+    let idt = id_token("dc@example.com", "sub-dc", "acct-dc", "pro");
+    token_reply("acc-dc", Some("r-dc"), Some(&idt))
+}
+
+#[test]
+fn d58_1_device_sign_in_polls_then_trades_the_callback_code() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    host.http().enqueue(device_usercode());
+    let challenge = block_on(sub.start_sign_in(&device_ctx(), host.context())).expect("start");
+    let SignInChallenge::DeviceCode {
+        user_code,
+        verification_url,
+    } = challenge
+    else {
+        panic!("expected a device code challenge");
+    };
+    assert_eq!(user_code, "WG0E-J29UL");
+    assert_eq!(verification_url, "https://auth.test/codex/device");
+    let start = &host.http().calls()[0];
+    assert_eq!(start.method(), "POST");
+    assert_eq!(start.uri(), "https://auth.test/api/accounts/deviceauth/usercode");
+    assert_eq!(start.sensitive_headers(), ["user-agent".to_owned()]);
+
+    host.http().enqueue_response(403, &[], device_forbidden());
+    host.http().enqueue_response(403, &[], device_forbidden());
+    host.http().enqueue(device_trade());
+    host.http().enqueue(device_oauth_tokens());
+
+    let id = block_on(sub.complete_sign_in(
+        &device_ctx(),
+        SignInProof::Await,
+        host.context(),
+    ))
+    .expect("signed in");
+    assert_eq!(id, account_id_from(&["sub-dc", "acct-dc"]));
+    let trade = &host.http().calls()[4];
+    assert_eq!(trade.uri(), TOKEN_URL);
+    let form = String::from_utf8_lossy(trade.body());
+    assert!(form.contains("redirect_uri=https%3A%2F%2Fauth.test%2Fdeviceauth%2Fcallback"));
+    assert!(form.contains("code=dc"));
+    assert!(form.contains("code_verifier=ver-dc"));
+}
+
+#[test]
+fn d58_2_cancel_before_entering_the_code_leaves_no_account() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    host.http().enqueue(device_usercode());
+    let _ = block_on(sub.start_sign_in(&device_ctx(), host.context())).expect("start");
+    block_on(sub.cancel_sign_in(&device_ctx(), host.context())).expect("cancel");
+    assert!(block_on(host.context().accounts().list())
+        .expect("list")
+        .is_empty());
+    assert_eq!(host.http().calls().len(), 1, "no token trade");
+}
+
+#[test]
+fn d58_3_usercode_404_points_to_browser_sign_in() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    host.http().enqueue_response(404, &[], b"not found".to_vec());
+    let error = block_on(sub.start_sign_in(&device_ctx(), host.context())).expect_err("off");
+    assert_eq!(error.kind(), PluginErrorKind::Auth);
+    assert!(
+        error.to_string().contains("browser sign-in"),
+        "{}",
+        error
+    );
+}
+
+#[test]
+fn d58_4_browser_pkce_sign_in_is_still_the_default() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let challenge = block_on(sub.start_sign_in(&ctx(), host.context())).expect("start");
+    assert!(matches!(challenge, SignInChallenge::OpenUrl { .. }));
+    block_on(sub.cancel_sign_in(&ctx(), host.context())).expect("cancel");
+}
+
+#[test]
+fn d58_5_device_sign_in_rejects_a_callback_proof() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    host.http().enqueue(device_usercode());
+    let _ = block_on(sub.start_sign_in(&device_ctx(), host.context())).expect("start");
+    let error = block_on(sub.complete_sign_in(
+        &device_ctx(),
+        SignInProof::Callback {
+            code: secret("x"),
+            state: "y".to_owned(),
+        },
+        host.context(),
+    ))
+    .expect_err("wrong proof");
+    assert_eq!(error.kind(), PluginErrorKind::Config);
 }

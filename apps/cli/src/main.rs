@@ -396,6 +396,12 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
                     .ok_or_else(|| "--label needs a value".to_owned())?;
                 flags.label = Some(label.clone());
             }
+            "--site" => {
+                let site = iter
+                    .next()
+                    .ok_or_else(|| "--site needs a value".to_owned())?;
+                flags.site = Some(site.clone());
+            }
             "-h" | "--help" => help = true,
             "--version" | "-V" => words.push(argument.as_str()),
             other if pick_change(&words, other) => words.push(other),
@@ -421,7 +427,7 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
             Err(message) => Err(message),
         };
     }
-    let subscription_flags = flags.host.is_some() || flags.label.is_some();
+    let subscription_flags = flags.host.is_some() || flags.label.is_some() || flags.site.is_some();
     let json = flags.json;
     let command = match words.as_slice() {
         [] | ["version"] | ["--version"] | ["-V"] => Command::Version,
@@ -663,7 +669,7 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
         );
     if (subscription_flags || json_elsewhere) && !matches!(command, Command::Subscription(_)) {
         return Err(
-            "--json, --host, and --label are only valid with subscription commands".to_owned(),
+            "--json, --host, --label, and --site are only valid with subscription commands".to_owned(),
         );
     }
     if own_secret.is_some() && !matches!(command, Command::GatewayKey(_)) {
@@ -1203,6 +1209,7 @@ mod tests {
                 id: "codex-sub".to_owned(),
                 host: Some("corp.example.test".to_owned()),
                 label: Some("work".to_owned()),
+                site: None,
             }))
         );
         assert_eq!(
