@@ -452,6 +452,22 @@ pub trait AgentAdapter: Sync {
         model: Option<&str>,
     ) -> Result<Plan, AgentError>;
 
+    /// Rewrites model and provider references after a configured provider id changes.
+    ///
+    /// Returns `Ok(true)` when this agent's files were updated.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentError`] when a managed file cannot be parsed or written.
+    fn rename_provider_refs(
+        &self,
+        _session: &Session,
+        _from: &str,
+        _to: &str,
+    ) -> Result<bool, AgentError> {
+        Ok(false)
+    }
+
     /// The model string the tool stored, when that key exists and is a string.
     ///
     /// # Errors

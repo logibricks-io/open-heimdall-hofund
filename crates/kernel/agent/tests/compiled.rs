@@ -2195,3 +2195,37 @@ impl std::ops::Deref for Scratch {
 fn scratch() -> Scratch {
     Scratch(tempfile::tempdir().expect("temp dir"))
 }
+
+static RENAME_MODEL_SETS: &[AgentSet] = &[AgentSet::from_static(
+    "settings",
+    "model",
+    Slot::Literal("{model}"),
+)];
+static RENAME_MODEL: AgentDescription = AgentDescription::from_static(
+    PluginId::from_static("rename-model"),
+    "Rename Model",
+    "rename-model",
+    GEMINI_FILES,
+    RENAME_MODEL_SETS,
+    Some("model"),
+    None,
+    Visible::All,
+    AgentRoute::Gateway,
+    &[],
+)
+.with_model_prefix("hofund/");
+
+#[test]
+fn g3_4_agent_model_refs_rewritten_on_provider_rename() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let path = home.join(".gemini").join("settings.json");
+    seed(&path, "{\"model\":\"hofund/chat/m\"}");
+    let agent = Compiled::new(&RENAME_MODEL);
+    assert!(
+        agent
+            .rename_provider_refs(&session, "chat", "team")
+            .expect("rename")
+    );
+    assert_eq!(read_json(&path)["model"].as_str(), Some("hofund/team/m"));
+}
