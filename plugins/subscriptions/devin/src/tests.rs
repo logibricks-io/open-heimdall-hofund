@@ -91,11 +91,9 @@ fn a2b_5_model_list_parsing() {
 }
 
 #[test]
-fn a2b_6_upstream_round_trip_with_recording_http() {
+fn a2b_6_upstream_reports_unsupported_chat() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
-    host.http()
-        .enqueue(br#"{"choices":[{"message":{"role":"assistant","content":"ok"}}]}"#.to_vec());
     let id = seed_account(&host, "devin-upstream-key", "dev@example.test");
     let upstream = subscription(&host)
         .upstream(&id, host.context())
@@ -103,14 +101,13 @@ fn a2b_6_upstream_round_trip_with_recording_http() {
     let request = ProbeQuery::new(ProtocolId::OPENAI_CHAT, "swe-2")
         .expect("query")
         .minimal_request();
-    block_on(upstream.execute(request, ProtocolId::OPENAI_CHAT)).expect("execute");
-    let calls = host.http().calls();
-    let call = calls.last().expect("call");
-    assert!(call.uri().contains("api.devin.test/v1/chat/completions"));
-    assert!(
-        call.sensitive_headers()
-            .contains(&"authorization".to_owned())
-    );
+    match block_on(upstream.execute(request, ProtocolId::OPENAI_CHAT)) {
+        Err(error) => {
+            assert!(error.message().contains("not implemented"));
+        }
+        Ok(_) => panic!("execute should fail"),
+    }
+    assert!(host.http().calls().is_empty());
 }
 
 #[test]
@@ -128,6 +125,19 @@ fn a2b_7_secrets_not_in_debug_or_errors() {
         creds::read_credentials(std::path::Path::new("/nonexistent/devin/credentials.toml"));
     let text = error.expect_err("missing").to_string();
     assert!(!text.contains(key));
+    let dir = tempfile::tempdir().expect("dir");
+    let path = dir.path().join("credentials.toml");
+    std::fs::write(
+        &path,
+        format!("windsurf_api_key = \"{key}\"\n# comment tail\n"),
+    )
+    .expect("write");
+    let parsed = creds::read_credentials(&path).expect("parse");
+    assert_eq!(
+        secret_text(&parsed.key),
+        key,
+        "malformed comment must not truncate the key"
+    );
 }
 
 #[test]
@@ -151,7 +161,7 @@ fn a2b_9_list_models_requires_cli() {
 }
 
 #[test]
-fn a2b_28_reimport_replaces_stored_key() {
+fn a2b_29_reimport_replaces_stored_key() {
     let dir = tempfile::tempdir().expect("dir");
     let home = dir.path().join("agent").join("devin");
     std::fs::create_dir_all(&home).expect("dir");

@@ -229,7 +229,7 @@ pub(crate) fn write_credentials(path: &Path, credential: &Credential) -> Result<
         toml_string(&credential.api_server),
         toml_string(&credential.devin_api),
     );
-    write_private(path, &body)
+    write_atomic(path, body.as_bytes())
 }
 
 fn toml_string(value: &str) -> String {
@@ -272,4 +272,29 @@ fn write_private(path: &Path, text: &str) -> Result<(), PluginError> {
     }
     file.write_all(text.as_bytes()).map_err(failed)?;
     file.sync_all().map_err(failed)
+}
+
+fn write_atomic(path: &Path, text: &[u8]) -> Result<(), PluginError> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        private_dir(parent)?;
+    }
+    let mut temporary_name = path
+        .file_name()
+        .map_or_else(|| std::ffi::OsString::from("devin.tmp"), ToOwned::to_owned);
+    temporary_name.push(".tmp");
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let temporary = parent.join(temporary_name);
+    write_private(
+        &temporary,
+        std::str::from_utf8(text)
+            .map_err(|_| PluginError::io("Devin credentials are not valid UTF-8"))?,
+    )?;
+    std::fs::rename(&temporary, path)
+        .map_err(|_| PluginError::io("cannot write the Devin credentials file"))
 }
