@@ -20,6 +20,7 @@ mod member;
 mod overflow_memory;
 mod patience;
 pub mod quota;
+pub mod quota_alerts;
 mod scope;
 mod snapshot;
 pub mod strategy;

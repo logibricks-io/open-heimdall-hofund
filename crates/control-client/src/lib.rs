@@ -15,7 +15,8 @@ use hofund_control_proto::{
     GatewayKeyRequest, GatewayKeyResponse, GatewayKeyRestoreRequest, HealthResponse,
     MAX_RESPONSE_BODY_BYTES, ModelListResponse, PicksResponse, PicksSetRequest, ProviderKeyRequest,
     ProviderKeysResponse, ProviderListResponse, ProviderSpendCapRequest, ProviderSpendCapsResponse,
-    ProviderTestRequest, ProviderTestResponse, QuotaCreditsModesResponse, QuotaCreditsSetRequest,
+    ProviderTestRequest, ProviderTestResponse, QuotaAlertsResponse, QuotaAlertsSetRequest,
+    QuotaAlertsSetResponse, QuotaCreditsModesResponse, QuotaCreditsSetRequest,
     QuotaCreditsSetResponse, QuotaHistoryQuery, QuotaHistoryResponse, QuotaQuery, QuotaResponse,
     ReloadRequest, RouteListResponse, RouteModelListResponse, RouteQuery, SessionRouteResponse,
     ShutdownRequest, ShutdownResponse, StatusResponse, TokenRotateRequest, TokenRotateResponse,
@@ -599,6 +600,24 @@ impl Client {
         self.request(
             http::Method::POST,
             "/v1/hofund/quotas/credits/settings",
+            Some(json_body(&request)?),
+        )
+        .await
+    }
+
+    /// Reads quota alert thresholds.
+    pub async fn quota_alerts(&self) -> Result<QuotaAlertsResponse, ClientError> {
+        self.get("/v1/hofund/quotas/alerts").await
+    }
+
+    /// Sets quota alert thresholds.
+    pub async fn set_quota_alerts(
+        &self,
+        request: QuotaAlertsSetRequest,
+    ) -> Result<QuotaAlertsSetResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            "/v1/hofund/quotas/alerts/settings",
             Some(json_body(&request)?),
         )
         .await

@@ -8,6 +8,7 @@ use hofund_control_proto::{EventPayload, MemberCooledEvent, MemberRecoveredEvent
 use hofund_plugin_api::MemberId;
 use hofund_router::credits_mode::CreditsModeStore;
 use hofund_router::quota::QuotaStore;
+use hofund_router::quota_alerts::QuotaAlertStore;
 use hofund_router::{CooldownPolicy, Cooldowns, FailoverPolicy, Snapshot};
 use tokio::sync::watch;
 
@@ -70,6 +71,8 @@ pub(crate) struct Runtime {
     model_polls: tokio::sync::Mutex<ModelPolls>,
     quotas: Arc<QuotaStore>,
     credits_modes: Arc<CreditsModeStore>,
+    quota_alerts: Arc<QuotaAlertStore>,
+    alert_wake: Arc<tokio::sync::Notify>,
     affinity: hofund_router::affinity::AffinityState,
     model_catalog: OnceLock<Arc<hofund_model_catalog::ModelCatalog>>,
     /// Wakes the subscription task after a publication.
@@ -116,6 +119,10 @@ impl Runtime {
             credits_modes: Arc::new(CreditsModeStore::new(
                 path.parent().unwrap_or_else(|| Path::new(".")),
             )),
+            quota_alerts: Arc::new(QuotaAlertStore::new(
+                path.parent().unwrap_or_else(|| Path::new(".")),
+            )),
+            alert_wake: Arc::new(tokio::sync::Notify::new()),
             affinity: hofund_router::affinity::AffinityState::new(
                 path.parent()
                     .unwrap_or_else(|| Path::new("."))
@@ -166,6 +173,10 @@ impl Runtime {
             credits_modes: Arc::new(CreditsModeStore::new(
                 path.parent().unwrap_or_else(|| Path::new(".")),
             )),
+            quota_alerts: Arc::new(QuotaAlertStore::new(
+                path.parent().unwrap_or_else(|| Path::new(".")),
+            )),
+            alert_wake: Arc::new(tokio::sync::Notify::new()),
             affinity: hofund_router::affinity::AffinityState::new(
                 path.parent()
                     .unwrap_or_else(|| Path::new("."))
@@ -304,6 +315,18 @@ impl Runtime {
 
     pub(crate) fn credits_modes(&self) -> &Arc<CreditsModeStore> {
         &self.credits_modes
+    }
+
+    pub(crate) fn quota_alerts(&self) -> &Arc<QuotaAlertStore> {
+        &self.quota_alerts
+    }
+
+    pub(crate) fn alert_wake(&self) -> &Arc<tokio::sync::Notify> {
+        &self.alert_wake
+    }
+
+    pub(crate) fn events(&self) -> Option<Arc<EventBus>> {
+        self.events.get().cloned()
     }
 
     /// Connects live routing measurements to every published router snapshot.

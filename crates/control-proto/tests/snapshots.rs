@@ -48,6 +48,7 @@ const JSON_SNAPSHOTS: &[&str] = &[
     "provider-list-response",
     "provider-test-request",
     "provider-test-response",
+    "quota-alert-event",
     "reload-request",
     "request-finished-event",
     "request-started-event",
@@ -88,6 +89,7 @@ const RESPONSE_SNAPSHOTS: &[&str] = &[
     "picks-response",
     "provider-list-response",
     "provider-test-response",
+    "quota-alert-event",
     "request-finished-event",
     "request-started-event",
     "resync-required-event",
@@ -461,6 +463,15 @@ fn json_snapshots_round_trip() {
         EventPayload::TokenRotated(TokenRotatedEvent::default()),
     );
     event_snapshot(
+        "quota-alert-event",
+        EventPayload::QuotaAlert(dto!(QuotaAlertEvent,
+            title: "Sub · work".to_owned(),
+            body: "Weekly: 85% used".to_owned(),
+            provider: "sub".to_owned(),
+            window: "Weekly".to_owned(),
+        )),
+    );
+    event_snapshot(
         "shutdown-started-event",
         EventPayload::ShutdownStarted(dto!(ShutdownStartedEvent, draining: true)),
     );
@@ -589,6 +600,7 @@ fn every_event_payload_data_is_an_object_and_tolerates_unknown_fields() {
         EventPayload::AgentChanged(AgentChangedEvent::default()),
         EventPayload::SignInProgress(SignInProgressEvent::default()),
         EventPayload::TokenRotated(TokenRotatedEvent::default()),
+        EventPayload::QuotaAlert(QuotaAlertEvent::default()),
         EventPayload::ShutdownStarted(ShutdownStartedEvent::default()),
         EventPayload::ResyncRequired(ResyncRequiredEvent::default()),
     ];
