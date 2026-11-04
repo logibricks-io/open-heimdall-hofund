@@ -1,9 +1,8 @@
 //! Unit tests against recording host backends; no network.
 
 use std::sync::Arc;
-use std::time::Duration;
 
-use hofund_kit_subscription::{PipedScript, TestHost, advance_time, block_on, block_on_paused};
+use hofund_kit_subscription::{PipedScript, TestHost, block_on};
 use hofund_plugin_api::{
     AccountStatus, PluginId, PluginKind, ProbeQuery, ProtocolId, RawTable, RawValue, SecretString,
     SignInCtx, SignInProof, Subscription, SubscriptionFactory,
@@ -282,11 +281,14 @@ fn a2a_9_near_margin_account_stays_ready() {
 #[test]
 fn a2a_10_sign_in_start_complete_and_cancel() {
     let dir = tempfile::tempdir().expect("dir");
-    let grok_home = dir.path().join("cli-home");
-    unsafe {
-        std::env::set_var(crate::cli::HOME_VAR, &grok_home);
-    }
     let test_host = host(&dir);
+    let grok_home = test_host
+        .context()
+        .dirs()
+        .state_dir()
+        .expect("state")
+        .join("grok-homes")
+        .join(SESSION);
     let sub = subscription(&test_host);
     test_host.process().script_piped(
         PipedScript::new()
@@ -310,11 +312,14 @@ fn a2a_10_sign_in_start_complete_and_cancel() {
     assert_eq!(id, account_id_from(&["grok", "signin@example.test"]));
 
     let dir2 = tempfile::tempdir().expect("dir2");
-    let grok_home2 = dir2.path().join("cli-home-2");
-    unsafe {
-        std::env::set_var(crate::cli::HOME_VAR, &grok_home2);
-    }
     let test_host2 = host(&dir2);
+    let grok_home2 = test_host2
+        .context()
+        .dirs()
+        .state_dir()
+        .expect("state")
+        .join("grok-homes")
+        .join(SESSION);
     let sub2 = subscription(&test_host2);
     test_host2
         .process()

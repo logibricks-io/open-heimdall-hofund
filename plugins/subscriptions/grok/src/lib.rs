@@ -403,21 +403,12 @@ impl Subscription for Grok {
         let program = self.program()?;
         let session_dir = sign_in_dir(host, ctx)?;
         remove_dir(&session_dir);
-        let own_home = creds::read_sync(&default_cli_home()).is_ok();
-        let home = if own_home {
-            grok_account_home(host, ctx.session())?
-        } else {
-            default_cli_home()
-        };
-        if own_home {
-            remove_dir(&home);
-        }
+        let home = grok_account_home(host, ctx.session())?;
+        remove_dir(&home);
         let (pending, link) = match start_login(host, program, home.clone()).await {
             Ok(started) => started,
             Err(error) => {
-                if own_home {
-                    remove_dir(&home);
-                }
+                remove_dir(&home);
                 remove_dir(&session_dir);
                 return Err(error);
             }
