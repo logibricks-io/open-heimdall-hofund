@@ -558,7 +558,7 @@ impl ClockBackend for FixedClock {
 }
 
 /// Monotonic time follows Tokio's clock. Paused tests advance it with
-/// [`tokio::time::advance`](tokio::time::advance).
+/// [`tokio::time::advance`].
 #[derive(Clone, Debug)]
 pub struct TokioMonotonicClock {
     start: tokio::time::Instant,
