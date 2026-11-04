@@ -1,7 +1,7 @@
 //! D-66: offsetless citation relay and Codex input healing.
 
 use hofund_codec::citation_tidy;
-use hofund_codec::{Codec, OpenAiResponses, RawTap};
+use hofund_codec::{Codec, OpenAiResponses};
 use serde_json::json;
 
 #[test]

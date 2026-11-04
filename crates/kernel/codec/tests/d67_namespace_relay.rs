@@ -1,7 +1,7 @@
 //! D-67: namespaced function_call relay marks plain arguments unsealed.
 
 use hofund_codec::namespace_tidy;
-use hofund_codec::{Codec, OpenAiResponses, RawTap};
+use hofund_codec::{Codec, OpenAiResponses};
 use serde_json::json;
 
 #[test]

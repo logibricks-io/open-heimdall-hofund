@@ -95,7 +95,9 @@ pub(crate) fn for_backend(body: &[u8]) -> Option<Vec<u8>> {
     changed |= bound_call_ids(items);
     changed |= plain_item_ids(items);
     changed |= open_summaries(items, false).0;
-    changed |= drop_offsetless_citations(items);
+    if items.iter().any(item_cites_without_offsets) {
+        changed |= drop_offsetless_citations(items);
+    }
     changed.then(|| value.to_string().into_bytes())
 }
 

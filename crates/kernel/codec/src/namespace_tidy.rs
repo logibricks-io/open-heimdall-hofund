@@ -68,6 +68,7 @@ pub fn tidy_whole(bytes: Vec<u8>) -> Vec<u8> {
     tidy_event(&bytes).unwrap_or(bytes)
 }
 
+/// SSE lines with each finished `data:` payload marking namespaced calls.
 pub fn tidy_lines(bytes: &[u8]) -> Vec<u8> {
     if !bytes
         .windows(FUNCTION_CALL.len())
@@ -105,6 +106,7 @@ pub struct NamespaceTap {
 }
 
 impl NamespaceTap {
+    /// Wraps `inner` and marks namespaced calls on each finished SSE line.
     pub fn new(inner: Box<dyn crate::RawTap>) -> Self {
         Self {
             inner,
