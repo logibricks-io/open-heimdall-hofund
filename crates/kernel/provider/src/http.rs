@@ -20,6 +20,14 @@ use crate::error::ProviderError;
 use crate::stream::SseEvents;
 pub(crate) use crate::stream::{map_body, map_transport, message_from};
 
+fn model_from_body(body: &[u8]) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_slice(body).ok()?;
+    value
+        .get("model")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+}
+
 pub(crate) fn retry_after(headers: &HeaderMap) -> Option<Duration> {
     parse_retry_after_headers(headers, std::time::SystemTime::now())
 }
@@ -578,6 +586,8 @@ async fn send<'a>(
     let mut root_retried = false;
     let mut token_retried = false;
     let mut replacement_retried = false;
+    let mut beta_retried = false;
+    let mut thinking_back_retried = false;
     while !response.status().is_success() {
         let status = response.status();
         let retry_after = explicit_retry_after(response.headers());
@@ -615,6 +625,31 @@ async fn send<'a>(
                 token_retried = true;
                 upstream.state.learn_token_field(wanted);
                 body = renamed;
+                response = send_json(upstream, url, body.clone(), outbound.clone()).await?;
+                continue;
+            }
+        }
+        if !beta_retried
+            && matches!(status.as_u16(), 400 | 422)
+            && codec.id() == "anthropic-messages"
+            && let Some(stripped) =
+                hofund_quirks::retry_without_refused_betas(&upstream.state, &whole, &bytes)
+        {
+            beta_retried = true;
+            body = stripped;
+            response = send_json(upstream, url, body.clone(), outbound.clone()).await?;
+            continue;
+        }
+        if !thinking_back_retried
+            && status.as_u16() == 400
+            && hofund_quirks::thinking_back_refusal(&String::from_utf8_lossy(&bytes))
+            && let Some(model) = model_from_body(&whole)
+            && upstream.state.learn_thinking_back(&model)
+        {
+            let filled = hofund_quirks::fill_thinking_back(codec.id(), &whole);
+            if filled != whole {
+                thinking_back_retried = true;
+                body = filled;
                 response = send_json(upstream, url, body.clone(), outbound.clone()).await?;
                 continue;
             }

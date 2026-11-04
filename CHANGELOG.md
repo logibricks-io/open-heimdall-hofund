@@ -43,6 +43,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Missing reasoning on tool turns fails over to the next route member; a member
+  that demands it is retried once with filled thinking and remembers the model
+  (D-65).
+
+- Serial group walks share a 540-second budget; exhausted walks return HTTP 504
+  naming the budget and do not rest the cut member (D-69).
+
+- Foreign UUID-signed thinking blocks are stripped before Anthropic Messages
+  requests to Claude hosts so cross-member failover does not hit invalid
+  signature errors (D-70).
+
+- Refused Anthropic beta headers are retried once without the named betas and
+  omitted on later requests to that provider (D-64).
+
 - Tencent Cloud Token Plan preset regions use `tokenhub.tencentmaas.com` plan
   endpoints; saved providers with the old LKEAP plan bases migrate on load (D-53).
 

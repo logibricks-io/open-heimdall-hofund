@@ -2,8 +2,11 @@ use std::collections::BTreeSet;
 
 use hofund_ir::Request;
 
+use crate::betas::apply_learned_betas;
+use crate::foreign_thinking::without_foreign_thinking;
 use crate::json::{self, Edit, Kind, Node};
 use crate::state::{RequestState, fold_object_roots, wanted_token_field, with_token_field};
+use crate::thinking_back::fill_thinking_back;
 
 /// The endpoint and protocol an encoded request is going to.
 #[derive(Clone, Copy, Debug)]
@@ -65,7 +68,14 @@ pub fn apply_encoded_with_state(
         .unwrap_or_default();
     let (body, _) = state.strip_passthrough(context.protocol, body);
     let (body, _) = fold_object_roots(context.base_url, context.protocol, &model, state, &body);
-    apply_rules(context, state, &body)
+    let body = apply_rules(context, state, &body);
+    let body = apply_learned_betas(state, &body);
+    let body = if state.replays_thinking_back(&model) {
+        fill_thinking_back(context.protocol, &body)
+    } else {
+        body
+    };
+    without_foreign_thinking(context.base_url, context.protocol, &body)
 }
 
 fn chat_token_field(context: EncodedContext<'_>, state: &RequestState, body: &[u8]) -> Vec<u8> {
