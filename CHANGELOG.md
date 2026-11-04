@@ -21,6 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Message thread continuations on `/v1/messages` are refused with HTTP 400 so
   clients resend full conversation history (D-63).
 
+- Relayed native Responses replies mark namespaced `function_call` items with
+  empty `encrypted_function_args` when the upstream omitted the field, so Codex
+  V2 treats collaboration tasks as plain text (D-67).
+
 ### Fixed
 
 - Relayed Responses `url_citation` and `container_file_citation` annotations
