@@ -70,8 +70,8 @@ fn seed(host: &TestHost, expires: i64) -> AccountId {
 #[test]
 fn a2c_22_discover_import_desktop_auth() {
     let dir = tempfile::tempdir().expect("dir");
-    let home = dir.path().join(".workbuddy");
-    let auth_dir = home.join("auth");
+    let data = dir.path().join("CodeBuddyExtension").join("Data");
+    let auth_dir = data.join("Public").join("auth");
     std::fs::create_dir_all(&auth_dir).expect("dir");
     std::fs::copy(
         concat!(
@@ -81,10 +81,12 @@ fn a2c_22_discover_import_desktop_auth() {
         auth_dir.join("workbuddy-desktop.info"),
     )
     .expect("copy");
-    let rows = discover::list(&home).expect("list");
+    crate::auth_store::set_test_extension_data(Some(data.clone()));
+    let rows = discover::list(dir.path()).expect("list");
     assert_eq!(rows.len(), 1);
     let host = host(&dir);
-    let id = block_on(discover::import(&home, REFERENCE_CN, host.context())).expect("import");
+    let id = block_on(discover::import(dir.path(), REFERENCE_CN, host.context())).expect("import");
+    crate::auth_store::set_test_extension_data(None);
     let secret = block_on(host.context().accounts().secret(&id))
         .expect("read")
         .expect("stored");
@@ -96,6 +98,38 @@ fn a2c_22_discover_import_desktop_auth() {
             .map(secret_text),
         Some("wb-access-fixture")
     );
+}
+
+#[test]
+fn a2c_22b_desktop_expired_reports_needs_sign_in() {
+    let dir = tempfile::tempdir().expect("dir");
+    let data = dir.path().join("data");
+    let auth_dir = data.join("Public").join("auth");
+    std::fs::create_dir_all(&auth_dir).expect("dir");
+    let mut info = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/fixtures/workbuddy-desktop.info"
+    ))
+    .expect("read");
+    info = info.replace("4102444800000", "1");
+    std::fs::write(auth_dir.join("workbuddy-desktop.info"), info).expect("write");
+    crate::auth_store::set_test_extension_data(Some(data.clone()));
+    let host = host(&dir);
+    let id = block_on(discover::import(dir.path(), REFERENCE_CN, host.context())).expect("import");
+    crate::auth_store::set_test_extension_data(None);
+    let status = block_on(subscription(&host).account_status(&id, host.context())).expect("status");
+    assert!(matches!(
+        status,
+        hofund_plugin_api::AccountStatus::NeedsSignIn { .. }
+    ));
+}
+
+#[test]
+fn a2c_28_models_from_config_json() {
+    let list =
+        crate::models::parse_config(br#"{"models":[{"id":"deepseek-v3","name":"DeepSeek V3"}]}"#)
+            .expect("parse");
+    assert_eq!(list.models()[0].id(), "deepseek-v3");
 }
 
 #[test]

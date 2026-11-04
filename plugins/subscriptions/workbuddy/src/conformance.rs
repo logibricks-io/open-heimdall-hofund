@@ -44,4 +44,12 @@ fn a2c_21_unknown_account_needs_sign_in() {
     assert!(matches!(status, AccountStatus::NeedsSignIn { .. }));
     let err = block_on(built.quota(&account, host.context())).expect_err("quota");
     assert_eq!(err.kind(), PluginErrorKind::Auth);
+    let models = block_on(built.list_models(&account, host.context())).expect_err("models");
+    assert_eq!(models.kind(), PluginErrorKind::Auth);
+    let upstream = built.upstream(&account, host.context()).expect("upstream");
+    use hofund_plugin_api::{ProbeQuery, ProtocolId};
+    let query = ProbeQuery::new(ProtocolId::OPENAI_CHAT, "deepseek-v3").expect("query");
+    let probe = block_on(upstream.probe(&query)).expect_err("probe");
+    assert_eq!(probe.kind(), PluginErrorKind::Auth);
+    assert!(host.http().calls().is_empty());
 }

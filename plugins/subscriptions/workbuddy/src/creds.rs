@@ -4,6 +4,7 @@ use hofund_plugin_api::{AccountId, HostContext, PluginError, SecretString};
 use hofund_plugin_sdk::json::{self, Value};
 use hofund_plugin_sdk::oauth::{SecretObject, account_id_from, secret_text};
 
+use crate::auth_store;
 use crate::site::Site;
 
 #[derive(Clone, Debug)]
@@ -32,18 +33,35 @@ impl Stored {
                 "no WorkBuddy sign-in is stored for this account",
             ));
         };
-        parse_secret(&secret)
+        let mut stored = parse_secret(&secret)?;
+        if stored.credential.desktop {
+            stored.credential = hydrate_desktop(&stored.credential)?;
+        }
+        Ok(stored)
     }
 
     pub(crate) fn fresh_at(&self, now: std::time::SystemTime) -> bool {
-        if self.credential.desktop || self.credential.expires_at <= 0 {
-            return true;
+        if self.credential.expires_at <= 0 {
+            return !self.credential.desktop;
         }
         let Ok(now_ms) = now.duration_since(std::time::UNIX_EPOCH) else {
             return false;
         };
         now_ms.as_millis() as i64 + 60_000 < self.credential.expires_at
     }
+}
+
+fn hydrate_desktop(stored: &Credential) -> Result<Credential, PluginError> {
+    let path = auth_store::auth_path(stored.site)?;
+    let text = std::fs::read_to_string(&path).map_err(|error| {
+        PluginError::auth(format!(
+            "WorkBuddy desktop auth at {} can't be read ({error})",
+            path.display()
+        ))
+    })?;
+    let mut fresh = parse_desktop_info(&text, stored.site)?;
+    fresh.label = stored.label.clone();
+    Ok(fresh)
 }
 
 pub(crate) fn parse_secret(secret: &SecretString) -> Result<Stored, PluginError> {

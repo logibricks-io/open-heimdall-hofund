@@ -12,6 +12,7 @@ use hofund_plugin_api::{
 };
 use hofund_plugin_sdk::Contribution;
 
+mod auth_store;
 mod checkin;
 mod creds;
 mod discover;
@@ -29,8 +30,8 @@ static SPEC: SubscriptionSpec = SubscriptionSpec::from_static(
 .with_daily_checkin(true)
 .with_agent_sign_in(AgentSignIn::new(
     &["workbuddy", "workbuddy-ai"],
-    "WORKBUDDY_CONFIG_DIR",
-    ".workbuddy",
+    "HOFUND_CODEBUDDY_EXTENSION_DATA",
+    ".",
 ));
 
 /// Registers the WorkBuddy subscription.
@@ -146,15 +147,31 @@ impl Subscription for WorkBuddy {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(ctx.session());
         let site = site::Site::China;
+        let path = auth_store::auth_path(site).map_err(|error| {
+            PluginError::auth(format!(
+                "WorkBuddy desktop auth is not available: {}",
+                error.message()
+            ))
+        })?;
+        if !path.is_file() {
+            return Err(PluginError::auth(format!(
+                "WorkBuddy desktop auth file is missing at {}",
+                path.display()
+            )));
+        }
+        self.pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(ctx.session().to_owned(), site);
         SignInChallenge::instructions(format!(
             "Import the WorkBuddy desktop auth file at {} (China build).",
-            discover::auth_path(&default_agent_home()?, site).display()
+            path.display()
         ))
     }
 
     async fn complete_sign_in(
         &self,
-        _ctx: &SignInCtx,
+        ctx: &SignInCtx,
         proof: SignInProof,
         host: &HostContext,
     ) -> Result<AccountId, PluginError> {
@@ -163,12 +180,21 @@ impl Subscription for WorkBuddy {
                 "WorkBuddy sign-in completes once the desktop auth file is imported",
             ));
         };
-        let home = default_agent_home()?;
-        let path = discover::auth_path(&home, site::Site::China);
+        let Some(site) = self
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(ctx.session())
+        else {
+            return Err(PluginError::config(
+                "no WorkBuddy sign-in is in progress for this session",
+            ));
+        };
+        let path = auth_store::auth_path(site)?;
         let text = std::fs::read_to_string(&path).map_err(|error| {
             PluginError::auth(format!("{} can't be read ({error})", path.display()))
         })?;
-        let credential = creds::parse_desktop_info(&text, site::Site::China)?;
+        let credential = creds::parse_desktop_info(&text, site)?;
         discover::store(&credential, host).await
     }
 
@@ -191,9 +217,7 @@ impl Subscription for WorkBuddy {
         host: &HostContext,
     ) -> Result<AccountStatus, PluginError> {
         match creds::Stored::load(host, account).await {
-            Ok(stored) if stored.fresh_at(host.clock().now()) || stored.credential.desktop => {
-                Ok(AccountStatus::Ready)
-            }
+            Ok(stored) if stored.fresh_at(host.clock().now()) => Ok(AccountStatus::Ready),
             Ok(_) => Ok(AccountStatus::NeedsSignIn {
                 reason: "the WorkBuddy sign-in has expired".to_owned(),
             }),
@@ -247,8 +271,8 @@ impl Subscription for WorkBuddy {
         account: &AccountId,
         host: &HostContext,
     ) -> Result<ModelList, PluginError> {
-        let stored = creds::Stored::load(host, account).await?;
-        models::fallback(stored.credential.site)
+        let stored = refresh::ensure_fresh(host, Arc::clone(&self.endpoints), account).await?;
+        models::list_account(host, Arc::clone(&self.endpoints), &stored).await
     }
 
     fn upstream(
@@ -286,16 +310,6 @@ impl Subscription for WorkBuddy {
     ) -> Result<AccountId, PluginError> {
         discover::import(home, reference, host).await
     }
-}
-
-fn default_agent_home() -> Result<std::path::PathBuf, PluginError> {
-    if let Ok(dir) = std::env::var("WORKBUDDY_CONFIG_DIR") {
-        return Ok(std::path::PathBuf::from(dir));
-    }
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .map_err(|_| PluginError::io("cannot resolve the user home for sign-in"))?;
-    Ok(std::path::PathBuf::from(home).join(".workbuddy"))
 }
 
 #[cfg(test)]

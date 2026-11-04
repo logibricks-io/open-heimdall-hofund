@@ -19,7 +19,10 @@ pub(crate) async fn ensure_fresh(
     account: &AccountId,
 ) -> Result<Stored, PluginError> {
     let stored = Stored::load(host, account).await?;
-    if stored.credential.desktop || stored.fresh_at(host.clock().now()) {
+    if stored.credential.desktop {
+        return Ok(stored);
+    }
+    if stored.fresh_at(host.clock().now()) {
         return Ok(stored);
     }
     refresh_stale(host, endpoints, account, &stored).await?;
@@ -32,6 +35,20 @@ pub(crate) async fn run(
     account: &AccountId,
 ) -> Result<(), PluginError> {
     let _ = ensure_fresh(host, endpoints, account).await?;
+    Ok(())
+}
+
+/// Renews OAuth tokens even when the access token is not near expiry (401 retry).
+pub(crate) async fn force(
+    host: &HostContext,
+    endpoints: Arc<Endpoints>,
+    account: &AccountId,
+) -> Result<(), PluginError> {
+    let stored = Stored::load(host, account).await?;
+    if stored.credential.desktop {
+        return Ok(());
+    }
+    refresh_stale(host, endpoints, account, &stored).await?;
     Ok(())
 }
 
@@ -69,7 +86,7 @@ async fn refresh_stale(
         .await?;
     match reply.status() {
         200..=299 => {}
-        401 | 403 => {
+        401 => {
             return Err(PluginError::auth(
                 "WorkBuddy refused the stored sign-in; sign in again",
             ));

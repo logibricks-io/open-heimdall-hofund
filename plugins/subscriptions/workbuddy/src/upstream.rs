@@ -28,10 +28,17 @@ impl WorkBuddyUpstream {
     }
 
     async fn stored(&self, force: bool) -> Result<creds::Stored, PluginError> {
-        if force {
-            refresh::run(&self.host, Arc::clone(&self.endpoints), &self.account).await?;
+        if force && !self.stored_is_desktop().await? {
+            refresh::force(&self.host, Arc::clone(&self.endpoints), &self.account).await?;
         }
         refresh::ensure_fresh(&self.host, Arc::clone(&self.endpoints), &self.account).await
+    }
+
+    async fn stored_is_desktop(&self) -> Result<bool, PluginError> {
+        Ok(creds::Stored::load(&self.host, &self.account)
+            .await?
+            .credential
+            .desktop)
     }
 
     async fn send(
@@ -69,7 +76,7 @@ impl UpstreamProvider for WorkBuddyUpstream {
     ) -> Result<Completion, PluginError> {
         let stored = self.stored(false).await?;
         match self.send(&stored, request.clone(), inbound).await {
-            Err(error) if error.status() == Some(401) && !stored.credential.desktop => {
+            Err(error) if error.status() == Some(401) => {
                 let renewed = self.stored(true).await?;
                 self.send(&renewed, request, inbound).await
             }

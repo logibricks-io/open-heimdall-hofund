@@ -1,26 +1,23 @@
-//! Discover WorkBuddy desktop auth beside an agent home.
+//! Discover WorkBuddy desktop auth from CodeBuddyExtension storage.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use hofund_plugin_api::{AccountId, DiscoveredAgentAccount, HostContext, PluginError};
 
+use crate::auth_store;
 use crate::creds::{self, Credential};
 use crate::site::Site;
 
 pub(crate) const REFERENCE_CN: &str = "desktop-auth-cn";
 pub(crate) const REFERENCE_AI: &str = "desktop-auth-ai";
 
-pub(crate) fn auth_path(home: &Path, site: Site) -> PathBuf {
-    home.join("auth").join(site.auth_file())
-}
-
-pub(crate) fn list(home: &Path) -> Result<Vec<DiscoveredAgentAccount>, PluginError> {
+pub(crate) fn list(_home: &Path) -> Result<Vec<DiscoveredAgentAccount>, PluginError> {
     let mut out = Vec::new();
     for (site, reference) in [
         (Site::China, REFERENCE_CN),
         (Site::International, REFERENCE_AI),
     ] {
-        let path = auth_path(home, site);
+        let path = auth_store::auth_path(site)?;
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
         };
@@ -35,7 +32,7 @@ pub(crate) fn list(home: &Path) -> Result<Vec<DiscoveredAgentAccount>, PluginErr
 }
 
 pub(crate) async fn import(
-    home: &Path,
+    _home: &Path,
     reference: &str,
     host: &HostContext,
 ) -> Result<AccountId, PluginError> {
@@ -48,7 +45,7 @@ pub(crate) async fn import(
             )));
         }
     };
-    let path = auth_path(home, site);
+    let path = auth_store::auth_path(site)?;
     let text = std::fs::read_to_string(&path).map_err(|error| {
         PluginError::auth(format!("{} can't be read ({error})", path.display()))
     })?;
