@@ -70,7 +70,7 @@ pub(crate) const BASES: Bases = Bases {
 };
 
 /// Request headers that are about one hop, or that the client sets itself.
-const DROPPED: [&str; 11] = [
+const DROPPED: [&str; 10] = [
     "connection",
     "keep-alive",
     "proxy-connection",
@@ -81,7 +81,6 @@ const DROPPED: [&str; 11] = [
     "content-length",
     "host",
     "accept-encoding",
-    account_refusal::FALLBACKS_HEADER,
 ];
 
 /// Passthrough members each upstream base has refused.
@@ -764,7 +763,7 @@ async fn relay(
             Err(failure) => return error_response(&failure),
         };
         let status = response.status().as_u16();
-        let fallbacks = account_refusal::fallbacks_from(request.headers());
+        let fallbacks = kernel.codex_relay_fallbacks();
         if turn
             && !compact
             && !api_key(request.headers())
@@ -776,18 +775,25 @@ async fn relay(
             if likely {
                 let (parts, body) = response.into_parts();
                 let bytes = read_up_to(body, REFUSAL_CAP).await.unwrap_or_default();
-                if account_refusal::codex_account_refusal(status, &parts.headers, &bytes, stream)
-                    && let Some(model) = fallbacks.first()
-                    && let Some(rewritten) =
-                        account_refusal::with_model(request.body().bytes(), model)
-                {
-                    let (body, compaction) = input::for_hofund(&rewritten);
-                    if !compaction {
+                if account_refusal::codex_account_refusal(status, &parts.headers, &bytes, stream) {
+                    for model in fallbacks {
+                        let Some(rewritten) =
+                            account_refusal::with_model(request.body().bytes(), model)
+                        else {
+                            continue;
+                        };
+                        let (body, compaction) = input::for_hofund(&rewritten);
+                        if compaction {
+                            continue;
+                        }
                         let mut retry = HttpRequest::new(Body::from(body.unwrap_or(rewritten)));
                         *retry.method_mut() = request.method().clone();
                         *retry.uri_mut() = request.uri().clone();
                         *retry.headers_mut() = request.headers().clone();
-                        return in_process(kernel, &retry).await;
+                        let answer = in_process(kernel, &retry).await;
+                        if answer.status().is_success() {
+                            return answer;
+                        }
                     }
                 }
                 return restore_relay_response(

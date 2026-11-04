@@ -4,24 +4,6 @@ use hofund_plugin_sdk::HeaderMap;
 use hofund_plugin_sdk::json::{self, Value};
 use hofund_plugin_sdk::transport::{is_credit_error, is_quota_error};
 
-/// Header listing fallback models as `provider/model`, comma-separated.
-pub(crate) const FALLBACKS_HEADER: &str = "x-hofund-codex-fallbacks";
-
-/// Parses fallback model ids from the request.
-pub(crate) fn fallbacks_from(headers: &HeaderMap) -> Vec<String> {
-    headers
-        .get(FALLBACKS_HEADER)
-        .and_then(|value| value.to_str().ok())
-        .map(|text| {
-            text.split(',')
-                .map(str::trim)
-                .filter(|part| part.contains('/'))
-                .map(str::to_owned)
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
 /// Whether a relayed ChatGPT refusal is the account's, not the turn's.
 #[must_use]
 pub(crate) fn codex_account_refusal(

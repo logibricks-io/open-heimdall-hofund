@@ -86,6 +86,7 @@ struct Stub {
     sends: Mutex<VecDeque<Answer>>,
     called: Mutex<Vec<Seen>>,
     sent: Mutex<Vec<Seen>>,
+    relay_fallbacks: Vec<String>,
 }
 
 impl Stub {
@@ -105,6 +106,13 @@ impl Stub {
             200,
             json!({"object": "list", "data": data}).to_string(),
         ))
+    }
+
+    fn relay_fallbacks(self, models: &[&str]) -> Self {
+        Self {
+            relay_fallbacks: models.iter().map(|model| (*model).to_owned()).collect(),
+            ..self
+        }
     }
 
     fn called(&self) -> Vec<Seen> {
@@ -138,6 +146,10 @@ impl Kernel for Stub {
             .push(Seen::of(&request, within));
         let next = self.sends.lock().expect("sends").pop_front();
         response(next.expect("a send was not expected"))
+    }
+
+    fn codex_relay_fallbacks(&self) -> &[String] {
+        &self.relay_fallbacks
     }
 }
 
@@ -1851,18 +1863,11 @@ fn d57_8_restored_relay_reply_drops_stale_content_length() {
     assert!(!restored.headers().contains_key("content-length"));
 }
 
-fn with_fallbacks(mut request: HttpRequest, models: &str) -> HttpRequest {
-    request.headers_mut().insert(
-        super::account_refusal::FALLBACKS_HEADER,
-        models.parse().expect("header"),
-    );
-    request
-}
-
 #[test]
 fn d68_1_usage_limit_reached_falls_back_in_process() {
     let refuse = r#"{"error":{"code":"usage_limit_reached","message":"used up"}}"#;
     let stub = Stub::default()
+        .relay_fallbacks(&["backup/demo"])
         .listing(&[])
         .sending(answer(429, refuse))
         .calling(answer(
@@ -1871,10 +1876,7 @@ fn d68_1_usage_limit_reached_falls_back_in_process() {
         ));
     let body =
         r#"{"model":"gpt-5-codex","input":[{"type":"message","role":"user","content":"hi"}]}"#;
-    let request = with_fallbacks(
-        request("POST", "/backend-api/codex/responses", &[], body),
-        "backup/demo",
-    );
+    let request = request("POST", "/backend-api/codex/responses", &[], body);
     let (status, _, _) = ask(&stub, request);
     assert_eq!(status, 200);
     let called = stub.called();
@@ -1890,7 +1892,7 @@ fn d68_1_usage_limit_reached_falls_back_in_process() {
 }
 
 #[test]
-fn d68_2_no_fallback_header_relays_quota_refusal() {
+fn d68_2_no_fallback_configured_relays_quota_refusal() {
     let refuse = r#"{"error":{"code":"usage_limit_reached"}}"#;
     let stub = Stub::default().listing(&[]).sending(answer(429, refuse));
     let (status, _, body) = ask(
@@ -1915,17 +1917,15 @@ fn d68_2_no_fallback_header_relays_quota_refusal() {
 #[test]
 fn d68_3_sign_in_401_is_not_fallen_back() {
     let stub = Stub::default()
+        .relay_fallbacks(&["backup/demo"])
         .listing(&[])
         .sending(answer(401, "bad token"))
         .calling(answer(200, "{}"));
-    let request = with_fallbacks(
-        request(
-            "POST",
-            "/backend-api/codex/responses",
-            &[],
-            r#"{"model":"m","input":[]}"#,
-        ),
-        "backup/demo",
+    let request = request(
+        "POST",
+        "/backend-api/codex/responses",
+        &[],
+        r#"{"model":"m","input":[]}"#,
     );
     let (status, _, _) = ask(&stub, request);
     assert_eq!(status, 401);
@@ -1941,25 +1941,109 @@ fn d68_3_sign_in_401_is_not_fallen_back() {
 fn d68_4_overload_falls_back_like_quota() {
     let refuse = r#"{"error":{"code":"server_is_overloaded","message":"overloaded"}}"#;
     let stub = Stub::default()
+        .relay_fallbacks(&["backup/demo"])
         .listing(&[])
         .sending(answer(529, refuse))
         .calling(answer(
             200,
             r#"{"id":"r","object":"response","status":"completed","output":[]}"#,
         ));
-    let request = with_fallbacks(
-        request(
-            "POST",
-            "/backend-api/codex/responses",
-            &[],
-            r#"{"model":"m","input":[]}"#,
-        ),
-        "backup/demo",
+    let request = request(
+        "POST",
+        "/backend-api/codex/responses",
+        &[],
+        r#"{"model":"m","input":[]}"#,
     );
     let (status, _, _) = ask(&stub, request);
     assert_eq!(status, 200);
     assert!(
         stub.called().iter().any(|seen| seen.uri == "/v1/responses"),
         "overload should fall back in process"
+    );
+}
+
+#[test]
+fn d68_5_stream_usage_limit_reached_falls_back_in_process() {
+    let refuse = concat!(
+        "data: ",
+        r#"{"type":"response.failed","response":{"error":{"code":"usage_limit_reached"}}}"#,
+        "\n\n"
+    );
+    let stub = Stub::default()
+        .relay_fallbacks(&["backup/demo"])
+        .listing(&[])
+        .sending(Ok((
+            429,
+            vec![("content-type", "text/event-stream")],
+            BodyStream::from_bytes(refuse.as_bytes().to_vec()),
+        )))
+        .calling(answer(
+            200,
+            r#"{"id":"r","object":"response","status":"completed","output":[]}"#,
+        ));
+    let request = request(
+        "POST",
+        "/backend-api/codex/responses",
+        &[],
+        r#"{"model":"m","input":[],"stream":true}"#,
+    );
+    let (status, _, _) = ask(&stub, request);
+    assert_eq!(status, 200);
+    assert!(
+        stub.called().iter().any(|seen| seen.uri == "/v1/responses"),
+        "stream refusal should fall back in process"
+    );
+}
+
+#[test]
+fn d68_6_client_fallback_header_has_no_effect() {
+    let refuse = r#"{"error":{"code":"usage_limit_reached"}}"#;
+    let stub = Stub::default()
+        .listing(&[])
+        .sending(answer(429, refuse))
+        .calling(answer(200, "{}"));
+    let mut request = request(
+        "POST",
+        "/backend-api/codex/responses",
+        &[],
+        r#"{"model":"m","input":[]}"#,
+    );
+    request.headers_mut().insert(
+        "x-hofund-codex-fallbacks",
+        "backup/demo".parse().expect("header"),
+    );
+    let (status, _, body) = ask(&stub, request);
+    assert_eq!(status, 429);
+    assert!(body.contains("usage_limit_reached"), "{body}");
+    assert!(
+        stub.called()
+            .iter()
+            .all(|seen| seen.uri.contains("/models")),
+        "header must not trigger fallback"
+    );
+}
+
+#[test]
+fn d68_7_api_key_request_does_not_fall_back() {
+    let refuse = r#"{"error":{"code":"usage_limit_reached"}}"#;
+    let stub = Stub::default()
+        .relay_fallbacks(&["backup/demo"])
+        .listing(&[])
+        .sending(answer(429, refuse))
+        .calling(answer(200, "{}"));
+    let request = request(
+        "POST",
+        "/backend-api/codex/responses",
+        &[("authorization", "Bearer sk-test")],
+        r#"{"model":"m","input":[]}"#,
+    );
+    let (status, _, body) = ask(&stub, request);
+    assert_eq!(status, 429);
+    assert!(body.contains("usage_limit_reached"), "{body}");
+    assert!(
+        stub.called()
+            .iter()
+            .all(|seen| seen.uri.contains("/models")),
+        "API-key relay must not fall back"
     );
 }

@@ -25,9 +25,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   empty `encrypted_function_args` when the upstream omitted the field, so Codex
   V2 treats collaboration tasks as plain text (D-67).
 
-- Codex ChatGPT backend relay falls back to models listed in
-  `x-hofund-codex-fallbacks` on account quota, credit, rate, or overload
-  refusals when that header is present (D-68).
+- Codex ChatGPT backend relay falls back through the configured `codex`
+  provider's `fallback` list on account quota, credit, rate, or overload
+  refusals (D-68).
 
 ### Fixed
 

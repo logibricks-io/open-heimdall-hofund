@@ -1453,6 +1453,7 @@ async fn dispatch_surface(State(app): State<Arc<Inner>>, request: Request) -> Re
     });
     let members = app.snapshot.load().member_ids();
     let protocols = protocols_of(&app.codecs);
+    let codex_relay_fallbacks = codex_relay_fallbacks_of(&app);
     let host = match &app.surface_http {
         Some(http) => hofund_plugin_host::surface_host_with_http(
             members,
@@ -1460,8 +1461,15 @@ async fn dispatch_surface(State(app): State<Arc<Inner>>, request: Request) -> Re
             true,
             gateway,
             Arc::clone(http),
+            codex_relay_fallbacks,
         ),
-        None => hofund_plugin_host::surface_host_with_gateway(members, protocols, true, gateway),
+        None => hofund_plugin_host::surface_host_with_gateway(
+            members,
+            protocols,
+            true,
+            gateway,
+            codex_relay_fallbacks,
+        ),
     };
     let plugin_id = surface.id().as_str().to_owned();
     let span = tracing::info_span!(
@@ -1492,6 +1500,17 @@ fn protocols_of(codecs: &HashMap<String, Arc<dyn Codec>>) -> Vec<ProtocolId> {
         }
     }
     ids
+}
+
+fn codex_relay_fallbacks_of(app: &Inner) -> Arc<[String]> {
+    let Some(catalog) = app.visible_catalog.as_ref() else {
+        return Arc::from([]);
+    };
+    let config = &catalog
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .config;
+    Arc::from(hofund_config::codex_chatgpt_relay_fallbacks(config))
 }
 
 fn method_is(route: Method, method: &axum::http::Method) -> bool {

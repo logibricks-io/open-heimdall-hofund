@@ -856,6 +856,9 @@ pub enum UpstreamTarget {
     Group(String),
 }
 
+/// Subscription plugin id whose ChatGPT sign-in the Codex backend relay uses.
+pub const CODEX_SUBSCRIPTION_ID: &str = "codex";
+
 /// One provider fallback entry.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Fallback {
@@ -868,6 +871,59 @@ pub enum Fallback {
     },
     /// A whole routing group.
     Group(String),
+}
+
+impl Fallback {
+    /// The routed model id sent to the gateway for this fallback entry.
+    #[must_use]
+    pub fn route_model(&self) -> String {
+        match self {
+            Self::Model { provider, model } => format!("{provider}/{model}"),
+            Self::Group(group) => format!("group/{group}"),
+        }
+    }
+}
+
+/// Returns the configured provider whose fallbacks apply to ChatGPT sign-in
+/// Codex backend relay refusals.
+///
+/// That is the provider whose id matches the configured [`CODEX_SUBSCRIPTION_ID`]
+/// subscription when such a provider exists.
+#[must_use]
+pub fn codex_chatgpt_relay_provider(config: &Config) -> Option<&Provider> {
+    let has_codex = config
+        .subscriptions
+        .iter()
+        .any(|subscription| subscription.id == CODEX_SUBSCRIPTION_ID);
+    if !has_codex {
+        return None;
+    }
+    config
+        .providers
+        .iter()
+        .find(|provider| provider.id == CODEX_SUBSCRIPTION_ID)
+}
+
+/// Routed model ids to try after a ChatGPT sign-in Codex backend relay refusal.
+#[must_use]
+pub fn codex_chatgpt_relay_fallbacks(config: &Config) -> Vec<String> {
+    codex_chatgpt_relay_provider(config)
+        .map(|provider| {
+            provider
+                .fallback
+                .iter()
+                .map(Fallback::route_model)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+impl Provider {
+    /// Routed model ids to try after this provider fails, in configured order.
+    #[must_use]
+    pub fn fallback_routes(&self) -> Vec<String> {
+        self.fallback.iter().map(Fallback::route_model).collect()
+    }
 }
 
 /// One hop on a route: a provider or a subscription, plus an optional model.
@@ -2971,6 +3027,52 @@ mod tests {
         )
         .expect_err("unknown fallback group");
         assert!(error.to_string().contains("unknown group `missing`"));
+    }
+
+    #[test]
+    fn d68_codex_relay_fallbacks_use_the_matching_provider() {
+        let config = load(
+            r#"
+            [[providers]]
+            id = "codex"
+            preset = "openai"
+            fallback = ["backup/demo", "group/spare"]
+            [[providers]]
+            id = "backup"
+            preset = "openai"
+            [[subscriptions]]
+            id = "codex"
+            accounts = "*"
+            [[routes]]
+            model = "group/spare"
+            upstreams = ["backup"]
+            [[routes]]
+            model = "demo"
+            upstreams = [{ subscription = "codex" }]
+            "#,
+        )
+        .expect("codex relay fallbacks");
+        assert_eq!(
+            super::codex_chatgpt_relay_fallbacks(&config),
+            ["backup/demo".to_owned(), "group/spare".to_owned()]
+        );
+        assert_eq!(
+            config.providers[0].fallback_routes(),
+            ["backup/demo".to_owned(), "group/spare".to_owned()]
+        );
+    }
+
+    #[test]
+    fn d68_codex_relay_fallbacks_are_empty_without_a_matching_provider() {
+        let config = load(
+            r#"
+            [[subscriptions]]
+            id = "codex"
+            accounts = "*"
+            "#,
+        )
+        .expect("subscription only");
+        assert!(super::codex_chatgpt_relay_fallbacks(&config).is_empty());
     }
 
     #[test]

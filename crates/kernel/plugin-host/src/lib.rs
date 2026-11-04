@@ -138,7 +138,14 @@ pub fn surface_host(
     protocols: Vec<ProtocolId>,
     accepted: bool,
 ) -> SurfaceHost {
-    SurfaceHost::from_parts(members, protocols, AuthResult::new(accepted), None, None)
+    SurfaceHost::from_parts(
+        members,
+        protocols,
+        AuthResult::new(accepted),
+        None,
+        None,
+        Arc::from([]),
+    )
 }
 
 /// Builds a [`SurfaceHost`] whose gateway handle runs `gateway`.
@@ -148,6 +155,7 @@ pub fn surface_host_with_gateway(
     protocols: Vec<ProtocolId>,
     accepted: bool,
     gateway: Arc<dyn GatewayBackend>,
+    codex_relay_fallbacks: Arc<[String]>,
 ) -> SurfaceHost {
     SurfaceHost::from_parts(
         members,
@@ -155,6 +163,7 @@ pub fn surface_host_with_gateway(
         AuthResult::new(accepted),
         Some(gateway),
         None,
+        codex_relay_fallbacks,
     )
 }
 
@@ -167,6 +176,7 @@ pub fn surface_host_with_http(
     accepted: bool,
     gateway: Arc<dyn GatewayBackend>,
     http: Arc<dyn HttpBackend>,
+    codex_relay_fallbacks: Arc<[String]>,
 ) -> SurfaceHost {
     SurfaceHost::from_parts(
         members,
@@ -174,6 +184,7 @@ pub fn surface_host_with_http(
         AuthResult::new(accepted),
         Some(gateway),
         Some(http),
+        codex_relay_fallbacks,
     )
 }
 
@@ -1395,6 +1406,7 @@ mod tests {
             Vec::new(),
             true,
             std::sync::Arc::clone(&gateway),
+            std::sync::Arc::from([]),
         );
         assert!(joined.http().is_none());
         let recording = std::sync::Arc::new(super::RecordingHttp::default());
@@ -1405,6 +1417,7 @@ mod tests {
             false,
             gateway,
             std::sync::Arc::clone(&recording) as std::sync::Arc<dyn super::HttpBackend>,
+            std::sync::Arc::from([]),
         );
         assert!(!host.auth().accepted());
         assert!(host.gateway().is_available());
@@ -1417,6 +1430,7 @@ mod tests {
             false,
             std::sync::Arc::new(NoGateway),
             std::sync::Arc::new(super::RecordingHttp::default()),
+            std::sync::Arc::from([]),
         );
         assert_ne!(handle, other.http().expect("other"));
         let request = super::HttpRequest::builder()
