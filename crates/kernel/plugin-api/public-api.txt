@@ -512,6 +512,7 @@ MemberKey
 MemberKey #[non_exhaustive] derives(Clone, Debug)
 MemberKey::const fn from_static (value : & 'static str) -> Self
 MemberKey::fn as_str (& self) -> & str
+Message
 Method
 Method #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
 Method::Delete
@@ -939,6 +940,8 @@ SpawnRequest::fn program (& self) -> & Path
 Spawned
 Spawned #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
 Spawned::const fn id (self) -> u32
+Stop
+StopReason
 StreamEvent
 Subscription
 Subscription::async fn account_status (& self , account : & AccountId , host : & HostContext ,) -> Result < AccountStatus , PluginError >

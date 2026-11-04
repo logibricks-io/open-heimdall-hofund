@@ -48,11 +48,25 @@ package = "hofund-plugin-subscription-copilot"
 feature = "copilot"
 
 [[plugin]]
+id = "devin"
+kind = "subscription"
+path = "plugins/subscriptions/devin"
+package = "hofund-plugin-subscription-devin"
+feature = "devin"
+
+[[plugin]]
 id = "echo"
 kind = "inbound"
 path = "plugins/inbound/echo"
 package = "hofund-plugin-echo"
 feature = "echo"
+
+[[plugin]]
+id = "factory"
+kind = "subscription"
+path = "plugins/subscriptions/factory"
+package = "hofund-plugin-subscription-factory"
+feature = "factory"
 
 [[plugin]]
 id = "gemini"
@@ -67,6 +81,13 @@ kind = "provider"
 path = "plugins/providers/google-vertex"
 package = "hofund-plugin-google-vertex"
 feature = "google-vertex"
+
+[[plugin]]
+id = "kiro"
+kind = "subscription"
+path = "plugins/subscriptions/kiro"
+package = "hofund-plugin-subscription-kiro"
+feature = "kiro"
 
 [[plugin]]
 id = "muse"

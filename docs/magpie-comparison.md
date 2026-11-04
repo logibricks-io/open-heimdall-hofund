@@ -261,6 +261,17 @@ Official references, checked 2026-10-25:
 | --- | --- | --- | --- | --- |
 | Deployment list | `GET {root}/deployments?api-version=2022-12-01` with `api-key` and no bearer token. A refusal or an empty list tries `{base}/models`. The id is the deployment name. Non-chat ids are dropped. A failure tells the user to type the names. The list is not filtered by status. Pages follow `has_more` and `last_id`. | Adopt the two URLs, the header, and the id. | The `azure` plugin (`plugins/providers/azure`) does that against the v1 root from `azure_base`, for preset `azure` and for a custom Chat or Responses base on an Azure host. Extra headers replace a header of the same name. The gateway does not call it on a schedule (row 2.9). Verified with mocks only. CI run 40178604119 on `73656ae` executed the tests. | The data-plane list is the one an `api-key` can still read. The v1 model list is only the deployments' ids when each deployment is named after its model, so it stays the fallback. |
 
+## Devin, Kiro, and Factory subscription plugins
+
+Read from yetone/magpie `internal/provider/{devin,kiro,factory}.go` and agent
+sign-in paths in `internal/agent/{devin,droid}.go`.
+
+| Subsystem | magpie approach | Verdict | hofund approach | Rationale |
+| --- | --- | --- | --- | --- |
+| Devin sign-in and upstream | One CLI `credentials.toml` under XDG data; chat uses the Devin API base from the file; models come from `devin models list`. | Adopt paths; leave live CLI listing to the user environment | `hofund-plugin-subscription-devin` imports CLI-shaped TOML from XDG or agent homes, writes credentials atomically at mode `0600`, uses agent-home ids stable across key rotation, and refuses chat upstream because the reference has no verified Devin chat path. `list_models` errors until the CLI is available. No quota or online auth verification. | Typed secrets, injectable host, and no fake model cache. |
+| Kiro sign-in and upstream | IDE or CLI tokens under `~/.aws/sso/cache`; social and IdC refresh; chat is `POST …/generateAssistantResponse` with AWS event-stream replies, not Anthropic `/v1/messages`. | Adopt refresh lease, stream path, IdC client registration, and agent-home resolution | `hofund-plugin-subscription-kiro` uses `KIRO_IDE_CACHE` for agent-home resolution, stable agent-scoped account ids, case-insensitive IdC refresh via OIDC and `clientIdHash` registration files, JSON merge writes to the IDE token file on refresh and switch, Builder ID profile ARN when the token omits one, `Get-Usage-Limits` with `profileArn`, unary text-only upstream (tools, images, and streaming rejected). Agent name `kiro` only; kiro-cli SQLite sign-in is out of scope. | Matches the reference wire without copying another vendor's Messages URL. |
+| Factory sign-in, chat, and quota | `api.factory.ai`, WorkOS device tokens with `/api/cli/whoami`, per-model wires on `/api/llm/{a,r,o,g}/v1` with `x-api-provider` from the Droid registry, limits from `GET /api/billing/limits`. | Adopt | `hofund-plugin-subscription-factory` keeps WorkOS access and refresh tokens, stores `activeOrganizationId` and region from whoami, sends `X-Factory-Org-Id`, refreshes through WorkOS, routes OpenAI-compatible Core models on `/api/llm/o/v1` with per-model `x-api-provider`, and marks Core and extra-funded windows non-blocking. | Removes mistaken third-party API shapes; lapsed is 401/403 only. |
+
 ## Not in this version
 
 Sessions are not compared here yet. Add a row when that subsystem is built.
