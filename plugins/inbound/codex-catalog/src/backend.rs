@@ -25,6 +25,7 @@ use crate::{
     Kernel, capped_models, client_version, entry, error_response, ids, json_response,
     listed_models, official,
 };
+use crate::account_refusal;
 
 /// The route prefix Codex's base URL ends with.
 pub(crate) const PREFIX: &str = "/backend-api/codex";
@@ -69,7 +70,7 @@ pub(crate) const BASES: Bases = Bases {
 };
 
 /// Request headers that are about one hop, or that the client sets itself.
-const DROPPED: [&str; 10] = [
+const DROPPED: [&str; 11] = [
     "connection",
     "keep-alive",
     "proxy-connection",
@@ -80,6 +81,7 @@ const DROPPED: [&str; 10] = [
     "content-length",
     "host",
     "accept-encoding",
+    account_refusal::FALLBACKS_HEADER,
 ];
 
 /// Passthrough members each upstream base has refused.
@@ -747,6 +749,7 @@ async fn relay(
     let base = base_for(bases, request.headers(), rest);
     let turn =
         matches!(rest, "/responses" | "/responses/compact") && request.method().as_str() == "POST";
+    let compact = rest == "/responses/compact";
     if turn && let Some(body) = state.strip(base, request.body().bytes()) {
         *request.body_mut() = Body::from(body);
     }
@@ -760,7 +763,47 @@ async fn relay(
             Ok(response) => response,
             Err(failure) => return error_response(&failure),
         };
-        if !turn || response.status().as_u16() != 400 {
+        let status = response.status().as_u16();
+        let fallbacks = account_refusal::fallbacks_from(request.headers());
+        if turn
+            && !compact
+            && !api_key(request.headers())
+            && rest == "/responses"
+            && !fallbacks.is_empty()
+        {
+            let stream = relay_reply_is_stream(response.headers());
+            let likely = stream
+                || matches!(status, 403 | 429 | 529)
+                || status >= 500;
+            if likely {
+                let (parts, body) = response.into_parts();
+                let bytes = read_up_to(body, REFUSAL_CAP).await.unwrap_or_default();
+                if account_refusal::codex_account_refusal(
+                    status,
+                    &parts.headers,
+                    &bytes,
+                    stream,
+                ) && let Some(model) = fallbacks.first()
+                    && let Some(rewritten) =
+                        account_refusal::with_model(request.body().bytes(), model)
+                {
+                    let (body, compaction) = input::for_hofund(&rewritten);
+                    if !compaction {
+                        let mut retry =
+                            HttpRequest::new(Body::from(body.unwrap_or(rewritten)));
+                        *retry.method_mut() = request.method().clone();
+                        *retry.uri_mut() = request.uri().clone();
+                        *retry.headers_mut() = request.headers().clone();
+                        return in_process(kernel, &retry).await;
+                    }
+                }
+                return restore_relay_response(
+                    HttpResponse::from_parts(parts, BodyStream::from_bytes(bytes)),
+                    &tool_back,
+                );
+            }
+        }
+        if !turn || status != 400 {
             return restore_relay_response(response, &tool_back);
         }
         let (parts, body) = response.into_parts();

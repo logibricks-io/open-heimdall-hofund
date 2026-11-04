@@ -1850,3 +1850,101 @@ fn d57_8_restored_relay_reply_drops_stale_content_length() {
     let restored = super::backend::restore_relay_response(restored, &back);
     assert!(!restored.headers().contains_key("content-length"));
 }
+
+fn with_fallbacks(mut request: HttpRequest, models: &str) -> HttpRequest {
+    request.headers_mut().insert(
+        super::account_refusal::FALLBACKS_HEADER,
+        models.parse().expect("header"),
+    );
+    request
+}
+
+#[test]
+fn d68_1_usage_limit_reached_falls_back_in_process() {
+    let refuse = r#"{"error":{"code":"usage_limit_reached","message":"used up"}}"#;
+    let stub = Stub::default()
+        .listing(&[])
+        .sending(answer(429, refuse))
+        .calling(answer(200, r#"{"id":"r","object":"response","status":"completed","output":[]}"#));
+    let body = r#"{"model":"gpt-5-codex","input":[{"type":"message","role":"user","content":"hi"}]}"#;
+    let request = with_fallbacks(
+        request(
+            "POST",
+            "/backend-api/codex/responses",
+            &[],
+            body,
+        ),
+        "backup/demo",
+    );
+    let (status, _, _) = ask(&stub, request);
+    assert_eq!(status, 200);
+    let called = stub.called();
+    let routed = called
+        .iter()
+        .find(|seen| seen.uri == "/v1/responses")
+        .expect("fallback should run in process");
+    assert!(String::from_utf8(routed.body.clone()).expect("utf-8").contains("backup/demo"));
+}
+
+#[test]
+fn d68_2_no_fallback_header_relays_quota_refusal() {
+    let refuse = r#"{"error":{"code":"usage_limit_reached"}}"#;
+    let stub = Stub::default()
+        .listing(&[])
+        .sending(answer(429, refuse));
+    let (status, _, body) = ask(
+        &stub,
+        request(
+            "POST",
+            "/backend-api/codex/responses",
+            &[],
+            r#"{"model":"gpt-5-codex","input":[]}"#,
+        ),
+    );
+    assert_eq!(status, 429);
+    assert!(body.contains("usage_limit_reached"), "{body}");
+    assert!(
+        stub.called().iter().all(|seen| seen.uri.contains("/models")),
+        "only the model list uses in-process calls"
+    );
+}
+
+#[test]
+fn d68_3_sign_in_401_is_not_fallen_back() {
+    let stub = Stub::default()
+        .listing(&[])
+        .sending(answer(401, "bad token"))
+        .calling(answer(200, "{}"));
+    let request = with_fallbacks(
+        request("POST", "/backend-api/codex/responses", &[], r#"{"model":"m","input":[]}"#),
+        "backup/demo",
+    );
+    let (status, _, _) = ask(&stub, request);
+    assert_eq!(status, 401);
+    assert!(
+        stub.called().iter().all(|seen| seen.uri.contains("/models")),
+        "fallback must not run"
+    );
+}
+
+#[test]
+fn d68_4_overload_falls_back_like_quota() {
+    let refuse = r#"{"error":{"code":"server_is_overloaded","message":"overloaded"}}"#;
+    let stub = Stub::default()
+        .listing(&[])
+        .sending(answer(529, refuse))
+        .calling(answer(200, r#"{"id":"r","object":"response","status":"completed","output":[]}"#));
+    let request = with_fallbacks(
+        request("POST", "/backend-api/codex/responses", &[], r#"{"model":"m","input":[]}"#),
+        "backup/demo",
+    );
+    let (status, _, _) = ask(&stub, request);
+    assert_eq!(status, 200);
+    assert!(
+        stub
+            .called()
+            .iter()
+            .any(|seen| seen.uri == "/v1/responses"),
+        "overload should fall back in process"
+    );
+}

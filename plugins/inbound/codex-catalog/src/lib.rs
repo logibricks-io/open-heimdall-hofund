@@ -47,6 +47,8 @@ mod backend;
 
 mod input;
 
+mod account_refusal;
+
 /// The header that says how many models were left out to fit [`MOST`].
 pub const LEFT_OUT_HEADER: &str = "x-hofund-left-out";
 
