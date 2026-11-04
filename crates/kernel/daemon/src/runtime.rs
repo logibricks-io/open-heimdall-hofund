@@ -6,6 +6,7 @@ use std::time::Duration;
 use hofund_config::Config;
 use hofund_control_proto::{EventPayload, MemberCooledEvent, MemberRecoveredEvent};
 use hofund_plugin_api::MemberId;
+use hofund_router::credits_mode::CreditsModeStore;
 use hofund_router::quota::QuotaStore;
 use hofund_router::{CooldownPolicy, Cooldowns, FailoverPolicy, Snapshot};
 use tokio::sync::watch;
@@ -68,6 +69,7 @@ pub(crate) struct Runtime {
     polls: tokio::sync::Mutex<QuotaPolls>,
     model_polls: tokio::sync::Mutex<ModelPolls>,
     quotas: Arc<QuotaStore>,
+    credits_modes: Arc<CreditsModeStore>,
     affinity: hofund_router::affinity::AffinityState,
     model_catalog: OnceLock<Arc<hofund_model_catalog::ModelCatalog>>,
     /// Wakes the subscription task after a publication.
@@ -106,6 +108,9 @@ impl Runtime {
             polls: tokio::sync::Mutex::new(QuotaPolls::default()),
             model_polls: tokio::sync::Mutex::new(ModelPolls::default()),
             quotas: Arc::new(QuotaStore::new(
+                path.parent().unwrap_or_else(|| Path::new(".")),
+            )),
+            credits_modes: Arc::new(CreditsModeStore::new(
                 path.parent().unwrap_or_else(|| Path::new(".")),
             )),
             affinity: hofund_router::affinity::AffinityState::new(
@@ -151,6 +156,9 @@ impl Runtime {
             quotas: Arc::new(QuotaStore::with_clock(
                 path.parent().unwrap_or_else(|| Path::new(".")),
                 clock,
+            )),
+            credits_modes: Arc::new(CreditsModeStore::new(
+                path.parent().unwrap_or_else(|| Path::new(".")),
             )),
             affinity: hofund_router::affinity::AffinityState::new(
                 path.parent()
@@ -215,6 +223,7 @@ impl Runtime {
                 Arc::clone(&self.cooldowns),
                 self.affinity.clone(),
                 Arc::clone(&self.quotas),
+                Arc::clone(&self.credits_modes),
             ),
         )?;
         let configured = fingerprints.keys().cloned().collect::<HashSet<_>>();
@@ -240,14 +249,27 @@ impl Runtime {
         Ok(snapshot.hold(owner))
     }
 
+    #[allow(dead_code)]
+    pub(crate) fn quotas(&self) -> &Arc<QuotaStore> {
+        &self.quotas
+    }
+
+    pub(crate) fn credits_modes(&self) -> &Arc<CreditsModeStore> {
+        &self.credits_modes
+    }
+
     /// Connects live routing measurements to every published router snapshot.
     pub(crate) fn attach_measurements(
         &self,
         usage: Arc<hofund_usage::Ledger>,
         models: Arc<ModelsHost>,
     ) {
-        let measurements =
-            crate::measurements::DaemonMeasurements::new(Arc::clone(&self.quotas), usage, models);
+        let measurements = crate::measurements::DaemonMeasurements::new(
+            Arc::clone(&self.quotas),
+            Arc::clone(&self.credits_modes),
+            usage,
+            models,
+        );
         self.table
             .get()
             .expect("initial snapshot")
@@ -427,6 +449,7 @@ impl Runtime {
         let mut members = fingerprints.keys().cloned().collect::<HashSet<_>>();
         members.extend(subscription_members);
         self.cooldowns.retain_members(&members);
+        self.credits_modes.retain_members(&members);
         let mut changed = Vec::new();
         for (id, fingerprint) in &fingerprints {
             match previous.get(id) {
@@ -487,6 +510,7 @@ impl Runtime {
                 .collect::<HashSet<_>>();
             members.extend(subscriptions::member_ids(&plan.subscriptions));
             self.cooldowns.retain_members(&members);
+            self.credits_modes.retain_members(&members);
         }
         changed
     }

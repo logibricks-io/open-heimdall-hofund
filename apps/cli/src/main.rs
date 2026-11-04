@@ -204,7 +204,7 @@ enum Command {
     },
     Subscription(SubscriptionCommand),
     Accounts(AccountsCommand),
-    /// `quota`, `quota history`, and `quota wait`.
+    /// `quota`, `quota history`, `quota wait`, and `quota credits`.
     Quota(quota::QuotaCommand),
     /// `warmup` and `warmup <subscription>/<account>`.
     Warmup(warmup::WarmupCommand),
@@ -839,6 +839,8 @@ commands:
   quota [<provider>...] [--json]  print what is left of each subscription
   quota wait <provider|account> [--timeout <duration>] [--quiet]
   quota history [<provider|account>...] [--days <n>] [--json]
+  quota credits [--json]
+  quota credits <subscription>/<account> [on|first|last|off] [--json]
   warmup [--json]  last daily warm-up per account
   warmup <subscription>/<account>  run warm-up now
   models [<model>]                show catalog spec and prices for route models

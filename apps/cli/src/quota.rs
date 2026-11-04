@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use chrono::{DateTime, Local, TimeDelta, TimeZone, Utc};
 use hofund_control_client::hofund_control_proto::{
-    Quota, QuotaHistory, QuotaHistoryQuery, QuotaKind, QuotaPoint, QuotaQuery, QuotaSpan,
-    QuotaStanding, QuotaTime,
+    Quota, QuotaCreditsModeEntry, QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistory,
+    QuotaHistoryQuery, QuotaKind, QuotaPoint, QuotaQuery, QuotaSpan, QuotaStanding, QuotaTime,
 };
 
 use crate::commands::{client, failure};
@@ -39,6 +39,9 @@ pub(crate) const QUOTA_HELP: &str = "\
 usage: hofund quota [<provider|name|kind|alias>...] [--json] [--config PATH]
        hofund quota wait <provider|account> [--timeout <duration>] [--quiet]
        hofund quota history [<provider|account>...] [--days <n>] [--json]
+       hofund quota credits [--json]
+       hofund quota credits <subscription>/<account> [--json]
+       hofund quota credits <subscription>/<account> on|first|last|off [--json]
 
 `quota` prints what is left of every subscription hofund reads, asked of the
 vendors now: one line per card with each window's use, when it starts again,
@@ -62,6 +65,14 @@ days, a reading only when it changed: the latest readings of each window, or
 with --json every one since --days days ago, as
 GET /v1/hofund/quotas/history?days=&provider=&user= answers. A provider, an
 account, or <provider>/<account> narrows it.
+
+`quota credits` lists every subscription account whose credits spending mode
+is not the default `on`, or shows or sets one account. Modes are `on`
+(normal order), `first` (spend credits before other members), `last` (only
+after other usable members), and `off` (never spend credits). The gateway
+serves the same at GET /v1/hofund/quotas/credits-modes and POST
+/v1/hofund/quotas/credits/settings. Non-default modes also appear as
+creditsMode on each quota card.
 ";
 
 /// A parsed `hofund quota` command line.
@@ -81,10 +92,27 @@ pub(crate) enum QuotaCommand {
         timeout: Option<Duration>,
         quiet: bool,
     },
+    /// `quota credits` subcommands.
+    Credits(CreditsCommand),
     /// A command line that fails with this exit code and message.
     Invalid { code: u8, message: String },
     /// `help` anywhere in the words.
     Help,
+}
+
+/// Parsed `hofund quota credits` words.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum CreditsCommand {
+    /// Every account not on the default mode.
+    List { json: bool },
+    /// One account's current mode.
+    Show { target: String, json: bool },
+    /// Set one account's mode.
+    Set {
+        target: String,
+        mode: String,
+        json: bool,
+    },
 }
 
 /// Parses the words after `quota`. Errors carry their exit codes: 2 for a
@@ -93,14 +121,63 @@ pub(crate) fn parse(args: &[&str]) -> QuotaCommand {
     match args {
         ["wait", rest @ ..] => parse_wait(rest),
         ["history", rest @ ..] => parse_history(rest),
-        [
-            verb @ ("reset" | "auto-reset" | "credits" | "alert" | "refresh"),
-            ..,
-        ] => QuotaCommand::Invalid {
+        ["credits", rest @ ..] => match parse_credits(rest) {
+            Ok(command) => QuotaCommand::Credits(command),
+            Err(other) => other,
+        },
+        [verb @ ("reset" | "auto-reset" | "alert" | "refresh"), ..] => QuotaCommand::Invalid {
             code: 2,
             message: format!("hofund quota {verb} is not supported yet"),
         },
         rest => parse_list(rest),
+    }
+}
+
+const CREDITS_MODES: &[&str] = &["on", "first", "last", "off"];
+
+fn parse_credits(args: &[&str]) -> Result<CreditsCommand, QuotaCommand> {
+    let mut json = false;
+    let mut positionals = Vec::new();
+    for arg in args {
+        match *arg {
+            "--json" | "-j" => json = true,
+            "help" | "-h" | "--help" => return Err(QuotaCommand::Help),
+            other if other.starts_with('-') => {
+                return Err(QuotaCommand::Invalid {
+                    code: 1,
+                    message: format!("unknown flag {other}\n{QUOTA_HELP}"),
+                });
+            }
+            other => positionals.push(other.to_owned()),
+        }
+    }
+    match positionals.as_slice() {
+        [] => Ok(CreditsCommand::List { json }),
+        [target] => Ok(CreditsCommand::Show {
+            target: target.clone(),
+            json,
+        }),
+        [target, mode] => {
+            let mode = mode.to_ascii_lowercase();
+            if CREDITS_MODES.contains(&mode.as_str()) {
+                Ok(CreditsCommand::Set {
+                    target: target.clone(),
+                    mode,
+                    json,
+                })
+            } else {
+                Err(QuotaCommand::Invalid {
+                    code: 1,
+                    message: format!(
+                        "credits mode must be on, first, last, or off, not {mode:?}\n{QUOTA_HELP}"
+                    ),
+                })
+            }
+        }
+        _ => Err(QuotaCommand::Invalid {
+            code: 1,
+            message: format!("too many arguments after credits\n{QUOTA_HELP}"),
+        }),
     }
 }
 
@@ -276,7 +353,99 @@ pub(crate) fn run(config: &Path, command: QuotaCommand) -> ExitCode {
             timeout,
             quiet,
         } => ExitCode::from(runtime.block_on(wait(config, &target, timeout, quiet))),
+        QuotaCommand::Credits(command) => printed(runtime.block_on(run_credits(config, command))),
     }
+}
+
+fn split_credits_target(target: &str) -> Result<(String, String), String> {
+    let (provider, user) = target.split_once('/').ok_or_else(|| {
+        "use subscription/account, for example codex/user@example.test".to_owned()
+    })?;
+    if provider.is_empty() || user.is_empty() {
+        return Err("subscription and account must be non-empty".to_owned());
+    }
+    Ok((provider.to_owned(), user.to_owned()))
+}
+
+async fn run_credits(config: &Path, command: CreditsCommand) -> Result<String, String> {
+    match command {
+        CreditsCommand::List { json } => credits_list(config, json).await,
+        CreditsCommand::Show { target, json } => credits_show(config, &target, json).await,
+        CreditsCommand::Set { target, mode, json } => {
+            credits_set(config, &target, &mode, json).await
+        }
+    }
+}
+
+async fn credits_list(config: &Path, json: bool) -> Result<String, String> {
+    let client = client(config).await?;
+    let response = client.quota_credits_modes().await.map_err(failure)?;
+    if json {
+        return serde_json::to_string_pretty(&response).map_err(|error| error.to_string());
+    }
+    if response.accounts.is_empty() {
+        return Ok("every account uses the default credits mode on".to_owned());
+    }
+    Ok(response
+        .accounts
+        .iter()
+        .map(format_credits_entry)
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
+async fn credits_show(config: &Path, target: &str, json: bool) -> Result<String, String> {
+    let (provider, user) = split_credits_target(target)?;
+    let client = client(config).await?;
+    let response = client.quota_credits_modes().await.map_err(failure)?;
+    let mode = credits_mode_for(&response.accounts, &provider, &user);
+    if json {
+        return serde_json::to_string_pretty(&serde_json::json!({
+            "provider": provider,
+            "user": user,
+            "mode": mode,
+        }))
+        .map_err(|error| error.to_string());
+    }
+    Ok(format!("{provider} / {user}: {mode}"))
+}
+
+async fn credits_set(
+    config: &Path,
+    target: &str,
+    mode: &str,
+    json: bool,
+) -> Result<String, String> {
+    let (provider, user) = split_credits_target(target)?;
+    let client = client(config).await?;
+    let response = client
+        .set_quota_credits(QuotaCreditsSetRequest::new(provider, user, mode))
+        .await
+        .map_err(failure)?;
+    if json {
+        return serde_json::to_string_pretty(&response).map_err(|error| error.to_string());
+    }
+    Ok(format_credits_set(&response))
+}
+
+fn credits_mode_for(accounts: &[QuotaCreditsModeEntry], provider: &str, user: &str) -> String {
+    accounts
+        .iter()
+        .find(|entry| {
+            entry.provider.eq_ignore_ascii_case(provider) && entry.user.eq_ignore_ascii_case(user)
+        })
+        .map_or_else(|| "on".to_owned(), |entry| entry.mode.clone())
+}
+
+fn format_credits_entry(entry: &QuotaCreditsModeEntry) -> String {
+    format!("{} / {}: {}", entry.provider, entry.user, entry.mode)
+}
+
+fn format_credits_set(response: &QuotaCreditsSetResponse) -> String {
+    format!(
+        "{} / {}: {}",
+        response.provider, response.user, response.mode
+    )
 }
 
 /// The provider and subscription ids the config names, for telling a name
@@ -413,6 +582,9 @@ where
         if !card.error.is_empty() {
             line.push_str("  ");
             line.push_str(&card.error);
+        }
+        if !card.credits_mode.is_empty() {
+            line.push_str(&format!("  credits:{}", card.credits_mode));
         }
         line.push_str(&reading_cell(
             card.as_of.as_ref(),
@@ -1158,10 +1330,12 @@ mod tests {
     };
 
     use super::{
-        QuotaCommand, Step, Target, Waiter, go_duration, new_run, parse, parse_go_duration,
-        plan_term, points_cell, reading_cell, render_history, render_list, reset_clock, resolve,
-        round_wait, until_short, window_cell,
+        CreditsCommand, QuotaCommand, Step, Target, Waiter, credits_mode_for, format_credits_entry,
+        go_duration, new_run, parse, parse_credits, parse_go_duration, plan_term, points_cell,
+        reading_cell, render_history, render_list, reset_clock, resolve, round_wait,
+        split_credits_target, until_short, window_cell,
     };
+    use hofund_control_client::hofund_control_proto::QuotaCreditsModeEntry;
 
     fn zone() -> FixedOffset {
         FixedOffset::east_opt(8 * 3600).expect("offset")
@@ -1886,5 +2060,79 @@ mod tests {
         );
         assert_eq!(super::balance_text(-1000.0, ""), "-1,000 left");
         assert_eq!(super::balance_text(12.0, "USD"), "12 USD left");
+    }
+
+    #[test]
+    fn d42_parse_credits_list_show_and_set() {
+        assert_eq!(
+            parse(&["credits"]),
+            QuotaCommand::Credits(CreditsCommand::List { json: false })
+        );
+        assert_eq!(
+            parse(&["credits", "--json"]),
+            QuotaCommand::Credits(CreditsCommand::List { json: true })
+        );
+        assert_eq!(
+            parse(&["credits", "codex/user@x.io"]),
+            QuotaCommand::Credits(CreditsCommand::Show {
+                target: "codex/user@x.io".to_owned(),
+                json: false,
+            })
+        );
+        assert_eq!(
+            parse(&["credits", "codex/user@x.io", "last"]),
+            QuotaCommand::Credits(CreditsCommand::Set {
+                target: "codex/user@x.io".to_owned(),
+                mode: "last".to_owned(),
+                json: false,
+            })
+        );
+        assert!(matches!(
+            parse(&["credits", "codex/user@x.io", "maybe"]),
+            QuotaCommand::Invalid { code: 1, .. }
+        ));
+        assert!(matches!(
+            parse_credits(&["codex/user@x.io", "on", "extra"]),
+            Err(QuotaCommand::Invalid { code: 1, .. })
+        ));
+    }
+
+    #[test]
+    fn d42_split_credits_target_requires_subscription_and_account() {
+        let (provider, user) = split_credits_target("codex/a@x.io").expect("split");
+        assert_eq!(provider, "codex");
+        assert_eq!(user, "a@x.io");
+        assert!(split_credits_target("noseparator").is_err());
+    }
+
+    #[test]
+    fn d42_credits_mode_lookup_and_list_render() {
+        let accounts = vec![
+            QuotaCreditsModeEntry {
+                provider: "codex".to_owned(),
+                user: "a@x.io".to_owned(),
+                mode: "first".to_owned(),
+            },
+            QuotaCreditsModeEntry {
+                provider: "claude".to_owned(),
+                user: "b@x.io".to_owned(),
+                mode: "off".to_owned(),
+            },
+        ];
+        assert_eq!(credits_mode_for(&accounts, "codex", "A@x.io"), "first");
+        assert_eq!(credits_mode_for(&accounts, "codex", "z@x.io"), "on");
+        assert_eq!(format_credits_entry(&accounts[0]), "codex / a@x.io: first");
+    }
+
+    #[test]
+    fn d42_render_list_shows_credits_mode_in_text_and_json() {
+        let known = vec!["codex".to_owned()];
+        let mut card = card("codex", QuotaKind::Subscription);
+        card.user = "a@x.io".to_owned();
+        card.credits_mode = "last".to_owned();
+        let text = render_list(vec![card.clone()], &[], false, &known, &now()).expect("text");
+        assert!(text.contains("credits:last"), "{text}");
+        let json = render_list(vec![card], &[], true, &known, &now()).expect("json");
+        assert!(json.contains("\"creditsMode\": \"last\""), "{json}");
     }
 }

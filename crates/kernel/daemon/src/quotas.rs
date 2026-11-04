@@ -32,6 +32,7 @@ impl DaemonQuotas {
         let now = self.runtime.quota_now();
         let served = served_since(Arc::clone(&self.usage), now).await;
         apply_last_served(&mut data, &served, now);
+        crate::credits_modes::decorate_quotas(&mut data, self.runtime.credits_modes());
         QuotaResponse {
             data,
             standings,

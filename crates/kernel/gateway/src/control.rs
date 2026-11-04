@@ -28,11 +28,12 @@ use hofund_control_proto::{
     GatewayKeyRequest, GatewayKeyResponse, GatewayKeyRestoreRequest, HealthResponse, MAX_ID_BYTES,
     MAX_REQUEST_BODY_BYTES, ModelListResponse, PicksResponse, PicksSetRequest, ProviderKeyRequest,
     ProviderKeysResponse, ProviderListResponse, ProviderTestRequest, ProviderTestResponse,
-    QuotaHistoryQuery, QuotaHistoryResponse, QuotaQuery, QuotaResponse, ReloadRequest,
-    RouteListResponse, RouteModelListResponse, RouteQuery, SessionRouteResponse, ShutdownRequest,
-    ShutdownResponse, StatusResponse, TokenRotateRequest, TokenRotateResponse, Topic,
-    UnroutedListResponse, UsageQuery, UsageResponse, WarmupListResponse, WarmupRunRequest,
-    WarmupRunResponse, decode_request,
+    QuotaCreditsModesResponse, QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryQuery,
+    QuotaHistoryResponse, QuotaQuery, QuotaResponse, ReloadRequest, RouteListResponse,
+    RouteModelListResponse, RouteQuery, SessionRouteResponse, ShutdownRequest, ShutdownResponse,
+    StatusResponse, TokenRotateRequest, TokenRotateResponse, Topic, UnroutedListResponse,
+    UsageQuery, UsageResponse, WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
+    decode_request,
 };
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
@@ -364,6 +365,31 @@ pub trait ControlState: Send + Sync {
     fn quotas(&self, query: QuotaQuery) -> ControlFuture<'_, QuotaResponse>;
     /// Reports sampled quota history.
     fn quota_history(&self, query: QuotaHistoryQuery) -> ControlFuture<'_, QuotaHistoryResponse>;
+    /// Lists subscription accounts whose credits spending mode is not the default.
+    fn quota_credits_modes(&self) -> ControlFuture<'_, QuotaCreditsModesResponse> {
+        Box::pin(async {
+            Err(ControlError::new(
+                ControlErrorKind::BadRequest,
+                "quota credits modes are not supported by this control state",
+                "control",
+            )
+            .into())
+        })
+    }
+    /// Sets how one subscription account spends credits in routing.
+    fn set_quota_credits(
+        &self,
+        _request: QuotaCreditsSetRequest,
+    ) -> ControlFuture<'_, QuotaCreditsSetResponse> {
+        Box::pin(async {
+            Err(ControlError::new(
+                ControlErrorKind::BadRequest,
+                "quota credits settings are not supported by this control state",
+                "control",
+            )
+            .into())
+        })
+    }
     /// Lists last daily warm-up results per subscription account.
     fn warmups(&self) -> ControlFuture<'_, WarmupListResponse> {
         Box::pin(async {
@@ -594,6 +620,14 @@ impl Control {
             .route(
                 "/v1/hofund/quotas/history",
                 get(quota_history).head(method_not_allowed),
+            )
+            .route(
+                "/v1/hofund/quotas/credits-modes",
+                get(quota_credits_modes).head(method_not_allowed),
+            )
+            .route(
+                "/v1/hofund/quotas/credits/settings",
+                post(set_quota_credits),
             )
             .route("/v1/hofund/warmups", get(warmups).head(method_not_allowed))
             .route("/v1/hofund/warmups/run", post(run_warmup))
@@ -1256,6 +1290,18 @@ async fn quotas(State(state): State<HttpState>, uri: Uri) -> Response {
 async fn quota_history(State(state): State<HttpState>, uri: Uri) -> Response {
     let query = QuotaHistoryQuery::parse(uri.query());
     operation_response!(state.control.state.quota_history(query).await)
+}
+
+async fn quota_credits_modes(State(state): State<HttpState>) -> Response {
+    operation_response!(state.control.state.quota_credits_modes().await)
+}
+
+async fn set_quota_credits(State(state): State<HttpState>, body: Bytes) -> Response {
+    let request = match decode_body::<QuotaCreditsSetRequest>(&body) {
+        Ok(request) => request,
+        Err(failure) => return failure_response(failure),
+    };
+    operation_response!(state.control.state.set_quota_credits(request).await)
 }
 
 async fn warmups(State(state): State<HttpState>) -> Response {

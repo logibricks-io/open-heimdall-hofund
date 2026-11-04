@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::API_VERSION;
+use crate::{API_VERSION, ControlError, ControlErrorKind, MAX_ID_BYTES};
 
 /// An RFC 3339 timestamp on a quota reading or window.
 #[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -96,6 +96,9 @@ pub struct Quota {
     /// First key user id when several keys share one account balance.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub shared_balance: String,
+    /// Credits spending mode when not the default `on`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub credits_mode: String,
     /// Router member identity for a plan key. Not part of the wire model.
     #[serde(skip)]
     pub member: String,
@@ -458,6 +461,112 @@ const fn is_false(value: &bool) -> bool {
 
 fn is_zero(value: &f64) -> bool {
     *value == 0.0
+}
+
+/// One account's non-default credits mode.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuotaCreditsModeEntry {
+    /// Subscription id.
+    pub provider: String,
+    /// Lowercase account id.
+    pub user: String,
+    /// `first`, `last`, or `off`.
+    pub mode: String,
+}
+
+/// Response for `GET /v1/hofund/quotas/credits-modes`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuotaCreditsModesResponse {
+    /// Body wire version.
+    pub version: u32,
+    /// Accounts not on the default mode.
+    pub accounts: Vec<QuotaCreditsModeEntry>,
+}
+
+/// Request for `POST /v1/hofund/quotas/credits/settings`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QuotaCreditsSetRequest {
+    /// Body wire version.
+    pub version: u32,
+    /// Configured subscription id.
+    pub provider: String,
+    /// Account id.
+    pub user: String,
+    /// `on`, `first`, `last`, or `off`.
+    pub mode: String,
+}
+
+impl QuotaCreditsSetRequest {
+    /// Builds a set request for one account.
+    #[must_use]
+    pub fn new(
+        provider: impl Into<String>,
+        user: impl Into<String>,
+        mode: impl Into<String>,
+    ) -> Self {
+        Self {
+            version: API_VERSION,
+            provider: provider.into(),
+            user: user.into(),
+            mode: mode.into(),
+        }
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), ControlError> {
+        for (field, value) in [("provider", &self.provider), ("user", &self.user)] {
+            if value.is_empty() || value.len() > MAX_ID_BYTES {
+                return Err(ControlError::new(
+                    ControlErrorKind::Unprocessable,
+                    format!("{field} is missing or too long"),
+                    "validate",
+                ));
+            }
+        }
+        if self.mode.is_empty() || self.mode.len() > MAX_ID_BYTES {
+            return Err(ControlError::new(
+                ControlErrorKind::Unprocessable,
+                "mode is missing or too long",
+                "validate",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Response for `POST /v1/hofund/quotas/credits/settings`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuotaCreditsSetResponse {
+    /// Body wire version.
+    pub version: u32,
+    /// Subscription id.
+    pub provider: String,
+    /// Lowercase account id.
+    pub user: String,
+    /// Mode now stored.
+    pub mode: String,
+}
+
+impl Default for QuotaCreditsModesResponse {
+    fn default() -> Self {
+        Self {
+            version: API_VERSION,
+            accounts: Vec::new(),
+        }
+    }
+}
+
+impl Default for QuotaCreditsSetResponse {
+    fn default() -> Self {
+        Self {
+            version: API_VERSION,
+            provider: String::new(),
+            user: String::new(),
+            mode: String::new(),
+        }
+    }
 }
 
 #[cfg(test)]

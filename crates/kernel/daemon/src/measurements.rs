@@ -19,6 +19,7 @@ const FRESH_WEEK_PACE: f64 = 100.0 / 168.0;
 
 pub(crate) struct DaemonMeasurements {
     quotas: Arc<QuotaStore>,
+    credits_modes: Arc<hofund_router::credits_mode::CreditsModeStore>,
     usage: Arc<Ledger>,
     models: Arc<ModelsHost>,
 }
@@ -26,11 +27,13 @@ pub(crate) struct DaemonMeasurements {
 impl DaemonMeasurements {
     pub(crate) fn new(
         quotas: Arc<QuotaStore>,
+        credits_modes: Arc<hofund_router::credits_mode::CreditsModeStore>,
         usage: Arc<Ledger>,
         models: Arc<ModelsHost>,
     ) -> Self {
         Self {
             quotas,
+            credits_modes,
             usage,
             models,
         }
@@ -77,7 +80,13 @@ impl Measurements for DaemonMeasurements {
         };
         for (index, seat) in seats.iter_mut().enumerate() {
             if let Some(allowance) = allowances.get(&seat.key) {
-                fill_allowance(seat, allowance, &wire_models[index], now);
+                fill_allowance(
+                    seat,
+                    allowance,
+                    &wire_models[index],
+                    now,
+                    &self.credits_modes,
+                );
             } else {
                 seat.known = false;
                 seat.pace = if seat.account { FRESH_WEEK_PACE } else { 0.0 };
@@ -108,14 +117,21 @@ impl Measurements for DaemonMeasurements {
     }
 }
 
-fn fill_allowance(seat: &mut Seat, allowance: &Allowance, model: &str, now: SystemTime) {
+fn fill_allowance(
+    seat: &mut Seat,
+    allowance: &Allowance,
+    model: &str,
+    now: SystemTime,
+    modes: &hofund_router::credits_mode::CreditsModeStore,
+) {
     seat.known = !allowance.windows.is_empty();
     seat.learns &= !seat.known;
     seat.used = allowance.used_for_routing(model, now);
     seat.soon = allowance.routing_renewals(model, now);
     seat.lapse = allowance.lapse(model, now);
     seat.pace = allowance.pace(model, now);
-    seat.credits = allowance.spends_credits(model);
+    let mode = modes.mode_for_member(&seat.key);
+    hofund_router::credits_mode::apply_to_seat(seat, allowance, model, now, mode);
     if let Some((left, left_in)) = allowance.left(model) {
         seat.left = left;
         seat.left_in = left_in;
@@ -220,7 +236,12 @@ mod tests {
         let usage = Arc::new(Ledger::open(&dir.join("usage.sqlite")).expect("ledger"));
         let models = Arc::new(ModelsHost::new(Duration::ZERO, Duration::ZERO));
         (
-            DaemonMeasurements::new(Arc::clone(&quotas), Arc::clone(&usage), models),
+            DaemonMeasurements::new(
+                Arc::clone(&quotas),
+                Arc::new(hofund_router::credits_mode::CreditsModeStore::in_memory()),
+                Arc::clone(&usage),
+                models,
+            ),
             quotas,
             usage,
         )
@@ -423,7 +444,12 @@ mod tests {
         let quotas = Arc::new(QuotaStore::new(dir.path()));
         let usage = Arc::new(Ledger::open(&dir.path().join("usage.sqlite")).expect("ledger"));
         let models = Arc::new(ModelsHost::new(Duration::ZERO, Duration::ZERO));
-        let measurements = DaemonMeasurements::new(quotas, usage, Arc::clone(&models));
+        let measurements = DaemonMeasurements::new(
+            quotas,
+            Arc::new(hofund_router::credits_mode::CreditsModeStore::in_memory()),
+            usage,
+            Arc::clone(&models),
+        );
         let paid = ModelSpec::new("demo", None)
             .expect("model")
             .with_prices(1, 2, 0);

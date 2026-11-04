@@ -11,6 +11,7 @@ use crate::{
     GatewayKeyResponse, GatewayKeyRestoreRequest, HealthResponse, MAX_REQUEST_BODY_BYTES,
     MAX_RESPONSE_BODY_BYTES, ModelListResponse, PicksResponse, PicksSetRequest, ProviderKeyRequest,
     ProviderKeysResponse, ProviderListResponse, ProviderTestRequest, ProviderTestResponse,
+    QuotaCreditsModesResponse, QuotaCreditsSetRequest, QuotaCreditsSetResponse,
     QuotaHistoryResponse, QuotaResponse, ReloadRequest, RouteListResponse, RouteModelListResponse,
     SessionRouteResponse, ShutdownRequest, ShutdownResponse, StatusResponse, TokenRotateRequest,
     TokenRotateResponse, UnroutedListResponse, UsageResponse, WarmupListResponse, WarmupRunRequest,
@@ -231,6 +232,7 @@ request!(AgentHiddenSetRequest);
 request!(AgentPickedOnlyRequest);
 request!(TokenRotateRequest);
 request!(WarmupRunRequest, validate);
+request!(QuotaCreditsSetRequest, validate);
 request!(ShutdownRequest);
 request!(GatewayKeyRequest);
 request!(GatewayKeyRestoreRequest);
@@ -306,6 +308,8 @@ response!(
     GatewayKeyResponse,
     WarmupListResponse,
     WarmupRunResponse,
+    QuotaCreditsModesResponse,
+    QuotaCreditsSetResponse,
 );
 
 #[cfg(test)]
