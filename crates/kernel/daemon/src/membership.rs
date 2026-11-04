@@ -63,6 +63,7 @@ pub(crate) struct Table {
     offline: Arc<Offline>,
     strategies: Arc<StrategyState>,
     affinity: hofund_router::affinity::AffinityState,
+    overflow: hofund_router::OverflowMemory,
     measurements: Mutex<Option<Arc<dyn Measurements>>>,
     model_catalog: Mutex<Option<Arc<hofund_model_catalog::ModelCatalog>>>,
     snapshot: Snapshot,
@@ -293,6 +294,7 @@ fn build_table(
         offline: Arc::new(Offline::new(network)),
         strategies,
         affinity,
+        overflow: hofund_router::OverflowMemory::in_memory(),
         measurements: Mutex::new(None),
         model_catalog: Mutex::new(None),
         snapshot,
@@ -504,7 +506,8 @@ impl Table {
         let mut router = Router::from_routes(routes, policy)
             .with_strategies(Arc::clone(&self.strategies))
             .with_cooldowns(Arc::clone(&self.cooldowns))
-            .with_affinity(self.affinity.clone());
+            .with_affinity(self.affinity.clone())
+            .with_overflow_memory(self.overflow.clone());
         if let Some(quotas) = &self.quotas {
             router = router.with_quotas(Arc::clone(quotas));
         }

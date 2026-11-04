@@ -46,6 +46,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Context overflow detection treats `context window is full` and the
   matching OpenAI input-length wording as too-long on 400, 413, and 422,
   but not on 5xx (D-33).
+- Per-conversation overflow memory (D-38): when a member refuses with
+  overflow wording on a 4xx other than 413, later requests of the same
+  conversation still may use that member but ask it after every other
+  eligible member until the member succeeds, the request shrinks below the
+  refused size, or an hour passes (at most 512 entries are kept).
 - Codex backend input ids longer than 64 characters are replaced with a
   deterministic prefixed SHA-256, except vendor-sealed reasoning items
   (D-35).
