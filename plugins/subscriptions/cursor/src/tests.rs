@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use hofund_kit_subscription::{PipedScript, TestHost, block_on};
+use hofund_kit_subscription::{PipedScript, TestHost, block_on, join_all, yield_times};
 use hofund_plugin_api::{
     PluginId, PluginKind, RawTable, RawValue, SignInCtx, SignInProof, Subscription,
     SubscriptionFactory,
@@ -381,26 +381,35 @@ fn a2a_40_browser_sign_in_cancel_during_poll() {
         for _ in 0..30 {
             host.http().enqueue_response(404, &[], b"");
         }
+        let ctx = ctx();
+        join_all(vec![
+            Box::pin(async {
+                let error = sub
+                    .complete_sign_in(&ctx, SignInProof::Await, host.context())
+                    .await
+                    .expect_err("cancelled");
+                assert_eq!(error.kind(), PluginErrorKind::Config);
+                assert!(error.to_string().contains("cancelled"));
+            }),
+            Box::pin(async {
+                loop {
+                    if host
+                        .http()
+                        .calls()
+                        .iter()
+                        .any(|call| call.uri().contains("/auth/poll"))
+                    {
+                        sub.cancel_sign_in(&ctx, host.context())
+                            .await
+                            .expect("cancel");
+                        return;
+                    }
+                    yield_times(1).await;
+                }
+            }),
+        ])
+        .await;
     });
-    let ctx = ctx();
-    let host_ctx = host.context().clone();
-    let sub_thread = Arc::clone(&sub);
-    let finish = std::thread::spawn(move || {
-        block_on(sub_thread.complete_sign_in(&ctx, SignInProof::Await, &host_ctx))
-    });
-    while !host
-        .http()
-        .calls()
-        .iter()
-        .any(|call| call.uri().contains("/auth/poll"))
-    {
-        std::thread::sleep(std::time::Duration::from_millis(1));
-    }
-    block_on(sub.cancel_sign_in(&ctx(), host.context())).expect("cancel");
-    let result = finish.join().expect("thread");
-    let error = result.expect_err("cancelled");
-    assert_eq!(error.kind(), PluginErrorKind::Config);
-    assert!(error.to_string().contains("cancelled"));
 }
 
 #[test]
@@ -466,8 +475,11 @@ fn a2a_42_list_models_spawn_uses_isolated_models_dir() {
         .account(id.clone(), "models@example.test")
         .expect("account");
     block_on(host.context().accounts().upsert(account, blob.to_secret())).expect("upsert");
-    host.process()
-        .script_piped(PipedScript::new().line(MODELS_FIXTURE.trim()));
+    host.process().script_piped(
+        PipedScript::new()
+            .line("auto - Auto (default)")
+            .exits(|_| vec![]),
+    );
     let list = block_on(sub.list_models(&id, host.context())).expect("models");
     assert!(!list.models().is_empty());
     let label = id
