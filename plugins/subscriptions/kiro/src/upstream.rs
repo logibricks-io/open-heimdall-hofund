@@ -10,7 +10,7 @@ use hofund_plugin_sdk::Call;
 use hofund_plugin_sdk::json::{self, Value};
 use hofund_plugin_sdk::oauth::secret_text;
 
-use crate::creds::Stored;
+use crate::creds::{self, Stored};
 use crate::refresh;
 use crate::{Endpoints, kiro_body, kiro_stream};
 
@@ -40,9 +40,7 @@ impl KiroUpstream {
         _inbound: ProtocolId,
     ) -> Result<Completion, PluginError> {
         let profile = creds::effective_profile_arn(&stored.credential);
-        let base = self
-            .endpoints
-            .chat_base(profile, &stored.credential.region);
+        let base = self.endpoints.chat_base(profile, &stored.credential.region);
         let url = format!("{base}/generateAssistantResponse");
         let body = kiro_body::encode(&request, &stored.credential)?;
         let mut call = Call::post(url)

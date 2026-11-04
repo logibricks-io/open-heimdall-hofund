@@ -6,9 +6,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use hofund_plugin_api::{
-    AccountId, AccountStatus, BinaryName, BuildError, ConfigError, HostContext,
-    ModelList, PluginError, PluginId, QuotaWindow, RawTable, Schema, SignInChallenge, SignInCtx,
-    SignInFlow, SignInFlowKind, SignInProof, Subscription, SubscriptionFactory, SubscriptionSpec,
+    AccountId, AccountStatus, BinaryName, BuildError, ConfigError, HostContext, ModelList,
+    PluginError, PluginId, QuotaWindow, RawTable, Schema, SignInChallenge, SignInCtx, SignInFlow,
+    SignInFlowKind, SignInProof, Subscription, SubscriptionFactory, SubscriptionSpec,
     UpstreamProvider, ValidConfig,
 };
 use hofund_plugin_sdk::Contribution;

@@ -129,5 +129,6 @@ fn path_for_wire(wire: ProtocolId) -> &'static str {
         ProtocolId::OPENAI_RESPONSES => "/api/llm/r/v1",
         ProtocolId::GENERATIVE_LANGUAGE => "/api/llm/g/v1",
         ProtocolId::OPENAI_CHAT => "/api/llm/o/v1",
+        _ => "/api/llm/o/v1",
     }
 }

@@ -138,11 +138,7 @@ fn a2b_7_secrets_not_in_debug_or_errors() {
         key,
         "malformed comment must not truncate the key"
     );
-    std::fs::write(
-        &path,
-        format!("windsurf_api_key = \"{key}\n"),
-    )
-    .expect("rewrite");
+    std::fs::write(&path, format!("windsurf_api_key = \"{key}\n")).expect("rewrite");
     let malformed = creds::read_credentials(&path).expect_err("unterminated");
     let malformed_text = malformed.to_string();
     assert!(!malformed_text.contains(key));

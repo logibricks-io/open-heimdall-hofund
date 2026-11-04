@@ -355,3 +355,26 @@ fn a2b_40_eu_account_quota_uses_eu_api_host() {
             .is_some_and(|call| call.uri().contains("factory-eu.test"))
     );
 }
+
+#[test]
+fn a2b_42_eu_account_upstream_uses_eu_api_host() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_oauth_eu(&host);
+    host.http().enqueue(
+        json!({
+            "id": "chat-eu",
+            "object": "chat.completion",
+            "choices": [{"message": {"role": "assistant", "content": "ok"}}]
+        })
+        .to_string()
+        .into_bytes(),
+    );
+    let sub = subscription(&host);
+    let upstream = sub.upstream(&id, host.context()).expect("upstream");
+    let query = ProbeQuery::new(ProtocolId::OPENAI_CHAT, "glm-5.3").expect("query");
+    block_on(upstream.probe(&query)).expect("probe");
+    assert!(host.http().calls().last().is_some_and(|call| {
+        call.uri().contains("factory-eu.test") && call.uri().contains("/api/llm/o/v1")
+    }));
+}
