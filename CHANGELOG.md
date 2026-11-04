@@ -23,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Relayed Responses `url_citation` and `container_file_citation` annotations
+  without `start_index`/`end_index` are dropped on relay, and poisoned Codex
+  thread history is healed on the way to the ChatGPT backend (D-66).
+
 - Vendor overload (HTTP 529 or a 5xx whose message says overloaded) rests
   only the requested model on that member for 30 seconds, or for
   `Retry-After` capped at one minute, without climbing the generic failure

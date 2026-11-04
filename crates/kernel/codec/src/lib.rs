@@ -19,6 +19,8 @@ mod jsonutil;
 mod openai_chat;
 mod openai_responses;
 mod opening;
+pub mod citation_tidy;
+pub mod namespace_tidy;
 mod passthrough;
 mod reasoning_tidy;
 mod refusal;

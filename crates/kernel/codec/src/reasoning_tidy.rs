@@ -13,6 +13,7 @@
 
 use serde_json::Value;
 
+use crate::citation_tidy;
 use crate::openai_responses::made_reasoning;
 use crate::passthrough::RawTap;
 
@@ -71,7 +72,7 @@ impl RawTap for ReasoningTap {
 /// SSE lines with each `data:` line's reasoning items made over, line ends
 /// kept.
 pub(crate) fn tidy_lines(bytes: &[u8]) -> Vec<u8> {
-    if !contains(bytes, MARK) {
+    if !contains(bytes, MARK) && !contains(bytes, b"\"annotations\"") {
         return bytes.to_vec();
     }
     let mut out = Vec::with_capacity(bytes.len());
@@ -81,11 +82,17 @@ pub(crate) fn tidy_lines(bytes: &[u8]) -> Vec<u8> {
             .rposition(|&byte| byte != b'\n' && byte != b'\r')
             .map_or(0, |index| index + 1);
         let (body, end) = line.split_at(body_len);
-        let tidied = body
-            .strip_prefix(b"data:")
-            .filter(|data| contains(data, MARK))
-            .and_then(tidy_body);
+        let tidied = body.strip_prefix(b"data:").and_then(|data| {
+            citation_tidy::tidy_event(data.strip_prefix(b" ").unwrap_or(data)).or_else(|| {
+                data.strip_prefix(b" ")
+                    .unwrap_or(data)
+                    .starts_with(b"{")
+                    .then(|| tidy_body(data.strip_prefix(b" ").unwrap_or(data)))
+                    .flatten()
+            })
+        });
         match tidied {
+            Some(data) if data.is_empty() => {}
             Some(data) => {
                 out.extend_from_slice(b"data: ");
                 out.extend(data);
@@ -105,7 +112,9 @@ pub(crate) fn tidy_lines(bytes: &[u8]) -> Vec<u8> {
 pub(crate) fn tidy_body(data: &[u8]) -> Option<Vec<u8>> {
     let mut value: Value = serde_json::from_slice(data).ok()?;
     let event = value.as_object_mut()?;
-    let mut changed = event.get_mut("item").is_some_and(make_over);
+    let mut changed = event.get_mut("item").is_some_and(|item| {
+        make_over(item) | citation_tidy::drop_offsetless_citations(item)
+    });
     let response = if event.get("response").is_some_and(Value::is_object) {
         event.get_mut("response").and_then(Value::as_object_mut)
     } else if event.get("object").and_then(Value::as_str) == Some("response") {
@@ -115,7 +124,7 @@ pub(crate) fn tidy_body(data: &[u8]) -> Option<Vec<u8>> {
     };
     if let Some(Value::Array(output)) = response.and_then(|response| response.get_mut("output")) {
         for item in output {
-            changed |= make_over(item);
+            changed |= make_over(item) | citation_tidy::drop_offsetless_citations(item);
         }
     }
     if !changed {
@@ -126,10 +135,12 @@ pub(crate) fn tidy_body(data: &[u8]) -> Option<Vec<u8>> {
 
 /// A whole relayed reply with its reasoning items made over, else as it came.
 pub(crate) fn tidy_whole(bytes: Vec<u8>) -> Vec<u8> {
-    if !contains(&bytes, MARK) {
-        return bytes;
-    }
-    tidy_body(&bytes).unwrap_or(bytes)
+    let bytes = if contains(&bytes, MARK) {
+        tidy_body(&bytes).unwrap_or(bytes)
+    } else {
+        bytes
+    };
+    citation_tidy::tidy_whole(bytes)
 }
 
 fn make_over(item: &mut Value) -> bool {
