@@ -57,7 +57,10 @@ fn stream_account_refusal(body: &[u8]) -> bool {
         let Ok(event) = json::from_str::<Value>(data.trim()) else {
             continue;
         };
-        let kind = event.get("type").and_then(Value::as_str).unwrap_or_default();
+        let kind = event
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         if matches!(kind, "response.failed" | "error") {
             let message = event
                 .pointer("/response/error/message")
@@ -88,8 +91,7 @@ fn body_contains(body: &[u8], needle: &str) -> bool {
 }
 
 fn vendor_overloaded(status: u16, message: &str) -> bool {
-    status == 529
-        || (status >= 500 && message.to_ascii_lowercase().contains("overloaded"))
+    status == 529 || (status >= 500 && message.to_ascii_lowercase().contains("overloaded"))
 }
 
 /// Rewrites `body` to use `model` as the routed model id.

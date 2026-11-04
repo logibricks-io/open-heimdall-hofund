@@ -20,12 +20,12 @@ use hofund_plugin_sdk::{
     HeaderMap, HttpRequest, HttpResponse, refused_passthrough, text_response, without_passthrough,
 };
 
+use crate::account_refusal;
 use crate::input::{self, sealed};
 use crate::{
     Kernel, capped_models, client_version, entry, error_response, ids, json_response,
     listed_models, official,
 };
-use crate::account_refusal;
 
 /// The route prefix Codex's base URL ends with.
 pub(crate) const PREFIX: &str = "/backend-api/codex";
@@ -772,25 +772,18 @@ async fn relay(
             && !fallbacks.is_empty()
         {
             let stream = relay_reply_is_stream(response.headers());
-            let likely = stream
-                || matches!(status, 403 | 429 | 529)
-                || status >= 500;
+            let likely = stream || matches!(status, 403 | 429 | 529) || status >= 500;
             if likely {
                 let (parts, body) = response.into_parts();
                 let bytes = read_up_to(body, REFUSAL_CAP).await.unwrap_or_default();
-                if account_refusal::codex_account_refusal(
-                    status,
-                    &parts.headers,
-                    &bytes,
-                    stream,
-                ) && let Some(model) = fallbacks.first()
+                if account_refusal::codex_account_refusal(status, &parts.headers, &bytes, stream)
+                    && let Some(model) = fallbacks.first()
                     && let Some(rewritten) =
                         account_refusal::with_model(request.body().bytes(), model)
                 {
                     let (body, compaction) = input::for_hofund(&rewritten);
                     if !compaction {
-                        let mut retry =
-                            HttpRequest::new(Body::from(body.unwrap_or(rewritten)));
+                        let mut retry = HttpRequest::new(Body::from(body.unwrap_or(rewritten)));
                         *retry.method_mut() = request.method().clone();
                         *retry.uri_mut() = request.uri().clone();
                         *retry.headers_mut() = request.headers().clone();

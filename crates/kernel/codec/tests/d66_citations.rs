@@ -7,7 +7,8 @@ use serde_json::json;
 #[test]
 fn d66_1_whole_reply_drops_offsetless_url_citation() {
     let good = json!({"type":"url_citation","start_index":0,"end_index":4,"url":"https://example.com/g","title":"G"});
-    let bad = json!({"type":"url_citation","title":"V","url":"https://example.com/v","site_name":"Ark"});
+    let bad =
+        json!({"type":"url_citation","title":"V","url":"https://example.com/v","site_name":"Ark"});
     let whole = json!({
         "id": "resp_1",
         "object": "response",
@@ -51,14 +52,19 @@ fn d66_3_file_citation_with_one_index_is_kept() {
         }],
     });
     let tidied = citation_tidy::tidy_whole(whole.to_string().into_bytes());
-    assert!(String::from_utf8(tidied).expect("utf-8").contains("\"index\":3"));
+    assert!(
+        String::from_utf8(tidied)
+            .expect("utf-8")
+            .contains("\"index\":3")
+    );
 }
 
 #[test]
 fn d66_4_relay_tap_strips_bad_citation_from_stream_line() {
     let codec = OpenAiResponses;
     let mut tap = codec.raw_tap("vendor/m", "m");
-    let good = r#"{"type":"url_citation","start_index":0,"end_index":1,"url":"https://example.com/g"}"#;
+    let good =
+        r#"{"type":"url_citation","start_index":0,"end_index":1,"url":"https://example.com/g"}"#;
     let bad = r#"{"type":"url_citation","url":"https://example.com/v","title":"V"}"#;
     let line = format!(
         "data: {{\"type\":\"response.output_item.done\",\"item\":{{\"type\":\"message\",\"content\":[{{\"type\":\"output_text\",\"text\":\"hi\",\"annotations\":[{good},{bad}]}}]}}}}\n\n"

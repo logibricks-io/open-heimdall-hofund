@@ -43,7 +43,10 @@ fn d67_2_sealed_and_plain_calls_are_unchanged() {
     let whole = json!({"object":"response","output":[sealed.clone(), plain.clone()]});
     let tidied = namespace_tidy::tidy_whole(whole.to_string().into_bytes());
     let value: serde_json::Value = serde_json::from_slice(&tidied).expect("json");
-    assert_eq!(value["output"][0]["encrypted_function_args"], sealed["encrypted_function_args"]);
+    assert_eq!(
+        value["output"][0]["encrypted_function_args"],
+        sealed["encrypted_function_args"]
+    );
     assert!(value["output"][1].get("encrypted_function_args").is_none());
 }
 

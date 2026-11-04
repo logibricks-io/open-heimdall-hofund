@@ -112,9 +112,9 @@ pub(crate) fn tidy_lines(bytes: &[u8]) -> Vec<u8> {
 pub(crate) fn tidy_body(data: &[u8]) -> Option<Vec<u8>> {
     let mut value: Value = serde_json::from_slice(data).ok()?;
     let event = value.as_object_mut()?;
-    let mut changed = event.get_mut("item").is_some_and(|item| {
-        make_over(item) | citation_tidy::drop_offsetless_citations(item)
-    });
+    let mut changed = event
+        .get_mut("item")
+        .is_some_and(|item| make_over(item) | citation_tidy::drop_offsetless_citations(item));
     let response = if event.get("response").is_some_and(Value::is_object) {
         event.get_mut("response").and_then(Value::as_object_mut)
     } else if event.get("object").and_then(Value::as_str) == Some("response") {

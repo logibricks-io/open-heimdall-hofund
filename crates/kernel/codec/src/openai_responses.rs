@@ -137,7 +137,9 @@ impl Codec for OpenAiResponses {
             ),
         ));
         if client_model.contains('/') {
-            Box::new(crate::namespace_tidy::NamespaceTap::new(Box::new(reasoning)))
+            Box::new(crate::namespace_tidy::NamespaceTap::new(Box::new(
+                reasoning,
+            )))
         } else {
             Box::new(reasoning)
         }

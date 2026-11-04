@@ -59,14 +59,20 @@ pub fn tidy_event(data: &[u8]) -> Option<Vec<u8>> {
 /// A whole relayed reply with namespaced calls marked unsealed.
 #[must_use]
 pub fn tidy_whole(bytes: Vec<u8>) -> Vec<u8> {
-    if !bytes.windows(FUNCTION_CALL.len()).any(|w| w == FUNCTION_CALL.as_bytes()) {
+    if !bytes
+        .windows(FUNCTION_CALL.len())
+        .any(|w| w == FUNCTION_CALL.as_bytes())
+    {
         return bytes;
     }
     tidy_event(&bytes).unwrap_or(bytes)
 }
 
 pub fn tidy_lines(bytes: &[u8]) -> Vec<u8> {
-    if !bytes.windows(FUNCTION_CALL.len()).any(|w| w == FUNCTION_CALL.as_bytes()) {
+    if !bytes
+        .windows(FUNCTION_CALL.len())
+        .any(|w| w == FUNCTION_CALL.as_bytes())
+    {
         return bytes.to_vec();
     }
     let mut out = Vec::with_capacity(bytes.len());

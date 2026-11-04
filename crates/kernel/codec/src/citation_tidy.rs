@@ -54,7 +54,10 @@ pub fn drop_offsetless_citations(item: &mut Value) -> bool {
 pub fn tidy_event(data: &[u8]) -> Option<Vec<u8>> {
     let mut value: Value = serde_json::from_slice(data).ok()?;
     let event = value.as_object_mut()?;
-    let kind = event.get("type").and_then(Value::as_str).unwrap_or_default();
+    let kind = event
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     if kind == "response.output_text.annotation.added" {
         let annotation = event.get("annotation").unwrap_or(&Value::Null);
         if annotation_lacks_offsets(annotation) {

@@ -276,13 +276,13 @@ fn annotation_lacks_offsets(annotation: &Value) -> bool {
     if kind != "url_citation" && kind != "container_file_citation" {
         return false;
     }
-    ["start_index", "end_index"].into_iter().any(|key| {
-        match annotation.get(key) {
+    ["start_index", "end_index"]
+        .into_iter()
+        .any(|key| match annotation.get(key) {
             None | Some(Value::Null) => true,
             Some(Value::Number(_)) => false,
             _ => true,
-        }
-    })
+        })
 }
 
 /// Whether an input item may carry an offsetless output citation, without
