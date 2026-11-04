@@ -152,17 +152,11 @@ fn a2b_13_refresh_rotates_tokens() {
         .expect("stored");
     let parsed = SecretObject::parse(&blob).expect("blob");
     assert_eq!(
-        parsed
-            .secret("access_token")
-            .as_ref()
-            .map(secret_text),
+        parsed.secret("access_token").as_ref().map(secret_text),
         Some("factory-access-2")
     );
     assert_eq!(
-        parsed
-            .secret("refresh_token")
-            .as_ref()
-            .map(secret_text),
+        parsed.secret("refresh_token").as_ref().map(secret_text),
         Some("factory-refresh-2")
     );
 }
@@ -269,10 +263,7 @@ fn a2b_18_api_key_sign_in_stores_api_auth() {
     let parsed = SecretObject::parse(&blob).expect("blob");
     assert_eq!(parsed.text("auth_type"), Some("api"));
     assert_eq!(
-        parsed
-            .secret("api_key")
-            .as_ref()
-            .map(secret_text),
+        parsed.secret("api_key").as_ref().map(secret_text),
         Some("fk-test-key-12345678")
     );
 }

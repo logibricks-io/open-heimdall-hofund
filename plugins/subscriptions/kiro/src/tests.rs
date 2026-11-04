@@ -119,17 +119,11 @@ fn a2b_22_refresh_on_expiry_posts_to_refresh_url() {
         .expect("stored");
     let parsed = SecretObject::parse(&secret).expect("blob");
     assert_eq!(
-        parsed
-            .secret("access_token")
-            .as_ref()
-            .map(secret_text),
+        parsed.secret("access_token").as_ref().map(secret_text),
         Some("new-access")
     );
     assert_eq!(
-        parsed
-            .secret("refresh_token")
-            .as_ref()
-            .map(secret_text),
+        parsed.secret("refresh_token").as_ref().map(secret_text),
         Some("new-refresh")
     );
 }
