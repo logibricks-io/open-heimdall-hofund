@@ -12,7 +12,7 @@ use crate::tokens;
 pub(crate) const REFERENCE: &str = "agent-sign-in";
 
 pub(crate) fn list(home: &Path) -> Result<Vec<DiscoveredAgentAccount>, PluginError> {
-    let token = auth::read_access_file(&auth::auth_path(home));
+    let token = auth::read_agent_access(home);
     let Some(token) = token else {
         return Ok(Vec::new());
     };

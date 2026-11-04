@@ -142,6 +142,28 @@ fn a2a_3_refresh_on_expiry_runs_grok_models_with_home() {
     let spawns = host.process().programs();
     assert_eq!(spawns.len(), 1, "refresh runs grok models");
     assert_eq!(spawns[0].to_string_lossy(), PROGRAM);
+    let request = crate::cli::request(
+        std::path::Path::new(PROGRAM),
+        &crate::cli::MODELS_ARGS,
+        &home,
+    )
+    .expect("request");
+    assert_eq!(
+        request
+            .args()
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>(),
+        vec!["models".to_owned()]
+    );
+    assert_eq!(
+        request
+            .env()
+            .iter()
+            .find(|(key, _)| key == crate::cli::HOME_VAR)
+            .map(|(_, value)| value.to_string_lossy().into_owned()),
+        Some(home.to_string_lossy().into_owned())
+    );
     let secret = block_on(host.context().accounts().secret(&id))
         .expect("read")
         .expect("stored");
@@ -310,16 +332,82 @@ fn a2a_10_sign_in_start_complete_and_cancel() {
     let id = block_on(sub.complete_sign_in(&ctx(), SignInProof::Await, test_host.context()))
         .expect("complete");
     assert_eq!(id, account_id_from(&["grok", "signin@example.test"]));
+    assert!(
+        grok_home.is_dir(),
+        "sign-in home stays on disk after a successful import"
+    );
 
     let dir2 = tempfile::tempdir().expect("dir2");
     let test_host2 = host(&dir2);
     let sub2 = subscription(&test_host2);
+    let grok_home2 = test_host2
+        .context()
+        .dirs()
+        .state_dir()
+        .expect("state")
+        .join("grok-homes")
+        .join(SESSION);
     test_host2
         .process()
         .script_piped(PipedScript::new().line("Visit https://auth.test/device-2"));
     block_on(sub2.start_sign_in(&ctx(), test_host2.context())).expect("start2");
+    assert!(grok_home2.is_dir(), "login creates an isolated home");
     block_on(sub2.cancel_sign_in(&ctx(), test_host2.context())).expect("cancel");
+    assert!(
+        !grok_home2.exists(),
+        "cancel removes the isolated sign-in home"
+    );
     let err = block_on(sub2.complete_sign_in(&ctx(), SignInProof::Await, test_host2.context()))
         .expect_err("cancelled");
     assert_eq!(err.kind(), hofund_plugin_api::PluginErrorKind::Config);
+}
+
+#[test]
+fn a2a_11_missing_expiry_skips_grok_models_on_refresh() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let home = dir.path().join("account-home");
+    write_auth(
+        &home,
+        TOKEN,
+        "user@example.test",
+        "2099-01-01T00:00:00.000000000Z",
+    );
+    let mut credential = creds::read_sync(&home).expect("credential");
+    credential.expires_ms = 0;
+    let id = creds::account_id(&credential);
+    let secret = creds::secret_blob(&home, &credential).to_secret();
+    block_on(async {
+        let account = host
+            .context()
+            .accounts()
+            .account(id.clone(), "user@example.test")
+            .expect("account");
+        host.context()
+            .accounts()
+            .upsert(account, secret)
+            .await
+            .expect("upsert");
+    });
+    block_on(sub.refresh(&id, host.context())).expect("refresh");
+    assert!(
+        host.process().programs().is_empty(),
+        "missing expiry must not run grok models on every refresh"
+    );
+}
+
+#[test]
+fn a2a_12_refresh_margin_uses_strictly_after_boundary() {
+    let margin = creds::REFRESH_MARGIN;
+    let margin_ms = margin.as_millis() as u64;
+    let now = std::time::UNIX_EPOCH + std::time::Duration::from_millis(1_000_000);
+    assert!(
+        creds::expires_after(now, 1_000_000 + margin_ms + 1, margin),
+        "one millisecond past the margin should still be fresh"
+    );
+    assert!(
+        !creds::expires_after(now, 1_000_000 + margin_ms, margin),
+        "exactly at the margin should not count as fresh"
+    );
 }

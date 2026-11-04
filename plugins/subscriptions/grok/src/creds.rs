@@ -47,6 +47,9 @@ impl Stored {
 
     /// Whether the token is still good past the refresh margin.
     pub(crate) fn fresh_at(&self, now: SystemTime) -> bool {
+        if self.credential.expires_ms == 0 {
+            return true;
+        }
         expires_after(now, self.credential.expires_ms, REFRESH_MARGIN)
     }
 

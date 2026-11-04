@@ -44,7 +44,7 @@ pub(crate) fn limit_windows(limits: Option<&Value>) -> Vec<QuotaWindow> {
         return Vec::new();
     };
     let mut out = Vec::new();
-    for (typ, name, span_secs) in LIMITS {
+    for (typ, name, _) in LIMITS {
         let Some(entry) = list.iter().find(|item| {
             item.get("type")
                 .and_then(Value::as_str)
@@ -64,7 +64,6 @@ pub(crate) fn limit_windows(limits: Option<&Value>) -> Vec<QuotaWindow> {
             .and_then(parse_rfc3339);
         if let Ok(window) = QuotaWindow::new(name, used, Some(100), resets) {
             let window = window.with_blocking(true);
-            let _ = span_secs;
             out.push(window);
         }
     }

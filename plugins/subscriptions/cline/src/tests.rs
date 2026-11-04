@@ -200,7 +200,8 @@ fn a2a_15_usage_parse_limits_and_balance() {
 
     let balance = json!({"balance": 1_500_000});
     let usage = quota::assemble(None, Some(&balance), Some(&limits));
-    assert!(!usage.windows.is_empty());
+    assert_eq!(usage.windows.len(), 1);
+    assert_eq!(usage.windows[0].name(), "5 hours");
     assert_eq!(usage.balance.as_deref(), Some("$1.50"));
 }
 

@@ -51,6 +51,7 @@ pub fn contribute() -> Contribution {
 pub fn factory_with_endpoints(endpoints: Endpoints) -> CursorFactory {
     CursorFactory {
         endpoints: Arc::new(endpoints),
+        test_agent_home: None,
     }
 }
 
@@ -58,6 +59,9 @@ pub fn factory_with_endpoints(endpoints: Endpoints) -> CursorFactory {
 #[derive(Clone, Debug)]
 pub struct CursorFactory {
     endpoints: Arc<Endpoints>,
+    /// When set, agent refresh and token reads use this directory instead of the OS default.
+    #[doc(hidden)]
+    pub test_agent_home: Option<PathBuf>,
 }
 
 /// Validated plugin config.
@@ -114,6 +118,11 @@ impl SubscriptionFactory for CursorFactory {
             command: cfg.command.clone(),
             flow: SignInFlow::Pkce,
             pending: Mutex::new(HashMap::new()),
+            keychain: Mutex::new(cli::KeychainCache::default()),
+            agent_home: self
+                .test_agent_home
+                .clone()
+                .unwrap_or_else(auth::default_agent_home),
         }))
     }
 }
@@ -123,11 +132,17 @@ struct Cursor {
     command: Option<PathBuf>,
     flow: SignInFlow,
     pending: Mutex<HashMap<String, sign_in::BrowserPending>>,
+    keychain: Mutex<cli::KeychainCache>,
+    agent_home: PathBuf,
 }
 
 impl Cursor {
     fn program(&self) -> Result<PathBuf, PluginError> {
         cli::program(self.command.as_ref())
+    }
+
+    fn agent_home(&self) -> &Path {
+        &self.agent_home
     }
 }
 
@@ -244,8 +259,15 @@ impl Subscription for Cursor {
         };
         let blob = SecretObject::parse(&secret)?;
         if tokens::is_agent(&blob) {
+            let home = self.agent_home().to_path_buf();
+            let token = cli::live_access(host, &home, false, &self.keychain)
+                .await?
+                .unwrap_or_default();
+            let now = host.clock().now();
+            if !token.is_empty() && !tokens::near_expiry(now, tokens::jwt_expiry_ms(&token)) {
+                return Ok(());
+            }
             let program = self.program()?;
-            let home = auth::default_agent_home();
             refresh::agent_status(host, &program, &home).await
         } else {
             refresh::oauth_check(host, &self.endpoints, account).await
@@ -257,11 +279,15 @@ impl Subscription for Cursor {
         account: &AccountId,
         host: &HostContext,
     ) -> Result<Vec<QuotaWindow>, PluginError> {
-        let agent_home = auth::default_agent_home();
-        let program = self.program()?;
-        let token =
-            session::access_token(host, &self.endpoints, account, &agent_home, Some(&program))
-                .await?;
+        let token = session::access_token(
+            host,
+            &self.endpoints,
+            account,
+            self.agent_home(),
+            None,
+            &self.keychain,
+        )
+        .await?;
         let body =
             connect::unary(host, &self.endpoints, "GetCurrentPeriodUsage", &token, "{}").await?;
         quota::period_windows(&body)
@@ -272,13 +298,23 @@ impl Subscription for Cursor {
         account: &AccountId,
         host: &HostContext,
     ) -> Result<ModelList, PluginError> {
-        let agent_home = auth::default_agent_home();
-        let token =
-            session::access_token(host, &self.endpoints, account, &agent_home, None).await?;
-        let config = auth::config_dir(&agent_home);
-        auth::write_auth_file(&config, hofund_plugin_sdk::oauth::secret_text(&token))?;
+        let token = session::access_token(
+            host,
+            &self.endpoints,
+            account,
+            self.agent_home(),
+            None,
+            &self.keychain,
+        )
+        .await?;
         let program = self.program()?;
-        let request = cli::request(&program, &["models"], &agent_home)?;
+        let models_dir = host
+            .dirs()
+            .state_dir()?
+            .join("cursor-models")
+            .join(account_label(account));
+        auth::write_auth_file(&models_dir, hofund_plugin_sdk::oauth::secret_text(&token))?;
+        let request = cli::request(&program, &["models"], &models_dir)?;
         let child = host.spawn_process().spawn_piped(&request).await?;
         let mut stdout = child.stdout()?;
         let text =
@@ -337,6 +373,14 @@ impl Subscription for Cursor {
     ) -> Result<AccountId, PluginError> {
         discover::import(home, reference, host).await
     }
+}
+
+fn account_label(account: &AccountId) -> String {
+    account
+        .to_string()
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+        .collect()
 }
 
 #[cfg(test)]

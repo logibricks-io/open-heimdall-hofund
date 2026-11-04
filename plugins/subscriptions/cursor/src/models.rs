@@ -267,7 +267,10 @@ fn remove_words(name: &str, words: &str) -> String {
     }
     let name_words: Vec<_> = name.split_whitespace().collect();
     let strip: Vec<_> = words.split_whitespace().collect();
-    for start in 0..=name_words.len().saturating_sub(strip.len()) {
+    if strip.is_empty() || strip.len() > name_words.len() {
+        return name.to_owned();
+    }
+    for start in 0..=name_words.len() - strip.len() {
         if name_words[start..start + strip.len()] == strip[..] {
             let mut out = name_words[..start].to_vec();
             out.extend_from_slice(&name_words[start + strip.len()..]);
@@ -354,6 +357,11 @@ claude-4.6-opus-high-thinking - Claude Opus 4.6 1M Thinking\nclaude-4.6-opus-max
 gpt-5.5-none - GPT-5.5 1M None\ngpt-5.5-medium - GPT-5.5 1M\ngpt-5.5-extra-high - GPT-5.5 1M Extra High\n\
 gpt-5.5-medium-fast - GPT-5.5 Fast\ngpt-5.5-extra-high-fast - GPT-5.5 Extra High Fast\n\
 claude-4.6-sonnet-medium-thinking - Claude Sonnet 4.6 1M Thinking\ncomposer-2.5 - Composer 2.5\n\nTip: use --model <id>\n";
+
+    #[test]
+    fn xhigh_on_short_name_does_not_panic() {
+        let _ = collapse(parse_list("auto - Auto Extra High\n"));
+    }
 
     #[test]
     fn collapse_matches_reference_families() {

@@ -2,7 +2,8 @@
 
 use crate::auth;
 use crate::tokens;
-use hofund_plugin_api::{AccountId, HostContext, PluginError};
+use hofund_plugin_api::{AccountId, HostContext, PluginError, SecretString};
+use hofund_plugin_sdk::oauth::SecretObject;
 
 /// Stores an account from raw auth.json (`accessToken` field).
 pub(crate) async fn store(host: &HostContext, text: &str) -> Result<Vec<AccountId>, PluginError> {
@@ -14,27 +15,23 @@ pub(crate) async fn store(host: &HostContext, text: &str) -> Result<Vec<AccountI
         .ok_or_else(|| PluginError::config("auth.json must contain a non-empty accessToken"))?;
     let (label, id) = tokens::jwt_identity(&access)
         .ok_or_else(|| PluginError::auth("the access token does not name an account"))?;
-    if host.accounts().secret(&id).await?.is_some() {
-        let access_secret = hofund_plugin_api::SecretString::from(access.clone());
-        let refresh_secret = hofund_plugin_api::SecretString::from("none");
-        let expires = tokens::jwt_expiry_ms(&access)
-            .unwrap_or_else(|| tokens::unix_ms(host.clock().now()) as u64 + 30 * 24 * 3600 * 1000);
-        let blob = tokens::blob_oauth(&access_secret, &refresh_secret, expires, &label, None);
-        let account = host.accounts().account(id.clone(), label)?;
-        host.accounts().upsert(account, blob.to_secret()).await?;
-        return Ok(vec![id]);
-    }
-    let access_secret = hofund_plugin_api::SecretString::from(access.clone());
-    let refresh = tokens::blob_oauth(
-        &access_secret,
-        &hofund_plugin_api::SecretString::from("none"),
-        tokens::jwt_expiry_ms(&access)
-            .unwrap_or_else(|| tokens::unix_ms(host.clock().now()) as u64 + 30 * 24 * 3600 * 1000),
-        &label,
-        None,
-    );
+    let access_secret = SecretString::from(access.clone());
+    let expires = tokens::jwt_expiry_ms(&access)
+        .unwrap_or_else(|| tokens::unix_ms(host.clock().now()) as u64 + 30 * 24 * 3600 * 1000);
+    let refresh_secret = if let Some(stored) = host.accounts().secret(&id).await? {
+        let blob = SecretObject::parse(&stored)?;
+        auth::parse_refresh_text(trimmed)
+            .map(SecretString::from)
+            .or_else(|| blob.secret(tokens::REFRESH))
+            .unwrap_or_else(|| SecretString::from("none"))
+    } else {
+        auth::parse_refresh_text(trimmed)
+            .map(SecretString::from)
+            .unwrap_or_else(|| SecretString::from("none"))
+    };
+    let blob = tokens::blob_oauth(&access_secret, &refresh_secret, expires, &label, None);
     let account = host.accounts().account(id.clone(), label)?;
-    host.accounts().upsert(account, refresh.to_secret()).await?;
+    host.accounts().upsert(account, blob.to_secret()).await?;
     Ok(vec![id])
 }
 

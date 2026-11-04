@@ -275,6 +275,65 @@ async fn start_login(
     ))
 }
 
+struct LoginStdoutGuard {
+    pump: Arc<Mutex<LoginPump>>,
+    stdout: Option<hofund_plugin_api::BodyStream>,
+    last: String,
+}
+
+impl LoginStdoutGuard {
+    fn take(pump: &Arc<Mutex<LoginPump>>) -> Result<Self, PluginError> {
+        let mut state = pump
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(stdout) = state.stdout.take() else {
+            return Err(PluginError::config(
+                "Grok Build sign-in was cancelled before the CLI finished",
+            ));
+        };
+        Ok(Self {
+            pump: Arc::clone(pump),
+            stdout: Some(stdout),
+            last: std::mem::take(&mut state.last),
+        })
+    }
+
+    fn finish(&mut self, stream_ended: bool) {
+        let Some(stdout) = self.stdout.take() else {
+            return;
+        };
+        let mut state = self
+            .pump
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.last.clone_from(&self.last);
+        if !stream_ended {
+            state.stdout = Some(stdout);
+        }
+    }
+}
+
+impl Drop for LoginStdoutGuard {
+    fn drop(&mut self) {
+        if self.stdout.is_some() {
+            self.finish(false);
+        }
+    }
+}
+
+fn abort_login(grok: &Grok, session: &str, host: &HostContext) {
+    use std::sync::atomic::Ordering;
+    if let Some(Pending::Login {
+        home, cancelled, ..
+    }) = grok.take_pending(session)
+    {
+        cancelled.store(true, Ordering::Relaxed);
+        if let Ok(state) = host.dirs().state_dir() {
+            remove_dir_if_under(&home, &state.join("grok-homes"));
+        }
+    }
+}
+
 async fn finish_login(grok: &Grok, session: &str) -> Result<(), PluginError> {
     use std::sync::atomic::Ordering;
     let deadline = LOGIN_WAIT;
@@ -301,26 +360,11 @@ async fn finish_login(grok: &Grok, session: &str) -> Result<(), PluginError> {
                 Arc::clone(pump)
             };
             let done = {
-                let (mut stdout, mut last) = {
-                    let mut state = pump
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    let Some(stdout) = state.stdout.take() else {
-                        return Err(PluginError::config(
-                            "Grok Build sign-in was cancelled before the CLI finished",
-                        ));
-                    };
-                    (stdout, std::mem::take(&mut state.last))
-                };
-                let finished = cli::drain_once(&mut stdout, &mut last).await;
-                let mut state = pump
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                state.last = last;
-                if !finished {
-                    state.stdout = Some(stdout);
-                }
-                finished
+                let mut guard = LoginStdoutGuard::take(&pump)?;
+                let stream_ended =
+                    cli::drain_once(guard.stdout.as_mut().expect("stdout"), &mut guard.last).await;
+                guard.finish(stream_ended);
+                stream_ended
             };
             if done {
                 let home = {
@@ -457,8 +501,9 @@ impl Subscription for Grok {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .get(session)
                 .is_some_and(|pending| matches!(pending, Pending::Login { .. }));
-            if needs_wait {
-                finish_login(self, session).await?;
+            if needs_wait && let Err(error) = finish_login(self, session).await {
+                abort_login(self, session, host);
+                return Err(error);
             }
         }
         let Some(pending) = self.take_pending(session) else {

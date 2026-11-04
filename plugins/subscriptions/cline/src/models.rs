@@ -243,25 +243,6 @@ fn merge_cloud(models: &mut Vec<FeedModel>, cloud: Vec<FeedModel>) {
     }
 }
 
-#[allow(dead_code)]
-fn default_models() -> Vec<FeedModel> {
-    [
-        "anthropic/claude-sonnet-5.5",
-        "anthropic/claude-opus-5.5",
-        "openai/gpt-6-astra",
-        "cline-free/deepseek-v4.1-flash",
-    ]
-    .into_iter()
-    .map(|id| FeedModel {
-        id: id.to_owned(),
-        name: prettify(id),
-        free: id.starts_with("cline-free/"),
-        pass: id.starts_with("cline-pass/"),
-        context: None,
-    })
-    .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

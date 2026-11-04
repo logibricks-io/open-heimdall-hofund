@@ -1,6 +1,6 @@
 //! Unit tests with recording backends; no network.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use hofund_kit_subscription::{PipedScript, TestHost, block_on};
@@ -10,7 +10,7 @@ use hofund_plugin_api::{
 };
 use hofund_plugin_sdk::oauth::{SecretObject, account_id_from};
 
-use crate::{Endpoints, auth, cli, factory_with_endpoints, tokens};
+use crate::{Endpoints, factory_with_endpoints, tokens};
 
 const SESSION: &str = "0123456789abcdef0123456789abcdef";
 #[cfg(not(windows))]
@@ -37,9 +37,17 @@ fn host(dir: &tempfile::TempDir) -> TestHost {
 }
 
 fn subscription(host: &TestHost) -> Arc<dyn Subscription> {
+    subscription_with_agent_home(host, None)
+}
+
+fn subscription_with_agent_home(
+    host: &TestHost,
+    agent_home: Option<PathBuf>,
+) -> Arc<dyn Subscription> {
     let mut raw = RawTable::new();
     raw.insert("command", RawValue::String(PROGRAM.to_owned()));
-    let factory = factory_with_endpoints(endpoints());
+    let mut factory = factory_with_endpoints(endpoints());
+    factory.test_agent_home = agent_home;
     let cfg = factory.validate(&raw).expect("config");
     factory.build(&cfg, host.context()).expect("build")
 }
@@ -118,14 +126,12 @@ fn a2a_24_model_list_collapses_fixture() {
 
 #[test]
 fn a2a_25_refresh_runs_status_when_token_near_expiry() {
-    cli::test_skip_keychain(true);
     let dir = tempfile::tempdir().expect("dir");
     let agent_home = dir.path().join("agent");
-    auth::test_configured_dir(Some(agent_home.clone()));
     let near = jwt("refresh@example.test", 100);
     write_auth(&agent_home.join("auth.json"), &near);
     let host = host(&dir);
-    let sub = subscription(&host);
+    let sub = subscription_with_agent_home(&host, Some(agent_home));
     host.process().script_piped(PipedScript::new().line("ok"));
     let id = account_id_from(&["cursor", "refresh@example.test"]);
     let blob = tokens::blob_agent("refresh@example.test", None);
@@ -140,8 +146,6 @@ fn a2a_25_refresh_runs_status_when_token_near_expiry() {
         !host.process().programs().is_empty(),
         "agent refresh runs cursor-agent status"
     );
-    auth::test_configured_dir(None);
-    cli::test_skip_keychain(false);
 }
 
 #[test]
@@ -234,7 +238,8 @@ fn a2a_28_errors_never_echo_access_token() {
     let host = host(&dir);
     let sub = subscription(&host);
     let token = jwt("secret@example.test", 4_000_000_000);
-    let error = block_on(sub.import_accounts("not json at all", host.context())).expect_err("bad");
+    let text = format!(r#"{{"accessToken":"{token}","note":"broken"#);
+    let error = block_on(sub.import_accounts(&text, host.context())).expect_err("bad");
     assert!(!error.to_string().contains(&token));
 }
 
@@ -288,4 +293,44 @@ fn a2a_30_effort_suffix_stripped_from_name() {
         .find(|model| model.id() == "grok-4.7")
         .expect("grok family");
     assert_eq!(grok.display_name(), Some("Grok 4.7"));
+}
+
+#[test]
+fn a2a_31_remove_words_does_not_panic_on_short_names() {
+    let list = crate::models::model_list("auto - Auto (default)\n").expect("models");
+    assert_eq!(list.models().len(), 1);
+}
+
+#[test]
+fn a2a_32_reimport_keeps_stored_refresh_token() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let token = jwt("keep@example.test", 4_000_000_000);
+    let id = account_id_from(&["cursor", "keep@example.test"]);
+    let blob = tokens::blob_oauth(
+        &hofund_plugin_api::SecretString::from(token.clone()),
+        &hofund_plugin_api::SecretString::from("stored-refresh"),
+        4_000_000_000_000,
+        "keep@example.test",
+        None,
+    );
+    let account = host
+        .context()
+        .accounts()
+        .account(id.clone(), "keep@example.test")
+        .expect("account");
+    block_on(host.context().accounts().upsert(account, blob.to_secret())).expect("upsert");
+    let import = format!(r#"{{"accessToken":"{token}"}}"#);
+    block_on(sub.import_accounts(&import, host.context())).expect("import");
+    let secret = block_on(host.context().accounts().secret(&id))
+        .expect("read")
+        .expect("stored");
+    let parsed = SecretObject::parse(&secret).expect("blob");
+    assert_eq!(
+        parsed
+            .secret(tokens::REFRESH)
+            .map(|t| hofund_plugin_sdk::oauth::secret_text(&t).to_owned()),
+        Some("stored-refresh".to_owned())
+    );
 }

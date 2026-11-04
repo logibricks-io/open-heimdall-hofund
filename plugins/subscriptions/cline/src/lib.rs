@@ -192,13 +192,20 @@ impl Subscription for Cline {
                     };
                     pending.device.clone()
                 };
-                let signed_in = sign_in::device_finish(host, &self.endpoints, &device, || {
+                let signed_in = match sign_in::device_finish(host, &self.endpoints, &device, || {
                     self.pending
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .contains_key(&session)
                 })
-                .await?;
+                .await
+                {
+                    Ok(signed_in) => signed_in,
+                    Err(error) => {
+                        let _ = self.take_pending(&session);
+                        return Err(error);
+                    }
+                };
                 let _ = self.take_pending(&session);
                 let account = host
                     .accounts()

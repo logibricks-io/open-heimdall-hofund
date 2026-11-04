@@ -1,8 +1,9 @@
 //! Resolving the access token for an account.
 
 use std::path::Path;
+use std::sync::Mutex;
 
-use crate::cli;
+use crate::cli::{self, KeychainCache};
 use crate::tokens::{self, is_agent};
 use hofund_plugin_api::{AccountId, HostContext, PluginError, SecretString};
 
@@ -13,6 +14,7 @@ pub(crate) async fn access_token(
     account: &AccountId,
     agent_home: &Path,
     program: Option<&Path>,
+    keychain: &Mutex<KeychainCache>,
 ) -> Result<SecretString, PluginError> {
     let secret = host
         .accounts()
@@ -26,7 +28,7 @@ pub(crate) async fn access_token(
                 "cursor-agent is not installed: it is not on PATH; install it or set `command`",
             )
         })?;
-        return agent_token(host, agent_home, program).await;
+        return agent_token(host, agent_home, program, keychain).await;
     }
     let access = blob
         .secret(tokens::ACCESS)
@@ -51,14 +53,15 @@ async fn agent_token(
     host: &HostContext,
     agent_home: &Path,
     program: &Path,
+    keychain: &Mutex<KeychainCache>,
 ) -> Result<SecretString, PluginError> {
     let now = host.clock().now();
-    let mut token = cli::live_access(host, agent_home, false)
+    let mut token = cli::live_access(host, agent_home, false, keychain)
         .await?
         .unwrap_or_default();
     if token.is_empty() || tokens::near_expiry(now, tokens::jwt_expiry_ms(&token)) {
         crate::refresh::agent_status(host, program, agent_home).await?;
-        token = cli::live_access(host, agent_home, true)
+        token = cli::live_access(host, agent_home, true, keychain)
             .await?
             .unwrap_or_default();
     }

@@ -1,8 +1,8 @@
 //! Running cursor-agent and reading macOS keychain tokens.
 
-use std::cell::RefCell;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use hofund_plugin_api::{BodyStream, HostContext, PluginError, SpawnRequest};
@@ -21,45 +21,50 @@ pub(crate) const MODELS_WAIT: Duration = Duration::from_secs(30);
 /// How long a keychain read is reused.
 const KEYCHAIN_TTL: Duration = Duration::from_secs(10);
 
-struct KeychainCache {
+/// Cached macOS keychain token reads for one subscription instance.
+#[derive(Default)]
+pub(crate) struct KeychainCache {
     token: String,
     read_at: Option<Instant>,
 }
 
-thread_local! {
-    static KEYCHAIN: RefCell<KeychainCache> = const { RefCell::new(KeychainCache {
-        token: String::new(),
-        read_at: None,
-    }) };
+impl KeychainCache {
+    fn cached_token(&self) -> Option<String> {
+        let at = self.read_at?;
+        if at.elapsed() < KEYCHAIN_TTL {
+            Some(self.token.clone())
+        } else {
+            None
+        }
+    }
+
+    fn store(&mut self, token: String) {
+        self.read_at = Some(Instant::now());
+        self.token = token;
+    }
 }
 
 /// Whether macOS keychain reads are skipped (tests or `HOFUND_CURSOR_SKIP_KEYCHAIN`).
 pub(crate) fn skip_keychain() -> bool {
-    if skip_keychain_override() {
-        return true;
-    }
     std::env::var("HOFUND_CURSOR_SKIP_KEYCHAIN")
         .ok()
         .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
 }
 
 /// Reads cursor-agent's token from the macOS keychain when allowed.
-pub(crate) async fn keychain_token(host: &HostContext, fresh: bool) -> Result<String, PluginError> {
+pub(crate) async fn keychain_token(
+    host: &HostContext,
+    cache: &Mutex<KeychainCache>,
+    fresh: bool,
+) -> Result<String, PluginError> {
     if !cfg!(target_os = "macos") || skip_keychain() {
         return Ok(String::new());
     }
+    if !fresh
+        && let Ok(guard) = cache.lock()
+        && let Some(token) = guard.cached_token()
     {
-        if !fresh {
-            let (read_at, token) = KEYCHAIN.with(|slot| {
-                let cache = slot.borrow();
-                (cache.read_at, cache.token.clone())
-            });
-            if let Some(at) = read_at
-                && at.elapsed() < KEYCHAIN_TTL
-            {
-                return Ok(token);
-            }
-        }
+        return Ok(token);
     }
     let request = SpawnRequest::new(
         PathBuf::from("security"),
@@ -85,11 +90,9 @@ pub(crate) async fn keychain_token(host: &HostContext, fresh: bool) -> Result<St
         .trim()
         .to_owned();
     drop(child);
-    KEYCHAIN.with(|slot| {
-        let mut cache = slot.borrow_mut();
-        cache.read_at = Some(Instant::now());
-        cache.token = token.clone();
-    });
+    if let Ok(mut guard) = cache.lock() {
+        guard.store(token.clone());
+    }
     Ok(token)
 }
 
@@ -98,8 +101,9 @@ pub(crate) async fn live_access(
     host: &HostContext,
     agent_home: &Path,
     fresh: bool,
+    cache: &Mutex<KeychainCache>,
 ) -> Result<Option<String>, PluginError> {
-    let keychain = keychain_token(host, fresh).await?;
+    let keychain = keychain_token(host, cache, fresh).await?;
     if !keychain.is_empty() {
         return Ok(Some(keychain));
     }
@@ -150,20 +154,8 @@ pub(crate) fn program(configured: Option<&PathBuf>) -> Result<PathBuf, PluginErr
         })
 }
 
-#[cfg(not(test))]
-fn skip_keychain_override() -> bool {
-    false
-}
-
-#[cfg(test)]
-fn skip_keychain_override() -> bool {
-    test_only::skip()
-}
-
 #[cfg(test)]
 mod tests {
-    use super::strip_ansi;
-
     #[test]
     fn strips_ansi_colour_codes() {
         assert_eq!(
@@ -171,45 +163,22 @@ mod tests {
             "https://example.test/x"
         );
     }
-}
 
-#[cfg(test)]
-mod test_only {
-    use std::cell::RefCell;
-
-    thread_local! {
-        static SKIP_KEYCHAIN: RefCell<bool> = const { RefCell::new(false) };
-    }
-
-    pub(crate) fn set_skip(skip: bool) {
-        SKIP_KEYCHAIN.with(|slot| *slot.borrow_mut() = skip);
-    }
-
-    pub(crate) fn skip() -> bool {
-        SKIP_KEYCHAIN.with(|slot| *slot.borrow())
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn test_skip_keychain(skip: bool) {
-    test_only::set_skip(skip);
-}
-
-#[cfg(test)]
-#[allow(clippy::while_let_on_iterator)]
-fn strip_ansi(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut chars = text.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '\u{1b}' {
-            while let Some(next) = chars.next() {
-                if next.is_ascii_alphabetic() {
-                    break;
+    #[allow(clippy::while_let_on_iterator)]
+    fn strip_ansi(text: &str) -> String {
+        let mut out = String::with_capacity(text.len());
+        let mut chars = text.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == '\u{1b}' {
+                while let Some(next) = chars.next() {
+                    if next.is_ascii_alphabetic() {
+                        break;
+                    }
                 }
+                continue;
             }
-            continue;
+            out.push(ch);
         }
-        out.push(ch);
+        out
     }
-    out
 }
