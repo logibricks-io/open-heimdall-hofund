@@ -44,18 +44,35 @@ pub fn contribute() -> Contribution {
 #[doc(hidden)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Endpoints {
-    /// Factory API base, including `/api/v1`.
+    /// Factory API origin (`https://api.factory.ai`).
     pub api: String,
+    /// Factory EU API origin.
+    pub api_eu: String,
     /// WorkOS device authorization URL.
     pub workos_device: String,
     /// WorkOS token URL for device grant polling.
     pub workos_token: String,
 }
 
+impl Endpoints {
+    pub(crate) fn api_base(&self) -> &str {
+        self.api.as_str()
+    }
+
+    pub(crate) fn api_base_for_region(&self, region: Option<&str>) -> &str {
+        if region.is_some_and(|value| value.eq_ignore_ascii_case("eu")) {
+            self.api_eu.as_str()
+        } else {
+            self.api.as_str()
+        }
+    }
+}
+
 impl Default for Endpoints {
     fn default() -> Self {
         Self {
-            api: "https://api.factory.ai/api/v1".to_owned(),
+            api: "https://api.factory.ai".to_owned(),
+            api_eu: "https://api.eu.factory.ai".to_owned(),
             workos_device: "https://api.workos.com/user_management/authorize/device".to_owned(),
             workos_token: "https://api.workos.com/user_management/authenticate".to_owned(),
         }
@@ -235,9 +252,6 @@ impl Subscription for Factory {
                         "the stored Factory sign-in has no refresh token",
                     ));
                 }
-                if tokens::oauth_needs_renewal(&blob, host.clock().now()) {
-                    return Ok(needs_sign_in("the Factory sign-in is due for renewal"));
-                }
             }
         }
         Ok(AccountStatus::Ready)
@@ -256,44 +270,16 @@ impl Subscription for Factory {
         let limits = api::get(
             host,
             &self.endpoints,
-            "/users/me/plan/usage-limits",
-            Some(&bearer.token),
-            false,
-        )
-        .await;
-        let me = api::get(
-            host,
-            &self.endpoints,
-            "/users/me",
+            "/api/billing/limits",
             Some(&bearer.token),
             true,
         )
-        .await
-        .ok();
-        let balance = read_balance(host, &self.endpoints, &bearer, me.as_ref()).await;
-        let limits_value = match limits {
-            Ok(value) => Some(value),
-            Err(error) if error.status() == Some(404) => None,
-            Err(error) => {
-                let usage = quota::assemble(me.as_ref(), balance.as_ref(), None);
-                if usage.windows.is_empty() {
-                    return Err(error);
-                }
-                return Ok(usage.windows);
-            }
-        };
-        let usage = quota::assemble(me.as_ref(), balance.as_ref(), limits_value.as_ref());
-        let mut windows = usage.windows;
-        if windows.is_empty() {
-            if let Some(balance) = usage.balance {
-                windows.push(quota::balance_window(&balance)?);
-            } else {
-                return Err(PluginError::auth(
-                    "Factory reported neither plan limits nor a balance",
-                ));
-            }
+        .await;
+        match limits {
+            Ok(value) => quota::windows_from_limits(&value),
+            Err(error) if error.status() == Some(404) => Ok(Vec::new()),
+            Err(error) => Err(error),
         }
-        Ok(windows)
     }
 
     async fn list_models(
@@ -301,8 +287,8 @@ impl Subscription for Factory {
         account: &AccountId,
         host: &HostContext,
     ) -> Result<ModelList, PluginError> {
-        let bearer = tokens::bearer(host, &self.endpoints, account).await?;
-        models::list(host, &self.endpoints, &bearer).await
+        let _ = tokens::bearer(host, &self.endpoints, account).await?;
+        models::catalog()
     }
 
     fn upstream(
@@ -316,42 +302,6 @@ impl Subscription for Factory {
             Arc::clone(&self.endpoints),
         )))
     }
-}
-
-async fn read_balance(
-    host: &HostContext,
-    endpoints: &Endpoints,
-    bearer: &tokens::Bearer,
-    me: Option<&hofund_plugin_sdk::json::Value>,
-) -> Option<hofund_plugin_sdk::json::Value> {
-    let ids = me
-        .map(|value| {
-            ["clineUserId", "subject", "id"]
-                .iter()
-                .filter_map(|key| value.get(*key).and_then(|v| v.as_str()))
-                .map(str::to_owned)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    for id in ids {
-        let path = format!("/users/{}/balance", urlencoding(&id));
-        if let Ok(value) = api::get(host, endpoints, &path, Some(&bearer.token), false).await {
-            return Some(value);
-        }
-    }
-    None
-}
-
-fn urlencoding(id: &str) -> String {
-    id.bytes()
-        .map(|byte| {
-            if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
-                char::from(byte).to_string()
-            } else {
-                format!("%{byte:02X}")
-            }
-        })
-        .collect()
 }
 
 fn needs_sign_in(reason: &str) -> AccountStatus {

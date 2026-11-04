@@ -1,4 +1,4 @@
-//! Factory API envelope reads and writes.
+//! Factory API reads and writes.
 
 use hofund_plugin_api::{HostContext, PluginError, SecretString};
 use hofund_plugin_sdk::Call;
@@ -7,46 +7,13 @@ use hofund_plugin_sdk::json::{self, Value};
 use crate::Endpoints;
 use crate::client;
 
-/// Prefix OAuth access tokens carry in `Authorization`.
-pub(crate) const WORKOS_PREFIX: &str = "workos:";
-
-/// Reads a Factory `{success, data}` reply or plain JSON.
-pub(crate) fn decode_data(body: &[u8]) -> Result<Value, PluginError> {
-    let value: Value =
-        json::from_slice(body).map_err(|_| PluginError::decode("Factory's reply is not JSON"))?;
-    let Value::Object(object) = value else {
-        return Ok(value);
-    };
-    if let Some(success) = object.get("success").and_then(Value::as_bool)
-        && !success
-    {
-        return Err(PluginError::status_error(
-            502,
-            "Factory refused the request",
-        ));
-    }
-    if object.contains_key("data") {
-        return Ok(object.get("data").cloned().unwrap_or(Value::Null));
-    }
-    Ok(Value::Object(object))
+/// Whether an HTTP status means the sign-in itself is gone.
+pub(crate) fn sign_in_lapsed(status: u16) -> bool {
+    status == 401 || status == 403
 }
 
-/// Whether an HTTP status and body mean the sign-in itself is gone.
-pub(crate) fn sign_in_lapsed(status: u16, body: &[u8]) -> bool {
-    if status == 401 || status == 403 {
-        return true;
-    }
-    if status == 400 && body_lapsed(body) {
-        return true;
-    }
-    false
-}
-
-fn body_lapsed(body: &[u8]) -> bool {
-    let text = String::from_utf8_lossy(body).to_ascii_lowercase();
-    ["invalid", "expired", "revoked", "unauthorized"]
-        .iter()
-        .any(|word| text.contains(word))
+fn join_url(base: &str, path: &str) -> String {
+    format!("{}{path}", base.trim_end_matches('/'))
 }
 
 /// GET one Factory path with client headers and optional bearer.
@@ -57,9 +24,9 @@ pub(crate) async fn get(
     bearer: Option<&SecretString>,
     lapsed: bool,
 ) -> Result<Value, PluginError> {
-    let url = format!("{}{path}", endpoints.api.trim_end_matches('/'));
+    let url = join_url(endpoints.api_base(), path);
     let mut call = Call::get(url);
-    for (name, value) in client::headers(None) {
+    for (name, value) in client::headers() {
         call = call.header(name, value);
     }
     if let Some(token) = bearer {
@@ -68,7 +35,7 @@ pub(crate) async fn get(
     let reply = call.fetch(host.http()).await?;
     let status = reply.status();
     let body = reply.body();
-    if lapsed && sign_in_lapsed(status, body) {
+    if lapsed && sign_in_lapsed(status) {
         return Err(PluginError::auth(
             "Factory refused the stored sign-in; sign in to Factory again",
         ));
@@ -79,7 +46,7 @@ pub(crate) async fn get(
             format!("Factory request failed (HTTP {status})"),
         ));
     }
-    decode_data(body)
+    json::from_slice(body).map_err(|_| PluginError::decode("Factory's reply is not JSON"))
 }
 
 /// POST JSON to one Factory path.
@@ -91,13 +58,13 @@ pub(crate) async fn post_json(
     bearer: Option<&SecretString>,
     lapsed: bool,
 ) -> Result<Value, PluginError> {
-    let url = format!("{}{path}", endpoints.api.trim_end_matches('/'));
+    let url = join_url(endpoints.api_base(), path);
     let payload = json::to_vec(body)
         .map_err(|_| PluginError::decode("Factory request body could not be encoded"))?;
     let mut call = Call::post(url)
         .header("content-type", "application/json")
         .bytes(payload);
-    for (name, value) in client::headers(None) {
+    for (name, value) in client::headers() {
         call = call.header(name, value);
     }
     if let Some(token) = bearer {
@@ -106,7 +73,7 @@ pub(crate) async fn post_json(
     let reply = call.fetch(host.http()).await?;
     let status = reply.status();
     let raw = reply.body();
-    if lapsed && sign_in_lapsed(status, raw) {
+    if lapsed && sign_in_lapsed(status) {
         return Err(PluginError::auth(
             "Factory refused the stored sign-in; sign in to Factory again",
         ));
@@ -122,15 +89,5 @@ pub(crate) async fn post_json(
             format!("Factory request failed (HTTP {status})"),
         ));
     }
-    decode_data(raw)
-}
-
-/// Builds the bearer string Factory expects for OAuth tokens.
-#[must_use]
-pub(crate) fn bearer_oauth(access: &str) -> String {
-    if access.to_ascii_lowercase().starts_with(WORKOS_PREFIX) {
-        access.to_owned()
-    } else {
-        format!("{WORKOS_PREFIX}{access}")
-    }
+    json::from_slice(raw).map_err(|_| PluginError::decode("Factory's reply is not JSON"))
 }

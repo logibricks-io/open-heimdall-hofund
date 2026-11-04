@@ -9,17 +9,11 @@ use crate::creds::{self, Credential};
 pub(crate) const REFERENCE: &str = "cli-credentials";
 
 pub(crate) fn list(home: &Path) -> Result<Vec<DiscoveredAgentAccount>, PluginError> {
-    let path = if home.join("credentials.toml").is_file() {
-        home.join("credentials.toml")
-    } else if let Ok(default) = creds::default_credentials_path() {
-        default
-    } else {
-        return Ok(Vec::new());
-    };
+    let path = credentials_path(home);
     let Ok(credential) = creds::read_credentials(&path) else {
         return Ok(Vec::new());
     };
-    let id = creds::account_id(&credential);
+    let id = creds::agent_account_id(home);
     let row = DiscoveredAgentAccount::new(id, credential.label.clone(), REFERENCE)?;
     Ok(vec![row])
 }
@@ -34,24 +28,29 @@ pub(crate) async fn import(
             "unknown agent sign-in reference `{reference}`"
         )));
     }
-    let path = if home.join("credentials.toml").is_file() {
-        home.join("credentials.toml")
-    } else {
-        creds::default_credentials_path()?
-    };
+    let path = credentials_path(home);
     let credential = creds::read_credentials(&path)?;
-    let id = creds::account_id(&credential);
-    if host.accounts().secret(&id).await?.is_some() {
-        return Ok(id);
+    let id = creds::agent_account_id(home);
+    store(&credential, host, id).await
+}
+
+fn credentials_path(home: &Path) -> std::path::PathBuf {
+    let direct = home.join("credentials.toml");
+    if direct.is_file() {
+        return direct;
     }
-    store(&credential, host).await
+    let nested = creds::agent_credentials_path(home);
+    if nested.is_file() {
+        return nested;
+    }
+    creds::default_credentials_path().unwrap_or(nested)
 }
 
 pub(crate) async fn store(
     credential: &Credential,
     host: &HostContext,
+    id: AccountId,
 ) -> Result<AccountId, PluginError> {
-    let id = creds::account_id(credential);
     let account = host
         .accounts()
         .account(id.clone(), credential.label.clone())?;

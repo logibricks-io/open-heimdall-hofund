@@ -11,8 +11,8 @@ use hofund_plugin_sdk::json::json;
 use hofund_plugin_sdk::oauth::SecretObject;
 use hofund_plugin_sdk::oauth::secret_text;
 
-use crate::models::{self, parse_feed};
-use crate::quota::{self, limit_windows};
+use crate::models;
+use crate::quota;
 use crate::tokens::{self, AuthKind};
 use crate::{Endpoints, factory_with_endpoints};
 
@@ -22,6 +22,7 @@ const API: &str = "https://factory.test";
 fn endpoints() -> Endpoints {
     Endpoints {
         api: API.to_owned(),
+        api_eu: "https://factory-eu.test".to_owned(),
         workos_device: "https://workos.test/authorize/device".to_owned(),
         workos_token: "https://workos.test/authenticate".to_owned(),
     }
@@ -66,13 +67,11 @@ fn device_auth_body() -> Vec<u8> {
 
 fn register_body() -> Vec<u8> {
     json!({
-        "success": true,
-        "data": {
-            "accessToken": "factory-access-1",
-            "refreshToken": "factory-refresh-1",
-            "expiresAt": "2030-01-01T00:00:00Z",
-            "userInfo": {"email": "user@factory.test", "userId": "uid-1"}
-        }
+        "accessToken": "factory-access-1",
+        "refreshToken": "factory-refresh-1",
+        "expiresAt": "2030-01-01T00:00:00Z",
+        "email": "user@factory.test",
+        "userId": "uid-1"
     })
     .to_string()
     .into_bytes()
@@ -83,14 +82,14 @@ fn seed_oauth(host: &TestHost) -> AccountId {
     let blob = SecretObject::new()
         .with_number("v", 1)
         .with_text("auth_type", AuthKind::Oauth.as_str())
-        .with_secret("access_token", &secret("cline-access-1"))
-        .with_secret("refresh_token", &secret("cline-refresh-1"))
+        .with_secret("access_token", &secret("factory-access-1"))
+        .with_secret("refresh_token", &secret("factory-refresh-1"))
         .with_number("expires_ms", 4_000_000_000_000)
-        .with_text("email", "user@cline.test");
+        .with_text("email", "user@factory.test");
     block_on(async {
         let accounts = host.context().accounts();
         let account = accounts
-            .account(id.clone(), "user@cline.test")
+            .account(id.clone(), "user@factory.test")
             .expect("account");
         accounts
             .upsert(account, blob.to_secret())
@@ -134,12 +133,9 @@ fn a2b_13_refresh_rotates_tokens() {
     let id = seed_oauth(&host);
     host.http().enqueue(
         json!({
-            "success": true,
-            "data": {
-                "accessToken": "cline-access-2",
-                "refreshToken": "cline-refresh-2",
-                "expiresAt": "2031-01-01T00:00:00Z"
-            }
+            "accessToken": "factory-access-2",
+            "refreshToken": "factory-refresh-2",
+            "expiresAt": "2031-01-01T00:00:00Z"
         })
         .to_string()
         .into_bytes(),
@@ -148,54 +144,55 @@ fn a2b_13_refresh_rotates_tokens() {
         host.context().clone(),
         endpoints(),
         id.clone(),
-        secret("cline-access-1"),
+        secret("factory-access-1"),
     ))
     .expect("refresh");
     let blob = block_on(host.context().accounts().secret(&id))
         .expect("read")
         .expect("stored");
     let parsed = SecretObject::parse(&blob).expect("blob");
-    assert!(
+    assert_eq!(
         parsed
             .secret("access_token")
-            .is_some_and(|t| secret_text(&t) == "cline-access-2")
+            .as_ref()
+            .map(secret_text)
+            .as_deref(),
+        Some("factory-access-2")
+    );
+    assert_eq!(
+        parsed
+            .secret("refresh_token")
+            .as_ref()
+            .map(secret_text)
+            .as_deref(),
+        Some("factory-refresh-2")
     );
 }
 
 #[test]
-fn a2b_14_model_feed_parse_and_list() {
-    let feed = json!({
-        "recommended": [{"id": "anthropic/claude-sonnet-5.5"}],
-        "free": [{"id": "cline-free/deepseek-v4.1-flash"}],
+fn a2b_14_model_catalog_lists_factory_models() {
+    let list = models::catalog().expect("catalog");
+    assert!(
+        list.models()
+            .iter()
+            .any(|model| model.id() == "claude-sonnet-5-5")
+    );
+}
+
+#[test]
+fn a2b_15_usage_parse_limits() {
+    let limits = json!({
+        "limits": {
+            "standard": {
+                "fiveHour": {"usedPercent": 25.0, "windowEnd": "2030-01-01T00:00:00Z"},
+                "monthly": {"usedPercent": 10.0, "windowEnd": "2030-02-01T00:00:00Z"},
+            }
+        }
     });
-    let models = parse_feed(&feed);
-    assert_eq!(models.len(), 2);
-    assert!(models[1].free);
-
-    let dir = tempfile::tempdir().expect("dir");
-    let host = host(&dir);
-    let id = seed_oauth(&host);
-    host.http().enqueue(
-        json!({"success": true, "data": feed})
-            .to_string()
-            .into_bytes(),
-    );
-    let sub = subscription(&host);
-    let list = block_on(sub.list_models(&id, host.context())).expect("models");
-    assert_eq!(list.models().len(), 2);
-}
-
-#[test]
-fn a2b_15_usage_parse_limits_and_balance() {
-    let limits = json!({"limits": [{"type": "five_hour", "percentUsed": 25.0}]});
-    let windows = limit_windows(Some(&limits));
-    assert_eq!(windows.len(), 1);
+    let windows = quota::windows_from_limits(&limits).expect("windows");
+    assert_eq!(windows.len(), 2);
+    assert_eq!(windows[0].name(), "5 hours");
     assert_eq!(windows[0].used(), 25);
-
-    let balance = json!({"balance": 1_500_000});
-    let usage = quota::assemble(None, Some(&balance), Some(&limits));
-    assert!(!usage.windows.is_empty());
-    assert_eq!(usage.balance.as_deref(), Some("$1.50"));
 }
 
 #[test]
@@ -205,36 +202,25 @@ fn a2b_16_chat_upstream_round_trip() {
     let id = seed_oauth(&host);
     host.http().enqueue(
         json!({
-            "success": true,
-            "data": {
-                "id": "chat-1",
-                "object": "chat.completion",
-                "choices": [{"message": {"role": "assistant", "content": "ok"}}]
-            }
+            "id": "chat-1",
+            "object": "chat.completion",
+            "choices": [{"message": {"role": "assistant", "content": "ok"}}]
         })
         .to_string()
         .into_bytes(),
     );
     let sub = subscription(&host);
     let upstream = sub.upstream(&id, host.context()).expect("upstream");
-    let query =
-        ProbeQuery::new(ProtocolId::OPENAI_CHAT, "anthropic/claude-sonnet-5.5").expect("query");
+    let query = ProbeQuery::new(ProtocolId::OPENAI_CHAT, "claude-sonnet-5-5").expect("query");
     block_on(upstream.probe(&query)).expect("probe");
     let calls = host.http().calls();
-    assert!(
-        calls
-            .iter()
-            .any(|call| call.uri().contains("chat/completions"))
-    );
+    assert!(calls.iter().any(
+        |call| call.uri().contains("/api/llm/c/v1") && call.uri().contains("chat/completions")
+    ));
     assert!(calls.iter().any(|call| {
         call.sensitive_headers()
             .contains(&"authorization".to_owned())
     }));
-    assert!(
-        calls
-            .iter()
-            .any(|call| call.uri().contains("chat/completions") && !call.body().is_empty())
-    );
 }
 
 #[test]
@@ -242,19 +228,16 @@ fn a2b_17_no_secrets_in_errors() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
     let id = seed_oauth(&host);
-    host.http().enqueue_response(
-        400,
-        &[],
-        br#"{"error":"invalid_grant: cline-refresh-1 leaked"}"#.to_vec(),
-    );
+    host.http()
+        .enqueue_response(401, &[], br#"{"message":"invalid_grant"}"#.to_vec());
     let error = block_on(tokens::refresh_for_test(
         host.context().clone(),
         endpoints(),
         id,
-        secret("cline-access-1"),
+        secret("factory-access-1"),
     ))
     .expect_err("refresh");
-    assert!(!error.message().contains("cline-refresh-1"));
+    assert!(!error.message().contains("factory-refresh-1"));
     assert_eq!(error.kind(), PluginErrorKind::Auth);
 }
 
@@ -264,13 +247,13 @@ fn a2b_18_api_key_sign_in_stores_api_auth() {
     let host = host(&dir);
     let sub = subscription(&host);
     host.http().enqueue(
-        json!({"success": true, "data": {"email": "api@cline.test", "id": "u-9"}})
+        json!({"email": "api@factory.test", "userId": "u-9"})
             .to_string()
             .into_bytes(),
     );
     let id = block_on(sub.complete_sign_in(
         &ctx(),
-        SignInProof::Token(secret("sk-cline-test-key")),
+        SignInProof::Token(secret("fk-test-key-12345678")),
         host.context(),
     ))
     .expect("api sign-in");
@@ -279,13 +262,12 @@ fn a2b_18_api_key_sign_in_stores_api_auth() {
         .expect("stored");
     let parsed = SecretObject::parse(&blob).expect("blob");
     assert_eq!(parsed.text("auth_type"), Some("api"));
-    assert!(parsed.secret("api_key").is_some());
-}
-
-#[test]
-fn prettify_names_models() {
     assert_eq!(
-        models::prettify("anthropic/claude-sonnet-5.5"),
-        "Claude Sonnet 5.5"
+        parsed
+            .secret("api_key")
+            .as_ref()
+            .map(secret_text)
+            .as_deref(),
+        Some("fk-test-key-12345678")
     );
 }

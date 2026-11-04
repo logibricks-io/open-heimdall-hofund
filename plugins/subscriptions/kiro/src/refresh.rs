@@ -6,10 +6,12 @@ use std::time::Duration;
 use hofund_plugin_api::{AccountId, HostContext, PluginError, SecretString};
 use hofund_plugin_sdk::Call;
 use hofund_plugin_sdk::json::{self, Value};
-use hofund_plugin_sdk::oauth::secret_text;
+use hofund_plugin_sdk::oauth::{SecretObject, same_secret, secret_text};
 
 use crate::Endpoints;
 use crate::creds::{self, Stored};
+
+const LEASE_WAIT: Duration = Duration::from_secs(30);
 
 pub(crate) async fn ensure_fresh(
     host: &HostContext,
@@ -34,6 +36,14 @@ pub(crate) async fn refresh_stale(
         return Err(PluginError::auth(
             "Kiro sign-in has expired; sign in again with the Kiro IDE or kiro-cli",
         ));
+    }
+    let lease = host.accounts().lease(account, LEASE_WAIT).await?;
+    let blob = SecretObject::parse(lease.secret())?;
+    let current_refresh = blob
+        .secret("refresh_token")
+        .ok_or_else(|| PluginError::auth("the stored Kiro sign-in has no refresh token"))?;
+    if !same_secret(&current_refresh, &stored.credential.refresh) {
+        return Ok(());
     }
     let url = endpoints.refresh_url(&stored.credential.region);
     let body = json::json!({"refreshToken": secret_text(&stored.credential.refresh)});
@@ -65,7 +75,9 @@ pub(crate) async fn refresh_stale(
     let refresh = root
         .get("refreshToken")
         .and_then(Value::as_str)
-        .unwrap_or("");
+        .filter(|t| !t.is_empty())
+        .map(SecretString::from)
+        .unwrap_or_else(|| stored.credential.refresh.clone());
     let expires_in = root
         .get("expiresIn")
         .and_then(Value::as_u64)
@@ -76,16 +88,17 @@ pub(crate) async fn refresh_stale(
         .unwrap_or(stored.credential.profile_arn.as_str());
     let mut credential = stored.credential.clone();
     credential.access = SecretString::from(access.to_owned());
-    credential.refresh = SecretString::from(refresh.to_owned());
+    credential.refresh = refresh;
     credential.profile_arn = profile.to_owned();
     credential.expires_at = host
         .clock()
         .now()
         .checked_add(Duration::from_secs(expires_in));
-    let accounts = host.accounts();
-    let row = accounts.account(account.clone(), credential.label.clone())?;
-    accounts
-        .upsert(row, creds::secret_blob(&credential).to_secret())
+    lease
+        .commit(
+            Some(credential.label.clone()),
+            creds::secret_blob(&credential).to_secret(),
+        )
         .await?;
     Ok(())
 }

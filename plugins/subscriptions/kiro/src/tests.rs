@@ -32,7 +32,7 @@ fn write_token(dir: &std::path::Path, access: &str, refresh: &str, exp: &str) {
     std::fs::write(
         path,
         format!(
-            r#"{{"accessToken":"{access}","refreshToken":"{refresh}","expiresAt":"{exp}","region":"us-east-1","profileArn":"arn:aws:codewhisperer:us-east-1:1:profile/P"}}"#
+            r#"{{"accessToken":"{access}","refreshToken":"{refresh}","expiresAt":"{exp}","region":"us-east-1","profileArn":"arn:aws:codewhisperer:us-east-1:1:profile/P","email":"k@example.test"}}"#
         ),
     )
     .expect("write");
@@ -48,6 +48,7 @@ fn seed(host: &TestHost, access: &str, refresh: &str, exp: &str, label: &str) ->
         region: "us-east-1".to_owned(),
         profile_arn: "arn:aws:codewhisperer:us-east-1:1:profile/P".to_owned(),
         label: label.to_owned(),
+        method: "social".to_owned(),
     };
     let id = creds::account_id(&credential);
     block_on(async {
@@ -66,7 +67,7 @@ fn seed(host: &TestHost, access: &str, refresh: &str, exp: &str, label: &str) ->
 #[test]
 fn a2b_21_discover_import_fixture_token() {
     let dir = tempfile::tempdir().expect("dir");
-    let home = dir.path().join("agent");
+    let home = dir.path().join("cache");
     std::fs::create_dir_all(&home).expect("dir");
     write_token(
         &home,
@@ -105,14 +106,31 @@ fn a2b_22_refresh_on_expiry_posts_to_refresh_url() {
         br#"{"accessToken":"new-access","refreshToken":"new-refresh","expiresIn":3600,"profileArn":"arn:aws:codewhisperer:us-east-1:1:profile/P"}"#.to_vec(),
     );
     block_on(sub.refresh(&id, host.context())).expect("refresh");
+    let calls = host.http().calls();
+    let call = calls.last().expect("refresh call");
+    assert!(call.uri().contains("auth.desktop.kiro.dev/refreshToken"));
+    let body = std::str::from_utf8(call.body()).expect("utf8");
+    assert!(body.contains("kiro-refresh-1"));
     let secret = block_on(host.context().accounts().secret(&id))
         .expect("read")
         .expect("stored");
-    let access = SecretObject::parse(&secret)
-        .expect("blob")
-        .secret("access_token")
-        .expect("access");
-    assert_eq!(secret_text(&access), "new-access");
+    let parsed = SecretObject::parse(&secret).expect("blob");
+    assert_eq!(
+        parsed
+            .secret("access_token")
+            .as_ref()
+            .map(secret_text)
+            .as_deref(),
+        Some("new-access")
+    );
+    assert_eq!(
+        parsed
+            .secret("refresh_token")
+            .as_ref()
+            .map(secret_text)
+            .as_deref(),
+        Some("new-refresh")
+    );
 }
 
 #[test]
@@ -129,9 +147,7 @@ fn a2b_23_model_catalog_lists_anthropic_models() {
 fn a2b_24_upstream_round_trip_with_recording_http() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
-    host.http().enqueue(
-        br#"{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"model":"claude-sonnet-4.5","stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}"#.to_vec(),
-    );
+    host.http().enqueue(br#"{"content":"ok"}"#.to_vec());
     let id = seed(
         &host,
         "kiro-access-up",
@@ -148,7 +164,12 @@ fn a2b_24_upstream_round_trip_with_recording_http() {
     block_on(upstream.execute(request, ProtocolId::ANTHROPIC_MESSAGES)).expect("execute");
     let calls = host.http().calls();
     let call = calls.last().expect("call");
-    assert!(call.uri().contains("amazonaws.com"));
+    assert!(call.uri().contains("runtime.us-east-1.kiro.dev"));
+    assert!(call.uri().contains("generateAssistantResponse"));
+    assert!(
+        call.sensitive_headers()
+            .contains(&"authorization".to_owned())
+    );
 }
 
 #[test]
@@ -158,6 +179,7 @@ fn a2b_25_usage_parsing() {
     assert_eq!(windows.len(), 1);
     assert_eq!(windows[0].name(), "Credits");
     assert_eq!(windows[0].used(), 40);
+    assert_eq!(windows[0].limit(), Some(100));
 }
 
 #[test]
@@ -170,8 +192,11 @@ fn a2b_26_secrets_not_in_debug_or_errors() {
         region: "us-east-1".to_owned(),
         profile_arn: String::new(),
         label: "k@example.test".to_owned(),
+        method: "social".to_owned(),
     };
     assert!(!format!("{credential:?}").contains(token));
+    let error = creds::read_token_file(std::path::Path::new("/no/such/kiro-auth-token.json"));
+    assert!(!error.expect_err("missing").to_string().contains(token));
 }
 
 #[test]
@@ -186,10 +211,44 @@ fn a2b_27_agent_sign_in_writes_token_file() {
         "2099-01-01T00:00:00Z",
         "k@example.test",
     );
-    let home = dir.path().join("kiro-home");
+    let home = dir.path().join("sso-cache");
     block_on(sub.write_agent_sign_in(&id, &home, host.context())).expect("write");
-    let path = creds::default_token_path(&home);
-    let body = std::fs::read_to_string(path).expect("read");
+    let body = std::fs::read_to_string(home.join(TOKEN_FILE)).expect("read");
     assert!(body.contains("agent-access"));
-    assert!(body.contains("us-east-1"));
+    assert!(body.contains("k@example.test"));
+}
+
+#[test]
+fn a2b_28_reimport_replaces_stored_access_token() {
+    let dir = tempfile::tempdir().expect("dir");
+    let home = dir.path().join("cache");
+    std::fs::create_dir_all(&home).expect("dir");
+    write_token(
+        &home,
+        "kiro-access-v1",
+        "kiro-refresh-v1",
+        "2099-01-01T00:00:00Z",
+    );
+    let host = host(&dir);
+    let id =
+        block_on(discover::import(&home, discover::REFERENCE, host.context())).expect("import");
+    write_token(
+        &home,
+        "kiro-access-v2",
+        "kiro-refresh-v2",
+        "2099-01-01T00:00:00Z",
+    );
+    block_on(discover::import(&home, discover::REFERENCE, host.context())).expect("reimport");
+    assert_eq!(
+        block_on(host.context().accounts().secret(&id))
+            .expect("read")
+            .and_then(|secret| {
+                SecretObject::parse(&secret)
+                    .ok()?
+                    .secret("access_token")
+                    .map(|token| secret_text(&token).to_owned())
+            })
+            .as_deref(),
+        Some("kiro-access-v2")
+    );
 }

@@ -16,6 +16,8 @@ use hofund_plugin_sdk::Contribution;
 mod agent_sign_in;
 mod creds;
 mod discover;
+mod kiro_body;
+mod kiro_stream;
 mod models;
 mod quota;
 mod refresh;
@@ -26,7 +28,11 @@ static SPEC: SubscriptionSpec = SubscriptionSpec::from_static(
     "Kiro",
     SignInFlowKind::Bridge,
 )
-.with_agent_sign_in(AgentSignIn::new(&["kiro-cli"], "KIRO_CLI_HOME", ".kiro"));
+.with_agent_sign_in(AgentSignIn::new(
+    &["kiro-cli", "kiro"],
+    "HOME",
+    ".aws/sso/cache",
+));
 
 /// Registers the Kiro subscription.
 #[must_use]
@@ -37,6 +43,8 @@ pub fn contribute() -> Contribution {
 /// HTTP endpoints for refresh and usage. Tests aim these at mocks.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Endpoints {
+    /// Kiro runtime API base; `{region}` is substituted per account.
+    pub runtime: String,
     /// Management API base URL; `{region}` is substituted per account.
     pub management: String,
     /// Refresh token URL; `{region}` is substituted per account.
@@ -45,7 +53,7 @@ pub struct Endpoints {
 
 impl Endpoints {
     pub(crate) fn chat_base(&self, region: &str) -> String {
-        format!("https://q.{region}.amazonaws.com")
+        self.runtime.replace("{region}", region)
     }
 
     pub(crate) fn refresh_url(&self, region: &str) -> String {
@@ -63,6 +71,7 @@ impl Endpoints {
 impl Default for Endpoints {
     fn default() -> Self {
         Self {
+            runtime: "https://runtime.{region}.kiro.dev".to_owned(),
             management: "https://management.{region}.kiro.dev".to_owned(),
             refresh: "https://prod.{region}.auth.desktop.kiro.dev/refreshToken".to_owned(),
         }
@@ -154,10 +163,7 @@ impl Subscription for Kiro {
         _host: &HostContext,
     ) -> Result<SignInChallenge, PluginError> {
         drop(self.take_pending(ctx.session()));
-        let home = std::env::var("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("."));
-        let path = creds::default_token_path(&home);
+        let path = creds::discover_token_path();
         creds::read_token_file(&path).map_err(|error| {
             PluginError::auth(format!(
                 "Kiro is not signed in at {}; {}",
@@ -209,10 +215,7 @@ impl Subscription for Kiro {
         host: &HostContext,
     ) -> Result<AccountStatus, PluginError> {
         match creds::Stored::load(host, account).await {
-            Ok(stored) if stored.fresh_at(host.clock().now()) => Ok(AccountStatus::Ready),
-            Ok(_) => Ok(AccountStatus::NeedsSignIn {
-                reason: "the Kiro sign-in is due for renewal".to_owned(),
-            }),
+            Ok(_) => Ok(AccountStatus::Ready),
             Err(error) if error.kind() == hofund_plugin_api::PluginErrorKind::Auth => {
                 Ok(AccountStatus::NeedsSignIn {
                     reason: error.to_string(),

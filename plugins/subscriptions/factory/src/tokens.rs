@@ -9,7 +9,7 @@ use hofund_plugin_sdk::oauth::{SecretObject, detached, same_secret};
 use hofund_plugin_sdk::time::parse_rfc3339;
 
 use crate::Endpoints;
-use crate::api::{self, bearer_oauth};
+use crate::api;
 
 /// How long before expiry an OAuth access token is refreshed.
 pub(crate) const REFRESH_MARGIN: Duration = Duration::from_secs(5 * 60);
@@ -65,6 +65,7 @@ pub(crate) struct ParsedAuth {
 #[derive(Debug)]
 pub(crate) struct Bearer {
     pub(crate) token: SecretString,
+    pub(crate) region: Option<String>,
 }
 
 fn stored(secret: &SecretString) -> Result<SecretObject, PluginError> {
@@ -91,7 +92,7 @@ pub(crate) fn bearer_of(blob: &SecretObject) -> Result<SecretString, PluginError
             let access = blob.secret("access_token").ok_or_else(|| {
                 PluginError::auth("the stored Factory sign-in has no access token")
             })?;
-            Ok(SecretString::from(bearer_oauth(secret_text(&access))))
+            Ok(access)
         }
     }
 }
@@ -141,11 +142,13 @@ pub(crate) async fn bearer(
     if kind(&blob) == AuthKind::Api {
         return Ok(Bearer {
             token: bearer_of(&blob)?,
+            region: blob.text("region").map(str::to_owned),
         });
     }
     if !needs_refresh(&blob, host.clock().now()) {
         return Ok(Bearer {
             token: bearer_of(&blob)?,
+            region: blob.text("region").map(str::to_owned),
         });
     }
     let access = blob
@@ -189,6 +192,7 @@ async fn refresh_oauth(
     if kind(&blob) == AuthKind::Api {
         return Ok(Bearer {
             token: bearer_of(&blob)?,
+            region: blob.text("region").map(str::to_owned),
         });
     }
     let current = blob
@@ -197,6 +201,7 @@ async fn refresh_oauth(
     if !same_secret(&current, &stale) {
         return Ok(Bearer {
             token: bearer_of(&blob)?,
+            region: blob.text("region").map(str::to_owned),
         });
     }
     let refresh_token = blob
@@ -206,25 +211,28 @@ async fn refresh_oauth(
         "refreshToken": secret_text(&refresh_token),
         "grantType": "refresh_token",
     });
-    let reply = match api::post_json(&host, &endpoints, "/auth/refresh", &body, None, true).await {
-        Ok(data) => data,
-        Err(error) if error.kind() == PluginErrorKind::Auth => {
-            lease
-                .commit(None, blob.with_flag(LAPSED, true).to_secret())
-                .await?;
-            return Err(error);
-        }
-        Err(_error)
-            if !expired(&blob, host.clock().now())
-                && ms_remaining(&blob, host.clock().now()) > RETRYABLE_GRACE =>
-        {
-            return Ok(Bearer {
-                token: bearer_of(&blob)?,
-            });
-        }
-        Err(error) => return Err(error),
-    };
+    let reply =
+        match api::post_json(&host, &endpoints, "/api/v1/auth/refresh", &body, None, true).await {
+            Ok(data) => data,
+            Err(error) if error.kind() == PluginErrorKind::Auth => {
+                lease
+                    .commit(None, blob.with_flag(LAPSED, true).to_secret())
+                    .await?;
+                return Err(error);
+            }
+            Err(_error)
+                if !expired(&blob, host.clock().now())
+                    && ms_remaining(&blob, host.clock().now()) > RETRYABLE_GRACE =>
+            {
+                return Ok(Bearer {
+                    token: bearer_of(&blob)?,
+                    region: blob.text("region").map(str::to_owned),
+                });
+            }
+            Err(error) => return Err(error),
+        };
     let parsed = parse_register(&reply, Some(&refresh_token), host.clock().now())?;
+    let region = blob.text("region").map(str::to_owned);
     let mut next = blob
         .with_secret("access_token", &parsed.access)
         .with_secret("refresh_token", &parsed.refresh)
@@ -240,7 +248,8 @@ async fn refresh_oauth(
     }
     lease.commit(None, next.to_secret()).await?;
     Ok(Bearer {
-        token: SecretString::from(bearer_oauth(secret_text(&parsed.access))),
+        token: parsed.access.clone(),
+        region,
     })
 }
 
@@ -253,11 +262,6 @@ fn ms_remaining(blob: &SecretObject, now: SystemTime) -> Duration {
         return Duration::ZERO;
     };
     at.duration_since(now).unwrap_or(Duration::ZERO)
-}
-
-/// Whether an OAuth blob is past expiry or inside the refresh margin.
-pub(crate) fn oauth_needs_renewal(blob: &SecretObject, now: SystemTime) -> bool {
-    needs_refresh(blob, now)
 }
 
 /// Reads Factory's register or refresh answer.
@@ -278,21 +282,23 @@ pub(crate) fn parse_register(
         .map(SecretString::from)
         .or_else(|| fallback_refresh.cloned())
         .ok_or_else(|| PluginError::decode("Factory sent back no refresh token"))?;
-    let ui = data.get("userInfo").and_then(Value::as_object);
-    let uid = ui
-        .and_then(|map| map.get("clineUserId").or_else(|| map.get("subject")))
+    let uid = data
+        .get("userId")
+        .or_else(|| data.get("userInfo").and_then(|ui| ui.get("userId")))
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|text| !text.is_empty())
         .map(str::to_owned);
-    let email = ui
-        .and_then(|map| map.get("email"))
+    let email = data
+        .get("email")
+        .or_else(|| data.get("userInfo").and_then(|ui| ui.get("email")))
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|text| !text.is_empty())
         .map(str::to_owned);
-    let name = ui
-        .and_then(|map| map.get("name"))
+    let name = data
+        .get("userInfo")
+        .and_then(|ui| ui.get("name"))
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|text| !text.is_empty())

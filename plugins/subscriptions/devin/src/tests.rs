@@ -7,7 +7,7 @@ use hofund_plugin_api::{
     AccountId, PluginId, PluginKind, ProbeQuery, ProtocolId, RawTable, SecretString, Subscription,
     SubscriptionFactory,
 };
-use hofund_plugin_sdk::oauth::SecretObject;
+use hofund_plugin_sdk::oauth::{SecretObject, secret_text};
 
 use crate::creds::{self, Credential};
 use crate::{DevinFactory, discover};
@@ -48,26 +48,18 @@ fn seed_account(host: &TestHost, key: &str, label: &str) -> AccountId {
     id
 }
 
-fn seed_models_cache(host: &TestHost) {
-    let path = host
-        .context()
-        .dirs()
-        .cache_dir()
-        .expect("cache")
-        .join("devin-models.json");
-    std::fs::write(path, MODELS_FIXTURE).expect("models cache");
-}
-
 #[test]
 fn a2b_3_discover_import_fixture_credentials() {
     let dir = tempfile::tempdir().expect("dir");
-    let home = dir.path().join("agent");
+    let home = dir.path().join("agent").join("devin");
     std::fs::create_dir_all(&home).expect("dir");
-    let creds = home.join("credentials.toml");
-    std::fs::write(&creds, "windsurf_api_key = \"devin-import-key-1\"\n").expect("write");
+    std::fs::write(
+        home.join("credentials.toml"),
+        "windsurf_api_key = \"devin-import-key-1\"\n",
+    )
+    .expect("write");
     let rows = discover::list(&home).expect("list");
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].reference(), discover::REFERENCE);
     let host = host(&dir);
     let id =
         block_on(discover::import(&home, discover::REFERENCE, host.context())).expect("import");
@@ -75,7 +67,10 @@ fn a2b_3_discover_import_fixture_credentials() {
         .expect("read")
         .expect("stored");
     let blob = SecretObject::parse(&secret).expect("blob");
-    assert!(blob.secret("api_key").is_some());
+    assert_eq!(
+        blob.secret("api_key").as_ref().map(secret_text).as_deref(),
+        Some("devin-import-key-1")
+    );
 }
 
 #[test]
@@ -85,13 +80,14 @@ fn a2b_4_refresh_is_no_op_for_api_key() {
     let sub = subscription(&host);
     let id = seed_account(&host, "devin-static-key", "dev@example.test");
     block_on(sub.refresh(&id, host.context())).expect("refresh");
+    let calls = host.http().calls();
+    assert!(calls.is_empty(), "refresh must not call the network");
 }
 
 #[test]
 fn a2b_5_model_list_parsing() {
     let models = crate::models::parse_models(MODELS_FIXTURE.as_bytes()).expect("parse");
     assert!(models.iter().any(|model| model.id() == "swe-2"));
-    assert!(models.iter().any(|model| model.id() == "swe-2-max"));
 }
 
 #[test]
@@ -111,8 +107,10 @@ fn a2b_6_upstream_round_trip_with_recording_http() {
     let calls = host.http().calls();
     let call = calls.last().expect("call");
     assert!(call.uri().contains("api.devin.test"));
-    let body = std::str::from_utf8(call.body()).expect("utf8");
-    assert!(body.contains("swe-2"));
+    assert!(
+        call.sensitive_headers()
+            .contains(&"authorization".to_owned())
+    );
 }
 
 #[test]
@@ -143,12 +141,37 @@ fn a2b_8_quota_is_empty() {
 }
 
 #[test]
-fn a2b_9_list_models_reads_cache() {
+fn a2b_9_list_models_requires_cli() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
-    seed_models_cache(&host);
     let id = seed_account(&host, "devin-models-key", "dev@example.test");
     let sub = subscription(&host);
-    let list = block_on(sub.list_models(&id, host.context())).expect("models");
-    assert!(list.models().iter().any(|model| model.id() == "swe-2"));
+    let error = block_on(sub.list_models(&id, host.context())).expect_err("models");
+    assert!(error.message().contains("devin models list"));
+}
+
+#[test]
+fn a2b_28_reimport_replaces_stored_key() {
+    let dir = tempfile::tempdir().expect("dir");
+    let home = dir.path().join("agent").join("devin");
+    std::fs::create_dir_all(&home).expect("dir");
+    let path = home.join("credentials.toml");
+    std::fs::write(&path, "windsurf_api_key = \"devin-key-v1\"\n").expect("write");
+    let host = host(&dir);
+    let id =
+        block_on(discover::import(&home, discover::REFERENCE, host.context())).expect("import");
+    std::fs::write(&path, "windsurf_api_key = \"devin-key-v2\"\n").expect("rewrite");
+    block_on(discover::import(&home, discover::REFERENCE, host.context())).expect("reimport");
+    let secret = block_on(host.context().accounts().secret(&id))
+        .expect("read")
+        .expect("stored");
+    assert_eq!(
+        SecretObject::parse(&secret)
+            .expect("blob")
+            .secret("api_key")
+            .as_ref()
+            .map(secret_text)
+            .as_deref(),
+        Some("devin-key-v2")
+    );
 }

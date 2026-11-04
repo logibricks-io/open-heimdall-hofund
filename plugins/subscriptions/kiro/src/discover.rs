@@ -9,7 +9,7 @@ use crate::creds::{self, Credential};
 pub(crate) const REFERENCE: &str = "ide-token";
 
 pub(crate) fn list(home: &Path) -> Result<Vec<DiscoveredAgentAccount>, PluginError> {
-    let path = creds::default_token_path(home);
+    let path = creds::token_path_in_home(home);
     let Ok(credential) = creds::read_token_file(&path) else {
         return Ok(Vec::new());
     };
@@ -28,12 +28,8 @@ pub(crate) async fn import(
             "unknown agent sign-in reference `{reference}`"
         )));
     }
-    let path = creds::default_token_path(home);
+    let path = creds::token_path_in_home(home);
     let credential = creds::read_token_file(&path)?;
-    let id = creds::account_id(&credential);
-    if host.accounts().secret(&id).await?.is_some() {
-        return Ok(id);
-    }
     store(&credential, host).await
 }
 

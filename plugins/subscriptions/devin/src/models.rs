@@ -94,6 +94,7 @@ fn push_family(
     Ok(())
 }
 
+#[allow(dead_code)]
 pub(crate) fn list_from_fixture(body: &[u8]) -> Result<ModelList, PluginError> {
     let models = parse_models(body)?;
     Ok(ModelList::new(models, None))

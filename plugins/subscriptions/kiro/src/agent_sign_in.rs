@@ -12,9 +12,6 @@ pub(crate) async fn write(
     host: &HostContext,
 ) -> Result<(), PluginError> {
     let stored = Stored::load(host, account).await?;
-    let path = creds::default_token_path(home);
-    if path.file_name().is_some_and(|name| name != TOKEN_FILE) {
-        return creds::write_token_file(&home.join(TOKEN_FILE), &stored.credential);
-    }
+    let path = home.join(TOKEN_FILE);
     creds::write_token_file(&path, &stored.credential)
 }

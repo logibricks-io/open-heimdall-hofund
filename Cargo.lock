@@ -2213,10 +2213,14 @@ dependencies = [
 name = "hofund-plugin-subscription-devin"
 version = "0.1.0"
 dependencies = [
+ "hex",
  "hofund-kit-subscription",
  "hofund-plugin-api",
  "hofund-plugin-sdk",
+ "serde",
+ "sha2",
  "tempfile",
+ "toml 1.1.8+spec-1.1.0",
 ]
 
 [[package]]

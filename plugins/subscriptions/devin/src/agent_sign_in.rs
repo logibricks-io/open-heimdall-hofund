@@ -12,6 +12,6 @@ pub(crate) async fn write(
     host: &HostContext,
 ) -> Result<(), PluginError> {
     let stored = Stored::load(host, account).await?;
-    let path = home.join("credentials.toml");
+    let path = creds::agent_credentials_path(home);
     creds::write_credentials(&path, &stored.credential)
 }

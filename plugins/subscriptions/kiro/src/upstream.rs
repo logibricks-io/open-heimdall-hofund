@@ -1,16 +1,18 @@
-//! Kiro chat upstream on the Anthropic Messages API.
+//! Kiro chat upstream on `generateAssistantResponse`.
 
 use std::sync::Arc;
 
 use hofund_plugin_api::{
-    AccountId, Completion, CredentialStyle, HostContext, PluginError, ProbeQuery, ProbeReport,
-    ProtocolId, Request, UpstreamProvider,
+    AccountId, Completion, ContentPart, HostContext, Message, PluginError, ProbeQuery, ProbeReport,
+    ProtocolId, Request, Response, Role, Stop, StopReason, UpstreamProvider,
 };
+use hofund_plugin_sdk::Call;
+use hofund_plugin_sdk::json::{self, Value};
 use hofund_plugin_sdk::oauth::secret_text;
-use hofund_plugin_sdk::wire::{self, Target};
 
 use crate::creds::Stored;
-use crate::{Endpoints, refresh};
+use crate::refresh;
+use crate::{Endpoints, kiro_body, kiro_stream};
 
 pub(crate) struct KiroUpstream {
     account: AccountId,
@@ -37,29 +39,72 @@ impl KiroUpstream {
         request: Request,
         inbound: ProtocolId,
     ) -> Result<Completion, PluginError> {
-        let base = self.endpoints.chat_base(&stored.credential.region);
-        let mut headers = vec![(
-            "authorization".to_owned(),
-            format!("Bearer {}", secret_text(&stored.credential.access)),
-        )];
+        let region = stored.credential.region.as_str();
+        let base = self.endpoints.chat_base(region);
+        let url = format!("{base}/generateAssistantResponse");
+        let body = kiro_body::encode(&request, &stored.credential)?;
+        let mut call = Call::post(url)
+            .header("content-type", "application/json")
+            .header("accept", "application/vnd.amazon.eventstream")
+            .header("x-amzn-codewhisperer-optout", "true")
+            .sensitive_header(
+                "authorization",
+                format!("Bearer {}", secret_text(&stored.credential.access)),
+            );
+        if stored.credential.method == "apikey" {
+            call = call.header("tokentype", "API_KEY");
+        } else if stored.credential.method == "external-idp" {
+            call = call.header("tokentype", "EXTERNAL_IDP");
+        }
         if !stored.credential.profile_arn.is_empty() {
-            headers.push((
-                "x-amzn-codewhisperer-token".to_owned(),
-                stored.credential.profile_arn.clone(),
+            call = call.header("x-amz-codewhisperer-token", &stored.credential.profile_arn);
+        }
+        let reply = call.bytes(body).fetch(self.host.http()).await?;
+        if reply.status() == 401 || reply.status() == 403 {
+            return Err(PluginError::auth(
+                "Kiro refused the sign-in for this request",
             ));
         }
-        let target = Target::new(ProtocolId::ANTHROPIC_MESSAGES, base)
-            .credential(CredentialStyle::Bearer)
-            .headers(headers);
-        wire::execute(
-            self.host.http(),
-            &target,
-            Some(&stored.credential.access),
-            request,
-            inbound,
-        )
-        .await
+        if !(200..300).contains(&reply.status()) {
+            return Err(PluginError::status_error(
+                reply.status(),
+                "Kiro did not complete the request",
+            ));
+        }
+        let text =
+            decode_json(reply.body()).or_else(|_| kiro_stream::assistant_text(reply.body()))?;
+        let response = anthropic_response(&request.model, &text);
+        if inbound == ProtocolId::ANTHROPIC_MESSAGES {
+            return Ok(Completion::Unary(response));
+        }
+        Err(PluginError::config(
+            "Kiro upstream only serves Anthropic Messages on this path",
+        ))
     }
+}
+
+fn decode_json(body: &[u8]) -> Result<String, PluginError> {
+    let value: Value =
+        json::from_slice(body).map_err(|_| PluginError::decode("Kiro's reply is not JSON"))?;
+    value
+        .get("content")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| PluginError::decode("Kiro's JSON reply has no content"))
+}
+
+fn anthropic_response(model: &str, text: &str) -> Box<Response> {
+    let mut message = Message::new(Role::Assistant);
+    message.content.push(ContentPart::text(text));
+    Box::new(
+        Response::new(message)
+            .with_id(Some("msg_kiro_probe".to_owned()))
+            .with_model(Some(model.to_owned()))
+            .with_stop(Some(Stop {
+                reason: StopReason::EndTurn,
+                sequence: None,
+            })),
+    )
 }
 
 #[hofund_plugin_sdk::async_trait]

@@ -1,9 +1,12 @@
 //! Devin CLI credentials.toml and stored account secrets.
 
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use hofund_plugin_api::{AccountId, HostContext, PluginError, SecretString};
-use hofund_plugin_sdk::oauth::{SecretObject, account_id_from};
+use hofund_plugin_sdk::oauth::{SecretObject, account_id_from, secret_text};
+use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 const FILE_CAP: u64 = 64 * 1024;
 
@@ -51,8 +54,8 @@ pub(crate) fn parse_secret(secret: &SecretString) -> Result<Stored, PluginError>
     let label = blob
         .text("label")
         .filter(|value| !value.is_empty())
-        .unwrap_or("Devin")
-        .to_owned();
+        .map(str::to_owned)
+        .unwrap_or_else(|| default_label(&key));
     Ok(Stored {
         credential: Credential {
             key,
@@ -72,8 +75,39 @@ pub(crate) fn secret_blob(credential: &Credential) -> SecretObject {
         .with_text("label", &credential.label)
 }
 
+/// Label-based account id for seeded accounts and tests.
+#[allow(dead_code)]
 pub(crate) fn account_id(credential: &Credential) -> AccountId {
-    account_id_from(&["devin", &credential.label])
+    account_id_from(&["devin", &credential.label.to_ascii_lowercase()])
+}
+
+pub(crate) fn agent_account_id(home: &Path) -> AccountId {
+    let mut hasher = Sha256::new();
+    hasher.update(home.to_string_lossy().as_bytes());
+    let digest = hasher.finalize();
+    account_id_from(&["devin", "agent", &hex::encode(&digest[..8])])
+}
+
+pub(crate) fn cli_account_id() -> AccountId {
+    account_id_from(&["devin", "cli"])
+}
+
+fn stable_key(key: &SecretString) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(secret_text(key).as_bytes());
+    let digest = hasher.finalize();
+    hex::encode(&digest[..8])
+}
+
+fn default_label(key: &SecretString) -> String {
+    format!("Devin {}", &stable_key(key)[..8])
+}
+
+#[derive(Deserialize)]
+struct DevinCredentialsFile {
+    windsurf_api_key: String,
+    api_server_url: Option<String>,
+    devin_api_url: Option<String>,
 }
 
 pub(crate) fn read_credentials(path: &Path) -> Result<Credential, PluginError> {
@@ -90,51 +124,30 @@ pub(crate) fn read_credentials(path: &Path) -> Result<Credential, PluginError> {
 }
 
 pub(crate) fn parse_credentials_toml(text: &str) -> Result<Credential, PluginError> {
-    let mut key = String::new();
-    let mut api_server = String::new();
-    let mut devin_api = String::new();
-    for line in text.lines() {
-        let line = line.split('#').next().unwrap_or(line).trim();
-        let Some((name, value)) = line.split_once('=') else {
-            continue;
-        };
-        let name = name.trim();
-        let value = parse_toml_string(value.trim());
-        match name {
-            "windsurf_api_key" => key = value,
-            "api_server_url" => api_server = value,
-            "devin_api_url" => devin_api = value,
-            _ => {}
-        }
-    }
+    let file: DevinCredentialsFile = toml::from_str(text).map_err(|error| {
+        PluginError::decode(format!("Devin credentials file is not valid TOML: {error}"))
+    })?;
+    let key = file.windsurf_api_key.trim();
     if key.is_empty() {
         return Err(PluginError::auth(
             "Devin credentials file has no windsurf_api_key",
         ));
     }
-    if api_server.is_empty() {
-        api_server = "https://server.codeium.com".to_owned();
-    }
-    if devin_api.is_empty() {
-        devin_api = "https://api.devin.ai".to_owned();
-    }
+    let api_server = file
+        .api_server_url
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "https://server.codeium.com".to_owned());
+    let devin_api = file
+        .devin_api_url
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "https://api.devin.ai".to_owned());
+    let key = SecretString::from(key.to_owned());
     Ok(Credential {
-        key: SecretString::from(key),
+        label: default_label(&key),
+        key,
         api_server,
         devin_api,
-        label: "Devin".to_owned(),
     })
-}
-
-fn parse_toml_string(raw: &str) -> String {
-    let raw = raw.trim();
-    if raw.starts_with('"') && raw.ends_with('"') && raw.len() >= 2 {
-        raw[1..raw.len() - 1]
-            .replace("\\\"", "\"")
-            .replace("\\\\", "\\")
-    } else {
-        raw.to_owned()
-    }
 }
 
 pub(crate) fn default_credentials_path() -> Result<PathBuf, PluginError> {
@@ -150,21 +163,69 @@ pub(crate) fn default_credentials_path() -> Result<PathBuf, PluginError> {
     Ok(base.join("devin").join("credentials.toml"))
 }
 
+/// Path to credentials.toml for an agent home directory.
+pub(crate) fn agent_credentials_path(home: &Path) -> PathBuf {
+    if home
+        .file_name()
+        .is_some_and(|name| name == std::ffi::OsStr::new("devin"))
+    {
+        home.join("credentials.toml")
+    } else {
+        home.join("devin").join("credentials.toml")
+    }
+}
+
 pub(crate) fn write_credentials(path: &Path, credential: &Credential) -> Result<(), PluginError> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|_| PluginError::io("cannot create the Devin credentials directory"))?;
+        private_dir(parent)?;
     }
     let body = format!(
-        "windsurf_api_key = \"{}\"\napi_server_url = \"{}\"\ndevin_api_url = \"{}\"\n",
-        escape_toml(hofund_plugin_sdk::oauth::secret_text(&credential.key)),
-        escape_toml(&credential.api_server),
-        escape_toml(&credential.devin_api),
+        "windsurf_api_key = {}\napi_server_url = {}\ndevin_api_url = {}\n",
+        toml_string(secret_text(&credential.key)),
+        toml_string(&credential.api_server),
+        toml_string(&credential.devin_api),
     );
-    std::fs::write(path, body).map_err(|_| PluginError::io("cannot write Devin credentials"))?;
+    write_private(path, &body)
+}
+
+fn toml_string(value: &str) -> String {
+    format!(
+        "\"{}\"",
+        value
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n")
+    )
+}
+
+fn private_dir(dir: &Path) -> Result<(), PluginError> {
+    std::fs::create_dir_all(dir)
+        .map_err(|_| PluginError::io("cannot create the Devin credentials directory"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|_| PluginError::io("cannot restrict the Devin credentials directory"))?;
+    }
     Ok(())
 }
 
-fn escape_toml(text: &str) -> String {
-    text.replace('\\', "\\\\").replace('"', "\\\"")
+fn write_private(path: &Path, text: &str) -> Result<(), PluginError> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let failed = |_| PluginError::io("cannot write the Devin credentials file");
+    let mut file = options.open(path).map_err(failed)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .map_err(failed)?;
+    }
+    file.write_all(text.as_bytes()).map_err(failed)?;
+    file.sync_all().map_err(failed)
 }

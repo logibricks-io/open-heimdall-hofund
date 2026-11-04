@@ -6,7 +6,6 @@ use hofund_plugin_api::{
     AccountId, Completion, CredentialStyle, HostContext, PluginError, ProbeQuery, ProbeReport,
     ProtocolId, Request, UpstreamProvider,
 };
-use hofund_plugin_sdk::json::Value;
 use hofund_plugin_sdk::wire::{self, Target};
 
 use crate::Endpoints;
@@ -38,10 +37,10 @@ impl FactoryUpstream {
         request: Request,
         inbound: ProtocolId,
     ) -> Result<Completion, PluginError> {
-        let target = Target::new(ProtocolId::OPENAI_CHAT, self.endpoints.api.clone())
+        let api_base = self.endpoints.api_base_for_region(bearer.region.as_deref());
+        let target = Target::new(ProtocolId::OPENAI_CHAT, format!("{api_base}/api/llm/c/v1"))
             .credential(CredentialStyle::Bearer)
-            .headers(client::headers(None))
-            .unwrap(Arc::new(unwrap_envelope));
+            .headers(client::headers());
         wire::execute(
             self.host.http(),
             &target,
@@ -77,18 +76,4 @@ impl UpstreamProvider for FactoryUpstream {
             .await?;
         ProbeReport::from_completion(completion).await
     }
-}
-
-/// Lifts `{"data": {"choices": …}}` to the inner completion object.
-fn unwrap_envelope(value: Value) -> Value {
-    let Value::Object(map) = value else {
-        return value;
-    };
-    let Some(data) = map.get("data") else {
-        return Value::Object(map);
-    };
-    if data.get("choices").and_then(Value::as_array).is_some() {
-        return data.clone();
-    }
-    Value::Object(map)
 }

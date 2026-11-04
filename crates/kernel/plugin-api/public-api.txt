@@ -500,6 +500,7 @@ MatchNeedle
 MatchNeedle #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
 MatchNeedle::const fn as_str (self) -> & 'static str
 MatchNeedle::const fn new (value : & 'static str) -> Self
+Message
 MemberId
 MemberId #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Hash)
 MemberId::fn account (& self) -> Option < & AccountId >
@@ -940,6 +941,8 @@ Spawned
 Spawned #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
 Spawned::const fn id (self) -> u32
 StreamEvent
+Stop
+StopReason
 Subscription
 Subscription::async fn account_status (& self , account : & AccountId , host : & HostContext ,) -> Result < AccountStatus , PluginError >
 Subscription::async fn cancel_sign_in (& self , ctx : & SignInCtx , host : & HostContext) -> Result < () , PluginError >

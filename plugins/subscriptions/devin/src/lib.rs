@@ -15,6 +15,7 @@ use hofund_plugin_sdk::Contribution;
 mod agent_sign_in;
 mod creds;
 mod discover;
+#[cfg(test)]
 mod models;
 mod upstream;
 
@@ -27,8 +28,8 @@ static SPEC: SubscriptionSpec = SubscriptionSpec::from_static(
 )
 .with_agent_sign_in(AgentSignIn::new(
     &["devin"],
-    "XDG_CONFIG_HOME",
-    ".config/devin",
+    "XDG_DATA_HOME",
+    ".local/share/devin",
 ));
 
 /// Registers the Devin subscription.
@@ -143,7 +144,7 @@ impl Subscription for Devin {
             ));
         };
         let credential = creds::read_credentials(&path)?;
-        discover::store(&credential, host).await
+        discover::store(&credential, host, creds::cli_account_id()).await
     }
 
     async fn cancel_sign_in(
@@ -189,13 +190,9 @@ impl Subscription for Devin {
         host: &HostContext,
     ) -> Result<ModelList, PluginError> {
         let _ = creds::Stored::load(host, account).await?;
-        let path = host.dirs().cache_dir()?.join("devin-models.json");
-        let body = std::fs::read(&path).map_err(|_| {
-            PluginError::config(
-                "no Devin model list is cached; run list models after the CLI reports models",
-            )
-        })?;
-        models::list_from_fixture(&body)
+        Err(PluginError::config(
+            "Devin models come from `devin models list`; hofund does not run the CLI offline",
+        ))
     }
 
     fn upstream(

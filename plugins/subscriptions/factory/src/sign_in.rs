@@ -95,7 +95,7 @@ async fn register_workos(
         "accessToken": secret_text(access),
         "refreshToken": refresh_text,
     });
-    let data = api::post_json(host, endpoints, "/auth/register", &body, None, false).await?;
+    let data = api::post_json(host, endpoints, "/api/v1/auth/register", &body, None, false).await?;
     let parsed = parse_register(&data, refresh, host.clock().now())?;
     store_signed_in(parsed)
 }
@@ -136,7 +136,7 @@ fn store_signed_in(parsed: tokens::ParsedAuth) -> Result<SignedIn, PluginError> 
     })
 }
 
-/// Stores an API key after checking it against `/users/me`.
+/// Stores an API key after checking it with `/api/cli/whoami`.
 pub(crate) async fn import_api_key(
     host: &HostContext,
     endpoints: &Endpoints,
@@ -146,15 +146,22 @@ pub(crate) async fn import_api_key(
     if trimmed.is_empty() {
         return Err(PluginError::auth("Factory API key is empty"));
     }
+    if !trimmed.starts_with("fk-") {
+        return Err(PluginError::auth("Factory API keys start with fk-"));
+    }
     let key = SecretString::from(trimmed.to_owned());
-    let me = api::get(host, endpoints, "/users/me", Some(&key), true).await?;
-    let email = first_string(&me, &["email"]);
-    let uid = first_string(&me, &["clineUserId", "subject", "id"]);
+    let who = api::get(host, endpoints, "/api/cli/whoami", Some(&key), true).await?;
+    let email = first_string(&who, &["email"]);
+    let uid = first_string(&who, &["userId"]);
+    let region = first_string(&who, &["region"]);
     let label = email
         .clone()
         .or(uid.clone())
         .unwrap_or_else(|| "Factory API key".to_owned());
-    let account_key = email.clone().or(uid).unwrap_or_else(|| label.clone());
+    let account_key = email
+        .clone()
+        .or(uid.clone())
+        .unwrap_or_else(|| label.clone());
     let id = account_id_from(&["factory", "api", &account_key.to_ascii_lowercase()]);
     let mut blob = SecretObject::new()
         .with_number("v", 1)
@@ -163,6 +170,12 @@ pub(crate) async fn import_api_key(
         .with_text("account_id", &account_key);
     if let Some(ref addr) = email {
         blob = blob.with_text("email", addr);
+    }
+    if let Some(ref user) = uid {
+        blob = blob.with_text("uid", user);
+    }
+    if let Some(ref reg) = region {
+        blob = blob.with_text("region", reg);
     }
     Ok(SignedIn {
         id,
