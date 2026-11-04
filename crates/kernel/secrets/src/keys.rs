@@ -510,6 +510,42 @@ impl KeyStore {
         Ok(moved)
     }
 
+    /// Rewrites provider-scoped model and account patterns after a provider id change.
+    pub fn replace_provider(&self, from: &str, to: &str) -> Result<(), SecretError> {
+        if from == to {
+            return Ok(());
+        }
+        let _guard = self.lock()?;
+        let mut keys = self.load_migrated()?;
+        let from_prefix = format!("{from}/");
+        let to_prefix = format!("{to}/");
+        let mut changed = false;
+        for key in &mut keys {
+            for model in &mut key.models {
+                if let Some(rest) = model.strip_prefix(&from_prefix) {
+                    *model = format!("{to_prefix}{rest}");
+                    changed = true;
+                } else if model.eq_ignore_ascii_case(from) {
+                    *model = to.to_owned();
+                    changed = true;
+                }
+            }
+            for account in &mut key.accounts {
+                if let Some(rest) = account.strip_prefix(&from_prefix) {
+                    *account = format!("{to_prefix}{rest}");
+                    changed = true;
+                } else if account.eq_ignore_ascii_case(from) {
+                    *account = to.to_owned();
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.save(&keys)?;
+        }
+        Ok(())
+    }
+
     /// Rewrites exact model ids after a model move; wildcard patterns stay unchanged.
     pub fn move_model(&self, from: &str, to: &str) -> Result<(), SecretError> {
         let _guard = self.lock()?;

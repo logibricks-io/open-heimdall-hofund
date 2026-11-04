@@ -15,8 +15,13 @@ use thiserror::Error;
 
 mod migrate;
 pub mod pass_headers;
+mod provider_rename;
 mod visible;
 
+pub use provider_rename::{
+    GATEWAY_PROVIDER_ID, GROUP_ROUTE_PREFIX, edit_provider_rename, provider_id_valid, renamed_ref,
+    validate_provider_rename,
+};
 pub use visible::{
     AgentModels, CatalogEntry, VisibleCatalog, build_catalog_index, catalog_for_agent,
     edit_agent_hidden_models, edit_agent_picked_models, edit_agent_picked_only, edit_agent_visible,
