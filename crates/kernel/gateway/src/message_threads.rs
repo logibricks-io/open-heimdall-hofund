@@ -12,9 +12,6 @@ pub fn names_thread(body: &[u8]) -> bool {
     let Some(thread) = value.get("thread") else {
         return false;
     };
-    if thread.is_null() {
-        return false;
-    }
     let Some(kind) = thread.get("type").and_then(Value::as_str) else {
         return false;
     };

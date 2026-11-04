@@ -393,4 +393,12 @@ mod tests {
         let raw = serde_json::to_vec(&body).unwrap();
         assert_eq!(codex_tool_names_body(&raw), raw);
     }
+
+    #[test]
+    fn d57_9_long_bad_name_is_cut_to_the_prefix_cap() {
+        let long = format!("{}:x", "a".repeat(80));
+        let fixed = super::codex_tool_name(&long);
+        assert_eq!(fixed.len(), 55 + 1 + 8);
+        assert!(fixed.starts_with(&"a".repeat(55)));
+    }
 }

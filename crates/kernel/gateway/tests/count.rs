@@ -142,3 +142,15 @@ async fn a_missing_count_endpoint_is_marked_as_an_estimate() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body, r#"{"totalTokens":1,"estimated":true}"#);
 }
+
+#[tokio::test]
+async fn d63_4_messages_thread_continue_is_refused_by_the_gateway() {
+    let (status, body) = post(
+        app(Some(9)),
+        "/v1/messages",
+        r#"{"model":"demo","max_tokens":8,"messages":[{"role":"user","content":"hi"}],"thread":{"type":"continue","previous_message_id":"msg_1"}}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("thread_unsupported_request"), "{body}");
+}
