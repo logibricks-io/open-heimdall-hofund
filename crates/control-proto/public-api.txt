@@ -819,6 +819,20 @@ UnroutedRequest.inbound_protocol
 UnroutedRequest.phase
 UnroutedRequest.session
 UnroutedRequest.since_ms
+UsageBreakdownBy #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (rename_all = "kebab-case")]
+UsageBreakdownBy::Agent
+UsageBreakdownBy::GatewayKey
+UsageBreakdownBy::ProviderKey
+UsageBreakdownBy::Unknown #[serde(other)]
+UsageBreakdownBy::const fn as_query_value (self) -> & 'static str
+UsageBreakdownGroup #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Serialize, Deserialize)
+UsageBreakdownGroup.cost
+UsageBreakdownGroup.id
+UsageBreakdownGroup.input_tokens
+UsageBreakdownGroup.label
+UsageBreakdownGroup.output_tokens
+UsageBreakdownGroup.requests
+UsageBreakdownGroup.unpriced
 UsagePeriod #[non_exhaustive] derives(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize) # [serde (rename_all = "snake_case")]
 UsagePeriod::All
 UsagePeriod::Day
@@ -826,10 +840,14 @@ UsagePeriod::Month
 UsagePeriod::Unknown #[serde(other)]
 UsagePeriod::Week
 UsageQuery #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
+UsageQuery.by
 UsageQuery.period
 UsageQuery::fn new (period : UsagePeriod) -> Self
 UsageQuery::fn validate (& self) -> Result < () , ControlError >
+UsageQuery::fn with_breakdown (period : UsagePeriod , by : UsageBreakdownBy) -> Self
 UsageResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Serialize, Deserialize)
+UsageResponse.breakdown
+UsageResponse.breakdown_by
 UsageResponse.cny_per_usd
 UsageResponse.currency
 UsageResponse.period
@@ -844,6 +862,7 @@ UsageRow.cache_write_5m_tokens
 UsageRow.caller_issuer_id
 UsageRow.caller_key_id
 UsageRow.caller_key_name
+UsageRow.client_agent
 UsageRow.cost
 UsageRow.created_at_ms
 UsageRow.duration_ms

@@ -1137,10 +1137,11 @@ impl ControlState for DaemonControl {
                     &config,
                 ));
             }
-            let summary = tokio::task::spawn_blocking(move || ledger.summary(since, USAGE_ROW_LIMIT))
-                .await
-                .map_err(|error| internal(format!("usage query task failed: {error}")))?
-                .map_err(|error| internal(format!("usage query failed: {error}")))?;
+            let summary =
+                tokio::task::spawn_blocking(move || ledger.summary(since, USAGE_ROW_LIMIT))
+                    .await
+                    .map_err(|error| internal(format!("usage query task failed: {error}")))?
+                    .map_err(|error| internal(format!("usage query failed: {error}")))?;
             Ok::<_, ControlFailure>(usage_response(query.period, summary, &config))
         })
     }
@@ -1429,12 +1430,22 @@ fn window_of(period: UsagePeriod) -> Result<Window, ControlError> {
     }
 }
 
-fn breakdown_dimension(by: UsageBreakdownBy) -> Result<hofund_usage::BreakdownDimension, ControlFailure> {
+fn breakdown_dimension(
+    by: UsageBreakdownBy,
+) -> Result<hofund_usage::BreakdownDimension, ControlFailure> {
     Ok(match by {
         UsageBreakdownBy::Agent => hofund_usage::BreakdownDimension::Agent,
         UsageBreakdownBy::ProviderKey => hofund_usage::BreakdownDimension::ProviderKey,
         UsageBreakdownBy::GatewayKey => hofund_usage::BreakdownDimension::GatewayKey,
         UsageBreakdownBy::Unknown => {
+            return Err(ControlError::new(
+                ControlErrorKind::BadRequest,
+                "unknown usage breakdown; expected agent, provider-key, or gateway-key",
+                "validate",
+            )
+            .into());
+        }
+        _ => {
             return Err(ControlError::new(
                 ControlErrorKind::BadRequest,
                 "unknown usage breakdown; expected agent, provider-key, or gateway-key",

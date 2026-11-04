@@ -310,7 +310,14 @@ impl RequestTrack {
         self.drop_status = 499;
         self.cancel_usage = Some((
             usage,
-            UsageMeta::new(request, "", &request.model, self.started, identity, UNKNOWN_CLIENT_AGENT),
+            UsageMeta::new(
+                request,
+                "",
+                &request.model,
+                self.started,
+                identity,
+                UNKNOWN_CLIENT_AGENT,
+            ),
         ));
     }
 
@@ -1682,7 +1689,14 @@ fn reserve_for_codec(
         Err(limits::ReserveFailure::Refused(refusal)) => {
             write_usage_app(
                 app,
-                &UsageMeta::new(request, "", &request.model, started, identity, UNKNOWN_CLIENT_AGENT),
+                &UsageMeta::new(
+                    request,
+                    "",
+                    &request.model,
+                    started,
+                    identity,
+                    UNKNOWN_CLIENT_AGENT,
+                ),
                 None,
                 StatusCode::TOO_MANY_REQUESTS,
             );
@@ -1691,7 +1705,14 @@ fn reserve_for_codec(
         Err(limits::ReserveFailure::Unavailable) => {
             write_usage_app(
                 app,
-                &UsageMeta::new(request, "", &request.model, started, identity, UNKNOWN_CLIENT_AGENT),
+                &UsageMeta::new(
+                    request,
+                    "",
+                    &request.model,
+                    started,
+                    identity,
+                    UNKNOWN_CLIENT_AGENT,
+                ),
                 None,
                 StatusCode::SERVICE_UNAVAILABLE,
             );
@@ -1979,6 +2000,7 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
                     model_request,
                     started,
                     identity,
+                    &client_agent,
                     track,
                     capture,
                     dispatch,
@@ -2050,6 +2072,7 @@ struct HeldResponse {
     request: ModelRequest,
     started: Instant,
     identity: Identity,
+    client_agent: String,
     track: Option<RequestTrack>,
     capture: Option<prev_response::Capture>,
     incoming: Option<BytesStream>,
@@ -2064,6 +2087,7 @@ fn held_response(
     request: ModelRequest,
     started: Instant,
     identity: Identity,
+    client_agent: &str,
     track: RequestTrack,
     capture: Option<prev_response::Capture>,
     dispatch: DispatchFuture,
@@ -2076,6 +2100,7 @@ fn held_response(
         request,
         started,
         identity,
+        client_agent: client_agent.to_owned(),
         track: Some(track),
         capture,
         incoming: None,
@@ -2124,6 +2149,7 @@ fn held_response(
                                 routed.affinity_reason,
                                 state.started,
                                 &state.identity,
+                                &state.client_agent,
                                 state.track.as_mut().expect("held request track"),
                                 state.capture.take(),
                             )
@@ -2147,6 +2173,7 @@ fn held_response(
                                 error,
                                 state.started,
                                 &state.identity,
+                                &state.client_agent,
                                 state.track.as_mut().expect("held request track"),
                             );
                             let bytes = state
@@ -2879,14 +2906,7 @@ fn failure(
     if let RouterError::PreviousResponseNotFound { id } = &error {
         write_usage_app(
             app.as_ref(),
-            &UsageMeta::new(
-                request,
-                "",
-                &request.model,
-                started,
-                identity,
-                client_agent,
-            ),
+            &UsageMeta::new(request, "", &request.model, started, identity, client_agent),
             None,
             StatusCode::BAD_REQUEST,
         );

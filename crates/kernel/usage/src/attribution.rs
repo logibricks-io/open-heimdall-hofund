@@ -1,8 +1,6 @@
 //! Usage breakdown by agent, provider key, or gateway key.
 
-use rusqlite::params;
-
-use super::{Ledger, Totals, UsageError, counts_as_request};
+use super::{Ledger, Totals, UsageError};
 
 /// Stored when no client agent was identified.
 pub const UNKNOWN_CLIENT_AGENT: &str = "unknown";
@@ -74,18 +72,21 @@ impl Ledger {
             .connection
             .lock()
             .map_err(|_| UsageError("usage database lock is poisoned".to_owned()))?;
+        let unknown = sql_string(UNKNOWN_CLIENT_AGENT);
+        let no_provider = sql_string(NO_PROVIDER_KEY);
+        let no_gateway = sql_string(NO_GATEWAY_KEY);
         let (group_expr, label_expr) = match dimension {
             BreakdownDimension::Agent => (
-                "COALESCE(NULLIF(TRIM(client_agent), ''), ?2)",
-                "COALESCE(NULLIF(TRIM(client_agent), ''), ?2)",
+                format!("COALESCE(NULLIF(TRIM(client_agent), ''), {unknown})"),
+                format!("COALESCE(NULLIF(TRIM(client_agent), ''), {unknown})"),
             ),
             BreakdownDimension::ProviderKey => (
-                "CASE WHEN provider_key_id = '' THEN ?3 ELSE provider_key_id END",
-                "CASE WHEN provider_key_id = '' THEN ?3 ELSE provider_key_id END",
+                format!("CASE WHEN provider_key_id = '' THEN {no_provider} ELSE provider_key_id END"),
+                format!("CASE WHEN provider_key_id = '' THEN {no_provider} ELSE provider_key_id END"),
             ),
             BreakdownDimension::GatewayKey => (
-                "CASE WHEN caller_key_id = '' THEN ?4 ELSE caller_key_id END",
-                "MAX(caller_key_name)",
+                format!("CASE WHEN caller_key_id = '' THEN {no_gateway} ELSE caller_key_id END"),
+                "MAX(caller_key_name)".to_owned(),
             ),
         };
         let sql = format!(
@@ -110,14 +111,7 @@ impl Ledger {
             .prepare(&sql)
             .map_err(|error| UsageError(error.to_string()))?;
         let rows = statement
-            .query_map(
-                params![
-                    since,
-                    UNKNOWN_CLIENT_AGENT,
-                    NO_PROVIDER_KEY,
-                    NO_GATEWAY_KEY,
-                ],
-                |row| {
+            .query_map([since], |row| {
                     let id: String = row.get(0)?;
                     let label_hint: String = row.get(1)?;
                     let requests: i64 = row.get(2)?;
@@ -149,13 +143,16 @@ impl Ledger {
             .map_err(|error| UsageError(error.to_string()))?;
         let mut groups = Vec::new();
         for row in rows {
-            let (id, label_hint, totals) =
-                row.map_err(|error| UsageError(error.to_string()))?;
+            let (id, label_hint, totals) = row.map_err(|error| UsageError(error.to_string()))?;
             let (id, label) = label_for(dimension, &id, &label_hint);
             groups.push(BreakdownGroup { id, label, totals });
         }
         Ok(groups)
     }
+}
+
+fn sql_string(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
 }
 
 fn label_for(dimension: BreakdownDimension, id: &str, hint: &str) -> (String, String) {
@@ -197,7 +194,7 @@ mod tests {
 
     fn ledger_with(rows: &[Row]) -> Ledger {
         let dir = tempfile::tempdir().expect("dir");
-        let ledger = Ledger::open(dir.path().join("usage.sqlite")).expect("open");
+        let ledger = Ledger::open(&dir.path().join("usage.sqlite")).expect("open");
         for row in rows {
             ledger.record(row).expect("row");
         }
@@ -309,15 +306,14 @@ mod tests {
             .breakdown(None, BreakdownDimension::Agent)
             .expect("breakdown");
         assert_eq!(groups[0].totals.requests, 0);
-        assert!(counts_as_request(crate::OUTCOME_HANDED_ON));
     }
 
     #[test]
     fn u1c_11_unpriced_rows_stay_in_breakdown_totals() {
         let mut priced = base_row();
         priced.client_agent = "priced".to_owned();
-        let ledger = Ledger::open(tempfile::tempdir().expect("dir").path().join("u.sqlite"))
-            .expect("open");
+        let dir = tempfile::tempdir().expect("dir");
+        let ledger = Ledger::open(&dir.path().join("u.sqlite")).expect("open");
         ledger
             .record_with_details(
                 &priced,

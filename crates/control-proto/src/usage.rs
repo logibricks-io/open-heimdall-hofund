@@ -260,3 +260,18 @@ impl Default for UsageResponse {
 fn default_currency() -> String {
     "USD".to_owned()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{UsageBreakdownBy, UsagePeriod, UsageQuery};
+
+    #[test]
+    fn u1c_15_usage_query_validate_rejects_unknown_breakdown() {
+        let query = UsageQuery {
+            period: UsagePeriod::All,
+            by: Some(UsageBreakdownBy::Unknown),
+        };
+        let error = query.validate().expect_err("unknown by");
+        assert!(error.message.contains("provider-key"));
+    }
+}

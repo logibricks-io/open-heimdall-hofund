@@ -20,6 +20,7 @@ mod provider_edit;
 mod quota;
 mod serve;
 mod subscription;
+mod usage;
 mod visible;
 mod warmup;
 
@@ -88,7 +89,7 @@ fn run_control(config: &Path, command: Command) -> Result<String, String> {
             Command::EventsTail { requests } => events::tail(config, requests).await,
             Command::Healthcheck => commands::healthcheck(config).await,
             Command::TokenRotate => commands::token_rotate(config).await,
-            Command::Usage => commands::usage(config)
+            Command::Usage { by } => commands::usage(config, by)
                 .await
                 .map(|table| table.trim_end_matches('\n').to_owned()),
             Command::Route => commands::route(config)
@@ -199,7 +200,9 @@ enum Command {
     TokenShow,
     TokenRotate,
     GatewayKey(gateway_key::Command),
-    Usage,
+    Usage {
+        by: Option<hofund_control_client::hofund_control_proto::UsageBreakdownBy>,
+    },
     Route,
     AgentList,
     AgentConnect {
@@ -486,7 +489,11 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
         ["events", "tail"] => Command::EventsTail { requests },
         ["token", "show"] => Command::TokenShow,
         ["token", "rotate"] => Command::TokenRotate,
-        ["usage"] => Command::Usage,
+        ["usage"] => Command::Usage { by: None },
+        ["usage", rest @ ..] => match usage::parse(rest) {
+            Ok(usage::UsageCommand::Report { by }) => Command::Usage { by },
+            Err(message) => return Err(message),
+        },
         ["route"] => Command::Route,
         ["agent", "list"] => Command::AgentList,
         ["agent", "connect", name] => Command::AgentConnect {
@@ -1074,10 +1081,12 @@ agent file cannot be updated, the command prints `hofund agent connect <name>`.
 ";
 
 const USAGE_HELP: &str = "\
-usage: hofund usage [--config PATH]
+usage: hofund usage [--by agent|provider-key|gateway-key] [--config PATH]
 
 Print one row per recorded request, with local time, plus a totals line.
-The newest rows are shown when there are too many to list.
+The newest rows are shown when there are too many to list. --by groups
+totals by client agent, provider key fingerprint, or gateway key instead
+of listing individual rows.
 ";
 
 const AGENT_HELP: &str = "\
