@@ -4,7 +4,8 @@
 //!
 //! | Event | Cooldown and ladder |
 //! | --- | --- |
-//! | Generic failure | Starts at 1 minute and doubles after an ended generic rest, capped at 10 minutes. A failure during an active generic rest keeps its rung. Connection, timeout, transport, interrupted-body, decode, I/O, and authentication errors use this ladder, as do HTTP 401, 403, 408, and 5xx statuses. An unserved model uses this ladder on its own key. Other model failures also count on both keys and move to the model ladder when its count passes the member's, so sibling answers do not restart it. |
+//! | Generic failure | Starts at 1 minute and doubles after an ended generic rest, capped at 10 minutes. A failure during an active generic rest keeps its rung. Connection, timeout, transport, interrupted-body, decode, I/O, and authentication errors use this ladder, as do HTTP 401, 403, 408, and 5xx statuses that are not vendor overload. An unserved model uses this ladder on its own key. Other model failures also count on both keys and move to the model ladder when its count passes the member's, so sibling answers do not restart it. |
+//! | Vendor overload | Rests only the requested model on that member for 30 seconds, or for `Retry-After` capped at 1 minute when present. Counts no failure and does not climb the generic ladder. |
 //! | HTTP 429 | Uses the larger of the rate ladder and the retry hint, with the hint capped at 1 hour. The rate ladder starts at 1 minute, doubles for a new 429 within 30 minutes after the previous rate rest ended, and is capped at 30 minutes. A 429 during an active rest does not advance the ladder. A refusal saying the requested model's credentials are cooling uses a model-local ladder. |
 //! | Exhausted quota | Uses the header retry hint capped at 1 hour, or 15 minutes without a positive hint. Model-cooling wording scopes the rest to that model. |
 //! | API-key credit refusal | Climbs 30 minutes, 2 hours, 8 hours, 24 hours, 3 days, then 7 days after each ended credit rest, repeating 7 days. An active rest keeps its rung. A named reset wins and is capped at 35 days. A retry hint or soon/smaller-request wording stays flat at 30 minutes and off the ladder. Model-cooling wording keys the ladder by model. Success and manual removal restart the ladder. |
@@ -106,6 +107,10 @@ pub struct CooldownPolicy {
     pub quota_max: Duration,
     /// Minimum cooldown for insufficient credit.
     pub credit: Duration,
+    /// Flat rest for a vendor overload without a retry hint.
+    pub overload: Duration,
+    /// Maximum retry hint for a vendor overload.
+    pub overload_max: Duration,
     /// Maximum number of member states retained by the book.
     pub max_entries: usize,
 }
@@ -121,6 +126,8 @@ impl Default for CooldownPolicy {
             quota_default: Duration::from_secs(15 * 60),
             quota_max: Duration::from_secs(8 * 24 * 60 * 60),
             credit: Duration::from_secs(30 * 60),
+            overload: Duration::from_secs(30),
+            overload_max: Duration::from_secs(60),
             max_entries: 10_000,
         }
     }
@@ -142,17 +149,20 @@ pub enum CooldownCause {
     Observed,
     /// A contained member panic.
     Panic,
+    /// Vendor servers too busy for the requested model.
+    Overload,
 }
 
 impl CooldownCause {
     /// Every cooldown cause. A new variant must be added to this list.
-    pub const ALL: [CooldownCause; 6] = [
+    pub const ALL: [CooldownCause; 7] = [
         Self::Failure,
         Self::RateLimit,
         Self::Quota,
         Self::Credit,
         Self::Observed,
         Self::Panic,
+        Self::Overload,
     ];
 
     /// Stable label used by metrics.
@@ -165,6 +175,7 @@ impl CooldownCause {
             Self::Credit => "credit",
             Self::Observed => "observed",
             Self::Panic => "panic",
+            Self::Overload => "overload",
         }
     }
 }
@@ -551,9 +562,18 @@ impl Cooldowns {
         let now = (self.clock)();
         let mut book = self.lock();
         self.maintain_locked(&mut book, now);
-        let failure = failure?;
+        let mut failure = failure?;
         note_probe_failure(&mut book, id, now);
         let model = model.filter(|model| !model.is_empty());
+        if matches!(failure, Failure::Overload) {
+            if let Some(model) = model {
+                let applied = self.overload_model(&mut book, id, model, now, error);
+                drop(book);
+                self.emit_for_model(id, Some(model), &applied, now);
+                return Some(applied);
+            }
+            failure = Failure::Generic(CooldownCause::Failure);
+        }
         let model_only = model.is_some()
             && (matches!(
                 failure,
@@ -973,6 +993,34 @@ impl Cooldowns {
             .collect()
     }
 
+    fn overload_model(
+        &self,
+        book: &mut Book,
+        id: &MemberId,
+        model: &str,
+        now: Instant,
+        error: &PluginError,
+    ) -> Cooling {
+        let key = CooldownKey::new(id, Some(model));
+        let revision = next_revision(book);
+        let duration = overload_duration(&self.policy, error);
+        let vendor_timed = positive_hint(error.retry_after()).is_some();
+        let Some(state) = self.entry_for_insert(book, &key, now, revision) else {
+            let mut candidate = cooling(now, duration, CooldownCause::Overload, 0);
+            candidate.status = error.status();
+            candidate.error = error.message().trim().chars().take(300).collect();
+            candidate.vendor_timed = vendor_timed;
+            return candidate;
+        };
+        let mut candidate = cooling(now, duration, CooldownCause::Overload, 0);
+        candidate.status = error.status();
+        candidate.error = error.message().trim().chars().take(300).collect();
+        candidate.vendor_timed = vendor_timed;
+        let applied = apply(state, candidate, vendor_timed);
+        state.idle_since = None;
+        applied
+    }
+
     fn generic_model(
         &self,
         book: &mut Book,
@@ -1043,6 +1091,13 @@ impl Cooldowns {
         let mut ladder = None;
         let (mut candidate, named) = match failure {
             Failure::Generic(cause) => (Self::generic(state, now, &self.policy, cause), false),
+            Failure::Overload => {
+                let duration = overload_duration(&self.policy, error);
+                let vendor_timed = positive_hint(error.retry_after()).is_some();
+                let mut candidate = cooling(now, duration, CooldownCause::Overload, 0);
+                candidate.vendor_timed = vendor_timed;
+                (candidate, vendor_timed)
+            }
             Failure::RateLimit => (self.rate_limit(state, now, error.retry_after()), false),
             Failure::Quota => {
                 let hint = positive_hint(error.retry_after());
@@ -1358,6 +1413,7 @@ fn credit_context(book: &Book, id: &MemberId, now: Instant) -> CreditContext {
 #[derive(Clone, Copy)]
 enum Failure {
     Generic(CooldownCause),
+    Overload,
     RateLimit,
     Quota,
     Credit,
@@ -1415,6 +1471,9 @@ fn failure_kind(error: &PluginError) -> Option<Failure> {
         PluginErrorKind::Status => match error.status() {
             Some(429) => Some(Failure::RateLimit),
             Some(402) => Some(Failure::Credit),
+            Some(status) if hofund_ir::vendor_overloaded(status, error.message()) => {
+                Some(Failure::Overload)
+            }
             Some(401 | 403 | 408) | Some(500..=u16::MAX) => {
                 Some(Failure::Generic(CooldownCause::Failure))
             }
@@ -1463,6 +1522,12 @@ fn ladder(base: Duration, cap: Duration, failures: u32) -> Duration {
 
 fn positive_hint(duration: Option<Duration>) -> Option<Duration> {
     duration.filter(|duration| !duration.is_zero())
+}
+
+fn overload_duration(policy: &CooldownPolicy, error: &PluginError) -> Duration {
+    positive_hint(error.retry_after())
+        .map(|after| after.min(policy.overload_max))
+        .unwrap_or(policy.overload)
 }
 
 fn observation_rest(policy: &CooldownPolicy, observation: &QuotaObservation) -> Option<Duration> {
@@ -1567,6 +1632,7 @@ mod tests {
                 CooldownCause::Credit => 3,
                 CooldownCause::Observed => 4,
                 CooldownCause::Panic => 5,
+                CooldownCause::Overload => 6,
             })
             .collect::<Vec<_>>();
         assert_eq!(indices, (0..CooldownCause::ALL.len()).collect::<Vec<_>>());
