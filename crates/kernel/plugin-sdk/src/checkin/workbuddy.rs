@@ -4,7 +4,7 @@ use crate::json;
 use crate::transport::Call;
 use hofund_plugin_api::{CheckinOutcome, CheckinResult, PluginError};
 
-use super::{CheckinTransport, expired_sign_in, result_failed};
+use super::{CheckinTransport, result_failed};
 
 const CHECKIN_ALREADY: i64 = 1001;
 const CHECKIN_INELIGIBLE: i64 = 1002;
@@ -24,12 +24,6 @@ impl WorkBuddySite {
         match self {
             Self::China => "https://copilot.tencent.com",
             Self::International => "https://www.workbuddy.ai",
-        }
-    }
-
-    fn user_agent(self) -> &'static str {
-        match self {
-            Self::China | Self::International => "WorkBuddy/5.5.6",
         }
     }
 }
@@ -135,31 +129,49 @@ async fn daily_claim<T: CheckinTransport>(
 
 async fn post_json<T: CheckinTransport, D: for<'de> serde::Deserialize<'de>>(
     transport: &T,
-    site: WorkBuddySite,
+    _site: WorkBuddySite,
     url: &str,
 ) -> Result<D, String> {
     let call = Call::post(url)
         .header("Accept", "application/json")
         .header("Content-Type", "application/json")
-        .header("User-Agent", site.user_agent())
         .bytes(b"{}");
     let reply = transport
         .send(call)
         .await
         .map_err(|error| error.to_string())?;
-    if expired_sign_in(&reply) {
-        return Err("unauthorized".to_owned());
-    }
     let body = std::str::from_utf8(reply.body()).unwrap_or("");
-    if !(200..300).contains(&reply.status()) {
-        return Err(format!("HTTP {}", reply.status()));
-    }
     let env: Envelope<D> = json::from_str(body).map_err(|error| error.to_string())?;
     let code = env.code.as_i64().unwrap_or(-1);
     if code != 0 {
         return Err(format!("code {code}: {}", env.msg));
     }
+    if reply.status() == 401 {
+        return Err("unauthorized".to_owned());
+    }
+    if !(200..300).contains(&reply.status()) {
+        return Err(format!("HTTP {}", reply.status()));
+    }
     env.data.ok_or_else(|| "empty data".to_owned())
+}
+
+async fn credits_summary_ok<T: CheckinTransport>(transport: &T, site: WorkBuddySite) -> bool {
+    let summary_url = format!(
+        "{}/billing/meter/get-user-resource-summary",
+        site.api_base()
+    );
+    let call = Call::post(&summary_url)
+        .header("Accept", "application/json")
+        .header("Content-Type", "application/json")
+        .bytes(b"{}");
+    let Ok(reply) = transport.send(call).await else {
+        return false;
+    };
+    let body = std::str::from_utf8(reply.body()).unwrap_or("");
+    let Ok(env) = json::from_str::<Envelope<serde_json::Value>>(body) else {
+        return false;
+    };
+    env.code.as_i64() == Some(0) && (200..300).contains(&reply.status())
 }
 
 async fn handle_status_error<T: CheckinTransport>(
@@ -167,17 +179,13 @@ async fn handle_status_error<T: CheckinTransport>(
     site: WorkBuddySite,
     error: String,
 ) -> CheckinResult {
+    if let Some(mapped) = map_vendor_code_error(&error) {
+        return mapped;
+    }
     if error != "unauthorized" {
         return result_failed(error);
     }
-    let summary_url = format!(
-        "{}/billing/meter/get-user-resource-summary",
-        site.api_base()
-    );
-    if post_json::<T, serde_json::Value>(transport, site, &summary_url)
-        .await
-        .is_ok()
-    {
+    if credits_summary_ok(transport, site).await {
         return CheckinResult::new(
             CheckinOutcome::Ineligible,
             "WorkBuddy answered the check-in 401 while this account's credits read fine: check in in the WorkBuddy app",
@@ -190,17 +198,8 @@ async fn handle_status_error<T: CheckinTransport>(
 }
 
 fn map_claim_error(error: String) -> CheckinResult {
-    if let Some(code) = error.strip_prefix("code ")
-        && let Some((num, msg)) = code.split_once(':')
-        && let Ok(code) = num.trim().parse::<i64>()
-    {
-        let detail = msg.trim().to_owned();
-        return match code {
-            CHECKIN_ALREADY => CheckinResult::new(CheckinOutcome::Done, detail),
-            CHECKIN_INELIGIBLE => CheckinResult::new(CheckinOutcome::Ineligible, detail),
-            CHECKIN_ENDED => CheckinResult::new(CheckinOutcome::Inactive, detail),
-            _ => result_failed(error),
-        };
+    if let Some(mapped) = map_vendor_code_error(&error) {
+        return mapped;
     }
     if error == "unauthorized" {
         return CheckinResult::new(
@@ -209,6 +208,19 @@ fn map_claim_error(error: String) -> CheckinResult {
         );
     }
     result_failed(error)
+}
+
+fn map_vendor_code_error(error: &str) -> Option<CheckinResult> {
+    let code = error.strip_prefix("code ")?;
+    let (num, msg) = code.split_once(':')?;
+    let code = num.trim().parse::<i64>().ok()?;
+    let detail = msg.trim().to_owned();
+    Some(match code {
+        CHECKIN_ALREADY => CheckinResult::new(CheckinOutcome::Done, detail),
+        CHECKIN_INELIGIBLE => CheckinResult::new(CheckinOutcome::Ineligible, detail),
+        CHECKIN_ENDED => CheckinResult::new(CheckinOutcome::Inactive, detail),
+        _ => return None,
+    })
 }
 
 #[cfg(test)]
@@ -263,5 +275,44 @@ mod tests {
         assert_eq!(urls.len(), 2);
         assert!(urls[0].contains("checkin-activity-status"));
         assert!(urls[1].contains("daily-checkin"));
+    }
+
+    #[tokio::test]
+    async fn a2c_workbuddy_checkin_vendor_code_on_non_2xx() {
+        let transport = Mock {
+            seen: Arc::new(Mutex::new(Vec::new())),
+            responses: vec![Reply::from_parts(
+                400,
+                br#"{"code":1001,"msg":"already","data":null}"#,
+            )],
+        };
+        let result = run(&transport, WorkBuddySite::China).await.expect("run");
+        assert_eq!(result.outcome(), CheckinOutcome::Done);
+    }
+
+    #[tokio::test]
+    async fn a2c_workbuddy_checkin_401_with_empty_credits_data() {
+        let transport = Mock {
+            seen: Arc::new(Mutex::new(Vec::new())),
+            responses: vec![
+                Reply::from_parts(401, br#"{"code":0,"msg":"ok","data":null}"#),
+                Reply::from_parts(200, br#"{"code":0,"msg":"ok","data":null}"#),
+            ],
+        };
+        let result = run(&transport, WorkBuddySite::China).await.expect("run");
+        assert_eq!(result.outcome(), CheckinOutcome::Ineligible);
+    }
+
+    #[tokio::test]
+    async fn a2c_workbuddy_checkin_401_when_credits_fail() {
+        let transport = Mock {
+            seen: Arc::new(Mutex::new(Vec::new())),
+            responses: vec![
+                Reply::from_parts(401, br#"{"code":0,"msg":"ok","data":null}"#),
+                Reply::from_parts(401, br#"{"code":0,"msg":"ok","data":null}"#),
+            ],
+        };
+        let result = run(&transport, WorkBuddySite::China).await.expect("run");
+        assert_eq!(result.outcome(), CheckinOutcome::Failed);
     }
 }
