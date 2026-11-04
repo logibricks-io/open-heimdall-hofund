@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use hofund_plugin_api::{
-    AccountId, AccountStatus, AgentSignIn, BinaryName, BuildError, ConfigError, HostContext,
+    AccountId, AccountStatus, BinaryName, BuildError, ConfigError, HostContext,
     ModelList, PluginError, PluginId, QuotaWindow, RawTable, Schema, SignInChallenge, SignInCtx,
     SignInFlow, SignInFlowKind, SignInProof, Subscription, SubscriptionFactory, SubscriptionSpec,
     UpstreamProvider, ValidConfig,
@@ -29,11 +29,7 @@ static SPEC: SubscriptionSpec = SubscriptionSpec::from_static(
     "Kiro",
     SignInFlowKind::Bridge,
 )
-.with_agent_sign_in(AgentSignIn::new(
-    &["kiro-cli", "kiro"],
-    "KIRO_IDE_CACHE",
-    ".aws/sso/cache",
-));
+.with_agent_sign_in(creds::AGENT_SIGN_IN);
 
 /// Registers the Kiro subscription.
 #[must_use]
@@ -254,9 +250,10 @@ impl Subscription for Kiro {
         host: &HostContext,
     ) -> Result<Vec<QuotaWindow>, PluginError> {
         let stored = refresh::ensure_fresh(host, account, Arc::clone(&self.endpoints)).await?;
-        let url = self
-            .endpoints
-            .usage_url(&stored.credential.profile_arn, &stored.credential.region);
+        let url = self.endpoints.usage_url(
+            creds::effective_profile_arn(&stored.credential),
+            &stored.credential.region,
+        );
         let reply = hofund_plugin_sdk::Call::get(url)
             .sensitive_header(
                 "authorization",

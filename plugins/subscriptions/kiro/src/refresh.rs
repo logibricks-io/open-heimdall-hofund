@@ -98,6 +98,10 @@ pub(crate) async fn refresh_stale(
             creds::secret_blob(&credential).to_secret(),
         )
         .await?;
+    if !credential.ide_token_path.is_empty() {
+        let path = std::path::Path::new(&credential.ide_token_path);
+        let _ = creds::write_token_file(path, &credential);
+    }
     Ok(())
 }
 

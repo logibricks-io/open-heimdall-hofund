@@ -270,3 +270,88 @@ fn a2b_18_api_key_sign_in_stores_api_auth() {
         Some("fk-test-key-12345678")
     );
 }
+
+fn seed_oauth_eu(host: &TestHost) -> AccountId {
+    let id = AccountId::from_static("a-0000000000000002");
+    let blob = SecretObject::new()
+        .with_number("v", 1)
+        .with_text("auth_type", AuthKind::Oauth.as_str())
+        .with_secret("access_token", &secret("factory-access-eu"))
+        .with_secret("refresh_token", &secret("factory-refresh-eu"))
+        .with_number("expires_ms", 4_000_000_000_000)
+        .with_text("email", "eu@factory.test")
+        .with_text("region", "eu")
+        .with_text("active_organization_id", "org-eu");
+    block_on(async {
+        let accounts = host.context().accounts();
+        let account = accounts
+            .account(id.clone(), "eu@factory.test")
+            .expect("account");
+        accounts
+            .upsert(account, blob.to_secret())
+            .await
+            .expect("upsert");
+    });
+    id
+}
+
+#[test]
+fn a2b_39_glm_uses_open_wire_and_x_api_provider() {
+    let (wire, path) = models::wire_target("glm-5.3");
+    assert_eq!(wire, ProtocolId::OPENAI_CHAT);
+    assert_eq!(path, "/api/llm/o/v1");
+    assert_eq!(models::x_api_provider("glm-5.3"), Some("fireworks"));
+    assert_eq!(
+        models::outbound_llm_headers("glm-5.3"),
+        vec![("x-api-provider".to_owned(), "fireworks".to_owned())]
+    );
+
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_oauth(&host);
+    host.http().enqueue(
+        json!({
+            "id": "chat-glm",
+            "object": "chat.completion",
+            "choices": [{"message": {"role": "assistant", "content": "ok"}}]
+        })
+        .to_string()
+        .into_bytes(),
+    );
+    let sub = subscription(&host);
+    let upstream = sub.upstream(&id, host.context()).expect("upstream");
+    let query = ProbeQuery::new(ProtocolId::OPENAI_CHAT, "glm-5.3").expect("query");
+    block_on(upstream.probe(&query)).expect("probe");
+    assert!(
+        host.http()
+            .calls()
+            .iter()
+            .any(|call| call.uri().contains("/api/llm/o/v1"))
+    );
+}
+
+#[test]
+fn a2b_40_eu_account_quota_uses_eu_api_host() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_oauth_eu(&host);
+    host.http().enqueue(
+        json!({
+            "limits": {
+                "standard": {
+                    "fiveHour": {"usedPercent": 0.0, "windowEnd": "2030-01-01T00:00:00Z"},
+                }
+            }
+        })
+        .to_string()
+        .into_bytes(),
+    );
+    let sub = subscription(&host);
+    block_on(sub.quota(&id, host.context())).expect("quota");
+    assert!(
+        host.http()
+            .calls()
+            .last()
+            .is_some_and(|call| call.uri().contains("factory-eu.test"))
+    );
+}

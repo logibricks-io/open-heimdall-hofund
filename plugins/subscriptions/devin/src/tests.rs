@@ -138,6 +138,14 @@ fn a2b_7_secrets_not_in_debug_or_errors() {
         key,
         "malformed comment must not truncate the key"
     );
+    std::fs::write(
+        &path,
+        format!("windsurf_api_key = \"{key}\n"),
+    )
+    .expect("rewrite");
+    let malformed = creds::read_credentials(&path).expect_err("unterminated");
+    let malformed_text = malformed.to_string();
+    assert!(!malformed_text.contains(key));
 }
 
 #[test]
@@ -161,7 +169,7 @@ fn a2b_9_list_models_requires_cli() {
 }
 
 #[test]
-fn a2b_29_reimport_replaces_stored_key() {
+fn a2b_35_reimport_replaces_stored_key() {
     let dir = tempfile::tempdir().expect("dir");
     let home = dir.path().join("agent").join("devin");
     std::fs::create_dir_all(&home).expect("dir");

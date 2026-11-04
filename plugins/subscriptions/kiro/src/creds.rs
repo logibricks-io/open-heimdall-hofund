@@ -21,6 +21,14 @@ pub(crate) const REFRESH_MARGIN: Duration = Duration::from_secs(120);
 const FILE_CAP: u64 = 64 * 1024;
 pub(crate) const TOKEN_FILE: &str = "kiro-auth-token.json";
 
+/// Profile ARN the reference uses for AWS Builder ID sign-ins without their own profile.
+pub(crate) const BUILDER_ID_PROFILE: &str =
+    "arn:aws:codewhisperer:us-east-1:638616132270:profile/AAAACCCCXXXX";
+
+/// Agent names and home declaration shared with the subscription spec and tests.
+pub(crate) const AGENT_SIGN_IN: AgentSignIn =
+    AgentSignIn::new(&["kiro"], "KIRO_IDE_CACHE", ".aws/sso/cache");
+
 #[derive(Clone, Debug)]
 pub(crate) struct Credential {
     pub access: SecretString,
@@ -35,6 +43,7 @@ pub(crate) struct Credential {
     pub client_secret: SecretString,
     pub client_id_hash: String,
     pub token_url: String,
+    pub ide_token_path: String,
 }
 
 #[derive(Clone, Debug)]
@@ -87,6 +96,7 @@ pub(crate) fn parse_secret(secret: &SecretString) -> Result<Stored, PluginError>
         .unwrap_or_else(|| SecretString::from(String::new()));
     let client_id_hash = blob.text("client_id_hash").unwrap_or("").to_owned();
     let token_url = blob.text("token_url").unwrap_or("").to_owned();
+    let ide_token_path = blob.text("ide_token_path").unwrap_or("").to_owned();
     let expires_at = blob.number("expires_at").and_then(|secs| {
         if secs == 0 {
             None
@@ -108,6 +118,7 @@ pub(crate) fn parse_secret(secret: &SecretString) -> Result<Stored, PluginError>
             client_secret,
             client_id_hash,
             token_url,
+            ide_token_path,
         },
     })
 }
@@ -126,6 +137,9 @@ pub(crate) fn secret_blob(credential: &Credential) -> SecretObject {
         .with_secret("client_secret", &credential.client_secret)
         .with_text("client_id_hash", &credential.client_id_hash)
         .with_text("token_url", &credential.token_url);
+    if !credential.ide_token_path.is_empty() {
+        blob = blob.with_text("ide_token_path", &credential.ide_token_path);
+    }
     if let Some(at) = credential
         .expires_at
         .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
@@ -148,9 +162,6 @@ pub(crate) fn account_id_for_home(home: &Path, credential: &Credential) -> Accou
     agent_account_id(home)
 }
 
-const IDE_AGENT: AgentSignIn =
-    AgentSignIn::new(&["kiro-cli", "kiro"], "KIRO_IDE_CACHE", ".aws/sso/cache");
-
 /// Resolves the agent home directory the same way the daemon does for [`AgentSignIn`].
 pub(crate) fn resolve_agent_home(decl: &AgentSignIn) -> Result<PathBuf, PluginError> {
     let home_env = std::env::var(decl.home_env()).ok();
@@ -172,7 +183,7 @@ pub(crate) fn resolve_agent_home_from(
 }
 
 pub(crate) fn default_cache_dir() -> PathBuf {
-    resolve_agent_home(&IDE_AGENT).unwrap_or_else(|_| PathBuf::from(".aws/sso/cache"))
+    resolve_agent_home(&AGENT_SIGN_IN).unwrap_or_else(|_| PathBuf::from(".aws/sso/cache"))
 }
 
 pub(crate) fn discover_token_path() -> PathBuf {
@@ -284,7 +295,20 @@ pub(crate) fn parse_token_json(text: &str, cache_dir: &Path) -> Result<Credentia
         client_secret,
         client_id_hash,
         token_url,
+        ide_token_path: String::new(),
     })
+}
+
+/// Profile ARN sent on Kiro runtime and usage calls.
+#[must_use]
+pub(crate) fn effective_profile_arn(credential: &Credential) -> &str {
+    if !credential.profile_arn.is_empty() {
+        return credential.profile_arn.as_str();
+    }
+    if credential.provider.eq_ignore_ascii_case("BuilderId") {
+        return BUILDER_ID_PROFILE;
+    }
+    ""
 }
 
 fn read_registration(

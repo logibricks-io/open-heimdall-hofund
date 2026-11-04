@@ -5,7 +5,7 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use hofund_kit_subscription::{TestHost, block_on};
 use hofund_plugin_api::{
-    AccountId, AgentSignIn, ContentPart, Message, PluginId, PluginKind, ProbeQuery, ProtocolId,
+    AccountId, ContentPart, Message, PluginId, PluginKind, ProbeQuery, ProtocolId,
     RawTable, Request, Role, SecretString, Subscription, SubscriptionFactory,
 };
 use hofund_plugin_sdk::oauth::{SecretObject, secret_text};
@@ -61,6 +61,7 @@ fn seed(
         client_secret: SecretString::from(String::new()),
         client_id_hash: String::new(),
         token_url: String::new(),
+        ide_token_path: String::new(),
     };
     let id = creds::account_id_for_home(home, &credential);
     block_on(async {
@@ -212,6 +213,7 @@ fn a2b_26_secrets_not_in_debug_or_errors() {
         client_secret: SecretString::from(String::new()),
         client_id_hash: String::new(),
         token_url: String::new(),
+        ide_token_path: String::new(),
     };
     assert!(!format!("{credential:?}").contains(token));
     let error = creds::read_token_file(std::path::Path::new("/no/such/kiro-auth-token.json"));
@@ -240,7 +242,7 @@ fn a2b_27_agent_sign_in_writes_token_file() {
 }
 
 #[test]
-fn a2b_29_reimport_replaces_stored_access_token() {
+fn a2b_35_reimport_replaces_stored_access_token() {
     let dir = tempfile::tempdir().expect("dir");
     let home = dir.path().join("cache");
     std::fs::create_dir_all(&home).expect("dir");
@@ -276,7 +278,7 @@ fn a2b_29_reimport_replaces_stored_access_token() {
 
 #[test]
 fn a2b_30_agent_home_resolution_matches_daemon_rule() {
-    let decl = AgentSignIn::new(&["kiro-cli", "kiro"], "KIRO_IDE_CACHE", ".aws/sso/cache");
+    let decl = creds::AGENT_SIGN_IN;
     assert_eq!(decl.home_env(), "KIRO_IDE_CACHE");
     let override_home =
         creds::resolve_agent_home_from(Some("/tmp/kiro-cache-override"), Some("/ignored"), &decl)
@@ -315,6 +317,7 @@ fn a2b_31_idc_refresh_posts_to_oidc_token() {
         client_secret: SecretString::from("idc-secret".to_owned()),
         client_id_hash: String::new(),
         token_url: String::new(),
+        ide_token_path: String::new(),
     };
     let id = creds::account_id_for_home(&home, &credential);
     block_on(async {
@@ -337,6 +340,55 @@ fn a2b_31_idc_refresh_posts_to_oidc_token() {
     let calls = host.http().calls();
     let call = calls.last().expect("call");
     assert!(call.uri().contains("oidc.us-east-1.amazonaws.com/token"));
+}
+
+#[test]
+fn a2b_41_idc_token_file_parsing_and_refresh() {
+    let dir = tempfile::tempdir().expect("dir");
+    let cache = dir.path().join("cache");
+    std::fs::create_dir_all(&cache).expect("dir");
+    std::fs::write(
+        cache.join("deadbeef.json"),
+        r#"{"clientId":"reg-client","clientSecret":"reg-secret"}"#,
+    )
+    .expect("write");
+    std::fs::write(
+        cache.join(TOKEN_FILE),
+        r#"{"accessToken":"old-access","refreshToken":"idc-refresh","authMethod":"IdC","clientIdHash":"deadbeef","region":"us-east-1","expiresAt":"1970-01-01T00:00:00Z"}"#,
+    )
+    .expect("write");
+    let credential = creds::read_token_file(&cache.join(TOKEN_FILE)).expect("parse");
+    assert_eq!(credential.method, "idc");
+    assert_eq!(credential.client_id, "reg-client");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let home = dir.path().join("seed-home");
+    let mut stored = credential;
+    stored.ide_token_path = cache.join(TOKEN_FILE).to_string_lossy().into_owned();
+    let id = creds::account_id_for_home(&home, &stored);
+    block_on(async {
+        host.context()
+            .accounts()
+            .upsert(
+                host.context()
+                    .accounts()
+                    .account(id.clone(), "Kiro".to_owned())
+                    .expect("account"),
+                creds::secret_blob(&stored).to_secret(),
+            )
+            .await
+            .expect("upsert");
+    });
+    host.http().enqueue(
+        br#"{"accessToken":"new-idc","refreshToken":"new-idc-r","expiresIn":3600}"#.to_vec(),
+    );
+    block_on(sub.refresh(&id, host.context())).expect("refresh");
+    let call = host.http().calls().last().expect("call");
+    assert!(call.uri().contains("oidc.us-east-1.amazonaws.com/token"));
+    let body = String::from_utf8_lossy(call.body());
+    assert!(body.contains("reg-client"));
+    let on_disk = std::fs::read_to_string(cache.join(TOKEN_FILE)).expect("read");
+    assert!(on_disk.contains("new-idc"));
 }
 
 #[test]
@@ -394,6 +446,7 @@ fn a2b_34_history_and_system_prompt_are_encoded() {
         client_secret: SecretString::from(String::new()),
         client_id_hash: String::new(),
         token_url: String::new(),
+        ide_token_path: String::new(),
     };
     let encoded = crate::kiro_body::encode(&request, &credential).expect("encode");
     let body = std::str::from_utf8(&encoded).expect("utf8");

@@ -29,11 +29,12 @@ pub(crate) async fn import(
         )));
     }
     let path = creds::token_path_in_home(home);
-    let credential = creds::read_token_file(&path)?;
-    store(home, &credential, host).await
+    let mut credential = creds::read_token_file(&path)?;
+    credential.ide_token_path = path.to_string_lossy().into_owned();
+    store_credential(home, &credential, host).await
 }
 
-pub(crate) async fn store(
+async fn store_credential(
     home: &Path,
     credential: &Credential,
     host: &HostContext,
@@ -46,4 +47,18 @@ pub(crate) async fn store(
         .upsert(account, creds::secret_blob(credential).to_secret())
         .await?;
     Ok(id)
+}
+
+pub(crate) async fn store(
+    home: &Path,
+    credential: &Credential,
+    host: &HostContext,
+) -> Result<AccountId, PluginError> {
+    let mut credential = credential.clone();
+    if credential.ide_token_path.is_empty() {
+        credential.ide_token_path = creds::token_path_in_home(home)
+            .to_string_lossy()
+            .into_owned();
+    }
+    store_credential(home, &credential, host).await
 }

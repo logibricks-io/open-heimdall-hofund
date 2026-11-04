@@ -41,6 +41,7 @@ impl FactoryUpstream {
         let (wire, path) = models::wire_target(&request.model);
         let api_base = self.endpoints.api_base_for_region(bearer.region.as_deref());
         let mut headers = client::chat_headers();
+        headers.extend(models::outbound_llm_headers(&request.model));
         if let Some(org) = &bearer.active_org {
             headers.push(("x-factory-org-id".to_owned(), org.clone()));
         }

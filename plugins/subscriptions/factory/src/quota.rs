@@ -135,7 +135,7 @@ mod tests {
     }
 
     #[test]
-    fn a2b_31_core_windows_do_not_block() {
+    fn a2b_37_core_windows_do_not_block() {
         let limits = json!({
             "limits": {
                 "core": {
@@ -149,7 +149,7 @@ mod tests {
     }
 
     #[test]
-    fn a2b_32_extra_usage_makes_standard_non_blocking() {
+    fn a2b_38_extra_usage_makes_standard_non_blocking() {
         let limits = json!({
             "extraUsageAllowed": true,
             "extraUsageBalanceCents": 500.0,

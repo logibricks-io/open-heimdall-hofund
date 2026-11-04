@@ -33,6 +33,7 @@ pub(crate) fn reject_unsupported(request: &Request) -> Result<(), PluginError> {
 
 pub(crate) fn encode(request: &Request, credential: &Credential) -> Result<Vec<u8>, PluginError> {
     reject_unsupported(request)?;
+    let profile_arn = crate::creds::effective_profile_arn(credential);
     let mut system = String::new();
     let mut turns: Vec<Value> = Vec::new();
     for message in &request.messages {
@@ -61,7 +62,7 @@ pub(crate) fn encode(request: &Request, credential: &Credential) -> Result<Vec<u
                         "content": content,
                         "modelId": request.model,
                         "origin": "KIRO_CLI",
-                        "profileArn": credential.profile_arn,
+                        "profileArn": profile_arn,
                     }
                 }));
             }
@@ -86,7 +87,7 @@ pub(crate) fn encode(request: &Request, credential: &Credential) -> Result<Vec<u
                         "content": format!("[tool result]\n{text}"),
                         "modelId": request.model,
                         "origin": "KIRO_CLI",
-                        "profileArn": credential.profile_arn,
+                        "profileArn": profile_arn,
                     }
                 }));
             }
@@ -98,7 +99,7 @@ pub(crate) fn encode(request: &Request, credential: &Credential) -> Result<Vec<u
                 "content": if system.is_empty() { "hi".to_owned() } else { system },
                 "modelId": request.model,
                 "origin": "KIRO_CLI",
-                "profileArn": credential.profile_arn,
+                "profileArn": profile_arn,
             }
         })
     });

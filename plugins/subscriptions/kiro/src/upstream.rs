@@ -39,9 +39,10 @@ impl KiroUpstream {
         request: Request,
         _inbound: ProtocolId,
     ) -> Result<Completion, PluginError> {
+        let profile = creds::effective_profile_arn(&stored.credential);
         let base = self
             .endpoints
-            .chat_base(&stored.credential.profile_arn, &stored.credential.region);
+            .chat_base(profile, &stored.credential.region);
         let url = format!("{base}/generateAssistantResponse");
         let body = kiro_body::encode(&request, &stored.credential)?;
         let mut call = Call::post(url)

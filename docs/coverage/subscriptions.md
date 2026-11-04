@@ -85,7 +85,7 @@ Account discovery is implemented for subscriptions that declare an agent home an
 | claude | `CLAUDE_CONFIG_DIR` or `~/.claude` | `.credentials.json`, `.claude.json` |
 | codex | `CODEX_HOME` or `~/.codex` | `auth.json` (file mode) |
 | devin | `XDG_DATA_HOME` or `~/.local/share/devin` | `credentials.toml` |
-| kiro | `HOME` / `~/.aws/sso/cache` | `kiro-auth-token.json` |
+| kiro | `KIRO_IDE_CACHE` or `~/.aws/sso/cache` | `kiro-auth-token.json` |
 
 Left out until a plugin declares agent home and readable credentials (not Keychain, encrypted stores, or CLI-only sign-in):
 
