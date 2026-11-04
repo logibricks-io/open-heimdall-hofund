@@ -352,29 +352,21 @@ pub fn mask_account(alias: &str, user: &str) -> String {
 fn mask_user_id(user: &str) -> String {
     let trimmed = user.trim();
     if let Some((local, domain)) = trimmed.split_once('@') {
-        if local.len() <= 2 {
+        let chars: Vec<char> = local.chars().collect();
+        if chars.len() <= 2 {
             return format!("***@{domain}");
         }
-        let prefix = &local[..local.len().min(2)];
-        let suffix = local
-            .chars()
-            .rev()
-            .take(2)
-            .collect::<String>()
-            .chars()
-            .rev()
-            .collect::<String>();
+        let prefix: String = chars[..2].iter().collect();
+        let suffix: String = chars[chars.len().saturating_sub(2)..].iter().collect();
         return format!("{prefix}****{suffix}@{domain}");
     }
-    if trimmed.len() <= 4 {
-        return "*".repeat(trimmed.len());
+    let chars: Vec<char> = trimmed.chars().collect();
+    if chars.len() <= 4 {
+        return "*".repeat(chars.len());
     }
-    format!(
-        "{}{}{}",
-        &trimmed[..2],
-        "*".repeat(trimmed.len().saturating_sub(4)),
-        &trimmed[trimmed.len() - 2..]
-    )
+    let prefix: String = chars[..2].iter().collect();
+    let suffix: String = chars[chars.len() - 2..].iter().collect();
+    format!("{prefix}{}{suffix}", "*".repeat(chars.len() - 4))
 }
 
 /// English notification title and body for one alert.
@@ -566,6 +558,90 @@ mod tests {
         assert!(due_alerts(&topped, &mut marks, 0, 5.0, now).is_empty());
         let low = vec![card("p", "a@x.io", vec![], "3 credits")];
         assert_eq!(due_alerts(&low, &mut marks, 0, 5.0, now).len(), 1);
+    }
+
+    #[test]
+    fn al1_13_thresholds_are_inclusive() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_000);
+        let reset = Some(now + Duration::from_secs(3600));
+        let at = vec![card(
+            "sub",
+            "a@x.io",
+            vec![window("Weekly", 80.0, reset, true)],
+            "",
+        )];
+        let below = vec![card(
+            "sub",
+            "b@x.io",
+            vec![window("Weekly", 79.5, reset, true)],
+            "",
+        )];
+        let mut marks = Default::default();
+        assert_eq!(due_alerts(&at, &mut marks, 80, 0.0, now).len(), 1);
+        assert!(due_alerts(&below, &mut marks, 80, 0.0, now).is_empty());
+        let equal = vec![card("p", "c@x.io", vec![], "5 credits")];
+        let above = vec![card("p", "d@x.io", vec![], "5.5 credits")];
+        assert_eq!(due_alerts(&equal, &mut marks, 0, 5.0, now).len(), 1);
+        assert!(due_alerts(&above, &mut marks, 0, 5.0, now).is_empty());
+    }
+
+    #[test]
+    fn al1_14_usage_alert_rearms_after_dropping_below() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_000);
+        let reset = Some(now + Duration::from_secs(3600));
+        let high = vec![card(
+            "sub",
+            "a@x.io",
+            vec![window("Weekly", 90.0, reset, true)],
+            "",
+        )];
+        let low = vec![card(
+            "sub",
+            "a@x.io",
+            vec![window("Weekly", 10.0, reset, true)],
+            "",
+        )];
+        let mut marks = Default::default();
+        assert_eq!(due_alerts(&high, &mut marks, 80, 0.0, now).len(), 1);
+        assert!(due_alerts(&low, &mut marks, 80, 0.0, now).is_empty());
+        assert_eq!(due_alerts(&high, &mut marks, 80, 0.0, now).len(), 1);
+    }
+
+    #[test]
+    fn al1_15_failed_or_cached_cards_do_not_alert() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_000);
+        let reset = Some(now + Duration::from_secs(3600));
+        let mut failed = card(
+            "sub",
+            "a@x.io",
+            vec![window("Weekly", 95.0, reset, true)],
+            "1 credits",
+        );
+        failed.0.error = "sign-in expired".to_owned();
+        let mut cached = card(
+            "sub",
+            "b@x.io",
+            vec![window("Weekly", 95.0, reset, true)],
+            "1 credits",
+        );
+        cached.0.as_of = Some(quota_time(now));
+        let mut marks = Default::default();
+        assert!(due_alerts(&[failed, cached], &mut marks, 80, 5.0, now).is_empty());
+        assert!(marks.is_empty());
+    }
+
+    #[test]
+    fn al1_16_mask_user_id_handles_non_ascii() {
+        assert_eq!(
+            mask_user_id("\u{e9}lodie@example.test"),
+            "\u{e9}l****ie@example.test"
+        );
+        assert_eq!(
+            mask_user_id("\u{e9}\u{e8}\u{ea}\u{eb}\u{ec}"),
+            "\u{e9}\u{e8}*\u{eb}\u{ec}"
+        );
+        assert_eq!(mask_user_id("abcdef"), "ab**ef");
+        assert_eq!(mask_user_id("abcd"), "****");
     }
 
     #[test]
