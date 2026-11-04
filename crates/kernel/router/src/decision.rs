@@ -199,7 +199,8 @@ pub(crate) fn allows(error: &PluginError, connect_errors: bool, statuses: &BTree
             || upstream_shape_refusal(&text)
             || UNSAID_WORDS.is_match(&text)
             || REGION_WORDS.is_match(&text)
-            || wrong_endpoint(status, &text))
+            || wrong_endpoint(status, &text)
+            || reasoning_back_refused(error.message()))
 }
 
 /// Whether the request was too long for this member's model, said by the
@@ -348,7 +349,8 @@ fn shape_refused(status: u16, message: &str) -> bool {
             || upstream_shape_refusal(&text)
             || UNSAID_WORDS.is_match(&text)
             || CUSTOM_TOOL_REFUSAL.is_match(&text)
-            || wrong_endpoint(status, &text))
+            || wrong_endpoint(status, &text)
+            || reasoning_back_refused(message))
         && !QUOTA_WORDS.is_match(&text)
         && !CREDIT_WORDS.is_match(&text)
         && !UNSERVED_WORDS.is_match(&text)
@@ -377,6 +379,41 @@ fn wrong_endpoint(status: u16, text: &str) -> bool {
     }
     let lower = text.to_lowercase();
     WRONG_ENDPOINT.iter().any(|phrase| lower.contains(phrase))
+}
+
+fn reasoning_back_refused(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("must be passed back")
+        && (lower.contains("content[].thinking") || lower.contains("reasoning_content"))
+    {
+        return true;
+    }
+    if !lower.contains("reasoning_content") {
+        return false;
+    }
+    if lower.contains("missing required parameter")
+        && (lower.contains("'messages'") || lower.contains("\"messages\""))
+    {
+        return false;
+    }
+    if lower.contains("missing") && lower.contains("reasoning_content") {
+        return true;
+    }
+    if lower.contains("required") && lower.contains("reasoning_content") {
+        return true;
+    }
+    if let Some(at) = lower.find("reasoning_content") {
+        let window = &lower[at..lower.len().min(at + 80)];
+        if window.contains("is missing")
+            || window.contains("is required")
+            || window.contains("must be passed")
+            || window.contains("must be provided")
+            || window.contains("must be included")
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// Whether a JSON error body is the vendor's safety filter refusing the
@@ -452,6 +489,22 @@ mod tests {
         );
         assert!(!asks_next(&error));
         assert!(!allows(&error, false, &none()));
+    }
+
+    #[test]
+    fn d65_7_missing_reasoning_content_failsover_as_shape() {
+        let error = PluginError::status_error(
+            400,
+            r#"Missing required parameter: 'messages[1].reasoning_content'"#,
+        );
+        assert!(asks_next(&error));
+        assert!(allows(&error, false, &none()));
+    }
+
+    #[test]
+    fn d65_8_missing_messages_parameter_is_not_shape() {
+        let error = PluginError::status_error(400, "Missing required parameter: 'messages'");
+        assert!(!asks_next(&error));
     }
 
     #[test]

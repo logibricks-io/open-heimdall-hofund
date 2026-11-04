@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Missing reasoning on tool turns fails over to the next route member; a member
+  that demands it is retried once with filled thinking and remembers the model
+  (D-65).
+
 - Refused Anthropic beta headers are retried once without the named betas and
   omitted on later requests to that provider (D-64).
 

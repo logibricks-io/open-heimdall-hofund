@@ -11,6 +11,7 @@ mod encoded;
 mod json;
 mod passthrough;
 mod state;
+mod thinking_back;
 
 pub use betas::{apply_learned_betas, named_refused_betas, retry_without_refused_betas};
 pub use encoded::{EncodedContext, apply_before_encode, apply_encoded, apply_encoded_with_state};
@@ -19,6 +20,7 @@ pub use state::{
     RequestState, TokenField, fold_encoded, fold_object_roots, root_union_refusal,
     token_field_wanted, with_token_field,
 };
+pub use thinking_back::{fill_thinking_back, reasoning_back_refused, thinking_back_refusal};
 
 use hofund_ir::{ContentPart, Request, Role};
 

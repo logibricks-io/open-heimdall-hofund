@@ -14,6 +14,7 @@ pub struct RequestState {
     token_field: Mutex<Option<TokenField>>,
     passthrough: Mutex<BTreeSet<String>>,
     refused_betas: Mutex<BTreeSet<String>>,
+    thinking_back: Mutex<BTreeSet<String>>,
 }
 
 /// The Chat Completions reply-length field.
@@ -84,6 +85,22 @@ impl RequestState {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .contains(beta)
+    }
+
+    /// Remembers that this model asked for thinking back on tool turns.
+    pub fn learn_thinking_back(&self, model: &str) -> bool {
+        self.thinking_back
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(model.to_owned())
+    }
+
+    /// Whether tool-turn thinking should be filled for this model.
+    pub fn replays_thinking_back(&self, model: &str) -> bool {
+        self.thinking_back
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(model)
     }
 
     pub(crate) fn strip_passthrough(&self, protocol: &str, body: &[u8]) -> (Vec<u8>, bool) {
