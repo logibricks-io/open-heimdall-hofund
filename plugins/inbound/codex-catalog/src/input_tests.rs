@@ -288,3 +288,34 @@ fn d35_5_vendor_reasoning_keeps_an_overlong_non_plain_id() {
     assert_eq!(input[0]["id"], id);
     assert_eq!(input[0]["encrypted_content"], SEALED_REASONING);
 }
+
+#[test]
+fn d66_5_for_backend_heals_offsetless_url_citation() {
+    use super::input::item_cites_without_offsets;
+    let bad = json!({"type":"url_citation","title":"V","url":"https://example.com/v"});
+    let good = json!({"type":"url_citation","start_index":90,"end_index":152,"url":"https://example.com/g"});
+    let input = json!([{
+        "type": "message",
+        "role": "assistant",
+        "content": [{
+            "type": "output_text",
+            "text": "Sun.",
+            "annotations": [good, bad],
+        }],
+    }]);
+    assert!(item_cites_without_offsets(&input[0]));
+    let out = backend(&input).expect("healed");
+    let text = out.to_string();
+    assert!(!text.contains("site_name"), "{text}");
+    assert!(text.contains("example.com/g"), "{text}");
+}
+
+#[test]
+fn d66_6_input_with_only_good_citations_is_unchanged() {
+    let good = json!({"type":"url_citation","start_index":0,"end_index":1,"url":"u"});
+    let input = json!([{
+        "type": "message",
+        "content": [{"type":"output_text","text":"x","annotations":[good]}],
+    }]);
+    assert_eq!(backend(&input), None);
+}

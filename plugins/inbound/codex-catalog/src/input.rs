@@ -89,12 +89,15 @@ pub(crate) fn restore_sse_line(line: &[u8], back: &BTreeMap<String, String>) -> 
 pub(crate) fn for_backend(body: &[u8]) -> Option<Vec<u8>> {
     let mut value = json::from_slice::<Value>(body).ok()?;
     let object = value.as_object_mut()?;
+    let mut changed = hofund_plugin_sdk::codex_tool_names::codex_tool_names_object(object);
     let items = object.get_mut("input").and_then(Value::as_array_mut)?;
-    let mut changed = call_item_ids(items);
+    changed |= call_item_ids(items);
     changed |= bound_call_ids(items);
     changed |= plain_item_ids(items);
     changed |= open_summaries(items, false).0;
-    changed |= hofund_plugin_sdk::codex_tool_names::codex_tool_names_object(object);
+    if items.iter().any(item_cites_without_offsets) {
+        changed |= drop_offsetless_citations(items);
+    }
     changed.then(|| value.to_string().into_bytes())
 }
 
@@ -266,6 +269,60 @@ fn foreign_reasoning(item: &Value) -> bool {
         Some(_) => true,
     };
     shown || text(item, "encrypted_content").is_empty()
+}
+
+fn annotation_lacks_offsets(annotation: &Value) -> bool {
+    let Some(kind) = annotation.get("type").and_then(Value::as_str) else {
+        return false;
+    };
+    if kind != "url_citation" && kind != "container_file_citation" {
+        return false;
+    }
+    ["start_index", "end_index"]
+        .into_iter()
+        .any(|key| match annotation.get(key) {
+            None | Some(Value::Null) => true,
+            Some(Value::Number(_)) => false,
+            _ => true,
+        })
+}
+
+/// Whether an input item may carry an offsetless output citation, without
+/// decoding the whole conversation when nothing names annotations.
+#[must_use]
+pub(crate) fn item_cites_without_offsets(item: &Value) -> bool {
+    item.get("content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|part| {
+            part.get("type").and_then(Value::as_str) == Some("output_text")
+                && part
+                    .get("annotations")
+                    .and_then(Value::as_array)
+                    .is_some_and(|notes| notes.iter().any(annotation_lacks_offsets))
+        })
+}
+
+fn drop_offsetless_citations(items: &mut [Value]) -> bool {
+    let mut changed = false;
+    for item in items.iter_mut() {
+        let Some(parts) = item.get_mut("content").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for part in parts.iter_mut() {
+            if part.get("type").and_then(Value::as_str) != Some("output_text") {
+                continue;
+            }
+            let Some(notes) = part.get_mut("annotations").and_then(Value::as_array_mut) else {
+                continue;
+            };
+            let before = notes.len();
+            notes.retain(|note| !annotation_lacks_offsets(note));
+            changed |= notes.len() != before;
+        }
+    }
+    changed
 }
 
 /// Opens hofund's summaries as messages. For a hofund model a

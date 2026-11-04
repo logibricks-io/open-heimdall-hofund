@@ -24,7 +24,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Quota and usage alerts: `hofund quota alert`, daemon `quota_alert` control
   events, and `GET/POST /v1/hofund/quotas/alerts(/settings)` (AL-1).
 
+- Relayed native Responses replies mark namespaced `function_call` items with
+  empty `encrypted_function_args` when the upstream omitted the field, so Codex
+  V2 treats collaboration tasks as plain text (D-67).
+
+- Codex ChatGPT backend relay falls back through the configured `codex`
+  provider's `fallback` list on account quota, credit, rate, or overload
+  refusals (D-68).
+
 ### Fixed
+
+- Relayed Responses `url_citation` and `container_file_citation` annotations
+  without `start_index`/`end_index` are dropped on relay, and poisoned Codex
+  thread history is healed on the way to the ChatGPT backend (D-66).
 
 - Vendor overload (HTTP 529 or a 5xx whose message says overloaded) rests
   only the requested model on that member for 30 seconds, or for
