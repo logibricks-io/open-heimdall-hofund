@@ -250,6 +250,13 @@ fn shipped_agent_descriptions_preserve_public_fields() {
             ("provider.hofund.options.baseURL", Slot::V1),
             ("provider.hofund.options.apiKey", Slot::Token),
             ("provider.hofund.models", Slot::CatalogModels),
+            ("providers.hofund.settings.baseURL", Slot::V1),
+            ("providers.hofund.settings.apiKey", Slot::Token),
+            (
+                "providers.hofund.package",
+                Slot::Literal("aisdk:@ai-sdk/openai-compatible"),
+            ),
+            ("providers.hofund.models", Slot::CatalogModels),
         ],
     );
 }

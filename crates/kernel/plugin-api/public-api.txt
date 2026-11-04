@@ -128,7 +128,9 @@ AgentSet #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 AgentSet::const fn file (& self) -> & 'static str
 AgentSet::const fn from_static (file : & 'static str , key : & 'static str , slot : Slot) -> Self
 AgentSet::const fn key (& self) -> & 'static str
+AgentSet::const fn providers_table (& self) -> Option < bool >
 AgentSet::const fn slot (& self) -> & Slot
+AgentSet::const fn with_providers_table (mut self , providers_table : Option < bool >) -> Self
 AgentSignIn
 AgentSignIn #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
 AgentSignIn::const fn home_dir (& self) -> & 'static str
