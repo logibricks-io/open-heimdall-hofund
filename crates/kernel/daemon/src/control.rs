@@ -13,16 +13,18 @@ use hofund_control_proto::{
     CheckinRunRequest, CheckinRunResponse, ControlError, ControlErrorKind, FieldIssue, GatewayKey,
     GatewayKeyAction, GatewayKeyLimit, GatewayKeyRequest, GatewayKeyResponse,
     GatewayKeyRestoreRequest, HealthResponse, ModelEntry, ModelListResponse, PicksResponse,
-    PicksSetRequest, ProviderKeyRequest, ProviderKeysResponse, ProviderListResponse,
-    ProviderSpendCap, ProviderSpendCapPeriod, ProviderSpendCapRequest, ProviderSpendCapsResponse,
-    ProviderSummary, ProviderTestRequest, ProviderTestResponse, ProviderTestResult,
-    QuotaAlertsResponse, QuotaAlertsSetRequest, QuotaAlertsSetResponse, QuotaCreditsModesResponse,
-    QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryQuery, QuotaHistoryResponse,
-    QuotaQuery, QuotaResponse, RouteListResponse, RouteModel, RouteModelListResponse, RouteQuery,
-    RouteReserve, SessionRouteResponse, ShutdownRequest, ShutdownResponse, ShutdownState,
-    StatusResponse, TokenRotateRequest, TokenRotateResponse, UnroutedListResponse, UsagePeriod,
-    UsageQuery, UsageResponse, UsageRow, UsageTotals, WarmupAccountRow, WarmupListResponse,
-    WarmupRunRequest, WarmupRunResponse,
+    PicksSetRequest, ProfileDeleteRequest, ProfileDetailResponse, ProfileListResponse,
+    ProfileSaveRequest, ProfileSwitchRequest, ProfileSwitchResponse, ProviderKeyRequest,
+    ProviderKeysResponse, ProviderListResponse, ProviderSpendCap, ProviderSpendCapPeriod,
+    ProviderSpendCapRequest, ProviderSpendCapsResponse, ProviderSummary, ProviderTestRequest,
+    ProviderTestResponse, ProviderTestResult, QuotaAlertsResponse, QuotaAlertsSetRequest,
+    QuotaAlertsSetResponse, QuotaCreditsModesResponse, QuotaCreditsSetRequest,
+    QuotaCreditsSetResponse, QuotaHistoryQuery, QuotaHistoryResponse, QuotaQuery, QuotaResponse,
+    RouteListResponse, RouteModel, RouteModelListResponse, RouteQuery, RouteReserve,
+    SessionRouteResponse, ShutdownRequest, ShutdownResponse, ShutdownState, StatusResponse,
+    TokenRotateRequest, TokenRotateResponse, UnroutedListResponse, UsagePeriod, UsageQuery,
+    UsageResponse, UsageRow, UsageTotals, WarmupAccountRow, WarmupListResponse, WarmupRunRequest,
+    WarmupRunResponse,
 };
 use hofund_control_proto::{
     ConfigApplyRequest, ConfigResponse, ConfigValidateRequest, ConfigValidationResponse,
@@ -42,6 +44,7 @@ use tokio::sync::watch;
 
 use super::config_ops::{ConfigOps, ReloadOrigin};
 use super::control_agents::AgentOps;
+use super::control_profiles::ProfileOps;
 use super::events::{EventBus, SnapshotSource};
 use super::models::{PicksError, Timed, test_timeout};
 use super::{
@@ -60,6 +63,7 @@ pub(crate) struct DaemonControl {
     usage: Arc<Ledger>,
     keys: Arc<KeyStore>,
     agents: AgentOps,
+    profiles: ProfileOps,
     shutdown: watch::Sender<bool>,
     events: Arc<EventBus>,
     in_flight: Arc<AtomicU64>,
@@ -105,6 +109,7 @@ impl DaemonControl {
                 }),
                 token_path,
             ),
+            profiles: ProfileOps::new(config_path, registry_agents),
             usage,
             keys,
             ops,
@@ -211,8 +216,9 @@ impl DaemonControl {
     ) -> Self {
         self.agents = self
             .agents
-            .with_session(session)
+            .with_session(session.clone())
             .with_token_generation(generation);
+        self.profiles = self.profiles.with_session(session);
         self
     }
 
@@ -833,6 +839,48 @@ impl ControlState for DaemonControl {
 
     fn agents(&self) -> ControlFuture<'_, AgentListResponse> {
         Box::pin(async move { self.agents.list().await.map_err(Into::into) })
+    }
+
+    fn profiles(&self) -> ControlFuture<'_, ProfileListResponse> {
+        Box::pin(async move { self.profiles.list().await.map_err(Into::into) })
+    }
+
+    fn profile_detail(&self, name: String) -> ControlFuture<'_, ProfileDetailResponse> {
+        Box::pin(async move { self.profiles.detail(name).await.map_err(Into::into) })
+    }
+
+    fn save_profile(
+        &self,
+        request: ProfileSaveRequest,
+    ) -> ControlFuture<'_, ProfileDetailResponse> {
+        let name = request.name.trim().to_owned();
+        Box::pin(async move {
+            self.profiles
+                .save(request)
+                .await
+                .map_err(ControlFailure::from)?;
+            self.profiles.detail(name).await.map_err(Into::into)
+        })
+    }
+
+    fn switch_profile(
+        &self,
+        request: ProfileSwitchRequest,
+    ) -> ControlFuture<'_, ProfileSwitchResponse> {
+        Box::pin(async move { self.profiles.switch(request).await.map_err(Into::into) })
+    }
+
+    fn delete_profile(
+        &self,
+        request: ProfileDeleteRequest,
+    ) -> ControlFuture<'_, ProfileListResponse> {
+        Box::pin(async move {
+            self.profiles
+                .delete(request)
+                .await
+                .map_err(ControlFailure::from)?;
+            self.profiles.list().await.map_err(Into::into)
+        })
     }
 
     fn agent_status(&self) -> ControlFuture<'_, AgentStatusResponse> {

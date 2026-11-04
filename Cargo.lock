@@ -1820,6 +1820,7 @@ dependencies = [
  "signal-hook",
  "tempfile",
  "tokio",
+ "toml 0.8.2",
  "tower",
  "tracing",
  "url",

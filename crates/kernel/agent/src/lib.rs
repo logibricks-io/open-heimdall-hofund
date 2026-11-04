@@ -59,12 +59,16 @@ mod credential;
 mod edit;
 mod go_binary;
 mod jsonc_edit;
+mod profile;
 mod request_agent;
 mod store;
 mod yaml_edit;
 
-pub use catalog::{Catalog, Compiled, catalog, resolve, resolve_agent_path};
+pub use catalog::{Catalog, Compiled, catalog, catalog_from, resolve, resolve_agent_path};
 pub use credential::CREDENTIAL_CHANGE_PREFIX;
+pub use profile::{
+    ApplyOutcome, ProfileFields, apply_fields, in_use, is_profile_secret, snapshot_fields,
+};
 pub use request_agent::request_agent_id;
 
 /// The operating system path template selected by a compiled adapter.
