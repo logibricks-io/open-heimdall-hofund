@@ -119,7 +119,7 @@ mod tests {
         let seats = ids.iter().map(Seat::new).collect::<Vec<_>>();
         let state = StrategyState::with_builtins();
         for mode in [
-            "smart", "order", "rotate", "usage", "pace", "weight", "free", "fast", "cheap",
+            "smart", "order", "rotate", "usage", "pace", "weight", "free", "fast", "cheap", "drain",
         ] {
             let strategy = state.order(mode, "at-once-test", &seats);
             let placement = place(&members, &ids, &strategy, &resting);

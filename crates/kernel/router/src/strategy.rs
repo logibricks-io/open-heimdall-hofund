@@ -329,6 +329,7 @@ struct Pools {
     turns: HashMap<String, u64>,
     rounds: HashMap<String, Round>,
     probes: HashMap<String, Probe>,
+    drains: HashMap<String, String>,
 }
 
 #[derive(Default)]
@@ -401,12 +402,19 @@ impl StrategyState {
         apply(&strategy, pool, seats, self)
     }
 
-    /// Drops the turn, weighted round, and speed probe for one pool.
+    /// Drops the turn, weighted round, speed probe, and drain choice for one pool.
     pub fn forget(&self, pool: &str) {
         let mut pools = self.lock();
         pools.turns.remove(pool);
         pools.rounds.remove(pool);
         pools.probes.remove(pool);
+        pools.drains.remove(pool);
+    }
+
+    /// Remembers which seat key drain routing keeps for `pool`.
+    pub fn record_drain(&self, pool: &str, key: &str) {
+        let mut pools = self.lock();
+        pools.drains.insert(pool.to_owned(), key.to_owned());
     }
 
     fn speed_probe(&self, pool: &str, unmeasured: &[usize]) -> Option<usize> {
@@ -541,7 +549,7 @@ fn panic_text(payload: &(dyn std::any::Any + Send)) -> &str {
     }
 }
 
-fn builtins() -> [(&'static str, Strategy); 9] {
+fn builtins() -> [(&'static str, Strategy); 10] {
     [
         ("smart", Strategy::new(smart)),
         (
@@ -555,6 +563,7 @@ fn builtins() -> [(&'static str, Strategy); 9] {
         ("free", Strategy::new(free_first).by_free()),
         ("fast", Strategy::new(fastest).by_speed()),
         ("cheap", Strategy::new(cheapest).by_price()),
+        ("drain", Strategy::new(drain).exact()),
     ]
 }
 
@@ -941,6 +950,41 @@ fn stable_by_less(order: &mut [usize], less: impl Fn(usize, usize) -> bool) {
 fn same_cost(a: f64, b: f64) -> bool {
     let difference = (a - b).abs();
     difference <= 1e-6 || difference <= 1e-6 * a.max(b)
+}
+
+fn drain_usable(seat: &Seat) -> bool {
+    !seat.resting && (seat.credits || seat.used < crate::affinity::spent_share_of("drain"))
+}
+
+fn first_usable(seats: &[Seat], from: usize) -> Option<usize> {
+    for offset in 0..seats.len() {
+        let index = (from + offset) % seats.len();
+        if drain_usable(&seats[index]) {
+            return Some(index);
+        }
+    }
+    None
+}
+
+/// The seat drain routing asks first: the first usable seat from the one that
+/// last answered (`record_drain`), wrapping. A pool with no usable seat starts
+/// from the remembered one. Ordering never changes the remembered seat; only
+/// an answer does.
+fn pick_drain(pool: &str, seats: &[Seat], state: &StrategyState) -> usize {
+    let from = state
+        .lock()
+        .drains
+        .get(pool)
+        .and_then(|key| seats.iter().position(|seat| seat.key == *key))
+        .unwrap_or(0);
+    first_usable(seats, from).unwrap_or(from)
+}
+
+fn drain(pool: &str, seats: &[Seat], state: &StrategyState) -> Vec<usize> {
+    let start = pick_drain(pool, seats, state);
+    (0..seats.len())
+        .map(|offset| (start + offset) % seats.len())
+        .collect()
 }
 
 fn rotate(pool: &str, seats: &[Seat], state: &StrategyState) -> Vec<usize> {
@@ -1508,7 +1552,7 @@ mod tests {
         use super::Needs;
         let state = StrategyState::with_builtins();
         let none = Needs::default();
-        for name in ["smart", "order", "rotate", "weight", "missing"] {
+        for name in ["smart", "order", "rotate", "weight", "drain", "missing"] {
             assert_eq!(state.needs(name), none, "{name}");
         }
         assert_eq!(state.needs("free"), Needs { free: true, ..none });
@@ -1603,5 +1647,163 @@ mod tests {
             ]
         );
         assert!(state.registry().find("cheap").expect("cheap").by_price);
+    }
+
+    fn drain_picks(state: &StrategyState, pool: &str, seats: &[Seat], turns: usize) -> Vec<String> {
+        let strategy = state.registry().find("drain").expect("drain");
+        (0..turns)
+            .map(|_| keys(seats, &apply(&strategy, pool, seats, state))[0].clone())
+            .collect()
+    }
+
+    #[test]
+    fn d41_1_drain_sticks_to_one_member_across_requests() {
+        let state = StrategyState::with_builtins();
+        let seats = self::seats(&["a", "b", "c"]);
+        assert_eq!(
+            drain_picks(&state, "pool", &seats, 5),
+            ["a", "a", "a", "a", "a"]
+        );
+    }
+
+    #[test]
+    fn d41_2_drain_moves_on_when_resting_and_sticks_to_the_next() {
+        let state = StrategyState::with_builtins();
+        let strategy = state.registry().find("drain").expect("drain");
+        let mut seats = self::seats(&["a", "b", "c"]);
+        assert_eq!(
+            keys(&seats, &apply(&strategy, "pool", &seats, &state))[0],
+            "a"
+        );
+        seats[0].resting = true;
+        assert_eq!(drain_picks(&state, "pool", &seats, 3), ["b", "b", "b"]);
+    }
+
+    #[test]
+    fn d41_3_drain_moves_on_when_used_up_without_credits() {
+        let state = StrategyState::with_builtins();
+        let mut seats = self::seats(&["a", "b", "c"]);
+        seats[0].used = 100.0;
+        assert_eq!(drain_picks(&state, "pool", &seats, 1), ["b"]);
+        assert_eq!(drain_picks(&state, "pool", &seats, 2), ["b", "b"]);
+    }
+
+    #[test]
+    fn d41_4_drain_keeps_spent_member_while_credits_remain() {
+        let state = StrategyState::with_builtins();
+        let mut seats = self::seats(&["a", "b"]);
+        seats[0].used = 100.0;
+        seats[0].credits = true;
+        assert_eq!(drain_picks(&state, "pool", &seats, 2), ["a", "a"]);
+    }
+
+    #[test]
+    fn d41_5_drain_failover_sticks_to_the_member_that_answered() {
+        let state = StrategyState::with_builtins();
+        let strategy = state.registry().find("drain").expect("drain");
+        let seats = self::seats(&["a", "b", "c"]);
+        assert_eq!(
+            keys(&seats, &apply(&strategy, "pool", &seats, &state)),
+            ["a", "b", "c"]
+        );
+        state.record_drain("pool", "b");
+        assert_eq!(drain_picks(&state, "pool", &seats, 2), ["b", "b"]);
+    }
+
+    #[test]
+    fn d41_6_drain_wraps_to_the_first_usable_after_the_last() {
+        let state = StrategyState::with_builtins();
+        let mut seats = self::seats(&["a", "b", "c"]);
+        state.record_drain("pool", "c");
+        seats[2].resting = true;
+        assert_eq!(drain_picks(&state, "pool", &seats, 1), ["a"]);
+        assert_eq!(drain_picks(&state, "pool", &seats, 2), ["a", "a"]);
+    }
+
+    #[test]
+    fn d41_7_drain_state_survives_a_cloned_strategy_state() {
+        let state = StrategyState::with_builtins();
+        let seats = self::seats(&["a", "b", "c"]);
+        assert_eq!(drain_picks(&state, "pool", &seats, 2), ["a", "a"]);
+        let shared = state.clone();
+        assert_eq!(drain_picks(&shared, "pool", &seats, 2), ["a", "a"]);
+    }
+
+    #[test]
+    fn d41_8_removed_member_falls_back_to_first_usable() {
+        let state = StrategyState::with_builtins();
+        let mut seats = self::seats(&["a", "b", "c"]);
+        state.record_drain("pool", "b");
+        seats.remove(1);
+        assert_eq!(drain_picks(&state, "pool", &seats, 2), ["a", "a"]);
+    }
+
+    #[test]
+    fn d41_9_forget_clears_the_drain_choice() {
+        let state = StrategyState::with_builtins();
+        let seats = self::seats(&["a", "b", "c"]);
+        state.record_drain("pool", "c");
+        assert_eq!(drain_picks(&state, "pool", &seats, 1), ["c"]);
+        state.forget("pool");
+        assert_eq!(drain_picks(&state, "pool", &seats, 1), ["a"]);
+    }
+
+    #[test]
+    fn d41_12_a_pool_with_no_usable_member_keeps_its_drain_choice() {
+        let state = StrategyState::with_builtins();
+        let mut seats = self::seats(&["a", "b", "c"]);
+        state.record_drain("pool", "b");
+        for seat in &mut seats {
+            seat.resting = true;
+        }
+        assert_eq!(drain_picks(&state, "pool", &seats, 1), ["b"]);
+        for seat in &mut seats {
+            seat.resting = false;
+        }
+        assert_eq!(drain_picks(&state, "pool", &seats, 1), ["b"]);
+    }
+
+    #[test]
+    fn d41_13_drain_orders_an_empty_pool_without_panicking() {
+        let state = StrategyState::with_builtins();
+        assert!(super::drain("pool", &[], &state).is_empty());
+    }
+
+    #[test]
+    fn d41_16_drain_keeps_a_member_short_of_a_full_allowance() {
+        let state = StrategyState::with_builtins();
+        let mut seats = self::seats(&["a", "b"]);
+        seats[0].used = 99.0;
+        assert_eq!(drain_picks(&state, "pool", &seats, 1), ["a"]);
+    }
+
+    #[test]
+    fn d41_17_ordering_alone_does_not_move_the_drain_choice() {
+        let state = StrategyState::with_builtins();
+        let mut seats = self::seats(&["a", "b", "c"]);
+        seats[0].resting = true;
+        assert_eq!(drain_picks(&state, "pool", &seats, 1), ["b"]);
+        seats[0].resting = false;
+        assert_eq!(drain_picks(&state, "pool", &seats, 1), ["a"]);
+        state.record_drain("pool", "b");
+        assert_eq!(drain_picks(&state, "pool", &seats, 1), ["b"]);
+    }
+
+    #[test]
+    fn d41_10_drain_is_registered_exact_and_listed() {
+        let state = StrategyState::with_builtins();
+        let strategy = state.registry().find("drain").expect("drain");
+        assert!(strategy.exact);
+        assert!(state.registry().served("drain"));
+        let seats = self::seats(&["a", "b"]);
+        assert_eq!(
+            apply(&strategy, "pool", &seats, &state),
+            apply(
+                &state.registry().find("order").expect("order"),
+                "pool",
+                &seats,
+                &state
+            )
+        );
     }
 }

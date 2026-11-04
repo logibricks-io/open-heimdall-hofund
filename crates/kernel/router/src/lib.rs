@@ -297,12 +297,19 @@ struct Ordered {
     hops: Vec<Hop>,
     reserves: BTreeMap<String, usize>,
     affinity: Option<ReplyRoute>,
+    drain_moves: Vec<RoundMove>,
 }
 
 struct RoundMove {
     pool: String,
     picked: String,
     choices: Vec<(String, String)>,
+}
+
+#[derive(Default)]
+struct PoolMoves {
+    weight: Vec<RoundMove>,
+    drain: Vec<RoundMove>,
 }
 
 struct ReplyRoute {
@@ -718,6 +725,8 @@ impl Router {
             affinity_state: self.affinity.clone(),
             cooldowns: self.cooldowns.clone(),
             trace,
+            strategies: Arc::clone(&self.strategies),
+            drain_moves: ordered.drain_moves,
         }
         .run(0)
         .await;
@@ -933,8 +942,8 @@ impl Router {
         resolved: &Resolved,
         conversation: Option<&affinity::Conversation>,
     ) -> Ordered {
-        let mut rounds = Vec::new();
-        let ordered = self.order_level(resolved, 0, resolved.hops.clone(), &mut rounds);
+        let mut moves = PoolMoves::default();
+        let ordered = self.order_level(resolved, 0, resolved.hops.clone(), &mut moves);
         let ordered = if let Some(cooldowns) = &self.cooldowns {
             order_hops(ordered, cooldowns, &resolved.bare)
         } else {
@@ -1050,7 +1059,7 @@ impl Router {
             && let Some(kept) = ordered.first()
         {
             let kept_id = kept.member.id().to_string();
-            for round in rounds {
+            for round in &moves.weight {
                 if let Some((_, key)) = round.choices.iter().find(|(member, _)| *member == kept_id)
                 {
                     self.strategies.move_round(&round.pool, &round.picked, key);
@@ -1077,6 +1086,7 @@ impl Router {
                     planned,
                     reason: decision.reason.as_str(),
                 }),
+            drain_moves: moves.drain,
         }
     }
 
@@ -1085,7 +1095,7 @@ impl Router {
         resolved: &Resolved,
         depth: usize,
         hops: Vec<Hop>,
-        rounds: &mut Vec<RoundMove>,
+        moves: &mut PoolMoves,
     ) -> Vec<Hop> {
         let mut groups: Vec<(String, u64, Vec<Hop>)> = Vec::new();
         for hop in hops {
@@ -1102,7 +1112,7 @@ impl Router {
         for (_, _, group) in &mut groups {
             let nested = group[0].units.get(depth + 1).is_some();
             if nested {
-                *group = self.order_level(resolved, depth + 1, std::mem::take(group), rounds);
+                *group = self.order_level(resolved, depth + 1, std::mem::take(group), moves);
                 continue;
             }
             let (pool, routing, sink) = group[0].units.get(depth).map_or_else(
@@ -1116,7 +1126,7 @@ impl Router {
                     (key, hop.weight, vec![hop])
                 })
                 .collect();
-            *group = self.order_units(resolved, &pool, &routing, sink, leaves, rounds);
+            *group = self.order_units(resolved, &pool, &routing, sink, leaves, moves);
         }
         let (pool, routing, sink) = if depth == 0 {
             (
@@ -1128,7 +1138,7 @@ impl Router {
             let unit = &groups[0].2[0].units[depth - 1];
             (unit.pool.clone(), unit.routing.clone(), unit.sink)
         };
-        self.order_units(resolved, &pool, &routing, sink, groups, rounds)
+        self.order_units(resolved, &pool, &routing, sink, groups, moves)
     }
 
     fn order_units(
@@ -1138,7 +1148,7 @@ impl Router {
         routing: &str,
         sink: bool,
         groups: Vec<(String, u64, Vec<Hop>)>,
-        rounds: &mut Vec<RoundMove>,
+        moves: &mut PoolMoves,
     ) -> Vec<Hop> {
         let heads = groups
             .iter()
@@ -1158,7 +1168,21 @@ impl Router {
             credits_mode::adjust_order(&mut order, &seats);
         }
         if groups.len() > 1 && routing == "weight" {
-            rounds.push(RoundMove {
+            moves.weight.push(RoundMove {
+                pool: pool.to_owned(),
+                picked: groups[order[0]].0.clone(),
+                choices: groups
+                    .iter()
+                    .flat_map(|(key, _, group)| {
+                        group
+                            .iter()
+                            .map(|hop| (hop.member.id().to_string(), key.clone()))
+                    })
+                    .collect(),
+            });
+        }
+        if groups.len() > 1 && routing == "drain" {
+            moves.drain.push(RoundMove {
                 pool: pool.to_owned(),
                 picked: groups[order[0]].0.clone(),
                 choices: groups
@@ -1458,6 +1482,8 @@ struct DispatchState {
     affinity_state: affinity::AffinityState,
     cooldowns: Option<Arc<Cooldowns>>,
     trace: Option<RouteTraceHandle>,
+    strategies: Arc<strategy::StrategyState>,
+    drain_moves: Vec<RoundMove>,
 }
 
 /// One member's answer within a dispatch round.
@@ -1664,6 +1690,16 @@ impl DispatchState {
                 Ok(completion) => {
                     if let Some(hook) = self.hook.as_ref() {
                         hook.answered(&info);
+                    }
+                    let member_id = hop.member.id().to_string();
+                    for pool_move in &self.drain_moves {
+                        if let Some((_, key)) = pool_move
+                            .choices
+                            .iter()
+                            .find(|(member, _)| *member == member_id)
+                        {
+                            self.strategies.record_drain(&pool_move.pool, key);
+                        }
                     }
                     self.note_try(index, &hop, &upstream_model, true, Some(200), String::new());
                     let completion = if self.asked == upstream_model {

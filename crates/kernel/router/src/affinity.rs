@@ -179,7 +179,7 @@ pub const SPENT_SHARE: f64 = 98.0;
 /// `SpentShareOf`).
 #[must_use]
 pub fn spent_share_of(routing: &str) -> f64 {
-    if routing == "order" {
+    if routing == "order" || routing == "drain" {
         100.0
     } else {
         SPENT_SHARE
