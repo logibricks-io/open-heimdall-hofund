@@ -467,6 +467,17 @@ mod tests {
     }
 
     #[test]
+    fn a3b_21_successful_persist_removes_temp_file() {
+        let dir = tempfile::tempdir().expect("temp");
+        let store = CheckinStore::new(dir.path());
+        let temp = dir.path().join("daily-checkin.json.tmp");
+        store.set_day("member/a-0000000000000001", "2026-11-04");
+        assert!(!temp.exists(), "atomic write must not leave a temp file");
+        let on_disk = dir.path().join("daily-checkin.json");
+        assert!(on_disk.is_file());
+    }
+
+    #[test]
     fn a3b_12_stale_temp_or_corrupt_state_file_does_not_panic() {
         let dir = tempfile::tempdir().expect("temp");
         let path = dir.path().join("daily-checkin.json");
