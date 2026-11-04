@@ -18,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   provider only, overriding fixed `headers` of the same name; forbidden names are
   rejected at config load (D-62).
 
+- Message thread continuations on `/v1/messages` are refused with HTTP 400 so
+  clients resend full conversation history (D-63).
+
 ### Fixed
 
 - Vendor overload (HTTP 529 or a 5xx whose message says overloaded) rests

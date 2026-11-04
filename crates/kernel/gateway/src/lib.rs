@@ -10,6 +10,7 @@ mod endpoints;
 mod issue_keys;
 mod limits;
 mod me;
+mod message_threads;
 mod model_list;
 mod oidc;
 mod oidc_keys;
@@ -1762,6 +1763,24 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
             );
         }
     };
+    if (path == "/v1/messages" || path == "/messages") && message_threads::names_thread(&bytes) {
+        write_usage_simple(
+            &app.usage,
+            &UsageMeta::new(
+                &ModelRequest::new(model_name(&bytes)),
+                "",
+                &model_name(&bytes),
+                started,
+                &identity,
+            ),
+            None,
+            message_threads::REFUSAL_STATUS,
+        );
+        return json_response(
+            message_threads::REFUSAL_STATUS,
+            message_threads::refusal_body(),
+        );
+    }
     if let Some(hold) = &unrouted_hold {
         hold.end_known_wait();
     }
