@@ -246,3 +246,34 @@ async fn d42_13_off_spent_ranks_after_ready_peer_on_smart() {
     dispatch(&router).await;
     assert_eq!(*order.lock().expect("order"), ["b"]);
 }
+
+#[tokio::test]
+async fn d42_14_first_at_spent_share_promotes_before_blocking_gone() {
+    let order = Arc::new(Mutex::new(Vec::new()));
+    let first = fake("sub", "a", &order, vec![ok()]);
+    let second = fake("sub", "b", &order, vec![ok()]);
+    let quotas = Arc::new(QuotaStore::in_memory());
+    // 98% blocking still available -> not on_credits, but First must promote.
+    record(&quotas, "sub", "a", 10.0);
+    record(&quotas, "sub", "b", 98.0);
+    let modes = Arc::new(CreditsModeStore::in_memory());
+    modes.set("sub", "b", CreditsMode::First);
+    let router = order_router(vec![first, second], quotas, modes);
+    dispatch(&router).await;
+    assert_eq!(*order.lock().expect("order"), ["b"]);
+}
+
+#[tokio::test]
+async fn d42_15_last_within_allowance_keeps_listed_place() {
+    let order = Arc::new(Mutex::new(Vec::new()));
+    let first = fake("sub", "a", &order, vec![ok()]);
+    let second = fake("sub", "b", &order, vec![ok()]);
+    let quotas = Arc::new(QuotaStore::in_memory());
+    record(&quotas, "sub", "a", 10.0);
+    record(&quotas, "sub", "b", 10.0);
+    let modes = Arc::new(CreditsModeStore::in_memory());
+    modes.set("sub", "a", CreditsMode::Last);
+    let router = order_router(vec![first, second], quotas, modes);
+    dispatch(&router).await;
+    assert_eq!(*order.lock().expect("order"), ["a"]);
+}

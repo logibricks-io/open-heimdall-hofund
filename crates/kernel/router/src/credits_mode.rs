@@ -354,6 +354,22 @@ mod tests {
         assert_eq!(order, [2, 1, 0]);
     }
     #[test]
+    fn d42_first_promotes_at_spent_share_before_on_credits() {
+        let mut seats = vec![Seat::new("a"), Seat::new("b")];
+        seats[0].credits_mode = CreditsMode::First;
+        seats[0].credits = true;
+        seats[0].on_credits = false;
+        seats[0].used = crate::affinity::SPENT_SHARE;
+        let mut order = vec![1, 0];
+        adjust_order(&mut order, &seats);
+        assert_eq!(
+            order,
+            [0, 1],
+            "first at spent share promotes even before blocking is fully gone"
+        );
+    }
+
+    #[test]
     fn d42_first_stays_ahead_while_credits_remain_then_falls_back() {
         let mut seats = vec![Seat::new("a"), Seat::new("b")];
         seats[0].credits_mode = CreditsMode::First;
