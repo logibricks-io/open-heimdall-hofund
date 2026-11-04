@@ -11,8 +11,6 @@ use serde::{Deserialize, Serialize};
 use crate::quota::Allowance;
 use crate::strategy::Seat;
 
-const SPENT_SHARE: f64 = 98.0;
-
 /// How an account spends credits once its blocking allowance is used up.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -199,11 +197,10 @@ pub fn apply_to_seat(
     seat.credits_mode = mode;
     seat.on_credits = on_credits_spending(allowance, model, now) && mode != CreditsMode::Off;
     seat.credits = effective_spends_credits(allowance, model, mode);
-    if mode == CreditsMode::Off && seat.on_credits {
-        seat.on_credits = false;
-    }
+    // Off never spends credits: a spent blocking window is fully used up, matching
+    // order/drain's 100% threshold as well as the 98% smart tiers.
     if mode == CreditsMode::Off && !allowance.available(model, now) {
-        seat.used = seat.used.max(SPENT_SHARE);
+        seat.used = seat.used.max(100.0);
     }
 }
 
@@ -220,7 +217,7 @@ pub fn adjust_order(order: &mut [usize], seats: &[Seat]) {
         let seat = &seats[index];
         if seat.credits_mode == CreditsMode::First
             && seat.credits
-            && (seat.on_credits || seat.used >= SPENT_SHARE)
+            && (seat.on_credits || seat.used >= crate::affinity::SPENT_SHARE)
         {
             first_on.push(index);
         } else if seat.credits_mode == CreditsMode::Last && seat.on_credits {
@@ -276,6 +273,8 @@ fn save(root: &Path, modes: &BTreeMap<String, CreditsMode>) {
 #[cfg(test)]
 mod tests {
     use std::time::{Duration, UNIX_EPOCH};
+
+    use std::collections::BTreeMap;
 
     use super::*;
     use crate::quota::{QuotaStore, WindowInfo};
@@ -338,7 +337,7 @@ mod tests {
         apply_to_seat(&mut seat, &allowance, "model", now, CreditsMode::Off);
         assert!(!seat.credits);
         assert!(!seat.on_credits);
-        assert!(seat.used >= SPENT_SHARE);
+        assert!(seat.used >= 100.0);
     }
 
     #[test]
@@ -353,5 +352,78 @@ mod tests {
         let mut order = vec![0, 1, 2];
         adjust_order(&mut order, &seats);
         assert_eq!(order, [2, 1, 0]);
+    }
+    #[test]
+    fn d42_first_stays_ahead_while_credits_remain_then_falls_back() {
+        let mut seats = vec![Seat::new("a"), Seat::new("b")];
+        seats[0].credits_mode = CreditsMode::First;
+        seats[0].credits = true;
+        seats[0].used = 99.0;
+        seats[0].on_credits = true;
+        let mut order = vec![1, 0];
+        adjust_order(&mut order, &seats);
+        assert_eq!(
+            order,
+            [0, 1],
+            "first on credits pulls ahead of listed order"
+        );
+        seats[0].credits = false;
+        seats[0].on_credits = false;
+        order = vec![1, 0];
+        adjust_order(&mut order, &seats);
+        assert_eq!(
+            order,
+            [1, 0],
+            "without credits first mode no longer promotes"
+        );
+    }
+
+    #[test]
+    fn d42_last_only_demotes_when_on_credits() {
+        let mut seats = vec![Seat::new("a"), Seat::new("b"), Seat::new("c")];
+        seats[0].credits_mode = CreditsMode::Last;
+        seats[0].credits = true;
+        seats[0].on_credits = false;
+        seats[0].used = 50.0;
+        let mut order = vec![0, 1, 2];
+        adjust_order(&mut order, &seats);
+        assert_eq!(order, [0, 1, 2], "last within allowance keeps listed place");
+        seats[0].on_credits = true;
+        seats[0].used = 100.0;
+        order = vec![0, 1, 2];
+        adjust_order(&mut order, &seats);
+        assert_eq!(order, [1, 2, 0]);
+    }
+
+    #[test]
+    fn d42_on_leaves_strategy_order_alone() {
+        let mut seats = vec![Seat::new("a"), Seat::new("b")];
+        seats[0].credits_mode = CreditsMode::On;
+        seats[0].credits = true;
+        seats[0].on_credits = true;
+        seats[0].used = 100.0;
+        let mut order = vec![1, 0];
+        adjust_order(&mut order, &seats);
+        assert_eq!(order, [1, 0]);
+    }
+
+    #[test]
+    fn d42_retain_drops_removed_accounts() {
+        let store = CreditsModeStore::in_memory();
+        store.set("sub", "a", CreditsMode::Off);
+        store.set("sub", "b", CreditsMode::First);
+        let mut live = BTreeMap::new();
+        live.insert("sub|a".to_owned(), ());
+        store.retain_accounts(&live);
+        assert_eq!(store.listed().len(), 1);
+        assert_eq!(store.mode("sub", "a"), CreditsMode::Off);
+        assert_eq!(store.mode("sub", "b"), CreditsMode::On);
+    }
+
+    #[test]
+    fn d42_parse_rejects_unknown_mode() {
+        assert_eq!(CreditsMode::parse("on"), Some(CreditsMode::On));
+        assert_eq!(CreditsMode::parse("FIRST"), Some(CreditsMode::First));
+        assert_eq!(CreditsMode::parse("maybe"), None);
     }
 }

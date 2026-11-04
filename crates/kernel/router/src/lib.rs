@@ -1024,11 +1024,19 @@ impl Router {
                                 .is_some()
                         }),
                         reserve,
-                        nearly_spent: hop.nearly_spent
-                            || used.is_some_and(|used| {
+                        nearly_spent: {
+                            let spent_by_use = used.is_some_and(|used| {
                                 used >= affinity::spent_share_of(&resolved.routing)
-                            })
-                            || (mode == credits_mode::CreditsMode::Last && on_credits),
+                            });
+                            let first_keeps = mode == credits_mode::CreditsMode::First
+                                && allowance.is_some_and(|entry| {
+                                    credits_mode::effective_spends_credits(entry, model, mode)
+                                })
+                                && (on_credits || spent_by_use);
+                            hop.nearly_spent
+                                || (spent_by_use && !first_keeps)
+                                || (mode == credits_mode::CreditsMode::Last && on_credits)
+                        },
                         low_allowance: used.is_some_and(|used| used >= 90.0),
                         fallback: hop.fallback,
                         aside: false,
@@ -1272,28 +1280,40 @@ impl Router {
             .as_ref()
             .map(|quotas| quotas.allowances(now))
             .unwrap_or_default();
-        let mut front = Vec::with_capacity(hops.len());
-        let mut back = Vec::new();
+        let mut first = Vec::new();
+        let mut middle = Vec::with_capacity(hops.len());
+        let mut last = Vec::new();
         for hop in hops.drain(..) {
             let model = hop.wire_model.as_deref().unwrap_or(&resolved.bare);
             let member = hop.member.id().to_string();
-            let demote = modes.mode_for_member(&member) == credits_mode::CreditsMode::Last
-                && allowances.iter().any(|allowance| {
-                    allowance.member == member
-                        && credits_mode::on_credits_spending(allowance, model, now)
-                });
-            if demote {
-                back.push(hop);
+            let mode = modes.mode_for_member(&member);
+            let allowance = allowances.iter().find(|entry| entry.member == member);
+            let on_credits =
+                allowance.is_some_and(|entry| credits_mode::on_credits_spending(entry, model, now));
+            let spends = allowance
+                .is_some_and(|entry| credits_mode::effective_spends_credits(entry, model, mode));
+            let used = allowance
+                .and_then(|entry| entry.fullest(model, now))
+                .map(|window| window.used)
+                .unwrap_or(0.0);
+            if mode == credits_mode::CreditsMode::First
+                && spends
+                && (on_credits || used >= affinity::spent_share_of(&resolved.routing))
+            {
+                first.push(hop);
+            } else if mode == credits_mode::CreditsMode::Last && on_credits {
+                last.push(hop);
             } else {
-                front.push(hop);
+                middle.push(hop);
             }
         }
-        if back.is_empty() {
-            *hops = front;
+        if first.is_empty() && last.is_empty() {
+            *hops = middle;
             return;
         }
-        front.extend(back);
-        *hops = front;
+        first.extend(middle);
+        first.extend(last);
+        *hops = first;
     }
 
     fn resolve(&self, asked: &str) -> Result<Resolved, RouterError> {

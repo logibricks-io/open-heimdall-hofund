@@ -13,6 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   allowance without credits, fails over, or leaves the pool, then sticks to the
   next member in listed order (D-41).
 
+- Per-account credits spending modes for subscription routing (D-42):
+  `credits-modes.json` beside the config, router `first`/`last`/`off` ordering,
+  `GET /v1/hofund/quotas/credits-modes`, `POST /v1/hofund/quotas/credits/settings`,
+  `creditsMode` on quota cards, and `hofund quota credits` to list, show, or set
+  modes.
+
+
 ### Fixed
 
 - Codex summary compaction on `/backend-api/codex` retries once with a
@@ -62,15 +69,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matching window's reset elapsed since the last good reading or moved to a
   later cycle; failed and empty readings lift nothing. Ordinary renewed-window
   readings still lift rests whose deadlines were not vendor-named (D-29).
-
-### Added
-
-- Per-account credits spending modes for subscription routing (D-42):
-  `credits-modes.json` beside the config, router `first`/`last`/`off` ordering,
-  `GET /v1/hofund/quotas/credits-modes`, `POST /v1/hofund/quotas/credits/settings`,
-  `creditsMode` on quota cards, and `hofund quota credits` to list, show, or set
-  modes. Tests: `d42_*` in `apps/cli/src/quota.rs`, `crates/kernel/router/src/credits_mode.rs`,
-  and control-route coverage in `crates/kernel/gateway/tests/control_routes.rs`.
 
 - Copilot Gemini Chat Completions rename provably disjoint tool-schema `anyOf`
   unions to `oneOf` in place; Copilot Grok Responses map custom tools to
