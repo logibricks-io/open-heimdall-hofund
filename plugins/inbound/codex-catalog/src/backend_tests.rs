@@ -323,6 +323,129 @@ fn codexs_own_model_is_relayed_as_it_came_less_the_hop_headers() {
 }
 
 #[test]
+fn d57_5_relay_unary_reply_restores_rewritten_tool_names() {
+    use hofund_plugin_sdk::codex_tool_names::codex_tool_name;
+    let bad = "search:web";
+    let fixed = codex_tool_name(bad);
+    let client = json!({
+        "model": "gpt-5",
+        "stream": false,
+        "tools": [{"type": "function", "name": bad, "parameters": {"type": "object"}}],
+        "input": []
+    })
+    .to_string();
+    let upstream = json!({
+        "id": "resp_1",
+        "object": "response",
+        "status": "completed",
+        "output": [{"type": "function_call", "name": fixed, "call_id": "c1"}]
+    })
+    .to_string();
+    let stub = Stub::default().listing(&[]).sending(answer(200, upstream));
+    let (status, _, text) = ask(
+        &stub,
+        request(
+            "POST",
+            "/backend-api/codex/responses",
+            &[
+                ("authorization", "Bearer chatgpt"),
+                ("content-type", "application/json"),
+            ],
+            &client,
+        ),
+    );
+    assert_eq!(status, 200, "{text}");
+    let reply: Value = json::from_str(&text).expect("json");
+    assert_eq!(reply["output"][0]["name"].as_str(), Some(bad));
+    assert!(
+        stub.sent()[0]
+            .body
+            .windows(fixed.len())
+            .any(|window| window == fixed.as_bytes())
+    );
+}
+
+#[test]
+fn d57_6_relay_stream_reply_restores_rewritten_tool_names() {
+    use hofund_plugin_sdk::codex_tool_names::codex_tool_name;
+    let bad = "search:web";
+    let fixed = codex_tool_name(bad);
+    let client = json!({
+        "model": "gpt-5",
+        "stream": true,
+        "tools": [{"type": "function", "name": bad, "parameters": {"type": "object"}}],
+        "input": []
+    })
+    .to_string();
+    let item = json!({"type": "function_call", "name": fixed, "call_id": "c1"});
+    let added =
+        json!({"type": "response.output_item.added", "output_index": 0, "item": item.clone()});
+    let done =
+        json!({"type": "response.output_item.done", "output_index": 0, "item": item.clone()});
+    let completed = json!({
+        "type": "response.completed",
+        "response": {
+            "id": "resp_1",
+            "object": "response",
+            "status": "completed",
+            "output": [item]
+        }
+    });
+    let upstream = format!(
+        "event: response.output_item.added\ndata: {added}\n\nevent: response.output_item.done\ndata: {done}\n\nevent: response.completed\ndata: {completed}\n\n"
+    );
+    let stub = Stub::default().listing(&[]).sending(Ok((
+        200,
+        vec![("content-type", "text/event-stream")],
+        BodyStream::from_bytes(upstream.into_bytes()),
+    )));
+    let (status, kind, text) = ask(
+        &stub,
+        request(
+            "POST",
+            "/backend-api/codex/responses",
+            &[
+                ("authorization", "Bearer chatgpt"),
+                ("content-type", "application/json"),
+            ],
+            &client,
+        ),
+    );
+    assert_eq!(status, 200, "{text}");
+    assert_eq!(kind, "text/event-stream");
+    assert!(text.contains(bad), "{text}");
+    assert!(!text.contains(&fixed), "{text}");
+}
+
+#[test]
+fn d57_7_relay_leaves_reply_bytes_unchanged_when_tool_names_are_valid() {
+    let good = "my_tool.v2";
+    let client = json!({
+        "model": "gpt-5",
+        "tools": [{"type": "function", "name": good, "parameters": {"type": "object"}}],
+        "input": []
+    })
+    .to_string();
+    let upstream = format!(
+        r#"{{"id":"resp_1","status":"completed","output":[{{"type":"function_call","name":"{good}","call_id":"c1"}}]}}"#
+    );
+    let stub = Stub::default()
+        .listing(&[])
+        .sending(answer(200, upstream.as_str()));
+    let (status, _, text) = ask(
+        &stub,
+        request(
+            "POST",
+            "/backend-api/codex/responses",
+            &[("authorization", "Bearer chatgpt")],
+            &client,
+        ),
+    );
+    assert_eq!(status, 200, "{text}");
+    assert_eq!(text, upstream);
+}
+
+#[test]
 fn any_other_path_is_relayed_to_the_same_backend() {
     let stub = Stub::default()
         .sending(answer(200, "usage"))

@@ -165,11 +165,13 @@ pub(crate) async fn serve_with_state(
         if request.headers().contains_key(ACCOUNT_HEADER) {
             return error(400, &format!("{ACCOUNT_HEADER} {ACCOUNT_MESSAGE}"));
         }
+        let tool_back = input::tool_names_back(request.body().bytes());
         if let Some(body) = input::for_backend(request.body().bytes()) {
             *request.body_mut() = Body::from(body);
         }
+        return relay(kernel, bases, &rest, request, state, tool_back).await;
     }
-    relay(kernel, bases, &rest, request, state).await
+    relay(kernel, bases, &rest, request, state, BTreeMap::new()).await
 }
 
 /// Whether the request asks to become a websocket.
@@ -740,6 +742,7 @@ async fn relay(
     rest: &str,
     mut request: HttpRequest,
     state: &State,
+    tool_back: BTreeMap<String, String>,
 ) -> HttpResponse {
     let base = base_for(bases, request.headers(), rest);
     let turn =
@@ -758,7 +761,7 @@ async fn relay(
             Err(failure) => return error_response(&failure),
         };
         if !turn || response.status().as_u16() != 400 {
-            return response;
+            return restore_relay_response(response, &tool_back);
         }
         let (parts, body) = response.into_parts();
         let Some(body) = read_up_to(body, REFUSAL_CAP).await else {
@@ -771,8 +774,108 @@ async fn relay(
                 continue;
             }
         }
-        return HttpResponse::from_parts(parts, BodyStream::from_bytes(body));
+        return restore_relay_response(
+            HttpResponse::from_parts(parts, BodyStream::from_bytes(body)),
+            &tool_back,
+        );
     }
+}
+
+fn relay_reply_is_stream(headers: &HeaderMap) -> bool {
+    headers
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("text/event-stream"))
+}
+
+fn restore_relay_response(
+    mut response: HttpResponse,
+    back: &BTreeMap<String, String>,
+) -> HttpResponse {
+    if back.is_empty() {
+        return response;
+    }
+    let stream = relay_reply_is_stream(response.headers());
+    let body = std::mem::replace(
+        response.body_mut(),
+        BodyStream::from_bytes(Vec::<u8>::new()),
+    );
+    *response.body_mut() = restore_relay_body(body, back, stream);
+    response
+}
+
+fn restore_relay_body(
+    body: BodyStream,
+    back: &BTreeMap<String, String>,
+    event_stream: bool,
+) -> BodyStream {
+    let back = back.clone();
+    if !event_stream {
+        return BodyStream::unfold(Some(body), move |body| {
+            let back = back.clone();
+            async move {
+                let mut body = body?;
+                let mut bytes = Vec::new();
+                while let Some(chunk) = body.next_chunk().await {
+                    match chunk {
+                        Ok(chunk) => bytes.extend_from_slice(&chunk),
+                        Err(error) => return Some((Err(error), None)),
+                    }
+                }
+                Some((Ok(input::restore_unary_reply(&bytes, &back)), None))
+            }
+        });
+    }
+    BodyStream::unfold(
+        ReplyLines {
+            body,
+            back,
+            pending: Vec::new(),
+            finished: false,
+        },
+        |mut lines| async move {
+            if lines.finished {
+                return None;
+            }
+            loop {
+                match lines.body.next_chunk().await {
+                    None => {
+                        lines.finished = true;
+                        let rest = std::mem::take(&mut lines.pending);
+                        if rest.is_empty() {
+                            return None;
+                        }
+                        return Some((Ok(input::restore_sse_line(&rest, &lines.back)), lines));
+                    }
+                    Some(Err(error)) => {
+                        lines.finished = true;
+                        return Some((Err(error), lines));
+                    }
+                    Some(Ok(chunk)) => {
+                        lines.pending.extend_from_slice(&chunk);
+                        let Some(end) = lines.pending.iter().rposition(|byte| *byte == b'\n')
+                        else {
+                            continue;
+                        };
+                        let rest = lines.pending.split_off(end + 1);
+                        let whole = std::mem::replace(&mut lines.pending, rest);
+                        let mut out = Vec::with_capacity(whole.len());
+                        for line in whole.split_inclusive(|byte| *byte == b'\n') {
+                            out.extend(input::restore_sse_line(line, &lines.back));
+                        }
+                        return Some((Ok(out), lines));
+                    }
+                }
+            }
+        },
+    )
+}
+
+struct ReplyLines {
+    body: BodyStream,
+    back: BTreeMap<String, String>,
+    pending: Vec<u8>,
+    finished: bool,
 }
 
 /// The backend's model list for this sign-in, with hofund's models after

@@ -6,6 +6,11 @@
 //! ones it takes, and a summary hofund wrote when it compacted a hofund
 //! model's conversation is opened again as a message.
 
+use std::collections::BTreeMap;
+
+use hofund_plugin_sdk::codex_tool_names::{
+    codex_tool_names_back, declared_tool_names, restore_tool_names,
+};
 use hofund_plugin_sdk::json::{self, Value, json};
 use hofund_plugin_sdk::sigv4::payload_hash;
 
@@ -34,6 +39,49 @@ const CALL_PREFIXES: [(&str, &str); 2] =
 /// then the summary as it is. Codex keeps the field as an opaque string.
 pub(crate) fn sealed(summary: &str) -> String {
     format!("{MARK}{summary}")
+}
+
+/// Maps rewritten tool names in a relayed reply back to what the client
+/// declared, or empty when nothing was renamed on the way out.
+pub(crate) fn tool_names_back(body: &[u8]) -> BTreeMap<String, String> {
+    codex_tool_names_back(&declared_tool_names(body))
+}
+
+/// A whole JSON relay reply with tool names restored.
+pub(crate) fn restore_unary_reply(body: &[u8], back: &BTreeMap<String, String>) -> Vec<u8> {
+    if back.is_empty() {
+        return body.to_vec();
+    }
+    let Ok(mut value) = json::from_slice::<Value>(body) else {
+        return body.to_vec();
+    };
+    restore_tool_names(&mut value, back);
+    value.to_string().into_bytes()
+}
+
+/// One SSE line with a JSON `data:` payload restored when it parses.
+pub(crate) fn restore_sse_line(line: &[u8], back: &BTreeMap<String, String>) -> Vec<u8> {
+    if back.is_empty() {
+        return line.to_vec();
+    }
+    let body_end = line
+        .iter()
+        .rposition(|byte| !matches!(byte, b'\r' | b'\n'))
+        .map_or(0, |last| last + 1);
+    let (text, end) = line.split_at(body_end);
+    let Some(payload) = text.strip_prefix(b"data:") else {
+        return line.to_vec();
+    };
+    let payload = payload.strip_prefix(b" ").unwrap_or(payload);
+    let Ok(mut value) = json::from_slice::<Value>(payload) else {
+        return line.to_vec();
+    };
+    restore_tool_names(&mut value, back);
+    let mut out = Vec::with_capacity(value.to_string().len() + 8);
+    out.extend_from_slice(b"data: ");
+    out.extend(value.to_string().bytes());
+    out.extend_from_slice(end);
+    out
 }
 
 /// A body for one of Codex's own models, as the backend takes it, or
