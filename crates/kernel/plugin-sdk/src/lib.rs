@@ -50,6 +50,7 @@ pub mod codex_tool_names;
 pub mod daily_checkin;
 pub mod daily_warmup;
 pub mod digest;
+pub mod enc_v1;
 pub mod jwt;
 pub mod oauth;
 pub mod page;

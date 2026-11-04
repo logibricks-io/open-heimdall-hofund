@@ -47,6 +47,8 @@ daily_warmup::fn normalize_time (text : & str) -> Result < String , & 'static st
 daily_warmup::fn read_times (raw : & RawTable) -> Result < Vec < String > , ConfigError >
 digest::fn hmac_sha256 (key : & [u8] , data : & [u8]) -> [u8 ; 32]
 digest::fn sha256 (bytes : & [u8]) -> [u8 ; 32]
+enc_v1::fn decrypt (key : & [u8] , value : & str) -> Option < String >
+enc_v1::fn encrypt_for_test (key : & [u8] , plain : & str) -> String
 form_body
 gemini_models
 gemini_models_with_dropped
