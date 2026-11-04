@@ -10,6 +10,7 @@ mod endpoints;
 mod issue_keys;
 mod limits;
 mod me;
+mod message_threads;
 mod model_list;
 mod oidc;
 mod oidc_keys;
@@ -29,7 +30,7 @@ pub use quotas::{
 pub use relisten::BindHook;
 pub use relisten::{Relisten, RelistenError};
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -1762,6 +1763,24 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
             );
         }
     };
+    if (path == "/v1/messages" || path == "/messages") && message_threads::names_thread(&bytes) {
+        write_usage_simple(
+            &app.usage,
+            &UsageMeta::new(
+                &ModelRequest::new(model_name(&bytes)),
+                "",
+                &model_name(&bytes),
+                started,
+                &identity,
+            ),
+            None,
+            message_threads::REFUSAL_STATUS,
+        );
+        return json_response(
+            message_threads::REFUSAL_STATUS,
+            message_threads::refusal_body(),
+        );
+    }
     if let Some(hold) = &unrouted_hold {
         hold.end_known_wait();
     }
@@ -1779,7 +1798,7 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
         .as_ref()
         .and_then(|expansion| expansion.ask.clone());
     let capture = expansion.and_then(|expansion| expansion.capture);
-    let model_request = match codec.decode_request(&bytes) {
+    let mut model_request = match codec.decode_request(&bytes) {
         Ok(model_request) => model_request,
         Err(error) => {
             let fallback_model = model_name(&bytes);
@@ -1798,6 +1817,18 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
             return coded(codec.as_ref(), StatusCode::BAD_REQUEST, &error.to_string());
         }
     };
+    let client_headers = client_request_headers(&headers);
+    if !client_headers.is_empty() {
+        model_request.extensions.insert(
+            hofund_config::pass_headers::CLIENT_MAP,
+            serde_json::Value::Object(
+                client_headers
+                    .into_iter()
+                    .map(|(name, value)| (name, serde_json::Value::String(value)))
+                    .collect(),
+            ),
+        );
+    }
     let reservation = match reserve_for_codec(
         &app,
         codec.as_ref(),
@@ -3421,6 +3452,20 @@ fn message_saw_reasoning(message: &hofund_ir::Message) -> bool {
         .content
         .iter()
         .any(|part| matches!(part, hofund_ir::ContentPart::Thinking(_)))
+}
+
+fn client_request_headers(headers: &HeaderMap) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    for (name, value) in headers.iter() {
+        if !hofund_config::pass_headers::passable(name.as_str()) {
+            continue;
+        }
+        let Ok(text) = value.to_str() else {
+            continue;
+        };
+        out.insert(name.as_str().to_owned(), text.to_owned());
+    }
+    out
 }
 
 fn model_name(bytes: &[u8]) -> String {

@@ -23,6 +23,13 @@ classify::ModelTags::const fn decides (self) -> bool
 classify::ModelTags::const fn draws (self) -> bool
 classify::ModelTags::const fn films (self) -> bool
 classify::fn classify_model (id : & str , kind : & str) -> Option < ModelTags >
+codex_tool_names::fn codex_names_bad (body : & [u8]) -> bool
+codex_tool_names::fn codex_tool_name (name : & str) -> String
+codex_tool_names::fn codex_tool_names_back (declared : & [String]) -> BTreeMap < String , String >
+codex_tool_names::fn codex_tool_names_body (body : & [u8]) -> Vec < u8 >
+codex_tool_names::fn codex_tool_names_object (object : & mut Map < String , Value >) -> bool
+codex_tool_names::fn declared_tool_names (body : & [u8]) -> Vec < String >
+codex_tool_names::fn restore_tool_names (value : & mut Value , back : & BTreeMap < String , String >)
 const daily_warmup::TIMES_KEY
 const page::BODY_CAP
 const page::ERROR_RUNES
@@ -53,6 +60,7 @@ jwt::RsaSigner::fn from_pem (text : & str) -> Result < Self , KeyError >
 jwt::RsaSigner::fn sign (& self , header : & Value , claims : & Value) -> Result < String , KeyError >
 mod bedrock
 mod classify
+mod codex_tool_names
 mod daily_warmup
 mod digest
 mod jwt

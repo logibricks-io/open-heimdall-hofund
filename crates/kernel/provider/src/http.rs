@@ -85,6 +85,8 @@ pub struct Endpoint {
     pub credential: Credential,
     /// Extra headers. Names and values must be valid HTTP header text.
     pub headers: Vec<(String, String)>,
+    /// Client header names to copy from each request.
+    pub pass_headers: Vec<String>,
     /// Quirk profile applied to the canonical request before encode.
     pub quirks: Option<&'static Profile>,
     /// Idle deadline the kernel enforces between body chunks.
@@ -144,6 +146,7 @@ impl Endpoint {
             api_key: String::new(),
             credential: Credential::Default,
             headers: Vec::new(),
+            pass_headers: Vec::new(),
             quirks: None,
             timeout: Duration::from_secs(60),
             client: None,
@@ -165,6 +168,7 @@ pub(crate) struct Upstream {
     client: reqwest::Client,
     url: String,
     headers: HeaderMap,
+    pass_headers: Vec<String>,
     quirks: Option<&'static Profile>,
     base_url: String,
     preset: Option<String>,
@@ -246,6 +250,7 @@ impl Upstream {
             client,
             url,
             headers,
+            pass_headers: endpoint.pass_headers.clone(),
             quirks: endpoint.quirks,
             base_url: endpoint.base_url,
             preset: endpoint.preset.clone(),
@@ -377,18 +382,27 @@ pub(crate) async fn post_json(
     url: &str,
     body: Vec<u8>,
 ) -> Result<reqwest::Response, ProviderError> {
-    send_json(upstream, url, body).await
+    send_json(upstream, url, body, upstream.headers.clone()).await
+}
+
+fn outbound_headers(upstream: &Upstream, request: &Request) -> HeaderMap {
+    let mut headers = upstream.headers.clone();
+    if let Some(client) = crate::pass_headers::client_map(request) {
+        crate::pass_headers::apply(&upstream.pass_headers, &client, &mut headers);
+    }
+    headers
 }
 
 async fn send_json(
     upstream: &Upstream,
     url: &str,
     body: Vec<u8>,
+    headers: HeaderMap,
 ) -> Result<reqwest::Response, ProviderError> {
     let builder = upstream
         .client
         .post(url)
-        .headers(upstream.headers.clone())
+        .headers(headers)
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .body(body);
     send_builder(builder).await
@@ -563,11 +577,12 @@ async fn send<'a>(
     let cross_protocol = codec.id() != inbound_protocol;
     let streaming = request.stream;
     let model = request.model.clone();
+    let outbound = outbound_headers(upstream, &request);
     let whole = prepare_body(upstream, codec, request, prepare, inbound_protocol)?;
     let shortened = hook.and_then(|hook| hook.prepare(route, &whole));
     let delta = shortened.is_some();
     let mut body = shortened.unwrap_or_else(|| whole.clone());
-    let mut response = send_json(upstream, url, body.clone()).await?;
+    let mut response = send_json(upstream, url, body.clone(), outbound.clone()).await?;
     let mut root_retried = false;
     let mut token_retried = false;
     let mut replacement_retried = false;
@@ -586,7 +601,7 @@ async fn send<'a>(
             let (stripped, changed) = hofund_quirks::without_passthrough(&body, &field);
             if changed && upstream.state.learn_passthrough(&field) {
                 body = stripped;
-                response = send_json(upstream, url, body.clone()).await?;
+                response = send_json(upstream, url, body.clone(), outbound.clone()).await?;
                 continue;
             }
         }
@@ -596,7 +611,7 @@ async fn send<'a>(
                 root_retried = true;
                 upstream.state.learn_root_union(&model);
                 body = folded;
-                response = send_json(upstream, url, body.clone()).await?;
+                response = send_json(upstream, url, body.clone(), outbound.clone()).await?;
                 continue;
             }
         }
@@ -610,7 +625,7 @@ async fn send<'a>(
                 token_retried = true;
                 upstream.state.learn_token_field(wanted);
                 body = renamed;
-                response = send_json(upstream, url, body.clone()).await?;
+                response = send_json(upstream, url, body.clone(), outbound.clone()).await?;
                 continue;
             }
         }
@@ -647,7 +662,7 @@ async fn send<'a>(
         {
             replacement_retried = true;
             body = replacement;
-            response = send_json(upstream, url, body.clone()).await?;
+            response = send_json(upstream, url, body.clone(), outbound.clone()).await?;
             continue;
         }
         let refused = delta
@@ -656,7 +671,7 @@ async fn send<'a>(
                 hook.refused(route, status.as_u16(), &bytes[..bytes.len().min(1 << 20)])
             });
         if refused {
-            response = send_json(upstream, url, whole.clone()).await?;
+            response = send_json(upstream, url, whole.clone(), outbound.clone()).await?;
             if !response.status().is_success() {
                 return Err(response_error(response, upstream.allocation_quota_rate).await);
             }

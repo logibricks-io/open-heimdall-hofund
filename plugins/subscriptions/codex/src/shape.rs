@@ -102,6 +102,7 @@ pub(crate) fn body(body: &mut Map<String, Value>, codex: Option<&str>) -> Vec<(S
     body.entry("text")
         .or_insert_with(|| json::json!({"verbosity": "medium"}));
     reasoning(body);
+    hofund_plugin_sdk::codex_tool_names::codex_tool_names_object(body);
     session_headers(body)
 }
 

@@ -7,6 +7,7 @@ use hofund_plugin_api::{
     ProtocolId, Request, UpstreamProvider,
 };
 use hofund_plugin_sdk::Call;
+use hofund_plugin_sdk::codex_tool_names;
 use hofund_plugin_sdk::oauth::secret_text;
 use hofund_plugin_sdk::wire::{self, Target};
 
@@ -78,10 +79,20 @@ impl CodexUpstream {
         inbound: ProtocolId,
     ) -> Result<Completion, PluginError> {
         let codex = self.instructions(access, &request.model).await;
-        let target = Target::new(ProtocolId::OPENAI_RESPONSES, self.endpoints.base.clone())
+        let declared: Vec<String> = request.tools.iter().map(|tool| tool.name.clone()).collect();
+        let back = codex_tool_names::codex_tool_names_back(&declared);
+        let mut target = Target::new(ProtocolId::OPENAI_RESPONSES, self.endpoints.base.clone())
             .credential(CredentialStyle::Bearer)
             .headers(headers(access.account.as_deref()))
             .rewrite(Arc::new(move |body| shape::body(body, codex.as_deref())));
+        if !back.is_empty() {
+            let restore = Arc::new(back);
+            let unwrap = Arc::clone(&restore);
+            target = target.unwrap(Arc::new(move |mut value| {
+                codex_tool_names::restore_tool_names(&mut value, &unwrap);
+                value
+            }));
+        }
         let unary = !request.stream;
         request.stream = true;
         let sent = wire::send(
