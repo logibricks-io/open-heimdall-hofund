@@ -1666,39 +1666,25 @@ fn offline_provider_set_one_shot() {
     scratch.assert_no_daemon_state();
 }
 
-/// Asserts that every `id=` form of `provider set` fails before any I/O.
-fn assert_rename_rejected(scratch: &Scratch) {
+#[test]
+fn offline_provider_set_id_renames_one_shot() {
+    let scratch = Scratch::new("127.0.0.1:0", ROUTED);
     let config = scratch.config_text();
-    for args in [
-        &["provider", "set", "chat", "id=renamed"][..],
-        &["provider", "set", "chat", "models=a", "id=renamed"],
-        &[
-            "provider",
-            "set",
-            "chat",
-            "max_output_tokens=9",
-            "ID=renamed",
-        ],
-    ] {
-        let out = scratch.hofund(args);
-        assert_eq!(out.code, Some(2), "{args:?}: {out:#?}");
-        assert_eq!(
-            out.stderr.trim_end(),
-            "renaming a provider is not supported yet; see feature-parity row 11.6"
-        );
-        assert_eq!(out.stdout, "");
-    }
-    assert_eq!(scratch.config_text(), config);
-    assert!(!models_dir(scratch).exists(), "host state was written");
+    let out = scratch.hofund(&["provider", "set", "chat", "id=team"]);
+    let stdout = out.ok();
+    assert!(
+        stdout.contains("renamed provider `chat` to `team`"),
+        "{out:#?}"
+    );
+    let text = scratch.config_text();
+    assert_ne!(text, config);
+    assert!(text.contains("id = \"team\""), "{text}");
+    assert!(text.contains("upstreams = [\"team\"]"), "{text}");
+    scratch.assert_no_daemon_state();
 }
 
 #[test]
-fn provider_set_id_is_rejected_until_rename_lands() {
-    let scratch = Scratch::new("127.0.0.1:0", ROUTED);
-    assert_rename_rejected(&scratch);
-    scratch.assert_no_daemon_state();
-
-    // The same with a daemon running, which then takes a real edit.
+fn offline_provider_set_id_with_daemon() {
     let scratch = Scratch::new(&format!("127.0.0.1:{}", free_port()), ROUTED);
     let mut daemon_command = scratch.command(hofundd(), &[]);
     daemon_command.stdout(Stdio::null()).stderr(Stdio::null());
@@ -1708,7 +1694,6 @@ fn provider_set_id_is_rejected_until_rename_lands() {
         assert!(started.elapsed() < DEADLINE, "daemon never answered");
         std::thread::sleep(Duration::from_millis(100));
     }
-    assert_rename_rejected(&scratch);
     let out = scratch.hofund(&["provider", "set", "chat", "max_output_tokens=9"]);
     assert!(out.ok().starts_with("saved provider `chat`"), "{out:#?}");
     assert!(scratch.config_text().contains("max_output_tokens = 9\n"));

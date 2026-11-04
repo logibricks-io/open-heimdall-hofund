@@ -25,8 +25,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   provider only, overriding fixed `headers` of the same name; forbidden names are
   rejected at config load (D-62).
 
-- Message thread continuations on `/v1/messages` are refused with HTTP 400 so
-  clients resend full conversation history (D-63).
+- Provider rename through `hofund provider set <id> id=<new>`: rewrite every
+  config reference, move model state, gateway key scopes, and agent model refs
+  atomically (G-3 / feature-parity row 11.6).
 
 - Opt-in daily vendor check-in for subscription accounts: `daily-checkin = true`
   under `[subscriptions.options]`, persisted once-per-local-day state in

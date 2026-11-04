@@ -24,10 +24,6 @@ use crate::provider::{edit_picks, picks_text};
 /// How many times a config edit is sent before a revision conflict is final.
 pub(crate) const EDIT_ATTEMPTS: usize = 3;
 
-/// The error for `id=` on `provider set`, raised before any I/O.
-pub(crate) const RENAME_UNSUPPORTED: &str =
-    "renaming a provider is not supported yet; see feature-parity row 11.6";
-
 /// One provider config field a `k=v` pair names.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum FieldKey {
@@ -60,6 +56,7 @@ pub(crate) struct Field {
 pub(crate) struct Pairs {
     pub(crate) fields: Vec<Field>,
     pub(crate) models: Option<Vec<String>>,
+    pub(crate) new_id: Option<String>,
 }
 
 const FIELDS: &str = "preset, protocol, base_url (url), api_key (key), quirks, \
@@ -103,8 +100,7 @@ pub(crate) fn is_pair(arg: &str) -> bool {
         .is_some_and(|(key, _)| name(key).is_some())
 }
 
-/// Parses `k=v` pairs. `id=` is refused: `set` cannot rename, and `add`
-/// takes the id as its first argument.
+/// Parses `k=v` pairs. `id=` on `set` schedules a rename after other fields.
 pub(crate) fn parse_pairs(pairs: &[&str], verb: &str) -> Result<Pairs, String> {
     let mut parsed = Pairs::default();
     for pair in pairs {
@@ -113,7 +109,16 @@ pub(crate) fn parse_pairs(pairs: &[&str], verb: &str) -> Result<Pairs, String> {
         };
         let value = value.trim().to_owned();
         let key = match name(key) {
-            Some(Name::Id) if verb == "set" => return Err(RENAME_UNSUPPORTED.to_owned()),
+            Some(Name::Id) if verb == "set" => {
+                if value.is_empty() {
+                    return Err("a provider's new id must not be empty".to_owned());
+                }
+                if parsed.new_id.is_some() {
+                    return Err("only one id= pair is allowed".to_owned());
+                }
+                parsed.new_id = Some(value);
+                continue;
+            }
             Some(Name::Id) => {
                 return Err("the provider id is the first argument of provider add".to_owned());
             }
@@ -465,19 +470,41 @@ pub(crate) async fn add(config: &Path, id: &str, pairs: &Pairs) -> Result<String
     Ok(out)
 }
 
-/// `hofund provider set <id> k=v...`. `id=` never gets here: parsing
-/// refuses it.
+/// `hofund provider set <id> k=v...`. `id=` renames after other fields are saved.
 pub(crate) async fn set(config: &Path, id: &str, pairs: &Pairs) -> Result<String, String> {
     let client = client(config).await?;
     let mut out = String::new();
+    let mut effective_id = id.to_owned();
     if !pairs.fields.is_empty() || pairs.models.is_none() {
         let edit = Edit::Set {
-            id: id.to_owned(),
+            id: effective_id.clone(),
             fields: pairs.fields.clone(),
         };
-        out = report("saved", id, &apply_edit(&client, &edit).await?);
+        out = report("saved", &effective_id, &apply_edit(&client, &edit).await?);
     }
-    let picks = picks_after(&client, id, pairs.models.as_deref()).await?;
+    if let Some(new_id) = &pairs.new_id {
+        let response = client
+            .rename_provider(&effective_id, new_id)
+            .await
+            .map_err(failure)?;
+        effective_id.clone_from(new_id);
+        let mut rename_out = format!(
+            "renamed provider `{id}` to `{new_id}` (revision {})",
+            response.disk_revision
+        );
+        if !response.agents.is_empty() {
+            rename_out.push_str(&format!(
+                "\n  agents updated: {}",
+                response.agents.join(", ")
+            ));
+        }
+        out = if out.is_empty() {
+            rename_out
+        } else {
+            format!("{out}\n{rename_out}")
+        };
+    }
+    let picks = picks_after(&client, &effective_id, pairs.models.as_deref()).await?;
     out.push_str(if out.is_empty() {
         picks.trim_start_matches('\n')
     } else {
@@ -708,8 +735,8 @@ mod tests {
     };
 
     use super::{
-        ConfigApi, EDIT_ATTEMPTS, Edit, EditError, Field, FieldKey, RENAME_UNSUPPORTED, apply_edit,
-        at_once_line, auto_include_line, edit_text, parse_at_once, parse_pairs, refresh_line,
+        ConfigApi, EDIT_ATTEMPTS, Edit, EditError, Field, FieldKey, apply_edit, at_once_line,
+        auto_include_line, edit_text, parse_at_once, parse_pairs, refresh_line,
     };
 
     const BASE: &str = "# top\nlisten = \"127.0.0.1:0\"\n\n# the chat one\n[[providers]]\n\
@@ -1039,16 +1066,17 @@ url = \"http://list\"\n\n[providers.headers]\nX-A = \"1\"\n\n[providers.options]
             parse_pairs(&["models="], "set").expect("empty").models,
             Some(Vec::new())
         );
-        for pairs in [
-            &["id=x"][..],
-            &["models=a", "id=x"],
-            &["quirks=q", " Id =x"],
-        ] {
-            assert_eq!(
-                parse_pairs(pairs, "set").expect_err("id"),
-                RENAME_UNSUPPORTED
-            );
+        for pairs in [&["models=a", "id=x"], &["quirks=q", " Id =x"]] {
+            parse_pairs(pairs, "set").expect("id");
         }
+        assert_eq!(
+            parse_pairs(&["id=x"], "set").expect("id").new_id,
+            Some("x".to_owned())
+        );
+        assert_eq!(
+            parse_pairs(&["id="], "set").expect_err("empty id"),
+            "a provider's new id must not be empty"
+        );
         assert_eq!(
             parse_pairs(&["id=x"], "add").expect_err("id"),
             "the provider id is the first argument of provider add"
