@@ -569,6 +569,98 @@ impl Default for QuotaCreditsSetResponse {
     }
 }
 
+/// Response for `GET /v1/hofund/quotas/alerts`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuotaAlertsResponse {
+    /// Body wire version.
+    pub version: u32,
+    /// Usage alert percent, or 0 when off.
+    pub usage_alert: u8,
+    /// Balance alert amount, or 0 when off.
+    pub balance_alert: f64,
+}
+
+impl Default for QuotaAlertsResponse {
+    fn default() -> Self {
+        Self {
+            version: API_VERSION,
+            usage_alert: 0,
+            balance_alert: 0.0,
+        }
+    }
+}
+
+/// Request for `POST /v1/hofund/quotas/alerts/settings`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QuotaAlertsSetRequest {
+    /// Body wire version.
+    pub version: u32,
+    /// New usage alert percent; omit to leave unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_alert: Option<u8>,
+    /// New balance alert amount; omit to leave unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub balance_alert: Option<f64>,
+}
+
+impl QuotaAlertsSetRequest {
+    /// Constructs a settings update.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            version: API_VERSION,
+            usage_alert: None,
+            balance_alert: None,
+        }
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), ControlError> {
+        if let Some(pct) = self.usage_alert
+            && pct > 100
+        {
+            return Err(ControlError::new(
+                ControlErrorKind::BadRequest,
+                "usage alert must be from 1 to 100, or 0 to turn off",
+                "quotas",
+            ));
+        }
+        if let Some(bal) = self.balance_alert
+            && bal < 0.0
+        {
+            return Err(ControlError::new(
+                ControlErrorKind::BadRequest,
+                "balance alert must be over 0, or 0 to turn off",
+                "quotas",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Response for `POST /v1/hofund/quotas/alerts/settings`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuotaAlertsSetResponse {
+    /// Body wire version.
+    pub version: u32,
+    /// Usage alert percent, or 0 when off.
+    pub usage_alert: u8,
+    /// Balance alert amount, or 0 when off.
+    pub balance_alert: f64,
+}
+
+impl Default for QuotaAlertsSetResponse {
+    fn default() -> Self {
+        Self {
+            version: API_VERSION,
+            usage_alert: 0,
+            balance_alert: 0.0,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{QuotaHistoryQuery, QuotaQuery};

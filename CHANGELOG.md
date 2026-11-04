@@ -21,6 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Message thread continuations on `/v1/messages` are refused with HTTP 400 so
   clients resend full conversation history (D-63).
 
+- Quota and usage alerts: `hofund quota alert`, daemon `quota_alert` control
+  events, and `GET/POST /v1/hofund/quotas/alerts(/settings)` (AL-1).
+
 ### Fixed
 
 - Vendor overload (HTTP 529 or a 5xx whose message says overloaded) rests

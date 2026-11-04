@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "boot_id": "boot-example",
+  "topic": "control",
+  "seq": 12,
+  "time_ms": 1700000004000,
+  "payload": {
+    "event": "quota_alert",
+    "data": {
+      "title": "Codex · work",
+      "body": "Weekly: 85% used",
+      "provider": "codex",
+      "window": "Weekly"
+    }
+  }
+}

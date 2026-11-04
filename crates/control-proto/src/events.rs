@@ -128,6 +128,8 @@ pub enum EventPayload {
     SignInProgress(SignInProgressEvent),
     /// The bearer token rotated; no token material is included.
     TokenRotated(TokenRotatedEvent),
+    /// A quota usage or balance alert fired.
+    QuotaAlert(QuotaAlertEvent),
     /// Graceful shutdown started.
     ShutdownStarted(ShutdownStartedEvent),
     /// The client must replace one topic's state from a fresh snapshot.
@@ -174,6 +176,7 @@ impl<'de> Deserialize<'de> for EventPayload {
             "agent_changed" => decode!(AgentChanged, AgentChangedEvent),
             "sign_in_progress" => decode!(SignInProgress, SignInProgressEvent),
             "token_rotated" => decode!(TokenRotated, TokenRotatedEvent),
+            "quota_alert" => decode!(QuotaAlert, QuotaAlertEvent),
             "shutdown_started" => decode!(ShutdownStarted, ShutdownStartedEvent),
             "resync_required" => decode!(ResyncRequired, ResyncRequiredEvent),
             _ => Self::Unknown,
@@ -209,6 +212,7 @@ impl EventPayload {
             Self::AgentChanged(_) => "agent_changed",
             Self::SignInProgress(_) => "sign_in_progress",
             Self::TokenRotated(_) => "token_rotated",
+            Self::QuotaAlert(_) => "quota_alert",
             Self::ShutdownStarted(_) => "shutdown_started",
             Self::ResyncRequired(_) => "resync_required",
             Self::Unknown => "unknown",
@@ -535,6 +539,21 @@ pub struct SignInProgressEvent {
     pub provider: String,
     /// Opaque sign-in state label.
     pub state: String,
+}
+
+/// Quota alert notification payload (no raw account secrets).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct QuotaAlertEvent {
+    /// Notification title with masked account label.
+    pub title: String,
+    /// Notification body.
+    pub body: String,
+    /// Provider or subscription id.
+    pub provider: String,
+    /// Window name when this is a usage alert.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub window: String,
 }
 
 /// Token rotation notification without token material.

@@ -11,8 +11,9 @@ use std::time::Duration;
 
 use chrono::{DateTime, Local, TimeDelta, TimeZone, Utc};
 use hofund_control_client::hofund_control_proto::{
-    Quota, QuotaCreditsModeEntry, QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistory,
-    QuotaHistoryQuery, QuotaKind, QuotaPoint, QuotaQuery, QuotaSpan, QuotaStanding, QuotaTime,
+    Quota, QuotaAlertsSetRequest, QuotaCreditsModeEntry, QuotaCreditsSetRequest,
+    QuotaCreditsSetResponse, QuotaHistory, QuotaHistoryQuery, QuotaKind, QuotaPoint, QuotaQuery,
+    QuotaSpan, QuotaStanding, QuotaTime,
 };
 
 use crate::commands::{client, failure};
@@ -42,6 +43,7 @@ usage: hofund quota [<provider|name|kind|alias>...] [--json] [--config PATH]
        hofund quota credits [--json]
        hofund quota credits <subscription>/<account> [--json]
        hofund quota credits <subscription>/<account> on|first|last|off [--json]
+       hofund quota alert [<percent>|off] [--balance <amount>|off]
 
 `quota` prints what is left of every subscription hofund reads, asked of the
 vendors now: one line per card with each window's use, when it starts again,
@@ -73,6 +75,15 @@ after other usable members), and `off` (never spend credits). The gateway
 serves the same at GET /v1/hofund/quotas/credits-modes and POST
 /v1/hofund/quotas/credits/settings. Non-default modes also appear as
 creditsMode on each quota card.
+
+`quota alert 80` notifies when any subscription or plan window reaches 80%
+used, once each time the window runs (windows set aside, such as on-demand
+spending, are excluded). `--balance 5` notifies when a balance falls to 5 or
+under, once until topped up past it. `off` turns either off; with no
+arguments it says what is set. Both are off until set. The gateway serves the
+same at GET /v1/hofund/quotas/alerts and POST
+/v1/hofund/quotas/alerts/settings; the daemon emits `quota_alert` control
+events when a threshold is crossed.
 ";
 
 /// A parsed `hofund quota` command line.
@@ -94,6 +105,8 @@ pub(crate) enum QuotaCommand {
     },
     /// `quota credits` subcommands.
     Credits(CreditsCommand),
+    /// `quota alert` settings.
+    Alert(AlertCommand),
     /// A command line that fails with this exit code and message.
     Invalid { code: u8, message: String },
     /// `help` anywhere in the words.
@@ -115,6 +128,30 @@ pub(crate) enum CreditsCommand {
     },
 }
 
+/// Parsed `hofund quota alert` words.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum AlertCommand {
+    /// Print current thresholds.
+    Show,
+    /// Apply one or more changes.
+    Set {
+        usage: Option<AlertUsage>,
+        balance: Option<AlertBalance>,
+    },
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum AlertUsage {
+    Off,
+    Percent(u8),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum AlertBalance {
+    Off,
+    Amount(String),
+}
+
 /// Parses the words after `quota`. Errors carry their exit codes: 2 for a
 /// `quota wait` usage error, 1 for the others.
 pub(crate) fn parse(args: &[&str]) -> QuotaCommand {
@@ -125,7 +162,11 @@ pub(crate) fn parse(args: &[&str]) -> QuotaCommand {
             Ok(command) => QuotaCommand::Credits(command),
             Err(other) => other,
         },
-        [verb @ ("reset" | "auto-reset" | "alert" | "refresh"), ..] => QuotaCommand::Invalid {
+        ["alert", rest @ ..] => match parse_alert(rest) {
+            Ok(command) => QuotaCommand::Alert(command),
+            Err(other) => other,
+        },
+        [verb @ ("reset" | "auto-reset" | "refresh"), ..] => QuotaCommand::Invalid {
             code: 2,
             message: format!("hofund quota {verb} is not supported yet"),
         },
@@ -134,6 +175,73 @@ pub(crate) fn parse(args: &[&str]) -> QuotaCommand {
 }
 
 const CREDITS_MODES: &[&str] = &["on", "first", "last", "off"];
+
+fn parse_alert(args: &[&str]) -> Result<AlertCommand, QuotaCommand> {
+    if args.is_empty() {
+        return Ok(AlertCommand::Show);
+    }
+    let mut usage = None;
+    let mut balance = None;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index] {
+            "help" | "-h" | "--help" => return Err(QuotaCommand::Help),
+            "--balance" => {
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    return Err(QuotaCommand::Invalid {
+                        code: 1,
+                        message: "--balance needs an amount, or off".to_owned(),
+                    });
+                };
+                balance = Some(parse_alert_balance(&value.to_ascii_lowercase())?);
+            }
+            other if other.starts_with("--balance=") => {
+                let value = other.trim_start_matches("--balance=");
+                balance = Some(parse_alert_balance(&value.to_ascii_lowercase())?);
+            }
+            "off" => usage = Some(AlertUsage::Off),
+            other => {
+                let lowered = other.to_ascii_lowercase();
+                let trimmed = lowered.trim_end_matches('%');
+                let pct = trimmed.parse::<u8>().map_err(|_| QuotaCommand::Invalid {
+                    code: 1,
+                    message: format!(
+                        "a usage alert is at a percentage from 1 to 100, or off, not {other:?}"
+                    ),
+                })?;
+                if !(1..=100).contains(&pct) {
+                    return Err(QuotaCommand::Invalid {
+                        code: 1,
+                        message: format!(
+                            "a usage alert is at a percentage from 1 to 100, or off, not {other:?}"
+                        ),
+                    });
+                }
+                usage = Some(AlertUsage::Percent(pct));
+            }
+        }
+        index += 1;
+    }
+    Ok(AlertCommand::Set { usage, balance })
+}
+
+fn parse_alert_balance(value: &str) -> Result<AlertBalance, QuotaCommand> {
+    if value == "off" {
+        return Ok(AlertBalance::Off);
+    }
+    let amount = value.parse::<f64>().map_err(|_| QuotaCommand::Invalid {
+        code: 1,
+        message: format!("a balance alert is at an amount over 0, or off, not {value:?}"),
+    })?;
+    if amount <= 0.0 || !amount.is_finite() {
+        return Err(QuotaCommand::Invalid {
+            code: 1,
+            message: format!("a balance alert is at an amount over 0, or off, not {value:?}"),
+        });
+    }
+    Ok(AlertBalance::Amount(value.to_owned()))
+}
 
 fn parse_credits(args: &[&str]) -> Result<CreditsCommand, QuotaCommand> {
     let mut json = false;
@@ -354,6 +462,7 @@ pub(crate) fn run(config: &Path, command: QuotaCommand) -> ExitCode {
             quiet,
         } => ExitCode::from(runtime.block_on(wait(config, &target, timeout, quiet))),
         QuotaCommand::Credits(command) => printed(runtime.block_on(run_credits(config, command))),
+        QuotaCommand::Alert(command) => printed(runtime.block_on(run_alert(config, command))),
     }
 }
 
@@ -375,6 +484,63 @@ async fn run_credits(config: &Path, command: CreditsCommand) -> Result<String, S
             credits_set(config, &target, &mode, json).await
         }
     }
+}
+
+async fn run_alert(config: &Path, command: AlertCommand) -> Result<String, String> {
+    let client = client(config).await?;
+    match command {
+        AlertCommand::Show => {
+            let response = client.quota_alerts().await.map_err(failure)?;
+            Ok(format_alert_thresholds(
+                response.usage_alert,
+                response.balance_alert,
+            ))
+        }
+        AlertCommand::Set { usage, balance } => {
+            let mut request = QuotaAlertsSetRequest::new();
+            if let Some(value) = usage {
+                request.usage_alert = Some(match value {
+                    AlertUsage::Off => 0,
+                    AlertUsage::Percent(pct) => pct,
+                });
+            }
+            if let Some(value) = balance {
+                request.balance_alert = Some(match value {
+                    AlertBalance::Off => 0.0,
+                    AlertBalance::Amount(text) => text
+                        .parse()
+                        .map_err(|_| "balance alert amount is invalid".to_owned())?,
+                });
+            }
+            let response = client.set_quota_alerts(request).await.map_err(failure)?;
+            Ok(format!(
+                "✓ {}\n  notifications come from the daemon while it runs",
+                format_alert_thresholds(response.usage_alert, response.balance_alert)
+            ))
+        }
+    }
+}
+
+fn format_alert_thresholds(usage_alert: u8, balance_alert: f64) -> String {
+    let usage = if usage_alert > 0 {
+        format!("notifies when a window reaches {usage_alert}% used, once each time it runs")
+    } else {
+        "no usage alert".to_owned()
+    };
+    let balance = if balance_alert > 0.0 {
+        format!(
+            "; and when a balance falls to {} or under, once until topped up",
+            trim_amount(balance_alert)
+        )
+    } else {
+        "; no balance alert".to_owned()
+    };
+    format!("{usage}{balance}")
+}
+
+fn trim_amount(value: f64) -> String {
+    let text = format!("{value}");
+    text.trim_end_matches(".0").to_owned()
 }
 
 async fn credits_list(config: &Path, json: bool) -> Result<String, String> {
@@ -1330,10 +1496,11 @@ mod tests {
     };
 
     use super::{
-        CreditsCommand, QuotaCommand, Step, Target, Waiter, credits_mode_for, format_credits_entry,
-        go_duration, new_run, parse, parse_credits, parse_go_duration, plan_term, points_cell,
-        reading_cell, render_history, render_list, reset_clock, resolve, round_wait,
-        split_credits_target, until_short, window_cell,
+        AlertCommand, AlertUsage, CreditsCommand, QuotaCommand, Step, Target, Waiter,
+        credits_mode_for, format_alert_thresholds, format_credits_entry, go_duration, new_run,
+        parse, parse_alert, parse_credits, parse_go_duration, plan_term, points_cell, reading_cell,
+        render_history, render_list, reset_clock, resolve, round_wait, split_credits_target,
+        until_short, window_cell,
     };
     use hofund_control_client::hofund_control_proto::QuotaCreditsModeEntry;
 
@@ -2134,5 +2301,28 @@ mod tests {
         assert!(text.contains("credits:last"), "{text}");
         let json = render_list(vec![card], &[], true, &known, &now()).expect("json");
         assert!(json.contains("\"creditsMode\": \"last\""), "{json}");
+    }
+
+    #[test]
+    fn al1_8_parse_alert_and_format_status() {
+        assert_eq!(parse_alert(&[]), Ok(AlertCommand::Show));
+        assert_eq!(
+            parse(&["alert", "80", "--balance", "5"]),
+            QuotaCommand::Alert(AlertCommand::Set {
+                usage: Some(AlertUsage::Percent(80)),
+                balance: Some(super::AlertBalance::Amount("5".to_owned())),
+            })
+        );
+        let status = format_alert_thresholds(80, 5.0);
+        assert!(status.contains("80%"));
+        assert!(status.contains("5"));
+    }
+
+    #[test]
+    fn al1_9_parse_alert_rejects_bad_percent() {
+        match parse(&["alert", "101"]) {
+            QuotaCommand::Invalid { code, .. } => assert_eq!(code, 1),
+            other => panic!("expected invalid, got {other:?}"),
+        }
     }
 }

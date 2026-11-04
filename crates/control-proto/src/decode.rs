@@ -11,11 +11,11 @@ use crate::{
     GatewayKeyResponse, GatewayKeyRestoreRequest, HealthResponse, MAX_REQUEST_BODY_BYTES,
     MAX_RESPONSE_BODY_BYTES, ModelListResponse, PicksResponse, PicksSetRequest, ProviderKeyRequest,
     ProviderKeysResponse, ProviderListResponse, ProviderTestRequest, ProviderTestResponse,
-    QuotaCreditsModesResponse, QuotaCreditsSetRequest, QuotaCreditsSetResponse,
-    QuotaHistoryResponse, QuotaResponse, ReloadRequest, RouteListResponse, RouteModelListResponse,
-    SessionRouteResponse, ShutdownRequest, ShutdownResponse, StatusResponse, TokenRotateRequest,
-    TokenRotateResponse, UnroutedListResponse, UsageResponse, WarmupListResponse, WarmupRunRequest,
-    WarmupRunResponse,
+    QuotaAlertsResponse, QuotaAlertsSetRequest, QuotaAlertsSetResponse, QuotaCreditsModesResponse,
+    QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryResponse, QuotaResponse,
+    ReloadRequest, RouteListResponse, RouteModelListResponse, SessionRouteResponse,
+    ShutdownRequest, ShutdownResponse, StatusResponse, TokenRotateRequest, TokenRotateResponse,
+    UnroutedListResponse, UsageResponse, WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
 };
 
 mod sealed {
@@ -233,6 +233,7 @@ request!(AgentPickedOnlyRequest);
 request!(TokenRotateRequest);
 request!(WarmupRunRequest, validate);
 request!(QuotaCreditsSetRequest, validate);
+request!(QuotaAlertsSetRequest, validate);
 request!(ShutdownRequest);
 request!(GatewayKeyRequest);
 request!(GatewayKeyRestoreRequest);
@@ -310,6 +311,8 @@ response!(
     WarmupRunResponse,
     QuotaCreditsModesResponse,
     QuotaCreditsSetResponse,
+    QuotaAlertsResponse,
+    QuotaAlertsSetResponse,
 );
 
 #[cfg(test)]

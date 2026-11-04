@@ -131,7 +131,7 @@ impl WindowInfo {
         }
     }
 
-    fn reset(&self, now: SystemTime) -> Option<SystemTime> {
+    pub(crate) fn reset(&self, now: SystemTime) -> Option<SystemTime> {
         self.span
             .resets_at
             .as_ref()
@@ -491,6 +491,17 @@ impl QuotaStore {
                     .unwrap_or_default();
                 standing(&quota, &windows, now)
             })
+            .collect()
+    }
+
+    /// Quota cards with routing window metadata for alert evaluation.
+    #[must_use]
+    pub fn alert_cards(&self) -> Vec<(Quota, Vec<WindowInfo>)> {
+        let state = self.state.lock().expect("quota store");
+        state
+            .records
+            .iter()
+            .map(|record| (record.quota.clone(), record.windows.clone()))
             .collect()
     }
 
