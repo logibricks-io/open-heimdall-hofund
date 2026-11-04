@@ -21,6 +21,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Message thread continuations on `/v1/messages` are refused with HTTP 400 so
   clients resend full conversation history (D-63).
 
+- Opt-in daily vendor check-in for subscription accounts: `daily-checkin = true`
+  under `[subscriptions.options]`, persisted once-per-local-day state in
+  `.hofund/daily-checkin.json`, daemon scheduler, control routes, and
+  `hofund checkin` CLI (A-3b). Vendor HTTP helpers for Trae CN, MiniMax Code,
+  and Qoder live in `hofund-plugin-sdk`; no shipped subscription plugin wires
+  them yet.
+
 ### Fixed
 
 - Vendor overload (HTTP 529 or a 5xx whose message says overloaded) rests

@@ -273,6 +273,26 @@ pub trait Subscription: Send + Sync + 'static {
         ))
     }
 
+    /// Presses the vendor daily check-in for one signed-in account.
+    ///
+    /// The daemon calls this when daily check-in is configured and due, or when
+    /// the operator triggers a manual run.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when the check-in cannot run. Unsupported plugins
+    /// keep the default error.
+    async fn daily_checkin(
+        &self,
+        account: &AccountId,
+        host: &HostContext,
+    ) -> Result<crate::CheckinResult, PluginError> {
+        let _ = (account, host);
+        Err(PluginError::unsupported(
+            "this subscription does not support daily check-in",
+        ))
+    }
+
     /// Reads the agent sign-in under `home` and returns account identity without
     /// storing secrets. The default does nothing.
     ///

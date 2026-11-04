@@ -4,6 +4,7 @@
 //! does not encode a protocol.
 
 mod accounts;
+mod checkin;
 mod commands;
 mod connect;
 mod events;
@@ -53,6 +54,7 @@ fn main() -> ExitCode {
         Command::Accounts(command) => hand_over(accounts::run(&config, &command)),
         Command::Quota(command) => quota::run(&config, command),
         Command::Warmup(command) => warmup::run(&config, command),
+        Command::Checkin(command) => checkin::run(&config, command),
         other => finish(run_control(&config, other)),
     }
 }
@@ -158,6 +160,7 @@ fn run_control(config: &Path, command: Command) -> Result<String, String> {
             | Command::Subscription(_)
             | Command::Quota(_)
             | Command::Warmup(_)
+            | Command::Checkin(_)
             | Command::Accounts(_) => Err("not a control command".to_owned()),
         }
     })
@@ -208,6 +211,7 @@ enum Command {
     Quota(quota::QuotaCommand),
     /// `warmup` and `warmup <subscription>/<account>`.
     Warmup(warmup::WarmupCommand),
+    Checkin(checkin::CheckinCommand),
     /// `models` and `models refresh`.
     Models {
         model: Option<String>,
@@ -327,6 +331,7 @@ enum HelpTopic {
     SubscriptionQuota,
     Quota,
     Warmup,
+    Checkin,
     Provider,
     Routes,
     Model,
@@ -468,6 +473,10 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
         ["warmup", rest @ ..] => match warmup::parse(rest) {
             warmup::WarmupCommand::Help => Command::Help(HelpTopic::Warmup),
             parsed => Command::Warmup(parsed),
+        },
+        ["checkin", rest @ ..] => match checkin::parse(rest) {
+            checkin::CheckinCommand::Help => Command::Help(HelpTopic::Checkin),
+            parsed => Command::Checkin(parsed),
         },
         ["subscription", rest @ ..] => match subscription::parse(rest, flags) {
             Some(parsed) => Command::Subscription(parsed?),
@@ -752,6 +761,7 @@ fn help_topic(words: &[&str]) -> Result<HelpTopic, String> {
         ["subscription", ..] => HelpTopic::Subscription,
         ["quota", ..] => HelpTopic::Quota,
         ["warmup", ..] => HelpTopic::Warmup,
+        ["checkin", ..] => HelpTopic::Checkin,
         ["provider", ..] => HelpTopic::Provider,
         ["routes", ..] => HelpTopic::Routes,
         ["model", ..] => HelpTopic::Model,
@@ -796,6 +806,7 @@ fn help_text(topic: HelpTopic) -> String {
         HelpTopic::SubscriptionQuota => subscription::QUOTA_HELP,
         HelpTopic::Quota => quota::QUOTA_HELP,
         HelpTopic::Warmup => warmup::WARMUP_HELP,
+        HelpTopic::Checkin => checkin::CHECKIN_HELP,
         HelpTopic::Provider => PROVIDER_HELP,
         HelpTopic::Routes => ROUTES_HELP,
         HelpTopic::Model => MODEL_HELP,
@@ -843,6 +854,8 @@ commands:
   quota credits <subscription>/<account> [on|first|last|off] [--json]
   warmup [--json]  last daily warm-up per account
   warmup <subscription>/<account>  run warm-up now
+  checkin [--json]  last daily check-in per account
+  checkin <subscription>/<account>  run check-in now
   models [<model>]                show catalog spec and prices for route models
   models <agent>                  when <agent> is an agent id, list shown and hidden models
   models refresh                  refetch the models.dev catalog cache

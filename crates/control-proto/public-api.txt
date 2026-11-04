@@ -88,6 +88,25 @@ CatalogModelRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Seria
 CatalogModelRequest.model
 CatalogModelRequest.version
 CatalogModelRequest::fn new (model : impl Into < String >) -> Self
+CheckinAccountRow #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize) # [serde (rename_all = "camelCase")]
+CheckinAccountRow.account
+CheckinAccountRow.at_ms
+CheckinAccountRow.detail
+CheckinAccountRow.outcome
+CheckinAccountRow.subscription
+CheckinListResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+CheckinListResponse.accounts
+CheckinListResponse.version
+CheckinRunRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
+CheckinRunRequest.account
+CheckinRunRequest.subscription
+CheckinRunRequest.version
+CheckinRunRequest::fn new (subscription : impl Into < String > , account : impl Into < String >) -> Self
+CheckinRunResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (rename_all = "camelCase")]
+CheckinRunResponse.at_ms
+CheckinRunResponse.detail
+CheckinRunResponse.outcome
+CheckinRunResponse.version
 ConfigApplyRequest #[non_exhaustive] derives(Clone, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
 ConfigApplyRequest.expected_revision
 ConfigApplyRequest.text

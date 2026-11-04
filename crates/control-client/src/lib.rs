@@ -10,17 +10,18 @@ use hofund_control_proto::{
     AgentChangeResponse, AgentConnectRequest, AgentDisconnectRequest, AgentHiddenSetRequest,
     AgentListResponse, AgentModelRequest, AgentModelsResponse, AgentPickedOnlyRequest,
     AgentPlanRequest, AgentPlanResponse, AgentStatusResponse, AgentVisibleSetRequest,
-    CatalogDisabledListResponse, CatalogModelRequest, ConfigApplyRequest, ConfigResponse,
-    ConfigValidateRequest, ConfigValidationResponse, ControlError, ErrorEnvelope, EventEnvelope,
-    GatewayKeyRequest, GatewayKeyResponse, GatewayKeyRestoreRequest, HealthResponse,
-    MAX_RESPONSE_BODY_BYTES, ModelListResponse, PicksResponse, PicksSetRequest, ProviderKeyRequest,
-    ProviderKeysResponse, ProviderListResponse, ProviderTestRequest, ProviderTestResponse,
-    QuotaCreditsModesResponse, QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryQuery,
-    QuotaHistoryResponse, QuotaQuery, QuotaResponse, ReloadRequest, RouteListResponse,
-    RouteModelListResponse, RouteQuery, SessionRouteResponse, ShutdownRequest, ShutdownResponse,
-    StatusResponse, TokenRotateRequest, TokenRotateResponse, Topic, UnroutedListResponse,
-    UsagePeriod, UsageQuery, UsageResponse, WarmupListResponse, WarmupRunRequest,
-    WarmupRunResponse, decode_error_envelope, decode_response,
+    CatalogDisabledListResponse, CatalogModelRequest, CheckinListResponse, CheckinRunRequest,
+    CheckinRunResponse, ConfigApplyRequest, ConfigResponse, ConfigValidateRequest,
+    ConfigValidationResponse, ControlError, ErrorEnvelope, EventEnvelope, GatewayKeyRequest,
+    GatewayKeyResponse, GatewayKeyRestoreRequest, HealthResponse, MAX_RESPONSE_BODY_BYTES,
+    ModelListResponse, PicksResponse, PicksSetRequest, ProviderKeyRequest, ProviderKeysResponse,
+    ProviderListResponse, ProviderTestRequest, ProviderTestResponse, QuotaCreditsModesResponse,
+    QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryQuery, QuotaHistoryResponse,
+    QuotaQuery, QuotaResponse, ReloadRequest, RouteListResponse, RouteModelListResponse,
+    RouteQuery, SessionRouteResponse, ShutdownRequest, ShutdownResponse, StatusResponse,
+    TokenRotateRequest, TokenRotateResponse, Topic, UnroutedListResponse, UsagePeriod, UsageQuery,
+    UsageResponse, WarmupListResponse, WarmupRunRequest, WarmupRunResponse, decode_error_envelope,
+    decode_response,
 };
 use http::header;
 use http_body_util::{BodyExt, Full, Limited};
@@ -591,6 +592,24 @@ impl Client {
         self.request(
             http::Method::POST,
             "/v1/hofund/warmups/run",
+            Some(json_body(&request)?),
+        )
+        .await
+    }
+
+    /// Lists last daily check-in results known to the daemon.
+    pub async fn checkins(&self) -> Result<CheckinListResponse, ClientError> {
+        self.get("/v1/hofund/checkins").await
+    }
+
+    /// Runs daily check-in for one subscription account now.
+    pub async fn run_checkin(
+        &self,
+        request: CheckinRunRequest,
+    ) -> Result<CheckinRunResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            "/v1/hofund/checkins/run",
             Some(json_body(&request)?),
         )
         .await

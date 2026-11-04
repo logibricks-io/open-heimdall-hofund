@@ -9,8 +9,9 @@ use hofund_control_proto::{
     AgentChangeResponse, AgentConnectRequest, AgentDisconnectRequest, AgentHiddenSetRequest,
     AgentListResponse, AgentModelRequest, AgentModelsResponse, AgentPickedOnlyRequest,
     AgentPlanRequest, AgentPlanResponse, AgentStatusResponse, AgentVisibleSetRequest,
-    CatalogDisabledListResponse, CatalogModelRequest, ControlError, ControlErrorKind, FieldIssue,
-    GatewayKey, GatewayKeyAction, GatewayKeyLimit, GatewayKeyRequest, GatewayKeyResponse,
+    CatalogDisabledListResponse, CatalogModelRequest, CheckinAccountRow, CheckinListResponse,
+    CheckinRunRequest, CheckinRunResponse, ControlError, ControlErrorKind, FieldIssue, GatewayKey,
+    GatewayKeyAction, GatewayKeyLimit, GatewayKeyRequest, GatewayKeyResponse,
     GatewayKeyRestoreRequest, HealthResponse, ModelEntry, ModelListResponse, PicksResponse,
     PicksSetRequest, ProviderKeyRequest, ProviderKeysResponse, ProviderListResponse,
     ProviderSummary, ProviderTestRequest, ProviderTestResponse, ProviderTestResult,
@@ -28,7 +29,7 @@ use hofund_control_proto::{
 use hofund_gateway::control::{
     ControlFailure, ControlFuture, ControlState, EventSubscription, EventsQuery,
 };
-use hofund_plugin_api::{ModelSpec, WarmupOutcome};
+use hofund_plugin_api::{CheckinOutcome, ModelSpec, WarmupOutcome};
 
 use crate::quotas::DaemonQuotas;
 use hofund_router::Cooldowns;
@@ -896,6 +897,50 @@ impl ControlState for DaemonControl {
         })
     }
 
+    fn checkins(&self) -> ControlFuture<'_, CheckinListResponse> {
+        let runtime = self.runtime.clone();
+        let registry = Arc::clone(&self.registry);
+        Box::pin(async move {
+            let Some(runtime) = runtime else {
+                return Err(internal("check-in status is not available".to_owned()).into());
+            };
+            let rows =
+                crate::checkin::list_statuses(&runtime, registry.as_ref(), runtime.checkin())
+                    .into_iter()
+                    .map(checkin_row)
+                    .collect();
+            let mut response = CheckinListResponse::default();
+            response.accounts = rows;
+            Ok(response)
+        })
+    }
+
+    fn run_checkin(&self, request: CheckinRunRequest) -> ControlFuture<'_, CheckinRunResponse> {
+        let runtime = self.runtime.clone();
+        let registry = Arc::clone(&self.registry);
+        Box::pin(async move {
+            let Some(runtime) = runtime else {
+                return Err(internal("check-in is not available".to_owned()).into());
+            };
+            let record = crate::checkin::run_now(
+                &runtime,
+                runtime.checkin(),
+                registry.as_ref(),
+                &request.subscription,
+                &request.account,
+            )
+            .await
+            .map_err(|message| {
+                ControlFailure::from(ControlError::new(
+                    ControlErrorKind::Unprocessable,
+                    message,
+                    "checkin",
+                ))
+            })?;
+            Ok(checkin_run_response(record))
+        })
+    }
+
     fn usage(&self, query: UsageQuery) -> ControlFuture<'_, UsageResponse> {
         let ledger = Arc::clone(&self.usage);
         let config = self.ops.live().config.clone();
@@ -1323,6 +1368,39 @@ const fn outcome_name(outcome: WarmupOutcome) -> &'static str {
         WarmupOutcome::Failed => "failed",
         _ => "failed",
     }
+}
+
+fn checkin_row(status: hofund_plugin_api::CheckinAccountStatus) -> CheckinAccountRow {
+    let mut row = CheckinAccountRow::default();
+    row.subscription = status.subscription().to_owned();
+    row.account = status.account().to_string();
+    if let Some(last) = status.last() {
+        row.outcome = checkin_outcome_name(last.outcome()).to_owned();
+        row.detail = last.detail().to_owned();
+        row.at_ms = last
+            .at()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .map(|d| u64::try_from(d.as_millis()).unwrap_or(0));
+    }
+    row
+}
+
+fn checkin_run_response(record: hofund_plugin_api::CheckinRecord) -> CheckinRunResponse {
+    let mut response = CheckinRunResponse::default();
+    response.outcome = checkin_outcome_name(record.outcome()).to_owned();
+    response.detail = record.detail().to_owned();
+    response.at_ms = record
+        .at()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|d| u64::try_from(d.as_millis()).ok())
+        .unwrap_or(0);
+    response
+}
+
+fn checkin_outcome_name(outcome: CheckinOutcome) -> &'static str {
+    outcome.as_str()
 }
 
 pub(crate) fn unix_milliseconds() -> u64 {

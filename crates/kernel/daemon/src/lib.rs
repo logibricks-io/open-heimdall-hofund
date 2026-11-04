@@ -36,6 +36,7 @@ mod adapt;
 mod agent_login;
 mod agent_visible;
 mod balances;
+mod checkin;
 mod config_ops;
 mod config_write;
 mod control;
@@ -674,6 +675,11 @@ async fn start_inner(
         Arc::clone(runtime.warmup()),
         Arc::clone(&registry),
     );
+    let checkins = crate::checkin::spawn(
+        Arc::clone(&runtime),
+        Arc::clone(runtime.checkin()),
+        Arc::clone(&registry),
+    );
     let probes = runtime.spawn_probes();
     let running = running.with_resource(AffinityFlush(runtime.affinity()));
     Ok(running
@@ -681,6 +687,7 @@ async fn start_inner(
         .with_task(maintenance)
         .with_task(subscriptions)
         .with_task(warmups)
+        .with_task(checkins)
         .with_task(probes))
 }
 

@@ -75,6 +75,7 @@ pub(crate) struct Runtime {
     /// Wakes the subscription task after a publication.
     wake: tokio::sync::Notify,
     warmup: Arc<crate::warmup::WarmupStore>,
+    checkin: Arc<crate::checkin::CheckinStore>,
 }
 
 impl Candidate {
@@ -123,6 +124,9 @@ impl Runtime {
             warmup: Arc::new(crate::warmup::WarmupStore::new(&crate::beside(
                 path, ".hofund",
             ))),
+            checkin: Arc::new(crate::checkin::CheckinStore::new(&crate::beside(
+                path, ".hofund",
+            ))),
         })
     }
 
@@ -167,6 +171,9 @@ impl Runtime {
             ),
             wake: tokio::sync::Notify::new(),
             warmup: Arc::new(crate::warmup::WarmupStore::new(&crate::beside(
+                path, ".hofund",
+            ))),
+            checkin: Arc::new(crate::checkin::CheckinStore::new(&crate::beside(
                 path, ".hofund",
             ))),
         })
@@ -620,6 +627,10 @@ impl Runtime {
 
     pub(crate) fn warmup(&self) -> &Arc<crate::warmup::WarmupStore> {
         &self.warmup
+    }
+
+    pub(crate) fn checkin(&self) -> &Arc<crate::checkin::CheckinStore> {
+        &self.checkin
     }
 
     pub(crate) fn subscription_states(&self) -> Subscriptions {

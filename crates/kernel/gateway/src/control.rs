@@ -23,9 +23,10 @@ use hofund_control_proto::{
     AgentChangeResponse, AgentConnectRequest, AgentDisconnectRequest, AgentHiddenSetRequest,
     AgentListResponse, AgentModelRequest, AgentModelsResponse, AgentPickedOnlyRequest,
     AgentPlanRequest, AgentPlanResponse, AgentStatusResponse, AgentVisibleSetRequest,
-    CatalogDisabledListResponse, CatalogModelRequest, ConfigApplyRequest, ConfigResponse,
-    ConfigValidateRequest, ConfigValidationResponse, ControlError, ControlErrorKind, ErrorEnvelope,
-    GatewayKeyRequest, GatewayKeyResponse, GatewayKeyRestoreRequest, HealthResponse, MAX_ID_BYTES,
+    CatalogDisabledListResponse, CatalogModelRequest, CheckinListResponse, CheckinRunRequest,
+    CheckinRunResponse, ConfigApplyRequest, ConfigResponse, ConfigValidateRequest,
+    ConfigValidationResponse, ControlError, ControlErrorKind, ErrorEnvelope, GatewayKeyRequest,
+    GatewayKeyResponse, GatewayKeyRestoreRequest, HealthResponse, MAX_ID_BYTES,
     MAX_REQUEST_BODY_BYTES, ModelListResponse, PicksResponse, PicksSetRequest, ProviderKeyRequest,
     ProviderKeysResponse, ProviderListResponse, ProviderTestRequest, ProviderTestResponse,
     QuotaCreditsModesResponse, QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryQuery,
@@ -412,6 +413,28 @@ pub trait ControlState: Send + Sync {
             .into())
         })
     }
+    /// Lists last daily check-in results per subscription account.
+    fn checkins(&self) -> ControlFuture<'_, CheckinListResponse> {
+        Box::pin(async {
+            Err(ControlError::new(
+                ControlErrorKind::BadRequest,
+                "daily check-in status is not supported by this control state",
+                "control",
+            )
+            .into())
+        })
+    }
+    /// Runs daily check-in for one subscription account now.
+    fn run_checkin(&self, _request: CheckinRunRequest) -> ControlFuture<'_, CheckinRunResponse> {
+        Box::pin(async {
+            Err(ControlError::new(
+                ControlErrorKind::BadRequest,
+                "daily check-in is not supported by this control state",
+                "control",
+            )
+            .into())
+        })
+    }
     /// Lists named gateway keys.
     fn gateway_keys(&self) -> ControlFuture<'_, GatewayKeyResponse> {
         Box::pin(async { Err(unsupported_gateway_keys()) })
@@ -631,6 +654,11 @@ impl Control {
             )
             .route("/v1/hofund/warmups", get(warmups).head(method_not_allowed))
             .route("/v1/hofund/warmups/run", post(run_warmup))
+            .route(
+                "/v1/hofund/checkins",
+                get(checkins).head(method_not_allowed),
+            )
+            .route("/v1/hofund/checkins/run", post(run_checkin))
             .route("/v1/hofund/token/rotate", post(rotate_token))
             .route("/v1/hofund/shutdown", post(shutdown))
             .route("/v1/hofund/config", get(config).head(method_not_allowed))
@@ -1314,6 +1342,18 @@ async fn run_warmup(State(state): State<HttpState>, body: Bytes) -> Response {
         Err(failure) => return failure_response(failure),
     };
     operation_response!(state.control.state.run_warmup(request).await)
+}
+
+async fn checkins(State(state): State<HttpState>) -> Response {
+    operation_response!(state.control.state.checkins().await)
+}
+
+async fn run_checkin(State(state): State<HttpState>, body: Bytes) -> Response {
+    let request = match decode_body::<CheckinRunRequest>(&body) {
+        Ok(request) => request,
+        Err(failure) => return failure_response(failure),
+    };
+    operation_response!(state.control.state.run_checkin(request).await)
 }
 
 async fn rotate_token(State(state): State<HttpState>, body: Bytes) -> Response {
