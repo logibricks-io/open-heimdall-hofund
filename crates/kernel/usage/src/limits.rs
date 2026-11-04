@@ -82,8 +82,8 @@ impl Ledger {
                     uncached_input_tokens, cache_read_tokens, cache_write_tokens,
                     cache_write_5m_tokens, cache_write_1h_tokens, reasoning_tokens, reasoning_hidden,
                     priced, cost_usd, price_input, price_output, price_cache_read, price_cache_write,
-                    price_cache_write_1h, outcome, provider_key_id
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27)",
+                    price_cache_write_1h, outcome, provider_key_id, client_agent
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28)",
                 params![
                     row.created_unix,
                     row.model,
@@ -114,6 +114,7 @@ impl Ledger {
                         .map(|pricing| pricing.price.cache_write_1h),
                     row.outcome,
                     row.provider_key_id,
+                    row.client_agent,
                 ],
             )
             .map(|_| ())

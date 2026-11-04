@@ -11,11 +11,16 @@ use chrono::{DateTime, Days, Local, NaiveTime, TimeZone};
 use rusqlite::{Connection, params};
 use thiserror::Error;
 
+mod attribution;
 mod fx;
 mod key;
 mod limits;
 mod price;
 mod spent;
+pub use attribution::{
+    BreakdownDimension, BreakdownGroup, NO_GATEWAY_KEY, NO_PROVIDER_KEY, UNKNOWN_CLIENT_AGENT,
+    masked_provider_key_id, normalize_client_agent,
+};
 pub use fx::{CnyRate, DisplayCurrency, Fx, RateFetcher};
 pub use key::{CallerModel, CallerTotals};
 pub use limits::{KeyUsage, UsageDetails};
@@ -150,6 +155,8 @@ pub struct Row {
     /// Five-byte API-key fingerprint of the provider key that served the request.
     /// Empty when the member has no API key.
     pub provider_key_id: String,
+    /// Client agent that sent the request, or [`UNKNOWN_CLIENT_AGENT`] when unset.
+    pub client_agent: String,
 }
 
 /// One successful request as routing measurements read it.
@@ -234,6 +241,7 @@ impl Ledger {
             ("price_cache_write_1h", "REAL"),
             ("outcome", "TEXT NOT NULL DEFAULT ''"),
             ("provider_key_id", "TEXT NOT NULL DEFAULT ''"),
+            ("client_agent", "TEXT NOT NULL DEFAULT ''"),
         ] {
             ensure_column(&connection, column, declaration)?;
         }
@@ -285,7 +293,8 @@ impl Ledger {
                         cache_read_tokens, cache_write_5m_tokens, cache_write_1h_tokens,
                         reasoning_tokens, reasoning_hidden,
                         priced, cost_usd, price_input, price_output, price_cache_read,
-                        price_cache_write, price_cache_write_1h, outcome, provider_key_id
+                        price_cache_write, price_cache_write_1h, outcome, provider_key_id,
+                        client_agent
                  FROM requests ORDER BY id",
             )
             .map_err(|error| UsageError(error.to_string()))?;
@@ -420,7 +429,8 @@ impl Ledger {
                         cache_read_tokens, cache_write_5m_tokens, cache_write_1h_tokens,
                         reasoning_tokens, reasoning_hidden,
                         priced, cost_usd, price_input, price_output, price_cache_read,
-                        price_cache_write, price_cache_write_1h, outcome, provider_key_id
+                        price_cache_write, price_cache_write_1h, outcome, provider_key_id,
+                        client_agent
                  FROM requests WHERE created_unix >= ?1 ORDER BY id DESC LIMIT ?2",
             )
             .map_err(|error| UsageError(error.to_string()))?;
@@ -491,6 +501,7 @@ fn read_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Row> {
         price: read_price(row, 17)?,
         outcome: row.get(22)?,
         provider_key_id: row.get(23)?,
+        client_agent: normalize_client_agent(&row.get::<_, String>(24)?),
     })
 }
 

@@ -63,7 +63,7 @@ use hofund_plugin_host::HttpBackend;
 use hofund_router::{AttemptHook, Completion, RouteScope, Routed, RouterError, Snapshot, WaitHook};
 use hofund_secrets::oidc::RuleStore;
 use hofund_secrets::{Identity, KeyStore};
-use hofund_usage::{Ledger, Row};
+use hofund_usage::{Ledger, Row, UNKNOWN_CLIENT_AGENT};
 use thiserror::Error;
 use tokio::net::TcpListener;
 use tokio::sync::{oneshot, watch};
@@ -310,7 +310,14 @@ impl RequestTrack {
         self.drop_status = 499;
         self.cancel_usage = Some((
             usage,
-            UsageMeta::new(request, "", &request.model, self.started, identity),
+            UsageMeta::new(
+                request,
+                "",
+                &request.model,
+                self.started,
+                identity,
+                UNKNOWN_CLIENT_AGENT,
+            ),
         ));
     }
 
@@ -1108,6 +1115,7 @@ impl hofund_plugin_host::GatewayBackend for InProcess {
                         call.model(),
                         started,
                         &self.identity,
+                        UNKNOWN_CLIENT_AGENT,
                     ),
                     None,
                     status,
@@ -1128,6 +1136,7 @@ impl hofund_plugin_host::GatewayBackend for InProcess {
                         call.model(),
                         started,
                         &self.identity,
+                        UNKNOWN_CLIENT_AGENT,
                     ),
                     None,
                     status,
@@ -1147,6 +1156,7 @@ impl hofund_plugin_host::GatewayBackend for InProcess {
                 call.model(),
                 started,
                 &self.identity,
+                UNKNOWN_CLIENT_AGENT,
             )
         };
         if let Some((status, message)) =
@@ -1679,7 +1689,14 @@ fn reserve_for_codec(
         Err(limits::ReserveFailure::Refused(refusal)) => {
             write_usage_app(
                 app,
-                &UsageMeta::new(request, "", &request.model, started, identity),
+                &UsageMeta::new(
+                    request,
+                    "",
+                    &request.model,
+                    started,
+                    identity,
+                    UNKNOWN_CLIENT_AGENT,
+                ),
                 None,
                 StatusCode::TOO_MANY_REQUESTS,
             );
@@ -1688,7 +1705,14 @@ fn reserve_for_codec(
         Err(limits::ReserveFailure::Unavailable) => {
             write_usage_app(
                 app,
-                &UsageMeta::new(request, "", &request.model, started, identity),
+                &UsageMeta::new(
+                    request,
+                    "",
+                    &request.model,
+                    started,
+                    identity,
+                    UNKNOWN_CLIENT_AGENT,
+                ),
                 None,
                 StatusCode::SERVICE_UNAVAILABLE,
             );
@@ -1739,6 +1763,7 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
         Ok(identity) => identity,
         Err(response) => return *response,
     };
+    let client_agent = resolve_client_agent(&app, &headers, &identity);
     let started = Instant::now();
     let mut identity_headers = Vec::new();
     for name in SESSION_HEADERS.iter().copied().chain([SUBAGENT_HEADER]) {
@@ -1795,6 +1820,7 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
                 &model_name(&bytes),
                 started,
                 &identity,
+                &client_agent,
             ),
             None,
             message_threads::REFUSAL_STATUS,
@@ -1833,6 +1859,7 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
                     &fallback_model,
                     started,
                     &identity,
+                    &client_agent,
                 ),
                 None,
                 StatusCode::BAD_REQUEST,
@@ -1868,7 +1895,14 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
     {
         write_usage_simple(
             &app.usage,
-            &UsageMeta::new(&model_request, "", &model_request.model, started, &identity),
+            &UsageMeta::new(
+                &model_request,
+                "",
+                &model_request.model,
+                started,
+                &identity,
+                &client_agent,
+            ),
             None,
             status,
         );
@@ -1966,6 +2000,7 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
                     model_request,
                     started,
                     identity,
+                    &client_agent,
                     track,
                     capture,
                     dispatch,
@@ -1989,6 +2024,7 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
                 routed.affinity_reason,
                 started,
                 &identity,
+                &client_agent,
                 &mut track,
                 capture,
             )
@@ -2002,6 +2038,7 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
             error,
             started,
             &identity,
+            &client_agent,
             &mut track,
         ),
     }
@@ -2035,6 +2072,7 @@ struct HeldResponse {
     request: ModelRequest,
     started: Instant,
     identity: Identity,
+    client_agent: String,
     track: Option<RequestTrack>,
     capture: Option<prev_response::Capture>,
     incoming: Option<BytesStream>,
@@ -2049,6 +2087,7 @@ fn held_response(
     request: ModelRequest,
     started: Instant,
     identity: Identity,
+    client_agent: &str,
     track: RequestTrack,
     capture: Option<prev_response::Capture>,
     dispatch: DispatchFuture,
@@ -2061,6 +2100,7 @@ fn held_response(
         request,
         started,
         identity,
+        client_agent: client_agent.to_owned(),
         track: Some(track),
         capture,
         incoming: None,
@@ -2109,6 +2149,7 @@ fn held_response(
                                 routed.affinity_reason,
                                 state.started,
                                 &state.identity,
+                                &state.client_agent,
                                 state.track.as_mut().expect("held request track"),
                                 state.capture.take(),
                             )
@@ -2132,6 +2173,7 @@ fn held_response(
                                 error,
                                 state.started,
                                 &state.identity,
+                                &state.client_agent,
                                 state.track.as_mut().expect("held request track"),
                             );
                             let bytes = state
@@ -2290,6 +2332,22 @@ fn unrouted_watched(path: &str) -> bool {
 }
 
 /// Agent label stored on the routing trace when the gateway can infer it.
+fn resolve_client_agent(app: &Inner, headers: &HeaderMap, identity: &Identity) -> String {
+    app.request_agent
+        .as_ref()
+        .and_then(|hook| hook(headers, identity))
+        .unwrap_or_else(|| UNKNOWN_CLIENT_AGENT.to_owned())
+}
+
+#[doc(hidden)]
+pub fn resolve_client_agent_for_test(
+    app: &Gateway,
+    headers: &HeaderMap,
+    identity: &Identity,
+) -> String {
+    resolve_client_agent(app.inner.as_ref(), headers, identity)
+}
+
 fn trace_agent_label(headers: &[(&str, &str)], identity: &Identity) -> String {
     if let Some((_, value)) = headers
         .iter()
@@ -2363,7 +2421,14 @@ fn unrouted_timeout_before_routing(
         .unwrap_or(StatusCode::GATEWAY_TIMEOUT);
     write_usage_app(
         app.as_ref(),
-        &UsageMeta::new(&ModelRequest::new(String::new()), "", "", started, identity),
+        &UsageMeta::new(
+            &ModelRequest::new(String::new()),
+            "",
+            "",
+            started,
+            identity,
+            UNKNOWN_CLIENT_AGENT,
+        ),
         None,
         status,
     );
@@ -2536,11 +2601,19 @@ async fn success(
     affinity_reason: Option<String>,
     started: Instant,
     identity: &Identity,
+    client_agent: &str,
     track: &mut RequestTrack,
     capture: Option<prev_response::Capture>,
 ) -> Response {
     track.reason = affinity_reason;
-    let mut meta = UsageMeta::new(request, upstream, upstream_model, started, identity);
+    let mut meta = UsageMeta::new(
+        request,
+        upstream,
+        upstream_model,
+        started,
+        identity,
+        client_agent,
+    );
     meta.provider_key_id = provider_key_id.to_owned();
     let member = Some(upstream.to_owned());
     let capture = prev_response::ReplyCapture::new(capture);
@@ -2827,12 +2900,13 @@ fn failure(
     error: RouterError,
     started: Instant,
     identity: &Identity,
+    client_agent: &str,
     track: &mut RequestTrack,
 ) -> Response {
     if let RouterError::PreviousResponseNotFound { id } = &error {
         write_usage_app(
             app.as_ref(),
-            &UsageMeta::new(request, "", &request.model, started, identity),
+            &UsageMeta::new(request, "", &request.model, started, identity, client_agent),
             None,
             StatusCode::BAD_REQUEST,
         );
@@ -2861,7 +2935,14 @@ fn failure(
     };
     write_usage_app(
         app.as_ref(),
-        &UsageMeta::new(request, &upstream, &request.model, started, identity),
+        &UsageMeta::new(
+            request,
+            &upstream,
+            &request.model,
+            started,
+            identity,
+            client_agent,
+        ),
         None,
         status,
     );
@@ -2928,6 +3009,7 @@ struct UsageMeta {
     served_model: String,
     started: Instant,
     identity: Identity,
+    client_agent: String,
     input: Option<i64>,
     output: Option<i64>,
     ttft_ms: Option<i64>,
@@ -2942,6 +3024,7 @@ impl UsageMeta {
         wire_model: &str,
         started: Instant,
         identity: &Identity,
+        client_agent: &str,
     ) -> Self {
         Self {
             model: request.model.clone(),
@@ -2951,6 +3034,7 @@ impl UsageMeta {
             served_model: String::new(),
             started,
             identity: identity.clone(),
+            client_agent: client_agent.to_owned(),
             input: None,
             output: None,
             ttft_ms: None,
@@ -3452,6 +3536,7 @@ fn write_usage(
         caller_key_name: meta.identity.key_name.clone(),
         caller_issuer_id: meta.identity.issuer.clone(),
         provider_key_id: meta.provider_key_id.clone(),
+        client_agent: meta.client_agent.clone(),
         ..Default::default()
     };
     let mut details = meta.details;

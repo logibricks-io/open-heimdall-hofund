@@ -726,7 +726,12 @@ impl Client {
             UsagePeriod::All => "all",
             _ => "unknown",
         };
-        self.get(&format!("/v1/hofund/usage?period={period}")).await
+        let mut url = format!("/v1/hofund/usage?period={period}");
+        if let Some(by) = query.by {
+            url.push_str("&by=");
+            url.push_str(by.as_query_value());
+        }
+        self.get(&url).await
     }
 
     /// Lists named gateway keys.
