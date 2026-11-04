@@ -165,11 +165,16 @@ fn a2b_13_refresh_rotates_tokens_via_workos() {
 #[test]
 fn a2b_14_model_catalog_lists_factory_models() {
     let list = models::catalog().expect("catalog");
+    assert_eq!(list.models().len(), 39);
     assert!(
         list.models()
             .iter()
             .any(|model| model.id() == "claude-sonnet-5-5")
     );
+    assert!(list.models().iter().any(|model| model.id() == "gpt-5.5"));
+    let (wire, _) = models::wire_target("minimax-m2.7");
+    assert_eq!(wire, ProtocolId::ANTHROPIC_MESSAGES);
+    assert_eq!(models::x_api_provider("gpt-5.5"), Some("openai"));
 }
 
 #[test]
@@ -322,11 +327,14 @@ fn a2b_39_glm_uses_open_wire_and_x_api_provider() {
     let upstream = sub.upstream(&id, host.context()).expect("upstream");
     let query = ProbeQuery::new(ProtocolId::OPENAI_CHAT, "glm-5.3").expect("query");
     block_on(upstream.probe(&query)).expect("probe");
+    let calls = host.http().calls();
+    let call = calls.last().expect("upstream call");
+    assert!(call.uri().contains("/api/llm/o/v1"));
     assert!(
-        host.http()
-            .calls()
+        call.sensitive_headers()
             .iter()
-            .any(|call| call.uri().contains("/api/llm/o/v1"))
+            .any(|name| name.eq_ignore_ascii_case("x-api-provider")),
+        "expected x-api-provider on the upstream HTTP request"
     );
 }
 
