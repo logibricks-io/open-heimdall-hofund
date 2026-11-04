@@ -338,6 +338,13 @@ mod tests {
                 )
                 .expect("record");
         }
+        // Rows written before pricing was tracked can carry a cost with priced = 0.
+        ledger
+            .connection
+            .lock()
+            .expect("lock")
+            .execute("UPDATE requests SET cost_usd = 2.0 WHERE priced = 0", [])
+            .expect("update");
         let groups = ledger
             .breakdown(None, BreakdownDimension::Agent)
             .expect("groups");
