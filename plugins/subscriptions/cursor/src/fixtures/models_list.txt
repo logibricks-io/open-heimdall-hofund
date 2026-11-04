@@ -1,0 +1,19 @@
+Available models
+
+auto - Auto (default)
+gpt-5.3-codex-low - Codex 5.3 Low
+gpt-5.3-codex - Codex 5.3
+gpt-5.3-codex-high - Codex 5.3 High
+gpt-5.3-codex-high-fast - Codex 5.3 High Fast
+grok-4.7-low - Grok 4.7  Low
+grok-4.7-low-fast - Grok 4.7  Low Fast
+grok-4.7-medium - Grok 4.7  Medium
+grok-4.7-medium-fast - Grok 4.7  Medium Fast
+grok-4.7-xhigh - Grok 4.7  Extra High
+grok-4.7-xhigh-fast - Grok 4.7  Extra High Fast
+claude-opus-4-7-low - Claude Opus 4.7 1M Low
+claude-opus-4-7-xhigh - Claude Opus 4.7 1M
+claude-opus-4-7-max - Claude Opus 4.7 1M Max
+composer-2.5 - Composer 2.5
+
+Tip: use --model <id>

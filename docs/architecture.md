@@ -80,6 +80,9 @@ flowchart BT
   pluginClaude["plugin-subscription-claude<br/>subscription"]
   pluginCopilot["plugin-subscription-copilot<br/>subscription"]
   pluginGemini["plugin-subscription-gemini<br/>subscription"]
+  pluginGrok["plugin-subscription-grok<br/>subscription"]
+  pluginCline["plugin-subscription-cline<br/>subscription"]
+  pluginCursor["plugin-subscription-cursor<br/>subscription"]
   gateway["gateway<br/>HTTP server"]
   daemon["daemon<br/>daemon library"]
   hofundd["hofundd<br/>process composition root"]
@@ -112,6 +115,9 @@ flowchart BT
   pluginRegistry --> pluginClaude
   pluginRegistry --> pluginCopilot
   pluginRegistry --> pluginGemini
+  pluginRegistry --> pluginGrok
+  pluginRegistry --> pluginCline
+  pluginRegistry --> pluginCursor
   pluginRegistry --> provider
   pluginRegistry --> quirks
   pluginPlanQuota --> pluginApi
@@ -136,6 +142,12 @@ flowchart BT
   pluginCopilot --> pluginSdk
   pluginGemini --> pluginApi
   pluginGemini --> pluginSdk
+  pluginGrok --> pluginApi
+  pluginGrok --> pluginSdk
+  pluginCline --> pluginApi
+  pluginCline --> pluginSdk
+  pluginCursor --> pluginApi
+  pluginCursor --> pluginSdk
   router --> pluginApi
   router --> controlProto
   router --> ir
@@ -235,14 +247,17 @@ This table covers normal and build dependencies, including their target-specific
 | `hofund-plugin-plan-quota` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-upstream` (tests) |
 | `hofund-plugin-relay` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-upstream` (tests) |
 | `hofund-plugin-retrieval` | `hofund-plugin-api`, `hofund-plugin-sdk` |
-| `hofund-plugin-registry` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-plugin-codex-catalog`, `hofund-plugin-echo`, `hofund-plugin-muse`, `hofund-plugin-ollama`, `hofund-plugin-plan-quota`, `hofund-plugin-relay`, `hofund-plugin-retrieval`, `hofund-plugin-subscription-claude`, `hofund-plugin-subscription-codex`, `hofund-plugin-subscription-copilot`, `hofund-plugin-subscription-devin`, `hofund-plugin-subscription-factory`, `hofund-plugin-subscription-gemini`, `hofund-plugin-subscription-kiro`, `hofund-provider`, `hofund-quirks`, `hofund-agent` (tests), `hofund-kit-upstream` (tests), `hofund-kit-agent` (tests) |
+| `hofund-plugin-registry` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-plugin-codex-catalog`, `hofund-plugin-echo`, `hofund-plugin-muse`, `hofund-plugin-ollama`, `hofund-plugin-plan-quota`, `hofund-plugin-relay`, `hofund-plugin-retrieval`, `hofund-plugin-subscription-claude`, `hofund-plugin-subscription-cline`, `hofund-plugin-subscription-codex`, `hofund-plugin-subscription-copilot`, `hofund-plugin-subscription-cursor`, `hofund-plugin-subscription-devin`, `hofund-plugin-subscription-factory`, `hofund-plugin-subscription-gemini`, `hofund-plugin-subscription-grok`, `hofund-plugin-subscription-kiro`, `hofund-provider`, `hofund-quirks`, `hofund-agent` (tests), `hofund-kit-upstream` (tests), `hofund-kit-agent` (tests) |
 | `hofund-plugin-subscription-devin` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
 | `hofund-plugin-subscription-factory` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
 | `hofund-plugin-subscription-kiro` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
 | `hofund-plugin-subscription-claude` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
+| `hofund-plugin-subscription-cline` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
 | `hofund-plugin-subscription-codex` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
 | `hofund-plugin-subscription-copilot` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
+| `hofund-plugin-subscription-cursor` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
 | `hofund-plugin-subscription-gemini` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
+| `hofund-plugin-subscription-grok` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
 | `hofund-plugin-host` | `hofund-plugin-api`, `hofund-plugin-sdk` (tests) |
 | `hofund-kit-upstream` | `hofund-plugin-api`, `hofund-plugin-host` |
 | `hofund-kit-subscription` | `hofund-plugin-host` |
@@ -331,6 +346,9 @@ The `control-client` and gateway `control-proto` edges landed in L3; the
 | `plugin-subscription-claude` | Claude Code subscription: sign-in and refresh by running the `claude` command line in a private config directory. |
 | `plugin-subscription-copilot` | GitHub Copilot subscription, on github.com or a `<name>.ghe.com` enterprise host: device sign-in, session tokens, quota, the account model list, and per-model Chat Completions, Responses and Messages routing. |
 | `plugin-subscription-gemini` | Gemini CLI (Code Assist) subscription: browser sign-in, Code Assist project setup, and token refresh. |
+| `plugin-subscription-grok` | Grok Build subscription: CLI device sign-in, auth.json import, CLI token renewal, Responses upstream, and allowance quota. |
+| `plugin-subscription-cline` | Cline subscription: WorkOS device sign-in or API key, token refresh, recommended-models list, chat upstream, and ClinePass quota. |
+| `plugin-subscription-cursor` | Cursor subscription: browser PKCE sign-in, agent auth import, model list from the CLI catalog, usage windows; chat upstream not served yet. |
 | `kit-upstream`, `kit-subscription`, `kit-agent` | Unpublished test hosts. |
 | `codec` | Per-protocol encode and decode to and from the IR. Hub-and-spoke, so N protocols do not become an N-by-M matrix. |
 | `quirks` | Data-driven vendor capability and quirk descriptions. |

@@ -11,17 +11,20 @@ homepage.workspace = true
 rust-version.workspace = true
 
 [features]
-default = ["azure", "bedrock", "bedrock-mantle", "claude", "codex", "copilot", "devin", "echo", "factory", "gemini", "google-vertex", "kiro", "codex-catalog", "muse", "ollama", "plan-quota", "relay", "remote-gateway", "retrieval"]
+default = ["azure", "bedrock", "bedrock-mantle", "claude", "cline", "codex", "copilot", "cursor", "devin", "echo", "factory", "gemini", "grok", "google-vertex", "kiro", "codex-catalog", "muse", "ollama", "plan-quota", "relay", "remote-gateway", "retrieval"]
 azure = ["dep:hofund-plugin-azure"]
 bedrock = ["dep:hofund-plugin-bedrock"]
 bedrock-mantle = ["dep:hofund-plugin-bedrock-mantle"]
 claude = ["dep:hofund-plugin-subscription-claude"]
+cline = ["dep:hofund-plugin-subscription-cline"]
 codex = ["dep:hofund-plugin-subscription-codex"]
 copilot = ["dep:hofund-plugin-subscription-copilot"]
+cursor = ["dep:hofund-plugin-subscription-cursor"]
 devin = ["dep:hofund-plugin-subscription-devin"]
 echo = ["dep:hofund-plugin-echo"]
 factory = ["dep:hofund-plugin-subscription-factory"]
 gemini = ["dep:hofund-plugin-subscription-gemini"]
+grok = ["dep:hofund-plugin-subscription-grok"]
 google-vertex = ["dep:hofund-plugin-google-vertex"]
 kiro = ["dep:hofund-plugin-subscription-kiro"]
 codex-catalog = ["dep:hofund-plugin-codex-catalog"]
@@ -50,11 +53,14 @@ hofund-plugin-plan-quota = { workspace = true, optional = true }
 hofund-plugin-relay = { workspace = true, optional = true }
 hofund-plugin-remote-gateway = { workspace = true, optional = true }
 hofund-plugin-subscription-claude = { workspace = true, optional = true }
+hofund-plugin-subscription-cline = { workspace = true, optional = true }
 hofund-plugin-subscription-codex = { workspace = true, optional = true }
 hofund-plugin-subscription-copilot = { workspace = true, optional = true }
+hofund-plugin-subscription-cursor = { workspace = true, optional = true }
 hofund-plugin-subscription-devin = { workspace = true, optional = true }
 hofund-plugin-subscription-factory = { workspace = true, optional = true }
 hofund-plugin-subscription-gemini = { workspace = true, optional = true }
+hofund-plugin-subscription-grok = { workspace = true, optional = true }
 hofund-plugin-subscription-kiro = { workspace = true, optional = true }
 hofund-provider = { workspace = true }
 hofund-quirks = { workspace = true }
