@@ -12,6 +12,7 @@ use hofund_plugin_api::{
     UpstreamProvider, ValidConfig,
 };
 use hofund_plugin_sdk::Contribution;
+use hofund_plugin_sdk::oauth::secret_text;
 
 mod agent_sign_in;
 mod creds;
@@ -214,15 +215,21 @@ impl Subscription for Kiro {
         account: &AccountId,
         host: &HostContext,
     ) -> Result<AccountStatus, PluginError> {
-        match creds::Stored::load(host, account).await {
-            Ok(_) => Ok(AccountStatus::Ready),
-            Err(error) if error.kind() == hofund_plugin_api::PluginErrorKind::Auth => {
-                Ok(AccountStatus::NeedsSignIn {
-                    reason: error.to_string(),
-                })
-            }
-            Err(error) => Err(error),
+        let Some(secret) = host.accounts().secret(account).await? else {
+            return Ok(AccountStatus::NeedsSignIn {
+                reason: "no Kiro sign-in is stored for this account".to_owned(),
+            });
+        };
+        let stored = creds::parse_secret(&secret)?;
+        if stored.credential.method != "apikey"
+            && secret_text(&stored.credential.refresh).is_empty()
+            && !stored.fresh_at(host.clock().now())
+        {
+            return Ok(AccountStatus::NeedsSignIn {
+                reason: "Kiro sign-in has expired and cannot be refreshed".to_owned(),
+            });
         }
+        Ok(AccountStatus::Ready)
     }
 
     async fn refresh(&self, account: &AccountId, host: &HostContext) -> Result<(), PluginError> {

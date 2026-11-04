@@ -9,6 +9,14 @@ use hofund_plugin_sdk::json::Value;
 use hofund_plugin_sdk::oauth::{SecretObject, account_id_from, secret_text};
 use hofund_plugin_sdk::time::parse_rfc3339;
 
+fn hash_hex(data: &[u8]) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    data.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
 pub(crate) const REFRESH_MARGIN: Duration = Duration::from_secs(120);
 const FILE_CAP: u64 = 64 * 1024;
 pub(crate) const TOKEN_FILE: &str = "kiro-auth-token.json";
@@ -22,6 +30,9 @@ pub(crate) struct Credential {
     pub profile_arn: String,
     pub label: String,
     pub method: String,
+    pub client_id: String,
+    pub client_secret: SecretString,
+    pub token_url: String,
 }
 
 #[derive(Clone, Debug)]
@@ -67,6 +78,11 @@ pub(crate) fn parse_secret(secret: &SecretString) -> Result<Stored, PluginError>
         .unwrap_or("Kiro")
         .to_owned();
     let method = blob.text("method").unwrap_or("social").to_owned();
+    let client_id = blob.text("client_id").unwrap_or("").to_owned();
+    let client_secret = blob
+        .secret("client_secret")
+        .unwrap_or_else(|| SecretString::from(String::new()));
+    let token_url = blob.text("token_url").unwrap_or("").to_owned();
     let expires_at = blob.number("expires_at").and_then(|secs| {
         if secs == 0 {
             None
@@ -83,6 +99,9 @@ pub(crate) fn parse_secret(secret: &SecretString) -> Result<Stored, PluginError>
             profile_arn,
             label,
             method,
+            client_id,
+            client_secret,
+            token_url,
         },
     })
 }
@@ -95,7 +114,10 @@ pub(crate) fn secret_blob(credential: &Credential) -> SecretObject {
         .with_text("region", &credential.region)
         .with_text("profile_arn", &credential.profile_arn)
         .with_text("label", &credential.label)
-        .with_text("method", &credential.method);
+        .with_text("method", &credential.method)
+        .with_text("client_id", &credential.client_id)
+        .with_secret("client_secret", &credential.client_secret)
+        .with_text("token_url", &credential.token_url);
     if let Some(at) = credential
         .expires_at
         .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
@@ -106,6 +128,13 @@ pub(crate) fn secret_blob(credential: &Credential) -> SecretObject {
 }
 
 pub(crate) fn account_id(credential: &Credential) -> AccountId {
+    if credential.label.eq_ignore_ascii_case("kiro") {
+        return account_id_from(&[
+            "kiro",
+            "key",
+            &hash_hex(secret_text(&credential.access).as_bytes()),
+        ]);
+    }
     account_id_from(&["kiro", &credential.label.to_ascii_lowercase()])
 }
 
@@ -164,6 +193,25 @@ pub(crate) fn parse_token_json(text: &str) -> Result<Credential, PluginError> {
         .and_then(Value::as_str)
         .map(str::to_owned)
         .unwrap_or_else(|| "social".to_owned());
+    let client_id = root
+        .get("clientId")
+        .or_else(|| root.get("client_id"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    let client_secret = root
+        .get("clientSecret")
+        .or_else(|| root.get("client_secret"))
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+        .map(|text| SecretString::from(text.to_owned()))
+        .unwrap_or_else(|| SecretString::from(String::new()));
+    let token_url = root
+        .get("tokenUrl")
+        .or_else(|| root.get("token_url"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
     let expires_at = root
         .get("expiresAt")
         .or_else(|| root.get("expires_at"))
@@ -177,6 +225,9 @@ pub(crate) fn parse_token_json(text: &str) -> Result<Credential, PluginError> {
         profile_arn,
         label,
         method,
+        client_id,
+        client_secret,
+        token_url,
     })
 }
 

@@ -37,7 +37,7 @@ impl KiroUpstream {
         &self,
         stored: &Stored,
         request: Request,
-        inbound: ProtocolId,
+        _inbound: ProtocolId,
     ) -> Result<Completion, PluginError> {
         let region = stored.credential.region.as_str();
         let base = self.endpoints.chat_base(region);
@@ -56,9 +56,6 @@ impl KiroUpstream {
         } else if stored.credential.method == "external-idp" {
             call = call.header("tokentype", "EXTERNAL_IDP");
         }
-        if !stored.credential.profile_arn.is_empty() {
-            call = call.header("x-amz-codewhisperer-token", &stored.credential.profile_arn);
-        }
         let reply = call.bytes(body).fetch(self.host.http()).await?;
         if reply.status() == 401 || reply.status() == 403 {
             return Err(PluginError::auth(
@@ -74,12 +71,7 @@ impl KiroUpstream {
         let text =
             decode_json(reply.body()).or_else(|_| kiro_stream::assistant_text(reply.body()))?;
         let response = anthropic_response(&request.model, &text);
-        if inbound == ProtocolId::ANTHROPIC_MESSAGES {
-            return Ok(Completion::Unary(response));
-        }
-        Err(PluginError::config(
-            "Kiro upstream only serves Anthropic Messages on this path",
-        ))
+        Ok(Completion::Unary(response))
     }
 }
 
@@ -114,6 +106,16 @@ impl UpstreamProvider for KiroUpstream {
         request: Request,
         inbound: ProtocolId,
     ) -> Result<Completion, PluginError> {
+        if inbound != ProtocolId::ANTHROPIC_MESSAGES {
+            return Err(PluginError::config(
+                "Kiro upstream only serves Anthropic Messages on this path",
+            ));
+        }
+        if request.stream {
+            return Err(PluginError::config(
+                "Kiro upstream does not stream on this path yet",
+            ));
+        }
         let stored = self.stored().await?;
         self.send(&stored, request, inbound).await
     }

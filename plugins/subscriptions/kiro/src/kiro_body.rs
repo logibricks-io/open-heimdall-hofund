@@ -1,40 +1,99 @@
 //! Request bodies for Kiro `generateAssistantResponse`.
 
 use hofund_plugin_api::{ContentPart, PluginError, Request, Role};
-use hofund_plugin_sdk::json;
+use hofund_plugin_sdk::json::{self, Value};
 
 use crate::creds::Credential;
 
 pub(crate) fn encode(request: &Request, credential: &Credential) -> Result<Vec<u8>, PluginError> {
-    let mut content = String::new();
+    let mut system = String::new();
+    let mut turns: Vec<Value> = Vec::new();
     for message in &request.messages {
-        if message.role != Role::User {
-            continue;
-        }
-        for part in &message.content {
-            if let ContentPart::Text(text) = part {
-                if !content.is_empty() {
-                    content.push('\n');
+        match message.role {
+            Role::System | Role::Developer => {
+                for part in &message.content {
+                    if let ContentPart::Text(text) = part {
+                        if !system.is_empty() {
+                            system.push('\n');
+                        }
+                        system.push_str(&text.text);
+                    }
                 }
-                content.push_str(&text.text);
+            }
+            Role::User => {
+                let text = text_from_parts(&message.content);
+                if text.is_empty() {
+                    continue;
+                }
+                let mut content = text;
+                if turns.is_empty() && !system.is_empty() {
+                    content = format!("{system}\n\n{content}");
+                }
+                turns.push(json::json!({
+                    "userInputMessage": {
+                        "content": content,
+                        "modelId": request.model,
+                        "origin": "KIRO_CLI",
+                        "profileArn": credential.profile_arn,
+                    }
+                }));
+            }
+            Role::Assistant => {
+                let text = text_from_parts(&message.content);
+                if text.is_empty() {
+                    continue;
+                }
+                turns.push(json::json!({
+                    "assistantResponseMessage": {
+                        "content": text,
+                    }
+                }));
+            }
+            Role::Tool => {
+                let text = text_from_parts(&message.content);
+                if text.is_empty() {
+                    continue;
+                }
+                turns.push(json::json!({
+                    "userInputMessage": {
+                        "content": format!("[tool result]\n{text}"),
+                        "modelId": request.model,
+                        "origin": "KIRO_CLI",
+                        "profileArn": credential.profile_arn,
+                    }
+                }));
             }
         }
     }
-    if content.is_empty() {
-        content.push_str("hi");
-    }
+    let current = turns.pop().unwrap_or_else(|| {
+        json::json!({
+            "userInputMessage": {
+                "content": if system.is_empty() { "hi".to_owned() } else { system },
+                "modelId": request.model,
+                "origin": "KIRO_CLI",
+                "profileArn": credential.profile_arn,
+            }
+        })
+    });
+    let history: Vec<Value> = turns;
     let body = json::json!({
         "conversationState": {
-            "history": [],
-            "currentMessage": {
-                "userInputMessage": {
-                    "content": content,
-                    "modelId": request.model,
-                    "origin": "KIRO_CLI",
-                    "profileArn": credential.profile_arn,
-                }
-            }
+            "history": history,
+            "currentMessage": current,
         }
     });
     json::to_vec(&body).map_err(|_| PluginError::decode("Kiro request body could not be encoded"))
+}
+
+fn text_from_parts(parts: &[ContentPart]) -> String {
+    let mut out = String::new();
+    for part in parts {
+        if let ContentPart::Text(text) = part {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(&text.text);
+        }
+    }
+    out
 }

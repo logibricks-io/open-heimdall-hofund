@@ -5,6 +5,7 @@ use hofund_plugin_sdk::json::{self, Value};
 
 pub(crate) fn assistant_text(body: &[u8]) -> Result<String, PluginError> {
     let mut offset = 0;
+    let mut parts = Vec::new();
     while offset + 12 <= body.len() {
         let total =
             u32::from_be_bytes(body[offset..offset + 4].try_into().expect("prelude")) as usize;
@@ -21,13 +22,16 @@ pub(crate) fn assistant_text(body: &[u8]) -> Result<String, PluginError> {
         let headers = &body[offset + 12..offset + 12 + header_len];
         let payload = &body[payload_start..payload_end];
         if let Some(text) = frame_text(headers, payload)? {
-            return Ok(text);
+            parts.push(text);
         }
         offset += total;
     }
-    Err(PluginError::decode(
-        "Kiro's event stream did not contain assistant text",
-    ))
+    if parts.is_empty() {
+        return Err(PluginError::decode(
+            "Kiro's event stream did not contain assistant text",
+        ));
+    }
+    Ok(parts.join(""))
 }
 
 fn frame_text(headers: &[u8], payload: &[u8]) -> Result<Option<String>, PluginError> {

@@ -46,4 +46,8 @@ fn a2b_20_unknown_account_needs_sign_in_and_sends_nothing() {
         ProbeQuery::new(ProtocolId::ANTHROPIC_MESSAGES, "claude-sonnet-4.5").expect("query");
     let probe = block_on(upstream.probe(&query)).expect_err("no sign-in");
     assert_eq!(probe.kind(), PluginErrorKind::Auth);
+    assert!(
+        host.http().calls().is_empty(),
+        "unknown account must not call the network"
+    );
 }

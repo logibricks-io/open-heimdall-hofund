@@ -49,6 +49,9 @@ fn seed(host: &TestHost, access: &str, refresh: &str, exp: &str, label: &str) ->
         profile_arn: "arn:aws:codewhisperer:us-east-1:1:profile/P".to_owned(),
         label: label.to_owned(),
         method: "social".to_owned(),
+        client_id: String::new(),
+        client_secret: SecretString::from(String::new()),
+        token_url: String::new(),
     };
     let id = creds::account_id(&credential);
     block_on(async {
@@ -119,16 +122,14 @@ fn a2b_22_refresh_on_expiry_posts_to_refresh_url() {
         parsed
             .secret("access_token")
             .as_ref()
-            .map(secret_text)
-            .as_deref(),
+            .map(secret_text),
         Some("new-access")
     );
     assert_eq!(
         parsed
             .secret("refresh_token")
             .as_ref()
-            .map(secret_text)
-            .as_deref(),
+            .map(secret_text),
         Some("new-refresh")
     );
 }
@@ -166,6 +167,9 @@ fn a2b_24_upstream_round_trip_with_recording_http() {
     let call = calls.last().expect("call");
     assert!(call.uri().contains("runtime.us-east-1.kiro.dev"));
     assert!(call.uri().contains("generateAssistantResponse"));
+    let body = std::str::from_utf8(call.body()).expect("utf8");
+    assert!(body.contains("profileArn"));
+    assert!(body.contains("claude-sonnet-4.5"));
     assert!(
         call.sensitive_headers()
             .contains(&"authorization".to_owned())
@@ -180,6 +184,9 @@ fn a2b_25_usage_parsing() {
     assert_eq!(windows[0].name(), "Credits");
     assert_eq!(windows[0].used(), 40);
     assert_eq!(windows[0].limit(), Some(100));
+    let body2 = br#"{"usageBreakdownList":[{"displayName":"Credits","currentUsageWithPrecision":50,"usageLimitWithPrecision":100}]}"#;
+    let windows2 = crate::quota::windows(body2).expect("windows2");
+    assert_eq!(windows2[0].used(), 50);
 }
 
 #[test]
@@ -193,6 +200,9 @@ fn a2b_26_secrets_not_in_debug_or_errors() {
         profile_arn: String::new(),
         label: "k@example.test".to_owned(),
         method: "social".to_owned(),
+        client_id: String::new(),
+        client_secret: SecretString::from(String::new()),
+        token_url: String::new(),
     };
     assert!(!format!("{credential:?}").contains(token));
     let error = creds::read_token_file(std::path::Path::new("/no/such/kiro-auth-token.json"));

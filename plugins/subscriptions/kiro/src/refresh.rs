@@ -1,4 +1,4 @@
-//! Refresh Kiro social sign-ins through the desktop refresh endpoint.
+//! Refresh Kiro sign-ins through the desktop or OIDC refresh endpoints.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -32,6 +32,9 @@ pub(crate) async fn refresh_stale(
     stored: &Stored,
     endpoints: &Endpoints,
 ) -> Result<(), PluginError> {
+    if stored.credential.method == "apikey" {
+        return Ok(());
+    }
     if secret_text(&stored.credential.refresh).is_empty() {
         return Err(PluginError::auth(
             "Kiro sign-in has expired; sign in again with the Kiro IDE or kiro-cli",
@@ -45,41 +48,36 @@ pub(crate) async fn refresh_stale(
     if !same_secret(&current_refresh, &stored.credential.refresh) {
         return Ok(());
     }
-    let url = endpoints.refresh_url(&stored.credential.region);
-    let body = json::json!({"refreshToken": secret_text(&stored.credential.refresh)});
-    let reply = Call::post(url)
-        .header("content-type", "application/json")
-        .header("accept", "application/json")
-        .header("user-agent", "Kiro-Desktop/0.2.13 (darwin; arm64)")
-        .bytes(json::to_vec(&body).expect("json"))
-        .fetch(host.http())
-        .await?;
-    if reply.status() == 401 || reply.status() == 403 {
-        return Err(PluginError::auth(
-            "Kiro refused to refresh the sign-in; sign in again",
-        ));
-    }
-    if !(200..300).contains(&reply.status()) {
-        return Err(PluginError::status_error(
-            reply.status(),
-            "Kiro did not refresh the sign-in",
-        ));
-    }
-    let root: Value = json::from_slice(reply.body())
-        .map_err(|_| PluginError::decode("Kiro refresh reply is not JSON"))?;
+    let root = match stored.credential.method.as_str() {
+        "social" => refresh_social(host, stored, endpoints).await?,
+        "idc" => refresh_idc(host, stored).await?,
+        "external-idp" => {
+            return Err(PluginError::config(
+                "Kiro external-idp refresh is not implemented offline",
+            ));
+        }
+        other => {
+            return Err(PluginError::config(format!(
+                "Kiro sign-in method `{other}` cannot be refreshed here",
+            )));
+        }
+    };
     let access = root
         .get("accessToken")
+        .or_else(|| root.get("access_token"))
         .and_then(Value::as_str)
         .filter(|t| !t.is_empty())
         .ok_or_else(|| PluginError::auth("Kiro refresh sent back no access token"))?;
     let refresh = root
         .get("refreshToken")
+        .or_else(|| root.get("refresh_token"))
         .and_then(Value::as_str)
         .filter(|t| !t.is_empty())
         .map(SecretString::from)
         .unwrap_or_else(|| stored.credential.refresh.clone());
     let expires_in = root
         .get("expiresIn")
+        .or_else(|| root.get("expires_in"))
         .and_then(Value::as_u64)
         .unwrap_or(3600);
     let profile = root
@@ -101,4 +99,61 @@ pub(crate) async fn refresh_stale(
         )
         .await?;
     Ok(())
+}
+
+async fn refresh_social(
+    host: &HostContext,
+    stored: &Stored,
+    endpoints: &Endpoints,
+) -> Result<Value, PluginError> {
+    let url = endpoints.refresh_url(&stored.credential.region);
+    let body = json::json!({"refreshToken": secret_text(&stored.credential.refresh)});
+    let reply = Call::post(url)
+        .header("content-type", "application/json")
+        .header("accept", "application/json")
+        .header("user-agent", "Kiro-Desktop/0.2.13 (darwin; arm64)")
+        .bytes(json::to_vec(&body).expect("json"))
+        .fetch(host.http())
+        .await?;
+    refresh_status(reply.status(), reply.body())
+}
+
+async fn refresh_idc(host: &HostContext, stored: &Stored) -> Result<Value, PluginError> {
+    if stored.credential.client_id.is_empty() {
+        return Err(PluginError::auth(
+            "Kiro IdC sign-in is missing client credentials; sign in again",
+        ));
+    }
+    let url = format!(
+        "https://oidc.{}.amazonaws.com/token",
+        stored.credential.region
+    );
+    let body = json::json!({
+        "clientId": stored.credential.client_id,
+        "clientSecret": secret_text(&stored.credential.client_secret),
+        "refreshToken": secret_text(&stored.credential.refresh),
+        "grantType": "refresh_token",
+    });
+    let reply = Call::post(url)
+        .header("content-type", "application/json")
+        .header("accept", "application/json")
+        .bytes(json::to_vec(&body).expect("json"))
+        .fetch(host.http())
+        .await?;
+    refresh_status(reply.status(), reply.body())
+}
+
+fn refresh_status(status: u16, body: &[u8]) -> Result<Value, PluginError> {
+    if status == 401 || status == 403 {
+        return Err(PluginError::auth(
+            "Kiro refused to refresh the sign-in; sign in again",
+        ));
+    }
+    if !(200..300).contains(&status) {
+        return Err(PluginError::status_error(
+            status,
+            "Kiro did not refresh the sign-in",
+        ));
+    }
+    json::from_slice(body).map_err(|_| PluginError::decode("Kiro refresh reply is not JSON"))
 }
