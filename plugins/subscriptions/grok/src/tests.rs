@@ -313,24 +313,13 @@ fn a2a_10_sign_in_start_complete_and_cancel() {
 
     let dir2 = tempfile::tempdir().expect("dir2");
     let test_host2 = host(&dir2);
-    let grok_home2 = test_host2
-        .context()
-        .dirs()
-        .state_dir()
-        .expect("state")
-        .join("grok-homes")
-        .join(SESSION);
     let sub2 = subscription(&test_host2);
     test_host2
         .process()
         .script_piped(PipedScript::new().line("Visit https://auth.test/device-2"));
     block_on(sub2.start_sign_in(&ctx(), test_host2.context())).expect("start2");
     block_on(sub2.cancel_sign_in(&ctx(), test_host2.context())).expect("cancel");
-    let err = block_on(sub2.complete_sign_in(
-        &ctx(),
-        SignInProof::Await,
-        test_host2.context(),
-    ))
-    .expect_err("cancelled");
+    let err = block_on(sub2.complete_sign_in(&ctx(), SignInProof::Await, test_host2.context()))
+        .expect_err("cancelled");
     assert_eq!(err.kind(), hofund_plugin_api::PluginErrorKind::Config);
 }
