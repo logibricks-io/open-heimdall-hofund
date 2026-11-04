@@ -1434,6 +1434,7 @@ fn endpoint_for(
         .iter()
         .map(|(name, value)| (name.clone(), value.clone()))
         .collect();
+    endpoint.pass_headers = provider.pass_headers.clone();
     if let Some(profile) = &provider.quirks {
         endpoint.quirks = Some(named(profile).ok_or_else(|| {
             DaemonError::new(format!(

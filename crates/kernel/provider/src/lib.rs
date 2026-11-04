@@ -15,6 +15,7 @@ mod generative;
 mod http;
 mod models;
 mod openai_compat;
+pub mod pass_headers;
 mod probe;
 mod stream;
 mod wire;

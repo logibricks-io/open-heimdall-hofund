@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Codex ChatGPT backend rewrites tool names outside `^[a-zA-Z0-9_.-]+$` for
+  upstream acceptance and maps them back in replies (D-57).
+
+- LongCat vendor preset with OpenAI and Anthropic bases on api.longcat.chat (D-60).
+
+- Per-provider `pass_headers` forwards listed client request header names to that
+  provider only, overriding fixed `headers` of the same name; forbidden names are
+  rejected at config load (D-62).
+
+- Message thread continuations on `/v1/messages` are refused with HTTP 400 so
+  clients resend full conversation history (D-63).
+
 ### Fixed
 
 - Vendor overload (HTTP 529 or a 5xx whose message says overloaded) rests

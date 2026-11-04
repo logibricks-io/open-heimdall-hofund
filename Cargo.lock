@@ -2221,6 +2221,7 @@ dependencies = [
  "bytes",
  "futures-util",
  "hofund-codec",
+ "hofund-config",
  "hofund-ir",
  "hofund-plugin-api",
  "hofund-plugin-sdk",

@@ -14,6 +14,7 @@ use serde::Deserialize;
 use thiserror::Error;
 
 mod migrate;
+pub mod pass_headers;
 mod visible;
 
 pub use visible::{
@@ -386,6 +387,8 @@ pub struct Provider {
     pub quirks: Option<String>,
     /// Extra request headers.
     pub headers: BTreeMap<String, String>,
+    /// Client request header names copied from each agent call.
+    pub pass_headers: Vec<String>,
     /// Output cap used when the client omits `max_tokens`.
     ///
     /// A route member can override this. Absent leaves the cap to a quirk
@@ -1220,6 +1223,7 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
             .map(|entry| parse_fallback(&provider.id, entry))
             .collect::<Result<Vec<_>, _>>()?;
         let at_once = validated_at_once("provider", &provider.id, provider.at_once)?;
+        let pass_headers = pass_headers::validated(&provider.id, provider.pass_headers)?;
         let family =
             visible::validated_family("provider", &provider.id, provider.family.as_deref())?;
         let mut model_list = provider.models;
@@ -1239,6 +1243,7 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
             at_once,
             quirks: provider.quirks,
             headers: provider.headers,
+            pass_headers,
             max_output_tokens: provider.max_output_tokens,
             free: provider.free,
             fallback,
@@ -2364,6 +2369,8 @@ struct RawProvider {
     quirks: Option<String>,
     #[serde(default)]
     headers: BTreeMap<String, String>,
+    #[serde(default)]
+    pass_headers: Vec<String>,
     #[serde(default)]
     max_output_tokens: Option<u64>,
     #[serde(default)]
