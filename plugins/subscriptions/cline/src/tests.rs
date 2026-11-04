@@ -358,3 +358,21 @@ fn prettify_names_models() {
         "Claude Sonnet 5.5"
     );
 }
+
+#[test]
+fn a2a_43_client_headers_identify_as_cline_desktop() {
+    let headers = crate::client::headers(Some("task-1"));
+    let get = |name: &str| {
+        headers
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.as_str())
+    };
+    assert_eq!(get("X-CLIENT-TYPE"), Some("cline-desktop"));
+    assert_eq!(get("X-Task-ID"), Some("task-1"));
+    assert!(
+        crate::client::headers(Some(""))
+            .iter()
+            .all(|(key, _)| key != "X-Task-ID")
+    );
+}
