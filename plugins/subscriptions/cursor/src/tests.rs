@@ -48,6 +48,7 @@ fn subscription_with_agent_home(
     raw.insert("command", RawValue::String(PROGRAM.to_owned()));
     let mut factory = factory_with_endpoints(endpoints());
     factory.test_agent_home = agent_home;
+    factory.skip_keychain = true;
     let cfg = factory.validate(&raw).expect("config");
     factory.build(&cfg, host.context()).expect("build")
 }
@@ -509,4 +510,42 @@ fn a2a_42_list_models_spawn_uses_isolated_models_dir() {
         spawn.env_var("CURSOR_CONFIG_DIR"),
         Some(override_home.as_os_str())
     );
+}
+
+#[test]
+fn a2a_43_agent_quota_uses_auth_json_when_keychain_read_fails() {
+    let dir = tempfile::tempdir().expect("dir");
+    let agent_home = dir.path().join("agent");
+    let token = jwt("keychain-fallback@example.test", 4_000_000_000);
+    write_auth(&agent_home.join("auth.json"), &token);
+    let host = host(&dir);
+    let mut raw = RawTable::new();
+    raw.insert("command", RawValue::String(PROGRAM.to_owned()));
+    let mut factory = factory_with_endpoints(endpoints());
+    factory.test_agent_home = Some(agent_home);
+    factory.skip_keychain = false;
+    let cfg = factory.validate(&raw).expect("config");
+    let sub = factory.build(&cfg, host.context()).expect("build");
+    let id = account_id_from(&["cursor", "keychain-fallback@example.test"]);
+    let blob = tokens::blob_agent("keychain-fallback@example.test", None);
+    let account = host
+        .context()
+        .accounts()
+        .account(id.clone(), "keychain-fallback@example.test")
+        .expect("account");
+    block_on(host.context().accounts().upsert(account, blob.to_secret())).expect("upsert");
+    let period_url = endpoints().dashboard("GetCurrentPeriodUsage");
+    host.http().enqueue_response(
+        200,
+        &[("content-type", "application/json")],
+        br#"{"billingCycleEnd":"1792833042000","planUsage":{"autoPercentUsed":1,"apiPercentUsed":2,"totalPercentUsed":3}}"#,
+    );
+    let windows = block_on(sub.quota(&id, host.context())).expect("quota");
+    assert_eq!(windows.len(), 3);
+    assert!(
+        host.process().programs().is_empty(),
+        "quota must not spawn cursor-agent when auth.json is fresh"
+    );
+    let calls = host.http().calls();
+    assert!(calls.iter().any(|call| call.uri().contains(&period_url)));
 }

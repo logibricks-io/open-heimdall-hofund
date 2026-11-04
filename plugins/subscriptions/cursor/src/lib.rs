@@ -52,6 +52,7 @@ pub fn factory_with_endpoints(endpoints: Endpoints) -> CursorFactory {
     CursorFactory {
         endpoints: Arc::new(endpoints),
         test_agent_home: None,
+        skip_keychain: false,
     }
 }
 
@@ -62,6 +63,9 @@ pub struct CursorFactory {
     /// When set, agent refresh and token reads use this directory instead of the OS default.
     #[doc(hidden)]
     pub test_agent_home: Option<PathBuf>,
+    /// When true, macOS keychain reads are skipped (tests).
+    #[doc(hidden)]
+    pub skip_keychain: bool,
 }
 
 /// Validated plugin config.
@@ -123,6 +127,7 @@ impl SubscriptionFactory for CursorFactory {
                 .test_agent_home
                 .clone()
                 .unwrap_or_else(auth::default_agent_home),
+            skip_keychain: self.skip_keychain,
         }))
     }
 }
@@ -134,6 +139,7 @@ struct Cursor {
     pending: Mutex<HashMap<String, sign_in::BrowserPending>>,
     keychain: Mutex<cli::KeychainCache>,
     agent_home: PathBuf,
+    skip_keychain: bool,
 }
 
 impl Cursor {
@@ -283,7 +289,7 @@ impl Subscription for Cursor {
         let blob = SecretObject::parse(&secret)?;
         if tokens::is_agent(&blob) {
             let home = self.agent_home().to_path_buf();
-            let token = cli::live_access(host, &home, false, &self.keychain)
+            let token = cli::live_access(host, &home, false, &self.keychain, self.skip_keychain)
                 .await?
                 .unwrap_or_default();
             let now = host.clock().now();
@@ -309,6 +315,7 @@ impl Subscription for Cursor {
             self.agent_home(),
             self.program().ok(),
             &self.keychain,
+            self.skip_keychain,
         )
         .await?;
         let body =
@@ -328,6 +335,7 @@ impl Subscription for Cursor {
             self.agent_home(),
             self.program().ok(),
             &self.keychain,
+            self.skip_keychain,
         )
         .await?;
         let program = self.program()?;

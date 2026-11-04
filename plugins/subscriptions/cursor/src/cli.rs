@@ -21,6 +21,9 @@ pub(crate) const MODELS_WAIT: Duration = Duration::from_secs(30);
 /// How long a keychain read is reused.
 const KEYCHAIN_TTL: Duration = Duration::from_secs(10);
 
+/// macOS `security(1)` used for keychain reads.
+const SECURITY: &str = "/usr/bin/security";
+
 /// Cached macOS keychain token reads for one subscription instance.
 #[derive(Default)]
 pub(crate) struct KeychainCache {
@@ -44,30 +47,27 @@ impl KeychainCache {
     }
 }
 
-/// Whether macOS keychain reads are skipped (tests or `HOFUND_CURSOR_SKIP_KEYCHAIN`).
-pub(crate) fn skip_keychain() -> bool {
-    std::env::var("HOFUND_CURSOR_SKIP_KEYCHAIN")
-        .ok()
-        .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-}
-
 /// Reads cursor-agent's token from the macOS keychain when allowed.
+///
+/// Spawn or read failures yield an empty string so callers can fall back to
+/// `auth.json`. This call must not fail the surrounding operation.
 pub(crate) async fn keychain_token(
     host: &HostContext,
     cache: &Mutex<KeychainCache>,
     fresh: bool,
-) -> Result<String, PluginError> {
-    if !cfg!(target_os = "macos") || skip_keychain() {
-        return Ok(String::new());
+    skip: bool,
+) -> String {
+    if !cfg!(target_os = "macos") || skip {
+        return String::new();
     }
     if !fresh
         && let Ok(guard) = cache.lock()
         && let Some(token) = guard.cached_token()
     {
-        return Ok(token);
+        return token;
     }
-    let request = SpawnRequest::new(
-        PathBuf::from("security"),
+    let Ok(request) = SpawnRequest::new(
+        PathBuf::from(SECURITY),
         [
             "find-generic-password",
             "-s",
@@ -81,9 +81,15 @@ pub(crate) async fn keychain_token(
         .collect(),
         vec![],
         std::env::temp_dir(),
-    )?;
-    let child = host.spawn_process().spawn_piped(&request).await?;
-    let mut stdout = child.stdout()?;
+    ) else {
+        return String::new();
+    };
+    let Ok(child) = host.spawn_process().spawn_piped(&request).await else {
+        return String::new();
+    };
+    let Ok(mut stdout) = child.stdout() else {
+        return String::new();
+    };
     let token = collect(&mut stdout, 4096)
         .await
         .unwrap_or_default()
@@ -93,7 +99,7 @@ pub(crate) async fn keychain_token(
     if let Ok(mut guard) = cache.lock() {
         guard.store(token.clone());
     }
-    Ok(token)
+    token
 }
 
 /// Live access token: keychain on macOS, else auth.json.
@@ -102,8 +108,9 @@ pub(crate) async fn live_access(
     agent_home: &Path,
     fresh: bool,
     cache: &Mutex<KeychainCache>,
+    skip_keychain: bool,
 ) -> Result<Option<String>, PluginError> {
-    let keychain = keychain_token(host, cache, fresh).await?;
+    let keychain = keychain_token(host, cache, fresh, skip_keychain).await;
     if !keychain.is_empty() {
         return Ok(Some(keychain));
     }
@@ -149,33 +156,4 @@ pub(crate) fn program(configured: Option<&PathBuf>) -> Result<PathBuf, PluginErr
                 "cursor-agent is not installed: it is not on PATH; install it or set `command`",
             )
         })
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn strips_ansi_colour_codes() {
-        assert_eq!(
-            strip_ansi("\u{1b}[4mhttps://example.test/x\u{1b}[24m"),
-            "https://example.test/x"
-        );
-    }
-
-    #[allow(clippy::while_let_on_iterator)]
-    fn strip_ansi(text: &str) -> String {
-        let mut out = String::with_capacity(text.len());
-        let mut chars = text.chars().peekable();
-        while let Some(ch) = chars.next() {
-            if ch == '\u{1b}' {
-                while let Some(next) = chars.next() {
-                    if next.is_ascii_alphabetic() {
-                        break;
-                    }
-                }
-                continue;
-            }
-            out.push(ch);
-        }
-        out
-    }
 }

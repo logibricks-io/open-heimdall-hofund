@@ -380,6 +380,14 @@ claude-4.6-sonnet-medium-thinking - Claude Sonnet 4.6 1M Thinking\ncomposer-2.5 
     }
 
     #[test]
+    fn strip_ansi_removes_escape_sequences() {
+        assert_eq!(
+            strip_ansi("\u{1b}[4mhttps://example.test/x\u{1b}[24m"),
+            "https://example.test/x"
+        );
+    }
+
+    #[test]
     fn context_from_name() {
         assert_eq!(
             cursor_context("claude-opus-4-7-low", "Claude Opus 4.7 1M Low"),

@@ -15,6 +15,7 @@ pub(crate) async fn access_token(
     agent_home: &Path,
     program: Option<PathBuf>,
     keychain: &Mutex<KeychainCache>,
+    skip_keychain: bool,
 ) -> Result<SecretString, PluginError> {
     let secret = host
         .accounts()
@@ -23,7 +24,14 @@ pub(crate) async fn access_token(
         .ok_or_else(|| PluginError::auth("no Cursor sign-in is stored for this account"))?;
     let blob = tokens::parse_blob(&secret)?;
     if is_agent(&blob) {
-        return agent_token(host, agent_home, program.as_deref(), keychain).await;
+        return agent_token(
+            host,
+            agent_home,
+            program.as_deref(),
+            keychain,
+            skip_keychain,
+        )
+        .await;
     }
     let access = blob
         .secret(tokens::ACCESS)
@@ -49,9 +57,10 @@ async fn agent_token(
     agent_home: &Path,
     program: Option<&Path>,
     keychain: &Mutex<KeychainCache>,
+    skip_keychain: bool,
 ) -> Result<SecretString, PluginError> {
     let now = host.clock().now();
-    let mut token = cli::live_access(host, agent_home, false, keychain)
+    let mut token = cli::live_access(host, agent_home, false, keychain, skip_keychain)
         .await?
         .unwrap_or_default();
     if token.is_empty() || tokens::near_expiry(now, tokens::jwt_expiry_ms(&token)) {
@@ -61,7 +70,7 @@ async fn agent_token(
             )
         })?;
         crate::refresh::agent_status(host, program, agent_home).await?;
-        token = cli::live_access(host, agent_home, true, keychain)
+        token = cli::live_access(host, agent_home, true, keychain, skip_keychain)
             .await?
             .unwrap_or_default();
     }
