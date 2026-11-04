@@ -55,6 +55,7 @@ mod plans;
 mod pricing;
 mod probe;
 mod provider_keys;
+mod quota_alerts;
 mod quotas;
 mod registry;
 mod rests;
@@ -670,6 +671,11 @@ async fn start_inner(
     );
     let maintenance = runtime.spawn_maintenance();
     let subscriptions = runtime.spawn_subscriptions();
+    let quota_alert_watch = crate::quota_alerts::spawn_watch(
+        Arc::clone(&runtime),
+        Arc::clone(runtime.quota_alerts()),
+        Arc::clone(runtime.alert_wake()),
+    );
     let warmups = crate::warmup::spawn(
         Arc::clone(&runtime),
         Arc::clone(runtime.warmup()),
@@ -686,6 +692,7 @@ async fn start_inner(
         .with_task(refresh)
         .with_task(maintenance)
         .with_task(subscriptions)
+        .with_task(quota_alert_watch)
         .with_task(warmups)
         .with_task(checkins)
         .with_task(probes))

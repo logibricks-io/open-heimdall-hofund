@@ -29,12 +29,12 @@ use hofund_control_proto::{
     GatewayKeyResponse, GatewayKeyRestoreRequest, HealthResponse, MAX_ID_BYTES,
     MAX_REQUEST_BODY_BYTES, ModelListResponse, PicksResponse, PicksSetRequest, ProviderKeyRequest,
     ProviderKeysResponse, ProviderListResponse, ProviderTestRequest, ProviderTestResponse,
-    QuotaCreditsModesResponse, QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryQuery,
-    QuotaHistoryResponse, QuotaQuery, QuotaResponse, ReloadRequest, RouteListResponse,
-    RouteModelListResponse, RouteQuery, SessionRouteResponse, ShutdownRequest, ShutdownResponse,
-    StatusResponse, TokenRotateRequest, TokenRotateResponse, Topic, UnroutedListResponse,
-    UsageQuery, UsageResponse, WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
-    decode_request,
+    QuotaAlertsResponse, QuotaAlertsSetRequest, QuotaAlertsSetResponse, QuotaCreditsModesResponse,
+    QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryQuery, QuotaHistoryResponse,
+    QuotaQuery, QuotaResponse, ReloadRequest, RouteListResponse, RouteModelListResponse,
+    RouteQuery, SessionRouteResponse, ShutdownRequest, ShutdownResponse, StatusResponse,
+    TokenRotateRequest, TokenRotateResponse, Topic, UnroutedListResponse, UsageQuery,
+    UsageResponse, WarmupListResponse, WarmupRunRequest, WarmupRunResponse, decode_request,
 };
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
@@ -391,6 +391,31 @@ pub trait ControlState: Send + Sync {
             .into())
         })
     }
+    /// Reads quota alert thresholds.
+    fn quota_alerts(&self) -> ControlFuture<'_, QuotaAlertsResponse> {
+        Box::pin(async {
+            Err(ControlError::new(
+                ControlErrorKind::BadRequest,
+                "quota alerts are not supported by this control state",
+                "control",
+            )
+            .into())
+        })
+    }
+    /// Sets quota alert thresholds.
+    fn set_quota_alerts(
+        &self,
+        _request: QuotaAlertsSetRequest,
+    ) -> ControlFuture<'_, QuotaAlertsSetResponse> {
+        Box::pin(async {
+            Err(ControlError::new(
+                ControlErrorKind::BadRequest,
+                "quota alert settings are not supported by this control state",
+                "control",
+            )
+            .into())
+        })
+    }
     /// Lists last daily warm-up results per subscription account.
     fn warmups(&self) -> ControlFuture<'_, WarmupListResponse> {
         Box::pin(async {
@@ -652,6 +677,11 @@ impl Control {
                 "/v1/hofund/quotas/credits/settings",
                 post(set_quota_credits),
             )
+            .route(
+                "/v1/hofund/quotas/alerts",
+                get(quota_alerts).head(method_not_allowed),
+            )
+            .route("/v1/hofund/quotas/alerts/settings", post(set_quota_alerts))
             .route("/v1/hofund/warmups", get(warmups).head(method_not_allowed))
             .route("/v1/hofund/warmups/run", post(run_warmup))
             .route(
@@ -1330,6 +1360,18 @@ async fn set_quota_credits(State(state): State<HttpState>, body: Bytes) -> Respo
         Err(failure) => return failure_response(failure),
     };
     operation_response!(state.control.state.set_quota_credits(request).await)
+}
+
+async fn quota_alerts(State(state): State<HttpState>) -> Response {
+    operation_response!(state.control.state.quota_alerts().await)
+}
+
+async fn set_quota_alerts(State(state): State<HttpState>, body: Bytes) -> Response {
+    let request = match decode_body::<QuotaAlertsSetRequest>(&body) {
+        Ok(request) => request,
+        Err(failure) => return failure_response(failure),
+    };
+    operation_response!(state.control.state.set_quota_alerts(request).await)
 }
 
 async fn warmups(State(state): State<HttpState>) -> Response {

@@ -27,6 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `hofund checkin` CLI (A-3b). Vendor HTTP helpers for Trae CN, MiniMax Code,
   and Qoder live in `hofund-plugin-sdk`; no shipped subscription plugin wires
   them yet.
+- Quota and usage alerts: `hofund quota alert`, daemon `quota_alert` control
+  events, and `GET/POST /v1/hofund/quotas/alerts(/settings)` (AL-1).
 
 - Relayed native Responses replies mark namespaced `function_call` items with
   empty `encrypted_function_args` when the upstream omitted the field, so Codex

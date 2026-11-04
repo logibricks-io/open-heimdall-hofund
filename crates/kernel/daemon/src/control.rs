@@ -15,12 +15,13 @@ use hofund_control_proto::{
     GatewayKeyRestoreRequest, HealthResponse, ModelEntry, ModelListResponse, PicksResponse,
     PicksSetRequest, ProviderKeyRequest, ProviderKeysResponse, ProviderListResponse,
     ProviderSummary, ProviderTestRequest, ProviderTestResponse, ProviderTestResult,
-    QuotaCreditsModesResponse, QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryQuery,
-    QuotaHistoryResponse, QuotaQuery, QuotaResponse, RouteListResponse, RouteModel,
-    RouteModelListResponse, RouteQuery, RouteReserve, SessionRouteResponse, ShutdownRequest,
-    ShutdownResponse, ShutdownState, StatusResponse, TokenRotateRequest, TokenRotateResponse,
-    UnroutedListResponse, UsagePeriod, UsageQuery, UsageResponse, UsageRow, UsageTotals,
-    WarmupAccountRow, WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
+    QuotaAlertsResponse, QuotaAlertsSetRequest, QuotaAlertsSetResponse, QuotaCreditsModesResponse,
+    QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryQuery, QuotaHistoryResponse,
+    QuotaQuery, QuotaResponse, RouteListResponse, RouteModel, RouteModelListResponse, RouteQuery,
+    RouteReserve, SessionRouteResponse, ShutdownRequest, ShutdownResponse, ShutdownState,
+    StatusResponse, TokenRotateRequest, TokenRotateResponse, UnroutedListResponse, UsagePeriod,
+    UsageQuery, UsageResponse, UsageRow, UsageTotals, WarmupAccountRow, WarmupListResponse,
+    WarmupRunRequest, WarmupRunResponse,
 };
 use hofund_control_proto::{
     ConfigApplyRequest, ConfigResponse, ConfigValidateRequest, ConfigValidationResponse,
@@ -851,6 +852,29 @@ impl ControlState for DaemonControl {
                 return Err(internal("quota credits settings are not available".to_owned()).into());
             };
             crate::credits_modes::set(&runtime, runtime.credits_modes(), request).await
+        })
+    }
+
+    fn quota_alerts(&self) -> ControlFuture<'_, QuotaAlertsResponse> {
+        let runtime = self.runtime.clone();
+        Box::pin(async move {
+            let Some(runtime) = runtime else {
+                return Err(internal("quota alerts are not available".to_owned()).into());
+            };
+            Ok(crate::quota_alerts::list(runtime.quota_alerts()))
+        })
+    }
+
+    fn set_quota_alerts(
+        &self,
+        request: QuotaAlertsSetRequest,
+    ) -> ControlFuture<'_, QuotaAlertsSetResponse> {
+        let runtime = self.runtime.clone();
+        Box::pin(async move {
+            let Some(runtime) = runtime else {
+                return Err(internal("quota alert settings are not available".to_owned()).into());
+            };
+            crate::quota_alerts::set(runtime.quota_alerts(), runtime.alert_wake(), request)
         })
     }
 

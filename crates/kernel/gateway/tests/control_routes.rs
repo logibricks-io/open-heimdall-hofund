@@ -13,10 +13,11 @@ use hofund_control_proto::{
     CheckinListResponse, CheckinRunRequest, CheckinRunResponse, ControlError, ControlErrorKind,
     ErrorEnvelope, HealthResponse, MAX_REQUEST_BODY_BYTES, ModelListResponse, PicksResponse,
     PicksSetRequest, ProviderListResponse, ProviderTestRequest, ProviderTestResponse,
-    QuotaCreditsModesResponse, QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryQuery,
-    QuotaHistoryResponse, QuotaQuery, QuotaResponse, RouteModelListResponse, ShutdownRequest,
-    ShutdownResponse, StatusResponse, TokenRotateRequest, TokenRotateResponse, UsageQuery,
-    UsageResponse, WarmupListResponse, WarmupRunRequest, WarmupRunResponse, decode_error_envelope,
+    QuotaAlertsResponse, QuotaAlertsSetRequest, QuotaAlertsSetResponse, QuotaCreditsModesResponse,
+    QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryQuery, QuotaHistoryResponse,
+    QuotaQuery, QuotaResponse, RouteModelListResponse, ShutdownRequest, ShutdownResponse,
+    StatusResponse, TokenRotateRequest, TokenRotateResponse, UsageQuery, UsageResponse,
+    WarmupListResponse, WarmupRunRequest, WarmupRunResponse, decode_error_envelope,
 };
 use hofund_control_proto::{
     ConfigApplyRequest, ConfigResponse, ConfigValidateRequest, ConfigValidationResponse,
@@ -181,6 +182,21 @@ impl ControlState for FakeControlState {
         self.reply(format!(
             "set_quota_credits:{}:{}:{}",
             request.provider, request.user, request.mode
+        ))
+    }
+
+    fn quota_alerts(&self) -> ControlFuture<'_, QuotaAlertsResponse> {
+        self.reply("quota_alerts")
+    }
+
+    fn set_quota_alerts(
+        &self,
+        request: QuotaAlertsSetRequest,
+    ) -> ControlFuture<'_, QuotaAlertsSetResponse> {
+        self.reply(format!(
+            "set_quota_alerts:{}:{}",
+            request.usage_alert.unwrap_or(255),
+            request.balance_alert.unwrap_or(-1.0)
         ))
     }
 
