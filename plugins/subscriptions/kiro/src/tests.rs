@@ -516,3 +516,13 @@ fn a2b_34_history_and_system_prompt_are_encoded() {
     streaming.stream = true;
     assert!(crate::kiro_body::reject_unsupported(&streaming).is_err());
 }
+
+#[test]
+fn a2b_44_kiro_region_prefers_profile_arn_then_eu_fallback() {
+    assert_eq!(
+        creds::kiro_region("arn:aws:codewhisperer:us-west-2:1:profile/P", "eu-west-1"),
+        "us-west-2"
+    );
+    assert_eq!(creds::kiro_region("", "eu-west-1"), "eu-central-1");
+    assert_eq!(creds::kiro_region("", "ap-south-1"), "us-east-1");
+}
