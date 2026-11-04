@@ -1,5 +1,6 @@
 //! Stored account session material.
 
+use std::path::Path;
 use std::time::SystemTime;
 
 use hofund_plugin_api::{AccountId, HostContext, PluginError, SecretString};
@@ -33,35 +34,31 @@ pub(crate) async fn load(
     host: &HostContext,
     endpoints: &crate::Endpoints,
     account: &AccountId,
+    device_file: &Path,
 ) -> Result<Stored, PluginError> {
     let Some(secret) = host.accounts().secret(account).await? else {
         return Err(PluginError::auth(
             "no Z Code sign-in is stored for this account",
         ));
     };
-    parse_loaded(host, endpoints, &secret).await
+    parse_loaded(host, endpoints, &secret, device_file).await
 }
 
 pub(crate) async fn parse_loaded(
     host: &HostContext,
     endpoints: &crate::Endpoints,
     secret: &SecretString,
+    device_file: &Path,
 ) -> Result<Stored, PluginError> {
-    let blob = SecretObject::parse(secret)?;
+    let _ = SecretObject::parse(secret)?;
     let auth = creds::parse_secret(secret)?;
-    let device = blob
-        .text("device")
-        .filter(|value| !value.is_empty())
-        .unwrap_or("00000000-0000-4000-8000-000000000000")
-        .to_owned();
-    let _ = device;
-    let mut api_key = auth
-        .api_key
-        .clone()
-        .or(auth.jwt.clone())
-        .ok_or_else(|| PluginError::auth("the stored Z Code sign-in has no plan key"))?;
-    if auth.team() && auth.api_key.is_none() {
-        api_key = team::resolve_project_key(host, endpoints, &auth).await?;
-    }
+    let api_key = if auth.team() && auth.api_key.is_none() {
+        team::resolve_project_key(host, endpoints, &auth, device_file).await?
+    } else {
+        auth.api_key
+            .clone()
+            .or(auth.jwt.clone())
+            .ok_or_else(|| PluginError::auth("the stored Z Code sign-in has no plan key"))?
+    };
     Ok(Stored { auth, api_key })
 }

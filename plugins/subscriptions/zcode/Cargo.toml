@@ -1,6 +1,6 @@
 [package]
 name = "hofund-plugin-subscription-zcode"
-description = "Z Code subscription: agent credential import, device sign-in, GLM plan upstream, and quota reads."
+description = "Z Code subscription: agent credential import, GLM plan upstream, and quota reads."
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
@@ -12,7 +12,7 @@ rust-version.workspace = true
 
 [dependencies]
 hofund-plugin-api = { workspace = true }
-hofund-plugin-sdk = { workspace = true }
+hofund-plugin-sdk = { workspace = true, features = ["enc-v1-test"] }
 
 [dev-dependencies]
 hofund-kit-subscription = { workspace = true }

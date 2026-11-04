@@ -60,6 +60,7 @@ pub mod register;
 pub mod sigv4;
 pub mod time;
 pub mod transport;
+pub mod uuid;
 pub mod wire;
 
 pub use oauth::{AccessToken, TokenError, form_body, parse_access_token, refresh_form};

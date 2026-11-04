@@ -1,24 +1,29 @@
 //! Team plan project API key resolution.
 
+use std::path::Path;
+
 use hofund_plugin_api::{HostContext, PluginError, SecretString};
 use hofund_plugin_sdk::json::Value;
+use hofund_plugin_sdk::oauth::secret_text;
 
 use crate::Endpoints;
 use crate::api;
-use crate::creds::PlanAuth;
+use crate::creds::{PlanAuth, Site};
 
 pub(crate) async fn resolve_project_key(
     host: &HostContext,
     endpoints: &Endpoints,
     auth: &PlanAuth,
+    device_file: &Path,
 ) -> Result<SecretString, PluginError> {
-    resolve(host, endpoints, auth).await
+    resolve(host, endpoints, auth, device_file).await
 }
 
 pub(crate) async fn resolve(
     host: &HostContext,
     endpoints: &Endpoints,
     auth: &PlanAuth,
+    device_file: &Path,
 ) -> Result<SecretString, PluginError> {
     let token = auth
         .team_token
@@ -34,14 +39,14 @@ pub(crate) async fn resolve(
         "{biz}/api/biz/v1/organization/{}/projects/{}/api_keys",
         auth.org, auth.project
     );
-    let device_path = std::sync::Mutex::new(None);
+    let auth_header = business_authorization(auth, token);
     let data = api::get_envelope(&api::EnvelopeRequest::get(
         host,
         endpoints,
         &list_url,
-        Some(token),
+        Some(&auth_header),
         &header_refs,
-        &device_path,
+        device_file,
     ))
     .await?;
     let key_id = find_team_key_id(&data)?;
@@ -53,18 +58,28 @@ pub(crate) async fn resolve(
         host,
         endpoints,
         &copy_url,
-        Some(token),
+        Some(&auth_header),
         &header_refs,
-        &device_path,
+        device_file,
     ))
     .await?;
     let text = secret
         .get("secret")
         .or_else(|| secret.get("apiKeySecret"))
+        .or_else(|| secret.get("secretKey"))
         .and_then(Value::as_str)
         .filter(|value| value.contains('.'))
         .ok_or_else(|| PluginError::decode("Z Code team key copy returned no secret"))?;
     Ok(SecretString::from(text.to_owned()))
+}
+
+pub(crate) fn business_authorization(auth: &PlanAuth, token: &SecretString) -> SecretString {
+    let raw = secret_text(token);
+    if auth.site == Site::Zai && !raw.starts_with("Bearer ") {
+        SecretString::from(format!("Bearer {raw}"))
+    } else {
+        token.clone()
+    }
 }
 
 fn find_team_key_id(data: &Value) -> Result<String, PluginError> {
@@ -109,4 +124,58 @@ pub(crate) fn team_headers(base: &str, org: &str, project: &str) -> Vec<(&'stati
         ("set-language", lang.to_owned()),
         ("accept-language", "en-US,en".to_owned()),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{business_authorization, team_headers};
+    use crate::creds::{PlanAuth, Site};
+    use crate::{BIGMODEL_ANTHROPIC_BASE, ZAI_ANTHROPIC_BASE};
+    use hofund_plugin_api::SecretString;
+    use hofund_plugin_sdk::oauth::secret_text;
+
+    #[test]
+    fn a2d_14_business_authorization_bearer_on_zai_only() {
+        let token = SecretString::from("biz-token".to_owned());
+        let zai = PlanAuth {
+            api_key: None,
+            jwt: None,
+            team_token: Some(token.clone()),
+            org: "o".to_owned(),
+            project: "p".to_owned(),
+            base: ZAI_ANTHROPIC_BASE.to_owned(),
+            site: Site::Zai,
+            uid: String::new(),
+            label: String::new(),
+            follow_agent: false,
+            agent_credentials: None,
+        };
+        let bigmodel = PlanAuth {
+            site: Site::Bigmodel,
+            base: BIGMODEL_ANTHROPIC_BASE.to_owned(),
+            team_token: Some(token.clone()),
+            org: zai.org.clone(),
+            project: zai.project.clone(),
+            api_key: None,
+            jwt: None,
+            uid: String::new(),
+            label: String::new(),
+            follow_agent: false,
+            agent_credentials: None,
+        };
+        assert_eq!(
+            secret_text(&business_authorization(&zai, &token.clone())),
+            "Bearer biz-token"
+        );
+        assert_eq!(
+            secret_text(&business_authorization(&bigmodel, &token)),
+            "biz-token"
+        );
+        let headers = team_headers(ZAI_ANTHROPIC_BASE, "org", "proj");
+        assert!(
+            headers
+                .iter()
+                .any(|(name, _)| *name == "bigmodel-organization")
+        );
+    }
 }

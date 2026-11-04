@@ -1,5 +1,6 @@
 //! Anthropic Messages upstream on the GLM plan base URL.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use hofund_plugin_api::{
@@ -15,19 +16,32 @@ pub(crate) struct ZcodeUpstream {
     account: AccountId,
     host: HostContext,
     endpoints: Arc<Endpoints>,
+    device_file: PathBuf,
 }
 
 impl ZcodeUpstream {
-    pub(crate) fn new(account: AccountId, host: HostContext, endpoints: Arc<Endpoints>) -> Self {
+    pub(crate) fn new(
+        account: AccountId,
+        host: HostContext,
+        endpoints: Arc<Endpoints>,
+        device_file: PathBuf,
+    ) -> Self {
         Self {
             account,
             host,
             endpoints,
+            device_file,
         }
     }
 
     async fn stored(&self) -> Result<session::Stored, PluginError> {
-        session::load(&self.host, &self.endpoints, &self.account).await
+        session::load(
+            &self.host,
+            &self.endpoints,
+            &self.account,
+            &self.device_file,
+        )
+        .await
     }
 }
 

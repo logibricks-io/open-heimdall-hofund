@@ -3,7 +3,6 @@
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use ring::aead::{AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
-use ring::rand::{SecureRandom, SystemRandom};
 
 /// Decrypts `enc:v1:<iv>.<tag>.<ciphertext>` with a 32-byte AES key.
 #[must_use]
@@ -45,8 +44,10 @@ fn decode_b64url(text: &str) -> Option<Vec<u8>> {
 /// # Panics
 ///
 /// Panics when `key` is not a valid AES-256 key length or encryption fails.
+#[cfg(any(test, feature = "enc-v1-test"))]
 #[must_use]
 pub fn encrypt_for_test(key: &[u8], plain: &str) -> String {
+    use ring::rand::{SecureRandom, SystemRandom};
     let unbound = UnboundKey::new(&AES_256_GCM, key).expect("key length");
     let sealing_key = LessSafeKey::new(unbound);
     let rng = SystemRandom::new();
@@ -67,13 +68,13 @@ pub fn encrypt_for_test(key: &[u8], plain: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{decrypt, encrypt_for_test};
+    use super::decrypt;
     use crate::digest::sha256;
 
     #[test]
     fn round_trip_matches_zcode_layout() {
         let key = sha256(b"test-seed");
-        let enc = encrypt_for_test(&key, "secret-value");
+        let enc = super::encrypt_for_test(&key, "secret-value");
         assert!(enc.starts_with("enc:v1:"));
         assert_eq!(decrypt(&key, &enc).as_deref(), Some("secret-value"));
     }

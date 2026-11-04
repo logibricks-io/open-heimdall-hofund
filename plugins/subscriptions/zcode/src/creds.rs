@@ -6,7 +6,7 @@ use hofund_plugin_api::{PluginError, SecretString};
 use hofund_plugin_sdk::digest::sha256;
 use hofund_plugin_sdk::enc_v1;
 use hofund_plugin_sdk::json::{self, Value};
-use hofund_plugin_sdk::oauth::{SecretObject, account_id_from, secret_text, unverified_claims};
+use hofund_plugin_sdk::oauth::{SecretObject, account_id_from, unverified_claims};
 
 use crate::{BIGMODEL_ANTHROPIC_BASE, ZAI_ANTHROPIC_BASE};
 
@@ -40,18 +40,6 @@ impl PlanAuth {
 
     pub(crate) fn ready_key(&self) -> Option<&SecretString> {
         self.api_key.as_ref().or(self.jwt.as_ref())
-    }
-
-    pub(crate) fn biz_auth_bearer(&self) -> Option<String> {
-        if self.team() {
-            self.team_token
-                .as_ref()
-                .map(|token| secret_text(token).to_owned())
-        } else {
-            self.api_key
-                .as_ref()
-                .map(|token| secret_text(token).to_owned())
-        }
     }
 }
 

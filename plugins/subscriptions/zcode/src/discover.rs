@@ -37,7 +37,7 @@ pub(crate) async fn store(
     home: &Path,
     host: &HostContext,
 ) -> Result<AccountId, PluginError> {
-    let mid = device::device_mid(&std::sync::Mutex::new(None))?;
+    let mid = device::device_mid(&device::device_path(host)?)?;
     let id = creds::account_id_for(auth);
     let account = host.accounts().account(id.clone(), auth.label.clone())?;
     host.accounts()

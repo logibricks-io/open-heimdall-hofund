@@ -79,6 +79,7 @@ mod register
 mod sigv4
 mod time
 mod transport
+mod uuid
 mod wire
 next_cursor
 oauth::AccessToken
@@ -224,6 +225,7 @@ transport::fn retry_after_from_body (body : & [u8]) -> Option < Duration >
 transport::fn status_for_error (body : & [u8]) -> u16
 transport::fn text_response (status : u16 , body : impl AsRef < [u8] >) -> HttpResponse
 url
+uuid::fn v4 () -> std :: io :: Result < String >
 wire::Rewrite
 wire::Sent
 wire::Sent::async fn complete (self) -> Result < Completion , PluginError >

@@ -1,7 +1,6 @@
 //! Z.ai JSON envelope HTTP helpers.
 
-use std::path::PathBuf;
-use std::sync::Mutex;
+use std::path::Path;
 
 use hofund_plugin_api::{HostContext, PluginError, SecretString};
 use hofund_plugin_sdk::Call;
@@ -19,7 +18,7 @@ pub(crate) struct EnvelopeRequest<'a> {
     pub auth: Option<&'a SecretString>,
     pub extra_headers: &'a [(&'a str, &'a str)],
     pub body: Option<&'a Value>,
-    pub device_path: &'a Mutex<Option<PathBuf>>,
+    pub device_file: &'a Path,
 }
 
 impl<'a> EnvelopeRequest<'a> {
@@ -29,7 +28,7 @@ impl<'a> EnvelopeRequest<'a> {
         url: &'a str,
         auth: Option<&'a SecretString>,
         extra_headers: &'a [(&'a str, &'a str)],
-        device_path: &'a Mutex<Option<PathBuf>>,
+        device_file: &'a Path,
     ) -> Self {
         Self {
             host,
@@ -39,7 +38,7 @@ impl<'a> EnvelopeRequest<'a> {
             auth,
             extra_headers,
             body: None,
-            device_path,
+            device_file,
         }
     }
 }
@@ -57,7 +56,7 @@ pub(crate) async fn call(req: &EnvelopeRequest<'_>) -> Result<Value, PluginError
         auth,
         extra_headers,
         body,
-        device_path,
+        device_file,
     } = req;
     let payload = body
         .map(json::to_vec)
@@ -77,7 +76,7 @@ pub(crate) async fn call(req: &EnvelopeRequest<'_>) -> Result<Value, PluginError
         .header("accept", "application/json")
         .header("user-agent", format!("ZCode/{APP_VERSION}"));
     if url.starts_with(&format!("{}/", endpoints.portal.trim_end_matches('/'))) {
-        call = call.header("x-device-mid", device_mid(device_path)?);
+        call = call.header("x-device-mid", device_mid(device_file)?);
     }
     if let Some(token) = auth {
         call = call.sensitive_header("authorization", secret_text(token));

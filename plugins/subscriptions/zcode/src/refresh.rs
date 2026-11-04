@@ -7,12 +7,12 @@ use hofund_plugin_sdk::oauth::SecretObject;
 
 use crate::Endpoints;
 use crate::creds;
-use crate::device;
 
 pub(crate) async fn run(
     host: &HostContext,
     _endpoints: &Endpoints,
     account: &AccountId,
+    device_file: &Path,
 ) -> Result<(), PluginError> {
     let Some(secret) = host.accounts().secret(account).await? else {
         return Err(PluginError::auth(
@@ -29,9 +29,18 @@ pub(crate) async fn run(
     {
         let home = agent_home_from_credentials(path);
         let fresh = creds::parse_agent_home(&home)?;
-        let mid = blob.text("device").map(str::to_owned).unwrap_or_else(|| {
-            device::device_mid(&std::sync::Mutex::new(None)).unwrap_or_default()
-        });
+        if creds::account_id_for(&fresh) != *account {
+            return Err(PluginError::auth(
+                "the Z Code app is signed in to a different account than this import",
+            ));
+        }
+        let mid = blob
+            .text("device")
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| {
+                crate::device::device_mid(device_file).unwrap_or_else(|_| String::new())
+            });
         let account_row = host
             .accounts()
             .account(account.clone(), fresh.label.clone())?;

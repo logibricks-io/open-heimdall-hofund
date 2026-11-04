@@ -1,19 +1,17 @@
 //! Z Code (Z.ai) subscription.
 //!
-//! Imports the agent's encrypted credential store, optional device sign-in on
-//! zcode.z.ai, resolves team plan keys when needed, lists GLM models, reads
-//! personal or team package resets, and serves Anthropic Messages on the plan
-//! API base.
+//! Imports the agent's encrypted credential store, resolves team plan keys when
+//! needed, lists GLM models, reads personal or team monitor quota, and serves
+//! Anthropic Messages on the plan API base.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use hofund_plugin_api::{
-    AccountId, AccountStatus, AgentSignIn, BuildError, ConfigError, HeaderName, HostContext,
-    ModelList, PluginError, PluginId, QuotaWindow, RawTable, Schema, SignInChallenge, SignInCtx,
-    SignInFlow, SignInFlowKind, SignInProof, Subscription, SubscriptionFactory, SubscriptionSpec,
-    UpstreamProvider, ValidConfig,
+    AccountId, AccountStatus, AgentSignIn, BinaryName, BuildError, ConfigError, HeaderName,
+    HostContext, ModelList, PluginError, PluginId, QuotaWindow, RawTable, Schema, SignInChallenge,
+    SignInCtx, SignInFlow, SignInFlowKind, SignInProof, Subscription, SubscriptionFactory,
+    SubscriptionSpec, UpstreamProvider, ValidConfig,
 };
 use hofund_plugin_sdk::Contribution;
 
@@ -33,7 +31,7 @@ mod upstream;
 pub(crate) const ZAI_ANTHROPIC_BASE: &str = "https://api.z.ai/api/anthropic";
 /// Anthropic-compatible API for BigModel individual plans.
 pub(crate) const BIGMODEL_ANTHROPIC_BASE: &str = "https://open.bigmodel.cn/api/anthropic";
-/// Z Code portal used for device sign-in and device headers.
+/// Z Code portal root (device mid header scope on portal URLs).
 pub(crate) const ZCODE_PORTAL: &str = "https://zcode.z.ai";
 /// Z.ai business API origin.
 pub(crate) const ZAI_BIZ: &str = "https://api.z.ai";
@@ -49,7 +47,7 @@ pub(crate) const AGENT_SIGN_IN: AgentSignIn =
 static SPEC: SubscriptionSpec = SubscriptionSpec::from_static(
     PluginId::from_static("zcode"),
     "Z Code",
-    SignInFlowKind::Device,
+    SignInFlowKind::Bridge,
 )
 .with_agent_sign_in(AGENT_SIGN_IN);
 
@@ -63,24 +61,14 @@ pub fn contribute() -> Contribution {
 #[doc(hidden)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Endpoints {
-    /// Device-code authorization URL on zcode.z.ai.
-    pub device_authorize: String,
-    /// Device-code token URL on zcode.z.ai.
-    pub device_token: String,
-    /// Page where the user enters the device code.
-    pub device_page: String,
     /// Plan portal root (device mid header scope).
     pub portal: String,
 }
 
 impl Default for Endpoints {
     fn default() -> Self {
-        let portal = ZCODE_PORTAL.to_owned();
         Self {
-            device_authorize: format!("{portal}/api/v1/oauth/device/code"),
-            device_token: format!("{portal}/api/v1/oauth/device/token"),
-            device_page: format!("{portal}/device"),
-            portal,
+            portal: ZCODE_PORTAL.to_owned(),
         }
     }
 }
@@ -101,7 +89,6 @@ impl Endpoints {
 pub fn factory_with_endpoints(endpoints: Endpoints) -> ZcodeFactory {
     ZcodeFactory {
         endpoints: Arc::new(endpoints),
-        device_mid_path: Arc::new(Mutex::new(None)),
     }
 }
 
@@ -110,7 +97,6 @@ pub fn factory_with_endpoints(endpoints: Endpoints) -> ZcodeFactory {
 #[derive(Clone, Debug)]
 pub struct ZcodeFactory {
     endpoints: Arc<Endpoints>,
-    device_mid_path: Arc<Mutex<Option<PathBuf>>>,
 }
 
 /// Validated config: no options yet.
@@ -142,38 +128,24 @@ impl SubscriptionFactory for ZcodeFactory {
     fn build(
         &self,
         _cfg: &Self::Config,
-        _host: &HostContext,
+        host: &HostContext,
     ) -> Result<Arc<dyn Subscription>, BuildError> {
+        let device_file =
+            device::device_path(host).map_err(|error| BuildError::new(error.message()))?;
         Ok(Arc::new(Zcode {
             endpoints: Arc::clone(&self.endpoints),
-            flow: SignInFlow::Device(
-                hofund_plugin_api::DeviceFlow::new("zcode.z.ai")
-                    .map_err(|error| BuildError::new(error.message()))?,
-            ),
-            pending: Mutex::new(HashMap::new()),
-            device_mid_path: Arc::clone(&self.device_mid_path),
+            flow: SignInFlow::Bridge {
+                command: BinaryName::new("zcode"),
+            },
+            device_file,
         }))
     }
-}
-
-struct Pending {
-    device: device::DevicePending,
 }
 
 struct Zcode {
     endpoints: Arc<Endpoints>,
     flow: SignInFlow,
-    pending: Mutex<HashMap<String, Pending>>,
-    device_mid_path: Arc<Mutex<Option<PathBuf>>>,
-}
-
-impl Zcode {
-    fn take_pending(&self, session: &str) -> Option<Pending> {
-        self.pending
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(session)
-    }
+    device_file: PathBuf,
 }
 
 #[hofund_plugin_sdk::async_trait]
@@ -188,55 +160,30 @@ impl Subscription for Zcode {
 
     async fn start_sign_in(
         &self,
-        ctx: &SignInCtx,
-        host: &HostContext,
+        _ctx: &SignInCtx,
+        _host: &HostContext,
     ) -> Result<SignInChallenge, PluginError> {
-        let pending = device::start(host, &self.endpoints, &self.device_mid_path).await?;
-        let page = device::verification_page(&self.endpoints);
-        let challenge = SignInChallenge::device_code(pending.start.user_code().to_owned(), page)?;
-        self.pending
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(ctx.session().to_owned(), Pending { device: pending });
-        Ok(challenge)
+        Err(PluginError::unsupported(
+            "Sign in with the Z Code app, then import with agent discovery or agent connect",
+        ))
     }
 
     async fn complete_sign_in(
         &self,
-        ctx: &SignInCtx,
-        proof: SignInProof,
-        host: &HostContext,
+        _ctx: &SignInCtx,
+        _proof: SignInProof,
+        _host: &HostContext,
     ) -> Result<AccountId, PluginError> {
-        let SignInProof::Await = proof else {
-            return Err(PluginError::config(
-                "Z Code device sign-in completes once the code is entered on zcode.z.ai",
-            ));
-        };
-        let Some(pending) = self.take_pending(ctx.session()) else {
-            return Err(PluginError::config(
-                "no Z Code sign-in is in progress for this session",
-            ));
-        };
-        let signed_in = device::finish(
-            host,
-            &self.endpoints,
-            &pending.device,
-            &self.device_mid_path,
-        )
-        .await?;
-        let account = host
-            .accounts()
-            .account(signed_in.id.clone(), signed_in.label)?;
-        host.accounts().upsert(account, signed_in.secret).await?;
-        Ok(signed_in.id)
+        Err(PluginError::unsupported(
+            "Sign in with the Z Code app, then import with agent discovery or agent connect",
+        ))
     }
 
     async fn cancel_sign_in(
         &self,
-        ctx: &SignInCtx,
+        _ctx: &SignInCtx,
         _host: &HostContext,
     ) -> Result<(), PluginError> {
-        let _ = self.take_pending(ctx.session());
         Ok(())
     }
 
@@ -245,7 +192,7 @@ impl Subscription for Zcode {
         account: &AccountId,
         host: &HostContext,
     ) -> Result<AccountStatus, PluginError> {
-        match session::load(host, &self.endpoints, account).await {
+        match session::load(host, &self.endpoints, account, &self.device_file).await {
             Ok(stored) if stored.ready(host.clock().now()) => Ok(AccountStatus::Ready),
             Ok(_) => Ok(needs_sign_in("the stored Z Code sign-in has expired")),
             Err(error) if error.kind() == hofund_plugin_api::PluginErrorKind::Auth => {
@@ -256,7 +203,7 @@ impl Subscription for Zcode {
     }
 
     async fn refresh(&self, account: &AccountId, host: &HostContext) -> Result<(), PluginError> {
-        refresh::run(host, &self.endpoints, account).await
+        refresh::run(host, &self.endpoints, account, &self.device_file).await
     }
 
     async fn quota(
@@ -264,8 +211,8 @@ impl Subscription for Zcode {
         account: &AccountId,
         host: &HostContext,
     ) -> Result<Vec<QuotaWindow>, PluginError> {
-        let stored = session::load(host, &self.endpoints, account).await?;
-        quota::read(host, &self.endpoints, &stored).await
+        let stored = session::load(host, &self.endpoints, account, &self.device_file).await?;
+        quota::read(host, &stored, &self.device_file).await
     }
 
     async fn list_models(
@@ -273,7 +220,7 @@ impl Subscription for Zcode {
         account: &AccountId,
         host: &HostContext,
     ) -> Result<ModelList, PluginError> {
-        let stored = session::load(host, &self.endpoints, account).await?;
+        let stored = session::load(host, &self.endpoints, account, &self.device_file).await?;
         models::list(host, &self.endpoints, &stored).await
     }
 
@@ -286,6 +233,7 @@ impl Subscription for Zcode {
             account.clone(),
             host.clone(),
             Arc::clone(&self.endpoints),
+            self.device_file.clone(),
         )))
     }
 
