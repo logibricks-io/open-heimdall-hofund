@@ -170,7 +170,7 @@ mod tests {
     static EMPTY_AGENTS: &[&AgentDescription] = &[];
 
     #[test]
-    fn zeroed_main_file_reads_backup() {
+    fn g1_7_zeroed_main_file_reads_backup() {
         let dir = tempfile::tempdir().expect("dir");
         let config = dir.path().join("hofund.toml");
         fs::write(&config, "[gateway]\nlisten = \"127.0.0.1:0\"\n").expect("config");
