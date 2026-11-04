@@ -61,7 +61,7 @@ impl ProfileStore {
         if trimmed.is_empty() {
             return Err("profile name is empty".to_owned());
         }
-        let mut profiles = self.load().unwrap_or_default();
+        let mut profiles = self.load()?;
         profiles.insert(trimmed.to_owned(), fields);
         self.store(profiles)
     }
@@ -88,9 +88,6 @@ impl ProfileStore {
             }
             Err(error) => return Err(format!("{}: {error}", self.path.display())),
         };
-        if bytes.iter().all(|byte| *byte == 0) {
-            return self.read_backup();
-        }
         match toml::from_str::<ProfilesDocument>(
             &String::from_utf8(bytes).map_err(|error| error.to_string())?,
         ) {
@@ -181,8 +178,10 @@ mod tests {
             BTreeMap::from([("codex.model".to_owned(), "a".to_owned())]),
         );
         store.store(profiles).expect("store");
+        fs::copy(&store.path, &store.backup).expect("seed backup");
         fs::write(&store.path, vec![0_u8; 512]).expect("zero");
-        let loaded = store.load().expect("load");
+        let fresh = ProfileStore::new(&config, EMPTY_AGENTS);
+        let loaded = fresh.load().expect("load");
         assert_eq!(
             loaded
                 .get("work")
@@ -190,5 +189,105 @@ mod tests {
                 .map(String::as_str),
             Some("a")
         );
+    }
+
+    #[test]
+    fn g1_12_corrupt_main_reads_valid_backup() {
+        let dir = tempfile::tempdir().expect("dir");
+        let config = dir.path().join("hofund.toml");
+        fs::write(&config, "[gateway]\nlisten = \"127.0.0.1:0\"\n").expect("config");
+        let store = ProfileStore::new(&config, EMPTY_AGENTS);
+        let mut profiles = BTreeMap::new();
+        profiles.insert(
+            "saved".to_owned(),
+            BTreeMap::from([("agent.field".to_owned(), "from-backup".to_owned())]),
+        );
+        store.store(profiles).expect("seed");
+        fs::copy(&store.path, &store.backup).expect("seed backup");
+        fs::write(&store.path, b"{{not valid toml").expect("corrupt main");
+        let fresh = ProfileStore::new(&config, EMPTY_AGENTS);
+        let loaded = fresh.load().expect("load from backup");
+        assert_eq!(
+            loaded
+                .get("saved")
+                .and_then(|fields| fields.get("agent.field"))
+                .map(String::as_str),
+            Some("from-backup")
+        );
+    }
+
+    #[test]
+    fn g1_13_store_refreshes_backup_with_previous_main() {
+        let dir = tempfile::tempdir().expect("dir");
+        let config = dir.path().join("hofund.toml");
+        fs::write(&config, "[gateway]\nlisten = \"127.0.0.1:0\"\n").expect("config");
+        let store = ProfileStore::new(&config, EMPTY_AGENTS);
+        let first = BTreeMap::from([(
+            "alpha".to_owned(),
+            BTreeMap::from([("a".to_owned(), "1".to_owned())]),
+        )]);
+        store.store(first).expect("first write");
+        let before = fs::read(&store.path).expect("read main");
+        let mut second = BTreeMap::new();
+        second.insert(
+            "beta".to_owned(),
+            BTreeMap::from([("b".to_owned(), "2".to_owned())]),
+        );
+        store.store(second).expect("second write");
+        let backup = fs::read(&store.backup).expect("read backup");
+        assert_eq!(backup, before);
+    }
+
+    #[test]
+    fn g1_14_delete_unknown_profile_errors() {
+        let dir = tempfile::tempdir().expect("dir");
+        let config = dir.path().join("hofund.toml");
+        fs::write(&config, "[gateway]\nlisten = \"127.0.0.1:0\"\n").expect("config");
+        let store = ProfileStore::new(&config, EMPTY_AGENTS);
+        let error = store.delete("missing").expect_err("delete unknown profile");
+        assert!(error.contains("missing"));
+    }
+
+    #[test]
+    fn g1_15_empty_profile_name_errors() {
+        let dir = tempfile::tempdir().expect("dir");
+        let config = dir.path().join("hofund.toml");
+        fs::write(&config, "[gateway]\nlisten = \"127.0.0.1:0\"\n").expect("config");
+        let store = ProfileStore::new(&config, EMPTY_AGENTS);
+        let fields = BTreeMap::from([("a".to_owned(), "b".to_owned())]);
+        store
+            .save("   ", fields.clone())
+            .expect_err("whitespace name");
+        store.save("", fields).expect_err("empty name");
+    }
+
+    #[test]
+    fn g1_16_save_fails_when_profiles_unreadable() {
+        let dir = tempfile::tempdir().expect("dir");
+        let config = dir.path().join("hofund.toml");
+        fs::write(&config, "[gateway]\nlisten = \"127.0.0.1:0\"\n").expect("config");
+        let root = crate::beside(&config, ".hofund");
+        fs::create_dir_all(&root).expect("mkdir");
+        let path = root.join("profiles.toml");
+        let backup = root.join("profiles.toml.bak");
+        let good = r#"
+[profiles.alpha]
+a = "1"
+
+[profiles.beta]
+b = "2"
+"#;
+        fs::write(&path, good).expect("write main");
+        fs::write(&backup, b"{{bad backup").expect("bad backup");
+        fs::write(&path, b"{{bad main").expect("corrupt main");
+        let store = ProfileStore::new(&config, EMPTY_AGENTS);
+        let fields = BTreeMap::from([("x".to_owned(), "y".to_owned())]);
+        let error = store
+            .save("gamma", fields)
+            .expect_err("save must not drop profiles");
+        assert!(error.contains("profiles.toml"), "unexpected error: {error}");
+        let still = fs::read_to_string(&path).expect("main untouched");
+        assert!(still.contains("{{bad main"));
+        assert!(!still.contains("[profiles.gamma]"));
     }
 }

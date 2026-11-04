@@ -104,3 +104,14 @@ fn secret_value(value: &str) -> bool {
         || trimmed.starts_with("eyJ")
         || (trimmed.len() >= 32 && trimmed.chars().all(|ch| ch.is_ascii_alphanumeric()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::profile_field_rank;
+
+    #[test]
+    fn g1_11_profile_field_rank_orders_provider_before_model() {
+        assert!(profile_field_rank("agent.provider") < profile_field_rank("agent.model"));
+        assert!(profile_field_rank("agent.model") < profile_field_rank("agent.other"));
+    }
+}

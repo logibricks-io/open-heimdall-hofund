@@ -23,6 +23,9 @@ static ROUTE_SETS: &[AgentSet] = &[
     AgentSet::from_static("config", "models", Slot::CatalogModels),
     AgentSet::from_static("config", "model", Slot::model_if_unset(None)),
     AgentSet::from_static("config", "literal", Slot::Literal("kept")),
+    AgentSet::from_static("config", "api_key", Slot::Literal("")),
+    AgentSet::from_static("config", "note", Slot::Literal("")),
+    AgentSet::from_static("config", "provider", Slot::Literal("")),
 ];
 static ROUTE_NONE: AgentDescription = AgentDescription::from_static(
     PluginId::from_static("route-none"),
@@ -157,4 +160,61 @@ fn g1_6_partial_profile_leaves_missing_fields() {
     let value: serde_json::Value = serde_json::from_str(&text).expect("json");
     assert!(value.get("model").is_none());
     assert_eq!(value["extra"], "stay");
+}
+
+#[test]
+fn g1_8_token_slot_never_snapshotted_even_with_plain_value() {
+    let home = scratch();
+    install(home.path());
+    fs::write(
+        home.path().join(".route").join("config.json"),
+        r#"{"model":"m","token":"plain-session-label","literal":"kept"}"#,
+    )
+    .expect("write");
+    let session = Session::new(home.path());
+    let catalog = catalog_from(LIST).expect("catalog");
+    let snapshot = snapshot_fields(&catalog, &session).expect("snapshot");
+    assert!(!snapshot.contains_key("route-none.token"));
+}
+
+#[test]
+fn g1_9_secret_name_excludes_plain_value() {
+    let home = scratch();
+    install(home.path());
+    fs::write(
+        home.path().join(".route").join("config.json"),
+        r#"{"model":"m","api_key":"plain-not-a-token","literal":"kept"}"#,
+    )
+    .expect("write");
+    let session = Session::new(home.path());
+    let catalog = catalog_from(LIST).expect("catalog");
+    let snapshot = snapshot_fields(&catalog, &session).expect("snapshot");
+    assert!(!snapshot.contains_key("route-none.api_key"));
+    assert!(is_profile_secret("route-none.api_key", "plain-not-a-token"));
+}
+
+#[test]
+fn g1_10_secret_value_excludes_key_like_strings() {
+    let sk = "sk-test12345678901234567890123456789012";
+    let opaque = "abcdefghijklmnopqrstuvwxyz0123456789AB";
+    assert!(opaque.len() >= 32);
+    assert!(is_profile_secret("route-none.note", sk));
+    assert!(is_profile_secret("route-none.note", opaque));
+    assert!(!is_profile_secret("route-none.literal", "kept-value"));
+
+    let home = scratch();
+    install(home.path());
+    fs::write(
+        home.path().join(".route").join("config.json"),
+        format!(r#"{{"model":"m","note":"{sk}","literal":"kept-value"}}"#),
+    )
+    .expect("write");
+    let session = Session::new(home.path());
+    let catalog = catalog_from(LIST).expect("catalog");
+    let snapshot = snapshot_fields(&catalog, &session).expect("snapshot");
+    assert!(!snapshot.contains_key("route-none.note"));
+    assert_eq!(
+        snapshot.get("route-none.literal").map(String::as_str),
+        Some("kept-value")
+    );
 }
