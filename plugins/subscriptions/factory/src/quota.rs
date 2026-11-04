@@ -50,9 +50,7 @@ fn pool_windows(
 }
 
 fn window_end(value: Option<&Value>) -> Option<std::time::SystemTime> {
-    let Some(value) = value else {
-        return None;
-    };
+    let value = value?;
     if let Some(text) = value.as_str() {
         return parse_rfc3339(text);
     }
@@ -72,10 +70,7 @@ pub(crate) fn windows_from_limits(value: &Value) -> Result<Vec<QuotaWindow>, Plu
         &mut out,
     )?;
     pool_windows(
-        limits
-            .get("core")
-            .or_else(|| limits.get("Core"))
-            .or_else(|| value.get("limits").and_then(|l| l.get("core"))),
+        limits.get("core").or_else(|| limits.get("Core")),
         "Droid Core · ",
         &mut out,
     )?;
