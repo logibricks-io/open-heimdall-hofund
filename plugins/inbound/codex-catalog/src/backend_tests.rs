@@ -2024,6 +2024,67 @@ fn d68_6_client_fallback_header_has_no_effect() {
 }
 
 #[test]
+fn d68_8_second_fallback_succeeds_after_first_fails() {
+    let refuse = r#"{"error":{"code":"usage_limit_reached","message":"upstream refuse"}}"#;
+    let ok = r#"{"id":"r2","object":"response","status":"completed","output":[{"type":"message","content":[]}]}"#;
+    let stub = Stub::default()
+        .relay_fallbacks(&["bad/demo", "good/demo"])
+        .listing(&[])
+        .sending(answer(429, refuse))
+        .calling(answer(429, r#"{"error":"first fallback failed"}"#))
+        .calling(answer(200, ok));
+    let request = request(
+        "POST",
+        "/backend-api/codex/responses",
+        &[],
+        r#"{"model":"gpt-5-codex","input":[{"type":"message","role":"user","content":"hi"}]}"#,
+    );
+    let (status, _, body) = ask(&stub, request);
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("\"id\":\"r2\""), "{body}");
+    let routed: Vec<_> = stub
+        .called()
+        .into_iter()
+        .filter(|seen| seen.uri == "/v1/responses")
+        .collect();
+    assert_eq!(routed.len(), 2, "both fallbacks should be tried");
+    assert!(
+        String::from_utf8(routed[0].body.clone())
+            .expect("utf-8")
+            .contains("bad/demo")
+    );
+    assert!(
+        String::from_utf8(routed[1].body.clone())
+            .expect("utf-8")
+            .contains("good/demo")
+    );
+}
+
+#[test]
+fn d68_9_all_fallbacks_fail_restores_upstream_refusal() {
+    let refuse = r#"{"error":{"code":"usage_limit_reached","message":"keep-this-upstream"}}"#;
+    let stub = Stub::default()
+        .relay_fallbacks(&["bad/a", "bad/b"])
+        .listing(&[])
+        .sending(answer(429, refuse))
+        .calling(answer(503, r#"{"error":"fallback-a"}"#))
+        .calling(answer(503, r#"{"error":"fallback-b"}"#));
+    let request = request(
+        "POST",
+        "/backend-api/codex/responses",
+        &[],
+        r#"{"model":"m","input":[]}"#,
+    );
+    let (status, _, body) = ask(&stub, request);
+    assert_eq!(status, 429, "{body}");
+    assert!(
+        body.contains("keep-this-upstream"),
+        "original refusal must be relayed: {body}"
+    );
+    assert!(!body.contains("fallback-a"), "{body}");
+}
+
+#[test]
 fn d68_7_api_key_request_does_not_fall_back() {
     let refuse = r#"{"error":{"code":"usage_limit_reached"}}"#;
     let stub = Stub::default()

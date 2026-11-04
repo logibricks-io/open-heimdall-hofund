@@ -414,3 +414,6 @@ mod backend_tests;
 
 #[cfg(test)]
 mod input_tests;
+
+#[cfg(test)]
+mod account_refusal_tests;

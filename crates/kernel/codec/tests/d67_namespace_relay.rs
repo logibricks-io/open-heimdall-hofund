@@ -51,7 +51,22 @@ fn d67_2_sealed_and_plain_calls_are_unchanged() {
 }
 
 #[test]
-fn d67_3_relay_tap_applies_only_for_routed_models() {
+fn d67_3_non_function_call_with_namespace_is_unchanged() {
+    let item = json!({
+        "type": "message",
+        "role": "assistant",
+        "namespace": "collaboration",
+        "content": [{"type":"output_text","text":"hi"}],
+    });
+    let whole = json!({"object":"response","output":[item]});
+    let tidied = namespace_tidy::tidy_whole(whole.to_string().into_bytes());
+    let value: serde_json::Value = serde_json::from_slice(&tidied).expect("json");
+    assert!(value["output"][0].get("encrypted_function_args").is_none());
+    assert_eq!(value["output"][0]["namespace"], "collaboration");
+}
+
+#[test]
+fn d67_4_relay_tap_applies_only_for_routed_models() {
     let codec = OpenAiResponses;
     let call = r#"{"type":"function_call","name":"spawn_agent","namespace":"collaboration","arguments":"{}"}"#;
     let line = format!("data: {{\"type\":\"response.output_item.done\",\"item\":{call}}}\n\n");

@@ -3076,6 +3076,26 @@ mod tests {
     }
 
     #[test]
+    fn d68_codex_relay_fallbacks_empty_without_codex_subscription() {
+        let config = load(
+            r#"
+            [[providers]]
+            id = "codex"
+            preset = "openai"
+            fallback = ["backup/demo"]
+            [[providers]]
+            id = "backup"
+            preset = "openai"
+            "#,
+        )
+        .expect("provider without subscription");
+        assert!(
+            super::codex_chatgpt_relay_fallbacks(&config).is_empty(),
+            "fallbacks require a codex subscription even when a codex provider exists"
+        );
+    }
+
+    #[test]
     fn d2_group_members_keep_their_manual_order() {
         let config = load(
             r#"

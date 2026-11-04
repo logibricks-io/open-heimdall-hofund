@@ -60,7 +60,68 @@ fn d66_3_file_citation_with_one_index_is_kept() {
 }
 
 #[test]
-fn d66_4_relay_tap_strips_bad_citation_from_stream_line() {
+fn d66_4_container_file_citation_without_offsets_is_dropped() {
+    let bad = json!({"type":"container_file_citation","container_id":"c1","filename":"x.txt"});
+    let whole = json!({
+        "object": "response",
+        "output": [{
+            "type": "message",
+            "content": [{
+                "type": "output_text",
+                "text": "see file",
+                "annotations": [bad],
+            }],
+        }],
+    });
+    let tidied = citation_tidy::tidy_whole(whole.to_string().into_bytes());
+    let text = String::from_utf8(tidied).expect("utf-8");
+    assert!(!text.contains("container_id"), "{text}");
+    assert!(text.contains("see file"), "{text}");
+}
+
+#[test]
+fn d66_5_citation_with_start_but_no_end_is_dropped() {
+    let partial = json!({"type":"url_citation","start_index":0,"url":"https://example.com/p"});
+    assert!(citation_tidy::annotation_lacks_offsets(&partial));
+    let whole = json!({
+        "object": "response",
+        "output": [{
+            "type": "message",
+            "content": [{
+                "type": "output_text",
+                "text": "link",
+                "annotations": [partial],
+            }],
+        }],
+    });
+    let tidied = citation_tidy::tidy_whole(whole.to_string().into_bytes());
+    let text = String::from_utf8(tidied).expect("utf-8");
+    assert!(!text.contains("example.com/p"), "{text}");
+    assert!(text.contains("link"), "{text}");
+}
+
+#[test]
+fn d66_6_non_output_text_part_annotations_are_untouched() {
+    let bad = json!({"type":"url_citation","url":"https://example.com/v","title":"V"});
+    let whole = json!({
+        "object": "response",
+        "output": [{
+            "type": "message",
+            "content": [{
+                "type": "output_image",
+                "image_url": "https://example.com/i.png",
+                "annotations": [bad.clone()],
+            }],
+        }],
+    });
+    let tidied = citation_tidy::tidy_whole(whole.to_string().into_bytes());
+    let text = String::from_utf8(tidied).expect("utf-8");
+    assert!(text.contains("example.com/v"), "{text}");
+    assert!(text.contains("output_image"), "{text}");
+}
+
+#[test]
+fn d66_7_relay_tap_strips_bad_citation_from_stream_line() {
     let codec = OpenAiResponses;
     let mut tap = codec.raw_tap("vendor/m", "m");
     let good =
