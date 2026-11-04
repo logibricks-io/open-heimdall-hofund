@@ -2064,8 +2064,8 @@ mod tests {
         );
         assert!(responses.ends_with("\n\n"), "{responses}");
 
-        let overloaded =
-            String::from_utf8(OpenAiResponses.encode_stream_error(502, "overloaded")).expect("utf-8");
+        let overloaded = String::from_utf8(OpenAiResponses.encode_stream_error(502, "overloaded"))
+            .expect("utf-8");
         assert!(overloaded.contains("server_is_overloaded"), "{overloaded}");
 
         let chat = String::from_utf8(OpenAiChat.encode_stream_error(500, "nope")).expect("utf-8");
