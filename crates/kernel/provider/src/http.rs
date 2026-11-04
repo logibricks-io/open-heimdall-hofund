@@ -637,7 +637,7 @@ async fn send<'a>(
         {
             beta_retried = true;
             body = stripped;
-            response = send_json(upstream, url, body.clone()).await?;
+            response = send_json(upstream, url, body.clone(), outbound.clone()).await?;
             continue;
         }
         if !thinking_back_retried
@@ -650,7 +650,7 @@ async fn send<'a>(
             if filled != whole {
                 thinking_back_retried = true;
                 body = filled;
-                response = send_json(upstream, url, body.clone()).await?;
+                response = send_json(upstream, url, body.clone(), outbound.clone()).await?;
                 continue;
             }
         }
