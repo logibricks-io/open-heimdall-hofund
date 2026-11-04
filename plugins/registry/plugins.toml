@@ -27,6 +27,13 @@ package = "hofund-plugin-subscription-claude"
 feature = "claude"
 
 [[plugin]]
+id = "cline"
+kind = "subscription"
+path = "plugins/subscriptions/cline"
+package = "hofund-plugin-subscription-cline"
+feature = "cline"
+
+[[plugin]]
 id = "codex"
 kind = "subscription"
 path = "plugins/subscriptions/codex"
@@ -48,6 +55,13 @@ package = "hofund-plugin-subscription-copilot"
 feature = "copilot"
 
 [[plugin]]
+id = "cursor"
+kind = "subscription"
+path = "plugins/subscriptions/cursor"
+package = "hofund-plugin-subscription-cursor"
+feature = "cursor"
+
+[[plugin]]
 id = "echo"
 kind = "inbound"
 path = "plugins/inbound/echo"
@@ -67,6 +81,13 @@ kind = "provider"
 path = "plugins/providers/google-vertex"
 package = "hofund-plugin-google-vertex"
 feature = "google-vertex"
+
+[[plugin]]
+id = "grok"
+kind = "subscription"
+path = "plugins/subscriptions/grok"
+package = "hofund-plugin-subscription-grok"
+feature = "grok"
 
 [[plugin]]
 id = "muse"

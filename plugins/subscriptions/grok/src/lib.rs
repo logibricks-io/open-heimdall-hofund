@@ -1,0 +1,539 @@
+//! Grok Build subscription.
+//!
+//! Sign-in runs `grok login --device-auth` in a directory of its own, shows
+//! the link it prints, and waits for the CLI to finish. hofund keeps the
+//! token and the CLI home path, renews the sign-in with `grok models`, reads
+//! models and billing from the CLI backend, and serves it as an OpenAI
+//! Responses upstream.
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use hofund_plugin_api::{
+    AccountId, AccountStatus, AgentSignIn, BinaryName, BuildError, ConfigError, HostContext,
+    ModelList, PipedChild, PluginError, PluginId, QuotaWindow, RawTable, RawValue, Schema,
+    SignInChallenge, SignInCtx, SignInFlow, SignInFlowKind, SignInProof, Subscription,
+    SubscriptionFactory, SubscriptionSpec, UpstreamProvider, ValidConfig,
+};
+use hofund_plugin_sdk::Contribution;
+
+mod agent_sign_in;
+mod cli;
+mod creds;
+mod discover;
+mod headers;
+mod models;
+mod quota;
+mod refresh;
+mod shape;
+mod upstream;
+
+/// The CLI command this subscription drives.
+pub(crate) const COMMAND: BinaryName = BinaryName::new("grok");
+
+/// Sign-in option that imports the CLI's existing home instead of device auth.
+pub(crate) const CURRENT_SITE: &str = "current";
+
+const LINK_WAIT: Duration = Duration::from_secs(30);
+const LOGIN_WAIT: Duration = Duration::from_secs(600);
+
+static SPEC: SubscriptionSpec = SubscriptionSpec::from_static(
+    PluginId::from_static("grok"),
+    "Grok Build",
+    SignInFlowKind::Bridge,
+)
+.with_agent_sign_in(AgentSignIn::new(&["grok"], "GROK_HOME", ".grok"));
+
+/// Registers the Grok Build subscription.
+#[must_use]
+pub fn contribute() -> Contribution {
+    Contribution::new().subscription(factory_with_endpoints(Endpoints::default()))
+}
+
+/// Where the plugin sends requests. Tests point it at mocks.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Endpoints {
+    /// The CLI backend base; requests go to `{base}/responses`.
+    pub base: String,
+}
+
+impl Default for Endpoints {
+    fn default() -> Self {
+        Self {
+            base: "https://cli-chat-proxy.grok.com/v1".to_owned(),
+        }
+    }
+}
+
+/// Builds the factory against `endpoints`.
+#[doc(hidden)]
+#[must_use]
+pub fn factory_with_endpoints(endpoints: Endpoints) -> GrokFactory {
+    GrokFactory {
+        endpoints: Arc::new(endpoints),
+    }
+}
+
+/// Builds Grok Build subscription instances.
+#[doc(hidden)]
+#[derive(Clone, Debug)]
+pub struct GrokFactory {
+    endpoints: Arc<Endpoints>,
+}
+
+/// The validated config.
+#[doc(hidden)]
+#[derive(Clone, Debug)]
+pub struct GrokConfig {
+    command: Option<PathBuf>,
+    x_search: bool,
+}
+
+impl ValidConfig for GrokConfig {}
+
+impl SubscriptionFactory for GrokFactory {
+    type Config = GrokConfig;
+
+    fn spec(&self) -> &'static SubscriptionSpec {
+        &SPEC
+    }
+
+    fn config_schema(&self) -> Schema {
+        Schema::object(
+            vec![
+                ("command".to_owned(), Schema::string()),
+                ("x_search".to_owned(), Schema::boolean()),
+            ],
+            &[],
+        )
+        .expect("the config schema is valid")
+    }
+
+    fn validate(&self, raw: &RawTable) -> Result<Self::Config, ConfigError> {
+        for key in raw.keys() {
+            if key != "command" && key != "x_search" {
+                return Err(ConfigError::new("unknown key").with_path(key));
+            }
+        }
+        let command = match raw.get("command") {
+            None => None,
+            Some(RawValue::String(value)) => {
+                let path = PathBuf::from(value.trim());
+                if !path.is_absolute() {
+                    return Err(
+                        ConfigError::new("command must be an absolute path").with_path("command")
+                    );
+                }
+                Some(path)
+            }
+            Some(_) => {
+                return Err(ConfigError::new("command must be a string").with_path("command"));
+            }
+        };
+        let x_search = match raw.get("x_search") {
+            None => false,
+            Some(RawValue::Boolean(value)) => *value,
+            Some(_) => {
+                return Err(ConfigError::new("x_search must be a boolean").with_path("x_search"));
+            }
+        };
+        Ok(GrokConfig { command, x_search })
+    }
+
+    fn build(
+        &self,
+        cfg: &Self::Config,
+        _host: &HostContext,
+    ) -> Result<Arc<dyn Subscription>, BuildError> {
+        Ok(Arc::new(Grok {
+            endpoints: Arc::clone(&self.endpoints),
+            command: cfg.command.clone(),
+            x_search: cfg.x_search,
+            flow: SignInFlow::Bridge { command: COMMAND },
+            pending: Mutex::new(HashMap::new()),
+        }))
+    }
+}
+
+enum Pending {
+    Login {
+        home: PathBuf,
+        #[allow(dead_code)]
+        child: PipedChild,
+        stdout: hofund_plugin_api::BodyStream,
+        last: String,
+    },
+    Current {
+        home: PathBuf,
+    },
+}
+
+struct Grok {
+    endpoints: Arc<Endpoints>,
+    command: Option<PathBuf>,
+    x_search: bool,
+    flow: SignInFlow,
+    pending: Mutex<HashMap<String, Pending>>,
+}
+
+impl Grok {
+    fn take_pending(&self, session: &str) -> Option<Pending> {
+        self.pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(session)
+    }
+
+    fn program(&self) -> Result<PathBuf, PluginError> {
+        cli::program(self.command.as_ref())
+    }
+
+    fn program_fn(&self) -> Arc<dyn Fn() -> Result<PathBuf, PluginError> + Send + Sync> {
+        let command = self.command.clone();
+        Arc::new(move || cli::program(command.as_ref()))
+    }
+}
+
+fn sign_in_dir(host: &HostContext, ctx: &SignInCtx) -> Result<PathBuf, PluginError> {
+    Ok(host.dirs().state_dir()?.join("signin").join(ctx.session()))
+}
+
+fn remove_dir(dir: &Path) {
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+fn user_home() -> Result<PathBuf, PluginError> {
+    let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE"));
+    let Ok(home) = home else {
+        return Err(PluginError::io("cannot resolve the user home for sign-in"));
+    };
+    let path = PathBuf::from(home);
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Err(PluginError::io("cannot resolve the user home for sign-in"))
+    }
+}
+
+fn default_cli_home() -> PathBuf {
+    if let Ok(home) = std::env::var(cli::HOME_VAR) {
+        return PathBuf::from(home);
+    }
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_default();
+    PathBuf::from(home).join(".grok")
+}
+
+async fn start_login(
+    host: &HostContext,
+    program: PathBuf,
+    home: PathBuf,
+) -> Result<(Pending, String), PluginError> {
+    private_dir(&home)?;
+    let cwd = user_home()?;
+    let request = cli::login_request(&program, &home, &cwd)?;
+    let child = host.spawn_process().spawn_piped(&request).await?;
+    let mut stdout = child.stdout()?;
+    let mut last = String::new();
+    let link = hofund_plugin_sdk::timeout(LINK_WAIT, cli::read_link(&mut stdout, &mut last)).await;
+    let Some(Some(link)) = link else {
+        return Err(PluginError::auth(format!(
+            "Grok Build did not print a sign-in link; {}",
+            cli::said(&last)
+        )));
+    };
+    Ok((
+        Pending::Login {
+            home,
+            child,
+            stdout,
+            last,
+        },
+        link,
+    ))
+}
+
+async fn finish_login(pending: &mut Pending) -> Result<(PathBuf, creds::Credential), PluginError> {
+    let Pending::Login {
+        home, stdout, last, ..
+    } = pending
+    else {
+        return Err(PluginError::config(
+            "Grok Build sign-in is not waiting on the CLI",
+        ));
+    };
+    let _ = hofund_plugin_sdk::timeout(LOGIN_WAIT, cli::drain(stdout, last)).await;
+    let credential = creds::read_sync(home).map_err(|error| match error {
+        creds::ReadError::Torn(reason) => PluginError::auth(format!(
+            "Grok Build finished, but its sign-in couldn't be read ({reason})"
+        )),
+        creds::ReadError::Missing(reason) => {
+            PluginError::auth(format!("Grok Build did not leave a sign-in: {reason}"))
+        }
+    })?;
+    if credential.who.is_empty() {
+        return Err(PluginError::auth(
+            "Grok Build left a sign-in that names no account",
+        ));
+    }
+    Ok((home.clone(), credential))
+}
+
+#[hofund_plugin_sdk::async_trait]
+impl Subscription for Grok {
+    fn id(&self) -> &PluginId {
+        SPEC.plugin()
+    }
+
+    fn flow(&self) -> &SignInFlow {
+        &self.flow
+    }
+
+    async fn start_sign_in(
+        &self,
+        ctx: &SignInCtx,
+        host: &HostContext,
+    ) -> Result<SignInChallenge, PluginError> {
+        drop(self.take_pending(ctx.session()));
+        if ctx.option("site") == Some(CURRENT_SITE) {
+            let home = default_cli_home();
+            let credential = creds::read_sync(&home).map_err(|error| {
+                PluginError::auth(format!(
+                    "Grok Build is not signed in in {}; {}",
+                    home.display(),
+                    error.message()
+                ))
+            })?;
+            if credential.who.is_empty() {
+                return Err(PluginError::auth(
+                    "Grok Build is signed in but names no account",
+                ));
+            }
+            self.pending
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(ctx.session().to_owned(), Pending::Current { home });
+            return SignInChallenge::instructions(
+                "Grok Build is signed in; confirm to import its sign-in.",
+            );
+        }
+        let program = self.program()?;
+        let session_dir = sign_in_dir(host, ctx)?;
+        remove_dir(&session_dir);
+        let own_home = creds::read_sync(&default_cli_home()).is_ok();
+        let home = if own_home {
+            session_dir.clone()
+        } else {
+            default_cli_home()
+        };
+        let (pending, link) = match start_login(host, program, home.clone()).await {
+            Ok(started) => started,
+            Err(error) => {
+                if own_home {
+                    remove_dir(&session_dir);
+                }
+                return Err(error);
+            }
+        };
+        self.pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(ctx.session().to_owned(), pending);
+        if cli::opens_page_natively() {
+            SignInChallenge::instructions(format!(
+                "Grok Build opened the sign-in page in your browser.\n\
+                 Approve the sign-in there; this finishes when the CLI exits.\n\
+                 If nothing opened, visit:\n  {link}"
+            ))
+        } else {
+            SignInChallenge::open_url(link)
+        }
+    }
+
+    async fn complete_sign_in(
+        &self,
+        ctx: &SignInCtx,
+        proof: SignInProof,
+        host: &HostContext,
+    ) -> Result<AccountId, PluginError> {
+        let Some(mut pending) = self.take_pending(ctx.session()) else {
+            return Err(PluginError::config(
+                "no Grok Build sign-in is in progress for this session",
+            ));
+        };
+        let SignInProof::Await = proof else {
+            return Err(PluginError::config(
+                "Grok Build sign-in completes once the CLI finishes or the current sign-in is imported",
+            ));
+        };
+        let (home, credential) = match &mut pending {
+            Pending::Current { home } => {
+                let home = home.clone();
+                let credential = creds::read_sync(&home).map_err(|error| {
+                    PluginError::auth(format!(
+                        "Grok Build has no readable sign-in in {}: {}",
+                        home.display(),
+                        error.message()
+                    ))
+                })?;
+                (home, credential)
+            }
+            Pending::Login { .. } => finish_login(&mut pending).await?,
+        };
+        let id = creds::account_id(&credential);
+        let label = if !credential.email.is_empty() {
+            credential.email.clone()
+        } else {
+            credential.who.clone()
+        };
+        let secret = creds::secret_blob(&home, &credential).to_secret();
+        let account = host.accounts().account(id.clone(), label)?;
+        host.accounts().upsert(account, secret).await?;
+        if let Pending::Login { home, .. } = &pending
+            && let Ok(state) = host.dirs().state_dir()
+            && home.starts_with(state)
+        {
+            remove_dir(home);
+        }
+        Ok(id)
+    }
+
+    async fn cancel_sign_in(&self, ctx: &SignInCtx, host: &HostContext) -> Result<(), PluginError> {
+        if let Some(pending) = self.take_pending(ctx.session()) {
+            if let Pending::Login { home, .. } = pending {
+                remove_dir(&home);
+            }
+        } else if let Ok(dir) = sign_in_dir(host, ctx) {
+            remove_dir(&dir);
+        }
+        Ok(())
+    }
+
+    async fn account_status(
+        &self,
+        account: &AccountId,
+        host: &HostContext,
+    ) -> Result<AccountStatus, PluginError> {
+        match creds::Stored::load(host, account).await {
+            Ok(stored) if stored.fresh_at(host.clock().now()) => Ok(AccountStatus::Ready),
+            Ok(_) => Ok(AccountStatus::NeedsSignIn {
+                reason: "the Grok Build sign-in is due for renewal".to_owned(),
+            }),
+            Err(error) if error.kind() == hofund_plugin_api::PluginErrorKind::Auth => {
+                Ok(AccountStatus::NeedsSignIn {
+                    reason: error.to_string(),
+                })
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn refresh(&self, account: &AccountId, host: &HostContext) -> Result<(), PluginError> {
+        refresh::run(host, || self.program(), account).await
+    }
+
+    async fn quota(
+        &self,
+        account: &AccountId,
+        host: &HostContext,
+    ) -> Result<Vec<QuotaWindow>, PluginError> {
+        let stored = refresh::ensure_fresh(host, account, || self.program(), false).await?;
+        let url = format!("{}/billing?format=credits", self.endpoints.base);
+        let reply = hofund_plugin_sdk::Call::get(url)
+            .sensitive_header(
+                "authorization",
+                format!(
+                    "Bearer {}",
+                    hofund_plugin_sdk::oauth::secret_text(&stored.credential.key)
+                ),
+            )
+            .header("accept", "application/json")
+            .fetch(host.http())
+            .await?;
+        match reply.status() {
+            200..=299 => quota::windows(reply.body()),
+            401 => Err(PluginError::auth(
+                "the CLI backend refused the sign-in while reading billing",
+            )),
+            status => Err(PluginError::status_error(
+                status,
+                "the CLI backend did not return billing",
+            )),
+        }
+    }
+
+    async fn list_models(
+        &self,
+        account: &AccountId,
+        host: &HostContext,
+    ) -> Result<ModelList, PluginError> {
+        models::list(host, &self.endpoints, account, || self.program()).await
+    }
+
+    fn upstream(
+        &self,
+        account: &AccountId,
+        host: &HostContext,
+    ) -> Result<Arc<dyn UpstreamProvider>, PluginError> {
+        Ok(Arc::new(upstream::GrokUpstream::new(
+            account.clone(),
+            host.clone(),
+            Arc::clone(&self.endpoints),
+            self.x_search,
+            self.program_fn(),
+        )))
+    }
+
+    async fn write_agent_sign_in(
+        &self,
+        account: &AccountId,
+        home: &Path,
+        host: &HostContext,
+    ) -> Result<(), PluginError> {
+        agent_sign_in::write(account, home, host).await
+    }
+
+    async fn discover_agent_sign_in(
+        &self,
+        home: &Path,
+    ) -> Result<Vec<hofund_plugin_api::DiscoveredAgentAccount>, PluginError> {
+        discover::list(home)
+    }
+
+    async fn import_agent_sign_in(
+        &self,
+        home: &Path,
+        reference: &str,
+        host: &HostContext,
+    ) -> Result<AccountId, PluginError> {
+        discover::import(home, reference, host).await
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn private_dir(path: &Path) -> Result<(), PluginError> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(path)
+        .map_err(|_| PluginError::io("cannot create a private directory"))?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+        .map_err(|_| PluginError::io("cannot restrict a private directory"))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub(crate) fn private_dir(path: &Path) -> Result<(), PluginError> {
+    std::fs::create_dir_all(path).map_err(|_| PluginError::io("cannot create a directory"))?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod conformance;
+#[cfg(test)]
+mod tests;

@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Subscription plugins for Grok Build, Cursor, and Cline (feature-parity row 3.5,
+  part 1): device or browser sign-in, agent auth import where supported, token
+  refresh, model lists, quota reads, and chat or Responses upstream for Grok
+  and Cline; Cursor upstream chat is not served yet.
 - ChatGPT (Codex) subscription sign-in by device code (`--site device`): ask
   for a code, poll until it is entered on another machine, trade at the
   device callback redirect (D-58).

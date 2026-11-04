@@ -2107,9 +2107,12 @@ dependencies = [
  "hofund-plugin-retrieval",
  "hofund-plugin-sdk",
  "hofund-plugin-subscription-claude",
+ "hofund-plugin-subscription-cline",
  "hofund-plugin-subscription-codex",
  "hofund-plugin-subscription-copilot",
+ "hofund-plugin-subscription-cursor",
  "hofund-plugin-subscription-gemini",
+ "hofund-plugin-subscription-grok",
  "hofund-provider",
  "hofund-quirks",
  "serde",
@@ -2187,6 +2190,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "hofund-plugin-subscription-cline"
+version = "0.1.0"
+dependencies = [
+ "hofund-kit-subscription",
+ "hofund-plugin-api",
+ "hofund-plugin-sdk",
+ "tempfile",
+]
+
+[[package]]
 name = "hofund-plugin-subscription-codex"
 version = "0.1.0"
 dependencies = [
@@ -2207,7 +2220,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "hofund-plugin-subscription-cursor"
+version = "0.1.0"
+dependencies = [
+ "hofund-kit-subscription",
+ "hofund-plugin-api",
+ "hofund-plugin-sdk",
+ "tempfile",
+]
+
+[[package]]
 name = "hofund-plugin-subscription-gemini"
+version = "0.1.0"
+dependencies = [
+ "hofund-kit-subscription",
+ "hofund-plugin-api",
+ "hofund-plugin-sdk",
+ "tempfile",
+]
+
+[[package]]
+name = "hofund-plugin-subscription-grok"
 version = "0.1.0"
 dependencies = [
  "hofund-kit-subscription",
