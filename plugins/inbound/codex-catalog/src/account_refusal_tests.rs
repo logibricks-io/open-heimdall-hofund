@@ -30,3 +30,24 @@ fn d68_account_refusal_stream_usage_limit_counts() {
         true
     ));
 }
+
+#[test]
+fn d68_account_refusal_stream_error_event_with_reset_counts() {
+    let body = concat!(
+        "data: ",
+        r#"{"type":"error","error":{"message":"Please wait, the window resets at 17:00 UTC"}}"#,
+        "\n\n"
+    );
+    assert!(codex_account_refusal(
+        200,
+        &HeaderMap::new(),
+        body.as_bytes(),
+        true
+    ));
+    assert!(!codex_account_refusal(
+        200,
+        &HeaderMap::new(),
+        body.as_bytes(),
+        false
+    ));
+}

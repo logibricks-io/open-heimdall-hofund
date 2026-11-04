@@ -58,7 +58,9 @@ fn d67_3_non_function_call_with_namespace_is_unchanged() {
         "namespace": "collaboration",
         "content": [{"type":"output_text","text":"hi"}],
     });
-    let whole = json!({"object":"response","output":[item]});
+    // A sibling function_call keeps the byte prefilter from short-circuiting.
+    let call = json!({"type":"function_call","name":"f","arguments":"{}","call_id":"c1"});
+    let whole = json!({"object":"response","output":[item, call]});
     let tidied = namespace_tidy::tidy_whole(whole.to_string().into_bytes());
     let value: serde_json::Value = serde_json::from_slice(&tidied).expect("json");
     assert!(value["output"][0].get("encrypted_function_args").is_none());
