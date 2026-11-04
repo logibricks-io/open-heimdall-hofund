@@ -78,6 +78,7 @@ pub(crate) struct Runtime {
     /// Wakes the subscription task after a publication.
     wake: tokio::sync::Notify,
     warmup: Arc<crate::warmup::WarmupStore>,
+    checkin: Arc<crate::checkin::CheckinStore>,
     spend_caps: Arc<crate::spend_caps::SpendCapStore>,
     spend_gate: Mutex<Option<Arc<crate::spend_caps::SpendCapGate>>>,
     key_spent: Mutex<Option<Arc<hofund_usage::KeySpent>>>,
@@ -133,6 +134,9 @@ impl Runtime {
             warmup: Arc::new(crate::warmup::WarmupStore::new(&crate::beside(
                 path, ".hofund",
             ))),
+            checkin: Arc::new(crate::checkin::CheckinStore::new(&crate::beside(
+                path, ".hofund",
+            ))),
             spend_caps: Arc::new(crate::spend_caps::SpendCapStore::new(path)),
             spend_gate: Mutex::new(None),
             key_spent: Mutex::new(None),
@@ -184,6 +188,9 @@ impl Runtime {
             ),
             wake: tokio::sync::Notify::new(),
             warmup: Arc::new(crate::warmup::WarmupStore::new(&crate::beside(
+                path, ".hofund",
+            ))),
+            checkin: Arc::new(crate::checkin::CheckinStore::new(&crate::beside(
                 path, ".hofund",
             ))),
             spend_caps: Arc::new(crate::spend_caps::SpendCapStore::new(path)),
@@ -692,6 +699,10 @@ impl Runtime {
 
     pub(crate) fn warmup(&self) -> &Arc<crate::warmup::WarmupStore> {
         &self.warmup
+    }
+
+    pub(crate) fn checkin(&self) -> &Arc<crate::checkin::CheckinStore> {
+        &self.checkin
     }
 
     pub(crate) fn subscription_states(&self) -> Subscriptions {

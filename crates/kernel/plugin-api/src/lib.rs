@@ -40,6 +40,7 @@ pub mod kernel;
 
 mod balance;
 mod billed;
+mod checkin;
 #[cfg(not(feature = "kernel"))]
 mod kernel;
 mod plan;
@@ -64,6 +65,7 @@ pub use balance::{
 };
 pub use billed::BilledUsage;
 pub use body::{Body, BodyStream};
+pub use checkin::{CheckinAccountStatus, CheckinOutcome, CheckinRecord, CheckinResult};
 pub use completion::{Completion, CountOutcome, PROBE_CAP, ProbeReport};
 pub use config::{BuildError, ConfigError, RawTable, RawValue, Schema, ValidConfig};
 pub use error::{PluginError, PluginErrorKind};

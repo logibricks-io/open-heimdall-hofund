@@ -5,18 +5,18 @@ use crate::{
     API_VERSION, AgentChangeResponse, AgentConnectRequest, AgentDisconnectRequest,
     AgentHiddenSetRequest, AgentListResponse, AgentModelRequest, AgentModelsResponse,
     AgentPickedOnlyRequest, AgentPlanRequest, AgentPlanResponse, AgentStatusResponse,
-    AgentVisibleSetRequest, CatalogDisabledListResponse, CatalogModelRequest, ConfigApplyRequest,
-    ConfigResponse, ConfigValidateRequest, ConfigValidationResponse, ControlError,
-    ControlErrorKind, ErrorEnvelope, EventEnvelope, FieldIssue, GatewayKeyRequest,
-    GatewayKeyResponse, GatewayKeyRestoreRequest, HealthResponse, MAX_REQUEST_BODY_BYTES,
-    MAX_RESPONSE_BODY_BYTES, ModelListResponse, PicksResponse, PicksSetRequest, ProviderKeyRequest,
-    ProviderKeysResponse, ProviderListResponse, ProviderSpendCapRequest, ProviderSpendCapsResponse,
-    ProviderTestRequest, ProviderTestResponse, QuotaAlertsResponse, QuotaAlertsSetRequest,
-    QuotaAlertsSetResponse, QuotaCreditsModesResponse, QuotaCreditsSetRequest,
-    QuotaCreditsSetResponse, QuotaHistoryResponse, QuotaResponse, ReloadRequest, RouteListResponse,
-    RouteModelListResponse, SessionRouteResponse, ShutdownRequest, ShutdownResponse,
-    StatusResponse, TokenRotateRequest, TokenRotateResponse, UnroutedListResponse, UsageResponse,
-    WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
+    AgentVisibleSetRequest, CatalogDisabledListResponse, CatalogModelRequest, CheckinListResponse,
+    CheckinRunRequest, CheckinRunResponse, ConfigApplyRequest, ConfigResponse,
+    ConfigValidateRequest, ConfigValidationResponse, ControlError, ControlErrorKind, ErrorEnvelope,
+    EventEnvelope, FieldIssue, GatewayKeyRequest, GatewayKeyResponse, GatewayKeyRestoreRequest,
+    HealthResponse, MAX_REQUEST_BODY_BYTES, MAX_RESPONSE_BODY_BYTES, ModelListResponse,
+    PicksResponse, PicksSetRequest, ProviderKeyRequest, ProviderKeysResponse, ProviderListResponse,
+    ProviderSpendCapRequest, ProviderSpendCapsResponse, ProviderTestRequest, ProviderTestResponse,
+    QuotaAlertsResponse, QuotaAlertsSetRequest, QuotaAlertsSetResponse, QuotaCreditsModesResponse,
+    QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryResponse, QuotaResponse,
+    ReloadRequest, RouteListResponse, RouteModelListResponse, SessionRouteResponse,
+    ShutdownRequest, ShutdownResponse, StatusResponse, TokenRotateRequest, TokenRotateResponse,
+    UnroutedListResponse, UsageResponse, WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
 };
 
 mod sealed {
@@ -233,6 +233,7 @@ request!(AgentHiddenSetRequest);
 request!(AgentPickedOnlyRequest);
 request!(TokenRotateRequest);
 request!(WarmupRunRequest, validate);
+request!(CheckinRunRequest, validate);
 request!(QuotaCreditsSetRequest, validate);
 request!(QuotaAlertsSetRequest, validate);
 request!(ShutdownRequest);
@@ -312,6 +313,8 @@ response!(
     GatewayKeyResponse,
     WarmupListResponse,
     WarmupRunResponse,
+    CheckinListResponse,
+    CheckinRunResponse,
     QuotaCreditsModesResponse,
     QuotaCreditsSetResponse,
     QuotaAlertsResponse,

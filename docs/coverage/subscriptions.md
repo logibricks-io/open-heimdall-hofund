@@ -70,6 +70,12 @@ Doc URLs were checked on 2026-10-25 (HTTP 200 unless noted). "not found" means n
   for that subscription; manual `hofund warmup <subscription>/<account>` still
   runs when the account is signed in.
 
+- `daily-checkin` (optional, default false). When set to `true` on a
+  subscription whose plugin declares daily check-in, the daemon presses the
+  vendor check-in once per local calendar day for each signed-in account.
+  Failures are logged and retried on the next local day; routing is unaffected.
+  Manual `hofund checkin <subscription>/<account>` runs one check-in now.
+
 Boolean `discover` (default false) under `[subscriptions.options]` on any subscription row opts the daemon into reading configured agents' own sign-in files and importing accounts that are not already stored. The same reads run on demand with `hofund accounts discover` (list) and `hofund accounts discover --add` (import). `HOFUND_NO_ACCOUNTS=1` disables every discovery read even when `discover = true`. Discovery never writes agent credential files and never prints tokens.
 
 Account discovery is implemented for subscriptions that declare an agent home and keep a readable sign-in on disk:

@@ -10,13 +10,14 @@ use futures_util::StreamExt;
 use hofund_control_proto::{
     API_VERSION, AgentAction, AgentChangeResponse, AgentConnectRequest, AgentDisconnectRequest,
     AgentListResponse, AgentModelRequest, AgentPlanRequest, AgentPlanResponse, AgentStatusResponse,
-    ControlError, ControlErrorKind, ErrorEnvelope, HealthResponse, MAX_REQUEST_BODY_BYTES,
-    ModelListResponse, PicksResponse, PicksSetRequest, ProviderListResponse, ProviderTestRequest,
-    ProviderTestResponse, QuotaAlertsResponse, QuotaAlertsSetRequest, QuotaAlertsSetResponse,
-    QuotaCreditsModesResponse, QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryQuery,
-    QuotaHistoryResponse, QuotaQuery, QuotaResponse, RouteModelListResponse, ShutdownRequest,
-    ShutdownResponse, StatusResponse, TokenRotateRequest, TokenRotateResponse, UsageQuery,
-    UsageResponse, WarmupListResponse, WarmupRunRequest, WarmupRunResponse, decode_error_envelope,
+    CheckinListResponse, CheckinRunRequest, CheckinRunResponse, ControlError, ControlErrorKind,
+    ErrorEnvelope, HealthResponse, MAX_REQUEST_BODY_BYTES, ModelListResponse, PicksResponse,
+    PicksSetRequest, ProviderListResponse, ProviderTestRequest, ProviderTestResponse,
+    QuotaAlertsResponse, QuotaAlertsSetRequest, QuotaAlertsSetResponse, QuotaCreditsModesResponse,
+    QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryQuery, QuotaHistoryResponse,
+    QuotaQuery, QuotaResponse, RouteModelListResponse, ShutdownRequest, ShutdownResponse,
+    StatusResponse, TokenRotateRequest, TokenRotateResponse, UsageQuery, UsageResponse,
+    WarmupListResponse, WarmupRunRequest, WarmupRunResponse, decode_error_envelope,
 };
 use hofund_control_proto::{
     ConfigApplyRequest, ConfigResponse, ConfigValidateRequest, ConfigValidationResponse,
@@ -210,6 +211,17 @@ impl ControlState for FakeControlState {
         ))
     }
 
+    fn checkins(&self) -> ControlFuture<'_, CheckinListResponse> {
+        self.reply("checkins")
+    }
+
+    fn run_checkin(&self, request: CheckinRunRequest) -> ControlFuture<'_, CheckinRunResponse> {
+        self.reply(format!(
+            "run_checkin:{}:{}",
+            request.subscription, request.account
+        ))
+    }
+
     fn usage(&self, query: UsageQuery) -> ControlFuture<'_, UsageResponse> {
         self.reply(format!("usage:{:?}", query.period))
     }
@@ -334,6 +346,12 @@ fn operation_routes() -> Vec<(Method, &'static str, Vec<u8>)> {
             Method::POST,
             "/v1/hofund/warmups/run",
             json!(&WarmupRunRequest::new("acct", "a@x.io")),
+        ),
+        (Method::GET, "/v1/hofund/checkins", Vec::new()),
+        (
+            Method::POST,
+            "/v1/hofund/checkins/run",
+            json!(&CheckinRunRequest::new("acct", "a@x.io")),
         ),
         (
             Method::POST,
@@ -462,6 +480,8 @@ async fn control_routes_success_and_error_envelopes_against_fake_state() {
             "set_quota_credits:acct:a@x.io:first",
             "warmups",
             "run_warmup:acct:a@x.io",
+            "checkins",
+            "run_checkin:acct:a@x.io",
             "rotate_token",
             "shutdown",
             "config",
@@ -953,5 +973,45 @@ async fn a3a_11_warmups_control_routes_return_versioned_json() {
             .expect("calls")
             .iter()
             .any(|c| c == "warmups")
+    );
+}
+
+#[tokio::test]
+async fn a3b_11_checkins_control_routes_return_versioned_json() {
+    let state = Arc::new(FakeControlState::default());
+    let router = app(&state);
+    let (status, headers, body) = call(
+        router.clone(),
+        Method::GET,
+        "/v1/hofund/checkins",
+        Vec::new(),
+        true,
+        false,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_no_store(&headers);
+    let list: CheckinListResponse = serde_json::from_slice(&body).expect("checkins JSON");
+    assert_eq!(list.version, API_VERSION);
+
+    let (status, _, body) = call(
+        router,
+        Method::POST,
+        "/v1/hofund/checkins/run",
+        serde_json::to_vec(&CheckinRunRequest::new("acct", "a@x.io")).expect("json"),
+        true,
+        true,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let run: CheckinRunResponse = serde_json::from_slice(&body).expect("run JSON");
+    assert_eq!(run.version, API_VERSION);
+    assert!(
+        state
+            .calls
+            .lock()
+            .expect("calls")
+            .iter()
+            .any(|c| c == "checkins")
     );
 }
