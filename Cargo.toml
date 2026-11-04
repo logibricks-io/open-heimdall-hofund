@@ -40,6 +40,9 @@ members = [
     "plugins/subscriptions/cline",
     "plugins/subscriptions/cursor",
     "plugins/subscriptions/kiro",
+    "plugins/subscriptions/qoder",
+    "plugins/subscriptions/workbuddy",
+    "plugins/subscriptions/zed",
     "crates/kernel/provider",
     "kits/agent",
     "kits/subscription",
@@ -102,6 +105,9 @@ hofund-plugin-subscription-grok = { version = "0.1.0", path = "plugins/subscript
 hofund-plugin-subscription-cline = { version = "0.1.0", path = "plugins/subscriptions/cline" }
 hofund-plugin-subscription-cursor = { version = "0.1.0", path = "plugins/subscriptions/cursor" }
 hofund-plugin-subscription-kiro = { version = "0.1.0", path = "plugins/subscriptions/kiro" }
+hofund-plugin-subscription-qoder = { version = "0.1.0", path = "plugins/subscriptions/qoder" }
+hofund-plugin-subscription-workbuddy = { version = "0.1.0", path = "plugins/subscriptions/workbuddy" }
+hofund-plugin-subscription-zed = { version = "0.1.0", path = "plugins/subscriptions/zed" }
 hofund-plugin-sdk = { version = "0.1.0", path = "crates/kernel/plugin-sdk" }
 hofund-provider = { version = "0.1.0", path = "crates/kernel/provider" }
 hofund-quirks = { version = "0.1.0", path = "crates/kernel/quirks" }

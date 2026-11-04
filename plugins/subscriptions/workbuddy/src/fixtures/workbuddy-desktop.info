@@ -1,0 +1,14 @@
+{
+  "account": {
+    "uid": "wb-fixture-uid",
+    "nickname": "WorkBuddy User"
+  },
+  "auth": {
+    "accessToken": "wb-access-fixture",
+    "refreshToken": "wb-refresh-fixture",
+    "expiresAt": 4102444800000,
+    "refreshExpiresAt": 4200000000000,
+    "domain": "www.codebuddy.cn",
+    "tokenType": "Bearer"
+  }
+}

@@ -19,6 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Factory per-model wires), Factory billing limits, agent-home resolution for
   Kiro via `KIRO_IDE_CACHE`, atomic credential writes, and deterministic
   `a2b_*` tests (A-2b, feature-parity row 3.5 partial).
+- Qoder, Zed, and WorkBuddy subscription plugins (`hofund-plugin-subscription-qoder`,
+  `-zed`, `-workbuddy`): credential import from agent fixtures, refresh, model
+  lists, OpenAI chat or Responses upstream, WorkBuddy billing quota, Qoder and
+  WorkBuddy daily check-in, and deterministic `a2c_*` tests (A-2c, feature-parity
+  row 3.5 partial).
 
 - ChatGPT (Codex) subscription sign-in by device code (`--site device`): ask
   for a code, poll until it is entered on another machine, trade at the
