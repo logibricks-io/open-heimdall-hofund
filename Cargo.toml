@@ -33,7 +33,10 @@ members = [
     "plugins/subscriptions/claude",
     "plugins/subscriptions/codex",
     "plugins/subscriptions/copilot",
+    "plugins/subscriptions/devin",
+    "plugins/subscriptions/factory",
     "plugins/subscriptions/gemini",
+    "plugins/subscriptions/kiro",
     "crates/kernel/provider",
     "kits/agent",
     "kits/subscription",
@@ -89,7 +92,10 @@ hofund-plugin-remote-gateway = { version = "0.1.0", path = "plugins/providers/re
 hofund-plugin-subscription-claude = { version = "0.1.0", path = "plugins/subscriptions/claude" }
 hofund-plugin-subscription-codex = { version = "0.1.0", path = "plugins/subscriptions/codex" }
 hofund-plugin-subscription-copilot = { version = "0.1.0", path = "plugins/subscriptions/copilot" }
+hofund-plugin-subscription-devin = { version = "0.1.0", path = "plugins/subscriptions/devin" }
+hofund-plugin-subscription-factory = { version = "0.1.0", path = "plugins/subscriptions/factory" }
 hofund-plugin-subscription-gemini = { version = "0.1.0", path = "plugins/subscriptions/gemini" }
+hofund-plugin-subscription-kiro = { version = "0.1.0", path = "plugins/subscriptions/kiro" }
 hofund-plugin-sdk = { version = "0.1.0", path = "crates/kernel/plugin-sdk" }
 hofund-provider = { version = "0.1.0", path = "crates/kernel/provider" }
 hofund-quirks = { version = "0.1.0", path = "crates/kernel/quirks" }

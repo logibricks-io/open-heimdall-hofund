@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Devin, Kiro, and Factory subscription plugins (`hofund-plugin-subscription-devin`,
+  `-kiro`, `-factory`): CLI or token import, refresh where the reference supports
+  it, model listing, chat upstream, Factory billing limits, and deterministic
+  `a2b_*` tests (A-2b, feature-parity row 3.5 partial).
+
 - ChatGPT (Codex) subscription sign-in by device code (`--site device`): ask
   for a code, poll until it is entered on another machine, trade at the
   device callback redirect (D-58).
