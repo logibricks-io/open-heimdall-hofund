@@ -234,6 +234,9 @@ impl Route {
     }
 }
 
+/// Total time a route pool may spend across its members on one request.
+pub const GROUP_WALK_BUDGET: Duration = Duration::from_secs(540);
+
 /// A model-to-upstream table.
 pub struct Router {
     routes: BTreeMap<String, Route>,
@@ -248,6 +251,7 @@ pub struct Router {
     overflow: OverflowMemory,
     measurements: Option<Arc<dyn strategy::Measurements>>,
     member_skip: Option<MemberSkipFn>,
+    group_walk_budget: Duration,
 }
 
 /// A counted input.
@@ -371,7 +375,15 @@ impl Router {
             overflow: OverflowMemory::in_memory(),
             measurements: None,
             member_skip: None,
+            group_walk_budget: GROUP_WALK_BUDGET,
         }
+    }
+
+    /// Overrides the serial walk budget used when a route has several members.
+    #[must_use]
+    pub fn with_group_walk_budget(mut self, budget: Duration) -> Self {
+        self.group_walk_budget = budget;
+        self
     }
 
     /// Shares the allowance view with later snapshots of this route table.
@@ -737,7 +749,7 @@ impl Router {
             outgrown: Vec::new(),
             needs_room: None,
             missing_detail: self.models().join(", "),
-            wait_hook,
+            wait_hook: wait_hook.clone(),
             affinity: ordered.affinity,
             affinity_state: self.affinity.clone(),
             overflow_memory: self.overflow.clone(),
@@ -745,6 +757,10 @@ impl Router {
             trace,
             strategies: Arc::clone(&self.strategies),
             drain_moves: ordered.drain_moves,
+            walk_started: wait_hook
+                .as_ref()
+                .map_or_else(Instant::now, |hook| hook.now()),
+            group_walk_budget: self.group_walk_budget,
         }
         .run(0)
         .await;
@@ -1523,6 +1539,8 @@ struct DispatchState {
     trace: Option<RouteTraceHandle>,
     strategies: Arc<strategy::StrategyState>,
     drain_moves: Vec<RoundMove>,
+    walk_started: Instant,
+    group_walk_budget: Duration,
 }
 
 /// One member's answer within a dispatch round.
@@ -1538,6 +1556,26 @@ impl DispatchState {
         self.wait_hook
             .as_ref()
             .map_or_else(Instant::now, |hook| hook.now())
+    }
+
+    fn group_budget_exhausted(&self) -> Option<PluginError> {
+        if self.resolved.hops.len() <= 1 {
+            return None;
+        }
+        let elapsed = self.now().duration_since(self.walk_started);
+        if elapsed < self.group_walk_budget {
+            return None;
+        }
+        Some(
+            PluginError::status_error(
+                504,
+                format!(
+                    "no member of the group answered within its {}s budget",
+                    self.group_walk_budget.as_secs()
+                ),
+            )
+            .without_cooldown(),
+        )
     }
 
     async fn run(mut self, start: usize) -> Result<Routed, RouterError> {
@@ -1874,6 +1912,12 @@ impl DispatchState {
                                 message: fail_text(&error),
                             },
                         );
+                    }
+                    if let Some(budget) = self.group_budget_exhausted() {
+                        return Err(RouterError::Upstream {
+                            upstream_id,
+                            error: budget,
+                        });
                     }
                     if let Some(failure) = patience::busy(&error, index, self.now()) {
                         // Each member is asked once a round, so noted once.
