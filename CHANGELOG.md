@@ -24,6 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Serial group walks share a 540-second budget; exhausted walks return HTTP 504
   naming the budget and do not rest the cut member (D-69).
 
+- Foreign UUID-signed thinking blocks are stripped before Anthropic Messages
+  requests to Claude hosts so cross-member failover does not hit invalid
+  signature errors (D-70).
+
 - Refused Anthropic beta headers are retried once without the named betas and
   omitted on later requests to that provider (D-64).
 
