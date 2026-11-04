@@ -95,7 +95,15 @@ async fn register_workos(
         "accessToken": secret_text(access),
         "refreshToken": refresh_text,
     });
-    let data = api::post_json(host, endpoints, "/api/v1/auth/register", &body, None, false).await?;
+    let data = api::post_json(
+        host,
+        endpoints.api_base(),
+        "/api/v1/auth/register",
+        &body,
+        None,
+        false,
+    )
+    .await?;
     let parsed = parse_register(&data, refresh, host.clock().now())?;
     store_signed_in(parsed)
 }
@@ -150,7 +158,14 @@ pub(crate) async fn import_api_key(
         return Err(PluginError::auth("Factory API keys start with fk-"));
     }
     let key = SecretString::from(trimmed.to_owned());
-    let who = api::get(host, endpoints, "/api/cli/whoami", Some(&key), true).await?;
+    let who = api::get(
+        host,
+        endpoints.api_base(),
+        "/api/cli/whoami",
+        Some(&key),
+        true,
+    )
+    .await?;
     let email = first_string(&who, &["email"]);
     let uid = first_string(&who, &["userId"]);
     let region = first_string(&who, &["region"]);

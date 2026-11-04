@@ -4,7 +4,6 @@ use hofund_plugin_api::{HostContext, PluginError, SecretString};
 use hofund_plugin_sdk::Call;
 use hofund_plugin_sdk::json::{self, Value};
 
-use crate::Endpoints;
 use crate::client;
 
 /// Whether an HTTP status means the sign-in itself is gone.
@@ -19,12 +18,12 @@ fn join_url(base: &str, path: &str) -> String {
 /// GET one Factory path with client headers and optional bearer.
 pub(crate) async fn get(
     host: &HostContext,
-    endpoints: &Endpoints,
+    api_base: &str,
     path: &str,
     bearer: Option<&SecretString>,
     lapsed: bool,
 ) -> Result<Value, PluginError> {
-    let url = join_url(endpoints.api_base(), path);
+    let url = join_url(api_base, path);
     let mut call = Call::get(url);
     for (name, value) in client::headers() {
         call = call.header(name, value);
@@ -52,13 +51,13 @@ pub(crate) async fn get(
 /// POST JSON to one Factory path.
 pub(crate) async fn post_json(
     host: &HostContext,
-    endpoints: &Endpoints,
+    api_base: &str,
     path: &str,
     body: &Value,
     bearer: Option<&SecretString>,
     lapsed: bool,
 ) -> Result<Value, PluginError> {
-    let url = join_url(endpoints.api_base(), path);
+    let url = join_url(api_base, path);
     let payload = json::to_vec(body)
         .map_err(|_| PluginError::decode("Factory request body could not be encoded"))?;
     let mut call = Call::post(url)

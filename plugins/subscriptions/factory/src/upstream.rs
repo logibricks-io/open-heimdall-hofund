@@ -40,7 +40,7 @@ impl FactoryUpstream {
         let api_base = self.endpoints.api_base_for_region(bearer.region.as_deref());
         let target = Target::new(ProtocolId::OPENAI_CHAT, format!("{api_base}/api/llm/c/v1"))
             .credential(CredentialStyle::Bearer)
-            .headers(client::headers());
+            .headers(client::chat_headers());
         wire::execute(
             self.host.http(),
             &target,

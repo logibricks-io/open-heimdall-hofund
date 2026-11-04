@@ -269,7 +269,7 @@ impl Subscription for Factory {
         let bearer = tokens::bearer(host, &self.endpoints, account).await?;
         let limits = api::get(
             host,
-            &self.endpoints,
+            self.endpoints.api_base_for_region(bearer.region.as_deref()),
             "/api/billing/limits",
             Some(&bearer.token),
             true,

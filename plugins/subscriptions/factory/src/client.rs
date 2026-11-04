@@ -18,3 +18,15 @@ pub(crate) fn headers() -> Vec<(String, String)> {
         ),
     ]
 }
+
+/// Headers for OpenAI-compatible chat calls (wire sets Accept for streams).
+#[must_use]
+pub(crate) fn chat_headers() -> Vec<(String, String)> {
+    vec![
+        ("x-factory-client".to_owned(), CLIENT_TYPE.to_owned()),
+        (
+            "user-agent".to_owned(),
+            format!("{CLIENT_TYPE}/{CLIENT_VERSION}"),
+        ),
+    ]
+}

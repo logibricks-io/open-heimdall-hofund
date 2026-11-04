@@ -211,8 +211,10 @@ async fn refresh_oauth(
         "refreshToken": secret_text(&refresh_token),
         "grantType": "refresh_token",
     });
+    let region = blob.text("region").map(str::to_owned);
+    let api_base = endpoints.api_base_for_region(region.as_deref());
     let reply =
-        match api::post_json(&host, &endpoints, "/api/v1/auth/refresh", &body, None, true).await {
+        match api::post_json(&host, api_base, "/api/v1/auth/refresh", &body, None, true).await {
             Ok(data) => data,
             Err(error) if error.kind() == PluginErrorKind::Auth => {
                 lease

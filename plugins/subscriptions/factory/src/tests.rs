@@ -155,16 +155,14 @@ fn a2b_13_refresh_rotates_tokens() {
         parsed
             .secret("access_token")
             .as_ref()
-            .map(secret_text)
-            .as_deref(),
+            .map(secret_text),
         Some("factory-access-2")
     );
     assert_eq!(
         parsed
             .secret("refresh_token")
             .as_ref()
-            .map(secret_text)
-            .as_deref(),
+            .map(secret_text),
         Some("factory-refresh-2")
     );
 }
@@ -233,12 +231,20 @@ fn a2b_17_no_secrets_in_errors() {
     let error = block_on(tokens::refresh_for_test(
         host.context().clone(),
         endpoints(),
-        id,
+        id.clone(),
         secret("factory-access-1"),
     ))
     .expect_err("refresh");
     assert!(!error.message().contains("factory-refresh-1"));
     assert_eq!(error.kind(), PluginErrorKind::Auth);
+    let blob = block_on(host.context().accounts().secret(&id))
+        .expect("read")
+        .expect("stored");
+    assert!(
+        SecretObject::parse(&blob)
+            .expect("blob")
+            .flag(tokens::LAPSED)
+    );
 }
 
 #[test]
@@ -266,8 +272,7 @@ fn a2b_18_api_key_sign_in_stores_api_auth() {
         parsed
             .secret("api_key")
             .as_ref()
-            .map(secret_text)
-            .as_deref(),
+            .map(secret_text),
         Some("fk-test-key-12345678")
     );
 }
