@@ -20,9 +20,7 @@ pub use fx::{CnyRate, DisplayCurrency, Fx, RateFetcher};
 pub use key::{CallerModel, CallerTotals};
 pub use limits::{KeyUsage, UsageDetails};
 pub use price::{RowPricing, TokenPrice, token_bearing};
-pub use spent::{
-    KeySpent, SpendCapPeriod, provider_key_id_from_upstream, spend_cap_retry_after, spend_cap_since,
-};
+pub use spent::{KeySpent, SpendCapPeriod, spend_cap_retry_after, spend_cap_since};
 
 /// A reporting window over the ledger.
 ///
@@ -149,7 +147,8 @@ pub struct Row {
     pub price: Option<TokenPrice>,
     /// Row kind for handed-off, refusal, or turned-away tries; empty for ordinary rows.
     pub outcome: String,
-    /// Five-byte API-key fingerprint when the upstream route names one.
+    /// Five-byte API-key fingerprint of the provider key that served the request.
+    /// Empty when the member has no API key.
     pub provider_key_id: String,
 }
 

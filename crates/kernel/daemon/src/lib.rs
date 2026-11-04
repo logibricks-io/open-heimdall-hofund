@@ -59,6 +59,8 @@ mod registry;
 mod rests;
 mod runtime;
 mod sign_in;
+#[cfg(all(test, feature = "test-util"))]
+mod spend_cap_live;
 mod spend_caps;
 mod subscriptions;
 mod terminate;
@@ -1363,6 +1365,7 @@ fn providers(
                     patience: provider.patience.duration(),
                     base_url: endpoint.base_url.clone(),
                     key: key_member,
+                    key_id: key.id.clone(),
                 },
             );
             instances.insert(instance_id, instance);

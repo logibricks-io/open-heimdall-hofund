@@ -55,13 +55,27 @@ pub use view::{
     candidates_from_hops, fail_text, try_status, unrouted_timeout_status,
 };
 
-/// Returns `true` when a hop should be skipped (for example a disabled model).
-/// The last argument is the member's configured route id (including `#key`).
+/// Returns `true` when a hop should be skipped (for example a disabled model
+/// or a key that has reached its spend cap).
+///
+/// Arguments are the route name, the asked model, the provider id, the wire
+/// model, and the provider key fingerprint. The fingerprint is empty when the
+/// member has no API key.
 pub type MemberSkipFn = Arc<dyn Fn(&str, &str, &str, &str, &str) -> bool + Send + Sync>;
+
+/// One candidate the spend-cap exhausted hook may refuse.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SpendCapCandidate {
+    /// Provider id for this hop.
+    pub provider: String,
+    /// Key fingerprint. Empty when the member has no API key.
+    pub key_id: String,
+}
 
 /// When every candidate hop was removed and each is spend-capped, returns
 /// `Some(retry_after)` with `None` inside for a lifetime cap.
-pub type SpendCapExhaustedFn = Arc<dyn Fn(&[String]) -> Option<Option<u64>> + Send + Sync>;
+pub type SpendCapExhaustedFn =
+    Arc<dyn Fn(&[SpendCapCandidate]) -> Option<Option<u64>> + Send + Sync>;
 
 /// Which failures may try the next member.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -455,8 +469,8 @@ impl Router {
             .filter(|hop| {
                 let provider = hop.member.scope_provider();
                 let wire = hop.wire_model.as_deref().unwrap_or(&resolved.bare);
-                let route_id = hop.member.route_id();
-                !skip(&resolved.route, asked, provider, wire, route_id)
+                let key_id = hop.member.provider_key_id();
+                !skip(&resolved.route, asked, provider, wire, key_id)
             })
             .cloned()
             .collect()
@@ -709,11 +723,14 @@ impl Router {
             && !before_skip.is_empty()
             && let Some(exhausted) = &self.spend_cap_exhausted
         {
-            let route_ids: Vec<String> = before_skip
+            let candidates: Vec<SpendCapCandidate> = before_skip
                 .iter()
-                .map(|hop| hop.member.route_id().to_owned())
+                .map(|hop| SpendCapCandidate {
+                    provider: hop.member.scope_provider().to_owned(),
+                    key_id: hop.member.provider_key_id().to_owned(),
+                })
                 .collect();
-            if let Some(retry_after) = exhausted(&route_ids) {
+            if let Some(retry_after) = exhausted(&candidates) {
                 return Err(RouterError::SpendCapReached { retry_after });
             }
         }
@@ -909,6 +926,7 @@ impl Router {
                 .clone()
                 .unwrap_or_else(|| resolved.bare.clone());
             let upstream_id = hop.member.route_id().to_owned();
+            let provider_key_id = hop.member.provider_key_id().to_owned();
             let body = call
                 .body_for(&upstream_model)
                 .map_err(|error| RouterError::Upstream {
@@ -927,6 +945,7 @@ impl Router {
                 Ok(answer) => {
                     return Ok(Forwarded {
                         upstream_id,
+                        provider_key_id,
                         upstream_model,
                         answer,
                     });
@@ -1557,6 +1576,7 @@ struct DispatchState {
 struct Answered {
     index: usize,
     upstream_id: String,
+    provider_key_id: String,
     upstream_model: String,
     completion: Completion,
 }
@@ -1599,6 +1619,7 @@ impl DispatchState {
                         let continuation = RouteContinuation { state: self, next };
                         return Ok(Routed {
                             upstream_id: answered.upstream_id,
+                            provider_key_id: answered.provider_key_id,
                             upstream_model: answered.upstream_model,
                             completion: answered.completion,
                             affinity_reason,
@@ -1618,6 +1639,7 @@ impl DispatchState {
                     }
                     return Ok(Routed {
                         upstream_id: answered.upstream_id,
+                        provider_key_id: answered.provider_key_id,
                         upstream_model: answered.upstream_model,
                         completion: answered.completion,
                         affinity_reason,
@@ -1828,6 +1850,7 @@ impl DispatchState {
                     return Ok(Some(Answered {
                         index,
                         upstream_id: hop.member.route_id().to_owned(),
+                        provider_key_id: hop.member.provider_key_id().to_owned(),
                         upstream_model,
                         completion,
                     }));
@@ -1985,6 +2008,9 @@ impl RouteContinuation {
 pub struct Routed {
     /// Id of the provider that produced the completion.
     pub upstream_id: String,
+    /// Fingerprint of the provider API key that produced the completion.
+    /// Empty when that member has no API key.
+    pub provider_key_id: String,
     /// Model name sent to that provider. The gateway compares it with the
     /// name the client asked for before touching a raw body.
     pub upstream_model: String,
@@ -2008,6 +2034,9 @@ impl Routed {
 pub struct Forwarded {
     /// Id of the provider that answered.
     pub upstream_id: String,
+    /// Fingerprint of the provider API key that answered.
+    /// Empty when that member has no API key.
+    pub provider_key_id: String,
     /// Model name that provider was sent.
     pub upstream_model: String,
     /// The provider's answer.

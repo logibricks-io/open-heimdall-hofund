@@ -1165,6 +1165,7 @@ impl hofund_plugin_host::GatewayBackend for InProcess {
                 let status =
                     StatusCode::from_u16(answer.status()).unwrap_or(StatusCode::BAD_GATEWAY);
                 let mut meta = usage(&forwarded.upstream_id);
+                meta.provider_key_id = forwarded.provider_key_id.clone();
                 if answer.is_streaming() {
                     return Ok(streamed_forward(
                         answer,
@@ -1963,6 +1964,7 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
                 &model_request,
                 &routed.upstream_id,
                 &routed.upstream_model,
+                &routed.provider_key_id,
                 routed.completion,
                 continuation,
                 routed.affinity_reason,
@@ -2082,6 +2084,7 @@ fn held_response(
                                 &state.request,
                                 &routed.upstream_id,
                                 &routed.upstream_model,
+                                &routed.provider_key_id,
                                 routed.completion,
                                 continuation,
                                 routed.affinity_reason,
@@ -2508,6 +2511,7 @@ async fn success(
     request: &ModelRequest,
     upstream: &str,
     upstream_model: &str,
+    provider_key_id: &str,
     completion: Completion,
     continuation: Option<hofund_router::RouteContinuation>,
     affinity_reason: Option<String>,
@@ -2518,6 +2522,7 @@ async fn success(
 ) -> Response {
     track.reason = affinity_reason;
     let mut meta = UsageMeta::new(request, upstream, upstream_model, started, identity);
+    meta.provider_key_id = provider_key_id.to_owned();
     let member = Some(upstream.to_owned());
     let capture = prev_response::ReplyCapture::new(capture);
     match completion {
@@ -2899,6 +2904,7 @@ fn status_of(error: &PluginError) -> StatusCode {
 struct UsageMeta {
     model: String,
     upstream: String,
+    provider_key_id: String,
     wire_model: String,
     served_model: String,
     started: Instant,
@@ -2921,6 +2927,7 @@ impl UsageMeta {
         Self {
             model: request.model.clone(),
             upstream: upstream.to_owned(),
+            provider_key_id: String::new(),
             wire_model: wire_model.to_owned(),
             served_model: String::new(),
             started,
@@ -3425,7 +3432,7 @@ fn write_usage(
         caller_key_id: meta.identity.key_id.clone(),
         caller_key_name: meta.identity.key_name.clone(),
         caller_issuer_id: meta.identity.issuer.clone(),
-        provider_key_id: hofund_usage::provider_key_id_from_upstream(&meta.upstream),
+        provider_key_id: meta.provider_key_id.clone(),
         ..Default::default()
     };
     let mut details = meta.details;

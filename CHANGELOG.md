@@ -30,6 +30,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Provider key spend caps use the key fingerprint carried by the serving
+  member, including a provider with one key. Usage rows record that id, and
+  routing skips a capped key before failover (D-61).
+
 - Vendor overload (HTTP 529 or a 5xx whose message says overloaded) rests
   only the requested model on that member for 30 seconds, or for
   `Retry-After` capped at one minute, without climbing the generic failure

@@ -7,17 +7,21 @@ use async_trait::async_trait;
 use hofund_ir::Request;
 use hofund_plugin_api::{MemberId, MemberKey, PluginError, PresetId};
 use hofund_router::Completion;
-use hofund_router::{FailoverPolicy, Hop, Member, Router, RouterError, SpendCapExhaustedFn};
+use hofund_router::{
+    FailoverPolicy, Hop, Member, Router, RouterError, SpendCapCandidate, SpendCapExhaustedFn,
+};
 
 struct StubMember {
     id: MemberId,
     route_id: String,
+    key_id: String,
 }
 
-fn member(route_id: &str, preset: &'static str) -> Arc<dyn Member> {
+fn member(provider: &str, key_id: &str, preset: &'static str) -> Arc<dyn Member> {
     Arc::new(StubMember {
         id: MemberId::from_preset(PresetId::from_static(preset), MemberKey::from_static("k")),
-        route_id: route_id.to_owned(),
+        route_id: provider.to_owned(),
+        key_id: key_id.to_owned(),
     })
 }
 
@@ -31,8 +35,12 @@ impl Member for StubMember {
         &self.route_id
     }
 
+    fn provider_key_id(&self) -> &str {
+        &self.key_id
+    }
+
     fn scope_provider(&self) -> &str {
-        "p"
+        &self.route_id
     }
 
     fn protocol(&self) -> &str {
@@ -48,20 +56,17 @@ impl Member for StubMember {
 
 #[tokio::test]
 async fn d61_6_all_spend_capped_keys_return_spend_cap_reached() {
-    let capped = Arc::new(BTreeMap::from([
-        ("p#a".to_owned(), true),
-        ("p#b".to_owned(), true),
-    ]));
-    let skip = {
-        let capped = Arc::clone(&capped);
-        Arc::new(
-            move |_route: &str, _asked: &str, _provider: &str, _wire: &str, route_id: &str| {
-                capped.contains_key(route_id)
-            },
-        )
-    };
-    let exhausted: SpendCapExhaustedFn = Arc::new(move |routes: &[String]| {
-        if routes.iter().all(|route| route == "p#a" || route == "p#b") {
+    let skip = Arc::new(
+        move |_route: &str, _asked: &str, provider: &str, _wire: &str, key_id: &str| {
+            provider == "p" && (key_id == "a" || key_id == "b")
+        },
+    );
+    let exhausted: SpendCapExhaustedFn = Arc::new(move |candidates: &[SpendCapCandidate]| {
+        if candidates.iter().all(|hop| {
+            hop.provider == "p"
+                && (hop.key_id == "a" || hop.key_id == "b")
+                && !hop.key_id.is_empty()
+        }) {
             Some(Some(120))
         } else {
             None
@@ -70,7 +75,10 @@ async fn d61_6_all_spend_capped_keys_return_spend_cap_reached() {
     let router = Router::from_hops(
         BTreeMap::from([(
             "demo".to_owned(),
-            vec![Hop::new(member("p#a", "a")), Hop::new(member("p#b", "b"))],
+            vec![
+                Hop::new(member("p", "a", "a")),
+                Hop::new(member("p", "b", "b")),
+            ],
         )]),
         FailoverPolicy::default(),
     )

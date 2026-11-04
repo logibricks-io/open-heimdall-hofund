@@ -78,7 +78,7 @@ fn gateway(temp: &TempDir, settings: CatalogSettings) -> Gateway {
     routes.insert("hidden".to_owned(), vec![Hop::new(Arc::clone(&member))]);
     let mut router = Router::from_hops(routes, FailoverPolicy::default());
     let visibility = catalog.visibility().clone();
-    router = router.with_member_skip(Arc::new(move |route, asked, provider, wire, _route_id| {
+    router = router.with_member_skip(Arc::new(move |route, asked, provider, wire, _key_id| {
         visibility.hop_disabled(route, asked, provider, wire)
     }));
     let codecs = HashMap::from([(

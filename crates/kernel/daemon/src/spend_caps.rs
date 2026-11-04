@@ -248,7 +248,7 @@ fn validate_amount(usd: f64) -> Result<(), String> {
 pub(crate) struct SpendCapGate {
     store: Arc<SpendCapStore>,
     spent: Arc<KeySpent>,
-    routes: Mutex<BTreeMap<String, RouteCap>>,
+    routes: Mutex<BTreeMap<(String, String), RouteCap>>,
 }
 
 struct RouteCap {
@@ -275,15 +275,8 @@ impl SpendCapGate {
             let Ok(keys) = provider_keys::resolve(provider) else {
                 continue;
             };
-            let several = keys.len() > 1
-                || provider
-                    .key_entries()
-                    .iter()
-                    .filter(|entry| entry.on)
-                    .count()
-                    > 1;
             for key in keys {
-                if !key.entry.on {
+                if !key.entry.on || key.id.is_empty() {
                     continue;
                 }
                 let Some(stored) = caps
@@ -292,13 +285,8 @@ impl SpendCapGate {
                 else {
                     continue;
                 };
-                let route_id = if several {
-                    provider_keys::built_id(&provider.id, &key.id)
-                } else {
-                    provider.id.clone()
-                };
                 routes.insert(
-                    route_id,
+                    (provider.id.clone(), key.id.clone()),
                     RouteCap {
                         provider: provider.id.clone(),
                         key_id: key.id.clone(),
@@ -312,19 +300,23 @@ impl SpendCapGate {
         *self.routes.lock().expect("routes") = routes;
     }
 
-    pub(crate) fn skip_route(&self, route_id: &str) -> bool {
+    /// Whether the key `key_id` on `provider` is at or past its cap.
+    pub(crate) fn skip_key(&self, provider: &str, key_id: &str) -> bool {
+        if provider.is_empty() || key_id.is_empty() {
+            return false;
+        }
         let routes = self.routes.lock().expect("routes");
-        let Some(spec) = routes.get(route_id) else {
+        let Some(spec) = routes.get(&(provider.to_owned(), key_id.to_owned())) else {
             return false;
         };
         self.capped(spec)
     }
 
-    pub(crate) fn retry_after_for_routes(&self, route_ids: &[&str]) -> Option<u64> {
+    pub(crate) fn retry_after_for_keys(&self, hops: &[(&str, &str)]) -> Option<u64> {
         let routes = self.routes.lock().expect("routes");
         let mut best: Option<u64> = None;
-        for route_id in route_ids {
-            let Some(spec) = routes.get(*route_id) else {
+        for (provider, key_id) in hops {
+            let Some(spec) = routes.get(&(provider.to_string(), key_id.to_string())) else {
                 continue;
             };
             if !self.capped(spec) {
@@ -341,12 +333,15 @@ impl SpendCapGate {
         best
     }
 
-    pub(crate) fn all_routes_capped<'a>(
+    pub(crate) fn all_keys_capped<'a>(
         &self,
-        route_ids: impl IntoIterator<Item = &'a str>,
+        hops: impl IntoIterator<Item = (&'a str, &'a str)>,
     ) -> bool {
-        let ids: Vec<_> = route_ids.into_iter().collect();
-        !ids.is_empty() && ids.iter().all(|route_id| self.skip_route(route_id))
+        let hops: Vec<_> = hops.into_iter().collect();
+        !hops.is_empty()
+            && hops
+                .iter()
+                .all(|(provider, key_id)| self.skip_key(provider, key_id))
     }
 
     fn capped(&self, spec: &RouteCap) -> bool {

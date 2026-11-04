@@ -120,15 +120,6 @@ fn month_start_local<Tz: TimeZone>(now: chrono::DateTime<Tz>) -> Option<i64> {
         .map(|start| start.timestamp())
 }
 
-/// Ten-hex fingerprint after `#` in a multi-key upstream route id.
-#[must_use]
-pub fn provider_key_id_from_upstream(upstream: &str) -> String {
-    upstream
-        .split_once('#')
-        .map(|(_, id)| id.to_owned())
-        .unwrap_or_default()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,11 +164,29 @@ mod tests {
     }
 
     #[test]
-    fn d61_2_upstream_route_id_splits_on_hash() {
-        assert_eq!(
-            provider_key_id_from_upstream("primary#0123456789"),
-            "0123456789"
-        );
-        assert_eq!(provider_key_id_from_upstream("solo"), "");
+    fn d61_2_spend_follows_the_stored_key_id() {
+        let dir = tempfile::tempdir().expect("dir");
+        let ledger = Arc::new(Ledger::open(&dir.path().join("usage.sqlite")).expect("ledger"));
+        let price = RowPricing {
+            priced: true,
+            cost_usd: 2.0,
+            price: TokenPrice::default(),
+        };
+        let mut hashed = priced_row(100, "");
+        hashed.upstream = "primary#0123456789".to_owned();
+        ledger
+            .record_with_details(&hashed, None, UsageDetails::default(), Some(price))
+            .expect("hashed");
+        ledger
+            .record_with_details(
+                &priced_row(100, "0123456789"),
+                None,
+                UsageDetails::default(),
+                Some(price),
+            )
+            .expect("keyed");
+        let spent = KeySpent::new(Arc::clone(&ledger));
+        assert!((spent.usd("0123456789", 0).expect("keyed") - 2.0).abs() < 1e-9);
+        assert_eq!(spent.usd("", 0).expect("empty"), 0.0);
     }
 }
