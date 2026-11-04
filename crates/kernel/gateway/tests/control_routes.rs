@@ -12,7 +12,8 @@ use hofund_control_proto::{
     AgentListResponse, AgentModelRequest, AgentPlanRequest, AgentPlanResponse, AgentStatusResponse,
     ControlError, ControlErrorKind, ErrorEnvelope, HealthResponse, MAX_REQUEST_BODY_BYTES,
     ModelListResponse, PicksResponse, PicksSetRequest, ProviderListResponse, ProviderTestRequest,
-    ProviderTestResponse, QuotaHistoryQuery, QuotaHistoryResponse, QuotaQuery, QuotaResponse,
+    ProviderTestResponse, QuotaCreditsModesResponse, QuotaCreditsSetRequest,
+    QuotaCreditsSetResponse, QuotaHistoryQuery, QuotaHistoryResponse, QuotaQuery, QuotaResponse,
     RouteModelListResponse, ShutdownRequest, ShutdownResponse, StatusResponse, TokenRotateRequest,
     TokenRotateResponse, UsageQuery, UsageResponse, WarmupListResponse, WarmupRunRequest,
     WarmupRunResponse, decode_error_envelope,
@@ -169,6 +170,20 @@ impl ControlState for FakeControlState {
         ))
     }
 
+    fn quota_credits_modes(&self) -> ControlFuture<'_, QuotaCreditsModesResponse> {
+        self.reply("quota_credits_modes")
+    }
+
+    fn set_quota_credits(
+        &self,
+        request: QuotaCreditsSetRequest,
+    ) -> ControlFuture<'_, QuotaCreditsSetResponse> {
+        self.reply(format!(
+            "set_quota_credits:{}:{}:{}",
+            request.provider, request.user, request.mode
+        ))
+    }
+
     fn warmups(&self) -> ControlFuture<'_, WarmupListResponse> {
         self.reply("warmups")
     }
@@ -292,6 +307,12 @@ fn operation_routes() -> Vec<(Method, &'static str, Vec<u8>)> {
             Method::GET,
             "/v1/hofund/quotas/history?days=7&provider=acct&user=Me%40x.io",
             Vec::new(),
+        ),
+        (Method::GET, "/v1/hofund/quotas/credits-modes", Vec::new()),
+        (
+            Method::POST,
+            "/v1/hofund/quotas/credits/settings",
+            json!(&QuotaCreditsSetRequest::new("acct", "a@x.io", "first")),
         ),
         (Method::GET, "/v1/hofund/warmups", Vec::new()),
         (
@@ -422,6 +443,8 @@ async fn control_routes_success_and_error_envelopes_against_fake_state() {
             "usage:Day",
             "quotas:kept=true",
             "quota_history:Some(\"7\"):Some(\"acct\"):Some(\"Me@x.io\")",
+            "quota_credits_modes",
+            "set_quota_credits:acct:a@x.io:first",
             "warmups",
             "run_warmup:acct:a@x.io",
             "rotate_token",

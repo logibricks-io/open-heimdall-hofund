@@ -42,6 +42,7 @@ mod control;
 mod control_agents;
 mod control_local;
 pub(crate) mod control_map;
+mod credits_modes;
 mod events;
 mod measurements;
 mod membership;
@@ -819,6 +820,7 @@ fn router(
         Arc<Cooldowns>,
         hofund_router::affinity::AffinityState,
         Arc<hofund_router::quota::QuotaStore>,
+        Arc<hofund_router::credits_mode::CreditsModeStore>,
     ),
 ) -> Result<RouterParts, DaemonError> {
     let Built {
@@ -865,6 +867,7 @@ fn router(
         shared.0,
         shared.1,
         Some(shared.2),
+        Some(shared.3),
     )?;
     Ok(RouterParts {
         snapshot,

@@ -15,11 +15,12 @@ use hofund_control_proto::{
     GatewayKeyRequest, GatewayKeyResponse, GatewayKeyRestoreRequest, HealthResponse,
     MAX_RESPONSE_BODY_BYTES, ModelListResponse, PicksResponse, PicksSetRequest, ProviderKeyRequest,
     ProviderKeysResponse, ProviderListResponse, ProviderTestRequest, ProviderTestResponse,
-    QuotaHistoryQuery, QuotaHistoryResponse, QuotaQuery, QuotaResponse, ReloadRequest,
-    RouteListResponse, RouteModelListResponse, RouteQuery, SessionRouteResponse, ShutdownRequest,
-    ShutdownResponse, StatusResponse, TokenRotateRequest, TokenRotateResponse, Topic,
-    UnroutedListResponse, UsagePeriod, UsageQuery, UsageResponse, WarmupListResponse,
-    WarmupRunRequest, WarmupRunResponse, decode_error_envelope, decode_response,
+    QuotaCreditsModesResponse, QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryQuery,
+    QuotaHistoryResponse, QuotaQuery, QuotaResponse, ReloadRequest, RouteListResponse,
+    RouteModelListResponse, RouteQuery, SessionRouteResponse, ShutdownRequest, ShutdownResponse,
+    StatusResponse, TokenRotateRequest, TokenRotateResponse, Topic, UnroutedListResponse,
+    UsagePeriod, UsageQuery, UsageResponse, WarmupListResponse, WarmupRunRequest,
+    WarmupRunResponse, decode_error_envelope, decode_response,
 };
 use http::header;
 use http_body_util::{BodyExt, Full, Limited};
@@ -557,6 +558,24 @@ impl Client {
             self.get(&format!("/v1/hofund/quotas/history?{query}"))
                 .await
         }
+    }
+
+    /// Lists subscription accounts whose credits spending mode is not the default.
+    pub async fn quota_credits_modes(&self) -> Result<QuotaCreditsModesResponse, ClientError> {
+        self.get("/v1/hofund/quotas/credits-modes").await
+    }
+
+    /// Sets how one subscription account spends credits in routing.
+    pub async fn set_quota_credits(
+        &self,
+        request: QuotaCreditsSetRequest,
+    ) -> Result<QuotaCreditsSetResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            "/v1/hofund/quotas/credits/settings",
+            Some(json_body(&request)?),
+        )
+        .await
     }
 
     /// Lists last daily warm-up results known to the daemon.
