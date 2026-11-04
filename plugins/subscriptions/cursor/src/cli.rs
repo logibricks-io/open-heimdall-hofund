@@ -31,27 +31,14 @@ struct KeychainCache {
     read_at: Option<Instant>,
 }
 
-/// Whether tests skip macOS keychain reads.
+/// Whether macOS keychain reads are skipped (tests or `HOFUND_CURSOR_SKIP_KEYCHAIN`).
 pub(crate) fn skip_keychain() -> bool {
-    #[cfg(test)]
-    {
-        if SKIP_KEYCHAIN.with(|slot| *slot.borrow()) {
-            return true;
-        }
+    if skip_keychain_override() {
+        return true;
     }
     std::env::var("HOFUND_CURSOR_SKIP_KEYCHAIN")
         .ok()
         .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-}
-
-#[cfg(test)]
-thread_local! {
-    static SKIP_KEYCHAIN: std::cell::RefCell<bool> = const { std::cell::RefCell::new(false) };
-}
-
-#[cfg(test)]
-pub(crate) fn test_skip_keychain(skip: bool) {
-    SKIP_KEYCHAIN.with(|slot| *slot.borrow_mut() = skip);
 }
 
 /// Reads cursor-agent's token from the macOS keychain when allowed.
@@ -153,4 +140,36 @@ pub(crate) fn program(configured: Option<&PathBuf>) -> Result<PathBuf, PluginErr
                 "cursor-agent is not installed: it is not on PATH; install it or set `command`",
             )
         })
+}
+
+#[cfg(not(test))]
+fn skip_keychain_override() -> bool {
+    false
+}
+
+#[cfg(test)]
+mod test_only {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static SKIP_KEYCHAIN: RefCell<bool> = const { RefCell::new(false) };
+    }
+
+    pub(crate) fn set_skip(skip: bool) {
+        SKIP_KEYCHAIN.with(|slot| *slot.borrow_mut() = skip);
+    }
+
+    pub(crate) fn skip() -> bool {
+        SKIP_KEYCHAIN.with(|slot| *slot.borrow())
+    }
+}
+
+#[cfg(test)]
+fn skip_keychain_override() -> bool {
+    test_only::skip()
+}
+
+#[cfg(test)]
+pub(crate) fn test_skip_keychain(skip: bool) {
+    test_only::set_skip(skip);
 }
