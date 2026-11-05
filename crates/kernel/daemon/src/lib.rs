@@ -979,6 +979,15 @@ pub(crate) fn routes_without_sendable_hops(config: &Config) -> Vec<String> {
         .collect()
 }
 
+pub(crate) fn routes_with_sendable_hops(config: &Config) -> BTreeSet<String> {
+    let (planned, _) = route_plan(config, None, None, &BTreeMap::new());
+    planned
+        .into_iter()
+        .filter(|(_, hops)| !hops.is_empty())
+        .map(|(model, _)| model)
+        .collect()
+}
+
 pub(crate) fn validate_route_targets(config: &Config) -> Result<(), DaemonError> {
     let providers: BTreeSet<&str> = config.providers.iter().map(|p| p.id.as_str()).collect();
     let mut seen = BTreeSet::new();

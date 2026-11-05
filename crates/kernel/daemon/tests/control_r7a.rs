@@ -922,3 +922,109 @@ async fn unlisted_provider_hides_exclusive_route_not_member_candidates() {
 
     support::shutdown(running).await;
 }
+
+fn reseat_fixture_config() -> String {
+    format!(
+        "listen = \"127.0.0.1:0\"\n\
+[[providers]]\nid = \"dead-off\"\nenabled = false\nprotocol = \"openai-chat\"\nbase_url = \"http://127.0.0.1:9/v1\"\napi_key = \"{SECRET}\"\n\
+[[providers]]\nid = \"chat\"\nprotocol = \"openai-chat\"\nbase_url = \"http://127.0.0.1:9/v1\"\napi_key = \"{SECRET}\"\n\
+[[providers]]\nid = \"spare\"\nprotocol = \"openai-chat\"\nbase_url = \"http://127.0.0.1:9/v1\"\napi_key = \"{SECRET}\"\n\
+[[routes]]\nmodel = \"dead-only\"\nupstreams = [\"dead-off\"]\n\
+[[routes]]\nmodel = \"on-spare\"\nupstreams = [\"spare\"]\n\
+[[routes]]\nmodel = \"safe\"\nupstreams = [\"chat\"]\n"
+    )
+}
+
+#[tokio::test]
+async fn disabling_provider_reseat_skips_already_dead_routes_in_config_order() {
+    let scratch = Scratch::new("reseat-dead-first");
+    let settings_spare = scratch
+        .runtime_dir
+        .join("home")
+        .join(".claude")
+        .join("settings.json");
+    std::fs::create_dir_all(settings_spare.parent().expect("spare parent")).expect("dir");
+    std::fs::write(&settings_spare, "{\"model\": \"on-spare\"}\n").expect("spare settings");
+
+    let text = reseat_fixture_config();
+    let session_spare = Session::new(scratch.runtime_dir.join("home")).with_path("");
+    let running = support::within(
+        "start daemon spare agent",
+        support::REQUEST,
+        start_with(
+            &scratch,
+            &text,
+            options_with(
+                &scratch,
+                StartOptions {
+                    agent_session: Some(session_spare),
+                    ..StartOptions::default()
+                },
+            ),
+        ),
+    )
+    .await;
+    let client = Client::new(&running, &scratch);
+    let read = client.config().await;
+    let disable = provider_patch(json!({
+        "version": API_VERSION,
+        "expected_revision": read.disk_revision,
+        "enabled": false,
+    }));
+    let (status, _) = client.patch("/v1/hofund/providers/spare", &disable).await;
+    assert_eq!(status, reqwest::StatusCode::OK);
+
+    let spare_settings = std::fs::read_to_string(&settings_spare).expect("spare after disable");
+    assert!(
+        spare_settings.contains("\"safe\""),
+        "agent on a route that lost hops must move to a sendable route, not dead-only first in config, got: {spare_settings}"
+    );
+    assert!(
+        !spare_settings.contains("dead-only"),
+        "must not reseat onto an already-dead route: {spare_settings}"
+    );
+    support::shutdown(running).await;
+
+    let scratch_dead = Scratch::new("reseat-dead-agent");
+    let settings_dead = scratch_dead
+        .runtime_dir
+        .join("home")
+        .join(".claude")
+        .join("settings.json");
+    std::fs::create_dir_all(settings_dead.parent().expect("dead parent")).expect("dir");
+    std::fs::write(&settings_dead, "{\"model\": \"dead-only\"}\n").expect("dead settings");
+    let session_dead = Session::new(scratch_dead.runtime_dir.join("home")).with_path("");
+    let running_dead = support::within(
+        "start daemon dead agent",
+        support::REQUEST,
+        start_with(
+            &scratch_dead,
+            &reseat_fixture_config(),
+            options_with(
+                &scratch_dead,
+                StartOptions {
+                    agent_session: Some(session_dead),
+                    ..StartOptions::default()
+                },
+            ),
+        ),
+    )
+    .await;
+    let client_dead = Client::new(&running_dead, &scratch_dead);
+    let read_dead = client_dead.config().await;
+    let disable_dead = provider_patch(json!({
+        "version": API_VERSION,
+        "expected_revision": read_dead.disk_revision,
+        "enabled": false,
+    }));
+    let (status, _) = client_dead
+        .patch("/v1/hofund/providers/spare", &disable_dead)
+        .await;
+    assert_eq!(status, reqwest::StatusCode::OK);
+    let dead_settings = std::fs::read_to_string(&settings_dead).expect("dead agent settings");
+    assert!(
+        dead_settings.contains("dead-only"),
+        "agent already on a dead route must not move when another provider is disabled, got: {dead_settings}"
+    );
+    support::shutdown(running_dead).await;
+}

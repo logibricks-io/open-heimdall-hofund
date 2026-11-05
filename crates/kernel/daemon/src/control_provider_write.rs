@@ -108,6 +108,7 @@ pub(crate) async fn patch_provider(
     }
     let reseat = request.enabled == Some(false);
     let backup = current.text.clone();
+    let pre_config = load(&current.text).map_err(config_failure)?;
     let edited = edit_provider_patch(
         &current.text,
         id,
@@ -120,18 +121,24 @@ pub(crate) async fn patch_provider(
     .map_err(config_failure)?;
     let applied = if reseat {
         let provider_id = id.to_owned();
+        let pre_for_reseat = pre_config;
         ops.apply_with_sidecar_work(
             &request.expected_revision,
             edited,
             backup.clone(),
             move |_ops, text| {
+                let post_config = load(text).map_err(config_failure)?;
+                let matched =
+                    routes_newly_losing_sendable_hops(&pre_for_reseat, &post_config, &provider_id);
+                let fallback = sendable_fallback_routes(&post_config, &provider_id);
                 run_reseat_locked(
                     descriptions,
                     agent_session,
                     gateway_target,
                     &provider_id,
                     false,
-                    None,
+                    Some(&matched),
+                    Some(&fallback),
                     text,
                 )
             },
@@ -187,6 +194,7 @@ pub(crate) async fn delete_provider(
                     &provider_id,
                     false,
                     Some(&match_route_models),
+                    None,
                     text,
                 )
             },
@@ -198,6 +206,7 @@ pub(crate) async fn delete_provider(
     Ok(response)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_reseat_locked(
     descriptions: &'static [&'static AgentDescription],
     configured_session: Option<hofund_agent::Session>,
@@ -205,6 +214,7 @@ fn run_reseat_locked(
     provider_id: &str,
     provider_still_present: bool,
     match_route_models: Option<&[String]>,
+    fallback_route_models: Option<&[String]>,
     config_text: &str,
 ) -> Result<(), ControlFailure> {
     let config = load(config_text).map_err(config_failure)?;
@@ -218,7 +228,9 @@ fn run_reseat_locked(
     let matched = match_route_models
         .map(<[String]>::to_vec)
         .unwrap_or_else(|| crate::routes_without_sendable_hops(&config));
-    let fallback = fallback_route_models(&config, provider_id);
+    let fallback = fallback_route_models
+        .map(<[String]>::to_vec)
+        .unwrap_or_else(|| sendable_fallback_routes(&config, provider_id));
     let catalog = catalog(descriptions).map_err(|error| internal(error.to_string()))?;
     reseat_after_provider_change(
         &catalog,
@@ -231,6 +243,34 @@ fn run_reseat_locked(
     )
     .map_err(|error| internal(error.to_string()))
     .map(|_| ())
+}
+
+pub(crate) fn routes_newly_losing_sendable_hops(
+    before: &Config,
+    after: &Config,
+    provider_id: &str,
+) -> Vec<String> {
+    let before_sendable = crate::routes_with_sendable_hops(before);
+    let after_sendable = crate::routes_with_sendable_hops(after);
+    after
+        .routes
+        .iter()
+        .filter(|route| route_uses_provider(after, route, provider_id))
+        .filter(|route| before_sendable.contains(&route.model))
+        .filter(|route| !after_sendable.contains(&route.model))
+        .map(|route| route.model.clone())
+        .collect()
+}
+
+fn sendable_fallback_routes(config: &Config, provider_id: &str) -> Vec<String> {
+    let sendable = crate::routes_with_sendable_hops(config);
+    config
+        .routes
+        .iter()
+        .filter(|route| !route_uses_provider(config, route, provider_id))
+        .filter(|route| sendable.contains(&route.model))
+        .map(|route| route.model.clone())
+        .collect()
 }
 
 fn resolve_reseat_target(
@@ -256,15 +296,6 @@ fn affected_route_models(config: &Config, provider_id: &str) -> Vec<String> {
         .routes
         .iter()
         .filter(|route| route_uses_provider(config, route, provider_id))
-        .map(|route| route.model.clone())
-        .collect()
-}
-
-fn fallback_route_models(config: &Config, provider_id: &str) -> Vec<String> {
-    config
-        .routes
-        .iter()
-        .filter(|route| !route_uses_provider(config, route, provider_id))
         .map(|route| route.model.clone())
         .collect()
 }
@@ -353,7 +384,33 @@ fn internal(message: String) -> ControlFailure {
 mod tests {
     use hofund_config::load;
 
-    use super::{affected_route_models, fallback_route_models};
+    use super::{
+        affected_route_models, routes_newly_losing_sendable_hops, sendable_fallback_routes,
+    };
+
+    const RESEAT_FIXTURE: &str = "\
+[[providers]]\nid = \"dead-off\"\nenabled = false\nprotocol = \"openai-chat\"\nbase_url = \"http://127.0.0.1/v1\"\napi_key = \"k\"\n\
+[[providers]]\nid = \"live\"\nprotocol = \"openai-chat\"\nbase_url = \"http://127.0.0.1/v1\"\napi_key = \"k\"\n\
+[[providers]]\nid = \"spare\"\nprotocol = \"openai-chat\"\nbase_url = \"http://127.0.0.1/v1\"\napi_key = \"k\"\n\
+[[routes]]\nmodel = \"dead-only\"\nupstreams = [\"dead-off\"]\n\
+[[routes]]\nmodel = \"on-spare\"\nupstreams = [\"spare\"]\n\
+[[routes]]\nmodel = \"safe\"\nupstreams = [\"live\"]\n";
+
+    #[test]
+    fn r7a_disable_reseat_matches_only_routes_newly_losing_sendable_hops() {
+        let before = load(RESEAT_FIXTURE).expect("before");
+        let mut after = before.clone();
+        let spare = after
+            .providers
+            .iter_mut()
+            .find(|provider| provider.id == "spare")
+            .expect("spare");
+        spare.enabled = false;
+        let matched = routes_newly_losing_sendable_hops(&before, &after, "spare");
+        assert_eq!(matched, ["on-spare"]);
+        let fallback = sendable_fallback_routes(&after, "spare");
+        assert_eq!(fallback, ["safe"]);
+    }
 
     #[test]
     fn r7a_fallback_routes_exclude_routes_whose_upstream_still_uses_provider() {
@@ -366,7 +423,7 @@ mod tests {
         let config = load(text).expect("config");
         let affected = affected_route_models(&config, "a");
         assert_eq!(affected, ["on-a", "alias-a"]);
-        let fallback = fallback_route_models(&config, "a");
+        let fallback = sendable_fallback_routes(&config, "a");
         assert_eq!(fallback, ["safe"]);
     }
 }
