@@ -4,6 +4,8 @@ use std::time::Instant;
 
 use hofund_ir::{BlockStart, StreamEvent};
 use hofund_usage::FlowTracker;
+use serde::Deserialize;
+use serde_json::Value;
 
 /// Tracks a streamed reply for TTFT and flow_ms.
 #[derive(Debug)]
@@ -60,6 +62,9 @@ impl StreamTiming {
             StreamEvent::ToolArgumentsDelta(_) => (true, false, false, false),
             StreamEvent::ContentBlockStart(start) => match &start.block {
                 BlockStart::ToolCall { .. } => (true, false, false, false),
+                BlockStart::Unknown { kind } if kind == "server_tool_use" => {
+                    (true, false, false, false)
+                }
                 BlockStart::Thinking { redacted: true, .. } => {
                     self.timing_hidden = true;
                     (false, false, false, true)
@@ -114,7 +119,7 @@ impl StreamTiming {
             }
             let (content, text, reasoning, hidden) = timing_kind(&event);
             self.timing_hidden = self.timing_hidden || hidden;
-            if !content {
+            if !content && !text {
                 continue;
             }
             self.note_content(elapsed, text, reasoning, event.len().max(1));
@@ -200,32 +205,243 @@ fn event_end(pending: &[u8]) -> Option<usize> {
 }
 
 fn flow_content(event: &[u8]) -> bool {
-    has(event, b"delta") || has(event, br#""parts""#)
+    let (_, data) = parse_sse_event(event);
+    if data.is_empty() {
+        return false;
+    }
+    if has(&data, br#""type":"response.completed""#)
+        || has(&data, br#""type": "response.completed""#)
+    {
+        return false;
+    }
+    has(&data, b"delta") || has(&data, br#""parts""#)
 }
 
-fn timing_data_marker(event: &[u8]) -> bool {
-    flow_content(event)
-        || has(event, b"content_block_start")
-        || has(event, b"output_item.added")
-        || has(event, b"encrypted_content")
+fn parse_sse_event(event: &[u8]) -> (String, Vec<u8>) {
+    let mut name = String::new();
+    let mut data = Vec::new();
+    for line in event.split(|byte| *byte == b'\n') {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        if let Some(rest) = line.strip_prefix(b"event:") {
+            name = String::from_utf8_lossy(rest.trim_ascii()).into_owned();
+        } else if let Some(rest) = line.strip_prefix(b"data:") {
+            if !data.is_empty() {
+                data.push(b' ');
+            }
+            data.extend_from_slice(rest.trim_ascii());
+        }
+    }
+    (name, data)
+}
+
+fn timing_gate(data: &[u8]) -> bool {
+    if data.is_empty() {
+        return false;
+    }
+    has(data, b"delta")
+        || has(data, br#""parts""#)
+        || has(data, b"content_block_start")
+        || has(data, b"output_item.added")
+        || has(data, b"encrypted_content")
+}
+
+fn filled(raw: &Value) -> bool {
+    match raw {
+        Value::Null => false,
+        Value::String(text) => !text.is_empty(),
+        Value::Array(items) => !items.is_empty(),
+        Value::Object(map) => !map.is_empty(),
+        Value::Number(_) | Value::Bool(_) => true,
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct TimingEnvelope {
+    #[serde(default)]
+    r#type: String,
+    #[serde(default)]
+    delta: Value,
+    #[serde(default)]
+    content_block: Option<TypedBlock>,
+    #[serde(default)]
+    item: Option<TimingItem>,
+    #[serde(default)]
+    choices: Vec<ChatChoice>,
+    #[serde(default)]
+    candidates: Vec<GeminiCandidate>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TypedBlock {
+    #[serde(default)]
+    r#type: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct TimingItem {
+    #[serde(default)]
+    r#type: String,
+    #[serde(default)]
+    encrypted_content: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatChoice {
+    #[serde(default)]
+    delta: ChatDelta,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ChatDelta {
+    #[serde(default)]
+    content: Value,
+    #[serde(default)]
+    refusal: Value,
+    #[serde(default)]
+    reasoning_content: Value,
+    #[serde(default)]
+    reasoning: Value,
+    #[serde(default)]
+    tool_calls: Value,
+    #[serde(default)]
+    function_call: Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct GeminiCandidate {
+    #[serde(default)]
+    content: GeminiContent,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct GeminiContent {
+    #[serde(default)]
+    parts: Vec<GeminiPart>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct GeminiPart {
+    #[serde(default)]
+    text: String,
+    #[serde(default)]
+    thought: bool,
+    #[serde(default, rename = "functionCall")]
+    function_call: Value,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct AnthropicDelta {
+    #[serde(default)]
+    text: String,
+    #[serde(default)]
+    thinking: String,
+    #[serde(default)]
+    partial_json: String,
 }
 
 fn timing_kind(event: &[u8]) -> (bool, bool, bool, bool) {
-    let hidden = has(event, b"encrypted_content") || has(event, b"redacted_thinking");
-    if has(event, b"content_block_start") {
-        let tool = has(event, b"tool_use") || has(event, b"server_tool_use");
-        return (tool, false, false, hidden);
+    let (name, data) = parse_sse_event(event);
+    if !timing_gate(&data) {
+        return (false, false, false, false);
     }
-    if has(event, b"output_item.added") {
-        let tool = has(event, b"function_call") || has(event, b"custom_tool_call");
-        return (tool, false, false, hidden);
+    let Ok(v) = serde_json::from_slice::<TimingEnvelope>(&data) else {
+        return (false, false, false, false);
+    };
+    let mut hidden = false;
+    if let Some(item) = &v.item
+        && !item.encrypted_content.is_empty()
+    {
+        hidden = true;
     }
-    if !timing_data_marker(event) {
+    if let Some(block) = &v.content_block
+        && block.r#type == "redacted_thinking"
+    {
+        hidden = true;
+    }
+    let mut typ = v.r#type;
+    if typ.is_empty() {
+        typ = name;
+    }
+    if typ == "response.completed" {
         return (false, false, false, hidden);
     }
-    let text = has(event, br#""text""#);
-    let reasoning = has(event, b"thinking") || has(event, b"reasoning");
-    (true, text, reasoning, hidden)
+    match typ.as_str() {
+        "content_block_delta" => {
+            let delta =
+                serde_json::from_value::<AnthropicDelta>(v.delta.clone()).unwrap_or_default();
+            if !delta.text.is_empty() {
+                return (true, true, false, hidden);
+            }
+            if !delta.thinking.is_empty() {
+                return (true, false, true, false);
+            }
+            if !delta.partial_json.is_empty() {
+                return (true, false, false, hidden);
+            }
+            (false, false, false, hidden)
+        }
+        "content_block_start" => {
+            let tool = v.content_block.as_ref().is_some_and(|block| {
+                block.r#type == "tool_use" || block.r#type == "server_tool_use"
+            });
+            (tool, false, false, hidden)
+        }
+        "response.output_text.delta" | "response.refusal.delta" => {
+            let delta = filled(&v.delta);
+            (delta, delta, false, false)
+        }
+        "response.reasoning_summary_text.delta"
+        | "response.reasoning_text.delta"
+        | "response.function_call_arguments.delta"
+        | "response.custom_tool_call_input.delta" => {
+            let delta = filled(&v.delta);
+            let reasoning = matches!(
+                typ.as_str(),
+                "response.reasoning_text.delta" | "response.reasoning_summary_text.delta"
+            ) && delta;
+            (delta, false, reasoning, false)
+        }
+        "response.output_item.added" => {
+            let tool = v.item.as_ref().is_some_and(|item| {
+                item.r#type == "function_call" || item.r#type == "custom_tool_call"
+            });
+            (tool, false, false, hidden)
+        }
+        _ => {
+            let mut content = false;
+            let text = false;
+            let mut reasoning = false;
+            for choice in &v.choices {
+                let delta = &choice.delta;
+                reasoning =
+                    reasoning || filled(&delta.reasoning_content) || filled(&delta.reasoning);
+                if filled(&delta.content) || filled(&delta.refusal) {
+                    return (true, true, reasoning, hidden);
+                }
+                if filled(&delta.reasoning_content)
+                    || filled(&delta.reasoning)
+                    || filled(&delta.tool_calls)
+                    || filled(&delta.function_call)
+                {
+                    content = true;
+                }
+            }
+            for candidate in &v.candidates {
+                for part in &candidate.content.parts {
+                    if !part.text.is_empty() && !part.thought {
+                        return (true, true, reasoning, hidden);
+                    }
+                    if !part.text.is_empty() || filled(&part.function_call) {
+                        content = true;
+                        if part.thought && !part.text.is_empty() {
+                            reasoning = true;
+                        }
+                    }
+                }
+            }
+            (content, text, reasoning, hidden)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -235,6 +451,15 @@ mod tests {
         BlockStart, ContentBlockStart, Extensions, StreamEvent, TextDelta, ToolArgumentsDelta,
     };
     use std::time::Instant;
+
+    fn frame(body: &str) -> Vec<u8> {
+        format!("{body}\n\n").into_bytes()
+    }
+
+    fn first_kind(body: &str) -> (bool, bool) {
+        let (content, text, _, _) = timing_kind(&frame(body));
+        (content, text)
+    }
 
     #[test]
     fn r10_has_uses_needle_length_for_windows() {
@@ -260,38 +485,150 @@ mod tests {
             b"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"a\"}]}}]}\n\n"
         ));
         assert!(!flow_content(b"data: {\"type\":\"message_start\"}\n\n"));
+        assert!(!flow_content(
+            br#"event: response.completed
+data: {"type":"response.completed","response":{"output":[{"type":"output_text","text":"hi"}]}}
+
+"#
+        ));
     }
 
     #[test]
-    fn r10_timing_kind_tool_content_block_start_is_content() {
-        let tool = br#"event: content_block_start
-data: {"type":"content_block_start","content_block":{"type":"tool_use","id":"t","name":"n"}}
-
-"#;
-        let (content, text, reasoning, hidden) = timing_kind(tool);
-        assert!(content);
-        assert!(!text);
-        assert!(!reasoning);
-        assert!(!hidden);
+    fn r10_timing_kind_reference_table() {
+        for (body, want_content, want_text) in [
+            (
+                r#"data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"t","name":"ls","input":{}}}"#,
+                true,
+                false,
+            ),
+            (
+                r#"data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+                false,
+                false,
+            ),
+            (
+                r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"a"}}"#,
+                true,
+                false,
+            ),
+            (
+                r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"x"}}"#,
+                false,
+                false,
+            ),
+            (
+                r#"data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}"#,
+                false,
+                false,
+            ),
+            (
+                r#"data: {"choices":[{"delta":{"role":"assistant","content":null}}]}"#,
+                false,
+                false,
+            ),
+            (
+                r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"ls"}}]}}]}"#,
+                true,
+                false,
+            ),
+            (
+                r#"data: {"choices":[{"delta":{"reasoning":"hm"}}]}"#,
+                true,
+                false,
+            ),
+            (
+                r#"data: {"choices":[{"delta":{"content":"hi"}}]}"#,
+                true,
+                true,
+            ),
+            (
+                "event: response.function_call_arguments.delta\ndata: {\"type\":\"response.function_call_arguments.delta\",\"delta\":\"{\"}",
+                true,
+                false,
+            ),
+            (
+                r#"data: {"type":"response.output_item.added","item":{"type":"function_call","name":"ls"}}"#,
+                true,
+                false,
+            ),
+            (
+                r#"data: {"type":"response.output_item.added","item":{"type":"message"}}"#,
+                false,
+                false,
+            ),
+            (
+                r#"data: {"type":"response.output_text.delta","delta":""}"#,
+                false,
+                false,
+            ),
+            (
+                r#"data: {"candidates":[{"content":{"parts":[{"text":"hm","thought":true}]}}]}"#,
+                true,
+                false,
+            ),
+            (
+                r#"data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"ls"}}]}}]}"#,
+                true,
+                false,
+            ),
+            (
+                r#"data: {"candidates":[{"content":{"parts":[{"text":"hi"}]}}]}"#,
+                true,
+                true,
+            ),
+        ] {
+            let (content, text) = first_kind(body);
+            assert_eq!((content, text), (want_content, want_text), "body={body:?}");
+        }
     }
 
     #[test]
-    fn r10_timing_kind_text_content_block_start_not_content() {
-        let text = br#"event: content_block_start
-data: {"type":"content_block_start","content_block":{"type":"text"}}
+    fn r10_timing_kind_output_text_delta_is_visible_text() {
+        let ev = frame(
+            r#"event: response.output_text.delta
+data: {"type":"response.output_text.delta","delta":"hi"}"#,
+        );
+        let (content, text, reasoning, hidden) = timing_kind(&ev);
+        assert!(content && text && !reasoning && !hidden);
+    }
 
-"#;
-        let (content, _, _, _) = timing_kind(text);
+    #[test]
+    fn r10_timing_kind_function_call_output_not_content() {
+        let ev = frame(
+            r#"data: {"type":"response.output_item.added","item":{"type":"function_call_output","output":"x"}}"#,
+        );
+        let (content, _, _, _) = timing_kind(&ev);
         assert!(!content);
     }
 
     #[test]
-    fn r10_timing_kind_encrypted_content_marks_hidden_not_content() {
-        let item = br#"event: response.output_item.added
-data: {"type":"response.output_item.added","item":{"type":"reasoning","encrypted_content":"sealed"}}
+    fn r10_timing_kind_server_tool_use_block_start_is_content() {
+        let ev = frame(
+            r#"data: {"type":"content_block_start","content_block":{"type":"server_tool_use","id":"t","name":"n"}}"#,
+        );
+        let (content, text, _, _) = timing_kind(&ev);
+        assert!(content);
+        assert!(!text);
+    }
 
-"#;
-        let (content, _, _, hidden) = timing_kind(item);
+    #[test]
+    fn r10_timing_kind_completed_not_first_content_even_with_text() {
+        let ev = frame(
+            r#"event: response.completed
+data: {"type":"response.completed","response":{"output":[{"type":"output_text","text":"hi"}],"usage":{"output_tokens":1}},"item":{"encrypted_content":"sealed"}}"#,
+        );
+        let (content, text, _, hidden) = timing_kind(&ev);
+        assert!(!content && !text);
+        assert!(hidden);
+    }
+
+    #[test]
+    fn r10_timing_kind_encrypted_reasoning_item_hidden_not_content() {
+        let item = frame(
+            r#"event: response.output_item.added
+data: {"type":"response.output_item.added","item":{"type":"reasoning","encrypted_content":"sealed"}}"#,
+        );
+        let (content, _, _, hidden) = timing_kind(&item);
         assert!(!content);
         assert!(hidden);
     }
@@ -304,6 +641,22 @@ data: {"type":"response.output_item.added","item":{"type":"reasoning","encrypted
 data: {"type":"content_block_start","content_block":{"type":"tool_use","id":"t","name":"n"}}
 
 "#,
+        );
+        assert!(timing.finish_fields(0).expect("fields").0.is_some());
+    }
+
+    #[test]
+    fn r10_stream_timing_server_tool_use_on_decode_path() {
+        let mut timing = StreamTiming::new(Instant::now());
+        timing.note_stream_event(
+            &StreamEvent::ContentBlockStart(ContentBlockStart {
+                index: 0,
+                block: BlockStart::Unknown {
+                    kind: "server_tool_use".to_owned(),
+                },
+                extensions: Extensions::default(),
+            }),
+            64,
         );
         assert!(timing.finish_fields(0).expect("fields").0.is_some());
     }

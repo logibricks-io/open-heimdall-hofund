@@ -99,11 +99,13 @@ pub fn parse_since(value: &str) -> Result<i64, String> {
         .map(|dt| dt.timestamp())
 }
 
-/// Parses `--last` as a positive Go-style duration (`24h`, `90m`, `1h30m`, `1.5d`).
+/// Parses `--last` as a positive duration: Go-style units (`24h`, `90m`, `1h30m`)
+/// or a whole-value day suffix (`1.5d`), which is a hofund extension beyond Go
+/// `ParseDuration`.
 ///
 /// # Errors
 ///
-/// Returns a message when the duration is missing or not positive.
+/// Returns a message when the duration is missing, not positive, or out of range.
 pub fn parse_last(value: &str) -> Result<Duration, String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -118,18 +120,46 @@ pub fn parse_last(value: &str) -> Result<Duration, String> {
                 "--last takes a duration greater than zero, not {value:?}"
             ));
         }
-        return Ok(Duration::seconds((days * 86_400.0).round() as i64));
+        let seconds_f = days * 86_400.0;
+        if !(seconds_f.is_finite()) || seconds_f <= 0.0 || seconds_f >= i64::MAX as f64 {
+            return Err(format!(
+                "--last takes a duration greater than zero, not {value:?}"
+            ));
+        }
+        return finish_last_seconds(seconds_f.round() as i64, value);
     }
     if !duration_has_unit(trimmed) {
         return Err(format!(
             "--last takes a duration greater than zero, not {value:?}"
         ));
     }
-    // Go accepts any positive duration; the ledger keeps whole seconds, so a
-    // sub-millisecond window still counts as one millisecond.
-    Ok(Duration::milliseconds(parse_go_duration(
-        trimmed, "--last",
-    )?))
+    let ms = parse_go_duration(trimmed, "--last")?;
+    finish_last_milliseconds(ms, value)
+}
+
+fn max_last_seconds() -> i64 {
+    (100_f64 * 365_f64 * 86_400_f64).round() as i64
+}
+
+fn finish_last_seconds(seconds: i64, value: &str) -> Result<Duration, String> {
+    if seconds <= 0 || seconds > max_last_seconds() {
+        return Err(format!(
+            "--last takes a duration greater than zero, not {value:?}"
+        ));
+    }
+    Duration::try_seconds(seconds)
+        .ok_or_else(|| format!("--last takes a duration greater than zero, not {value:?}"))
+}
+
+fn finish_last_milliseconds(ms: i64, value: &str) -> Result<Duration, String> {
+    let max_ms = max_last_seconds().saturating_mul(1000);
+    if ms <= 0 || ms > max_ms {
+        return Err(format!(
+            "--last takes a duration greater than zero, not {value:?}"
+        ));
+    }
+    Duration::try_milliseconds(ms)
+        .ok_or_else(|| format!("--last takes a duration greater than zero, not {value:?}"))
 }
 
 fn duration_has_unit(trimmed: &str) -> bool {
@@ -485,6 +515,8 @@ mod tests {
             parse_last("1μs").expect("greek micro").num_milliseconds(),
             1
         );
+        assert!(parse_last("200000000000d").is_err());
+        assert!(parse_last("200000000000h").is_err());
     }
 
     #[test]
