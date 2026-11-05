@@ -13,15 +13,26 @@ use std::time::Duration;
 use serde::Deserialize;
 use thiserror::Error;
 
+mod groups_write;
 mod migrate;
 pub mod pass_headers;
 mod provider_rename;
+mod provider_write;
+mod ruleparse;
 mod visible;
 
+pub use groups_write::{
+    edit_group_create, edit_group_delete, edit_group_patch, edit_group_restore, group_id_from_name,
+    validate_group_rules,
+};
 pub use provider_rename::{
     GATEWAY_PROVIDER_ID, GROUP_ROUTE_PREFIX, edit_provider_rename, provider_id_valid, renamed_ref,
     validate_provider_rename,
 };
+pub use provider_write::{
+    edit_provider_create, edit_provider_delete, edit_provider_patch, validate_fallback_list,
+};
+pub use ruleparse::{ParsedRule, parse_rule_line};
 pub use visible::{
     AgentModels, CatalogEntry, VisibleCatalog, build_catalog_index, catalog_for_agent,
     edit_agent_hidden_models, edit_agent_picked_models, edit_agent_picked_only, edit_agent_visible,
@@ -360,6 +371,12 @@ impl fmt::Display for Stays {
 pub struct Provider {
     /// Stable id used by routes.
     pub id: String,
+    /// Display name when set in config.
+    pub name: String,
+    /// Whether the provider accepts routed requests.
+    pub enabled: bool,
+    /// Whether the provider appears in agent model pickers.
+    pub listed: bool,
     /// Optional visibility family tag.
     pub family: Option<String>,
     /// Preset id. The daemon fills the endpoint from the preset catalog.
@@ -832,8 +849,20 @@ impl Subscription {
 pub struct Route {
     /// Model name the client sends.
     pub model: String,
+    /// Display name for routing groups.
+    pub name: Option<String>,
     /// Optional visibility family tag for a routing group.
     pub family: Option<String>,
+    /// Routing rule lines stored verbatim.
+    pub rules: Vec<String>,
+    /// Classifier route ref for intent rules.
+    pub classifier: Option<String>,
+    /// Declared context size in tokens.
+    pub context: Option<i64>,
+    /// Offered reasoning levels.
+    pub levels: Vec<String>,
+    /// User-hidden auto-found group.
+    pub hidden: bool,
     /// Registered member-ordering strategy.
     pub routing: String,
     /// Conversation affinity for this routing group.
@@ -948,6 +977,12 @@ pub struct Upstream {
     pub max_output_tokens: Option<u64>,
     /// Relative weighted-routing share. Absent means one.
     pub weight: Option<u64>,
+    /// Fixed reasoning effort for this member.
+    pub effort: Option<String>,
+    /// Fast mode for this member.
+    pub fast: bool,
+    /// Whether this member takes requests.
+    pub enabled: bool,
 }
 
 impl Upstream {
@@ -1291,6 +1326,9 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
         model_list.auto_include = auto_include;
         providers.push(Provider {
             id: provider.id,
+            name: provider.name,
+            enabled: provider.enabled,
+            listed: provider.listed,
             family,
             preset: provider.preset,
             protocol,
@@ -1420,7 +1458,15 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
         }
         routes.push(Route {
             model: route.model.clone(),
+            name: route.name.filter(|name| !name.trim().is_empty()),
             family: visible::validated_family("route", &route.model, route.family.as_deref())?,
+            rules: route.rules,
+            classifier: route
+                .classifier
+                .filter(|classifier| !classifier.trim().is_empty()),
+            context: route.context,
+            levels: route.levels,
+            hidden: route.hidden,
             routing,
             stays,
             stays_explicit,
@@ -1659,7 +1705,7 @@ fn normalized_account_weights(
     Ok(weights)
 }
 
-const ROUTING_NAMES: [&str; 10] = [
+pub(crate) const ROUTING_NAMES: [&str; 10] = [
     "smart", "order", "rotate", "usage", "pace", "weight", "free", "fast", "cheap", "drain",
 ];
 
@@ -1695,9 +1741,15 @@ fn upstream_of(
     subscriptions: &BTreeSet<String>,
     groups: &BTreeSet<String>,
 ) -> Result<Upstream, ConfigError> {
+    let mut effort = None;
+    let mut fast = false;
+    let mut enabled = true;
     let (target, model, max_output_tokens, weight) = match upstream {
         RawUpstream::Id(provider) => (UpstreamTarget::Provider(provider), None, None, None),
         RawUpstream::Mapped(mapped) => {
+            effort = mapped.effort.filter(|effort| !effort.trim().is_empty());
+            fast = mapped.fast;
+            enabled = mapped.on;
             if mapped.weight == Some(0) {
                 return Err(ConfigError::Invalid(format!(
                     "route `{route}` has weight 0; weight must be at least 1"
@@ -1806,10 +1858,13 @@ fn upstream_of(
         model,
         max_output_tokens,
         weight,
+        effort,
+        fast,
+        enabled,
     })
 }
 
-fn parse_fallback(provider: &str, entry: &str) -> Result<Fallback, ConfigError> {
+pub(crate) fn parse_fallback(provider: &str, entry: &str) -> Result<Fallback, ConfigError> {
     if let Some(group) = entry.strip_prefix("group/") {
         if group.is_empty() || group.contains('/') {
             return Err(ConfigError::Invalid(format!(
@@ -2402,6 +2457,12 @@ fn default_statuses() -> BTreeSet<u16> {
 struct RawProvider {
     id: String,
     #[serde(default)]
+    name: String,
+    #[serde(default = "default_true")]
+    enabled: bool,
+    #[serde(default = "default_true")]
+    listed: bool,
+    #[serde(default)]
     family: Option<String>,
     #[serde(default)]
     preset: Option<String>,
@@ -2559,6 +2620,8 @@ fn default_smart() -> String {
 struct RawRoute {
     model: String,
     #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
     family: Option<String>,
     #[serde(default = "default_smart")]
     routing: String,
@@ -2568,6 +2631,16 @@ struct RawRoute {
     patience: Option<Value>,
     #[serde(default)]
     sink: bool,
+    #[serde(default)]
+    rules: Vec<String>,
+    #[serde(default)]
+    classifier: Option<String>,
+    #[serde(default)]
+    context: Option<i64>,
+    #[serde(default)]
+    levels: Vec<String>,
+    #[serde(default)]
+    hidden: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2592,6 +2665,12 @@ struct RawMappedUpstream {
     max_output_tokens: Option<u64>,
     #[serde(default)]
     weight: Option<u64>,
+    #[serde(default)]
+    effort: Option<String>,
+    #[serde(default)]
+    fast: bool,
+    #[serde(default = "default_true")]
+    on: bool,
 }
 
 #[cfg(test)]

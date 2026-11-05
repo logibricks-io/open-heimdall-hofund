@@ -61,6 +61,7 @@ mod go_binary;
 mod jsonc_edit;
 mod profile;
 mod request_agent;
+mod reseat;
 mod store;
 mod yaml_edit;
 
@@ -70,6 +71,7 @@ pub use profile::{
     ApplyOutcome, ProfileFields, apply_fields, in_use, is_profile_secret, snapshot_fields,
 };
 pub use request_agent::request_agent_id;
+pub use reseat::reseat_after_provider_change;
 
 /// The operating system path template selected by a compiled adapter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

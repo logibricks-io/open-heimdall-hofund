@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- R-7a control-plane gaps G-1 through G-4, G-9, and G-10: extended provider
+  summaries, preset catalog, provider create/patch/delete with agent reseat,
+  routing group CRUD and member-candidate list, profile rename, and status
+  `serves` / `owned_by_pid` from the environment (`hofund-control-proto`,
+  daemon, gateway, control-client; tests `control_r7a`).
+
 - Subscription plugins for Grok Build, Cursor, and Cline (feature-parity row 3.5,
   part 1): device or browser sign-in, agent auth import where supported, token
   refresh, model lists, quota reads, and chat or Responses upstream for Grok

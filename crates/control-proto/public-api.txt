@@ -296,6 +296,79 @@ GatewayKeyRestoreRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Seri
 GatewayKeyRestoreRequest.keys
 GatewayKeyRestoreRequest.version
 GatewayKeyRestoreRequest::fn new (keys : Vec < GatewayKey >) -> Self
+Group #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+Group.classifier
+Group.context
+Group.family
+Group.found
+Group.hidden
+Group.id
+Group.levels
+Group.members
+Group.name
+Group.routing
+Group.rules
+Group.stays
+GroupCreateRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
+GroupCreateRequest.expected_revision
+GroupCreateRequest.first_member
+GroupCreateRequest.name
+GroupCreateRequest.version
+GroupCreateRequest::fn validate (& self) -> Result < () , ControlError >
+GroupDeleteRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
+GroupDeleteRequest.expected_revision
+GroupDeleteRequest.version
+GroupDeleteRequest::fn validate (& self) -> Result < () , ControlError >
+GroupDeleteResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+GroupDeleteResponse.disk_revision
+GroupDeleteResponse.removed
+GroupDeleteResponse.version
+GroupListResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+GroupListResponse.disk_revision
+GroupListResponse.groups
+GroupListResponse.version
+GroupMember #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+GroupMember.effort
+GroupMember.enabled
+GroupMember.fast
+GroupMember.reference
+GroupMemberCandidate #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+GroupMemberCandidate.decision
+GroupMemberCandidate.reference
+GroupMemberCandidatesResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+GroupMemberCandidatesResponse.deciders
+GroupMemberCandidatesResponse.served
+GroupMemberCandidatesResponse.version
+GroupMemberWire #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+GroupMemberWire.effort
+GroupMemberWire.enabled
+GroupMemberWire.fast
+GroupMemberWire.reference
+GroupPatchRequest #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
+GroupPatchRequest.classifier
+GroupPatchRequest.context
+GroupPatchRequest.expected_revision
+GroupPatchRequest.family
+GroupPatchRequest.levels
+GroupPatchRequest.members
+GroupPatchRequest.rename_to
+GroupPatchRequest.routing
+GroupPatchRequest.rules
+GroupPatchRequest.stays
+GroupPatchRequest.version
+GroupPatchRequest::fn validate (& self) -> Result < () , ControlError >
+GroupRestoreRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
+GroupRestoreRequest.expected_revision
+GroupRestoreRequest.version
+GroupRestoreRequest::fn validate (& self) -> Result < () , ControlError >
+GroupRule #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+GroupRule.line
+GroupWriteResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+GroupWriteResponse.disk_revision
+GroupWriteResponse.group
+GroupWriteResponse.pending_restart
+GroupWriteResponse.runtime_revision
+GroupWriteResponse.version
 HealthResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
 HealthResponse.api_version
 HealthResponse.daemon_version
@@ -383,6 +456,23 @@ PicksSetRequest::fn replace (expected_picks_revision : impl Into < String > , id
 PlannedChange #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
 PlannedChange.diff
 PlannedChange.path
+PresetEntry #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+PresetEntry.id
+PresetEntry.kind
+PresetEntry.name
+PresetEntry.needs_address
+PresetEntry.needs_key
+PresetEntry.needs_project
+PresetEntry.option_keys
+PresetKind #[non_exhaustive] derives(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize) # [serde (rename_all = "snake_case")]
+PresetKind::Custom
+PresetKind::Local
+PresetKind::Preset
+PresetKind::Remote
+PresetKind::Unknown #[serde(other)]
+PresetListResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+PresetListResponse.presets
+PresetListResponse.version
 ProfileDeleteRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
 ProfileDeleteRequest.name
 ProfileDeleteRequest.version
@@ -396,6 +486,11 @@ ProfileDetailResponse.version
 ProfileListResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
 ProfileListResponse.profiles
 ProfileListResponse.version
+ProfileRenameRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
+ProfileRenameRequest.from
+ProfileRenameRequest.to
+ProfileRenameRequest.version
+ProfileRenameRequest::fn validate (& self) -> Result < () , ControlError >
 ProfileSaveRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
 ProfileSaveRequest.fields
 ProfileSaveRequest.from_current
@@ -417,6 +512,25 @@ ProfileSwitchResponse.notes
 ProfileSwitchResponse.version
 ProfileSwitchResponse.warnings
 ProfileSwitchResponse::fn new (changed : u64) -> Self
+ProviderCreateRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
+ProviderCreateRequest.api_key
+ProviderCreateRequest.base_url
+ProviderCreateRequest.expected_revision
+ProviderCreateRequest.family
+ProviderCreateRequest.id
+ProviderCreateRequest.name
+ProviderCreateRequest.options
+ProviderCreateRequest.preset
+ProviderCreateRequest.version
+ProviderCreateRequest::fn validate (& self) -> Result < () , ControlError >
+ProviderDeleteRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
+ProviderDeleteRequest.expected_revision
+ProviderDeleteRequest.version
+ProviderDeleteRequest::fn validate (& self) -> Result < () , ControlError >
+ProviderDeleteResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+ProviderDeleteResponse.disk_revision
+ProviderDeleteResponse.removed
+ProviderDeleteResponse.version
 ProviderKey #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
 ProviderKey.id
 ProviderKey.masked
@@ -466,6 +580,15 @@ ProviderKeysResponse.version
 ProviderListResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
 ProviderListResponse.providers
 ProviderListResponse.version
+ProviderPatchRequest #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
+ProviderPatchRequest.base_url
+ProviderPatchRequest.enabled
+ProviderPatchRequest.expected_revision
+ProviderPatchRequest.fallback
+ProviderPatchRequest.family
+ProviderPatchRequest.listed
+ProviderPatchRequest.version
+ProviderPatchRequest::fn validate (& self) -> Result < () , ControlError >
 ProviderRenameRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
 ProviderRenameRequest.new_id
 ProviderRenameRequest.version
@@ -496,12 +619,24 @@ ProviderSpendCapsResponse derives(Clone, Debug, PartialEq, Serialize, Deserializ
 ProviderSpendCapsResponse.caps
 ProviderSpendCapsResponse.version
 ProviderSummary #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+ProviderSummary.account_label
+ProviderSummary.base_url
+ProviderSummary.enabled
+ProviderSummary.family
 ProviderSummary.id
+ProviderSummary.impersonate_account
+ProviderSummary.key_masked
 ProviderSummary.kind
+ProviderSummary.list_error
+ProviderSummary.listed
 ProviderSummary.model_count
+ProviderSummary.name
+ProviderSummary.preset
+ProviderSummary.project_address_ready
 ProviderSummary.protocol
 ProviderSummary.ready
 ProviderSummary.resting_models
+ProviderSummary.signed_out
 ProviderTestRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
 ProviderTestRequest.models
 ProviderTestRequest.version
@@ -516,6 +651,12 @@ ProviderTestResult.latency_ms
 ProviderTestResult.model
 ProviderTestResult.ok
 ProviderTestResult.status
+ProviderWriteResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+ProviderWriteResponse.disk_revision
+ProviderWriteResponse.pending_restart
+ProviderWriteResponse.provider
+ProviderWriteResponse.runtime_revision
+ProviderWriteResponse.version
 Quota derives(Clone, Debug, Default, PartialEq, Serialize, Deserialize) # [serde (rename_all = "camelCase")]
 Quota.alias
 Quota.as_of
@@ -739,6 +880,11 @@ RoutingDecision.status
 RoutingDecision.time_ms
 RoutingDecision.tries
 RoutingDecision.unrouted
+ServeRole #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (rename_all = "snake_case")]
+ServeRole::Desktop
+ServeRole::Serve
+ServeRole::Tui
+ServeRole::Unknown #[serde(other)]
 SessionRouteResponse #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
 SessionRouteResponse.decision
 SessionRouteResponse.seq
@@ -799,9 +945,11 @@ StatusResponse.generation
 StatusResponse.in_flight
 StatusResponse.model_listener
 StatusResponse.not_applied
+StatusResponse.owned_by_pid
 StatusResponse.pending_restart
 StatusResponse.pid
 StatusResponse.runtime_revision
+StatusResponse.serves
 StatusResponse.shutdown
 StatusResponse.started_at_ms
 StatusResponse.version

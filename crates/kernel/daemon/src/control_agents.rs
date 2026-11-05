@@ -145,6 +145,15 @@ impl AgentOps {
         self
     }
 
+    pub(crate) fn session(&self) -> Option<Session> {
+        self.session.clone()
+    }
+
+    pub(crate) fn gateway_target(&self) -> Result<GatewayTarget, ControlError> {
+        let token = self.parts.token()?;
+        Ok(self.parts.target(token))
+    }
+
     /// Publishes token rotations on `sender`. L6 subscribes to close event
     /// streams that authenticated with the previous token.
     pub(crate) fn with_token_generation(mut self, sender: Option<watch::Sender<u64>>) -> Self {

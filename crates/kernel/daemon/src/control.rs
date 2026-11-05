@@ -12,19 +12,23 @@ use hofund_control_proto::{
     CatalogDisabledListResponse, CatalogModelRequest, CheckinAccountRow, CheckinListResponse,
     CheckinRunRequest, CheckinRunResponse, ControlError, ControlErrorKind, FieldIssue, GatewayKey,
     GatewayKeyAction, GatewayKeyLimit, GatewayKeyRequest, GatewayKeyResponse,
-    GatewayKeyRestoreRequest, HealthResponse, ModelEntry, ModelListResponse, PicksResponse,
-    PicksSetRequest, ProfileDeleteRequest, ProfileDetailResponse, ProfileListResponse,
-    ProfileSaveRequest, ProfileSwitchRequest, ProfileSwitchResponse, ProviderKeyRequest,
-    ProviderKeysResponse, ProviderListResponse, ProviderRenameRequest, ProviderRenameResponse,
-    ProviderSpendCap, ProviderSpendCapPeriod, ProviderSpendCapRequest, ProviderSpendCapsResponse,
-    ProviderSummary, ProviderTestRequest, ProviderTestResponse, ProviderTestResult,
-    QuotaAlertsResponse, QuotaAlertsSetRequest, QuotaAlertsSetResponse, QuotaCreditsModesResponse,
-    QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryQuery, QuotaHistoryResponse,
-    QuotaQuery, QuotaResponse, RouteListResponse, RouteModel, RouteModelListResponse, RouteQuery,
-    RouteReserve, SessionRouteResponse, ShutdownRequest, ShutdownResponse, ShutdownState,
-    StatusResponse, TokenRotateRequest, TokenRotateResponse, UnroutedListResponse,
-    UsageBreakdownBy, UsageBreakdownGroup, UsagePeriod, UsageQuery, UsageResponse, UsageRow,
-    UsageTotals, WarmupAccountRow, WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
+    GatewayKeyRestoreRequest, GroupCreateRequest, GroupDeleteRequest, GroupDeleteResponse,
+    GroupListResponse, GroupMemberCandidatesResponse, GroupPatchRequest, GroupRestoreRequest,
+    GroupWriteResponse, HealthResponse, ModelEntry, ModelListResponse, PicksResponse,
+    PicksSetRequest, PresetListResponse, ProfileDeleteRequest, ProfileDetailResponse,
+    ProfileListResponse, ProfileRenameRequest, ProfileSaveRequest, ProfileSwitchRequest,
+    ProfileSwitchResponse, ProviderCreateRequest, ProviderDeleteRequest, ProviderDeleteResponse,
+    ProviderKeyRequest, ProviderKeysResponse, ProviderListResponse, ProviderPatchRequest,
+    ProviderRenameRequest, ProviderRenameResponse, ProviderSpendCap, ProviderSpendCapPeriod,
+    ProviderSpendCapRequest, ProviderSpendCapsResponse, ProviderTestRequest, ProviderTestResponse,
+    ProviderTestResult, ProviderWriteResponse, QuotaAlertsResponse, QuotaAlertsSetRequest,
+    QuotaAlertsSetResponse, QuotaCreditsModesResponse, QuotaCreditsSetRequest,
+    QuotaCreditsSetResponse, QuotaHistoryQuery, QuotaHistoryResponse, QuotaQuery, QuotaResponse,
+    RouteListResponse, RouteModel, RouteModelListResponse, RouteQuery, RouteReserve, ServeRole,
+    SessionRouteResponse, ShutdownRequest, ShutdownResponse, ShutdownState, StatusResponse,
+    TokenRotateRequest, TokenRotateResponse, UnroutedListResponse, UsageBreakdownBy,
+    UsageBreakdownGroup, UsagePeriod, UsageQuery, UsageResponse, UsageRow, UsageTotals,
+    WarmupAccountRow, WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
 };
 use hofund_control_proto::{
     ConfigApplyRequest, ConfigResponse, ConfigValidateRequest, ConfigValidationResponse,
@@ -47,10 +51,7 @@ use super::control_agents::AgentOps;
 use super::control_profiles::ProfileOps;
 use super::events::{EventBus, SnapshotSource};
 use super::models::{PicksError, Timed, test_timeout};
-use super::{
-    DaemonError, DaemonRegistry, ErrorKind, ModelsHost, Picks, control_map, membership, plugin_for,
-    protocol_of,
-};
+use super::{DaemonError, DaemonRegistry, ErrorKind, ModelsHost, Picks, control_map, membership};
 
 pub(crate) struct DaemonControl {
     config_path: PathBuf,
@@ -428,6 +429,8 @@ impl ControlState for DaemonControl {
         status.model_listener.effective = listener.effective.to_string();
         status.model_listener.running = listener.running.map(|running| running.to_string());
         status.model_listener.effective_source = listener.source;
+        status.serves = serve_role_from_env();
+        status.owned_by_pid = owned_by_pid_from_env();
         status
     }
 
@@ -436,34 +439,25 @@ impl ControlState for DaemonControl {
     }
 
     fn providers(&self) -> ControlFuture<'_, ProviderListResponse> {
-        let mut response = ProviderListResponse::default();
+        let config = self.config();
         let rests = self.cooldowns.scoped_entries();
-        response.providers = self
-            .config()
-            .providers
-            .iter()
-            .map(|provider| {
-                let cached = self.models.cached(&provider.id);
-                let planned = self.models.planned(provider);
-                let id = membership::member_id(&provider.id);
-                let resting = self.cooldowns.cooling(&id).is_some();
-                let mut summary = ProviderSummary::default();
-                summary.id = provider.id.clone();
-                summary.ready = planned.is_ok() && !resting;
-                summary.model_count = u64::try_from(cached.models.len()).unwrap_or(u64::MAX);
-                summary.resting_models = rests
-                    .iter()
-                    .filter(|(rest_id, model, _)| *rest_id == id && model.is_some())
-                    .filter_map(|(_, model, _)| model.clone())
-                    .collect();
-                if let Ok(planned) = planned {
-                    summary.kind = plugin_for(provider, &planned, &self.registry);
-                    summary.protocol = protocol_of(planned.wire).to_owned();
-                }
-                summary
-            })
-            .collect();
-        Box::pin(async move { Ok(response) })
+        let models = Arc::clone(&self.models);
+        let registry = Arc::clone(&self.registry);
+        let cooldowns = Arc::clone(&self.cooldowns);
+        Box::pin(async move {
+            let mut response = ProviderListResponse::default();
+            response.providers = config
+                .providers
+                .iter()
+                .map(|provider| {
+                    super::control_provider_summary::summarize_provider(
+                        provider, &config, &models, &registry, &cooldowns,
+                    )
+                })
+                .collect();
+            let _ = rests;
+            Ok(response)
+        })
     }
 
     fn provider_keys(&self, id: String) -> ControlFuture<'_, ProviderKeysResponse> {
@@ -908,6 +902,117 @@ impl ControlState for DaemonControl {
                 .map_err(ControlFailure::from)?;
             self.profiles.list().await.map_err(Into::into)
         })
+    }
+
+    fn rename_profile(
+        &self,
+        request: ProfileRenameRequest,
+    ) -> ControlFuture<'_, ProfileListResponse> {
+        Box::pin(async move { self.profiles.rename(request).await.map_err(Into::into) })
+    }
+
+    fn presets(&self) -> ControlFuture<'_, PresetListResponse> {
+        let registry = Arc::clone(&self.registry);
+        Box::pin(async move { Ok(super::control_presets::list_presets(registry.as_ref())) })
+    }
+
+    fn create_provider(
+        &self,
+        request: ProviderCreateRequest,
+    ) -> ControlFuture<'_, ProviderWriteResponse> {
+        Box::pin(async move {
+            super::control_provider_write::create_provider(
+                &self.ops,
+                &self.models,
+                &self.registry,
+                &self.cooldowns,
+                request,
+            )
+            .await
+        })
+    }
+
+    fn patch_provider(
+        &self,
+        id: String,
+        request: ProviderPatchRequest,
+    ) -> ControlFuture<'_, ProviderWriteResponse> {
+        let descriptions = self.registry.agents();
+        let session = self.agents.session();
+        let target = self.agents.gateway_target().ok();
+        Box::pin(async move {
+            super::control_provider_write::patch_provider(
+                &self.ops,
+                &self.models,
+                &self.registry,
+                &self.cooldowns,
+                descriptions,
+                session,
+                target,
+                &id,
+                request,
+            )
+            .await
+        })
+    }
+
+    fn delete_provider(
+        &self,
+        id: String,
+        request: ProviderDeleteRequest,
+    ) -> ControlFuture<'_, ProviderDeleteResponse> {
+        let descriptions = self.registry.agents();
+        let session = self.agents.session();
+        let target = self.agents.gateway_target().ok();
+        Box::pin(async move {
+            super::control_provider_write::delete_provider(
+                &self.ops,
+                descriptions,
+                session,
+                target,
+                &id,
+                request,
+            )
+            .await
+        })
+    }
+
+    fn groups(&self) -> ControlFuture<'_, GroupListResponse> {
+        Box::pin(async move { super::control_groups::list_groups(&self.ops).await })
+    }
+
+    fn create_group(&self, request: GroupCreateRequest) -> ControlFuture<'_, GroupWriteResponse> {
+        Box::pin(async move { super::control_groups::create_group(&self.ops, request).await })
+    }
+
+    fn patch_group(
+        &self,
+        id: String,
+        request: GroupPatchRequest,
+    ) -> ControlFuture<'_, GroupWriteResponse> {
+        Box::pin(async move { super::control_groups::patch_group(&self.ops, &id, request).await })
+    }
+
+    fn delete_group(
+        &self,
+        id: String,
+        request: GroupDeleteRequest,
+    ) -> ControlFuture<'_, GroupDeleteResponse> {
+        Box::pin(async move { super::control_groups::delete_group(&self.ops, &id, request).await })
+    }
+
+    fn restore_group(
+        &self,
+        id: String,
+        request: GroupRestoreRequest,
+    ) -> ControlFuture<'_, GroupWriteResponse> {
+        Box::pin(async move { super::control_groups::restore_group(&self.ops, &id, request).await })
+    }
+
+    fn group_member_candidates(&self) -> ControlFuture<'_, GroupMemberCandidatesResponse> {
+        let config = self.config();
+        let models = Arc::clone(&self.models);
+        Box::pin(async move { Ok(super::control_groups::member_candidates(&config, &models)) })
     }
 
     fn agent_status(&self) -> ControlFuture<'_, AgentStatusResponse> {
@@ -1734,4 +1839,25 @@ pub(crate) fn revision(bytes: &[u8]) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+fn serve_role_from_env() -> Option<ServeRole> {
+    match std::env::var("HOFUND_SERVES")
+        .ok()
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some("tui") => Some(ServeRole::Tui),
+        Some("serve") => Some(ServeRole::Serve),
+        Some("desktop") => Some(ServeRole::Desktop),
+        _ => None,
+    }
+}
+
+fn owned_by_pid_from_env() -> u32 {
+    std::env::var("HOFUND_OWNER_PID")
+        .ok()
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or(0)
 }
