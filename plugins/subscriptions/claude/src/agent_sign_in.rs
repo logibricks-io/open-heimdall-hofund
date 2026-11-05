@@ -28,6 +28,9 @@ pub(crate) async fn write(
         ));
     };
     let blob = SecretObject::parse(&secret)?;
+    if crate::setup_token::is_setup_token(&blob) {
+        return Err(PluginError::config(crate::setup_token::AGENT_SWITCH));
+    }
     if blob.flag(creds::LAPSED) {
         return Err(PluginError::auth(creds::LAPSED_REASON));
     }

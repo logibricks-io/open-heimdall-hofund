@@ -31,6 +31,26 @@ pub(crate) fn account_dir(host: &HostContext, account: &AccountId) -> Result<Pat
         .join(account.as_str()))
 }
 
+/// Deletes `<state>/accounts/<id>` when an account is removed.
+pub(crate) fn remove_tree(host: &HostContext, account: &AccountId) -> Result<(), PluginError> {
+    let dir = account_dir(host, account)?;
+    if dir.is_dir() {
+        std::fs::remove_dir_all(&dir)
+            .map_err(|_| PluginError::io("cannot remove the Claude account directory"))?;
+    }
+    Ok(())
+}
+
+pub(crate) fn run_env(blob: &SecretObject) -> Vec<(OsString, OsString)> {
+    let Some(token) = crate::setup_token::token_from_blob(blob) else {
+        return Vec::new();
+    };
+    vec![(
+        OsString::from(crate::cli::OAUTH_TOKEN_VAR),
+        OsString::from(token),
+    )]
+}
+
 /// Asks Claude Code for the account's status, which refreshes its tokens
 /// when they are due, and keeps what it wrote.
 pub(crate) async fn refresh(
@@ -39,8 +59,11 @@ pub(crate) async fn refresh(
     account: &AccountId,
 ) -> Result<(), PluginError> {
     let lease = host.accounts().lease(account, LEASE_WAIT).await?;
-    let _run = crate::run_lock::mark(account, host)?;
     let blob = SecretObject::parse(lease.secret())?;
+    if crate::setup_token::is_setup_token(&blob) {
+        return Ok(());
+    }
+    let _run = crate::run_lock::mark(account, host)?;
     if blob.flag(creds::LAPSED) {
         return Err(PluginError::auth(creds::LAPSED_REASON));
     }
@@ -55,7 +78,7 @@ pub(crate) async fn refresh(
     let dir = account_dir(host, account)?;
     creds::private_dir(&dir)?;
     let file = dir.join(creds::CREDENTIALS_FILE);
-    let ran = run(host, &program, &dir, &file, &stored, &profile).await;
+    let ran = run(host, &program, &dir, &file, &stored, &profile, &blob).await;
     let read_back = creds::read_credentials(&dir);
     let _ = std::fs::remove_file(&file);
     let status = ran?;
@@ -77,6 +100,55 @@ pub(crate) async fn refresh(
     Ok(())
 }
 
+/// Reads subscription quota via `claude -p /usage`, with the same lease, run
+/// mark, credential materialization, rotation read-back, and file cleanup as
+/// [`refresh`].
+pub(crate) async fn read_usage(
+    host: &HostContext,
+    program: impl FnOnce() -> Result<PathBuf, PluginError>,
+    account: &AccountId,
+) -> Result<Vec<hofund_plugin_api::QuotaWindow>, PluginError> {
+    let lease = host.accounts().lease(account, LEASE_WAIT).await?;
+    let blob = SecretObject::parse(lease.secret())?;
+    if crate::setup_token::is_setup_token(&blob) {
+        return Err(PluginError::unsupported(crate::usage::SETUP_TOKEN_QUOTA));
+    }
+    let _run = crate::run_lock::mark(account, host)?;
+    if blob.flag(creds::LAPSED) {
+        return Err(PluginError::auth(creds::LAPSED_REASON));
+    }
+    let Some(stored) = blob.text(creds::CREDENTIALS) else {
+        return Err(PluginError::auth(
+            "the stored Claude Code sign-in has no credentials",
+        ));
+    };
+    let stored = stored.to_owned();
+    let profile = Profile::parse(blob.text(creds::PROFILE).unwrap_or_default());
+    let program = program()?;
+    let dir = account_dir(host, account)?;
+    creds::private_dir(&dir)?;
+    let file = dir.join(creds::CREDENTIALS_FILE);
+    let now = host.clock().now();
+    let _cleanup = CredentialFileCleanup(&file);
+    let parsed = async {
+        creds::write_private(&file, &stored)?;
+        let settings = dir.join(creds::PROFILE_FILE);
+        if !settings.exists() {
+            creds::write_private(&settings, &profile.settings_text())?;
+        }
+        let text = crate::usage::run_usage_cli(host, &program, &dir, &run_env(&blob)).await?;
+        crate::usage::parse(&text, now)
+    }
+    .await;
+    let read_back = creds::read_credentials(&dir);
+    let _ = std::fs::remove_file(&file);
+    if let Some(rotated) = read_back.filter(|rotated| rotated.text != stored) {
+        let updated = blob.with_text(creds::CREDENTIALS, &rotated.text);
+        lease.commit(None, updated.to_secret()).await?;
+    }
+    parsed
+}
+
 const WARM_ARGS: [&str; 11] = [
     "-p",
     "--output-format",
@@ -90,6 +162,15 @@ const WARM_ARGS: [&str; 11] = [
     "",
     "--no-session-persistence",
 ];
+
+/// Removes the landed credentials file even when the usage read is cancelled.
+struct CredentialFileCleanup<'a>(&'a Path);
+
+impl Drop for CredentialFileCleanup<'_> {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(self.0);
+    }
+}
 
 struct WarmupCleanup<'a> {
     file: &'a Path,
@@ -112,6 +193,9 @@ pub(crate) async fn warmup(
     let lease = host.accounts().lease(account, LEASE_WAIT).await?;
     let _run = crate::run_lock::mark(account, host)?;
     let blob = SecretObject::parse(lease.secret())?;
+    if crate::setup_token::is_setup_token(&blob) {
+        return Ok(());
+    }
     if blob.flag(creds::LAPSED) {
         return Err(PluginError::auth(creds::LAPSED_REASON));
     }
@@ -221,13 +305,35 @@ async fn run(
     file: &Path,
     stored: &str,
     profile: &Profile,
+    blob: &SecretObject,
 ) -> Result<Option<hofund_plugin_sdk::json::Value>, PluginError> {
-    creds::write_private(file, stored)?;
-    let settings = dir.join(creds::PROFILE_FILE);
-    if !settings.exists() {
-        creds::write_private(&settings, &profile.settings_text())?;
+    if crate::setup_token::is_setup_token(blob) {
+        creds::write_onboarded(dir)?;
+    } else {
+        creds::write_private(file, stored)?;
+        let settings = dir.join(creds::PROFILE_FILE);
+        if !settings.exists() {
+            creds::write_private(&settings, &profile.settings_text())?;
+        }
     }
-    Ok(crate::status(host, program, dir).await)
+    Ok(status(host, program, dir, blob).await)
+}
+
+pub(crate) async fn status(
+    host: &HostContext,
+    program: &Path,
+    dir: &Path,
+    blob: &SecretObject,
+) -> Option<hofund_plugin_sdk::json::Value> {
+    let request =
+        crate::cli::request_with_extra(program, &crate::cli::STATUS_ARGS, dir, &run_env(blob))
+            .ok()?;
+    let child = host.spawn_process().spawn_piped(&request).await.ok()?;
+    let mut stdout = child.stdout().ok()?;
+    let text =
+        hofund_plugin_sdk::timeout(crate::STATUS_WAIT, crate::cli::collect(&mut stdout)).await?;
+    drop(child);
+    creds::parse_status(&text)
 }
 
 #[cfg(test)]
@@ -245,5 +351,22 @@ mod warmup_tests {
     fn a3a_20_claude_warmup_empty_output_fails() {
         assert!(finish_warmup_output("").is_err());
         assert!(finish_warmup_output("   \n").is_err());
+    }
+}
+
+#[cfg(test)]
+mod cleanup_tests {
+    use super::CredentialFileCleanup;
+
+    #[test]
+    fn r7_2_credential_file_removed_on_drop() {
+        let dir = tempfile::tempdir().expect("dir");
+        let file = dir.path().join(".credentials.json");
+        std::fs::write(&file, "{}").expect("write");
+        {
+            let _cleanup = CredentialFileCleanup(&file);
+            assert!(file.exists());
+        }
+        assert!(!file.exists());
     }
 }
