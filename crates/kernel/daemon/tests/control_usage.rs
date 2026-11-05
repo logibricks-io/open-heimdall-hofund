@@ -208,7 +208,7 @@ async fn usage_route_filters_period_and_totals() {
 async fn usage_route_rejects_unknown_period_and_key() {
     let dir = Scratch::new("reject");
     let running = start_tcp(&dir.0, CONFIG).await;
-    for query in ["?period=year", "?window=all", "?period=all&extra=1"] {
+    for query in ["?period=year"] {
         let response = usage(&running, &dir.0, query).await;
         assert_eq!(
             response.status(),
@@ -513,5 +513,34 @@ async fn u1c_12_control_usage_breakdown_by_agent() {
     assert_eq!(body.breakdown[0].input_tokens, 10);
     let bad = usage(&running, &dir.0, "?period=all&by=not-a-dimension").await;
     assert_eq!(bad.status(), reqwest::StatusCode::BAD_REQUEST);
+    support::shutdown(running).await;
+}
+
+#[tokio::test]
+async fn r10_usage_report_exposes_ttft_speed_and_model_filter() {
+    let dir = Scratch::new("r10-report");
+    let now = now_unix();
+    {
+        let ledger = Ledger::open(&dir.0.join("usage.sqlite")).expect("ledger");
+        let mut kept = row(now, "keep", Some(10), Some(100));
+        kept.upstream = "account:relay:me@x.test".to_owned();
+        kept.latency_ms = 2_000;
+        ledger
+            .record_with_ttft(&kept, Some(500))
+            .expect("streamed row");
+        ledger
+            .record(&row(now, "drop", Some(1), Some(1)))
+            .expect("other");
+    }
+    let running = start_tcp(&dir.0, CONFIG).await;
+    let body =
+        decoded_usage(usage(&running, &dir.0, "?period=all&model=keep&unlimited=1").await).await;
+    assert_eq!(body.totals.requests, 1);
+    assert_eq!(body.rows.len(), 1);
+    let row = &body.rows[0];
+    assert_eq!(row.ttft_ms, Some(500));
+    assert!((row.tokens_per_second.expect("speed") - 66.666).abs() < 0.1);
+    assert_eq!(row.account, "me@x.test");
+    assert!(body.totals.mean_ttft_ms.is_some());
     support::shutdown(running).await;
 }

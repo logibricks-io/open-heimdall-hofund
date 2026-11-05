@@ -2001,6 +2001,7 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
                     started,
                     identity,
                     &client_agent,
+                    &session,
                     track,
                     capture,
                     dispatch,
@@ -2025,6 +2026,7 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
                 started,
                 &identity,
                 &client_agent,
+                &session,
                 &mut track,
                 capture,
             )
@@ -2073,6 +2075,7 @@ struct HeldResponse {
     started: Instant,
     identity: Identity,
     client_agent: String,
+    session_id: String,
     track: Option<RequestTrack>,
     capture: Option<prev_response::Capture>,
     incoming: Option<BytesStream>,
@@ -2088,6 +2091,7 @@ fn held_response(
     started: Instant,
     identity: Identity,
     client_agent: &str,
+    session_id: &str,
     track: RequestTrack,
     capture: Option<prev_response::Capture>,
     dispatch: DispatchFuture,
@@ -2101,6 +2105,7 @@ fn held_response(
         started,
         identity,
         client_agent: client_agent.to_owned(),
+        session_id: session_id.to_owned(),
         track: Some(track),
         capture,
         incoming: None,
@@ -2150,6 +2155,7 @@ fn held_response(
                                 state.started,
                                 &state.identity,
                                 &state.client_agent,
+                                &state.session_id,
                                 state.track.as_mut().expect("held request track"),
                                 state.capture.take(),
                             )
@@ -2602,6 +2608,7 @@ async fn success(
     started: Instant,
     identity: &Identity,
     client_agent: &str,
+    session_id: &str,
     track: &mut RequestTrack,
     capture: Option<prev_response::Capture>,
 ) -> Response {
@@ -2615,6 +2622,7 @@ async fn success(
         client_agent,
     );
     meta.provider_key_id = provider_key_id.to_owned();
+    meta.session_id = session_id.to_owned();
     let member = Some(upstream.to_owned());
     let capture = prev_response::ReplyCapture::new(capture);
     match completion {
@@ -3010,6 +3018,7 @@ struct UsageMeta {
     started: Instant,
     identity: Identity,
     client_agent: String,
+    session_id: String,
     input: Option<i64>,
     output: Option<i64>,
     ttft_ms: Option<i64>,
@@ -3035,6 +3044,7 @@ impl UsageMeta {
             started,
             identity: identity.clone(),
             client_agent: client_agent.to_owned(),
+            session_id: String::new(),
             input: None,
             output: None,
             ttft_ms: None,
@@ -3537,6 +3547,7 @@ fn write_usage(
         caller_issuer_id: meta.identity.issuer.clone(),
         provider_key_id: meta.provider_key_id.clone(),
         client_agent: meta.client_agent.clone(),
+        session_id: meta.session_id.clone(),
         ..Default::default()
     };
     let mut details = meta.details;
@@ -3563,7 +3574,8 @@ fn write_usage(
             price: token_price,
         })
     });
-    let _ = usage.record_with_details(&row, meta.ttft_ms, details, pricing);
+    let ttft_ms = meta.ttft_ms.or(Some(row.latency_ms));
+    let _ = usage.record_with_details(&row, ttft_ms, details, pricing);
 }
 
 fn as_i64(value: Option<u64>) -> Option<i64> {
