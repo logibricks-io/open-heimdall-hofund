@@ -125,16 +125,11 @@ pub fn parse_last(value: &str) -> Result<Duration, String> {
             "--last takes a duration greater than zero, not {value:?}"
         ));
     }
-    let ms = parse_go_duration(trimmed, "--last")?;
-    if ms <= 0 {
-        if trimmed.contains("ns") || trimmed.contains("us") {
-            return Err(format!(
-                "--last takes a duration greater than zero, not {value:?}"
-            ));
-        }
-        return Ok(Duration::milliseconds(1));
-    }
-    Ok(Duration::milliseconds(ms.max(1)))
+    // Go accepts any positive duration; the ledger keeps whole seconds, so a
+    // sub-millisecond window still counts as one millisecond.
+    Ok(Duration::milliseconds(parse_go_duration(
+        trimmed, "--last",
+    )?))
 }
 
 fn duration_has_unit(trimmed: &str) -> bool {
@@ -144,8 +139,7 @@ fn duration_has_unit(trimmed: &str) -> bool {
 }
 
 fn parse_go_duration(trimmed: &str, flag: &str) -> Result<i64, String> {
-    let mut total_ms = 0i64;
-    let mut parsed_segments = 0u32;
+    let mut total_ms = 0f64;
     let mut rest = trimmed.trim();
     while !rest.is_empty() {
         let start = rest
@@ -160,7 +154,7 @@ fn parse_go_duration(trimmed: &str, flag: &str) -> Result<i64, String> {
         let value: f64 = number
             .parse()
             .map_err(|_| format!("{flag} takes a duration greater than zero, not {trimmed:?}"))?;
-        if !(value.is_finite()) || value <= 0.0 {
+        if !(value.is_finite()) || value < 0.0 {
             return Err(format!(
                 "{flag} takes a duration greater than zero, not {trimmed:?}"
             ));
@@ -186,19 +180,15 @@ fn parse_go_duration(trimmed: &str, flag: &str) -> Result<i64, String> {
                 "{flag} takes a duration greater than zero, not {trimmed:?}"
             ));
         };
-        total_ms += unit_ms.round() as i64;
-        parsed_segments += 1;
+        total_ms += unit_ms;
         rest = next;
     }
-    if total_ms <= 0 {
-        if parsed_segments == 0 {
-            return Err(format!(
-                "{flag} takes a duration greater than zero, not {trimmed:?}"
-            ));
-        }
-        return Ok(0);
+    if !(total_ms.is_finite()) || total_ms <= 0.0 || total_ms >= i64::MAX as f64 {
+        return Err(format!(
+            "{flag} takes a duration greater than zero, not {trimmed:?}"
+        ));
     }
-    Ok(total_ms)
+    Ok((total_ms.round() as i64).max(1))
 }
 
 /// Parses `--days` as a positive number of days (fractions allowed).
@@ -483,8 +473,13 @@ mod tests {
         assert!(parse_last("").is_err());
         assert!(parse_last("90").is_err());
         assert!(parse_last("0").is_err());
-        assert!(parse_last("1ns").is_err());
-        assert!(parse_last("1us").is_err());
+        assert!(parse_last("0s").is_err());
+        assert!(parse_last("0h0m").is_err());
+        assert_eq!(parse_last("1ns").expect("nano").num_milliseconds(), 1);
+        assert_eq!(parse_last("1us").expect("micro").num_milliseconds(), 1);
+        assert_eq!(parse_last("1h0m").expect("zero part").num_minutes(), 60);
+        assert_eq!(parse_last("1h30m").expect("compound").num_minutes(), 90);
+        assert_eq!(parse_last("1.5ms").expect("fraction").num_milliseconds(), 2);
         assert_eq!(parse_last("1µs").expect("micro").num_milliseconds(), 1);
         assert_eq!(
             parse_last("1μs").expect("greek micro").num_milliseconds(),
