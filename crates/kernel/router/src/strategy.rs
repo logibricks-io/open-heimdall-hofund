@@ -586,9 +586,6 @@ fn tier(share: f64) -> u8 {
 }
 
 fn seat_tier(seat: &Seat) -> u8 {
-    if seat.credits_mode == CreditsMode::First && seat.on_credits {
-        return 0;
-    }
     let band = tier(seat.used);
     if band == 1 && seat.week_low {
         return 0;
@@ -1278,6 +1275,54 @@ mod tests {
             ["week", "cap"]
         );
         assert_eq!(routed(&state, "pace", &[week, cap]), ["week", "cap"]);
+    }
+
+    #[test]
+    fn r4_72_usage_routing_clears_week_low_in_dispatch_order() {
+        use std::time::{Duration, SystemTime};
+
+        let state = StrategyState::with_builtins();
+        let now = SystemTime::now();
+        let mut week = seat("week");
+        week.known = true;
+        week.used = 92.0;
+        week.week_low = false;
+        week.soon = vec![Some(now + Duration::from_secs(3 * 3600))];
+        let mut cap = seat("cap");
+        cap.known = true;
+        cap.used = 91.0;
+        cap.soon = vec![Some(now + Duration::from_secs(24 * 3600))];
+        assert_eq!(
+            routed(&state, "usage", &[week.clone(), cap.clone()]),
+            ["cap", "week"]
+        );
+        week.week_low = true;
+        assert_eq!(
+            routed(&state, "smart", &[week.clone(), cap.clone()]),
+            ["week", "cap"]
+        );
+        assert_eq!(routed(&state, "pace", &[week, cap]), ["week", "cap"]);
+    }
+
+    #[test]
+    fn r4_72_credits_first_seat_does_not_promote_pace_order() {
+        use crate::credits_mode::CreditsMode;
+
+        let state = StrategyState::with_builtins();
+        let mut first = seat("first");
+        first.known = true;
+        first.used = 50.0;
+        first.credits_mode = CreditsMode::First;
+        first.on_credits = true;
+        first.pace = 10.0;
+        let mut second = seat("second");
+        second.known = true;
+        second.used = 50.0;
+        second.pace = 20.0;
+        assert_eq!(
+            routed(&state, "pace", &[first, second]),
+            ["second", "first"]
+        );
     }
 
     #[test]

@@ -505,6 +505,9 @@ pub trait UpstreamProvider: Send + Sync + 'static {
         let _ = deadline;
         Ok(())
     }
+
+    /// Drops idle keep-alive connections before the next upstream attempt.
+    fn close_idle_connections(&self) {}
 }
 
 #[cfg(test)]

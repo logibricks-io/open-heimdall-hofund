@@ -164,6 +164,24 @@ impl PooledHttp {
 }
 
 static POOL: OnceLock<Mutex<BTreeMap<ClientKey, reqwest::Client>>> = OnceLock::new();
+/// Marks the pooled client for `profile` so the next send uses a new client,
+/// and evicts any idle entry now.
+pub fn close_idle_after_region(profile: &HttpProfile, limits: HttpLimits) {
+    let key = ClientKey {
+        profile: profile.clone(),
+        limits,
+    };
+    if let Ok(mut guard) = pool().lock() {
+        guard.remove(&key);
+    }
+}
+
+/// Evicts every pooled client so the next send on each profile dials fresh.
+pub fn close_all_pooled_idle_connections() {
+    if let Ok(mut guard) = pool().lock() {
+        guard.clear();
+    }
+}
 
 fn pool() -> &'static Mutex<BTreeMap<ClientKey, reqwest::Client>> {
     POOL.get_or_init(|| Mutex::new(BTreeMap::new()))
@@ -356,7 +374,10 @@ mod tests {
     use hofund_plugin_api::{Body, PluginErrorKind};
     use hofund_plugin_sdk::Call;
 
-    use super::{HttpLimits, HttpProfile, PooledHttp, pooled_client_count, take_sends};
+    use super::{
+        HttpLimits, HttpProfile, PooledHttp, close_idle_after_region, pooled_client_count,
+        take_sends,
+    };
     use crate::context_for_http;
 
     async fn exclusive() -> tokio::sync::MutexGuard<'static, ()> {
@@ -1109,5 +1130,55 @@ mod tests {
         assert_eq!(error.status(), Some(429));
         assert_eq!(error.retry_after(), Some(Duration::from_secs(3)));
         assert_eq!(error.message(), "busy");
+    }
+
+    fn serve_two_on_keepalive(body: Vec<u8>) -> (u16, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let accepts = Arc::new(AtomicUsize::new(0));
+        let count = Arc::clone(&accepts);
+        std::thread::spawn(move || {
+            for _ in 0..2 {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
+                count.fetch_add(1, Ordering::SeqCst);
+                let _ = read_request(&mut stream, true);
+                let header = format!(
+                    "HTTP/1.1 400 Bad Request\r\ncontent-length: {}\r\nconnection: keep-alive\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(header.as_bytes());
+                let _ = stream.write_all(&body);
+            }
+        });
+        (port, accepts)
+    }
+
+    #[tokio::test]
+    async fn r4_71_region_fresh_closes_idle_before_reuse() {
+        let _guard = exclusive().await;
+        let limits = HttpLimits::default().with_max_idle_per_host(4);
+        let http = PooledHttp::with_limits(HttpProfile::direct(), limits);
+        let body = b"User location is not supported for the API use.".to_vec();
+        let (port, accepts) = serve_two_on_keepalive(body);
+        let url = format!("http://127.0.0.1:{port}/v1");
+        let request = |path: &str| {
+            HttpRequest::builder()
+                .method("GET")
+                .uri(format!("{url}{path}"))
+                .body(Body::empty())
+                .expect("request")
+        };
+        http.send(request("/first")).await.expect("first");
+        http.send(request("/second")).await.expect("reuse");
+        assert_eq!(
+            accepts.load(Ordering::SeqCst),
+            1,
+            "idle reuse should stay on one connection"
+        );
+        close_idle_after_region(&HttpProfile::direct(), limits);
+        http.send(request("/third")).await.expect("third");
+        wait_until(&accepts, 2).await;
     }
 }

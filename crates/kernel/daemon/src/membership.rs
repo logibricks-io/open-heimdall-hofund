@@ -712,6 +712,11 @@ impl Member for LiveMember {
         self.kernel
     }
 
+    fn close_idle_connections(&self) {
+        self.stack.inner.inner.provider.close_idle_connections();
+        hofund_plugin_host::close_all_pooled_idle_connections();
+    }
+
     fn learns_allowance(&self) -> bool {
         // As the reference: a Claude subscription tells what it has left as
         // it answers, so one not yet known is tried first to learn it.

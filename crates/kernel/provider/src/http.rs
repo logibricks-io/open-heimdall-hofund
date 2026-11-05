@@ -163,9 +163,27 @@ pub fn pooled_reqwest(value: &dyn std::any::Any) -> Option<reqwest::Client> {
     value.downcast_ref::<reqwest::Client>().cloned()
 }
 
+impl Upstream {
+    pub(crate) fn close_idle_connections(&self) {
+        let Ok(mut guard) = self.client.lock() else {
+            return;
+        };
+        if let Ok(fresh) = reqwest::Client::builder()
+            .connect_timeout(self.connect_timeout)
+            .read_timeout(self.read_timeout)
+            .pool_max_idle_per_host(0)
+            .build()
+        {
+            *guard = fresh;
+        }
+    }
+}
+
 pub(crate) struct Upstream {
     pub id: String,
-    client: reqwest::Client,
+    client: std::sync::Mutex<reqwest::Client>,
+    connect_timeout: Duration,
+    read_timeout: Duration,
     url: String,
     headers: HeaderMap,
     pass_headers: Vec<String>,
@@ -247,7 +265,9 @@ impl Upstream {
         };
         Ok(Self {
             id: endpoint.id,
-            client,
+            client: std::sync::Mutex::new(client),
+            connect_timeout: endpoint.timeout,
+            read_timeout: socket_backstop(endpoint.timeout),
             url,
             headers,
             pass_headers: endpoint.pass_headers.clone(),
@@ -401,6 +421,8 @@ async fn send_json(
 ) -> Result<reqwest::Response, ProviderError> {
     let builder = upstream
         .client
+        .lock()
+        .map_err(|_| ProviderError::internal("upstream client lock is poisoned"))?
         .post(url)
         .headers(headers)
         .header(reqwest::header::CONTENT_TYPE, "application/json")

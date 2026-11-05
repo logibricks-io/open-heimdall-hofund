@@ -43,7 +43,9 @@ pub use accounts::{AccountStorageKind, AccountStore, StoreError};
 pub use agent_credentials::native_credential_store;
 pub use hofund_plugin_api::kernel::{GatewayBackend, HttpBackend, ObserveBackend};
 pub use loopback::LoopbackRegistry;
-pub use pool::{HttpLimits, HttpProfile, PooledHttp};
+pub use pool::{
+    HttpLimits, HttpProfile, PooledHttp, close_all_pooled_idle_connections, close_idle_after_region,
+};
 pub use scripted::{PipedScript, PipedSpawn};
 
 /// The kernel side of a browser sign-in: the loopback listeners and the

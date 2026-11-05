@@ -794,10 +794,9 @@ impl Router {
             last: None,
             refused_providers: BTreeSet::new(),
             region_attempts: BTreeMap::new(),
-            region_closed: BTreeSet::new(),
+            region_closed: BTreeMap::new(),
             region_reask: Vec::new(),
             last_model: None,
-            region_failure: None,
             outgrown: Vec::new(),
             needs_room: None,
             missing_detail: self.models().join(", "),
@@ -1101,7 +1100,11 @@ impl Router {
                         .and_then(|entry| entry.fullest(model, now))
                         .map(|window| window.used);
                     let week_low = match (allowance, used) {
-                        (Some(entry), Some(used)) => entry.week_low(model, used, now),
+                        (Some(entry), Some(used))
+                            if affinity::keeps_week_low_routing(&resolved.routing) =>
+                        {
+                            entry.week_low(model, used, now)
+                        }
                         _ => false,
                     };
                     let group_member = group_member(hop);
@@ -1587,10 +1590,9 @@ struct DispatchState {
     last: Option<(String, PluginError)>,
     refused_providers: BTreeSet<String>,
     region_attempts: BTreeMap<String, u32>,
-    region_closed: BTreeSet<String>,
+    region_closed: BTreeMap<String, u16>,
     region_reask: Vec<usize>,
     last_model: Option<String>,
-    region_failure: Option<(String, PluginError)>,
     outgrown: Vec<(String, String)>,
     needs_room: Option<u64>,
     missing_detail: String,
@@ -1620,7 +1622,13 @@ impl DispatchState {
     fn region_closed_for(&self, hop: &Hop) -> bool {
         let model = hop.wire_model.as_deref().unwrap_or(&self.resolved.bare);
         let key = format!("{}\0{model}", hop.member.route_id());
-        self.region_closed.contains(&key)
+        self.region_closed.contains_key(&key)
+    }
+
+    fn region_closed_status(&self, hop: &Hop) -> Option<u16> {
+        let model = hop.wire_model.as_deref().unwrap_or(&self.resolved.bare);
+        let key = format!("{}\0{model}", hop.member.route_id());
+        self.region_closed.get(&key).copied()
     }
 
     fn now(&self) -> Instant {
@@ -1740,7 +1748,7 @@ impl DispatchState {
             }
             if !self.region_reask.is_empty() {
                 if let Some(hook) = self.wait_hook.as_ref() {
-                    hook.wait(Duration::from_millis(2)).await;
+                    hook.wait(patience::REGION_RETRY_PAUSE).await;
                 }
                 asking = std::mem::take(&mut self.region_reask);
                 continue;
@@ -1762,12 +1770,13 @@ impl DispatchState {
         }
         match self.last {
             Some((upstream_id, error)) => {
-                let (upstream_id, error) = self.region_failure.unwrap_or((upstream_id, error));
                 let model = self.last_model.as_deref().unwrap_or(&self.request.model);
-                Err(RouterError::Upstream {
-                    upstream_id,
-                    error: decision::with_region_agent_note(error, model),
-                })
+                let error = if decision::region_refused(&error) {
+                    decision::with_region_agent_note(error, model)
+                } else {
+                    error
+                };
+                Err(RouterError::Upstream { upstream_id, error })
             }
             None => {
                 let detail = if self.missing_detail.is_empty() {
@@ -1813,7 +1822,7 @@ impl DispatchState {
                     self.note_skip(
                         index as u32,
                         SkipReason::Failure {
-                            status: Some(400),
+                            status: self.region_closed_status(&hop),
                             message: "regional model refusal".to_owned(),
                         },
                     );
@@ -1951,18 +1960,13 @@ impl DispatchState {
                     );
                     let error = inferred.unwrap_or(error);
                     if decision::region_refused(&error) {
+                        hop.member.close_idle_connections();
                         let key = format!("{}\0{upstream_model}", hop.member.route_id());
+                        let status = error.status().unwrap_or(400);
                         let count = self.region_attempts.entry(key.clone()).or_insert(0);
                         *count += 1;
                         if *count > 1 {
-                            self.region_closed.insert(key);
-                            self.region_failure = Some((
-                                upstream_id.clone(),
-                                PluginError::status_error(
-                                    error.status().unwrap_or(400),
-                                    error.message(),
-                                ),
-                            ));
+                            self.region_closed.insert(key, status);
                         } else {
                             let has_mate = self.resolved.hops.iter().enumerate().any(|(j, h)| {
                                 j > index

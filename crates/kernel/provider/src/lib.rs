@@ -182,4 +182,7 @@ pub trait Provider: Send + Sync {
             "this upstream has no probe",
         ))
     }
+
+    /// Drops idle keep-alive connections before the next upstream attempt.
+    fn close_idle_connections(&self) {}
 }

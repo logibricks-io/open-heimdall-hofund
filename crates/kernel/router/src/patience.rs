@@ -12,6 +12,8 @@ const LONGEST_PAUSE: Duration = Duration::from_secs(30);
 const SHORT_RATE_LIMIT: Duration = Duration::from_secs(240);
 const VENDOR_TIME_CLAMP: Duration = Duration::from_secs(1);
 const REPLAN_ROUNDS: u32 = 12;
+/// Pause before the same account is asked again after a regional refusal.
+pub(crate) const REGION_RETRY_PAUSE: Duration = Duration::from_secs(1);
 
 /// Supplies runtime-specific sleeping for a patience pause.
 pub trait WaitHook: Send + Sync {

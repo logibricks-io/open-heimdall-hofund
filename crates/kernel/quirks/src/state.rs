@@ -132,8 +132,9 @@ impl RequestState {
     }
 }
 
-/// Folds Chat or Responses function parameters when xAI or a learned refusal
-/// requires it, and reports the resulting body and whether it changed.
+/// Folds tool `input_schema` or function `parameters` when xAI, a learned
+/// refusal, or anthropic-messages requires it, and reports the resulting body
+/// and whether it changed.
 #[must_use]
 pub fn fold_object_roots(
     base_url: &str,
@@ -188,9 +189,6 @@ fn fold_tools(protocol: &str, tools: &mut Value) -> bool {
             continue;
         }
         if protocol == "anthropic-messages" {
-            if tool.get("type").is_some() {
-                continue;
-            }
             if let Some(input_schema) = tool.get_mut("input_schema") {
                 changed |= fold_object_root(input_schema);
             }

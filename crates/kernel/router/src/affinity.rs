@@ -3,6 +3,10 @@
 mod rules;
 pub(crate) mod sealed;
 
+pub(crate) fn keeps_week_low_routing(routing: &str) -> bool {
+    rules::keeps_week_low_routing(routing)
+}
+
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};

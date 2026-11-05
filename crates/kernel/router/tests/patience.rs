@@ -240,6 +240,25 @@ async fn b6g_pauses_double_to_thirty_seconds_and_stop_at_the_budget() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn r4_75_dispatch_retries_cloudflare_520_through_524() {
+    for status in [520, 521, 522, 523, 524] {
+        let (router, hits) = make_router(
+            vec![
+                Err(PluginError::status_error(status, "edge error")),
+                Ok(answer()),
+            ],
+            Some(Duration::from_secs(60)),
+        );
+        let started = tokio::time::Instant::now();
+        dispatch(&router, "primary/demo")
+            .await
+            .unwrap_or_else(|error| panic!("{status}: {error:?}"));
+        assert_eq!(hits.load(Ordering::SeqCst), 2, "{status}");
+        assert_eq!(started.elapsed(), Duration::from_secs(2), "{status}");
+    }
+}
+
+#[tokio::test(start_paused = true)]
 async fn b6h_patience_off_and_240_second_cap() {
     let (router, hits) = make_router(vec![Err(PluginError::status_error(503, "busy"))], None);
     let started = tokio::time::Instant::now();
