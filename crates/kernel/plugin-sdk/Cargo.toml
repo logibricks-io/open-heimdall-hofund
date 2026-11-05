@@ -31,6 +31,9 @@ tokio = { version = "1.52.2", features = ["sync", "time"] }
 tracing = "0.1.44"
 url = "2.5.8"
 
+[features]
+enc-v1-test = []
+
 [dev-dependencies]
 quote = "1.0.45"
 syn = { version = "3.0.9", features = ["full"] }

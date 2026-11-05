@@ -47,6 +47,8 @@ daily_warmup::fn normalize_time (text : & str) -> Result < String , & 'static st
 daily_warmup::fn read_times (raw : & RawTable) -> Result < Vec < String > , ConfigError >
 digest::fn hmac_sha256 (key : & [u8] , data : & [u8]) -> [u8 ; 32]
 digest::fn sha256 (bytes : & [u8]) -> [u8 ; 32]
+enc_v1::fn decrypt (key : & [u8] , value : & str) -> Option < String >
+enc_v1::fn encrypt_for_test (key : & [u8] , plain : & str) -> String
 form_body
 gemini_models
 gemini_models_with_dropped
@@ -67,6 +69,7 @@ mod codex_tool_names
 mod daily_checkin
 mod daily_warmup
 mod digest
+mod enc_v1
 mod jwt
 mod oauth
 mod page
@@ -76,6 +79,7 @@ mod register
 mod sigv4
 mod time
 mod transport
+mod uuid
 mod wire
 next_cursor
 oauth::AccessToken
@@ -221,6 +225,7 @@ transport::fn retry_after_from_body (body : & [u8]) -> Option < Duration >
 transport::fn status_for_error (body : & [u8]) -> u16
 transport::fn text_response (status : u16 , body : impl AsRef < [u8] >) -> HttpResponse
 url
+uuid::fn v4 () -> std :: io :: Result < String >
 wire::Rewrite
 wire::Sent
 wire::Sent::async fn complete (self) -> Result < Completion , PluginError >

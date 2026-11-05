@@ -24,6 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   desktop auth from CodeBuddyExtension, refresh, model lists, OpenAI chat upstream
   (Zed cloud completions remain unsupported), WorkBuddy billing quota, Qoder and
   WorkBuddy daily check-in, and deterministic `a2c_*` tests (A-2c, feature-parity
+- Z Code subscription plugin (`hofund-plugin-subscription-zcode`): agent
+  `credentials.json` import with AES-GCM decryption, team plan key resolution,
+  monitor usage quota, GLM model list, Anthropic Messages upstream on Z.ai or
+  BigModel plan bases, and deterministic `a2d_*` tests (A-2d, feature-parity
   row 3.5 partial).
 
 - ChatGPT (Codex) subscription sign-in by device code (`--site device`): ask

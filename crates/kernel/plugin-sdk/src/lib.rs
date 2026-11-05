@@ -50,6 +50,7 @@ pub mod codex_tool_names;
 pub mod daily_checkin;
 pub mod daily_warmup;
 pub mod digest;
+pub mod enc_v1;
 pub mod jwt;
 pub mod oauth;
 pub mod page;
@@ -59,6 +60,7 @@ pub mod register;
 pub mod sigv4;
 pub mod time;
 pub mod transport;
+pub mod uuid;
 pub mod wire;
 
 pub use oauth::{AccessToken, TokenError, form_body, parse_access_token, refresh_form};

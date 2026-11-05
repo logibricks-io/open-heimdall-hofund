@@ -167,6 +167,13 @@ package = "hofund-plugin-subscription-workbuddy"
 feature = "workbuddy"
 
 [[plugin]]
+id = "zcode"
+kind = "subscription"
+path = "plugins/subscriptions/zcode"
+package = "hofund-plugin-subscription-zcode"
+feature = "zcode"
+
+[[plugin]]
 id = "zed"
 kind = "subscription"
 path = "plugins/subscriptions/zed"

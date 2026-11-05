@@ -11,7 +11,7 @@ homepage.workspace = true
 rust-version.workspace = true
 
 [features]
-default = ["azure", "bedrock", "bedrock-mantle", "claude", "cline", "codex", "copilot", "cursor", "devin", "echo", "factory", "gemini", "grok", "google-vertex", "kiro", "codex-catalog", "muse", "ollama", "plan-quota", "qoder", "relay", "remote-gateway", "retrieval", "workbuddy", "zed"]
+default = ["azure", "bedrock", "bedrock-mantle", "claude", "cline", "codex", "copilot", "cursor", "devin", "echo", "factory", "gemini", "grok", "google-vertex", "kiro", "zcode", "codex-catalog", "muse", "ollama", "plan-quota", "qoder", "relay", "remote-gateway", "retrieval", "workbuddy", "zed"]
 azure = ["dep:hofund-plugin-azure"]
 bedrock = ["dep:hofund-plugin-bedrock"]
 bedrock-mantle = ["dep:hofund-plugin-bedrock-mantle"]
@@ -27,6 +27,7 @@ gemini = ["dep:hofund-plugin-subscription-gemini"]
 grok = ["dep:hofund-plugin-subscription-grok"]
 google-vertex = ["dep:hofund-plugin-google-vertex"]
 kiro = ["dep:hofund-plugin-subscription-kiro"]
+zcode = ["dep:hofund-plugin-subscription-zcode"]
 codex-catalog = ["dep:hofund-plugin-codex-catalog"]
 retrieval = ["dep:hofund-plugin-retrieval"]
 muse = ["dep:hofund-plugin-muse"]
@@ -67,6 +68,7 @@ hofund-plugin-subscription-grok = { workspace = true, optional = true }
 hofund-plugin-subscription-kiro = { workspace = true, optional = true }
 hofund-plugin-subscription-qoder = { workspace = true, optional = true }
 hofund-plugin-subscription-workbuddy = { workspace = true, optional = true }
+hofund-plugin-subscription-zcode = { workspace = true, optional = true }
 hofund-plugin-subscription-zed = { workspace = true, optional = true }
 hofund-provider = { workspace = true }
 hofund-quirks = { workspace = true }
