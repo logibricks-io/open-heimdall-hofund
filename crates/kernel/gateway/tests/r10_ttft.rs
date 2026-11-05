@@ -62,7 +62,7 @@ impl Member for Reply {
                 }))],
                 ReplyMode::ToolBurst => vec![
                     Ok(StreamEvent::ContentBlockStart(ContentBlockStart {
-                        index: 0,
+                        index: 2,
                         block: BlockStart::ToolCall {
                             id: "call".to_owned(),
                             name: "demo".to_owned(),
@@ -70,7 +70,7 @@ impl Member for Reply {
                         extensions: Extensions::default(),
                     })),
                     Ok(StreamEvent::ToolArgumentsDelta(ToolArgumentsDelta {
-                        index: 0,
+                        index: 2,
                         partial_json: r#"{"x":1}"#.to_owned(),
                         extensions: Extensions::default(),
                     })),
@@ -176,7 +176,9 @@ async fn r10_gateway_tool_burst_stream_stores_flow_without_speed() {
     assert_eq!(chat(app, true).await, StatusCode::OK);
     let row = usage.rows().expect("rows").pop().expect("one row");
     assert!(
-        row.flow_ms.is_none() || row_tokens_per_second(&row).is_none(),
-        "burst tool replies must not report a steady tokens-per-second"
+        row.flow_ms.is_some_and(|flow| flow >= 1),
+        "flow_ms={:?}",
+        row.flow_ms
     );
+    assert!(row_tokens_per_second(&row).is_none());
 }

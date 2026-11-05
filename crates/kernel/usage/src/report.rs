@@ -105,11 +105,31 @@ pub fn parse_since(value: &str) -> Result<i64, String> {
 ///
 /// Returns a message when the duration is missing or not positive.
 pub fn parse_last(value: &str) -> Result<Duration, String> {
-    parse_duration_value(value, "--last")
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err("--last takes a duration".to_owned());
+    }
+    if let Some(rest) = trimmed.strip_suffix('d') {
+        let days: f64 = rest
+            .parse()
+            .map_err(|_| format!("--last takes a duration greater than zero, not {value:?}"))?;
+        if !(days.is_finite()) || days <= 0.0 {
+            return Err(format!(
+                "--last takes a duration greater than zero, not {value:?}"
+            ));
+        }
+        return Ok(Duration::seconds((days * 86_400.0).round() as i64));
+    }
+    if !trimmed.chars().any(|ch| ch.is_ascii_alphabetic()) {
+        return Err(format!(
+            "--last takes a duration greater than zero, not {value:?}"
+        ));
+    }
+    Ok(Duration::milliseconds(parse_go_duration(trimmed, "--last")?))
 }
 
 fn parse_go_duration(trimmed: &str, flag: &str) -> Result<i64, String> {
-    let mut total_seconds = 0i64;
+    let mut total_ms = 0i64;
     let mut rest = trimmed.trim();
     while !rest.is_empty() {
         let start = rest
@@ -129,28 +149,34 @@ fn parse_go_duration(trimmed: &str, flag: &str) -> Result<i64, String> {
                 "{flag} takes a duration greater than zero, not {trimmed:?}"
             ));
         }
-        let (unit, next) = if let Some(stripped) = after.strip_prefix("ms") {
-            (0.001, stripped)
+        let (unit_ms, next) = if let Some(stripped) = after.strip_prefix("ns") {
+            (value / 1_000_000.0, stripped)
+        } else if let Some(stripped) = after.strip_prefix("us") {
+            (value / 1_000.0, stripped)
+        } else if let Some(stripped) = after.strip_prefix("µs") {
+            (value / 1_000.0, stripped)
+        } else if let Some(stripped) = after.strip_prefix("ms") {
+            (value, stripped)
         } else if let Some(stripped) = after.strip_prefix('h') {
-            (3600.0, stripped)
+            (value * 3_600_000.0, stripped)
         } else if let Some(stripped) = after.strip_prefix('m') {
-            (60.0, stripped)
+            (value * 60_000.0, stripped)
         } else if let Some(stripped) = after.strip_prefix('s') {
-            (1.0, stripped)
+            (value * 1_000.0, stripped)
         } else {
             return Err(format!(
                 "{flag} takes a duration greater than zero, not {trimmed:?}"
             ));
         };
-        total_seconds += (value * unit).round() as i64;
+        total_ms += unit_ms.round() as i64;
         rest = next;
     }
-    if total_seconds <= 0 {
+    if total_ms <= 0 {
         return Err(format!(
             "{flag} takes a duration greater than zero, not {trimmed:?}"
         ));
     }
-    Ok(total_seconds)
+    Ok(total_ms)
 }
 
 /// Parses `--days` as a positive number of days (fractions allowed).
@@ -170,61 +196,6 @@ pub fn parse_days(value: &str) -> Result<Duration, String> {
     }
     let seconds = (days * 86_400.0).round() as i64;
     Ok(Duration::seconds(seconds.max(1)))
-}
-
-fn parse_duration_value(value: &str, flag: &str) -> Result<Duration, String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return Err(format!("{flag} takes a duration"));
-    }
-    if let Some(rest) = trimmed.strip_suffix('d') {
-        let days: f64 = rest
-            .parse()
-            .map_err(|_| format!("{flag} takes a duration greater than zero, not {value:?}"))?;
-        if !(days.is_finite()) || days <= 0.0 {
-            return Err(format!(
-                "{flag} takes a duration greater than zero, not {value:?}"
-            ));
-        }
-        return Ok(Duration::seconds((days * 86_400.0).round() as i64));
-    }
-    if trimmed.chars().any(|ch| ch.is_ascii_alphabetic()) {
-        return Ok(Duration::seconds(parse_go_duration(trimmed, flag)?));
-    }
-    parse_hms_duration(trimmed, flag)
-}
-
-fn parse_hms_duration(trimmed: &str, flag: &str) -> Result<Duration, String> {
-    let trimmed = trimmed.trim();
-    if trimmed.is_empty() {
-        return Err(format!("{flag} takes a duration"));
-    }
-    let (number, unit) = trimmed
-        .chars()
-        .rev()
-        .position(|ch| !ch.is_ascii_digit() && ch != '.')
-        .map(|index| trimmed.split_at(trimmed.len() - index))
-        .unwrap_or((trimmed, ""));
-    let value: f64 = number
-        .trim()
-        .parse()
-        .map_err(|_| format!("{flag} takes a duration greater than zero, not {trimmed:?}"))?;
-    if !(value.is_finite()) || value <= 0.0 {
-        return Err(format!(
-            "{flag} takes a duration greater than zero, not {trimmed:?}"
-        ));
-    }
-    let seconds = match unit {
-        "h" | "hr" | "hour" | "hours" => value * 3600.0,
-        "m" | "min" | "minute" | "minutes" => value * 60.0,
-        "s" | "sec" | "second" | "seconds" | "" => value,
-        _ => {
-            return Err(format!(
-                "{flag} takes a duration greater than zero, not {trimmed:?}"
-            ));
-        }
-    };
-    Ok(Duration::seconds(seconds.round() as i64))
 }
 
 /// CSV column order for `hofund usage --csv` (matches the reference ledger header).
@@ -485,6 +456,7 @@ mod tests {
         assert_eq!(parse_days("1.5").expect("days").num_seconds(), 129_600);
         assert_eq!(parse_last("90m").expect("last").num_minutes(), 90);
         assert_eq!(parse_last("1h30m").expect("last").num_seconds(), 5400);
+        assert_eq!(parse_last("500ms").expect("last").num_milliseconds(), 500);
         assert!(parse_days("0").is_err());
         assert!(parse_last("").is_err());
         assert!(parse_last("90").is_err());
@@ -595,24 +567,70 @@ mod tests {
             .expect("row");
         let (rows, _) = ledger.report(None, None, None, 10).expect("report");
         let csv = format_csv(&rows).expect("csv");
+        let header_line = csv.lines().next().expect("header");
+        assert_eq!(
+            header_line,
+            CSV_HEADER
+                .iter()
+                .copied()
+                .map(csv_field)
+                .collect::<Vec<_>>()
+                .join(",")
+        );
         let data: Vec<&str> = csv.lines().nth(1).expect("row").split(',').collect();
         assert_eq!(data.len(), CSV_HEADER.len());
-        assert_eq!(data[1], "fixture");
-        assert_eq!(data[2], "asked");
-        assert_eq!(data[6], "served-id");
-        assert_eq!(data[9], "0");
-        assert_eq!(data[10], "7");
-        assert_eq!(data[14], "0.250000");
-        assert_eq!(data[16], "0");
-        assert_eq!(data[17], "502");
-        assert_eq!(data[18], "true");
-        assert_eq!(data[19], "sess");
-        assert_eq!(data[21], "pk");
-        assert_eq!(data[23], "me@x.test");
-        assert_eq!(data[34], "gk");
-        assert_eq!(data[35], "Guest");
-        assert_eq!(data[37], "account:relay:me@x.test");
-        assert_eq!(data[41], "true");
+        let expected = [
+            "2023-11-14T22:13:20+00:00",
+            "fixture",
+            "asked",
+            "",
+            "",
+            "",
+            "served-id",
+            "",
+            "",
+            "0",
+            "7",
+            "0",
+            "",
+            "",
+            "0.250000",
+            "1200",
+            "0",
+            "502",
+            "true",
+            "sess",
+            "",
+            "pk",
+            "",
+            "me@x.test",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "gk",
+            "Guest",
+            "",
+            "account:relay:me@x.test",
+            "",
+            "",
+            "",
+            "true",
+            "",
+            "",
+            "",
+            "",
+            "",
+        ];
+        for (index, (name, value)) in CSV_HEADER.iter().zip(expected.iter()).enumerate() {
+            assert_eq!(data[index], *value, "column {name}");
+        }
     }
 
     #[test]
@@ -637,7 +655,8 @@ mod tests {
             .expect("filtered");
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].model, "keep");
-        assert!(rows[0].created_unix >= rows[1].created_unix);
+        assert_eq!(rows[0].created_unix, base + 4);
+        assert_eq!(rows[1].created_unix, base + 2);
     }
 
     #[test]

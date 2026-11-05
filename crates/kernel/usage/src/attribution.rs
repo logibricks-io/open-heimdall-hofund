@@ -139,7 +139,7 @@ impl Ledger {
                AND (?2 = '' OR model = ?2 COLLATE NOCASE)
                AND (?3 = '' OR (
                     upstream LIKE 'account:%:%'
-                    AND LOWER(substr(upstream, 9 + instr(substr(upstream, 9), ':') + 1)) = LOWER(?3)
+                    AND LOWER(substr(upstream, 9 + instr(substr(upstream, 9), ':'))) = LOWER(?3)
                ))
              GROUP BY {group_expr}
              ORDER BY (COALESCE(SUM(MAX(input_tokens, 0)), 0) + COALESCE(SUM(MAX(output_tokens, 0)), 0)) DESC,
@@ -452,5 +452,23 @@ mod tests {
             .expect("open group");
         assert_eq!(open_group.totals.unpriced, 1);
         assert_eq!(open_group.totals.cost_usd, 0.0);
+    }
+
+    #[test]
+    fn r10_breakdown_honors_account_filter() {
+        let mut kept = base_row();
+        kept.upstream = "account:relay:me@x.test".to_owned();
+        kept.input_tokens = Some(10);
+        let mut other = base_row();
+        other.created_unix = 101;
+        other.upstream = "account:relay:other@x.test".to_owned();
+        other.input_tokens = Some(99);
+        let ledger = ledger_with(&[kept, other]);
+        let groups = ledger
+            .breakdown(None, BreakdownDimension::Model, None, Some("me@x.test"))
+            .expect("breakdown");
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].totals.requests, 1);
+        assert_eq!(groups[0].totals.input_tokens, 10);
     }
 }

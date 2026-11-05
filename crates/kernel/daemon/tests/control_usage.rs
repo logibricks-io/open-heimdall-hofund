@@ -576,3 +576,36 @@ async fn r10_group_by_model_applies_model_filter_to_breakdown() {
     assert_eq!(body.totals.requests, 1);
     support::shutdown(running).await;
 }
+
+#[tokio::test]
+async fn r10_group_by_with_account_filter_matches_rows() {
+    let dir = Scratch::new("r10-group-account");
+    let now = now_unix();
+    {
+        let ledger = Ledger::open(&dir.0.join("usage.sqlite")).expect("ledger");
+        for (upstream, input) in [
+            ("account:relay:me@x.test", 10),
+            ("account:relay:other@x.test", 99),
+        ] {
+            let mut entry = row(now, "m", Some(input), Some(1));
+            entry.upstream = upstream.to_owned();
+            ledger.record(&entry).expect("row");
+        }
+    }
+    let running = start_tcp(&dir.0, CONFIG).await;
+    let body = decoded_usage(
+        usage(
+            &running,
+            &dir.0,
+            "?period=all&by=model&account=me@x.test&unlimited=1",
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(body.rows.len(), 1);
+    assert_eq!(body.rows[0].input_tokens, Some(10));
+    assert_eq!(body.breakdown.len(), 1);
+    assert_eq!(body.breakdown[0].input_tokens, 10);
+    assert_eq!(body.totals.input_tokens, 10);
+    support::shutdown(running).await;
+}

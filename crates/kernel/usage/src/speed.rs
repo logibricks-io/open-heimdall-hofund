@@ -2,6 +2,10 @@
 
 use crate::decode::decode_row;
 
+fn row_failed(row: &crate::Row) -> bool {
+    row.status.parse::<u16>().is_ok_and(|code| code >= 400)
+}
+
 /// Mean output tokens per second: sum of decode tokens over sum of decode windows.
 #[must_use]
 pub fn mean_tokens_per_second<'a, I>(rows: I) -> Option<f64>
@@ -11,6 +15,9 @@ where
     let mut tokens = 0i64;
     let mut window_ms = 0i64;
     for row in rows {
+        if row_failed(row) {
+            continue;
+        }
         let (row_tokens, row_window) = decode_row(row);
         if row_tokens <= 0 || row_window <= 0 {
             continue;
@@ -69,5 +76,33 @@ mod tests {
         };
         let mean = mean_tokens_per_second([&fast, &slow]).expect("mean");
         assert!((mean - 36.666).abs() < 0.1, "mean={mean}");
+    }
+
+    #[test]
+    fn r10_mean_speed_skips_hidden_and_failed_rows() {
+        let good = Row {
+            output_tokens: Some(100),
+            latency_ms: 2500,
+            ttft_ms: Some(500),
+            status: "200".to_owned(),
+            ..Default::default()
+        };
+        let hidden = Row {
+            output_tokens: Some(100),
+            latency_ms: 2500,
+            ttft_ms: Some(500),
+            reasoning_hidden: true,
+            status: "200".to_owned(),
+            ..Default::default()
+        };
+        let failed = Row {
+            output_tokens: Some(100),
+            latency_ms: 2500,
+            ttft_ms: Some(500),
+            status: "502".to_owned(),
+            ..Default::default()
+        };
+        let mean = mean_tokens_per_second([&good, &hidden, &failed]).expect("mean");
+        assert!((mean - 50.0).abs() < 0.001, "mean={mean}");
     }
 }

@@ -32,7 +32,7 @@ pub(crate) struct UsageReportOptions {
     pub format: UsageOutputFormat,
 }
 
-const USAGE: &str = "usage: hofund usage [today|7d|30d|all] [--days <n>] [--last <dur>] [--since <time>] [--group-by agent|model|provider|provider-key|gateway-key|account|session|day] [--by <same>] [--account <name>] [--model <id>] [--csv] [--json] [--config PATH]
+pub(crate) const USAGE_HELP: &str = "usage: hofund usage [today|7d|30d|all] [--days <n>] [--last <dur>] [--since <time>] [--group-by agent|model|provider|provider-key|gateway-key|account|session|day] [--by <same>] [--account <name>] [--model <id>] [--csv] [--json] [--config PATH]
 
 Period presets count from local midnight (default: last 30 days / 30d). Rolling --days and --last end at now.
 
@@ -61,57 +61,57 @@ pub(crate) fn parse(args: &[&str]) -> Result<UsageCommand, String> {
             "--json" => format = UsageOutputFormat::Json,
             "--by" | "--group-by" | "--group_by" => {
                 let Some(value) = iter.next() else {
-                    return Err(format!("{USAGE}\n{arg} needs a dimension"));
+                    return Err(format!("{USAGE_HELP}\n{arg} needs a dimension"));
                 };
                 group_by = Some(parse_group_by(value)?);
             }
             "--days" => {
                 let Some(value) = iter.next() else {
-                    return Err(format!("{USAGE}\n--days needs a number of days"));
+                    return Err(format!("{USAGE_HELP}\n--days needs a number of days"));
                 };
                 days = Some((*value).to_owned());
             }
             "--last" => {
                 let Some(value) = iter.next() else {
-                    return Err(format!("{USAGE}\n--last needs a duration"));
+                    return Err(format!("{USAGE_HELP}\n--last needs a duration"));
                 };
                 last = Some((*value).to_owned());
             }
             "--since" => {
                 let Some(value) = iter.next() else {
-                    return Err(format!("{USAGE}\n--since needs a timestamp or date"));
+                    return Err(format!("{USAGE_HELP}\n--since needs a timestamp or date"));
                 };
                 since = Some((*value).to_owned());
             }
             "--account" => {
                 let Some(value) = iter.next() else {
                     return Err(format!(
-                        "{USAGE}\n--account needs a subscription account name"
+                        "{USAGE_HELP}\n--account needs a subscription account name"
                     ));
                 };
                 account = Some((*value).to_owned());
             }
             "--model" | "-m" => {
                 let Some(value) = iter.next() else {
-                    return Err(format!("{USAGE}\n--model needs a model id"));
+                    return Err(format!("{USAGE_HELP}\n--model needs a model id"));
                 };
                 model = Some((*value).to_owned());
             }
             value if !value.starts_with('-') => {
                 if positional_period.is_some() {
-                    return Err(format!("{USAGE}\nunexpected argument {value:?}"));
+                    return Err(format!("{USAGE_HELP}\nunexpected argument {value:?}"));
                 }
                 positional_period = Some(parse_positional_period(value)?);
             }
-            other => return Err(format!("{USAGE}\nunknown flag {other:?}")),
+            other => return Err(format!("{USAGE_HELP}\nunknown flag {other:?}")),
         }
     }
     if days.is_some() && last.is_some() {
-        return Err(format!("{USAGE}\ntake --days or --last, not both"));
+        return Err(format!("{USAGE_HELP}\ntake --days or --last, not both"));
     }
     if positional_period.is_some() && (days.is_some() || last.is_some() || since.is_some()) {
         return Err(format!(
-            "{USAGE}\ntake --days/--last/--since or a period preset, not both"
+            "{USAGE_HELP}\ntake --days/--last/--since or a period preset, not both"
         ));
     }
     let (window, period) = if let Some(ref value) = days {
@@ -131,10 +131,10 @@ pub(crate) fn parse(args: &[&str]) -> Result<UsageCommand, String> {
             UsagePeriod::Month => ReportWindow::Month,
             UsagePeriod::All => ReportWindow::All,
             UsagePeriod::Unknown => {
-                return Err(format!("{USAGE}\nunknown period preset"));
+                return Err(format!("{USAGE_HELP}\nunknown period preset"));
             }
             _ => {
-                return Err(format!("{USAGE}\nunknown period preset"));
+                return Err(format!("{USAGE_HELP}\nunknown period preset"));
             }
         };
         (window, period)
@@ -173,13 +173,13 @@ fn parse_positional_period(value: &str) -> Result<UsagePeriod, String> {
         "7d" | "week" => Ok(UsagePeriod::Week),
         "30d" | "month" => Ok(UsagePeriod::Month),
         "all" => Ok(UsagePeriod::All),
-        other => Err(format!("{USAGE}\nunknown period {other:?}")),
+        other => Err(format!("{USAGE_HELP}\nunknown period {other:?}")),
     }
 }
 
 fn parse_group_by(value: &str) -> Result<UsageBreakdownBy, String> {
     UsageBreakdownBy::parse(value).ok_or_else(|| {
-        format!("{USAGE}\nunknown breakdown {value:?}; expected agent, model, provider, provider-key, gateway-key, account, session, or day")
+        format!("{USAGE_HELP}\nunknown breakdown {value:?}; expected agent, model, provider, provider-key, gateway-key, account, session, or day")
     })
 }
 

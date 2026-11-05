@@ -146,6 +146,9 @@ impl FlowTracker {
 /// Token count and decode window for one row, for aggregate speed.
 #[must_use]
 pub fn decode_row(row: &super::Row) -> (i64, i64) {
+    if row.reasoning_hidden && row.first_text_ms.unwrap_or(0) <= 0 {
+        return (0, 0);
+    }
     let output = row.output_tokens.unwrap_or(0);
     let reasoning = row.reasoning_tokens.unwrap_or(0);
     let ttft = row.ttft_ms.unwrap_or(0);
@@ -163,21 +166,9 @@ pub fn decode_row(row: &super::Row) -> (i64, i64) {
 /// Tokens per second from one ledger row, or `None` when speed is untold.
 #[must_use]
 pub fn row_tokens_per_second(row: &super::Row) -> Option<f64> {
-    let output = row.output_tokens.filter(|tokens| *tokens > 0)?;
-    let ttft = row.ttft_ms.filter(|ms| *ms > 0)?;
-    let reasoning = row.reasoning_tokens.unwrap_or(0);
-    if row.reasoning_hidden && reasoning > 0 && row.first_text_ms.filter(|ms| *ms > 0).is_none() {
-        return None;
-    }
-    let (tokens, window) = decode_of(
-        output,
-        reasoning,
-        row.latency_ms,
-        ttft,
-        row.first_text_ms.unwrap_or(0),
-        row.flow_ms.unwrap_or(0),
-        row.first_reasoning_ms.unwrap_or(0),
-    );
+    row.output_tokens.filter(|tokens| *tokens > 0)?;
+    row.ttft_ms.filter(|ms| *ms > 0)?;
+    let (tokens, window) = decode_row(row);
     if tokens <= 0 || window <= 0 {
         return None;
     }
@@ -255,6 +246,20 @@ mod tests {
             ttft_ms: Some(500),
             ..Default::default()
         };
+        assert!(row_tokens_per_second(&row).is_none());
+    }
+
+    #[test]
+    fn r10_decode_row_hidden_reasoning_zero_reasoning_without_first_text() {
+        let row = Row {
+            output_tokens: Some(50),
+            reasoning_tokens: Some(0),
+            reasoning_hidden: true,
+            latency_ms: 5000,
+            ttft_ms: Some(500),
+            ..Default::default()
+        };
+        assert_eq!(super::decode_row(&row), (0, 0));
         assert!(row_tokens_per_second(&row).is_none());
     }
 }

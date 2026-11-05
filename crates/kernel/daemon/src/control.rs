@@ -1770,10 +1770,7 @@ fn usage_row(row: hofund_usage::Row, convert: impl Fn(f64) -> f64 + Copy) -> Usa
     out.provider_key_id = row.provider_key_id.clone();
     out.served_model = row.served_model.clone();
     out.client_agent = row.client_agent;
-    out.ttft_ms = row
-        .ttft_ms
-        .and_then(|ms| u64::try_from(ms).ok())
-        .filter(|ms| *ms > 0);
+    out.ttft_ms = row.ttft_ms.and_then(|ms| u64::try_from(ms).ok());
     out.tokens_per_second = tokens_per_second;
     out.account = hofund_usage::account_of_upstream(&row.upstream)
         .unwrap_or_default()

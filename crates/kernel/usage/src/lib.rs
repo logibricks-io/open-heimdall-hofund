@@ -804,7 +804,7 @@ mod tests {
         let (rows, totals) = ledger.summary(Some(10), 2).expect("summary");
         assert_eq!(
             rows.iter().map(|row| row.created_unix).collect::<Vec<_>>(),
-            [11, 12]
+            [12, 11]
         );
         assert_eq!(
             totals,
@@ -819,7 +819,7 @@ mod tests {
         );
         let (rows, totals) = ledger.summary(None, 10).expect("all");
         assert_eq!(rows.len(), 4);
-        assert_eq!(rows[0].created_unix, 5);
+        assert_eq!(rows[0].created_unix, 12);
         assert_eq!(totals.requests, 4);
         assert_eq!(totals.input_tokens, 101);
         let (rows, totals) = ledger.summary(Some(13), 10).expect("empty");

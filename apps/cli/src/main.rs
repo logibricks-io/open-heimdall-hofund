@@ -884,7 +884,7 @@ fn help_text(topic: HelpTopic) -> String {
         HelpTopic::TokenShow => TOKEN_SHOW_HELP,
         HelpTopic::TokenRotate => TOKEN_ROTATE_HELP,
         HelpTopic::GatewayKey => gateway_key::HELP,
-        HelpTopic::Usage => USAGE_HELP,
+        HelpTopic::Usage => usage::USAGE_HELP,
         HelpTopic::Agent => AGENT_HELP,
         HelpTopic::AgentList => AGENT_LIST_HELP,
         HelpTopic::AgentConnect => AGENT_CONNECT_HELP,
@@ -1094,15 +1094,6 @@ usage: hofund token rotate [--config PATH]
 Replace the bearer token. A running gateway reads the token file on the
 next request. Connected agents have their token keys rewritten. When an
 agent file cannot be updated, the command prints `hofund agent connect <name>`.
-";
-
-const USAGE_HELP: &str = "\
-usage: hofund usage [today|7d|30d|all] [--days <n>] [--last <dur>] [--since <time>] [--group-by agent|model|provider|provider-key|gateway-key|account|session|day] [--account <name>] [--model <id>] [--csv] [--json] [--config PATH]
-
-Print one row per recorded request, with local time, plus a totals line.
-The newest rows are shown when there are too many to list. --by groups
-totals by client agent, provider key fingerprint, or gateway key instead
-of listing individual rows.
 ";
 
 const AGENT_HELP: &str = "\

@@ -52,9 +52,10 @@ impl StreamTiming {
             StreamEvent::ThinkingDelta(_) => (true, false, true),
             StreamEvent::ToolArgumentsDelta(_) => (true, false, false),
             StreamEvent::ContentBlockStart(start) => match &start.block {
-                BlockStart::ToolCall { .. } | BlockStart::Text => (true, false, false),
-                BlockStart::Thinking { .. } => (true, false, true),
-                BlockStart::Unknown { .. } => (false, false, false),
+                BlockStart::ToolCall { .. } => (true, false, false),
+                BlockStart::Text | BlockStart::Thinking { .. } | BlockStart::Unknown { .. } => {
+                    (false, false, false)
+                }
             },
             _ => (false, false, false),
         };
@@ -178,11 +179,10 @@ fn timing_kind(event: &[u8]) -> (bool, bool, bool) {
     if event.windows(18).any(|w| w == b"content_block_start") {
         let tool = event.windows(9).any(|w| w == b"tool_use")
             || event.windows(15).any(|w| w == b"server_tool_use");
-        return (
-            true,
-            false,
-            !tool && event.windows(8).any(|w| w == b"thinking"),
-        );
+        if tool {
+            return (true, false, false);
+        }
+        return (false, false, false);
     }
     if !flow_content(event) && !event.windows(16).any(|w| w == b"output_item.added") {
         return (false, false, false);
