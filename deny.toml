@@ -68,6 +68,12 @@ skip = [
     { crate = "toml_datetime@0.6.3", reason = "glib-macros depends on proc-macro-crate 2 and toml_datetime 0.6 while the workspace toml uses 1" },
     { crate = "toml_edit@0.19.15", reason = "gtk3-macros depends on proc-macro-crate 1 and toml_edit 0.19 while the workspace uses 0.25" },
     { crate = "toml_edit@0.20.2", reason = "glib-macros depends on proc-macro-crate 2 and toml_edit 0.20 while the workspace uses 0.25" },
+    { crate = "unicode-width@0.1.14", reason = "unicode-truncate 1.1 depends on unicode-width 0.1 while ratatui 0.29 also depends on 0.2" },
+    { crate = "foldhash@0.1.5", reason = "hashbrown 0.15 through ratatui's lru 0.12 chain uses foldhash 0.1 while hashbrown 0.17 uses 0.2" },
+    { crate = "hashbrown@0.15.5", reason = "ratatui 0.29 pulls hashbrown 0.15 through lru 0.12 while the workspace indexmap stack uses 0.17" },
+    { crate = "signal-hook@0.3.18", reason = "crossterm 0.28 pulls signal-hook 0.3 through signal-hook-mio 0.2 while crossterm also uses signal-hook 0.4 for event streams" },
+    { crate = "rustix@0.38.44", reason = "crossterm 0.28 depends on rustix 0.38 while tempfile and the rest of the graph use rustix 1.x" },
+    { crate = "linux-raw-sys@0.4.15", reason = "rustix 0.38 depends on linux-raw-sys 0.4 while rustix 1.x uses linux-raw-sys 0.12" },
     { crate = "windows-sys@0.52.0", reason = "ring 0.17 depends on windows-sys 0.52 while tokio depends on 0.61" },
     { crate = "winnow@0.5.40", reason = "gtk3-macros depends on toml_edit 0.19 and winnow 0.5 while the workspace toml uses winnow 1" },
 ]

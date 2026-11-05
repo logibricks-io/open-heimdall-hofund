@@ -6,3 +6,5 @@
 *.gif binary
 *.webp binary
 *.ico binary
+
+apps/tui/tests/fixtures/*.txt -whitespace
