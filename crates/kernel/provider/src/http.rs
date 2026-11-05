@@ -240,14 +240,33 @@ impl Upstream {
     }
 }
 
-pub(crate) fn build_private_client(
+fn private_client_builder(
     connect_timeout: Duration,
     read_timeout: Duration,
-) -> Result<reqwest::Client, ProviderError> {
+) -> reqwest::ClientBuilder {
     reqwest::Client::builder()
         .http1_only()
         .connect_timeout(connect_timeout)
         .read_timeout(read_timeout)
+}
+
+pub(crate) fn build_private_client(
+    connect_timeout: Duration,
+    read_timeout: Duration,
+) -> Result<reqwest::Client, ProviderError> {
+    private_client_builder(connect_timeout, read_timeout)
+        .build()
+        .map_err(|error| ProviderError::connect(error.to_string()))
+}
+
+/// Same settings as [`build_private_client`], plus invalid-cert acceptance for local TLS fixtures.
+#[cfg(test)]
+pub(crate) fn build_private_client_insecure_for_tests(
+    connect_timeout: Duration,
+    read_timeout: Duration,
+) -> Result<reqwest::Client, ProviderError> {
+    private_client_builder(connect_timeout, read_timeout)
+        .danger_accept_invalid_certs(true)
         .build()
         .map_err(|error| ProviderError::connect(error.to_string()))
 }
@@ -949,7 +968,9 @@ mod tests {
 
     use tokio::io::AsyncReadExt;
 
-    use super::{build_private_client, note_dropped, send_builder};
+    use super::{
+        build_private_client, build_private_client_insecure_for_tests, note_dropped, send_builder,
+    };
     use hofund_plugin_sdk::transport::parse_retry_after;
 
     #[test]
@@ -1421,13 +1442,9 @@ mod tests {
             }
         });
         tokio::time::sleep(Duration::from_millis(50)).await;
-        let client = reqwest::Client::builder()
-            .http1_only()
-            .danger_accept_invalid_certs(true)
-            .connect_timeout(Duration::from_secs(5))
-            .read_timeout(Duration::from_secs(5))
-            .build()
-            .expect("client");
+        let client =
+            build_private_client_insecure_for_tests(Duration::from_secs(5), Duration::from_secs(5))
+                .expect("client");
         let _ = client
             .get(format!("https://127.0.0.1:{port}/probe"))
             .send()

@@ -254,8 +254,14 @@ impl PipedChildBackend for StdPipedChild {
                                 .copied();
                         }
                     }
-                    Err(_) => {
-                        return Err(PluginError::internal("exit slot lock is poisoned"));
+                    Err(poisoned) => {
+                        let slot = poisoned.into_inner();
+                        if let Some(stored) = slot.as_ref() {
+                            return stored
+                                .as_ref()
+                                .map_err(|message| PluginError::io(message.clone()))
+                                .copied();
+                        }
                     }
                 }
                 std::thread::sleep(Duration::from_millis(5));
@@ -269,12 +275,15 @@ impl PipedChildBackend for StdPipedChild {
 mod tests {
     use std::io::Cursor;
 
+    use std::sync::{Arc, Mutex};
+
     use hofund_plugin_api::PluginErrorKind;
+    use hofund_plugin_api::kernel::PipedChildBackend;
 
-    use super::{MAX_LINE, is_allowed, read_lines, write_exit_store};
+    use super::{MAX_LINE, StdPipedChild, is_allowed, read_lines, write_exit_store};
 
-    #[test]
-    fn write_exit_store_records_through_a_poisoned_lock() {
+    #[tokio::test]
+    async fn write_exit_store_records_through_a_poisoned_lock() {
         let slot = std::sync::Arc::new(std::sync::Mutex::new(None));
         let slot_for_panic = std::sync::Arc::clone(&slot);
         let poisoned = std::thread::spawn(move || {
@@ -285,11 +294,14 @@ mod tests {
         assert!(poisoned.is_err());
         assert!(slot.lock().is_err());
         write_exit_store(&slot, Ok(44));
-        let stored = match slot.lock() {
-            Ok(guard) => guard.clone(),
-            Err(poisoned) => poisoned.into_inner().clone(),
+        let child = StdPipedChild {
+            id: 0,
+            child: Arc::new(Mutex::new(None)),
+            stdin: Arc::new(Mutex::new(None)),
+            stdout: Mutex::new(None),
+            exit: slot,
         };
-        assert_eq!(stored.as_ref().unwrap(), &Ok(44));
+        assert_eq!(child.exit_code().await.expect("exit code"), 44);
     }
 
     fn lines(input: Vec<u8>) -> Vec<Result<Vec<u8>, PluginErrorKind>> {

@@ -304,10 +304,14 @@ async fn public_key(issuer: &str, kid: &str) -> Result<Vec<u8>, String> {
     }
 }
 
-fn default_fetch(url: &str) -> Result<Vec<u8>, String> {
-    let client = reqwest::blocking::Client::builder()
+fn default_fetch_client_builder() -> reqwest::blocking::ClientBuilder {
+    reqwest::blocking::Client::builder()
         .http1_only()
         .timeout(Duration::from_secs(10))
+}
+
+fn default_fetch(url: &str) -> Result<Vec<u8>, String> {
+    let client = default_fetch_client_builder()
         .build()
         .map_err(|error| error.to_string())?;
     let response = client.get(url).send().map_err(|error| error.to_string())?;
@@ -525,7 +529,7 @@ mod fetch_client_tests {
     use std::sync::mpsc;
     use std::time::Duration;
 
-    use super::{FETCH, default_fetch};
+    use super::{FETCH, default_fetch, default_fetch_client_builder};
 
     #[test]
     fn default_fetch_client_sends_an_http11_request_line() {
@@ -636,10 +640,8 @@ mod fetch_client_tests {
             tokio::time::sleep(Duration::from_millis(50)).await;
             port
         });
-        let client = reqwest::blocking::Client::builder()
-            .http1_only()
+        let client = default_fetch_client_builder()
             .danger_accept_invalid_certs(true)
-            .timeout(Duration::from_secs(10))
             .build()
             .expect("client");
         let url = format!("https://127.0.0.1:{port}/jwks");

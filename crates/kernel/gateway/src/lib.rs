@@ -2213,7 +2213,15 @@ fn stream_error(error: &RouterError) -> (StatusCode, String) {
             StatusCode::TOO_MANY_REQUESTS,
             "spend cap reached".to_owned(),
         ),
-        RouterError::Upstream { error, .. } => (status_of(error), broken_off(error)),
+        RouterError::Upstream { error, .. } => {
+            let status = status_of(error);
+            let message = if error.kind() == PluginErrorKind::Timeout {
+                error.message().to_owned()
+            } else {
+                broken_off(error)
+            };
+            (status, message)
+        }
     }
 }
 
@@ -2992,7 +3000,11 @@ const ENDED_SHORT: &str = "the reply ended before it was complete";
 /// compaction) can tell a cut from a vendor's own failure.
 fn broken_off(error: &PluginError) -> String {
     let message = error.message();
-    if error.kind() == PluginErrorKind::Interrupted && !message.ends_with(ENDED_SHORT) {
+    if matches!(
+        error.kind(),
+        PluginErrorKind::Interrupted | PluginErrorKind::Timeout
+    ) && !message.ends_with(ENDED_SHORT)
+    {
         format!("{message}: {ENDED_SHORT}")
     } else {
         message.to_owned()
@@ -3902,6 +3914,37 @@ mod line_hold_tests {
         );
         let vendor = hofund_plugin_api::PluginError::status_error(502, "upstream said no");
         assert_eq!(super::broken_off(&vendor), "upstream said no");
+    }
+
+    #[test]
+    fn d23_4_a_stream_body_timeout_says_it_ended_short() {
+        let stalled =
+            hofund_plugin_api::PluginError::timeout("error decoding response body: timed out");
+        assert_eq!(
+            super::broken_off(&stalled),
+            format!(
+                "error decoding response body: timed out: {}",
+                super::ENDED_SHORT
+            )
+        );
+    }
+
+    #[test]
+    fn stream_error_leaves_a_connect_timeout_without_the_ended_short_suffix() {
+        use hofund_router::RouterError;
+
+        let timeout = hofund_plugin_api::PluginError::timeout("connect timed out");
+        let upstream = RouterError::Upstream {
+            error: timeout,
+            upstream_id: "demo".to_owned(),
+        };
+        assert_eq!(
+            super::stream_error(&upstream),
+            (
+                axum::http::StatusCode::BAD_GATEWAY,
+                "connect timed out".to_owned()
+            )
+        );
     }
 
     #[test]

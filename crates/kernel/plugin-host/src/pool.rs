@@ -402,6 +402,17 @@ fn map_body(error: reqwest::Error) -> PluginError {
     PluginError::interrupted(error.to_string())
 }
 
+fn map_duplex_body(error: reqwest::Error) -> PluginError {
+    if error.is_timeout() {
+        let mut message = error.to_string();
+        if !message.contains("timed out") {
+            message.push_str(": timed out");
+        }
+        return PluginError::interrupted(message);
+    }
+    PluginError::interrupted(error.to_string())
+}
+
 /// A success body streamed chunk by chunk as the upstream sends it.
 ///
 /// A read failure becomes one [`PluginError::interrupted`] chunk and ends the
@@ -438,7 +449,7 @@ pub(crate) fn live_duplex_body(
             match response.chunk().await {
                 Ok(Some(chunk)) => Some((Ok(chunk), Some(response))),
                 Ok(None) => None,
-                Err(error) => Some((Err(map_body(error)), None)),
+                Err(error) => Some((Err(map_duplex_body(error)), None)),
             }
         }
     }))

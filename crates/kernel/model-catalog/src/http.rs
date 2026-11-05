@@ -22,11 +22,21 @@ impl ReqwestFetcher {
     }
 }
 
-fn client() -> io::Result<Client> {
+fn catalog_client_builder() -> reqwest::blocking::ClientBuilder {
     Client::builder()
         .http1_only()
         .user_agent(USER_AGENT_VALUE)
         .timeout(std::time::Duration::from_secs(30))
+}
+
+fn client() -> io::Result<Client> {
+    catalog_client_builder().build().map_err(io::Error::other)
+}
+
+#[cfg(test)]
+fn client_insecure_for_tests() -> io::Result<Client> {
+    catalog_client_builder()
+        .danger_accept_invalid_certs(true)
         .build()
         .map_err(io::Error::other)
 }
@@ -63,7 +73,7 @@ mod tests {
     use std::sync::mpsc;
     use std::time::Duration;
 
-    use super::client;
+    use super::{client, client_insecure_for_tests};
 
     #[test]
     fn catalog_client_sends_an_http11_request_line() {
@@ -174,12 +184,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(50)).await;
             port
         });
-        let client = reqwest::blocking::Client::builder()
-            .http1_only()
-            .danger_accept_invalid_certs(true)
-            .timeout(Duration::from_secs(5))
-            .build()
-            .expect("client");
+        let client = client_insecure_for_tests().expect("client");
         let _ = client
             .get(format!("https://127.0.0.1:{port}/catalog"))
             .send()

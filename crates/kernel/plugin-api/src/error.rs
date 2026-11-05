@@ -19,13 +19,14 @@ pub enum PluginErrorKind {
     /// A retry may repeat this kind for every HTTP method. A reset after the
     /// request was sent is [`Transport`](Self::Transport), not `Connect`.
     Connect,
-    /// The socket stalled past the host's connect or pre-header read deadline.
+    /// The socket stalled past the host's connect or pre-header read deadline,
+    /// or a unary upstream body read exceeded its budget after a 2xx status.
     ///
     /// A retry may repeat this kind only when the call is idempotent: `GET`,
     /// `HEAD`, `OPTIONS`, `PUT`, `DELETE`, or a call the caller marked
     /// idempotent. `POST` and `PATCH` are not retried on a timeout unless
-    /// that mark is set. A body-read timeout after a 2xx status is
-    /// [`Interrupted`](Self::Interrupted).
+    /// that mark is set. A duplex body-read stall after a 2xx status is
+    /// [`Interrupted`](Self::Interrupted), not `Timeout`.
     Timeout,
     /// The request was sent, then the connection failed before a status arrived.
     ///
