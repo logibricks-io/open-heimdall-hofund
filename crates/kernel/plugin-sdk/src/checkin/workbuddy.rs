@@ -1,7 +1,7 @@
 //! `WorkBuddy` (China) daily check-in against copilot.tencent.com billing meters.
 
 use crate::json;
-use crate::transport::Call;
+use crate::transport::{Call, Reply};
 use hofund_plugin_api::{CheckinOutcome, CheckinResult, PluginError};
 
 use super::{CheckinTransport, result_failed};
@@ -30,7 +30,9 @@ impl WorkBuddySite {
 
 #[derive(Debug, serde::Deserialize)]
 struct Envelope<T> {
-    code: serde_json::Number,
+    #[serde(default)]
+    code: i64,
+    #[serde(default)]
     msg: String,
     data: Option<T>,
 }
@@ -116,7 +118,7 @@ async fn activity_status<T: CheckinTransport>(
         "{}/v2/billing/meter/checkin-activity-status",
         site.api_base()
     );
-    post_json(transport, site, &url).await
+    post_json(transport, &url).await
 }
 
 async fn daily_claim<T: CheckinTransport>(
@@ -124,12 +126,11 @@ async fn daily_claim<T: CheckinTransport>(
     site: WorkBuddySite,
 ) -> Result<Claim, String> {
     let url = format!("{}/v2/billing/meter/daily-checkin", site.api_base());
-    post_json(transport, site, &url).await
+    post_json(transport, &url).await
 }
 
 async fn post_json<T: CheckinTransport, D: for<'de> serde::Deserialize<'de>>(
     transport: &T,
-    _site: WorkBuddySite,
     url: &str,
 ) -> Result<D, String> {
     let call = Call::post(url)
@@ -140,17 +141,32 @@ async fn post_json<T: CheckinTransport, D: for<'de> serde::Deserialize<'de>>(
         .send(call)
         .await
         .map_err(|error| error.to_string())?;
+    decode_envelope(&reply)
+}
+
+fn decode_envelope<D: for<'de> serde::Deserialize<'de>>(reply: &Reply) -> Result<D, String> {
     let body = std::str::from_utf8(reply.body()).unwrap_or("");
-    let env: Envelope<D> = json::from_str(body).map_err(|error| error.to_string())?;
-    let code = env.code.as_i64().unwrap_or(-1);
-    if code != 0 {
-        return Err(format!("code {code}: {}", env.msg));
-    }
-    if reply.status() == 401 {
+    let status = reply.status();
+    let Ok(env) = json::from_str::<Envelope<D>>(body) else {
+        if status == 401 {
+            return Err("unauthorized".to_owned());
+        }
+        if !(200..300).contains(&status) {
+            return Err(format!("HTTP {status}"));
+        }
+        return Err("invalid JSON".to_owned());
+    };
+    if env.code == 401 {
         return Err("unauthorized".to_owned());
     }
-    if !(200..300).contains(&reply.status()) {
-        return Err(format!("HTTP {}", reply.status()));
+    if env.code != 0 {
+        return Err(format!("code {}: {}", env.code, env.msg));
+    }
+    if status == 401 {
+        return Err("unauthorized".to_owned());
+    }
+    if !(200..300).contains(&status) {
+        return Err(format!("HTTP {status}"));
     }
     env.data.ok_or_else(|| "empty data".to_owned())
 }
@@ -168,10 +184,11 @@ async fn credits_summary_ok<T: CheckinTransport>(transport: &T, site: WorkBuddyS
         return false;
     };
     let body = std::str::from_utf8(reply.body()).unwrap_or("");
+    let status = reply.status();
     let Ok(env) = json::from_str::<Envelope<serde_json::Value>>(body) else {
         return false;
     };
-    env.code.as_i64() == Some(0) && (200..300).contains(&reply.status())
+    env.code == 0 && (200..300).contains(&status)
 }
 
 async fn handle_status_error<T: CheckinTransport>(
@@ -278,24 +295,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a2c_workbuddy_checkin_vendor_code_on_non_2xx() {
-        let transport = Mock {
-            seen: Arc::new(Mutex::new(Vec::new())),
-            responses: vec![Reply::from_parts(
-                400,
-                br#"{"code":1001,"msg":"already","data":null}"#,
-            )],
-        };
-        let result = run(&transport, WorkBuddySite::China).await.expect("run");
-        assert_eq!(result.outcome(), CheckinOutcome::Done);
-    }
-
-    #[tokio::test]
-    async fn a2c_workbuddy_checkin_401_with_empty_credits_data() {
+    async fn a2c_29_checkin_bare_html_401_credits_ok() {
         let transport = Mock {
             seen: Arc::new(Mutex::new(Vec::new())),
             responses: vec![
-                Reply::from_parts(401, br#"{"code":0,"msg":"ok","data":null}"#),
+                Reply::from_parts(401, b"<html>denied</html>"),
                 Reply::from_parts(200, br#"{"code":0,"msg":"ok","data":null}"#),
             ],
         };
@@ -304,15 +308,54 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a2c_workbuddy_checkin_401_when_credits_fail() {
+    async fn a2c_30_checkin_bare_html_401_credits_refused() {
         let transport = Mock {
             seen: Arc::new(Mutex::new(Vec::new())),
             responses: vec![
-                Reply::from_parts(401, br#"{"code":0,"msg":"ok","data":null}"#),
-                Reply::from_parts(401, br#"{"code":0,"msg":"ok","data":null}"#),
+                Reply::from_parts(401, b"<html>denied</html>"),
+                Reply::from_parts(401, b"<html>denied</html>"),
             ],
         };
         let result = run(&transport, WorkBuddySite::China).await.expect("run");
         assert_eq!(result.outcome(), CheckinOutcome::Failed);
+    }
+
+    #[tokio::test]
+    async fn a2c_31_checkin_vendor_code_1002() {
+        let transport = Mock {
+            seen: Arc::new(Mutex::new(Vec::new())),
+            responses: vec![Reply::from_parts(
+                400,
+                br#"{"code":1002,"msg":"not eligible","data":null}"#,
+            )],
+        };
+        let result = run(&transport, WorkBuddySite::China).await.expect("run");
+        assert_eq!(result.outcome(), CheckinOutcome::Ineligible);
+    }
+
+    #[tokio::test]
+    async fn a2c_32_checkin_vendor_code_1003() {
+        let transport = Mock {
+            seen: Arc::new(Mutex::new(Vec::new())),
+            responses: vec![Reply::from_parts(
+                503,
+                br#"{"code":1003,"msg":"ended","data":null}"#,
+            )],
+        };
+        let result = run(&transport, WorkBuddySite::China).await.expect("run");
+        assert_eq!(result.outcome(), CheckinOutcome::Inactive);
+    }
+
+    #[tokio::test]
+    async fn a2c_33_checkin_envelope_code_401() {
+        let transport = Mock {
+            seen: Arc::new(Mutex::new(Vec::new())),
+            responses: vec![
+                Reply::from_parts(403, br#"{"code":401}"#),
+                Reply::from_parts(200, br#"{"code":0,"msg":"ok","data":null}"#),
+            ],
+        };
+        let result = run(&transport, WorkBuddySite::China).await.expect("run");
+        assert_eq!(result.outcome(), CheckinOutcome::Ineligible);
     }
 }
