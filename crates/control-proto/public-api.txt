@@ -830,16 +830,24 @@ UnroutedRequest.phase
 UnroutedRequest.session
 UnroutedRequest.since_ms
 UsageBreakdownBy #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (rename_all = "kebab-case")]
+UsageBreakdownBy::Account
 UsageBreakdownBy::Agent
+UsageBreakdownBy::Day
 UsageBreakdownBy::GatewayKey
+UsageBreakdownBy::Model
+UsageBreakdownBy::Provider
 UsageBreakdownBy::ProviderKey
+UsageBreakdownBy::Session
 UsageBreakdownBy::Unknown #[serde(other)]
 UsageBreakdownBy::const fn as_query_value (self) -> & 'static str
+UsageBreakdownBy::fn parse (value : & str) -> Option < Self >
 UsageBreakdownGroup #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Serialize, Deserialize)
 UsageBreakdownGroup.cost
 UsageBreakdownGroup.id
 UsageBreakdownGroup.input_tokens
 UsageBreakdownGroup.label
+UsageBreakdownGroup.mean_tokens_per_second
+UsageBreakdownGroup.mean_ttft_ms
 UsageBreakdownGroup.output_tokens
 UsageBreakdownGroup.requests
 UsageBreakdownGroup.unpriced
@@ -850,9 +858,17 @@ UsagePeriod::Month
 UsagePeriod::Unknown #[serde(other)]
 UsagePeriod::Week
 UsageQuery #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
+UsageQuery.account
 UsageQuery.by
+UsageQuery.days
+UsageQuery.last
+UsageQuery.model
 UsageQuery.period
+UsageQuery.since
+UsageQuery.unlimited
+UsageQuery::fn encode (& self) -> String
 UsageQuery::fn new (period : UsagePeriod) -> Self
+UsageQuery::fn parse (query : Option < & str >) -> Self
 UsageQuery::fn validate (& self) -> Result < () , ControlError >
 UsageQuery::fn with_breakdown (period : UsagePeriod , by : UsageBreakdownBy) -> Self
 UsageResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Serialize, Deserialize)
@@ -865,7 +881,9 @@ UsageResponse.rows
 UsageResponse.rows_truncated
 UsageResponse.totals
 UsageResponse.version
+UsageResponse.window_label
 UsageRow #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Serialize, Deserialize)
+UsageRow.account
 UsageRow.cache_read_tokens
 UsageRow.cache_write_1h_tokens
 UsageRow.cache_write_5m_tokens
@@ -884,13 +902,18 @@ UsageRow.priced
 UsageRow.provider
 UsageRow.reasoning_hidden
 UsageRow.reasoning_tokens
+UsageRow.session_id
 UsageRow.status
+UsageRow.tokens_per_second
+UsageRow.ttft_ms
 UsageTotals #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Serialize, Deserialize)
 UsageTotals.cache_read_tokens
 UsageTotals.cache_write_1h_tokens
 UsageTotals.cache_write_5m_tokens
 UsageTotals.cost
 UsageTotals.input_tokens
+UsageTotals.mean_tokens_per_second
+UsageTotals.mean_ttft_ms
 UsageTotals.output_tokens
 UsageTotals.reasoning_tokens
 UsageTotals.requests

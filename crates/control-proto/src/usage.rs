@@ -33,6 +33,16 @@ pub enum UsageBreakdownBy {
     ProviderKey,
     /// Group by authenticated gateway key.
     GatewayKey,
+    /// Group by client-facing model id.
+    Model,
+    /// Group by answering provider member id.
+    Provider,
+    /// Group by subscription account on the upstream id.
+    Account,
+    /// Group by client session id.
+    Session,
+    /// Group by local calendar day.
+    Day,
     /// A newer peer supplied an unknown breakdown.
     #[serde(other)]
     Unknown,
@@ -46,7 +56,28 @@ impl UsageBreakdownBy {
             Self::Agent => "agent",
             Self::ProviderKey => "provider-key",
             Self::GatewayKey => "gateway-key",
+            Self::Model => "model",
+            Self::Provider => "provider",
+            Self::Account => "account",
+            Self::Session => "session",
+            Self::Day => "day",
             Self::Unknown => "unknown",
+        }
+    }
+
+    /// Parses a breakdown query token.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "agent" => Some(Self::Agent),
+            "provider-key" => Some(Self::ProviderKey),
+            "gateway-key" => Some(Self::GatewayKey),
+            "model" => Some(Self::Model),
+            "provider" => Some(Self::Provider),
+            "account" => Some(Self::Account),
+            "session" => Some(Self::Session),
+            "day" => Some(Self::Day),
+            _ => None,
         }
     }
 }
@@ -70,6 +101,12 @@ pub struct UsageBreakdownGroup {
     pub cost: f64,
     /// Token-bearing rows without a stored list price.
     pub unpriced: u64,
+    /// Mean time to first content in milliseconds when measured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mean_ttft_ms: Option<f64>,
+    /// Weighted mean output tokens per second after first content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mean_tokens_per_second: Option<f64>,
 }
 
 /// Query-only usage request. It uses the path version and has no JSON body
@@ -83,13 +120,34 @@ pub struct UsageQuery {
     /// When set, the response includes a grouped breakdown instead of only rows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub by: Option<UsageBreakdownBy>,
+    /// Rolling window length in days (`--days`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub days: Option<String>,
+    /// Rolling window duration (`--last`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last: Option<String>,
+    /// Inclusive window start (`--since`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<String>,
+    /// Subscription account filter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+    /// Client-facing model filter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// When true, return every row in the window instead of the row cap.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unlimited: bool,
 }
 
 impl UsageQuery {
     /// Constructs a usage query.
     #[must_use]
     pub fn new(period: UsagePeriod) -> Self {
-        Self { period, by: None }
+        Self {
+            period,
+            ..Self::default()
+        }
     }
 
     /// Constructs a usage query with a breakdown dimension.
@@ -98,7 +156,59 @@ impl UsageQuery {
         Self {
             period,
             by: Some(by),
+            ..Self::default()
         }
+    }
+
+    /// Parses usage query parameters from a query string.
+    #[must_use]
+    pub fn parse(query: Option<&str>) -> Self {
+        let mut out = Self::default();
+        for (key, value) in query_pairs(query) {
+            if value.is_empty() {
+                continue;
+            }
+            match key.as_str() {
+                "period" => out.period = parse_period(&value),
+                "by" | "group-by" | "group_by" => {
+                    out.by = UsageBreakdownBy::parse(&value).or(Some(UsageBreakdownBy::Unknown));
+                }
+                "days" => out.days = Some(value),
+                "last" => out.last = Some(value),
+                "since" => out.since = Some(value),
+                "account" => out.account = Some(value),
+                "model" => out.model = Some(value),
+                "unlimited" if value == "1" || value.eq_ignore_ascii_case("true") => {
+                    out.unlimited = true;
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// Encodes this query for `GET /v1/hofund/usage`.
+    #[must_use]
+    pub fn encode(&self) -> String {
+        let mut parts = vec![format!("period={}", period_token(self.period))];
+        if let Some(by) = self.by {
+            parts.push(format!("by={}", by.as_query_value()));
+        }
+        for (key, value) in [
+            ("days", &self.days),
+            ("last", &self.last),
+            ("since", &self.since),
+            ("account", &self.account),
+            ("model", &self.model),
+        ] {
+            if let Some(value) = value {
+                parts.push(format!("{key}={}", percent_encode(value)));
+            }
+        }
+        if self.unlimited {
+            parts.push("unlimited=1".to_owned());
+        }
+        parts.join("&")
     }
 
     /// Rejects unknown query values. The HTTP layer must call this after
@@ -118,12 +228,34 @@ impl UsageQuery {
             return Err(error);
         }
         if self.by == Some(UsageBreakdownBy::Unknown) {
-            let message = "unknown usage breakdown; expected agent, provider-key, or gateway-key";
+            let message = "unknown usage breakdown; expected agent, provider-key, gateway-key, model, provider, account, session, or day";
             let mut error = ControlError::new(ControlErrorKind::BadRequest, message, "validate");
             error
                 .details
                 .push(FieldIssue::new("by", "unknown_variant", message));
             return Err(error);
+        }
+        let rolling = [
+            self.days.as_deref().filter(|value| !value.is_empty()),
+            self.last.as_deref().filter(|value| !value.is_empty()),
+            self.since.as_deref().filter(|value| !value.is_empty()),
+        ];
+        let rolling_count = rolling.iter().filter(|value| value.is_some()).count();
+        if rolling_count > 1 {
+            let message = "take one of --days, --last, or --since, not several";
+            return Err(ControlError::new(
+                ControlErrorKind::BadRequest,
+                message,
+                "validate",
+            ));
+        }
+        if rolling_count > 0 && self.period != UsagePeriod::All {
+            let message = "take a rolling window or a calendar period, not both";
+            return Err(ControlError::new(
+                ControlErrorKind::BadRequest,
+                message,
+                "validate",
+            ));
         }
         Ok(())
     }
@@ -184,6 +316,18 @@ pub struct UsageRow {
     /// Detected client agent id, absent in older peers.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub client_agent: String,
+    /// Time to first content in milliseconds when measured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttft_ms: Option<u64>,
+    /// Output tokens per second after first content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens_per_second: Option<f64>,
+    /// Subscription account parsed from the upstream id when present.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub account: String,
+    /// Client session id when recorded.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub session_id: String,
 }
 
 /// Aggregated usage totals.
@@ -209,6 +353,12 @@ pub struct UsageTotals {
     pub cost: f64,
     /// Token-bearing rows with no stored list price.
     pub unpriced: u64,
+    /// Mean time to first content in milliseconds when measured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mean_ttft_ms: Option<f64>,
+    /// Weighted mean output tokens per second after first content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mean_tokens_per_second: Option<f64>,
 }
 
 /// Usage response.
@@ -239,6 +389,9 @@ pub struct UsageResponse {
     /// Grouped totals when `breakdown_by` is set.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub breakdown: Vec<UsageBreakdownGroup>,
+    /// Human-readable window label for rolling or custom ranges.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub window_label: String,
 }
 
 impl Default for UsageResponse {
@@ -253,7 +406,83 @@ impl Default for UsageResponse {
             cny_per_usd: None,
             breakdown_by: None,
             breakdown: Vec::new(),
+            window_label: String::new(),
         }
+    }
+}
+
+fn period_token(period: UsagePeriod) -> &'static str {
+    match period {
+        UsagePeriod::Day => "day",
+        UsagePeriod::Week => "week",
+        UsagePeriod::Month => "month",
+        UsagePeriod::All => "all",
+        UsagePeriod::Unknown => "unknown",
+    }
+}
+
+fn parse_period(value: &str) -> UsagePeriod {
+    match value {
+        "day" | "today" => UsagePeriod::Day,
+        "week" | "7d" => UsagePeriod::Week,
+        "month" | "30d" => UsagePeriod::Month,
+        "all" => UsagePeriod::All,
+        _ => UsagePeriod::Unknown,
+    }
+}
+
+fn query_pairs(query: Option<&str>) -> impl Iterator<Item = (String, String)> + '_ {
+    query
+        .unwrap_or_default()
+        .split('&')
+        .filter(|pair| !pair.is_empty())
+        .map(|pair| {
+            let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+            (percent_decode(key), percent_decode(value))
+        })
+}
+
+fn percent_encode(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            out.push(char::from(byte));
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
+}
+
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'+' => out.push(b' '),
+            b'%' if index + 2 < bytes.len() => {
+                match (hex(bytes[index + 1]), hex(bytes[index + 2])) {
+                    (Some(high), Some(low)) => {
+                        out.push(high << 4 | low);
+                        index += 2;
+                    }
+                    _ => out.push(b'%'),
+                }
+            }
+            byte => out.push(byte),
+        }
+        index += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
     }
 }
 
@@ -270,8 +499,23 @@ mod tests {
         let query = UsageQuery {
             period: UsagePeriod::All,
             by: Some(UsageBreakdownBy::Unknown),
+            ..UsageQuery::default()
         };
         let error = query.validate().expect_err("unknown by");
         assert!(error.message.contains("provider-key"));
+    }
+
+    #[test]
+    fn r10_usage_query_parse_group_by_alias_and_conflicts() {
+        let parsed = UsageQuery::parse(Some("period=week&group-by=model&model=demo"));
+        assert_eq!(parsed.period, UsagePeriod::Week);
+        assert_eq!(parsed.by, Some(UsageBreakdownBy::Model));
+        assert_eq!(parsed.model.as_deref(), Some("demo"));
+        let conflict = UsageQuery {
+            days: Some("1".to_owned()),
+            last: Some("1h".to_owned()),
+            ..UsageQuery::default()
+        };
+        assert!(conflict.validate().is_err());
     }
 }
