@@ -549,9 +549,8 @@ fn attach_client(endpoint: &mut Endpoint, host: &HostContext) {
         return;
     };
     endpoint.client = Some(client);
-    if handle.fresh_client().is_none() {
-        return;
-    }
+    // Do not probe `fresh_client` here: it evicts the shared pool entry and
+    // builds a new client, which would break connection reuse at every attach.
     let refresh = handle.clone();
     endpoint.client_refresh = Some(Arc::new(move || match refresh.fresh_client() {
         Some(Ok(any)) => hofund_provider::pooled_reqwest(any.as_ref())
