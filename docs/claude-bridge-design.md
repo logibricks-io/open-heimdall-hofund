@@ -43,7 +43,7 @@ Hofund:
 
 - Port WSL discovery into `plugins/subscriptions/claude/src/cli.rs` (or `wsl.rs`), invoked from `program()` (`lib.rs:221-229`) and from run/spawn paths.
 - **WSL process model:** spawn via `wsl.exe -d <distro> --exec …` (`wslrun.go:351-358`, `404-409`). Killing the Windows `wsl.exe` parent does **not** stop Claude Code inside the distro (`369-383`). **`LongLivedChild::kill`**, abort, and **`UpstreamProvider::shutdown`** must call a **distro-side stop** keyed by an in-distro marker env var (hofund-chosen name, e.g. `HOFUND_WSL_RUN=<id>`; do not reuse the reference `runVar` prefix in `wslrun.go:365-388`).
-- When Claude runs in WSL, rewrite host paths through `binary.file` / `wsl.Linux` for helper binaries and prompt files (`wslrun.go:414-424`, `807-813`).
+- When Claude runs in WSL, rewrite **Claude Code** paths and prompt files through `binary.file` / `wsl.Linux` (`807-813`, `414-424`). **MCP helper `command`:** the **Windows** hofund executable path passed through **`Tool.Linux`** so WSL interop runs the helper on Windows (`wslrun.go:530-537`), not a Linux-only helper binary inside the distro (default NAT: distro `127.0.0.1` does not reach the Windows listener, `325-338`). **Callback URL** stays **`http://127.0.0.1:<port>`** — do **not** rewrite the callback host through **`Tool.proxy`** (proxy rewrite applies only to Bun proxy env vars, `479-497`).
 - Read per-account proxy choice from daemon account metadata (same channel the reference passes through `p.Via(ctx)` at `6056`) and apply the Bun proxy helper before spawn.
 - Document in tests: fake runner records `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`/`NO_PROXY` as set by the proxy helper, without network.
 
@@ -51,13 +51,13 @@ Hofund:
 
 `startRun` chooses `work` (`claude_subscription.go:989-1038`):
 
-- Client folder from **`clientWorkDir`**: parsed from system / system-message text (`Primary working directory`, `CWD:`, `<cwd>`, etc.; `522-632`, `clientSaidWorkDir`), accepted only when the path is an **absolute** directory that **exists locally** (`529-544`). Not from model text.
+- Client folder from **`clientWorkDir`**: derived from **`clientNamedWorkPlace`** (`582-625`). Scan **system text and system-role messages** with the broad matcher **`clientSaidWorkDir`** (`596-607`, `632`). If still empty, scan **non-assistant, non-system** message text with the narrow matcher **`clientTurnWorkDir`** only (`614-622`, `641` — `Working directory`, `Current working directory`, `<cwd>`; **not** quoted `Primary working directory` / `CWD:` lines). **Last match in a given text wins**; strip a trailing **` (was …)`** suffix (`workdir.go:36`, `590`). Then require **absolute** path, **`filepath.Clean`**, existing **directory** `Stat` (`529-544`). Not from model assistant text.
 - Else gateway-owned work dir from **`claudeWorkDir`** (`998-1007`, `503-518`).
-- Untrusted caller folder → `tuiUntrusted` → retry in gateway folder (`903-914`).
+- **`passedOver` / `tuiUntrusted`** apply only to interactive trust prompts (`96-118`, `909-914`); R-6 `-p` with `--dangerously-skip-permissions` does not use that path (TUI deferred, section 0).
 
 **WSL:** client-named directories are **not** used (`990-995`: `binary.wsl == nil` guard around `clientWorkDir`).
 
-Hofund: **`hofund_ir::Request` has no working-directory field** (`crates/kernel/ir/src/request.rs:16-39`). The **plugin** parses the same patterns from hoisted system text and system-role messages (mirror `clientNamedWorkPlace`, `582-632`) and validates `Stat` + absolute path before `cmd.Dir`. Implement `passedOver` with `untrusted` map (`96-118`, `909-914`). Plugin state dir `{state}/claude-bridge/work` replaces the reference app work dir; create with mode **`0700`**, and if the path already exists require **`ownedByMe`** and reject **`othersCanWrite`** (`503-518`), same as `claudeWorkDir`.
+Hofund: **`hofund_ir::Request` has no working-directory field** (`crates/kernel/ir/src/request.rs:16-39`). The **plugin** implements the parsing order above in `bridge/workdir.rs`. Plugin state dir `{state}/claude-bridge/work` replaces the reference app work dir; create with mode **`0700`**, and if the path already exists require **`ownedByMe`** and reject **`othersCanWrite`** (`503-518`), same as `claudeWorkDir`.
 
 Cleanup: each run gets `MkdirTemp` prefix `hofund-claude-` (`945-948` analogue); `cleanup()` on failed start (`949-957`); remove tree on run exit (`subscriptionRun.tmp`). Cross-process credential safety uses **`run_lock`** (section 1.8), not a long-lived `accounts().lease` (`account.rs:17-18`, `LEASE_WAIT` 30s).
 
@@ -83,11 +83,11 @@ Core args from `claudeCLIArgs` (`3244-3263`):
 (--no-session-persistence when sessions must not persist; see below)
 ```
 
-**`--no-session-persistence`:** present in `claudeCLIArgs` (`3257`) for the default template. **`startRun` removes it** on **native** runs with a usable work directory so sessions are recorded for shelve / replay / `--resume` (`1029-1033`, `claudeSessions`). **WSL keeps the flag**; `sessions` stays nil and on-disk resume is not used (`1022-1024`, `1029` branch skipped when `binary.wsl != nil`).
+**`--no-session-persistence`:** present in `claudeCLIArgs` (`3257`) for the default template. **`startRun` removes it** only on **native** runs when **`claudeWorkDir` succeeds** so sessions are recorded for shelve / replay / `--resume` (`1029-1033`, `claudeSessions`). If **`claudeWorkDir` fails**, work falls back to the run temp dir and the flag **stays**, with **no** on-disk session recovery (`1024-1028`). **WSL keeps the flag**; `sessions` stays nil (`1022-1024`, `1029` branch skipped when `binary.wsl != nil`).
 
 Optional: `--effort`, `--thinking-display summarized`, `--thinking disabled` when the client disables thinking (`975-981`), `--json-schema`, `--system-prompt-file`, `--append-system-prompt-file`, `--resume <session>` (`991-1115`).
 
-MCP server entry (`971-973`): JSON `mcpServers` with a **hofund-local server key** (not copied from the reference wire name). `command` is the helper’s **absolute path** (through WSL Linux rewrite when Claude runs in WSL). `args` are **`[bridge-mcp-stdio, callbackPath, toolsPath, listedPath]`** — four strings after the program, matching `RunMCP` (`mcp.go:64-73`). The first arg is the hidden subcommand name constant in hofund, not the helper binary path (`mcp.go` documents the reference subcommand only as a line citation; reimplement the protocol, do not copy `serverInfo.name`, env var prefixes, or comments from that file).
+MCP server entry (`971-973`): JSON `mcpServers` with a **hofund-local server key** (not copied from the reference wire name). On **native** runs, `command` is the helper executable absolute path. On **WSL**, `command` is **`Tool.Linux(Windows hofund exe)`** so the helper runs on Windows via interop (section 1.2). `args` are **`[bridge-mcp-stdio, callbackPath, toolsPath, listedPath]`** — four strings after the program, matching `RunMCP` (`mcp.go:64-73`).
 
 The callback URL is written mode `0600` into `callbackPath`; the helper reads the URL from that file when the arg is not `http(s)://` (`959-967`, `mcp.go:75-82`).
 
@@ -101,7 +101,9 @@ WSL env crossing uses the reference **`Tool.Env`** rules (`wslrun.go:437-477`, `
 
 Prompt and system files: paths passed to Claude Code use `binary.file(path)` (`807-813`). Lean system prompts use `--system-prompt-file` under the run temp dir (`1009-1017`).
 
-Environment: start from the **host inherited environment** with a **deny-list scrub** (reference `cleanClaudeEnv`, `3293-3305` on `os.Environ()` at `1152`), not `env_clear()` plus only `PATH`/locale. Block vendor override keys and setup-token duplicates; **keep** `HOME`, locale, and on Windows **`SYSTEMROOT`** (socket stack, `piped.rs:32-33`). Append plugin-controlled vars (`inClaudeDir`, `asRoot`, Bun proxy helper output, `WSLENV`, `cleanClaudeEnv` additions). Proxy variables come **only** from the Bun helper (`799-804`), not from piped spawn’s automatic proxy allowlist (`piped.rs:42-45`, `61-63`). When the inbound request carries **client cache marks**, set **`DISABLE_PROMPT_CACHING=1`** after scrub (`1157-1161`; message marks stay in IR only — they do not enter `turnKey`, `claude_cache.go:15-17`).
+Environment: start from the **host inherited environment** with a **deny-list scrub** (reference `cleanClaudeEnv`, blocked keys `3293-3305` on `os.Environ()` at `1152`), not `env_clear()` plus only `PATH`/locale. Block vendor override keys and setup-token duplicates; **keep** `HOME`, locale, and on Windows **`SYSTEMROOT`** (socket stack, `piped.rs:32-33`). **Always append** after scrub (`3311-3320`): `ENABLE_CLAUDEAI_MCP_SERVERS=0`, `DISABLE_AUTO_COMPACT=1`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, `CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS=1`, `CLAUDE_CODE_PROMPT_CACHE_TTL=1h`. The last three are **not** in `claudeEnvVars` (`773-776`) — do **not** add them to **`WSLENV`**. Append `inClaudeDir`, `asRoot`, Bun proxy helper output, and **`WSLENV`** as in section 1.2. Proxy variables come **only** from the Bun helper (`799-804`), not from piped spawn’s automatic proxy allowlist (`piped.rs:42-45`, `61-63`).
+
+**Client cache opt-in:** `DISABLE_PROMPT_CACHING=1` only when the client **opted in** to client-side cache marks (request header opt-in or auto-mode classifier body, `claude_cache.go:36-51`, `1157-1161`) — **not** merely because Messages `cache_control` survived in IR. Codecs set a vendor-neutral boolean on **`Request.extensions`**, e.g. **`hofund_client_cache_marks`**, when that opt-in applies; the plugin reads it. **Lean prompt** is **`true` only when client-cache mode is off and the subscription setting is on** (`6169`: reference `leanPrompt = clientCache == nil && setting`). Message-level cache marks stay out of `turnKey` (`claude_cache.go:15-17`).
 
 **Effort and thinking argv:** Anthropic Messages codec maps `output_config.effort` into **`params.effort`** and `thinking.type == "disabled"` into **`Effort::None`** while **`thinking` stays in `extensions`** (`crates/kernel/codec/src/anthropic.rs:142`, `358-374`). The plugin may pass **`--effort`** from `params.effort` when set (including auto-classifier → low, `6152-6161`) **and** **`--thinking disabled`** when thinking is off (`975-981`); both flags can appear on one spawn.
 
@@ -114,7 +116,7 @@ Bridge spawn uses **`LongLivedChild`** / `SpawnRequest` via `cli::request_with_e
 | Long-lived `-p` run | Default turn; stays alive across turns and tool parks | Header comment `15-20`; idle map `78` |
 | Resume same process | New user turn after assistant reply without tool pending | `resume` `1771-1897` |
 | Tool park | `tools/call` blocked; HTTP request with tool results | `match` `4839-4924`; `mcpCall` `5368+` |
-| Fresh process | No idle run; replay/resume failed; fork conflict | `start` retry `890-893`; `serveSubscription` 6213-6223 |
+| Fresh process | No idle run; replay/resume failed; fork conflict | `start` retry `890-893`; fork handoff `6213-6223` |
 | Warm-up / usage | Separate short `-p` invocations | `claude_warmup.go:519-531`; `cli.rs:16-17` |
 
 Run timeout: `runTimeout = 30 * time.Minute` (`claude_runs.go:61`); reset on activity via `endIn` (`3343-3348`, `1241-1242`, `1875`).
@@ -130,11 +132,11 @@ Parked on tools: `parkLongest = 5m`, `parkedMost = 16` (`138-159`).
 - **Turn key** and `nextTurn` decide resume vs new messages (`1900+`).
 - **Shelve / unshelve** session files when idle evicted (`2365-2413`).
 - **Replay session** when no `--resume` but on-disk transcript can be written (`1083-1089`; `claude_replay.go:12-80`).
-- **Branch / cut session** when another request answered tools first (`1054-1070`, `6213-6223`).
+- **Branch / cut session** when another request answered tools first (`1054-1070`).
 - **Rewind** on client cancel 499 (`22-28`; `letGo` paths in `retire` `2117+`).
 - **Effort change** on idle run: non-TUI may `setEffort`; TUI aborts (`1881-1891`).
 
-Hofund implements the same state machine in the plugin. **Idle/resume map key** is the reference `turnKey` SHA-256 (`3140-3146`, `1909-1933`, stored on the run at `2281`), not the owner string alone (`6043-6053` is only the owner prefix inside the hash). The hash covers owner, model, whether effort was requested (not the level), think-off, tool choice, system (billing header stripped), tools JSON, web search, JSON schema, **`cacheIdentity`** (`claude_cache.go:236-247`: **`client-cache` system marks** and **`lean-prompt` flag** only — per-message cache marks are excluded, `15-17`), and message bodies via `hashMessages` (tool ids excluded, `3205-3210`). A **cache-mode or lean-prompt change must not resume** an existing run (`6224-6229`). After a matching idle run is found, apply effort with `setEffort` before the turn (`1881-1891`).
+Hofund implements the same state machine in the plugin. **Idle/resume map key** is the reference `turnKey` SHA-256 (`3140-3146`, `1909-1933`, stored on the run at `2281`), not the owner string alone (`6043-6053` is only the owner prefix inside the hash). The hash covers owner, model, whether effort was requested (not the level), think-off, tool choice, system (billing header stripped), tools JSON, web search, JSON schema, **`cacheIdentity`** (`claude_cache.go:236-247`: **`client-cache` system marks** and **`lean-prompt` flag** only — per-message cache marks are excluded, `15-17`), and message bodies via `hashMessages` (tool ids excluded, `3205-3210`). After a matching idle run is found, apply effort with `setEffort` before the turn (`1881-1891`).
 
 ### 1.8 Concurrency and run lock
 
@@ -143,7 +145,7 @@ Reference global cap: `claudeRoom` (`claude_room.go:21-47`); wait `claudeRoomWai
 Hofund:
 
 - **Bridge runs:** `run_lock::mark` at start; keep the **`RunMark`** until the Claude Code process exits; **never** call `run_lock::wait` from the bridge (multiple marks may coexist, `run_lock.rs:155-177`; `wait` serializes callers, `185-209`).
-- **Refresh, usage, warmup:** call **`run_lock::wait`** before materializing or deleting credential files; fail if marks remain after the wait limit (`agent_sign_in.rs:19` pattern for sign-in; extend to `account.rs:66+` paths). Do **not** hold `accounts().lease` for an entire bridge conversation (`LEASE_WAIT` 30s, `account.rs:17-18`).
+- **Refresh, usage, warmup:** call **`run_lock::wait`** before materializing or deleting credential files; then **`mark`** for the duration of the short subprocess (`account.rs:66` — wait alone does not block another process from starting Claude Code on the same credentials). Fail if marks remain after the wait limit. Do **not** hold `accounts().lease` for an entire bridge conversation (`LEASE_WAIT` 30s, `account.rs:17-18`).
 - Plugin-local counting semaphore for concurrent Claude Code processes (config key `claude-runs-most` mirroring reference settings `claude_room.go:72-78`), default from available memory heuristic in reference `claudeMemRuns`.
 
 ### 1.9 Abort and cleanup
@@ -165,7 +167,7 @@ Claude Code loads a **stdio MCP server** child. The reference reuses its gateway
 
 Claude Code is configured via `--mcp-config` JSON (`971-973`) to spawn that helper.
 
-Hofund ships the same protocol in **`hofundd` or `hofund` hidden subcommand** (implemented in `apps/cli` or `crates/kernel/daemon`, not in the plugin crate—plugins cannot use `std::process`). The plugin resolves the absolute helper path through a new `HostContext::bridge_helper()` API returning the current executable plus subcommand name constant defined in plugin (`plugins/subscriptions/claude/src/mcp.rs`).
+Hofund ships the same protocol in **`hofundd` or `hofund` hidden subcommand** `bridge-mcp-stdio` (implemented in `apps/cli` or `crates/kernel/daemon`, not in the plugin crate—plugins cannot use `std::process`). The plugin resolves the helper through **`HostContext::bridge_mcp_helper()`** → `SpawnRequest` (section 5.2).
 
 ### 2.2 Callback transport
 
@@ -193,28 +195,51 @@ This sits beside [`LoopbackHandle`](crates/kernel/plugin-api/src/host.rs:1203+) 
 
 1. Claude Code emits tool_use in stream-json; bridge emits IR tool-call events to client.
 2. MCP helper blocks in `tools/call` until callback HTTP completes (`mcp.go:93-98`).
-3. Client’s **next** HTTP request carries tool results; bridge **`match`** finds the run by **tool call id** in a **plugin-global `calls` map** (reference `b.calls`, `4894-4924`, `5446`), with the **20 × 25 ms** registration race loop (`4891-4923`). This is **not** `turnKey`: `nextTurn` returns no idle key when the tail is tool results (`1909-1933`).
-4. If the routed **owner** differs from the run’s owner, **`abort`** the run and start fresh (`6233-6242`). Hofund has one `UpstreamProvider` per account (`crates/kernel/daemon/src/subscriptions.rs:66-72`), but **`calls` is shared inside the Claude plugin** so a wrong route still finds the parked process.
-5. Deliver results into stdin (`tell`), unblocking the helper.
-6. Optional `early` map if result arrives before registration (`5436-5440`).
-7. Tool ID remap for clients that rewrite ids (`4927-4937`).
+3. Client’s **next** HTTP request carries tool results; bridge **`match`** finds the run by **tool call id** in a **plugin-global `calls` map** (reference `b.calls`, `4894-4924`, `5446`), with the **20 × 25 ms** registration race loop (`4891-4923`). This is **not** `turnKey`: `nextTurn` returns no idle key when the tail is tool results (`1909-1933`). Comment at **`6213-6223`**: one handoff per batch when forks race on the same calls.
+
+**After `match` returns a run**, apply **`serveSubscription` post-match rules** before `tell`:
+
+| Condition | Action |
+|-----------|--------|
+| **`claimResume` fails** (`1746-1753`, `6230-6231`) | Do **not** abort the parked process; **start a new run** for this request. |
+| History does not **`follows`** (`6256-6259`) | **`released()`** (`1760-1766`): original run keeps parking up to **`parkLongest`**. |
+| Client-cache mode or **lean-prompt** mismatch (`6224-6229`) | Drop **this match only**; do **not** abort. |
+| **Owner mismatch** (`6233-6242`) | **`abort`** the run and start fresh. Hofund account ids are stable from sign-in, so **`takeNamedOwner`** (`5918-5947`) does **not** apply. |
+
+4. Deliver results into stdin (`tell`), unblocking the helper.
+5. Optional `early` map if result arrives before registration (`5436-5440`).
+6. Tool ID remap for clients that rewrite ids (`4927-4937`).
 
 Final-only tools (`StructuredOutput`) use `finalGrace` 30s (`144-152`).
 
 ### 2.4 Timeouts and keepalive
 
 - MCP HTTP read body limit 16 MiB (`5382`).
+- MCP helper **stdin** JSON-RPC scanner buffer **16 MiB** (`mcp.go:103`), same order of magnitude as the callback body limit.
 - Helper HTTP client: no explicit timeout in reference; bridge should use bounded read on callback handler matching plugin-host HTTP defaults.
 - Search tool path uses 55s context timeout (`5414-5415`).
 - Run timer `runTimeout` (section 1.6).
 - Park patience `parkLongest` releases run to fresh whole-history start (`138-141`).
 
-**Client keepalive during quiet upstream work:** the gateway’s `: keepalive` SSE comments apply only while `dispatch` has not returned (`crates/kernel/gateway/src/lib.rs:2120-2136`). After relay starts, match **`keepBridgeHeard`** (`claude_subscription.go:6489-6536`, `gateway.go:8471`, `8482`):
+**Client keepalive during quiet upstream work:** the gateway’s `: keepalive` SSE comments apply only while `dispatch` has not returned (`crates/kernel/gateway/src/lib.rs:2120-2136`). After relay starts, match **`keepBridgeHeard`** timing (`claude_subscription.go:6489-6536`, `gateway.go:8471`, `8482`, `8493`) but **do not emit one `StreamEvent::Ping` per tick on every protocol**.
 
-- Start counting from **relay start** (`began` in `6489+`).
-- After **`bridgeHeardAfter` (1 minute)** since relay start **and** at least **`keepaliveEvery` (15 s)** since the last upstream event, emit **`StreamEvent::Ping`** every **15 s**.
-- Stop when quiet reaches **`translatedQuietLongest` (30 minutes)**.
-- **Never** emit `Ping` before **`StreamEvent::MessageStart`**: if the reply has not started, emit an **empty `MessageStart` first** (`6524-6532`), because pings before `message_start` break Anthropic SDK clients.
+The **plugin** emits a single neutral **`StreamEvent::StillWorking`** (or `Ping` with a dedicated extension flag) on the **`keepaliveEvery` (15 s)** cadence once **`bridgeHeardAfter` (1 minute)** has passed since relay start and upstream has been quiet at least 15 s, until **`translatedQuietLongest` (30 minutes)**. **Each outbound encoder** translates that signal per reference wire behaviour:
+
+| Protocol | Encoder behaviour (reference) |
+|----------|-------------------------------|
+| Anthropic Messages | At most **one `ping` event per `pingEvery` (1 minute)**; other ticks are **SSE comments** (`anthropic.go:1724-1736`, `gateway.go:8484-8493`). |
+| Chat Completions | **SSE comments only** (`chat.go:1627-1629`). |
+| OpenAI Responses | Repeat **`response.in_progress`** (`responses.go:2415-2423`). |
+
+**One reply, one stream head:** exactly **one** `MessageStart` / **`response.created`** / first Chat assistant role chunk per reply. If keepalive must start before upstream text, the plugin opens the stream with a **placeholder** start event; when the real id, model, and usage arrive, encoders **update the open message** instead of emitting a second start. **No keepalive before `message_start` on Anthropic** (`anthropic.go:1727-1729`).
+
+**R-6f / codec slice (required):** today, naïve `StreamEvent::Ping` and duplicate `MessageStart` double-emit on the wire:
+
+- Anthropic: `MessageStart` → `message_start` (`crates/kernel/codec/src/anthropic.rs:1227-1229`); `Ping` → `ping` JSON (`1313`).
+- Chat: `Ping` → `{"type":"ping"}` data frame (`openai_chat.rs:1624-1628`).
+- Responses: `MessageStart` → `response.created` (`openai_responses.rs:1967-1977`); bare `Ping` → `ping` event (`2082-2085`).
+
+Change encoders to: (1) treat the plugin still-working signal as comments / throttled ping / `response.in_progress` per table above; (2) merge or suppress a second `MessageStart` when a placeholder start was already sent.
 
 ### 2.5 Security checklist
 
@@ -276,7 +301,7 @@ Usage numbers: extract from result/message_stop events per reference tests (`cla
 
 HTTP second leg: `match` extracts tool result parts (`4844-4871`), remaps ids (`4927+`), writes stream-json user message to stdin (`1863-1896` pattern).
 
-**Tool-result continuations** use **`match` / call id** (section 2.3), not `turnKey`. **Idle resume** after a completed assistant turn uses **`turnKey`** (section 1.7). `hofund_ir::Request` has no session id field (`crates/kernel/ir/src/request.rs:16-39`).
+**Tool-result continuations** use **`match` / call id** and the post-match table (section 2.3), not `turnKey`. **Idle resume** after a completed assistant turn uses **`turnKey`** (section 1.7). `hofund_ir::Request` has no session id field (`crates/kernel/ir/src/request.rs:16-39`).
 
 ## 4. Error classification
 
@@ -292,7 +317,7 @@ Reference `ClaudeSignInRequired` (`claude_auth.go:25-41`) and `NoteClaudeSignInF
 - `OAuth token revoked` / `OAuth access token has been revoked`
 - Reference lapse strings
 
-Emit **`PluginError::auth`** only for subscription lifecycle (`refresh`, sign-in). For upstream **run** failures where `ClaudeSignInRequired` matches, map status with **`bridgeFailed(name, msg, APIErrorStatus)`** (`6408-6419`): **keep `>= 400` statuses**, else **502** — do **not** force **401**. Attach **`.without_cooldown()`** so the member is not rested (`claude_auth.go:7-12`; `failureOf` treats sign-in-shaped `>= 400` as auth skip without rest, `routing.go:658-666`). Default failover still includes 401 and 5xx (`crates/kernel/router/src/lib.rs:95-98`).
+Emit **`PluginError::auth`** only for subscription lifecycle (`refresh`, sign-in). For upstream **run** failures where `ClaudeSignInRequired` matches, map status with **`bridgeFailed(name, msg, APIErrorStatus)`** (`6408-6419`): **keep `>= 400` statuses**, else **502** — do **not** force **401**. Attach **`.without_cooldown()`** so the member is not rested (`claude_auth.go:7-12`; `failureOf` treats sign-in-shaped `>= 400` as auth skip without rest, `routing.go:658-666`). **Failover:** default policy includes **401 and 5xx** (`crates/kernel/router/src/lib.rs:95-98`); a sign-in lapse kept as **400** (or another status outside that set) **does not** try the next member unless the status is in the configured failover set. Status-less sign-in text becomes **502** and can failover like other 5xx.
 
 On auth-shaped stream errors, plugin calls **`host.accounts()`** to mark the account lapsed (mirror `refuseClaudeLogin`, `claude_auth.go:121-128`) with hofund’s `LAPSED` flag (`creds.rs`). Pin the refusal to **`loginVersion` captured at run start** (`1236-1238`, `NoteClaudeSignInFailure` `143-144`): a credential rotated after refresh or re-sign-in must not inherit the old refusal.
 
@@ -355,7 +380,7 @@ Plugins cannot bind sockets (`docs/plugins/boundary.md`). Add to `hofund-plugin-
    - Unknown token → 404 fixed body; constant-time compare over all live tokens; never log request targets.
 
 2. **`BridgeHelperProgram`**
-   - `fn bridge_mcp_helper(&self) -> SpawnRequest` — absolute path to current binary + static subcommand argv prefix `bridge-mcp-stdio` (no vendor in API name).
+   - `fn bridge_mcp_helper(&self) -> SpawnRequest` — Windows hofund executable (via `Tool.Linux` when Claude runs in WSL) + argv prefix **`bridge-mcp-stdio`**.
 
 3. **`LongLivedChild`** (extend `PipedChild`; **R-6a**)
    - `write_stdin(Bytes)`, `stdout_stream() -> BodyStream`, explicit `kill()`, `wait() -> ExitStatus`.
@@ -456,6 +481,7 @@ Requires review of session-on-disk format against reference `claude_sessions` he
 |-------|-------|-------|------|
 | Images | `bridge/images.rs` | 300 LOC | Large stdin |
 | Effort/thinking/schema | `bridge/flags.rs` | 250 LOC | |
+| Stream keepalive encoders | `crates/kernel/codec` (section 2.4) | 200 LOC | Anthropic ping storm |
 | `rate_limit_event` → quota | tie to R-5 `usage.rs` | 150 LOC | |
 
 ### R-6g — Error mapping + parity docs
