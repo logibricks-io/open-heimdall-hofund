@@ -65,31 +65,29 @@ fn anthropic_catalog(host: &HostContext) -> Result<Vec<ModelSpec>, PluginError> 
     else {
         return Ok(Vec::new());
     };
-    let Some(provider) = catalog
-        .get("providers")
-        .and_then(Value::as_object)
-        .and_then(|providers| providers.get("anthropic"))
-    else {
+    let Some(provider) = catalog.get("anthropic") else {
         return Ok(Vec::new());
     };
     let Some(models) = provider.get("models").and_then(Value::as_object) else {
         return Ok(Vec::new());
     };
     let mut out = Vec::new();
-    for model in models.values() {
+    for (model_key, model) in models {
         let Some(object) = model.as_object() else {
             continue;
         };
-        let id = object.get("id").and_then(Value::as_str).unwrap_or_default();
-        if id.is_empty() {
-            continue;
-        }
+        let id = object
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| model_key.clone());
         let name = object
             .get("name")
             .and_then(Value::as_str)
             .unwrap_or_default();
         let display = (!name.is_empty()).then(|| name.to_owned());
-        let mut spec = ModelSpec::new(id, display)?;
+        let mut spec = ModelSpec::new(id.as_str(), display)?;
         if let Some(limit) = object.get("limit").and_then(Value::as_object) {
             if let Some(context) = limit.get("context").and_then(Value::as_u64)
                 && context > 0
@@ -327,5 +325,35 @@ mod tests {
         assert_eq!(root, dir.path());
         let cache = DevCatalogCache::beside_data_root(&root);
         assert_eq!(cache.path, dir.path().join("catalog/models.dev.json"));
+    }
+
+    #[test]
+    fn r5_39_anthropic_models_from_cache_envelope() {
+        use std::fs;
+
+        use hofund_kit_subscription::TestHost;
+        use hofund_plugin_api::{PluginId, PluginKind};
+
+        let dir = tempfile::tempdir().expect("dir");
+        fs::create_dir_all(dir.path().join("catalog")).expect("catalog dir");
+        let envelope = r#"{"catalog":{"anthropic":{"id":"anthropic","models":{"claude-sonnet-4-5":{"name":"Sonnet 4.5","limit":{"context":200000}},"claude-haiku-map-key":{"name":"Haiku","limit":{"context":1000}}}}}}"#;
+        fs::write(dir.path().join("catalog/models.dev.json"), envelope).expect("cache");
+        let host = TestHost::open_for(
+            PluginKind::Subscription,
+            PluginId::from_static("claude"),
+            dir.path(),
+        );
+        let account = dir.path().join("account");
+        fs::create_dir_all(&account).expect("account");
+        fs::write(
+            account.join(creds::PROFILE_FILE),
+            r#"{"additionalModelOptionsCache":[{"value":"claude-mythos-5-1","label":"Mythos"}]}"#,
+        )
+        .expect("profile");
+        let list = list_for_account(host.context(), &account, &[]).expect("list");
+        let ids: Vec<_> = list.models().iter().map(|m| m.id().to_owned()).collect();
+        assert!(ids.contains(&"claude-sonnet-4-5".to_owned()));
+        assert!(ids.contains(&"claude-haiku-map-key".to_owned()));
+        assert!(ids.contains(&"claude-mythos-5-1".to_owned()));
     }
 }

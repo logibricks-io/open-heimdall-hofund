@@ -208,4 +208,32 @@ mod tests {
             Some(utc_at("2026-11-01T06:30:00Z"))
         );
     }
+
+    #[test]
+    fn r5_36_dst_fall_back_nov_1_new_york_first_occurrence() {
+        let week = Duration::from_secs(7 * 86400);
+        let now = utc_at("2026-11-01T05:20:00Z");
+        assert_eq!(
+            reset_time(Some("Nov 1, 1:30am (America/New_York)"), now, week),
+            Some(utc_at("2026-11-01T05:30:00Z"))
+        );
+        assert_eq!(
+            reset_time(Some("1:30am (America/New_York)"), now, week),
+            Some(utc_at("2026-11-01T05:30:00Z"))
+        );
+    }
+
+    #[test]
+    fn r5_37_dst_fall_back_berlin_first_occurrence() {
+        let week = Duration::from_secs(7 * 86400);
+        let now = utc_at("2026-10-25T00:20:00Z");
+        assert_eq!(
+            reset_time(Some("Oct 25, 2:30am (Europe/Berlin)"), now, week),
+            Some(utc_at("2026-10-25T00:30:00Z"))
+        );
+        assert_eq!(
+            reset_time(Some("2:30am (Europe/Berlin)"), now, week),
+            Some(utc_at("2026-10-25T00:30:00Z"))
+        );
+    }
 }

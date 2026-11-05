@@ -160,6 +160,106 @@ fn wall_clock_readings(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn date_in_location(
+    loc: Tz,
+    year: i32,
+    month: u32,
+    day: u32,
+    hour: u32,
+    minute: u32,
+) -> Option<chrono::DateTime<Tz>> {
+    let naive = NaiveDate::from_ymd_opt(year, month, day)?.and_hms_opt(hour, minute, 0)?;
+    match loc.from_local_datetime(&naive) {
+        LocalResult::Single(t) => Some(t),
+        LocalResult::Ambiguous(earlier, _) => Some(earlier),
+        LocalResult::None => None,
+    }
+}
+
+/// First wall-clock reading for `t` that is not before `ref_dt`, else not before `lim`.
+fn next_reading(
+    t: chrono::DateTime<Tz>,
+    ref_dt: chrono::DateTime<Tz>,
+    lim: chrono::DateTime<Tz>,
+) -> Option<chrono::DateTime<Tz>> {
+    let naive = t.naive_local();
+    let loc = t.timezone();
+    let readings = wall_clock_readings(
+        loc,
+        naive.year(),
+        naive.month(),
+        naive.day(),
+        naive.hour(),
+        naive.minute(),
+    );
+    let mut first = readings.first().copied().unwrap_or(t);
+    let mut last = readings.last().copied().unwrap_or(t);
+    expand_next_reading_bounds(&mut first, &mut last, t);
+    for from in [ref_dt, lim] {
+        for r in [first, last] {
+            if r >= from {
+                return Some(r);
+            }
+        }
+    }
+    None
+}
+
+/// Expands duplicate readings around a fall-back transition (reference `nextReading`).
+fn expand_next_reading_bounds(
+    first: &mut chrono::DateTime<Tz>,
+    last: &mut chrono::DateTime<Tz>,
+    t: chrono::DateTime<Tz>,
+) {
+    let off = t.offset().fix().local_minus_utc();
+    if let Some(start) = zone_period_start(t) {
+        let probe = start - chrono::Duration::seconds(1);
+        let prev = probe.offset().fix().local_minus_utc();
+        if prev > off {
+            let e = t + chrono::Duration::seconds(i64::from(off - prev));
+            if e < start {
+                *first = e;
+            }
+        }
+    }
+    if let Some(end) = zone_period_end(t) {
+        let next = end.offset().fix().local_minus_utc();
+        if next < off {
+            let l = t + chrono::Duration::seconds(i64::from(off - next));
+            if l >= end {
+                *last = l;
+            }
+        }
+    }
+}
+
+fn zone_period_start(t: chrono::DateTime<Tz>) -> Option<chrono::DateTime<Tz>> {
+    let off = t.offset().fix().local_minus_utc();
+    let mut cur = t;
+    for _ in 0..50_000 {
+        let prev = cur - chrono::Duration::seconds(1);
+        if prev.offset().fix().local_minus_utc() != off {
+            return Some(cur);
+        }
+        cur = prev;
+    }
+    None
+}
+
+fn zone_period_end(t: chrono::DateTime<Tz>) -> Option<chrono::DateTime<Tz>> {
+    let off = t.offset().fix().local_minus_utc();
+    let mut cur = t;
+    for _ in 0..50_000 {
+        let next = cur + chrono::Duration::seconds(1);
+        if next.offset().fix().local_minus_utc() != off {
+            return Some(next);
+        }
+        cur = next;
+    }
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
 fn next_reading_wall(
     loc: Tz,
     year: i32,
@@ -170,20 +270,8 @@ fn next_reading_wall(
     ref_dt: chrono::DateTime<Tz>,
     lim: chrono::DateTime<Tz>,
 ) -> Option<chrono::DateTime<Tz>> {
-    let readings = wall_clock_readings(loc, year, month, day, hour, minute);
-    if readings.is_empty() {
-        return None;
-    }
-    let first = readings[0];
-    let last = *readings.last().unwrap_or(&first);
-    for from in [ref_dt, lim] {
-        for r in [first, last] {
-            if r >= from {
-                return Some(r);
-            }
-        }
-    }
-    None
+    let t = date_in_location(loc, year, month, day, hour, minute)?;
+    next_reading(t, ref_dt, lim)
 }
 
 fn gap_fallback(
@@ -223,10 +311,10 @@ fn pick_yearless(
         {
             return system_from_datetime(&chosen);
         }
-        for candidate in wall_clock_readings(loc, year, month, day, hour, minute) {
-            if candidate < ref_dt {
-                past = Some(candidate);
-            }
+        if let Some(d) = date_in_location(loc, year, month, day, hour, minute)
+            && d < ref_dt
+        {
+            past = Some(d);
         }
     }
     past.as_ref().and_then(system_from_datetime)
@@ -257,14 +345,12 @@ fn pick_time_only(
     }
     for day_offset in 0..=2i64 {
         let day = ref_dt.date_naive() - chrono::Duration::days(day_offset);
-        for candidate in wall_clock_readings(loc, day.year(), day.month(), day.day(), hour, minute)
+        if let Some(t) = date_in_location(loc, day.year(), day.month(), day.day(), hour, minute)
+            && t.time().hour() == hour
+            && t.time().minute() == minute
+            && t < ref_dt
         {
-            if candidate.time().hour() == hour
-                && candidate.time().minute() == minute
-                && candidate < ref_dt
-            {
-                return system_from_datetime(&candidate);
-            }
+            return system_from_datetime(&t);
         }
     }
     None
@@ -384,6 +470,26 @@ mod tests {
         let now = utc(2026, 11, 1, 6, 20);
         let got = pick_yearless_wall(&zone, now, week(), slack(), 11, 1, 1, 30);
         assert_eq!(got, Some(utc(2026, 11, 1, 6, 30)));
+    }
+
+    #[test]
+    fn yearless_fall_back_new_york_first_occurrence_at_one_thirty() {
+        let zone = resolve_iana(Some("America/New_York"));
+        let now = utc(2026, 11, 1, 5, 20);
+        let got = pick_yearless_wall(&zone, now, week(), slack(), 11, 1, 1, 30);
+        assert_eq!(got, Some(utc(2026, 11, 1, 5, 30)));
+        let got = pick_time_only_wall(&zone, now, week(), slack(), 1, 30);
+        assert_eq!(got, Some(utc(2026, 11, 1, 5, 30)));
+    }
+
+    #[test]
+    fn yearless_fall_back_berlin_first_occurrence_at_two_thirty() {
+        let zone = resolve_iana(Some("Europe/Berlin"));
+        let now = utc(2026, 10, 25, 0, 20);
+        let got = pick_yearless_wall(&zone, now, week(), slack(), 10, 25, 2, 30);
+        assert_eq!(got, Some(utc(2026, 10, 25, 0, 30)));
+        let got = pick_time_only_wall(&zone, now, week(), slack(), 2, 30);
+        assert_eq!(got, Some(utc(2026, 10, 25, 0, 30)));
     }
 
     #[test]
