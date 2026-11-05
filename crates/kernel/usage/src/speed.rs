@@ -79,6 +79,20 @@ mod tests {
     }
 
     #[test]
+    fn r10r8_mean_ttft_skips_zero_measurements() {
+        let measured = Row {
+            ttft_ms: Some(300),
+            ..Default::default()
+        };
+        let zero = Row {
+            ttft_ms: Some(0),
+            ..Default::default()
+        };
+        assert!((mean_ttft_ms([&measured, &zero]).expect("mean") - 300.0).abs() < 0.001);
+        assert!(mean_ttft_ms([&zero]).is_none());
+    }
+
+    #[test]
     fn r10_mean_ttft_skips_failed_rows() {
         let ok = Row {
             ttft_ms: Some(100),

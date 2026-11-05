@@ -504,6 +504,8 @@ mod tests {
         assert_eq!(parse_last("1h30m").expect("last").num_seconds(), 5400);
         assert_eq!(parse_last("500ms").expect("last").num_milliseconds(), 500);
         assert!(parse_days("0").is_err());
+        assert!(parse_last("0d").is_err());
+        assert!(parse_last("-1d").is_err());
         assert!(parse_last("").is_err());
         assert!(parse_last("90").is_err());
         assert!(parse_last("0").is_err());

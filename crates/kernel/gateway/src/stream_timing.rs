@@ -587,6 +587,31 @@ data: {"type":"response.completed","response":{"output":[{"type":"output_text","
     }
 
     #[test]
+    fn r10r8_timing_kind_gate_skips_events_without_content_markers() {
+        let start =
+            br#"data: {"type":"message_start","content_block":{"type":"redacted_thinking"}}"#;
+        assert_eq!(timing_kind(start), (false, false, false, false));
+    }
+
+    #[test]
+    fn r10r8_timing_kind_redacted_block_start_is_hidden() {
+        let start = br#"data: {"type":"content_block_start","index":0,"content_block":{"type":"redacted_thinking","data":"x"}}"#;
+        assert_eq!(timing_kind(start), (false, false, false, true));
+    }
+
+    #[test]
+    fn r10r8_timing_kind_thinking_delta_is_reasoning_not_text() {
+        let delta = br#"data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"hm"}}"#;
+        assert_eq!(timing_kind(delta), (true, false, true, false));
+    }
+
+    #[test]
+    fn r10r8_timing_kind_completed_ignores_choice_content() {
+        let done = br#"data: {"type":"response.completed","choices":[{"delta":{"content":"hi"}}]}"#;
+        assert_eq!(timing_kind(done), (false, false, false, false));
+    }
+
+    #[test]
     fn r10_timing_kind_null_fields_read_as_empty() {
         let added = br#"data: {"type":"response.output_item.added","item":{"type":"function_call","encrypted_content":null}}"#;
         assert_eq!(timing_kind(added), (true, false, false, false));
