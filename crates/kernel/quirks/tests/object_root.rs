@@ -115,6 +115,61 @@ fn v4_root_union_folded_where_refused() {
 }
 
 #[test]
+fn r4_73_messages_input_schema_root_union_folded_up_front() {
+    let state = RequestState::default();
+    let schema = r#"{"anyOf":[{"type":"object","properties":{"a":{"type":"string"}}}]}"#;
+    let body = format!(
+        r#"{{"model":"demo","tools":[{{"name":"union","input_schema":{schema}}},{{"name":"plain","input_schema":{{"type":"object","properties":{{"b":{{"type":"string"}}}}}}}}]}}"#
+    );
+    let (folded, changed) = fold_object_roots(
+        "https://relay.test",
+        "anthropic-messages",
+        "demo",
+        &state,
+        body.as_bytes(),
+    );
+    assert!(changed);
+    let value: Value = serde_json::from_slice(&folded).expect("json");
+    let union = &value["tools"][0]["input_schema"];
+    assert_eq!(union["type"], "object");
+    assert!(union.get("anyOf").is_none());
+    assert_eq!(value["tools"][1]["input_schema"]["type"], "object");
+}
+
+#[test]
+fn r4_73_custom_type_tool_with_input_schema_root_union_is_folded() {
+    let state = RequestState::default();
+    let body = br#"{"model":"demo","tools":[{"type":"custom","name":"union","input_schema":{"anyOf":[{"type":"object","properties":{"a":{"type":"string"}}}]}}]}"#;
+    let (folded, changed) = fold_object_roots(
+        "https://relay.test",
+        "anthropic-messages",
+        "demo",
+        &state,
+        body,
+    );
+    assert!(changed);
+    let value: Value = serde_json::from_slice(&folded).expect("json");
+    let schema = &value["tools"][0]["input_schema"];
+    assert_eq!(schema["type"], "object");
+    assert!(schema.get("anyOf").is_none());
+}
+
+#[test]
+fn r4_74_tool_with_type_and_no_input_schema_is_unchanged() {
+    let state = RequestState::default();
+    let body = br#"{"model":"demo","tools":[{"type":"web_search","name":"search"}]}"#;
+    let (folded, changed) = fold_object_roots(
+        "https://relay.test",
+        "anthropic-messages",
+        "demo",
+        &state,
+        body,
+    );
+    assert!(!changed);
+    assert_eq!(folded, body);
+}
+
+#[test]
 fn v4_responses_namespace_tools_folded() {
     // Reference foldTools: a Responses namespace's own tools are folded.
     let body = br#"{"model":"m","tools":[{"type":"namespace","name":"ns","tools":[{"type":"function","name":"f","parameters":{"anyOf":[{"type":"object","properties":{"a":{"type":"string"}}}]}}]}]}"#;

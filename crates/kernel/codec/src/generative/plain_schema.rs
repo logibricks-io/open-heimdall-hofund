@@ -230,16 +230,29 @@ impl<'a> Walker<'a> {
                     }
                 }
                 "enum" => {
-                    if let Some(values) = value.as_array()
-                        && values.iter().all(Value::is_string)
-                    {
-                        out.insert(key.clone(), value.clone());
+                    if let Some(values) = value.as_array() {
+                        let mut strs = Vec::new();
+                        let mut all_strings = true;
+                        for item in values {
+                            let Some(text) = item.as_str() else {
+                                all_strings = false;
+                                break;
+                            };
+                            if !text.trim().is_empty() {
+                                strs.push(Value::String(text.to_owned()));
+                            }
+                        }
+                        if all_strings && !strs.is_empty() {
+                            out.insert(key.clone(), Value::Array(strs));
+                        }
                     }
                 }
                 _ => {}
             }
         }
-        if let Some(constant) = object.get("const").and_then(Value::as_str) {
+        if let Some(constant) = object.get("const").and_then(Value::as_str)
+            && !constant.trim().is_empty()
+        {
             out.insert(
                 "enum".to_owned(),
                 Value::Array(vec![Value::String(constant.to_owned())]),

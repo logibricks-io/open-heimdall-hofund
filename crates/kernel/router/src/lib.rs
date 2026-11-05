@@ -44,6 +44,7 @@ use tracing::Instrument;
 
 pub use attempt::{Attempt, AttemptError, AttemptHook, MemberAttempt};
 pub use cooldown::{CooldownCause, CooldownPolicy, Cooldowns, Cooling, PersistedRest};
+pub use decision::{region_agent_note, with_region_agent_note};
 pub use hofund_plugin_api::{Completion, MemberId, PluginError, Request};
 pub use member::{Member, ModelListAnswer};
 pub use overflow_memory::OverflowMemory;
@@ -792,6 +793,10 @@ impl Router {
             input_tokens,
             last: None,
             refused_providers: BTreeSet::new(),
+            region_attempts: BTreeMap::new(),
+            region_closed: BTreeMap::new(),
+            region_reask: Vec::new(),
+            last_model: None,
             outgrown: Vec::new(),
             needs_room: None,
             missing_detail: self.models().join(", "),
@@ -1094,6 +1099,14 @@ impl Router {
                     let used = allowance
                         .and_then(|entry| entry.fullest(model, now))
                         .map(|window| window.used);
+                    let week_low = match (allowance, used) {
+                        (Some(entry), Some(used))
+                            if affinity::keeps_week_low_routing(&resolved.routing) =>
+                        {
+                            entry.week_low(model, used, now)
+                        }
+                        _ => false,
+                    };
                     let group_member = group_member(hop);
                     let reserve = reserves.get(&member).copied().unwrap_or(0);
                     affinity::Candidate {
@@ -1120,6 +1133,7 @@ impl Router {
                                 || (mode == credits_mode::CreditsMode::Last && on_credits)
                         },
                         low_allowance: used.is_some_and(|used| used >= 90.0),
+                        week_low,
                         fallback: hop.fallback,
                         aside: false,
                         place: places.get(&group_member).copied().unwrap_or(0),
@@ -1575,6 +1589,10 @@ struct DispatchState {
     input_tokens: u64,
     last: Option<(String, PluginError)>,
     refused_providers: BTreeSet<String>,
+    region_attempts: BTreeMap<String, u32>,
+    region_closed: BTreeMap<String, u16>,
+    region_reask: Vec<usize>,
+    last_model: Option<String>,
     outgrown: Vec<(String, String)>,
     needs_room: Option<u64>,
     missing_detail: String,
@@ -1600,7 +1618,23 @@ struct Answered {
     completion: Completion,
 }
 
+fn region_key(provider: &str, model: &str) -> String {
+    format!("{provider}\0{model}")
+}
+
 impl DispatchState {
+    fn region_closed_for(&self, hop: &Hop) -> bool {
+        let model = hop.wire_model.as_deref().unwrap_or(&self.resolved.bare);
+        let key = region_key(hop.member.scope_provider(), model);
+        self.region_closed.contains_key(&key)
+    }
+
+    fn region_closed_status(&self, hop: &Hop) -> Option<u16> {
+        let model = hop.wire_model.as_deref().unwrap_or(&self.resolved.bare);
+        let key = region_key(hop.member.scope_provider(), model);
+        self.region_closed.get(&key).copied()
+    }
+
     fn now(&self) -> Instant {
         self.wait_hook
             .as_ref()
@@ -1716,6 +1750,14 @@ impl DispatchState {
                     continue;
                 }
             }
+            if !self.region_reask.is_empty() {
+                if let Some(hook) = self.wait_hook.as_ref() {
+                    hook.waiting();
+                    hook.wait(patience::REGION_RETRY_PAUSE).await;
+                }
+                asking = std::mem::take(&mut self.region_reask);
+                continue;
+            }
             break;
         }
         let error_message = self
@@ -1732,7 +1774,15 @@ impl DispatchState {
             );
         }
         match self.last {
-            Some((upstream_id, error)) => Err(RouterError::Upstream { upstream_id, error }),
+            Some((upstream_id, error)) => {
+                let model = self.last_model.as_deref().unwrap_or(&self.request.model);
+                let error = if decision::region_refused(&error) {
+                    decision::with_region_agent_note(error, model)
+                } else {
+                    error
+                };
+                Err(RouterError::Upstream { upstream_id, error })
+            }
             None => {
                 let detail = if self.missing_detail.is_empty() {
                     String::new()
@@ -1762,6 +1812,7 @@ impl DispatchState {
             apply_wire(&mut attempt, &hop, &self.resolved.bare);
             let upstream_model = attempt.model.clone();
             if self.refused_providers.contains(hop.member.route_id())
+                || self.region_closed_for(&hop)
                 || self.outgrown.iter().any(|(route, model)| {
                     route == hop.member.route_id() && *model == upstream_model
                 })
@@ -1772,6 +1823,14 @@ impl DispatchState {
             {
                 if self.refused_providers.contains(hop.member.route_id()) {
                     self.note_skip(index as u32, SkipReason::ProviderRefused);
+                } else if self.region_closed_for(&hop) {
+                    self.note_skip(
+                        index as u32,
+                        SkipReason::Failure {
+                            status: self.region_closed_status(&hop),
+                            message: "regional model refusal".to_owned(),
+                        },
+                    );
                 } else if self.needs_room.is_some_and(|tokens| {
                     hop.context_window
                         .is_some_and(|window| window > 0 && tokens >= window)
@@ -1905,6 +1964,26 @@ impl DispatchState {
                         &upstream_id,
                     );
                     let error = inferred.unwrap_or(error);
+                    if decision::region_refused(&error) {
+                        hop.member.close_idle_connections();
+                        let key = region_key(hop.member.scope_provider(), &upstream_model);
+                        let status = error.status().unwrap_or(400);
+                        let count = self.region_attempts.entry(key.clone()).or_insert(0);
+                        *count += 1;
+                        if *count > 1 {
+                            self.region_closed.insert(key, status);
+                        } else {
+                            let has_mate = self.resolved.hops.iter().enumerate().any(|(j, h)| {
+                                j > index
+                                    && h.member.scope_provider() == hop.member.scope_provider()
+                                    && h.wire_model.as_deref().unwrap_or(&self.resolved.bare)
+                                        == upstream_model
+                            });
+                            if !has_mate {
+                                self.region_reask.push(index);
+                            }
+                        }
+                    }
                     if decision::outgrown(&error) {
                         // As long on every account of this model; another
                         // member not known to be too small may hold it.
@@ -1983,6 +2062,7 @@ impl DispatchState {
                         *ending = Ending::Other;
                     }
                     self.last = Some((upstream_id, error));
+                    self.last_model = Some(upstream_model);
                 }
             }
         }
