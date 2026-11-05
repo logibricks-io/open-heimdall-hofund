@@ -20,6 +20,7 @@ mod api;
 mod creds;
 mod device;
 mod discover;
+mod http_auth;
 mod models;
 mod quota;
 mod refresh;
@@ -195,7 +196,13 @@ impl Subscription for Zcode {
         match session::load(host, &self.endpoints, account, &self.device_file).await {
             Ok(stored) if stored.ready(host.clock().now()) => Ok(AccountStatus::Ready),
             Ok(_) => Ok(needs_sign_in("the stored Z Code sign-in has expired")),
-            Err(error) if error.kind() == hofund_plugin_api::PluginErrorKind::Auth => {
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    hofund_plugin_api::PluginErrorKind::Auth
+                        | hofund_plugin_api::PluginErrorKind::Unsupported
+                ) =>
+            {
                 Ok(needs_sign_in(error.message()))
             }
             Err(error) => Err(error),

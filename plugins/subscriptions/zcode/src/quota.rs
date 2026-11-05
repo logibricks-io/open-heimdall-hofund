@@ -8,6 +8,9 @@ use hofund_plugin_sdk::json::{self, Value};
 use hofund_plugin_sdk::oauth::secret_text;
 
 use crate::APP_VERSION;
+use crate::http_auth::{
+    auth_for_http_status, key_refused_code, parse_envelope_code, refusal_from_monitor_body,
+};
 use crate::session::Stored;
 use crate::team;
 
@@ -53,13 +56,30 @@ async fn fetch_monitor(
     }
     let reply = call.fetch(host.http()).await?;
     if !(200..300).contains(&reply.status()) {
-        return Err(PluginError::status_error(
+        return Err(auth_for_http_status(
             reply.status(),
-            format!("Z Code quota request failed (HTTP {})", reply.status()),
+            "Z Code quota request failed",
         ));
     }
-    json::from_slice(reply.body())
-        .map_err(|_| PluginError::decode("Z Code quota reply is not JSON"))
+    let body: Value = json::from_slice(reply.body())
+        .map_err(|_| PluginError::decode("Z Code quota reply is not JSON"))?;
+    if let Some(error) = refusal_from_monitor_body(&body) {
+        return Err(error);
+    }
+    if let Some(code) = parse_envelope_code(body.get("code"))
+        && code != 0
+        && code != 200
+    {
+        let msg = body
+            .get("msg")
+            .and_then(Value::as_str)
+            .unwrap_or("Z Code quota request failed");
+        if key_refused_code(code) {
+            return Err(PluginError::auth(msg));
+        }
+        return Err(PluginError::decode(msg));
+    }
+    Ok(body)
 }
 
 fn monitor_root(anthropic_base: &str) -> &'static str {
@@ -71,6 +91,26 @@ fn monitor_root(anthropic_base: &str) -> &'static str {
 }
 
 pub(crate) fn windows_from_monitor(body: &Value) -> Result<Vec<QuotaWindow>, PluginError> {
+    if let Some(error) = refusal_from_monitor_body(body) {
+        return Err(error);
+    }
+    if let Some(code) = parse_envelope_code(body.get("code"))
+        && code != 0
+        && code != 200
+    {
+        let msg = body
+            .get("msg")
+            .and_then(Value::as_str)
+            .unwrap_or("Z Code quota request failed");
+        if key_refused_code(code) {
+            return Err(PluginError::auth(msg));
+        }
+        return Err(PluginError::decode(msg));
+    }
+    let data = body.get("data");
+    if data.is_none() || data.is_some_and(Value::is_null) {
+        return Err(PluginError::decode("Z Code quota reply has no usage data"));
+    }
     if let Some(success) = body.get("success").and_then(Value::as_bool)
         && !success
     {
@@ -80,8 +120,7 @@ pub(crate) fn windows_from_monitor(body: &Value) -> Result<Vec<QuotaWindow>, Plu
             .unwrap_or("Z Code quota request failed");
         return Err(PluginError::decode(msg));
     }
-    let limits = body
-        .get("data")
+    let limits = data
         .and_then(|data| data.get("limits"))
         .and_then(Value::as_array)
         .cloned()
@@ -140,6 +179,7 @@ fn parse_reset_ms(value: &Value) -> Option<u64> {
 mod tests {
     use super::{monitor_root, windows_from_monitor};
     use crate::{BIGMODEL_ANTHROPIC_BASE, ZAI_ANTHROPIC_BASE};
+    use hofund_plugin_api::PluginErrorKind;
     use hofund_plugin_sdk::json::json;
 
     #[test]
@@ -149,6 +189,20 @@ mod tests {
             "https://open.bigmodel.cn"
         );
         assert_eq!(monitor_root(ZAI_ANTHROPIC_BASE), "https://api.z.ai");
+    }
+
+    #[test]
+    fn a2d_21_quota_missing_data_is_an_error() {
+        let body = json!({"success": true, "code": 200});
+        let error = windows_from_monitor(&body).expect_err("no data");
+        assert_eq!(error.kind(), PluginErrorKind::Decode);
+    }
+
+    #[test]
+    fn a2d_22_quota_refused_code_is_auth() {
+        let body = json!({"success": false, "code": 1001, "msg": "key refused"});
+        let error = windows_from_monitor(&body).expect_err("refused");
+        assert_eq!(error.kind(), PluginErrorKind::Auth);
     }
 
     #[test]

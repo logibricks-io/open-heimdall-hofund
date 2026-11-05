@@ -4,8 +4,8 @@ use std::path::PathBuf;
 
 use hofund_kit_subscription::{TestHost, block_on};
 use hofund_plugin_api::{
-    AccountId, PluginErrorKind, PluginId, PluginKind, ProbeQuery, ProtocolId, RawTable,
-    SecretString, SubscriptionFactory,
+    AccountId, AccountStatus, PluginErrorKind, PluginId, PluginKind, ProbeQuery, ProtocolId,
+    RawTable, SecretString, SubscriptionFactory,
 };
 use hofund_plugin_sdk::json::json;
 use hofund_plugin_sdk::oauth::{SecretObject, secret_text};
@@ -53,6 +53,49 @@ fn write_agent_credentials(home: &std::path::Path, key_plain: &str, user_id: &st
         "oauth:zai:user_info": creds::encrypt_for_test(
             &secret,
             &format!(r#"{{"user_id":"{user_id}","email":"user@zcode.test","name":"User"}}"#)
+        ),
+    });
+    std::fs::write(home.join("v2").join("credentials.json"), store.to_string()).expect("write");
+}
+
+fn write_team_agent_credentials(
+    home: &std::path::Path,
+    biz_token: &str,
+    org: &str,
+    project: &str,
+    user_id: &str,
+) {
+    std::fs::create_dir_all(home.join("v2")).expect("dir");
+    let secret = creds::secret_seed(home);
+    let store = json!({
+        "oauth:zai:access_token": creds::encrypt_for_test(&secret, biz_token),
+        "oauth:zai:user_info": creds::encrypt_for_test(
+            &secret,
+            &format!(r#"{{"user_id":"{user_id}","email":"team@zcode.test","name":"Team"}}"#)
+        ),
+    });
+    std::fs::write(home.join("v2").join("credentials.json"), store.to_string()).expect("write");
+    let setting = json!({
+        "providerFamilyDomain": "zai",
+        "providerFamilyConnectionSelections": {
+            "zai": {
+                "kind": "team-coding-plan",
+                "organizationId": org,
+                "projectId": project
+            }
+        }
+    });
+    std::fs::write(home.join("v2").join("setting.json"), setting.to_string()).expect("write");
+}
+
+fn write_jwt_only_credentials(home: &std::path::Path, user_id: &str) {
+    std::fs::create_dir_all(home.join("v2")).expect("dir");
+    let secret = creds::secret_seed(home);
+    let store = json!({
+        "zcodejwttoken": creds::encrypt_for_test(&secret, "session.jwt.only.token"),
+        "oauth:zai:user_info": creds::encrypt_for_test(
+            &secret,
+            &format!(r#"{{"user_id":"{user_id}","email":"jwt@zcode.test","name":"Jwt"}}"#)
         ),
     });
     std::fs::write(home.join("v2").join("credentials.json"), store.to_string()).expect("write");
@@ -273,6 +316,63 @@ fn a2d_4c_refresh_accepts_unexpired_jwt() {
         .expect("read")
         .expect("stored");
     assert_eq!(secret_text(&before), secret_text(&after));
+    let status = block_on(sub.account_status(&id, host.context())).expect("status");
+    assert!(matches!(status, AccountStatus::NeedsSignIn { .. }));
+}
+
+#[test]
+fn a2d_17_refresh_reimports_rotated_team_business_token() {
+    let dir = tempfile::tempdir().expect("dir");
+    let home = dir.path().join(".zcode");
+    write_team_agent_credentials(&home, "team-biz-old", "org-a", "proj-a", "u-team-refresh");
+    let host = host(&dir);
+    let id =
+        block_on(discover::import(&home, discover::REFERENCE, host.context())).expect("import");
+    write_team_agent_credentials(&home, "team-biz-new", "org-a", "proj-a", "u-team-refresh");
+    let sub = subscription(&host);
+    block_on(sub.refresh(&id, host.context())).expect("refresh");
+    let secret = block_on(host.context().accounts().secret(&id))
+        .expect("read")
+        .expect("stored");
+    let blob = SecretObject::parse(&secret).expect("blob");
+    assert_eq!(
+        blob.secret("team_token").as_ref().map(secret_text),
+        Some("team-biz-new")
+    );
+}
+
+#[test]
+fn a2d_18_business_api_401_reports_needs_sign_in() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_team(
+        &host,
+        Site::Zai,
+        ZAI_ANTHROPIC_BASE,
+        "expired-biz",
+        "t1",
+        "tp1",
+    );
+    host.http().enqueue_response(
+        401,
+        &[],
+        json!({"code": 401, "msg": "token expired"}).to_string(),
+    );
+    let sub = subscription(&host);
+    let status = block_on(sub.account_status(&id, host.context())).expect("status");
+    assert!(matches!(status, AccountStatus::NeedsSignIn { .. }));
+}
+
+#[test]
+fn a2d_19_start_plan_jwt_only_is_unsupported_on_import() {
+    let dir = tempfile::tempdir().expect("dir");
+    let home = dir.path().join(".zcode");
+    write_jwt_only_credentials(&home, "u-jwt-only");
+    assert!(discover::list(&home).expect("list").is_empty());
+    let host = host(&dir);
+    let error = block_on(discover::import(&home, discover::REFERENCE, host.context()))
+        .expect_err("jwt only");
+    assert_eq!(error.kind(), PluginErrorKind::Unsupported);
 }
 
 #[test]

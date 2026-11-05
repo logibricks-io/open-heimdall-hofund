@@ -21,9 +21,6 @@ pub(crate) async fn run(
     };
     let blob = SecretObject::parse(&secret)?;
     let auth = creds::parse_secret(&secret)?;
-    if auth.api_key.is_some() || auth.team() {
-        return Ok(());
-    }
     if auth.follow_agent
         && let Some(path) = blob.text("agent_credentials").filter(|p| !p.is_empty())
     {
@@ -47,6 +44,9 @@ pub(crate) async fn run(
         host.accounts()
             .upsert(account_row, creds::secret_blob(&fresh, &mid).to_secret())
             .await?;
+        return Ok(());
+    }
+    if auth.api_key.is_some() || auth.team() {
         return Ok(());
     }
     if let Some(jwt) = &auth.jwt

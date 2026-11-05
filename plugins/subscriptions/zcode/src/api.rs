@@ -8,6 +8,7 @@ use hofund_plugin_sdk::json::{self, Value};
 use hofund_plugin_sdk::oauth::secret_text;
 
 use crate::device::device_mid;
+use crate::http_auth::{auth_for_http_status, key_refused_code, parse_envelope_code};
 use crate::{APP_VERSION, Endpoints};
 
 pub(crate) struct EnvelopeRequest<'a> {
@@ -97,12 +98,12 @@ pub(crate) async fn call(req: &EnvelopeRequest<'_>) -> Result<Value, PluginError
                 .and_then(Value::as_str)
                 .filter(|m| !m.is_empty())
         {
+            if status == 401 || status == 403 {
+                return Err(PluginError::auth(msg.to_owned()));
+            }
             return Err(PluginError::status_error(status, msg.to_owned()));
         }
-        return Err(PluginError::status_error(
-            status,
-            format!("Z Code request failed (HTTP {status})"),
-        ));
+        return Err(auth_for_http_status(status, "Z Code request failed"));
     }
     let Value::Object(env) =
         json::from_slice(raw).map_err(|_| PluginError::decode("Z Code reply is not JSON"))?
@@ -115,6 +116,9 @@ pub(crate) async fn call(req: &EnvelopeRequest<'_>) -> Result<Value, PluginError
             .get("msg")
             .and_then(Value::as_str)
             .unwrap_or("Z Code returned an error");
+        if key_refused_code(parse_envelope_code(env.get("code")).unwrap_or(0)) {
+            return Err(PluginError::auth(msg));
+        }
         return Err(PluginError::decode(msg));
     }
     match env.get("data") {

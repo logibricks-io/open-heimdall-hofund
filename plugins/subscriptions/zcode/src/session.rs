@@ -15,18 +15,8 @@ pub(crate) struct Stored {
 }
 
 impl Stored {
-    pub(crate) fn ready(&self, now: SystemTime) -> bool {
-        if self.auth.api_key.is_some() || self.auth.team() {
-            return true;
-        }
-        if let Some(jwt) = &self.auth.jwt {
-            if let Some(exp_ms) = creds::jwt_exp_ms(jwt) {
-                let exp = SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(exp_ms);
-                return exp > now;
-            }
-            return true;
-        }
-        false
+    pub(crate) fn ready(&self, _now: SystemTime) -> bool {
+        self.auth.api_key.is_some() || self.auth.team()
     }
 }
 
@@ -55,10 +45,9 @@ pub(crate) async fn parse_loaded(
     let api_key = if auth.team() && auth.api_key.is_none() {
         team::resolve_project_key(host, endpoints, &auth, device_file).await?
     } else {
-        auth.api_key
-            .clone()
-            .or(auth.jwt.clone())
-            .ok_or_else(|| PluginError::auth("the stored Z Code sign-in has no plan key"))?
+        auth.api_key.clone().ok_or_else(|| {
+            PluginError::auth("the stored Z Code sign-in has no GLM Coding Plan key")
+        })?
     };
     Ok(Stored { auth, api_key })
 }

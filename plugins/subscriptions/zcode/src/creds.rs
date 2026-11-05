@@ -37,10 +37,6 @@ impl PlanAuth {
     pub(crate) fn team(&self) -> bool {
         !self.org.is_empty() && !self.project.is_empty()
     }
-
-    pub(crate) fn ready_key(&self) -> Option<&SecretString> {
-        self.api_key.as_ref().or(self.jwt.as_ref())
-    }
 }
 
 pub(crate) fn credentials_path(home: &Path) -> PathBuf {
@@ -183,7 +179,12 @@ fn parse_store(
         auth.site = team.site;
         auth.api_key = None;
     }
-    if auth.ready_key().is_none() && !auth.team() {
+    if auth.api_key.is_none() && !auth.team() && auth.jwt.is_some() {
+        return Err(PluginError::unsupported(
+            "Z Code Start Plan sign-in is not supported; use a GLM Coding Plan or team seat",
+        ));
+    }
+    if auth.api_key.is_none() && !auth.team() {
         return Err(PluginError::auth(
             "Z Code has no readable GLM Coding Plan or team seat in that directory",
         ));
@@ -372,23 +373,25 @@ fn selection_org_project(
 ) -> (String, String) {
     if let Some(map) = selections
         && let Some(entry) = map.get(fam).and_then(Value::as_object)
-        && entry.get("kind").and_then(Value::as_str) == Some("team-coding-plan")
     {
-        let org = entry
-            .get("organizationId")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .trim()
-            .to_owned();
-        let project = entry
-            .get("projectId")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .trim()
-            .to_owned();
-        if !org.is_empty() && !project.is_empty() {
-            return (org, project);
+        if entry.get("kind").and_then(Value::as_str) == Some("team-coding-plan") {
+            let org = entry
+                .get("organizationId")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_owned();
+            let project = entry
+                .get("projectId")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_owned();
+            if !org.is_empty() && !project.is_empty() {
+                return (org, project);
+            }
         }
+        return (String::new(), String::new());
     }
     if let Some(map) = legacy {
         let prefix = format!("team-plan:builtin:{fam}-coding-plan:");
@@ -532,11 +535,54 @@ pub(crate) fn jwt_exp_ms(jwt: &SecretString) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hofund_plugin_sdk::json::json;
 
     #[test]
     fn a2d_20_decrypt_matches_reference_layout() {
         let secret = secret_seed(Path::new("/home/tester"));
         let enc = encrypt_for_test(&secret, "own.secret.key");
         assert_eq!(decrypt(&secret, &enc).as_deref(), Some("own.secret.key"));
+    }
+
+    #[test]
+    fn a2d_16_personal_selection_ignores_stale_legacy_team_key() {
+        let dir = tempfile::tempdir().expect("dir");
+        let home = dir.path().join(".zcode");
+        std::fs::create_dir_all(home.join("v2")).expect("dir");
+        let secret = secret_seed(&home);
+        let key_name =
+            "account-provider:coding-plan:account:zai-individual-coding-plan:account:abc:api-key";
+        let enc_key = encrypt_for_test(&secret, "personal.plan.key");
+        let store = json!({
+            key_name: enc_key,
+            "oauth:zai:access_token": encrypt_for_test(&secret, "stale-team-biz-token"),
+            "oauth:zai:user_info": encrypt_for_test(
+                &secret,
+                r#"{"user_id":"u-personal","email":"user@zcode.test","name":"User"}"#
+            ),
+        });
+        std::fs::write(home.join("v2").join("credentials.json"), store.to_string()).expect("write");
+        let setting = json!({
+            "providerFamilyDomain": "zai",
+            "providerFamilyConnectionSelections": {
+                "zai": {
+                    "kind": "individual-coding-plan",
+                    "organizationId": "",
+                    "projectId": ""
+                }
+            },
+            "modelProviderFamilySelectedKeys": {
+                "zai": "team-plan:builtin:zai-coding-plan:legacy-org:legacy-proj"
+            }
+        });
+        std::fs::write(home.join("v2").join("setting.json"), setting.to_string()).expect("write");
+        let auth = parse_agent_home(&home).expect("parse personal");
+        assert!(!auth.team());
+        assert_eq!(
+            auth.api_key
+                .as_ref()
+                .map(hofund_plugin_sdk::oauth::secret_text),
+            Some("personal.plan.key")
+        );
     }
 }

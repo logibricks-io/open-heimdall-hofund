@@ -264,7 +264,7 @@ fn expected_dev_deps(package: &str) -> Option<&'static [&'static str]> {
         "hofund-plugin-subscription-gemini" => &["hofund-kit-subscription"],
         "hofund-plugin-subscription-grok" => &["hofund-kit-subscription"],
         "hofund-plugin-subscription-kiro" => &["hofund-kit-subscription"],
-        "hofund-plugin-subscription-zcode" => &["hofund-kit-subscription"],
+        "hofund-plugin-subscription-zcode" => &["hofund-kit-subscription", "hofund-plugin-sdk"],
         "hofund-plugin-sdk" => &[],
         "hofund-provider" => &["hofund-config", "hofund-ir", "hofund-quirks"],
         "hofund-quirks" => &[],

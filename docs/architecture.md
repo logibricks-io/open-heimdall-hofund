@@ -251,7 +251,7 @@ This table covers normal and build dependencies, including their target-specific
 | `hofund-plugin-subscription-devin` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
 | `hofund-plugin-subscription-factory` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
 | `hofund-plugin-subscription-kiro` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
-| `hofund-plugin-subscription-zcode` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
+| `hofund-plugin-subscription-zcode` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests), `hofund-plugin-sdk` (tests) |
 | `hofund-plugin-subscription-claude` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
 | `hofund-plugin-subscription-cline` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
 | `hofund-plugin-subscription-codex` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
