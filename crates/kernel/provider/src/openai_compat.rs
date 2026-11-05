@@ -120,6 +120,10 @@ impl Provider for OpenAiCompat {
         self.attempt.clone()
     }
 
+    fn close_idle_connections(&self) {
+        self.upstream.close_idle_connections();
+    }
+
     async fn execute(
         &self,
         request: Request,
