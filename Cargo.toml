@@ -4,6 +4,7 @@ members = [
     "apps/cli",
     "apps/desktop/src-tauri",
     "apps/hofundd",
+    "apps/tui",
     "crates/kernel/agent",
     "crates/kernel/codec",
     "crates/kernel/config",
@@ -115,7 +116,10 @@ hofund-provider = { version = "0.1.0", path = "crates/kernel/provider" }
 hofund-quirks = { version = "0.1.0", path = "crates/kernel/quirks" }
 hofund-router = { version = "0.1.0", path = "crates/kernel/router" }
 hofund-secrets = { version = "0.1.0", path = "crates/kernel/secrets" }
+hofund-tui = { version = "0.1.0", path = "apps/tui" }
 hofund-usage = { version = "0.1.0", path = "crates/kernel/usage" }
+crossterm = "0.28.1"
+ratatui = "0.29.0"
 sha2 = "0.10.9"
 tempfile = "3.27.0"
 

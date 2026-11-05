@@ -24,7 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Subscription plugins for Grok Build, Cursor, and Cline (feature-parity row 3.5,
+- Terminal UI shell (`hofund tui`, `hofund-tui`): six-page navigation, control
+  event toasts, gateway handoff scaffold, empty Sessions and Library frames,
+  and TestBackend fixtures (R-11 part 1).
+
   part 1): device or browser sign-in, agent auth import where supported, token
   refresh, model lists, quota reads, and chat or Responses upstream for Grok
   and Cline; Cursor upstream chat is not served yet.

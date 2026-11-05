@@ -17,6 +17,7 @@ const MEMBERS: &[&str] = &[
     "apps/cli",
     "apps/desktop/src-tauri",
     "apps/hofundd",
+    "apps/tui",
     "crates/kernel/agent",
     "crates/kernel/codec",
     "crates/kernel/config",
@@ -79,6 +80,7 @@ fn expected_deps(package: &str) -> Option<&'static [&'static str]> {
             "hofund-model-catalog",
             "hofund-secrets",
         ],
+        "hofund-tui" => &["hofund-config", "hofund-control-client", "hofund-secrets"],
         "hofund-codec" => &["hofund-ir"],
         "hofund-config" => &[],
         "hofund-model-catalog" => &["hofund-config"],
@@ -216,6 +218,7 @@ fn expected_dev_deps(package: &str) -> Option<&'static [&'static str]> {
     Some(match package {
         "hofund-agent" => &[],
         "hofund-cli" => &["hofund-control-proto"],
+        "hofund-tui" => &["hofund-control-proto"],
         "hofund-codec" => &[],
         "hofund-config" => &[],
         "hofund-model-catalog" => &[],
@@ -451,6 +454,7 @@ fn dependency_graph_matches_architecture() {
     for package in [
         "hofund-agent",
         "hofund-cli",
+        "hofund-tui",
         "hofund-codec",
         "hofund-config",
         "hofund-control-proto",
