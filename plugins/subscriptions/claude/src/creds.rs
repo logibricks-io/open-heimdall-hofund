@@ -109,10 +109,13 @@ impl Profile {
         }
     }
 
-    /// The account this profile names. The UUID is stable; the email is the
-    /// fallback when Claude Code did not say it.
+    /// The account this profile names. The UUID is stable; when an organization
+    /// UUID is present it separates Team seats that share one account UUID.
     pub(crate) fn account_id(&self) -> Result<AccountId, PluginError> {
         if let Some(uuid) = self.uuid() {
+            if let Some(org) = non_empty(&self.fields, "organizationUuid") {
+                return Ok(account_id_from(&["claude", org, uuid]));
+            }
             return Ok(account_id_from(&["claude", uuid]));
         }
         let email = self.email().ok_or_else(|| {

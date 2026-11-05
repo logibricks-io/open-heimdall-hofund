@@ -1,7 +1,7 @@
 //! Inference-only accounts from a pasted `claude setup-token` value.
 
 use hofund_plugin_api::{AccountId, HostContext, PluginError};
-use hofund_plugin_sdk::oauth::{SecretObject, account_id_from};
+use hofund_plugin_sdk::oauth::{SecretObject, account_id_from, constant_time_eq};
 use sha2::{Digest, Sha256};
 
 use crate::account;
@@ -79,7 +79,9 @@ pub(crate) async fn store(host: &HostContext, token: &str) -> Result<AccountId, 
         let Ok(blob) = SecretObject::parse(&secret) else {
             continue;
         };
-        if token_from_blob(&blob).as_deref() == Some(token.as_str()) {
+        if let Some(stored) = token_from_blob(&blob)
+            && constant_time_eq(stored.as_bytes(), token.as_bytes())
+        {
             return Ok(account.id().clone());
         }
     }

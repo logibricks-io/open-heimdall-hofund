@@ -4,12 +4,20 @@ use std::str::FromStr;
 use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use chrono::{Datelike, TimeZone, Timelike};
+use chrono::{Datelike, LocalResult, NaiveDate, TimeZone, Timelike};
 use chrono_tz::Tz;
 use regex::Regex;
 
 /// How long a reset time may read ahead of its window (clock slack).
 pub(super) const RESET_SLACK: Duration = Duration::from_secs(2 * 60 * 60);
+
+#[cfg(test)]
+static TEST_LOCAL_TZ: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+pub(super) fn set_test_local_tz(iana: Option<&str>) {
+    *TEST_LOCAL_TZ.lock().expect("test tz lock") = iana.map(str::to_owned);
+}
 
 fn month_day_time() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
@@ -33,9 +41,7 @@ pub(super) fn reset_time(
 ) -> Option<SystemTime> {
     let reset = reset.map(str::trim).filter(|s| !s.is_empty())?;
     let (zone_name, rest) = split_zone(reset);
-    let loc = zone_name
-        .and_then(|name| Tz::from_str(name).ok())
-        .unwrap_or(chrono_tz::UTC);
+    let loc = resolve_loc(zone_name);
     let ref_dt = datetime_from_system(now)?.with_timezone(&loc);
     let slack = chrono::Duration::from_std(span + RESET_SLACK)
         .unwrap_or_else(|_| chrono::Duration::hours(2));
@@ -55,10 +61,7 @@ pub(super) fn reset_time(
             .and_then(|m| m.as_str().parse().ok())
             .unwrap_or(0);
         if let Some(year) = year {
-            let dt = loc
-                .with_ymd_and_hms(year, month, day, hour, minute, 0)
-                .single()?;
-            return system_from_datetime(dt);
+            return explicit_year(loc, year, month, day, hour, minute);
         }
         return pick_yearless(month, day, hour, minute, ref_dt, latest, &loc);
     }
@@ -73,6 +76,112 @@ pub(super) fn reset_time(
     None
 }
 
+fn resolve_loc(zone_name: Option<&str>) -> Tz {
+    if let Some(name) = zone_name
+        && let Ok(tz) = Tz::from_str(name)
+    {
+        return tz;
+    }
+    host_local_tz()
+}
+
+fn host_local_tz() -> Tz {
+    #[cfg(test)]
+    if let Some(name) = TEST_LOCAL_TZ.lock().expect("test tz lock").as_deref()
+        && let Ok(tz) = Tz::from_str(name)
+    {
+        return tz;
+    }
+    iana_time_zone::get_timezone()
+        .ok()
+        .and_then(|name| Tz::from_str(&name).ok())
+        .unwrap_or(chrono_tz::UTC)
+}
+
+fn explicit_year(
+    loc: Tz,
+    year: i32,
+    month: u32,
+    day: u32,
+    hour: u32,
+    minute: u32,
+) -> Option<SystemTime> {
+    let naive = NaiveDate::from_ymd_opt(year, month, day)?.and_hms_opt(hour, minute, 0)?;
+    let dt = match loc.from_local_datetime(&naive) {
+        LocalResult::Single(t) => t,
+        LocalResult::Ambiguous(_, later) => later,
+        LocalResult::None => gap_fallback(&loc, year, month, day, hour, minute)?,
+    };
+    system_from_datetime(dt)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn next_reading_wall(
+    loc: &Tz,
+    year: i32,
+    month: u32,
+    day: u32,
+    hour: u32,
+    minute: u32,
+    ref_dt: chrono::DateTime<Tz>,
+    lim: chrono::DateTime<Tz>,
+) -> Option<chrono::DateTime<Tz>> {
+    let readings = wall_clock_readings(loc, year, month, day, hour, minute);
+    if readings.is_empty() {
+        return None;
+    }
+    let first = readings[0];
+    let last = *readings.last().unwrap_or(&first);
+    for from in [ref_dt, lim] {
+        for r in [first, last] {
+            if r >= from {
+                return Some(r);
+            }
+        }
+    }
+    None
+}
+
+fn gap_fallback(
+    loc: &Tz,
+    year: i32,
+    month: u32,
+    day: u32,
+    hour: u32,
+    minute: u32,
+) -> Option<chrono::DateTime<Tz>> {
+    let naive = NaiveDate::from_ymd_opt(year, month, day)?.and_hms_opt(hour, minute, 0)?;
+    for offset in 0..=3i64 {
+        let shifted = naive + chrono::Duration::hours(offset);
+        match loc.from_local_datetime(&shifted) {
+            LocalResult::Single(dt) => return Some(dt),
+            LocalResult::Ambiguous(earlier, _) => return Some(earlier),
+            LocalResult::None => {}
+        }
+    }
+    None
+}
+
+fn wall_clock_readings(
+    loc: &Tz,
+    year: i32,
+    month: u32,
+    day: u32,
+    hour: u32,
+    minute: u32,
+) -> Vec<chrono::DateTime<Tz>> {
+    let Some(naive) =
+        NaiveDate::from_ymd_opt(year, month, day).and_then(|d| d.and_hms_opt(hour, minute, 0))
+    else {
+        return Vec::new();
+    };
+    match loc.from_local_datetime(&naive) {
+        LocalResult::Single(t) => vec![t],
+        LocalResult::Ambiguous(earlier, later) => vec![earlier, later],
+        LocalResult::None => Vec::new(),
+    }
+}
+
 fn pick_yearless(
     month: u32,
     day: u32,
@@ -85,19 +194,15 @@ fn pick_yearless(
     let lim = ref_dt - chrono::Duration::days(1);
     let mut past = None;
     for year in (ref_dt.year() - 1)..=(ref_dt.year() + 1) {
-        let Some(candidate) = loc
-            .with_ymd_and_hms(year, month, day, hour, minute, 0)
-            .single()
-        else {
-            continue;
-        };
-        if let Some(chosen) = next_reading(candidate, ref_dt, lim)
+        if let Some(chosen) = next_reading_wall(loc, year, month, day, hour, minute, ref_dt, lim)
             && chosen <= latest
         {
             return system_from_datetime(chosen);
         }
-        if candidate < ref_dt {
-            past = Some(candidate);
+        for candidate in wall_clock_readings(loc, year, month, day, hour, minute) {
+            if candidate < ref_dt {
+                past = Some(candidate);
+            }
         }
     }
     past.and_then(system_from_datetime)
@@ -112,46 +217,30 @@ fn pick_time_only(
 ) -> Option<SystemTime> {
     for day_offset in 0..=2i64 {
         let day = ref_dt.date_naive() + chrono::Duration::days(day_offset);
-        let Some(candidate) = loc
-            .from_local_datetime(&day.and_hms_opt(hour, minute, 0).expect("valid hms"))
-            .single()
-        else {
-            continue;
-        };
-        if candidate.time().hour() == hour
-            && candidate.time().minute() == minute
-            && let Some(chosen) = next_reading(candidate, ref_dt, ref_dt)
-            && chosen <= latest
+        if let Some(chosen) = next_reading_wall(
+            loc,
+            day.year(),
+            day.month(),
+            day.day(),
+            hour,
+            minute,
+            ref_dt,
+            ref_dt,
+        ) && chosen <= latest
         {
             return system_from_datetime(chosen);
         }
     }
     for day_offset in 0..=2i64 {
         let day = ref_dt.date_naive() - chrono::Duration::days(day_offset);
-        let Some(candidate) = loc
-            .from_local_datetime(&day.and_hms_opt(hour, minute, 0).expect("valid hms"))
-            .single()
-        else {
-            continue;
-        };
-        if candidate.time().hour() == hour
-            && candidate.time().minute() == minute
-            && candidate < ref_dt
+        for candidate in wall_clock_readings(loc, day.year(), day.month(), day.day(), hour, minute)
         {
-            return system_from_datetime(candidate);
-        }
-    }
-    None
-}
-
-fn next_reading(
-    t: chrono::DateTime<Tz>,
-    ref_dt: chrono::DateTime<Tz>,
-    lim: chrono::DateTime<Tz>,
-) -> Option<chrono::DateTime<Tz>> {
-    for from in [ref_dt, lim] {
-        if t >= from {
-            return Some(t);
+            if candidate.time().hour() == hour
+                && candidate.time().minute() == minute
+                && candidate < ref_dt
+            {
+                return system_from_datetime(candidate);
+            }
         }
     }
     None
@@ -204,9 +293,10 @@ pub(super) fn split_zone(s: &str) -> (Option<&str>, String) {
 
 fn datetime_from_system(now: SystemTime) -> Option<chrono::DateTime<chrono::Utc>> {
     let dur = now.duration_since(UNIX_EPOCH).ok()?;
-    chrono::Utc
-        .timestamp_opt(dur.as_secs() as i64, dur.subsec_nanos())
-        .single()
+    match chrono::Utc.timestamp_opt(dur.as_secs() as i64, dur.subsec_nanos()) {
+        LocalResult::Single(dt) => Some(dt),
+        _ => None,
+    }
 }
 
 pub(super) fn system_from_datetime<Tz: TimeZone>(dt: chrono::DateTime<Tz>) -> Option<SystemTime> {
@@ -221,7 +311,7 @@ pub(super) fn system_from_datetime<Tz: TimeZone>(dt: chrono::DateTime<Tz>) -> Op
 mod tests {
     use super::*;
     use chrono::TimeZone;
-    use chrono_tz::Asia::Shanghai;
+    use chrono_tz::{America::Los_Angeles, Asia::Shanghai};
 
     fn utc(y: i32, m: u32, d: u32, h: u32, min: u32) -> SystemTime {
         let dt = chrono::Utc
@@ -231,8 +321,8 @@ mod tests {
         UNIX_EPOCH + Duration::from_secs(dt.timestamp() as u64)
     }
 
-    fn shanghai(y: i32, m: u32, d: u32, h: u32, min: u32) -> SystemTime {
-        let dt = Shanghai
+    fn tz_time(tz: Tz, y: i32, m: u32, d: u32, h: u32, min: u32) -> SystemTime {
+        let dt = tz
             .with_ymd_and_hms(y, m, d, h, min, 0)
             .single()
             .expect("time");
@@ -245,7 +335,7 @@ mod tests {
         let text = "Oct 1 at 3:30pm (Asia/Shanghai)";
         assert_eq!(
             reset_time(Some(text), now, Duration::from_secs(5 * 3600)),
-            Some(shanghai(2026, 10, 1, 15, 30))
+            Some(tz_time(Shanghai, 2026, 10, 1, 15, 30))
         );
         assert_eq!(
             reset_time(
@@ -253,7 +343,7 @@ mod tests {
                 now,
                 Duration::from_secs(7 * 86400)
             ),
-            Some(shanghai(2026, 10, 3, 14, 0))
+            Some(tz_time(Shanghai, 2026, 10, 3, 14, 0))
         );
         assert_eq!(
             reset_time(
@@ -261,7 +351,7 @@ mod tests {
                 now,
                 Duration::from_secs(7 * 86400)
             ),
-            Some(shanghai(2026, 1, 2, 14, 0))
+            Some(tz_time(Shanghai, 2026, 1, 2, 14, 0))
         );
         assert_eq!(
             reset_time(Some("3am (UTC)"), now, Duration::from_secs(7 * 86400)),
@@ -279,16 +369,36 @@ mod tests {
     }
 
     #[test]
-    fn r5_14_unknown_zone_falls_back_to_utc() {
-        let now = utc(2026, 10, 1, 12, 0);
+    fn r5_14_unknown_zone_uses_host_local_not_utc() {
+        set_test_local_tz(Some("America/Los_Angeles"));
+        let _guard = RestoreTz;
+        let now = tz_time(Los_Angeles, 2026, 9, 28, 10, 0);
         assert_eq!(
             reset_time(
-                Some("Oct 1 at 3:30pm (Not/AZone)"),
+                Some("Oct 1, 2026 at 3:30pm (Not/AZone)"),
                 now,
-                Duration::from_secs(5 * 3600)
+                Duration::from_secs(7 * 86400)
             ),
-            Some(utc(2026, 10, 1, 15, 30))
+            Some(tz_time(Los_Angeles, 2026, 10, 1, 15, 30))
         );
+    }
+
+    #[test]
+    fn r5_34_time_only_without_zone_uses_host_local() {
+        set_test_local_tz(Some("America/Los_Angeles"));
+        let _guard = RestoreTz;
+        let now = tz_time(Los_Angeles, 2026, 6, 15, 10, 0);
+        assert_eq!(
+            reset_time(Some("3pm"), now, Duration::from_secs(5 * 3600)),
+            Some(tz_time(Los_Angeles, 2026, 6, 15, 15, 0))
+        );
+    }
+
+    struct RestoreTz;
+    impl Drop for RestoreTz {
+        fn drop(&mut self) {
+            set_test_local_tz(None);
+        }
     }
 
     #[test]
@@ -301,6 +411,20 @@ mod tests {
                 Duration::from_secs(7 * 86400)
             ),
             Some(utc(2027, 1, 2, 14, 0))
+        );
+    }
+
+    #[test]
+    fn r5_35_dst_fall_back_nov_1_new_york() {
+        let week = Duration::from_secs(7 * 86400);
+        let now = utc(2026, 11, 1, 6, 20);
+        assert_eq!(
+            reset_time(Some("Nov 1, 1:30am (America/New_York)"), now, week),
+            Some(utc(2026, 11, 1, 6, 30))
+        );
+        assert_eq!(
+            reset_time(Some("1:30am (America/New_York)"), now, week),
+            Some(utc(2026, 11, 1, 6, 30))
         );
     }
 }

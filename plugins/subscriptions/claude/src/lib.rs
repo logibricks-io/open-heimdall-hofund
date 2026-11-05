@@ -392,6 +392,11 @@ impl Subscription for Claude {
         proof: SignInProof,
         host: &HostContext,
     ) -> Result<AccountId, PluginError> {
+        if self.pending_expired(ctx, host) {
+            return Err(PluginError::config(
+                "this Claude Code sign-in timed out; start again",
+            ));
+        }
         self.expire_idle(host);
         if let SignInProof::Token(token) = &proof
             && setup_token::normalize(secret_text(token)).is_ok()

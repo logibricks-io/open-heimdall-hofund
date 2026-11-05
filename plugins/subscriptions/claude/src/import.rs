@@ -113,12 +113,170 @@ pub async fn store(host: &HostContext, text: &str) -> Result<Vec<AccountId>, Plu
     if is_swap {
         return store_swap(host, trimmed).await;
     }
-    if let Some(row) = parse_login_object(&value)? {
-        return Ok(vec![store_login(host, row).await?]);
+    let rows = collect_import_rows(&value)?;
+    if rows.is_empty() {
+        return Err(PluginError::unsupported(
+            "not an account export this subscription reads",
+        ));
     }
-    Err(PluginError::unsupported(
-        "not an account export this subscription reads",
-    ))
+    let mut ids = Vec::new();
+    for row in rows {
+        ids.push(store_login(host, row).await?);
+    }
+    Ok(ids)
+}
+
+fn collect_import_rows(value: &Value) -> Result<Vec<LoginRow>, PluginError> {
+    let mut out = Vec::new();
+    if let Some(items) = value.as_array() {
+        for item in items {
+            walk_import_lenient(item, &mut out);
+        }
+        return Ok(out);
+    }
+    walk_import_strict(value, &mut out)?;
+    Ok(out)
+}
+
+fn walk_import_lenient(value: &Value, out: &mut Vec<LoginRow>) {
+    let _ = walk_import_strict(value, out);
+}
+
+fn walk_import_strict(value: &Value, out: &mut Vec<LoginRow>) -> Result<(), PluginError> {
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                walk_import_lenient(item, out);
+            }
+        }
+        Value::Object(map) => {
+            if map.get("credentials").and_then(Value::as_object).is_some()
+                && !json_str(map, &["platform"]).is_empty()
+            {
+                out.push(parse_sub2api_row(map)?);
+                return Ok(());
+            }
+            if let Some(accounts) = map.get("accounts").and_then(Value::as_array)
+                && json_str(map, &["refresh_token", "refreshToken"]).is_empty()
+            {
+                for entry in accounts {
+                    walk_import_lenient(entry, out);
+                }
+                return Ok(());
+            }
+            if let Some(row) = parse_login_object(map)? {
+                out.push(row);
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn parse_sub2api_row(entry: &Map<String, Value>) -> Result<LoginRow, PluginError> {
+    let credentials = entry
+        .get("credentials")
+        .and_then(Value::as_object)
+        .ok_or_else(|| PluginError::config("an account has no credentials"))?;
+    let platform = json_str(entry, &["platform"]).to_ascii_lowercase();
+    if !matches!(platform.as_str(), "anthropic" | "claude") {
+        return Err(PluginError::config(format!(
+            "a {platform} account, not Claude's"
+        )));
+    }
+    let typ = json_str(entry, &["type"]).to_ascii_lowercase();
+    if typ == "apikey" {
+        return Err(PluginError::config(
+            "an API key, not a sign-in; add it as a key instead",
+        ));
+    }
+    if typ != "oauth" && !typ.is_empty() {
+        return Err(PluginError::config("not a Claude sign-in"));
+    }
+    let extra = entry.get("extra").and_then(Value::as_object);
+    let email = cmp_str(
+        json_str(credentials, &["email", "email_address"]),
+        extra.map(|e| json_str(e, &["email_address", "email"])),
+        json_str(entry, &["name"]),
+    )
+    .ok_or_else(|| {
+        PluginError::config(
+            "the file doesn't say which Claude account this is; sign in to it from hofund instead",
+        )
+    })?;
+    let access = json_str(credentials, &["access_token", "accessToken"]);
+    let refresh = json_str(credentials, &["refresh_token", "refreshToken"]);
+    if refresh.is_empty() && !access.is_empty() {
+        return Err(PluginError::config(
+            "only an access token, no refresh_token: it would stop working within days and can't be renewed; sign in to this account instead",
+        ));
+    }
+    if refresh.is_empty() {
+        return Err(PluginError::config("no refresh_token in it"));
+    }
+    let expires = credentials
+        .get("expires_at")
+        .or_else(|| credentials.get("expiresAt"))
+        .and_then(json_i64)
+        .unwrap_or(1);
+    let account_uuid = first_non_empty(&[
+        json_str(credentials, &["account_uuid"]),
+        extra
+            .map(|e| json_str(e, &["account_uuid"]))
+            .unwrap_or_default(),
+    ]);
+    let org_uuid = first_non_empty(&[
+        json_str(credentials, &["org_uuid"]),
+        extra
+            .map(|e| json_str(e, &["org_uuid"]))
+            .unwrap_or_default(),
+    ]);
+    let scopes = import_scopes(credentials.get("scopes").or_else(|| credentials.get("scope")));
+    let cred = build_import_credentials(&access, &refresh, expires, &scopes)?;
+    let profile = build_profile(&email, account_uuid.as_deref(), org_uuid.as_deref(), None);
+    Ok(LoginRow {
+        email,
+        credentials: cred,
+        profile,
+    })
+}
+
+fn cmp_str(primary: String, extra: Option<String>, name: String) -> Option<String> {
+    if !primary.is_empty() {
+        return Some(primary);
+    }
+    if let Some(extra) = extra.filter(|s| !s.is_empty()) {
+        return Some(extra);
+    }
+    if name.contains('@') {
+        return Some(name);
+    }
+    None
+}
+
+fn first_non_empty(values: &[String]) -> Option<String> {
+    values.iter().find(|v| !v.is_empty()).cloned()
+}
+
+fn json_i64(value: &Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_str().and_then(|text| text.parse::<i64>().ok()))
+}
+
+fn import_scopes(value: Option<&Value>) -> Vec<String> {
+    match value {
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect(),
+        Some(Value::String(text)) => text.split_whitespace().map(str::to_owned).collect(),
+        _ => IMPORT_SCOPES
+            .iter()
+            .map(|scope| (*scope).to_owned())
+            .collect(),
+    }
 }
 
 async fn store_swap(host: &HostContext, text: &str) -> Result<Vec<AccountId>, PluginError> {
@@ -167,10 +325,7 @@ struct LoginRow {
     profile: String,
 }
 
-fn parse_login_object(value: &Value) -> Result<Option<LoginRow>, PluginError> {
-    let Some(object) = value.as_object() else {
-        return Ok(None);
-    };
+fn parse_login_object(object: &Map<String, Value>) -> Result<Option<LoginRow>, PluginError> {
     if object.contains_key("claudeAiOauth") {
         return parse_credentials_root(object);
     }
@@ -210,7 +365,15 @@ fn parse_login_object(value: &Value) -> Result<Option<LoginRow>, PluginError> {
         .or_else(|| src.get("expires_at"))
         .and_then(Value::as_i64)
         .unwrap_or(1);
-    let cred = build_import_credentials(&access, &refresh, expires)?;
+    let cred = build_import_credentials(
+        &access,
+        &refresh,
+        expires,
+        &IMPORT_SCOPES
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect::<Vec<_>>(),
+    )?;
     let profile = build_profile_email(email);
     Ok(Some(LoginRow {
         email: email.to_owned(),
@@ -219,21 +382,67 @@ fn parse_login_object(value: &Value) -> Result<Option<LoginRow>, PluginError> {
     }))
 }
 
-fn parse_credentials_root(_object: &Map<String, Value>) -> Result<Option<LoginRow>, PluginError> {
-    Err(PluginError::config(
-        "the file doesn't say which Claude account this is; sign in to it from hofund instead",
-    ))
+fn parse_credentials_root(object: &Map<String, Value>) -> Result<Option<LoginRow>, PluginError> {
+    let email = object
+        .get("email")
+        .and_then(Value::as_str)
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| {
+            PluginError::config(
+                "the file doesn't say which Claude account this is; sign in to it from hofund instead",
+            )
+        })?;
+    let oauth = object
+        .get("claudeAiOauth")
+        .and_then(Value::as_object)
+        .ok_or_else(|| PluginError::config("an imported account has no credentials"))?;
+    let access = json_str(oauth, &["accessToken", "access_token"]);
+    let refresh = json_str(oauth, &["refreshToken", "refresh_token"]);
+    if refresh.is_empty() && !access.is_empty() {
+        return Err(PluginError::config(
+            "only an access token, no refresh_token: it would stop working within days and can't be renewed; sign in to this account instead",
+        ));
+    }
+    if refresh.is_empty() {
+        return Err(PluginError::config("no refresh_token in it"));
+    }
+    let expires = oauth
+        .get("expiresAt")
+        .or_else(|| oauth.get("expires_at"))
+        .and_then(json_i64)
+        .unwrap_or(1);
+    let scopes = import_scopes(oauth.get("scopes").or_else(|| oauth.get("scope")));
+    let cred = build_import_credentials(&access, &refresh, expires, &scopes)?;
+    let profile = build_profile(
+        email,
+        non_empty_str(oauth, "accountUuid").or_else(|| non_empty_str(oauth, "account_uuid")),
+        non_empty_str(oauth, "organizationUuid").or_else(|| non_empty_str(oauth, "org_uuid")),
+        non_empty_str(oauth, "organizationName"),
+    );
+    Ok(Some(LoginRow {
+        email: email.to_owned(),
+        credentials: cred,
+        profile,
+    }))
+}
+
+fn non_empty_str<'a>(object: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
+    object
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|v| !v.is_empty())
 }
 
 fn build_import_credentials(
     access: &str,
     refresh: &str,
     expires: i64,
+    scopes: &[String],
 ) -> Result<String, PluginError> {
     let scopes = Value::Array(
-        IMPORT_SCOPES
+        scopes
             .iter()
-            .map(|scope| Value::String((*scope).to_owned()))
+            .map(|scope| Value::String(scope.clone()))
             .collect(),
     );
     let mut oauth = Map::new();
@@ -253,9 +462,33 @@ fn build_import_credentials(
 }
 
 fn build_profile_email(email: &str) -> String {
-    let mut profile = Map::new();
-    profile.insert("emailAddress".to_owned(), Value::String(email.to_owned()));
-    Value::Object(profile).to_string()
+    build_profile(email, None, None, None)
+}
+
+fn build_profile(
+    email: &str,
+    account_uuid: Option<&str>,
+    org_uuid: Option<&str>,
+    org_name: Option<&str>,
+) -> String {
+    let mut oauth = Map::new();
+    oauth.insert("emailAddress".to_owned(), Value::String(email.to_owned()));
+    if let Some(uuid) = account_uuid {
+        oauth.insert("accountUuid".to_owned(), Value::String(uuid.to_owned()));
+    }
+    if let Some(uuid) = org_uuid {
+        oauth.insert(
+            "organizationUuid".to_owned(),
+            Value::String(uuid.to_owned()),
+        );
+    }
+    if let Some(name) = org_name {
+        oauth.insert(
+            "organizationName".to_owned(),
+            Value::String(name.to_owned()),
+        );
+    }
+    Value::Object(oauth).to_string()
 }
 
 fn json_str(object: &Map<String, Value>, keys: &[&str]) -> String {
@@ -471,5 +704,59 @@ mod tests {
         let id_a = block_on(store(host.context(), a)).expect("a")[0].clone();
         let id_b = block_on(store(host.context(), b)).expect("b")[0].clone();
         assert_ne!(id_a, id_b);
+    }
+
+    #[test]
+    fn r5_38_import_claude_logins_fixture_shape() {
+        let dir = tempfile::tempdir().expect("dir");
+        let host = host(&dir);
+        let cpa = r#"{"type":"claude","access_token":"sk-ant-oat01-old","refresh_token":"sk-ant-ort01-cpa","email":"max@example.com"}"#;
+        let creds = r#"{"claudeAiOauth":{"accessToken":"a","refreshToken":"sk-ant-ort01-gone","expiresAt":1}}"#;
+        let batch = format!("[{cpa},{creds},{{\"type\":\"codex\",\"refresh_token\":\"r-x\"}}]");
+        let ids = block_on(store(host.context(), &batch)).expect("import");
+        assert_eq!(ids.len(), 1);
+        let secret = block_on(host.context().accounts().secret(&ids[0]))
+            .expect("read")
+            .expect("stored");
+        let blob = SecretObject::parse(&secret).expect("blob");
+        assert!(
+            blob.text(creds::CREDENTIALS)
+                .is_some_and(|text| text.contains("sk-ant-ort01-cpa"))
+        );
+    }
+
+    #[test]
+    fn r5_39_import_sub2api_claude_accounts_fixture_shape() {
+        let dir = tempfile::tempdir().expect("dir");
+        let host = host(&dir);
+        let reported = r#"{"accounts":[{"name":"my-claude-account","platform":"anthropic","type":"oauth","credentials":{"email_address":"user@example.com","access_token":"sk-ant-oat01-reported","refresh_token":"sk-ant-ort01-reported"}}]}"#;
+        let seats = r#"{"exported_at":"2026-10-12T00:00:00Z","proxies":[],"type":"sub2api-data","version":1,"accounts":[
+ {"name":"seat-a","platform":"anthropic","type":"oauth","credentials":{"access_token":"sk-ant-oat01-a","refresh_token":"sk-ant-ort01-a","scope":"user:inference user:profile user:sessions:claude_code","org_uuid":"org-a","account_uuid":"acct-1","email_address":"team@example.com"},
+  "extra":{"org_uuid":"org-a","account_uuid":"acct-1","email_address":"team@example.com"}},
+ {"name":"seat-b","platform":"anthropic","type":"oauth",
+  "credentials":{"access_token":"sk-ant-oat01-b","refresh_token":"sk-ant-ort01-b"},
+  "extra":{"org_uuid":"org-b","account_uuid":"acct-1","email_address":"team@example.com"}}
+]}"#;
+        let ids_a = block_on(store(host.context(), reported)).expect("reported");
+        let ids_b = block_on(store(host.context(), seats)).expect("seats");
+        assert_eq!(ids_a.len(), 1);
+        assert_eq!(ids_b.len(), 2);
+        assert_ne!(ids_b[0], ids_b[1]);
+        let profile_b = SecretObject::parse(
+            &block_on(host.context().accounts().secret(&ids_b[0]))
+                .expect("read")
+                .expect("stored"),
+        )
+        .expect("blob");
+        let profile =
+            crate::creds::Profile::parse(profile_b.text(creds::PROFILE).unwrap_or_default());
+        assert_eq!(profile.uuid(), Some("acct-1"));
+        assert_eq!(
+            profile
+                .fields
+                .get("organizationUuid")
+                .and_then(|v| v.as_str()),
+            Some("org-a")
+        );
     }
 }

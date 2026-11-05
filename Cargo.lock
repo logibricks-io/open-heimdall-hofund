@@ -2206,6 +2206,7 @@ dependencies = [
  "hofund-model-catalog",
  "hofund-plugin-api",
  "hofund-plugin-sdk",
+ "iana-time-zone",
  "regex",
  "sha2",
  "tempfile",

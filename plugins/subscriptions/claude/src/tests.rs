@@ -1304,6 +1304,11 @@ fn r5_18_complete_sign_in_rejects_idle_pending() {
             .await
             .expect_err("expired");
         assert_eq!(error.kind(), PluginErrorKind::Config);
+        assert!(
+            error
+                .to_string()
+                .contains("this Claude Code sign-in timed out")
+        );
     });
 }
 
@@ -1371,6 +1376,21 @@ fn r5_22_refresh_no_op_for_setup_token() {
     ))
     .expect("store");
     block_on(sub.refresh(&id, host.context())).expect("refresh");
+    assert!(host.process().piped_spawns().is_empty());
+}
+
+#[test]
+fn r5_40_setup_token_daily_warmup_is_no_op() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let id = block_on(sub.complete_sign_in(
+        &ctx(),
+        SignInProof::Token(SecretString::from(SETUP_TOKEN.to_owned())),
+        host.context(),
+    ))
+    .expect("store");
+    block_on(sub.daily_warmup(&id, host.context())).expect("warmup");
     assert!(host.process().piped_spawns().is_empty());
 }
 

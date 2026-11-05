@@ -100,11 +100,6 @@ pub(crate) fn parse(text: &str, now: SystemTime) -> Result<Vec<QuotaWindow>, Plu
                 clip_line(line)
             )));
         }
-        if usage_unknown().is_match(line) {
-            return Err(PluginError::transport(
-                "Claude Code's /usage is temporarily unavailable",
-            ));
-        }
     }
     let mut out = Vec::new();
     for line in text.lines() {
@@ -125,11 +120,10 @@ pub(crate) fn parse(text: &str, now: SystemTime) -> Result<Vec<QuotaWindow>, Plu
             ("5 hours".to_owned(), None)
         } else {
             let mut scope_label = scope.unwrap_or("all models");
-            if let Some(stripped) = scope_label
-                .strip_suffix(" only")
-                .or_else(|| scope_label.strip_suffix(" Only"))
-            {
-                scope_label = stripped.trim();
+            let lower = scope_label.to_ascii_lowercase();
+            if let Some(stripped) = lower.strip_suffix(" only") {
+                let end = stripped.len();
+                scope_label = scope_label[..end].trim();
             }
             if scope_label.eq_ignore_ascii_case("all models") {
                 ("7 days".to_owned(), None)
@@ -158,6 +152,14 @@ pub(crate) fn parse(text: &str, now: SystemTime) -> Result<Vec<QuotaWindow>, Plu
         out.push(overages_window(&out)?);
     }
     if out.is_empty() {
+        if text
+            .lines()
+            .any(|line| usage_unknown().is_match(line.trim()))
+        {
+            return Err(PluginError::transport(
+                "Claude Code's /usage is temporarily unavailable",
+            ));
+        }
         if text.is_empty()
             || text.lines().any(|line| {
                 line.trim().trim_end_matches('.')
@@ -299,5 +301,25 @@ Current week (all models): 40% used · resets Nov 6 at 11am (UTC)
         assert_eq!(windows[2].name(), "Extra usage");
         assert_eq!(windows[2].used(), 100);
         assert_eq!(windows[2].resets_at(), Some(utc(2026, 11, 1, 15, 0)));
+    }
+
+    #[test]
+    fn r5_36_unknown_line_with_session_still_returns_windows() {
+        let now = utc(2026, 10, 1, 4, 0);
+        let text = "/usage couldn't load the plan's usage
+Current session: 5% used · resets 3pm (UTC)
+";
+        let windows = parse(text, now).expect("windows");
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].name(), "5 hours");
+    }
+
+    #[test]
+    fn r5_37_scope_only_suffix_is_case_insensitive() {
+        let now = utc(2026, 10, 1, 4, 0);
+        let text = "Current week (Sonnet ONLY): 10% used
+";
+        let windows = parse(text, now).expect("windows");
+        assert_eq!(windows[0].scope_model(), Some("sonnet"));
     }
 }

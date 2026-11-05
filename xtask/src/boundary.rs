@@ -25,6 +25,7 @@ const PLUGIN_EXTRA_DEPS: &[(&str, &[&str])] = &[(
         "chrono",
         "chrono-tz",
         "hofund-model-catalog",
+        "iana-time-zone",
         "regex",
         "sha2",
     ],

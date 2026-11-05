@@ -183,6 +183,9 @@ pub(crate) async fn warmup(
     let lease = host.accounts().lease(account, LEASE_WAIT).await?;
     let _run = crate::run_lock::mark(account, host)?;
     let blob = SecretObject::parse(lease.secret())?;
+    if crate::setup_token::is_setup_token(&blob) {
+        return Ok(());
+    }
     if blob.flag(creds::LAPSED) {
         return Err(PluginError::auth(creds::LAPSED_REASON));
     }
