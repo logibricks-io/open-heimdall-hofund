@@ -143,7 +143,7 @@ Listener, bearer, and Host checks are the existing control listener. Shapes are 
 | `POST /api/sessions/relocate-claude` | `POST /v1/hofund/sessions/relocate` | `relocate_claude.go:RelocateClaudeProject` |
 | `POST /api/sessions/codex-provider` | deferred | `MoveCodexProvider` changes which provider a thread lists under. Not required for the TUI. Tracked under R-34 as optional and off unless the Codex plugin implements it. |
 
-`X-Hofund-Tag` / `X-Hofund-Same` may repeat an unchanged list when `X-Hofund-Had` matches, matching `X-Magpie-Had` in the list handler. v0.2.0 may omit this optimization. The body shape stays.
+`X-Hofund-Tag` / `X-Hofund-Same` may repeat an unchanged list when `X-Hofund-Had` matches, matching the reference list handler's "had" header. v0.2.0 may omit this optimization. The body shape stays.
 
 ### 1.6 Gateway identity, projection, dedup — R-33
 
