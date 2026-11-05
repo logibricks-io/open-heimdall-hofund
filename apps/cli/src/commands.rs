@@ -677,7 +677,7 @@ mod tests {
         );
         let row = lines.next().expect("row");
         assert!(
-            row.starts_with("m      p         3   -    12          4       25.0      200     "),
+            row.starts_with("m      p         3   -    12          4        25.0      200     "),
             "{row:?}"
         );
         assert_eq!(
