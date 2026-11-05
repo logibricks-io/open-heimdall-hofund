@@ -1,6 +1,6 @@
 # Sessions and Library design
 
-Status: design for v0.2.0. Implementation of recording, agent-config writes, and MCP command execution waits on a second security review (section 7). This document does not use the reference project's name. Kernel `gateway` and `router` stay free of vendor names, agent ids, and that name. Agent ids, file layouts, and header names come from agent plugins.
+Status: design for v0.2.0. Recording (section 4.2), library and session file writes (section 4.3), and MCP command execution (section 4.4) wait on a second security review before implementation (section 7). This document does not use the reference project's name. Kernel `gateway` and `router` stay free of vendor names, agent ids, and that name. Agent ids, file layouts, and header names come from agent plugins.
 
 Parity citations are `path:function` in the reference tree. Hofund enforcement sites are the modules that must contain the check. They do not exist until the row lands.
 
@@ -12,9 +12,9 @@ Parity citations are `path:function` in the reference tree. Hofund enforcement s
 | Recording default | Off. No conversation bytes are written unless recording was turned on for this machine and is still on at save time. |
 | Who parses agent files | The agent plugin. `crates/kernel/sessions` and `crates/kernel/library` call plugin traits. They do not match on agent id. |
 | Who serves HTTP | Only `crates/kernel/gateway`. It receives a header-name list and a hub trait from the daemon. It does not name agents. |
-| Control wire | Existing `/v1/hofund/*` on the loopback control listener. Body `version` is the control proto `u32`. Mutations also send `expected_revision`. Responses add fields; they do not rename the TUI draft's paths (`r-3` design section 5). |
+| Control wire | Existing `/v1/hofund/*` on the loopback control listener. Body `version` is the control proto `u32`. Mutations may send `expected_revision` when the client has a revision; omitting it is allowed where the TUI draft already sends `{version, …}` only. Responses add fields; they do not rename the TUI draft's paths (`docs/tui-design.md` section 5). `GET/PATCH /v1/hofund/sessions/reads` keeps `enabled: [agent id]`; `found`, `all`, and `revision` are additive. Path `{key}` uses the same `id` as each list row's `id` field (with `agent` separate in JSON). R-45 binds only to `GET /v1/hofund/library`; per-agent toggles and other library mutations stay off the TUI until their routes exist. |
 | Optimistic concurrency | `revision` is the lowercase hex SHA-256 of the canonical JSON of the resource. Mismatch is `409` `Conflict`. |
-| Second review | Recording (R-33), library writes into agent files (R-35 and every later row that calls that writer), and MCP command execution (R-38) do not start until that review accepts this section 4. |
+| Second review | Recording (R-33) waits on section 4.2. Library writes into agent files (R-35 and every later row that calls that writer) and session file mutation (R-34 relocate, carry convert, delete, restore, purge) wait on section 4.3. MCP command execution (R-38) waits on section 4.4. |
 
 ## 1. Sessions parity
 
@@ -28,15 +28,15 @@ Reference: `internal/sessions/access.go:Reads`, `SettleReads`, `SetReads`, `allo
 | Upgrade that already indexed | `readBefore` is true when `sessions.json` or `calls-v*` exists; settle sets `Asked` and `All`. | Same test against `<state>/sessions-index.json` only. Hofund has no `calls-v*`. A fresh tree has no index, so settle does not grant `All`. |
 | Save failure | Settle keeps an empty `SessionReads` for this process and does not retry the write. | Same. Unwritable consent file means this process reads nothing. |
 | Per-agent map | `Agents[id]` wins over `All`. Unknown id follows `All`. | Same. Ids must match `^[A-Za-z0-9][A-Za-z0-9_-]{0,63}(@wsl:[A-Za-z0-9][A-Za-z0-9._-]{0,63})?$` (`internal/library/library.go:checkAgent`). |
+| Found, not read | `Found` stats directories only. WSL distros are not opened; `All` covers them. Codex consent probes both `sessions` and `archived_sessions` under each Codex home (`internal/sessions/access.go:Found`). | Plugin `SessionLocator::present` is a directory stat. It must not open session files. Same Codex folder pair for `Found`. |
 | Gate on every list and on cached rows | `allowed` filters files. Readers of an already-listed session call `Reads` again. `SetReads` calls `Reset`. | `SessionIndex::list` and `SessionIndex::get` both call `Consent::allows`. Turning an agent off drops its rows before the response is built. |
-| Found, not read | `Found` stats directories only. WSL distros are not opened; `All` covers them. | Plugin `SessionLocator::present` is a directory stat. It must not open session files. |
 | Own-files off | `OwnOff` forces `readsNone` while gateway-only rows still show (`access.go:ownOff`). | Daemon flag `local_sessions`. Default on. Off skips every plugin read. Ledger projection still runs. |
 
 CLI: `hofund sessions read` with no args prints asked, all, and each found agent on or off. `hofund sessions read on|off all|<agent>…` maps to `SetReads`. Unknown id is an error and writes nothing.
 
 ### 1.2 Readers — R-29, R-31, R-32
 
-Each reader is a plugin `SessionStore`. The kernel passes the consent-filtered root and receives records. The plugin does not decide consent.
+Each reader is a plugin `SessionStore`. The kernel passes the consent-filtered root and receives records. The plugin does not decide consent. Agent ids in the table match `internal/sessions/access.go:Found`, file discovery follows `internal/sessions/sessions.go:allFiles`, and call attribution follows `internal/sessions/calls.go:callSources` / `callFileLists`.
 
 Shared parse rules, enforced in `crates/kernel/sessions` before plugin bytes are trusted:
 
@@ -54,22 +54,27 @@ Shared parse rules, enforced in `crates/kernel/sessions` before plugin bytes are
 | `codex` | R-29 | JSONL, some zstd | `$CODEX_HOME` or `~/.codex`, plus every home `CodexHomes` finds; `sessions/**/rollout-*.jsonl` | `codex` `resume` `<id>` | `internal/appdir/codex.go:CodexHome`, `CodexHomes`; `internal/sessions/codex.go` header; `codex_resume.go:ResumeNow` |
 | `opencode` | R-31 | SQLite, else JSON | `$XDG_DATA_HOME/opencode` or `~/.local/share/opencode`; `$OPENCODE_DB` or `opencode.db`. If migration `v1-v2` is completed, read `session_v2` and `session_message` only. Else `session`, `message`, `part`. No database: `storage/session`, `message`, `part` JSON | `opencode` `--session` `<id>` | `internal/sessions/opencode.go:OpenCodeDir`, `openCodeDB` |
 | `pi` | R-31 | JSONL | `$PI_CODING_AGENT_DIR` or `~/.pi/agent`; `sessions/<cwd-folder>/<time>_<id>.jsonl` | `pi` `--session` `<path>` | `internal/sessions/pi.go:PiDir`, `piParse` |
+| `raft` | R-32 | JSONL, Pi shape | `$SLOCK_HOME` or `~/.slock`; `agents/*/.pi-sessions/*.jsonl` and `agents/*/.builtin-sessions/*.jsonl` | plugin argv | `internal/sessions/raft.go:SlockDir`, `raftFilesIn`; `internal/sessions/access.go:Found` |
+| `cindy` | R-32 | JSONL, Pi shape | Cindy / CindyGlobal under the OS config dir; `pi-agent-home/sessions/*.jsonl` | none (desktop) | `internal/sessions/cindy.go:CindyDirs`, `cindyFilesIn`; `internal/sessions/access.go:Found` |
+| `minimax-code` | R-32 | JSONL | `$MINIMAX_DATA_DIR` or `~/.minimax`; `v2/sessions/**/messages.jsonl` (and sibling `messages*.jsonl` from the history catalog) | plugin argv when present | `internal/sessions/calls_minimax.go:MiniMaxDir`, `minimaxCallFiles`; `internal/sessions/access.go:Found` |
 | `omp` | R-31 | JSONL, same as Pi | `~/.omp/agent/sessions`, profile sessions, and `$XDG_DATA_HOME/omp/sessions` when not Windows | `omp` `--resume` `<id>` | `internal/sessions/omp.go:OmpDir`, `ompSessionRoots` |
 | `gemini` | R-31 | JSON and JSONL | `$GEMINI_CLI_HOME` or `~`; `.gemini/tmp/*/chats/session-*.json` and `session-*.jsonl` | `gemini` `--resume` `<id>` when the plugin reports a binary | `internal/sessions/traces_gemini.go:geminiTraceFiles`, `geminiTmpDir` |
-| Claude Desktop / Cowork | R-31 | Same JSONL as `claude`, tagged `app` | Same Claude project tree. `entrypoint` selects the desktop app id. Usage counts under `app`. Resume and transcript stay on `claude`. | none for the desktop app | `internal/sessions/sessions.go` `Session.App`; `internal/gui/sessions.go` list handler (`s.App`) |
-| `cursor` | R-32 | SQLite plus protobuf blobs | Cursor config `chats/<md5(cwd)>/<chat id>/store.db` (`meta`, `blobs`). Newer `meta.json` beside it. | none when the plugin reports no CLI resume | `internal/sessions/cursor.go` header, `CursorDir` |
+| `claude-desktop` | R-31 | Same JSONL as `claude`, tagged `app` | Desktop data dirs: `local-agent-mode-sessions/*/*/local_*/.claude/projects/…` (Cowork); consent `Found` also probes `claude-code-sessions`. Agent id `claude-desktop` per `internal/sessions/calls.go:callFileLists`. Usage counts under `app`. | none for the desktop app | `internal/sessions/calls.go:callFileLists`; `internal/sessions/access.go:Found` |
+| `cursor` | R-32 | SQLite, protobuf, editor KV, JSONL transcripts | CLI: `chats/<md5(cwd)>/<chat id>/store.db` (`meta`, `blobs`), optional `meta.json`. Editor: `state.vscdb` `cursorDiskKV` (`internal/sessions/cursor_editor.go:cursorEditorDB`) and `cursorDataDir()/projects/<slug>/agent-transcripts/…` | CLI: `cursor-agent` `--resume` `<id>` (`internal/sessions/sessions.go:resumeCommand`). Editor transcript sessions cannot be resumed (`internal/sessions/cursor_editor.go` header) | `internal/sessions/cursor.go:CursorDir`, `cursorDataDir`; `internal/sessions/access.go:Found` |
 | `droid` | R-32 | JSONL plus settings JSON | `$FACTORY_HOME_OVERRIDE/.factory/sessions` or `~/.factory/sessions`; `<cwd>/<id>.jsonl` and `<id>.settings.json` | `droid` `--resume` `<id>` | `internal/sessions/droid.go` header |
 | `grok` | R-32 | JSON plus JSONL | `$GROK_HOME` or `~/.grok`; `sessions/<url-encoded cwd>/<id>/summary.json` and `updates.jsonl` | `grok` `--resume` `<id>` | `internal/sessions/grok.go` header, `GrokDir` |
 | `qoder`, `qoder-cn` | R-32 | JSONL, Claude shape | `$QODER_CONFIG_DIR` or `~/.qoder`; `$QODERCN_CONFIG_DIR` or `~/.qoder-cn`; `projects/*/<id>.jsonl` | `qodercli` `--resume` `<id>` | `internal/sessions/qoder.go:QoderDir` |
 | `kimi` | R-32 | JSONL wire | `$KIMI_CODE_HOME` or `~/.kimi-code`; `sessions/<slug>/<id>/agents/<agent>/wire.jsonl` | plugin resume argv when the binary exists | `internal/sessions/calls_kimi.go:KimiCodeDir` |
-| `cline` | R-32 | JSON rewritten whole | `$CLINE_SESSION_DATA_DIR`, else `$CLINE_DATA_DIR/sessions`, else `$CLINE_DIR/data/sessions`, else `~/.cline/data/sessions`; `<id>.json` and `<id>.messages.json` | `cline` `--id` `<id>` | `internal/sessions/cline.go:ClineSessionDir` |
+| `cline` | R-32 | JSON rewritten whole | `$CLINE_SESSION_DATA_DIR`, else `$CLINE_DATA_DIR/sessions`, else `$CLINE_DIR/data/sessions`, else `~/.cline/data/sessions`; manifest `<id>.json`; conversation files `ClineSessionDir()/*/*.messages.json` | `cline` `--id` `<id>` | `internal/sessions/cline.go:ClineSessionDir`, `clineFiles` |
 | `hermes` | R-32 | SQLite | Hermes home and `profiles/*/state.db`. Read-only. Aggregates, not per-request rows. | plugin argv | `internal/sessions/hermes.go:HermesDir`, `HermesDirs` |
-| `workbuddy`, `workbuddy-ai`, `codebuddy` | R-32 | JSONL | `$WORKBUDDY_CONFIG_DIR` or `~/.workbuddy`; `projects/**/<id>.jsonl`. CodeBuddy shares the folder when the paths are the same directory. | none (desktop) | `internal/sessions/workbuddy.go:WorkBuddyDir`, `codebuddyInWorkBuddy` |
+| `workbuddy` | R-32 | JSONL | `$WORKBUDDY_CONFIG_DIR` or `~/.workbuddy`; `projects/**/<id>.jsonl` | none (desktop) | `internal/sessions/workbuddy.go:WorkBuddyDir`, `workbuddyFiles` |
+| `workbuddy-ai` | R-32 | JSONL | `~/.workbuddy-ai`; `projects/**/<id>.jsonl` | none (desktop) | `internal/sessions/workbuddy.go:WorkBuddyAIDir`, `workbuddyAIFiles` |
+| `codebuddy` | R-32 | JSONL | `$CODEBUDDY_CONFIG_DIR` or `~/.codebuddy`; `projects/**/<id>.jsonl`. Listed as one agent with `workbuddy` only when `sameFolder` says CodeBuddy and WorkBuddy dirs are the same directory (`internal/sessions/workbuddy.go:codebuddyInWorkBuddy`). | none (desktop) | `internal/sessions/workbuddy.go:CodeBuddyDir`, `codebuddyFiles` |
 | `zcode` | R-32 | SQLite, OpenCode tables | `~/.zcode/cli/db/db.sqlite` under the OS home, not a custom `HOME` on Windows | none | `internal/sessions/zcode.go:ZCodeDir`, `zcodeDB` |
 | `dsh` | R-32 | JSONL, optional zstd frames | `$DSH_HOME/sessions` or `~/.dsh/sessions`; newest `session.jsonl`, `session.jsonl.zstd`, or `session.v<N>.*` | none until the plugin reports one | `internal/sessions/dsh.go` header |
 | `agy` | R-32 | JSONL plus SQLite summary | agy data `brain/<id>/.system_generated/logs/transcript_full.jsonl`; titles in `conversation_summaries.db` | plugin argv | `internal/sessions/agy.go` header, `calls_agy.go:AgyDir` |
 | `alma` | R-32 | SQLite, read-only, not deletable | OS user config `alma/chat_threads.db` | none | `internal/sessions/alma.go:AlmaDir` |
-| WSL | R-32 | Same readers | On Windows, `\\wsl.localhost\<distro>\<home>\…` for distros the agent catalog already found. Cache file `<state>/sessions-wsl.json`. A stopped distro is not opened. | `wsl.exe` `-d` `<distro>` `--` plus the Linux argv | `internal/sessions/wsl.go:wslScan`, `wslList`, `wslResume` |
+| WSL | R-32 | Same readers | On Windows, `\\wsl.localhost\<distro>\<home>\…` for distros the agent catalog already found. Per-distro agents are only those in `wslAgents`: `claude`, `codex`, `pi`, `raft`, `omp`, `kimi` (`internal/sessions/wsl.go:wslAgents`). Cache file `<state>/sessions-wsl.json`. A stopped distro is not opened. | `wsl.exe` `-d` `<distro>` `--` plus the Linux argv | `internal/sessions/wsl.go:wslScan`, `wslList`, `wslResume` |
 
 Subagent grouping (`internal/sessions/sessions.go` `Session.Subs`, `Copies`, `BranchOf`; `internal/sessions/subagents.go`; `codex_fork.go` header; `zcode.go` copies):
 
@@ -84,7 +89,7 @@ Subagent grouping (`internal/sessions/sessions.go` `Session.Subs`, `Copies`, `Br
 | dsh `parentSession` | Grouped. Seed events up to `session/end-seed` (format 2) or `seedLength` (older) are not double-counted. |
 | Cursor `subagentInfo` | Grouped under `rootParentAgentId` or `parentAgentId`. |
 
-Title (`internal/sessions/sessions.go` `Session.Title`): custom title, else the agent's title, else the first user prompt, else the id. Model is the set of model ids with tokens. Folder is `cwd`. Cost uses `crates/kernel/usage` prices at the settings the index read once (`internal/sessions/sessions.go:PriceOf`). Unpriced models increment `unpriced` and add no dollars.
+Title (`internal/sessions/sessions.go` `Session.Title`): custom title, else the agent's title, else the first user prompt, else the id. For Pi-family gateway rows, titles from PI-Desktop's `pi.sqlite` `sessions` table when present (`internal/sessions/pidesktop_titles.go:PIDesktopTitles`, keyed for `pi` and `pi-desktop`). Model is the set of model ids with tokens. Folder is `cwd`. Cost uses `crates/kernel/usage` prices at the settings the index read once (`internal/sessions/sessions.go:PriceOf`). Unpriced models increment `unpriced` and add no dollars.
 
 Daily stats (`internal/sessions/sessions.go` `state.day`, `use`; `internal/sessions/stats.go`): local date of each message. A session that crosses midnight appears on both days. Active time is gaps under the reference idle gap, on the later line's day, and is not required for v0.2.0 CLI output. Stats rows are agent, folder, model, tokens, cost.
 
@@ -153,18 +158,18 @@ Hofund ledger today (`crates/kernel/usage` `requests`) has `client_agent` and no
 
 | Column | Source |
 |---|---|
-| `session_id` | First non-empty header in the injected list, else the opening hash. Max 128 bytes. Truncate on the byte boundary only when the cut is UTF-8, else truncate earlier. |
+| `session_id` | First non-empty header in the injected list, else the opening id from `crates/kernel/codec/src/opening.rs:hashed_id` (`hofund-` plus hex of the first 12 bytes of SHA-256 over the opening user turn). Max 128 bytes. Hofund truncates on a UTF-8 code-point boundary when the cut would split a character; the reference truncates at a fixed byte index (`internal/gateway/gateway.go:sessionOf`). |
 | `native_session_id` | First non-empty plugin header, ignoring `X-Hofund-Session`. |
 | `endpoint` | Request path, for MCP rows. |
 | `kind` | Empty for model calls. `mcp` for hub tool calls. |
 
 Header policy is built by the daemon from each agent descriptor's `session_headers` (new field, same shape rules as `request_agent_header` in `docs/plugins/agents.md`). The gateway sees `Vec<HeaderName>` plus the fixed echo name `X-Hofund-Session`. Order: echo header first, then the injected list (`sessionOf`). The response sets `X-Hofund-Session` only when the request named one (`conversations.go:withGatewaySession`). The gateway never invents an id.
 
-Opening hash, when no plugin header is present (`conversationID`): SHA-256 of the first user message bytes, or of the user messages through the first non-boilerplate one, first 12 bytes hex. Implemented in `codec` as a pure function. Gateway calls it. No agent name in that function.
+Opening id, when no plugin header is present (`conversationID` in the reference; ledger uses the same bytes via `opening.rs`): SHA-256 of the first user message bytes, or of the user messages through the first non-boilerplate one, first 12 digest bytes as hex with the `hofund-` prefix from `crates/kernel/codec/src/opening.rs:hashed_id` (lines 61–68). Router affinity already stores that value. The gateway calls `hashed_id`; it does not reimplement the hash. `X-Hofund-Session` on the response echoes only a client-sent id (`conversations.go:withGatewaySession`); the gateway never invents an id in that header.
 
 Projection (`GatewaySessions`): group ledger rows by `(client_agent, session_id)` where `session_id` is non-empty. Sum tokens and `cost_usd`. Drop unidentified rows. Title is the first user text in the recording store if recording has it, else the id.
 
-Dedup (`externalAdded`): native wins. A ledger row is hidden when any of these pairs exist on a native session: `(agent, id)`, `(agent, copy id)`, `(agent, sub id)`, `(app, id)`. Plugin id `raft` also suppresses `(pi, id)` if a raft reader exists; no raft plugin ships in v0.2.0, so that pair is unused. External rows are `read_only` and `gateway`, with no `path` and no resume. Deleted gateway sessions stay hidden until a later ledger row is newer than the trash stamp (`gateway_delete.go:GatewayHidden`).
+Dedup (`externalAdded`): native wins. A ledger row is hidden when any of these pairs exist on a native session: `(agent, id)`, `(agent, copy id)`, `(agent, sub id)`, `(app, id)`. With the `raft` reader (R-32), plugin id `raft` also suppresses `(pi, id)` when both share the id (`internal/sessions/raft.go:GatewayKeys`). External rows are `read_only` and `gateway`, with no `path` and no resume. Deleted gateway sessions stay hidden until a later ledger row is newer than the trash stamp (`gateway_delete.go:GatewayHidden`).
 
 ### 1.7 Recording — R-33, second security review
 
@@ -199,15 +204,15 @@ Clear is `POST` recording `{on:false, clear:true}` or CLI `hofund sessions recor
 |---|---|---|
 | Resume | Control returns `resume` as `{argv, cwd}` or null. The TUI and CLI spawn `Command` with that argv. They do not join a shell string. WSL argv starts with `wsl.exe`, `-d`, distro, `--`. | `sessions.go` `Resume`; `wsl.go:wslResume`; `codex_resume.go:ResumeNow` |
 | Carry, Pi to omp | No file copy. Argv is `omp` `--fork` `<pi session path>` with `cwd` set. Offered only when the omp plugin is present and the session is not read-only and not WSL. | `carry.go:carries` |
-| Carry, Claude and Codex | User action only, never on list. Plugin `convert` reads the source and writes a new session in the destination agent's tree, then returns the new id and resume argv. Source bytes are not modified. | `carry.go` `Convert`; `carry_convert.go` |
+| Carry, Claude and Codex | User action only, never on list. Plugin `convert` reads the source and writes a new session in the destination agent's tree, then returns the new id and resume argv. Source bytes are not modified. Convert writes wait on section 4.3. | `carry.go` `Convert`; `carry_convert.go` |
 | Fork | omp fork is the carry above. Codex fork is a read-side dedup, not a write. v0.2.0 does not write a Codex fork. | `codex_fork.go` header |
 | Transcript | Plugin reads the listed session's own path. `sub` must be an id on that session's `subagents`. Gateway-only sessions read the recording store. | `transcript.go:TranscriptOf`; `gateway.go:GatewayTranscript` |
 | Search | Case-folded substring. Cap 200 hits or 8 seconds, whichever first. Cancel with the request. Gateway-only sessions search recording text. | `search.go:SearchSession`, `SearchGateway`; `sessions_manage.go` `searchHitMax`, `searchBudget` |
-| Export | Markdown of the transcript. `POST` export writes under the user's Downloads with mode `0600` and returns the path. `GET` markdown returns the bytes. | `markdown.go`; `sessions.go:sessionMarkdown` |
-| Delete | Move the plugin-declared files into `<state>/trash/sessions/<key>/`. A file whose mtime changed during the move returns `active` and is left in place. Gateway-only rows move recording files and write a hide stamp. Alma and any plugin that sets `deletable: false` refuse. | `manage.go:Delete`, `TrashDir`, `ErrActive`; `gateway_delete.go:DeleteGateway` |
-| Restore | Move the trash folder back to the original paths. Refuse if the destination exists. | `manage.go:Restore` |
-| Purge | Delete one trash key, or all keys currently listed. Paths must stay under the trash root after canonicalize. | `manage.go:Purge` |
-| Relocate | Claude plugin only. Rewrites `cwd` inside that project's JSONL and the index, with a backup folder. Body cap 16 KiB. `from` and `to` are absolute paths the plugin checks. | `relocate_claude.go:RelocateClaudeProject`; manage route body limit |
+| Export | Markdown of the transcript. `POST` export writes under the user's Downloads with mode `0600` and returns the path. File stem is the agent id, `-`, and the session id truncated to 12 characters then mapped to `[A-Za-z0-9_-]` only (`internal/gui/sessions.go:sessionMarkdown`); after normalization the path must stay under Downloads. No session body in logs or error text. `GET` markdown returns the bytes. | `markdown.go`; `sessions.go:sessionMarkdown` |
+| Delete | Move the plugin-declared files into `<state>/trash/sessions/<key>/`. A file whose mtime changed during the move returns `active` and is left in place. Gateway-only rows move recording files and write a hide stamp. Alma and any plugin that sets `deletable: false` refuse. Implementation waits on section 4.3 (same review as `prepare_dest`). | `manage.go:Delete`, `TrashDir`, `ErrActive`; `gateway_delete.go:DeleteGateway` |
+| Restore | Move the trash folder back to the original paths. Refuse if the destination exists. Waits on section 4.3. | `manage.go:Restore` |
+| Purge | Delete one trash key, or all keys currently listed. Paths must stay under the trash root after canonicalize. Waits on section 4.3. | `manage.go:Purge` |
+| Relocate | Claude plugin only. Rewrites `cwd` inside that project's JSONL and the index, with a backup folder. Body cap 16 KiB. `from` and `to` are absolute paths the plugin checks. Waits on section 4.3. | `relocate_claude.go:RelocateClaudeProject`; manage route body limit |
 
 ## 2. Library parity
 
@@ -252,7 +257,9 @@ Reference: `internal/library/mcp.go:Server`, `ServerOf`, `mcpFormat` constants, 
 
 User fields: a writer loads the agent file, replaces or deletes only names in `Applied.mcp`, and copies every other key on an entry and every unknown sibling entry through (`mcp.go` foreign-entry checks used by `hubFor`).
 
-Env refs stay `${NAME}` in `library.json`. The plugin writes the syntax that agent reads (`envref.go:refsOf`). An agent with no syntax for a field that contains a ref does not receive that server.
+Env refs stay `${NAME}` in `library.json`. The plugin writes the syntax that agent reads (`envref.go:refsOf`). Formats without env-reference syntax (`internal/library/envref.go:refsOf` default arm): Claude Desktop (`fmtDesktop`), ZCode (`fmtZCode`), Antigravity, Alma, Cline, Kimi, Zed, Devin (`fmtDevin`), and the same class of agents — a server entry that contains a reference is not delivered to that agent; the writer must not substitute a default `${NAME}`.
+
+Per-agent MCP file formats also include Copilot (`fmtCopilot`), Crush (`fmtCrush`), Claude Desktop (`fmtDesktop`), ZCode (`fmtZCode`), Devin (`fmtDevin`), and Pi's native file (`fmtPiNative`, second file beside the adapter) as wired in `internal/library/targets.go`.
 
 | Plugin format id | Header syntax | Env syntax | Reference format |
 |---|---|---|---|
@@ -262,6 +269,12 @@ Env refs stay `${NAME}` in `library.json`. The plugin writes the syntax that age
 | cursor | `${env:NAME}` | `${env:NAME}` | `fmtCursor` |
 | goose | `${NAME}` plus `env_keys` | `env_keys` only | `fmtGoose` |
 | dsh | `!!js` `process.env` expression | same | `fmtDsh` |
+| copilot | `${NAME}` | `${NAME}` | `fmtCopilot` |
+| crush | `${NAME}` | `${NAME}` | `fmtCrush` |
+| claude-desktop | none (refs omitted) | none | `fmtDesktop` |
+| zcode | none for library servers | none | `fmtZCode` |
+| devin | none | none | `fmtDevin` |
+| pi-native | `${NAME}` | `${NAME}` | `fmtPiNative` |
 | grok-toml, hermes-yaml, pi-json, kimi, gemini, cline, zed, kiro, antigravity, alma, omp, commandcode | plugin table, default `${NAME}` when the reference `refsOf` arm says `refDollar` | same | `mcp.go` format list |
 
 Tools-off: `disabled_tools` is written in the agent's list or deny rule. `Applied.tools_off` and `Applied.tool_rules` record the exact entries. A tool the user added to the deny list is not removed.
@@ -337,9 +350,9 @@ R-40 and R-41 call the R-35 writer. They do not start until the write review has
 
 Reference: `hooks.go:Hook`, `HookEvents`, `HookEntry`; `subagents.go` file table; `projects.go:Project`.
 
-Hooks: one command, portable event `turn-end`, `after-tool`, `before-tool`, `prompt`, `session-start`, or `<agent>:<Event>`. Matcher `shell` or `edit` maps to the agent's tool names. `Applied.hooks` stores the JSON entry exactly. Removal only if the file still contains that JSON. User hooks beside it stay. Plugins in v0.2.0 that implement hooks: Claude (`settings.json`), Codex (`hooks.json`), Gemini (`settings.json`, timeout in milliseconds), Cursor (`hooks.json`, flat entries). Others report unsupported and are skipped.
+Hooks: one command, portable event `turn-end`, `after-tool`, `before-tool`, `prompt`, `session-start`, or `<agent>:<Event>`. Matcher `shell` or `edit` maps to the agent's tool names. `Applied.hooks` stores the JSON entry exactly. Removal only if the file still contains that JSON. User hooks beside it stay. Plugins in v0.2.0 that implement hooks: Claude (`settings.json`), Codex (`hooks.json`), Gemini (`settings.json`, timeout in milliseconds), Cursor (`hooks.json`, flat entries), Grok and Grok App (`config.toml`, `internal/library/hooks.go:hookSpecOf`). Others report unsupported and are skipped.
 
-Subagents: one markdown or TOML file per agent, hash stored in `Applied.subagents`. A changed file is the user's and is not deleted. Shapes follow `subagents.go` comments for Claude, Codex, OpenCode, Gemini, Qwen, Droid, Grok, Cursor. Skills and MCP names inside a subagent are written only when that plugin says it reads them.
+Subagents: one markdown or TOML file per agent, hash stored in `Applied.subagents`. A changed file is the user's and is not deleted. Shapes follow `subagents.go` comments for Claude, Codex, OpenCode, Gemini, Qwen, Droid, Grok, Cursor, and Copilot CLI (`<copilot home>/agents/<name>.agent.md`, `internal/library/subagents.go`). Skills and MCP names inside a subagent are written only when that plugin says it reads them.
 
 Projects: a directory the user adds. Skills and MCP servers are placed only in paths the plugin declares under that directory (`Placed`, `Wrote`). Empty directories hofund created are removed. A `.gitignore` is added only when the plugin asks and `Applied` records that hofund created it. Copy versus link is the project's `copy` flag.
 
@@ -500,7 +513,15 @@ Threat: a sync deletes user MCP entries, follows a symlink into another home, or
 | Project path | The project dir must be absolute, canonical, and not the config directory. Placed paths are relative and must stay under the project dir. | `library::project::place` | `project_place_stays_inside` |
 | Crash heal | Section 3.2. Heal never deletes bytes it cannot prove it wrote. | `library::heal` | `heal_leaves_diverged_file` |
 | Concurrent writers | Flock. A second process waits or returns `Unavailable` after 30 seconds. | `library::lock` | `second_writer_waits` |
-| Revision | Control mutations require `expected_revision`. The lock is taken, the file is reread, and a mismatch returns `409` without writing. | daemon handler | `library_stale_revision_409` |
+| Revision | Control mutations require `expected_revision` when the client sends one. The lock is taken, the file is reread, and a mismatch returns `409` without writing. | daemon handler | `library_stale_revision_409` |
+
+Session file mutation (R-34 delete, restore, purge, relocate, carry convert, export path) waits on this same review before implementation. Threat: a manage or export path follows a symlink out of the agent home or trash root.
+
+| Risk | Rule | Enforcement | Test |
+|---|---|---|---|
+| Symlink on delete or restore | Same no-follow and single-level resolve rules as `prepare_dest`. Trash paths must stay under `<state>/trash/sessions/` after canonicalize. Agent paths must stay under the plugin root. | `sessions::manage::*` | `manage_refuses_symlink_escape` |
+| Export path | Downloads directory only; stem from agent id and sanitized id only; mode `0600`; errors are generic. | export handler | `export_stays_in_downloads` |
+| Carry convert destination | New bytes only under the destination plugin's declared root via `prepare_dest`. | plugin convert + kernel check | `carry_convert_stays_in_root` |
 
 ### 4.4 MCP router command execution
 
@@ -558,9 +579,9 @@ The local user can still register any command. That is the product. The design c
 
 ## 5. Control API and CLI
 
-All routes are under the existing control listener. `version` is the control proto version. Mutating JSON bodies include `expected_revision`. Unknown request fields are rejected. Error body is `ErrorEnvelope`. Kinds used here: `Unauthorized` 401, `Forbidden` 403, `NotFound` 404, `Conflict` 409, `BadRequest` 400, `Unprocessable` 422, `Unavailable` 503, `Timeout` 504, `Internal` 500.
+All routes are under the existing control listener. `version` is the control proto version. Mutating JSON bodies include `expected_revision` when the client already tracks `revision`; omitting it remains valid for bodies the TUI draft sends with `{version, …}` only (`docs/tui-design.md` section 5). Unknown request fields are rejected except additive optional fields documented below. Error body is `ErrorEnvelope`. Kinds used here: `Unauthorized` 401, `Forbidden` 403, `NotFound` 404, `Conflict` 409, `BadRequest` 400, `Unprocessable` 422, `Unavailable` 503, `Timeout` 504, `Internal` 500.
 
-Session key in paths is `agent:id` with the colon percent-encoded. The JSON still has `agent` and `id`.
+Session key in paths is `agent:id` with the colon percent-encoded. The JSON still has `agent` and `id`; the path uses the same `id` string as each list row's `id` field.
 
 ### 5.1 Sessions routes
 
@@ -576,8 +597,8 @@ Session key in paths is `agent:id` with the colon percent-encoded. The JSON stil
 | `POST /v1/hofund/sessions/{key}/export` | `{version}` | `{version, path}` | `404` |
 | `GET /v1/hofund/sessions/search` | `agent`, `q` | `{version, hits:[{key, id, excerpt}], cut}` | `400` empty `q` |
 | `GET /v1/hofund/sessions/manage` | Query `agent` | `{version, revision, agents:[{agent, count, deletable}], agent, sessions:[…], trash:[{key, agent, id, title}], trash_dir, recording, recorded}` | none |
-| `GET /v1/hofund/sessions/reads` | none | `{version, revision, asked, all, found:[{agent, on}]}` | none |
-| `PATCH /v1/hofund/sessions/reads` | `{version, expected_revision, all?:bool, agents?:{id:bool}}` | the GET body | `409`, `400` bad id |
+| `GET /v1/hofund/sessions/reads` | none | `{version, revision, asked, all, enabled:[agent id], found:[{agent, on}]}` — `enabled` is the TUI shape; `found`, `all`, and `revision` are additive | none |
+| `PATCH /v1/hofund/sessions/reads` | `{version, expected_revision?, all?:bool, agents?:{id:bool}}` — accepts the TUI's `{version, …}` without `expected_revision` | same as GET | `409`, `400` bad id |
 | `POST /v1/hofund/sessions/recording` | `{version, expected_revision, on:bool, clear:bool}` | `{version, revision, recording:bool, recorded:bool}` | `409`. Review gate |
 | `POST /v1/hofund/sessions/delete` | `{version, agent, ids:[string]}` | `{version, deleted:[id], refused:[{id, error, active:bool}]}` | `400` |
 | `POST /v1/hofund/sessions/restore` | `{version, key}` | `{version, agent, id, title}` | `404`, `409` if destination exists (`Conflict`) |
@@ -680,20 +701,20 @@ Sizes match the backlog: S about 3–4h, M about 6–8h, L about 12–20h. Revie
 | 4 | R-32 | L | Remaining readers and WSL cache | R-29 | No. WSL must not start a stopped distro; that test is part of the row. |
 | 5 | R-33 projection | part of L | Ledger columns, header injection, merge and dedup | R-29 | No |
 | 6 | R-33 recording | part of L | Opt-in store, scrub, prune, clear | R-29 and the review | Yes |
-| 7 | R-34 | M–L | Resume argv, carry, transcript, search, export, delete, restore, purge, relocate | R-30, R-31 | No, provided delete uses the trash root checks in section 4.1. Relocate is a Claude plugin write and uses `prepare_dest`. |
+| 7 | R-34 | M–L | Resume argv, carry, transcript, search, export, delete, restore, purge, relocate | R-30, R-31 | Resume, transcript, and search: no extra review. Relocate, carry convert writes, delete, restore, purge, and export path: yes — section 4.3 (same gate as `prepare_dest`) before implementation. |
 | 8 | R-35 | L | library.json, lock, Applied, backups, instruction splice, sync engine, library CLI status and instructions | This document and the review | Yes. This is the writer every later library row calls. |
 | 9 | R-36 | M | Library control routes for status, sync, instructions, backups. Later routes return 404 until their row. | R-35 | The sync route is covered by the R-35 review. Do not implement sync before that review. |
 | 10 | R-37 | L | MCP formats, env refs, tools-off, local, check, MCP CLI | R-35 | Yes. It writes agent config and can spawn a check process. The spawn waits on the R-38 review as well if the check lands in the same change as the writer. Split the writer from the spawn if needed so the writer review is not blocked on the process review. |
-| 11 | R-38 | L | Hub endpoints, pool, idle,| 11 | R-38 | L | Hub routes `/mcp/hofund/hub` and `/mcp/hofund/hub/{agent}`, `/mcp/run/{name}`, backend pool, 10 minute and 15 minute idle, loopback guard, 50 second call wait, usage rows with `kind=mcp` and no arguments | R-37 | Yes. Command execution (section 4.4). |
+| 11 | R-38 | L | Hub routes `/mcp/hofund/hub` and `/mcp/hofund/hub/{agent}`, `/mcp/run/{name}`, backend pool, 10 minute and 15 minute idle, loopback guard, 50 second call wait, usage rows with `kind=mcp` and no arguments | R-37 | Yes. Command execution (section 4.4). |
 | 12 | R-39 | M | OAuth sign-in, credential-store tokens, metadata file, cancel and timeout, relay `/mcp/{name}` | R-37 | Yes for section 4.5. No child process, but a late token must fail the named test before merge. |
 | 13 | R-40 | L | `SKILL.md` model, GitHub, git, and local install, link versus copy, `~/.agents/skills` first, `rm`, use-library, keep-own | R-35 | Yes. Uses the R-35 writer. Do not start until that review has accepted the writer. |
 | 14 | R-41 | L | Update with commit or ETag, refuse local edits unless `--replace-edits`, hand-over, hand-back, off-here, groups, skills.sh and MCP registry | R-40 | Yes. Same writer. Market clients are fakes in tests. |
 | 15 | R-42 | M–L | Hooks, subagents, project skill and MCP folders | R-37, R-40 | Yes. Same writer. |
 | 16 | R-43 | M | RTK on and off per agent, install, upgrade, path, WSL argv | R-35 | Yes. `rtk init` goes through `hub::spawn` and waits on the section 4.4 review as well as the writer review. |
 | 17 | R-44 | M | TUI Sessions page: range, model, folder, newest first, enter resumes from server argv, `s` shows totals and the day chart | R-11, R-30 | No. Resume with a null argv does not spawn. Resume with argv uses `Command` and does not wait on R-34 for the empty state. |
-| 18 | R-45 | M–L | TUI Library page: instructions, MCP and router rows, skills, per-agent ticks, found rows, RTK | R-11, R-36, R-41 | No extra review. Mutations call routes whose implementations already waited. A 404 is the empty "not in this build" frame. |
+| 18 | R-45 | M–L | TUI Library page: read-only rows from `GET /v1/hofund/library` (instructions, MCP and router rows, skills, found rows, RTK). Per-agent ticks and library mutations are not in R-45. | R-11, R-36, R-41 | No extra review. Mutations call routes whose implementations already waited. A 404 is the empty "not in this build" frame. |
 
-Rows that write agent files (R-35, R-37, R-40, R-41, R-42, R-43) share one writer. The second review is of that writer plus section 4.3, not a separate review per row, unless a row adds a new write primitive. R-38 and the RTK installer share one spawn helper. The second review is of section 4.4 once. Recording is a separate review of section 4.2 and is not bundled with the writer.
+Rows that write agent files (R-35, R-37, R-40, R-41, R-42, R-43) share one writer. Session file mutation in R-34 (delete, restore, purge, relocate, carry convert, export path) shares the section 4.3 review with that writer. The second review is of section 4.3, not a separate review per row, unless a row adds a new write primitive. R-38 and the RTK installer share one spawn helper. The second review is of section 4.4 once. Recording is a separate review of section 4.2 and is not bundled with the writer.
 
 ### Risks
 
@@ -719,4 +740,4 @@ Rows that write agent files (R-35, R-37, R-40, R-41, R-42, R-43) share one write
 | Spawn | A hub `tools/call` whose arguments contain shell metacharacters leaves the child argv equal to the stored spec. |
 | OAuth | Cancel, then a token response, leaves the credential store empty. |
 | Kernel source | `crates/kernel/gateway` and `crates/kernel/router` contain no agent id and no reference-project name. Plugin crates own the format tables. |
-| Docs | The architecture dependency table and `expected_deps` list the new edges in the same change as the crate. |
+| Docs | The architecture dependency table and `expected_deps` list the new edges in the same change as the crate. When implementation rows land in `docs/feature-parity.md`, sections 6.1–6.5 and 9.6–9.7 will cite this document as evidence. |
