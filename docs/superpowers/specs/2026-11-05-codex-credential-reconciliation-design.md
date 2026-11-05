@@ -30,7 +30,7 @@ Single state machine: home owner, markers, adopt vs OAuth, store write-back. No 
 
 ## In-blob fields and marker precedence
 
-Non-secret JSON inside existing account secret (exact keys = implementation detail):
+Protocol metadata and candidate secrets stay inside the existing protected account-secret JSON; no plaintext journal. (Exact keys = implementation detail.)
 
 | Field | When set |
 |-------|----------|
@@ -108,9 +108,9 @@ Prerequisite: lease + full guard + fresh baseline + owner OK. **Noop/adopt must 
 |------|-------------------|------------|
 | 0 | **CandidatePending repair** (table below) | conflict → stop; **no generic OAuth in same call after repair branch** |
 | 1 | commit RefreshInFlight + fps above | **0 POST** |
-| 2 | Single OAuth POST (guard held) | definitive auth fail may clear InFlight; else keep → reauth |
+| 2 | Single OAuth POST (guard held) | only **definitive non-rotating issuer failure** may clear InFlight; unknown HTTP/timeout response **keeps** marker → reauth; transport **must not** auto-retry refresh POST unless provably unsent |
 | 3 | commit CandidatePending + candidate tuple | **Keep InFlight**; no claim recoverable candidate if commit fails; reauth if tokens lost in memory |
-| 4 | Re-read store; if baseline fp match → conditional write candidate | if third tuple vs baseline → **skip write**, **keep Pending** |
+| 4 | Re-read store; if baseline fp match → conditional write candidate | if third tuple vs baseline → **skip write**, **KEEP Pending**, **RETURN conflict**; **DO NOT run step 5** |
 | 5 | commit clear markers + full tuple secrets | failed clear **retains Pending**; store may hold candidate; next call verify + clear |
 
 Restart: ambiguous InFlight → reauth; Pending → step 0 repair only (**0 POST**).
@@ -119,9 +119,9 @@ Restart: ambiguous InFlight → reauth; Pending → step 0 repair only (**0 POST
 
 | Live store vs pending | Action | Same-call OAuth after? |
 |-----------------------|--------|------------------------|
-| Matches **candidate** fp | Clear markers if needed; return candidate access | No |
-| Matches **baseline** fp or explicit **ABSENT** | Conditional write candidate; clear; return candidate | No |
-| Third tuple / unexpected missing / invalid / unreadable / refused / unsafe | **Conflict**; set INVALID if unrecoverable; no adopt-back | No |
+| Matches **candidate** fp | After verified durable store (if write needed), clear markers; return candidate **only if** access still usable; if expired → **retryable refresh-needed** after clear (**no** known-expired success); same call **no POST**; next call new refresh under full guard | No |
+| Matches **baseline** fp or explicit **ABSENT** | Conditional write candidate; after verified durable store, clear; same usable vs expired return rules as candidate-match row | No |
+| Third tuple / unexpected missing / invalid / unreadable / refused / unsafe | **Conflict**; **keep Pending unchanged** (no commit); no adopt-back | No |
 
 Failed step 5: Pending + candidate remain; next entry repeats step 0 before noop/adopt/OAuth.
 
@@ -158,7 +158,7 @@ Usable access → commit full tuple → success **0 POST**. Expired → commit f
 |----|-------|-------|
 | M1 | Two accounts same home fail before POST | `rotate_for_test` |
 | M2–M4 | Protocol steps + clear fail + crash hooks | `rotate_for_test`, `access` |
-| M5 | Pending repair; no rollback | `access` |
+| M5 | Pending repair; no rollback; delayed Pending candidate expiry after repair clear | `access` |
 | M6–M7 | Expired adopt; 401 Replace + readopt | `access` |
 | M8 | Lock timeout zero side effects | `rotate_for_test` |
 | M9 | No double POST | `rotate_for_test` |
@@ -181,7 +181,7 @@ Usable access → commit full tuple → success **0 POST**. Expired → commit f
 
 ## Self-review
 
-Markers + repair table restored; step 0 blocks same-call OAuth; step 3 fail keeps InFlight; step 4 skip on third tuple; Missing allows live retry after TTL without stale success; waits 30s/10s/50ms; M12 expanded; no trailing whitespace.
+Final five mechanical fixes in this revision (doc text only; **not** runtime proof): (1) in-blob intro wording, (2) step 4 third-tuple skip/keep Pending/no step 5, (3) repair success rows usable vs expired-after-clear, (4) conflict row keeps Pending without INVALID commit, (5) step 2 definitive-fail vs ambiguous HTTP + no auto POST retry.
 
 ---
 
