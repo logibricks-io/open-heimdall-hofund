@@ -547,6 +547,22 @@ impl Router {
             .collect()
     }
 
+    /// Returns affinity candidates built while ordering hops for a route pool.
+    #[doc(hidden)]
+    pub fn test_planned_candidates(
+        &self,
+        route: &str,
+        conversation: &affinity::Conversation,
+    ) -> Vec<affinity::Candidate> {
+        let resolved = self
+            .resolve(route)
+            .unwrap_or_else(|error| panic!("resolve {route}: {error:?}"));
+        self.order_for(&resolved, Some(conversation))
+            .affinity
+            .unwrap_or_else(|| panic!("no affinity plan for {route}"))
+            .planned
+    }
+
     /// Runs `request` against the upstreams configured for its model.
     ///
     /// `inbound_protocol` is forwarded to each member so an adapter can tell
