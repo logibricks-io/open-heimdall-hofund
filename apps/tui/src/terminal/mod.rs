@@ -492,7 +492,10 @@ mod tests {
             stop_rx,
             || "t".to_owned(),
         ));
-        worker.await.expect("worker join");
+        tokio::time::timeout(std::time::Duration::from_secs(60), worker)
+            .await
+            .expect("worker must exit when stop is already set")
+            .expect("worker join");
         while work_rx.try_recv().is_ok() {}
         assert_eq!(*deps.spawn_count.lock().expect("spawn"), 0);
     }

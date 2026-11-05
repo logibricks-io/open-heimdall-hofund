@@ -61,17 +61,12 @@ pub fn record_attach<D: HandoffDeps>(
     deps: &D,
 ) {
     if state.spawned
+        && daemon_pid == 0
         && let Some(child) = state.child_pid
+        && deps.process_alive(child)
     {
-        if daemon_pid == 0 {
-            if deps.process_alive(child) {
-                state.client = Some(client);
-                return;
-            }
-        } else if daemon_pid == child {
-            state.client = Some(client);
-            return;
-        }
+        state.client = Some(client);
+        return;
     }
 
     let own = state.spawned && state.child_pid == Some(daemon_pid) && daemon_pid != 0;
