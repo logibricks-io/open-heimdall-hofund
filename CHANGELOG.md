@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Usage reports (R-10, feature-parity rows 9.4 and 9.9): `hofund usage` period
+  presets, rolling `--days` / `--last`, `--since`, grouped `--group-by` (with
+  `--by` alias), `--csv`, `--json`, `--account`, and `--model`; control
+  `GET /v1/hofund/usage` query filters and additive TTFT / tokens-per-second
+  fields; ledger `session_id` column for session grouping; documented tokens/s
+  edge cases in `crates/kernel/usage/src/speed.rs`.
+
 - Subscription plugins for Grok Build, Cursor, and Cline (feature-parity row 3.5,
   part 1): device or browser sign-in, agent auth import where supported, token
   refresh, model lists, quota reads, and chat or Responses upstream for Grok
