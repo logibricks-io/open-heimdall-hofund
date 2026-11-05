@@ -20,7 +20,7 @@ use ratatui::backend::CrosstermBackend;
 use tokio::sync::mpsc;
 
 use crate::app::{App, AppAction};
-use crate::gateway::{HandoffState, WATCH_INTERVAL, run_handoff_tick};
+use crate::gateway::{HandoffDeps, HandoffState, WATCH_INTERVAL, run_handoff_tick};
 use crate::pages::read_path;
 use crate::quit::{QuitAction, perform_quit};
 use crate::runtime::{
@@ -153,11 +153,18 @@ async fn async_main(config: &Path, no_color: bool) -> Result<QuitAction, String>
         }
     }
 
+    let _ = shutdown_handoff_worker(&handoff_stop_tx, handoff_task).await;
+
+    perform_quit(config, &handoff_snapshot, live.client(), live.as_ref()).await
+}
+
+async fn shutdown_handoff_worker(
+    handoff_stop_tx: &tokio::sync::watch::Sender<bool>,
+    handoff_task: tokio::task::JoinHandle<()>,
+) {
     let _ = handoff_stop_tx.send(true);
     handoff_task.abort();
     let _ = handoff_task.await;
-
-    perform_quit(config, &handoff_snapshot, live.client(), live.as_ref()).await
 }
 
 fn spawn_handoff_worker(
@@ -165,58 +172,75 @@ fn spawn_handoff_worker(
     config: PathBuf,
     listen: std::net::SocketAddr,
     work_tx: mpsc::Sender<WorkerMsg>,
-    mut handoff_stop: tokio::sync::watch::Receiver<bool>,
+    handoff_stop: tokio::sync::watch::Receiver<bool>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut watch = tokio::time::interval(WATCH_INTERVAL);
-        watch.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let tokens = TokenReader::new(config.clone());
-        let mut state = HandoffState::default();
-        loop {
-            if *handoff_stop.borrow() {
-                break;
-            }
-            tokio::select! {
-                biased;
-                changed = handoff_stop.changed() => {
-                    if changed.is_ok() && *handoff_stop.borrow() {
-                        break;
-                    }
+        run_handoff_worker_loop(live, config, listen, work_tx, handoff_stop, move || {
+            tokens.read()
+        })
+        .await;
+    })
+}
+
+async fn run_handoff_worker_loop<D, R>(
+    deps: Arc<D>,
+    config: PathBuf,
+    listen: std::net::SocketAddr,
+    work_tx: mpsc::Sender<WorkerMsg>,
+    mut handoff_stop: tokio::sync::watch::Receiver<bool>,
+    mut read_token: R,
+) where
+    D: HandoffDeps + Send + Sync,
+    R: FnMut() -> String + Send,
+{
+    let mut watch = tokio::time::interval(WATCH_INTERVAL);
+    watch.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut state = HandoffState::default();
+    loop {
+        if *handoff_stop.borrow() {
+            break;
+        }
+        tokio::select! {
+            biased;
+            changed = handoff_stop.changed() => {
+                if changed.is_ok() && *handoff_stop.borrow() {
+                    break;
                 }
-                _ = watch.tick() => {
-                    if *handoff_stop.borrow() {
-                        break;
-                    }
-                    let outcome = run_handoff_tick(
-                        live.as_ref(),
-                        &config,
-                        &mut || tokens.read(),
-                        listen,
-                        &mut state,
-                        &mut |state| {
-                            let snapshot = HandoffSnapshot {
-                                spawned: state.spawned,
-                                child_pid: state.child_pid,
-                            };
-                            let _ = work_tx.try_send(WorkerMsg::HandoffProgress { snapshot });
-                        },
-                    )
-                    .await;
-                    let snapshot = HandoffSnapshot {
-                        spawned: state.spawned,
-                        child_pid: state.child_pid,
-                    };
-                    if work_tx
-                        .send(WorkerMsg::Handoff { outcome, snapshot })
-                        .await
-                        .is_err()
-                    {
-                        break;
-                    }
+            }
+            _ = watch.tick() => {
+                if *handoff_stop.borrow() {
+                    break;
+                }
+                let outcome = run_handoff_tick(
+                    deps.as_ref(),
+                    &config,
+                    &mut read_token,
+                    listen,
+                    &mut state,
+                    &mut |state| {
+                        let snapshot = HandoffSnapshot {
+                            spawned: state.spawned,
+                            child_pid: state.child_pid,
+                        };
+                        let _ = work_tx.try_send(WorkerMsg::HandoffProgress { snapshot });
+                    },
+                )
+                .await;
+                let snapshot = HandoffSnapshot {
+                    spawned: state.spawned,
+                    child_pid: state.child_pid,
+                };
+                if work_tx
+                    .send(WorkerMsg::Handoff { outcome, snapshot })
+                    .await
+                    .is_err()
+                {
+                    break;
                 }
             }
         }
-    })
+    }
 }
 
 struct TokenReader {
@@ -251,9 +275,9 @@ async fn open_control_if_needed(
 }
 
 /// Records a failed control stream open without exiting the UI loop.
-pub(crate) fn apply_event_stream_open_failure(
+pub(crate) fn apply_event_stream_open_failure<T>(
     app: &mut App,
-    control: &mut Option<ControlEventStream>,
+    control: &mut Option<T>,
     message: String,
 ) {
     *control = None;
@@ -339,20 +363,76 @@ fn read_token(config: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 
     use super::apply_event_stream_open_failure;
     use super::open_control_if_needed;
+    use super::run_handoff_worker_loop;
+    use super::shutdown_handoff_worker;
     use crate::app::App;
-    use crate::gateway::HandoffOutcome;
+    use crate::gateway::{HandoffDeps, HandoffOutcome};
     use crate::runtime::{HandoffSnapshot, WorkerMsg, apply_worker_msg};
     use crate::state::PageId;
     use crate::terminal::deps::LiveHandoff;
+    use hofund_control_client::hofund_control_proto::StatusResponse;
+    use hofund_control_client::{Client, ClientError};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+
+    struct HandoffWorkerFake {
+        spawn_count: Mutex<u32>,
+    }
+
+    impl HandoffWorkerFake {
+        fn new() -> Self {
+            Self {
+                spawn_count: Mutex::new(0),
+            }
+        }
+    }
+
+    impl HandoffDeps for HandoffWorkerFake {
+        fn held_locks(&self, _config: &Path) -> Result<Vec<PathBuf>, String> {
+            Ok(Vec::new())
+        }
+
+        async fn discover_attached(
+            &self,
+            _config: &Path,
+            _token: &str,
+        ) -> Result<Client, ClientError> {
+            Err(ClientError::ConnectionUnavailable("no daemon".to_owned()))
+        }
+
+        async fn probe_model_port(&self, _listen: SocketAddr) -> Result<(), ClientError> {
+            Err(ClientError::ConnectionUnavailable("quiet".to_owned()))
+        }
+
+        fn spawn_daemon(&self, _config: &Path) -> Result<u32, String> {
+            *self.spawn_count.lock().expect("spawn") += 1;
+            Ok(999)
+        }
+
+        async fn fetch_status(&self, _client: &Client) -> Result<StatusResponse, ClientError> {
+            Err(ClientError::ConnectionUnavailable("unused".to_owned()))
+        }
+
+        fn process_alive(&self, _pid: u32) -> bool {
+            true
+        }
+    }
+
+    fn listen() -> SocketAddr {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9)
+    }
 
     #[test]
     fn event_stream_reopen_failure_keeps_control_none_and_sets_flash() {
         let mut app = App::for_test(PageId::Agents);
-        let mut control = None;
+        let mut control: Option<u32> = Some(1);
         apply_event_stream_open_failure(
             &mut app,
             &mut control,
@@ -399,6 +479,52 @@ mod tests {
                 .is_some_and(|flash| !flash.text.is_empty()),
             "failure should surface as status flash text"
         );
+    }
+
+    #[tokio::test]
+    async fn handoff_worker_exits_without_spawning_when_stopped_up_front() {
+        tokio::time::pause();
+        let deps = Arc::new(HandoffWorkerFake::new());
+        let (work_tx, mut work_rx) = tokio::sync::mpsc::channel(4);
+        let (_stop_tx, stop_rx) = tokio::sync::watch::channel(true);
+        let worker = tokio::spawn(run_handoff_worker_loop(
+            deps.clone(),
+            PathBuf::from("/tmp/x.toml"),
+            listen(),
+            work_tx,
+            stop_rx,
+            || "t".to_owned(),
+        ));
+        worker.await.expect("worker join");
+        while work_rx.try_recv().is_ok() {}
+        assert_eq!(*deps.spawn_count.lock().expect("spawn"), 0);
+    }
+
+    #[tokio::test]
+    async fn shutdown_handoff_worker_stops_production_watch_loop() {
+        tokio::time::pause();
+        let deps = Arc::new(HandoffWorkerFake::new());
+        let (work_tx, _work_rx) = tokio::sync::mpsc::channel(8);
+        let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+        let worker = tokio::spawn(run_handoff_worker_loop(
+            Arc::clone(&deps),
+            PathBuf::from("/tmp/x.toml"),
+            listen(),
+            work_tx,
+            stop_rx,
+            || "t".to_owned(),
+        ));
+        tokio::task::yield_now().await;
+        let spawns_at_shutdown = *deps.spawn_count.lock().expect("spawn");
+        shutdown_handoff_worker(&stop_tx, worker).await;
+        tokio::time::advance(
+            crate::gateway::SPAWN_WAIT
+                + crate::gateway::WATCH_INTERVAL
+                + std::time::Duration::from_secs(1),
+        )
+        .await;
+        tokio::task::yield_now().await;
+        assert_eq!(*deps.spawn_count.lock().expect("spawn"), spawns_at_shutdown);
     }
 
     #[test]

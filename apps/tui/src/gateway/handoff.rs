@@ -244,7 +244,9 @@ pub const fn probe_timeout() -> Duration {
 
 #[cfg(test)]
 mod tests {
-    use super::{HandoffDeps, HandoffState, QuitDecision, decide_quit, run_handoff_tick};
+    use super::{
+        HandoffDeps, HandoffState, QuitDecision, decide_quit, record_attach, run_handoff_tick,
+    };
     use hofund_control_client::hofund_control_proto::StatusResponse;
     use hofund_control_client::{Client, ClientError};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -496,6 +498,66 @@ mod tests {
         assert_eq!(*deps.spawn_count.lock().expect("spawn"), 1);
     }
 
+    #[test]
+    fn record_attach_clears_spawned_when_status_pid_is_not_our_child() {
+        let deps = FakeDeps::new();
+        *deps.alive.lock().expect("alive") = false;
+        let mut state = HandoffState {
+            spawned: true,
+            child_pid: Some(999),
+            client: None,
+        };
+        record_attach(
+            &mut state,
+            100,
+            Client::tcp("127.0.0.1:9".parse().expect("addr"), "t"),
+            &deps,
+        );
+        assert!(!state.spawned);
+        assert_eq!(state.child_pid, None);
+    }
+
+    #[test]
+    fn record_attach_other_alive_daemon_clears_spawned_claim() {
+        let deps = FakeDeps::new();
+        let mut state = HandoffState {
+            spawned: true,
+            child_pid: Some(999),
+            client: None,
+        };
+        record_attach(
+            &mut state,
+            888,
+            Client::tcp("127.0.0.1:9".parse().expect("addr"), "t"),
+            &deps,
+        );
+        assert!(!state.spawned);
+        assert_eq!(state.child_pid, None);
+    }
+
+    #[tokio::test]
+    async fn handoff_tick_idle_while_spawned_child_still_alive() {
+        let deps = FakeDeps::new();
+        let mut state = HandoffState {
+            spawned: true,
+            child_pid: Some(999),
+            client: None,
+        };
+        let mut token = || "t".to_owned();
+        let mut notify = |_: &HandoffState| {};
+        let outcome = run_handoff_tick(
+            &deps,
+            Path::new("/tmp/x.toml"),
+            &mut token,
+            listen(),
+            &mut state,
+            &mut notify,
+        )
+        .await;
+        assert!(matches!(outcome, super::HandoffOutcome::Idle));
+        assert_eq!(*deps.spawn_count.lock().expect("spawn"), 0);
+    }
+
     #[tokio::test]
     async fn stopped_handoff_before_interval_does_not_respawn() {
         tokio::time::pause();
@@ -543,9 +605,8 @@ mod tests {
             }
         });
         let _ = stop_tx.send(true);
-        worker.abort();
+        worker.await.expect("handoff worker should exit");
         tokio::time::advance(super::WATCH_INTERVAL + std::time::Duration::from_secs(1)).await;
-        let _ = worker.await;
         assert_eq!(*deps.spawn_count.lock().expect("spawn"), 0);
     }
 }

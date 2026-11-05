@@ -72,6 +72,12 @@ pub async fn any_connected_agent(client: &Client) -> Result<bool, String> {
         .any(|entry| entry.state == AgentState::Connected))
 }
 
+/// Picks the pid shown when leaving a spawned daemon running (status wins over snapshot).
+#[must_use]
+pub(crate) fn resolve_leave_running_pid(status_pid: Option<u32>, child_pid: Option<u32>) -> u32 {
+    status_pid.or(child_pid).unwrap_or(0)
+}
+
 /// Builds the leave-running stderr line (pure, testable).
 #[must_use]
 pub fn leave_running_notice(pid: u32, log_path: &str) -> String {
@@ -101,7 +107,7 @@ pub async fn perform_quit(
             } else {
                 None
             };
-            let pid = status_pid.or(handoff.child_pid).unwrap_or(0);
+            let pid = resolve_leave_running_pid(status_pid, handoff.child_pid);
             let log = spawn::daemon_log_path(config)
                 .map(|path| path.display().to_string())
                 .unwrap_or_else(|| ".hofund/daemon-<id>.log".to_owned());
@@ -169,7 +175,7 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::{Arc, Mutex};
 
-    use super::{QuitShutdown, leave_running_notice, perform_quit};
+    use super::{QuitShutdown, leave_running_notice, perform_quit, resolve_leave_running_pid};
     use crate::gateway::{HandoffDeps, HandoffState, run_handoff_tick};
     use crate::runtime::HandoffSnapshot;
     use hofund_control_client::{Client, ClientError};
@@ -178,6 +184,7 @@ mod tests {
         token: String,
         shutdown_calls: AtomicU32,
         discover_calls: AtomicU32,
+        wait_calls: AtomicU32,
         discover_ok: Mutex<bool>,
     }
 
@@ -187,6 +194,7 @@ mod tests {
                 token: token.into(),
                 shutdown_calls: AtomicU32::new(0),
                 discover_calls: AtomicU32::new(0),
+                wait_calls: AtomicU32::new(0),
                 discover_ok: Mutex::new(true),
             }
         }
@@ -212,6 +220,7 @@ mod tests {
         }
 
         async fn wait_after_shutdown(&self, _config: &Path) -> Result<(), String> {
+            self.wait_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
     }
@@ -289,6 +298,12 @@ mod tests {
     }
 
     #[test]
+    fn leave_running_pid_prefers_status_over_child_snapshot() {
+        assert_eq!(resolve_leave_running_pid(Some(4242), Some(999)), 4242);
+        assert_eq!(resolve_leave_running_pid(None, Some(999)), 999);
+    }
+
+    #[test]
     fn leave_running_notice_contains_pid_log_and_service_line() {
         let text = leave_running_notice(4242, "/tmp/.hofund/daemon-test.log");
         assert!(text.contains("4242"));
@@ -331,7 +346,22 @@ mod tests {
             .await
             .expect("quit");
         assert_eq!(quit_deps.shutdown_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(quit_deps.wait_calls.load(Ordering::SeqCst), 1);
         tick.abort();
+    }
+
+    #[tokio::test]
+    async fn shutdown_spawned_waits_after_control_shutdown() {
+        let quit_deps = FakeQuitDeps::new("t");
+        let snapshot = HandoffSnapshot {
+            spawned: true,
+            child_pid: Some(999),
+        };
+        perform_quit(Path::new("/tmp/x.toml"), &snapshot, None, &quit_deps)
+            .await
+            .expect("quit");
+        assert_eq!(quit_deps.shutdown_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(quit_deps.wait_calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
