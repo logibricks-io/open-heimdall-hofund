@@ -115,6 +115,28 @@ fn v4_root_union_folded_where_refused() {
 }
 
 #[test]
+fn r4_73_messages_input_schema_root_union_folded_up_front() {
+    let state = RequestState::default();
+    let schema = r#"{"anyOf":[{"type":"object","properties":{"a":{"type":"string"}}}]}"#;
+    let body = format!(
+        r#"{{"model":"demo","tools":[{{"name":"union","input_schema":{schema}}},{{"name":"plain","input_schema":{{"type":"object","properties":{{"b":{{"type":"string"}}}}}}}}]}}"#
+    );
+    let (folded, changed) = fold_object_roots(
+        "https://relay.test",
+        "anthropic-messages",
+        "demo",
+        &state,
+        body.as_bytes(),
+    );
+    assert!(changed);
+    let value: Value = serde_json::from_slice(&folded).expect("json");
+    let union = &value["tools"][0]["input_schema"];
+    assert_eq!(union["type"], "object");
+    assert!(union.get("anyOf").is_none());
+    assert_eq!(value["tools"][1]["input_schema"]["type"], "object");
+}
+
+#[test]
 fn v4_responses_namespace_tools_folded() {
     // Reference foldTools: a Responses namespace's own tools are folded.
     let body = br#"{"model":"m","tools":[{"type":"namespace","name":"ns","tools":[{"type":"function","name":"f","parameters":{"anyOf":[{"type":"object","properties":{"a":{"type":"string"}}}]}}]}]}"#;

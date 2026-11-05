@@ -142,7 +142,8 @@ pub fn fold_object_roots(
     state: &RequestState,
     body: &[u8],
 ) -> (Vec<u8>, bool) {
-    if host(base_url) != "api.x.ai" && !state.folds_root(model) {
+    if host(base_url) != "api.x.ai" && protocol != "anthropic-messages" && !state.folds_root(model)
+    {
         return (body.to_vec(), false);
     }
     fold_encoded(protocol, body)
@@ -151,7 +152,10 @@ pub fn fold_object_roots(
 /// Folds every eligible function schema in a Chat or Responses body.
 #[must_use]
 pub fn fold_encoded(protocol: &str, body: &[u8]) -> (Vec<u8>, bool) {
-    if !matches!(protocol, "openai-chat" | "openai-responses") {
+    if !matches!(
+        protocol,
+        "openai-chat" | "openai-responses" | "anthropic-messages"
+    ) {
         return (body.to_vec(), false);
     }
     let Ok(mut root) = serde_json::from_slice::<Value>(body) else {
@@ -180,6 +184,15 @@ fn fold_tools(protocol: &str, tools: &mut Value) -> bool {
         {
             if let Some(nested) = tool.get_mut("tools") {
                 changed |= fold_tools(protocol, nested);
+            }
+            continue;
+        }
+        if protocol == "anthropic-messages" {
+            if tool.get("type").is_some() {
+                continue;
+            }
+            if let Some(input_schema) = tool.get_mut("input_schema") {
+                changed |= fold_object_root(input_schema);
             }
             continue;
         }

@@ -647,6 +647,26 @@ impl Allowance {
             .fold(0.0, f64::max)
     }
 
+    /// Greatest used share among short windows that count `model`, excluding
+    /// budget spans of a day or longer (`reference: provider.Allowance.CapUsed`).
+    #[must_use]
+    pub fn cap_used(&self, model: &str, now: SystemTime) -> f64 {
+        self.windows
+            .iter()
+            .filter(|window| window.counts(model))
+            .filter(|window| window.window_span.is_some_and(|span| span < BUDGET_SPAN))
+            .filter(|window| !window.expired(now))
+            .map(|window| window.used)
+            .fold(0.0, f64::max)
+    }
+
+    /// Whether `used` is at the low band for budget windows alone, not for a
+    /// nearly full rate cap (`reference: routes.Seat.WeekLow`).
+    #[must_use]
+    pub fn week_low(&self, model: &str, used: f64, now: SystemTime) -> bool {
+        (90.0..98.0).contains(&used) && self.cap_used(model, now) < 90.0
+    }
+
     /// Applicable reset deadlines, earliest first.
     #[must_use]
     pub fn renewals(&self, model: &str, now: SystemTime) -> Vec<SystemTime> {

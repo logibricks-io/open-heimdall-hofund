@@ -47,6 +47,7 @@ enum Kind {
     ResponsesCreatedThenEnd,
     ResponsesNothing,
     ResponsesPartialThenError,
+    RegionFailThenOk,
 }
 
 #[async_trait]
@@ -79,6 +80,17 @@ impl Member for Fake {
         self.hits.fetch_add(1, Ordering::SeqCst);
         match self.kind {
             Kind::Status(status, message) => Err(PluginError::status_error(status, message)),
+            Kind::RegionFailThenOk => {
+                let hit = self.hits.load(Ordering::SeqCst);
+                if hit == 1 {
+                    Err(PluginError::status_error(
+                        400,
+                        "User location is not supported for the API use.",
+                    ))
+                } else {
+                    Ok(Completion::Unary(Box::new(reply())))
+                }
+            }
             Kind::Connect(message) => Err(PluginError::connect(message)),
             Kind::Transport(message) => Err(PluginError::transport(message)),
             Kind::Auth => Err(PluginError::auth("denied")),
@@ -826,6 +838,67 @@ async fn c10_region_refusal_asks_the_next_member_as_any_failure() {
     let routed = dispatch(&router, "demo").await.expect("region failover");
     assert_eq!(routed.upstream_id, "shared");
     assert_eq!(mate.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn r4_71_region_refusal_rests_no_account() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let member = fake_on(
+        "prov",
+        "prov",
+        &hits,
+        Kind::Status(400, "User location is not supported for the API use."),
+    );
+    let book = Cooldowns::new(CooldownPolicy::default());
+    let error = PluginError::status_error(400, "User location is not supported for the API use.");
+    assert_eq!(book.record_failure(member.id(), &error), None);
+    let router = router(vec![member]);
+    let _ = dispatch(&router, "demo").await;
+    assert_eq!(hits.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn r4_71_second_region_refusal_skips_provider_mates() {
+    let first = Arc::new(AtomicUsize::new(0));
+    let second = Arc::new(AtomicUsize::new(0));
+    let other = Arc::new(AtomicUsize::new(0));
+    let router = router(vec![
+        fake_on(
+            "shared",
+            "a1",
+            &first,
+            Kind::Status(400, "User location is not supported for the API use."),
+        ),
+        fake_on(
+            "shared",
+            "a2",
+            &second,
+            Kind::Status(400, "User location is not supported for the API use."),
+        ),
+        fake_on("other", "b1", &other, Kind::Status(502, "down")),
+    ]);
+    let error = match dispatch(&router, "demo").await {
+        Ok(_) => panic!("expected failure"),
+        Err(RouterError::Upstream { error, .. }) => error,
+        Err(other) => panic!("{other:?}"),
+    };
+    assert_eq!(first.load(Ordering::SeqCst), 1);
+    assert_eq!(second.load(Ordering::SeqCst), 1);
+    assert_eq!(other.load(Ordering::SeqCst), 1);
+    assert!(error.message().contains("User location is not supported"));
+    assert!(
+        error
+            .message()
+            .contains("regional restriction on the model")
+    );
+}
+
+#[tokio::test]
+async fn r4_71_single_account_is_asked_once_more_on_region_refusal() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let router = router(vec![fake("solo", &hits, Kind::RegionFailThenOk)]);
+    dispatch(&router, "demo").await.expect("second try");
+    assert_eq!(hits.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]

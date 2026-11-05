@@ -101,7 +101,7 @@ pub(super) fn ready_for_new(candidates: &[Candidate], index: usize) -> bool {
     !candidate.resting
         && !candidate.aside
         && !stands_in(candidates, index)
-        && !candidate.low_allowance
+        && !(candidate.low_allowance && !candidate.week_low)
 }
 
 fn stands_in(candidates: &[Candidate], index: usize) -> bool {

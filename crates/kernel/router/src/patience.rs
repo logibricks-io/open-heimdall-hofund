@@ -54,6 +54,7 @@ pub(crate) fn busy(error: &PluginError, index: usize, now: Instant) -> Option<Bu
     }
     let status = error.status()?;
     let eligible = matches!(status, 408 | 500 | 502 | 503 | 504 | 529)
+        || (520..=524).contains(&status)
         || status == 429
             && error
                 .retry_after()
@@ -241,6 +242,18 @@ mod tests {
             replan(&mut failures, 12, now, Duration::from_secs(60), now).is_none(),
             "twelve rounds at most"
         );
+    }
+
+    #[test]
+    fn r4_75_cloudflare_520_through_524_count_as_busy() {
+        let now = std::time::Instant::now();
+        for status in [520, 521, 522, 523, 524] {
+            let error = PluginError::status_error(status, "cloudflare");
+            assert!(
+                busy(&error, 0, now).is_some(),
+                "status {status} should pass"
+            );
+        }
     }
 
     #[test]
