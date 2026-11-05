@@ -110,7 +110,7 @@ Up: each client frame's payload (the 5-byte head stripped) is `POST /aiserver.v1
 
 `BidiAppend` calls stay ordered. Up to 16 may be in flight (`H1.atOnce`). A message `kvReply` accepts (first payload byte `0x1a`, field 3 length-delimited) may sit in that window. Any other message waits until every earlier append has completed, goes alone, and is acknowledged before the next write. A native Run sends only KV replies in the window; a tool result does not (`index.mjs:2428-2433`). R-8 has the same split: the opening Run request and exec refusals are alone; blob replies pipeline.
 
-Deadline: 60 seconds plus `Math.ceil(body.length / 65536) * 1000` milliseconds, where `body` is the full protobuf built for that append (`index.mjs:2524-2525`, `2528-2532`). One byte of payload therefore gets 61 seconds. A timeout ends the Run with Connect code `deadline_exceeded`. A transport failure ends it with `unavailable`. The RunSSE read and the appends share one cancel flag.
+Deadline: 60 seconds plus `Math.ceil(body.length / 65536) * 1000` milliseconds, where `body` is the full protobuf built for that append (`index.mjs:2524-2525`, `2528-2532`). One byte of payload therefore gets 61 seconds, longer than the unary pool's 60-second read budget, so the host budget for an append must come from this formula (section 3.2, per-call read budget). A timeout ends the Run with Connect code `deadline_exceeded`. A transport failure ends it with `unavailable`. The RunSSE read and the appends share one cancel flag.
 
 ### 1.6 Messages the codec must read and write
 
@@ -289,13 +289,15 @@ Error classes, stable prefixes the plugin matches. These strings are the contrac
 
 Attack on prefixes: a future edit that rewords them silently disables the fallback. A plugin-host unit test asserts the prefixes. The Cursor plugin tests assert it switches on the kind and the prefix, not on a substring of a `reqwest` error.
 
+Per-call read budget: `Call` has no per-request timeout today (`plugin-sdk/src/transport.rs:234-238`), and the unary pool's read budget is a fixed 60 seconds (`plugin-host/src/pool.rs:23-24`), reported as `PluginErrorKind::Timeout` (`pool.rs:220-221`). Add a generic, optional per-call read budget on `Call` (for example `Call::read_timeout(Duration)`) that replaces the pool's 60-second budget for that one request, in either direction (longer or shorter). Each `BidiAppend` sets it to its section 1.5 deadline, so the plugin's deadline, not the pool's, ends the call. The plugin maps a `Timeout` from an append to the synthetic end frame with Connect code `deadline_exceeded`, which section 6 turns into `status_error(502, ...)`. A plugin-host test asserts that a per-call budget above 60 seconds is honoured and one below 60 seconds fires first.
+
 `PipedChild` has no exit status (`plugin-host/src/piped.rs:170-206`). The keychain fix in section 5 needs `exit_code()` after stdout reaches EOF. Drop still kills a child the caller abandoned. That method is generic.
 
 ### 3.3 What the plugin does with it
 
-HTTP/2 Run: `open_duplex` with `HttpVersionPin::Http2`, write the first frame only after a 2xx head (or skip it on non-2xx, section 1.2), then interleave writes and reads. HTTP/1.1 RunSSE: `Call::open_raw` on the HTTP/1.1 pool with `attempts = 1` (`plugin-sdk/src/transport.rs:307-327`), so a non-2xx status returns an unread body the plugin caps and maps like `failed` above; with one attempt the retry loop never runs, including on `PluginErrorKind::Connect`. Stream the 2xx body. Each `BidiAppend`: `Call::fetch` (`transport.rs:234-238`), which has no `attempts` parameter and sends once. Do not use `Call::open` or `Call::send` on either HTTP/1.1 Run leg. Concurrency of 16 is a `FuturesUnordered` polled on the execute task. `futures-util` is not a plugin dependency. The SDK re-exports the small piece the plugin needs (`FuturesUnordered` and a two-future race). It does not become a general runtime.
+HTTP/2 Run: `open_duplex` with `HttpVersionPin::Http2`, write the first frame only after a 2xx head (or skip it on non-2xx, section 1.2), then interleave writes and reads. HTTP/1.1 RunSSE: `Call::open_raw` on the HTTP/1.1 pool with `attempts = 1` (`plugin-sdk/src/transport.rs:307-327`), so a non-2xx status returns an unread body the plugin caps and maps like `failed` above; with one attempt the retry loop never runs, including on `PluginErrorKind::Connect`. Stream the 2xx body. Each `BidiAppend`: `Call::fetch` (`transport.rs:234-238`), which has no `attempts` parameter and sends once, with the per-call read budget (section 3.2) set to that append's section 1.5 deadline. Do not use `Call::open` or `Call::send` on either HTTP/1.1 Run leg. Concurrency of 16 is a `FuturesUnordered` polled on the execute task. `futures-util` is not a plugin dependency. The SDK re-exports the small piece the plugin needs (`FuturesUnordered` and a two-future race). It does not become a general runtime.
 
-Attack: sixteen blocking `Call::fetch` futures inside one task are fine only if each one yields. `Call::fetch` is async and uses the host client, so they will. A synchronous inflate of a 64 MiB frame on that task will stall the append window and the stall clock. Cap a frame at 64 MiB, inflate with a size cap, and treat a larger frame as malformed the way `frames` does.
+Attack: sixteen blocking `Call::fetch` futures inside one task are fine only if each one yields. `Call::fetch` is async and uses the host client, so they will. A synchronous inflate of a 64 MiB frame on that task will stall the append window and the stall clock. Cap a frame at 64 MiB, inflate with a size cap, and treat a larger frame as malformed the way `frames` does. The inflated output is capped at 64 MiB too; a gzip frame that inflates past the cap is malformed. The reference's `gunzipSync` has no output cap; this is a deliberate tightening (parity table, section 8).
 
 ## 4. Request mapping
 
@@ -414,7 +416,7 @@ Replace that with a unique directory under the process temp dir for each call (m
 
 ### 5.4 Team id from cli-config.json
 
-One in-process cache of `cli-config.json` (`teamRead`, `TEAM_TTL = 10_000`, `index.mjs:152-166`). It is not keyed by access-token hash. Re-read the file at most every 10 seconds; a parse failure keeps the previous `authInfo`; only `ENOENT` clears it.
+The file is `cli-config.json` in `CURSOR_CONFIG_DIR` when set and non-empty, else `$XDG_CONFIG_HOME/cursor` when `XDG_CONFIG_HOME` is set and non-empty, else `~/.cursor`, on every OS (no `APPDATA` on Windows; `cliConfigFile`, `index.mjs:123-127`). Do not reuse the plugin's `auth_file_dir()` (`plugins/subscriptions/cursor/src/auth.rs:36-54`), which resolves a different directory on Linux. One in-process cache of `cli-config.json` (`teamRead`, `TEAM_TTL = 10_000`, `index.mjs:152-166`). It is not keyed by access-token hash. Re-read the file at most every 10 seconds; a parse failure keeps the previous `authInfo`; only `ENOENT` clears it.
 
 Send decimal `x-cursor-team-id` only when `authInfo.authId` is non-empty, equals the JWT `sub` (`tokenSub`, `index.mjs:131-139`), and `activeTeamId` is a safe integer greater than zero (`teamOf`, line 142). Omit the header otherwise (`team-id.test.mjs`).
 
@@ -496,7 +498,7 @@ Session tests against the kit servers:
 - `REFUSED_STREAM` before headers: this Run falls back, the next Run tries HTTP/2.
 - Region body on HTTP/1.1: one HTTP/2 retry at the refreshed agent URL.
 - Sixteen blob replies in flight, and a following non-KV frame that does not start until those sixteen complete. A 17th KV reply waits.
-- Append timeout ends the Run.
+- Append timeout ends the Run: with an injected per-call budget equal to the section 1.5 formula (above 60 seconds for a non-empty body), the append times out at that budget, not at the unary pool's 60 seconds, and the Run ends with the synthetic `deadline_exceeded` end frame mapped to `status_error(502, ...)`.
 - Idle 60 seconds with a shrunk clock, and 240 seconds of heartbeats only, both become the stall error and do not set the HTTP/2 memory.
 - R-9: the `stall-550.test.mjs` trace shape (two server-completed calls, one exec, a count, a checkpoint, then heartbeats) emits one caller tool call and then ends, without waiting 240 seconds.
 - Cancel drops the duplex session and does not append further.
@@ -525,6 +527,7 @@ Goal: one account can stream text. Tools, images, reasoning events, and usage co
 | Piece | Files | Size | Risk |
 |---|---|---|---|
 | Duplex API and HTTP/1.1-only pool | `crates/kernel/plugin-api/src/host.rs`, `kernel.rs`; `crates/kernel/plugin-host/src/pool.rs`, `Cargo.toml`; SDK future helper | about 700 lines plus tests | Enabling `reqwest` `http2` without pinning the unary client to HTTP/1.1 changes every plugin. The unary test that a cleartext request sends `HTTP/1.1` is the guard. |
+| Per-call read budget | `plugin-sdk` `Call`, `plugin-api` `HttpRequest`, `plugin-host` `pool.rs` | about 120 lines | A budget that only shortens, or that the pool ignores, lets the 60-second unary budget end a long append as `Timeout` instead of `deadline_exceeded`. |
 | Gzip helper | `crates/kernel/plugin-sdk` | about 80 lines | `cargo deny` on `flate2` / `miniz_oxide`. No C backend. |
 | Piped exit status | `plugin-api` `PipedChild`, `plugin-host` `piped.rs` | about 120 lines | A drop-kills-before-wait race hides exit 44. |
 | Issue 609 | `cursor/src/cli.rs`, `lib.rs`, `endpoints.rs` | about 250 lines | Denial TTL that treats timeout as denial will hide a slow keychain for 10 minutes. Timeout must not set it. |
@@ -564,6 +567,7 @@ Depends on R-8's Run.
 - A second plugin retry after the client has seen a stream delta (section 4.2).
 - Free credit beyond included usage: plan bonus (`GetCurrentPeriodUsage` `planUsage.bonusSpend`, `remainingBonus`, `index.mjs:549-553`) and active cli grants (`GetUsageLimitStatusAndActiveGrants`, `clientType` `cli`, `index.mjs:556-578`), plus the rule that usable credit keeps serving after included usage is spent (`index.mjs:585-592`). Until a follow-up item implements both RPCs, the existing subscription `GetCurrentPeriodUsage` quota path stays as today; an account may still be quota-rested while bonus or a cli grant remains.
 - Enterprise `usage-summary` and included-only routing. Quota already has a separate path.
+- On-demand spend: after included usage is spent, the reference marks the included window aside when `onDemandOf` / `GetHardLimit` still allows paid use (`index.mjs:689-710`, `772`). Today's quota reads only the three percentages (`plugins/subscriptions/cursor/src/quota.rs:9-27`). Deferred with the credits item above.
 
 ### Parity matrix updates (when implemented)
 
@@ -575,6 +579,9 @@ Add rows or notes to `docs/feature-parity.md` for these documented deviations:
 | Keychain read timeout | 10-minute denial (`index.mjs:63-66`, `206-209`) | No denial on timeout (section 5.2) | R-8 |
 | Tool-step usage miss | May estimate (`index.mjs:2977-2982`) | Zeros only (section 4.3) | R-9 |
 | HTTP 429 classification | Single 429 in `statusOf` (`index.mjs:1679-1680`) | Quota vs rate split (section 6) | R-8 |
+| Stateless Run append window | `runOnce` passes no `overlaps`, so on HTTP/1.1 every client frame may be among 16 in flight (`index.mjs:2838-2842`, `openH1` default); only `runNative` limits the window to `kvReply` (`2762-2765`) | The opening request and exec refusals go alone; only blob replies pipeline (section 1.5) | R-8 |
+| OS name | Node `platform()` passed through, `win32` → `windows` (`index.mjs:55`) | Rust `std::env::consts::OS` with `macos` → `darwin`; a value with no Node equivalent (for example `solaris` vs `sunos`) falls back to `linux` (section 1.6) | R-8 |
+| Inflated frame size | `gunzipSync` has no output cap | Inflated output capped at 64 MiB (section 3.3) | R-8 |
 | Prompt / usage totals | Includes cache write in client prompt total (`index.mjs:1937-1939`) | Protocols with `input_includes_cache` omit cache write from prompt counts (section 4.3) | R-9 |
 
 Enterprise `usage-summary` and included-only routing remain explicitly deferred (section 8).
