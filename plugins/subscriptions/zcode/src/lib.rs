@@ -9,11 +9,13 @@ use std::sync::Arc;
 
 use hofund_plugin_api::{
     AccountId, AccountStatus, AgentSignIn, BinaryName, BuildError, ConfigError, HeaderName,
-    HostContext, ModelList, PluginError, PluginId, QuotaWindow, RawTable, Schema, SignInChallenge,
-    SignInCtx, SignInFlow, SignInFlowKind, SignInProof, Subscription, SubscriptionFactory,
-    SubscriptionSpec, UpstreamProvider, ValidConfig,
+    HostContext, ModelList, PluginError, PluginId, QuotaWindow, RawTable, Schema, SecretString,
+    SignInChallenge, SignInCtx, SignInFlow, SignInFlowKind, SignInProof, Subscription,
+    SubscriptionFactory, SubscriptionSpec, UpstreamProvider, ValidConfig,
 };
 use hofund_plugin_sdk::Contribution;
+use hofund_plugin_sdk::oauth::TokenCache;
+use std::time::Duration;
 
 mod agent_sign_in;
 mod api;
@@ -139,6 +141,7 @@ impl SubscriptionFactory for ZcodeFactory {
                 command: BinaryName::new("zcode"),
             },
             device_file,
+            team_keys: Arc::new(TokenCache::new(Duration::ZERO)),
         }))
     }
 }
@@ -147,6 +150,7 @@ struct Zcode {
     endpoints: Arc<Endpoints>,
     flow: SignInFlow,
     device_file: PathBuf,
+    team_keys: Arc<TokenCache<SecretString>>,
 }
 
 #[hofund_plugin_sdk::async_trait]
@@ -193,24 +197,23 @@ impl Subscription for Zcode {
         account: &AccountId,
         host: &HostContext,
     ) -> Result<AccountStatus, PluginError> {
-        match session::load(host, &self.endpoints, account, &self.device_file).await {
-            Ok(stored) if stored.ready(host.clock().now()) => Ok(AccountStatus::Ready),
-            Ok(_) => Ok(needs_sign_in("the stored Z Code sign-in has expired")),
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    hofund_plugin_api::PluginErrorKind::Auth
-                        | hofund_plugin_api::PluginErrorKind::Unsupported
-                ) =>
-            {
-                Ok(needs_sign_in(error.message()))
-            }
-            Err(error) => Err(error),
+        let Some(secret) = host.accounts().secret(account).await? else {
+            return Ok(needs_sign_in(
+                "no Z Code sign-in is stored for this account",
+            ));
+        };
+        match session::offline_status(&secret) {
+            Ok(()) => Ok(AccountStatus::Ready),
+            Err(error) => Ok(needs_sign_in(error.message())),
         }
     }
 
     async fn refresh(&self, account: &AccountId, host: &HostContext) -> Result<(), PluginError> {
-        refresh::run(host, &self.endpoints, account, &self.device_file).await
+        let result = refresh::run(host, &self.endpoints, account, &self.device_file).await;
+        if result.is_ok() {
+            self.team_keys.remove(account);
+        }
+        result
     }
 
     async fn quota(
@@ -218,8 +221,15 @@ impl Subscription for Zcode {
         account: &AccountId,
         host: &HostContext,
     ) -> Result<Vec<QuotaWindow>, PluginError> {
-        let stored = session::load(host, &self.endpoints, account, &self.device_file).await?;
-        quota::read(host, &stored, &self.device_file).await
+        let stored = session::load(
+            host,
+            &self.endpoints,
+            account,
+            &self.device_file,
+            &self.team_keys,
+        )
+        .await?;
+        quota::read(host, account, &stored, &self.device_file, &self.team_keys).await
     }
 
     async fn list_models(
@@ -227,8 +237,15 @@ impl Subscription for Zcode {
         account: &AccountId,
         host: &HostContext,
     ) -> Result<ModelList, PluginError> {
-        let stored = session::load(host, &self.endpoints, account, &self.device_file).await?;
-        models::list(host, &self.endpoints, &stored).await
+        let stored = session::load(
+            host,
+            &self.endpoints,
+            account,
+            &self.device_file,
+            &self.team_keys,
+        )
+        .await?;
+        models::list(host, account, &stored, &self.team_keys).await
     }
 
     fn upstream(
@@ -241,6 +258,7 @@ impl Subscription for Zcode {
             host.clone(),
             Arc::clone(&self.endpoints),
             self.device_file.clone(),
+            Arc::clone(&self.team_keys),
         )))
     }
 

@@ -39,6 +39,12 @@ impl PlanAuth {
     }
 }
 
+pub(crate) const LAPSED: &str = "lapsed";
+
+/// Why a team seat with a refused business token needs sign-in again.
+pub(crate) const LAPSED_REASON: &str =
+    "Z Code refused the stored team business sign-in; sign in again";
+
 pub(crate) fn credentials_path(home: &Path) -> PathBuf {
     home.join("v2").join("credentials.json")
 }
@@ -492,6 +498,9 @@ pub(crate) fn secret_blob(auth: &PlanAuth, device: &str) -> SecretObject {
 
 pub(crate) fn parse_secret(secret: &SecretString) -> Result<PlanAuth, PluginError> {
     let blob = SecretObject::parse(secret)?;
+    if blob.flag(LAPSED) {
+        return Err(PluginError::auth(LAPSED_REASON));
+    }
     let base = blob
         .text("base")
         .filter(|value| !value.is_empty())

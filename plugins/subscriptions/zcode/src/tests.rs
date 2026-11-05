@@ -359,8 +359,65 @@ fn a2d_18_business_api_401_reports_needs_sign_in() {
         json!({"code": 401, "msg": "token expired"}).to_string(),
     );
     let sub = subscription(&host);
+    let quota_error = block_on(sub.quota(&id, host.context())).expect_err("quota");
+    assert_eq!(quota_error.kind(), PluginErrorKind::Auth);
+    let secret = block_on(host.context().accounts().secret(&id))
+        .expect("read")
+        .expect("stored");
+    let blob = SecretObject::parse(&secret).expect("blob");
+    assert!(blob.flag(creds::LAPSED));
+    let calls_after_quota = host.http().calls().len();
     let status = block_on(sub.account_status(&id, host.context())).expect("status");
     assert!(matches!(status, AccountStatus::NeedsSignIn { .. }));
+    assert_eq!(host.http().calls().len(), calls_after_quota);
+}
+
+#[test]
+fn a2d_23_team_status_is_offline_and_project_key_is_cached() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_team(
+        &host,
+        Site::Zai,
+        ZAI_ANTHROPIC_BASE,
+        "team-biz",
+        "t1",
+        "tp1",
+    );
+    let sub = subscription(&host);
+    block_on(sub.account_status(&id, host.context())).expect("status 1");
+    block_on(sub.account_status(&id, host.context())).expect("status 2");
+    assert!(host.http().calls().is_empty());
+    host.http().enqueue(
+        json!({"code": 200, "data": [{"name": "zcode-team-api-key", "apiKey": "tk", "keyType": 2}]})
+            .to_string()
+            .into_bytes(),
+    );
+    host.http().enqueue(
+        json!({"code": 200, "data": {"secretKey": "tk.ts"}})
+            .to_string()
+            .into_bytes(),
+    );
+    host.http().enqueue(
+        json!({
+            "success": true,
+            "data": {"limits": [{"type": "TOKENS_LIMIT", "unit": 6, "number": 1, "percentage": 1.0}]}
+        })
+        .to_string()
+        .into_bytes(),
+    );
+    block_on(sub.quota(&id, host.context())).expect("quota 1");
+    assert_eq!(host.http().calls().len(), 3);
+    host.http().enqueue(
+        json!({
+            "success": true,
+            "data": {"limits": [{"type": "TOKENS_LIMIT", "unit": 6, "number": 1, "percentage": 2.0}]}
+        })
+        .to_string()
+        .into_bytes(),
+    );
+    block_on(sub.quota(&id, host.context())).expect("quota 2");
+    assert_eq!(host.http().calls().len(), 4);
 }
 
 #[test]

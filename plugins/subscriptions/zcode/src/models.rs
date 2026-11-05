@@ -1,19 +1,19 @@
 //! GLM model list from the plan Anthropic-compatible API.
 
-use hofund_plugin_api::{HostContext, ModelList, ModelSpec, PluginError};
+use hofund_plugin_api::{AccountId, HostContext, ModelList, ModelSpec, PluginError, SecretString};
 use hofund_plugin_sdk::Call;
 use hofund_plugin_sdk::json::{self, Value};
-use hofund_plugin_sdk::oauth::secret_text;
+use hofund_plugin_sdk::oauth::{TokenCache, secret_text};
 
-use crate::session::Stored;
-use crate::{APP_VERSION, Endpoints};
+use crate::APP_VERSION;
+use crate::session::{self, Stored};
 
 pub(crate) async fn list(
     host: &HostContext,
-    endpoints: &Endpoints,
+    account: &AccountId,
     stored: &Stored,
+    team_keys: &TokenCache<SecretString>,
 ) -> Result<ModelList, PluginError> {
-    let _ = endpoints;
     let url = format!("{}/v1/models", stored.auth.base.trim_end_matches('/'));
     let reply = Call::get(url.clone())
         .header("accept", "application/json")
@@ -22,6 +22,9 @@ pub(crate) async fn list(
         .fetch(host.http())
         .await?;
     if reply.status() == 401 || reply.status() == 403 {
+        if stored.auth.team() && stored.auth.api_key.is_none() {
+            session::drop_team_key_cache(team_keys, account);
+        }
         return Err(PluginError::auth(
             "Z Code refused the plan key while listing models",
         ));

@@ -2,22 +2,24 @@
 
 use std::path::Path;
 
-use hofund_plugin_api::{HostContext, PluginError, QuotaWindow, SecretString};
+use hofund_plugin_api::{AccountId, HostContext, PluginError, QuotaWindow, SecretString};
 use hofund_plugin_sdk::Call;
 use hofund_plugin_sdk::json::{self, Value};
-use hofund_plugin_sdk::oauth::secret_text;
+use hofund_plugin_sdk::oauth::{TokenCache, secret_text};
 
 use crate::APP_VERSION;
 use crate::http_auth::{
     auth_for_http_status, key_refused_code, parse_envelope_code, refusal_from_monitor_body,
 };
-use crate::session::Stored;
+use crate::session::{self, Stored};
 use crate::team;
 
 pub(crate) async fn read(
     host: &HostContext,
+    account: &AccountId,
     stored: &Stored,
     device_file: &Path,
+    team_keys: &TokenCache<SecretString>,
 ) -> Result<Vec<QuotaWindow>, PluginError> {
     let root = monitor_root(&stored.auth.base);
     if stored.auth.team() {
@@ -27,7 +29,17 @@ pub(crate) async fn read(
             .iter()
             .map(|(name, value)| (*name, value.as_str()))
             .collect();
-        let body = fetch_monitor(host, &url, &stored.api_key, &header_refs, device_file).await?;
+        let body = fetch_monitor(
+            host,
+            account,
+            stored,
+            team_keys,
+            &url,
+            &stored.api_key,
+            &header_refs,
+            device_file,
+        )
+        .await?;
         return windows_from_monitor(&body);
     }
     let plan_key =
@@ -35,12 +47,26 @@ pub(crate) async fn read(
             PluginError::auth("the stored Z Code sign-in has no plan key for quota")
         })?;
     let url = format!("{root}/api/monitor/usage/quota/limit");
-    let body = fetch_monitor(host, &url, plan_key, &[], device_file).await?;
+    let body = fetch_monitor(
+        host,
+        account,
+        stored,
+        team_keys,
+        &url,
+        plan_key,
+        &[],
+        device_file,
+    )
+    .await?;
     windows_from_monitor(&body)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn fetch_monitor(
     host: &HostContext,
+    account: &AccountId,
+    stored: &Stored,
+    team_keys: &TokenCache<SecretString>,
     url: &str,
     auth: &SecretString,
     extra_headers: &[(&str, &str)],
@@ -56,10 +82,14 @@ async fn fetch_monitor(
     }
     let reply = call.fetch(host.http()).await?;
     if !(200..300).contains(&reply.status()) {
-        return Err(auth_for_http_status(
-            reply.status(),
-            "Z Code quota request failed",
-        ));
+        let error = auth_for_http_status(reply.status(), "Z Code quota request failed");
+        if matches!(error.kind(), hofund_plugin_api::PluginErrorKind::Auth)
+            && stored.auth.team()
+            && stored.auth.api_key.is_none()
+        {
+            session::drop_team_key_cache(team_keys, account);
+        }
+        return Err(error);
     }
     let body: Value = json::from_slice(reply.body())
         .map_err(|_| PluginError::decode("Z Code quota reply is not JSON"))?;

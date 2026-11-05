@@ -5,8 +5,9 @@ use std::sync::Arc;
 
 use hofund_plugin_api::{
     AccountId, Completion, HostContext, PluginError, ProbeQuery, ProbeReport, ProtocolId, Request,
-    UpstreamProvider,
+    SecretString, UpstreamProvider,
 };
+use hofund_plugin_sdk::oauth::TokenCache;
 use hofund_plugin_sdk::wire::{self, Target};
 
 use crate::session;
@@ -17,6 +18,7 @@ pub(crate) struct ZcodeUpstream {
     host: HostContext,
     endpoints: Arc<Endpoints>,
     device_file: PathBuf,
+    team_keys: Arc<TokenCache<SecretString>>,
 }
 
 impl ZcodeUpstream {
@@ -25,12 +27,14 @@ impl ZcodeUpstream {
         host: HostContext,
         endpoints: Arc<Endpoints>,
         device_file: PathBuf,
+        team_keys: Arc<TokenCache<SecretString>>,
     ) -> Self {
         Self {
             account,
             host,
             endpoints,
             device_file,
+            team_keys,
         }
     }
 
@@ -40,6 +44,7 @@ impl ZcodeUpstream {
             &self.endpoints,
             &self.account,
             &self.device_file,
+            &self.team_keys,
         )
         .await
     }
@@ -67,14 +72,22 @@ impl UpstreamProvider for ZcodeUpstream {
             "user-agent".to_owned(),
             format!("ZCode/{APP_VERSION}"),
         )]);
-        wire::execute(
+        let result = wire::execute(
             self.host.http(),
             &target,
             Some(&stored.api_key),
             request,
             inbound,
         )
-        .await
+        .await;
+        if let Err(error) = &result
+            && matches!(error.kind(), hofund_plugin_api::PluginErrorKind::Auth)
+            && stored.auth.team()
+            && stored.auth.api_key.is_none()
+        {
+            session::drop_team_key_cache(&self.team_keys, &self.account);
+        }
+        result
     }
 
     async fn probe(&self, query: &ProbeQuery) -> Result<ProbeReport, PluginError> {
