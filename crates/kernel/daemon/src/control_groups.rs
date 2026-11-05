@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use hofund_agent::{GatewayTarget, catalog};
+use hofund_agent::{GatewayTarget, SidecarCheckpoint, catalog};
 use hofund_config::{
     Stays, edit_group_create, edit_group_delete, edit_group_patch, edit_group_restore, load,
     validate_group_rules,
@@ -110,9 +110,17 @@ pub(crate) async fn patch_group(
     let applied = ops.apply(&request.expected_revision, edited).await?;
     if request.rename_to.is_some() && effective_id != rename_from {
         let session = agent_session.unwrap_or_else(crate::agent_session);
-        if let Err(error) =
-            rename_group_agents(descriptions, &session, &rename_from, &effective_id).await
-        {
+        let mut checkpoint = SidecarCheckpoint::new();
+        if let Err(error) = rename_group_agents(
+            descriptions,
+            &session,
+            &rename_from,
+            &effective_id,
+            &mut checkpoint,
+        ) {
+            if let Err(restore) = checkpoint.restore() {
+                return Err(internal(restore.to_string()));
+            }
             let current = ops.get().await?;
             ops.apply(&current.disk_revision, backup).await?;
             return Err(error);
@@ -203,24 +211,17 @@ pub(crate) fn member_candidates(
     response
 }
 
-async fn rename_group_agents(
+fn rename_group_agents(
     descriptions: &'static [&'static AgentDescription],
     session: &hofund_agent::Session,
     from: &str,
     to: &str,
+    checkpoint: &mut SidecarCheckpoint,
 ) -> Result<(), ControlFailure> {
-    let from = from.to_owned();
-    let to = to.to_owned();
-    let session = session.clone();
-    tokio::task::spawn_blocking(move || {
-        let catalog = catalog(descriptions).map_err(|error| internal(error.to_string()))?;
-        catalog
-            .rename_group_refs(&session, &from, &to)
-            .map_err(|error| internal(error.to_string()))?;
-        Ok::<(), ControlFailure>(())
-    })
-    .await
-    .map_err(|_| internal("group rename agent task failed".to_owned()))??;
+    let catalog = catalog(descriptions).map_err(|error| internal(error.to_string()))?;
+    catalog
+        .rename_group_refs(session, from, to, checkpoint)
+        .map_err(|error| internal(error.to_string()))?;
     Ok(())
 }
 

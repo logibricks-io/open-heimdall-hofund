@@ -165,6 +165,13 @@ pub fn edit_group_patch(
                     "a group cannot classify with itself".to_owned(),
                 ));
             }
+            if let Some(new_id) = rename_to.map(str::trim).filter(|id| !id.is_empty())
+                && reference == format!("group/{new_id}")
+            {
+                return Err(ConfigError::Invalid(
+                    "a group cannot classify with itself".to_owned(),
+                ));
+            }
             table.insert("classifier", value(reference));
         } else {
             table.remove("classifier");
@@ -175,6 +182,9 @@ pub fn edit_group_patch(
             return Err(ConfigError::Invalid(
                 "a group must keep at least one member".to_owned(),
             ));
+        }
+        for (reference, _, _, _) in entries {
+            validate_member_ref(&before, reference)?;
         }
         let new_refs: Vec<String> = entries
             .iter()
@@ -514,5 +524,52 @@ listen = \"127.0.0.1:0\"\n\
         ));
         assert_eq!(outer.upstreams[0].effort.as_deref(), Some("high"));
         assert!(outer.upstreams[0].fast);
+    }
+
+    #[test]
+    fn r7a_group_patch_rejects_classifier_matching_rename_to() {
+        let (inner_text, id) = edit_group_create(BASE, "Team", "chat/m").expect("create");
+        let renamed = format!("renamed-{id}");
+        let classifier = format!("group/{renamed}");
+        let error = edit_group_patch(
+            &inner_text,
+            &id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(Some(classifier.as_str())),
+            None,
+            None,
+            Some(renamed.as_str()),
+        )
+        .expect_err("self classifier via rename_to");
+        assert!(
+            error.to_string().contains("classify with itself"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn r7a_group_patch_rejects_unknown_member_ref() {
+        let (text, id) = edit_group_create(BASE, "Team", "chat/m").expect("create");
+        let before = text.clone();
+        let error = edit_group_patch(
+            &text,
+            &id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&[("unknown/pair".to_owned(), String::new(), false, true)]),
+            None,
+            None,
+        )
+        .expect_err("unknown member");
+        assert!(error.to_string().contains("unknown member"), "{error}");
+        assert_eq!(before, text, "config text must be unchanged on rejection");
     }
 }

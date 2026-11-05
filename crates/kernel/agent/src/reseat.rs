@@ -1,22 +1,22 @@
 //! Moves agents off route models a disabled or removed provider no longer serves.
 
-use crate::{AgentError, Catalog, GatewayTarget, Session};
+use std::collections::HashSet;
+
+use crate::{AgentError, Catalog, GatewayTarget, Session, SidecarCheckpoint};
 
 /// Rewrites agent model settings that pointed at route models served through
 /// `provider_id`.
-///
-/// Agents store routed model ids (optionally prefixed; see `model_prefix`).
-/// `match_route_models` lists routed model ids whose upstreams used the
-/// provider before this edit (include removed routes when deleting a provider).
-/// `fallback_route_models` lists route ids that do not.
+#[allow(clippy::too_many_arguments)]
 pub fn reseat_after_provider_change(
     catalog: &Catalog,
     session: &Session,
-    target: &GatewayTarget,
+    gateway_target: &GatewayTarget,
     provider_id: &str,
     provider_still_present: bool,
     match_route_models: &[String],
-    fallback_route_models: &[String],
+    sendable_fallback_routes: &[String],
+    agent_visible_sendable: impl Fn(&str) -> Vec<String>,
+    checkpoint: &mut SidecarCheckpoint,
 ) -> Result<Vec<String>, AgentError> {
     let provider_id = provider_id.trim();
     let prefix = format!("{provider_id}/");
@@ -25,7 +25,6 @@ pub fn reseat_after_provider_change(
     } else {
         Vec::new()
     };
-    let fallback = fallback_route_models.first().cloned();
     let mut moved = Vec::new();
     for adapter in catalog.adapters() {
         if !adapter.detect(session) {
@@ -45,14 +44,27 @@ pub fn reseat_after_provider_change(
         if !on_provider {
             continue;
         }
+        let agent_models = agent_visible_sendable(adapter.id());
+        let target = gateway_target.clone().with_models(agent_models.clone());
+        adapter.record_sidecar_paths(session, checkpoint)?;
+        if agent_models.is_empty() {
+            adapter.set_model(session, &target, None)?;
+            moved.push(adapter.id().to_owned());
+            continue;
+        }
+        let visible: HashSet<String> = agent_models.iter().cloned().collect();
+        let fallback = sendable_fallback_routes
+            .iter()
+            .find(|model| visible.contains(*model))
+            .map(String::as_str);
         let current_route = route_model.as_deref().unwrap_or(current.as_str());
-        let replacement = same_provider
+        let replacement: Option<&str> = same_provider
             .iter()
             .find(|model| model.as_str() != current_route)
-            .or(same_provider.first())
-            .or(fallback.as_ref())
-            .map(String::as_str);
-        adapter.set_model(session, target, replacement)?;
+            .map(String::as_str)
+            .or_else(|| same_provider.first().map(String::as_str))
+            .or(fallback);
+        adapter.set_model(session, &target, replacement)?;
         moved.push(adapter.id().to_owned());
     }
     Ok(moved)

@@ -25,7 +25,7 @@ use crate::store::{
 };
 use crate::{
     AgentAdapter, AgentError, ConfigFile, ConnectionStatus, CredentialStore, FileChange,
-    GatewayTarget, Plan, Session, TargetOs,
+    GatewayTarget, Plan, Session, SidecarCheckpoint, TargetOs,
 };
 use crate::{DisconnectOutcome, usable_override};
 use crate::{active_provider, go_binary};
@@ -124,6 +124,7 @@ impl Catalog {
         session: &Session,
         from: &str,
         to: &str,
+        checkpoint: &mut SidecarCheckpoint,
     ) -> Result<Vec<String>, AgentError> {
         let from = from.trim().to_ascii_lowercase();
         let to = to.trim().to_ascii_lowercase();
@@ -137,7 +138,7 @@ impl Catalog {
             if !adapter.detect(session) {
                 continue;
             }
-            if adapter.rename_group_refs(session, &old_ref, &new_ref)? {
+            if adapter.rename_group_refs(session, &old_ref, &new_ref, checkpoint)? {
                 moved.push(adapter.id().to_owned());
             }
         }
@@ -691,6 +692,20 @@ impl Engine {
         self.apply_with(target, Choice::Set(id))
     }
 
+    fn record_sidecar_paths(
+        &self,
+        session: &Session,
+        checkpoint: &mut SidecarCheckpoint,
+    ) -> Result<(), AgentError> {
+        if !self.detect(session) {
+            return Ok(());
+        }
+        for chosen in self.chosen()? {
+            checkpoint.record(&chosen.path)?;
+        }
+        Ok(())
+    }
+
     fn rename_provider_refs(
         &self,
         session: &Session,
@@ -762,6 +777,7 @@ impl Engine {
         session: &Session,
         old_ref: &str,
         new_ref: &str,
+        checkpoint: &mut SidecarCheckpoint,
     ) -> Result<bool, AgentError> {
         if !self.detect(session) {
             return Ok(false);
@@ -802,6 +818,7 @@ impl Engine {
             if assignments.is_empty() {
                 continue;
             }
+            checkpoint.record(&chosen.path)?;
             backup_once(&chosen.path)?;
             let after = render(chosen.kind, Some(text), &assignments)?;
             write_atomic(&chosen.path, &after)?;
@@ -2084,14 +2101,24 @@ impl AgentAdapter for Compiled {
             .rename_provider_refs(session, from, to)
     }
 
+    fn record_sidecar_paths(
+        &self,
+        session: &Session,
+        checkpoint: &mut SidecarCheckpoint,
+    ) -> Result<(), AgentError> {
+        self.engine(session)?
+            .record_sidecar_paths(session, checkpoint)
+    }
+
     fn rename_group_refs(
         &self,
         session: &Session,
         old_ref: &str,
         new_ref: &str,
+        checkpoint: &mut SidecarCheckpoint,
     ) -> Result<bool, AgentError> {
         self.engine(session)?
-            .rename_group_refs(session, old_ref, new_ref)
+            .rename_group_refs(session, old_ref, new_ref, checkpoint)
     }
 
     fn configured_model(&self, session: &Session) -> Result<Option<String>, AgentError> {

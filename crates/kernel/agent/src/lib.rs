@@ -55,6 +55,7 @@ pub use hofund_plugin_api::{
 
 mod active_provider;
 mod catalog;
+mod checkpoint;
 mod credential;
 mod edit;
 mod go_binary;
@@ -66,6 +67,7 @@ mod store;
 mod yaml_edit;
 
 pub use catalog::{Catalog, Compiled, catalog, catalog_from, resolve, resolve_agent_path};
+pub use checkpoint::SidecarCheckpoint;
 pub use credential::CREDENTIAL_CHANGE_PREFIX;
 pub use profile::{
     ApplyOutcome, ProfileFields, apply_fields, in_use, is_profile_secret, snapshot_fields,
@@ -474,12 +476,27 @@ pub trait AgentAdapter: Sync {
         Ok(false)
     }
 
+    /// Records paths this adapter would touch on a model or reference rewrite.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentError`] when managed paths cannot be resolved.
+    fn record_sidecar_paths(
+        &self,
+        session: &Session,
+        checkpoint: &mut SidecarCheckpoint,
+    ) -> Result<(), AgentError> {
+        let _ = (session, checkpoint);
+        Ok(())
+    }
+
     /// Rewrites model settings that pointed at one group route id.
     fn rename_group_refs(
         &self,
         _session: &Session,
         _old_ref: &str,
         _new_ref: &str,
+        _checkpoint: &mut SidecarCheckpoint,
     ) -> Result<bool, AgentError> {
         Ok(false)
     }

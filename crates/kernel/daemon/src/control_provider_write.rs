@@ -3,10 +3,10 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use hofund_agent::{GatewayTarget, catalog, reseat_after_provider_change};
+use hofund_agent::{GatewayTarget, SidecarCheckpoint, catalog, reseat_after_provider_change};
 use hofund_config::{
-    Config, Route, UpstreamTarget, edit_provider_create, edit_provider_delete, edit_provider_patch,
-    load, validate_fallback_list, validate_provider_base_url,
+    Config, Route, UpstreamTarget, VisibleCatalog, edit_provider_create, edit_provider_delete,
+    edit_provider_patch, load, validate_fallback_list, validate_provider_base_url,
 };
 use hofund_control_proto::{
     ControlError, ControlErrorKind, ProviderCreateRequest, ProviderDeleteRequest,
@@ -223,20 +223,31 @@ fn run_reseat_locked(
     config_text: &str,
 ) -> Result<(), ControlFailure> {
     let config = Arc::new(load(config_text).map_err(config_failure)?);
-    ops.reseat_sync_visible_catalog(Arc::clone(&config));
-    let route_models = agent_visible_sendable_route_models(ops, config.as_ref());
-    let target = resolve_reseat_target(gateway_target, configured_session.as_ref(), &route_models)?;
+    let route_ids = ops.snapshot_route_models();
+    let visible_catalog = VisibleCatalog::build(Arc::clone(&config), &route_ids);
+    let sendable: HashSet<String> = crate::routes_with_sendable_hops(config.as_ref())
+        .into_iter()
+        .collect();
+    let target = resolve_reseat_target(gateway_target, configured_session.as_ref())?;
     let session = configured_session.unwrap_or_else(crate::agent_session);
     let matched = match_route_models
         .map(<[String]>::to_vec)
         .unwrap_or_else(|| crate::routes_without_sendable_hops(config.as_ref()));
     let fallback = fallback_route_models
         .map(<[String]>::to_vec)
-        .unwrap_or_else(|| {
-            agent_visible_sendable_fallback_routes(ops, config.as_ref(), provider_id)
-        });
+        .unwrap_or_else(|| sendable_fallback_routes(config.as_ref(), provider_id));
     let catalog = catalog(descriptions).map_err(|error| internal(error.to_string()))?;
-    reseat_after_provider_change(
+    let mut checkpoint = SidecarCheckpoint::new();
+    let route_ids_for_closure = route_ids.clone();
+    let agent_visible_sendable = move |agent_id: &str| {
+        let (shown, _) =
+            visible_catalog.models_for_agent(&route_ids_for_closure, Some(agent_id), None);
+        shown
+            .into_iter()
+            .filter(|model| sendable.contains(model))
+            .collect::<Vec<_>>()
+    };
+    if let Err(error) = reseat_after_provider_change(
         &catalog,
         &session,
         &target,
@@ -244,29 +255,30 @@ fn run_reseat_locked(
         provider_still_present,
         &matched,
         &fallback,
-    )
-    .map_err(|error| internal(error.to_string()))
-    .map(|_| ())
+        agent_visible_sendable,
+        &mut checkpoint,
+    ) {
+        if let Err(restore) = checkpoint.restore() {
+            return Err(internal(restore.to_string()));
+        }
+        return Err(agent_reseat_failure(error, &target, config_text));
+    }
+    Ok(())
 }
 
-fn agent_visible_sendable_route_models(ops: &ConfigOps, config: &Config) -> Vec<String> {
-    let sendable = crate::routes_with_sendable_hops(config);
-    ops.agent_route_models(None, None)
-        .into_iter()
-        .filter(|model| sendable.contains(model))
-        .collect()
-}
-
-fn agent_visible_sendable_fallback_routes(
-    ops: &ConfigOps,
-    config: &Config,
-    provider_id: &str,
-) -> Vec<String> {
-    let visible: HashSet<String> = ops.agent_route_models(None, None).into_iter().collect();
-    sendable_fallback_routes(config, provider_id)
-        .into_iter()
-        .filter(|model| visible.contains(model))
-        .collect()
+fn agent_reseat_failure(
+    error: hofund_agent::AgentError,
+    target: &GatewayTarget,
+    config_text: &str,
+) -> ControlFailure {
+    let token = target.token();
+    let message = crate::control_agents::scrub(&error.to_string(), &[token]);
+    let message = crate::config_ops::scrub_config_message(&message, config_text);
+    ControlFailure::from(ControlError::new(
+        ControlErrorKind::Internal,
+        message,
+        "control",
+    ))
 }
 
 pub(crate) fn routes_newly_losing_sendable_hops(
@@ -300,10 +312,9 @@ fn sendable_fallback_routes(config: &Config, provider_id: &str) -> Vec<String> {
 fn resolve_reseat_target(
     gateway_target: Option<GatewayTarget>,
     configured_session: Option<&hofund_agent::Session>,
-    route_models: &[String],
 ) -> Result<GatewayTarget, ControlFailure> {
     match gateway_target {
-        Some(target) => Ok(target.with_models(route_models.to_vec())),
+        Some(target) => Ok(target),
         None if configured_session.is_some() => Err(unprocessable(
             "agent",
             "agent reseat requires a configured gateway target",
@@ -399,7 +410,12 @@ fn internal(message: String) -> ControlFailure {
 mod tests {
     use hofund_config::{Config, load};
 
-    use super::{route_uses_provider, routes_newly_losing_sendable_hops, sendable_fallback_routes};
+    use hofund_agent::{AgentError, GatewayTarget};
+
+    use super::{
+        agent_reseat_failure, route_uses_provider, routes_newly_losing_sendable_hops,
+        sendable_fallback_routes,
+    };
 
     fn route_models_using_provider(config: &Config, provider_id: &str) -> Vec<String> {
         config
@@ -468,5 +484,15 @@ upstreams = [{ provider = \"a\", model = \"m\" }, { provider = \"b\", model = \"
             crate::routes_with_sendable_hops(&after).contains("group/pair"),
             "group must remain sendable after one member is deleted"
         );
+    }
+
+    #[test]
+    fn r7a_reseat_failure_scrubs_bearer_token_from_response() {
+        let token = "sk-secret-bearer-token-value";
+        let error = AgentError::Rejected(format!("connect failed with bearer {token}"));
+        let target = GatewayTarget::new("http://127.0.0.1:3425/", token, Vec::new());
+        let failure = agent_reseat_failure(error, &target, "");
+        let body = failure.error.message;
+        assert!(!body.contains(token), "response leaked token: {body}");
     }
 }

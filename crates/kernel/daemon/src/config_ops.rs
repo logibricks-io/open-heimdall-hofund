@@ -204,13 +204,9 @@ impl ConfigOps {
         }
     }
 
-    /// Rebuilds the agent visibility catalog for a staged config during reseat.
-    pub(crate) fn reseat_sync_visible_catalog(&self, config: Arc<Config>) {
-        crate::agent_visible::rebuild_catalog(
-            &self.routing.visible_catalog,
-            config,
-            &self.routing.snapshot,
-        );
+    /// Route model ids from the published router snapshot.
+    pub(crate) fn snapshot_route_models(&self) -> Vec<String> {
+        self.routing.snapshot.load().models()
     }
 
     /// Route model ids an agent is shown, after visibility filters.
@@ -702,6 +698,11 @@ fn config_issue(error: &ConfigError, text: &str) -> FieldIssue {
         ConfigError::Invalid(message) => FieldIssue::new("config", "invalid", scrub(message, text)),
         ConfigError::Read(message) => FieldIssue::new("config", "read", scrub(message, text)),
     }
+}
+
+/// Removes quoted secret-like values from `message` when they appear in `text`.
+pub(crate) fn scrub_config_message(message: &str, text: &str) -> String {
+    scrub(message, text)
 }
 
 /// Removes any quoted value from `message` that appears verbatim in `text`

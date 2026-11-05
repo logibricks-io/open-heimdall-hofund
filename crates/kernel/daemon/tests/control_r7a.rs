@@ -1,5 +1,8 @@
 //! R-7a control routes against a live daemon (presets, status, providers, groups, profiles).
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 mod support;
 
 use std::path::{Path, PathBuf};
@@ -1232,4 +1235,205 @@ async fn disabling_provider_reseat_skips_already_dead_routes_in_config_order() {
         "agent already on a dead route must not move when another provider is disabled, got: {dead_settings}"
     );
     support::shutdown(running_dead).await;
+}
+
+fn agent_hidden_models_reseat_fixture() -> String {
+    format!(
+        "listen = \"127.0.0.1:0\"\n\
+[[providers]]\nid = \"spare\"\nprotocol = \"openai-chat\"\nbase_url = \"http://127.0.0.1:9/v1\"\napi_key = \"{SECRET}\"\n\
+[[providers]]\nid = \"chat\"\nprotocol = \"openai-chat\"\nbase_url = \"http://127.0.0.1:9/v1\"\napi_key = \"{SECRET}\"\n\
+[[routes]]\nmodel = \"secret-route\"\nupstreams = [\"chat\"]\n\
+[[routes]]\nmodel = \"on-spare\"\nupstreams = [\"spare\"]\n\
+[[routes]]\nmodel = \"normal\"\nupstreams = [\"chat\"]\n\
+[agents.hidden_models]\nclaude-code = [\"secret-route\"]\n"
+    )
+}
+
+#[tokio::test]
+async fn r7a_reseat_honors_agent_hidden_models_on_provider_disable() {
+    let scratch = Scratch::new("hidden-models-reseat");
+    let settings = scratch
+        .runtime_dir
+        .join("home")
+        .join(".claude")
+        .join("settings.json");
+    std::fs::create_dir_all(settings.parent().expect("settings parent")).expect("dir");
+    std::fs::write(&settings, "{\"model\": \"on-spare\"}\n").expect("agent settings");
+    let session = Session::new(scratch.runtime_dir.join("home")).with_path("");
+    let running = support::within(
+        "start daemon for hidden-models reseat",
+        support::REQUEST,
+        start_with(
+            &scratch,
+            &agent_hidden_models_reseat_fixture(),
+            options_with(
+                &scratch,
+                StartOptions {
+                    agent_session: Some(session),
+                    ..StartOptions::default()
+                },
+            ),
+        ),
+    )
+    .await;
+    let client = Client::new(&running, &scratch);
+    let read = client.config().await;
+    let disable = provider_patch(json!({
+        "version": API_VERSION,
+        "expected_revision": read.disk_revision,
+        "enabled": false,
+    }));
+    let (status, _) = client.patch("/v1/hofund/providers/spare", &disable).await;
+    assert_eq!(status, reqwest::StatusCode::OK);
+    let settings_text = std::fs::read_to_string(&settings).expect("settings after disable");
+    assert!(
+        settings_text.contains("\"normal\""),
+        "agent must reseat to a visible route, got: {settings_text}"
+    );
+    assert!(
+        !settings_text.contains("secret-route"),
+        "hidden route must not be written to the agent file, got: {settings_text}"
+    );
+    support::shutdown(running).await;
+}
+
+fn reseat_sidecar_rollback_fixture() -> String {
+    format!(
+        "listen = \"127.0.0.1:0\"\n\
+[[providers]]\nid = \"spare\"\nprotocol = \"openai-chat\"\nbase_url = \"http://127.0.0.1:9/v1\"\napi_key = \"{SECRET}\"\n\
+[[providers]]\nid = \"chat\"\nprotocol = \"openai-chat\"\nbase_url = \"http://127.0.0.1:9/v1\"\napi_key = \"{SECRET}\"\n\
+[[routes]]\nmodel = \"on-spare\"\nupstreams = [\"spare\"]\n\
+[[routes]]\nmodel = \"normal\"\nupstreams = [\"chat\"]\n"
+    )
+}
+
+#[tokio::test]
+async fn r7a_provider_disable_reseat_rolls_back_config_and_first_agent_when_second_write_fails() {
+    let scratch = Scratch::new("reseat-sidecar-rollback");
+    let claude_settings = scratch
+        .runtime_dir
+        .join("home")
+        .join(".claude")
+        .join("settings.json");
+    std::fs::create_dir_all(claude_settings.parent().expect("claude parent")).expect("dir");
+    std::fs::write(&claude_settings, "{\"model\": \"on-spare\"}\n").expect("claude settings");
+    let codex_config = scratch
+        .runtime_dir
+        .join("home")
+        .join(".codex")
+        .join("config.toml");
+    std::fs::create_dir_all(codex_config.parent().expect("codex parent")).expect("dir");
+    std::fs::write(
+        &codex_config,
+        "model = \"on-spare\"\nmodel_provider = \"openai\"\n",
+    )
+    .expect("codex config");
+    std::fs::set_permissions(&codex_config, std::fs::Permissions::from_mode(0o000))
+        .expect("codex inaccessible");
+    let config_before = reseat_sidecar_rollback_fixture();
+    let session = Session::new(scratch.runtime_dir.join("home")).with_path("");
+    let running = support::within(
+        "start daemon for reseat rollback",
+        support::REQUEST,
+        start_with(
+            &scratch,
+            &config_before,
+            options_with(
+                &scratch,
+                StartOptions {
+                    agent_session: Some(session),
+                    ..StartOptions::default()
+                },
+            ),
+        ),
+    )
+    .await;
+    let client = Client::new(&running, &scratch);
+    let read = client.config().await;
+    let disable = provider_patch(json!({
+        "version": API_VERSION,
+        "expected_revision": read.disk_revision,
+        "enabled": false,
+    }));
+    let (status, _) = client.patch("/v1/hofund/providers/spare", &disable).await;
+    assert_eq!(status, reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+    let config_after = std::fs::read_to_string(scratch.path()).expect("config after");
+    assert_eq!(
+        config_after, config_before,
+        "config must roll back on reseat failure"
+    );
+    let claude_text = std::fs::read_to_string(&claude_settings).expect("claude after failure");
+    assert!(
+        claude_text.contains("on-spare"),
+        "first agent file must roll back, got: {claude_text}"
+    );
+    support::shutdown(running).await;
+}
+
+#[tokio::test]
+async fn r7a_group_rename_rolls_back_config_and_first_agent_when_second_write_fails() {
+    let scratch = Scratch::new("group-rename-sidecar-rollback");
+    let text = format!(
+        "{base}\
+[[routes]]\nmodel = \"group/old\"\nname = \"Old\"\nrouting = \"smart\"\nupstreams = [\"chat\"]\n",
+        base = reseat_sidecar_rollback_fixture()
+    );
+    let claude_settings = scratch
+        .runtime_dir
+        .join("home")
+        .join(".claude")
+        .join("settings.json");
+    std::fs::create_dir_all(claude_settings.parent().expect("claude parent")).expect("dir");
+    std::fs::write(&claude_settings, "{\"model\": \"group/old\"}\n").expect("claude settings");
+    let codex_config = scratch
+        .runtime_dir
+        .join("home")
+        .join(".codex")
+        .join("config.toml");
+    std::fs::create_dir_all(codex_config.parent().expect("codex parent")).expect("dir");
+    std::fs::write(
+        &codex_config,
+        "model = \"group/old\"\nmodel_provider = \"openai\"\n",
+    )
+    .expect("codex config");
+    std::fs::set_permissions(&codex_config, std::fs::Permissions::from_mode(0o000))
+        .expect("codex inaccessible");
+    let config_before = text.clone();
+    let session = Session::new(scratch.runtime_dir.join("home")).with_path("");
+    let running = support::within(
+        "start daemon for group rename rollback",
+        support::REQUEST,
+        start_with(
+            &scratch,
+            &text,
+            options_with(
+                &scratch,
+                StartOptions {
+                    agent_session: Some(session),
+                    ..StartOptions::default()
+                },
+            ),
+        ),
+    )
+    .await;
+    let client = Client::new(&running, &scratch);
+    let read = client.config().await;
+    let patch = group_patch(json!({
+        "version": API_VERSION,
+        "expected_revision": read.disk_revision,
+        "rename_to": "new",
+    }));
+    let (status, _) = client.patch("/v1/hofund/groups/old", &patch).await;
+    assert_eq!(status, reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+    let config_after = std::fs::read_to_string(scratch.path()).expect("config after");
+    assert_eq!(
+        config_after, config_before,
+        "config must roll back on rename failure"
+    );
+    let claude_text = std::fs::read_to_string(&claude_settings).expect("claude after failure");
+    assert!(
+        claude_text.contains("group/old"),
+        "first agent file must roll back, got: {claude_text}"
+    );
+    support::shutdown(running).await;
 }
