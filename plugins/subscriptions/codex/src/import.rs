@@ -3,7 +3,7 @@
 use hofund_plugin_api::{AccountId, HostContext, PluginError, SecretString};
 use hofund_plugin_sdk::Call;
 use hofund_plugin_sdk::json::{Map, Value};
-use hofund_plugin_sdk::oauth::{SecretObject, parse_token_set, token_error};
+use hofund_plugin_sdk::oauth::{SecretObject, account_id_from, parse_token_set, token_error};
 
 use crate::sign_in;
 use crate::tokens;
@@ -52,7 +52,10 @@ pub(crate) async fn import_accounts(
         if !seen_refresh.insert(row.refresh_token.clone()) {
             continue;
         }
-        ids.push(store_row(host, token_url, row).await?);
+        ids.push(match store_row(host, token_url, row).await {
+            Ok(id) => id,
+            Err(_) => continue,
+        });
     }
     Ok(ids)
 }
@@ -287,13 +290,32 @@ async fn store_row(
         .or_else(|| row.id_token.map(SecretString::from))
         .ok_or_else(|| PluginError::auth("ChatGPT sent back no ID token"))?;
     let identity = sign_in::identity(&id_token)?;
-    if host.accounts().secret(&identity.id).await?.is_some() {
-        return Ok(identity.id);
+    let file_account = row.account_id.as_ref().filter(|value| !value.is_empty());
+    let member_id = if identity.chatgpt_account.is_empty() {
+        if let Some(workspace) = file_account {
+            let claims = hofund_plugin_sdk::oauth::unverified_claims(&id_token)
+                .map_err(|_| PluginError::auth("ChatGPT sent back an unreadable ID token"))?;
+            let sub = claims
+                .get("sub")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default();
+            account_id_from(&[sub, workspace.as_str()])
+        } else {
+            identity.id.clone()
+        }
+    } else {
+        identity.id.clone()
+    };
+    if host.accounts().secret(&member_id).await?.is_some() {
+        return Ok(member_id);
     }
-    let account_id = row
-        .account_id
-        .filter(|value| !value.is_empty())
-        .unwrap_or(identity.chatgpt_account.clone());
+    let account_id = if identity.chatgpt_account.is_empty() {
+        file_account.cloned().unwrap_or_default()
+    } else {
+        file_account
+            .cloned()
+            .unwrap_or(identity.chatgpt_account.clone())
+    };
     let label = disambiguate_label(host, &identity.label, &account_id).await?;
     let secret = SecretObject::new()
         .with_number("v", 1)
@@ -306,9 +328,9 @@ async fn store_row(
         .with_text("account_id", &account_id)
         .with_number("last_refresh", tokens::unix_seconds(now))
         .to_secret();
-    let account = host.accounts().account(identity.id.clone(), label)?;
+    let account = host.accounts().account(member_id.clone(), label)?;
     host.accounts().upsert(account, secret).await?;
-    Ok(identity.id)
+    Ok(member_id)
 }
 
 async fn disambiguate_label(

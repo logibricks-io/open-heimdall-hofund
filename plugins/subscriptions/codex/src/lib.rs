@@ -440,7 +440,14 @@ impl Subscription for Codex {
         account: &AccountId,
         host: &HostContext,
     ) -> Result<(), PluginError> {
-        warmup::run(&self.endpoints, &self.prompts, account, host).await
+        warmup::run(
+            &self.endpoints,
+            &self.prompts,
+            account,
+            host,
+            self.skip_keychain,
+        )
+        .await
     }
 
     async fn import_accounts(

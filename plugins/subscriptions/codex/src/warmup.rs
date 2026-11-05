@@ -53,8 +53,9 @@ pub(crate) async fn run(
     prompts: &Arc<Prompts>,
     account: &AccountId,
     host: &HostContext,
+    skip_keychain: bool,
 ) -> Result<(), PluginError> {
-    let access = tokens::access(host, endpoints, account, Need::IfExpiring, false).await?;
+    let access = tokens::access(host, endpoints, account, Need::IfExpiring, skip_keychain).await?;
     let list = models::list(host, endpoints, &access, prompts).await?;
     let model = pick_warmup_model(&list)?;
     let upstream = CodexUpstream::new(
@@ -62,7 +63,7 @@ pub(crate) async fn run(
         host.clone(),
         Arc::clone(endpoints),
         Arc::clone(prompts),
-        false,
+        skip_keychain,
     );
     let query = ProbeQuery::new(ProtocolId::OPENAI_RESPONSES, &model)?;
     let request = query.minimal_request();

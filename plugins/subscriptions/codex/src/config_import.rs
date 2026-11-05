@@ -147,19 +147,63 @@ fn string_field(table: &Map<String, Value>, key: &str) -> Option<String> {
 /// Gateway-written model catalog file name under a Codex home (skip importing its models).
 pub(crate) const GATEWAY_MODEL_CATALOG: &str = "hofund-models.json";
 
+#[cfg(test)]
+mod test_codex_home {
+    use std::cell::RefCell;
+    use std::path::PathBuf;
+
+    thread_local! {
+        static OVERRIDE: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+    }
+
+    pub(super) fn get() -> Option<PathBuf> {
+        OVERRIDE.with(|slot| slot.borrow().clone())
+    }
+
+    pub(super) fn set(home: Option<PathBuf>) {
+        OVERRIDE.with(|slot| *slot.borrow_mut() = home);
+    }
+}
+
+fn codex_home_dir() -> PathBuf {
+    #[cfg(test)]
+    if let Some(home) = test_codex_home::get() {
+        return home;
+    }
+    if let Ok(dir) = std::env::var("CODEX_HOME") {
+        let trimmed = dir.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed);
+        }
+    }
+    std::env::var("HOME")
+        .map(|home| PathBuf::from(home).join(".codex"))
+        .unwrap_or_else(|_| PathBuf::from(".codex"))
+}
+
 fn gateway_catalog_in_codex_home(home: &Path) -> PathBuf {
     home.join(GATEWAY_MODEL_CATALOG)
+}
+
+fn paths_match_after_clean(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    if let (Ok(left), Ok(right)) = (left.canonicalize(), right.canonicalize()) {
+        return left == right;
+    }
+    false
 }
 
 fn import_models(config_path: &Path, catalog_path: Option<&str>) -> Vec<String> {
     let Some(catalog_path) = catalog_path.filter(|value| !value.is_empty()) else {
         return Vec::new();
     };
-    let home = std::env::var("HOME")
+    let user_home = std::env::var("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("/"));
-    let resolved = if let Some(rest) = catalog_path.strip_prefix("~/") {
-        home.join(rest)
+    let mut resolved = if let Some(rest) = catalog_path.strip_prefix("~/") {
+        user_home.join(rest)
     } else if Path::new(catalog_path).is_absolute() {
         PathBuf::from(catalog_path)
     } else {
@@ -168,7 +212,33 @@ fn import_models(config_path: &Path, catalog_path: Option<&str>) -> Vec<String> 
             .unwrap_or_else(|| Path::new("."))
             .join(catalog_path)
     };
-    if resolved == gateway_catalog_in_codex_home(&home) {
+    if resolved.components().any(|component| {
+        matches!(
+            component,
+            std::path::Component::ParentDir | std::path::Component::CurDir
+        )
+    }) {
+        resolved = resolved
+            .components()
+            .fold(PathBuf::new(), |mut out, component| {
+                match component {
+                    std::path::Component::ParentDir => {
+                        out.pop();
+                    }
+                    std::path::Component::CurDir => {}
+                    other => out.push(other.as_os_str()),
+                }
+                out
+            });
+    }
+    if resolved.file_name() == Some(std::ffi::OsStr::new(GATEWAY_MODEL_CATALOG))
+        && resolved.parent().is_some_and(|parent| {
+            paths_match_after_clean(parent, &codex_home_dir())
+                || config_path
+                    .parent()
+                    .is_some_and(|home| paths_match_after_clean(parent, home))
+        })
+    {
         return Vec::new();
     }
     let Ok(text) = std::fs::read_to_string(resolved) else {
@@ -204,6 +274,10 @@ fn import_models(config_path: &Path, catalog_path: Option<&str>) -> Vec<String> 
 mod tests {
     use super::*;
 
+    fn set_test_codex_home(home: Option<PathBuf>) {
+        test_codex_home::set(home);
+    }
+
     #[test]
     fn r47b_config_import_reads_model_providers() {
         let dir = tempfile::tempdir().expect("dir");
@@ -233,5 +307,108 @@ name = "hofund"
         assert_eq!(rows[1].id, "relay");
         assert_eq!(rows[1].base_url, "https://relay.test/v1");
         assert!(rows[1].models.contains(&"gpt-5".to_owned()));
+    }
+
+    #[test]
+    fn r47b_rr2_config_import_skips_gateway_catalog_in_codex_home() {
+        let dir = tempfile::tempdir().expect("dir");
+        let codex_home = dir.path().join("codex");
+        std::fs::create_dir_all(&codex_home).expect("codex home");
+        let gateway_catalog = codex_home.join(GATEWAY_MODEL_CATALOG);
+        std::fs::write(
+            &gateway_catalog,
+            r#"{"models":[{"slug":"gateway-only","visibility":"list"}]}"#,
+        )
+        .expect("gateway catalog");
+        let relay_catalog = dir.path().join("relay-models.json");
+        std::fs::write(
+            &relay_catalog,
+            r#"{"models":[{"slug":"relay-model","visibility":"list"}]}"#,
+        )
+        .expect("relay catalog");
+        std::fs::write(
+            codex_home.join("config.toml"),
+            format!(
+                r#"
+model_provider = "relay"
+model_catalog_json = "{catalog}"
+
+[model_providers.relay]
+name = "Relay"
+base_url = "https://relay.test/v1"
+wire_api = "responses"
+"#,
+                catalog = relay_catalog.display()
+            ),
+        )
+        .expect("config");
+        let rows = read_providers(&codex_home).expect("read");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "relay");
+        assert!(rows[0].models.contains(&"relay-model".to_owned()));
+        assert!(!rows[0].models.contains(&"gateway-only".to_owned()));
+    }
+
+    #[test]
+    fn r47b_rr2_config_import_skips_relative_gateway_catalog_in_codex_home() {
+        let dir = tempfile::tempdir().expect("dir");
+        let codex_home = dir.path().join("override-codex");
+        std::fs::create_dir_all(&codex_home).expect("codex home");
+        std::fs::write(
+            codex_home.join(GATEWAY_MODEL_CATALOG),
+            r#"{"models":[{"slug":"gateway-only","visibility":"list"}]}"#,
+        )
+        .expect("gateway catalog");
+        std::fs::write(
+            codex_home.join("config.toml"),
+            r#"
+model_provider = "relay"
+model_catalog_json = "hofund-models.json"
+
+[model_providers.relay]
+name = "Relay"
+base_url = "https://relay.test/v1"
+wire_api = "responses"
+"#,
+        )
+        .expect("config");
+        let rows = read_providers(&codex_home).expect("read");
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].models.is_empty());
+    }
+
+    #[test]
+    fn r47b_rr2_config_import_skips_gateway_catalog_via_codex_home_override() {
+        let dir = tempfile::tempdir().expect("dir");
+        let codex_home = dir.path().join("env-codex");
+        std::fs::create_dir_all(&codex_home).expect("codex home");
+        set_test_codex_home(Some(codex_home.clone()));
+        std::fs::write(
+            codex_home.join(GATEWAY_MODEL_CATALOG),
+            r#"{"models":[{"slug":"gateway-only","visibility":"list"}]}"#,
+        )
+        .expect("gateway catalog");
+        let other_home = dir.path().join("other-config-home");
+        std::fs::create_dir_all(&other_home).expect("other");
+        std::fs::write(
+            other_home.join("config.toml"),
+            format!(
+                r#"
+model_provider = "relay"
+model_catalog_json = "{}"
+
+[model_providers.relay]
+name = "Relay"
+base_url = "https://relay.test/v1"
+wire_api = "responses"
+"#,
+                codex_home.join(GATEWAY_MODEL_CATALOG).display()
+            ),
+        )
+        .expect("config");
+        let rows = read_providers(&other_home).expect("read");
+        set_test_codex_home(None);
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].models.is_empty());
     }
 }

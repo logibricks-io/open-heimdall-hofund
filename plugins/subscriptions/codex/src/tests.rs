@@ -1630,6 +1630,7 @@ fn a3a_9_codex_warmup_posts_one_minimal_responses_call() {
         &Arc::new(models::Prompts::default()),
         &id,
         host.context(),
+        false,
     ))
     .expect("warmup");
     let responses = format!("{BASE}/responses");
@@ -2130,4 +2131,103 @@ wire_api = "responses"
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].id, "relay");
     assert_eq!(rows[0].models, vec!["gpt-5".to_owned()]);
+}
+
+#[test]
+fn r47b_rr2_import_accounts_skips_failed_first_entry() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    host.http()
+        .enqueue_response(400, &[], br#"{"error":"bad refresh"}"#.to_vec());
+    let idt = id_token("second@example.test", "sub-2", "acct-2", "plus");
+    host.http()
+        .enqueue(token_reply("acc-2", Some("r-2"), Some(&idt)));
+    let text = r#"[{"type":"codex","refresh_token":"bad","email":"first@example.test"},
+        {"type":"codex","refresh_token":"good","email":"second@example.test"}]"#;
+    let ids = block_on(sub.import_accounts(text, host.context())).expect("import");
+    assert_eq!(ids.len(), 1);
+    assert_eq!(token_posts(&host), 2);
+}
+
+#[test]
+fn r47b_rr2_import_accounts_continues_after_duplicate_refresh() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let idt1 = id_token("a@example.test", "sub-a", "acct-a", "plus");
+    let idt2 = id_token("c@example.test", "sub-c", "acct-c", "plus");
+    host.http()
+        .enqueue(token_reply("acc-a", Some("r-a"), Some(&idt1)));
+    host.http()
+        .enqueue(token_reply("acc-c", Some("r-c"), Some(&idt2)));
+    let text = r#"[{"type":"codex","refresh_token":"dup","email":"a@test"},
+        {"type":"codex","refresh_token":"dup","email":"b@test"},
+        {"type":"codex","refresh_token":"unique","email":"c@test"}]"#;
+    let ids = block_on(sub.import_accounts(text, host.context())).expect("import");
+    assert_eq!(ids.len(), 2);
+}
+
+#[test]
+fn r47b_rr2_import_cockpit_and_team_seats_store_distinct_accounts() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let team_id = jwt(r#"{"email":"team@example.test","sub":"sub-team"}"#);
+    let idt1 = team_id.clone();
+    let idt2 = team_id;
+    host.http()
+        .enqueue(token_reply("acc-1", Some("r-seat1"), Some(&idt1)));
+    host.http()
+        .enqueue(token_reply("acc-2", Some("r-seat2"), Some(&idt2)));
+    let cockpit = r#"[{"id":"1","type":"codex","email":"cockpit@example.com","id_token":"x","access_token":"y","refresh_token":"r-cockpit","account_id":"acct-cockpit"}]"#;
+    let idt_c = id_token("cockpit@example.com", "sub-cock", "acct-cockpit", "plus");
+    host.http()
+        .enqueue(token_reply("acc-c", Some("r-cockpit"), Some(&idt_c)));
+    let ids = block_on(sub.import_accounts(cockpit, host.context())).expect("cockpit");
+    assert_eq!(ids.len(), 1);
+    let seat1 = r#"{"OPENAI_API_KEY":null,"tokens":{"id_token":"x","access_token":"y","refresh_token":"r-seat1","account_id":"acct-t1"},"type":"codex"}"#;
+    let ids1 = block_on(sub.import_accounts(seat1, host.context())).expect("seat1");
+    assert_eq!(ids1.len(), 1);
+    let seat2 = r#"{"OPENAI_API_KEY":null,"tokens":{"id_token":"x","access_token":"y","refresh_token":"r-seat2","account_id":"acct-t2"},"type":"codex"}"#;
+    let ids2 = block_on(sub.import_accounts(seat2, host.context())).expect("seat2");
+    assert_eq!(ids2.len(), 1);
+    assert_ne!(ids1[0], ids2[0]);
+    let secret1 = stored(&host, &ids1[0]);
+    let secret2 = stored(&host, &ids2[0]);
+    assert_eq!(secret1.text("account_id"), Some("acct-t1"));
+    assert_eq!(secret2.text("account_id"), Some("acct-t2"));
+}
+
+#[test]
+fn r47b_rr2_rotate_persist_refresh_updates_codex_auth_json() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let home = dir.path().join("agent-codex");
+    let stale = access_token("stale-on-disk", 100);
+    let id = seed(&host, &stale);
+    block_on(subscription(&host).write_agent_sign_in(&id, &home, host.context())).expect("switch");
+    let blob = stored(&host, &id);
+    let stale_access = blob.secret("access_token").expect("stale access").clone();
+    let fresh = access_token("rotated", 10_000);
+    let updated = blob.with_secret("access_token", &secret(&fresh));
+    block_on(crate::agent_sign_in::persist_refresh(
+        &home,
+        host.context(),
+        true,
+        &updated,
+        &stale_access,
+        None,
+    ));
+    let text = std::fs::read_to_string(home.join("auth.json")).expect("auth");
+    let root: Value = json::from_str(&text).expect("json");
+    let on_disk = root
+        .get("tokens")
+        .and_then(|tokens| tokens.get("access_token"))
+        .and_then(Value::as_str)
+        .expect("access on disk");
+    assert!(same_secret(
+        &SecretString::from(on_disk.to_owned()),
+        &secret(&fresh)
+    ));
 }

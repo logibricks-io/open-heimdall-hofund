@@ -70,10 +70,9 @@ pub(crate) async fn write(
         && let Some(row) = rows.iter().find(|row| row.id() == account)
     {
         let account_row = host.accounts().account(account.clone(), row.label())?;
-        let _ = host
-            .accounts()
+        host.accounts()
             .upsert(account_row, updated.to_secret())
-            .await;
+            .await?;
     }
     Ok(())
 }
@@ -99,12 +98,10 @@ pub(crate) async fn persist_refresh(
     skip_keychain: bool,
     blob: &SecretObject,
     stale: &SecretString,
+    fake: Option<&crate::store::FakeKeychain>,
 ) {
-    let _lock = match codex_lock::acquire(home).await {
-        Ok(lock) => lock,
-        Err(_) => return,
-    };
-    let reader = StoreReader::new(Some(host), skip_keychain, None);
+    let _lock = codex_lock::acquire(home).await;
+    let reader = StoreReader::new(Some(host), skip_keychain, fake);
     let Ok((base, _)) = reader.read_login(home, true).await else {
         return;
     };
@@ -137,4 +134,159 @@ fn access_token_from_auth(bytes: &[u8]) -> Option<SecretString> {
         hofund_plugin_sdk::json::from_slice::<hofund_plugin_sdk::json::Value>(bytes).ok()?;
     let token = value.get("tokens")?.get("access_token")?.as_str()?;
     Some(SecretString::from(token.to_owned()))
+}
+
+#[cfg(test)]
+mod tests {
+    use hofund_kit_subscription::{TestHost, block_on};
+    use hofund_plugin_api::{PluginId, PluginKind, SecretString};
+    use hofund_plugin_sdk::oauth::SecretObject;
+
+    use super::*;
+    use crate::store::{FakeKeychain, StoreReader, write_atomic_private};
+
+    fn host(dir: &tempfile::TempDir) -> TestHost {
+        TestHost::open_for(
+            PluginKind::Subscription,
+            PluginId::from_static("codex"),
+            dir.path(),
+        )
+    }
+
+    #[test]
+    fn r47b_rr2_persist_refresh_writes_keychain_when_stale_matches() {
+        let dir = tempfile::tempdir().expect("dir");
+        let host = host(&dir);
+        let home = dir.path().join("codex");
+        std::fs::create_dir_all(&home).expect("home");
+        std::fs::write(
+            home.join("config.toml"),
+            "cli_auth_credentials_store = \"keyring\"\n",
+        )
+        .expect("config");
+        let stale = SecretString::from("stale-access".to_owned());
+        let fake = FakeKeychain::default();
+        let account = crate::store::keychain_account(&home);
+        let on_disk = br#"{"auth_mode":"chatgpt","tokens":{"access_token":"stale-access","refresh_token":"old-r"}}"#;
+        fake.set(&account, on_disk);
+        let blob = SecretObject::new()
+            .with_secret(
+                "access_token",
+                &SecretString::from("fresh-access".to_owned()),
+            )
+            .with_secret("refresh_token", &SecretString::from("new-r".to_owned()));
+        block_on(persist_refresh(
+            &home,
+            host.context(),
+            false,
+            &blob,
+            &stale,
+            Some(&fake),
+        ));
+        let reader = StoreReader::new(Some(host.context()), false, Some(&fake));
+        let (read, _) = block_on(reader.read_login(&home, true)).expect("read back");
+        let text = String::from_utf8(read).expect("utf8");
+        assert!(text.contains("fresh-access"));
+        assert!(text.contains("new-r"));
+    }
+
+    #[test]
+    fn r47b_rr2_persist_refresh_keeps_keychain_when_access_replaced() {
+        let dir = tempfile::tempdir().expect("dir");
+        let host = host(&dir);
+        let home = dir.path().join("codex");
+        std::fs::create_dir_all(&home).expect("home");
+        std::fs::write(
+            home.join("config.toml"),
+            "cli_auth_credentials_store = \"keyring\"\n",
+        )
+        .expect("config");
+        let stale = SecretString::from("stale-access".to_owned());
+        let fake = FakeKeychain::default();
+        let account = crate::store::keychain_account(&home);
+        let on_disk = br#"{"auth_mode":"chatgpt","tokens":{"access_token":"someone-else","refresh_token":"keep-r"}}"#;
+        fake.set(&account, on_disk);
+        let blob = SecretObject::new()
+            .with_secret(
+                "access_token",
+                &SecretString::from("fresh-access".to_owned()),
+            )
+            .with_secret("refresh_token", &SecretString::from("new-r".to_owned()));
+        block_on(persist_refresh(
+            &home,
+            host.context(),
+            false,
+            &blob,
+            &stale,
+            Some(&fake),
+        ));
+        let reader = StoreReader::new(Some(host.context()), false, Some(&fake));
+        let (read, _) = block_on(reader.read_login(&home, true)).expect("read back");
+        assert_eq!(read, on_disk);
+    }
+
+    #[test]
+    fn r47b_rr2_persist_refresh_writes_auth_json_when_stale_matches() {
+        let dir = tempfile::tempdir().expect("dir");
+        let host = host(&dir);
+        let home = dir.path().join("codex");
+        std::fs::create_dir_all(&home).expect("home");
+        std::fs::write(
+            home.join("config.toml"),
+            "cli_auth_credentials_store = \"file\"\n",
+        )
+        .expect("config");
+        write_atomic_private(
+            &home.join("auth.json"),
+            br#"{"auth_mode":"chatgpt","tokens":{"access_token":"stale-access","refresh_token":"old-r"}}"#,
+        )
+        .expect("seed");
+        let stale = SecretString::from("stale-access".to_owned());
+        let blob = SecretObject::new()
+            .with_secret(
+                "access_token",
+                &SecretString::from("fresh-access".to_owned()),
+            )
+            .with_secret("refresh_token", &SecretString::from("new-r".to_owned()));
+        block_on(persist_refresh(
+            &home,
+            host.context(),
+            true,
+            &blob,
+            &stale,
+            None,
+        ));
+        let text = std::fs::read_to_string(home.join("auth.json")).expect("auth");
+        assert!(text.contains("fresh-access"));
+    }
+
+    #[test]
+    fn r47b_rr2_persist_refresh_keeps_auth_json_when_access_replaced() {
+        let dir = tempfile::tempdir().expect("dir");
+        let host = host(&dir);
+        let home = dir.path().join("codex");
+        std::fs::create_dir_all(&home).expect("home");
+        std::fs::write(
+            home.join("config.toml"),
+            "cli_auth_credentials_store = \"file\"\n",
+        )
+        .expect("config");
+        let seed = br#"{"auth_mode":"chatgpt","tokens":{"access_token":"someone-else","refresh_token":"keep-r"}}"#;
+        write_atomic_private(&home.join("auth.json"), seed).expect("seed");
+        let stale = SecretString::from("stale-access".to_owned());
+        let blob = SecretObject::new().with_secret(
+            "access_token",
+            &SecretString::from("fresh-access".to_owned()),
+        );
+        block_on(persist_refresh(
+            &home,
+            host.context(),
+            true,
+            &blob,
+            &stale,
+            None,
+        ));
+        let read = std::fs::read(home.join("auth.json")).expect("auth");
+        assert_eq!(read, seed);
+    }
 }

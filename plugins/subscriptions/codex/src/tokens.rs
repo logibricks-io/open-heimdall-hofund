@@ -180,7 +180,8 @@ async fn rotate(
     lease.commit(None, next.to_secret()).await?;
     if let Some(home) = next.text("codex_home") {
         let path = std::path::PathBuf::from(home);
-        crate::agent_sign_in::persist_refresh(&path, &host, skip_keychain, &next, &stale).await;
+        crate::agent_sign_in::persist_refresh(&path, &host, skip_keychain, &next, &stale, None)
+            .await;
     }
     Ok(Access {
         token: set.access().clone(),

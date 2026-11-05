@@ -86,6 +86,8 @@ struct FakeKeychainState {
     items: HashMap<String, Vec<u8>>,
     find_err: Option<KeychainError>,
     put_err: Option<KeychainError>,
+    find_calls: u32,
+    stat_calls: u32,
 }
 
 impl FakeKeychain {
@@ -97,14 +99,40 @@ impl FakeKeychain {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         guard.items.insert(account.to_owned(), bytes.to_vec());
     }
+
+    #[allow(dead_code)] // used from `store::tests`
+    pub(crate) fn set_find_err(&self, err: Option<KeychainError>) {
+        let mut guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.find_err = err;
+    }
+
+    #[allow(dead_code)] // used from `store::tests`
+    pub(crate) fn find_calls(&self) -> u32 {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .find_calls
+    }
+
+    #[allow(dead_code)] // used from `store::tests`
+    pub(crate) fn stat_calls(&self) -> u32 {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .stat_calls
+    }
 }
 
 impl CodexKeychain for FakeKeychain {
     fn find(&self, service: &str, account: &str) -> Result<Vec<u8>, KeychainError> {
-        let guard = self
+        let mut guard = self
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.find_calls = guard.find_calls.saturating_add(1);
         if service != KEYCHAIN_SERVICE {
             return Err(KeychainError::Unreadable);
         }
@@ -119,7 +147,22 @@ impl CodexKeychain for FakeKeychain {
     }
 
     fn stat(&self, service: &str, account: &str) -> Result<String, KeychainError> {
-        let bytes = self.find(service, account)?;
+        let mut guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.stat_calls = guard.stat_calls.saturating_add(1);
+        if service != KEYCHAIN_SERVICE {
+            return Err(KeychainError::Unreadable);
+        }
+        if let Some(err) = &guard.find_err {
+            return Err(err.clone());
+        }
+        let bytes = guard
+            .items
+            .get(account)
+            .cloned()
+            .ok_or(KeychainError::Missing)?;
         let sum = sha256(&bytes);
         Ok(hex8(&sum[..8]))
     }
@@ -340,50 +383,84 @@ impl<'a> StoreReader<'a> {
 
     async fn find_keychain(&self, home: &Path, fresh: bool) -> Result<Vec<u8>, KeychainError> {
         let account = keychain_account(home);
-        if let Some(fake) = self.fake {
-            return fake.find(KEYCHAIN_SERVICE, &account);
-        }
-        if self.skip_keychain || !keychain_available() {
+        if self.skip_keychain || (self.fake.is_none() && !keychain_available()) {
             return Err(KeychainError::Missing);
         }
         let now = Instant::now();
-        {
+        let reuse_cached = {
             let cache = self
                 .cache
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if cache.account == account {
-                if let Some(err) = &cache.err
-                    && !fresh
-                    && now.duration_since(cache.at) < KEYCHAIN_REFUSED
-                {
-                    return Err(err.clone());
-                } else if let Some(bytes) = &cache.bytes
-                    && !fresh
-                    && now.duration_since(cache.checked) < KEYCHAIN_TTL
-                {
+            if cache.account != account {
+                None
+            } else if let Some(err) = &cache.err
+                && !fresh
+                && now.duration_since(cache.at) < KEYCHAIN_REFUSED
+            {
+                return Err(err.clone());
+            } else if let Some(bytes) = &cache.bytes {
+                if !fresh && now.duration_since(cache.checked) < KEYCHAIN_TTL {
                     return Ok(bytes.clone());
                 }
+                if !fresh && now.duration_since(cache.checked) >= KEYCHAIN_TTL {
+                    Some((bytes.clone(), cache.mdat.clone()))
+                } else {
+                    None
+                }
+            } else {
+                None
             }
+        };
+        if let Some((cached_bytes, cached_mdat)) = reuse_cached
+            && !cached_mdat.is_empty()
+            && self.keychain_stat(&account).await.ok().as_deref() == Some(cached_mdat.as_str())
+        {
+            let mut cache = self
+                .cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if cache.account == account {
+                cache.checked = now;
+            }
+            return Ok(cached_bytes);
         }
-        let bytes = self.read_keychain_live(&account).await?;
-        let mdat = self.keychain_stat(&account).await.unwrap_or_default();
+        let read = self.read_keychain_live(&account).await;
+        let mdat = match &read {
+            Ok(_) => self.keychain_stat(&account).await.unwrap_or_default(),
+            Err(_) => String::new(),
+        };
         let mut cache = self
             .cache
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         cache.account = account;
-        cache.bytes = Some(bytes.clone());
-        cache.err = None;
-        cache.mdat = mdat;
-        cache.at = now;
         cache.checked = now;
-        Ok(bytes)
+        match read {
+            Ok(bytes) => {
+                cache.bytes = Some(bytes.clone());
+                cache.err = None;
+                cache.mdat = mdat;
+                cache.at = now;
+                Ok(bytes)
+            }
+            Err(err) => {
+                cache.bytes = None;
+                cache.err = Some(err.clone());
+                cache.mdat = String::new();
+                cache.at = now;
+                Err(err)
+            }
+        }
     }
 
     async fn read_keychain_live(&self, account: &str) -> Result<Vec<u8>, KeychainError> {
-        let host = self.host.ok_or(KeychainError::Unreadable)?;
-        let bytes = find_keychain(host, account).await?;
+        let bytes = if let Some(fake) = self.fake {
+            fake.find(KEYCHAIN_SERVICE, account)?
+        } else {
+            let host = self.host.ok_or(KeychainError::Unreadable)?;
+            find_keychain(host, account).await?
+        };
         validate_keychain_json(&bytes)?;
         Ok(bytes)
     }
@@ -630,26 +707,65 @@ pub(crate) fn parse_toml(text: &str) -> (Map<String, Value>, HashMap<String, Map
             continue;
         };
         let key = trim_quotes(key.trim());
-        let value = trim_toml_value(value);
+        let value = parse_toml_string(value);
         if let Some(table) = &current {
             tables
                 .entry(table.clone())
                 .or_default()
-                .insert(key.to_owned(), Value::String(value.to_owned()));
+                .insert(key.to_owned(), Value::String(value.clone()));
         } else {
-            top.insert(key.to_owned(), Value::String(value.to_owned()));
+            top.insert(key.to_owned(), Value::String(value));
         }
     }
     (top, tables)
 }
 
+fn parse_toml_string(raw: &str) -> String {
+    let trimmed = trim_toml_value(raw);
+    if raw.trim().starts_with('"') {
+        unescape_toml_basic(trimmed)
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+fn unescape_toml_basic(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            match chars.next() {
+                Some('"') => out.push('"'),
+                Some('\\') => out.push('\\'),
+                Some(other) => {
+                    out.push('\\');
+                    out.push(other);
+                }
+                None => out.push('\\'),
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
 fn trim_toml_value(raw: &str) -> &str {
     let raw = raw.trim();
     if raw.starts_with('"') {
+        let bytes = raw.as_bytes();
         let mut end = 1;
-        while end < raw.len() {
-            if raw.as_bytes()[end] == b'"' && raw.as_bytes()[end - 1] != b'\\' {
-                return trim_quotes(&raw[..=end]);
+        while end < bytes.len() {
+            if bytes[end] == b'"' {
+                let mut slashes = 0_usize;
+                let mut idx = end;
+                while idx > 0 && bytes[idx - 1] == b'\\' {
+                    slashes += 1;
+                    idx -= 1;
+                }
+                if slashes.is_multiple_of(2) {
+                    return trim_quotes(&raw[..=end]);
+                }
             }
             end += 1;
         }
@@ -770,15 +886,12 @@ async fn spawn_security(host: &HostContext, args: &[&str]) -> Result<Vec<u8>, Ke
         .spawn_piped(&request)
         .await
         .map_err(|_| KeychainError::Unreadable)?;
-    let stdout = read_piped_stdout(host, child).await?;
+    let stdout = read_piped_stdout(child).await?;
     Ok(decode_keychain_password(&stdout))
 }
 
 #[cfg(target_os = "macos")]
-async fn read_piped_stdout(
-    host: &HostContext,
-    child: hofund_plugin_api::PipedChild,
-) -> Result<Vec<u8>, KeychainError> {
+async fn read_piped_stdout(child: hofund_plugin_api::PipedChild) -> Result<Vec<u8>, KeychainError> {
     let mut stream = child.stdout().map_err(|_| KeychainError::Unreadable)?;
     let mut out = Vec::new();
     while let Some(chunk) = stream.next_chunk().await {
@@ -913,5 +1026,79 @@ mod tests {
         write_atomic_private(&path, br#"{"tokens":{"access_token":"x"}}"#).expect("write");
         let read = std::fs::read(&path).expect("read");
         assert!(is_valid_auth_json(&read));
+    }
+
+    #[test]
+    fn r47b_rr2_toml_quoted_value_with_trailing_escape_before_comment() {
+        let (top, _) = parse_toml(r#"note = "value\\" # not a comment"#);
+        let value = top.get("note").and_then(Value::as_str).expect("value");
+        assert_eq!(value, "value\\");
+        assert!(!value.contains('#'));
+    }
+
+    #[test]
+    fn r47b_rr2_keychain_refusal_is_cached_on_fake() {
+        let dir = tempfile::tempdir().expect("dir");
+        let home = dir.path().join("codex");
+        std::fs::create_dir_all(&home).expect("home");
+        std::fs::write(
+            home.join("config.toml"),
+            "cli_auth_credentials_store = \"keyring\"\n",
+        )
+        .expect("config");
+        let fake = FakeKeychain::default();
+        fake.set_find_err(Some(KeychainError::Refused));
+        let reader = StoreReader::new(None, false, Some(&fake));
+        let _ = hofund_kit_subscription::block_on(reader.read_login(&home, false)).expect_err("1");
+        let _ = hofund_kit_subscription::block_on(reader.read_login(&home, false)).expect_err("2");
+        assert_eq!(fake.find_calls(), 1, "refusal should stay cached");
+    }
+
+    #[test]
+    fn r47b_rr2_keychain_ttl_reuses_unchanged_mdat_without_find() {
+        let dir = tempfile::tempdir().expect("dir");
+        let home = dir.path().join("codex");
+        std::fs::create_dir_all(&home).expect("home");
+        std::fs::write(
+            home.join("config.toml"),
+            "cli_auth_credentials_store = \"keyring\"\n",
+        )
+        .expect("config");
+        let fake = FakeKeychain::default();
+        let auth = br#"{"auth_mode":"chatgpt","tokens":{"access_token":"a","refresh_token":"r","id_token":"i"}}"#;
+        fake.set(&keychain_account(&home), auth);
+        let reader = StoreReader::new(None, false, Some(&fake));
+        hofund_kit_subscription::block_on(reader.read_login(&home, false)).expect("first");
+        assert_eq!(fake.find_calls(), 1);
+        std::thread::sleep(KEYCHAIN_TTL + Duration::from_secs(1));
+        hofund_kit_subscription::block_on(reader.read_login(&home, false)).expect("second");
+        assert_eq!(
+            fake.find_calls(),
+            1,
+            "unchanged item should not be read again"
+        );
+        assert!(
+            fake.stat_calls() >= 2,
+            "TTL expiry should stat before reusing cache"
+        );
+    }
+
+    #[test]
+    fn r47b_rr2_keychain_fresh_bypasses_cache() {
+        let dir = tempfile::tempdir().expect("dir");
+        let home = dir.path().join("codex");
+        std::fs::create_dir_all(&home).expect("home");
+        std::fs::write(
+            home.join("config.toml"),
+            "cli_auth_credentials_store = \"keyring\"\n",
+        )
+        .expect("config");
+        let fake = FakeKeychain::default();
+        let auth = br#"{"auth_mode":"chatgpt","tokens":{"access_token":"a","refresh_token":"r","id_token":"i"}}"#;
+        fake.set(&keychain_account(&home), auth);
+        let reader = StoreReader::new(None, false, Some(&fake));
+        hofund_kit_subscription::block_on(reader.read_login(&home, false)).expect("warm");
+        hofund_kit_subscription::block_on(reader.read_login(&home, true)).expect("fresh");
+        assert_eq!(fake.find_calls(), 2, "fresh reads bypass the cache");
     }
 }
