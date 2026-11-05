@@ -8,7 +8,7 @@ Vendor names stay inside `plugins/subscriptions/devin`. Kernel changes named her
 
 ## 0. Decision, and where it is weak
 
-Ship one unary Connect RPC per `UpstreamProvider::execute`: `POST {api_server}/exa.api_server_pb.ApiServerService/GetChatMessage` with a single framed protobuf body and a framed protobuf stream back. Part 1 (R-12) returns streamed **text** on a real account, live **GetCliModelConfigs** (plus variant resolution), PKCE sign-in, CLI install guidance, gzip on large bodies, and metadata that matches the pinned CLI version. Part 2 (R-13) adds tools, inline images, reasoning replay and thinking signatures, usage and list prices, quota windows, full error classification, cache keepalive, and the Messages-shaped history rules (cache marks, split calls, gemini schema cleaning).
+Ship one unary Connect RPC per `UpstreamProvider::execute`: `POST {api_server}/exa.api_server_pb.ApiServerService/GetChatMessage` with a single framed protobuf body and a framed protobuf stream back. Part 1 (R-12) returns streamed **text and reasoning** on a real account, live **GetCliModelConfigs** (plus variant resolution against embedded snapshot families), PKCE sign-in, CLI install guidance, gzip on large bodies, metadata that matches the pinned CLI version, and **section 6 `failure` mapping for every outcome the text-only chat path can hit** (HTTP errors, Connect end JSON, empty reply, broken stream). Part 2 (R-13) adds tools, inline images, reasoning signature replay, usage and list prices, **quota windows and free-tier `notModels`**, cache keepalive, and the Messages-shaped history rules (cache marks, split calls, gemini schema cleaning). R-13 does not re-own generic chat HTTP classification—that stays in R-12.
 
 This will be wrong if R-12 silently drops tools or images. A tool-bearing request encoded with an empty tool list can still make the model call a tool the client never sees. R-12 must refuse requests that need R-13 fields with a fixed, router-safe error (section 4.2), not send a partial wire shape.
 
@@ -28,7 +28,7 @@ Attack: treating `list_models` as a static JSON fixture. The reference refreshes
 | Model configs | `/exa.api_server_pb.ApiServerService/GetCliModelConfigs` | `application/proto` | `MODEL_CONFIGS_RPC`, `index.mjs:349` |
 | Account identity / quota JSON | `/exa.seat_management_pb.SeatManagementService/GetUserStatus` | `application/json` | `userStatus`, `index.mjs:2987-2995` |
 | PKCE token exchange | `/exa.seat_management_pb.SeatManagementService/ExchangeDevinCLIPKCECode` | `application/json` | `EXCHANGE`, `index.mjs:30`; `exchange`, `index.mjs:908-914` |
-| Browser PKCE start | `https://app.devin.ai/auth/cli/continue` | redirect | `AUTHORIZE`, `index.mjs:29`; `browserSignIn`, `index.mjs:945-1008` (`code_challenge`, `code_challenge_method=S256`, `cli_pkce_marker=1` at `index.mjs:999-1001`; authorize query also `redirect_uri`, `state`, `prompt=select_account` at `index.mjs:995-998`; callback verifies `state` before exchange at `index.mjs:974`; `exchange` always posts to fixed `SERVER` at `index.mjs:908-909`; success uses `SERVER` only and ignores returned API host URLs at `index.mjs:976-977`) |
+| Browser PKCE start | `https://app.devin.ai/auth/cli/continue` | redirect | `AUTHORIZE`, `index.mjs:29`; `browserSignIn`, `index.mjs:945-1008`. Loopback **`RedirectHost::Ipv4`**, path **`/callback`**, redirect URL **`http://127.0.0.1:<port>/callback`** (`index.mjs:987-989`, `loopback.rs:263`). Authorize query: same `redirect_uri`, `state`, `prompt=select_account`, `code_challenge`, `code_challenge_method=S256`, `cli_pkce_marker=1` (`index.mjs:995-1001`). Verifier = base64url of **48** random bytes; challenge = base64url(SHA-256 of the **verifier string**, not raw bytes) (`index.mjs:948-950`); state = base64url of **24** bytes, verified before exchange (`index.mjs:974`). **`exchange`** POST body includes the same `redirect_uri` plus `code` and `code_verifier` (`index.mjs:908-912`); posts to fixed `SERVER` (`index.mjs:908-909`); success uses `SERVER` only and ignores returned API host URLs (`index.mjs:976-977`) |
 
 Default API origin: `https://server.codeium.com` (`SERVER`, `index.mjs:28`). Stored accounts carry `api_server` from `credentials.toml` (`windsurf_api_key`, `api_server_url`, `devin_api_url`; `plugins/subscriptions/devin/src/creds.rs:111-147`). The reference also honors `WINDSURF_API_SERVER_URL` at request time (`live`, `index.mjs:3084`). Hofund reads the env var only during `execute` / `list_models` for the account being billed, not process-wide.
 
@@ -91,7 +91,7 @@ Built in `metadata(key)` (`index.mjs:1414-1415`), embedded as field 1 bytes of t
 | 2 | string | `CLI_VERSION` (`3000.11.3`) |
 | 3 | string | session token (same as Basic auth secret) |
 | 4 | string | `en` |
-| 5 | string | OS name: send **`darwin`** on macOS (`std::env::consts::OS` is `macos`; reference `osName` uses `process.platform`, `index.mjs:1410-1415`), **`windows`** on Windows |
+| 5 | string | OS name from `osName`: **`darwin`** on macOS, **`windows`** on Windows, **`linux`** on Linux (`process.platform`; `index.mjs:1410-1415`) |
 | 7 | string | `CLI_VERSION` again |
 | 12 | string | `chisel` |
 | 28 | string | `chisel` |
@@ -161,7 +161,7 @@ Server frames decode to deltas (`events`, `index.mjs:1711-1789`):
 | 5 | varint | stop reason: `10` → tool_calls, `3` → length |
 | 7 | bytes | usage: inner 2 input, 3 output, 4 cache write, 5 cache read |
 
-After the stream ends cleanly, if no text, reasoning, or tool call was seen (`said` stays zero; reasoning field 9 increments `said`, `index.mjs:1738-1740`), map to HTTP 502 with the full **`EMPTY_REPLY_MESSAGE`** string (`crates/kernel/codec/src/responses_empty.rs:6`), not the reference plugin's shorter sentence (`index.mjs:1774-1776`; `empty-reply.test.mjs`; wire bytes in `testdata/empty-reply.bin` are **Connect frames**, not raw model-config protobuf).
+After the stream ends cleanly, the reference treats the reply as empty when **`said` stays zero and no tool call was counted** (`!said && tools < 0`, `index.mjs:1774-1776`) and maps to HTTP 502 with a short message (hofund uses the full **`EMPTY_REPLY_MESSAGE`**, `crates/kernel/codec/src/responses_empty.rs:6`; `empty-reply.test.mjs`; wire bytes in `testdata/empty-reply.bin` are **Connect frames**, not raw model-config protobuf). Only **fields 3 and 9** increment `said` (`index.mjs:1735-1740`); field **6** increments **`tools`**, not `said`.
 
 If usage reports zero output but content was seen, estimate output as `floor((said + 3) / 4)` (`index.mjs:1778`).
 
@@ -172,7 +172,7 @@ If usage reports zero output but content was seen, estimate output as `floor((sa
 - Immediate end frame with error JSON → map through `failure`, return error without opening a success stream (`errors.test.mjs` lines 87-91).
 - Immediate end with `{}` on a metadata-only success → 502 with **`EMPTY_REPLY_MESSAGE`** (`errors.test.mjs` lines 95-101).
 - EOF before content → 502 (`errors.test.mjs` lines 81-85).
-- Before returning `Ok(Completion::Stream)`, wait until **`events`** yields **text (field 3), reasoning (field 9), or a tool call (field 6)**—the same set that increments `said` (`index.mjs:1734-1740`, `1774-1776`). **Field 10 (signature) and field 7 (usage) alone do not open the stream**; skip them and keep reading (`index.mjs:1741-1744`, `1763-1771`). Only after that may hofund emit stream events to the router; failover before the first yielded client byte is only safe when nothing was yielded (`roundtrip`, `index.mjs:1851-1858`).
+- Before returning `Ok(Completion::Stream)`, wait until **`events`** yields **text (field 3) or reasoning (field 9)**—the only fields that increment `said` (`index.mjs:1735-1740`). **Do not open a success stream on field 6 (tool call), field 10 (signature delta), field 21 (signature type), or field 7 (usage)**; skip them and keep reading (`index.mjs:1741-1747`, `1763-1771`). If the stream ends with **tool calls only** (`tools >= 0` in the reference counter, `index.mjs:1748-1760`) and **`said` is still zero**, fail **before** `Ok` with **`PluginError::status_error(404, …).without_cooldown()`** using the same fixed phrase as inbound tool refusal (section 4.2)—not `EMPTY_REPLY_MESSAGE` and not a success stream (tools are R-13). Only after the first field **3** or **9** delta may hofund emit stream events; failover before the first yielded client byte is only safe when nothing was yielded (`roundtrip`, `index.mjs:1851-1858`).
 
 Both empty-reply paths (post-stream `events` check and metadata-only end frame) use **`EMPTY_REPLY_MESSAGE`** exactly. The reference plugin's shorter `"an empty reply"` substring would incorrectly **rest** the member (`decision.rs` `rests`, `docs/cursor-upstream-design.md` section 4.2).
 
@@ -234,7 +234,7 @@ Set **`Authorization`** via `Call::sensitive_header` with the literal `Basic ` +
 
 Request compression: gzip the protobuf **before** framing when `msg.len() > 8192` (`index.mjs:1139-1146`). Prefer SDK `gzip::compress` mirroring the shared inflate helper (section 2).
 
-Streaming read: poll `BodyStream` on the execute task. If the socket goes silent **after** stream bytes were already yielded to the router, return `PluginError::status_error(502, "the reply broke off: …")` with the same wording as `events` (`index.mjs:1720-1722`): **rest** applies, **no** failover (`allows` is false once output started). If the break happens **before** any stream byte is returned from `execute`, use the same `status_error(502, …)` wording; failover may still apply. Do not use `PluginErrorKind::Interrupted` for Devin mid-stream breaks (section 6 aligns with `docs/cursor-upstream-design.md` section 6).
+Streaming read: poll `BodyStream` on the execute task. With **`Call::read_timeout`**, a timeout **before** response headers arrive maps to **`PluginErrorKind::Timeout`** (`pool.rs:295-306`); idle **after** a **2xx** status maps to **`PluginErrorKind::Interrupted`** on the body stream (`pool.rs:309-314`). The Devin plugin must **never** return `Interrupted` to the router for chat: rewrite idle-after-2xx to **`PluginError::status_error(502, "the reply broke off: …")`** with the same wording as `events` (`index.mjs:1720-1722`, `1843-1844`). If bytes were already yielded, **rest** applies and **no** failover; if the break happens before any client byte, failover may still apply.
 
 ### 3.2 Kernel extension (shared with Cursor R-8)
 
@@ -261,11 +261,13 @@ Inbound protocol id may affect **outbound** client shape when hofund re-encodes,
 
 ### 4.1 Shared rules (R-12 baseline)
 
-Model id: resolve with `variantFor(families, model, effort)` (`index.mjs:234-272`, `variantFor` tests in `request.test.mjs` / snapshot families). R-12 implements family list + effort/nearest level + fast/priority tiers (`LEVEL_RANK`, `TIERS`, `index.mjs:136-183`). **`execute` and `list_models` use the same `familiesFor` chain** (`index.mjs:856-858`): live RPC → CLI JSON when the CLI confirms the account → **`familiesOf(SNAPSHOT)` in production** when both fail. `plugins/subscriptions/devin/src/fixtures/models.json` is a test fixture only, not a production fallback.
+Model id: resolve with `variantFor(families, model, effort)` (`index.mjs:234-272`, `variantFor` tests in `request.test.mjs` / snapshot families). R-12 implements family list + effort/nearest level + fast/priority tiers (`LEVEL_RANK`, `TIERS`, `index.mjs:136-183`). **`execute` and `list_models` use the same `familiesFor` chain** (`index.mjs:856-858`): live RPC → CLI JSON when the CLI confirms the account → **`familiesOf(SNAPSHOT)` in production** when both fail.
+
+**Production snapshot data:** embed the reference **`SNAPSHOT`** table (`index.mjs:51-106`) as **plugin source data** (for example `plugins/subscriptions/devin/src/snapshot_families.rs`), **separate from** `plugins/subscriptions/devin/src/fixtures/models.json` (tests only). Build **`SNAPSHOT_FAMILIES`** once from that table; **`list_models` and `execute` share it**. After resolving against the live family list, if the requested id is not a known variant uid, run the same second pass as **`variantFor`** against **`SNAPSHOT_FAMILIES`** when `families !== SNAPSHOT_FAMILIES` (`index.mjs:250-251`) so a family id such as **`swe-2`** becomes **`swe-2-high`** (via `defaultModel`), never the bare family id on field 21.
 
 Sampling: map IR generation params to field 8; default temperature **1** and top_p **0.95** when absent; apply `above0` (`index.mjs:1605-1607`). Other params (penalties, stop, seed) have no wire home—ignore without failing.
 
-Effort: map `GenerationParams::effort` through the same strings as `effortOf` (`index.mjs:1219-1227`).
+Effort: map `GenerationParams::effort` through the same strings as `effortOf` (`index.mjs:1219-1227`). **`None` (field absent on the IR request) → `effortOf` returns `""`**, which makes `variantFor` use **`defaultModel(f).id`** (for example **`swe-2-high`** for family `swe-2`). Only **`Some(Effort::None)`** maps to the wire string **`"none"`** for nearest-level picking among explicit none/minimal/… variants.
 
 System and developer text: prepend to the first user message (`build`, `index.mjs:1572-1590`). R-12 includes **no** tool-description block because R-12 refuses tools.
 
@@ -278,13 +280,13 @@ Structured output and other R-13-only wire fields: section 4.2 refusals (not a f
 **Successful execute** returns:
 
 1. `MessageStart` with generated id and the **requested** model id from the inbound request (`chat.model` in the reference stream, `index.mjs:1887`), not the resolved wire uid alone.
-2. `ContentBlockStart` text and/or thinking blocks: **`TextDelta` for field 3**; **R-12 forwards field-9 reasoning to the client** (same `said` accounting as text, `index.mjs:1738-1740`) using the gateway’s reasoning stream shape for the inbound protocol. Skip field-10 signature and field-7 usage until open (section 1.7).
+2. `ContentBlockStart` text and/or thinking blocks: **`TextDelta` for field 3**; **R-12 forwards field-9 reasoning** (same `said` accounting as text, `index.mjs:1738-1740`) using the gateway’s reasoning stream shape for the inbound protocol. Skip fields **6, 10, 21, and 7** until open (section 1.7); do not stream tool calls in R-12.
 3. On clean end: map stop varint **3** to `StopReason::MaxTokens`; tool stop **10** and default stop to `EndTurn` / tool-use as in `events` (`index.mjs:1781`).
 4. Omit usage in R-12 even if field 7 arrives (R-13 billing path).
 
 Before `Ok(Completion::Stream)`, buffer until the first **`events`** output or a terminal error (`roundtrip`, `index.mjs:1851-1858`; section 1.7).
 
-**list_models (R-12)** calls `GetCliModelConfigs` (section 1.3a), parses with `parseConfigFamilies`, merges image flags via `parseModelConfigs`, applies `listed()` catalog rules (`index.mjs:274-320`). Fallback order matches **`familiesFor`** (`index.mjs:856-858`): RPC → CLI JSON (`devin models list --format json`, `parseFamilies` `index.mjs:112-134`) when `cliAnswersFor` is true → **`familiesOf(SNAPSHOT)`**. CLI subprocesses use `HostContext::spawn_process().spawn_piped` (`crates/kernel/plugin-api/src/host.rs:570-575`) with **`XDG_DATA_HOME` and `APPDATA`** set to an isolated directory in `SpawnRequest::env`; plugin source must not use `std::process` or `std::net` (`xtask/plugin-boundary`, `clippy.toml`). **`spawn_piped` caps each stdout line at 1 MiB** (`host.rs:572-575`); a single-line `models list --format json` larger than that is truncated, JSON parse fails, and the chain falls through to **`SNAPSHOT`**—document this in tests.
+**list_models (R-12)** calls `GetCliModelConfigs` (section 1.3a), parses with `parseConfigFamilies`, merges image flags via `parseModelConfigs`, applies `listed()` catalog rules (`index.mjs:274-320`). Fallback order matches **`familiesFor`** (`index.mjs:856-858`): RPC → CLI JSON (`devin models list --format json`, `parseFamilies` `index.mjs:112-134`) when `cliAnswersFor` is true → **`familiesOf(SNAPSHOT)`** from embedded snapshot data (above). Locate the CLI with the same search order as **`cliPath`**: **`PATH`**, then **`~/.local/bin/devin`**, **`/usr/local/bin/devin`**, **`/opt/homebrew/bin/devin`** (`index.mjs:618-622`); do not rely on `PATH` alone. CLI subprocesses use `HostContext::spawn_process().spawn_piped` (`crates/kernel/plugin-api/src/host.rs:570-575`) with **`XDG_DATA_HOME`** (Unix) and **`APPDATA`** (Windows) set to the **root of a per-call temporary directory** (mode **`0o700`**). Write credentials at **`{temp}/devin/credentials.toml`** (mode **`0o600`**) with the same keys as **`credentials()`** (`windsurf_api_key`, `api_server_url`, `devin_webapp_host`, `devin_api_url`; `index.mjs:643-651`, path layout `cliCredentialsPath` `index.mjs:635-637`). Remove the **entire** temp directory on **every** exit path including failure. Plugin source must not use `std::process` or `std::net` (`xtask/plugin-boundary`, `clippy.toml`). **`spawn_piped` does not truncate oversized stdout**: a line longer than **1 MiB** without a newline stops with **`PluginError::io("child output line is longer than 1 MiB")`** (`piped.rs:113-117`; test **`oversized_line_errors`** asserts **`PluginErrorKind::Io`**, `piped.rs:292-299`). Treat that **`Io`** like any other CLI subprocess failure and fall through **`familiesFor`** to **`familiesOf(SNAPSHOT)`** (`index.mjs:856-858`)—do not parse truncated JSON.
 
 **Refusals (R-12)** before RPC when the IR or leftover protocol JSON requests structured output or other R-13-only shapes:
 
@@ -300,7 +302,9 @@ Return `PluginError::status_error(404, …).without_cooldown()` with one fixed p
 
 Attack: passing tools with empty field 10 but tool calls still in history—still unsafe. Refuse when history contains tool calls or results, not only when `tools` is non-empty.
 
-### 4.3 Part 2 (R-13): tools, images, reasoning, usage, errors
+### 4.3 Part 2 (R-13): tools, images, reasoning, usage, quota
+
+R-12 already implements **section 6** for unary chat and model-config HTTP failures (section 3.1). R-13 adds tool/image stream behavior and **quota-window / free-tier** logic on top; it does not replace R-12’s `failure` table for text-only turns.
 
 Implement the reference builders in full:
 
@@ -322,7 +326,7 @@ Implement the reference builders in full:
 | Free tier model set | `parseFree`, `index.mjs:380-393`; `free.test.mjs` |
 | Price map | `parsePrices`, `index.mjs:401-425`; `prices.test.mjs` |
 | Quota windows from `GetUserStatus` | `usage`, `index.mjs:3008-3056`; `usage.test.mjs` |
-| Error mapping | `failure`, `index.mjs:1684-1705`; `errors.test.mjs` |
+| Tool/image-specific server errors | Same section 6 constructors as R-12 where the full `build` path hits them |
 
 Messages inbound via IR: preserve block boundaries for cache marks; do not merge marked blocks (`README.md` lines 64-73; `buildMessages` comment `index.mjs:1956-1963`). Strip billing header line (`BILLING_LINE`, `index.mjs:1931`).
 
@@ -346,13 +350,15 @@ No scheduled refresh on the chat path (`README.md` lines 32-36). `Subscription::
 
 Prefer `GetUserStatus` JSON via `whoByKey` (`index.mjs:802-818`, `identity.test.mjs`). Request body metadata mirrors CLI fields (`index.mjs:2991-2993`). Parse `whoOfStatus` (`index.mjs:780-796`): email, plan tier name, orgId, teamId.
 
-Fallback when RPC inconclusive: run `devin auth status` / `models list` through **`spawn_piped`** with **`XDG_DATA_HOME` and `APPDATA`** pointing at a **per-call temporary directory** (mode `0o700`, credentials file `0o600`), removed on every exit path including failure. That directory is the **only** exception to “account store is the only persistent secret” (section 5.6). Do **not** keep a long-lived cache copy like the reference’s `homeFor` (`index.mjs:667-675` writes under `XDG_CACHE_HOME/...` and reuses the file); hofund intentionally uses ephemeral temp dirs instead.
+Fallback when RPC inconclusive: run `devin auth status` / `models list` through **`spawn_piped`** with the same **CLI temp layout** as section 4.2: set **`XDG_DATA_HOME` / `APPDATA` to the temp root**, credentials at **`{temp}/devin/credentials.toml`** (`0o600`, parent `devin/` and temp root **`0o700`**), fields from **`credentials()`** (`index.mjs:643-651`, `635-637`). Remove the whole temp dir on every exit path including failure. Do **not** keep a long-lived cache copy like the reference’s **`homeFor`** under `XDG_CACHE_HOME` (`index.mjs:667-675`); hofund uses ephemeral temp dirs only.
 
 Windows: do not trust CLI status for a browser token when CLI reads `%APPDATA%\devin\` regardless of home (`cliAnswersFor`, `index.mjs:821-840`; `identity.test.mjs`).
 
 ### 5.3 Lease
 
-Any PKCE exchange, CLI TOML re-read for `live`, or refresh that touches secrets must take `accounts().lease(id, 30s)` first (`HostContext` pattern in `docs/cursor-upstream-design.md` section 5.1). Serialize with the reference's single-flight CLI refresh intent (`cli-key.test.mjs`).
+**PKCE first exchange:** `accounts().lease` on a **not-yet-stored** account returns **`PluginError` config** (“account is not stored”, `host.rs:185-186`). The initial **`ExchangeDevinCLIPKCECode`** completes **before** the account row exists—**do not lease** for that exchange; write the secret only after success.
+
+**After the account exists:** any CLI TOML re-read for `live`, token refresh, or other secret mutation must take **`accounts().lease(id, 30s)`** first (`HostContext` pattern in `docs/cursor-upstream-design.md` section 5.1). Serialize with the reference's single-flight CLI refresh intent (`cli-key.test.mjs`).
 
 ### 5.4 Keepalive (R-13 only)
 
@@ -372,11 +378,13 @@ Match Go install hints (`internal/provider/install.go:56-58`): curl install.sh /
 
 ### 5.6 What is never written
 
-Account store is the only **persistent** secret (section 5.2 temp dirs are the sole exception). Chat does not write `credentials.toml` except `write_agent_sign_in`. Do not log Basic auth, metadata field 3, or the **`apiKey` field in `GetUserStatus` JSON** (`index.mjs:2991-2993`). Temp dirs for CLI runs must be removed on drop (section 5.2).
+Account store is the only **persistent** secret. Per-call CLI temp dirs (sections 4.2 and 5.2) are the sole exception. Chat does not write `credentials.toml` except `write_agent_sign_in`. Do not log Basic auth, metadata field 3, or the **`apiKey` field in `GetUserStatus` JSON** (`index.mjs:2991-2993`). Temp dirs for CLI runs must be removed on drop (sections 4.2 and 5.2).
 
-## 6. Error classification
+## 6. Error classification (R-12)
 
-Map using **`failure` only** (`index.mjs:1684-1705`) and `errors.test.mjs`. There is no `statusOf` in the Devin plugin. Append a hofund sign-in hint without naming the reference product: e.g. `sign in to Devin again` (`index.mjs:1695`).
+**R-12** implements this table for **`GetChatMessage`**, **`GetCliModelConfigs`**, **`GetUserStatus`**, and PKCE **`exchange`** failures on the text path. **R-13** adds **quota window** routing, **`notModels` / free-tier** holds, and any tool- or image-specific cases—not a second copy of generic HTTP chat mapping.
+
+Map using **`failure`** (`index.mjs:1684-1705`) and `errors.test.mjs`, in the **plugin** after reading status bodies via **`Call::open_raw`** (section 3.1). There is no `statusOf` in the Devin plugin. Append a hofund sign-in hint without naming the reference product: e.g. `sign in to Devin again` (`index.mjs:1695`).
 
 Follow the same **`PluginError` shapes and router rules** as `docs/cursor-upstream-design.md` section 6 (`allows`, `decision.rs:171-178`; `failure_kind`, `cooldown.rs`). Do **not** use `PluginError::auth` on the chat path—401 uses `status_error(401, …)` so failover can try another account while the secret stays stored. **`Connect` / `Transport` / `Interrupted`** are for failures **before** a successful HTTP status on the wire, not for mapped HTTP statuses from `failure`.
 
@@ -385,8 +393,8 @@ Classification order matches `failure` (`index.mjs:1694-1705`):
 | Reference outcome | HTTP | Hofund | Rest / failover |
 |---|---|---|---|
 | `unauthenticated` or HTTP 401 | 401 | `status_error(401, …)`; do not delete secret | Generic ladder; 401 failovers (`allows` treats `Status`, not `Auth`) |
-| `resource_exhausted` or message contains **quota** (not plain rate limit) | 429 | `quota_status(429, "usage limit reached: …")` (`index.mjs:1696`) | Quota rest + failover |
-| message contains **rate limit** without quota wording | 429 | `status_error(429, …)` | Rate ladder + failover |
+| `resource_exhausted` or message contains **quota** (and not treated as plain rate limit below) | 429 | `quota_status(429, "usage limit reached: …")` (`index.mjs:1696` quota branch) | Quota rest + failover |
+| message contains **rate limit** without relying on the quota-only path above | 429 | `status_error(429, …)` — **do not** prefix **`usage limit reached:`** and **do not** use `quota_status` (reference merges quota and rate limit in one string at `index.mjs:1696`; hofund must split so rate limits use the status ladder, not quota rest) | Rate ladder + failover |
 | content policy | 400 | `status_error(400, …)` | |
 | too long / context length / too many tokens | 400 | `status_error(400, "input is too long for the model's context: …")` | `overflowed`; no status-list failover |
 | `invalid_argument` (other) | 400 | `status_error(400, …).without_cooldown()` when text is not quota-shaped | |
@@ -456,7 +464,7 @@ cargo test --workspace
 | Connect codec (Devin messages) | `plugins/subscriptions/devin/src/connect/{mod,chat,configs}.rs` | Field tables in section 1 |
 | Shared Connect + read_timeout | `plugin-sdk` `Call::read_timeout`, `plugin-host` `pool.rs` | **Blocker**: same API as Cursor R-8 section 3.2; Devin R-12 must not ship on 60 s pool idle alone |
 | Upstream execute + probe | `upstream.rs`, `stream.rs` | Replace `unsupported()` |
-| Model list + variant picker | `models.rs`, `discover.rs` touch | Wire `list_models` to RPC |
+| Model list + variant picker | `models.rs`, `snapshot_families.rs`, `discover.rs` touch | Wire `list_models` to RPC; embedded **`SNAPSHOT`** (`index.mjs:51-106`) |
 | PKCE sign-in | `sign_in.rs` (new), `lib.rs` | Loopback server via host loopback handle |
 | CLI install copy | `lib.rs` or `sign_in.rs` | Strings only |
 | `live` + CLI re-read | `creds.rs`, `session.rs` (new) | Lease guarded |
@@ -476,7 +484,7 @@ cargo test --workspace
 | Reasoning + signatures | `thinking.rs` | Global `sigTypes` with cap 512 |
 | Quota + usage | `quota.rs` | `GetUserStatus` JSON |
 | Keepalive scheduler | `keepalive.rs` | Requires session key from host; off default |
-| Error taxonomy tests | `errors.rs` | Parity with `errors.test.mjs` |
+| Error taxonomy tests | `errors.rs` | Extends R-12 section 6 for tool/image paths; base chat mapping ships in R-12 |
 | Feature parity + comparison table rows | docs only in same PRs | Evidence links |
 
 **Deferred beyond R-13:** OpenCode v2 `LanguageModelV3` adapter (reference `devinLanguage`, `index.mjs:2662+`); usage ping reporting **until the daemon exposes a usage hook**; Anthropic `/devin/v1/messages` as a separate HTTP API (reference still uses `GetChatMessage` for Messages-shaped clients—hofund IR path only).
