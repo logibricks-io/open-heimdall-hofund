@@ -405,7 +405,47 @@ mod tests {
     use chrono::{LocalResult, NaiveDate, TimeZone};
     use chrono_tz::Tz;
 
-    use super::{local_wall_instant, pick_time_only_wall, pick_yearless_wall, resolve_iana};
+    use super::{
+        expand_next_reading_bounds, local_wall_instant, next_reading, pick_time_only_wall,
+        pick_yearless_wall, resolve_iana,
+    };
+
+    fn ny_at(h: u32, min: u32) -> chrono::DateTime<Tz> {
+        chrono::Utc
+            .with_ymd_and_hms(2026, 11, 1, h, min, 0)
+            .single()
+            .expect("utc")
+            .with_timezone(&Tz::America__New_York)
+    }
+
+    #[test]
+    fn r8_9_expand_bounds_reaches_the_earlier_reading_from_the_later() {
+        // 06:30 UTC is 01:30 EST, the second reading; the first is 05:30 UTC (01:30 EDT).
+        let t = ny_at(6, 30);
+        let (mut first, mut last) = (t, t);
+        expand_next_reading_bounds(&mut first, &mut last, t);
+        assert_eq!(first, ny_at(5, 30));
+        assert_eq!(last, t);
+    }
+
+    #[test]
+    fn r8_10_expand_bounds_reaches_the_later_reading_from_the_earlier() {
+        let t = ny_at(5, 30);
+        let (mut first, mut last) = (t, t);
+        expand_next_reading_bounds(&mut first, &mut last, t);
+        assert_eq!(first, t);
+        assert_eq!(last, ny_at(6, 30));
+    }
+
+    #[test]
+    fn r8_11_next_reading_accepts_a_reading_equal_to_the_reference() {
+        let t = chrono::Utc
+            .with_ymd_and_hms(2026, 7, 1, 12, 0, 0)
+            .single()
+            .expect("utc")
+            .with_timezone(&Tz::America__New_York);
+        assert_eq!(next_reading(t, t, t), Some(t));
+    }
 
     fn utc(y: i32, m: u32, d: u32, h: u32, min: u32) -> std::time::SystemTime {
         let dt = chrono::Utc

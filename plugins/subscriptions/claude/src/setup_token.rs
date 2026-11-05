@@ -126,6 +126,17 @@ mod tests {
     }
 
     #[test]
+    fn r8_6_api_key_named_and_length_capped() {
+        let error = normalize("sk-ant-api03-key").expect_err("api key refused");
+        assert!(error.message().contains("API key"), "{error}");
+        let at_cap = format!("sk-ant-oat01-{}", "a".repeat(512 - 13));
+        assert_eq!(at_cap.len(), 512);
+        assert!(normalize(&at_cap).is_ok());
+        let over = format!("{at_cap}a");
+        assert!(normalize(&over).is_err());
+    }
+
+    #[test]
     fn r5_6_setup_token_strips_env_prefix() {
         let token = normalize("CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-abc").expect("token");
         assert_eq!(token, "sk-ant-oat01-abc");

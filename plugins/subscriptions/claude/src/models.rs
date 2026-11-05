@@ -327,6 +327,30 @@ mod tests {
     }
 
     #[test]
+    fn r8_7_disabled_model_option_is_skipped() {
+        let text = r#"{
+            "additionalModelOptionsAnsweredAt": 2,
+            "additionalModelOptionsCache": [
+                {"value":"claude-mythos-5-1","label":"Mythos","disabled":true},
+                {"value":"claude-haiku-5-1","label":"Haiku","disabled":false}
+            ],
+            "modelAccessCache": []
+        }"#;
+        let parsed = parse_code_models(text).expect("parsed");
+        assert!(!parsed.extra.contains_key("claude-mythos-5-1"));
+        assert!(parsed.extra.contains_key("claude-haiku-5-1"));
+    }
+
+    #[test]
+    fn r8_8_micros_rounds_and_floors_at_zero() {
+        assert_eq!(micros(3.0), 3_000_000);
+        assert_eq!(micros(0.000_001_7), 2);
+        assert_eq!(micros(0.000_001_2), 1);
+        assert_eq!(micros(0.0), 0);
+        assert_eq!(micros(-2.5), 0);
+    }
+
+    #[test]
     fn r5_8_api_id_strips_window_suffix() {
         assert_eq!(
             api_id("claude-mythos-5-1[1m]"),

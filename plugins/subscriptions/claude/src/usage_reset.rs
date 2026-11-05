@@ -120,6 +120,17 @@ mod tests {
     }
 
     #[test]
+    fn r8_5_hour12_midnight_noon_and_range() {
+        assert_eq!(hour12(12, "am"), Some(0));
+        assert_eq!(hour12(12, "pm"), Some(12));
+        assert_eq!(hour12(1, "am"), Some(1));
+        assert_eq!(hour12(1, "PM"), Some(13));
+        assert_eq!(hour12(0, "am"), None);
+        assert_eq!(hour12(0, "pm"), None);
+        assert_eq!(hour12(13, "pm"), None);
+    }
+
+    #[test]
     fn r5_12_reset_golden_matches_reference_parse_test() {
         let now = utc_at("2026-10-01T04:00:00Z");
         let text = "Oct 1 at 3:30pm (Asia/Shanghai)";
