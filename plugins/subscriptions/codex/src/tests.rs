@@ -1518,7 +1518,6 @@ fn wham_usage_maps_windows() {
     let windows = block_on(subscription(&host).quota(&id, host.context())).expect("quota");
     let call = &host.http().calls()[0];
     assert_eq!(call.uri(), "https://codex.test/backend-api/wham/usage");
-    assert!(call.is_http11());
     assert!(
         call.sensitive_headers()
             .iter()
@@ -1823,7 +1822,6 @@ fn r47a_e_codex_responses_turn_sends_zstd_body() {
     let call = &host.http().calls()[0];
     assert_eq!(call.uri(), format!("{BASE}/responses"));
     assert_eq!(call.header("content-encoding"), Some("zstd"));
-    assert!(call.is_http11());
     let plain = hofund_plugin_sdk::codex_zstd::decompress_turn(call.body(), 512 * 1024)
         .expect("decompress");
     let body = String::from_utf8(plain).expect("utf8");

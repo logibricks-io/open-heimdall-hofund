@@ -289,9 +289,6 @@ impl HttpBackend for PooledHttp {
             outbound = outbound.header(name.as_str(), header);
         }
         let bytes = request.body().bytes().clone();
-        if request.version() == http::Version::HTTP_11 {
-            outbound = outbound.version(reqwest::Version::HTTP_11);
-        }
         let mut response = outbound.body(bytes).send().await.map_err(map_error)?;
         let status = response.status();
         let mut headers = response.headers().clone();
@@ -992,6 +989,38 @@ mod tests {
             .expect("ok");
         assert_eq!(&body[..], b"busy");
         assert!(response.body_mut().next_chunk().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn pooled_client_sends_an_http11_request_line() {
+        let _guard = exclusive().await;
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let (request_tx, request_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(1);
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+            let request = read_request(&mut stream, false);
+            let _ = request_tx.send(request);
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n");
+        });
+        let _ = PooledHttp::direct()
+            .send(get_request(port))
+            .await
+            .expect("send");
+        let request = request_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("request bytes");
+        let first_line = request
+            .split(|byte| *byte == b'\n')
+            .next()
+            .expect("request line");
+        assert!(
+            first_line.ends_with(b" HTTP/1.1\r"),
+            "request line was {:?}",
+            String::from_utf8_lossy(first_line)
+        );
     }
 
     #[tokio::test]

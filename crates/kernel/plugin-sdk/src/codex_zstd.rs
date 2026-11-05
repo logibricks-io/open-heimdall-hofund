@@ -4,30 +4,41 @@
 //! `Content-Encoding: zstd` at level 3. Other paths and methods stay plain JSON.
 
 use std::cell::Cell;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use url::Url;
-
-/// When false, turns stay plain JSON (unit tests against mock backends).
-static ENABLED: AtomicBool = AtomicBool::new(true);
 
 thread_local! {
     static TEST_OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
 }
 
-fn compression_enabled() -> bool {
-    TEST_OVERRIDE.with(|slot| {
-        slot.get()
-            .unwrap_or_else(|| ENABLED.load(Ordering::Relaxed))
-    })
+#[cfg(test)]
+thread_local! {
+    static COMPRESS_FAIL: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Sets whether Codex turns are zstd-compressed, for tests. Returns a restore closure.
+fn compression_enabled() -> bool {
+    TEST_OVERRIDE.with(Cell::get).unwrap_or(true)
+}
+
+/// Sets whether Codex turns are zstd-compressed on this thread. Returns a restore closure.
+///
+/// The override is thread-local: call this on the same thread that sends the HTTP request.
+#[doc(hidden)]
 pub fn codex_zstd_for_tests(on: bool) -> impl FnOnce() {
     TEST_OVERRIDE.with(|slot| {
         let was = slot.replace(Some(on));
         move || {
             TEST_OVERRIDE.with(|slot| slot.set(was));
+        }
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn force_compress_fail_for_tests(on: bool) -> impl FnOnce() {
+    COMPRESS_FAIL.with(|slot| {
+        let was = slot.replace(on);
+        move || {
+            COMPRESS_FAIL.set(was);
         }
     })
 }
@@ -58,7 +69,10 @@ pub fn maybe_compress_turn(
     if content_encoding.is_some_and(|enc| !enc.eq_ignore_ascii_case("identity")) {
         return (body.to_vec(), false);
     }
-    (compress_level3(body), true)
+    match compress_level3(body) {
+        Ok(compressed) => (compressed, true),
+        Err(()) => (body.to_vec(), false),
+    }
 }
 
 /// Decompresses a zstd turn body in unit tests (max `limit` bytes).
@@ -67,8 +81,12 @@ pub fn decompress_turn(body: &[u8], limit: usize) -> Option<Vec<u8>> {
     zstd::bulk::decompress(body, limit).ok()
 }
 
-fn compress_level3(body: &[u8]) -> Vec<u8> {
-    zstd::bulk::compress(body, 3).unwrap_or_else(|_| body.to_vec())
+fn compress_level3(body: &[u8]) -> Result<Vec<u8>, ()> {
+    #[cfg(test)]
+    if COMPRESS_FAIL.with(Cell::get) {
+        return Err(());
+    }
+    zstd::bulk::compress(body, 3).map_err(|_| ())
 }
 
 #[cfg(test)]
@@ -100,6 +118,17 @@ mod tests {
         assert_eq!(out, body);
 
         let (out, ok) = maybe_compress_turn("POST", turn, Some("gzip"), &body);
+        assert!(!ok);
+        assert_eq!(out, body);
+    }
+
+    #[test]
+    fn r47a_e_compress_failure_stays_plain() {
+        let _zstd = codex_zstd_for_tests(true);
+        let _fail = force_compress_fail_for_tests(true);
+        let body = br#"{"model":"gpt-5","input":"hello"}"#.repeat(1000);
+        let turn = "https://chatgpt.com/backend-api/codex/responses";
+        let (out, ok) = maybe_compress_turn("POST", turn, None, &body);
         assert!(!ok);
         assert_eq!(out, body);
     }

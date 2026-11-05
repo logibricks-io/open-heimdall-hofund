@@ -206,7 +206,6 @@ transport::Call::fn bytes (mut self , body : impl AsRef < [u8] >) -> Self
 transport::Call::fn credential (self , style : CredentialStyle , secret : & SecretString ,) -> Result < Self , PluginError >
 transport::Call::fn get (uri : impl Into < String >) -> Self
 transport::Call::fn header (mut self , name : impl Into < String > , value : impl Into < String >) -> Self
-transport::Call::fn http1_only (mut self) -> Self
 transport::Call::fn idempotent (mut self , idempotent : bool) -> Self
 transport::Call::fn json (self , body : impl AsRef < [u8] >) -> Self
 transport::Call::fn post (uri : impl Into < String >) -> Self
@@ -240,7 +239,6 @@ wire::Sent::fn headers (& self) -> & http :: HeaderMap
 wire::Sent::fn watch (mut self , limit : usize , watch : Watch) -> Self
 wire::Target derives(Clone)
 wire::Target::const fn allocation_quota_rate (mut self , enabled : bool) -> Self
-wire::Target::const fn chatgpt_codex_backend (mut self , enabled : bool) -> Self
 wire::Target::const fn chatgpt_codex_zstd (mut self , enabled : bool) -> Self
 wire::Target::fn credential (mut self , credential : CredentialStyle) -> Self
 wire::Target::fn headers (mut self , headers : Vec < (String , String) >) -> Self
