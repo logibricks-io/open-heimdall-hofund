@@ -34,6 +34,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   accounts, CLIProxy-style credential import, pending sign-in idle expiry, and
   account-directory cleanup on remove; tests `r5_1` through `r5_11` and fix-round
   tests `r5_12` through `r5_33`.
+
+- Codex subscription parity slice **R-47a**: ignore `auth_mode: apikey` in agent discovery/import;
+  zstd-compressed POST bodies and HTTP/1.1 on the ChatGPT Codex backend wire; Responses image
+  parts on the upstream body; `/wham/rate-limit-reset-credits` read and explicit consume on
+  `Subscription` (`quota_reset_credits`, `consume_quota_reset`).
 - Subscription plugins for Grok Build, Cursor, and Cline (feature-parity row 3.5,
   part 1): device or browser sign-in, agent auth import where supported, token
   refresh, model lists, quota reads, and chat or Responses upstream for Grok
