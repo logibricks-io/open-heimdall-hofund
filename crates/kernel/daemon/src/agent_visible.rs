@@ -76,4 +76,50 @@ codex = ["b"]
         let (shown, _) = models_for_agent(&catalog, &snapshot, Some("codex"), None);
         assert_eq!(shown, ["a"]);
     }
+
+    #[test]
+    fn r7a_agent_models_hide_unlisted_exclusive_routes() {
+        let text = r#"
+listen = "127.0.0.1:3425"
+[[providers]]
+id = "listed"
+protocol = "openai-chat"
+base_url = "http://127.0.0.1:1"
+api_key = "k"
+[[providers]]
+id = "secret"
+listed = false
+protocol = "openai-chat"
+base_url = "http://127.0.0.1:2"
+api_key = "k"
+[[routes]]
+model = "visible"
+upstreams = ["listed"]
+[[routes]]
+model = "hidden-only"
+upstreams = ["secret"]
+[[routes]]
+model = "group/work"
+upstreams = [{ group = "inner" }]
+[[routes]]
+model = "group/inner"
+upstreams = ["secret"]
+"#;
+        let dir = tempdir().expect("dir");
+        let path = dir.path().join("hofund.toml");
+        std::fs::write(&path, text).expect("write");
+        let config = Arc::new(load(text).expect("config"));
+        let runtime = Runtime::new(Arc::new(RegistryAdapter), &path, None);
+        let snapshot = runtime
+            .initial_snapshot(config.as_ref(), None)
+            .expect("snapshot");
+        let catalog = Arc::new(RwLock::new(VisibleCatalog::build(
+            Arc::clone(&config),
+            &snapshot.load().models(),
+        )));
+        let (shown, _) = models_for_agent(&catalog, &snapshot, None, None);
+        assert!(shown.iter().any(|id| id == "visible"));
+        assert!(shown.iter().any(|id| id == "group/work"));
+        assert!(!shown.iter().any(|id| id == "hidden-only"));
+    }
 }

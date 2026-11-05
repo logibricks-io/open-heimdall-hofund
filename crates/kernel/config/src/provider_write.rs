@@ -181,11 +181,15 @@ fn strip_provider_references(
 ) -> Result<(), ConfigError> {
     loop {
         let mut changed = false;
+        let groups = document
+            .get("routes")
+            .and_then(Item::as_array_of_tables)
+            .map(group_ids_in_routes)
+            .unwrap_or_default();
         if let Some(routes) = document
             .get_mut("routes")
             .and_then(Item::as_array_of_tables_mut)
         {
-            let groups = group_ids_in_routes(routes);
             let mut remove = Vec::new();
             for (index, route) in routes.iter_mut().enumerate() {
                 if let Some(upstreams) = route.get_mut("upstreams").and_then(Item::as_array_mut) {
@@ -219,9 +223,16 @@ fn strip_provider_references(
                 if let Some(fallback) = table.get_mut("fallback").and_then(Item::as_array_mut) {
                     let before = fallback.len();
                     fallback.retain(|entry| {
-                        entry
-                            .as_str()
-                            .is_none_or(|value| !fallback_targets_provider(value, provider_id))
+                        let Some(value) = entry.as_str() else {
+                            return true;
+                        };
+                        if fallback_targets_provider(value, provider_id) {
+                            return false;
+                        }
+                        if let Some(id) = value.strip_prefix("group/") {
+                            return groups.contains(id);
+                        }
+                        true
                     });
                     if fallback.len() != before {
                         changed = true;
@@ -233,7 +244,47 @@ fn strip_provider_references(
             break;
         }
     }
+    normalize_invalid_routing(document)?;
     Ok(())
+}
+
+fn normalize_invalid_routing(document: &mut DocumentMut) -> Result<(), ConfigError> {
+    let Some(routes) = document
+        .get_mut("routes")
+        .and_then(Item::as_array_of_tables_mut)
+    else {
+        return Ok(());
+    };
+    for route in routes.iter_mut() {
+        let routing = route
+            .get("routing")
+            .and_then(Item::as_str)
+            .unwrap_or("smart");
+        if routing != "cheap" {
+            continue;
+        }
+        if route_is_cheap_group(route) {
+            continue;
+        }
+        route.insert("routing", value("smart"));
+    }
+    Ok(())
+}
+
+fn route_is_cheap_group(route: &Table) -> bool {
+    let Some(upstreams) = route.get("upstreams").and_then(Item::as_array) else {
+        return false;
+    };
+    if upstreams.len() > 1 {
+        return true;
+    }
+    upstreams.iter().any(|entry| {
+        if let Value::InlineTable(table) = entry {
+            table.contains_key("group") || table.contains_key("subscription")
+        } else {
+            false
+        }
+    })
 }
 
 fn group_ids_in_routes(routes: &toml_edit::ArrayOfTables) -> std::collections::BTreeSet<String> {
@@ -367,5 +418,47 @@ mod tests {
             .expect("other provider");
         assert_eq!(other.fallback.len(), 1);
         assert_eq!(other.fallback[0].route_model(), "chat/x");
+    }
+
+    #[test]
+    fn r7a_provider_delete_drops_group_fallback_when_group_removed() {
+        let text = format!(
+            "{BASE}[[providers]]\nid = \"solo\"\nprotocol = \"openai-chat\"\nbase_url = \"http://127.0.0.1/v1\"\napi_key = \"k\"\n\
+             [[providers]]\nid = \"other\"\nprotocol = \"openai-chat\"\nbase_url = \"http://127.0.0.1/v1\"\napi_key = \"k\"\n\
+             fallback = [\"group/team\"]\n\
+             [[routes]]\nmodel = \"group/team\"\nupstreams = [\"solo\"]\n"
+        );
+        let edited = edit_provider_delete(&text, "solo").expect("delete");
+        load(&edited).expect("edited config loads");
+        assert!(!edited.contains("group/team"));
+        let config = load(&edited).expect("reload");
+        let other = config
+            .providers
+            .iter()
+            .find(|provider| provider.id == "other")
+            .expect("other");
+        assert!(other.fallback.is_empty());
+    }
+
+    #[test]
+    fn r7a_provider_delete_demotes_cheap_group_when_one_member_remains() {
+        let text = "\
+[[providers]]\nid = \"a\"\nprotocol = \"openai-chat\"\nbase_url = \"http://127.0.0.1/v1\"\napi_key = \"k\"\n\
+[[providers]]\nid = \"b\"\nprotocol = \"openai-chat\"\nbase_url = \"http://127.0.0.1/v1\"\napi_key = \"k\"\n\
+[[routes]]\nmodel = \"group/pair\"\nrouting = \"cheap\"\n\
+upstreams = [{ provider = \"a\" }, { provider = \"b\" }]\n";
+        let edited = edit_provider_delete(text, "b").expect("delete");
+        load(&edited).expect("edited config loads");
+        assert!(
+            edited.contains("routing = \"smart\"") || edited.contains("routing = 'smart'"),
+            "expected cheap routing demoted, got: {edited}"
+        );
+        let config = load(&edited).expect("reload");
+        let group = config
+            .routes
+            .iter()
+            .find(|route| route.model == "group/pair")
+            .expect("group route");
+        assert_eq!(group.routing, "smart");
     }
 }

@@ -61,10 +61,21 @@ impl VisibleCatalog {
         agent_id: Option<&str>,
         active_model: Option<&str>,
     ) -> (Vec<String>, Vec<String>) {
+        let route_ids: Vec<String> = route_ids
+            .iter()
+            .filter(|id| {
+                self.config
+                    .routes
+                    .iter()
+                    .find(|route| route.model == id.as_str())
+                    .is_none_or(|route| !route_hidden_by_unlisted_providers(&self.config, route))
+            })
+            .cloned()
+            .collect();
         catalog_for_agent(
             &self.settings,
             &self.index,
-            route_ids,
+            &route_ids,
             agent_id,
             active_model,
         )
@@ -84,6 +95,34 @@ pub fn build_catalog_index(
         }
     }
     out
+}
+
+/// Returns true when a non-group route should be hidden from agent model lists
+/// because every direct provider upstream is `listed: false`.
+#[must_use]
+pub fn route_hidden_by_unlisted_providers(config: &Config, route: &Route) -> bool {
+    if route.model.starts_with(GROUP_PREFIX) {
+        return false;
+    }
+    let mut providers = BTreeSet::new();
+    for upstream in &route.upstreams {
+        match &upstream.target {
+            UpstreamTarget::Provider(id) => {
+                providers.insert(id.as_str());
+            }
+            UpstreamTarget::Group(_) | UpstreamTarget::Subscription(_) => return false,
+        }
+    }
+    if providers.is_empty() {
+        return false;
+    }
+    providers.iter().all(|id| {
+        config
+            .providers
+            .iter()
+            .find(|provider| provider.id == *id)
+            .is_some_and(|provider| !provider.listed)
+    })
 }
 
 /// Returns the route ids an agent is shown and those kept from it.
@@ -415,7 +454,10 @@ pub(crate) fn validated_family(
 
 #[cfg(test)]
 mod tests {
-    use super::{VisibleCatalog, build_catalog_index, catalog_for_agent, shows};
+    use super::{
+        VisibleCatalog, build_catalog_index, catalog_for_agent, route_hidden_by_unlisted_providers,
+        shows,
+    };
     use crate::load;
     use std::sync::Arc;
 
@@ -541,6 +583,59 @@ codex = ["other/b"]
         let catalog = VisibleCatalog::build(config, &ids);
         let (shown, _) = catalog.models_for_agent(&ids, Some("codex"), None);
         assert_eq!(shown, ["relay/a", "group/work"]);
+    }
+
+    #[test]
+    fn r7a_unlisted_provider_hides_exclusive_route_from_agent_catalog() {
+        let config = load(
+            r#"
+listen = "127.0.0.1:3425"
+[[providers]]
+id = "listed"
+protocol = "openai-chat"
+base_url = "http://127.0.0.1:1"
+api_key = "k"
+[[providers]]
+id = "secret"
+listed = false
+protocol = "openai-chat"
+base_url = "http://127.0.0.1:2"
+api_key = "k"
+[[routes]]
+model = "visible"
+upstreams = ["listed"]
+[[routes]]
+model = "hidden-only"
+upstreams = ["secret"]
+[[routes]]
+model = "group/work"
+upstreams = [{ group = "inner" }]
+[[routes]]
+model = "group/inner"
+upstreams = ["secret"]
+"#,
+        )
+        .expect("config");
+        let hidden = config
+            .routes
+            .iter()
+            .find(|route| route.model == "hidden-only")
+            .expect("hidden route");
+        assert!(route_hidden_by_unlisted_providers(&config, hidden));
+        let group = config
+            .routes
+            .iter()
+            .find(|route| route.model == "group/work")
+            .expect("group route");
+        assert!(!route_hidden_by_unlisted_providers(&config, group));
+        let ids = vec![
+            "visible".to_owned(),
+            "hidden-only".to_owned(),
+            "group/work".to_owned(),
+        ];
+        let catalog = VisibleCatalog::build(Arc::new(config), &ids);
+        let (shown, _) = catalog.models_for_agent(&ids, None, None);
+        assert_eq!(shown, ["visible", "group/work"]);
     }
 
     #[test]

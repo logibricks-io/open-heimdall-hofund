@@ -10,11 +10,14 @@ use hofund_control_proto::{
     GroupMemberCandidatesResponse, GroupPatchRequest, GroupRestoreRequest, GroupWriteResponse,
     PresetListResponse, ProfileRenameRequest, ProfileSaveRequest, ProviderCreateRequest,
     ProviderDeleteRequest, ProviderDeleteResponse, ProviderListResponse, ProviderPatchRequest,
-    ProviderWriteResponse, ServeRole, StatusResponse, decode_error_envelope, decode_response,
+    ProviderWriteResponse, RouteModelListResponse, ServeRole, StatusResponse,
+    decode_error_envelope, decode_response,
 };
 use hofund_daemon::{ControlRuntime, Running, StartOptions, start_with_options};
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const SECRET: &str = "sk-control-r7a-provider-secret";
 
@@ -790,5 +793,132 @@ async fn deleting_provider_reseats_agent_and_leaves_loadable_config() {
         settings_text.contains("\"safe\""),
         "agent must reseat off the deleted provider's route, got: {settings_text}"
     );
+    support::shutdown(running).await;
+}
+
+#[tokio::test]
+async fn disabling_exclusive_provider_rejects_requests_and_mixed_group_keeps_agent() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [{"message": {"role": "assistant", "content": "ok"}}]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let scratch = Scratch::new("disabled-hops");
+    let settings = scratch
+        .runtime_dir
+        .join("home")
+        .join(".claude")
+        .join("settings.json");
+    std::fs::create_dir_all(settings.parent().expect("settings parent")).expect("claude dir");
+    std::fs::write(&settings, "{\"model\": \"group/pair\"}\n").expect("agent settings");
+    let session = Session::new(scratch.runtime_dir.join("home")).with_path("");
+    let text = format!(
+        "listen = \"127.0.0.1:0\"\n\
+[[providers]]\nid = \"primary\"\nprotocol = \"openai-chat\"\nbase_url = \"{}/v1\"\napi_key = \"{SECRET}\"\n\
+[[providers]]\nid = \"spare\"\nprotocol = \"openai-chat\"\nbase_url = \"http://127.0.0.1:9/v1\"\napi_key = \"{SECRET}\"\n\
+[[routes]]\nmodel = \"only-spare\"\nupstreams = [\"spare\"]\n\
+[[routes]]\nmodel = \"group/pair\"\nrouting = \"order\"\n\
+upstreams = [{{ provider = \"primary\", model = \"m\" }}, {{ provider = \"spare\", model = \"m\" }}]\n",
+        server.uri()
+    );
+    let options = options_with(
+        &scratch,
+        StartOptions {
+            agent_session: Some(session),
+            ..StartOptions::default()
+        },
+    );
+    let running = support::within(
+        "start daemon",
+        support::REQUEST,
+        start_with(&scratch, &text, options),
+    )
+    .await;
+    let client = Client::new(&running, &scratch);
+    let token = std::fs::read_to_string(scratch.runtime_dir.join("hofund.token"))
+        .or_else(|_| std::fs::read_to_string(scratch.config_dir.join("hofund.token")))
+        .expect("token")
+        .trim()
+        .to_owned();
+    let gateway = format!("http://{}", running.local_addr);
+
+    let read = client.config().await;
+    let disable = provider_patch(json!({
+        "version": API_VERSION,
+        "expected_revision": read.disk_revision,
+        "enabled": false,
+    }));
+    let (status, _) = client.patch("/v1/hofund/providers/spare", &disable).await;
+    assert_eq!(status, reqwest::StatusCode::OK);
+
+    let blocked = support::client()
+        .post(format!("{gateway}/v1/chat/completions"))
+        .bearer_auth(&token)
+        .json(&json!({"model": "only-spare", "messages": [{"role": "user", "content": "hi"}]}))
+        .send()
+        .await
+        .expect("exclusive route request");
+    assert_eq!(blocked.status(), reqwest::StatusCode::NOT_FOUND);
+
+    let routed = support::client()
+        .post(format!("{gateway}/v1/chat/completions"))
+        .bearer_auth(&token)
+        .json(&json!({"model": "group/pair", "messages": [{"role": "user", "content": "hi"}]}))
+        .send()
+        .await
+        .expect("group route request");
+    assert_eq!(routed.status(), reqwest::StatusCode::OK);
+
+    let settings_text = std::fs::read_to_string(&settings).expect("settings after disable");
+    assert!(
+        settings_text.contains("group/pair"),
+        "agent on a group with another enabled member must not reseat, got: {settings_text}"
+    );
+
+    support::shutdown(running).await;
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn unlisted_provider_hides_exclusive_route_not_member_candidates() {
+    let scratch = Scratch::new("listed-false");
+    seed_models(&scratch.config_dir, "hidden", json!([{"id": "x"}]));
+    let text = format!(
+        "listen = \"127.0.0.1:0\"\n\
+[[providers]]\nid = \"chat\"\nprotocol = \"openai-chat\"\nbase_url = \"http://127.0.0.1:9/v1\"\napi_key = \"{SECRET}\"\n\
+[[providers]]\nid = \"hidden\"\nlisted = false\nprotocol = \"openai-chat\"\nbase_url = \"http://127.0.0.1:9/v1\"\napi_key = \"{SECRET}\"\n\
+[[routes]]\nmodel = \"m\"\nupstreams = [\"chat\"]\n\
+[[routes]]\nmodel = \"secret-route\"\nupstreams = [\"hidden\"]\n\
+[[routes]]\nmodel = \"group/work\"\nupstreams = [{{ group = \"inner\" }}]\n\
+[[routes]]\nmodel = \"group/inner\"\nupstreams = [\"hidden\"]\n"
+    );
+    let running = support::within("start daemon", support::REQUEST, start(&scratch, &text)).await;
+    let client = Client::new(&running, &scratch);
+
+    let (status, body) = client.get("/v1/hofund/models").await;
+    assert_eq!(status, reqwest::StatusCode::OK);
+    let models: RouteModelListResponse = decode_response(API_VERSION, &body).expect("models");
+    let ids: Vec<_> = models.models.into_iter().map(|entry| entry.id).collect();
+    assert!(ids.contains(&"m".to_owned()));
+    assert!(ids.contains(&"group/work".to_owned()));
+    assert!(!ids.iter().any(|id| id == "secret-route"));
+
+    let (status, body) = client.get("/v1/hofund/groups/member-candidates").await;
+    assert_eq!(status, reqwest::StatusCode::OK);
+    let candidates: GroupMemberCandidatesResponse =
+        decode_response(API_VERSION, &body).expect("candidates");
+    assert!(
+        candidates
+            .served
+            .iter()
+            .any(|entry| entry.reference.starts_with("hidden/")),
+        "unlisted providers must still appear in member candidates"
+    );
+
     support::shutdown(running).await;
 }

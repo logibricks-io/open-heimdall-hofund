@@ -217,7 +217,7 @@ fn run_reseat_locked(
     let session = configured_session.unwrap_or_else(crate::agent_session);
     let matched = match_route_models
         .map(<[String]>::to_vec)
-        .unwrap_or_else(|| affected_route_models(&config, provider_id));
+        .unwrap_or_else(|| crate::routes_without_sendable_hops(&config));
     let fallback = fallback_route_models(&config, provider_id);
     let catalog = catalog(descriptions).map_err(|error| internal(error.to_string()))?;
     reseat_after_provider_change(

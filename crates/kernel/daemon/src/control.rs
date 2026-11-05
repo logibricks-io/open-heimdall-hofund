@@ -743,22 +743,26 @@ impl ControlState for DaemonControl {
         let catalog = self.ops.model_catalog();
         let router = self.router.clone();
         Box::pin(async move {
-            let visible: std::collections::BTreeSet<String> =
-                if let Some(catalog) = catalog.as_ref() {
-                    hofund_model_catalog::listable_route_models(
-                        config.routes.iter().map(|route| route.model.clone()),
-                        Some(catalog.as_ref()),
-                        Some(catalog.visibility()),
-                    )
-                    .into_iter()
-                    .collect()
-                } else {
-                    config
-                        .routes
-                        .iter()
-                        .map(|route| route.model.clone())
-                        .collect()
-                };
+            let visible: std::collections::BTreeSet<String> = config
+                .routes
+                .iter()
+                .filter(|route| !hofund_config::route_hidden_by_unlisted_providers(&config, route))
+                .map(|route| route.model.clone())
+                .filter(|model| {
+                    if let Some(catalog) = catalog.as_ref() {
+                        hofund_model_catalog::listable_route_models(
+                            std::iter::once(model.clone()),
+                            Some(catalog.as_ref()),
+                            Some(catalog.visibility()),
+                        )
+                        .into_iter()
+                        .next()
+                        .is_some()
+                    } else {
+                        true
+                    }
+                })
+                .collect();
             let mut response = RouteModelListResponse::default();
             response.models = config
                 .routes

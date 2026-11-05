@@ -37,7 +37,7 @@ pub use ruleparse::{ParsedRule, parse_rule_line, rule_rename_group_ref, rule_wit
 pub use visible::{
     AgentModels, CatalogEntry, VisibleCatalog, build_catalog_index, catalog_for_agent,
     edit_agent_hidden_models, edit_agent_picked_models, edit_agent_picked_only, edit_agent_visible,
-    shows,
+    route_hidden_by_unlisted_providers, shows,
 };
 
 /// A validated configuration file.
