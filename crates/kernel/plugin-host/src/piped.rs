@@ -83,7 +83,7 @@ pub(crate) fn spawn(request: &SpawnRequest) -> Result<StdPipedChild, PluginError
     let id = child.id();
     let child = Arc::new(Mutex::new(Some(child)));
     let (sender, receiver) = mpsc::channel(LINE_BUFFER);
-    let exit = Arc::new(Mutex::new(None));
+    let exit = Arc::new(Mutex::new(None::<Result<i32, String>>));
     let exit_store = Arc::clone(&exit);
     let child_for_wait = Arc::clone(&child);
     let reader = std::thread::Builder::new()
@@ -100,8 +100,8 @@ pub(crate) fn spawn(request: &SpawnRequest) -> Result<StdPipedChild, PluginError
             let code = match child.wait() {
                 Ok(status) => status
                     .code()
-                    .ok_or_else(|| PluginError::io("child exited without an exit code")),
-                Err(error) => Err(PluginError::io(error.to_string())),
+                    .ok_or_else(|| "child exited without an exit code".to_owned()),
+                Err(error) => Err(error.to_string()),
             };
             if let Ok(mut slot) = exit_store.lock() {
                 *slot = Some(code);
@@ -176,7 +176,7 @@ pub(crate) struct StdPipedChild {
     child: Arc<Mutex<Option<Child>>>,
     stdin: Arc<Mutex<Option<ChildStdin>>>,
     stdout: Mutex<Option<BodyStream>>,
-    exit: Arc<Mutex<Option<Result<i32, PluginError>>>>,
+    exit: Arc<Mutex<Option<Result<i32, String>>>>,
 }
 
 impl Drop for StdPipedChild {
@@ -236,10 +236,18 @@ impl PipedChildBackend for StdPipedChild {
         let exit = Arc::clone(&self.exit);
         accounts::run_blocking(move || {
             loop {
-                if let Ok(mut slot) = exit.lock()
-                    && let Some(code) = slot.take()
-                {
-                    return code;
+                match exit.lock() {
+                    Ok(slot) => {
+                        if let Some(stored) = slot.as_ref() {
+                            return stored
+                                .as_ref()
+                                .map_err(|message| PluginError::io(message.clone()))
+                                .copied();
+                        }
+                    }
+                    Err(_) => {
+                        return Err(PluginError::internal("exit slot lock is poisoned"));
+                    }
                 }
                 std::thread::sleep(Duration::from_millis(5));
             }
@@ -401,6 +409,7 @@ mod tests {
             let mut stdout = child.take_stdout().expect("stdout");
             while stdout.next_chunk().await.is_some() {}
             assert_eq!(child.exit_code().await.expect("exit code"), 44);
+            assert_eq!(child.exit_code().await.expect("second read"), 44);
         }
 
         #[tokio::test]

@@ -240,11 +240,12 @@ impl Upstream {
     }
 }
 
-fn build_private_client(
+pub(crate) fn build_private_client(
     connect_timeout: Duration,
     read_timeout: Duration,
 ) -> Result<reqwest::Client, ProviderError> {
     reqwest::Client::builder()
+        .http1_only()
         .connect_timeout(connect_timeout)
         .read_timeout(read_timeout)
         .build()
@@ -948,7 +949,7 @@ mod tests {
 
     use tokio::io::AsyncReadExt;
 
-    use super::{note_dropped, send_builder};
+    use super::{build_private_client, note_dropped, send_builder};
     use hofund_plugin_sdk::transport::parse_retry_after;
 
     #[test]
@@ -1085,6 +1086,7 @@ mod tests {
                 HeaderValue::from_static("injected"),
             );
             reqwest::Client::builder()
+                .http1_only()
                 .default_headers(headers)
                 .pool_max_idle_per_host(4)
                 .build()
@@ -1201,6 +1203,7 @@ mod tests {
         });
         fn build_client() -> reqwest::Client {
             reqwest::Client::builder()
+                .http1_only()
                 .pool_max_idle_per_host(4)
                 .build()
                 .expect("client")
@@ -1273,6 +1276,7 @@ mod tests {
         });
         let slot = Arc::new(RwLock::new(
             reqwest::Client::builder()
+                .http1_only()
                 .pool_max_idle_per_host(4)
                 .build()
                 .expect("client"),
@@ -1283,6 +1287,7 @@ mod tests {
             endpoint.client = Some(slot.read().expect("read").clone());
             endpoint.client_refresh = Some(Arc::new(|| {
                 let fresh = reqwest::Client::builder()
+                    .http1_only()
                     .pool_max_idle_per_host(4)
                     .build()
                     .expect("client");
@@ -1308,6 +1313,54 @@ mod tests {
             accepts.load(Ordering::SeqCst),
             2,
             "second upstream must dial after shared refresh"
+        );
+    }
+
+    #[tokio::test]
+    async fn private_client_sends_an_http11_request_line() {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let (request_tx, request_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            while let Ok(read) = socket.read(&mut chunk).await {
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..read]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let _ = request_tx.send(request);
+            let _ = socket
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                .await;
+        });
+        let client =
+            build_private_client(Duration::from_secs(5), Duration::from_secs(5)).expect("client");
+        let _ = client
+            .get(format!("http://127.0.0.1:{port}/probe"))
+            .send()
+            .await
+            .expect("send");
+        let request = request_rx.await.expect("request bytes");
+        let first_line = request
+            .split(|byte| *byte == b'\n')
+            .next()
+            .expect("request line");
+        assert!(
+            first_line.ends_with(b" HTTP/1.1\r"),
+            "request line was {:?}",
+            String::from_utf8_lossy(first_line)
         );
     }
 }

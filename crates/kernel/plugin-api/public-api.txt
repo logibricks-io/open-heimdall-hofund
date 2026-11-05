@@ -362,7 +362,7 @@ DuplexReader::fn headers (& self) -> & http :: HeaderMap
 DuplexReader::fn reader (& mut self) -> & mut BodyStream
 DuplexReader::fn status (& self) -> http :: StatusCode
 DuplexRequest
-DuplexRequest #[non_exhaustive] derives(Clone, Debug)
+DuplexRequest #[non_exhaustive] derives(Clone)
 DuplexRequest::const fn kernel_header_wait (& self) -> Duration
 DuplexRequest::const fn kernel_version_pin (& self) -> HttpVersionPin
 DuplexRequest::fn header (mut self , name : impl Into < String > , value : impl Into < String >) -> Self
@@ -377,7 +377,7 @@ DuplexSession
 DuplexSession #[non_exhaustive]
 DuplexSession::fn headers (& self) -> & http :: HeaderMap
 DuplexSession::fn into_split (self) -> (DuplexReader , DuplexWriter)
-DuplexSession::fn kernel_new (status : http :: StatusCode , headers : http :: HeaderMap , reader : BodyStream , writer : DuplexWriter ,) -> Self
+DuplexSession::fn kernel_new (status : http :: StatusCode , headers : http :: HeaderMap , reader : BodyStream , writer : DuplexWriter , guard : Arc < dyn DuplexGuard > ,) -> Self
 DuplexSession::fn reader (& mut self) -> & mut BodyStream
 DuplexSession::fn status (& self) -> http :: StatusCode
 DuplexSession::fn writer (& mut self) -> & mut DuplexWriter
@@ -385,7 +385,7 @@ DuplexWriter
 DuplexWriter #[non_exhaustive]
 DuplexWriter::async fn finish (mut self) -> Result < () , PluginError >
 DuplexWriter::async fn write (& mut self , bytes : Bytes) -> Result < () , PluginError >
-DuplexWriter::fn kernel_new (inner : Box < dyn DuplexWriterBackend >) -> Self
+DuplexWriter::fn kernel_new (inner : Box < dyn DuplexWriterBackend > , guard : Arc < dyn DuplexGuard >) -> Self
 DynAgentFactory
 DynAgentFactory::fn config_schema (& self) -> Schema
 DynAgentFactory::fn description (& self) -> & 'static AgentDescription
@@ -1144,6 +1144,9 @@ kernel::ClockBackend::fn now (& self) -> SystemTime
 kernel::DirBackend
 kernel::DirBackend::fn cache_dir (& self , plugin : & PluginKey) -> Result < PathBuf , PluginError >
 kernel::DirBackend::fn state_dir (& self , plugin : & PluginKey) -> Result < PathBuf , PluginError >
+kernel::DuplexGuard
+kernel::DuplexGuard::fn abort_if_unfinished (& self)
+kernel::DuplexGuard::fn finish (& self)
 kernel::DuplexWriterBackend
 kernel::DuplexWriterBackend::async fn finish (& mut self) -> Result < () , PluginError >
 kernel::DuplexWriterBackend::async fn write (& mut self , bytes : Bytes) -> Result < () , PluginError >

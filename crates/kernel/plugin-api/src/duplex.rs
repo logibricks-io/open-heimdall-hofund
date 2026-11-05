@@ -1,12 +1,15 @@
 //! Bidirectional HTTP on the host pool. No vendor framing lives here.
 
+use std::fmt;
+use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
+use futures_util::stream;
 
 use crate::body::BodyStream;
 use crate::error::PluginError;
-use crate::kernel::DuplexWriterBackend;
+use crate::kernel::{DuplexGuard, DuplexWriterBackend};
 
 /// Which HTTP version the host dials for a duplex call.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -19,7 +22,7 @@ pub enum HttpVersionPin {
 }
 
 /// One duplex call before the session is open.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 #[non_exhaustive]
 pub struct DuplexRequest {
     #[allow(dead_code)] // read when `kernel-internal` is enabled
@@ -33,7 +36,7 @@ pub struct DuplexRequest {
     header_timeout: Duration,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(crate) struct HeaderField {
     #[allow(dead_code)]
     name: String,
@@ -41,6 +44,34 @@ pub(crate) struct HeaderField {
     value: String,
     #[allow(dead_code)]
     sensitive: bool,
+}
+
+impl fmt::Debug for DuplexRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let names: Vec<&str> = self
+            .headers
+            .iter()
+            .map(|field| field.name.as_str())
+            .collect();
+        formatter
+            .debug_struct("DuplexRequest")
+            .field("method", &self.method)
+            .field("uri", &self.uri)
+            .field("header_names", &names)
+            .field("pin", &self.pin)
+            .field("header_timeout", &self.header_timeout)
+            .finish()
+    }
+}
+
+impl fmt::Debug for HeaderField {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HeaderField")
+            .field("name", &self.name)
+            .field("sensitive", &self.sensitive)
+            .finish_non_exhaustive()
+    }
 }
 
 impl DuplexRequest {
@@ -167,6 +198,33 @@ impl DuplexRequest {
     }
 }
 
+struct InertDuplexGuard;
+
+impl DuplexGuard for InertDuplexGuard {
+    fn finish(&self) {}
+    fn abort_if_unfinished(&self) {}
+}
+
+struct InertDuplexWriterBackend;
+
+#[async_trait::async_trait]
+impl DuplexWriterBackend for InertDuplexWriterBackend {
+    async fn write(&mut self, _bytes: Bytes) -> Result<(), PluginError> {
+        Ok(())
+    }
+
+    async fn finish(&mut self) -> Result<(), PluginError> {
+        Ok(())
+    }
+}
+
+fn inert_duplex_writer() -> DuplexWriter {
+    DuplexWriter {
+        inner: Box::new(InertDuplexWriterBackend),
+        guard: Arc::new(InertDuplexGuard),
+    }
+}
+
 /// An open duplex HTTP/2 (or pinned) session.
 ///
 /// Dropping this value, or either half after [`Self::into_split`], aborts the call.
@@ -176,6 +234,13 @@ pub struct DuplexSession {
     headers: http::HeaderMap,
     reader: BodyStream,
     writer: DuplexWriter,
+    guard: Arc<dyn DuplexGuard>,
+}
+
+impl Drop for DuplexSession {
+    fn drop(&mut self) {
+        self.guard.abort_if_unfinished();
+    }
 }
 
 impl DuplexSession {
@@ -188,12 +253,14 @@ impl DuplexSession {
         headers: http::HeaderMap,
         reader: BodyStream,
         writer: DuplexWriter,
+        guard: Arc<dyn DuplexGuard>,
     ) -> Self {
         Self {
             status,
             headers,
             reader,
             writer,
+            guard,
         }
     }
 
@@ -224,13 +291,19 @@ impl DuplexSession {
     /// Splits into independent reader and writer halves.
     #[must_use]
     pub fn into_split(self) -> (DuplexReader, DuplexWriter) {
+        let mut this = std::mem::ManuallyDrop::new(self);
+        let writer = std::mem::replace(&mut this.writer, inert_duplex_writer());
         (
             DuplexReader {
-                status: self.status,
-                headers: self.headers,
-                reader: self.reader,
+                status: this.status,
+                headers: std::mem::take(&mut this.headers),
+                reader: std::mem::replace(
+                    &mut this.reader,
+                    BodyStream::from_stream(stream::empty()),
+                ),
+                guard: Arc::clone(&this.guard),
             },
-            self.writer,
+            writer,
         )
     }
 }
@@ -241,6 +314,13 @@ pub struct DuplexReader {
     status: http::StatusCode,
     headers: http::HeaderMap,
     reader: BodyStream,
+    guard: Arc<dyn DuplexGuard>,
+}
+
+impl Drop for DuplexReader {
+    fn drop(&mut self) {
+        self.guard.abort_if_unfinished();
+    }
 }
 
 impl DuplexReader {
@@ -267,6 +347,13 @@ impl DuplexReader {
 #[non_exhaustive]
 pub struct DuplexWriter {
     inner: Box<dyn DuplexWriterBackend>,
+    guard: Arc<dyn DuplexGuard>,
+}
+
+impl Drop for DuplexWriter {
+    fn drop(&mut self) {
+        self.guard.abort_if_unfinished();
+    }
 }
 
 impl DuplexWriter {
@@ -274,8 +361,8 @@ impl DuplexWriter {
     #[cfg(feature = "kernel-internal")]
     #[doc(hidden)]
     #[must_use]
-    pub fn kernel_new(inner: Box<dyn DuplexWriterBackend>) -> Self {
-        Self { inner }
+    pub fn kernel_new(inner: Box<dyn DuplexWriterBackend>, guard: Arc<dyn DuplexGuard>) -> Self {
+        Self { inner, guard }
     }
 
     /// Queues `bytes` on the request body stream.
@@ -293,6 +380,24 @@ impl DuplexWriter {
     ///
     /// Returns [`PluginError`] when the host already closed the body.
     pub async fn finish(mut self) -> Result<(), PluginError> {
+        self.guard.finish();
         self.inner.finish().await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DuplexRequest;
+
+    #[test]
+    fn debug_omits_sensitive_header_values() {
+        let request = DuplexRequest::post("https://127.0.0.1/run")
+            .header("x-test", "visible")
+            .sensitive_header("authorization", "secret-token-value");
+        let text = format!("{request:?}");
+        assert!(text.contains("authorization"));
+        assert!(text.contains("x-test"));
+        assert!(!text.contains("secret-token-value"));
+        assert!(!text.contains("visible"));
     }
 }

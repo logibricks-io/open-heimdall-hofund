@@ -74,6 +74,7 @@ impl ModelClient {
         let client = match endpoint.client.clone() {
             Some(client) => client,
             None => reqwest::Client::builder()
+                .http1_only()
                 .connect_timeout(endpoint.timeout)
                 .read_timeout(crate::http::socket_backstop(endpoint.timeout))
                 .build()

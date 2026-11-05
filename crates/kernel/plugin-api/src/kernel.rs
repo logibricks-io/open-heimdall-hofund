@@ -310,6 +310,15 @@ pub trait PipedChildBackend: Send + Sync {
     }
 }
 
+/// Host hook that aborts an open duplex call when a session half is dropped.
+#[doc(hidden)]
+pub trait DuplexGuard: Send + Sync {
+    /// Marks the request body finished without aborting the call.
+    fn finish(&self);
+    /// Aborts the call when a half is dropped before [`Self::finish`].
+    fn abort_if_unfinished(&self);
+}
+
 /// Writes the request body of an open duplex session.
 #[async_trait]
 #[doc(hidden)]

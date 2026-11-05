@@ -13,6 +13,7 @@ use std::any::Any;
 use std::collections::BTreeMap;
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::Duration;
 
@@ -340,10 +341,9 @@ fn build_client(key: &ClientKey) -> Result<reqwest::Client, PluginError> {
             builder = builder.http1_only();
         }
         ClientMode::Duplex => match key.duplex_dial {
-            DuplexDial::PriorKnowledge => {
+            DuplexDial::PriorKnowledge | DuplexDial::Alpn => {
                 builder = builder.http2_prior_knowledge();
             }
-            DuplexDial::Alpn => {}
         },
     }
     if let Some(proxy) = &key.profile.proxy {
@@ -358,6 +358,23 @@ fn build_client(key: &ClientKey) -> Result<reqwest::Client, PluginError> {
 
 fn limits_for_request(default: HttpLimits, request: &HttpRequest<Body>) -> HttpLimits {
     read_budget(request).map_or(default, |read| default.with_read(read))
+}
+
+fn client_for_unary(
+    profile: &HttpProfile,
+    pool_limits: HttpLimits,
+    request: &HttpRequest<Body>,
+) -> Result<reqwest::Client, PluginError> {
+    let effective = limits_for_request(pool_limits, request);
+    if effective.read() == pool_limits.read() {
+        return client_for(profile, pool_limits, ClientMode::Unary, DuplexDial::Alpn);
+    }
+    build_client(&ClientKey {
+        profile: profile.clone(),
+        limits: effective,
+        mode: ClientMode::Unary,
+        duplex_dial: DuplexDial::Alpn,
+    })
 }
 
 fn map_error(error: reqwest::Error) -> PluginError {
@@ -400,6 +417,30 @@ pub(crate) fn live_body(response: reqwest::Response) -> BodyStream {
     ))
 }
 
+/// Response body for an open duplex session; aborts with an error chunk when the guard fires.
+pub(crate) fn live_duplex_body(
+    response: reqwest::Response,
+    aborted: Arc<AtomicBool>,
+) -> BodyStream {
+    BodyStream::from_stream(futures_util::stream::unfold(Some(response), move |state| {
+        let aborted = Arc::clone(&aborted);
+        async move {
+            if aborted.load(Ordering::Relaxed) {
+                return Some((
+                    Err(PluginError::interrupted("duplex response aborted")),
+                    None,
+                ));
+            }
+            let mut response = state?;
+            match response.chunk().await {
+                Ok(Some(chunk)) => Some((Ok(chunk), Some(response))),
+                Ok(None) => None,
+                Err(error) => Some((Err(map_body(error)), None)),
+            }
+        }
+    }))
+}
+
 #[cfg(test)]
 std::thread_local! {
     static SENDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -427,8 +468,7 @@ impl HttpBackend for PooledHttp {
     ) -> Result<HttpResponse<BodyStream>, PluginError> {
         #[cfg(test)]
         note_send();
-        let limits = limits_for_request(self.limits, &request);
-        let client = client_for(&self.profile, limits, ClientMode::Unary, DuplexDial::Alpn)?;
+        let client = client_for_unary(&self.profile, self.limits, &request)?;
         let method = reqwest::Method::from_bytes(request.method().as_str().as_bytes())
             .map_err(|error| PluginError::internal(error.to_string()))?;
         let url = request.uri().to_string();
@@ -813,13 +853,21 @@ mod tests {
     }
 
     fn raw(response: &'static [u8]) -> u16 {
+        raw_accepts(response, 1)
+    }
+
+    fn raw_accepts(response: &'static [u8], connections: usize) -> u16 {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let port = listener.local_addr().expect("addr").port();
         std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept");
-            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-            let _ = read_request(&mut stream, false);
-            let _ = stream.write_all(response);
+            for _ in 0..connections {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                let _ = read_request(&mut stream, false);
+                let _ = stream.write_all(response);
+            }
         });
         port
     }
@@ -1020,6 +1068,27 @@ mod tests {
                 let _ = stream.write_all(&[b'a' + u8::try_from(index).unwrap_or(b'a')]);
                 let _ = stream.flush();
                 std::thread::sleep(gap);
+            }
+        });
+        (port, hits)
+    }
+
+    fn hold_after_headers() -> (u16, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let hits = Arc::new(AtomicUsize::new(0));
+        std::thread::spawn({
+            let hits = Arc::clone(&hits);
+            move || {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
+                hits.fetch_add(1, Ordering::SeqCst);
+                let _ = read_request(&mut stream, false);
+                let _ = stream.write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-length: 4\r\nconnection: close\r\n\r\n",
+                );
+                std::thread::sleep(Duration::from_secs(30));
             }
         });
         (port, hits)
@@ -1516,7 +1585,7 @@ mod tests {
     async fn per_call_read_budget_shorter_than_the_pool_default_fires_first() {
         let _guard = exclusive().await;
         let pool_limits = HttpLimits::new(Duration::from_secs(2), Duration::from_secs(60));
-        let (port, _) = stall();
+        let (port, _) = hold_after_headers();
         let context = http(pool_limits);
         let started = std::time::Instant::now();
         let error = Call::get(format!("http://127.0.0.1:{port}/stall"))
@@ -1525,7 +1594,7 @@ mod tests {
             .await
             .expect_err("short budget");
         assert_eq!(error.kind(), PluginErrorKind::Interrupted);
-        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(started.elapsed() < Duration::from_millis(900));
         assert!(started.elapsed() > Duration::from_millis(250));
     }
 
@@ -1533,14 +1602,41 @@ mod tests {
     async fn per_call_read_budget_longer_than_the_pool_default_is_honoured() {
         let _guard = exclusive().await;
         let pool_limits = HttpLimits::new(Duration::from_secs(2), Duration::from_millis(400));
-        let (port, _) = drip(3, Duration::from_millis(250));
+        let (port, _) = drip(4, Duration::from_millis(550));
         let context = http(pool_limits);
         let reply = Call::get(format!("http://127.0.0.1:{port}/stream"))
             .read_timeout(Duration::from_secs(2))
             .send(context.http())
             .await
             .expect("longer budget");
-        assert_eq!(reply.body(), b"abc");
+        assert_eq!(reply.body(), b"abcd");
+    }
+
+    #[tokio::test]
+    async fn per_call_read_budget_does_not_add_pool_entries() {
+        let _guard = exclusive().await;
+        let pool_limits = HttpLimits::default();
+        let before = pooled_client_count();
+        PooledHttp::with_limits(HttpProfile::direct(), pool_limits)
+            .ensure()
+            .expect("seed");
+        let settled = pooled_client_count();
+        assert!(settled >= before);
+        let context = http(pool_limits);
+        const OK: &[u8] = b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok";
+        let port = raw_accepts(OK, 2);
+        let url = format!("http://127.0.0.1:{port}/a");
+        let _ = Call::get(url.clone())
+            .read_timeout(Duration::from_millis(500))
+            .send(context.http())
+            .await
+            .expect("first");
+        let _ = Call::get(url)
+            .read_timeout(Duration::from_secs(90))
+            .send(context.http())
+            .await
+            .expect("second");
+        assert_eq!(pooled_client_count(), settled);
     }
 
     #[tokio::test]
