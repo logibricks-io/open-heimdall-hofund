@@ -401,7 +401,7 @@ Requires review of session-on-disk format against reference `claude_sessions` he
 | Piece | Files | ~Size | Risk |
 |-------|-------|-------|------|
 | `failure.rs` classification | 250 LOC | Wrong rest → account stuck |
-| `docs/coverage/subscription-parity.md`, `docs/magpie-comparison.md` row | docs | | |
+| `docs/coverage/subscription-parity.md`, adopt-or-redesign comparison table per AGENTS.md | docs | | |
 
 ### Explicitly deferred (out of scope)
 
