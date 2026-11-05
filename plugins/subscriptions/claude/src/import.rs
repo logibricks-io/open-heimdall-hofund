@@ -231,7 +231,11 @@ fn parse_sub2api_row(entry: &Map<String, Value>) -> Result<LoginRow, PluginError
             .map(|e| json_str(e, &["org_uuid"]))
             .unwrap_or_default(),
     ]);
-    let scopes = import_scopes(credentials.get("scopes").or_else(|| credentials.get("scope")));
+    let scopes = import_scopes(
+        credentials
+            .get("scopes")
+            .or_else(|| credentials.get("scope")),
+    );
     let cred = build_import_credentials(&access, &refresh, expires, &scopes)?;
     let profile = build_profile(&email, account_uuid.as_deref(), org_uuid.as_deref(), None);
     Ok(LoginRow {
