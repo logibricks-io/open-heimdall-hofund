@@ -24,7 +24,7 @@ Each frame is a 5-byte head plus a payload. Byte 0 is flags. Bytes 1-4 are a big
 
 The trailer JSON is what `failure` parses (`index.mjs:1650-1665`): either `{code, message, details}` or the same object under `error`. The useful text is `details[].debug.details.title` plus `detail` when that pair is more than `":"`.
 
-Hofund does not have an inflate helper yet (`plugin-sdk/Cargo.toml` has no `flate2` entry). The plugin cannot take a new dependency (`docs/plugins/boundary.md`). R-8 adds `hofund_plugin_sdk::inflate::gzip` backed by `flate2` 1.1.10 (`Cargo.lock`) with `default-features = false` and the pure-Rust backend so it shares `miniz_oxide` 0.9.1 with the rest of the tree. `miniz_oxide` 0.8.9 is already pulled by `png` for the menu-bar icons (`deny.toml:57` skips that duplicate until the icon stack moves to 0.9; adding SDK `flate2` must not add a new skip). The helper is generic. It does not mention Cursor. A frame with the gzip bit set and a body `inflate` rejects is a decode error for that Run, not a retry on the other transport.
+Hofund does not have an inflate helper yet (`plugin-sdk/Cargo.toml` has no `flate2` entry). The plugin cannot take a new dependency (`docs/plugins/boundary.md`). R-8 adds `hofund_plugin_sdk::inflate::gzip` backed by `flate2` 1.1.10 (`Cargo.lock`) with `default-features = false` and feature `rust_backend` (pure `miniz_oxide` 0.9.1, not the same-version `zlib-rs` backend). `miniz_oxide` 0.8.9 is already pulled by `png` for the menu-bar icons (`deny.toml:57` skips that duplicate until the icon stack moves to 0.9; adding SDK `flate2` must not add a new skip). The helper is generic. It does not mention Cursor. A frame with the gzip bit set and a body `inflate` rejects is a decode error for that Run, not a retry on the other transport.
 
 ### 1.2 HTTP/2 Run
 
@@ -46,9 +46,11 @@ Headers on that request:
 | `x-cursor-team-id` | decimal team id, only when section 5.4 says one exists | `teamHeader`, `index.mjs:173-176` |
 | `x-cursor-agent-allowed-tools` | `mcp_tool_call,get_mcp_tools_tool_call` | `runOnce` |
 
-The client waits up to 15 seconds for response headers (`H2.wait`, `index.mjs:2362-2364`). Hofund writes the first client frame only after a 2xx head on the duplex path (section 3.3). The reference's `runOnce` sends the opening frame and starts the 5-second heartbeat first, then reads the status and, on failure, drains up to 1 MiB for `failure` (`index.mjs:2886-2895`). Match the reference on HTTP/1.1 fallback (RunSSE may fail before any append). On HTTP/2, prefer not writing user payload until 2xx so a refused head never ships conversation bytes; document that choice in the adopt-or-redesign table.
+The client waits up to 15 seconds for response headers (`H2.wait`, `index.mjs:2362-2364`). `openH2` resolves on the HTTP/2 `response` event with `:status` already known (`index.mjs:2414-2419`). `runOnce` then starts the 5-second heartbeat and writes the first client frame (`index.mjs:2886-2887`), then branches on `o.status`: outside 200-299 it drains the stream up to 1 MiB for `failure` (`index.mjs:2888-2895`). Status is therefore known before the reference writes that frame; on non-2xx it still writes the frame, then drains. Hofund's duplex path may skip writing the opening frame when the head is not 2xx (section 3.3); that is the only HTTP/2 timing difference. Document it in the adopt-or-redesign table.
 
-A head outside 200-299 on HTTP/2 (after the reference's early write) is read to completion (capped at 1 MiB) and passed to `failure`. A 2xx head is a Connect frame stream in both directions.
+HTTP/1.1 fallback stays as the reference: `openH1` returns immediately; `RunSSE` and `BidiAppend` run in parallel; HTTP failures become a synthetic end frame with flag byte 2 (section 1.5).
+
+A 2xx HTTP/2 head is a Connect frame stream in both directions. A non-2xx head is read to completion (capped at 1 MiB in the reference after the opening write) and passed to `failure`.
 
 Client heartbeat: every 5 seconds, one frame whose message is field 7, length-delimited, empty (`runOnce`, line 2886). That heartbeat is not a KV reply. Field 7, wire type 2, tags as `0x3a`. KV replies tag as `0x1a` (`kvReply`, `index.mjs:2440-2442`).
 
@@ -140,7 +142,7 @@ Conversation state: field 1 repeated SHA-256 ids of transcript blobs; field 8 th
 
 User turn blob: field 1 is the last user text, field 2 a message id, field 4 varint 1 (agent mode). The state points at a blob of `field 1 = (field 1 = that user message's blob id, field 10 = the same message id)`.
 
-Request context (`env` and `toolDef`, `index.mjs:1876-1883`): field 4 is the environment. Field 1 is the OS name as Node reports it: `darwin`, `linux`, or `windows` (`GOOS`, `index.mjs:55`, `1883`), not Rust `std::env::consts::OS` (`macos`). Map `macos` → `darwin`, `windows` → `windows`, everything else → `linux`. Field 2 is the temp directory; field 10 `"UTC"`. Field 7 repeated is an MCP tool definition: field 1 name, field 2 description, field 3 a `google.protobuf.Value` of the JSON schema (`pbValue`, lines 1568-1583; struct keys sorted at line 1580), field 4 namespace `"tools"`, field 5 name, field 6 schema JSON text.
+Request context (`env` and `toolDef`, `index.mjs:1876-1883`): field 4 is the environment. Field 1 is the OS name from Node `GOOS` (`index.mjs:55`, `1883`): `win32` maps to `windows`; every other `platform()` value is sent unchanged (`linux`, `darwin`, `freebsd`, etc.). Hofund maps Rust `std::env::consts::OS` (`macos` → `darwin`, `windows` unchanged, otherwise pass through when it already matches Node, else `linux`) and records any remaining mismatch in the parity table. Field 2 is the temp directory; field 10 `"UTC"`. Field 7 repeated is an MCP tool definition: field 1 name, field 2 description, field 3 a `google.protobuf.Value` of the JSON schema (`pbValue`, lines 1568-1583; struct keys sorted at line 1580), field 4 namespace `"tools"`, field 5 name, field 6 schema JSON text.
 
 Transcript blobs are UTF-8 JSON, not protobuf. `conversation` (`index.mjs:1794-1870`) writes AI SDK-shaped messages. Section 4 maps hofund `Request` onto that JSON. Blob ids are SHA-256 of those bytes. The server asks for them by the raw 32-byte digest, hex-looked-up (`decode` case 4).
 
@@ -291,13 +293,13 @@ Attack on prefixes: a future edit that rewords them silently disables the fallba
 
 ### 3.3 What the plugin does with it
 
-HTTP/2 Run: `open_duplex` with `HttpVersionPin::Http2`, write the first frame only after a 2xx head, then interleave writes and reads. HTTP/1.1 RunSSE: `Call::open_raw` on the HTTP/1.1 pool with `attempts = 1`, so a non-2xx status returns an unread body the plugin caps and maps like `failed` above. Stream the 2xx body. Each `BidiAppend`: `Call::fetch` with `attempts = 1`, then classify `!res.ok` locally. With `attempts = 1`, neither call retries, including `PluginErrorKind::Connect` (`transport.rs:312-327`: the retry loop never runs a second attempt). Keep attempts at 1 so a POST that may have reached the server is never sent twice. Do not use `Call::open` or `Call::send` on either HTTP/1.1 Run leg. Concurrency of 16 is a `FuturesUnordered` polled on the execute task. `futures-util` is not a plugin dependency. The SDK re-exports the small piece the plugin needs (`FuturesUnordered` and a two-future race). It does not become a general runtime.
+HTTP/2 Run: `open_duplex` with `HttpVersionPin::Http2`, write the first frame only after a 2xx head (or skip it on non-2xx, section 1.2), then interleave writes and reads. HTTP/1.1 RunSSE: `Call::open_raw` on the HTTP/1.1 pool with `attempts = 1` (`plugin-sdk/src/transport.rs:307-327`), so a non-2xx status returns an unread body the plugin caps and maps like `failed` above; with one attempt the retry loop never runs, including on `PluginErrorKind::Connect`. Stream the 2xx body. Each `BidiAppend`: `Call::fetch` (`transport.rs:234-238`), which has no `attempts` parameter and sends once. Do not use `Call::open` or `Call::send` on either HTTP/1.1 Run leg. Concurrency of 16 is a `FuturesUnordered` polled on the execute task. `futures-util` is not a plugin dependency. The SDK re-exports the small piece the plugin needs (`FuturesUnordered` and a two-future race). It does not become a general runtime.
 
 Attack: sixteen blocking `Call::fetch` futures inside one task are fine only if each one yields. `Call::fetch` is async and uses the host client, so they will. A synchronous inflate of a 64 MiB frame on that task will stall the append window and the stall clock. Cap a frame at 64 MiB, inflate with a size cap, and treat a larger frame as malformed the way `frames` does.
 
 ## 4. Request mapping
 
-`UpstreamProvider::execute` receives canonical `hofund_ir::Request` (`plugin-api/src/upstream.rs:401-416`). The gateway has already decoded Chat Completions, Responses, or Messages. The Cursor plugin does not parse those JSON bodies and does not branch on `inbound` except to know that extension bags were stripped when the inbound protocol is not the upstream protocol. There is no Cursor protocol id. Extensions on the request are not a session key. `prompt_cache_key` is not stored by the codecs.
+`UpstreamProvider::execute` receives canonical `hofund_ir::Request` and the inbound client protocol id (`plugin-api/src/upstream.rs:412-416`). The gateway has already decoded Chat Completions, Responses, Messages, Generative Language, or Bedrock Converse. The Cursor plugin does not parse those JSON bodies. It uses `inbound` for usage mapping (section 4.3) and to know extension bags were stripped when the inbound protocol is not the upstream protocol (`upstream.rs:404-406`). There is no Cursor protocol id. Extensions on the request are not a session key. `prompt_cache_key` is not stored by the codecs.
 
 ### 4.1 Shared mapping
 
@@ -350,20 +352,21 @@ Reasoning. Interaction field 4 becomes `ThinkingDelta` on its own block. It is n
 
 Images. Encoded as in section 4.1. A base64 `ImageSource` is the hex form. A URL is the placeholder, because the reference does not fetch it.
 
-Usage. On a turn that ends without tool calls, read field 14 as `[inp, cr, cw]` = fields 1, 3, 4 (`usageOf`, `index.mjs:1941-1943`). Map into `hofund_ir::Usage` on the last `MessageDelta`:
+Usage. On a turn that ends without tool calls, read field 14 as `[inp, cr, cw]` = fields 1, 3, 4 (`usageOf`, `index.mjs:1941-1943`). Map into `hofund_ir::Usage` on the last `MessageDelta` using one rule for both stream field 14 and dashboard rows. The plugin reads `inbound: ProtocolId` on `execute` (`upstream.rs:412-416`). Match the gateway's `input_includes_cache` (`crates/kernel/gateway/src/limits.rs:506-512`): true for OpenAI Chat, OpenAI Responses, and Generative Language; false for Anthropic Messages and Bedrock Converse.
 
-- `cache_read_tokens` = `cr`
-- `cache_write_tokens` = `cw`
+Let `uncached = max(inp - cr - cw, 0)`.
+
+- `cache_read_tokens` = `cr`; `cache_write_tokens` = `cw`
 - `output_tokens` = field 2; `reasoning_tokens` = field 5 when present
-- `input_tokens` = `max(inp - cr - cw, 0) + cr`
+- `input_tokens` = `uncached + cr` when `input_includes_cache(inbound)`; otherwise `input_tokens` = `uncached`
 
-Do **not** set `input_tokens` to uncached plus `cr` plus `cw` while also filling `cache_read_tokens` and `cache_write_tokens`. The gateway treats `input_tokens - cache_read` as uncached for Chat, Responses, and Generative Language (`crates/kernel/gateway/src/limits.rs:494-512`, `input_includes_cache`; `crates/kernel/gateway/src/lib.rs:3252-3258`; `crates/kernel/codec/src/passthrough.rs:249-271`, `707-716`; billing uses `uncached_input_tokens` in `crates/kernel/usage/src/price.rs:74-90`).
+Do **not** set `input_tokens` to `uncached + cr + cw` while also filling the cache fields. Codecs emit `Usage.input_tokens` unchanged (`anthropic.rs:913-916`, `openai_chat.rs:1382-1385`, `openai_responses.rs:1874`, `generative.rs:910-913`, `converse.rs:599`). Do not add Cursor-specific arithmetic in codecs. The gateway derives `uncached_input_tokens` as `input_tokens - cache_read` only when `input_includes_cache` (`limits.rs:494-500`, `gateway/src/lib.rs:3252-3258`; `passthrough.rs:249-271`, `707-716` records totals only). Billing uses `uncached_input_tokens` when present (`usage/src/price.rs:74-90`).
 
-Anthropic Messages encoding sends `usage.input_tokens` and `cache_read_input_tokens` separately (`crates/kernel/codec/src/anthropic.rs:913-927`). R-9 sets stream `Usage.input_tokens` to `max(inp - cr - cw, 0)` on Messages routes (uncached remainder on the wire) and to `max(inp - cr - cw, 0) + cr` on Chat/Responses routes so gateway uncached math stays `max(inp - cr - cw, 0)`.
+**Deviation:** the reference adds cache write back into client-facing prompt totals (`usageOf` comment, `index.mjs:1937-1939`). Hofund clients whose protocol uses `input_includes_cache` therefore report `prompt_tokens` / prompt counts lower than the reference prompt total by field 4 (`cw`). Record in `docs/feature-parity.md` when R-9 ships (section 8).
 
-**Deviation:** the reference adds cache write back into client-facing prompt totals (`usageOf` comment, `index.mjs:1937-1939`). Hofund Chat/Responses `prompt_tokens` therefore exclude cache write and are lower than the reference prompt total by field 4 (`cw`). Record in `docs/feature-parity.md` when R-9 ships (section 8).
+Dashboard tool-step rows (`index.mjs:2101-2102`: `inputTokens` is already uncached). Apply the same rule with event fields: `cache_read_tokens` / `cache_write_tokens` from the event; `input_tokens` = `inputTokens + cacheReadTokens` when `input_includes_cache(inbound)`, else `input_tokens` = `inputTokens`. Do not subtract cache from `inputTokens` again.
 
-A tool step has no field 14 until the tool results come back on the same Run, and the caller runs tools after this `execute` returns (`index.mjs:1946-1956`). R-9 closes the Run, then `POST https://api2.cursor.sh/aiserver.v1.DashboardService/GetFilteredUsageEvents` (`index.mjs:2076-2079`), not the agent host. Connect JSON headers from `headersFor` (`index.mjs:275-285`, `content-type: application/json`, not Run `application/connect+proto`). Body: `startDate` and `endDate` are decimal strings (`String(since - 60_000)`, `String(Date.now() + 60_000)`, line 2079); `page: 1`, `pageSize: 50`; optional `teamId` is a JSON number when present (`teamBody`, `index.mjs:177-179`). Window: first wait 1.5 seconds, then every 500 milliseconds, give up at 6 seconds, each request budget 5 seconds (`STEP_WAIT`, line 1973). Claim rows where `conversationId` matches and `timestamp >= since - 1000` (`index.mjs:2088-2100`). Dashboard `tokenUsage.inputTokens` is already uncached (`index.mjs:2102` builds `input` from it). Map a matched row with the same split: `cache_read_tokens` / `cache_write_tokens` from the event, `input_tokens` = `inputTokens + cacheReadTokens` (do not subtract cache from `inputTokens` again).
+A tool step has no field 14 until the tool results come back on the same Run, and the caller runs tools after this `execute` returns (`index.mjs:1946-1956`). R-9 closes the Run, then `POST https://api2.cursor.sh/aiserver.v1.DashboardService/GetFilteredUsageEvents` (`index.mjs:2076-2079`), not the agent host. Connect JSON headers from `headersFor` (`index.mjs:275-285`, `content-type: application/json`, not Run `application/connect+proto`). Body: `startDate` and `endDate` are decimal strings (`String(since - 60_000)`, `String(Date.now() + 60_000)`, line 2079); `page: 1`, `pageSize: 50`; optional `teamId` is a JSON number when present (`teamBody`, `index.mjs:177-179`). Window: first wait 1.5 seconds, then every 500 milliseconds, give up at 6 seconds, each request budget 5 seconds (`STEP_WAIT`, line 1973). Claim rows where `conversationId` matches and `timestamp >= since - 1000` (`index.mjs:2088-2100`).
 
 If the poll misses, report zeros for that step. Do not estimate. The reference estimates only when the account cannot read events or nothing can collect them later (`finish`, `index.mjs:2977-2982`). An estimate stored in `input_tokens` is what clients read as context fullness. Hofund `Usage` has no deferred-usage bag, and a later `execute` has no ledger to attach it to. The cross-step debt (`owed`, `skipAfter`, the deferred bag) is deferred. Polling once per tool step is the part that fits a stateless call.
 
@@ -498,14 +501,14 @@ Session tests against the kit servers:
 - R-9: the `stall-550.test.mjs` trace shape (two server-completed calls, one exec, a count, a checkpoint, then heartbeats) emits one caller tool call and then ends, without waiting 240 seconds.
 - Cancel drops the duplex session and does not append further.
 
-Conformance: `plugins/subscriptions/cursor/src/conformance.rs` currently expects `upstream()` to be unsupported. Replace that assertion with the kit's subscription conformance once `execute` returns a stream. Keep the existing sign-in, import, quota, and model-list tests. Add the lease test: two overlapping near-expiry refreshes spawn `cursor-agent status` once. Add the keychain tests: exit 44, exit non-44, timeout, `fresh` bypass, single flight. Add the `list_models` test: the state dir has no `cursor-models` child after success and after a failing CLI, and the temp directory name is a hash.
+Conformance: `plugins/subscriptions/cursor/src/conformance.rs` currently expects `upstream()` to be unsupported. Replace that assertion with the kit's subscription conformance once `execute` returns a stream. Keep the existing sign-in, import, quota, and model-list tests. Add the lease test: two overlapping near-expiry refreshes spawn `cursor-agent status` once. Add the keychain tests: exit 44, exit non-44, timeout, `fresh` bypass, single flight. Add the `list_models` test: after success and after a failing CLI, the state directory has no `cursor-models` child; each call uses a unique temp directory; the temp directory is removed on both paths (do not assert the directory name is a hash).
 
 Mutation-sized assertions, the ones a one-character edit should kill:
 
 - team id omitted when `authInfo.authId` is not the JWT `sub` (`team-id.test.mjs`)
 - team id omitted when `activeTeamId` is 0 or not an integer (`teamOf`, `index.mjs:142`)
 - `GetCurrentPeriodUsage` body stays `{}` when the team id is sent (`team-id.test.mjs` first test)
-- cache read and cache write on stream usage follow section 4.3 (`input_tokens` formula, no triple-count)
+- usage `input_tokens` follows section 4.3 for each inbound protocol: OpenAI Chat, OpenAI Responses, Generative Language (`input_includes_cache`), Anthropic Messages, Bedrock Converse (no cache in `input_tokens`), plus one dashboard poll row with `inputTokens` already uncached
 - thinking bytes are absent from the text block
 - a tool result is not submitted to a refused exec
 - HTTP/2 memory is not set by `stream refused`
@@ -554,6 +557,13 @@ Depends on R-8's Run.
 - Stable `conversation_id` and prompt-cache affinity. Needs a caller-supplied key on `Request`.
 - The model picker: `AvailableModels`, `GetUsableModels`, catalog scope 3, `@size` ids, fast variants, the 10-minute list shared by in-flight requests (`listFor`, `index.mjs:1324-1344`), and per-model effort level lists for `fitEffort`. R-8 sends the requested id. `auto` is sent as `auto`. Max Mode retry and `maxOnly` are R-9 plugin behavior, not picker output.
 - Historical MCP namespace alias on read (`bareName`, `index.mjs:1751-1753`). Outbound stays `tools` only until a branding-safe approach exists.
+- `service_tier` / `fast` on the wire (`index.mjs:3349-3352`).
+- Wire trace (`native-session.mjs` `WireTrace`).
+- Web search and every Cursor-owned tool (refused execs; section 1.6).
+- Streaming tool-argument deltas (full arguments in one exec).
+- A second plugin retry after the client has seen a stream delta (section 4.2).
+- Free credit beyond included usage: plan bonus (`GetCurrentPeriodUsage` `planUsage.bonusSpend`, `remainingBonus`, `index.mjs:549-553`) and active cli grants (`GetUsageLimitStatusAndActiveGrants`, `clientType` `cli`, `index.mjs:556-578`), plus the rule that usable credit keeps serving after included usage is spent (`index.mjs:585-592`). Until a follow-up item implements both RPCs, the existing subscription `GetCurrentPeriodUsage` quota path stays as today; an account may still be quota-rested while bonus or a cli grant remains.
+- Enterprise `usage-summary` and included-only routing. Quota already has a separate path.
 
 ### Parity matrix updates (when implemented)
 
@@ -561,18 +571,13 @@ Add rows or notes to `docs/feature-parity.md` for these documented deviations:
 
 | Topic | Reference | Hofund | When |
 |---|---|---|---|
-| HTTP/2 Run first frame | Sent before status check (`index.mjs:2886-2895`) | Duplex path writes first frame only after 2xx head (section 1.2, 3.3) | R-8 |
+| HTTP/2 Run first frame | Status known from `openH2` `response` (`index.mjs:2414-2419`); `runOnce` writes the opening frame, then drains on non-2xx (`2886-2895`), including writing the frame before drain | Duplex path may skip the opening frame when the head is not 2xx (section 1.2, 3.3) | R-8 |
 | Keychain read timeout | 10-minute denial (`index.mjs:63-66`, `206-209`) | No denial on timeout (section 5.2) | R-8 |
 | Tool-step usage miss | May estimate (`index.mjs:2977-2982`) | Zeros only (section 4.3) | R-9 |
 | HTTP 429 classification | Single 429 in `statusOf` (`index.mjs:1679-1680`) | Quota vs rate split (section 6) | R-8 |
-| Prompt / usage totals | Includes cache write in client prompt total (`index.mjs:1937-1939`) | Chat `prompt_tokens` omit cache write (section 4.3) | R-9 |
-- `service_tier` / `fast`.
-- Wire trace.
-- Web search and every Cursor-owned tool. They stay refused.
-- Enterprise `usage-summary` and included-only routing. Quota already has a separate path.
-- Free credit beyond included usage: plan bonus (`GetCurrentPeriodUsage` `planUsage.bonusSpend`, `remainingBonus`, `index.mjs:544-599`) and active grants (`GetUsageLimitStatusAndActiveGrants` `activeGrants`, cents strings, model allow-list, client type `cli`, `index.mjs:544-578`), plus the rule that usable credit keeps the account serving after included usage is spent. R-9 quota routing can adopt both windows or defer them together in one item.
-- Streaming tool-argument deltas. The exec carries the full arguments.
-- A second retry after the client has seen a delta.
+| Prompt / usage totals | Includes cache write in client prompt total (`index.mjs:1937-1939`) | Protocols with `input_includes_cache` omit cache write from prompt counts (section 4.3) | R-9 |
+
+Enterprise `usage-summary` and included-only routing remain explicitly deferred (section 8).
 
 ### Order
 
