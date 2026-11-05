@@ -52,10 +52,10 @@ Empty machine: the reference quits with "no supported agents found" (`tui.go:Run
 | Key | Action | Control |
 |---|---|---|
 | `j`/`k`, `up`/`down` | Row | `GET /v1/hofund/providers` |
-| `enter`, space | Model list. `enter` toggles a model on or off and the list stays open (`openProviderModels`). The TUI refuses to turn off the last exposed model before any request (`pages.go` toggle) | `GET/PUT /v1/hofund/providers/{id}/picks` with `expected_picks_revision`. `PicksForm::Replace` may send an empty id list; `422` with `empty_result` applies only to `PicksForm::Edit` when a removal leaves no exposed model (`models.rs` `next_picks`) |
+| `enter`, space | Model list. `enter` toggles a model on or off and the list stays open (`openProviderModels`). The TUI refuses to turn off the last exposed model before any request (`pages.go` toggle) | `GET /v1/hofund/providers/{id}/models` for every listable id and on/off marks, plus `GET/PUT .../picks` (`expected_picks_revision`). Picks alone omit switched-off models; the picker needs both. `PicksForm::Replace` may send an empty id list; `422` with `empty_result` applies only to `PicksForm::Edit` when a removal leaves no exposed model (`models.rs` `next_picks`) |
 | picker `ctrl+r` | Fetch that provider's models again | `POST .../models/refresh` |
-| `e` | Replace the key. Password echo. Refused for a signed-in account and for a credentials-based preset | `POST .../keys` action `replace`. Gap G-1 for the row text the page shows |
-| `w` | Address. Local preset, custom base URLs, or preset endpoint (`endpointAsk`, `localAddressAsk`, `customURLsAsk`) | Gap G-2 |
+| `e` | Replace one upstream key. Password echo. Refused for a signed-in account and for a credentials-based preset (`pages.go`) | `GET .../keys` for fingerprints (`id`, `masked`, `on`). `POST .../keys` with `ProviderKeyAction::Replace` (`provider_keys.rs`): required `key_id` (fingerprint from GET) and exactly one new credential in `keys`. One key: replace it. Several keys: the user picks the fingerprint in a picker first; the TUI never guesses. The new secret goes only in the request body, never in a toast, status line, or log |
+| `w` | Address (`pages.go` `w`). Opens the address ask only for a **local** preset (`KindLocal` → `localAddressAsk`), a custom provider with `customURLs`, or a preset that declares an **endpoint** (`endpointAsk`). **Vertex** (`IsVertex`) and presets **without** an endpoint only flash a hint (project/location or vendor URL); they do not PATCH `base_url`. Presets with **`needs_project`** (G-3) change project through add/`a`, not `w` | Gap G-2 `PATCH … base_url` when the ask applies |
 | `a` | Preset picker, then key, project, or address (`openPresets`, `addKeyAsk`, `vertexProjectAsk`) | Gap G-3. Remote hofund is a preset row, not a special page (`kindNote`) |
 | `f` | Family tag | Gap G-2 |
 | `u` | Listed in agent pickers, or groups only | Gap G-2 |
@@ -63,10 +63,11 @@ Empty machine: the reference quits with "no supported agents found" (`tui.go:Run
 | `t` | Connectivity test (`testCmd`) | `POST /v1/hofund/providers/{id}/test` |
 | `m` | Fetch models (`refetchCmd`) | `POST .../models/refresh` |
 | `b` | Balances (`balancesCmd`) | `GET /v1/hofund/quotas` (fresh). Cards with `kind=balance` |
+| first open | — | `goTo` to Providers runs `balancesCmd` once on first entry (`tui.go:goTo`), same data as `b` |
 | `d` `d` | Delete provider (`provider.Delete` via `reseatCmd`) | Gap G-2 `DELETE` with reseat in the same daemon write, not a follow-up `POST .../model`. On an account-type provider this hides the provider row; subscription sign-out stays Accounts `d d` → G-6 remove only |
 | `r` | Reload | GET |
 
-Row text the reference draws and `ProviderSummary` does not: display name, masked key or account label, signed-out, needs-project, switched off, family, groups-only, list error (`viewProviders`). Keys are available per id from `GET .../keys` (`masked`, `on`) but that is N+1 and still omits the other fields. G-1 extends the list response. Do not feed this page from `GET /config` text. That body can contain credentials.
+Row text the reference draws and today's `ProviderSummary` omits for one GET: display name, masked key or account label, signed-out, needs-project, switched off, family, groups-only, list error (`viewProviders`). G-1 adds the missing fields including `ready`. Derive the status column in this order (first match wins): `enabled: false` → switched off; else preset `needs_project` (G-3) and `!ready` → needs a project; else `ready` and empty `key_masked` → no key needed; else → no key. Account rows still use `account_label` / signed-out when present. Keys are available per id from `GET .../keys` (`masked`, `on`) but that is N+1 for multi-key replace. Do not feed this page from `GET /config` text. That body can contain credentials.
 
 ### Routing (page 3) — R-17
 
@@ -75,25 +76,29 @@ List: `internal/tui/routing.go:updateGroups`, `viewGroups`. Open group: `updateG
 | Key | Where | Action | Control |
 |---|---|---|---|
 | `j`/`k`, `up`/`down` | List and group | Cursor. Group cursor is members, then rules | Gap G-4 |
-| `enter`, space | List | Open group | G-4 |
-| `n` | List | Ask for a name, then pick the first member (`pickMsg`) | G-4 create |
-| `o` | List and group | Next strategy (`nextRouting`) | G-4. Cycle matches `routing.go:routings`: smart (empty id), order, rotate, usage, pace, weight, free, fast, cheap, drain, expiring, manual. Names match `router` strategy ids where present. Hofund `ROUTING_NAMES` has no `expiring` or `manual`; skip both in the TUI cycle like `manual` today |
-| `d` `d` | List | Delete group | G-4 |
-| `u` | List, removed row | Restore a hidden found group | G-4 restore. Found groups that are not in hofund yet render nothing in that section |
+| `enter`, space | List, visible group | Open group | G-4 |
+| `enter`, space | List, **hidden** found row under cursor | No open. Flash that `u` restores it (`routing.go:updateGroups` hidden branch) | G-4 restore hint only |
+| `n` | List | Ask for a name, then pick the first member (`pickMsg`). Works on hidden rows too | G-4 create |
+| `o` | List and group, visible | Next strategy (`nextRouting`) | G-4. Cycle matches `routing.go:routings`: smart (empty id), order, rotate, usage, pace, weight, free, fast, cheap, drain, expiring, manual. Names match `router` strategy ids where present. Hofund `ROUTING_NAMES` has no `expiring` or `manual`; skip both in the TUI cycle |
+| `o` | List, hidden row | No strategy change; same restore hint as enter | None |
+| `d` `d` | List, visible | Delete group | G-4 |
+| `d` `d` | List, hidden row | No delete; restore hint | None |
+| `u` | List, hidden row | Restore a hidden found group | G-4 restore. Found groups that are not in hofund yet render nothing in that section |
+| `j`/`k`, `up`/`down`, `n`, `r` | List, hidden row | Move cursor, create group, or reload in list mode; other keys flash the restore hint | As above |
 | `esc`, `q` | Group | Back to the list. Does not quit the UI | None |
 | `J`/`K`, `shift+down`/`shift+up` | Group | Swap member or rule (`move`) | G-4 order |
-| `a` | Group | Add member (`openMemberPicker`, `memberOptions`). Three picker cases (`routing.go:memberOptions`): creating a group (`n`, `self` empty) lists served routes and offered deciders; an existing decision group (`Decides()`) lists deciders only; an existing chat group lists served routes only. Group list rows show Match pattern count when `len(g.Match) > 0` (`viewGroups`) | `GET /v1/hofund/models` plus G-4 |
+| `a` | Group | Add member (`openMemberPicker`, `memberOptions`). Three picker cases (`routing.go:memberOptions`): creating a group (`n`, `self` empty) lists served routes and offered deciders; an existing decision group (`Decides()`) lists deciders only; an existing chat group lists served routes only. **Do not** use `GET /v1/hofund/models`: it is `listable_route_models` only, `RouteModel` has no decision flag, and it drops groups-only and unlisted models. Gap **G-4** member-candidate list: served refs (including routes not shown in agent pickers) and offered deciders, separately, with a decision flag | G-4 |
 | `n` | Group | New rule, typed line (`openRule`, `ruleHint`) | G-4. The daemon parses the line. The TUI does not |
 | `enter`, `e` | Group, on a rule | Edit that rule | G-4 |
-| `d` `d` | Group | Remove member or rule. Last member cannot be removed | G-4 |
-| `c` | Group | Classifier picker (`openClassifier`). Only if a rule has an intent | G-4 |
+| `d` `d` | Group | Remove member or rule. Last member cannot be removed. Removing a member sends a PATCH whose rules drop or rewrite lines that pointed only at that member (`routing.go:updateGroup`, `Rule.Without`) | G-4 |
+| `c` | Group | Classifier picker (`openClassifier`). Only if a rule has an intent. Reference uses `provider.Catalog()` and skips the group id; not the models route. Same G-4 candidate gap or a classifier-specific catalog slice | G-4 |
 | `E` | Group, on a model member | Cycle effort (`nextMemberEffort`): empty, low, medium, high, xhigh, max, then empty again | G-4 member effort |
 | `F` | Group, on a model member | Toggle fast (`SetMemberFast`) | G-4 member fast |
 | `s` | Group | Next affinity (`nextStays`): auto, session, turn, off, strict. Same spellings as `config::Stays` | G-4 |
 | `f`, `x`, `l`, `R` | Group | Family, context tokens, reasoning levels, rename id (`agent.RenameGroup`) | G-4 |
 | window | `groupWindow` | Keep the picked member or rule on screen | None |
 
-Fallback in the reference group screen is "the first member that can take the request", plus provider `fallback` entries. Provider fallback stays on the provider (G-2 `fallback` list). Group member order is the group fallback order.
+Fallback in the reference group screen is "the first member that can take the request", plus provider `fallback` entries. Provider fallback stays on the provider (G-2 `fallback` list). Group member order is the group fallback order. Visible group list rows show Match pattern count when `len(g.Match) > 0` (`viewGroups`).
 
 ### Usage (page 4) — R-15, fed by R-10
 
@@ -107,7 +112,7 @@ Fallback in the reference group screen is "the first member that can take the re
 | `c` | Check in every account that has a daily check-in (`checkinCmd`) | `GET /v1/hofund/checkins`, then `POST /v1/hofund/checkins/run` per row `{subscription, account}`. One toast joins the `outcome` and `detail` lines |
 | `r` | Drop quotas and read again | `GET /v1/hofund/quotas` with no `kept=1` |
 | open page | Asked read unless the last ask was under 30s (`quotasOpenGap`). While a read is in flight, retry every 1.5s, 20 times (`gotQuotas`) | Same GET. `standings` is not the card list. Cards are `data` |
-| sparkline, agent table, model table | Built from the summary (`usageBlock`) | Bucket `UsageResponse.rows` in the client. Grouped tables use `by=agent`, `by=provider-key`, or `by=gateway-key` on `UsageQuery`. There is no model breakdown query; the client groups rows by `model` for the model table |
+| sparkline, agent table, model table | Built from the summary (`usageBlock`) | `GET /v1/hofund/usage?period=…` returns at most the newest **10_000** rows (`USAGE_ROW_LIMIT` in `control.rs`); `rows_truncated` is set when older rows were dropped while **`totals` cover the whole period**. The **agent table** uses `by=agent`, `by=provider-key`, or `by=gateway-key` (complete grouped totals, not row bucketing). The sparkline and **by-model** table need a period summary (Gap **G-11**: daily series and per-model totals). When `rows_truncated` is true, mark the sparkline and model table **incomplete**; do not imply they cover the full period |
 | currency | `fmtCost` | `UsageResponse.currency` is `USD` or `CNY` with `cny_per_usd`. Settings stores `usd` or `cny` (G-5) |
 | alerts | Not a usage key in the reference. The plan puts alerts on this page | `GET /v1/hofund/quotas/alerts`, `POST /v1/hofund/quotas/alerts/settings`. Also a `quota_alert` event toast |
 | direct calls | Second block, "not through" the gateway, from session files | Not in `GET /usage`. Shown when R-30 stats exist. R-15 ships the gateway block alone |
@@ -183,7 +188,7 @@ Sign-in never prints a token. The existing `SignInProgressEvent` (`provider`, `s
 | usage alert, balance alert | Thresholds | Existing `POST /v1/hofund/quotas/alerts/settings` |
 | gateway keys | Named keys and limits | Existing `GET/POST /v1/hofund/gateway-keys` |
 | LAN allow-list | Display and edit the field | G-5 stores it. Enforcement is R-22. Until R-22 the row says the field is stored and not enforced |
-| token rotate | Confirm, then rotate | `POST /v1/hofund/token/rotate`. Reconnect the event stream with the new token |
+| token rotate | Confirm, then rotate | `POST /v1/hofund/token/rotate`. `TokenRotateResponse.token` is the next bearer for reconnecting only; never toast, print, or log it |
 
 ### Logs — R-18, not a reference page
 
@@ -236,7 +241,7 @@ Event application, without a refetch when the payload is enough:
 | `agent_changed` | Reload agents |
 | `sign_in_progress` | Mark the account dialog dirty and poll |
 | `quota_alert` | Toast `title` and `body` |
-| `token_rotated` | Drop the stream and discover again |
+| `token_rotated` | Re-read the token file (`hofund-secrets`; discovery JSON has endpoints only, no token). Drop the event stream and reconnect with the new bearer. `TokenRotatedEvent` is empty |
 | `resync_required` | Reopen the stream with no cursor |
 | `request_started`, `request_finished` | Logs page and Usage sparkline only |
 
@@ -264,7 +269,7 @@ Every new JSON body has `"version": 1` and `deny_unknown_fields` on requests. Re
 
 ### G-1 Provider list fields
 
-Extend `ProviderSummary` additively: `name`, `enabled` (default true), `family`, `base_url`, `preset`, `account_label`, `signed_out`, `listed` (default true), `list_error`, `key_masked`. No secret. `GET /v1/hofund/providers` returns them. Omitting a new field means the old meaning.
+Extend `ProviderSummary` additively: `name`, `enabled` (default true), `ready`, `family`, `base_url`, `preset`, `account_label`, `signed_out`, `listed` (default true), `list_error`, `key_masked`. No secret. `GET /v1/hofund/providers` returns them. Omitting a new field means the old meaning. Status text uses `enabled`, `ready`, `key_masked`, and G-3 `needs_project` as in the Providers section.
 
 ### G-2 Provider writes
 
@@ -297,6 +302,8 @@ Routes are `[[routes]]` groups, not a second store. `routing` is one of `smart`,
 | `POST /v1/hofund/groups/{id}/restore` | `{version, expected_revision}` | Group. 404 if it was not a hidden found group |
 
 `Group` is `{id, name, routing, stays, family, context, levels, classifier, members: [{ref, effort, fast, enabled}], rules: [{line}], hidden, found}`. `members` on PATCH replaces order. The client swaps locally and sends the full list. `rules[].line` is the reference rule line (`openRule`). The daemon parses and returns 422 with `FieldIssue` on `rules`. A group must keep one member. Fallback order is member order. Classifier must not be `group/{id}` itself.
+
+**Member and classifier pickers (G-4 extension):** add a control read (shape TBD) that lists routing member candidates the reference builds from `provider.Served()` and `provider.OfferedDeciders()`, with a `decision` (or equivalent) flag on deciders. `GET /v1/hofund/models` must not be reused: it calls `listable_route_models`, omits groups-only and unlisted providers, and has no decision flag. Classifier pick (`openClassifier`) needs catalog-like entries minus the group being edited, same gap or a dedicated classifier slice.
 
 ### G-5 Settings
 
@@ -344,6 +351,10 @@ Required for Agents `S` and for startup sync when the public catalog is empty (r
 ### G-10 Serve role
 
 Additive on `StatusResponse`: `serves` (`tui`, `serve`, `desktop`, or empty) and `owned_by_pid` (the process that spawned this daemon, else 0). Set from the child environment in section 4. Old clients ignore the fields.
+
+### G-11 Usage period summary
+
+Gap for the Usage page sparkline and by-model table. `GET /usage` row caps and `rows_truncated` behavior stay as today (`control.rs`, `USAGE_ROW_LIMIT`). Add a period-scoped summary (shape TBD) with at least a daily **series** for the sparkline and **by-model** totals for the model table, without relying on uncapped row iteration. Agent attribution tables continue to use `by=agent`, `by=provider-key`, or `by=gateway-key`.
 
 ## 4. Gateway handoff
 
@@ -479,7 +490,7 @@ Sizes are the plan's wall-clock sizes (S about 3–4h, M about 6–8h, L about 1
 | 7 | R-17 | M–L | Routing list, group editor, route view (`GET /v1/hofund/route`, `/route/session`, `/route/unrouted`) on a key or panel | R-11, R-7a |
 | 8 | R-18 | M | Settings (`8`), Logs (`9`), Help, fixtures, Windows raw-mode test | R-11, R-7b |
 | 9 | R-44 | M | Sessions page on section 5 reads | R-11, R-30 |
-| 10 | R-45 | M | Library read-only rows from `GET /v1/hofund/library` | R-11. Mutating library keys wait for security review |
+| 10 | R-45 | M | Library read-only rows from `GET /v1/hofund/library` (section 5, implemented in R-36) | R-11, **R-36**. R-11 empty frames that treat 404 as "not in this build yet" do not replace this. Mutating library keys wait for security review; R-41 stays out |
 
 R-19 (D-80) and R-20 (D-84) sit between R-18 and R-47 in the same lane but are not terminal UI items, so they are not listed here.
 
