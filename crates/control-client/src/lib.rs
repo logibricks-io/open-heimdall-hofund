@@ -26,7 +26,7 @@ use hofund_control_proto::{
     QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryQuery, QuotaHistoryResponse,
     QuotaQuery, QuotaResponse, ReloadRequest, RouteListResponse, RouteModelListResponse,
     RouteQuery, SessionRouteResponse, ShutdownRequest, ShutdownResponse, StatusResponse,
-    TokenRotateRequest, TokenRotateResponse, Topic, UnroutedListResponse, UsagePeriod, UsageQuery,
+    TokenRotateRequest, TokenRotateResponse, Topic, UnroutedListResponse, UsageQuery,
     UsageResponse, WarmupListResponse, WarmupRunRequest, WarmupRunResponse, decode_error_envelope,
     decode_response,
 };
@@ -193,6 +193,15 @@ impl ClientError {
     pub fn is_unavailable(&self) -> bool {
         matches!(self, Self::ConnectionUnavailable(_))
     }
+
+    /// HTTP status when the server returned a control error envelope.
+    #[must_use]
+    pub fn http_status(&self) -> Option<http::StatusCode> {
+        match self {
+            Self::Server { status, .. } => Some(*status),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for ClientError {
@@ -286,6 +295,23 @@ impl Client {
     /// Gets daemon status.
     pub async fn status(&self) -> Result<StatusResponse, ClientError> {
         self.get("/v1/hofund/status").await
+    }
+
+    /// GETs a path and returns once the status line is known.
+    ///
+    /// On success the body is discarded. On failure the error envelope is decoded when present.
+    pub async fn get_http_status(&self, path: &str) -> Result<http::StatusCode, ClientError> {
+        let response = self.open(http::Method::GET, path, None, None).await?;
+        let status = response.status();
+        if status.is_success() {
+            let _ = Limited::new(response.into_body(), MAX_RESPONSE_BODY_BYTES)
+                .collect()
+                .await
+                .map_err(|error| transport("control response body failed", error))?;
+            Ok(status)
+        } else {
+            Err(error_response(status, response.into_body()).await)
+        }
     }
 
     /// Lists configured providers.
@@ -849,18 +875,7 @@ impl Client {
 
     /// Reports usage for a period.
     pub async fn usage(&self, query: UsageQuery) -> Result<UsageResponse, ClientError> {
-        let period = match query.period {
-            UsagePeriod::Day => "day",
-            UsagePeriod::Week => "week",
-            UsagePeriod::Month => "month",
-            UsagePeriod::All => "all",
-            _ => "unknown",
-        };
-        let mut url = format!("/v1/hofund/usage?period={period}");
-        if let Some(by) = query.by {
-            url.push_str("&by=");
-            url.push_str(by.as_query_value());
-        }
+        let url = format!("/v1/hofund/usage?{}", query.encode());
         self.get(&url).await
     }
 

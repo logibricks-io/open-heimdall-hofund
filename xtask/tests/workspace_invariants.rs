@@ -17,6 +17,7 @@ const MEMBERS: &[&str] = &[
     "apps/cli",
     "apps/desktop/src-tauri",
     "apps/hofundd",
+    "apps/tui",
     "crates/kernel/agent",
     "crates/kernel/codec",
     "crates/kernel/config",
@@ -78,7 +79,9 @@ fn expected_deps(package: &str) -> Option<&'static [&'static str]> {
             "hofund-control-client",
             "hofund-model-catalog",
             "hofund-secrets",
+            "hofund-usage",
         ],
+        "hofund-tui" => &["hofund-config", "hofund-control-client", "hofund-secrets"],
         "hofund-codec" => &["hofund-ir"],
         "hofund-config" => &[],
         "hofund-model-catalog" => &["hofund-config"],
@@ -216,6 +219,7 @@ fn expected_dev_deps(package: &str) -> Option<&'static [&'static str]> {
     Some(match package {
         "hofund-agent" => &[],
         "hofund-cli" => &["hofund-control-proto"],
+        "hofund-tui" => &["hofund-control-proto"],
         "hofund-codec" => &[],
         "hofund-config" => &[],
         "hofund-model-catalog" => &[],
@@ -264,7 +268,7 @@ fn expected_dev_deps(package: &str) -> Option<&'static [&'static str]> {
         "hofund-plugin-google-vertex" => &["hofund-kit-upstream"],
         "hofund-plugin-relay" => &["hofund-kit-upstream"],
         "hofund-plugin-remote-gateway" => &["hofund-kit-upstream"],
-        "hofund-plugin-subscription-claude" => &["hofund-kit-subscription"],
+        "hofund-plugin-subscription-claude" => &["hofund-kit-subscription", "hofund-plugin-sdk"],
         "hofund-plugin-subscription-cline" => &["hofund-kit-subscription"],
         "hofund-plugin-subscription-codex" => &["hofund-kit-subscription"],
         "hofund-plugin-subscription-copilot" => &["hofund-kit-subscription"],
@@ -452,6 +456,7 @@ fn dependency_graph_matches_architecture() {
     for package in [
         "hofund-agent",
         "hofund-cli",
+        "hofund-tui",
         "hofund-codec",
         "hofund-config",
         "hofund-control-proto",
@@ -1162,13 +1167,17 @@ fn workspace_members(manifest: &str) -> BTreeSet<String> {
 }
 
 fn package_name(manifest: &str) -> String {
+    try_package_name(manifest).unwrap_or_else(|| panic!("manifest has no package name"))
+}
+
+fn try_package_name(manifest: &str) -> Option<String> {
     for line in manifest.lines() {
         let trimmed = strip_comment(line).trim();
         if let Some(rest) = trimmed.strip_prefix("name = ") {
-            return rest.trim().trim_matches('"').to_string();
+            return Some(rest.trim().trim_matches('"').to_string());
         }
     }
-    panic!("manifest has no package name");
+    None
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

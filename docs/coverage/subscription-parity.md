@@ -315,39 +315,38 @@ Every other gap below maps to an existing plan item.
 
 **Reference files read:** `internal/provider/signin.go`, `codex_store.go`, `import_codex.go`, `codex_request.go`, `codex_models.go`, `codex_limits.go`, `codex_credits.go`, `codex_resets.go`, `codex_zstd.go`, `codex_http1.go`, `codex_device_signin.go`, `codex_switch.go`, `warmup_daily.go`, `chatgpt_api.go`, `internal/gateway/codex_backend.go`.
 
-**hofund path:** `plugins/subscriptions/codex/` (`lib.rs`, `sign_in.rs`, `device_sign_in.rs`, `tokens.rs`, `discover.rs`, `agent_sign_in.rs`, `upstream.rs`, `limits.rs`, `usage.rs`, `models.rs`, `warmup.rs`, `shape.rs`). **ChatGPT API:** no plugin; `docs/coverage/subscriptions.md` row `chatgpt-api` → missing.
+**hofund path:** `plugins/subscriptions/codex/` (`lib.rs`, `sign_in.rs`, `device_sign_in.rs`, `tokens.rs`, `discover.rs`, `agent_sign_in.rs`, `upstream.rs`, `limits.rs`, `usage.rs`, `resets.rs`, `models.rs`, `warmup.rs`, `shape.rs`). **ChatGPT API:** no plugin; `docs/coverage/subscriptions.md` row `chatgpt-api` → missing.
 
 | # | capability | reference v0.1.3005 | hofund 08035c9 | status | gap to close |
 |---|------------|----------------------|----------------|--------|--------------|
 | a1 | sign-in: browser / loopback OAuth (Codex CLI PKCE) | `signin.go:38-45` codex authorize URL, fixed `127.0.0.1:1455`, scopes; loopback callback | `codex/src/lib.rs:191-241`, `sign_in.rs:16-37` same client, port 1455, PKCE + loopback | Done | — |
 | a2 | sign-in: device code | `codex_device_signin.go` (device auth APIs) | `device_sign_in.rs:27-30`, `lib.rs:196-206` `--device-auth` flow | Done | — |
-| a3 | sign-in: API key (detect only) | Codex `auth.json` with `auth_mode: apikey` is not an account: discovery and agent switch drop it (`logins.go:767` `codexLoginIn`, `account.go:1044` `codexAccount`); `CodexAPIKeySignedIn` (`logins.go:571`) also lets `/responses/compact` pass a key's account holds (`gateway/codex_backend.go:693` `compactSigninHeld`) | no `auth_mode` check in `discover.rs` | Missing | Drop API-key mode in discovery/switch; compaction allowance for key-held requests (**R-47**) |
+| a3 | sign-in: API key (detect only) | Codex `auth.json` with `auth_mode: apikey` is not an account: discovery and agent switch drop it (`logins.go:767` `codexLoginIn`, `account.go:1044` `codexAccount`); `CodexAPIKeySignedIn` (`logins.go:571`) also lets `/responses/compact` pass a key's account holds (`gateway/codex_backend.go:693` `compactSigninHeld`) | `discover.rs:73-80` drops `auth_mode: apikey` on read/list/import; `agent_sign_in.rs:47` writes `auth_mode: chatgpt`; tests `r47a_a3_*` | Partial | Gateway `/responses/compact` compaction allowance for API-key-held requests has no hofund mirror on the subscription path (**R-47**, later) |
 | a4 | sign-in: paste callback | `signin.go:69` PasteCallback on sign-in state | loopback failure falls back to pasted callback (`lib.rs:217-218` comment only) | Partial | Explicit paste-callback UX not verified in plugin API |
 | a5 | sign-in: ChatGPT API (Sign in with ChatGPT / dynamic client) | `chatgpt_api.go:42-66` `dynamic_agent_client`, per-account client id, `siwcAuthorize` | no `chatgpt-api` plugin (`docs/coverage/subscriptions.md:25`) | Missing | Full SIWC plugin (R-47) |
 | b | import sources | `codex_store.go:517+` read/write Codex `auth.json` and macOS Keychain; `import_codex.go` config.toml providers | `discover.rs:19-54` read `auth.json` only; `agent_sign_in.rs:9-71` write `auth.json` (file mode) | Partial | Keychain read/write, config.toml provider import (R-47) |
 | c | token storage / encryption | `logins.json` + optional Codex home/keychain (`codex_store.go`) | daemon `secret_ref` encrypted store via `host.accounts()` (`crates/kernel/daemon/src/subscriptions.rs` pattern) | Partial | Bidirectional Codex store sync with Keychain (R-47) |
 | d | refresh | OAuth refresh with rotation; Codex/keychain writers (`codex_store.go` write) | `tokens.rs:78-176` lease, `LAPSED` on refused refresh, 5 min margin | Partial | Persist refresh back to Codex Keychain when Codex rotates alone (R-47) |
-| e | upstream wire | POST `https://chatgpt.com/backend-api/codex/responses`, zstd bodies (`codex_zstd.go:12-24`), HTTP/1.1 fallback (`codex_http1.go`) | `upstream.rs:84-104` JSON POST to `{base}/responses`, no zstd | Partial | `Content-Encoding: zstd` on `/responses` (R-47) |
+| e | upstream wire | POST `https://chatgpt.com/backend-api/codex/responses`, zstd bodies (`codex_zstd.go:12-24`), HTTP/1.1 fallback (`codex_http1.go`) | `plugin-sdk` `codex_zstd.rs` + `wire.rs` zstd level 3 on POST `{base}/responses`; `upstream.rs` `chatgpt_codex_zstd(true)`; plugin HTTP uses the host unary pool built without reqwest `http2` (`crates/kernel/plugin-host/Cargo.toml:21`, test `pool.rs` `pooled_client_sends_an_http11_request_line`); a later Connect duplex client must pin unary dashboard calls to HTTP/1.1 (Cursor Connect design, row **e** above); tests `r47a_e_*`, SDK `r47a_e_*` | Done | — |
 | f | inbound API shapes | Gateway `codex_backend.go` serves Codex path; pool accounts use Responses upstream | Plugin upstream `ProtocolId::OPENAI_RESPONSES` only (`upstream.rs:84`); gateway codec translates Chat/Responses/Messages/Gemini to IR | Partial | Codex-as-provider gateway mirror (`codex_backend.go`) not in hofund scope here; subscription path is Responses-only |
 | g | streaming | SSE stream; fold for unary (`codex_request.go` patterns) | `upstream.rs:96-120` forces stream, fold when unary | Done | — |
 | h | tool calls | Codex tool name mapping in gateway/provider | `upstream.rs:82-94` `codex_tool_names` restore | Done | — |
-| i | images | via Responses content parts (gateway codex) | unverified in codex plugin tests | Partial | Confirm image parts end-to-end (R-47) |
+| i | images | via Responses content parts (gateway codex) | `tests.rs` `r47a_i_*`: Responses `input_image` in upstream POST body | Done | — |
 | j | reasoning / thinking | Codex model instructions / reasoning items in gateway | `shape.rs` (referenced by upstream) drops unsupported fields | Partial | Parity with the reference reasoning compaction paths unverified |
-| k | quota / usage | Headers + `codex.rate_limits` event; `/wham/usage`; credit resets (`codex_resets.go:180+`) | `limits.rs`, `usage.rs` headers, event, `/wham/usage`; credits non-blocking | Partial | Credit-funded window reset API (`/wham/rate-limit-reset-credits`) (R-47) |
+| k | quota / usage | Headers + `codex.rate_limits` event; `/wham/usage`; credit resets (`codex_resets.go:180+`) | `limits.rs`, `usage.rs` headers, event, `/wham/usage`; `resets.rs` + `Subscription::quota_reset_credits` / `consume_quota_reset` on `/wham/rate-limit-reset-credits` (consume only on explicit calls); tests `r47a_k_*` | Partial | UI cards and daemon CLI for reset consume (R-47 later slice) |
 | l | model list | `codex_models.go` backend list + instructions | `models.rs` `/codex/models`, cached prompts | Done | — |
 | m | multi-account | Multiple logins; routing in provider | Multiple accounts via daemon subscription members | Done | — |
 | n | error classification | Expired → refresh; spent windows; credits (`codex_credits.go`) | `tokens.rs` lapsed; `limits.rs` observe blocking vs credits | Partial | Remote reset / autoreset behaviours in the reference not ported |
 | o | daily warmup | `warmup_daily.go` + provider warmup | `lib.rs:372-377` `daily_warmup` → `warmup.rs` | Done | — |
 | p | agent sign-in switch | Writes Codex auth (`codex_switch.go`, store) | `write_agent_sign_in` → `agent_sign_in.rs` | Partial | Keychain mode + lock interaction with live Codex unverified |
-| q | extras | `chatgpt-account-id`, Codex version headers, plan in ID token | `upstream.rs:172+` headers, `CODEX_VERSION`, `sign_in.rs:13` auth claim | Done | zstd + HTTP/1.1 fallback (R-47) |
+| q | extras | `chatgpt-account-id`, Codex version headers, plan in ID token | `upstream.rs:172+` headers, `CODEX_VERSION`, `sign_in.rs:13` auth claim; zstd on Codex turns (row **e**) | Done | — |
 
 **Gaps**
 
 - Implement `chatgpt-api` subscription (dynamic OAuth, `api.openai.com/v1/responses`, agent instructions) — **L**, **R-47**.
-- Codex request zstd compression and HTTP/1.1 fallback — **M**, **R-47**.
 - Codex Keychain + two-writer auth.json sync — **M**, **R-47**.
-- Credit reset / consume APIs and UI cards — **M**, **R-47**.
-- Codex CLI signed in with an OpenAI API key (`auth.json` `auth_mode: "apikey"`): drop it in discovery and agent switching (reference `logins.go:767`, `account.go:1044`), and the compaction allowance for key-held requests (`codex_backend.go:693`) — **S**, **R-47** (audit-time correction: detection rules, not a separate sign-in method).
+- Credit reset consume surfaced in CLI/control UI cards — **M**, **R-47** (plugin API and Codex `/wham/rate-limit-reset-credits` read/consume are in place; automatic consume is forbidden).
+- Gateway `/responses/compact` compaction allowance when the held sign-in is API-key mode — **S**, **R-47** (subscription plugin already drops `auth_mode: apikey` accounts in discovery and agent switch).
 
 ---
 

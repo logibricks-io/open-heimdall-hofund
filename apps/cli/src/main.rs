@@ -20,9 +20,24 @@ mod provider_edit;
 mod quota;
 mod serve;
 mod subscription;
+mod tui;
 mod usage;
 mod visible;
 mod warmup;
+
+fn default_usage_options() -> usage::UsageReportOptions {
+    usage::UsageReportOptions {
+        window: hofund_usage::ReportWindow::All,
+        period: hofund_control_client::hofund_control_proto::UsagePeriod::All,
+        group_by: None,
+        account: None,
+        model: None,
+        since_text: None,
+        days_text: None,
+        last_text: None,
+        format: usage::UsageOutputFormat::Table,
+    }
+}
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -47,6 +62,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Command::Serve => hand_over(serve::run(&config)),
+        Command::Tui { no_color } => hand_over(tui::run(&config, no_color)),
         Command::Help(topic) => {
             println!("{}", help_text(topic));
             ExitCode::SUCCESS
@@ -89,7 +105,7 @@ fn run_control(config: &Path, command: Command) -> Result<String, String> {
             Command::EventsTail { requests } => events::tail(config, requests).await,
             Command::Healthcheck => commands::healthcheck(config).await,
             Command::TokenRotate => commands::token_rotate(config).await,
-            Command::Usage { by } => commands::usage(config, by)
+            Command::Usage { options } => commands::usage(config, options)
                 .await
                 .map(|table| table.trim_end_matches('\n').to_owned()),
             Command::Route => commands::route(config)
@@ -170,6 +186,7 @@ fn run_control(config: &Path, command: Command) -> Result<String, String> {
             Command::Version
             | Command::Help(_)
             | Command::Serve
+            | Command::Tui { .. }
             | Command::TokenShow
             | Command::Subscription(_)
             | Command::Quota(_)
@@ -185,6 +202,9 @@ enum Command {
     Help(HelpTopic),
     Version,
     Serve,
+    Tui {
+        no_color: bool,
+    },
     Check,
     ConfigApply {
         source: PathBuf,
@@ -201,7 +221,7 @@ enum Command {
     TokenRotate,
     GatewayKey(gateway_key::Command),
     Usage {
-        by: Option<hofund_control_client::hofund_control_proto::UsageBreakdownBy>,
+        options: usage::UsageReportOptions,
     },
     Route,
     AgentList,
@@ -383,6 +403,7 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
     let mut dry_run = false;
     let mut force = false;
     let mut requests = false;
+    let mut no_color = false;
     let mut read_only = false;
     let mut help = false;
     let mut own_secret = None;
@@ -422,6 +443,7 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
             "--dry-run" => dry_run = true,
             "--force" => force = true,
             "--requests" => requests = true,
+            "--no-color" => no_color = true,
             "--read-only" => read_only = true,
             "--json" => flags.json = true,
             "--key" => {
@@ -478,6 +500,7 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
     let command = match words.as_slice() {
         [] | ["version"] | ["--version"] | ["-V"] => Command::Version,
         ["serve"] => Command::Serve,
+        ["tui"] => Command::Tui { no_color },
         ["config", "check"] => Command::Check,
         ["config", "apply", source] => Command::ConfigApply {
             source: PathBuf::from(source),
@@ -489,9 +512,11 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
         ["events", "tail"] => Command::EventsTail { requests },
         ["token", "show"] => Command::TokenShow,
         ["token", "rotate"] => Command::TokenRotate,
-        ["usage"] => Command::Usage { by: None },
+        ["usage"] => Command::Usage {
+            options: default_usage_options(),
+        },
         ["usage", rest @ ..] => match usage::parse(rest) {
-            Ok(usage::UsageCommand::Report { by }) => Command::Usage { by },
+            Ok(usage::UsageCommand::Report(options)) => Command::Usage { options },
             Err(message) => return Err(message),
         },
         ["route"] => Command::Route,
@@ -868,7 +893,7 @@ fn help_text(topic: HelpTopic) -> String {
         HelpTopic::TokenShow => TOKEN_SHOW_HELP,
         HelpTopic::TokenRotate => TOKEN_ROTATE_HELP,
         HelpTopic::GatewayKey => gateway_key::HELP,
-        HelpTopic::Usage => USAGE_HELP,
+        HelpTopic::Usage => usage::USAGE_HELP,
         HelpTopic::Agent => AGENT_HELP,
         HelpTopic::AgentList => AGENT_LIST_HELP,
         HelpTopic::AgentConnect => AGENT_CONNECT_HELP,
@@ -1078,15 +1103,6 @@ usage: hofund token rotate [--config PATH]
 Replace the bearer token. A running gateway reads the token file on the
 next request. Connected agents have their token keys rewritten. When an
 agent file cannot be updated, the command prints `hofund agent connect <name>`.
-";
-
-const USAGE_HELP: &str = "\
-usage: hofund usage [--by agent|provider-key|gateway-key] [--config PATH]
-
-Print one row per recorded request, with local time, plus a totals line.
-The newest rows are shown when there are too many to list. --by groups
-totals by client agent, provider key fingerprint, or gateway key instead
-of listing individual rows.
 ";
 
 const AGENT_HELP: &str = "\

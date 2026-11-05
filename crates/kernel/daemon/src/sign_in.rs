@@ -344,6 +344,11 @@ async fn sign_out_in(
         )
         .await?;
     }
+    entry
+        .instance
+        .remove_account(target, &entry.host)
+        .await
+        .map_err(show)?;
     entry.host.accounts().remove(target).await.map_err(show)
 }
 
@@ -719,6 +724,7 @@ mod tests {
         cancels: AtomicUsize,
         proofs: Mutex<Vec<String>>,
         refreshes: Mutex<Vec<String>>,
+        removes: Mutex<Vec<String>>,
         redirect: Mutex<Option<String>>,
     }
 
@@ -842,6 +848,19 @@ mod tests {
             _host: &HostContext,
         ) -> Result<Arc<dyn UpstreamProvider>, PluginError> {
             Err(PluginError::unsupported("fake-sub does not serve"))
+        }
+
+        async fn remove_account(
+            &self,
+            account: &AccountId,
+            _host: &HostContext,
+        ) -> Result<(), PluginError> {
+            self.calls
+                .removes
+                .lock()
+                .expect("removes")
+                .push(account.to_string());
+            Ok(())
         }
     }
 
@@ -1254,6 +1273,10 @@ mod tests {
         sign_out_in(&opened, &config, PLUGIN, "one")
             .await
             .expect("sign out");
+        assert_eq!(
+            rig.calls.removes.lock().expect("removes").clone(),
+            vec!["one".to_owned()]
+        );
         let listings = list_in(&opened).await.expect("list");
         let ids: Vec<&str> = listings[0].accounts.iter().map(|a| a.id.as_str()).collect();
         assert_eq!(ids, vec!["two"]);

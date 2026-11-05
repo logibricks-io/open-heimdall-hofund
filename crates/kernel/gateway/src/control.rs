@@ -10,8 +10,8 @@ use std::time::Duration;
 use std::path::Path;
 
 use axum::body::{Body, Bytes};
-use axum::extract::rejection::{PathRejection, QueryRejection};
-use axum::extract::{DefaultBodyLimit, Path as AxumPath, Query, Request, State};
+use axum::extract::rejection::PathRejection;
+use axum::extract::{DefaultBodyLimit, Path as AxumPath, Request, State};
 use axum::http::{HeaderMap, Method, StatusCode, Uri, header};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event, Sse};
@@ -1810,25 +1810,8 @@ async fn delete_profile(
     )
 }
 
-async fn usage(
-    State(state): State<HttpState>,
-    uri: Uri,
-    query: Result<Query<UsageQuery>, QueryRejection>,
-) -> Response {
-    let query = if uri.query().is_none_or(str::is_empty) {
-        UsageQuery::default()
-    } else {
-        match query {
-            Ok(Query(query)) => query,
-            Err(_) => {
-                return error_response(
-                    StatusCode::BAD_REQUEST,
-                    ControlErrorKind::BadRequest,
-                    "invalid usage query",
-                );
-            }
-        }
-    };
+async fn usage(State(state): State<HttpState>, uri: Uri) -> Response {
+    let query = UsageQuery::parse(uri.query());
     if let Err(error) = query.validate() {
         return failure_response(error.into());
     }
