@@ -56,7 +56,7 @@ Hofund:
 
 Hofund: carry `working_directory` from IR metadata if the gateway attaches it (same as reference `clientWorkDir`). Implement `passedOver` with `untrusted` map (`96-118`, `909-914`). Plugin state dir `{state}/claude-bridge/work` replaces the reference app work dir; mode `0700`.
 
-Cleanup: each run gets `MkdirTemp` prefix `hofund-claude-` (`945-948` analogue); `cleanup()` on failed start (`949-957`); remove tree on run exit (`subscriptionRun.tmp`). Cross-process account dir uses existing `run_lock` (`run_lock.rs:155-209`) before starting Claude Code in `{state}/accounts/<id>`.
+Cleanup: each run gets `MkdirTemp` prefix `hofund-claude-` (`945-948` analogue); `cleanup()` on failed start (`949-957`); remove tree on run exit (`subscriptionRun.tmp`). Cross-process credential safety uses **`run_lock`** (section 1.8), not a long-lived `accounts().lease` (`account.rs:17-18`, `LEASE_WAIT` 30s).
 
 ### 1.4 Config directory and setup-token accounts
 
@@ -66,7 +66,7 @@ Per saved account, credentials are materialized under `{state}/accounts/<id>` fo
 2. `proxied` may append Bun proxy variables (`799-804`).
 3. `binary.env(binary.asRoot(env), configDir)` calls `inClaudeDir` **after** the scrub, so setup-token accounts get `CLAUDE_CONFIG_DIR` and a fresh `CLAUDE_CODE_OAUTH_TOKEN` from the account dir (`3266-3288`), never argv.
 
-Hofund already defines `OAUTH_TOKEN_VAR` (`cli.rs:21-22`) and `run_env` (`account.rs:44-51`); bridge spawn must mirror the same ordering in `bridge/run.rs`.
+Hofund already defines `OAUTH_TOKEN_VAR` (`cli.rs:21-22`) and `run_env` (`account.rs:44-51`); bridge spawn must mirror the same ordering in `bridge/run.rs`. **Credential files:** refresh, usage, and warmup materialize `{dir}/credentials` for a short subprocess, then remove it (`account.rs:80-83`, `:139-147`). While any **`RunMark`** exists beside the account dir, those paths must **`run_lock::wait`** before writing or deleting shared credential files and must **refuse** if marks remain after the wait budget (`run_lock.rs:185-209`). The bridge holds **`mark` only** (never `wait`) for the life of the Claude Code process (`run_lock.rs:155-177`).
 
 ### 1.5 Command line and MCP config
 
@@ -87,13 +87,17 @@ The callback URL is written mode `0600` into `callbackPath`; the helper reads th
 
 Root and WSL-root runs: when `claudeCLI.root()` is true, `asRoot` sets `IS_SANDBOX=1` unless already set or bubblewrap is configured (`744-769`), so `--dangerously-skip-permissions` is accepted.
 
-WSL env allowlist: only names in `claudeEnvVars` plus account dir vars and, when present after `inClaudeDir`, `CLAUDE_CODE_OAUTH_TOKEN` cross the WSL boundary (`773-796`).
+WSL env crossing uses the reference **`Tool.Env`** rules (`wslrun.go:437-477`, `claude_subscription.go:773-796`):
+
+- **`WSLENV`** lists `claudeEnvVars` entries present in env, account-dir vars (`CLAUDE_CONFIG_DIR/p`), and **`CLAUDE_CODE_OAUTH_TOKEN`** when set after `inClaudeDir`.
+- When the distro user is root, also list **`IS_SANDBOX`** (`792-795`) so `asRoot`'s value reaches the distro.
+- **`Tool.Env` always forwards proxy variables** (`434-470`, `462-468`) and rewrites loopback hosts in proxy URLs to the Windows NAT address via **`Tool.proxy`** (`479-497`).
 
 Prompt and system files: paths passed to Claude Code use `binary.file(path)` (`807-813`), not the client working directory when Claude runs in WSL (`990-995`). Lean system prompts use `--system-prompt-file` under the run temp dir (`1009-1017`).
 
 Environment additions from `cleanClaudeEnv` (`3293-3320`): disable auto memory/MCP servers, set `CLAUDE_CODE_PROMPT_CACHE_TTL=1h`, git instructions off, etc.
 
-Hofund spawn uses `SpawnRequest` via `cli::request_with_extra` (`cli.rs:68-77`) plus proxy, `asRoot`, and `inClaudeDir` pairs. Kernel clears other env; plugin supplies allowlist only.
+Bridge spawn uses `LongLivedChild` / `SpawnRequest` via `cli::request_with_extra` (`cli.rs:68-77`) with **only** explicit env pairs from the plugin (proxy helper, `asRoot`, `inClaudeDir`, WSL `WSLENV`). **`LongLivedChild` must not inherit the host proxy allowlist** from ordinary piped spawn (`piped.rs:61-63`, `33-48`), which would contradict section 1.2.
 
 ### 1.6 Long-lived run vs one-shot
 
@@ -109,6 +113,8 @@ Run timeout: `runTimeout = 30 * time.Minute` (`claude_runs.go:61`); reset on act
 
 Idle retention: up to `idleMost = 6` runs, max wait `idleLongest = 1h` matching cache TTL (`132-136`, `2293+` shelve path).
 
+**One-off turns do not idle:** when a run ends with `stop`, **no tools**, and **no assistant reply yet** (title/classifier one-shots), the reference **`abort`s** instead of parking in `idle` (`2200-2207`). Otherwise idle slots fill with processes that never get a continuation turn. Fake-runner test in **R-6c/R-6e** must assert such a run is killed, not keyed in `idle`.
+
 Parked on tools: `parkLongest = 5m`, `parkedMost = 16` (`138-159`).
 
 ### 1.7 Reuse, resume, fork, rewind
@@ -120,7 +126,7 @@ Parked on tools: `parkLongest = 5m`, `parkedMost = 16` (`138-159`).
 - **Rewind** on client cancel 499 (`22-28`; `letGo` paths in `retire` `2117+`).
 - **Effort change** on idle run: non-TUI may `setEffort`; TUI aborts (`1881-1891`).
 
-Hofund implements the same state machine in the plugin. **Idle/resume map key** is the reference `turnKey` SHA-256 (`3140-3146`, `1909-1933`, stored on the run at `2281`), not the owner string alone (`6043-6053` is only the owner prefix inside the hash). The hash covers owner, model, whether effort was requested (not the level), think-off, tool choice, system (billing header stripped), tools JSON, web search, JSON schema, and message bodies via `hashMessages` (tool ids excluded, `3205-3210`). After a matching idle run is found, apply effort with `setEffort` before the turn (`1881-1891`).
+Hofund implements the same state machine in the plugin. **Idle/resume map key** is the reference `turnKey` SHA-256 (`3140-3146`, `1909-1933`, stored on the run at `2281`), not the owner string alone (`6043-6053` is only the owner prefix inside the hash). The hash covers owner, model, whether effort was requested (not the level), think-off, tool choice, system (billing header stripped), tools JSON, web search, JSON schema, **`cacheIdentity`** (`claude_cache.go:236-247`: client-cache marks and lean-prompt mode), and message bodies via `hashMessages` (tool ids excluded, `3205-3210`). A **cache-mode or lean-prompt change must not resume** an existing run (`6224-6229`). After a matching idle run is found, apply effort with `setEffort` before the turn (`1881-1891`).
 
 ### 1.8 Concurrency and run lock
 
@@ -128,8 +134,9 @@ Reference global cap: `claudeRoom` (`claude_room.go:21-47`); wait `claudeRoomWai
 
 Hofund:
 
-- Keep per-account `run_lock` (`run_lock.rs`) for cross-process exclusivity with refresh/warmup (already used in `account.rs:66`).
-- Add plugin-local counting semaphore for concurrent Claude Code processes (config key `claude-runs-most` mirroring reference settings `claude_room.go:72-78`), default from available memory heuristic in reference `claudeMemRuns`.
+- **Bridge runs:** `run_lock::mark` at start; keep the **`RunMark`** until the Claude Code process exits; **never** call `run_lock::wait` from the bridge (multiple marks may coexist, `run_lock.rs:155-177`; `wait` serializes callers, `185-209`).
+- **Refresh, usage, warmup:** call **`run_lock::wait`** before materializing or deleting credential files; fail if marks remain after the wait limit (`agent_sign_in.rs:19` pattern for sign-in; extend to `account.rs:66+` paths). Do **not** hold `accounts().lease` for an entire bridge conversation (`LEASE_WAIT` 30s, `account.rs:17-18`).
+- Plugin-local counting semaphore for concurrent Claude Code processes (config key `claude-runs-most` mirroring reference settings `claude_room.go:72-78`), default from available memory heuristic in reference `claudeMemRuns`.
 
 ### 1.9 Abort and cleanup
 
@@ -137,7 +144,7 @@ Hofund:
 - Gateway shutdown → `abortAll` (`5807+`).
 - Idle sweep of project/session dirs (`939-943`, `1037-1038`).
 
-Plugin registers daemon shutdown hook via host job API to kill children and drop callback tokens (fail closed).
+**Shutdown:** implement **`UpstreamProvider::shutdown`** on the Claude bridge provider to **`kill`** all `LongLivedChild` handles and **invalidate** callback registrations (fail closed). The host scheduler **`shutdown`** only clears periodic jobs and aborts one-shot futures (`crates/kernel/plugin-host/src/lib.rs:1013-1023`); it does not reap bridge children. **R-6a** extends the daemon exit path to call **`UpstreamProvider::shutdown`** on every constructed upstream instance before the process exits (not done today; default `shutdown` is a no-op, `upstream.rs:499-507`).
 
 ## 2. MCP bridge
 
@@ -158,7 +165,7 @@ Flow (`mcp.go:159-198`, `claude_subscription.go:959-967`):
 
 1. Bridge writes random token and full callback URL to a mode-`0600` file (`callbackPath`).
 2. Helper reads URL from file if arg is path (`mcp.go:75-82`) so secrets never appear in argv.
-3. On `tools/call`, helper **POSTs JSON** `{tool_call_id,name,arguments}` to callback URL.
+3. On `tools/call`, helper **POSTs JSON** `{tool_call_id,name,arguments}` to callback URL. **`tool_call_id`** is `_meta["claudecode/toolUseId"]` when that string is non-empty, else a helper-generated id (`mcp.go:169-174`). This logic stays in the **MCP helper subcommand** (cli/daemon), not in router or gateway.
 4. HTTP client disables proxy (`mcp.go:99-101`).
 5. Bridge responds `{content,is_error,tools?}` JSON; helper returns MCP result.
 
@@ -193,7 +200,12 @@ Final-only tools (`StructuredOutput`) use `finalGrace` 30s (`144-152`).
 - Run timer `runTimeout` (section 1.6).
 - Park patience `parkLongest` releases run to fresh whole-history start (`138-141`).
 
-**Client keepalive during quiet upstream work:** the gateway’s `: keepalive` SSE comments apply only while `dispatch` has not returned (`crates/kernel/gateway/src/lib.rs:2120-2136`). After the plugin stream starts, the bridge must emit client-visible keepalive on the IR/`Completion::Stream` path when Claude Code has been silent for **`bridgeHeardAfter` (1 minute)** and continue on a fixed interval until **`translatedQuietLongest`** (`claude_subscription.go:6460-6477`), matching the reference `keepBridgeHeard` behaviour so long-thinking turns are not cut at ~600s idle.
+**Client keepalive during quiet upstream work:** the gateway’s `: keepalive` SSE comments apply only while `dispatch` has not returned (`crates/kernel/gateway/src/lib.rs:2120-2136`). After relay starts, match **`keepBridgeHeard`** (`claude_subscription.go:6489-6536`, `gateway.go:8471`, `8482`):
+
+- Start counting from **relay start** (`began` in `6489+`).
+- After **`bridgeHeardAfter` (1 minute)** since relay start **and** at least **`keepaliveEvery` (15 s)** since the last upstream event, emit **`StreamEvent::Ping`** every **15 s**.
+- Stop when quiet reaches **`translatedQuietLongest` (30 minutes)**.
+- **Never** emit `Ping` before **`StreamEvent::MessageStart`**: if the reply has not started, emit an **empty `MessageStart` first** (`6524-6532`), because pings before `message_start` break Anthropic SDK clients.
 
 ### 2.5 Security checklist
 
@@ -271,7 +283,7 @@ Reference `ClaudeSignInRequired` (`claude_auth.go:25-41`) and `NoteClaudeSignInF
 - `OAuth token revoked` / `OAuth access token has been revoked`
 - Reference lapse strings
 
-Emit **`PluginError::auth`** only for subscription lifecycle (`refresh`, sign-in). For upstream **run** failures, use **`PluginError::status_error(401, msg).without_cooldown()`** so the member is not rested (`claude_auth.go:7-12`) while **401 remains in the default failover set** (`decision.rs:171-178`).
+Emit **`PluginError::auth`** only for subscription lifecycle (`refresh`, sign-in). For upstream **run** failures where `ClaudeSignInRequired` matches, map status with **`bridgeFailed(name, msg, APIErrorStatus)`** (`6408-6419`): **keep `>= 400` statuses**, else **502** — do **not** force **401**. Attach **`.without_cooldown()`** so the member is not rested (`claude_auth.go:7-12`; `failureOf` treats sign-in-shaped `>= 400` as auth skip without rest, `routing.go:658-666`). Default failover still includes 401 and 5xx (`crates/kernel/router/src/lib.rs:95-98`).
 
 On auth-shaped stream errors, plugin calls **`host.accounts()`** to mark the account lapsed (mirror `refuseClaudeLogin`, `claude_auth.go:121-128`) with hofund’s `LAPSED` flag (`creds.rs`). Pin the refusal to **`loginVersion` captured at run start** (`1236-1238`, `NoteClaudeSignInFailure` `143-144`): a credential rotated after refresh or re-sign-in must not inherit the old refusal.
 
@@ -294,7 +306,7 @@ Prompt too large / context errors → **`status_error(400, ...)`** with substrin
 ### 4.5 Crashed / cut run
 
 - Process exit before complete turn → **`PluginError::transport`** or **`status_error(502, ...)`** with message `Claude Code ended` analogue (`877-878` comment).
-- **`claudeFull` room exhaustion** → **`status_error(503, msg).without_cooldown()`** where `msg` contains **`Claude Code processes are running, as many as may run at once`** (`claude_room.go:56-64`, `gateway.go:4252-4276`). Router must **skip remaining Claude subscription members** on the same daemon (same plugin id) for that failure, while **other providers may still failover**. Plain **`status_error(503)`** without that shape still cools and fails over normally.
+- **`claudeFull` room exhaustion** → **`status_error(503, msg).without_cooldown()`** where `msg` (plugin-only English) contains the reference room-full sentence (`claude_room.go:56-64`). Set a **vendor-neutral `PluginError` flag** (for example **`skip_failover_same_plugin`**, name finalized in R-6g) on that error; **`crates/kernel/router` must not embed the English sentence or vendor words** (`xtask/tests/workspace_invariants.rs:299-304`, `:1369-1383`). Router skips **only later route members with the same subscription plugin id**; other plugins may still failover (`gateway.go:4252-4276`). Plain **`status_error(503)`** without the flag still cools and fails over normally.
 - Run lost while tools pending → message from `whyNoRun` / `lostCalls` (`6030-6037`).
 - Timeout `runTimeout` → **`PluginError::timeout`** or 502 mapping.
 
@@ -304,7 +316,8 @@ Already **`PluginError::auth`** in plugin refresh (`account.rs:85-88`); do not m
 
 ### 4.7 Router follow-ups (R-6g)
 
-Implement **`claudeNoRoom`** and third-party refusal failover skipping in `crates/kernel/router` using fixed message substrings (no vendor names), mirroring `elsewhere` / `notMates` in `fallback.go:1800-1810` and `gateway.go:4256-4273`.
+- **`skip_failover_same_plugin`** (or equivalent) on `PluginError` in **`hofund-plugin-api`**, set only by the Claude plugin on room-full 503. Router failover reads the flag and drops remaining candidates with the **same plugin id**; no message substring matching in `crates/kernel/router`.
+- Third-party extra-usage 400: **`.without_cooldown()`** only; default failover does not try another member for bare 400 (`decision.rs:171-178`, `lib.rs:95-98`) — no extra router rule required (optional follow-up note in review).
 
 ## 5. Plugin versus kernel
 
@@ -317,7 +330,7 @@ Implement **`claudeNoRoom`** and third-party refusal failover skipping in `crate
 | Protocol translate Chat/Responses/Messages | `crates/kernel/gateway` + `codec` (existing) |
 | Account dir, lease, run_lock, setup-token | existing plugin modules |
 | Callback HTTP route | `plugin-host` loopback listener (not gateway mux) |
-| Router rests / failover | `router` (generic kinds only) |
+| Router rests / failover | `router` (generic kinds and flags only) |
 
 ### 5.2 Minimal plugin-api extensions
 
@@ -337,6 +350,7 @@ Plugins cannot bind sockets (`docs/plugins/boundary.md`). Add to `hofund-plugin-
 
 3. **`LongLivedChild`** (extend `PipedChild`; **R-6a**)
    - `write_stdin(Bytes)`, `stdout_stream() -> BodyStream`, explicit `kill()`, `wait() -> ExitStatus`.
+   - Spawn: **`env_clear()`** then **only** `SpawnRequest` env pairs (plus minimal host vars such as `PATH` / locale), **not** `piped.rs` `allowed_env()` proxy injection (`61-63`).
    - **Ownership:** the plugin **`Bridge` table** holds the handle across multiple `execute` calls for the same parked run; dropping at the end of one HTTP request must **not** kill the child (`piped.rs:152-166` today kills on drop).
    - **Stdout** line buffer **at least 64 MiB** (`claude_subscription.go:3408-3409`; today `MAX_LINE` is 1 MiB at `piped.rs:22-23`).
    - **Stderr** retained up to **1 MiB**, redacted in logs (`3337-3339`; today stderr is discarded in `piped.rs:5-6`).
@@ -367,9 +381,10 @@ Mutation tests (must fail on one-char regressions):
 - `tools/call` blocks until result POST (`claude_subscription_park_test.go` header comment).
 - Resume sends only `since` messages (`1771-1847` logs).
 - `match` retry window (`4891-4923`).
-- WSL env rewriting when enabled (mock).
-- Proxy env present when account has proxy metadata.
-- **No-cooldown classification:** sign-in-shaped **401** with `.without_cooldown()` does not rest the member; third-party **400** and room-full **503** (`claudeNoRoomSaid`) likewise (`gateway.go:4226-4276`, `6432-6441`). Router tests in **R-6g** assert skip behaviour for room-full vs other providers.
+- WSL env rewriting when enabled (mock): **`WSLENV`**, root **`IS_SANDBOX`**, proxy vars with loopback host rewrite (`wslrun.go:437-497`).
+- Proxy env present when account has proxy metadata (Bun helper only, not host inherit).
+- **One-off end → abort, not idle** (`2200-2207`).
+- **No-cooldown classification:** sign-in lapse uses **`bridgeFailed` status + `.without_cooldown()`**; third-party **400** and room-full **503** likewise (`gateway.go:4226-4276`, `6432-6441`). Router tests in **R-6g** assert **`skip_failover_same_plugin`** skips same plugin id only.
 
 Keep `plugins/subscriptions/claude/src/conformance.rs` expecting **`upstream()` unsupported** until the slice that completes a **text-only** turn on the fake runner (`lib.rs:509-516`). That first served slice must **fail closed** for images, tools, and sign-in lapse per sections 4 and 7.
 
@@ -383,6 +398,7 @@ Slices are ordered; later slices depend on earlier ones. **Safe before further d
 |-------|-------|-------|------|
 | `BridgeCallbackBackend` + **127.0.0.1-only** listener | `plugin-api`, `plugin-host` | 400 LOC | Callback reachable off-loopback |
 | `LongLivedChild` / piped limits + **`wait()`** (reuse R-8a exit status) | `plugin-api`, `plugin-host` | 200 LOC | Drop-kill ends parked runs |
+| Daemon **`UpstreamProvider::shutdown`** at process exit | `hofund-daemon` | 80 LOC | Orphan Claude Code after stop |
 | `bridge-mcp-stdio` subcommand (protocol reimplemented from `mcp.go`) | `apps/cli` or daemon | 250 LOC | Drift from Claude Code MCP expectations |
 | Host tests | `plugin-host/tests/bridge_*.rs` | 200 LOC | |
 
@@ -436,7 +452,7 @@ Requires review of session-on-disk format against reference `claude_sessions` he
 
 | Piece | Files | ~Size | Risk |
 |-------|-------|-------|------|
-| `failure.rs` classification + router room/third-party skips | `plugins/...`, `router` | 250 LOC | Wrong rest → account stuck |
+| `failure.rs` classification + **`skip_failover_same_plugin`** in plugin-api/router | `plugins/...`, `plugin-api`, `router` | 250 LOC | Wrong rest → account stuck |
 | `docs/coverage/subscription-parity.md`, adopt-or-redesign comparison table per AGENTS.md | docs | | |
 
 ### Explicitly deferred (out of scope)
