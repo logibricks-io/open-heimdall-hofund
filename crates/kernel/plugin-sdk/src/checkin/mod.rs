@@ -3,10 +3,12 @@
 mod minimax;
 mod qoder;
 mod trae;
+mod workbuddy;
 
 pub use minimax::{MiniMaxSite, run as run_minimax};
 pub use qoder::{QoderSite, run as run_qoder};
 pub use trae::run as run_trae;
+pub use workbuddy::{WorkBuddySite, run as run_workbuddy};
 
 use crate::transport::{Call, Reply};
 use hofund_plugin_api::{CheckinOutcome, CheckinResult, PluginError};
