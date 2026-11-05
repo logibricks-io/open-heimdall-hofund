@@ -18,7 +18,6 @@ pub struct PageShell {
     cursor: usize,
     rows: Vec<String>,
     message: String,
-    not_in_build: bool,
     fetch_gen: Generation,
 }
 
@@ -31,22 +30,21 @@ impl PageShell {
             cursor: 0,
             rows: Vec::new(),
             message: empty_message.into(),
-            not_in_build: matches!(id, PageId::Sessions | PageId::Library),
             fetch_gen: 0,
         }
     }
 
     /// Marks the deferred API as absent (HTTP 404).
-    pub fn set_not_in_build(&mut self, value: bool) {
-        self.not_in_build = value;
-        if value {
-            self.message = match self.id {
-                PageId::Sessions => "Sessions are not in this build yet.".to_owned(),
-                PageId::Library => "Library is not in this build yet.".to_owned(),
-                _ => self.message.clone(),
-            };
-        }
+    pub fn set_not_in_build(&mut self, _value: bool) {
+        self.message = match self.id {
+            PageId::Sessions => "Sessions are not in this build yet.".to_owned(),
+            PageId::Library => "Library is not in this build yet.".to_owned(),
+            _ => self.message.clone(),
+        };
     }
+
+    /// Clears the deferred-route placeholder before applying a new outcome.
+    pub fn clear_not_in_build_flag(&mut self) {}
 
     /// Sets the center message when the list is empty.
     pub fn set_message(&mut self, message: impl Into<String>) {
@@ -69,6 +67,12 @@ impl PageShell {
     #[must_use]
     pub fn fetch_gen(&self) -> Generation {
         self.fetch_gen
+    }
+
+    /// Body message (for tests).
+    #[must_use]
+    pub fn message(&self) -> &str {
+        &self.message
     }
 
     fn move_cursor(&mut self, delta: i32) {

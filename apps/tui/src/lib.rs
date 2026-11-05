@@ -8,6 +8,8 @@ pub mod app;
 pub mod events;
 pub mod gateway;
 pub mod pages;
+pub mod quit;
+pub mod runtime;
 pub mod state;
 pub mod terminal;
 pub mod theme;

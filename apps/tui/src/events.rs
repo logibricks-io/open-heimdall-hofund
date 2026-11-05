@@ -28,21 +28,21 @@ pub fn apply_control_event(app: &mut App, payload: &EventPayload) {
                 _ => unreachable!(),
             };
             app.set_flash(Flash::new(message, ok));
-            app.reload_open_page();
+            let _ = app.reload_open_page();
         }
         EventPayload::ModelsRefreshed(ModelsRefreshedEvent { provider, .. }) => {
             if app.page == PageId::Providers {
                 let _ = provider;
-                app.reload_open_page();
+                let _ = app.reload_open_page();
             }
         }
         EventPayload::AgentChanged(_) => {
             if app.page == PageId::Agents {
-                app.reload_open_page();
+                let _ = app.reload_open_page();
             }
         }
         EventPayload::SignInProgress(SignInProgressEvent { .. }) => {
-            app.mark_sign_in_dirty();
+            // Accounts sign-in polling is wired in R-15.
         }
         EventPayload::QuotaAlert(QuotaAlertEvent { title, body, .. }) => {
             let text = if body.is_empty() {
@@ -74,7 +74,7 @@ pub fn apply_control_event(app: &mut App, payload: &EventPayload) {
 fn apply_snapshot(app: &mut App, event: &SnapshotEvent) {
     app.disk_revision = event.disk_revision.clone();
     app.in_flight = event.in_flight;
-    app.listener_generation = event.generation;
+    app.effective_listen = event.effective_listen.clone();
 }
 
 #[cfg(test)]
@@ -93,11 +93,11 @@ mod tests {
         let mut event = SnapshotEvent::default();
         event.disk_revision = "abc".to_owned();
         event.in_flight = 3;
-        event.generation = 9;
+        event.effective_listen = "127.0.0.1:3425".to_owned();
         apply_control_event(&mut app, &EventPayload::Snapshot(event));
         assert_eq!(app.disk_revision, "abc");
         assert_eq!(app.in_flight, 3);
-        assert_eq!(app.listener_generation, 9);
+        assert_eq!(app.effective_listen, "127.0.0.1:3425");
     }
 
     #[test]

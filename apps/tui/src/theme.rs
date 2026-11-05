@@ -14,7 +14,12 @@ impl Theme {
     /// Builds a theme from CLI and environment.
     #[must_use]
     pub fn new(no_color: bool) -> Self {
-        let env = std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());
+        Self::with_no_color_flag(no_color, std::env::var_os("NO_COLOR"))
+    }
+
+    #[must_use]
+    fn with_no_color_flag(no_color: bool, no_color_env: Option<std::ffi::OsString>) -> Self {
+        let env = no_color_env.is_some_and(|value| !value.is_empty());
         Self {
             color: !(no_color || env),
         }
@@ -124,6 +129,12 @@ impl Theme {
 #[cfg(test)]
 mod tests {
     use super::Theme;
+
+    #[test]
+    fn no_color_env_disables_palette_when_set() {
+        let theme = Theme::with_no_color_flag(false, Some(std::ffi::OsString::from("1")));
+        assert_eq!(theme.accent(), ratatui::style::Color::Reset);
+    }
 
     #[test]
     fn no_color_uses_reset_only() {

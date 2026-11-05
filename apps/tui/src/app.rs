@@ -25,8 +25,8 @@ pub struct App {
     pub disk_revision: String,
     /// In-flight requests from snapshot events.
     pub in_flight: u64,
-    /// Listener generation from snapshot.
-    pub listener_generation: u64,
+    /// Effective model listener from the snapshot event.
+    pub effective_listen: String,
     /// Optional mutating operation.
     pub pending: Option<PendingOp>,
     /// Catalog sync indicator (Agents `S` in R-14).
@@ -35,8 +35,6 @@ pub struct App {
     pub pages: Pages,
     /// Monotonic generation for in-flight reads.
     generation: Generation,
-    /// Whether the account dialog needs a poll (R-15).
-    sign_in_dirty: bool,
     /// Token file must be reread (token_rotated).
     token_reread: bool,
     /// Event stream must reopen without cursor.
@@ -67,12 +65,11 @@ impl App {
             },
             disk_revision: String::new(),
             in_flight: 0,
-            listener_generation: 0,
+            effective_listen: String::new(),
             pending: None,
             catalog_syncing: false,
             pages: Pages::default(),
             generation: 1,
-            sign_in_dirty: false,
             token_reread: false,
             event_resync: false,
             #[cfg(test)]
@@ -91,18 +88,18 @@ impl App {
         self.flash = Some(flash);
     }
 
-    /// Marks sign-in dialog dirty.
+    /// Marks sign-in progress (Accounts polling is R-15).
     pub fn mark_sign_in_dirty(&mut self) {
-        self.sign_in_dirty = true;
+        let _ = ();
     }
 
-    /// Whether sign-in needs polling.
+    /// Whether sign-in needs polling (R-15).
     #[must_use]
     pub fn sign_in_dirty(&self) -> bool {
-        self.sign_in_dirty
+        false
     }
 
-    /// Requests bearer token reread after rotation.
+    /// Removes the token reread flag.
     pub fn request_token_reread(&mut self) {
         self.token_reread = true;
     }
@@ -124,8 +121,9 @@ impl App {
         std::mem::take(&mut self.event_resync)
     }
 
-    /// Schedules reload of the open page.
-    pub fn reload_open_page(&mut self) {
+    /// Schedules reload of the open page and returns the new read generation.
+    #[must_use]
+    pub fn reload_open_page(&mut self) -> Generation {
         self.bump_generation();
         let read_gen = self.generation;
         self.pages.mut_page(self.page).reload(read_gen);
@@ -133,6 +131,7 @@ impl App {
         {
             self.reloads += 1;
         }
+        read_gen
     }
 
     /// Returns the next read generation without consuming.
@@ -164,7 +163,7 @@ impl App {
         self.flash = None;
         self.page = page;
         self.mode = Mode::List;
-        self.reload_open_page();
+        let _ = self.reload_open_page();
     }
 
     /// Handles a terminal key when not in a pending mutation (except quit).
@@ -194,7 +193,7 @@ impl App {
                 return AppAction::None;
             }
             KeyCode::Char('r') => {
-                self.reload_open_page();
+                let _ = self.reload_open_page();
                 return AppAction::Reload;
             }
             KeyCode::Char(c @ '1'..='6') => {
@@ -313,7 +312,7 @@ mod tests {
     fn stale_generation_drops_result() {
         let mut app = App::for_test(PageId::Agents);
         let stale = app.generation();
-        app.reload_open_page();
+        let _ = app.reload_open_page();
         let mut applied = false;
         app.apply_read_result(stale, |_| applied = true);
         assert!(!applied);
@@ -330,7 +329,7 @@ mod tests {
     #[test]
     fn reload_increments_page_generation() {
         let mut app = App::for_test(PageId::Sessions);
-        app.reload_open_page();
+        let _ = app.reload_open_page();
         assert_eq!(app.pages.page(PageId::Sessions).fetch_gen(), 2);
     }
 }

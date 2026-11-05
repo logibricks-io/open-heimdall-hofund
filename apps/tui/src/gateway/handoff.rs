@@ -53,6 +53,16 @@ pub struct HandoffState {
     pub client: Option<Client>,
 }
 
+/// Updates attach state without clearing `spawned` for our own child pid.
+pub fn record_attach(state: &mut HandoffState, daemon_pid: u32, client: Client) {
+    let own = state.spawned && state.child_pid == Some(daemon_pid);
+    if !own {
+        state.spawned = false;
+        state.child_pid = None;
+    }
+    state.client = Some(client);
+}
+
 /// Result of one handoff tick.
 #[derive(Clone, Debug)]
 pub enum HandoffOutcome {
@@ -63,20 +73,27 @@ pub enum HandoffOutcome {
 }
 
 /// Runs steps 1–4 of section 4 once.
-pub async fn run_handoff_tick<D: HandoffDeps>(
+pub async fn run_handoff_tick<D: HandoffDeps, R: FnMut() -> String>(
     deps: &D,
     config: &Path,
-    token: &str,
+    read_token: &mut R,
     listen: SocketAddr,
     state: &mut HandoffState,
 ) -> HandoffOutcome {
-    if !deps.held_locks(config).unwrap_or_default().is_empty() {
-        match deps.discover_attached(config, token).await {
+    let locks = match deps.held_locks(config) {
+        Ok(locks) => locks,
+        Err(message) => {
+            return HandoffOutcome::Update(GatewayPresence::Error(message));
+        }
+    };
+    if !locks.is_empty() {
+        let token = read_token();
+        match deps.discover_attached(config, &token).await {
             Ok(client) => {
-                let line = status_line(deps, &client).await;
-                state.spawned = false;
-                state.child_pid = None;
-                state.client = Some(client);
+                let status = deps.fetch_status(&client).await.ok();
+                let daemon_pid = status.as_ref().map(|s| s.pid).unwrap_or(0);
+                record_attach(state, daemon_pid, client.clone());
+                let line = status_line_from_status(status.as_ref(), &client, deps).await;
                 return HandoffOutcome::Update(GatewayPresence::Attached { line });
             }
             Err(error) => {
@@ -100,9 +117,11 @@ pub async fn run_handoff_tick<D: HandoffDeps>(
         Ok(pid) => {
             state.spawned = true;
             state.child_pid = Some(pid);
-            match wait_for_daemon(deps, config, token).await {
+            match wait_for_daemon(deps, config, read_token).await {
                 Ok(client) => {
-                    state.client = Some(client);
+                    let status = deps.fetch_status(&client).await.ok();
+                    let daemon_pid = status.as_ref().map(|s| s.pid).unwrap_or(pid);
+                    record_attach(state, daemon_pid, client);
                     HandoffOutcome::Update(GatewayPresence::Spawned {
                         line: format!("served while the UI is open (pid {pid})"),
                         pid,
@@ -115,14 +134,15 @@ pub async fn run_handoff_tick<D: HandoffDeps>(
     }
 }
 
-async fn wait_for_daemon<D: HandoffDeps>(
+async fn wait_for_daemon<D: HandoffDeps, R: FnMut() -> String>(
     deps: &D,
     config: &Path,
-    token: &str,
+    read_token: &mut R,
 ) -> Result<Client, String> {
     let deadline = tokio::time::Instant::now() + SPAWN_WAIT;
     while tokio::time::Instant::now() < deadline {
-        if let Ok(client) = deps.discover_attached(config, token).await {
+        let token = read_token();
+        if let Ok(client) = deps.discover_attached(config, &token).await {
             return Ok(client);
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -133,9 +153,13 @@ async fn wait_for_daemon<D: HandoffDeps>(
     ))
 }
 
-async fn status_line<D: HandoffDeps>(deps: &D, client: &Client) -> String {
-    match deps.fetch_status(client).await {
-        Ok(status) => {
+async fn status_line_from_status<D: HandoffDeps>(
+    status: Option<&StatusResponse>,
+    client: &Client,
+    deps: &D,
+) -> String {
+    match status {
+        Some(status) => {
             let listener = status
                 .model_listener
                 .running
@@ -147,7 +171,17 @@ async fn status_line<D: HandoffDeps>(deps: &D, client: &Client) -> String {
                 .unwrap_or_default();
             format!("daemon pid {} · listener {listener}{serves}", status.pid)
         }
-        Err(error) => error.to_string(),
+        None => match deps.fetch_status(client).await {
+            Ok(status) => {
+                let listener = status
+                    .model_listener
+                    .running
+                    .as_deref()
+                    .unwrap_or("not running");
+                format!("daemon pid {} · listener {listener}", status.pid)
+            }
+            Err(error) => error.to_string(),
+        },
     }
 }
 
@@ -187,7 +221,10 @@ mod tests {
     use hofund_control_client::{Client, ClientError};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::path::{Path, PathBuf};
+    use std::sync::Arc;
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::time::Duration;
 
     use crate::state::GatewayPresence;
 
@@ -196,6 +233,10 @@ mod tests {
         model_in_use: Mutex<bool>,
         spawn_count: Mutex<u32>,
         alive: Mutex<bool>,
+        lock_probe_fails: Mutex<bool>,
+        discover_calls: AtomicU32,
+        discover_succeeds: Mutex<bool>,
+        status_pid: u32,
     }
 
     impl FakeDeps {
@@ -205,12 +246,19 @@ mod tests {
                 model_in_use: Mutex::new(false),
                 spawn_count: Mutex::new(0),
                 alive: Mutex::new(true),
+                lock_probe_fails: Mutex::new(false),
+                discover_calls: AtomicU32::new(0),
+                discover_succeeds: Mutex::new(false),
+                status_pid: 999,
             }
         }
     }
 
     impl HandoffDeps for FakeDeps {
         fn held_locks(&self, _config: &Path) -> Result<Vec<PathBuf>, String> {
+            if *self.lock_probe_fails.lock().expect("lock") {
+                return Err("lock probe failed".to_owned());
+            }
             Ok(self.locks.lock().expect("locks").clone())
         }
 
@@ -219,7 +267,12 @@ mod tests {
             _config: &Path,
             _token: &str,
         ) -> Result<Client, ClientError> {
-            Err(ClientError::ConnectionUnavailable("no daemon".to_owned()))
+            self.discover_calls.fetch_add(1, Ordering::SeqCst);
+            if *self.discover_succeeds.lock().expect("discover") {
+                Ok(Client::tcp("127.0.0.1:9".parse().expect("addr"), "t"))
+            } else {
+                Err(ClientError::ConnectionUnavailable("no daemon".to_owned()))
+            }
         }
 
         async fn probe_model_port(&self, _listen: SocketAddr) -> Result<(), ClientError> {
@@ -236,7 +289,9 @@ mod tests {
         }
 
         async fn fetch_status(&self, _client: &Client) -> Result<StatusResponse, ClientError> {
-            Ok(StatusResponse::default())
+            let mut status = StatusResponse::default();
+            status.pid = self.status_pid;
+            Ok(status)
         }
 
         fn process_alive(&self, _pid: u32) -> bool {
@@ -256,12 +311,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn model_port_taken_does_not_spawn() {
+    async fn lock_held_never_spawns() {
         let deps = FakeDeps::new();
-        *deps.model_in_use.lock().expect("model") = true;
+        *deps.locks.lock().expect("locks") = vec![PathBuf::from("/tmp/x.lock")];
         let mut state = HandoffState::default();
-        let outcome =
-            run_handoff_tick(&deps, Path::new("/tmp/x.toml"), "t", listen(), &mut state).await;
+        let mut token = || "t".to_owned();
+        let outcome = run_handoff_tick(
+            &deps,
+            Path::new("/tmp/x.toml"),
+            &mut token,
+            listen(),
+            &mut state,
+        )
+        .await;
         assert!(matches!(
             outcome,
             super::HandoffOutcome::Update(GatewayPresence::Error(_))
@@ -270,10 +332,69 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lock_free_quiet_port_spawns_once() {
+    async fn lock_probe_failure_does_not_spawn() {
         let deps = FakeDeps::new();
+        *deps.lock_probe_fails.lock().expect("f") = true;
         let mut state = HandoffState::default();
-        let _ = run_handoff_tick(&deps, Path::new("/tmp/x.toml"), "t", listen(), &mut state).await;
-        assert_eq!(*deps.spawn_count.lock().expect("spawn"), 1);
+        let mut token = || "t".to_owned();
+        let _ = run_handoff_tick(
+            &deps,
+            Path::new("/tmp/x.toml"),
+            &mut token,
+            listen(),
+            &mut state,
+        )
+        .await;
+        assert_eq!(*deps.spawn_count.lock().expect("spawn"), 0);
+    }
+
+    #[tokio::test]
+    async fn spawned_stays_after_second_tick_when_pid_matches() {
+        let mut deps = FakeDeps::new();
+        deps.status_pid = 999;
+        *deps.discover_succeeds.lock().expect("d") = true;
+        let mut state = HandoffState::default();
+        let mut token = || "t".to_owned();
+        let _ = run_handoff_tick(
+            &deps,
+            Path::new("/tmp/x.toml"),
+            &mut token,
+            listen(),
+            &mut state,
+        )
+        .await;
+        assert!(state.spawned);
+        *deps.locks.lock().expect("locks") = vec![PathBuf::from("/tmp/x.lock")];
+        let _ = run_handoff_tick(
+            &deps,
+            Path::new("/tmp/x.toml"),
+            &mut token,
+            listen(),
+            &mut state,
+        )
+        .await;
+        assert!(state.spawned);
+        assert_eq!(state.child_pid, Some(999));
+    }
+
+    #[tokio::test]
+    async fn wait_for_daemon_rereads_token() {
+        tokio::time::pause();
+        let deps = Arc::new(FakeDeps::new());
+        let deps_bg = Arc::clone(&deps);
+        let reads = Arc::new(AtomicU32::new(0));
+        let reads_bg = Arc::clone(&reads);
+        let mut token = move || {
+            reads_bg.fetch_add(1, Ordering::SeqCst);
+            "t".to_owned()
+        };
+        let worker = tokio::spawn(async move {
+            super::wait_for_daemon(deps_bg.as_ref(), Path::new("/tmp/x.toml"), &mut token).await
+        });
+        tokio::time::advance(Duration::from_millis(50)).await;
+        *deps.discover_succeeds.lock().expect("d") = true;
+        tokio::time::advance(Duration::from_millis(200)).await;
+        let _ = worker.await.expect("join");
+        assert!(reads.load(Ordering::SeqCst) >= 2);
     }
 }

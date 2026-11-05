@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+use hofund_tui::pages::ProbeOutcome;
 use hofund_tui::ui;
 use hofund_tui::{App, PageId, Theme, buffer_text};
 use ratatui::Terminal;
@@ -32,4 +33,18 @@ fn agents_empty_matches_fixture() {
     let text = buffer_text(terminal.backend().buffer(), 100, 30);
     let fixture = include_str!("fixtures/agents_empty.txt");
     assert_eq!(text, fixture);
+}
+
+#[test]
+fn sessions_not_in_build_renders_deferred_message() {
+    let mut app = App::for_test(PageId::Sessions);
+    app.pages
+        .apply_probe(PageId::Sessions, ProbeOutcome::NotInBuild);
+    let backend = TestBackend::new(100, 30);
+    let mut terminal = Terminal::new(backend).expect("terminal");
+    terminal
+        .draw(|frame| ui::draw(&app, frame.area(), frame.buffer_mut(), &Theme::monochrome()))
+        .expect("draw");
+    let text = buffer_text(terminal.backend().buffer(), 100, 30);
+    assert!(text.contains("not in this build yet"));
 }

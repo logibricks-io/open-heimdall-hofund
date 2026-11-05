@@ -37,6 +37,13 @@ impl LiveHandoff {
     fn store_client(&self, client: Client) {
         *self.client.lock().expect("client") = Some(client);
     }
+
+    /// Re-discovers the daemon with a fresh bearer token.
+    pub async fn rediscover(&self, config: &Path, token: &str) -> Result<Client, String> {
+        HandoffDeps::discover_attached(self, config, token)
+            .await
+            .map_err(|error| error.to_string())
+    }
 }
 
 impl HandoffDeps for LiveHandoff {

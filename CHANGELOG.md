@@ -24,13 +24,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Terminal UI shell (`hofund tui`, `hofund-tui`): six-page navigation, control
-  event toasts, gateway handoff scaffold, empty Sessions and Library frames,
-  and TestBackend fixtures (R-11 part 1).
-
+- Subscription plugins for Grok Build, Cursor, and Cline (feature-parity row 3.5,
   part 1): device or browser sign-in, agent auth import where supported, token
   refresh, model lists, quota reads, and chat or Responses upstream for Grok
   and Cline; Cursor upstream chat is not served yet.
+- Terminal UI shell (`hofund tui`, `hofund-tui`): six-page navigation, control
+  event toasts, gateway handoff scaffold, empty Sessions and Library frames,
+  and TestBackend fixtures (R-11 part 1).
 - Devin, Kiro, and Factory subscription plugins (`hofund-plugin-subscription-devin`,
   `-kiro`, `-factory`): CLI or token import, refresh where the reference supports
   it, model listing, upstream (Devin chat refused; Kiro unary text-only;

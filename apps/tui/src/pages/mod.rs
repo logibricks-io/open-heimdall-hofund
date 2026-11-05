@@ -1,8 +1,10 @@
 //! Page implementations (empty shells in R-11).
 
 mod frame;
+mod probe;
 
 pub use frame::PageShell;
+pub use probe::{ProbeOutcome, apply_probe_to_shell, read_path};
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -54,8 +56,8 @@ impl Default for Pages {
             providers: PageShell::new(PageId::Providers, "No providers loaded yet."),
             routing: PageShell::new(PageId::Routing, "No routing groups loaded yet."),
             usage: PageShell::new(PageId::Usage, "No usage loaded yet."),
-            sessions: PageShell::new(PageId::Sessions, "Sessions are not in this build yet."),
-            library: PageShell::new(PageId::Library, "Library is not in this build yet."),
+            sessions: PageShell::new(PageId::Sessions, "Loading sessions…"),
+            library: PageShell::new(PageId::Library, "Loading library…"),
         }
     }
 }
@@ -87,13 +89,7 @@ impl Pages {
     }
 
     /// Applies an HTTP probe result for deferred routes.
-    pub fn apply_route_probe(&mut self, id: PageId, ok: bool, not_found: bool) {
-        let page = self.mut_page(id);
-        if not_found {
-            page.set_not_in_build(true);
-        } else if ok {
-            page.set_not_in_build(false);
-            page.set_message("Ready (empty shell).");
-        }
+    pub fn apply_probe(&mut self, id: PageId, outcome: ProbeOutcome) {
+        apply_probe_to_shell(self.mut_page(id), outcome);
     }
 }

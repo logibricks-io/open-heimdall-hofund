@@ -2481,14 +2481,10 @@ dependencies = [
  "hofund-control-client",
  "hofund-control-proto",
  "hofund-secrets",
- "http",
- "http-body-util",
- "hyper",
- "hyper-util",
  "ratatui",
- "serde_json",
  "tempfile",
  "tokio",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

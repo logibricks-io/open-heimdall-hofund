@@ -1,6 +1,6 @@
 //! Detached `hofundd` spawn (mirrors `apps/cli/src/events.rs`).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use hofund_control_client::resolve_config_id;
@@ -28,6 +28,15 @@ pub fn spawn_detached(config: &Path) -> Result<u32, String> {
         .spawn()
         .map_err(|error| format!("cannot start {}: {error}", exe.display()))?
         .id())
+}
+
+/// Path to the daemon log beside the config, when it can be resolved.
+#[must_use]
+pub fn daemon_log_path(config: &Path) -> Option<PathBuf> {
+    let resolved = std::fs::canonicalize(config).ok()?;
+    let dir = resolved.parent()?.join(".hofund");
+    let id = resolve_config_id(config).ok()?;
+    Some(dir.join(format!("daemon-{id}.log")))
 }
 
 fn locate_daemon() -> Result<std::path::PathBuf, String> {
@@ -60,16 +69,25 @@ fn daemon_name() -> String {
     format!("hofundd{}", std::env::consts::EXE_SUFFIX)
 }
 
-fn open_log(config: &Path) -> Option<(std::path::PathBuf, std::fs::File)> {
+fn open_log(config: &Path) -> Option<(PathBuf, std::fs::File)> {
     let resolved = std::fs::canonicalize(config).ok()?;
     let dir = resolved.parent()?.join(".hofund");
     let path = dir.join(format!("daemon-{}.log", resolve_config_id(config).ok()?));
-    std::fs::create_dir_all(&dir).ok()?;
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .ok()?;
+    let mut builder = std::fs::DirBuilder::new();
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+        builder.mode(0o700);
+        options.mode(0o600);
+    }
+    match builder.create(&dir) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(_) => return None,
+    }
+    let file = options.open(&path).ok()?;
     Some((path, file))
 }
 
@@ -101,18 +119,56 @@ pub fn process_alive(pid: u32) -> bool {
     }
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt;
-        const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
-        let mut command = std::process::Command::new("tasklist");
-        command.args(["/FI", &format!("PID eq {pid}")]);
-        command.creation_flags(PROCESS_QUERY_LIMITED_INFORMATION);
-        command
-            .output()
-            .is_ok_and(|out| out.status.success() && !out.stdout.is_empty())
+        use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+        use windows_sys::Win32::System::Threading::{
+            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        // SAFETY: Win32 process query; invalid handles yield false.
+        unsafe {
+            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if handle == 0 {
+                return false;
+            }
+            let mut code = 0_u32;
+            if GetExitCodeProcess(handle, &mut code) == 0 {
+                CloseHandle(handle);
+                return false;
+            }
+            CloseHandle(handle);
+            code == STILL_ACTIVE as u32
+        }
     }
     #[cfg(not(any(unix, windows)))]
     {
         let _ = pid;
         false
+    }
+}
+
+#[cfg(all(unix, test))]
+mod unix_tests {
+    use super::open_log;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn open_log_uses_restrictive_modes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = dir.path().join("hofund.toml");
+        std::fs::write(&config, "token_file = \"t\"\nlisten = \"127.0.0.1:9\"\n").expect("write");
+        let (path, _file) = open_log(&config).expect("open log");
+        let meta = std::fs::metadata(path.parent().expect("parent")).expect("dir meta");
+        assert_eq!(meta.permissions().mode() & 0o777, 0o700);
+        let file_meta = std::fs::metadata(&path).expect("file meta");
+        assert_eq!(file_meta.permissions().mode() & 0o777, 0o600);
+    }
+}
+
+#[cfg(windows)]
+mod windows_tests {
+    use super::process_alive;
+
+    #[test]
+    fn missing_pid_is_not_alive() {
+        assert!(!process_alive(4_194_304));
     }
 }
