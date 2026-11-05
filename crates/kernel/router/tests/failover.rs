@@ -18,6 +18,7 @@ use hofund_router::{
 
 struct Fake {
     route_id: &'static str,
+    scope_provider: Option<&'static str>,
     member_id: MemberId,
     hits: Arc<AtomicUsize>,
     idle_drops: Arc<AtomicUsize>,
@@ -59,6 +60,10 @@ impl Member for Fake {
 
     fn route_id(&self) -> &str {
         self.route_id
+    }
+
+    fn scope_provider(&self) -> &str {
+        self.scope_provider.unwrap_or(self.route_id)
     }
 
     fn protocol(&self) -> &str {
@@ -239,8 +244,29 @@ fn fake_on(
 ) -> Arc<dyn Member> {
     Arc::new(Fake {
         route_id,
+        scope_provider: None,
         member_id: MemberId::from_preset(
             PresetId::try_from(id).expect("preset"),
+            MemberKey::from_static("row"),
+        ),
+        hits: Arc::clone(hits),
+        idle_drops: Arc::new(AtomicUsize::new(0)),
+        kind,
+    })
+}
+
+fn fake_scoped(
+    route_id: &'static str,
+    scope: &'static str,
+    preset: &'static str,
+    hits: &Arc<AtomicUsize>,
+    kind: Kind,
+) -> Arc<dyn Member> {
+    Arc::new(Fake {
+        route_id,
+        scope_provider: Some(scope),
+        member_id: MemberId::from_preset(
+            PresetId::try_from(preset).expect("preset"),
             MemberKey::from_static("row"),
         ),
         hits: Arc::clone(hits),
@@ -914,6 +940,7 @@ async fn r4_71_region_refusal_drops_idle_before_reask() {
     let idle = Arc::new(AtomicUsize::new(0));
     let member = Arc::new(Fake {
         route_id: "solo",
+        scope_provider: None,
         member_id: MemberId::from_preset(
             PresetId::try_from("solo").expect("preset"),
             MemberKey::from_static("row"),
@@ -964,6 +991,66 @@ async fn r4_71_region_closed_skip_keeps_refusal_status() {
             status: Some(403),
             message: "regional model refusal".to_owned(),
         }
+    );
+}
+
+#[tokio::test]
+async fn r4_region_scope_provider_skips_peer_accounts() {
+    let first = Arc::new(AtomicUsize::new(0));
+    let second = Arc::new(AtomicUsize::new(0));
+    let third = Arc::new(AtomicUsize::new(0));
+    let router = router(vec![
+        fake_scoped(
+            "sub-a1",
+            "antigravity",
+            "a1",
+            &first,
+            Kind::Status(400, "User location is not supported for the API use."),
+        ),
+        fake_scoped(
+            "sub-a2",
+            "antigravity",
+            "a2",
+            &second,
+            Kind::Status(400, "User location is not supported for the API use."),
+        ),
+        fake_scoped("sub-a3", "antigravity", "a3", &third, Kind::Unary),
+    ]);
+    let _ = dispatch(&router, "demo").await;
+    assert_eq!(first.load(Ordering::SeqCst), 1, "first account asked once");
+    assert_eq!(
+        second.load(Ordering::SeqCst),
+        1,
+        "second account asked once"
+    );
+    assert_eq!(
+        third.load(Ordering::SeqCst),
+        0,
+        "third account skipped after provider closed"
+    );
+}
+
+#[tokio::test]
+async fn r4_region_final_failure_carries_agent_note() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let router = router(vec![fake(
+        "solo",
+        &hits,
+        Kind::Status(400, "User location is not supported for the API use."),
+    )]);
+    let error = match dispatch(&router, "demo").await {
+        Ok(_) => panic!("region refusal should fail dispatch"),
+        Err(error) => error,
+    };
+    let RouterError::Upstream { error, .. } = error else {
+        panic!("expected upstream failure");
+    };
+    assert!(
+        error
+            .message()
+            .contains("regional restriction on the model"),
+        "{}",
+        error.message()
     );
 }
 

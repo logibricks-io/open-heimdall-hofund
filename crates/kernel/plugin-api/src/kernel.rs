@@ -8,6 +8,7 @@
 //! kernel calls is `hofund_plugin_host::host_context`. `xtask` rejects
 //! `from_backends` outside that crate.
 
+#[cfg(feature = "kernel-internal")]
 use std::any::Any;
 use std::path::PathBuf;
 use std::sync::Arc;

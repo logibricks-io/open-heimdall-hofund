@@ -545,12 +545,15 @@ fn attach_client(endpoint: &mut Endpoint, host: &HostContext) {
     let Some(pooled) = handle.pooled_client() else {
         return;
     };
-    let Some(client) = hofund_provider::pooled_reqwest(pooled.as_ref()) else {
+    let Some(slot) = hofund_provider::pooled_client_slot(pooled.as_ref()) else {
         return;
     };
-    endpoint.client = Some(client);
-    // Do not probe `fresh_client` here: it evicts the shared pool entry and
-    // builds a new client, which would break connection reuse at every attach.
+    endpoint.client_slot = Some(Arc::clone(&slot));
+    if let Ok(guard) = slot.read() {
+        endpoint.client = Some(guard.clone());
+    }
+    // Do not probe `fresh_client` here: it replaces the shared pool client and
+    // would break connection reuse at every attach.
     let refresh = handle.clone();
     endpoint.client_refresh = Some(Arc::new(move || match refresh.fresh_client() {
         Some(Ok(any)) => hofund_provider::pooled_reqwest(any.as_ref())

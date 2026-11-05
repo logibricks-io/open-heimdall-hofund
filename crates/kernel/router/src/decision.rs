@@ -243,13 +243,8 @@ pub fn with_region_agent_note(error: PluginError, model: &str) -> PluginError {
     if !region_refused(&error) {
         return error;
     }
-    let status = error.status().unwrap_or(400);
     let message = format!("{} — {}", error.message(), region_agent_note(model));
-    let mut said = PluginError::status_error(status, message);
-    if !error.cools() {
-        said = said.without_cooldown();
-    }
-    said
+    error.with_message(message)
 }
 
 /// Whether `error` is a request this vendor's API cannot read, which another
@@ -474,6 +469,8 @@ fn policy_refusal(raw: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     fn none() -> BTreeSet<u16> {
@@ -492,6 +489,15 @@ mod tests {
                 .message()
                 .contains("regional restriction on the model")
         );
+    }
+
+    #[test]
+    fn r4_region_note_keeps_retry_after() {
+        let error =
+            PluginError::status_error(400, "User location is not supported for the API use.")
+                .with_retry_after(Duration::from_secs(20));
+        let noted = with_region_agent_note(error, "demo");
+        assert_eq!(noted.retry_after(), Some(Duration::from_secs(20)));
     }
 
     #[test]

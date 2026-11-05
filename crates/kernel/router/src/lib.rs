@@ -1618,16 +1618,20 @@ struct Answered {
     completion: Completion,
 }
 
+fn region_key(provider: &str, model: &str) -> String {
+    format!("{provider}\0{model}")
+}
+
 impl DispatchState {
     fn region_closed_for(&self, hop: &Hop) -> bool {
         let model = hop.wire_model.as_deref().unwrap_or(&self.resolved.bare);
-        let key = format!("{}\0{model}", hop.member.route_id());
+        let key = region_key(hop.member.scope_provider(), model);
         self.region_closed.contains_key(&key)
     }
 
     fn region_closed_status(&self, hop: &Hop) -> Option<u16> {
         let model = hop.wire_model.as_deref().unwrap_or(&self.resolved.bare);
-        let key = format!("{}\0{model}", hop.member.route_id());
+        let key = region_key(hop.member.scope_provider(), model);
         self.region_closed.get(&key).copied()
     }
 
@@ -1748,6 +1752,7 @@ impl DispatchState {
             }
             if !self.region_reask.is_empty() {
                 if let Some(hook) = self.wait_hook.as_ref() {
+                    hook.waiting();
                     hook.wait(patience::REGION_RETRY_PAUSE).await;
                 }
                 asking = std::mem::take(&mut self.region_reask);
@@ -1961,7 +1966,7 @@ impl DispatchState {
                     let error = inferred.unwrap_or(error);
                     if decision::region_refused(&error) {
                         hop.member.close_idle_connections();
-                        let key = format!("{}\0{upstream_model}", hop.member.route_id());
+                        let key = region_key(hop.member.scope_provider(), &upstream_model);
                         let status = error.status().unwrap_or(400);
                         let count = self.region_attempts.entry(key.clone()).or_insert(0);
                         *count += 1;
@@ -1970,7 +1975,7 @@ impl DispatchState {
                         } else {
                             let has_mate = self.resolved.hops.iter().enumerate().any(|(j, h)| {
                                 j > index
-                                    && h.member.route_id() == hop.member.route_id()
+                                    && h.member.scope_provider() == hop.member.scope_provider()
                                     && h.wire_model.as_deref().unwrap_or(&self.resolved.bare)
                                         == upstream_model
                             });

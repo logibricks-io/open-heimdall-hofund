@@ -11,7 +11,7 @@
 
 use std::any::Any;
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -181,17 +181,20 @@ pub struct PooledClientKey {
     pub limits: HttpLimits,
 }
 
-static POOL: OnceLock<Mutex<BTreeMap<ClientKey, reqwest::Client>>> = OnceLock::new();
-/// Marks the pooled client for `profile` so the next send uses a new client,
-/// and evicts any idle entry now.
+static POOL: OnceLock<Mutex<BTreeMap<ClientKey, Arc<RwLock<reqwest::Client>>>>> = OnceLock::new();
+/// Replaces the pooled client for `profile` so the next send uses a new connection.
 pub fn close_idle_after_region(profile: &HttpProfile, limits: HttpLimits) {
     let key = ClientKey {
         profile: profile.clone(),
         limits,
     };
-    if let Ok(mut guard) = pool().lock() {
-        guard.remove(&key);
-    }
+    let Ok(guard) = pool().lock() else {
+        return;
+    };
+    let Some(shared) = guard.get(&key) else {
+        return;
+    };
+    let _ = refresh_shared(shared, &key);
 }
 
 /// Evicts `key` and returns a new pooled client with the same settings.
@@ -203,12 +206,31 @@ pub fn fresh_pooled_client(
     profile: &HttpProfile,
     limits: HttpLimits,
 ) -> Result<reqwest::Client, PluginError> {
-    close_idle_after_region(profile, limits);
-    client_for(profile, limits)
+    let key = ClientKey {
+        profile: profile.clone(),
+        limits,
+    };
+    let shared = client_handle(profile, limits)?;
+    refresh_shared(&shared, &key)?;
+    Ok(shared
+        .read()
+        .map_err(|_| PluginError::internal("http pool client lock is poisoned"))?
+        .clone())
 }
 
-fn pool() -> &'static Mutex<BTreeMap<ClientKey, reqwest::Client>> {
+fn pool() -> &'static Mutex<BTreeMap<ClientKey, Arc<RwLock<reqwest::Client>>>> {
     POOL.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+fn refresh_shared(
+    shared: &Arc<RwLock<reqwest::Client>>,
+    key: &ClientKey,
+) -> Result<(), PluginError> {
+    let fresh = build_client(key)?;
+    *shared
+        .write()
+        .map_err(|_| PluginError::internal("http pool client lock is poisoned"))? = fresh;
+    Ok(())
 }
 
 /// Clients currently in the pool. Tests use this to show one profile is one client.
@@ -217,7 +239,10 @@ pub(crate) fn pooled_client_count() -> usize {
     pool().lock().map(|guard| guard.len()).unwrap_or(0)
 }
 
-fn client_for(profile: &HttpProfile, limits: HttpLimits) -> Result<reqwest::Client, PluginError> {
+fn client_handle(
+    profile: &HttpProfile,
+    limits: HttpLimits,
+) -> Result<Arc<RwLock<reqwest::Client>>, PluginError> {
     let key = ClientKey {
         profile: profile.clone(),
         limits,
@@ -225,12 +250,20 @@ fn client_for(profile: &HttpProfile, limits: HttpLimits) -> Result<reqwest::Clie
     let mut guard = pool()
         .lock()
         .map_err(|_| PluginError::internal("http pool lock is poisoned"))?;
-    if let Some(client) = guard.get(&key) {
-        return Ok(client.clone());
+    if let Some(shared) = guard.get(&key) {
+        return Ok(Arc::clone(shared));
     }
-    let client = build_client(&key)?;
-    guard.insert(key, client.clone());
-    Ok(client)
+    let shared = Arc::new(RwLock::new(build_client(&key)?));
+    guard.insert(key, Arc::clone(&shared));
+    Ok(shared)
+}
+
+fn client_for(profile: &HttpProfile, limits: HttpLimits) -> Result<reqwest::Client, PluginError> {
+    let shared = client_handle(profile, limits)?;
+    Ok(shared
+        .read()
+        .map_err(|_| PluginError::internal("http pool client lock is poisoned"))?
+        .clone())
 }
 
 fn build_client(key: &ClientKey) -> Result<reqwest::Client, PluginError> {
@@ -380,9 +413,9 @@ impl HttpBackend for PooledHttp {
     }
 
     fn pooled_client(&self) -> Option<Arc<dyn Any + Send + Sync>> {
-        client_for(&self.profile, self.limits)
+        client_handle(&self.profile, self.limits)
             .ok()
-            .map(|client| Arc::new(client) as Arc<dyn Any + Send + Sync>)
+            .map(|shared| shared as Arc<dyn Any + Send + Sync>)
     }
 
     fn fresh_client(&self) -> Option<Result<Arc<dyn Any + Send + Sync>, PluginError>> {
@@ -1223,17 +1256,15 @@ mod tests {
         let direct = HttpProfile::direct();
         close_idle_after_region(&proxy, limits);
         close_idle_after_region(&direct, limits);
-        let base = pooled_client_count();
         let proxy_http = PooledHttp::with_limits(proxy.clone(), limits);
         let direct_http = PooledHttp::with_limits(direct, limits);
         proxy_http.ensure().expect("proxy client");
-        assert_eq!(pooled_client_count(), base + 1);
         direct_http.ensure().expect("direct client");
-        assert_eq!(pooled_client_count(), base + 2);
+        let count = pooled_client_count();
         close_idle_after_region(&proxy, limits);
-        assert_eq!(pooled_client_count(), base + 1);
+        assert_eq!(pooled_client_count(), count);
         assert!(direct_http.pooled_client().is_some());
-        assert_eq!(pooled_client_count(), base + 1);
+        assert!(proxy_http.pooled_client().is_some());
     }
 
     #[test]
@@ -1252,13 +1283,12 @@ mod tests {
         let limits = HttpLimits::default();
         let profile = HttpProfile::direct();
         close_idle_after_region(&profile, limits);
-        let base = pooled_client_count();
         let http = PooledHttp::with_limits(profile, limits);
         http.ensure().expect("seed pool");
-        assert_eq!(pooled_client_count(), base + 1);
+        let count = pooled_client_count();
         http.fresh_client()
             .expect("pooled backend")
             .expect("fresh client");
-        assert_eq!(pooled_client_count(), base + 1);
+        assert_eq!(pooled_client_count(), count);
     }
 }

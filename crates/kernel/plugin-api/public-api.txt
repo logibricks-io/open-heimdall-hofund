@@ -709,6 +709,7 @@ PluginError::fn timeout (message : impl Into < String >) -> Self
 PluginError::fn transport (message : impl Into < String >) -> Self
 PluginError::fn unsupported (message : impl Into < String >) -> Self
 PluginError::fn with_billed (mut self , billed : BilledUsage) -> Self
+PluginError::fn with_message (mut self , message : impl Into < String >) -> Self
 PluginError::fn with_reset_after (mut self , after : Duration) -> Self
 PluginError::fn with_retry_after (mut self , after : Duration) -> Self
 PluginError::fn with_source (mut self , source : impl Error + Send + Sync + 'static) -> Self

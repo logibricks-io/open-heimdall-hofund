@@ -24,7 +24,9 @@ pub use anthropic::Anthropic;
 pub use attempt::{AttemptHook, AttemptRoute};
 pub use error::{ProviderError, ProviderErrorKind};
 pub use generative::Generative;
-pub use http::{ClientRefresh, Credential, Endpoint, pooled_reqwest};
+pub use http::{
+    ClientRefresh, Credential, Endpoint, PooledClientSlot, pooled_client_slot, pooled_reqwest,
+};
 pub use models::{both_auth_applies, both_auth_refused, parse_model_rows};
 pub use openai_compat::{OpenAiCompat, OpenAiProtocol, responses_kept_by_host};
 pub use wire::{ModelPlan, Wire, credential_for};
