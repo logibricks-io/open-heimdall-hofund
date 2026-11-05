@@ -210,14 +210,13 @@ fn clip_line(s: &str) -> String {
 mod tests {
     use std::time::{Duration, UNIX_EPOCH};
 
-    use chrono::TimeZone;
-    use chrono_tz::Asia::Shanghai;
     use hofund_plugin_api::PluginErrorKind;
+    use hofund_plugin_sdk::time::zone::{TimeZone, chrono_tz::Asia::Shanghai};
 
     use super::*;
 
     fn utc(y: i32, m: u32, d: u32, h: u32, min: u32) -> SystemTime {
-        let dt = chrono::Utc
+        let dt = hofund_plugin_sdk::time::zone::chrono::Utc
             .with_ymd_and_hms(y, m, d, h, min, 0)
             .single()
             .expect("time");

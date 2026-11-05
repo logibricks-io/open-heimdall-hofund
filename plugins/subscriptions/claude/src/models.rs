@@ -3,9 +3,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use hofund_model_catalog::CacheFile;
 use hofund_plugin_api::{HostContext, ModelList, ModelSpec, PluginError, QuotaWindow};
 use hofund_plugin_sdk::json::Value;
+
+use crate::catalog_cache::DevCatalogCache;
 
 use crate::creds;
 
@@ -57,46 +58,76 @@ pub(crate) fn list_for_account(
 }
 
 fn anthropic_catalog(host: &HostContext) -> Result<Vec<ModelSpec>, PluginError> {
-    let cache = CacheFile::beside_data_root(&catalog_data_root(host)?);
-    let Some(envelope) = cache
-        .read()
+    let cache = DevCatalogCache::beside_data_root(&catalog_data_root(host)?);
+    let Some(catalog) = cache
+        .read_catalog()
         .map_err(|error| PluginError::io(error.to_string()))?
     else {
         return Ok(Vec::new());
     };
-    let Some(catalog) = envelope.catalog() else {
+    let Some(provider) = catalog
+        .get("providers")
+        .and_then(Value::as_object)
+        .and_then(|providers| providers.get("anthropic"))
+    else {
         return Ok(Vec::new());
     };
-    let Some(provider) = catalog.providers.get("anthropic") else {
+    let Some(models) = provider.get("models").and_then(Value::as_object) else {
         return Ok(Vec::new());
     };
     let mut out = Vec::new();
-    for model in provider.models.values() {
-        if model.id.is_empty() {
+    for model in models.values() {
+        let Some(object) = model.as_object() else {
+            continue;
+        };
+        let id = object.get("id").and_then(Value::as_str).unwrap_or_default();
+        if id.is_empty() {
             continue;
         }
-        let display = (!model.name.is_empty()).then(|| model.name.clone());
-        let mut spec = ModelSpec::new(&model.id, display)?;
-        if model.limit.context > 0 {
-            spec = spec.with_context(model.limit.context);
+        let name = object
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let display = (!name.is_empty()).then(|| name.to_owned());
+        let mut spec = ModelSpec::new(id, display)?;
+        if let Some(limit) = object.get("limit").and_then(Value::as_object) {
+            if let Some(context) = limit.get("context").and_then(Value::as_u64)
+                && context > 0
+            {
+                spec = spec.with_context(context);
+            }
+            if let Some(output) = limit.get("output").and_then(Value::as_u64)
+                && output > 0
+            {
+                spec = spec.with_max_output(output);
+            }
         }
-        if model.limit.output > 0 {
-            spec = spec.with_max_output(model.limit.output);
+        if object.get("reasoning").and_then(Value::as_bool) == Some(true) {
+            let efforts = object
+                .get("reasoning_options")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .flat_map(|o| {
+                    o.get("values")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                })
+                .collect();
+            spec = spec.with_efforts(efforts);
         }
-        if model.reasoning {
-            spec = spec.with_efforts(
-                model
-                    .reasoning_options
-                    .iter()
-                    .flat_map(|o| o.values.clone())
-                    .collect(),
-            );
-        }
-        if let Some(cost) = &model.cost {
+        if let Some(cost) = object.get("cost").and_then(Value::as_object) {
             spec = spec.with_prices(
-                micros(cost.input),
-                micros(cost.output),
-                micros(cost.cache_read),
+                micros(cost.get("input").and_then(Value::as_f64).unwrap_or(0.0)),
+                micros(cost.get("output").and_then(Value::as_f64).unwrap_or(0.0)),
+                micros(
+                    cost.get("cache_read")
+                        .and_then(Value::as_f64)
+                        .unwrap_or(0.0),
+                ),
             );
         }
         spec = spec.with_endpoints(vec!["/v1/messages".to_owned()]);
@@ -294,7 +325,7 @@ mod tests {
         );
         let root = catalog_data_root(host.context()).expect("root");
         assert_eq!(root, dir.path());
-        let cache = hofund_model_catalog::CacheFile::beside_data_root(&root);
+        let cache = DevCatalogCache::beside_data_root(&root);
         assert_eq!(cache.path, dir.path().join("catalog/models.dev.json"));
     }
 }

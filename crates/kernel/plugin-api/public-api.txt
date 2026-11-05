@@ -953,10 +953,10 @@ Subscription::async fn discover_agent_sign_in (& self , home : & std :: path :: 
 Subscription::async fn health (& self) -> Result < () , PluginError >
 Subscription::async fn import_accounts (& self , text : & str , host : & HostContext ,) -> Result < Vec < AccountId > , PluginError >
 Subscription::async fn import_agent_sign_in (& self , home : & std :: path :: Path , reference : & str , host : & HostContext ,) -> Result < AccountId , PluginError >
-Subscription::async fn remove_account (& self , account : & AccountId , host : & HostContext ,) -> Result < () , PluginError >
 Subscription::async fn list_models (& self , account : & AccountId , host : & HostContext ,) -> Result < ModelList , PluginError >
 Subscription::async fn quota (& self , account : & AccountId , host : & HostContext ,) -> Result < Vec < QuotaWindow > , PluginError >
 Subscription::async fn refresh (& self , account : & AccountId , host : & HostContext) -> Result < () , PluginError >
+Subscription::async fn remove_account (& self , account : & AccountId , host : & HostContext ,) -> Result < () , PluginError >
 Subscription::async fn shutdown (& self , deadline : Duration) -> Result < () , PluginError >
 Subscription::async fn start_sign_in (& self , ctx : & SignInCtx , host : & HostContext ,) -> Result < SignInChallenge , PluginError >
 Subscription::async fn write_agent_sign_in (& self , account : & AccountId , home : & std :: path :: Path , host : & HostContext ,) -> Result < () , PluginError >

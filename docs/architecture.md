@@ -238,7 +238,7 @@ This table covers normal and build dependencies, including their target-specific
 | `hofund-codec` | `hofund-ir` |
 | `hofund-quirks` | `hofund-ir` |
 | `hofund-plugin-api` | `hofund-ir` |
-| `hofund-plugin-sdk` | `hofund-codec`, `hofund-ir`, `hofund-plugin-api`, `hofund-quirks` |
+| `hofund-plugin-sdk` | `chrono`, `chrono-tz`, `hofund-codec`, `hofund-ir`, `hofund-plugin-api`, `hofund-quirks` |
 | `hofund-plugin-fixture` | `hofund-plugin-api` |
 | `hofund-plugin-echo` | `hofund-plugin-api`, `hofund-plugin-sdk` |
 | `hofund-plugin-codex-catalog` | `hofund-plugin-api`, `hofund-plugin-sdk` |
@@ -255,7 +255,7 @@ This table covers normal and build dependencies, including their target-specific
 | `hofund-plugin-subscription-workbuddy` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
 | `hofund-plugin-subscription-zcode` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests), `hofund-plugin-sdk` (tests) |
 | `hofund-plugin-subscription-zed` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
-| `hofund-plugin-subscription-claude` | `chrono`, `chrono-tz`, `hofund-model-catalog`, `hofund-plugin-api`, `hofund-plugin-sdk`, `regex`, `sha2`, `hofund-kit-subscription` (tests) |
+| `hofund-plugin-subscription-claude` | `hofund-plugin-api`, `hofund-plugin-sdk`, `regex`, `sha2`, `hofund-kit-subscription` (tests) |
 | `hofund-plugin-subscription-cline` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
 | `hofund-plugin-subscription-codex` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
 | `hofund-plugin-subscription-copilot` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |

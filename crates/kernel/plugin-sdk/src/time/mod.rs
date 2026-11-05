@@ -1,6 +1,11 @@
 //! Time stamps as vendors write them.
+//!
+//! [`zone`] resolves IANA names and converts local wall-clock readings to
+//! [`SystemTime`](std::time::SystemTime) for subscription reset lines.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+pub mod zone;
 
 /// Reads `YYYY-MM-DD`, or RFC 3339 `YYYY-MM-DDTHH:MM:SS[.frac](Z|+HH:MM)`.
 /// A date alone is midnight UTC.

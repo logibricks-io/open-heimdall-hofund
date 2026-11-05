@@ -19,17 +19,8 @@ use syn::visit::Visit;
 const ALLOWED_DEPS: &[&str] = &["hofund-plugin-api", "hofund-plugin-sdk"];
 
 /// Extra runtime dependencies reviewed for one plugin package.
-const PLUGIN_EXTRA_DEPS: &[(&str, &[&str])] = &[(
-    "hofund-plugin-subscription-claude",
-    &[
-        "chrono",
-        "chrono-tz",
-        "hofund-model-catalog",
-        "iana-time-zone",
-        "regex",
-        "sha2",
-    ],
-)];
+const PLUGIN_EXTRA_DEPS: &[(&str, &[&str])] =
+    &[("hofund-plugin-subscription-claude", &["regex", "sha2"])];
 
 fn plugin_allows_dep(package: &str, name: &str) -> bool {
     PLUGIN_EXTRA_DEPS
@@ -1832,7 +1823,7 @@ cc = "1"
         );
         assert_eq!(
             dependency_error(
-                "chrono",
+                "regex",
                 &[],
                 false,
                 None,

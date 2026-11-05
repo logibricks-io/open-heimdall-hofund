@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `hofund-plugin-sdk::time::zone`: resolve IANA names, host local zone with a
+  test hook, and map local wall-clock readings to `SystemTime` for subscription
+  reset lines (R-5 fix round 3).
+
 - Claude Pro/Max subscription plugin (R-5 part a): `claude -p /usage` quota
   windows with scoped model labels, model list from models.dev anthropic catalog
   plus Claude Code `.claude.json` caches, setup-token (`sk-ant-oat…`) inference-only
@@ -78,13 +82,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Claude subscription (R-5 fix round 1): parse `/usage` reset times with the
-  same rules as the reference (zones, yearless dates, time-only resets); quota
-  holds the account lease and run lock, reads rotated credentials back, and
-  always removes the on-disk credentials file; classify usage errors as auth,
-  quota, transport, or unsupported; build import JSON with the Value API; refuse
-  bare `.credentials.json` imports without an email; expire idle pending sign-in
-  in `complete_sign_in`; daemon sign-out invokes subscription `remove_account`.
+- Claude subscription (R-5 fix round 3): `/usage` reset times use
+  `hofund-plugin-sdk::time::zone` (zones, yearless dates, time-only resets);
+  the Claude plugin reads `catalog/models.dev.json` beside the data root
+  without `hofund-model-catalog`. Quota holds the account lease and run lock,
+  reads rotated credentials back, and always removes the on-disk credentials
+  file; classify usage errors as auth, quota, transport, or unsupported; build
+  import JSON with the Value API; refuse bare `.credentials.json` imports without
+  an email; expire idle pending sign-in in `complete_sign_in`; daemon sign-out
+  invokes subscription `remove_account`.
 - Provider key spend caps use the key fingerprint carried by the serving
   member, including a provider with one key. Usage rows record that id, and
   routing skips a capped key before failover (D-61).

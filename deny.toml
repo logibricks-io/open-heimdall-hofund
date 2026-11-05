@@ -55,7 +55,7 @@ skip = [
     { crate = "heck@0.4.1", reason = "glib-macros 0.18 depends on heck 0.4 while system-deps depends on 0.5" },
     { crate = "indexmap@1.9.3", reason = "schemars 0.8, via tauri-utils, depends on indexmap 1 while hyper depends on indexmap 2" },
     { crate = "miniz_oxide@0.8.9", reason = "png 0.18, via the menu-bar icons, depends on miniz_oxide 0.8 while flate2 depends on 0.9" },
-    { crate = "phf@0.12.1", reason = "chrono-tz 0.10, used by the Claude subscription plugin for reset time zones, depends on phf 0.12 while cssparser via tauri-utils depends on 0.13" },
+    { crate = "phf@0.12.1", reason = "chrono-tz 0.10, used by hofund-plugin-sdk for subscription reset time zones, depends on phf 0.12 while cssparser via tauri-utils depends on 0.13" },
     { crate = "phf_shared@0.12.1", reason = "chrono-tz 0.10 depends on phf 0.12 and phf_shared 0.12 while cssparser via tauri-utils depends on 0.13" },
     { crate = "proc-macro-crate@1.3.1", reason = "gtk3-macros 0.18 depends on proc-macro-crate 1 while glib-macros depends on 2" },
     { crate = "rand_core@0.9.5", reason = "tungstenite 0.29 depends on rand 0.9 while proptest uses rand_core 0.10" },

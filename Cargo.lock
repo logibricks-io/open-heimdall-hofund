@@ -2175,6 +2175,8 @@ dependencies = [
  "async-trait",
  "base64 0.23.1",
  "bytes",
+ "chrono",
+ "chrono-tz",
  "futures-util",
  "hofund-codec",
  "hofund-ir",
@@ -2182,6 +2184,7 @@ dependencies = [
  "hofund-quirks",
  "http",
  "httpdate",
+ "iana-time-zone",
  "md-5",
  "quote",
  "regex",
@@ -2200,13 +2203,9 @@ dependencies = [
 name = "hofund-plugin-subscription-claude"
 version = "0.1.0"
 dependencies = [
- "chrono",
- "chrono-tz",
  "hofund-kit-subscription",
- "hofund-model-catalog",
  "hofund-plugin-api",
  "hofund-plugin-sdk",
- "iana-time-zone",
  "regex",
  "sha2",
  "tempfile",

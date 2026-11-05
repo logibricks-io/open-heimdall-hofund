@@ -11,12 +11,8 @@ homepage.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-hofund-model-catalog = { workspace = true }
 hofund-plugin-api = { workspace = true }
 hofund-plugin-sdk = { workspace = true }
-chrono = { workspace = true }
-chrono-tz = "0.10.4"
-iana-time-zone = "0.1.65"
 regex = "1.13.1"
 sha2 = { workspace = true }
 

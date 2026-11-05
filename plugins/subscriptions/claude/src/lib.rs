@@ -23,6 +23,7 @@ use hofund_plugin_sdk::oauth::{SecretObject, secret_text};
 
 mod account;
 mod agent_sign_in;
+mod catalog_cache;
 mod cli;
 mod creds;
 mod discover;
