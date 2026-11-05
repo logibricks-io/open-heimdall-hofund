@@ -6,7 +6,7 @@ The UI is a client of the control plane. It does not link `gateway`, `router`, `
 
 ## 1. Scope
 
-Six reference pages, in order, selected by `1` through `6`, `]`, and `[` (`internal/tui/tui.go:pageKey`, `internal/tui/pages.go:pageNames`). Hofund keeps that order and those keys. Four surfaces the reference UI does not have as pages are in this release because the v0.2.0 plan asks for them: Accounts, Settings, Logs, and Help. Sessions and Library ship their screens with the shell and fill in when R-30 and R-36 exist.
+Six reference pages, in order, selected by `1` through `6`, `]`, and `[` (`internal/tui/tui.go:pageKey`, `internal/tui/pages.go:pageNames`). Hofund keeps that order and those keys. The `]` and `[` cycle wraps only those six pages. Four surfaces the reference UI does not have as pages are in this release because the v0.2.0 plan asks for them: Accounts (`7`), Settings (`8`), Logs (`9`), and Help (`?`). Accounts, Settings, and Logs do not participate in the `]`/`[` cycle. Sessions and Library ship their screens with the shell; Sessions fills in when R-30 and R-44 exist. Library list rows arrive in R-45; mutating library behavior waits for section 5.
 
 Global keys (`internal/tui/tui.go:Update`, `updateList`, `View`):
 
@@ -17,9 +17,9 @@ Global keys (`internal/tui/tui.go:Update`, `updateList`, `View`):
 | `1`–`6`, `]`, `[` | Page | R-11 | Reload that page |
 | `r` | Reload the open page. On Usage, also re-read quotas | R-11 | Page GETs |
 | resize | Keep the cursor row on screen | R-11 | None |
-| status line | Success or failure toast, else catalog sync, else gateway line | R-11 | `GET /status`, events |
+| status line | Success or failure toast, else catalog sync, else gateway line | R-11 | `GET /v1/hofund/health`, `GET /v1/hofund/status`, events |
 
-Modes (`internal/tui/tui.go` `mode` constants): list, picker, profiles, name line, typed line (`ask`), open group. `esc` returns to `back`. One mutation toast at a time. A second `d` confirms a delete; any other key clears the confirm token.
+Modes (`internal/tui/tui.go` `mode` constants): list, picker, profiles, name line, typed line (`ask`), open group. `esc` returns to `back`. One mutation toast at a time. A second `d` confirms a delete; any other key clears the confirm token, except `r`. On Providers, Routing, Usage, Sessions, and Library, `Update` handles `r` before the page handler and reloads without clearing `confirm` (`tui.go:Update`). On Agents, `r` in `updateList` behaves the same. Page keys (`1`–`6`, `7`–`9`, `]`, `[`) call `goTo`, which clears `confirm`. A pending delete applies only to MCP, skill, found-mcp, and found-skill library rows (not instructions); found-mcp on an agent-owned row is refused (`library.go:updateLibrary`).
 
 ### Agents (page 1) — R-14
 
@@ -31,10 +31,10 @@ Reference: one row per detected agent that still has fields and a CLI (`internal
 | `h`/`l`, `left`/`right`, `tab`, `shift+tab` | Next field (`updateList`) | Cycle model, visibility, connection | `GET /v1/hofund/agents/{id}/models` |
 | `enter`, space | Field picker, current value first, type-to-filter, custom value allowed (`openFieldPicker`, `picker.refilter`, `score`) | Model picker from route models. Visibility picker toggles. Connect asks for plan then connect | `POST .../model`, `POST .../visible`, `POST .../hidden_models`, `POST .../picked_only`, `POST .../plan`, `POST .../connect`, `POST .../disconnect` |
 | `r` | Reload values (`updateList`) | Reload | GETs above |
-| `S` | Sync the public model catalog (`syncCmd`) | Refresh listed models. No catalog-sync route exists | `POST /v1/hofund/providers/{id}/models/refresh`. Gap G-8 only if a single catalog sync is required |
+| `S` | Sync the public model catalog (`syncCmd` → `catalog.Sync`; `Init` batches the same when the catalog source is empty) | Same | Gap **G-8** `POST /v1/hofund/catalog/sync`. Per-provider list refresh stays `m` and picker `ctrl+r` → `POST /v1/hofund/providers/{id}/models/refresh` |
 | `s` | Name line, snapshot every agent (`updateName`) | Same | `POST /v1/hofund/profiles/save` |
 | `p` | Profile picker (`openProfiles`) | Same | `GET /v1/hofund/profiles`, `GET /v1/hofund/profiles/{name}`, `POST /v1/hofund/profiles/switch` |
-| picker `enter` | Apply (`updatePicker`) | Apply | `POST /profiles/switch` |
+| picker `enter` | Apply (`updatePicker`) | Apply | `POST /v1/hofund/profiles/switch` |
 | picker `ctrl+e` | Rename (`updatePicker`, `updateName`) | Same | No rename route. Gap G-9 |
 | picker `ctrl+d` | Delete (`updatePicker`) | Same | `DELETE /v1/hofund/profiles/{name}` |
 | picker `up`/`down`, `ctrl+p`/`ctrl+n` | Move (`updatePicker`) | Same | None |
@@ -50,42 +50,42 @@ Empty machine: the reference quits with "no supported agents found" (`tui.go:Run
 | Key | Action | Control |
 |---|---|---|
 | `j`/`k` | Row | `GET /v1/hofund/providers` |
-| `enter`, space | Model list. `enter` toggles a model on or off and the list stays open (`openProviderModels`) | `GET/PUT /v1/hofund/providers/{id}/picks` with `expected_picks_revision` |
+| `enter`, space | Model list. `enter` toggles a model on or off and the list stays open (`openProviderModels`). Refuses to turn off the last exposed model (`pages.go` toggle) | `GET/PUT /v1/hofund/providers/{id}/picks` with `expected_picks_revision`. An edit that leaves no exposed model returns 422 (`models.rs` `next_picks`) |
 | picker `ctrl+r` | Fetch that provider's models again | `POST .../models/refresh` |
 | `e` | Replace the key. Password echo. Refused for a signed-in account and for a credentials-based preset | `POST .../keys` action `replace`. Gap G-1 for the row text the page shows |
 | `w` | Address. Local preset, custom base URLs, or preset endpoint (`endpointAsk`, `localAddressAsk`, `customURLsAsk`) | Gap G-2 |
 | `a` | Preset picker, then key, project, or address (`openPresets`, `addKeyAsk`, `vertexProjectAsk`) | Gap G-3. Remote hofund is a preset row, not a special page (`kindNote`) |
 | `f` | Family tag | Gap G-2 |
 | `u` | Listed in agent pickers, or groups only | Gap G-2 |
-| `o` | Provider on or off (`SetOff` via `reseatCmd`) | Gap G-2. Key on/off already exists and is not the same switch |
+| `o` | Provider on or off (`SetOff` via `reseatCmd`, agent reseat in the same daemon write) | Gap G-2 `PATCH … enabled`. Key on/off already exists and is not the same switch |
 | `t` | Connectivity test (`testCmd`) | `POST /v1/hofund/providers/{id}/test` |
 | `m` | Fetch models (`refetchCmd`) | `POST .../models/refresh` |
 | `b` | Balances (`balancesCmd`) | `GET /v1/hofund/quotas` (fresh). Cards with `kind=balance` |
-| `d` `d` | Delete provider | Gap G-2. `reseat` of agent models is `POST .../model` after the delete |
+| `d` `d` | Delete provider (`provider.Delete` via `reseatCmd`) | Gap G-2 `DELETE` with reseat in the same daemon write, not a follow-up `POST .../model`. On an account-type provider this hides the provider row; subscription sign-out stays Accounts `d d` → G-6 remove only |
 | `r` | Reload | GET |
 
 Row text the reference draws and `ProviderSummary` does not: display name, masked key or account label, signed-out, needs-project, switched off, family, groups-only, list error (`viewProviders`). Keys are available per id from `GET .../keys` (`masked`, `on`) but that is N+1 and still omits the other fields. G-1 extends the list response. Do not feed this page from `GET /config` text. That body can contain credentials.
 
 ### Routing (page 3) — R-17
 
-List: `internal/tui/routing.go:updateGroups`, `viewGroups`. Open group: `updateGroup`, `viewGroup`.
+List: `internal/tui/routing.go:updateGroups`, `viewGroups`. Open group: `updateGroup`, `viewGroup`. **R-17** also binds a route view to a key or panel: `GET /v1/hofund/route`, `GET /v1/hofund/route/session`, and `GET /v1/hofund/route/unrouted` (control routes already present).
 
 | Key | Where | Action | Control |
 |---|---|---|---|
 | `j`/`k` | List and group | Cursor. Group cursor is members, then rules | Gap G-4 |
 | `enter`, space | List | Open group | G-4 |
 | `n` | List | Ask for a name, then pick the first member (`pickMsg`) | G-4 create |
-| `o` | List and group | Next strategy (`nextRouting`) | G-4. Cycle: smart, order, rotate, usage, pace, weight, free, fast, cheap, drain. Names match `router` strategy ids. `manual` is reference-only. Hofund has no manual strategy. Skip it |
+| `o` | List and group | Next strategy (`nextRouting`) | G-4. Cycle matches `routing.go:routings`: smart (empty id), order, rotate, usage, pace, weight, free, fast, cheap, drain, expiring, manual. Names match `router` strategy ids where present. Hofund `ROUTING_NAMES` has no `expiring` or `manual`; skip both in the TUI cycle like `manual` today |
 | `d` `d` | List | Delete group | G-4 |
 | `u` | List, removed row | Restore a hidden found group | G-4 restore. Found groups that are not in hofund yet render nothing in that section |
 | `esc`, `q` | Group | Back to the list. Does not quit the UI | None |
 | `J`/`K`, `shift+down`/`shift+up` | Group | Swap member or rule (`move`) | G-4 order |
-| `a` | Group | Add member (`openMemberPicker`, `memberOptions`) | `GET /v1/hofund/models` plus G-4 |
+| `a` | Group | Add member (`openMemberPicker`, `memberOptions`). When the group `Decides()`, the picker lists decision models (`OfferedDeciders`); otherwise served routes. Group list rows show Match pattern count when `len(g.Match) > 0` (`viewGroups`) | `GET /v1/hofund/models` plus G-4 |
 | `n` | Group | New rule, typed line (`openRule`, `ruleHint`) | G-4. The daemon parses the line. The TUI does not |
 | `enter`, `e` | Group, on a rule | Edit that rule | G-4 |
 | `d` `d` | Group | Remove member or rule. Last member cannot be removed | G-4 |
 | `c` | Group | Classifier picker (`openClassifier`). Only if a rule has an intent | G-4 |
-| `E` | Group, on a model member | Cycle effort (`nextMemberEffort`) | G-4 member effort |
+| `E` | Group, on a model member | Cycle effort (`nextMemberEffort`): empty, low, medium, high, xhigh, max, then empty again | G-4 member effort |
 | `F` | Group, on a model member | Toggle fast (`SetMemberFast`) | G-4 member fast |
 | `s` | Group | Next affinity (`nextStays`): auto, session, turn, off, strict. Same spellings as `config::Stays` | G-4 |
 | `f`, `x`, `l`, `R` | Group | Family, context tokens, reasoning levels, rename id (`agent.RenameGroup`) | G-4 |
@@ -105,8 +105,8 @@ Fallback in the reference group screen is "the first member that can take the re
 | `c` | Check in every account that has a daily check-in (`checkinCmd`) | `GET /v1/hofund/checkins`, then `POST /v1/hofund/checkins/run` per row `{subscription, account}`. One toast joins the `outcome` and `detail` lines |
 | `r` | Drop quotas and read again | `GET /v1/hofund/quotas` with no `kept=1` |
 | open page | Asked read unless the last ask was under 30s (`quotasOpenGap`). While a read is in flight, retry every 1.5s, 20 times (`gotQuotas`) | Same GET. `standings` is not the card list. Cards are `data` |
-| sparkline, agent table, model table | Built from the summary (`usageBlock`) | Bucket `UsageResponse.rows` in the client. `breakdown=agent` exists. There is no `breakdown=model`. Client groups rows by `model` |
-| currency | `fmtCost` | `UsageResponse.currency` and `cny_per_usd` already |
+| sparkline, agent table, model table | Built from the summary (`usageBlock`) | Bucket `UsageResponse.rows` in the client. Grouped tables use `by=agent`, `by=provider-key`, or `by=gateway-key` on `UsageQuery`. There is no model breakdown query; the client groups rows by `model` for the model table |
+| currency | `fmtCost` | `UsageResponse.currency` is `USD` or `CNY` with `cny_per_usd`. Settings stores `usd` or `cny` (G-5) |
 | alerts | Not a usage key in the reference. The plan puts alerts on this page | `GET /v1/hofund/quotas/alerts`, `POST /v1/hofund/quotas/alerts/settings`. Also a `quota_alert` event toast |
 | direct calls | Second block, "not through" the gateway, from session files | Not in `GET /usage`. Shown when R-30 stats exist. R-15 ships the gateway block alone |
 
@@ -132,11 +132,11 @@ Check-in copy is English. The reference prints a short native label. Hofund prin
 
 List columns (`sessListLines`): age, agent, folder basename, tokens, cost, title. Stats (`sessLines`, `sessChart`): totals and a daily bar.
 
-### Library (page 6) — shell in R-11, page in R-45
+### Library (page 6) — shell in R-11, read-only rows in R-45
 
 `internal/tui/library.go:updateLibrary`, `viewLibrary`, `openLibAdd`, `openLibAgents`, `openServer`, `editInstructions`.
 
-Sections, in order: instructions, MCP servers, skills, MCP servers found in agents, skills found in agents, RTK. API contract is section 5.
+Sections, in order: instructions, MCP servers, skills, MCP servers found in agents, skills found in agents, RTK. Row layout and keys match the reference for the parity spec. **R-45** binds only to `GET /v1/hofund/library` and draws rows. Keys that mutate the library or spawn local commands (`s`, `a`, `e`, `u`, `i`, `d`, and similar) are **not** implemented in the TUI until a later security design review passes (target: Opus review after 2025-11-11). Section 5 lists the response shape and deferred routes.
 
 | Key | Action |
 |---|---|
@@ -146,7 +146,7 @@ Sections, in order: instructions, MCP servers, skills, MCP servers found in agen
 | `e` | Edit instructions in `$EDITOR` or `vi` (`editInstructions`), or retype an MCP server (`openServer`) |
 | `u` | Update one skill from its source |
 | `i` | Bring a found server or skill into the library. Refused when the agent owns it |
-| `d` `d` | Remove from the library and from agents. Found rows say backups keep the files |
+| `d` `d` | Remove from the library and from agents. Found rows say backups keep the files. Spec only; gated per Library section until security review |
 | `s` | Write the library into agents (`library.Sync`) |
 | `r` | Reload |
 | footer path | Directory from the view (`viewLibrary`) |
@@ -159,7 +159,7 @@ The reference shows accounts as provider rows and usage cards. It has no device-
 |---|---|---|
 | `j`/`k` | Account row | G-6 list |
 | `a` | Start sign-in for a subscription | G-6 start |
-| dialog | Show URL or device code. `o` asks the OS to open the URL. A typed line submits a pasted final URL or a token file. `esc` cancels | G-6 poll, proof, cancel |
+| dialog | Show URL or device code. `o` asks the OS to open the URL. A typed line submits a pasted PKCE callback URL or a token file path. `esc` cancels | G-6 start, poll `GET .../sign-in/{session}`, proof POST only for URL or token, cancel |
 | `enter` | Switch the agent sign-in to this account | G-6 switch |
 | `n` | Switch to the next account with room | G-6 switch target `next` |
 | `i` | Import a file path | G-6 import |
@@ -174,7 +174,7 @@ Sign-in never prints a token. The existing `SignInProgressEvent` (`provider`, `s
 | Key | Action | Control |
 |---|---|---|
 | `enter` | Edit the row | G-5, or the route named in the row |
-| listen | Model address | G-5. Restart-only. Show `pending_restart` from `GET /status` |
+| listen | Model address | G-5. Restart-only. Show `pending_restart` from `GET /v1/hofund/status` |
 | currency | `usd` or `cny` | G-5 |
 | quota left | Same bit as Usage `u` | G-5 |
 | discover accounts | Read agent sign-in files | G-5. `HOFUND_NO_ACCOUNTS=1` still wins for one run |
@@ -240,7 +240,7 @@ Event application, without a refetch when the payload is enough:
 
 ### Layout
 
-Full screen. Header: six page pills, matching `header`. Body: page. Blank lines pad so the status and footer sit on the last rows (`View`). Footer is one or two `hints` lines. Width is the terminal width. Lists use a window of at least 3 body rows and keep the cursor inside it (`groupWindow`, library `spend`, agents `visible := max(3, h-7)`).
+Full screen. Header: six page pills, matching `header`. Body: page. Blank lines pad so the status and footer sit on the last rows (`View`). Footer is one or two `hints` lines. Width is the terminal width. Lists use a window of at least 3 body rows and keep the cursor inside it (`groupWindow`, library `spend` with `visible := max(4, h-6)`, agents `visible := max(3, h-7)`).
 
 ### Color, contrast, Windows
 
@@ -269,12 +269,12 @@ Extend `ProviderSummary` additively: `name`, `enabled` (default true), `family`,
 | Route | Body | Response | Errors |
 |---|---|---|---|
 | `POST /v1/hofund/providers` | `{version, expected_revision, preset, id?, name?, base_url?, api_key?, family?, options?}` | `{version, provider: ProviderSummary, disk_revision, runtime_revision, pending_restart}` | 422 unknown preset or bad address. 409 stale revision. 404 not used |
-| `PATCH /v1/hofund/providers/{id}` | `{version, expected_revision, enabled?, family?, listed?, base_url?, fallback?}` | same envelope | 404 unknown id. 409. 422 bad fallback. `fallback` entries are `provider/model` or `group/id` |
-| `DELETE /v1/hofund/providers/{id}` | `{version, expected_revision}` | `{version, disk_revision, removed: id}` | 404, 409 |
+| `PATCH /v1/hofund/providers/{id}` | `{version, expected_revision, enabled?, family?, listed?, base_url?, fallback?}` | same envelope | 404 unknown id. 409. 422 bad fallback. `fallback` entries are `provider/model` or `group/id`. `enabled: false` reseats in the same write |
+| `DELETE /v1/hofund/providers/{id}` | `{version, expected_revision}` | `{version, disk_revision, removed: id}` | 404, 409. Reseats agent models in the same transaction |
 
 `api_key` is write-only. It is never copied into the response, events, or logs. `options` is the preset's declared table (project, location, credentials path). The TUI sends only keys the preset catalog names.
 
-`enabled: false` removes that provider's members from routing until it is on again. `listed: false` keeps the provider valid as a group member and out of agent model pickers. Both are daemon behavior in this same change. A key's `on` flag is unchanged.
+`enabled: false` matches reference `SetOff`: agents stop seeing that provider's models, requests to them are refused as switched off, and routing group member lists are untouched. `listed: false` keeps the provider valid as a group member and out of agent model pickers. Enable, disable, and delete run agent reseat inside the same daemon write as the config change (reference `reseatCmd`). A key's `on` flag is unchanged.
 
 Remote hofund is `preset` of the remote-gateway plugin plus `base_url` and `api_key`. No separate route. The preset id is whatever `G-3` returns.
 
@@ -323,7 +323,7 @@ The CLI paths `apps/cli/src/subscription.rs` and `apps/cli/src/accounts.rs` spaw
 | `POST /v1/hofund/accounts/discover` | `{version, add: true}` | `{version, imported: [id]}` |
 | `POST /v1/hofund/subscriptions/{id}/accounts/{account}/remove` | `{version}` | `{version, removed}`. This is sign-out |
 
-`challenge` is one of `{type: "open_url", url}`, `{type: "device_code", user_code, verification_url}`, `{type: "instructions", text}`. It matches `SignInChallenge` and contains no secret. Poll at 1s while the dialog is open, and also on `sign_in_progress`. Session lifetime is 10 minutes, then `failed`. Cancel calls the plugin cancel and releases the loopback listener. 404 on an unknown session.
+`challenge` is one of `{type: "open_url", url}`, `{type: "device_code", user_code, verification_url}`, `{type: "instructions", text}`. It matches `SignInChallenge` and contains no secret. Device-code flow completes when the plugin finishes polling (`SignInProof::Await` in `drive_sign_in`); the TUI polls `GET .../sign-in/{session}` at 1s while the dialog is open, and also on `sign_in_progress`. `POST .../proof` is only for a pasted PKCE callback URL or a token file, not for device codes. Session lifetime is 10 minutes, then `failed`. Cancel calls the plugin cancel and releases the loopback listener. 404 on an unknown session.
 
 Extend `SignInProgressEvent` with optional `session` and `state`. Old clients ignore the extra fields.
 
@@ -333,7 +333,7 @@ Extend `SignInProgressEvent` with optional `session` and `state`. Old clients ig
 
 ### G-8 Catalog sync
 
-Only if `S` must do more than per-provider `models/refresh`. `POST /v1/hofund/catalog/sync` with `{version}` returns `{version, ok, error?}`. Otherwise R-14 does not add a route.
+Required for Agents `S` and for startup sync when the public catalog is empty (reference `Init` batches `syncCmd` with `fetchModelsCmd`). `POST /v1/hofund/catalog/sync` with `{version}` returns `{version, ok, error?}`.
 
 ### G-9 Profile rename
 
@@ -363,8 +363,8 @@ Hofund does not embed the gateway. `hofund-tui` must not depend on `gateway`.
 Protocol:
 
 1. Probe locks with `held_daemon_locks` without creating a file or a directory.
-2. If a lock is held, discover and `GET /health` and `GET /status`. Attach as a client. Do not spawn. Status uses `pid`, `model_listener.running`, and G-10 `serves`.
-3. If no lock is held, `probe_model_health` for `{"status":"ok","service":"hofund"}` with a 700ms budget. If that answers, something else has the model port. Do not bind. Status says the port is taken and this config's lock is free.
+2. If a lock is held, discover and `GET /v1/hofund/health` and `GET /v1/hofund/status`. Attach as a client. Do not spawn. Status uses `pid`, `model_listener.running`, and G-10 `serves`.
+3. If no lock is held, `probe_model_health` on the model listener: GET `/health` within a 700ms budget, HTTP 200, body `service` equals `hofund` (`model_health.rs`). If that answers, something else has the model port. Do not bind. Status says the port is taken and this config's lock is free.
 4. If neither answers, spawn `hofundd` the way `apps/cli/src/events.rs:autostart` does: own process group, Windows `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP`, stdin closed, stdout and stderr appended to `.hofund/daemon-<id>.log`, environment plus `HOFUND_SERVES=tui` and `HOFUND_OWNER_PID`. Wait up to 10s for discovery and health. Failure is a status error, and the UI still opens.
 5. Every 15s, repeat 1 through 4. Spawn only if this UI did not already spawn one and the lock is free and the model port is quiet.
 6. This UI records `spawned: bool` and the child pid. It never shuts down a daemon it did not spawn.
@@ -385,7 +385,9 @@ Two TUIs: the second sees the lock and attaches. It must not shut the daemon dow
 
 ## 5. Sessions and Library APIs
 
-R-44 and R-45 bind only to these routes. R-30 and R-36 implement them. Paths stay stable if fields are added.
+R-44 binds to the Sessions routes below. **R-45** binds only to `GET /v1/hofund/library` for read-only rows. Session **recording** (writes that populate session files) is out of scope for this contract; R-30 owns recording separately. R-30 and R-36 implement the routes. Paths stay stable if fields are added.
+
+Library **mutating** routes (`sync`, instructions, MCP, skills, found import/remove, RTK) and any local commands they may spawn on the daemon host are **not** to be wired from the TUI until a later security design review passes (Opus review after 2025-11-11). Section 5 still documents request and response shapes for that follow-on work.
 
 ### Sessions (R-30, reads from R-29)
 
@@ -411,7 +413,9 @@ Consent is part of the list call so the empty state matches `sessNothing`.
 
 ### Library (R-36)
 
-`GET /v1/hofund/library` returns `{version, dir, error?, rows: [{kind, name, on: [agent id], about, bad, own}], agents: [{id, name, instructions, mcp, skills}]}`. `kind` is `instructions`, `mcp`, `skill`, `found-mcp`, `found-skill`, or `rtk`. That is `reloadLibrary` and `viewLibrary`.
+`GET /v1/hofund/library` returns `{version, dir, error?, rows: [{kind, name, on: [agent id], about, bad, own}], agents: [{id, name, instructions, mcp, skills}]}`. `kind` is `instructions`, `mcp`, `skill`, `found-mcp`, `found-skill`, or `rtk`. R-45 uses this response only.
+
+Deferred mutating routes (the TUI must not call them until the security review in the section introduction passes):
 
 | Route | Body | Result |
 |---|---|---|
@@ -447,7 +451,7 @@ Key scenarios drive `App::handle` with crossterm key events and assert the fake'
 | `d` once | no DELETE. `d` again | DELETE with the revision from the last GET |
 | stale 409 | toast contains the server message, cursor stays |
 | `4` then `c` | one check-in POST per listed account |
-| sign-in | start, poll until `device_code`, proof, cancel |
+| sign-in | start, poll until `ready` or terminal state; proof POST only for pasted URL or token; cancel |
 | `3` then `enter` then `J` | PATCH members in swapped order |
 | `?` | help frame, `esc` restores the page |
 | quit with a connected agent and `spawned` | no shutdown POST |
@@ -456,7 +460,7 @@ Key scenarios drive `App::handle` with crossterm key events and assert the fake'
 
 Windows CI runs the same TestBackend tests. One extra test calls crossterm raw-mode enter and leave. If the runner has no console, the test accepts the not-a-terminal error and fails on any other error. No interactive session and no live daemon.
 
-Gateway handoff tests stub `held_daemon_locks`, discovery, and `probe_model_health`. They do not bind a port except one test that points the probe at a local listener returning `{"status":"ok","service":"hofund"}` and asserts no spawn.
+Gateway handoff tests stub `held_daemon_locks`, discovery, and `probe_model_health`. They do not bind a port except one test that points the probe at a local listener returning HTTP 200 and `"service":"hofund"` and asserts no spawn.
 
 ## 7. Work order
 
@@ -470,10 +474,12 @@ Sizes are the plan's wall-clock sizes (S about 3–4h, M about 6–8h, L about 1
 | 4 | R-11 | L | `apps/tui`, navigation, events, toasts, resize, handoff, empty Sessions and Library frames, deny clean | R-7a for handoff fields. Shell can use a fake before R-7b |
 | 5 | R-14 | M | Agents and Providers, including preset add and remote preset | R-11, R-7a |
 | 6 | R-15 | L | Usage, check-in, alerts, Accounts dialog | R-11, R-7b, R-10 |
-| 7 | R-17 | M–L | Routing list and group editor | R-11, R-7a |
-| 8 | R-18 | M | Settings, Logs, Help, fixtures, Windows raw-mode test | R-11, R-7b |
-| 9 | R-44 | M | Sessions page on section 5 | R-11, R-30 |
-| 10 | R-45 | M–L | Library page on section 5 | R-11, R-36, R-41 for skill update |
+| 7 | R-17 | M–L | Routing list, group editor, route view (`GET /v1/hofund/route`, `/route/session`, `/route/unrouted`) on a key or panel | R-11, R-7a |
+| 8 | R-18 | M | Settings (`8`), Logs (`9`), Help, fixtures, Windows raw-mode test | R-11, R-7b |
+| 9 | R-19 | M | D-80: G-8 catalog sync, Agents `S`, startup sync when catalog empty | R-7a, R-11 |
+| 10 | R-20 | S | D-84 | R-19 |
+| 11 | R-44 | M | Sessions page on section 5 reads | R-11, R-30 |
+| 12 | R-45 | M | Library read-only rows from `GET /v1/hofund/library` | R-11. Mutating library keys wait for security review |
 
 R-7 splits so provider and group routes are not blocked on sign-in. R-44 stays on the other track and uses the R-11 page trait unchanged.
 
@@ -486,7 +492,7 @@ R-7 splits so provider and group routes are not blocked on sign-in. R-44 stays o
 | Full-document config apply races a group edit | G-4 writes under the config sidecar lock and 409s on `disk_revision`. The TUI reloads and retries once |
 | Detached `hofundd` outlives a crash | Intended. `hofund shutdown` is the stop. Status shows `serves=tui` |
 | Linux service install is not in this release | Handoff leaves the child. Do not shell out to systemd |
-| Reference `manual` routing and provider-off have no hofund strategy or flag yet | G-2 `enabled` is the off switch. Do not send `manual` |
+| Reference `manual` and `expiring` routing and provider-off have no hofund strategy or flag yet | G-2 `enabled` is the off switch. Skip `manual` and `expiring` in the TUI routing cycle |
 | Sessions resume runs a local agent | Only with `resume` argv from the server. Never via a shell string on Windows. `Command` args only. The reference uses a shell (`resumeSession`). Hofund does not |
-| Library `POST` can start a local MCP command | R-36 owns that policy. The TUI only sends the line the user typed |
+| Library mutating control routes and local spawns | Blocked from the TUI until the section 5 security review passes. R-45 is read-only rows only |
 | Page shells land before R-30 and R-36 | Empty frames call the routes and treat 404 as "not in this build yet". Adding fields must not require a new page type |
