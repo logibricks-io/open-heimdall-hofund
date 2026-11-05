@@ -590,9 +590,9 @@ data: {"type":"response.completed","response":{"output":[{"type":"output_text","
     fn r10_timing_kind_null_fields_read_as_empty() {
         let added = br#"data: {"type":"response.output_item.added","item":{"type":"function_call","encrypted_content":null}}"#;
         assert_eq!(timing_kind(added), (true, false, false, false));
-        let gemini =
+        let parts =
             br#"data: {"candidates":[{"content":{"parts":[{"text":"hi","thought":null}]}}]}"#;
-        assert_eq!(timing_kind(gemini), (true, true, false, false));
+        assert_eq!(timing_kind(parts), (true, true, false, false));
         let chat = br#"data: {"choices":[{"delta":{"content":"hi","refusal":null}}]}"#;
         assert_eq!(timing_kind(chat), (true, true, false, false));
     }
@@ -930,7 +930,7 @@ data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use"
     #[test]
     fn r10r6_3_reasoning_burst_in_one_chunk_has_no_start() {
         let mut timing = StreamTiming::new(Instant::now());
-        timing.set_protocol("openai-chat");
+        timing.set_protocol(hofund_plugin_api::ProtocolId::OPENAI_CHAT.as_str());
         timing.ingest_raw(format!("{CHAT_REASONING}{CHAT_REASONING}{CHAT_TEXT}").as_bytes());
         let fields = timing.finish_fields(10).expect("fields");
         assert!(fields.0.is_some());
@@ -940,9 +940,15 @@ data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use"
     #[test]
     fn r10r6_4_paced_reasoning_keeps_start_only_for_chat_and_messages() {
         for (protocol, kept) in [
-            ("openai-chat", true),
-            ("anthropic-messages", true),
-            ("openai-responses", false),
+            (hofund_plugin_api::ProtocolId::OPENAI_CHAT.as_str(), true),
+            (
+                hofund_plugin_api::ProtocolId::ANTHROPIC_MESSAGES.as_str(),
+                true,
+            ),
+            (
+                hofund_plugin_api::ProtocolId::OPENAI_RESPONSES.as_str(),
+                false,
+            ),
             ("generative-language", false),
         ] {
             let mut timing = StreamTiming::new(Instant::now());
@@ -962,7 +968,7 @@ data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use"
     #[test]
     fn r10r6_5_tool_before_reasoning_has_no_start() {
         let mut timing = StreamTiming::new(Instant::now());
-        timing.set_protocol("openai-chat");
+        timing.set_protocol(hofund_plugin_api::ProtocolId::OPENAI_CHAT.as_str());
         timing.ingest_raw(CHAT_TOOL.as_bytes());
         std::thread::sleep(std::time::Duration::from_millis(5));
         timing.ingest_raw(CHAT_REASONING.as_bytes());
@@ -976,7 +982,7 @@ data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use"
     #[test]
     fn r10r6_6_hidden_reasoning_has_no_start() {
         let mut timing = StreamTiming::new(Instant::now());
-        timing.set_protocol("openai-chat");
+        timing.set_protocol(hofund_plugin_api::ProtocolId::OPENAI_CHAT.as_str());
         timing.ingest_raw(CHAT_REASONING.as_bytes());
         timing.ingest_raw(SEALED_ITEM.as_bytes());
         std::thread::sleep(std::time::Duration::from_millis(120));
