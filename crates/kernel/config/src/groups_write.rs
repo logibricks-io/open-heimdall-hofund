@@ -127,8 +127,10 @@ pub fn edit_group_patch(
         Some(Some(reference)) if reference.trim().is_empty() => None,
         Some(Some(reference)) => Some(reference),
     };
+    // A rename rewrites `group/{old id}` to `group/{final id}` everywhere, so a
+    // classifier naming either id ends up pointing at this group.
     if let Some(reference) = final_classifier
-        && reference == format!("group/{final_group_id}")
+        && (reference == format!("group/{final_group_id}") || reference == old_model)
     {
         return Err(ConfigError::Invalid(
             "a group cannot classify with itself".to_owned(),
@@ -447,7 +449,42 @@ fn rewrite_group_refs_in_document(
             }
         }
     }
+    if let Some(providers) = document
+        .get_mut("providers")
+        .and_then(Item::as_array_of_tables_mut)
+    {
+        for table in providers.iter_mut() {
+            if let Some(fallback) = table.get_mut("fallback").and_then(Item::as_array_mut) {
+                rename_exact_entries(fallback, &old_ref, &new_ref);
+            }
+        }
+    }
+    if let Some(agents) = document.get_mut("agents").and_then(Item::as_table_like_mut) {
+        for field in ["hidden_models", "picked_models"] {
+            let Some(map) = agents.get_mut(field).and_then(Item::as_table_like_mut) else {
+                continue;
+            };
+            for (_, item) in map.iter_mut() {
+                if let Some(array) = item.as_array_mut() {
+                    rename_exact_entries(array, &old_ref, &new_ref);
+                }
+            }
+        }
+    }
     Ok(())
+}
+
+/// Replaces string entries equal to `old_ref` with `new_ref`, keeping decor.
+fn rename_exact_entries(array: &mut Array, old_ref: &str, new_ref: &str) {
+    for entry in array.iter_mut() {
+        if let Value::String(text) = entry
+            && text.value() == old_ref
+        {
+            let decor = text.decor().clone();
+            *text = Formatted::new(new_ref.to_owned());
+            *text.decor_mut() = decor;
+        }
+    }
 }
 
 fn rewrite_upstream_group_ref(entry: &mut Value, old_ref: &str, new_ref: &str) {
@@ -697,6 +734,73 @@ listen = \"127.0.0.1:0\"\n\
         ));
         assert_eq!(group.upstreams[2].model.as_deref(), Some("m"));
         let _ = refs;
+    }
+
+    #[test]
+    fn r7a_group_patch_rename_rejects_classifier_naming_the_current_id() {
+        let (text, id) = edit_group_create(BASE, "Old Team", "chat/m").expect("create");
+        let before = text.clone();
+        let error = edit_group_patch(
+            &text,
+            &id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(Some(&format!("group/{id}"))),
+            None,
+            None,
+            Some("new"),
+        )
+        .expect_err("classifier on the current id becomes self after rename");
+        assert!(
+            error.to_string().contains("classify with itself"),
+            "{error}"
+        );
+        assert_eq!(before, text);
+    }
+
+    #[test]
+    fn r7a_group_rename_follows_provider_fallback_and_agent_model_lists() {
+        let (text, id) = edit_group_create(BASE, "Old Team", "chat/m").expect("create");
+        let text = text.replacen(
+            "api_key = \"k\"\n",
+            &format!("api_key = \"k\"\nfallback = [\"group/{id}\"]\n"),
+            1,
+        );
+        let text = format!(
+            "{text}\n[agents]\npicked_only = [\"claude\"]\n\n[agents.picked_models]\nclaude = [\"group/{id}\", \"m\"]\n\n[agents.hidden_models]\ncodex = [\"group/{id}\"]\n"
+        );
+        load(&text).expect("fixture loads");
+        let (renamed, _) = edit_group_patch(
+            &text,
+            &id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("new"),
+        )
+        .expect("rename succeeds with a provider fallback on the group");
+        let config = load(&renamed).expect("load after rename");
+        assert_eq!(
+            config.providers[0].fallback_routes(),
+            vec!["group/new".to_owned()]
+        );
+        assert_eq!(
+            config.agents.picked_models.get("claude"),
+            Some(&vec!["group/new".to_owned(), "m".to_owned()])
+        );
+        assert_eq!(
+            config.agents.hidden_models.get("codex"),
+            Some(&vec!["group/new".to_owned()])
+        );
+        assert!(!renamed.contains(&format!("group/{id}\"")));
     }
 
     #[test]
