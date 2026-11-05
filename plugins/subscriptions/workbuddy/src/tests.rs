@@ -14,10 +14,35 @@ use crate::creds::{self, Credential};
 use crate::discover::{self, REFERENCE_CN};
 use crate::quota;
 use crate::site::Site;
-use crate::{Endpoints, factory_with_extension_data};
+use crate::{Endpoints, contribute, factory_with_extension_data};
 
 const CN: &str = "https://workbuddy-cn.test";
 const TOKEN: &str = "wb-access-test";
+
+/// Resolves agent home the way the daemon does when the override env var is unset.
+fn daemon_agent_home(user_home: &std::path::Path) -> std::path::PathBuf {
+    let decl = contribute()
+        .subscriptions()
+        .first()
+        .expect("factory")
+        .spec()
+        .agent_sign_in()
+        .expect("agent sign-in");
+    user_home.join(decl.home_dir())
+}
+
+fn install_desktop_auth_fixture(data_root: &std::path::Path) {
+    let auth_dir = data_root.join("Public").join("auth");
+    std::fs::create_dir_all(&auth_dir).expect("dir");
+    std::fs::copy(
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/fixtures/workbuddy-desktop.info"
+        ),
+        auth_dir.join("workbuddy-desktop.info"),
+    )
+    .expect("copy");
+}
 
 fn endpoints() -> Endpoints {
     Endpoints {
@@ -89,11 +114,14 @@ fn setup_desktop_auth(dir: &tempfile::TempDir) -> std::path::PathBuf {
 #[test]
 fn a2c_22_discover_import_desktop_auth() {
     let dir = tempfile::tempdir().expect("dir");
-    let data = setup_desktop_auth(&dir);
-    let rows = discover::list(&data).expect("list");
+    let user_home = dir.path().join("user-home");
+    std::fs::create_dir_all(&user_home).expect("dir");
+    let agent_home = daemon_agent_home(&user_home);
+    install_desktop_auth_fixture(&agent_home);
+    let rows = discover::list(&agent_home).expect("list");
     assert_eq!(rows.len(), 1);
     let host = host(&dir);
-    let id = block_on(discover::import(&data, REFERENCE_CN, host.context())).expect("import");
+    let id = block_on(discover::import(&agent_home, REFERENCE_CN, host.context())).expect("import");
     let secret = block_on(host.context().accounts().secret(&id))
         .expect("read")
         .expect("stored");
@@ -104,6 +132,24 @@ fn a2c_22_discover_import_desktop_auth() {
             .as_ref()
             .map(secret_text),
         Some("wb-access-fixture")
+    );
+}
+
+#[test]
+fn a2c_38_discover_resolves_daemon_agent_home() {
+    let dir = tempfile::tempdir().expect("dir");
+    let user_home = dir.path().join("injected-home");
+    std::fs::create_dir_all(&user_home).expect("dir");
+    install_desktop_auth_fixture(&daemon_agent_home(&user_home));
+    let rows = discover::list(&daemon_agent_home(&user_home)).expect("list");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        contribute().subscriptions()[0]
+            .spec()
+            .agent_sign_in()
+            .expect("decl")
+            .home_dir(),
+        crate::auth_store::AGENT_HOME_DIR
     );
 }
 

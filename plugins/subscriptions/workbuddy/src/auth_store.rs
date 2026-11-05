@@ -8,6 +8,14 @@ use crate::site::Site;
 
 const EXTENSION_DATA_ENV: &str = "HOFUND_CODEBUDDY_EXTENSION_DATA";
 
+/// Relative path from the user home to CodeBuddyExtension data (matches agent sign-in).
+#[cfg(target_os = "macos")]
+pub(crate) const AGENT_HOME_DIR: &str = "Library/Application Support/CodeBuddyExtension/Data";
+#[cfg(windows)]
+pub(crate) const AGENT_HOME_DIR: &str = "AppData/Local/CodeBuddyExtension/Data";
+#[cfg(not(any(windows, target_os = "macos")))]
+pub(crate) const AGENT_HOME_DIR: &str = ".local/share/CodeBuddyExtension/Data";
+
 /// Directory that holds `Public/auth/*.info` for both WorkBuddy builds.
 pub(crate) fn extension_data_dir() -> Result<PathBuf, PluginError> {
     if let Ok(dir) = std::env::var(EXTENSION_DATA_ENV) {
@@ -18,13 +26,7 @@ pub(crate) fn extension_data_dir() -> Result<PathBuf, PluginError> {
 }
 
 fn default_extension_data_dir(home: &Path) -> PathBuf {
-    if cfg!(target_os = "macos") {
-        home.join("Library/Application Support/CodeBuddyExtension/Data")
-    } else if cfg!(windows) {
-        home.join("AppData/Local/CodeBuddyExtension/Data")
-    } else {
-        home.join(".local/share/CodeBuddyExtension/Data")
-    }
+    home.join(AGENT_HOME_DIR)
 }
 
 fn user_home() -> Result<PathBuf, PluginError> {

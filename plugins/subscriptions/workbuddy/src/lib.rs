@@ -31,7 +31,7 @@ static SPEC: SubscriptionSpec = SubscriptionSpec::from_static(
 .with_agent_sign_in(AgentSignIn::new(
     &["workbuddy", "workbuddy-ai"],
     "HOFUND_CODEBUDDY_EXTENSION_DATA",
-    ".",
+    auth_store::AGENT_HOME_DIR,
 ));
 
 /// Registers the WorkBuddy subscription.
