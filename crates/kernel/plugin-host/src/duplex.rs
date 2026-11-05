@@ -258,14 +258,22 @@ fn error_chain_message(error: &reqwest::Error) -> String {
     message
 }
 
-fn http2_unavailable_message(message: &str) -> bool {
+fn stream_refused_message(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
-    lower.starts_with("err_http2")
+    // h2 0.4.20: "stream error received: refused stream before processing any application logic"
+    lower.contains("stream error received:") && lower.contains("refused stream")
+}
+
+fn http2_unavailable_message(message: &str) -> bool {
+    if stream_refused_message(message) {
+        return false;
+    }
+    let lower = message.to_ascii_lowercase();
+    lower.contains("protocol error:")
+        || lower.contains("endpoint requires http/1.1")
         || lower.contains("h2 is not supported")
         || lower.contains("alpn")
         || lower.contains("nghttp2")
-        || lower.contains("http2 unavilable")
-        || lower.contains("cannot start a connection")
         || lower.contains("noapplicationprotocol")
         || lower.contains("no application protocol")
 }
@@ -275,6 +283,9 @@ pub(crate) fn classify_duplex_failure(
     is_connect: bool,
     message: &str,
 ) -> PluginError {
+    if stream_refused_message(message) {
+        return PluginError::transport(format!("{STREAM_REFUSED}: {message}"));
+    }
     if http2_unavailable_message(message) {
         return PluginError::transport(format!("{HTTP2_UNAVAILABLE}: {message}"));
     }
@@ -285,9 +296,6 @@ pub(crate) fn classify_duplex_failure(
         return PluginError::timeout(format!("{HEADERS_TIMED_OUT}: {message}"));
     }
     let lower = message.to_ascii_lowercase();
-    if lower.contains("stream refused") || lower.contains("refused_stream") {
-        return PluginError::transport(format!("{STREAM_REFUSED}: {message}"));
-    }
     if lower.contains("stream error") && !lower.contains("refused") {
         return PluginError::transport(format!("{STREAM_REFUSED}: {message}"));
     }
@@ -337,7 +345,8 @@ mod tests {
 
     #[test]
     fn alpn_failure_uses_http2_unavailable_prefix() {
-        let error = classify_duplex_failure(false, false, "h2 is not supported by proxy");
+        let proxy = "error sending request for url (https://proxy.test/duplex): http2 error: h2 is not supported by proxy";
+        let error = classify_duplex_failure(false, true, proxy);
         assert_eq!(error.kind(), PluginErrorKind::Transport);
         assert!(
             error.message().starts_with(HTTP2_UNAVAILABLE),
@@ -348,7 +357,11 @@ mod tests {
 
     #[test]
     fn stream_refused_uses_its_prefix() {
-        let error = classify_duplex_failure(false, false, "REFUSED_STREAM before headers");
+        let refused = concat!(
+            "error sending request for url (http://127.0.0.1:9/duplex): http2 error: ",
+            "stream error received: refused stream before processing any application logic"
+        );
+        let error = classify_duplex_failure(false, true, refused);
         assert_eq!(error.kind(), PluginErrorKind::Transport);
         assert!(
             error.message().starts_with(STREAM_REFUSED),
@@ -358,13 +371,68 @@ mod tests {
     }
 
     #[test]
+    fn native_h2_protocol_error_uses_http2_unavailable_prefix() {
+        let message = concat!(
+            "error sending request for url (http://127.0.0.1:9/duplex): http2 error: ",
+            "protocol error: unspecific protocol error detected"
+        );
+        let error = classify_duplex_failure(false, true, message);
+        assert_eq!(error.kind(), PluginErrorKind::Transport);
+        assert!(
+            error.message().starts_with(HTTP2_UNAVAILABLE),
+            "{}",
+            error.message()
+        );
+    }
+
+    #[test]
+    fn native_h2_http11_required_uses_http2_unavailable_prefix() {
+        let message = concat!(
+            "error sending request for url (http://127.0.0.1:9/duplex): http2 error: ",
+            "connection error received: endpoint requires HTTP/1.1"
+        );
+        let error = classify_duplex_failure(false, true, message);
+        assert_eq!(error.kind(), PluginErrorKind::Transport);
+        assert!(
+            error.message().starts_with(HTTP2_UNAVAILABLE),
+            "{}",
+            error.message()
+        );
+    }
+
+    #[test]
+    fn ordinary_connect_failure_stays_connect() {
+        let message = "error sending request for url (http://127.0.0.1:9/duplex): error trying to connect: tcp connect error: Connection refused (os error 111)";
+        let error = classify_duplex_failure(false, true, message);
+        assert_eq!(error.kind(), PluginErrorKind::Connect);
+        assert!(
+            !error.message().starts_with(HTTP2_UNAVAILABLE),
+            "{}",
+            error.message()
+        );
+        assert!(
+            !error.message().starts_with(STREAM_REFUSED),
+            "{}",
+            error.message()
+        );
+    }
+
+    #[test]
     fn inverted_prefix_branches_fail() {
-        let error = classify_duplex_failure(false, false, "h2 is not supported");
+        let error = classify_duplex_failure(
+            false,
+            false,
+            "error sending request: http2 error: h2 is not supported",
+        );
         assert!(
             !error.message().starts_with(STREAM_REFUSED),
             "http2 unavailable must not look like stream refused"
         );
-        let error = classify_duplex_failure(false, false, "REFUSED_STREAM");
+        let refused = concat!(
+            "error sending request: http2 error: ",
+            "stream error received: refused stream before processing any application logic"
+        );
+        let error = classify_duplex_failure(false, false, refused);
         assert!(
             !error.message().starts_with(HTTP2_UNAVAILABLE),
             "stream refused must not look like http2 unavailable"
@@ -383,6 +451,61 @@ mod tests {
             Arc::new(Mutex::new(Vec::new())),
         )
         .await
+    }
+
+    async fn spawn_h2_refused_stream_server() -> u16 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    let Ok(mut connection) = h2::server::handshake(stream).await else {
+                        return;
+                    };
+                    while let Some(result) = connection.accept().await {
+                        let Ok((_, mut respond)) = result else {
+                            continue;
+                        };
+                        respond.send_reset(h2::Reason::REFUSED_STREAM);
+                    }
+                });
+            }
+        });
+        port
+    }
+
+    #[tokio::test]
+    async fn native_h2_refused_stream_open_duplex_yields_stream_refused_prefix() {
+        let port = spawn_h2_refused_stream_server().await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let http = Arc::new(PooledHttp::new(HttpProfile::direct()));
+        let context = context_for_http(http);
+        let error = match context
+            .http()
+            .open_duplex(DuplexRequest::post(format!(
+                "http://127.0.0.1:{port}/duplex"
+            )))
+            .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("refused stream must not open"),
+        };
+        assert_eq!(
+            error.kind(),
+            PluginErrorKind::Transport,
+            "{}",
+            error.message()
+        );
+        assert!(
+            error.message().starts_with(STREAM_REFUSED),
+            "{}",
+            error.message()
+        );
     }
 
     #[tokio::test]

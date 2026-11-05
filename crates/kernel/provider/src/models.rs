@@ -1082,12 +1082,18 @@ mod tests {
             }
         });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let client = crate::http::build_private_client_insecure_for_tests(
-            std::time::Duration::from_secs(5),
-            std::time::Duration::from_secs(5),
-        )
-        .expect("client");
-        let _ = client
+        let mut endpoint =
+            crate::http::Endpoint::new("test", format!("https://127.0.0.1:{port}/v1"));
+        endpoint.client = Some(
+            crate::http::build_private_client_insecure_for_tests(
+                std::time::Duration::from_secs(5),
+                std::time::Duration::from_secs(5),
+            )
+            .expect("client"),
+        );
+        let model_client = super::ModelClient::new(&endpoint).expect("model client");
+        let _ = model_client
+            .client
             .get(format!("https://127.0.0.1:{port}/v1/models"))
             .send()
             .await

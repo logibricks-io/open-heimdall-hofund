@@ -264,12 +264,24 @@ async fn balance_client_sends_an_http11_request_line_over_https_when_alpn_offers
         }
     });
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    let client = crate::http::build_private_client_insecure_for_tests(
-        std::time::Duration::from_secs(5),
-        std::time::Duration::from_secs(5),
+    let mut endpoint = endpoint(&format!("https://127.0.0.1:{port}"));
+    endpoint.client = Some(
+        crate::http::build_private_client_insecure_for_tests(
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(5),
+        )
+        .expect("client"),
+    );
+    let reader = BalanceReader::new(
+        endpoint,
+        BalanceOptions {
+            url: format!("https://127.0.0.1:{port}/balance"),
+            ..BalanceOptions::default()
+        },
     )
-    .expect("client");
-    let _ = client
+    .expect("reader");
+    let _ = reader
+        .client
         .get(format!("https://127.0.0.1:{port}/balance"))
         .send()
         .await

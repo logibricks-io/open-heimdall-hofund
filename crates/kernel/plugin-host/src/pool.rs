@@ -327,6 +327,20 @@ pub(crate) fn duplex_client_for(
     )
 }
 
+#[cfg(test)]
+pub(crate) fn duplex_client_for_read(
+    profile: &HttpProfile,
+    dial: DuplexDial,
+    read: Duration,
+) -> Result<reqwest::Client, PluginError> {
+    client_for(
+        profile,
+        crate::duplex::duplex_limits().with_read(read),
+        ClientMode::Duplex,
+        dial,
+    )
+}
+
 fn build_client(key: &ClientKey) -> Result<reqwest::Client, PluginError> {
     // No whole-call timeout. `read` is per read and resets after each
     // successful read, so a long stream is not killed by a total budget.
@@ -571,7 +585,7 @@ impl HttpBackend for PooledHttp {
 mod tests {
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex, RwLock};
     use std::time::Duration;
 
@@ -1198,6 +1212,74 @@ mod tests {
             rest.extend_from_slice(&chunk.expect("ok"));
         }
         assert_eq!(rest, b"data: two\n\n");
+    }
+
+    #[tokio::test]
+    async fn duplex_response_body_read_timeout_is_interrupted_not_timeout() {
+        let _guard = exclusive().await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    let Ok(mut connection) = h2::server::handshake(stream).await else {
+                        return;
+                    };
+                    while let Some(result) = connection.accept().await {
+                        let Ok((request, mut respond)) = result else {
+                            continue;
+                        };
+                        tokio::spawn(async move {
+                            let response = http::Response::builder()
+                                .status(200)
+                                .body(())
+                                .expect("response");
+                            let Ok(mut send) = respond.send_response(response, false) else {
+                                return;
+                            };
+                            let _ = send.send_data(bytes::Bytes::from_static(b"hold"), false);
+                            let _ = request.into_body();
+                            tokio::time::sleep(Duration::from_secs(30)).await;
+                        });
+                    }
+                });
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let client = super::duplex_client_for_read(
+            &HttpProfile::direct(),
+            super::DuplexDial::PriorKnowledge,
+            Duration::from_millis(400),
+        )
+        .expect("client");
+        let response = client
+            .post(format!("http://127.0.0.1:{port}/duplex"))
+            .body(reqwest::Body::from("x"))
+            .send()
+            .await
+            .expect("headers");
+        let mut body = super::live_duplex_body(response, Arc::new(AtomicBool::new(false)));
+        let first = body.next_chunk().await.expect("first chunk").expect("ok");
+        assert_eq!(&first[..], b"hold");
+        let started = std::time::Instant::now();
+        let error = body
+            .next_chunk()
+            .await
+            .expect("timeout chunk")
+            .expect_err("stall");
+        assert_eq!(
+            error.kind(),
+            PluginErrorKind::Interrupted,
+            "{}",
+            error.message()
+        );
+        assert_ne!(error.kind(), PluginErrorKind::Timeout);
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 
     #[tokio::test]
