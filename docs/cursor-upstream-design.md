@@ -24,7 +24,7 @@ Each frame is a 5-byte head plus a payload. Byte 0 is flags. Bytes 1-4 are a big
 
 The trailer JSON is what `failure` parses (`index.mjs:1650-1665`): either `{code, message, details}` or the same object under `error`. The useful text is `details[].debug.details.title` plus `detail` when that pair is more than `":"`.
 
-Hofund does not have an inflate crate (`plugin-sdk/Cargo.toml` has no `flate2` or `miniz_oxide`). The plugin cannot take a new dependency (`docs/plugins/boundary.md`). R-8 adds `hofund_plugin_sdk::inflate::gzip` backed by `flate2` with the pure-Rust backend only. One version must satisfy `deny.toml` `multiple-versions = "deny"`. The helper is generic. It does not mention Cursor. A frame with the gzip bit set and a body `inflate` rejects is a decode error for that Run, not a retry on the other transport.
+Hofund does not have an inflate helper yet (`plugin-sdk/Cargo.toml` has no `flate2` entry). The plugin cannot take a new dependency (`docs/plugins/boundary.md`). R-8 adds `hofund_plugin_sdk::inflate::gzip` backed by `flate2` 1.1.10 (`Cargo.lock`) with `default-features = false` and the pure-Rust backend so it shares `miniz_oxide` 0.9.1 with the rest of the tree. `miniz_oxide` 0.8.9 is already pulled by `png` for the menu-bar icons (`deny.toml:57` skips that duplicate until the icon stack moves to 0.9; adding SDK `flate2` must not add a new skip). The helper is generic. It does not mention Cursor. A frame with the gzip bit set and a body `inflate` rejects is a decode error for that Run, not a retry on the other transport.
 
 ### 1.2 HTTP/2 Run
 
@@ -96,7 +96,7 @@ Up: each client frame's payload (the 5-byte head stripped) is `POST /aiserver.v1
 
 `BidiAppend` calls stay ordered. Up to 16 may be in flight (`H1.atOnce`). A message `kvReply` accepts (first payload byte `0x1a`, field 3 length-delimited) may sit in that window. Any other message waits until every earlier append has completed, goes alone, and is acknowledged before the next write. A native Run sends only KV replies in the window; a tool result does not (`index.mjs:2428-2433`). R-8 has the same split: the opening Run request and exec refusals are alone; blob replies pipeline.
 
-Deadline: 60 seconds plus one second per whole 65536 bytes of the append body (`index.mjs:2525-2539`). A timeout ends the Run with Connect code `deadline_exceeded`. A transport failure ends it with `unavailable`. The RunSSE read and the appends share one cancel flag.
+Deadline: 60 seconds plus `Math.ceil(body.length / 65536) * 1000` milliseconds, where `body` is the full protobuf built for that append (`index.mjs:2524-2525`, `2528-2532`). One byte of payload therefore gets 61 seconds. A timeout ends the Run with Connect code `deadline_exceeded`. A transport failure ends it with `unavailable`. The RunSSE read and the appends share one cancel flag.
 
 ### 1.6 Messages the codec must read and write
 
@@ -117,11 +117,11 @@ Client message (one unframed payload, then framed on the wire):
 | Field | Contents |
 |---|---|
 | 1 | conversation state |
-| 2 | action: field 2 wraps a request context |
-| 3 | model details: field 1, 3, and 4 are the model id string; field 7 varint 1 when Max Mode |
+| 2 | action: field 2 wraps field 2 again, which wraps the request context (`pb().bytes(2, pb().bytes(2, rc))`, `index.mjs:2282-2294`) |
+| 3 | model details: field 1, 3, and 4 are the model id string; field 7 varint 1 when Max Mode (R-9) |
 | 4 | MCP wrapper: field 1 repeated tool definitions |
 | 5 | conversation id string |
-| 9 | requested model: field 1 model id; field 2 varint 1 when Max Mode; field 3 repeated `{field 1 id, field 2 value}` parameters |
+| 9 | requested model: field 1 model id; field 2 varint 1 when Max Mode (R-9); field 3 repeated `{field 1 id, field 2 value}` parameters (R-9 effort from the picker) |
 | 19 | varint 1, inline images |
 
 Conversation state: field 1 repeated SHA-256 ids of transcript blobs; field 8 the user-turn blob id; field 10 varint 1; field 22 `"cli"`.
@@ -182,14 +182,15 @@ From `native-session.mjs` `NATIVE_LIMITS` (lines 8-47) and `Quiet` (lines 93-231
 |---|---|---|
 | HTTP/2 head | 15 s | time to response headers. Failure can set the 10-minute memory. |
 | HTTP/2 memory | 10 min | later Runs skip HTTP/2 |
-| Append | 60 s + 1 s per 64 KiB | one `BidiAppend` |
+| Append | 60 s + ceil(protobuf body / 65536) s | one `BidiAppend` (`index.mjs:2524-2525`) |
 | Idle | 60 s | no server frame at all. `Quiet.fire`. |
 | Quiet | 240 s | only heartbeats. Accumulated wait, not wall time while the plugin is busy, and not time parked on the caller. |
 | Client heartbeat | 5 s | our field-7 frames |
 | Config negative cache | 60 s | unlisted agent URL |
 | Model list | 10 min | not on the Run path in R-8 |
 | Tool count wait | 60 s | R-9 only. After at least one caller call, if no count has arrived and nothing is still streaming a call, heartbeats do not extend the wait (`decode` `read`, `index.mjs:3020-3057`; `countWait` in `native-session.mjs:19-24`). |
-| Outbound drain | 30 s | native retention only. Deferred. |
+| Outbound `writeWait` | 30 s | native retention only: KV reply waits for queue room (`native-session.mjs:36`). Deferred. |
+| Outbound `drain` | 6 s | native retention only: delay after turn end before `complete()` (`native-session.mjs:25`, `1236-1238`). Deferred. |
 
 `Quiet` resets its heartbeat tally on any non-heartbeat frame. The error is HTTP 502 and includes the last frame kind. A checkpoint names its index. Tests shrink these limits; production uses the table.
 
@@ -206,14 +207,14 @@ Weights:
 | What it must match | `PB`, `fields`, `pbValue`, `frame` (`index.mjs:1471-1639`), including "drop a malformed tail" | A schema we do not have. The reference never compiled one. Field numbers are the spec. |
 | Dependencies | None beyond `flate2` in the SDK for the frame gzip bit, and `ring` (already in the SDK) for SHA-256 blob ids | `prost` runtime. A build script is forbidden on a plugin (`docs/plugins/boundary.md`, `xtask/src/boundary.rs`). Checked-in generated code still needs the runtime crate. |
 | Boundary | Legal. The plugin may depend on the SDK, and the SDK grows one inflate function. | Illegal as a direct plugin dependency. Putting `prost` in the SDK compiles it into every plugin for one vendor's partial schema, and it puts field numbers in a crate that must stay vendor-neutral. |
-| `cargo-deny` | `flate2` with `rust_backend` pulls `miniz_oxide` once. No second version exists in the tree today. | `prost-types` and any older `prost` pulled by a future crate trip `multiple-versions = "deny"`. |
+| `cargo-deny` | SDK `flate2` with `rust_backend` reuses `miniz_oxide` 0.9.1; 0.8.9 stays only on the `png` path until that dependency upgrades. | `prost-types` and any older `prost` pulled by a future crate trip `multiple-versions = "deny"`. |
 | Build time | A few hundred lines of plain Rust. No `protoc`. | A plugin cannot run `protoc`. Generating elsewhere and checking the output in still needs a human to regenerate when a field is discovered. |
 | Maintenance | New fields are an explicit match arm plus a golden frame. Unknown fields already pass through the skip path. | Generated structs invite sending fields the reference never sends. `upstream-words.test.mjs` forbids the reference product name in any outbound byte. A generated catalog is how that name leaks back in. |
 | Numeric range | Decode varints as `u64`. The reference uses JavaScript numbers and goes wrong past 2^53. Exec ids are uint32 (`exec`, `index.mjs:3228-3233`). A test locks a varint above 2^53 so we do not copy that bug. | `prost` would also use `u64`, then we would still hand-check the subset. |
 
 Attack on the hand-written codec: it will drift. The defense is golden frames taken from `native-test-wire.mjs` shapes used by `stall-550.test.mjs` (text, thinking, heartbeat, exec, count, checkpoint, get-blob, set-blob), round-tripped in Rust, plus a fuzz-sized truncated buffer that must match `fields`' "return what you have" rule. Do not invent packed repeated fields or groups. The reference reader rejects wire type other than 0, 1, 2, and 5 by stopping.
 
-Namespace on the wire is the literal `tools` (`index.mjs:1749`). The reference still accepts one historical namespace when reading a call back, and `upstream-words.test.mjs` asserts that namespace is never written. Hofund accepts it on read and never emits it. Outbound bytes, prompts, and tool definitions must not contain the reference product name or `hofund`.
+Namespace on the wire is the literal `tools` (`index.mjs:1749`). When reading a namespaced tool name back, the reference also accepts one historical namespace string kept in a `NAMESPACES` array beside `tools` (`index.mjs:1749-1750`, `bareName`). That string is the reference product's old MCP label; it must not appear in outbound plugin bytes (`upstream-words.test.mjs`). Hofund keeps the same read alias in plugin-local data (a small constant table in the Cursor plugin crate, not kernel code), accepts it on decode only, and never writes it. A unit test feeds a golden exec name under the alias and asserts the decoded tool name; another golden Run or catalog frame asserts outbound bytes contain only `tools`, never the alias.
 
 ## 3. Transport inside hofund
 
@@ -221,7 +222,7 @@ Namespace on the wire is the literal `tools` (`index.mjs:1749`). The reference s
 
 `HttpHandle::send` takes `http::Request<Body>` and returns `http::Response<BodyStream>` (`crates/kernel/plugin-api/src/host.rs:36-52`). `Body` is a finished byte buffer (`body.rs:11-16`). `BodyStream` is the response only. `HttpBackend::send` has the same shape (`kernel.rs:47-55`). There is no second write after headers, no HTTP version pin, and no duplex split.
 
-`Call::open` (`plugin-sdk/src/transport.rs:290`) can leave a response body unread. That is enough for RunSSE and for a unary `BidiAppend`. It is not enough for `AgentService/Run`, which writes frames after the head and keeps writing while it reads.
+`Call::open` (`plugin-sdk/src/transport.rs:290-296`) reads the body and turns any status ≥ 400 into the same `PluginError` as `Call::send` (`transport.rs:217-221`), which also consumes the body. That matches unary Connect JSON. It cannot implement the HTTP/1.1 Run path: on RunSSE or `BidiAppend` failure the reference reads the HTTP body itself, builds a synthetic Connect end frame (flag byte 2) whose JSON is `{error: {code, message}}`, and maps bare HTTP statuses through `connectCode` (`index.mjs:2511-2517`, `2447-2448`). Hofund must do the same on the plugin side.
 
 The pooled client is `reqwest` 0.12 with `default-features = false` and only `rustls-tls-native-roots` (`crates/kernel/plugin-host/Cargo.toml:21`). The `http2` and `stream` features are off, so today's client does not speak HTTP/2. `HttpLimits::default` uses a 10-second connect budget and a 60-second idle read budget (`pool.rs:23-24`, `66-72`). The read budget resets after each successful read. It is process-wide.
 
@@ -276,9 +277,9 @@ Attack on prefixes: a future edit that rewords them silently disables the fallba
 
 ### 3.3 What the plugin does with it
 
-HTTP/2 Run: `open_duplex` with `HttpVersionPin::Http2`, write the first frame only after a 2xx head, then interleave writes and reads. HTTP/1.1 RunSSE: existing `Call::open` on the HTTP/1.1 pool, buffered body, streamed response. Each `BidiAppend`: existing `Call::send`, buffered body, buffered response. Concurrency of 16 is a `FuturesUnordered` polled on the execute task. `futures-util` is not a plugin dependency. The SDK re-exports the small piece the plugin needs (`FuturesUnordered` and a two-future race). It does not become a general runtime.
+HTTP/2 Run: `open_duplex` with `HttpVersionPin::Http2`, write the first frame only after a 2xx head, then interleave writes and reads. HTTP/1.1 RunSSE: `Call::open_raw` on the HTTP/1.1 pool with `attempts = 1`, so a non-2xx status returns an unread body the plugin caps and maps like `failed` above; only connect-class failures retry (`transport.rs:404-414`, Connect retries on POST, not timeout/transport after a status). Stream the 2xx body. Each `BidiAppend`: `Call::fetch` with `attempts = 1` (same retry rule), then classify `!res.ok` locally. Do not use `Call::open` or `Call::send` on either HTTP/1.1 Run leg. Concurrency of 16 is a `FuturesUnordered` polled on the execute task. `futures-util` is not a plugin dependency. The SDK re-exports the small piece the plugin needs (`FuturesUnordered` and a two-future race). It does not become a general runtime.
 
-Attack: sixteen blocking `Call::send` futures inside one task are fine only if each one yields. `Call::send` is async and uses the host client, so they will. A synchronous inflate of a 64 MiB frame on that task will stall the append window and the stall clock. Cap a frame at 64 MiB, inflate with a size cap, and treat a larger frame as malformed the way `frames` does.
+Attack: sixteen blocking `Call::fetch` futures inside one task are fine only if each one yields. `Call::fetch` is async and uses the host client, so they will. A synchronous inflate of a 64 MiB frame on that task will stall the append window and the stall clock. Cap a frame at 64 MiB, inflate with a size cap, and treat a larger frame as malformed the way `frames` does.
 
 ## 4. Request mapping
 
@@ -298,9 +299,7 @@ Conversation id: a new UUID per `execute`. The reference does that when nothing 
 
 Model id: R-8 sends `request.model` as model details and requested model, including the literal `auto`. It does not call the picker. The full picker (`request` / `pick` / `modelsOf` / `fromCatalog`, `index.mjs:1176-1217` and `1031-1150`) is a catalog project of its own: usable models, hidden Anthropic families, context-size ids, and fast variants. Hofund's `list_models` is `cursor-agent models` text, not `AvailableModels`.
 
-Max Mode: R-8 retries once when the error matches `maxRequired` (`index.mjs:3328`, `/max[ _]mode[ _]required|requires max mode/i`) and the first attempt was not already Max Mode. Remember that model id for the process (`maxOnly`). A second refusal is returned as the server's error. This retry runs inside `execute`, before `Ok(stream)`, and only when no text event has been produced.
-
-`GenerationParams::effort` exists (`crates/kernel/ir/src/params.rs:37-42`, `effort.rs`). `service_tier` does not exist on `Request`. R-8 sends no effort parameters and does not send `fast`. R-9 passes effort when the caller set it, using the reference's level order `none, minimal, low, medium, high, xhigh, max` (`LEVEL_RANK`, `index.mjs:862`) and `fitEffort` (lines 1245-1258). `Effort::None` is thinking off for a Claude-shaped id, matching `thinking=false` in `pick` (lines 1186-1188). Absent effort sends no effort parameter. Fast stays off until the IR can say it. Sending `fast=true` by default would bill a more expensive variant (`README.md` on `service_tier`).
+`GenerationParams::effort` exists (`crates/kernel/ir/src/params.rs:37-42`, `effort.rs`). `service_tier` does not exist on `Request`. R-8 sends no effort parameters, no Max Mode bits on fields 3 or 9, and does not send `fast`. R-9 passes effort when the caller set it, using per-model level lists from the picker (`fitEffort`, `index.mjs:1245-1258`, `LEVEL_RANK`, line 862). Until the picker lands, defer effort parameters with the picker rather than inventing level lists in the plugin. `Effort::None` is thinking off for a Claude-shaped id, matching `thinking=false` in `pick` (lines 1186-1188). Fast stays off until the IR can say it. Sending `fast=true` by default would bill a more expensive variant (`README.md` on `service_tier`).
 
 Sampling parameters (`temperature`, `top_p`, penalties, stop, seed, `max_tokens`) have nowhere to go on this wire. They are ignored. Document that in the comparison table. Do not fail the request because of them: Chat clients send defaults.
 
@@ -312,14 +311,14 @@ The stream is `Completion::Stream` of:
 
 1. `MessageStart` with a generated id and the requested model.
 2. `ContentBlockStart` text index 0, then `TextDelta` for each interaction text field.
-3. On a clean turn end with any text: `MessageDelta` stop `Stop::EndTurn`, `ContentBlockStop`, `MessageStop`.
+3. On a clean turn end with any text: `MessageDelta` with `Stop { reason: StopReason::EndTurn }`, `ContentBlockStop`, `MessageStop`.
 4. Usage is omitted in R-8 even if field 14 arrives. The turn end is only a delimiter. Guessing usage here is how a client treats a made-up prompt size as a full context window.
 
-Before returning `Ok`, drive the Run until the first text delta or a terminal failure. A region failure and a Max Mode failure retry inside that loop. The router failovers only before the first byte (`decision.rs` `allows`). An internal retry after a yielded delta cannot be taken back.
+Before returning `Ok`, drive the Run until the first text delta or a terminal failure. A region failure retries inside that loop (section 1.3). The router failovers only before the first byte (`decision.rs` `allows`). An internal retry after a yielded delta cannot be taken back.
 
 KV fetches, client heartbeats, request-context execs, and refusals of every other exec, including MCP, are part of R-8. Without them a text Run stalls or dies on the first server question.
 
-R-8 requests that contain an image or a tool (or a tool result) return `PluginError::status_error(400, ...)` before a Run, with `without_cooldown`, and with wording that `too_long` does not match. `Unsupported` does not fail over (`allows` returns false for every kind other than connect-class, `Status`, and `Quota`, `decision.rs:171-178`). A 400 that is not in the default failover set still fails over when it matches the shape or wrong-endpoint lists. Do not reuse those phrases. They mark the request as the wrong API for every vendor (`asks_next`). The honest R-8 behavior for tools and images is: the Cursor member does not take them until R-9, the error does not rest the account, and another member may try. If a 400 without those phrases does not fail over, return `Status` 404 with a clear message. 404 is in the default failover set (`config` test `default_failover_lists_auth_and_every_server_status`, `crates/kernel/config/src/lib.rs:2712-2716`) and `model_unserved` will not match unless the text looks like a missing model. Keep the words "tools are not served" / "images are not served", which do not match `UNSERVED_WORDS` (`decision.rs:49-52`).
+R-8 requests that contain an image or a tool (or a tool result) return `PluginError::status_error(404, ...)` with `without_cooldown`, and with wording that `too_long` does not match. Use only the fixed phrases "tools are not served" and "images are not served". `Unsupported` does not fail over (`allows` returns false for every kind other than connect-class, `Status`, and `Quota`, `decision.rs:171-178`). Status 404 is in the default failover set (`config` test `default_failover_lists_auth_and_every_server_status`, `crates/kernel/config/src/lib.rs:2712-2717`); 400 is not, and a 400 without the shape or wrong-endpoint word lists would not try another member (`allows`, `decision.rs:194-204`). Do not reuse the wrong-endpoint phrases. They mark the request as the wrong API for every vendor (`asks_next`). The honest R-8 behavior for tools and images is: the Cursor member does not take them until R-9, the error does not rest the account, and another member may try.
 
 Attack: 404 for "tools not served" can be read as a missing route. That is still better than a cooled account or a text answer that dropped the tool. R-9 deletes this rejection.
 
@@ -329,7 +328,7 @@ An empty text turn includes the exact substring `an empty reply (the model answe
 
 Tools. `toolsOf` (`index.mjs:1731-1740`): `tool_choice` none sends no tools; a named choice sends that function; otherwise every function tool. The system blob gains the catalog from `catalog` (lines 1763-1767), which tells the model to call `CallDynamicTool` with namespace `tools`. History encodes assistant tool calls as AI SDK tool-call parts whose tool name is `CallDynamicTool` and whose arguments are `{namespace, toolName, arguments}` (`conversation`, lines 1836-1841`). Call ids replace a newline with `__` on the way out and restore it on the way back (`callID`, line 1772).
 
-A server MCP exec whose tool name is one of the request's tools becomes `ContentBlockStart::ToolCall` plus a `ToolArgumentsDelta` holding the full JSON arguments (the wire delivers the arguments in one exec, not as token deltas) and `ContentBlockStop`. Stop reason is tool use. Cursor's own tools stay refused. `GetDynamicTools` (exec field 36) is answered with the request's tools and is not a caller event.
+A server MCP exec whose tool name is one of the request's tools becomes `ContentBlockStart { block: BlockStart::ToolCall { id, name } }` plus a `ToolArgumentsDelta` holding the full JSON arguments (the wire delivers the arguments in one exec, not as token deltas) and `ContentBlockStop`. Stop reason is tool use. Cursor's own tools stay refused. `GetDynamicTools` (exec field 36) is answered with the request's tools and is not a caller event.
 
 `stall-550`: once any caller call has been emitted, a 60-second wait with only heartbeats, or a checkpoint whose pending set equals the calls already handed over, ends the step with those calls. Calls the server completed by itself count toward the announced total and are not emitted. The step's error text, when the count never arrives and the stream then goes quiet, names how many were listed, emitted, answered locally, and completed by the server (`decode` catch, `index.mjs:3182-3188`).
 
@@ -339,7 +338,7 @@ Images. Encoded as in section 4.1. A base64 `ImageSource` is the hex form. A URL
 
 Usage. On a turn that ends without tool calls, map field 14 through `usageOf` into `hofund_ir::Usage`: `input_tokens` is uncached plus cache read plus cache write, `output_tokens` is field 2, `cache_read_tokens` field 3, `cache_write_tokens` field 4, `reasoning_tokens` field 5, `total_tokens` is input plus output. This is the last `MessageDelta`.
 
-A tool step has no field 14 until the tool results come back on the same Run, and the caller runs tools after this `execute` returns (`index.mjs:1946-1956`). R-9 closes the Run, then polls `DashboardService/GetFilteredUsageEvents` (`index.mjs:2076-2089`) with the team id in the header and, when present, `teamId` in the body (`teamBody`, lines 177-179`). Window: first wait 1.5 seconds, then every 500 milliseconds, give up at 6 seconds, each request budget 5 seconds (`STEP_WAIT`, line 1973). Match `conversationId` and a timestamp at or after the Run start minus one second. Claim that timestamp so a retry does not bill it twice.
+A tool step has no field 14 until the tool results come back on the same Run, and the caller runs tools after this `execute` returns (`index.mjs:1946-1956`). R-9 closes the Run, then polls `DashboardService/GetFilteredUsageEvents` (`index.mjs:2076-2081`) with Connect JSON headers from `headersFor` (`index.mjs:275-285`, `content-type: application/json`, not Run `application/connect+proto`), optional `teamId` in the JSON body (`teamBody`, lines 177-179), and `startDate = since - 60_000`, `endDate = now + 60_000`, `page = 1`, `pageSize = 50`. Window: first wait 1.5 seconds, then every 500 milliseconds, give up at 6 seconds, each request budget 5 seconds (`STEP_WAIT`, line 1973). Claim rows where `conversationId` matches and `timestamp >= since - 1000` (`index.mjs:2088-2100`). Dashboard `tokenUsage.inputTokens` is already the uncached portion; the reference sets `reasoning` to 0 for events (`index.mjs:2102`). Hofund `input_tokens` for the step is `inputTokens + cacheReadTokens + cacheWriteTokens`, not `inputTokens` minus cache again.
 
 If the poll misses, report zeros for that step. Do not estimate. The reference estimates only when the account cannot read events or nothing can collect them later (`finish`, `index.mjs:2977-2982`). An estimate stored in `input_tokens` is what clients read as context fullness. Hofund `Usage` has no deferred-usage bag, and a later `execute` has no ledger to attach it to. The cross-step debt (`owed`, `skipAfter`, the deferred bag) is deferred. Polling once per tool step is the part that fits a stateless call.
 
@@ -355,7 +354,7 @@ Three sources, matching `tokenOf` (`index.mjs:368-377`) and `README.md` "Signing
 |---|---|---|---|
 | Browser PKCE | Existing `sign_in.rs`. Poll `auth/poll`. | It is not renewed on the chat path. `tokenOf` returns the access token until `exp`, then a 401. The reference says the CLI has no renew call for this token. | Account store only. |
 | cursor-agent | Keychain on macOS, else `auth.json`. Marker `cursor-agent` (`tokens.rs` `AGENT_MARK`). | When expiry is within 5 minutes (`SOON`, `index.mjs:244`; hofund `REFRESH_MARGIN`), run `cursor-agent status` once and reread with `fresh`. | The account store holds the marker, not the access token. The token is read from the CLI store. |
-| API key | `POST /auth/exchange_user_api_key` body `{}`, `keyToken` (`index.mjs:348-364`). Authorization is the key. `Connect-Protocol-Version` is omitted. 5xx is a transport-class failure. A body without `accessToken` is a 401. | Again when the exchanged token's `exp` is within 5 minutes. Cache in memory by SHA-256 of the key. | The account store holds the key. The exchanged access token is memory only. |
+| API key | `POST /auth/exchange_user_api_key` body `{}`, `keyToken` (`index.mjs:348-364`). Authorization is the key. `Connect-Protocol-Version` is omitted. Network failure and HTTP ≥ 500 map to status 502 (`index.mjs:357-360`). A body without `accessToken` is status 401 (`index.mjs:362`). On the chat path use `PluginError::status_error(502, ...)` and `PluginError::status_error(401, ...)`, not `PluginErrorKind::Transport` or `PluginError::auth`. | Again when the exchanged token's `exp` is within 5 minutes. Cache in memory by SHA-256 of the key. | The account store holds the key. The exchanged access token is memory only. |
 
 Hofund `refresh::oauth_check` posts `/auth/refresh` (`refresh.rs:36-80`). `tokenOf` never does. Keep `refresh()` for an explicit refresh command, serialized by the lease below. The chat path follows `tokenOf`: a browser token past `exp` is a 401, not a silent refresh. A refresh endpoint the reference does not use on chat is how two tasks mint different tokens and the stored one no longer matches the Run.
 
@@ -376,7 +375,7 @@ Keychain (`cli.rs:21-102` versus `index.mjs:182-216` and `cursor.go:234-265`).
 - Any other non-zero exit is a denial. Do not spawn `security` again for 10 minutes (`KEYCHAIN_DENIED`, `keychainDeniedTTL` in `account.go:407-411`), unless the caller passes `fresh` (sign-in and the reread after `status`).
 - `fresh` bypasses both the 10-second cache and the denial period.
 - Overlapping callers share one in-flight spawn (`keychain.busy`).
-- The read has a 10-second timeout, the default of `run` (`index.mjs:63`). On timeout, drop the child (that kills it) and do not set the denial timestamp. A stuck dialog must not block the daemon, and it must not look like the user pressed cancel. The next try is allowed after the 10-second success TTL, because `at` was updated and the token is empty, so the denial branch is not taken.
+- The read has a 10-second timeout, the default of `run` (`index.mjs:63-66`). On timeout, `run` reports exit code `-1`, which `keychainToken` treats like any non-44 failure and sets the 10-minute denial (`index.mjs:206-209`; Go `keychainDenied` when exit ≠ 44, `account.go:546-551`; timeout → exit `-1`, `cursor.go:260-261`). Hofund intentionally does **not** set the 10-minute denial on timeout: a stuck keychain dialog must not block the daemon for ten minutes or masquerade as the user pressing cancel. Drop the child after the timeout, leave `ask` unset, and allow the next read after the 10-second success TTL expires with an empty token. Document this deviation in the adopt-or-redesign table.
 - This needs `PipedChild::exit_code` from section 3. Stdout alone cannot tell 44 from a denial. Today's code drops the child after reading stdout (`cli.rs:98`), which kills it and loses the status. Wait for exit after stdout EOF.
 
 `list_models` (`lib.rs:326-363`, `account_label` at 400-406) writes the access token to `{state}/cursor-models/{sanitized account id}/auth.json` and never removes it. The directory name is derived from the account id, which can carry the mailbox.
@@ -393,20 +392,24 @@ The account store is the only durable copy of a browser token or an API key. Cha
 
 `failure` / `statusOf` (`index.mjs:1650-1686`) and `errors.test.mjs` are the word list. Hofund must not copy the reference's "sign in again in {product}" suffix. The message is the server's text plus a short hofund clause, "sign in to Cursor again", with no other product name.
 
+Classification order matches `statusOf` (`index.mjs:1675-1678`): `regional(msg)` first, then `unauthenticated`, HTTP 401, or message containing `expired`. A regional message stays 403 even when the Connect status was 401.
+
 Map to kinds the router already understands. Do not add a `PluginErrorKind`. Do not add Cursor phrases to `crates/kernel/router`. `failure_kind` (`cooldown.rs:1453-1488`) and `allows` (`decision.rs:171-204`) are the rest rules.
+
+These rows are implemented in R-8 for errors a text-only Run can return; R-9 adds tool-step and Max Mode rows without changing the R-8 mappings.
 
 | Reference outcome | HTTP | Hofund error | Rest |
 |---|---|---|---|
-| `unauthenticated`, HTTP 401, or message containing `expired` (`errors.test.mjs` "any expired is the built-in's 401", including a trial) | 401 | `status_error(401, ...)`. Not `PluginError::auth`. `Auth` does not fail over. | Generic ladder (1 minute, doubling, cap 10 minutes). 401 is in the default failover set, so the next account is tried. |
-| Message contains `region`, after the one host retry | 403 | `status_error(403, server text)`. The reference forces 403 even when the Connect status was something else (`statusOf`, line 1675). | Generic ladder, because 403 is generic, not quota. Failover yes. `REGION_WORDS` will not special-case it. That is acceptable: the plugin already retried the regional host. |
+| `unauthenticated`, HTTP 401, or message containing `expired` (`errors.test.mjs` "any expired is the built-in's 401", including a trial), when not regional | 401 | `status_error(401, ...)`. Not `PluginError::auth`. `Auth` does not fail over. | Generic ladder (1 minute, doubling, cap 10 minutes). 401 is in the default failover set, so the next account is tried. |
+| Message contains `region`, after the one host retry | 403 | `status_error(403, server text)`. The reference forces 403 even when the Connect status was something else (`statusOf`, lines 1675-1676). | Generic ladder, because 403 is generic, not quota. Failover yes. `REGION_WORDS` will not special-case it. That is acceptable: the plugin already retried the regional host. |
 | `permission_denied` that is not regional | 403 | `status_error(403, server text)` | Generic ladder. Failover yes. |
 | `resource_exhausted`, or text containing `quota`, `usage limit`, or `rate limit` | 429 | Split. `quota`, `usage limit`, or `resource_exhausted`: `quota_status(429, "usage limit reached: ...")`. A `rate limit` that does not say quota or usage: `status_error(429, ...)`. | Quota kind: exhausted-quota rest, 15 minutes or a vendor hint, and failover. Status 429: the rate ladder (1 minute, doubling, cap 30 minutes), and failover. The reference collapses both to one 429. Hofund's ladders are different, and a usage-limit rest of 15 minutes matches "the allowance is gone" better than a one-minute rate rest. |
-| `too long`, `context length`, `too many tokens`, including Connect `invalid_argument` whose text says the prompt is too long | 400 | `status_error(400, "input is too long for the model's context: ...")`. That phrase matches `too_long` (`crates/kernel/ir/src/error.rs:12-14`). | `rests` is false. `allows` is true via overflow, even though 400 is not in the default status set. Another member may take a shorter prompt. |
+| `too long`, `context length`, `too many tokens`, including Connect `invalid_argument` whose text says the prompt is too long | 400 | `status_error(400, "input is too long for the model's context: ...")`. That phrase matches `too_long` (`crates/kernel/ir/src/error.rs:12-14`). | `rests` is false. `allows` returns false when `overflowed` (`decision.rs:184-186`), so this error does not fail over by status list. The router tries the next member from the earlier `outgrown` loop when every account of the model is too small (`router/src/lib.rs:1908-1924`). Keep the too-long sentence in tests. |
 | Other `invalid_argument` | 400 | `status_error(400, server text)`, `without_cooldown` when the text does not match quota or unserved-model words | 400 does not cool (`failure_kind` has no arm for a bare 400). It also does not fail over unless the text hits an existing list. Leave the server text intact. |
 | `unavailable` | 503 | `status_error(503, server text)` | Generic ladder, unless the message contains `overloaded`, in which case `vendor_overloaded` (`ir/src/error.rs:80-86`) makes it a 30-second overload rest. Failover yes. |
 | Any other Connect code | 502 | `status_error(502, server text)` | Generic ladder. Failover yes. |
 | Model not allowed, when the text matches `UNSERVED_WORDS` and is not quota text, status 400, 403, 404, or 422 | as mapped | preserve the server text | `model_unserved` uses the generic ladder on that model only (`cooldown.rs:1460-1461`). Do not rewrite the text to force a match. If a captured phrase does not match, add a vendor-neutral pattern to `UNSERVED_WORDS` in a router change. Do not put "Cursor" in the router. |
-| Max Mode required | — | retried once inside the plugin | The router does not see the first failure. |
+| Max Mode required | — | R-9: retried once inside the plugin with field 7 / requested field 2 set (`maxRequired`, `index.mjs:3328`) | The router does not see the first failure. |
 | Empty text turn | 502 | message contains the empty-reply constant from section 4.2 | Does not rest. Does fail over. |
 | Stall after output started | 502 | `the upstream stopped sending`, no empty-reply constant | Rests. Does not fail over, because bytes already went out. |
 | Caller cancel | — | `Cancelled` | Does not rest. |
@@ -433,6 +436,7 @@ The Cursor tests pass Connect bytes to those servers. A separate plugin-host tes
 
 Golden frames, in the plugin, with no socket:
 
+- `AgentRunRequest` action nesting: field 2 length-delimited, inner field 2 length-delimited, innermost request context (`index.mjs:2282-2283`)
 - text delta, thinking delta, heartbeat, turn-end usage, tool count
 - exec MCP arguments and the refusal frame
 - KV get and the KV reply, including the `0x1a` first byte
@@ -483,9 +487,10 @@ Goal: one account can stream text. Tools, images, reasoning events, and usage co
 | Piped exit status | `plugin-api` `PipedChild`, `plugin-host` `piped.rs` | about 120 lines | A drop-kills-before-wait race hides exit 44. |
 | Issue 609 | `cursor/src/cli.rs`, `lib.rs`, `endpoints.rs` | about 250 lines | Denial TTL that treats timeout as denial will hide a slow keychain for 10 minutes. Timeout must not set it. |
 | API-key exchange and lease | `tokens.rs`, `session.rs`, `refresh.rs`, new `exchange.rs`, `import.rs` | about 350 lines | Writing the exchanged token into the account store creates a second source of truth. Memory only. |
-| Team header | `connect.rs`, agent-host module | about 200 lines | Caching the team id under the wrong token bills the wrong team. Key the cache by token hash and require `authId == sub`. |
+| Team header | `connect.rs`, agent-host module | about 200 lines | Caching the team id under the wrong token bills the wrong team. Key the cache by token hash and require `authId == sub`. `cli-config.json` is reread at most every 10 seconds (`TEAM_TTL`, `index.mjs:152-166`): a parse failure keeps the previous value; only `ENOENT` clears it. |
 | Codec and Run session | new `proto.rs`, `frame.rs`, `run.rs`, `upstream.rs` | about 1,400 lines | The stateless Run still has to answer KV and refuse exec, or the first real server will stall. |
-| Mapping and stream | `upstream.rs` | about 500 lines | Retrying Max Mode or region after the first delta duplicates billing. Retry only before `Ok`. |
+| Mapping and stream | `upstream.rs` | about 500 lines | Retrying region after the first delta duplicates billing. Retry only before `Ok`. |
+| Run error classification | `failure.rs` | about 300 lines | Maps Connect and HTTP/1.1 failures to the section 6 table for 401, 403, 429, 502, overflow, empty reply, and stall. Tests assert kind, status, and wording without linking the router crate. |
 | Tests and docs | `src/tests.rs`, `conformance.rs`, kit fakes, `docs/coverage/subscription-parity.md`, the parity matrix, the adopt-or-redesign table required by `AGENTS.md` | about 1,200 lines | A fake that accepts any path will not catch a wrong RPC name. Assert the path. |
 
 Architecture crate edges do not change. `expected_deps` stays. External crates change: `reqwest` features, `flate2` on the SDK. Both go through `cargo deny`.
@@ -498,21 +503,21 @@ Depends on R-8's Run.
 |---|---|---|---|
 | Tool catalog, history, exec mapping, stall-550 | `run.rs`, `upstream.rs` | about 800 lines | Emitting a server-completed call as a caller tool makes the client run a tool the server already finished. |
 | Reasoning blocks | `upstream.rs` | about 150 lines | Concatenating thinking into text changes the next turn's roles. |
-| Usage and one dashboard poll | `run.rs`, `connect.rs` | about 400 lines | The poll holds the tool response. The deadline test is mandatory. Zeros on a miss, never an estimate. |
-| Effort parameters and Max Mode memory | `upstream.rs` | about 250 lines | `fast=true` by default over-bills. Leave fast off. |
+| Tool-step dashboard usage | `run.rs`, `connect.rs` | about 200 lines | The poll holds the tool response. The deadline test is mandatory. Zeros on a miss, never an estimate. |
+| Effort parameters, Max Mode memory, and maxRequired retry | `upstream.rs` | about 250 lines | Depends on the model picker for `fitEffort` level lists, or defer both with the picker. `fast=true` by default over-bills. Leave fast off. |
 | Images | `upstream.rs` | about 150 lines | Fetching a remote image URL is not what the reference does. Placeholder only. |
-| Error table tests | `failure.rs` | about 300 lines | `PluginError::auth` for a 401 skips failover. The test calls the same classification the router uses only by asserting kind, status, and wording, not by linking the router into the plugin. |
 
 ### Explicitly deferred
 
 - Native retention: the owner pool, 15-minute lifetime, 120-second result wait, 10-minute continue reserve, continuity header, replay of an identical retry, and `native-session.mjs` as a whole. A restarted gateway already takes the stateless path. Retention is a later item.
 - Cross-step usage debt, the deferred-usage bag, and the "stop waiting after three misses" account flag. There is no IR field and no ledger that survives `execute`.
 - Stable `conversation_id` and prompt-cache affinity. Needs a caller-supplied key on `Request`.
-- The model picker: `AvailableModels`, `GetUsableModels`, catalog scope 3, `@size` ids, fast variants, and the 10-minute list shared by in-flight requests (`listFor`, `index.mjs:1324-1344`). R-8 sends the requested id. `auto` is sent as `auto`.
+- The model picker: `AvailableModels`, `GetUsableModels`, catalog scope 3, `@size` ids, fast variants, the 10-minute list shared by in-flight requests (`listFor`, `index.mjs:1324-1344`), and per-model effort level lists for `fitEffort`. R-8 sends the requested id. `auto` is sent as `auto`. Max Mode retry and `maxOnly` memory move with the picker.
 - `service_tier` / `fast`.
 - Wire trace.
 - Web search and every Cursor-owned tool. They stay refused.
-- Enterprise `usage-summary`, grants, and included-only routing. Quota already has a separate path.
+- Enterprise `usage-summary` and included-only routing. Quota already has a separate path.
+- Free credit beyond included usage: plan bonus (`GetCurrentPeriodUsage` `planUsage.bonusSpend`, `remainingBonus`, `index.mjs:544-599`) and active grants (`GetUsageLimitStatusAndActiveGrants` `activeGrants`, cents strings, model allow-list, client type `cli`, `index.mjs:544-578`), plus the rule that usable credit keeps the account serving after included usage is spent. R-9 quota routing can adopt both windows or defer them together in one item.
 - Streaming tool-argument deltas. The exec carries the full arguments.
 - A second retry after the client has seen a delta.
 
@@ -520,7 +525,7 @@ Depends on R-8's Run.
 
 1. Kernel duplex, HTTP/1.1 pin, piped exit status, SDK inflate and future helper. Land this before the plugin uses it, with generic tests.
 2. Issue 609 and the API-key exchange, still with `upstream()` unsupported. These are account bugs, and they are independently testable.
-3. R-8 Run and text stream.
-4. R-9 tools, reasoning, usage, errors.
+3. R-8 Run, text stream, and Run error classification (section 6 rows for 401, 403, 429, 502, overflow, empty reply, stall).
+4. R-9 tools, reasoning, tool-step usage poll, Max Mode, effort when the picker exists.
 
 Each step updates the parity rows it touches. Stage 2 auxiliary work stays behind stage 1, as `AGENTS.md` requires. R-8 and R-9 are that stage's Cursor upstream, not a reason to start auxiliary features.
