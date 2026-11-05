@@ -38,8 +38,14 @@ fn subscription(host: &TestHost) -> Arc<dyn Subscription> {
 }
 
 fn seed(host: &TestHost) -> AccountId {
+    seed_named(host, "default")
+}
+
+fn seed_named(host: &TestHost, name: &str) -> AccountId {
+    crate::tokens::clear_cache_for_tests();
+    crate::models::clear_vendor_cache_for_tests();
     let credential = Credential {
-        user_id: "u1".to_owned(),
+        user_id: format!("u-{name}"),
         access: SecretString::from(ACCESS.to_owned()),
         system_id: "sys".to_owned(),
         org: "org1".to_owned(),
@@ -90,7 +96,7 @@ fn a2c_14_import_fixture_credentials() {
 fn a2c_15_refresh_mints_llm_token() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
-    let id = seed(&host);
+    let id = seed_named(&host, "refresh");
     host.http().enqueue(br#"{"token":"model-token-1"}"#);
     block_on(subscription(&host).refresh(&id, host.context())).expect("refresh");
     assert!(host.http().calls()[0].uri().contains("/client/llm_tokens"));
@@ -104,23 +110,55 @@ fn a2c_16_model_list_parsing() {
 
 #[test]
 fn a2c_16b_model_list_display_name() {
-    let body = br#"{"models":[{"id":"m1","display_name":"Pretty"}]}"#;
+    let body = br#"{"models":[{"id":"m1","display_name":"Pretty","provider":"anthropic"}]}"#;
     let list = models::parse_list(body).expect("parse");
     assert_eq!(list.models()[0].display_name(), Some("Pretty"));
 }
 
 #[test]
-fn a2c_17_upstream_is_unsupported() {
+fn a2c_17_models_list_401_is_auth() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_named(&host, "models-401");
+    host.http().enqueue(br#"{"token":"model-token-1"}"#);
+    host.http().enqueue_response(
+        401,
+        &[("content-type", "application/json")],
+        br#"{"message":"unauthorized"}"#,
+    );
+    let err = block_on(subscription(&host).list_models(&id, host.context())).expect_err("auth");
+    assert_eq!(err.kind(), PluginErrorKind::Auth);
+}
+
+#[test]
+fn a2c_18_upstream_posts_completions() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
     let id = seed(&host);
+    host.http().enqueue(br#"{"token":"model-token-1"}"#);
+    block_on(subscription(&host).refresh(&id, host.context())).expect("refresh");
+    host.http().enqueue_response(
+        200,
+        &[
+            ("content-type", "application/json"),
+            ("x-zed-server-supports-status-messages", "true"),
+        ],
+        br#"{"event":{"type":"response.created","response":{"id":"r1","object":"response","status":"completed"}}}
+{"event":{"type":"response.completed","response":{"id":"r1","object":"response","status":"completed","output":[]}}}
+{"status":"stream_ended"}
+"#,
+    );
     let upstream = subscription(&host)
         .upstream(&id, host.context())
         .expect("upstream");
     let query = ProbeQuery::new(ProtocolId::OPENAI_RESPONSES, "claude-sonnet-4").expect("query");
-    let err = block_on(upstream.probe(&query)).expect_err("unsupported");
-    assert_eq!(err.kind(), PluginErrorKind::Unsupported);
-    assert!(host.http().calls().is_empty());
+    block_on(upstream.probe(&query)).expect("probe");
+    assert!(
+        host.http()
+            .calls()
+            .iter()
+            .any(|call| call.uri().contains("/completions"))
+    );
 }
 
 #[test]

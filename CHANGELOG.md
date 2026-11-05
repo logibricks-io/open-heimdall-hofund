@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- R-16: Zed subscription upstream via POST `/completions` (provider envelope,
+  NDJSON event unwrap, unary fold), model-token refresh with stale headers,
+  live `/models` with snapshot fallback, plan quota from `/client/users/me`,
+  and conformance tests for unknown-account auth and `/models` 401.
+
 ### Changed
 
 - R-10 round 1: non-streamed gateway replies no longer store TTFT; tokens/s uses
