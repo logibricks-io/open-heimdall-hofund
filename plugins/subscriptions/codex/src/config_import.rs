@@ -186,13 +186,21 @@ fn gateway_catalog_in_codex_home(home: &Path) -> PathBuf {
 }
 
 fn paths_match_after_clean(left: &Path, right: &Path) -> bool {
-    if left == right {
-        return true;
-    }
-    if let (Ok(left), Ok(right)) = (left.canonicalize(), right.canonicalize()) {
-        return left == right;
-    }
-    false
+    lexical_clean(left) == lexical_clean(right)
+}
+
+fn lexical_clean(path: &Path) -> PathBuf {
+    path.components()
+        .fold(PathBuf::new(), |mut out, component| {
+            match component {
+                std::path::Component::ParentDir => {
+                    out.pop();
+                }
+                std::path::Component::CurDir => {}
+                other => out.push(other.as_os_str()),
+            }
+            out
+        })
 }
 
 fn import_models(config_path: &Path, catalog_path: Option<&str>) -> Vec<String> {
@@ -232,12 +240,7 @@ fn import_models(config_path: &Path, catalog_path: Option<&str>) -> Vec<String> 
             });
     }
     if resolved.file_name() == Some(std::ffi::OsStr::new(GATEWAY_MODEL_CATALOG))
-        && resolved.parent().is_some_and(|parent| {
-            paths_match_after_clean(parent, &codex_home_dir())
-                || config_path
-                    .parent()
-                    .is_some_and(|home| paths_match_after_clean(parent, home))
-        })
+        && paths_match_after_clean(&resolved, &gateway_catalog_in_codex_home(&codex_home_dir()))
     {
         return Vec::new();
     }
@@ -354,6 +357,7 @@ wire_api = "responses"
         let dir = tempfile::tempdir().expect("dir");
         let codex_home = dir.path().join("override-codex");
         std::fs::create_dir_all(&codex_home).expect("codex home");
+        set_test_codex_home(Some(codex_home.clone()));
         std::fs::write(
             codex_home.join(GATEWAY_MODEL_CATALOG),
             r#"{"models":[{"slug":"gateway-only","visibility":"list"}]}"#,
@@ -373,6 +377,7 @@ wire_api = "responses"
         )
         .expect("config");
         let rows = read_providers(&codex_home).expect("read");
+        set_test_codex_home(None);
         assert_eq!(rows.len(), 1);
         assert!(rows[0].models.is_empty());
     }
@@ -410,5 +415,38 @@ wire_api = "responses"
         set_test_codex_home(None);
         assert_eq!(rows.len(), 1);
         assert!(rows[0].models.is_empty());
+    }
+
+    #[test]
+    fn r47b_rr3_config_import_reads_gateway_catalog_outside_codex_home() {
+        let dir = tempfile::tempdir().expect("dir");
+        let codex_home = dir.path().join("real-codex");
+        std::fs::create_dir_all(&codex_home).expect("codex home");
+        set_test_codex_home(Some(codex_home));
+        let config_home = dir.path().join("project-codex-like");
+        std::fs::create_dir_all(&config_home).expect("config home");
+        let local_catalog = config_home.join(GATEWAY_MODEL_CATALOG);
+        std::fs::write(
+            &local_catalog,
+            r#"{"models":[{"slug":"local-gateway-model","visibility":"list"}]}"#,
+        )
+        .expect("local catalog");
+        std::fs::write(
+            config_home.join("config.toml"),
+            r#"
+model_provider = "relay"
+model_catalog_json = "hofund-models.json"
+
+[model_providers.relay]
+name = "Relay"
+base_url = "https://relay.test/v1"
+wire_api = "responses"
+"#,
+        )
+        .expect("config");
+        let rows = read_providers(&config_home).expect("read");
+        set_test_codex_home(None);
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].models.contains(&"local-gateway-model".to_owned()));
     }
 }

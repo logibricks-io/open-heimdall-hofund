@@ -144,6 +144,26 @@ async fn rotate(
             account: account_of(&blob),
         });
     }
+    if let Some(home_text) = blob.text("codex_home") {
+        let home = std::path::PathBuf::from(home_text);
+        match crate::agent_sign_in::reconcile_before_refresh(
+            &home,
+            &host,
+            skip_keychain,
+            &stale,
+            None,
+        )
+        .await
+        {
+            crate::agent_sign_in::RefreshReconcile::Adopt { access, account } => {
+                return Ok(Access {
+                    token: access,
+                    account,
+                });
+            }
+            crate::agent_sign_in::RefreshReconcile::Proceed => {}
+        }
+    }
     let refresh_token = blob
         .secret("refresh_token")
         .ok_or_else(|| PluginError::auth("the stored ChatGPT sign-in has no refresh token"))?;

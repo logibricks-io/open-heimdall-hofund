@@ -91,6 +91,44 @@ fn map_store(error: StoreError) -> PluginError {
     }
 }
 
+/// Outcome of reading Codex's on-disk store before spending a refresh token.
+pub(crate) enum RefreshReconcile {
+    Proceed,
+    Adopt {
+        access: SecretString,
+        account: Option<String>,
+    },
+}
+
+/// Locks when possible, then compares the Codex store access token to `stale`.
+pub(crate) async fn reconcile_before_refresh(
+    home: &Path,
+    host: &HostContext,
+    skip_keychain: bool,
+    stale: &SecretString,
+    fake: Option<&crate::store::FakeKeychain>,
+) -> RefreshReconcile {
+    let _lock = codex_lock::acquire(home).await;
+    let reader = StoreReader::new(Some(host), skip_keychain, fake);
+    match reader.read_login(home, true).await {
+        Ok((bytes, _)) => {
+            let Some(access) = access_token_from_auth(&bytes) else {
+                return RefreshReconcile::Proceed;
+            };
+            if !same_secret(&access, stale) {
+                return RefreshReconcile::Adopt {
+                    access,
+                    account: account_id_from_auth(&bytes),
+                };
+            }
+            RefreshReconcile::Proceed
+        }
+        Err(StoreError::SignedOut) | Err(StoreError::Unreadable { .. }) | Err(_) => {
+            RefreshReconcile::Proceed
+        }
+    }
+}
+
 /// Writes rotated tokens back to Codex's store for `home` when the on-disk access token still matches `stale`.
 pub(crate) async fn persist_refresh(
     home: &Path,
@@ -102,15 +140,6 @@ pub(crate) async fn persist_refresh(
 ) {
     let _lock = codex_lock::acquire(home).await;
     let reader = StoreReader::new(Some(host), skip_keychain, fake);
-    let Ok((base, _)) = reader.read_login(home, true).await else {
-        return;
-    };
-    let Some(current_access) = access_token_from_auth(&base) else {
-        return;
-    };
-    if !same_secret(&current_access, stale) {
-        return;
-    }
     let patch = AuthPatch {
         access_token: blob
             .secret("access_token")
@@ -123,10 +152,38 @@ pub(crate) async fn persist_refresh(
             .map(|token| secret_text(&token).to_owned()),
         chatgpt_mode: true,
     };
-    let Ok(merged) = merge_auth_tokens(&base, &patch) else {
-        return;
-    };
-    let _ = reader.save_login(home, &merged).await;
+    match reader.read_login(home, true).await {
+        Ok((base, _)) => {
+            let Some(current_access) = access_token_from_auth(&base) else {
+                return;
+            };
+            if !same_secret(&current_access, stale) {
+                return;
+            }
+            let Ok(merged) = merge_auth_tokens(&base, &patch) else {
+                return;
+            };
+            let _ = reader.save_login(home, &merged).await;
+        }
+        Err(StoreError::SignedOut) => {
+            let Ok(merged) = merge_auth_tokens(br#"{"auth_mode":"chatgpt","tokens":{}}"#, &patch)
+            else {
+                return;
+            };
+            let _ = reader.save_login(home, &merged).await;
+        }
+        Err(_) => {}
+    }
+}
+
+fn account_id_from_auth(bytes: &[u8]) -> Option<String> {
+    let value =
+        hofund_plugin_sdk::json::from_slice::<hofund_plugin_sdk::json::Value>(bytes).ok()?;
+    value
+        .get("tokens")
+        .and_then(|tokens| tokens.get("account_id"))
+        .and_then(hofund_plugin_sdk::json::Value::as_str)
+        .map(str::to_owned)
 }
 
 fn access_token_from_auth(bytes: &[u8]) -> Option<SecretString> {
@@ -151,6 +208,33 @@ mod tests {
             PluginId::from_static("codex"),
             dir.path(),
         )
+    }
+
+    #[test]
+    fn r47b_rr3_persist_refresh_seeds_auth_when_home_was_empty() {
+        let dir = tempfile::tempdir().expect("dir");
+        let host = host(&dir);
+        let home = dir.path().join("new-codex-home");
+        assert!(!home.exists());
+        std::fs::create_dir_all(home.parent().expect("parent")).expect("parent");
+        let stale = SecretString::from("stale-access".to_owned());
+        let blob = SecretObject::new()
+            .with_secret(
+                "access_token",
+                &SecretString::from("fresh-access".to_owned()),
+            )
+            .with_secret("refresh_token", &SecretString::from("new-r".to_owned()));
+        block_on(persist_refresh(
+            &home,
+            host.context(),
+            true,
+            &blob,
+            &stale,
+            None,
+        ));
+        assert!(home.is_dir());
+        let text = std::fs::read_to_string(home.join("auth.json")).expect("auth");
+        assert!(text.contains("fresh-access"));
     }
 
     #[test]

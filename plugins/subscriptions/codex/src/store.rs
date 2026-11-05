@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use hofund_plugin_api::{HostContext, PluginError};
@@ -183,8 +183,8 @@ impl CodexKeychain for FakeKeychain {
     }
 }
 
+#[derive(Clone)]
 struct KeychainCache {
-    account: String,
     bytes: Option<Vec<u8>>,
     err: Option<KeychainError>,
     mdat: String,
@@ -192,24 +192,82 @@ struct KeychainCache {
     checked: Instant,
 }
 
-impl Default for KeychainCache {
-    fn default() -> Self {
-        Self {
-            account: String::new(),
-            bytes: None,
-            err: None,
-            mdat: String::new(),
-            at: Instant::now(),
-            checked: Instant::now(),
-        }
+static KEYCHAIN_CACHE: LazyLock<Mutex<HashMap<String, KeychainCache>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn keychain_error_ttl(err: &KeychainError) -> Duration {
+    match err {
+        KeychainError::Refused => KEYCHAIN_REFUSED,
+        KeychainError::Missing => KEYCHAIN_TTL,
+        KeychainError::Unreadable => Duration::ZERO,
     }
+}
+
+fn note_keychain_read(account: &str, read: KeychainCache) {
+    let mut guard = KEYCHAIN_CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    guard.insert(account.to_owned(), read);
+}
+
+fn touch_keychain_checked(account: &str, now: Instant) {
+    let mut guard = KEYCHAIN_CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(entry) = guard.get_mut(account) {
+        entry.checked = now;
+    }
+}
+
+/// Creates `home` with `0700` when missing; refuses unsafe parents for a new credentials directory.
+pub(crate) fn ensure_codex_home(home: &Path) -> Result<(), ()> {
+    if home.is_dir() {
+        return Ok(());
+    }
+    if home.exists() {
+        return Err(());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        if let Some(parent) = home
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            if !parent.is_dir() {
+                std::fs::create_dir_all(parent).map_err(|_| ())?;
+            }
+            if !parent_safe_for_new_credentials(parent) {
+                return Err(());
+            }
+        }
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(home)
+            .map_err(|_| ())?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(home).map_err(|_| ())?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn parent_safe_for_new_credentials(parent: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(meta) = std::fs::metadata(parent) else {
+        return false;
+    };
+    let mode = meta.permissions().mode() & 0o777;
+    mode & 0o022 == 0
 }
 
 pub(crate) struct StoreReader<'a> {
     host: Option<&'a HostContext>,
     skip_keychain: bool,
     fake: Option<&'a FakeKeychain>,
-    cache: Mutex<KeychainCache>,
 }
 
 impl<'a> StoreReader<'a> {
@@ -222,7 +280,6 @@ impl<'a> StoreReader<'a> {
             host,
             skip_keychain,
             fake,
-            cache: Mutex::new(KeychainCache::default()),
         }
     }
 
@@ -372,6 +429,17 @@ impl<'a> StoreReader<'a> {
             } else {
                 return Err(StoreError::KeychainWrite);
             }
+            let mdat = self.keychain_stat(&account).await.unwrap_or_default();
+            note_keychain_read(
+                &account,
+                KeychainCache {
+                    bytes: Some(compact.clone()),
+                    err: None,
+                    mdat,
+                    at: Instant::now(),
+                    checked: Instant::now(),
+                },
+            );
             return Ok(());
         }
         let mut body = auth.to_vec();
@@ -388,68 +456,79 @@ impl<'a> StoreReader<'a> {
         }
         let now = Instant::now();
         let reuse_cached = {
-            let cache = self
-                .cache
+            let guard = KEYCHAIN_CACHE
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if cache.account != account {
-                None
-            } else if let Some(err) = &cache.err
-                && !fresh
-                && now.duration_since(cache.at) < KEYCHAIN_REFUSED
-            {
-                return Err(err.clone());
-            } else if let Some(bytes) = &cache.bytes {
-                if !fresh && now.duration_since(cache.checked) < KEYCHAIN_TTL {
-                    return Ok(bytes.clone());
+            match guard.get(&account) {
+                None => None,
+                Some(cache) => {
+                    if let Some(err) = &cache.err {
+                        if !fresh {
+                            let ttl = keychain_error_ttl(err);
+                            if ttl > Duration::ZERO && now.duration_since(cache.at) < ttl {
+                                return Err(err.clone());
+                            }
+                        }
+                        None
+                    } else if let Some(bytes) = &cache.bytes {
+                        if !fresh && now.duration_since(cache.checked) < KEYCHAIN_TTL {
+                            return Ok(bytes.clone());
+                        }
+                        if !fresh && now.duration_since(cache.checked) >= KEYCHAIN_TTL {
+                            Some((bytes.clone(), cache.mdat.clone()))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
                 }
-                if !fresh && now.duration_since(cache.checked) >= KEYCHAIN_TTL {
-                    Some((bytes.clone(), cache.mdat.clone()))
-                } else {
-                    None
-                }
-            } else {
-                None
             }
         };
-        if let Some((cached_bytes, cached_mdat)) = reuse_cached
-            && !cached_mdat.is_empty()
-            && self.keychain_stat(&account).await.ok().as_deref() == Some(cached_mdat.as_str())
-        {
-            let mut cache = self
-                .cache
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if cache.account == account {
-                cache.checked = now;
+        if let Some((cached_bytes, cached_mdat)) = reuse_cached {
+            match self.keychain_stat(&account).await {
+                Ok(mdat) if !cached_mdat.is_empty() && mdat == cached_mdat => {
+                    touch_keychain_checked(&account, now);
+                    return Ok(cached_bytes);
+                }
+                Err(_) if !fresh => {
+                    touch_keychain_checked(&account, now);
+                    return Ok(cached_bytes);
+                }
+                _ => {}
             }
-            return Ok(cached_bytes);
         }
         let read = self.read_keychain_live(&account).await;
         let mdat = match &read {
             Ok(_) => self.keychain_stat(&account).await.unwrap_or_default(),
             Err(_) => String::new(),
         };
-        let mut cache = self
-            .cache
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        cache.account = account;
-        cache.checked = now;
-        match read {
+        match &read {
             Ok(bytes) => {
-                cache.bytes = Some(bytes.clone());
-                cache.err = None;
-                cache.mdat = mdat;
-                cache.at = now;
-                Ok(bytes)
+                note_keychain_read(
+                    &account,
+                    KeychainCache {
+                        bytes: Some(bytes.clone()),
+                        err: None,
+                        mdat,
+                        at: now,
+                        checked: now,
+                    },
+                );
+                Ok(bytes.clone())
             }
             Err(err) => {
-                cache.bytes = None;
-                cache.err = Some(err.clone());
-                cache.mdat = String::new();
-                cache.at = now;
-                Err(err)
+                note_keychain_read(
+                    &account,
+                    KeychainCache {
+                        bytes: None,
+                        err: Some(err.clone()),
+                        mdat: String::new(),
+                        at: now,
+                        checked: now,
+                    },
+                );
+                Err(err.clone())
             }
         }
     }
@@ -964,6 +1043,7 @@ mod tests {
         assert_eq!(account.len(), "cli|".len() + 16);
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn r47b_non_macos_keychain_read_is_noop() {
         let dir = tempfile::tempdir().expect("dir");
@@ -1080,6 +1160,31 @@ mod tests {
         assert!(
             fake.stat_calls() >= 2,
             "TTL expiry should stat before reusing cache"
+        );
+    }
+
+    #[test]
+    fn r47b_rr3_keychain_cache_shared_across_store_readers() {
+        let dir = tempfile::tempdir().expect("dir");
+        let home = dir.path().join("codex");
+        std::fs::create_dir_all(&home).expect("home");
+        std::fs::write(
+            home.join("config.toml"),
+            "cli_auth_credentials_store = \"keyring\"\n",
+        )
+        .expect("config");
+        let fake = FakeKeychain::default();
+        let auth = br#"{"auth_mode":"chatgpt","tokens":{"access_token":"a","refresh_token":"r","id_token":"i"}}"#;
+        fake.set(&keychain_account(&home), auth);
+        let reader_a = StoreReader::new(None, false, Some(&fake));
+        hofund_kit_subscription::block_on(reader_a.read_login(&home, false)).expect("first");
+        assert_eq!(fake.find_calls(), 1);
+        let reader_b = StoreReader::new(None, false, Some(&fake));
+        hofund_kit_subscription::block_on(reader_b.read_login(&home, false)).expect("second");
+        assert_eq!(
+            fake.find_calls(),
+            1,
+            "process-wide cache should reuse the first find"
         );
     }
 

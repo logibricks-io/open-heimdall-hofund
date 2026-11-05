@@ -459,6 +459,54 @@ fn fresh_token_skips_the_refresh() {
 }
 
 #[test]
+fn r47b_rr3_rotate_skips_token_post_when_codex_store_already_rotated() {
+    use crate::store::write_atomic_private;
+
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let home = dir.path().join("codex-home");
+    std::fs::create_dir_all(&home).expect("home");
+    std::fs::write(
+        home.join("config.toml"),
+        "cli_auth_credentials_store = \"file\"\n",
+    )
+    .expect("config");
+    let stale = access_token("old", 100);
+    let rotated = access_token("already-rotated", 10_000);
+    let id = seed(&host, &stale);
+    let row = block_on(host.context().accounts().list())
+        .expect("list")
+        .into_iter()
+        .find(|row| row.id() == &id)
+        .expect("row");
+    let blob = stored(&host, &id).with_text("codex_home", &home.to_string_lossy());
+    let account = host
+        .context()
+        .accounts()
+        .account(id.clone(), row.label())
+        .expect("account");
+    block_on(host.context().accounts().upsert(account, blob.to_secret())).expect("upsert");
+    write_atomic_private(
+        &home.join("auth.json"),
+        format!(
+            r#"{{"auth_mode":"chatgpt","tokens":{{"access_token":"{rotated}","refresh_token":"refresh-1"}}}}"#,
+        )
+        .as_bytes(),
+    )
+    .expect("seed codex store");
+    let access = block_on(tokens::rotate_for_test(
+        host.context().clone(),
+        TOKEN_URL.to_owned(),
+        id,
+        secret(&stale),
+        true,
+    ))
+    .expect("rotate");
+    assert!(same_secret(&access.token, &secret(&rotated)));
+    assert_eq!(token_posts(&host), 0);
+}
+
+#[test]
 fn refresh_uses_token_rotated_by_other_process() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
