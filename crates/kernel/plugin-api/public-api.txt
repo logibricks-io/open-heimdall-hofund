@@ -426,6 +426,7 @@ HostContext::fn with_loopback (mut self , loopback : Arc < dyn LoopbackBackend >
 HttpHandle
 HttpHandle #[non_exhaustive] derives(Clone)
 HttpHandle::async fn send (& self , request : http :: Request < Body > ,) -> Result < http :: Response < BodyStream > , PluginError >
+HttpHandle::fn backend_arc (& self) -> Arc < dyn HttpBackend >
 HttpHandle::fn pooled_client (& self) -> Option < Arc < dyn Any + Send + Sync > >
 IdError
 IdError #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq, Error)
