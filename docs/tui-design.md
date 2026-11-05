@@ -136,7 +136,7 @@ List columns (`sessListLines`): age, agent, folder basename, tokens, cost, title
 
 `internal/tui/library.go:updateLibrary`, `viewLibrary`, `openLibAdd`, `openLibAgents`, `openServer`, `editInstructions`.
 
-Sections, in order: instructions, MCP servers, skills, MCP servers found in agents, skills found in agents, RTK. Row layout and keys match the reference for the parity spec. **R-45** binds only to `GET /v1/hofund/library` and draws rows. Keys that mutate the library or spawn local commands (`s`, `a`, `e`, `u`, `i`, `d`, and similar) are **not** implemented in the TUI until a later security design review passes (target: Opus review after 2025-11-11). Section 5 lists the response shape and deferred routes.
+Sections, in order: instructions, MCP servers, skills, MCP servers found in agents, skills found in agents, RTK. Row layout and keys match the reference for the parity spec. **R-45** binds only to `GET /v1/hofund/library` and draws rows. Keys that mutate the library or spawn local commands (`s`, `a`, `e`, `u`, `i`, `d`, and similar) are **not** implemented in the TUI until a later security design review passes. Section 5 lists the response shape and deferred routes.
 
 | Key | Action |
 |---|---|
@@ -387,7 +387,7 @@ Two TUIs: the second sees the lock and attaches. It must not shut the daemon dow
 
 R-44 binds to the Sessions routes below. **R-45** binds only to `GET /v1/hofund/library` for read-only rows. Session **recording** (writes that populate session files) is out of scope for this contract; R-30 owns recording separately. R-30 and R-36 implement the routes. Paths stay stable if fields are added.
 
-Library **mutating** routes (`sync`, instructions, MCP, skills, found import/remove, RTK) and any local commands they may spawn on the daemon host are **not** to be wired from the TUI until a later security design review passes (Opus review after 2025-11-11). Section 5 still documents request and response shapes for that follow-on work.
+Library **mutating** routes (`sync`, instructions, MCP, skills, found import/remove, RTK) and any local commands they may spawn on the daemon host are **not** to be wired from the TUI until a later security design review passes. Section 5 still documents request and response shapes for that follow-on work.
 
 ### Sessions (R-30, reads from R-29)
 
@@ -472,14 +472,14 @@ Sizes are the plan's wall-clock sizes (S about 3–4h, M about 6–8h, L about 1
 | 2 | R-7b | M | G-5, G-6, G-7. Sign-in must not block the daemon accept loop | R-7a |
 | 3 | R-10 | M | Usage query fields the Usage page reads if present | None. Parallel with R-7 |
 | 4 | R-11 | L | `apps/tui`, navigation, events, toasts, resize, handoff, empty Sessions and Library frames, deny clean | R-7a for handoff fields. Shell can use a fake before R-7b |
-| 5 | R-14 | M | Agents and Providers, including preset add and remote preset | R-11, R-7a |
+| 5 | R-14 | M | Agents and Providers, including preset add, remote preset, and G-8 catalog sync for Agents `S` and startup sync when the catalog is empty | R-11, R-7a |
 | 6 | R-15 | L | Usage, check-in, alerts, Accounts dialog | R-11, R-7b, R-10 |
 | 7 | R-17 | M–L | Routing list, group editor, route view (`GET /v1/hofund/route`, `/route/session`, `/route/unrouted`) on a key or panel | R-11, R-7a |
 | 8 | R-18 | M | Settings (`8`), Logs (`9`), Help, fixtures, Windows raw-mode test | R-11, R-7b |
-| 9 | R-19 | M | D-80: G-8 catalog sync, Agents `S`, startup sync when catalog empty | R-7a, R-11 |
-| 10 | R-20 | S | D-84 | R-19 |
-| 11 | R-44 | M | Sessions page on section 5 reads | R-11, R-30 |
-| 12 | R-45 | M | Library read-only rows from `GET /v1/hofund/library` | R-11. Mutating library keys wait for security review |
+| 9 | R-44 | M | Sessions page on section 5 reads | R-11, R-30 |
+| 10 | R-45 | M | Library read-only rows from `GET /v1/hofund/library` | R-11. Mutating library keys wait for security review |
+
+R-19 (D-80) and R-20 (D-84) sit between R-18 and R-47 in the same lane but are not terminal UI items, so they are not listed here.
 
 R-7 splits so provider and group routes are not blocked on sign-in. R-44 stays on the other track and uses the R-11 page trait unchanged.
 
