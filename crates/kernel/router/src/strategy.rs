@@ -22,6 +22,8 @@ pub struct Seat {
     pub learns: bool,
     /// Share of its allowance used, from 0 through 100.
     pub used: f64,
+    /// At 90% or more of budget windows alone, not a short rate cap near full.
+    pub week_low: bool,
     /// Allowance renewal times, largest window first; `None` is not known.
     pub soon: Vec<Option<SystemTime>>,
     /// When remaining credits lapse, apart from allowance renewals.
@@ -68,6 +70,7 @@ impl Seat {
             known: false,
             learns: false,
             used: 0.0,
+            week_low: false,
             soon: Vec::new(),
             lapse: None,
             pace: 0.0,
@@ -582,6 +585,14 @@ fn tier(share: f64) -> u8 {
     }
 }
 
+fn seat_tier(seat: &Seat) -> u8 {
+    let band = tier(seat.used);
+    if band == 1 && seat.week_low {
+        return 0;
+    }
+    band
+}
+
 fn identity(members: usize) -> Vec<usize> {
     (0..members).collect()
 }
@@ -592,7 +603,7 @@ fn smart(_: &str, seats: &[Seat], _: &StrategyState) -> Vec<usize> {
     let mut low = Vec::new();
     let mut spent = Vec::new();
     for (index, seat) in seats.iter().enumerate() {
-        match tier(seat.used) {
+        match seat_tier(seat) {
             2 => spent.push(index),
             1 => low.push(index),
             _ => fine.push(index),
@@ -772,7 +783,7 @@ fn weekly_pace(_: &str, seats: &[Seat], _: &StrategyState) -> Vec<usize> {
     let mut by_pace = seats
         .iter()
         .enumerate()
-        .filter(|(_, seat)| tier(seat.used) == 0 && !seat.learns)
+        .filter(|(_, seat)| seat_tier(seat) == 0 && !seat.learns)
         .map(|(index, _)| index)
         .collect::<Vec<_>>();
     by_pace.sort_by(|a, b| seats[*b].pace.total_cmp(&seats[*a].pace));
@@ -795,8 +806,8 @@ fn weekly_pace(_: &str, seats: &[Seat], _: &StrategyState) -> Vec<usize> {
         let (a_index, b_index) = (*a, *b);
         let a = &seats[a_index];
         let b = &seats[b_index];
-        let a_tier = tier(a.used);
-        let b_tier = tier(b.used);
+        let a_tier = seat_tier(a);
+        let b_tier = seat_tier(b);
         a_tier
             .cmp(&b_tier)
             .then_with(|| {
@@ -1242,6 +1253,76 @@ mod tests {
 
     fn routed(state: &StrategyState, name: &str, seats: &[Seat]) -> Vec<String> {
         keys(seats, &state.order(name, "pool", seats))
+    }
+
+    #[test]
+    fn r4_72_week_low_keeps_smart_place_before_short_cap_low() {
+        use std::time::{Duration, SystemTime};
+
+        let state = StrategyState::with_builtins();
+        let now = SystemTime::now();
+        let mut week = seat("week");
+        week.known = true;
+        week.used = 92.0;
+        week.week_low = true;
+        week.soon = vec![Some(now + Duration::from_secs(3 * 3600))];
+        let mut cap = seat("cap");
+        cap.known = true;
+        cap.used = 92.0;
+        cap.soon = vec![Some(now + Duration::from_secs(24 * 3600))];
+        assert_eq!(
+            routed(&state, "smart", &[week.clone(), cap.clone()]),
+            ["week", "cap"]
+        );
+        assert_eq!(routed(&state, "pace", &[week, cap]), ["week", "cap"]);
+    }
+
+    #[test]
+    fn r4_72_usage_routing_clears_week_low_in_dispatch_order() {
+        use std::time::{Duration, SystemTime};
+
+        let state = StrategyState::with_builtins();
+        let now = SystemTime::now();
+        let mut week = seat("week");
+        week.known = true;
+        week.used = 92.0;
+        week.week_low = false;
+        week.soon = vec![Some(now + Duration::from_secs(3 * 3600))];
+        let mut cap = seat("cap");
+        cap.known = true;
+        cap.used = 91.0;
+        cap.soon = vec![Some(now + Duration::from_secs(24 * 3600))];
+        assert_eq!(
+            routed(&state, "usage", &[week.clone(), cap.clone()]),
+            ["cap", "week"]
+        );
+        week.week_low = true;
+        assert_eq!(
+            routed(&state, "smart", &[week.clone(), cap.clone()]),
+            ["week", "cap"]
+        );
+        assert_eq!(routed(&state, "pace", &[week, cap]), ["week", "cap"]);
+    }
+
+    #[test]
+    fn r4_72_credits_first_seat_does_not_promote_pace_order() {
+        use crate::credits_mode::CreditsMode;
+
+        let state = StrategyState::with_builtins();
+        let mut first = seat("first");
+        first.known = true;
+        first.used = 50.0;
+        first.credits_mode = CreditsMode::First;
+        first.on_credits = true;
+        first.pace = 10.0;
+        let mut second = seat("second");
+        second.known = true;
+        second.used = 50.0;
+        second.pace = 20.0;
+        assert_eq!(
+            routed(&state, "pace", &[first, second]),
+            ["second", "first"]
+        );
     }
 
     #[test]

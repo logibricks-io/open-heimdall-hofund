@@ -221,6 +221,32 @@ pub(crate) fn skips_provider(error: &PluginError) -> bool {
         .is_some_and(|status| status >= 400 && PROTECTION_WORDS.is_match(error.message()))
 }
 
+/// Whether the vendor refused the request for where it came from.
+pub(crate) fn region_refused(error: &PluginError) -> bool {
+    error
+        .status()
+        .is_some_and(|status| status >= 400 && REGION_WORDS.is_match(&words_of(error.message())))
+}
+
+/// Agent-facing text beside a regional model refusal (`reference:
+/// internal/gateway/fallback.go:regionNote`), without naming a vendor.
+#[must_use]
+pub fn region_agent_note(model: &str) -> String {
+    format!(
+        "The vendor doesn't serve {model} to requests from the region this one left from: a regional restriction on the model, not on the account, so no account rests for it and the provider's other models may still answer. Use another provider for {model}, or give the provider a proxy in a region the vendor serves (its Proxy setting)"
+    )
+}
+
+/// Appends [`region_agent_note`] when `error` is a regional refusal.
+#[must_use]
+pub fn with_region_agent_note(error: PluginError, model: &str) -> PluginError {
+    if !region_refused(&error) {
+        return error;
+    }
+    let message = format!("{} — {}", error.message(), region_agent_note(model));
+    error.with_message(message)
+}
+
 /// Whether `error` is a request this vendor's API cannot read, which another
 /// vendor may, so the next member is asked whatever `failover.statuses` says
 /// (`reference: internal/gateway/gateway.go:3542`).
@@ -242,6 +268,7 @@ pub(crate) fn rests(error: &PluginError) -> bool {
         || PROTECTION_WORDS.is_match(message)
         || policy_refusal(message)
         || message.contains(EMPTY_REPLY)
+        || region_refused(error)
     {
         return false;
     }
@@ -442,10 +469,35 @@ fn policy_refusal(raw: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     fn none() -> BTreeSet<u16> {
         BTreeSet::new()
+    }
+
+    #[test]
+    fn r4_71_region_refusal_does_not_rest_the_member() {
+        let error =
+            PluginError::status_error(400, "User location is not supported for the API use.");
+        assert!(!rests(&error));
+        assert!(region_refused(&error));
+        let noted = with_region_agent_note(error, "demo");
+        assert!(
+            noted
+                .message()
+                .contains("regional restriction on the model")
+        );
+    }
+
+    #[test]
+    fn r4_region_note_keeps_retry_after() {
+        let error =
+            PluginError::status_error(400, "User location is not supported for the API use.")
+                .with_retry_after(Duration::from_secs(20));
+        let noted = with_region_agent_note(error, "demo");
+        assert_eq!(noted.retry_after(), Some(Duration::from_secs(20)));
     }
 
     #[test]

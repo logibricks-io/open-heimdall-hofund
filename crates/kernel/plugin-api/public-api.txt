@@ -426,6 +426,7 @@ HostContext::fn with_loopback (mut self , loopback : Arc < dyn LoopbackBackend >
 HttpHandle
 HttpHandle #[non_exhaustive] derives(Clone)
 HttpHandle::async fn send (& self , request : http :: Request < Body > ,) -> Result < http :: Response < BodyStream > , PluginError >
+HttpHandle::fn fresh_client (& self) -> Option < Result < Arc < dyn Any + Send + Sync > , PluginError > >
 HttpHandle::fn pooled_client (& self) -> Option < Arc < dyn Any + Send + Sync > >
 IdError
 IdError #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq, Error)
@@ -708,6 +709,7 @@ PluginError::fn timeout (message : impl Into < String >) -> Self
 PluginError::fn transport (message : impl Into < String >) -> Self
 PluginError::fn unsupported (message : impl Into < String >) -> Self
 PluginError::fn with_billed (mut self , billed : BilledUsage) -> Self
+PluginError::fn with_message (mut self , message : impl Into < String >) -> Self
 PluginError::fn with_reset_after (mut self , after : Duration) -> Self
 PluginError::fn with_retry_after (mut self , after : Duration) -> Self
 PluginError::fn with_source (mut self , source : impl Error + Send + Sync + 'static) -> Self
@@ -1015,6 +1017,7 @@ UpstreamProvider::async fn list_models (& self , query : & ListQuery) -> Result 
 UpstreamProvider::async fn probe (& self , query : & ProbeQuery) -> Result < ProbeReport , PluginError >
 UpstreamProvider::async fn quota (& self , query : & QuotaQuery) -> Result < Vec < QuotaWindow > , PluginError >
 UpstreamProvider::async fn shutdown (& self , deadline : Duration) -> Result < () , PluginError >
+UpstreamProvider::fn close_idle_connections (& self)
 UpstreamSpec
 UpstreamSpec #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 UpstreamSpec::const fn credential (& self) -> CredentialStyle
@@ -1077,6 +1080,7 @@ kernel::GatewayBackend::async fn call (& self , request : http :: Request < Body
 kernel::GatewayBackend::async fn forward (& self , call : Forward) -> Result < RawAnswer , PluginError >
 kernel::HttpBackend
 kernel::HttpBackend::async fn send (& self , request : HttpRequest < Body > ,) -> Result < HttpResponse < BodyStream > , PluginError >
+kernel::HttpBackend::fn fresh_client (& self) -> Option < Result < Arc < dyn Any + Send + Sync > , PluginError > >
 kernel::HttpBackend::fn pooled_client (& self) -> Option < Arc < dyn Any + Send + Sync > >
 kernel::HttpRequest
 kernel::HttpResponse

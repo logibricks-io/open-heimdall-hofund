@@ -9,6 +9,10 @@ pub(super) fn spreads_sessions(mode: Stays, routing: &str) -> bool {
         && matches!(routing, "" | "smart" | "usage" | "pace")
 }
 
+pub(super) fn keeps_week_low_routing(routing: &str) -> bool {
+    matches!(routing, "" | "smart" | "pace")
+}
+
 pub(super) fn back_to_main(candidates: &[Candidate], at: usize) -> bool {
     at > 0 && candidates[at].fallback && !candidates[0].fallback && !candidates[0].resting
 }
@@ -101,7 +105,7 @@ pub(super) fn ready_for_new(candidates: &[Candidate], index: usize) -> bool {
     !candidate.resting
         && !candidate.aside
         && !stands_in(candidates, index)
-        && !candidate.low_allowance
+        && !(candidate.low_allowance && !candidate.week_low)
 }
 
 fn stands_in(candidates: &[Candidate], index: usize) -> bool {
@@ -114,4 +118,48 @@ fn seat(candidate: &Candidate) -> (String, String, String) {
         candidate.model.clone(),
         candidate.effort.clone(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Candidate, keeps_week_low_routing, ready_for_new};
+
+    fn candidate(low: bool, week_low: bool) -> Candidate {
+        Candidate {
+            member: "m".to_owned(),
+            model: "demo".to_owned(),
+            effort: String::new(),
+            resting: false,
+            reserve: 0,
+            nearly_spent: false,
+            low_allowance: low,
+            week_low,
+            fallback: false,
+            aside: false,
+            place: 1,
+            group_member: String::new(),
+            cold_after: std::time::Duration::ZERO,
+        }
+    }
+
+    #[test]
+    fn r4_72_week_low_exempts_low_allowance_only_when_flagged() {
+        let high = candidate(true, false);
+        let candidates = vec![candidate(false, false), high];
+        assert!(!ready_for_new(&candidates, 1));
+
+        let kept = candidate(true, true);
+        let candidates = vec![candidate(false, false), kept];
+        assert!(ready_for_new(&candidates, 1));
+    }
+
+    #[test]
+    fn r4_72_keeps_week_low_routing_matches_smart_pace_and_empty() {
+        for routing in ["", "smart", "pace"] {
+            assert!(keeps_week_low_routing(routing), "{routing}");
+        }
+        for routing in ["usage", "rotate", "weight", "order"] {
+            assert!(!keeps_week_low_routing(routing), "{routing}");
+        }
+    }
 }

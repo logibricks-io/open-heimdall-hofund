@@ -3,6 +3,10 @@
 mod rules;
 pub(crate) mod sealed;
 
+pub(crate) fn keeps_week_low_routing(routing: &str) -> bool {
+    rules::keeps_week_low_routing(routing)
+}
+
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -136,6 +140,8 @@ pub struct Candidate {
     pub nearly_spent: bool,
     /// Whether its known allowance is at least 90 percent used.
     pub low_allowance: bool,
+    /// At 90% or more of budget windows alone, not a short rate cap near full.
+    pub week_low: bool,
     /// Whether this row is a provider fallback.
     pub fallback: bool,
     /// Whether this row is set aside for another protocol.
@@ -160,6 +166,7 @@ impl Candidate {
             reserve: 0,
             nearly_spent: false,
             low_allowance: false,
+            week_low: false,
             fallback: false,
             aside: false,
             group_member: String::new(),

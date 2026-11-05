@@ -64,6 +64,16 @@ pub trait HttpBackend: Send + Sync {
     fn pooled_client(&self) -> Option<Arc<dyn Any + Send + Sync>> {
         None
     }
+
+    /// Rebuilds the pooled client after a regional refusal.
+    ///
+    /// The default is `None`. The host pool backend evicts its profile and
+    /// limits and returns a new client.
+    #[cfg(feature = "kernel-internal")]
+    #[must_use]
+    fn fresh_client(&self) -> Option<Result<Arc<dyn Any + Send + Sync>, PluginError>> {
+        None
+    }
 }
 
 /// Reads a secret for one plugin. The handle does not cache the secret itself.

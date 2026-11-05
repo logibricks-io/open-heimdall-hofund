@@ -201,6 +201,13 @@ impl PluginError {
         self
     }
 
+    /// Replaces the message while keeping every other field.
+    #[must_use]
+    pub fn with_message(mut self, message: impl Into<String>) -> Self {
+        self.message = message.into();
+        self
+    }
+
     /// Attaches the delay until a reset named by the upstream.
     #[must_use]
     pub fn with_reset_after(mut self, after: Duration) -> Self {
