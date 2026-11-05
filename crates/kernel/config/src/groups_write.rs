@@ -909,8 +909,10 @@ listen = \"127.0.0.1:0\"\n\
     fn r7a_rr11_group_rename_rewrites_agents_visible_exact_group_route() {
         let (text, id) = edit_group_create(BASE, "Old Team", "chat/m").expect("create");
         let bare = id.to_ascii_uppercase();
-        let text =
-            format!("{text}\n[agents.visible]\nclaude = [\"group/{id}\", \"chat\", \"{bare}\"]\n");
+        let mixed = format!("GROUP/{id}");
+        let text = format!(
+            "{text}\n[agents.visible]\nclaude = [\"group/{id}\", \"{mixed}\", \"chat\", \"{bare}\"]\n"
+        );
         let (renamed, _) = edit_group_patch(
             &text,
             &id,
@@ -926,13 +928,23 @@ listen = \"127.0.0.1:0\"\n\
         )
         .expect("rename");
         let config = load(&renamed).expect("load");
+        let visible = config.agents.visible.get("claude").expect("claude visible");
         assert_eq!(
-            config.agents.visible.get("claude"),
-            Some(&vec![
-                "group/new".to_owned(),
-                "chat".to_owned(),
-                bare.clone()
-            ])
+            visible.len(),
+            3,
+            "mixed-case duplicates collapse to one route id"
+        );
+        assert!(
+            visible
+                .iter()
+                .any(|entry| entry.eq_ignore_ascii_case("group/new")),
+            "{visible:?}"
+        );
+        assert_eq!(visible[1], "chat");
+        assert_eq!(visible[2], bare);
+        assert!(
+            !renamed.contains(&format!("GROUP/{id}")),
+            "mixed-case qualified route must be rewritten"
         );
         let before = text.clone();
         let error = edit_group_patch(
@@ -991,8 +1003,14 @@ listen = \"127.0.0.1:0\"\n\
             Some(8192)
         );
         let route = "group/new";
-        assert!(catalog_pattern_matches_route(&config.catalog.disabled, route));
-        assert!(catalog_pattern_matches_route(&config.catalog.retired, route));
+        assert!(catalog_pattern_matches_route(
+            &config.catalog.disabled,
+            route
+        ));
+        assert!(catalog_pattern_matches_route(
+            &config.catalog.retired,
+            route
+        ));
         assert!(!renamed.contains(&format!("group/{id}\"")));
     }
 

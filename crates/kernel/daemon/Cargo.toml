@@ -28,7 +28,7 @@ hofund-model-catalog = { workspace = true }
 hofund-provider = { workspace = true }
 hofund-quirks = { workspace = true }
 hofund-router = { workspace = true }
-hofund-secrets = { workspace = true }
+hofund-secrets = { workspace = true, features = ["test-fixtures"] }
 hofund-usage = { workspace = true }
 async-trait = "0.1.89"
 bytes = "1.12.0"
