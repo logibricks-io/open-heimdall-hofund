@@ -172,7 +172,7 @@ pub(crate) fn read_code_models(path: &Path) -> CodeModels {
 }
 
 fn parse_code_models_file(path: &Path) -> Option<CodeModels> {
-    let text = std::fs::read_to_string(path).ok()?;
+    let text = crate::creds::read_capped(path)?;
     parse_code_models(&text)
 }
 
@@ -355,5 +355,39 @@ mod tests {
         assert!(ids.contains(&"claude-sonnet-4-5".to_owned()));
         assert!(ids.contains(&"claude-haiku-map-key".to_owned()));
         assert!(ids.contains(&"claude-mythos-5-1".to_owned()));
+    }
+
+    #[test]
+    fn r6_4_symlink_profile_ignored_for_code_models() {
+        use std::fs;
+
+        let dir = tempfile::tempdir().expect("dir");
+        let target = dir.path().join("real.json");
+        fs::write(
+            &target,
+            r#"{"additionalModelOptionsCache":[{"value":"claude-mythos-5-1","label":"M"}]}"#,
+        )
+        .expect("target");
+        let profile = dir.path().join(creds::PROFILE_FILE);
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, &profile).expect("symlink");
+        #[cfg(not(unix))]
+        return;
+
+        assert!(parse_code_models_file(&profile).is_none());
+        assert!(read_code_models(dir.path()).extra.is_empty());
+    }
+
+    #[test]
+    fn r6_5_oversize_profile_ignored_for_code_models() {
+        use std::fs;
+
+        let dir = tempfile::tempdir().expect("dir");
+        let big = format!(
+            r#"{{"additionalModelOptionsCache":[{{"value":"{}"}}]}}"#,
+            "x".repeat((1024 * 1024 + 64) as usize)
+        );
+        fs::write(dir.path().join(creds::PROFILE_FILE), big).expect("write");
+        assert!(parse_code_models_file(&dir.path().join(creds::PROFILE_FILE)).is_none());
     }
 }

@@ -115,7 +115,7 @@ pub(crate) fn parse(text: &str, now: SystemTime) -> Result<Vec<QuotaWindow>, Plu
             .as_str()
             .parse::<f64>()
             .unwrap_or(0.0);
-        let used_pct = used.round().clamp(0.0, 100.0) as u64;
+        let used_pct = used.floor().clamp(0.0, 100.0) as u64;
         let (name, model_scope) = if kind == "session" {
             ("5 hours".to_owned(), None)
         } else {
@@ -248,6 +248,7 @@ What's contributing to your limits usage?
         );
         assert_eq!(windows[2].name(), "7 days · Opus");
         assert_eq!(windows[2].scope_model(), Some("opus"));
+        assert_eq!(windows[2].used(), 12);
         assert_eq!(
             windows[2].resets_at(),
             Some(shanghai_at("2026-01-02T14:00:00+08:00"))
@@ -310,6 +311,16 @@ Current session: 5% used · resets 3pm (UTC)
         let windows = parse(text, now).expect("windows");
         assert_eq!(windows.len(), 1);
         assert_eq!(windows[0].name(), "5 hours");
+    }
+
+    #[test]
+    fn r6_6_usage_fractional_percent_uses_floor_not_round() {
+        let now = utc_at("2026-10-01T04:00:00Z");
+        let text = "Current session: 99.5% used · resets 3pm (UTC)
+";
+        let windows = parse(text, now).expect("windows");
+        assert_eq!(windows[0].used(), 99);
+        assert!(windows[0].used() < 100);
     }
 
     #[test]

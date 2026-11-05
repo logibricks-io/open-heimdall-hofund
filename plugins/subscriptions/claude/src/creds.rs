@@ -210,8 +210,8 @@ pub(crate) fn write_credentials_cas(
     write_private(path, text)
 }
 
-fn read_capped(path: &Path) -> Option<String> {
-    let meta = std::fs::metadata(path).ok()?;
+pub(crate) fn read_capped(path: &Path) -> Option<String> {
+    let meta = std::fs::symlink_metadata(path).ok()?;
     if !meta.is_file() || meta.len() > FILE_CAP {
         return None;
     }

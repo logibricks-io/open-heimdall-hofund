@@ -291,22 +291,9 @@ async fn store_swap(host: &HostContext, text: &str) -> Result<Vec<AccountId>, Pl
         let credentials = crate::creds::parse_credentials(&row.credentials)
             .ok_or_else(|| PluginError::config("an imported account has no credentials"))?;
         let id = profile.account_id()?;
-        if let Some(secret) = host.accounts().secret(&id).await? {
-            let blob = hofund_plugin_sdk::oauth::SecretObject::parse(&secret)?;
-            let same_refresh = blob
-                .text(crate::creds::CREDENTIALS)
-                .and_then(crate::creds::refresh_token)
-                .is_some_and(|stored| {
-                    crate::creds::refresh_token(&credentials.text)
-                        .is_some_and(|incoming| incoming == stored)
-                });
-            if same_refresh {
-                ids.push(id);
-                continue;
-            }
-            if crate::agent_sign_in::import_blocked(host, &id, &credentials.text, &profile).await? {
-                return Err(PluginError::config(crate::agent_sign_in::IMPORT_EXISTS));
-            }
+        if let Some(existing) = import_existing_action(host, &id, &credentials, &profile).await? {
+            ids.push(existing);
+            continue;
         }
         let blob = crate::creds::blob(&credentials, &profile);
         let account = host.accounts().account(id.clone(), row.email)?;
@@ -314,6 +301,34 @@ async fn store_swap(host: &HostContext, text: &str) -> Result<Vec<AccountId>, Pl
         ids.push(id);
     }
     Ok(ids)
+}
+
+/// When the account already exists: keep the id without writing if the refresh
+/// token matches; refuse an older export; otherwise allow upsert.
+async fn import_existing_action(
+    host: &HostContext,
+    id: &AccountId,
+    credentials: &crate::creds::Credentials,
+    profile: &crate::creds::Profile,
+) -> Result<Option<AccountId>, PluginError> {
+    let Some(secret) = host.accounts().secret(id).await? else {
+        return Ok(None);
+    };
+    let blob = hofund_plugin_sdk::oauth::SecretObject::parse(&secret)?;
+    let same_refresh = blob
+        .text(crate::creds::CREDENTIALS)
+        .and_then(crate::creds::refresh_token)
+        .is_some_and(|stored| {
+            crate::creds::refresh_token(&credentials.text)
+                .is_some_and(|incoming| incoming == stored)
+        });
+    if same_refresh {
+        return Ok(Some(id.clone()));
+    }
+    if crate::agent_sign_in::import_blocked(host, id, &credentials.text, profile).await? {
+        return Err(PluginError::config(crate::agent_sign_in::IMPORT_EXISTS));
+    }
+    Ok(None)
 }
 
 const IMPORT_SCOPES: [&str; 4] = [
@@ -507,6 +522,9 @@ async fn store_login(host: &HostContext, row: LoginRow) -> Result<AccountId, Plu
     let credentials = crate::creds::parse_credentials(&row.credentials)
         .ok_or_else(|| PluginError::config("an imported account has no credentials"))?;
     let id = profile.account_id()?;
+    if let Some(existing) = import_existing_action(host, &id, &credentials, &profile).await? {
+        return Ok(existing);
+    }
     let blob = crate::creds::blob(&credentials, &profile);
     let label = profile.email().unwrap_or(&row.email).to_owned();
     let account = host.accounts().account(id.clone(), label)?;
@@ -659,6 +677,114 @@ mod tests {
                 .to_string()
                 .contains(crate::agent_sign_in::IMPORT_EXISTS)
         );
+    }
+
+    #[test]
+    fn r6_1_cliproxy_import_rejects_older_than_stored() {
+        let dir = tempfile::tempdir().expect("dir");
+        let host = host(&dir);
+        let id = account_id_from(&["claude-email", "user@example.test"]);
+        let blob = SecretObject::new()
+            .with_text(
+                creds::CREDENTIALS,
+                r#"{"claudeAiOauth":{"accessToken":"stored-at","refreshToken":"rt-stored","expiresAt":3000}}"#,
+            )
+            .with_text(
+                creds::PROFILE,
+                r#"{"emailAddress":"user@example.test"}"#,
+            )
+            .to_secret();
+        let account = host
+            .context()
+            .accounts()
+            .account(id.clone(), "user@example.test")
+            .expect("account");
+        block_on(host.context().accounts().upsert(account, blob)).expect("upsert");
+        let text = r#"{"type":"claude","access_token":"file-at","refresh_token":"rt-file","email":"user@example.test","expiresAt":1000}"#;
+        let error = block_on(store(host.context(), text)).expect_err("older");
+        assert!(
+            error
+                .to_string()
+                .contains(crate::agent_sign_in::IMPORT_EXISTS)
+        );
+        let secret = block_on(host.context().accounts().secret(&id))
+            .expect("read")
+            .expect("stored");
+        let blob = SecretObject::parse(&secret).expect("blob");
+        let creds_text = blob.text(creds::CREDENTIALS).expect("creds");
+        assert_eq!(creds::expires_at(creds_text), Some(3000));
+        assert!(creds_text.contains("rt-stored"));
+        assert!(creds_text.contains("stored-at"));
+    }
+
+    #[test]
+    fn r6_2_sub2api_import_rejects_older_than_stored() {
+        let dir = tempfile::tempdir().expect("dir");
+        let host = host(&dir);
+        let id = account_id_from(&["claude", "org-a", "acct-1"]);
+        let blob = SecretObject::new()
+            .with_text(
+                creds::CREDENTIALS,
+                r#"{"claudeAiOauth":{"accessToken":"stored-at","refreshToken":"rt-stored","expiresAt":3000}}"#,
+            )
+            .with_text(
+                creds::PROFILE,
+                r#"{"accountUuid":"acct-1","organizationUuid":"org-a","emailAddress":"team@example.com"}"#,
+            )
+            .to_secret();
+        let account = host
+            .context()
+            .accounts()
+            .account(id.clone(), "team@example.com")
+            .expect("account");
+        block_on(host.context().accounts().upsert(account, blob)).expect("upsert");
+        let text = r#"{"accounts":[{"name":"seat","platform":"anthropic","type":"oauth","credentials":{"access_token":"file-at","refresh_token":"rt-file","expires_at":1000,"org_uuid":"org-a","account_uuid":"acct-1","email_address":"team@example.com"}}]}"#;
+        let error = block_on(store(host.context(), text)).expect_err("older");
+        assert!(
+            error
+                .to_string()
+                .contains(crate::agent_sign_in::IMPORT_EXISTS)
+        );
+        let secret = block_on(host.context().accounts().secret(&id))
+            .expect("read")
+            .expect("stored");
+        let blob = SecretObject::parse(&secret).expect("blob");
+        let creds_text = blob.text(creds::CREDENTIALS).expect("creds");
+        assert_eq!(creds::expires_at(creds_text), Some(3000));
+    }
+
+    #[test]
+    fn r6_3_same_refresh_token_keeps_stored_without_rewrite() {
+        let dir = tempfile::tempdir().expect("dir");
+        let host = host(&dir);
+        let id = account_id_from(&["claude-email", "user@example.test"]);
+        let blob = SecretObject::new()
+            .with_text(
+                creds::CREDENTIALS,
+                r#"{"claudeAiOauth":{"accessToken":"stored-at","refreshToken":"rt-same","expiresAt":3000}}"#,
+            )
+            .with_text(
+                creds::PROFILE,
+                r#"{"emailAddress":"user@example.test"}"#,
+            )
+            .to_secret();
+        let account = host
+            .context()
+            .accounts()
+            .account(id.clone(), "user@example.test")
+            .expect("account");
+        block_on(host.context().accounts().upsert(account, blob)).expect("upsert");
+        let text = r#"{"type":"claude","access_token":"file-at","refresh_token":"rt-same","email":"user@example.test","expiresAt":1000}"#;
+        let ids = block_on(store(host.context(), text)).expect("import");
+        assert_eq!(ids, std::slice::from_ref(&id));
+        let secret = block_on(host.context().accounts().secret(&id))
+            .expect("read")
+            .expect("stored");
+        let blob = SecretObject::parse(&secret).expect("blob");
+        let creds_text = blob.text(creds::CREDENTIALS).expect("creds");
+        assert_eq!(creds::expires_at(creds_text), Some(3000));
+        assert!(creds_text.contains("stored-at"));
+        assert!(!creds_text.contains("file-at"));
     }
 
     #[test]
