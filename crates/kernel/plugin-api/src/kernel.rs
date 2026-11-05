@@ -57,7 +57,7 @@ pub trait HttpBackend: Send + Sync {
 
     /// Opens a bidirectional HTTP session.
     ///
-    /// The default refuses with [`PluginErrorKind::Unsupported`].
+    /// The default refuses with [`PluginErrorKind::Unsupported`](crate::PluginErrorKind::Unsupported).
     async fn open_duplex(&self, request: DuplexRequest) -> Result<DuplexSession, PluginError> {
         let _ = request;
         Err(PluginError::unsupported(

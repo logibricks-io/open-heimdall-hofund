@@ -58,8 +58,9 @@ impl HttpHandle {
     /// # Errors
     ///
     /// Returns [`PluginError`] when the dial fails. Stable message prefixes on
-    /// [`PluginErrorKind::Timeout`], [`PluginErrorKind::Transport`], and
-    /// [`PluginErrorKind::Connect`] classify the failure for plugin fallback logic.
+    /// [`PluginErrorKind::Timeout`](crate::PluginErrorKind::Timeout),
+    /// [`PluginErrorKind::Transport`](crate::PluginErrorKind::Transport), and
+    /// [`PluginErrorKind::Connect`](crate::PluginErrorKind::Connect) classify the failure for plugin fallback logic.
     pub async fn open_duplex(&self, request: DuplexRequest) -> Result<DuplexSession, PluginError> {
         self.inner.open_duplex(request).await
     }

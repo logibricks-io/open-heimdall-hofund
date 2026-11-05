@@ -4,7 +4,7 @@ use std::time::Duration;
 
 /// Replaces the pooled client's default idle read budget for one [`super::kernel::HttpRequest`].
 ///
-/// Set through [`hofund_plugin_sdk::Call::read_timeout`]. The host pool honours a longer
+/// Set through the plugin SDK's `Call::read_timeout`. The host pool honours a longer
 /// or shorter budget than its process-wide default for that send only.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HostReadBudget(pub Duration);
