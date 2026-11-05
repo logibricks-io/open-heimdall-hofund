@@ -52,7 +52,7 @@ Empty machine: the reference quits with "no supported agents found" (`tui.go:Run
 | Key | Action | Control |
 |---|---|---|
 | `j`/`k`, `up`/`down` | Row | `GET /v1/hofund/providers` |
-| `enter`, space | Model list. `enter` toggles a model on or off and the list stays open (`openProviderModels`). The TUI refuses to turn off the last **enabled** id before PUT (`pages.go`) | `GET /v1/hofund/providers/{id}/models` plus `GET/PUT .../picks` (`expected_picks_revision`). **Enabled set:** when `picks` is non-empty, enabled ids are `picks`; when empty, enabled ids are **`default_exposed`** (listed chat models only: not image, video, or router; `models.rs`). Other listed ids show off. Toggle updates the enabled set locally; **Replace** sends the full enabled id list. Server **Replace** with an empty list clears explicit picks and agents fall back to **`default_exposed`**, never all-off. `422` **`empty_result`** applies only to **`PicksForm::Edit`**, not Replace |
+| `enter`, space | Model list. `enter` toggles a model on or off and the list stays open (`openProviderModels`). The TUI refuses to turn off the last **enabled** id before PUT (`pages.go`) | `GET /v1/hofund/providers/{id}/models` plus `GET/PUT .../picks` (`expected_picks_revision`). **Enabled set:** when `picks` is non-empty, enabled ids are `picks`; when empty, enabled ids are the server's **`default_exposed`** list (`models.rs`), taken from control gap G-12; the TUI never classifies models from id text. Other listed ids show off. Toggle updates the enabled set locally; **Replace** sends the full enabled id list. Replace with `ids: []` is refused with `422` reason `empty` and changes nothing; it is not a reset. Going back to default exposure is the Reset edit (`edit: ["all"]` or `edit: ["-"]`), which stores empty picks. `422` **`empty_result`** applies only to **`PicksForm::Edit`** |
 | picker `ctrl+r` | Fetch that provider's models again | `POST .../models/refresh` |
 | `e` | Replace one upstream key. Password echo. Refused only for a signed-in **account** row and for the **google-vertex** preset (`IsVertex`; credentials live in options). Other presets, including local presets that need no key, still open the password ask (`pages.go`) | `GET .../keys` for fingerprints (`id`, `masked`, `on`). `POST .../keys` with `ProviderKeyAction::Replace` (`provider_keys.rs`): required `key_id` (fingerprint from GET) and exactly one new credential in `keys`. One key: replace it. Several keys: the user picks the fingerprint in a picker first; the TUI never guesses. The new secret goes only in the request body, never in a toast, status line, or log |
 | `w` | Address (`pages.go` `w`). Opens the address ask only for a **local** preset (`KindLocal` → `localAddressAsk`), a custom provider with `customURLs`, or a preset that declares an **endpoint** (`endpointAsk`). **Vertex** (`IsVertex`) and presets **without** an endpoint only flash a hint (project/location or vendor URL); they do not PATCH `base_url`. Presets with **`needs_project`** (G-3) change project through add/`a`, not `w` | Gap G-2 `PATCH … base_url` when the ask applies |
@@ -73,8 +73,8 @@ Derive the **status** column first-match-wins (aligned with `viewProviders`, `Re
 
 1. `enabled: false` → switched off
 2. account row and `signed_out` → signed out (show `account_label`). **`signed_out`** matches the reference: account provider, at least one login that is on or active, and every such login has lapsed (`logins.go:SignedOut`)
-3. account row with `account_label` → that label
-4. Vertex (or preset **`needs_project`**) and the Vertex **base URL cannot be formed** (missing or invalid project/location, including mismatch) → needs a project
+3. account row (any account, even with an empty `account_label`) → that label
+4. Vertex (or preset **`needs_project`**) and the Vertex **base URL cannot be formed** (project empty or not a valid project id, or location not a valid location; an empty location means `global` and does form an address, see `plugins/providers/google-vertex/src/base.rs`) → needs a project
 5. Vertex row whose project and location **do** form an address → **Google credentials**, plus ` as <impersonate>` when impersonation is set. This branch shows **no masked key** even if a key exists; never show the credentials path in the column
 6. `key_masked` non-empty → show the masked key
 7. **`key_not_required`** is true → **no key needed**. Derive **`key_not_required`** like the reference **`keyOptional`**: preset **`needs_key: false`** (G-3 `NoKey`), or the provider **`base_url`** host is localhost, `127.0.0.1`, `0.0.0.0`, private, loopback, link-local, `100.64/10` (CGNAT), or ends in `.local` (`provider.go:keyOptional`, `ownNetwork`)
@@ -161,7 +161,7 @@ Sections, in order: instructions, MCP servers, skills, MCP servers found in agen
 | Key | Action |
 |---|---|
 | `j`/`k`, `up`/`down` | Row; list window keeps at least **4** body rows visible (`visible := max(4, h-6)`, `library.go:spend`) |
-| `enter`, space | Agent toggles for instructions, MCP, skill, RTK (`openLibAgents`). Found rows explain `i` and `d` |
+| `enter`, space | Agent toggles for instructions, MCP, skill, RTK (`openLibAgents`). Found rows explain `i` and `d`. Spec only; gated until security review |
 | `a` | Add MCP server or skills (`openLibAdd`, `probeCmd`). Spec only; gated until security review |
 | `e` | Edit instructions in `$EDITOR` or `vi` (`editInstructions`), or retype an MCP server (`openServer`). Spec only; gated until security review |
 | `u` | Update one skill from its source. Spec only; gated until security review |
@@ -368,6 +368,10 @@ Additive on `StatusResponse`: `serves` (`tui`, `serve`, `desktop`, or empty) and
 ### G-11 Usage period summary
 
 Gap for the Usage page sparkline and by-model table. `GET /usage` **`rows_truncated`** still describes only the row list cap (`USAGE_ROW_LIMIT`). Add a period-scoped summary (shape TBD) with a daily **series** and **by-model** totals covering the **whole period**, independent of row truncation. The Usage page agents table uses **`by=agent` only**.
+
+### G-12 Model exposure flags
+
+`ModelEntry` (`crates/control-proto/src/models.rs`) carries only id, display name, context and max output; `model_entries` (`control.rs`) drops the image, video and decision flags, so the TUI cannot compute the default enabled set. Add, additively, either the per-model `draws` / `films` / `decides` flags on the model list or the `default_exposed` id list on the picks response. Until G-12 lands, the TUI shows the model list read-only when `picks` is empty and sends no Replace.
 
 ## 4. Gateway handoff
 
