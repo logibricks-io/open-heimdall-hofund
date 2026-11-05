@@ -132,6 +132,13 @@ package = "hofund-plugin-plan-quota"
 feature = "plan-quota"
 
 [[plugin]]
+id = "qoder"
+kind = "subscription"
+path = "plugins/subscriptions/qoder"
+package = "hofund-plugin-subscription-qoder"
+feature = "qoder"
+
+[[plugin]]
 id = "relay"
 kind = "provider"
 path = "plugins/providers/relay"
@@ -153,8 +160,22 @@ package = "hofund-plugin-retrieval"
 feature = "retrieval"
 
 [[plugin]]
+id = "workbuddy"
+kind = "subscription"
+path = "plugins/subscriptions/workbuddy"
+package = "hofund-plugin-subscription-workbuddy"
+feature = "workbuddy"
+
+[[plugin]]
 id = "zcode"
 kind = "subscription"
 path = "plugins/subscriptions/zcode"
 package = "hofund-plugin-subscription-zcode"
 feature = "zcode"
+
+[[plugin]]
+id = "zed"
+kind = "subscription"
+path = "plugins/subscriptions/zed"
+package = "hofund-plugin-subscription-zed"
+feature = "zed"

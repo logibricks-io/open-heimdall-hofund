@@ -2116,7 +2116,10 @@ dependencies = [
  "hofund-plugin-subscription-gemini",
  "hofund-plugin-subscription-grok",
  "hofund-plugin-subscription-kiro",
+ "hofund-plugin-subscription-qoder",
+ "hofund-plugin-subscription-workbuddy",
  "hofund-plugin-subscription-zcode",
+ "hofund-plugin-subscription-zed",
  "hofund-provider",
  "hofund-quirks",
  "serde",
@@ -2284,7 +2287,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "hofund-plugin-subscription-qoder"
+version = "0.1.0"
+dependencies = [
+ "hofund-kit-subscription",
+ "hofund-plugin-api",
+ "hofund-plugin-sdk",
+ "tempfile",
+]
+
+[[package]]
+name = "hofund-plugin-subscription-workbuddy"
+version = "0.1.0"
+dependencies = [
+ "hofund-kit-subscription",
+ "hofund-plugin-api",
+ "hofund-plugin-sdk",
+ "tempfile",
+]
+
+[[package]]
 name = "hofund-plugin-subscription-zcode"
+version = "0.1.0"
+dependencies = [
+ "hofund-kit-subscription",
+ "hofund-plugin-api",
+ "hofund-plugin-sdk",
+ "tempfile",
+]
+
+[[package]]
+name = "hofund-plugin-subscription-zed"
 version = "0.1.0"
 dependencies = [
  "hofund-kit-subscription",
