@@ -70,17 +70,27 @@ Hofund's router `REGION_WORDS` (`crates/kernel/router/src/decision.rs:83-86`) do
 
 ### 1.4 HTTP/2-unavailable memory
 
-`open` and `h2Blocked` (`index.mjs:2343-2382`). `H2.retryAfter` is 10 minutes (line 2364).
+`open` and `h2Blocked` (`index.mjs:2343-2382`, `2375-2382`). `H2.retryAfter` is 10 minutes (`index.mjs:2364`). When `h2Blocked` is true, `open` sets `h1Until` for every later Run (`index.mjs:2355-2356`).
 
-Remember HTTP/2 as unavailable only when the failure is one of:
+Define blocked exactly like `h2Blocked` (`index.mjs:2375-2382`), in this order:
 
-- the 15-second head timer (`h2Timeout`)
-- an error whose code starts with `ERR_HTTP2`, except `ERR_HTTP2_STREAM_ERROR`
-- a message matching `h2 is not supported`, `alpn`, `nghttp2`, or `protocol error`
+1. `h2Timeout` (15-second head wait) → blocked.
+2. If the error text contains any of `ECONNREFUSED`, `ENOTFOUND`, `EAI_AGAIN`, `ENETUNREACH`, `EHOSTUNREACH`, `ECONNRESET`, `ETIMEDOUT`, `ECONNABORTED`, `EPIPE` (`NET`, line 2368) → not blocked.
+3. If the code is `ERR_HTTP2_STREAM_ERROR` → not blocked (HTTP/2 worked; the stream failed).
+4. Otherwise blocked when the code starts with `ERR_HTTP2`, or the message matches `h2 is not supported`, `alpn`, `nghttp2`, or `protocol error` (case-insensitive). A proxy CONNECT tunnel that answers `h2 is not supported` must set the memory, not classify as a generic connection failure.
 
-Do not remember it for a connection failure (`ECONNREFUSED`, `ENOTFOUND`, `EAI_AGAIN`, `ENETUNREACH`, `EHOSTUNREACH`, `ECONNRESET`, `ETIMEDOUT`, `ECONNABORTED`, `EPIPE`) or for a stream the server reset or refused before the head (`http1.test.mjs` covers stall, refuse, and the 10-minute stickiness). The memory is process-global in the reference, not per account: one blocked proxy affects every account. Match that. A region retry clears it.
+Hofund does not parse raw `reqwest` errors in the plugin. `plugin-host` maps duplex open failures to stable `PluginError` kinds and message prefixes (section 3.2). The plugin sets the memory when:
 
-The plugin owns this memory. The kernel must not store it. The plugin must not sniff raw `reqwest` strings. Section 3 gives the kernel error classes the plugin switches on.
+| Reference `h2Blocked` | Hofund signal |
+|---|---|
+| Head timeout | `PluginErrorKind::Timeout` and message prefix `duplex headers timed out` |
+| `NET` failures (DNS, TCP reset, timeout before HTTP, etc.) | `PluginErrorKind::Connect` |
+| `ERR_HTTP2_STREAM_ERROR` / reset before headers | `PluginErrorKind::Transport` and prefix `stream refused` — fall back for this Run only, do not set memory |
+| Other HTTP/2 / ALPN / protocol / `h2 is not supported` | `PluginErrorKind::Transport` and prefix `http2 unavailable`, or the same four substrings appearing in the host message after that prefix |
+
+Implementing `open_duplex` must fold reqwest/hyper failures into those prefixes (for example tunnel responses containing `h2 is not supported` → `http2 unavailable`, not `Connect`). Unit tests in `plugin-host` assert the mapping; Cursor plugin tests assert memory on prefix/kind only.
+
+The memory is process-global in the reference, not per account: one blocked proxy affects every account. Match that. A region retry clears it (`index.mjs:3385`).
 
 ### 1.5 HTTP/1.1 fallback
 
@@ -130,7 +140,7 @@ Conversation state: field 1 repeated SHA-256 ids of transcript blobs; field 8 th
 
 User turn blob: field 1 is the last user text, field 2 a message id, field 4 varint 1 (agent mode). The state points at a blob of `field 1 = (field 1 = that user message's blob id, field 10 = the same message id)`.
 
-Request context (`env` and `toolDef`, `index.mjs:1876-1883`): field 4 is the environment (field 1 OS name, field 2 temp directory, field 10 `"UTC"`). Field 7 repeated is an MCP tool definition: field 1 name, field 2 description, field 3 a `google.protobuf.Value` of the JSON schema (`pbValue`, lines 1568-1583), field 4 namespace `"tools"`, field 5 name, field 6 schema JSON text.
+Request context (`env` and `toolDef`, `index.mjs:1876-1883`): field 4 is the environment. Field 1 is the OS name as Node reports it: `darwin`, `linux`, or `windows` (`GOOS`, `index.mjs:55`, `1883`), not Rust `std::env::consts::OS` (`macos`). Map `macos` → `darwin`, `windows` → `windows`, everything else → `linux`. Field 2 is the temp directory; field 10 `"UTC"`. Field 7 repeated is an MCP tool definition: field 1 name, field 2 description, field 3 a `google.protobuf.Value` of the JSON schema (`pbValue`, lines 1568-1583; struct keys sorted at line 1580), field 4 namespace `"tools"`, field 5 name, field 6 schema JSON text.
 
 Transcript blobs are UTF-8 JSON, not protobuf. `conversation` (`index.mjs:1794-1870`) writes AI SDK-shaped messages. Section 4 maps hofund `Request` onto that JSON. Blob ids are SHA-256 of those bytes. The server asks for them by the raw 32-byte digest, hex-looked-up (`decode` case 4).
 
@@ -155,7 +165,7 @@ Interaction update (`kindOf` names in `native-session.mjs:72-77`, read in `decod
 | 7 | count only | partial tool call |
 | 8 | ignore | token delta, not a usage total |
 | 13 | heartbeat. `beat` (`index.mjs:3043-3049`): every top-level field is 1 and every inner field is 13. Does not reset the quiet clock. | same |
-| 14 | turn end. End the text turn. | usage, `usageOf` (`index.mjs:1941-1944`): field 1 input, 2 output, 3 cache read, 4 cache write, 5 reasoning. Input reported to the client is `max(input - cache_read - cache_write, 0)` plus the two cache counters added back into the prompt total. |
+| 14 | turn end. End the text turn. | usage, `usageOf` (`index.mjs:1941-1943`): field 1 input, 2 output, 3 cache read, 4 cache write, 5 reasoning. See section 4.3 for how Hofund maps this into `hofund_ir::Usage`. |
 | 27 | ignore | tool-call count for the step, inner field 1 |
 
 Exec (`exec`, `index.mjs:3224-3298`):
@@ -214,9 +224,11 @@ Weights:
 | Maintenance | New fields are an explicit match arm plus a golden frame. Unknown fields already pass through the skip path. | Generated structs invite sending fields the reference never sends. `upstream-words.test.mjs` forbids the reference product name in any outbound byte. A generated catalog is how that name leaks back in. |
 | Numeric range | Decode varints as `u64`. The reference uses JavaScript numbers and goes wrong past 2^53. Exec ids are uint32 (`exec`, `index.mjs:3228-3233`). A test locks a varint above 2^53 so we do not copy that bug. | `prost` would also use `u64`, then we would still hand-check the subset. |
 
-Attack on the hand-written codec: it will drift. The defense is golden frames taken from `native-test-wire.mjs` shapes used by `stall-550.test.mjs` (text, thinking, heartbeat, exec, count, checkpoint, get-blob, set-blob), round-tripped in Rust, plus a fuzz-sized truncated buffer that must match `fields`' "return what you have" rule. Do not invent packed repeated fields or groups. The reference reader rejects wire type other than 0, 1, 2, and 5 by stopping.
+Attack on the hand-written codec: it will drift. The defense is golden frames taken from `native-test-wire.mjs` shapes used by `stall-550.test.mjs` (text, thinking, heartbeat, exec, count, checkpoint, get-blob, set-blob), round-tripped in Rust, plus a fuzz-sized truncated buffer that must match `fields`' "return what you have" rule. Do not invent packed repeated fields or groups. The reference reader rejects wire type other than 0, 1, 2, and 5 by stopping. Golden `pbValue` frames lock sorted struct key order (`index.mjs:1580`).
 
-Namespace on the wire is the literal `tools` (`index.mjs:1749`). Outbound bytes, prompts, and tool definitions use only that namespace (`upstream-words.test.mjs`). The reference also accepts one historical MCP namespace when decoding names (`NAMESPACES`, `index.mjs:1749-1750`, `bareName`); that string is the upstream project's name and must not appear in plugin source, tests, or this file (`xtask/tests/workspace_invariants.rs` `inspiration_name_is_not_used_as_branding`; `docs/plugins/models.md` on reference-named wire fields). Accepting that alias on read is deferred. Until then, when exec field 5 is empty and field 1 has no `tools-` prefix, leave the tool name unchanged (`index.mjs:3247`). Do not add a constant table or golden frame containing the alias.
+Namespace on the wire is the literal `tools` (`index.mjs:1749`). Outbound bytes, prompts, and tool definitions use only that namespace (`upstream-words.test.mjs`). The reference also accepts one historical MCP namespace when decoding names (`bareName`, `index.mjs:1751-1753`); that label is the upstream project's name and must not appear in plugin source, tests, or this file (`xtask/tests/workspace_invariants.rs` `inspiration_name_is_not_used_as_branding`; `docs/plugins/models.md`). Accepting that alias on read is deferred.
+
+On the **stateless Run** path, resolve MCP exec tool names like `exec` case 11 (`index.mjs:3279`): use field 5 when non-empty; otherwise apply `bareName` to field 1, which in Hofund means strip a leading `tools-` prefix only (equivalent to the reference's `tools` entry, without recognising the legacy alias). If field 5 is empty and field 1 does not start with `tools-`, leave the name unchanged. The **native retention** path uses stricter matching (`index.mjs:3247`); R-8 does not implement that branch.
 
 ## 3. Transport inside hofund
 
@@ -338,9 +350,20 @@ Reasoning. Interaction field 4 becomes `ThinkingDelta` on its own block. It is n
 
 Images. Encoded as in section 4.1. A base64 `ImageSource` is the hex form. A URL is the placeholder, because the reference does not fetch it.
 
-Usage. On a turn that ends without tool calls, map field 14 through `usageOf` into `hofund_ir::Usage`: `input_tokens` is uncached plus cache read plus cache write, `output_tokens` is field 2, `cache_read_tokens` field 3, `cache_write_tokens` field 4, `reasoning_tokens` field 5, `total_tokens` is input plus output. This is the last `MessageDelta`.
+Usage. On a turn that ends without tool calls, read field 14 as `[inp, cr, cw]` = fields 1, 3, 4 (`usageOf`, `index.mjs:1941-1943`). Map into `hofund_ir::Usage` on the last `MessageDelta`:
 
-A tool step has no field 14 until the tool results come back on the same Run, and the caller runs tools after this `execute` returns (`index.mjs:1946-1956`). R-9 closes the Run, then `POST https://api2.cursor.sh/aiserver.v1.DashboardService/GetFilteredUsageEvents` (`index.mjs:2076-2079`), not the agent host. Connect JSON headers from `headersFor` (`index.mjs:275-285`, `content-type: application/json`, not Run `application/connect+proto`). Body: `startDate` and `endDate` are decimal strings (`String(since - 60_000)`, `String(Date.now() + 60_000)`, line 2079); `page` and `pageSize` are JSON numbers; optional `teamId` is a JSON number when present (`teamBody`, `index.mjs:177-179`). Window: first wait 1.5 seconds, then every 500 milliseconds, give up at 6 seconds, each request budget 5 seconds (`STEP_WAIT`, line 1973). Claim rows where `conversationId` matches and `timestamp >= since - 1000` (`index.mjs:2088-2100`). Dashboard `tokenUsage.inputTokens` is already the uncached portion; the reference sets `reasoning` to 0 for events (`index.mjs:2102`). Hofund `input_tokens` for the step is `inputTokens + cacheReadTokens + cacheWriteTokens`, not `inputTokens` minus cache again.
+- `cache_read_tokens` = `cr`
+- `cache_write_tokens` = `cw`
+- `output_tokens` = field 2; `reasoning_tokens` = field 5 when present
+- `input_tokens` = `max(inp - cr - cw, 0) + cr`
+
+Do **not** set `input_tokens` to uncached plus `cr` plus `cw` while also filling `cache_read_tokens` and `cache_write_tokens`. The gateway treats `input_tokens - cache_read` as uncached for Chat, Responses, and Generative Language (`crates/kernel/gateway/src/limits.rs:494-512`, `input_includes_cache`; `crates/kernel/gateway/src/lib.rs:3252-3258`; `crates/kernel/codec/src/passthrough.rs:249-271`, `707-716`; billing uses `uncached_input_tokens` in `crates/kernel/usage/src/price.rs:74-90`).
+
+Anthropic Messages encoding sends `usage.input_tokens` and `cache_read_input_tokens` separately (`crates/kernel/codec/src/anthropic.rs:913-927`). R-9 sets stream `Usage.input_tokens` to `max(inp - cr - cw, 0)` on Messages routes (uncached remainder on the wire) and to `max(inp - cr - cw, 0) + cr` on Chat/Responses routes so gateway uncached math stays `max(inp - cr - cw, 0)`.
+
+**Deviation:** the reference adds cache write back into client-facing prompt totals (`usageOf` comment, `index.mjs:1937-1939`). Hofund Chat/Responses `prompt_tokens` therefore exclude cache write and are lower than the reference prompt total by field 4 (`cw`). Record in `docs/feature-parity.md` when R-9 ships (section 8).
+
+A tool step has no field 14 until the tool results come back on the same Run, and the caller runs tools after this `execute` returns (`index.mjs:1946-1956`). R-9 closes the Run, then `POST https://api2.cursor.sh/aiserver.v1.DashboardService/GetFilteredUsageEvents` (`index.mjs:2076-2079`), not the agent host. Connect JSON headers from `headersFor` (`index.mjs:275-285`, `content-type: application/json`, not Run `application/connect+proto`). Body: `startDate` and `endDate` are decimal strings (`String(since - 60_000)`, `String(Date.now() + 60_000)`, line 2079); `page: 1`, `pageSize: 50`; optional `teamId` is a JSON number when present (`teamBody`, `index.mjs:177-179`). Window: first wait 1.5 seconds, then every 500 milliseconds, give up at 6 seconds, each request budget 5 seconds (`STEP_WAIT`, line 1973). Claim rows where `conversationId` matches and `timestamp >= since - 1000` (`index.mjs:2088-2100`). Dashboard `tokenUsage.inputTokens` is already uncached (`index.mjs:2102` builds `input` from it). Map a matched row with the same split: `cache_read_tokens` / `cache_write_tokens` from the event, `input_tokens` = `inputTokens + cacheReadTokens` (do not subtract cache from `inputTokens` again).
 
 If the poll misses, report zeros for that step. Do not estimate. The reference estimates only when the account cannot read events or nothing can collect them later (`finish`, `index.mjs:2977-2982`). An estimate stored in `input_tokens` is what clients read as context fullness. Hofund `Usage` has no deferred-usage bag, and a later `execute` has no ledger to attach it to. The cross-step debt (`owed`, `skipAfter`, the deferred bag) is deferred. Polling once per tool step is the part that fits a stateless call.
 
@@ -382,7 +405,7 @@ Keychain (`cli.rs:21-102` versus `index.mjs:182-216` and `cursor.go:234-265`).
 
 `list_models` (`lib.rs:326-363`, `account_label` at 400-406) writes the access token to `{state}/cursor-models/{sanitized account id}/auth.json` and never removes it. The directory name is derived from the account id, which can carry the mailbox.
 
-Replace that with a directory under the process temp dir, mode `0o700`, created for the call and removed on drop, including the error path. The directory name is the hex SHA-256 of the account id. `cursor-agent` still needs `CURSOR_CONFIG_DIR` pointed at that directory and an `auth.json` for the duration of `models` (file mode owner-read/write as `auth::write_auth_file` already sets). A crash can leave a temp directory. The name is not the mailbox, and it is not under the state dir that lives as long as the install. Do not add the `tempfile` crate to the plugin. `std::fs` is already used by `auth.rs`.
+Replace that with a unique directory under the process temp dir for each call (mode `0o700`), removed on drop including the error path. Name it with a random UUID (or equivalent) so overlapping `list_models` calls do not delete each other's `auth.json`; do not reuse only the SHA-256 of the account id as the directory name. `cursor-agent` still needs `CURSOR_CONFIG_DIR` pointed at that directory and an `auth.json` for the duration of `models` (file mode owner-read/write as `auth::write_auth_file` already sets). A crash can leave temp directories. Do not add the `tempfile` crate to the plugin. `std::fs` is already used by `auth.rs`.
 
 `Endpoints` is re-exported and its fields are public (`lib.rs:30`, `endpoints.rs:4-11`). `CursorFactory::test_agent_home` and `skip_keychain` are public (`lib.rs:64-68`). `factory_with_endpoints` is public (line 51). Tests live in the same crate. Make the fields `pub(crate)`, stop the public re-export, and mark `factory_with_endpoints` `#[doc(hidden)]` and `pub(crate)`. A test hook that is `pub` is part of the crate's API surface for every downstream user.
 
@@ -482,7 +505,7 @@ Mutation-sized assertions, the ones a one-character edit should kill:
 - team id omitted when `authInfo.authId` is not the JWT `sub` (`team-id.test.mjs`)
 - team id omitted when `activeTeamId` is 0 or not an integer (`teamOf`, `index.mjs:142`)
 - `GetCurrentPeriodUsage` body stays `{}` when the team id is sent (`team-id.test.mjs` first test)
-- cache read and cache write are subtracted from input before being added back into `input_tokens`
+- cache read and cache write on stream usage follow section 4.3 (`input_tokens` formula, no triple-count)
 - thinking bytes are absent from the text block
 - a tool result is not submitted to a refused exec
 - HTTP/2 memory is not set by `stream refused`
@@ -530,7 +553,19 @@ Depends on R-8's Run.
 - Cross-step usage debt, the deferred-usage bag, and the "stop waiting after three misses" account flag. There is no IR field and no ledger that survives `execute`.
 - Stable `conversation_id` and prompt-cache affinity. Needs a caller-supplied key on `Request`.
 - The model picker: `AvailableModels`, `GetUsableModels`, catalog scope 3, `@size` ids, fast variants, the 10-minute list shared by in-flight requests (`listFor`, `index.mjs:1324-1344`), and per-model effort level lists for `fitEffort`. R-8 sends the requested id. `auto` is sent as `auto`. Max Mode retry and `maxOnly` are R-9 plugin behavior, not picker output.
-- Historical MCP namespace alias on read (`NAMESPACES` / `bareName`, `index.mjs:1749-1750`). Outbound stays `tools` only until a branding-safe approach exists.
+- Historical MCP namespace alias on read (`bareName`, `index.mjs:1751-1753`). Outbound stays `tools` only until a branding-safe approach exists.
+
+### Parity matrix updates (when implemented)
+
+Add rows or notes to `docs/feature-parity.md` for these documented deviations:
+
+| Topic | Reference | Hofund | When |
+|---|---|---|---|
+| HTTP/2 Run first frame | Sent before status check (`index.mjs:2886-2895`) | Duplex path writes first frame only after 2xx head (section 1.2, 3.3) | R-8 |
+| Keychain read timeout | 10-minute denial (`index.mjs:63-66`, `206-209`) | No denial on timeout (section 5.2) | R-8 |
+| Tool-step usage miss | May estimate (`index.mjs:2977-2982`) | Zeros only (section 4.3) | R-9 |
+| HTTP 429 classification | Single 429 in `statusOf` (`index.mjs:1679-1680`) | Quota vs rate split (section 6) | R-8 |
+| Prompt / usage totals | Includes cache write in client prompt total (`index.mjs:1937-1939`) | Chat `prompt_tokens` omit cache write (section 4.3) | R-9 |
 - `service_tier` / `fast`.
 - Wire trace.
 - Web search and every Cursor-owned tool. They stay refused.
