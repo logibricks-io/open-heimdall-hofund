@@ -170,6 +170,9 @@ pub(crate) async fn ndjson_to_sse_stream(
                     Err(detail) => return Err(detail),
                 }
             }
+            if first_said.is_some() {
+                break;
+            }
             if !ended {
                 return Err("502:the reply ended before it was complete".to_owned());
             }

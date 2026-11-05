@@ -13,6 +13,7 @@ use hofund_plugin_sdk::oauth::{SecretObject, secret_text};
 
 use crate::body;
 use crate::creds::{self, Credential};
+use crate::import;
 use crate::models;
 use crate::stream;
 use crate::{Endpoints, factory_with_endpoints};
@@ -1098,6 +1099,139 @@ fn a2c_47_after_content_status_failed_stops_without_done() {
     assert!(text.contains("slow down"));
     assert!(text.contains("429"));
     assert!(!text.contains("[DONE]"));
+}
+
+#[test]
+fn a2c_48_eof_first_content_no_newline_execute_emits_text_and_cut_short() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let models_json = r#"{"models":[{"id":"grok-2","provider":"x_ai"}]}"#;
+    let id = seed_with_models_json(&host, "eof-no-nl", models_json);
+    enqueue_model_token(&host);
+    host.http().enqueue_response(
+        200,
+        &[
+            ("content-type", "application/json"),
+            ("x-zed-server-supports-status-messages", "true"),
+        ],
+        br#"{"status":"started"}
+{"event":{"id":"c1","object":"chat.completion.chunk","created":1,"model":"grok-2","choices":[{"index":0,"delta":{"role":"assistant"}}]}}
+{"event":{"id":"c1","object":"chat.completion.chunk","created":1,"model":"grok-2","choices":[{"index":0,"delta":{"content":"partial"}}]}}"#,
+    );
+    let request: Request = json::from_value(json!({
+        "model": "grok-2",
+        "stream": true,
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+    }))
+    .expect("request");
+    let bytes = execute_stream_sse(&host, &id, request, ProtocolId::OPENAI_CHAT);
+    let text = std::str::from_utf8(&bytes).expect("utf8");
+    assert!(text.contains("partial"));
+    assert!(text.contains("cut short"));
+}
+
+#[test]
+fn a2c_49_eof_first_responses_delta_no_newline_execute_succeeds() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let models_json = r#"{"models":[{"id":"gpt-5","provider":"open_ai"}]}"#;
+    let id = seed_with_models_json(&host, "resp-eof-nl", models_json);
+    enqueue_model_token(&host);
+    host.http().enqueue_response(
+        200,
+        &[
+            ("content-type", "application/json"),
+            ("x-zed-server-supports-status-messages", "true"),
+        ],
+        br#"{"status":"started"}
+{"event":{"type":"response.created","response":{"id":"r","object":"response","status":"in_progress","output":[]}}}
+{"event":{"type":"response.output_text.delta","delta":"hi","output_index":0,"content_index":0}}"#,
+    );
+    let request: Request = json::from_value(json!({
+        "model": "gpt-5",
+        "stream": true,
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+    }))
+    .expect("request");
+    let bytes = execute_stream_sse(&host, &id, request, ProtocolId::OPENAI_RESPONSES);
+    let text = std::str::from_utf8(&bytes).expect("utf8");
+    assert!(text.contains("response.output_text.delta"));
+    assert!(text.contains("hi"));
+}
+
+#[test]
+fn a2c_50_invalid_utf8_flush_fails_closed_incremental() {
+    use hofund_plugin_api::BodyStream;
+
+    let inner = BodyStream::from_bytes(vec![0xff, 0xfe]);
+    let err = block_on(stream::ndjson_to_sse_stream(
+        inner,
+        body::Wire::Responses,
+        true,
+    ))
+    .expect_err("utf8");
+    assert!(err.contains("non-UTF8") || err.contains("502"));
+}
+
+#[test]
+fn a2c_51_invalid_utf8_unary_parse_fails_closed() {
+    let err = stream::ndjson_to_sse_body(b"\xff\xfe\n", body::Wire::Responses, true, false)
+        .expect_err("utf8");
+    assert!(err.contains("non-UTF8"));
+}
+
+#[test]
+fn a2c_52_reimport_refreshes_vendor_from_models_json() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let first_json =
+        r#"{"models":[{"id":"custom-vision-pro","provider":"anthropic","supports_images":false}]}"#;
+    let id = seed_with_models_json(&host, "reimport-vendor", first_json);
+    models::clear_vendor_cache_for_tests(
+        &block_on(async {
+            creds::Stored::load(host.context(), &id)
+                .await
+                .expect("load")
+        })
+        .credential
+        .user_id,
+    );
+    assert_eq!(
+        models::vendor_of(
+            &block_on(async {
+                creds::Stored::load(host.context(), &id)
+                    .await
+                    .expect("load")
+            }),
+            "custom-vision-pro"
+        ),
+        "anthropic"
+    );
+    let second_json =
+        r#"{"models":[{"id":"custom-vision-pro","provider":"google","supports_images":false}]}"#;
+    let credential = Credential {
+        user_id: block_on(async {
+            creds::Stored::load(host.context(), &id)
+                .await
+                .expect("load")
+        })
+        .credential
+        .user_id,
+        access: SecretString::from("zed-access-reimport".to_owned()),
+        system_id: String::new(),
+        org: "org1".to_owned(),
+        login: "zed-user".to_owned(),
+        name: String::new(),
+        plan: String::new(),
+        models_json: second_json.to_owned(),
+    };
+    block_on(import::store(&credential, host.context())).expect("reimport");
+    let stored = block_on(async {
+        creds::Stored::load(host.context(), &id)
+            .await
+            .expect("load")
+    });
+    assert_eq!(models::vendor_of(&stored, "custom-vision-pro"), "google");
 }
 
 fn collect_stream(mut stream: hofund_plugin_api::BodyStream) -> Vec<u8> {
