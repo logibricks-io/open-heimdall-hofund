@@ -41,12 +41,24 @@ fn cache_key(user_id: &str, model: &str) -> String {
 
 pub(crate) fn vendor_of(stored: &Stored, model: &str) -> String {
     let key = cache_key(&stored.credential.user_id, model);
-    vendors()
-        .lock()
-        .expect("lock")
-        .get(&key)
-        .cloned()
-        .unwrap_or_else(|| body::guess_vendor(model).to_owned())
+    if let Some(found) = vendors().lock().expect("lock").get(&key).cloned() {
+        return found;
+    }
+    if let Some(provider) = stored_provider(stored, model) {
+        return provider;
+    }
+    body::guess_vendor(model).to_owned()
+}
+
+fn stored_provider(stored: &Stored, model: &str) -> Option<String> {
+    let items = stored_models_table(stored)?;
+    let map = items
+        .iter()
+        .find(|item| item.get("id").and_then(Value::as_str) == Some(model))?;
+    let provider = map.get("provider").and_then(Value::as_str)?;
+    KNOWN_PROVIDERS
+        .contains(&provider)
+        .then(|| provider.to_owned())
 }
 
 pub(crate) fn capabilities(stored: &Stored, model: &str) -> Capabilities {
@@ -190,7 +202,7 @@ async fn fetch_live(
             ));
         }
         let body = read_body(response).await?;
-        match parse_list(&body) {
+        match parse_list_for(&stored.credential.user_id, &body) {
             Ok(list) => return Ok(list),
             Err(error) if !moved => {
                 moved = true;
@@ -219,14 +231,19 @@ pub(crate) fn parse_stored_models(stored: &Stored) -> Result<ModelList, PluginEr
     build_list(&stored.credential.user_id, &items)
 }
 
+#[allow(dead_code)]
 pub(crate) fn parse_list(body: &[u8]) -> Result<ModelList, PluginError> {
+    parse_list_for("", body)
+}
+
+pub(crate) fn parse_list_for(user_id: &str, body: &[u8]) -> Result<ModelList, PluginError> {
     let root: Value = hofund_plugin_sdk::json::from_slice(body)
         .map_err(|_| PluginError::decode("Zed models JSON is invalid"))?;
     let items = root
         .get("models")
         .and_then(Value::as_array)
         .ok_or_else(|| PluginError::decode("Zed models JSON has no models array"))?;
-    build_list("", items)
+    build_list(user_id, items)
 }
 
 fn build_list(user_id: &str, items: &[Value]) -> Result<ModelList, PluginError> {

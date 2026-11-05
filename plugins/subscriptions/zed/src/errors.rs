@@ -118,8 +118,8 @@ pub(crate) fn refusal(status: u16, body: &str) -> (u16, String) {
 pub(crate) fn map_http(status: u16, message: impl Into<String>) -> PluginError {
     let message = message.into();
     match status {
-        401 | 403 => PluginError::auth(message),
-        402 => PluginError::quota(message),
+        401 | 403 => PluginError::status_error(status, message),
+        402 => PluginError::credit_status(402, message),
         429 => PluginError::status_error(status, message),
         other => PluginError::status_error(other, message),
     }

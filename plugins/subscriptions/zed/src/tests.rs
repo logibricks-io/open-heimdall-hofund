@@ -14,6 +14,7 @@ use hofund_plugin_sdk::oauth::{SecretObject, secret_text};
 use crate::body;
 use crate::creds::{self, Credential};
 use crate::models;
+use crate::stream;
 use crate::{Endpoints, factory_with_endpoints};
 
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -197,7 +198,6 @@ fn a2c_18_upstream_posts_completions() {
     let id = seed(&host);
     host.http().enqueue(br#"{"token":"model-token-1"}"#);
     block_on(subscription(&host).refresh(&id, host.context())).expect("refresh");
-    host.http().enqueue(br#"{"token":"model-token-2"}"#);
     let (headers, body) = completion_ok_anthropic();
     host.http().enqueue_response(200, headers, body);
     let upstream = subscription(&host)
@@ -765,4 +765,184 @@ fn a2c_36_unary_fold_preserves_text_and_usage() {
     let usage = response.usage.expect("usage");
     assert_eq!(usage.input_tokens, Some(11));
     assert_eq!(usage.output_tokens, Some(7));
+}
+
+#[test]
+fn a2c_37_stored_catalog_google_vendor_and_image_gate() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let models_json =
+        r#"{"models":[{"id":"custom-vision-pro","provider":"google","supports_images":false}]}"#;
+    let id = seed_with_models_json(&host, "catalog-google", models_json);
+    let stored = block_on(async {
+        creds::Stored::load(host.context(), &id)
+            .await
+            .expect("load")
+    });
+    models::clear_vendor_cache_for_tests(&stored.credential.user_id);
+    assert_eq!(models::vendor_of(&stored, "custom-vision-pro"), "google");
+    enqueue_model_token(&host);
+    host.http().enqueue_response(
+        200,
+        &[("content-type", "application/json")],
+        br#"{"candidates":[{"content":{"parts":[{"text":"ok"}],"role":"model"}}]}
+"#,
+    );
+    let request: Request = json::from_value(json!({
+        "model": "custom-vision-pro",
+        "stream": true,
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "describe"},
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "abc"}}
+            ]
+        }]
+    }))
+    .expect("request");
+    block_on(upstream_for(&host, &id).execute(request, ProtocolId::OPENAI_CHAT)).expect("execute");
+    let envelope = last_completion_body(&host);
+    assert_eq!(
+        envelope.get("provider").and_then(|v| v.as_str()),
+        Some("google")
+    );
+    let pr = envelope.get("provider_request").expect("provider_request");
+    assert!(pr.get("contents").is_some());
+    let text = pr.to_string();
+    assert!(!text.contains("inlineData"));
+    assert!(!text.contains("inline_data"));
+}
+
+#[test]
+fn a2c_38_completion_401_after_remint_is_status_not_auth() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host);
+    host.http().enqueue(br#"{"token":"tok-a"}"#);
+    host.http()
+        .enqueue_response(401, &[], br#"{"message":"denied"}"#);
+    host.http().enqueue(br#"{"token":"tok-b"}"#);
+    host.http()
+        .enqueue_response(401, &[], br#"{"message":"denied"}"#);
+    let upstream = upstream_for(&host, &id);
+    let query = ProbeQuery::new(ProtocolId::ANTHROPIC_MESSAGES, "claude-sonnet-4").expect("query");
+    let err = block_on(upstream.probe(&query)).expect_err("401");
+    assert_eq!(err.kind(), PluginErrorKind::Status);
+    assert_ne!(err.kind(), PluginErrorKind::Auth);
+    assert_eq!(err.status(), Some(401));
+}
+
+#[test]
+fn a2c_39_completion_402_is_credit_status_not_quota() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host);
+    host.http().enqueue(br#"{"token":"tok"}"#);
+    host.http()
+        .enqueue_response(402, &[], br#"{"message":"pay"}"#);
+    host.http()
+        .enqueue_response(502, &[], br#"{"message":"no org"}"#);
+    let upstream = upstream_for(&host, &id);
+    let query = ProbeQuery::new(ProtocolId::ANTHROPIC_MESSAGES, "claude-sonnet-4").expect("query");
+    let err = block_on(upstream.probe(&query)).expect_err("402");
+    assert_eq!(err.kind(), PluginErrorKind::Status);
+    assert!(err.is_credit());
+    assert_eq!(err.status(), Some(402));
+    assert_ne!(err.kind(), PluginErrorKind::Quota);
+}
+
+#[test]
+fn a2c_40_live_models_populate_vendor_cache() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let models_json = r#"{"models":[{"id":"other-model","provider":"anthropic"}]}"#;
+    let id = seed_with_models_json(&host, "live-vendor", models_json);
+    let stored = block_on(async {
+        creds::Stored::load(host.context(), &id)
+            .await
+            .expect("load")
+    });
+    models::clear_vendor_cache_for_tests(&stored.credential.user_id);
+    host.http().enqueue(br#"{"token":"tok"}"#);
+    host.http().enqueue_response(
+        200,
+        &[],
+        br#"{"models":[{"id":"custom-vision-pro","provider":"google","supports_images":false}]}"#,
+    );
+    block_on(subscription(&host).list_models(&id, host.context())).expect("list");
+    let stored = block_on(async {
+        creds::Stored::load(host.context(), &id)
+            .await
+            .expect("load")
+    });
+    assert_eq!(models::vendor_of(&stored, "custom-vision-pro"), "google");
+}
+
+#[test]
+fn a2c_41_incremental_sse_yields_before_upstream_eof() {
+    use crate::stream;
+    use hofund_plugin_api::BodyStream;
+
+    let inner = BodyStream::unfold(0_u8, |step| async move {
+        match step {
+            0 => Some((
+                Ok(br#"{"event":{"type":"response.created","response":{"id":"r","object":"response","status":"in_progress","output":[]}}}
+"#.to_vec()),
+                1,
+            )),
+            1 => Some((
+                Ok(br#"{"event":{"type":"response.output_text.delta","delta":"hi","output_index":0,"content_index":0}}
+"#.to_vec()),
+                2,
+            )),
+            2 => Some((
+                Ok(br#"{"event":{"type":"response.completed","response":{"id":"r","object":"response","status":"completed","output":[]}}}
+{"status":"stream_ended"}
+"#.to_vec()),
+                3,
+            )),
+            _ => None,
+        }
+    });
+    let mut out = block_on(stream::ndjson_to_sse_stream(
+        inner,
+        body::Wire::Responses,
+        true,
+    ))
+    .expect("stream");
+    let first = block_on(out.next_chunk()).expect("chunk").expect("ok");
+    let first_text = std::str::from_utf8(&first).expect("utf8");
+    assert!(first_text.contains("response.output_text.delta"));
+    assert!(block_on(out.next_chunk()).is_some());
+}
+
+#[test]
+fn a2c_42_chat_cut_short_appends_note_after_partial_text() {
+    let body = br#"{"event":{"id":"c1","object":"chat.completion.chunk","created":1,"model":"grok","choices":[{"index":0,"delta":{"role":"assistant"}}]}}
+{"event":{"id":"c1","object":"chat.completion.chunk","created":1,"model":"grok","choices":[{"index":0,"delta":{"content":"partial"}}]}}
+"#;
+    let stream = stream::ndjson_to_sse_body(body, body::Wire::Chat, true, true).expect("sse");
+    let bytes = collect_stream(stream);
+    let text = std::str::from_utf8(&bytes).expect("utf8");
+    assert!(text.contains("partial"));
+    assert!(text.contains("cut short"));
+}
+
+#[test]
+fn a2c_43_chat_cut_short_with_open_tool_fails() {
+    let body = br#"{"event":{"id":"c1","object":"chat.completion.chunk","created":1,"model":"grok","choices":[{"index":0,"delta":{"content":"x"}}]}}
+{"event":{"id":"c1","object":"chat.completion.chunk","created":1,"model":"grok","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"f","arguments":""}}]}}]}}
+"#;
+    let err = stream::ndjson_to_sse_body(body, body::Wire::Chat, true, true).expect_err("tool");
+    assert!(err.contains("502"));
+}
+
+fn collect_stream(mut stream: hofund_plugin_api::BodyStream) -> Vec<u8> {
+    block_on(async {
+        let mut out = Vec::new();
+        while let Some(chunk) = stream.next_chunk().await {
+            out.extend_from_slice(&chunk.expect("chunk"));
+        }
+        out
+    })
 }

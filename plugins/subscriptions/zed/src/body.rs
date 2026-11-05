@@ -570,11 +570,15 @@ fn append_blocks(message: &mut Value, blocks: &[Value]) {
         return;
     };
     let mut content = map.get("content").cloned().unwrap_or(Value::Array(vec![]));
-    let Value::Array(ref mut items) = content else {
-        map.insert("content".to_owned(), Value::Array(blocks.to_vec()));
-        return;
-    };
-    items.extend(blocks.iter().cloned());
+    match &mut content {
+        Value::Array(items) => items.extend(blocks.iter().cloned()),
+        Value::String(text) if !text.is_empty() => {
+            let mut items = vec![hofund_plugin_sdk::json::json!({"type":"text","text": text})];
+            items.extend(blocks.iter().cloned());
+            content = Value::Array(items);
+        }
+        _ => content = Value::Array(blocks.to_vec()),
+    }
     map.insert("content".to_owned(), content);
 }
 
@@ -583,6 +587,9 @@ fn insert_pending_after_tool_results(message: &mut Value, pending: &[Value]) {
         return;
     };
     let mut content = map.get("content").cloned().unwrap_or(Value::Array(vec![]));
+    if !matches!(&content, Value::Array(_)) {
+        content = Value::Array(system_blocks(map.get("content")));
+    }
     let Value::Array(ref mut items) = content else {
         map.insert("content".to_owned(), Value::Array(pending.to_vec()));
         return;

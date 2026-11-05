@@ -130,16 +130,22 @@ impl ZedUpstream {
                 .headers()
                 .get("x-zed-server-supports-status-messages")
                 .is_some();
-            let raw = read_body(response).await?;
-            let sse_body = stream::ndjson_to_sse_body(&raw, wire, wrapped, request.stream)
-                .map_err(|detail| {
-                    if let Some((status, message)) = detail.split_once(':')
-                        && let Ok(code) = status.parse::<u16>()
-                    {
-                        return errors::map_http(code, message);
-                    }
-                    PluginError::status_error(502, detail)
-                })?;
+            let map_detail = |detail: String| -> PluginError {
+                if let Some((status, message)) = detail.split_once(':')
+                    && let Ok(code) = status.parse::<u16>()
+                {
+                    return errors::map_http(code, message);
+                }
+                PluginError::status_error(502, detail)
+            };
+            let sse_body = if request.stream {
+                stream::ndjson_to_sse_stream(response.into_body(), wire, wrapped)
+                    .await
+                    .map_err(map_detail)?
+            } else {
+                let raw = read_body(response).await?;
+                stream::ndjson_to_sse_body(&raw, wire, wrapped, false).map_err(map_detail)?
+            };
             let http = HttpResponse::new(sse_body);
             return wire::decode_upstream_response(http, outbound, inbound, request.stream).await;
         }
