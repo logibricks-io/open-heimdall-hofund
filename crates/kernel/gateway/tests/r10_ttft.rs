@@ -89,21 +89,35 @@ fn app(
     delay: Duration,
     mode: ReplyMode,
 ) -> (axum::Router, Arc<Ledger>, tempfile::TempDir) {
+    app_with(stream, delay, mode, false)
+}
+
+fn member(key: &'static str, stream: bool, delay: Duration, mode: ReplyMode) -> Arc<dyn Member> {
+    Arc::new(Reply {
+        id: MemberId::from_preset(
+            PresetId::from_static("primary"),
+            MemberKey::from_static(key),
+        ),
+        stream,
+        delay,
+        mode,
+    })
+}
+
+fn app_with(
+    stream: bool,
+    delay: Duration,
+    mode: ReplyMode,
+    fallback: bool,
+) -> (axum::Router, Arc<Ledger>, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("temp dir");
     let usage = Arc::new(Ledger::open(&dir.path().join("usage.sqlite")).expect("usage"));
     let mut routes = BTreeMap::new();
-    routes.insert(
-        "demo".to_owned(),
-        vec![Arc::new(Reply {
-            id: MemberId::from_preset(
-                PresetId::from_static("primary"),
-                MemberKey::from_static("row"),
-            ),
-            stream,
-            delay,
-            mode,
-        }) as Arc<dyn Member>],
-    );
+    let mut members = vec![member("row", stream, delay, mode)];
+    if fallback {
+        members.push(member("spare", stream, delay, mode));
+    }
+    routes.insert("demo".to_owned(), members);
     let codecs = HashMap::from([(
         "/v1/chat/completions".to_owned(),
         Arc::new(OpenAiChat) as Arc<dyn Codec>,
@@ -181,4 +195,18 @@ async fn r10_gateway_tool_burst_stream_stores_flow_without_speed() {
         row.flow_ms
     );
     assert!(row_tokens_per_second(&row).is_none());
+}
+
+#[tokio::test]
+async fn r10_gateway_records_ttft_when_a_fallback_member_is_held() {
+    let (app, usage, _dir) = app_with(true, Duration::from_millis(50), ReplyMode::Text, true);
+    assert_eq!(chat(app, true).await, StatusCode::OK);
+    let row = usage.rows().expect("rows").pop().expect("one row");
+    let ttft = row.ttft_ms.expect("ttft on the handover stream");
+    assert!(ttft >= 40, "ttft={ttft} latency={}", row.latency_ms);
+    assert!(
+        row.flow_ms.is_some_and(|flow| flow > 0),
+        "flow_ms={:?}",
+        row.flow_ms
+    );
 }
