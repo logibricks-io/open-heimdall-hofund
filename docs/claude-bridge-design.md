@@ -51,7 +51,7 @@ Hofund:
 
 `startRun` chooses `work` (`claude_subscription.go:989-1038`):
 
-- Client folder from **`clientWorkDir`**: derived from **`clientNamedWorkPlace`** (`582-625`). Sources are scanned **in order**; **`look` returns as soon as `dir` is set**, so a later source is never consulted (`584-586`, `568-581`): (1) top-level **`req.System`** with **`clientSaidWorkDir`**, **`inTurns = false`** (`598`); (2) **`system`-role** message text with the same matcher, **`inTurns = true`** (`599-607`); (3) if still empty, **non-assistant, non-system** turn text with **`clientTurnWorkDir`** only (`614-622`, `641` — `Working directory`, `Current working directory`, `<cwd>`; **not** quoted `Primary working directory` / `CWD:` lines). **Within each scanned text**, **last regex match wins**; strip a trailing **` (was …)`** suffix (`587-592`, `workdir.go:36`). Then require **absolute** path, **`filepath.Clean`**, existing **directory** `Stat` (`529-544`). Not from model assistant text.
+- Client folder from **`clientWorkDir`**: derived from **`clientNamedWorkPlace`** (`582-625`). Sources are scanned **in order**; **`look` returns as soon as `dir` is set**, so a later source is never consulted (`584-586`, `568-581`): (1) top-level **`req.System`** with **`clientSaidWorkDir`**, **`inTurns = false`** (`598`); (2) **`system`-role** message text with the same matcher, **`inTurns = true`** (`599-607`); (3) if still empty, **non-assistant, non-system** turn text with **`clientTurnWorkDir`**, **`inTurns = true`** (`614-622`, `620`, `641` — `Working directory`, `Current working directory`, `<cwd>`; **not** quoted `Primary working directory` / `CWD:` lines). **Within each scanned text**, **last regex match wins**; strip a trailing **` (was …)`** suffix (`587-592`, `workdir.go:36`). Then require **absolute** path, **`filepath.Clean`**, existing **directory** `Stat` (`529-544`). Not from model assistant text.
 - Else gateway-owned work dir from **`claudeWorkDir`** (`998-1007`, `503-518`).
 - **`passedOver` / `tuiUntrusted`** apply only to interactive trust prompts (`96-118`, `909-914`); R-6 `-p` with `--dangerously-skip-permissions` does not use that path (TUI deferred, section 0).
 
@@ -59,7 +59,7 @@ Hofund:
 
 When the run is **not** in the client-named folder (gateway work dir or temp fallback), set **`envElsewhere`**, **`envInTurns`**, **`envDir`** from **`clientNamedWorkPlace`** (`999-1002`) and **`envUnknown`** only when **no directory was named** and the caller is remote (below). Append **`envNote(req)`** using the reference **`switch` order** (`4377-4388`), not informal paraphrase:
 
-1. **`envElsewhere && envInTurns`** → **`envTurnsNote(envDir)`** (`4379-4380`, `4369-4371`). **`envInTurns` is true** when the named path came from a **`system`-role message**, **false** when it came only from top-level **`req.System`** (`598`, `605`).
+1. **`envElsewhere && envInTurns`** → **`envTurnsNote(envDir)`** (`4379-4380`, `4369-4371`). **`envInTurns` is true** for sources (2) and (3) above; **only** top-level **`req.System`** (source 1) sets **`inTurns = false`** (`598`, `605`, `620`).
 2. **`envElsewhere && (leanPrompt || appendPrompt)`** → **`envElsewhereLeanNote`** (`4381-4382`, `4344-4347`) — **append-mode runs use the lean variant too**, not only `--system-prompt-file` lean runs.
 3. **`envElsewhere`** (else) → **`envElsewhereNote`** (`4383-4384`, `4342-4347`).
 4. **`envUnknown`** → **`envUnknownNote`** (`4385-4386`, `4349-4354`, set at `1003-1007`).
@@ -68,7 +68,7 @@ When the run is **not** in the client-named folder (gateway work dir or temp fal
 
 Hofund: **`hofund_ir::Request` has no working-directory or remote-caller field** (`crates/kernel/ir/src/request.rs:16-39`; `UpstreamProvider::execute` passes only `Request`, `crates/kernel/plugin-api/src/upstream.rs:412-415`). The **plugin** implements directory parsing in `bridge/workdir.rs`, sets the env flags on an internal view, and appends **`envNote`** to lean system files, `<external_system_instructions>`, or append prompts per reference render paths (`4217-4237`, `4423-4424`, `4412-4414`).
 
-**Remote caller (trusted transport only):** the reference sets **`remoteCaller = !local(r)`** at serve time (`6170-6172`; **`local`:** loopback peer, not **`proxied`**, not page-port — `lan.go:792-808`). **`envUnknown`** is **`!envElsewhere && remoteCaller`** (`1003-1007`). Hofund: the **gateway** (or daemon dispatch path with the HTTP connection) sets a **vendor-neutral boolean on `Request.extensions`**, e.g. **`hofund_remote_caller`**, using the same transport rules as the reference **`local`** check — **not** from the client JSON body and **not** by inferring remoteness because a named path **`Stat`** fails on the gateway host. The **plugin** sets **`envUnknown`** only when that extension is true **and** **`clientNamedWorkPlace`** named no directory (`envElsewhere == false`). Do **not** copy reference proxy-trust env var names into kernel crates.
+**Remote caller (trusted transport only):** the reference sets **`remoteCaller = !local(r)`** at serve time (`6170-6172`; **`local`:** loopback peer, not **`proxied`**, not page-port — `lan.go:792-808`). **`envUnknown`** is **`!envElsewhere && remoteCaller`** (`1003-1007`). Hofund: the **gateway** (or daemon dispatch path with the HTTP connection) sets a **vendor-neutral boolean on `Request.extensions`**, e.g. **`hofund_remote_caller`**, using the same transport rules as the reference **`local`** check — **not** from the client JSON body and **not** by inferring remoteness because a named path **`Stat`** fails on the gateway host. After body decode, the gateway **overwrites** that extension with **`true` or `false`** (including **`false` on local connections**) so a client-injected same-name key in **`extensions`** cannot stick (`anthropic.rs:152` retains unknown JSON fields). The **plugin** sets **`envUnknown`** only when that extension is true **and** **`clientNamedWorkPlace`** named no directory (`envElsewhere == false`). Do **not** copy reference proxy-trust env var names into kernel crates.
 
 Plugin state dir `{state}/claude-bridge/work` replaces the reference app work dir; create with mode **`0700`**, and if the path already exists require **`ownedByMe`** and reject **`othersCanWrite`** (`503-518`), same as `claudeWorkDir`.
 
@@ -116,9 +116,20 @@ Prompt and system files: paths passed to Claude Code use `binary.file(path)` (`8
 
 Environment: start from the **host inherited environment** with a **deny-list scrub** (reference `cleanClaudeEnv`, blocked keys `3293-3305` on `os.Environ()` at `1152`), not `env_clear()` plus only `PATH`/locale. Block vendor override keys and setup-token duplicates; **keep** `HOME`, locale, and on Windows **`SYSTEMROOT`** (socket stack, `piped.rs:32-33`). **Always append** after scrub (`3311-3320`): `ENABLE_CLAUDEAI_MCP_SERVERS=0`, `DISABLE_AUTO_COMPACT=1`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, `CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS=1`, `CLAUDE_CODE_PROMPT_CACHE_TTL=1h`. The last three are **not** in `claudeEnvVars` (`773-776`) — do **not** add them to **`WSLENV`**. Append `inClaudeDir`, `asRoot`, Bun proxy helper output, and **`WSLENV`** as in section 1.2. Proxy variables come **only** from the Bun helper (`799-804`), not from piped spawn’s automatic proxy allowlist (`piped.rs:42-45`, `61-63`).
 
-**Client cache opt-in:** `DISABLE_PROMPT_CACHING=1` only when the client **opted in** to client-side cache marks (request header opt-in or auto-mode classifier body, `claude_cache.go:36-51`, `1157-1161`) — **not** merely because Messages `cache_control` survived in IR. Codecs set a vendor-neutral boolean on **`Request.extensions`**, e.g. **`hofund_client_cache_marks`**, when that opt-in applies; the plugin reads it. **Remote caller:** gateway sets **`hofund_remote_caller`** on **`Request.extensions`** from trusted transport (section 1.3); the plugin reads it for **`envUnknown`** only. **Lean prompt** is **`true` only when client-cache mode is off and the subscription setting is on** (`6169`: reference `leanPrompt = clientCache == nil && setting`). Message-level cache marks stay out of `turnKey` (`claude_cache.go:15-17`).
+**Client cache opt-in:** `DISABLE_PROMPT_CACHING=1` only when the client **opted in** to client-side cache marks (request header opt-in or auto-mode classifier body, `claude_cache.go:36-51`, `1157-1161`) — **not** merely because Messages `cache_control` survived in IR. Reference header opt-in uses **`wantsClientCache(r, …)`** on the HTTP request (`36-38`); **`Codec::decode_request` sees only the body** (`crates/kernel/codec/src/lib.rs:61`). **Anthropic codec** may set **`hofund_client_cache_marks`** when **`classifierClientCache`** matches the raw body (`47-51`). The **gateway** must set or clear **`hofund_client_cache_marks` on `Request.extensions` after decode** from the header (and merge classifier detection from the codec path), **overwriting** any client-supplied same-name key — the plugin reads **only** that trusted value. **Remote caller:** gateway overwrites **`hofund_remote_caller`** after decode (section 1.3). **Lean prompt** is **`true` only when client-cache mode is off and the subscription setting is on** (`6169`: reference `leanPrompt = clientCache == nil && setting`). Message-level cache marks stay out of `turnKey` (`claude_cache.go:15-17`).
 
-**Effort and thinking argv:** Anthropic Messages codec maps `output_config.effort` into **`params.effort`** and `thinking.type == "disabled"` into **`Effort::None`** while **`thinking` stays in `extensions`** (`crates/kernel/codec/src/anthropic.rs:142`, `358-374`). The plugin may pass **`--effort`** from `params.effort` when set (including auto-classifier → low, `6152-6161`) **and** **`--thinking disabled`** when thinking is off (`975-981`); both flags can appear on one spawn.
+**Effort, thinking, and argv (by inbound protocol):** IR **`params.effort`** alone does not match reference **`turnKey`** / CLI behaviour. Reference **`turnKey`** hashes **`req.Effort != ""`** separately from **`req.ThinkOff`** (`3143`). Today hofund maps Anthropic **`thinking.type == "disabled"`** (and **`between_tools`**) to **`Effort::None`** while **`thinking` stays in `extensions`** (`crates/kernel/codec/src/anthropic.rs:358-374`); reference Anthropic parse sets **`ThinkOff` only** and leaves **`Effort` empty** (`anthropic.go:281-291`; **`6158-6161`** skips filling effort when **`ThinkOff`**). Chat / Responses map literal **`none`** through **`effortOf` → `low`** with **`ThinkOff = true`** (`ir.go:897-900`, `chat.go:95-103`, `responses.go:355-358`); **`minimal`** → **`low`** with **`ThinkOff` false**. After decode, the **gateway** (knowing **`ProtocolId`**) sets vendor-neutral **`Request.extensions`**, e.g. **`hofund_think_off`** and **`hofund_effort_requested`** (names finalized in R-6c), mirroring reference flags:
+
+| Inbound protocol | Client signal | `--thinking disabled` | `--effort` / `--thinking-display summarized` | **`hofund_effort_requested` (turnKey bit)** |
+|------------------|---------------|------------------------|-----------------------------------------------|---------------------------------------------|
+| Anthropic Messages | `thinking.type` disabled / between_tools | yes (`975-981`) | no — **`Effort` stays empty** (`281-291`, `3259-3262` only when `effort != ""`) | **false** |
+| Anthropic Messages | `output_config.effort` with thinking enabled | no | yes (normalized label; auto classifier → low, `6152-6161`) | **true** when effort string set |
+| Chat Completions | `reasoning_effort: none` | yes | **`--effort low`** (after **`effortOf`**, `897-900`) | **true** (`Effort != ""` after parse) |
+| Chat Completions | `minimal` / other levels | no | **`--effort`** with normalized level | **true** when level non-empty |
+| OpenAI Responses | `reasoning.effort: none` | yes | **`--effort low`** | **true** |
+| OpenAI Responses | `minimal` / other levels | no | **`--effort`** with normalized level | **true** when level non-empty |
+
+The Claude plugin builds **`claudeCLIArgs`** from **`hofund_effort_requested`** + normalized effort label (never pass **`Effort::None`** as **`--effort`**), **`hofund_think_off`** for **`--thinking disabled`**, and hashes **`turnKey`** with the same two booleans as reference (`3143`).
 
 Bridge spawn uses **`LongLivedChild`** / `SpawnRequest` via `cli::request_with_extra` (`cli.rs:68-77`) with the scrubbed host env plus explicit pairs above.
 
@@ -149,7 +160,7 @@ Parked on tools: `parkLongest = 5m`, `parkedMost = 16` (`138-159`).
 - **Rewind** on client cancel 499 (`22-28`; `letGo` paths in `retire` `2117+`).
 - **Effort change** on idle run: non-TUI may `setEffort`; TUI aborts (`1881-1891`).
 
-Hofund implements the same state machine in the plugin. **Idle/resume map key** is the reference `turnKey` SHA-256 (`3140-3146`, `1909-1933`, stored on the run at `2281`), not the owner string alone (`6043-6053` is only the owner prefix inside the hash). The hash covers owner, model, whether effort was requested (not the level), think-off, tool choice, system (billing header stripped), tools JSON, web search, JSON schema, **`cacheIdentity`** (`claude_cache.go:236-247`: **`client-cache` system marks** and **`lean-prompt` flag** only — per-message cache marks are excluded, `15-17`), and message bodies via `hashMessages` (tool ids excluded, `3205-3210`). After a matching idle run is found, apply effort with `setEffort` before the turn (`1881-1891`).
+Hofund implements the same state machine in the plugin. **Idle/resume map key** is the reference `turnKey` SHA-256 (`3140-3146`, `1909-1933`, stored on the run at `2281`), not the owner string alone (`6043-6053` is only the owner prefix inside the hash). The hash covers owner, model, **whether effort was requested** (**`hofund_effort_requested`**, reference **`req.Effort != ""`**, not the level — `3143`), **think-off** (**`hofund_think_off`**, reference **`req.ThinkOff`**), tool choice, system (billing header stripped), tools JSON, web search, JSON schema, **`cacheIdentity`** (`claude_cache.go:236-247`: **`client-cache` system marks** and **`lean-prompt` flag** only — per-message cache marks are excluded, `15-17`), and message bodies via `hashMessages` (tool ids excluded, `3205-3210`). After a matching idle run is found, apply effort with `setEffort` before the turn (`1881-1891`).
 
 ### 1.8 Concurrency and run lock
 
@@ -200,7 +211,7 @@ Handler rules:
 
 - Unknown, spent, or missing token → **404** with fixed body `unknown or expired bridge run` (mirror `claude_subscription.go:5379`); do not echo the token or log the request target path.
 - Valid token → constant-time compare against **every live registration** in the set (`lan.go:557-561`), not a single map lookup that short-circuits on length.
-- Tokens: 24 random bytes as hex via `ring` `SystemRandom` in the plugin (same pattern as `crates/kernel/plugin-sdk/src/oauth/pkce.rs:136-137`). RNG failure fails the run closed; do not fall back to timestamps (`claude_subscription.go:697-701`).
+- Tokens: 24 random bytes as hex via `ring` `SystemRandom` in the plugin (same pattern as `crates/kernel/plugin-sdk/src/oauth/pkce.rs:136-137`). RNG failure fails the run closed. Reference **`randomToken`** falls back to **`UnixNano`** on read error (`697-701`); **do not copy that fallback** (contrast section 2.5 table).
 
 This sits beside [`LoopbackHandle`](crates/kernel/plugin-api/src/host.rs:1203+) (one-shot browser OAuth redirect), not inside it: bridge callbacks are many concurrent POSTs with path suffix tokens.
 
@@ -255,7 +266,7 @@ Final-only tools (`StructuredOutput`) use `finalGrace` 30s (`144-152`).
 | Chat Completions | **SSE comments only** (`chat.go:1627-1629`). |
 | OpenAI Responses | Repeat **`response.in_progress`** (`responses.go:2415-2423`). |
 
-**One reply, one stream head on the wire:** encoders emit **at most one** `message_start` / **`response.created`** / first Chat assistant chunk. A **second `MessageStart` from upstream is dropped** once `started` is set (`anthropic.go:1548-1551`, `chat.go:1566-1568`, `responses.go:2183-2184`). **Never rewrite** an already-sent start event; placeholder id/model stay on the wire until real content arrives. **Usage on the wire:** today the Anthropic encoder writes **`MessageStart.usage` only on `message_start`** (`crates/kernel/codec/src/anthropic.rs:1401-1406`) and accumulates **`MessageDelta.usage` only from `MessageDelta` events** (`1297-1308`); terminal **`message_delta`** comes from **`flush_terminal`** (`1339-1369`). When a **real `MessageStart` is suppressed** after a placeholder start, **merge its usage into the encoder accumulator** so input tokens still appear on the terminal **`message_delta`**, not only on the dropped event. Placeholder starts keep **zero usage** on the wire; real totals still only at **`message_delta` / `message_stop`** (`anthropic.go:1753-1755`).
+**One reply, one stream head on the wire:** encoders emit **at most one** `message_start` / **`response.created`** / first Chat assistant chunk. A **second `MessageStart` from upstream is dropped** once `started` is set (`anthropic.go:1548-1551`, `chat.go:1566-1568`, `responses.go:2183-2184`). **Never rewrite** an already-sent start event; placeholder id/model stay on the wire until real content arrives. **Usage on the wire:** today the Anthropic encoder writes **`MessageStart.usage` only on `message_start`** (`crates/kernel/codec/src/anthropic.rs:1401-1406`) and accumulates **`MessageDelta.usage` only from `MessageDelta` events** (`1297-1308`); terminal **`message_delta`** comes from **`flush_terminal`** (`1339-1369`). **Chat** and **Responses** encoders already **`merge_patch` `MessageStart.usage` into their accumulators** (`openai_chat.rs:1509`, `openai_responses.rs:1970`). When a **real `MessageStart` is suppressed** after a placeholder or prior start, **merge its usage into the encoder accumulator before returning** (all three encoders) so input tokens still appear on the terminal event, not only on the dropped start. Placeholder starts keep **zero usage** on the wire; real totals still only at terminal events (`anthropic.go:1753-1755`).
 
 **R-6f / kernel slice (required):** add `StillWorking` to `hofund_ir::StreamEvent`; extend **`stream_commits`** and **`decoded_stream_empty`**. Today naïve `Ping` / duplicate `MessageStart` mis-emit:
 
@@ -263,14 +274,14 @@ Final-only tools (`StructuredOutput`) use `finalGrace` 30s (`144-152`).
 - Chat: `Ping` → `{"type":"ping"}` (`openai_chat.rs:1624-1628`).
 - Responses: `MessageStart` → `response.created` (`openai_responses.rs:1967-1977`); bare `Ping` → `ping` (`2082-2085`).
 
-Change encoders to map **`StillWorking`** per the table above, **suppress** duplicate upstream **`MessageStart`** after a placeholder or real start was already encoded, and **retain suppressed-start usage** for terminal **`message_delta`** (Anthropic, section above).
+Change encoders to map **`StillWorking`** per the table above, **merge usage then suppress** duplicate upstream **`MessageStart`** after a placeholder or real start was already encoded, and **retain suppressed-start usage** for terminal output (all three encoders, section above).
 
 ### 2.5 Security checklist
 
 | Rule | Reference | Hofund |
 |------|-----------|--------|
 | Callback bind loopback | Dedicated listener; URL host may be `127.0.0.1` when main listen is wildcard (`857-866`) | Separate listener on `127.0.0.1` only |
-| Token unguessable | `randomToken()` (`697-702`) | `ring` `SystemRandom`, 24 bytes hex; fail closed on RNG error |
+| Token unguessable | `randomToken()`; RNG error → **`UnixNano` fallback** (`697-701`) | `ring` `SystemRandom`, 24 bytes hex; **fail closed**, no timestamp fallback |
 | Token not in argv | file path arg (`959-967`, `mcp.go:75-82`) | same |
 | MCP POST unauthenticated but token | `ownCallback` on shared gateway listen (`lan.go:540-563`) | Token on dedicated loopback listener only |
 | Proxy disabled on callback | `mcp.go:99-101` | reqwest client `no_proxy` in host |
@@ -291,15 +302,15 @@ Fields to honor on the internal request (reference `Request` struct usage in `60
 | Field | Source | Reference lines |
 |-------|--------|-----------------|
 | Model id | Provider `OwnModelID` | `6086-6088` |
-| Effort | body `output_config` / auto classifier → low | `6072-6076`, `6152-6161` |
-| Think off | `--thinking disabled` | `975-981` |
+| Effort | body / protocol-specific; **`hofund_effort_requested`** + normalized label for CLI | `6072-6076`, `6152-6161`, `3143`, section 1.5 table |
+| Think off | **`hofund_think_off`** → `--thinking disabled` | `975-981`, `281-291`, section 1.5 table |
 | Tools + tool_choice | `bridgeTools`, `allowedTools`; disallowed names get **immediate MCP error** on callback (`5426-5432`) | `951`, `1873`, `5426-5432` |
 | Images | URL fetch in TUI; `-p` uses blocks | `6187-6192`; `claude_images.go` |
 | JSON schema / structured output | `--json-schema`, answer tool in TUI | `982-984`, `6194-6202` |
 | Web search | inject search tool | `6204-6210` |
 | Safeguards beta | header | `6178-6185` |
-| Client cache marks | Anthropic cache_control | `6164-6169`, `6135-6142` |
-| Remote caller | Trusted transport **`local`** inverse (`6170-6172`, `lan.go:792-808`) | Gateway sets **`hofund_remote_caller`** on **`Request.extensions`** (section 1.3); plugin **`envUnknown`** |
+| Client cache marks | Header + classifier body → gateway **`hofund_client_cache_marks`** | `36-51`, `6164-6169`, section 1.5 |
+| Remote caller | Trusted transport **`local`** inverse (`6170-6172`, `lan.go:792-808`) | Gateway **overwrites** **`hofund_remote_caller`** after decode (section 1.3); plugin **`envUnknown`** |
 
 ### 3.2 Prompt construction
 
