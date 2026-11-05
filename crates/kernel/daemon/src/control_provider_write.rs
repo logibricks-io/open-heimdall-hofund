@@ -258,8 +258,14 @@ fn run_reseat_locked(
         agent_visible_sendable,
         &mut checkpoint,
     ) {
-        if let Err(restore) = checkpoint.restore() {
-            return Err(internal(restore.to_string()));
+        if checkpoint.restore().is_err() {
+            return Err(crate::control_provider_write::agent_sidecar_failure(
+                hofund_agent::AgentError::Rejected(
+                    "agent sidecar restore failed during reseat".to_owned(),
+                ),
+                Some(&target),
+                config_text,
+            ));
         }
         return Err(agent_reseat_failure(error, &target, config_text));
     }
@@ -271,7 +277,15 @@ fn agent_reseat_failure(
     target: &GatewayTarget,
     config_text: &str,
 ) -> ControlFailure {
-    let token = target.token();
+    agent_sidecar_failure(error, Some(target), config_text)
+}
+
+pub(crate) fn agent_sidecar_failure(
+    error: hofund_agent::AgentError,
+    target: Option<&GatewayTarget>,
+    config_text: &str,
+) -> ControlFailure {
+    let token = target.map(GatewayTarget::token).unwrap_or("");
     let message = crate::control_agents::scrub(&error.to_string(), &[token]);
     let message = crate::config_ops::scrub_config_message(&message, config_text);
     ControlFailure::from(ControlError::new(

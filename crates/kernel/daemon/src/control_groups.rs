@@ -55,7 +55,7 @@ pub(crate) async fn patch_group(
     ops: &Arc<ConfigOps>,
     descriptions: &'static [&'static AgentDescription],
     agent_session: Option<hofund_agent::Session>,
-    _gateway_target: Option<GatewayTarget>,
+    gateway_target: Option<GatewayTarget>,
     group_id: &str,
     request: GroupPatchRequest,
 ) -> Result<GroupWriteResponse, ControlFailure> {
@@ -107,25 +107,47 @@ pub(crate) async fn patch_group(
     )
     .map_err(config_failure)?;
     let backup = current.text.clone();
-    let applied = ops.apply(&request.expected_revision, edited).await?;
-    if request.rename_to.is_some() && effective_id != rename_from {
+    let needs_agent_rename =
+        request.rename_to.is_some() && effective_id.as_str() != rename_from.as_str();
+    let applied = if needs_agent_rename {
+        let effective = effective_id.clone();
         let session = agent_session.unwrap_or_else(crate::agent_session);
-        let mut checkpoint = SidecarCheckpoint::new();
-        if let Err(error) = rename_group_agents(
-            descriptions,
-            &session,
-            &rename_from,
-            &effective_id,
-            &mut checkpoint,
-        ) {
-            if let Err(restore) = checkpoint.restore() {
-                return Err(internal(restore.to_string()));
-            }
-            let current = ops.get().await?;
-            ops.apply(&current.disk_revision, backup).await?;
-            return Err(error);
-        }
-    }
+        let gateway = gateway_target.clone();
+        ops.apply_with_sidecar_work(
+            &request.expected_revision,
+            edited,
+            backup,
+            move |_ops, staged_text| {
+                let mut checkpoint = SidecarCheckpoint::new();
+                match rename_group_agents(
+                    descriptions,
+                    &session,
+                    &rename_from,
+                    &effective,
+                    gateway.as_ref(),
+                    staged_text,
+                    &mut checkpoint,
+                ) {
+                    Ok(()) => Ok(()),
+                    Err(error) => {
+                        if checkpoint.restore().is_err() {
+                            return Err(crate::control_provider_write::agent_sidecar_failure(
+                                hofund_agent::AgentError::Rejected(
+                                    "agent sidecar restore failed during group rename".to_owned(),
+                                ),
+                                gateway.as_ref(),
+                                staged_text,
+                            ));
+                        }
+                        Err(error)
+                    }
+                }
+            },
+        )
+        .await?
+    } else {
+        ops.apply(&request.expected_revision, edited).await?
+    };
     let config = load(&applied.text).map_err(config_failure)?;
     let model = format!("group/{effective_id}");
     let route = config
@@ -216,12 +238,16 @@ fn rename_group_agents(
     session: &hofund_agent::Session,
     from: &str,
     to: &str,
+    gateway_target: Option<&GatewayTarget>,
+    config_text: &str,
     checkpoint: &mut SidecarCheckpoint,
 ) -> Result<(), ControlFailure> {
     let catalog = catalog(descriptions).map_err(|error| internal(error.to_string()))?;
     catalog
         .rename_group_refs(session, from, to, checkpoint)
-        .map_err(|error| internal(error.to_string()))?;
+        .map_err(|error| {
+            crate::control_provider_write::agent_sidecar_failure(error, gateway_target, config_text)
+        })?;
     Ok(())
 }
 

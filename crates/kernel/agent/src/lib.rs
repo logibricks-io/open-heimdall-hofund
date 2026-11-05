@@ -460,6 +460,17 @@ pub trait AgentAdapter: Sync {
         model: Option<&str>,
     ) -> Result<Plan, AgentError>;
 
+    /// Like [`Self::set_model`], recording sidecar files for rollback on failure.
+    fn set_model_tracked(
+        &self,
+        session: &Session,
+        target: &GatewayTarget,
+        model: Option<&str>,
+        _checkpoint: &mut SidecarCheckpoint,
+    ) -> Result<Plan, AgentError> {
+        self.set_model(session, target, model)
+    }
+
     /// Rewrites model and provider references after a configured provider id changes.
     ///
     /// Returns `Ok(true)` when this agent's files were updated.

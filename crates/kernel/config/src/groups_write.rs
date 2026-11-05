@@ -86,7 +86,7 @@ pub fn edit_group_create(
     table.insert("model", value(model.as_str()));
     table.insert("name", value(name.trim()));
     table.insert("routing", value("smart"));
-    table.insert("upstreams", member_array(first_member));
+    table.insert("upstreams", member_array(&config, first_member));
     array.push(table);
     Ok((document.to_string(), id))
 }
@@ -117,6 +117,23 @@ pub fn edit_group_patch(
         .find(|route| route.model == old_model)
         .ok_or_else(|| ConfigError::Invalid(format!("unknown group `{group_id}`")))?;
     let old_member_refs = member_refs_from_route(old_route);
+    let final_group_id = rename_to
+        .map(str::trim)
+        .filter(|id| !id.is_empty() && *id != group_id)
+        .unwrap_or(group_id);
+    let final_classifier = match classifier {
+        None => old_route.classifier.as_deref(),
+        Some(None) => None,
+        Some(Some(reference)) if reference.trim().is_empty() => None,
+        Some(Some(reference)) => Some(reference),
+    };
+    if let Some(reference) = final_classifier
+        && reference == format!("group/{final_group_id}")
+    {
+        return Err(ConfigError::Invalid(
+            "a group cannot classify with itself".to_owned(),
+        ));
+    }
     let mut document = text
         .parse::<DocumentMut>()
         .map_err(|error| ConfigError::Syntax(error.to_string()))?;
@@ -160,18 +177,6 @@ pub fn edit_group_patch(
     }
     if let Some(classifier) = classifier {
         if let Some(reference) = classifier.filter(|reference| !reference.trim().is_empty()) {
-            if reference == format!("group/{group_id}") {
-                return Err(ConfigError::Invalid(
-                    "a group cannot classify with itself".to_owned(),
-                ));
-            }
-            if let Some(new_id) = rename_to.map(str::trim).filter(|id| !id.is_empty())
-                && reference == format!("group/{new_id}")
-            {
-                return Err(ConfigError::Invalid(
-                    "a group cannot classify with itself".to_owned(),
-                ));
-            }
             table.insert("classifier", value(reference));
         } else {
             table.remove("classifier");
@@ -225,7 +230,7 @@ pub fn edit_group_patch(
         }
         let mut array = Array::new();
         for (reference, effort, fast, enabled) in entries {
-            array.push(member_value(reference, effort, *fast, *enabled));
+            array.push(member_value(&before, reference, effort, *fast, *enabled));
         }
         table.insert("upstreams", value(array));
     }
@@ -323,29 +328,62 @@ pub fn edit_group_restore(text: &str, group_id: &str) -> Result<String, ConfigEr
 }
 
 fn validate_member_ref(config: &crate::Config, reference: &str) -> Result<(), ConfigError> {
-    if reference.trim().is_empty() {
+    classify_member_ref(config, reference).map(|_| ())
+}
+
+fn classify_member_ref<'a>(
+    config: &'a crate::Config,
+    reference: &'a str,
+) -> Result<MemberRefKind<'a>, ConfigError> {
+    let reference = reference.trim();
+    if reference.is_empty() {
         return Err(ConfigError::Invalid("member ref is empty".to_owned()));
     }
-    if let Some((provider, model)) = reference.split_once('/')
-        && config
-            .providers
-            .iter()
-            .any(|entry| entry.id == provider && entry.enabled)
-    {
-        let _ = model;
-        return Ok(());
-    }
-    if reference.starts_with("group/")
-        && config
+    if let Some(group) = reference.strip_prefix("group/") {
+        if config
             .routes
             .iter()
             .any(|route| route.model == reference && !route.hidden)
+        {
+            return Ok(MemberRefKind::Group(group));
+        }
+        return Err(ConfigError::Invalid(format!(
+            "unknown member `{reference}`"
+        )));
+    }
+    if let Some((left, right)) = reference.split_once('/') {
+        if config.providers.iter().any(|entry| entry.id == left) {
+            return Ok(MemberRefKind::Provider {
+                id: left,
+                model: right,
+            });
+        }
+        if config.subscriptions.iter().any(|entry| entry.id == left) {
+            return Ok(MemberRefKind::Subscription {
+                id: left,
+                model: right,
+            });
+        }
+    } else if config.providers.iter().any(|entry| entry.id == reference) {
+        return Ok(MemberRefKind::BareProvider(reference));
+    } else if config
+        .subscriptions
+        .iter()
+        .any(|entry| entry.id == reference)
     {
-        return Ok(());
+        return Ok(MemberRefKind::BareSubscription(reference));
     }
     Err(ConfigError::Invalid(format!(
         "unknown member `{reference}`"
     )))
+}
+
+enum MemberRefKind<'a> {
+    Group(&'a str),
+    BareProvider(&'a str),
+    BareSubscription(&'a str),
+    Provider { id: &'a str, model: &'a str },
+    Subscription { id: &'a str, model: &'a str },
 }
 
 fn member_refs_from_route(route: &crate::Route) -> Vec<String> {
@@ -432,28 +470,46 @@ fn rewrite_upstream_group_ref(entry: &mut Value, old_ref: &str, new_ref: &str) {
     }
 }
 
-fn member_array(reference: &str) -> Item {
-    value(Array::from_iter([member_value(reference, "", false, true)]))
+fn member_array(config: &crate::Config, reference: &str) -> Item {
+    value(Array::from_iter([member_value(
+        config, reference, "", false, true,
+    )]))
 }
 
-fn member_value(reference: &str, effort: &str, fast: bool, enabled: bool) -> Value {
-    if effort.is_empty() && !fast && enabled && !reference.contains('/') {
-        return Value::String(Formatted::new(reference.to_owned()));
+fn member_value(
+    config: &crate::Config,
+    reference: &str,
+    effort: &str,
+    fast: bool,
+    enabled: bool,
+) -> Value {
+    let kind = classify_member_ref(config, reference).expect("validated member");
+    if effort.is_empty()
+        && !fast
+        && enabled
+        && let MemberRefKind::BareProvider(id) | MemberRefKind::BareSubscription(id) = kind
+    {
+        return Value::String(Formatted::new(id.to_owned()));
     }
     let mut table = InlineTable::new();
-    if let Some(group) = reference.strip_prefix("group/") {
-        table.insert("group", Value::String(Formatted::new(group.to_owned())));
-    } else if let Some((provider, model)) = reference.split_once('/') {
-        table.insert(
-            "provider",
-            Value::String(Formatted::new(provider.to_owned())),
-        );
-        table.insert("model", Value::String(Formatted::new(model.to_owned())));
-    } else {
-        table.insert(
-            "provider",
-            Value::String(Formatted::new(reference.to_owned())),
-        );
+    match kind {
+        MemberRefKind::Group(group) => {
+            table.insert("group", Value::String(Formatted::new(group.to_owned())));
+        }
+        MemberRefKind::BareProvider(id) => {
+            table.insert("provider", Value::String(Formatted::new(id.to_owned())));
+        }
+        MemberRefKind::BareSubscription(id) => {
+            table.insert("subscription", Value::String(Formatted::new(id.to_owned())));
+        }
+        MemberRefKind::Provider { id, model } => {
+            table.insert("provider", Value::String(Formatted::new(id.to_owned())));
+            table.insert("model", Value::String(Formatted::new(model.to_owned())));
+        }
+        MemberRefKind::Subscription { id, model } => {
+            table.insert("subscription", Value::String(Formatted::new(id.to_owned())));
+            table.insert("model", Value::String(Formatted::new(model.to_owned())));
+        }
     }
     if !effort.is_empty() {
         table.insert("effort", Value::String(Formatted::new(effort.to_owned())));
@@ -571,5 +627,114 @@ listen = \"127.0.0.1:0\"\n\
         .expect_err("unknown member");
         assert!(error.to_string().contains("unknown member"), "{error}");
         assert_eq!(before, text, "config text must be unchanged on rejection");
+    }
+
+    #[test]
+    fn r7a_group_patch_members_round_trips_list_shapes() {
+        let text = "\
+listen = \"127.0.0.1:0\"\n\
+[[providers]]\nid = \"chat\"\nenabled = false\nprotocol = \"openai-chat\"\nbase_url = \"http://127.0.0.1/v1\"\napi_key = \"k\"\n\
+[[providers]]\nid = \"live\"\nprotocol = \"openai-chat\"\nbase_url = \"http://127.0.0.1/v1\"\napi_key = \"k\"\n\
+[[subscriptions]]\nid = \"codex\"\naccounts = \"*\"\n\
+[[routes]]\nmodel = \"m\"\nupstreams = [\"live\"]\n";
+        let (created, id) = edit_group_create(text, "Mix", "live").expect("create");
+        let config = load(&created).expect("load");
+        let group = config
+            .routes
+            .iter()
+            .find(|route| route.model == format!("group/{id}"))
+            .expect("group");
+        let refs: Vec<String> = group
+            .upstreams
+            .iter()
+            .map(|upstream| match &upstream.target {
+                UpstreamTarget::Provider(provider) => upstream
+                    .model
+                    .as_ref()
+                    .map(|model| format!("{provider}/{model}"))
+                    .unwrap_or_else(|| provider.clone()),
+                UpstreamTarget::Subscription(subscription) => upstream
+                    .model
+                    .as_ref()
+                    .map(|model| format!("{subscription}/{model}"))
+                    .unwrap_or_else(|| subscription.clone()),
+                UpstreamTarget::Group(group) => format!("group/{group}"),
+            })
+            .collect();
+        let members = vec![
+            ("chat".to_owned(), String::new(), false, true),
+            ("live".to_owned(), "high".to_owned(), true, true),
+            ("codex/m".to_owned(), String::new(), false, true),
+        ];
+        let (patched, _) = edit_group_patch(
+            &created,
+            &id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&members),
+            None,
+            None,
+        )
+        .expect("patch same members");
+        let after = load(&patched).expect("load patched");
+        let group = after
+            .routes
+            .iter()
+            .find(|route| route.model == format!("group/{id}"))
+            .expect("group");
+        assert_eq!(group.upstreams.len(), 3);
+        assert!(matches!(
+            &group.upstreams[0].target,
+            UpstreamTarget::Provider(id) if id == "chat"
+        ));
+        assert!(matches!(
+            &group.upstreams[2].target,
+            UpstreamTarget::Subscription(id) if id == "codex"
+        ));
+        assert_eq!(group.upstreams[2].model.as_deref(), Some("m"));
+        let _ = refs;
+    }
+
+    #[test]
+    fn r7a_group_patch_rename_rejects_stored_classifier_for_new_id() {
+        let (text, id) = edit_group_create(BASE, "Old Team", "chat/m").expect("create");
+        let (with_classifier, _) = edit_group_patch(
+            &text,
+            &id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(Some("group/new")),
+            None,
+            None,
+            None,
+        )
+        .expect("set classifier");
+        let before = with_classifier.clone();
+        let error = edit_group_patch(
+            &with_classifier,
+            &id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("new"),
+        )
+        .expect_err("stored classifier becomes self after rename");
+        assert!(
+            error.to_string().contains("classify with itself"),
+            "{error}"
+        );
+        assert_eq!(before, with_classifier);
     }
 }

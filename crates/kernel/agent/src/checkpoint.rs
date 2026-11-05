@@ -4,12 +4,16 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::AgentError;
-use crate::store::{delete_file, read_optional, write_atomic};
+use crate::credential::CredentialUndo;
+use crate::store::{
+    credential_record, delete_file, read_optional, sidecar_marker_path, write_atomic,
+};
 
 /// Bytes that belonged to a path before a sidecar edit touched it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct SidecarCheckpoint {
     prior: BTreeMap<PathBuf, Option<Vec<u8>>>,
+    credentials: Vec<CredentialUndo>,
 }
 
 impl SidecarCheckpoint {
@@ -18,6 +22,7 @@ impl SidecarCheckpoint {
     pub fn new() -> Self {
         Self {
             prior: BTreeMap::new(),
+            credentials: Vec::new(),
         }
     }
 
@@ -34,12 +39,33 @@ impl SidecarCheckpoint {
         Ok(())
     }
 
+    /// Records an agent file and the connect sidecars beside it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentError`] when a path cannot be read.
+    pub fn record_agent_tree(&mut self, path: &Path) -> Result<(), AgentError> {
+        self.record(path)?;
+        for suffix in [".hofund.bak", ".hofund.absent", ".hofund.wrote"] {
+            self.record(&sidecar_marker_path(path, suffix))?;
+        }
+        self.record(&credential_record(path))?;
+        Ok(())
+    }
+
+    pub(crate) fn push_credential_undo(&mut self, undo: CredentialUndo) {
+        self.credentials.push(undo);
+    }
+
     /// Puts every recorded path back to its captured state.
     ///
     /// # Errors
     ///
     /// Returns [`AgentError`] when a path cannot be restored.
     pub fn restore(self) -> Result<(), AgentError> {
+        for undo in self.credentials.into_iter().rev() {
+            undo.restore()?;
+        }
         for (path, prior) in self.prior {
             match prior {
                 None => {
