@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Router: a regional model refusal no longer rests the member; the provider is
+  asked once more per model, then other accounts on that model are skipped and
+  the agent sees a regional note on the final error (R-4 D-71).
+- Router: smart and pace routing keep an account at 90% of a budget week alone
+  in the fine tier; only short rate-cap windows at 90% or more hold a seat back
+  (R-4 D-72).
+- Quirks: Anthropic Messages tool `input_schema` root unions fold on the first
+  ask for every upstream, not only after a learned refusal (R-4 D-73).
+- Codec: plain schema drops blank string enum values and empty enums for
+  generative upstreams (R-4 D-74).
+- Router: HTTP 520 through 524 count as busy for same-member patience retries
+  (R-4 D-75).
+
 ### Added
 
 - `hofund-plugin-sdk::time::zone`: resolve IANA names, host local zone with a

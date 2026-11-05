@@ -56,6 +56,10 @@ pub(crate) struct BuiltProvider {
     /// Fingerprint of this member's API key, including a provider with one key.
     /// Empty when the provider has no key.
     pub key_id: String,
+    /// Pooled HTTP profile for this provider's runtime host.
+    pub http_profile: hofund_plugin_host::HttpProfile,
+    /// Pooled HTTP limits for this provider's runtime host.
+    pub http_limits: hofund_plugin_host::HttpLimits,
 }
 
 pub(crate) struct Table {
@@ -105,6 +109,8 @@ struct LiveMember {
     subscription: bool,
     patience: Option<Duration>,
     kernel: bool,
+    http_profile: hofund_plugin_host::HttpProfile,
+    http_limits: hofund_plugin_host::HttpLimits,
     failed: Arc<AtomicU64>,
     stack: Cooldown<Guard<ProviderCall>>,
 }
@@ -659,6 +665,8 @@ impl LiveMember {
             subscription,
             patience: built.patience,
             kernel: built.kernel,
+            http_profile: built.http_profile.clone(),
+            http_limits: built.http_limits,
             failed,
             stack,
         }
@@ -710,6 +718,11 @@ impl Member for LiveMember {
 
     fn background_probe(&self) -> bool {
         self.kernel
+    }
+
+    fn close_idle_connections(&self) {
+        self.stack.inner.inner.provider.close_idle_connections();
+        hofund_plugin_host::close_idle_after_region(&self.http_profile, self.http_limits);
     }
 
     fn learns_allowance(&self) -> bool {
@@ -1441,6 +1454,8 @@ mod tests {
                 base_url: String::new(),
                 key: None,
                 key_id: String::new(),
+                http_profile: hofund_plugin_host::HttpProfile::direct(),
+                http_limits: hofund_plugin_host::HttpLimits::default(),
             },
         );
         let mut routes = BTreeMap::new();
@@ -1546,6 +1561,8 @@ mod tests {
                 base_url: String::new(),
                 key: None,
                 key_id: String::new(),
+                http_profile: hofund_plugin_host::HttpProfile::direct(),
+                http_limits: hofund_plugin_host::HttpLimits::default(),
             },
         );
         let mut routes = BTreeMap::new();
@@ -1642,6 +1659,8 @@ mod tests {
                 base_url: String::new(),
                 key: None,
                 key_id: String::new(),
+                http_profile: hofund_plugin_host::HttpProfile::direct(),
+                http_limits: hofund_plugin_host::HttpLimits::default(),
             },
         );
         let mut routes = BTreeMap::new();
@@ -1737,6 +1756,8 @@ mod tests {
                 base_url: String::new(),
                 key: None,
                 key_id: String::new(),
+                http_profile: hofund_plugin_host::HttpProfile::direct(),
+                http_limits: hofund_plugin_host::HttpLimits::default(),
             },
         );
         let mut routes = BTreeMap::new();
@@ -1802,6 +1823,8 @@ mod tests {
                     base_url: String::new(),
                     key: None,
                     key_id: String::new(),
+                    http_profile: hofund_plugin_host::HttpProfile::direct(),
+                    http_limits: hofund_plugin_host::HttpLimits::default(),
                 },
             );
         }
@@ -1869,6 +1892,8 @@ mod tests {
             base_url: String::new(),
             key: None,
             key_id: String::new(),
+            http_profile: hofund_plugin_host::HttpProfile::direct(),
+            http_limits: hofund_plugin_host::HttpLimits::default(),
         }
     }
 

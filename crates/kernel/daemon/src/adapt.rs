@@ -40,6 +40,10 @@ impl Provider for ProviderAdapter {
         &self.id
     }
 
+    fn close_idle_connections(&self) {
+        self.inner.close_idle_connections();
+    }
+
     async fn count_input(
         &self,
         request: Request,

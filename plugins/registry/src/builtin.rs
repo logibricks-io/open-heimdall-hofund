@@ -541,12 +541,28 @@ fn empty_schema() -> Schema {
 }
 
 fn attach_client(endpoint: &mut Endpoint, host: &HostContext) {
-    let Some(pooled) = host.http().pooled_client() else {
+    let handle = host.http();
+    let Some(pooled) = handle.pooled_client() else {
         return;
     };
-    if let Some(client) = hofund_provider::pooled_reqwest(pooled.as_ref()) {
-        endpoint.client = Some(client);
+    let Some(slot) = hofund_provider::pooled_client_slot(pooled.as_ref()) else {
+        return;
+    };
+    endpoint.client_slot = Some(Arc::clone(&slot));
+    if let Ok(guard) = slot.read() {
+        endpoint.client = Some(guard.clone());
     }
+    // Do not probe `fresh_client` here: it replaces the shared pool client and
+    // would break connection reuse at every attach.
+    let refresh = handle.clone();
+    endpoint.client_refresh = Some(Arc::new(move || match refresh.fresh_client() {
+        Some(Ok(any)) => hofund_provider::pooled_reqwest(any.as_ref())
+            .ok_or_else(|| hofund_provider::ProviderError::connect("pooled client type mismatch")),
+        Some(Err(error)) => Err(hofund_provider::ProviderError::connect(error.message())),
+        None => Err(hofund_provider::ProviderError::connect(
+            "no pooled client refresh",
+        )),
+    }));
 }
 
 fn read_endpoint(

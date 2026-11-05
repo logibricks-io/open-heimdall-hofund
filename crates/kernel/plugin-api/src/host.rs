@@ -65,6 +65,14 @@ impl HttpHandle {
     pub fn pooled_client(&self) -> Option<Arc<dyn Any + Send + Sync>> {
         self.inner.pooled_client()
     }
+
+    /// Rebuilds the pooled HTTP client with the same profile and limits.
+    #[cfg(feature = "kernel-internal")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn fresh_client(&self) -> Option<Result<Arc<dyn Any + Send + Sync>, PluginError>> {
+        self.inner.fresh_client()
+    }
 }
 
 impl fmt::Debug for HttpHandle {

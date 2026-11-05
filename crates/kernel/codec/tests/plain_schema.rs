@@ -315,6 +315,29 @@ fn v1_boolean_schemas_and_extension_keys_everywhere() {
     assert_eq!(out["properties"]["first"]["type"], "integer");
 }
 
+#[test]
+fn r4_74_plain_schema_drops_blank_enum_values() {
+    let input = json!({
+        "type":"object",
+        "properties":{
+            "StatusMessage":{"type":"object","properties":{"operationStatus":{
+                "allOf":[{"enum":["processing","warning","error",""],"type":"string"}]
+            }}},
+            "blank":{"type":"string","enum":[""," "]},
+            "c":{"type":"string","const":""},
+            "n":{"enum":["a",1,""]}
+        }
+    });
+    let out = plain_schema(&input);
+    let op = &out["properties"]["StatusMessage"]["properties"]["operationStatus"];
+    assert_eq!(op["type"], "string");
+    assert_eq!(op["enum"].as_array().map(Vec::len), Some(3));
+    for key in ["blank", "c", "n"] {
+        assert!(out["properties"][key].get("enum").is_none(), "{key}");
+    }
+    assert!(!out.to_string().contains("\"\""));
+}
+
 fn assert_schema_subset(schema: &Value) {
     const FIELDS: &[&str] = &[
         "type",
