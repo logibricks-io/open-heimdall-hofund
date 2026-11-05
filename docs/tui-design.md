@@ -15,15 +15,17 @@ Global keys (`internal/tui/tui.go:Update`, `updateList`, `View`):
 | `ctrl+c` | Quit from every mode | R-11 | Handoff in section 4 |
 | `q`, `esc` | Quit on a page in list mode | R-11 | Same |
 | `1`–`6`, `]`, `[` | Page | R-11 | Reload that page |
-| `r` | Reload the open page. On Usage, also re-read quotas | R-11 | Page GETs |
+| `r` | Reload the open page in **list mode** only (`tui.go:Update`, Agents `updateList`). On Usage, also re-read quotas. In an open routing group (`modeGroup`), `r` is not a reload; it only clears `confirm` like any non-`d` key (`routing.go:updateGroup`) | R-11 | Page GETs |
 | resize | Keep the cursor row on screen | R-11 | None |
 | status line | Success or failure toast, else catalog sync, else gateway line | R-11 | `GET /v1/hofund/health`, `GET /v1/hofund/status`, events |
 
-Modes (`internal/tui/tui.go` `mode` constants): list, picker, profiles, name line, typed line (`ask`), open group. `esc` returns to `back`. One mutation toast at a time. A second `d` confirms a delete; any other key clears the confirm token, except `r`. On Providers, Routing, Usage, Sessions, and Library, `Update` handles `r` before the page handler and reloads without clearing `confirm` (`tui.go:Update`). On Agents, `r` in `updateList` behaves the same. Page keys (`1`–`6`, `7`–`9`, `]`, `[`) call `goTo`, which clears `confirm`. A pending delete applies only to MCP, skill, found-mcp, and found-skill library rows (not instructions); found-mcp on an agent-owned row is refused (`library.go:updateLibrary`).
+Modes (`internal/tui/tui.go` `mode` constants): list, picker, profiles, name line, typed line (`ask`), open group. `esc` returns to `back`. One mutation toast at a time. A second `d` confirms a delete; any other key clears the confirm token, except `r` in list mode (see global `r` row). On Providers, Routing, Usage, Sessions, and Library in list mode, `Update` handles `r` before the page handler and reloads without clearing `confirm`. On Agents, `r` in `updateList` behaves the same. In `modeGroup`, `r` does not reload; it clears `confirm` with other non-`d` keys. Page keys (`1`–`6`, `7`–`9`, `]`, `[`) call `goTo`, which clears `confirm`. A pending delete applies only to MCP, skill, found-mcp, and found-skill library rows (not instructions); found-mcp on an agent-owned row is refused (`library.go:updateLibrary`).
+
+List navigation aliases: Providers, Routing, Sessions, and Library use `j`/`k` and `up`/`down` for the cursor (`pages.go`, `routing.go`, `sessions.go`, `library.go`). Usage and Sessions use `h`/`l` and `left`/`right` for period or range (`pages.go:updateUsage`, `sessions.go:updateSessions`). Agents use `h`/`l`, arrows, and `tab`/`shift+tab` for fields.
 
 ### Agents (page 1) — R-14
 
-Reference: one row per detected agent that still has fields and a CLI (`internal/tui/tui.go:newModel`). Hidden agents are last and dimmed. Columns are the agent's own fields. Hofund agents are model, visibility, and connect state (`AgentSummary`, `AgentStatusEntry`). Effort and similar columns appear only when a later agent descriptor lists them. Do not invent those columns in this release.
+Reference: one row per detected agent that still has fields and a CLI (`internal/tui/tui.go:newModel`). Hidden agents are last and dimmed. Columns are the agent's own fields. Hofund list rows use `AgentSummary` (`id`, `display_name`, `installed` from `GET /v1/hofund/agents`). Connection state and configured model come from `AgentStatusEntry` on `GET /v1/hofund/agents/status` (`model`, `state`). Visibility is shown versus hidden from `GET /v1/hofund/agents/{id}/models` (`shown`, `hidden`), not from `AgentSummary`. Effort and similar columns appear only when a later agent descriptor lists them. Do not invent those columns in this release.
 
 | Key | Reference | Hofund | Control, already present unless noted |
 |---|---|---|---|
@@ -49,8 +51,8 @@ Empty machine: the reference quits with "no supported agents found" (`tui.go:Run
 
 | Key | Action | Control |
 |---|---|---|
-| `j`/`k` | Row | `GET /v1/hofund/providers` |
-| `enter`, space | Model list. `enter` toggles a model on or off and the list stays open (`openProviderModels`). Refuses to turn off the last exposed model (`pages.go` toggle) | `GET/PUT /v1/hofund/providers/{id}/picks` with `expected_picks_revision`. An edit that leaves no exposed model returns 422 (`models.rs` `next_picks`) |
+| `j`/`k`, `up`/`down` | Row | `GET /v1/hofund/providers` |
+| `enter`, space | Model list. `enter` toggles a model on or off and the list stays open (`openProviderModels`). The TUI refuses to turn off the last exposed model before any request (`pages.go` toggle) | `GET/PUT /v1/hofund/providers/{id}/picks` with `expected_picks_revision`. `PicksForm::Replace` may send an empty id list; `422` with `empty_result` applies only to `PicksForm::Edit` when a removal leaves no exposed model (`models.rs` `next_picks`) |
 | picker `ctrl+r` | Fetch that provider's models again | `POST .../models/refresh` |
 | `e` | Replace the key. Password echo. Refused for a signed-in account and for a credentials-based preset | `POST .../keys` action `replace`. Gap G-1 for the row text the page shows |
 | `w` | Address. Local preset, custom base URLs, or preset endpoint (`endpointAsk`, `localAddressAsk`, `customURLsAsk`) | Gap G-2 |
@@ -72,7 +74,7 @@ List: `internal/tui/routing.go:updateGroups`, `viewGroups`. Open group: `updateG
 
 | Key | Where | Action | Control |
 |---|---|---|---|
-| `j`/`k` | List and group | Cursor. Group cursor is members, then rules | Gap G-4 |
+| `j`/`k`, `up`/`down` | List and group | Cursor. Group cursor is members, then rules | Gap G-4 |
 | `enter`, space | List | Open group | G-4 |
 | `n` | List | Ask for a name, then pick the first member (`pickMsg`) | G-4 create |
 | `o` | List and group | Next strategy (`nextRouting`) | G-4. Cycle matches `routing.go:routings`: smart (empty id), order, rotate, usage, pace, weight, free, fast, cheap, drain, expiring, manual. Names match `router` strategy ids where present. Hofund `ROUTING_NAMES` has no `expiring` or `manual`; skip both in the TUI cycle like `manual` today |
@@ -80,7 +82,7 @@ List: `internal/tui/routing.go:updateGroups`, `viewGroups`. Open group: `updateG
 | `u` | List, removed row | Restore a hidden found group | G-4 restore. Found groups that are not in hofund yet render nothing in that section |
 | `esc`, `q` | Group | Back to the list. Does not quit the UI | None |
 | `J`/`K`, `shift+down`/`shift+up` | Group | Swap member or rule (`move`) | G-4 order |
-| `a` | Group | Add member (`openMemberPicker`, `memberOptions`). When the group `Decides()`, the picker lists decision models (`OfferedDeciders`); otherwise served routes. Group list rows show Match pattern count when `len(g.Match) > 0` (`viewGroups`) | `GET /v1/hofund/models` plus G-4 |
+| `a` | Group | Add member (`openMemberPicker`, `memberOptions`). Three picker cases (`routing.go:memberOptions`): creating a group (`n`, `self` empty) lists served routes and offered deciders; an existing decision group (`Decides()`) lists deciders only; an existing chat group lists served routes only. Group list rows show Match pattern count when `len(g.Match) > 0` (`viewGroups`) | `GET /v1/hofund/models` plus G-4 |
 | `n` | Group | New rule, typed line (`openRule`, `ruleHint`) | G-4. The daemon parses the line. The TUI does not |
 | `enter`, `e` | Group, on a rule | Edit that rule | G-4 |
 | `d` `d` | Group | Remove member or rule. Last member cannot be removed | G-4 |
@@ -99,7 +101,7 @@ Fallback in the reference group screen is "the first member that can take the re
 
 | Key | Action | Control |
 |---|---|---|
-| `h`/`l` | Period: today, 7 days, 30 days, all (`periods`) | `GET /v1/hofund/usage?period=day\|week\|month\|all` |
+| `h`/`l`, `left`/`right` | Period: today, 7 days, 30 days, all (`periods`) | `GET /v1/hofund/usage?period=day\|week\|month\|all` |
 | `t`, `w`, `m`, `A` | Jump to today, week, month, all | Same |
 | `u` | Used percent versus left percent, persisted (`settings.QuotaLeft`) | Display uses `QuotaSpan.used` and `remaining`. Persist with G-5 `quota_left` |
 | `c` | Check in every account that has a daily check-in (`checkinCmd`) | `GET /v1/hofund/checkins`, then `POST /v1/hofund/checkins/run` per row `{subscription, account}`. One toast joins the `outcome` and `detail` lines |
@@ -110,7 +112,7 @@ Fallback in the reference group screen is "the first member that can take the re
 | alerts | Not a usage key in the reference. The plan puts alerts on this page | `GET /v1/hofund/quotas/alerts`, `POST /v1/hofund/quotas/alerts/settings`. Also a `quota_alert` event toast |
 | direct calls | Second block, "not through" the gateway, from session files | Not in `GET /usage`. Shown when R-30 stats exist. R-15 ships the gateway block alone |
 
-R-10 fields (`ttft`, tokens per second, `--since`, `--group-by`) render when present on the row. Absence is an empty cell, not an error.
+R-10 adds report fields the Usage page may read when present (for example time to first token and tokens per second on grouped or row summaries). They are not fields on today's `UsageResponse` rows. Absence is an empty cell, not an error. R-10 also covers CLI `--since` and `--group-by`; the TUI uses `period` and client-side bucketing instead.
 
 Check-in copy is English. The reference prints a short native label. Hofund prints `check-in` plus `outcome`.
 
@@ -120,9 +122,9 @@ Check-in copy is English. The reference prints a short native label. Hofund prin
 
 | Key | Action |
 |---|---|
-| `j`/`k` | Session row, list view only |
+| `j`/`k`, `up`/`down` | Session row, list view only |
 | `enter` | Resume in this terminal, then restore the UI (`resumeSession`). Needs a resume command on the row |
-| `h`/`l`, `t`, `w`, `m`, `A` | Range: today, 7, 30, 90, all (`sessRanges`) |
+| `h`/`l`, `left`/`right`, `t`, `w`, `m`, `A` | Range: today, 7, 30, 90, all (`sessRanges`) |
 | `s`, `tab` | List versus stats chart (`sstat`) |
 | `c` | Stats: tokens versus cost (`scost`) |
 | `M`, `f` | Model or folder picker (`openSessPick`) |
@@ -140,7 +142,7 @@ Sections, in order: instructions, MCP servers, skills, MCP servers found in agen
 
 | Key | Action |
 |---|---|
-| `j`/`k` | Row, windowed so section heads stay with the cursor |
+| `j`/`k`, `up`/`down` | Row; list window keeps at least **4** body rows visible (`visible := max(4, h-6)`, `library.go:spend`) |
 | `enter`, space | Agent toggles for instructions, MCP, skill, RTK (`openLibAgents`). Found rows explain `i` and `d` |
 | `a` | Add MCP server or skills (`openLibAdd`, `probeCmd`) |
 | `e` | Edit instructions in `$EDITOR` or `vi` (`editInstructions`), or retype an MCP server (`openServer`) |
@@ -159,7 +161,7 @@ The reference shows accounts as provider rows and usage cards. It has no device-
 |---|---|---|
 | `j`/`k` | Account row | G-6 list |
 | `a` | Start sign-in for a subscription | G-6 start |
-| dialog | Show URL or device code. `o` asks the OS to open the URL. A typed line submits a pasted PKCE callback URL or a token file path. `esc` cancels | G-6 start, poll `GET .../sign-in/{session}`, proof POST only for URL or token, cancel |
+| dialog | Show URL or device code. `o` asks the OS to open the URL. A typed line submits a pasted PKCE callback URL or secret token text only (not a filesystem path; paths belong on Accounts `i` → `POST /v1/hofund/accounts/import`). `esc` cancels | G-6 start, poll `GET .../sign-in/{session}`, proof POST for pasted URL or token text, cancel |
 | `enter` | Switch the agent sign-in to this account | G-6 switch |
 | `n` | Switch to the next account with room | G-6 switch target `next` |
 | `i` | Import a file path | G-6 import |
@@ -177,7 +179,7 @@ Sign-in never prints a token. The existing `SignInProgressEvent` (`provider`, `s
 | listen | Model address | G-5. Restart-only. Show `pending_restart` from `GET /v1/hofund/status` |
 | currency | `usd` or `cny` | G-5 |
 | quota left | Same bit as Usage `u` | G-5 |
-| discover accounts | Read agent sign-in files | G-5. `HOFUND_NO_ACCOUNTS=1` still wins for one run |
+| discover accounts | Read agent sign-in files | G-5 `discover_accounts` maps to config `discover_agent_accounts`. `HOFUND_NO_ACCOUNTS=1` still wins for one run |
 | usage alert, balance alert | Thresholds | Existing `POST /v1/hofund/quotas/alerts/settings` |
 | gateway keys | Named keys and limits | Existing `GET/POST /v1/hofund/gateway-keys` |
 | LAN allow-list | Display and edit the field | G-5 stores it. Enforcement is R-22. Until R-22 the row says the field is stored and not enforced |
@@ -200,7 +202,7 @@ Sign-in never prints a token. The existing `SignInProgressEvent` (`provider`, `s
 
 ### Crate
 
-New package `apps/tui`, crate `hofund-tui`, binary `hofund-tui`. `hofund tui` in `apps/cli` execs that binary the same way `hofund serve` locs `hofundd`. A bare `hofund` does not open the UI. The reference opens the UI when there is no GUI (`internal/cli/main.go:run`, `runTUI`). That default is not copied.
+New package `apps/tui`, crate `hofund-tui`, binary `hofund-tui`. `hofund tui` in `apps/cli` execs that binary the same way `hofund serve` locates `hofundd`. A bare `hofund` does not open the UI. The reference opens the UI when there is no GUI (`internal/cli/main.go:run`, `runTUI`). That default is not copied.
 
 `apps/cli` does not depend on ratatui. `hofund-tui` depends on `hofund-control-client` (proto is re-exported), `hofund-config` (config path and listen resolution only), and `hofund-secrets` (token file). Tokio is already in the graph. No dependency on `gateway`, so no axum, tower, or hyper in this crate. Update the manifest, `docs/architecture.md`, and `expected_deps` in `xtask/tests/workspace_invariants.rs` in R-11.
 
@@ -303,7 +305,7 @@ Routes are `[[routes]]` groups, not a second store. `routing` is one of `smart`,
 | `GET /v1/hofund/settings` | | `{version, disk_revision, listen, currency, quota_left, discover_accounts, lan_allow, pending_restart}` |
 | `PATCH /v1/hofund/settings` | `{version, expected_revision}` and any of those fields | Same shape, new revision |
 
-`currency` is `usd` or `cny` (422 otherwise). `listen` is `ip:port`. A listen change is `pending_restart` and does not rebind inside the call. `lan_allow` is a list of strings stored for R-22. `discover_accounts` maps to the existing config flag. `quota_left` is the Usage `u` bit. Alert thresholds stay on the quotas routes.
+`currency` is `usd` or `cny` (422 otherwise). `listen` is `ip:port`. A listen change is `pending_restart` and does not rebind inside the call. `lan_allow` is a list of strings stored for R-22. `discover_accounts` maps to config `discover_agent_accounts`. `quota_left` is the Usage `u` bit. Alert thresholds stay on the quotas routes.
 
 ### G-6 Subscriptions and accounts
 
@@ -314,7 +316,7 @@ The CLI paths `apps/cli/src/subscription.rs` and `apps/cli/src/accounts.rs` spaw
 | `GET /v1/hofund/subscriptions` | | `{version, subscriptions: [{id, name, flow, accounts: [{id, label, ready, needs_sign_in}]}]}`. `flow` is `pkce`, `device`, `token-file`, or `bridge`. No tokens |
 | `POST /v1/hofund/subscriptions/{id}/sign-in` | `{version, host?, label?, site?}` | `{version, session, flow, challenge}`. 404 unknown id. 409 if that subscription already has a session |
 | `GET .../sign-in/{session}` | | `{version, state, challenge?}` `state`: `pending`, `needs_proof`, `ready`, `failed`, `cancelled` |
-| `POST .../sign-in/{session}/proof` | `{version, url?}` or `{version, token?}` | Same as GET. `token` is write-only |
+| `POST .../sign-in/{session}/proof` | `{version, url?}` or `{version, token?}` | Same as GET. `url` is a pasted redirect URL parsed with `parse_pasted_callback` (`plugin-host/src/loopback.rs`) after the session id and `needs_proof` state check. `token` is write-only secret text for instructions or token-file flows, not a path. Never log or echo the URL, user code, or token |
 | `POST .../sign-in/{session}/cancel` | `{version}` | `{version, state: "cancelled"}` |
 | `POST /v1/hofund/subscriptions/{id}/refresh` | `{version, account?}` | `{version, refreshed: [account id]}` |
 | `POST /v1/hofund/accounts/switch` | `{version, agent, target}` | `{version, agent, account}`. `target` is `next` or an account id, email, or label. 422 if the agent has no switch |
@@ -323,7 +325,7 @@ The CLI paths `apps/cli/src/subscription.rs` and `apps/cli/src/accounts.rs` spaw
 | `POST /v1/hofund/accounts/discover` | `{version, add: true}` | `{version, imported: [id]}` |
 | `POST /v1/hofund/subscriptions/{id}/accounts/{account}/remove` | `{version}` | `{version, removed}`. This is sign-out |
 
-`challenge` is one of `{type: "open_url", url}`, `{type: "device_code", user_code, verification_url}`, `{type: "instructions", text}`. It matches `SignInChallenge` and contains no secret. Device-code flow completes when the plugin finishes polling (`SignInProof::Await` in `drive_sign_in`); the TUI polls `GET .../sign-in/{session}` at 1s while the dialog is open, and also on `sign_in_progress`. `POST .../proof` is only for a pasted PKCE callback URL or a token file, not for device codes. Session lifetime is 10 minutes, then `failed`. Cancel calls the plugin cancel and releases the loopback listener. 404 on an unknown session.
+`challenge` is one of `{type: "open_url", url}`, `{type: "device_code", user_code, verification_url}`, `{type: "instructions", text}`. It matches `SignInChallenge` and contains no secret. Device-code flow completes when the plugin finishes polling (`SignInProof::Await` in `drive_sign_in`); the TUI polls `GET .../sign-in/{session}` at 1s while the dialog is open, and also on `sign_in_progress`. Device codes never use a proof POST body. `POST .../proof` accepts only a pasted PKCE callback URL (`url`) or pasted token text (`token`), parsed and validated as above. Session lifetime is 10 minutes, then `failed`. Cancel calls the plugin cancel and releases the loopback listener. 404 on an unknown session.
 
 Extend `SignInProgressEvent` with optional `session` and `state`. Old clients ignore the extra fields.
 
@@ -366,8 +368,8 @@ Protocol:
 2. If a lock is held, discover and `GET /v1/hofund/health` and `GET /v1/hofund/status`. Attach as a client. Do not spawn. Status uses `pid`, `model_listener.running`, and G-10 `serves`.
 3. If no lock is held, `probe_model_health` on the model listener: GET `/health` within a 700ms budget, HTTP 200, body `service` equals `hofund` (`model_health.rs`). If that answers, something else has the model port. Do not bind. Status says the port is taken and this config's lock is free.
 4. If neither answers, spawn `hofundd` the way `apps/cli/src/events.rs:autostart` does: own process group, Windows `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP`, stdin closed, stdout and stderr appended to `.hofund/daemon-<id>.log`, environment plus `HOFUND_SERVES=tui` and `HOFUND_OWNER_PID`. Wait up to 10s for discovery and health. Failure is a status error, and the UI still opens.
-5. Every 15s, repeat 1 through 4. Spawn only if this UI did not already spawn one and the lock is free and the model port is quiet.
-6. This UI records `spawned: bool` and the child pid. It never shuts down a daemon it did not spawn.
+5. Every 15s, repeat 1 through 4 (`gatewayWatch` in the reference). Spawn only when this UI may spawn under step 4: lock free, model port quiet, and either this UI never spawned or the recorded child pid is no longer running (treat a dead spawn as `spawned: false`). A second TUI still never shuts down a daemon it did not start.
+6. This UI records `spawned: bool` and the child pid when it spawns. It never shuts down a daemon it did not spawn.
 
 Clean quit (`q`, `esc`, `ctrl+c`):
 
@@ -377,7 +379,7 @@ Clean quit (`q`, `esc`, `ctrl+c`):
 | None connected, and this UI spawned it | `POST /v1/hofund/shutdown`, wait until the lock is free or 10s, then exit |
 | This UI did not spawn it | Exit. Leave it running |
 
-Service install is not in this release (parity row 16.4 is missing). The reference installs a user service on the way out. Hofund prints that a future service command will do that, and leaves `hofundd` running instead. The WSL systemd sentence is a printed note, not an action.
+Service install is not in this release (parity row 16.4 is missing). The reference installs a user service on the way out. When any agent is still connected on quit, Hofund prints that a future service command will do that and leaves `hofundd` running. When none are connected and this UI spawned the daemon, it shuts down as in the quit table. The WSL systemd sentence is a printed note, not an action.
 
 Crash: the child is already detached, so it keeps the port. That is stricter than the reference and is what connected agents need. An orphan is visible to the next `hofund tui` as an attached daemon and stops with `hofund shutdown`. No watchdog.
 
@@ -451,7 +453,7 @@ Key scenarios drive `App::handle` with crossterm key events and assert the fake'
 | `d` once | no DELETE. `d` again | DELETE with the revision from the last GET |
 | stale 409 | toast contains the server message, cursor stays |
 | `4` then `c` | one check-in POST per listed account |
-| sign-in | start, poll until `ready` or terminal state; proof POST only for pasted URL or token; cancel |
+| sign-in | start, poll until `ready` or terminal state; proof POST with pasted URL or token text only; cancel |
 | `3` then `enter` then `J` | PATCH members in swapped order |
 | `?` | help frame, `esc` restores the page |
 | quit with a connected agent and `spawned` | no shutdown POST |
