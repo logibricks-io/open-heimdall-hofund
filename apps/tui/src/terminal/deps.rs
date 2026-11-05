@@ -34,6 +34,12 @@ impl LiveHandoff {
         self.client.lock().expect("client").clone()
     }
 
+    /// Installs a client for unit tests (event stream open failures, and similar).
+    #[cfg(test)]
+    pub fn set_client_for_test(&self, client: Client) {
+        self.store_client(client);
+    }
+
     fn store_client(&self, client: Client) {
         *self.client.lock().expect("client") = Some(client);
     }

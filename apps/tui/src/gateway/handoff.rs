@@ -495,4 +495,57 @@ mod tests {
         .await;
         assert_eq!(*deps.spawn_count.lock().expect("spawn"), 1);
     }
+
+    #[tokio::test]
+    async fn stopped_handoff_before_interval_does_not_respawn() {
+        tokio::time::pause();
+        let deps = Arc::new(FakeDeps::new());
+        *deps.alive.lock().expect("alive") = false;
+        let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+        let deps_bg = Arc::clone(&deps);
+        let worker = tokio::spawn(async move {
+            let mut watch_interval = tokio::time::interval(super::WATCH_INTERVAL);
+            watch_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut stop = stop_rx;
+            let mut state = HandoffState {
+                spawned: true,
+                child_pid: Some(999),
+                client: None,
+            };
+            loop {
+                if *stop.borrow() {
+                    break;
+                }
+                tokio::select! {
+                    biased;
+                    changed = stop.changed() => {
+                        if changed.is_ok() && *stop.borrow() {
+                            break;
+                        }
+                    }
+                    _ = watch_interval.tick() => {
+                        if *stop.borrow() {
+                            break;
+                        }
+                        let mut token = || "t".to_owned();
+                        let mut notify = |_: &HandoffState| {};
+                        let _ = run_handoff_tick(
+                            deps_bg.as_ref(),
+                            Path::new("/tmp/x.toml"),
+                            &mut token,
+                            listen(),
+                            &mut state,
+                            &mut notify,
+                        )
+                        .await;
+                    }
+                }
+            }
+        });
+        let _ = stop_tx.send(true);
+        worker.abort();
+        tokio::time::advance(super::WATCH_INTERVAL + std::time::Duration::from_secs(1)).await;
+        let _ = worker.await;
+        assert_eq!(*deps.spawn_count.lock().expect("spawn"), 0);
+    }
 }

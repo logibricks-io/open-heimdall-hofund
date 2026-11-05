@@ -82,11 +82,13 @@ async fn async_main(config: &Path, no_color: bool) -> Result<QuitAction, String>
     let live = Arc::new(deps::LiveHandoff::new(config));
     let mut handoff_snapshot = HandoffSnapshot::default();
     let (work_tx, mut work_rx) = mpsc::channel(32);
-    spawn_handoff_worker(
+    let (handoff_stop_tx, handoff_stop_rx) = tokio::sync::watch::channel(false);
+    let handoff_task = spawn_handoff_worker(
         Arc::clone(&live),
         config_path.clone(),
         listen,
         work_tx.clone(),
+        handoff_stop_rx,
     );
 
     let mut keys = EventStream::new();
@@ -101,7 +103,7 @@ async fn async_main(config: &Path, no_color: bool) -> Result<QuitAction, String>
                     handoff_snapshot = snapshot.clone();
                 }
                 apply_worker_msg(&mut app, msg);
-                open_control_if_needed(&live, &mut control, &app, &work_tx).await?;
+                open_control_if_needed(&live, &mut app, &mut control, &work_tx).await;
                 draw(&mut terminal, &app, &theme)?;
             }
             event = async {
@@ -115,9 +117,9 @@ async fn async_main(config: &Path, no_color: bool) -> Result<QuitAction, String>
                     Some(Ok(envelope)) => {
                         let followup = apply_control_followup(&mut app, &envelope.payload);
                         if followup.reread_token {
-                            reconnect_after_token(&live, config, &mut control).await?;
+                            reconnect_after_token(&live, config, &mut app, &mut control).await;
                         } else if followup.resync_stream {
-                            reopen_control_stream(&live, &mut control, None).await?;
+                            try_reopen_control_stream(&live, &mut app, &mut control, None).await;
                         }
                         schedule_probe_for_open_page(&app, live.client().as_ref(), &work_tx);
                         draw(&mut terminal, &app, &theme)?;
@@ -151,6 +153,10 @@ async fn async_main(config: &Path, no_color: bool) -> Result<QuitAction, String>
         }
     }
 
+    let _ = handoff_stop_tx.send(true);
+    handoff_task.abort();
+    let _ = handoff_task.await;
+
     perform_quit(config, &handoff_snapshot, live.client(), live.as_ref()).await
 }
 
@@ -159,42 +165,58 @@ fn spawn_handoff_worker(
     config: PathBuf,
     listen: std::net::SocketAddr,
     work_tx: mpsc::Sender<WorkerMsg>,
-) {
+    mut handoff_stop: tokio::sync::watch::Receiver<bool>,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut watch = tokio::time::interval(WATCH_INTERVAL);
         watch.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let tokens = TokenReader::new(config.clone());
         let mut state = HandoffState::default();
         loop {
-            watch.tick().await;
-            let outcome = run_handoff_tick(
-                live.as_ref(),
-                &config,
-                &mut || tokens.read(),
-                listen,
-                &mut state,
-                &mut |state| {
+            if *handoff_stop.borrow() {
+                break;
+            }
+            tokio::select! {
+                biased;
+                changed = handoff_stop.changed() => {
+                    if changed.is_ok() && *handoff_stop.borrow() {
+                        break;
+                    }
+                }
+                _ = watch.tick() => {
+                    if *handoff_stop.borrow() {
+                        break;
+                    }
+                    let outcome = run_handoff_tick(
+                        live.as_ref(),
+                        &config,
+                        &mut || tokens.read(),
+                        listen,
+                        &mut state,
+                        &mut |state| {
+                            let snapshot = HandoffSnapshot {
+                                spawned: state.spawned,
+                                child_pid: state.child_pid,
+                            };
+                            let _ = work_tx.try_send(WorkerMsg::HandoffProgress { snapshot });
+                        },
+                    )
+                    .await;
                     let snapshot = HandoffSnapshot {
                         spawned: state.spawned,
                         child_pid: state.child_pid,
                     };
-                    let _ = work_tx.try_send(WorkerMsg::HandoffProgress { snapshot });
-                },
-            )
-            .await;
-            let snapshot = HandoffSnapshot {
-                spawned: state.spawned,
-                child_pid: state.child_pid,
-            };
-            if work_tx
-                .send(WorkerMsg::Handoff { outcome, snapshot })
-                .await
-                .is_err()
-            {
-                break;
+                    if work_tx
+                        .send(WorkerMsg::Handoff { outcome, snapshot })
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
             }
         }
-    });
+    })
 }
 
 struct TokenReader {
@@ -213,44 +235,59 @@ impl TokenReader {
 
 async fn open_control_if_needed(
     live: &deps::LiveHandoff,
+    app: &mut App,
     control: &mut Option<ControlEventStream>,
-    app: &App,
     work_tx: &mpsc::Sender<WorkerMsg>,
-) -> Result<(), String> {
+) {
     if live.client().is_none() {
         *control = None;
-        return Ok(());
+        return;
     }
     if control.is_some() {
-        return Ok(());
+        return;
     }
-    reopen_control_stream(live, control, None).await?;
+    try_reopen_control_stream(live, app, control, None).await;
     schedule_probe_for_open_page(app, live.client().as_ref(), work_tx);
-    Ok(())
 }
 
-async fn reopen_control_stream(
+/// Records a failed control stream open without exiting the UI loop.
+pub(crate) fn apply_event_stream_open_failure(
+    app: &mut App,
+    control: &mut Option<ControlEventStream>,
+    message: String,
+) {
+    *control = None;
+    app.set_flash(crate::state::Flash::new(message, false));
+}
+
+async fn try_reopen_control_stream(
     live: &deps::LiveHandoff,
+    app: &mut App,
     control: &mut Option<ControlEventStream>,
     last_event_id: Option<&str>,
-) -> Result<(), String> {
+) {
     let Some(client) = live.client() else {
         *control = None;
-        return Ok(());
+        return;
     };
-    *control = Some(open_event_stream(&client, last_event_id).await?);
-    Ok(())
+    match open_event_stream(&client, last_event_id).await {
+        Ok(stream) => *control = Some(stream),
+        Err(message) => apply_event_stream_open_failure(app, control, message),
+    }
 }
 
 async fn reconnect_after_token(
     live: &deps::LiveHandoff,
     config: &Path,
+    app: &mut App,
     control: &mut Option<ControlEventStream>,
-) -> Result<(), String> {
+) {
     *control = None;
     let token = read_token(config);
-    let _client = live.rediscover(config, &token).await?;
-    reopen_control_stream(live, control, None).await
+    match live.rediscover(config, &token).await {
+        Ok(_client) => try_reopen_control_stream(live, app, control, None).await,
+        Err(message) => apply_event_stream_open_failure(app, control, message),
+    }
 }
 
 fn schedule_probe_for_open_page(
@@ -303,6 +340,66 @@ fn read_token(config: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
+
+    use super::apply_event_stream_open_failure;
+    use super::open_control_if_needed;
+    use crate::app::App;
+    use crate::gateway::HandoffOutcome;
+    use crate::runtime::{HandoffSnapshot, WorkerMsg, apply_worker_msg};
+    use crate::state::PageId;
+    use crate::terminal::deps::LiveHandoff;
+
+    #[test]
+    fn event_stream_reopen_failure_keeps_control_none_and_sets_flash() {
+        let mut app = App::for_test(PageId::Agents);
+        let mut control = None;
+        apply_event_stream_open_failure(
+            &mut app,
+            &mut control,
+            "control event stream failed".into(),
+        );
+        assert!(control.is_none());
+        assert_eq!(
+            app.flash.as_ref().map(|flash| flash.text.as_str()),
+            Some("control event stream failed")
+        );
+        assert!(app.flash.as_ref().is_some_and(|flash| !flash.ok));
+    }
+
+    #[tokio::test]
+    async fn handoff_message_then_event_stream_open_failure_keeps_ui_open() {
+        let config = std::path::Path::new("/tmp/hofund-tui-test-config.toml");
+        let live = LiveHandoff::new(config);
+        live.set_client_for_test(hofund_control_client::Client::tcp(
+            "127.0.0.1:1".parse().expect("addr"),
+            "test-token",
+        ));
+        let mut app = App::for_test(PageId::Agents);
+        apply_worker_msg(
+            &mut app,
+            WorkerMsg::Handoff {
+                outcome: HandoffOutcome::Idle,
+                snapshot: HandoffSnapshot {
+                    spawned: true,
+                    child_pid: Some(42),
+                },
+            },
+        );
+        let mut control = None;
+        let (work_tx, _work_rx) = tokio::sync::mpsc::channel(4);
+        open_control_if_needed(&live, &mut app, &mut control, &work_tx).await;
+        assert!(control.is_none());
+        assert!(
+            app.flash.as_ref().is_some_and(|flash| !flash.ok),
+            "expected error flash after failed stream open"
+        );
+        assert!(
+            app.flash
+                .as_ref()
+                .is_some_and(|flash| !flash.text.is_empty()),
+            "failure should surface as status flash text"
+        );
+    }
 
     #[test]
     fn raw_mode_reports_not_a_tty_gracefully() {
