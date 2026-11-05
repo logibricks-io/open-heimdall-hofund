@@ -44,6 +44,7 @@ pub(crate) async fn write(
         );
     }
     let mut root = Map::new();
+    root.insert("auth_mode".to_owned(), Value::String("chatgpt".to_owned()));
     root.insert("tokens".to_owned(), Value::Object(tokens));
     let text = Value::Object(root).to_string();
     std::fs::create_dir_all(home)

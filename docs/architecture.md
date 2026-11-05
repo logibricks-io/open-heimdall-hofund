@@ -238,7 +238,7 @@ This table covers normal and build dependencies, including their target-specific
 | `hofund-codec` | `hofund-ir` |
 | `hofund-quirks` | `hofund-ir` |
 | `hofund-plugin-api` | `hofund-ir` |
-| `hofund-plugin-sdk` | `hofund-codec`, `hofund-ir`, `hofund-plugin-api`, `hofund-quirks` |
+| `hofund-plugin-sdk` | `chrono`, `chrono-tz`, `hofund-codec`, `hofund-ir`, `hofund-plugin-api`, `hofund-quirks`, `iana-time-zone` |
 | `hofund-plugin-fixture` | `hofund-plugin-api` |
 | `hofund-plugin-echo` | `hofund-plugin-api`, `hofund-plugin-sdk` |
 | `hofund-plugin-codex-catalog` | `hofund-plugin-api`, `hofund-plugin-sdk` |
@@ -255,7 +255,7 @@ This table covers normal and build dependencies, including their target-specific
 | `hofund-plugin-subscription-workbuddy` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
 | `hofund-plugin-subscription-zcode` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests), `hofund-plugin-sdk` (tests) |
 | `hofund-plugin-subscription-zed` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
-| `hofund-plugin-subscription-claude` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
+| `hofund-plugin-subscription-claude` | `hofund-plugin-api`, `hofund-plugin-sdk`, `regex`, `hofund-kit-subscription` (tests) |
 | `hofund-plugin-subscription-cline` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
 | `hofund-plugin-subscription-codex` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
 | `hofund-plugin-subscription-copilot` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
@@ -337,7 +337,7 @@ The `control-client` and gateway `control-proto` edges landed in L3; the
 | --- | --- |
 | `ir` | Canonical request, response, and stream-event types. No I/O. |
 | `plugin-api` | Plugin traits, `PluginError`, newtypes, and `HostContext` handles. |
-| `plugin-sdk` | Helpers a plugin may use. `Call` sends on the host HTTP handle. SigV4, OAuth token parsing, form bodies, and JSON page cursors live here. Re-exports `tracing` and `async_trait`. |
+| `plugin-sdk` | Helpers a plugin may use. `Call` sends on the host HTTP handle. SigV4, OAuth token parsing, form bodies, JSON page cursors, and Codex `/responses` zstd compression live here. Re-exports `tracing` and `async_trait`. |
 | `plugin-host` | The `HostContext` constructor, the pooled HTTP client, and `PlaintextFileAccountStore` (mode `0600`, plaintext until pull request H). |
 | `plugin-registry` | Compile-time composition. One feature per plugin. Build fails on duplicate plugin ids, duplicate preset ids, and route-prefix conflicts. `factory` serves the built-in Chat, Responses, Messages, and Generative adapters. |
 | `plugin-plan-quota` | Vendor plan-window readers for key providers (allowances only when asked). The kit dependency is tests only. |
