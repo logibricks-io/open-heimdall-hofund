@@ -172,6 +172,11 @@ pub(crate) fn read_code_models(path: &Path) -> CodeModels {
 }
 
 fn parse_code_models_file(path: &Path) -> Option<CodeModels> {
+    // The model cache is only read, never followed: a symlinked file is
+    // ignored. Credentials keep their own reading rules.
+    if !std::fs::symlink_metadata(path).ok()?.is_file() {
+        return None;
+    }
     let text = crate::creds::read_capped(path)?;
     parse_code_models(&text)
 }

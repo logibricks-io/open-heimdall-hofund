@@ -211,7 +211,7 @@ pub(crate) fn write_credentials_cas(
 }
 
 pub(crate) fn read_capped(path: &Path) -> Option<String> {
-    let meta = std::fs::symlink_metadata(path).ok()?;
+    let meta = std::fs::metadata(path).ok()?;
     if !meta.is_file() || meta.len() > FILE_CAP {
         return None;
     }
