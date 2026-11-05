@@ -42,14 +42,19 @@ impl ZedUpstream {
         request: Request,
         inbound: ProtocolId,
     ) -> Result<Completion, PluginError> {
-        let wire = body::wire_for(inbound).ok_or_else(|| {
+        body::wire_for(inbound).ok_or_else(|| {
             PluginError::unsupported(format!(
                 "protocol `{}` is not served through Zed cloud",
                 inbound.as_str()
             ))
         })?;
         let model = request.model.clone();
-        let vendor = models::vendor_of(&model);
+        let vendor = models::vendor_of(&stored, &model);
+        let wire = body::wire_for_vendor(&vendor).ok_or_else(|| {
+            PluginError::unsupported(format!(
+                "provider `{vendor}` is not served through Zed cloud"
+            ))
+        })?;
         let caps = models::capabilities(&stored, &model);
         let outbound = wire.outbound();
         let encoded = wire::encode_outbound(outbound, inbound, request.clone())?;
@@ -77,7 +82,6 @@ impl ZedUpstream {
             let url = format!("{}/completions", self.endpoints.cloud);
             let mut call = Call::post(url)
                 .header("Content-Type", "application/json")
-                .header("Accept", "application/json")
                 .sensitive_header("authorization", format!("Bearer {token}"));
             for (name, value) in headers::model_token_headers() {
                 call = call.header(name, value);
@@ -106,10 +110,14 @@ impl ZedUpstream {
             }
             if status == 402 && !moved {
                 moved = true;
-                if let Some(org) =
-                    models::repick_org(&self.host, Arc::clone(&self.endpoints), &stored).await?
+                if models::repick_and_apply(
+                    &self.host,
+                    Arc::clone(&self.endpoints),
+                    &self.account,
+                    &mut stored,
+                )
+                .await?
                 {
-                    stored.credential.org = org;
                     continue;
                 }
             }
@@ -123,14 +131,15 @@ impl ZedUpstream {
                 .get("x-zed-server-supports-status-messages")
                 .is_some();
             let raw = read_body(response).await?;
-            let sse_body = stream::ndjson_to_sse_body(&raw, wire, wrapped).map_err(|detail| {
-                if let Some((status, message)) = detail.split_once(':')
-                    && let Ok(code) = status.parse::<u16>()
-                {
-                    return errors::map_http(code, message);
-                }
-                PluginError::status_error(502, detail)
-            })?;
+            let sse_body = stream::ndjson_to_sse_body(&raw, wire, wrapped, request.stream)
+                .map_err(|detail| {
+                    if let Some((status, message)) = detail.split_once(':')
+                        && let Ok(code) = status.parse::<u16>()
+                    {
+                        return errors::map_http(code, message);
+                    }
+                    PluginError::status_error(502, detail)
+                })?;
             let http = HttpResponse::new(sse_body);
             return wire::decode_upstream_response(http, outbound, inbound, request.stream).await;
         }

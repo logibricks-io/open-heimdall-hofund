@@ -26,8 +26,14 @@ pub(crate) async fn windows(
     }
     let reply = call.fetch(host.http()).await?;
     match reply.status() {
-        401 | 403 => {
+        401 => {
             return Err(errors::sign_in_expired(&creds::label(&stored.credential)));
+        }
+        403 => {
+            return Err(PluginError::status_error(
+                403,
+                errors::failure_message(403, std::str::from_utf8(reply.body()).unwrap_or("")),
+            ));
         }
         200..=299 => {}
         status => {

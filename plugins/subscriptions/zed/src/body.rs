@@ -91,6 +91,7 @@ pub fn transform_map(root: &mut Map<String, Value>) {
     filter_tool_choice(root, &mut dirty);
     filter_include(root, &mut dirty);
     filter_reasoning(root, &mut dirty);
+    root.insert("stream".to_owned(), Value::Bool(true));
     let _ = dirty;
 }
 
@@ -262,6 +263,18 @@ pub(crate) fn wire_for(inbound: ProtocolId) -> Option<Wire> {
     }
 }
 
+/// Provider id from Zed's catalog (`anthropic`, `open_ai`, `x_ai`, `google`).
+#[must_use]
+pub(crate) fn wire_for_vendor(vendor: &str) -> Option<Wire> {
+    match vendor {
+        "anthropic" => Some(Wire::Anthropic),
+        "open_ai" => Some(Wire::Responses),
+        "x_ai" => Some(Wire::Chat),
+        "google" => Some(Wire::Gemini),
+        _ => None,
+    }
+}
+
 #[must_use]
 pub(crate) fn guess_vendor(model: &str) -> &'static str {
     let lower = model.to_ascii_lowercase();
@@ -367,11 +380,24 @@ fn strip_message_images(value: &mut Value) {
     parts.retain(|part| {
         part.get("type").and_then(Value::as_str) != Some("image")
             && part.get("type").and_then(Value::as_str) != Some("image_url")
+            && part.get("type").and_then(Value::as_str) != Some("input_image")
     });
 }
 
 fn prepare_anthropic(root: &mut Map<String, Value>) {
     root.remove("stream");
+    if let Some(Value::Object(cm)) = root.get_mut("context_management") {
+        if let Some(Value::Array(edits)) = cm.get_mut("edits") {
+            edits.retain(|edit| {
+                edit.get("type").and_then(Value::as_str) == Some("compact_20260112")
+            });
+            if edits.is_empty() {
+                root.remove("context_management");
+            }
+        } else {
+            root.remove("context_management");
+        }
+    }
     if let Some(Value::Array(messages)) = root.get_mut("messages") {
         let folded = without_system_turns(std::mem::take(messages));
         *messages = folded;
@@ -456,17 +482,17 @@ fn prepare_gemini(root: &mut Map<String, Value>, model: &str) {
         .map(str::to_owned)
     {
         let upper = mode.to_ascii_uppercase();
-        for (from, to) in MODES {
-            if upper == *from {
-                root.get_mut("toolConfig")
-                    .and_then(Value::as_object_mut)
-                    .and_then(|tc| tc.get_mut("functionCallingConfig"))
-                    .and_then(Value::as_object_mut)
-                    .expect("fc")
-                    .insert("mode".to_owned(), Value::String((*to).to_owned()));
-                break;
-            }
-        }
+        let mapped = MODES
+            .iter()
+            .find(|(from, _)| upper == *from)
+            .map(|(_, to)| (*to).to_owned())
+            .unwrap_or_else(|| mode.to_ascii_lowercase());
+        root.get_mut("toolConfig")
+            .and_then(Value::as_object_mut)
+            .and_then(|tc| tc.get_mut("functionCallingConfig"))
+            .and_then(Value::as_object_mut)
+            .expect("fc")
+            .insert("mode".to_owned(), Value::String(mapped));
     }
 }
 

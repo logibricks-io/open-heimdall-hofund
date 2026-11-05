@@ -70,11 +70,18 @@ async fn mint(
         call = call.header("x-zed-system-id", stored.credential.system_id.clone());
     }
     let reply = call.bytes(body.into_bytes()).fetch(host.http()).await?;
-    match reply.status() {
+    let status = reply.status();
+    match status {
         200..=299 => {}
         401 | 403 => {
             let who = creds::label(&stored.credential);
-            return Err(errors::sign_in_expired(&who));
+            if status == 401 {
+                return Err(errors::sign_in_expired(&who));
+            }
+            return Err(PluginError::status_error(
+                status,
+                errors::failure_message(status, std::str::from_utf8(reply.body()).unwrap_or("")),
+            ));
         }
         status => {
             return Err(PluginError::status_error(
@@ -93,6 +100,7 @@ async fn mint(
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn clear_cache_for_tests() {
     cache().lock().expect("lock").clear();
 }

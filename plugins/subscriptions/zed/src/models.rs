@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use hofund_plugin_api::{AccountId, HostContext, ModelList, ModelSpec, PluginError};
 use hofund_plugin_sdk::json::Value;
+use hofund_plugin_sdk::transport::HttpResponse;
 
 use crate::body;
 use crate::creds::Stored;
@@ -34,26 +35,29 @@ fn caps() -> &'static CapMap {
     MAP.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-pub(crate) fn vendor_of(model: &str) -> String {
+fn cache_key(user_id: &str, model: &str) -> String {
+    format!("{user_id}:{model}")
+}
+
+pub(crate) fn vendor_of(stored: &Stored, model: &str) -> String {
+    let key = cache_key(&stored.credential.user_id, model);
     vendors()
         .lock()
         .expect("lock")
-        .get(model)
+        .get(&key)
         .cloned()
         .unwrap_or_else(|| body::guess_vendor(model).to_owned())
 }
 
 pub(crate) fn capabilities(stored: &Stored, model: &str) -> Capabilities {
-    if let Some(found) = caps().lock().expect("lock").get(model).copied() {
+    let key = cache_key(&stored.credential.user_id, model);
+    if let Some(found) = caps().lock().expect("lock").get(&key).copied() {
         return found;
     }
     stored_models_table(stored)
         .as_ref()
         .and_then(|items| capabilities_of(items, model))
-        .unwrap_or(Capabilities {
-            supports_images: true,
-            supports_thinking: true,
-        })
+        .unwrap_or_default()
 }
 
 fn stored_models_table(stored: &Stored) -> Option<Vec<Value>> {
@@ -73,11 +77,11 @@ fn capabilities_of(items: &[Value], model: &str) -> Option<Capabilities> {
         supports_images: map
             .get("supports_images")
             .and_then(Value::as_bool)
-            .unwrap_or(true),
+            .unwrap_or(false),
         supports_thinking: map
             .get("supports_thinking")
             .and_then(Value::as_bool)
-            .unwrap_or(true),
+            .unwrap_or(false),
     })
 }
 
@@ -86,19 +90,27 @@ pub(crate) async fn list_account(
     endpoints: Arc<crate::Endpoints>,
     account: &AccountId,
 ) -> Result<ModelList, PluginError> {
-    let stored = Stored::load(host, account).await?;
-    match fetch_live(host, Arc::clone(&endpoints), &stored).await {
+    let mut stored = Stored::load(host, account).await?;
+    match fetch_live(host, Arc::clone(&endpoints), account, &mut stored).await {
         Ok(list) => Ok(list),
         Err(error) if error.kind() == hofund_plugin_api::PluginErrorKind::Auth => Err(error),
+        Err(error) if error.kind() == hofund_plugin_api::PluginErrorKind::Decode => Err(error),
+        Err(error)
+            if error.kind() == hofund_plugin_api::PluginErrorKind::Status
+                && matches!(error.status(), Some(401..=403)) =>
+        {
+            Err(error)
+        }
         Err(_) => parse_stored_models(&stored),
     }
 }
 
-pub(crate) async fn repick_org(
+pub(crate) async fn repick_and_apply(
     host: &HostContext,
     endpoints: Arc<crate::Endpoints>,
-    stored: &Stored,
-) -> Result<Option<String>, PluginError> {
+    account: &AccountId,
+    stored: &mut Stored,
+) -> Result<bool, PluginError> {
     let url = format!("{}/client/users/me", endpoints.cloud);
     let mut call = hofund_plugin_sdk::Call::get(url)
         .header("Accept", "application/json")
@@ -111,26 +123,29 @@ pub(crate) async fn repick_org(
     }
     let reply = match call.fetch(host.http()).await {
         Ok(reply) => reply,
-        Err(_) => return Ok(None),
+        Err(_) => return Ok(false),
     };
     if !(200..300).contains(&reply.status()) {
-        return Ok(None);
+        return Ok(false);
     }
     let me = org::parse_me(reply.body())?;
     let next = org::org_of(&me, &stored.credential.org);
     if next.is_empty() || next == stored.credential.org {
-        Ok(None)
-    } else {
-        Ok(Some(next))
+        return Ok(false);
     }
+    org::apply_org(&mut stored.credential, &me);
+    crate::creds::persist(host, account, &stored.credential).await?;
+    Ok(true)
 }
 
 async fn fetch_live(
     host: &HostContext,
     endpoints: Arc<crate::Endpoints>,
-    stored: &Stored,
+    account: &AccountId,
+    stored: &mut Stored,
 ) -> Result<ModelList, PluginError> {
     let mut renewed = false;
+    let mut moved = false;
     loop {
         let token = tokens::model_token(host, Arc::clone(&endpoints), stored, renewed).await?;
         let url = format!("{}/models", endpoints.cloud);
@@ -140,24 +155,33 @@ async fn fetch_live(
         for (name, value) in headers::model_token_headers() {
             call = call.header(name, value);
         }
-        let reply = call.fetch(host.http()).await?;
-        let status = reply.status();
-        if status == 401 {
-            return Err(errors::sign_in_expired(&crate::creds::label(
-                &stored.credential,
-            )));
-        }
-        let headers: Vec<(String, String)> = Vec::new();
-        if !renewed && errors::token_stale(status, &headers) {
+        let response = call.open_raw(host.http(), 2).await?;
+        let status = response.status().as_u16();
+        let header_rows: Vec<(String, String)> = response
+            .headers()
+            .iter()
+            .map(|(name, value)| {
+                (
+                    name.as_str().to_owned(),
+                    value.to_str().unwrap_or("").to_owned(),
+                )
+            })
+            .collect();
+        if !renewed && errors::token_stale(status, &header_rows) {
             renewed = true;
             continue;
         }
-        if status == 402
-            && repick_org(host, Arc::clone(&endpoints), stored)
-                .await?
-                .is_some()
-        {
-            continue;
+        if status == 401 {
+            return Err(PluginError::status_error(
+                status,
+                errors::failure_message(status, ""),
+            ));
+        }
+        if status == 402 && !moved {
+            moved = true;
+            if repick_and_apply(host, Arc::clone(&endpoints), account, stored).await? {
+                continue;
+            }
         }
         if !(200..300).contains(&status) {
             return Err(PluginError::status_error(
@@ -165,14 +189,34 @@ async fn fetch_live(
                 "Zed did not return a model list",
             ));
         }
-        return parse_list(reply.body());
+        let body = read_body(response).await?;
+        match parse_list(&body) {
+            Ok(list) => return Ok(list),
+            Err(error) if !moved => {
+                moved = true;
+                if repick_and_apply(host, Arc::clone(&endpoints), account, stored).await? {
+                    continue;
+                }
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        }
     }
+}
+
+async fn read_body(response: HttpResponse) -> Result<Vec<u8>, PluginError> {
+    let mut body = response.into_body();
+    let mut out = Vec::new();
+    while let Some(chunk) = body.next_chunk().await {
+        out.extend_from_slice(&chunk?);
+    }
+    Ok(out)
 }
 
 pub(crate) fn parse_stored_models(stored: &Stored) -> Result<ModelList, PluginError> {
     let items = stored_models_table(stored)
         .ok_or_else(|| PluginError::decode("stored Zed models JSON is invalid"))?;
-    build_list(&items)
+    build_list(&stored.credential.user_id, &items)
 }
 
 pub(crate) fn parse_list(body: &[u8]) -> Result<ModelList, PluginError> {
@@ -182,10 +226,10 @@ pub(crate) fn parse_list(body: &[u8]) -> Result<ModelList, PluginError> {
         .get("models")
         .and_then(Value::as_array)
         .ok_or_else(|| PluginError::decode("Zed models JSON has no models array"))?;
-    build_list(items)
+    build_list("", items)
 }
 
-fn build_list(items: &[Value]) -> Result<ModelList, PluginError> {
+fn build_list(user_id: &str, items: &[Value]) -> Result<ModelList, PluginError> {
     let mut models = Vec::new();
     for item in items {
         let Some(map) = item.as_object() else {
@@ -205,23 +249,25 @@ fn build_list(items: &[Value]) -> Result<ModelList, PluginError> {
         let Some(id) = id else {
             continue;
         };
-        vendors()
-            .lock()
-            .expect("lock")
-            .insert(id.to_owned(), provider.to_owned());
-        caps().lock().expect("lock").insert(
-            id.to_owned(),
-            Capabilities {
-                supports_images: map
-                    .get("supports_images")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false),
-                supports_thinking: map
-                    .get("supports_thinking")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false),
-            },
-        );
+        if !user_id.is_empty() {
+            vendors()
+                .lock()
+                .expect("lock")
+                .insert(cache_key(user_id, id), provider.to_owned());
+            caps().lock().expect("lock").insert(
+                cache_key(user_id, id),
+                Capabilities {
+                    supports_images: map
+                        .get("supports_images")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                    supports_thinking: map
+                        .get("supports_thinking")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                },
+            );
+        }
         let name = map
             .get("name")
             .or_else(|| map.get("display_name"))
@@ -238,7 +284,15 @@ fn build_list(items: &[Value]) -> Result<ModelList, PluginError> {
 }
 
 #[cfg(test)]
-pub(crate) fn clear_vendor_cache_for_tests() {
-    vendors().lock().expect("lock").clear();
-    caps().lock().expect("lock").clear();
+#[allow(dead_code)]
+pub(crate) fn clear_vendor_cache_for_tests(user_id: &str) {
+    let prefix = format!("{user_id}:");
+    vendors()
+        .lock()
+        .expect("lock")
+        .retain(|key, _| !key.starts_with(&prefix));
+    caps()
+        .lock()
+        .expect("lock")
+        .retain(|key, _| !key.starts_with(&prefix));
 }

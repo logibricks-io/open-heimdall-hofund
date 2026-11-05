@@ -183,7 +183,7 @@ Every other gap below maps to an existing plan item.
 | j | thinking | `supports_thinking` in catalog | Anthropic/Gemini/OpenAI body shaping | Done | — |
 | k | quota / usage | Plan limits via Zed cloud (plugin); core reader minimal | `quota.rs` plan window from `/client/users/me` | Partial | No allowance meters (reference has none) |
 | l | model list | GET `/models` (`zed/index.mjs:17-18`) | Live fetch with snapshot fallback (`models.rs`) | Done | — |
-| m | multi-account | Org id on creds (`zed.go:21-22`) | Org on token mint + repick on 402 | Partial | No org picker UI |
+| m | multi-account | Org id on creds (`zed.go:21-22`) | Org on token mint, repick on 402 or empty list, persisted via `apply_org` | Partial | No org picker UI |
 | n | error classification | `SignInExpired`, 402 plan (`zed/index.mjs:83-147`) | `errors.rs` auth/quota/status mapping | Done | — |
 | o | warmup | N/A | N/A | N/A | — |
 | p | agent sign-in | N/A (Zed editor sign-in, not agent file) | No agent discover | N/A | — |
@@ -192,8 +192,9 @@ Every other gap below maps to an existing plan item.
 ### Gaps (Zed)
 
 - Native app sign-in (RSA loopback) — **L**, **R-56**
+- Org picker UI for multi-account (stored org + automatic repick only)
+- Plan-only quota windows (no allowance meters; matches reference)
 - Gateway-facing Zed client API shapes beyond subscription upstream (parity doc only; not in R-16 scope)
-- Org picker UI for multi-account (stored org + repick only)
 
 ---
 

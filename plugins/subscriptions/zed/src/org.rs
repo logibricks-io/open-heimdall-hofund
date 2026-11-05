@@ -139,7 +139,6 @@ pub(crate) fn plan_of(me: &Value, org: &str) -> String {
         .to_owned()
 }
 
-#[allow(dead_code)]
 pub(crate) fn apply_org(credential: &mut Credential, me: &Value) {
     let org = org_of(me, &credential.org);
     credential.org = org.clone();
