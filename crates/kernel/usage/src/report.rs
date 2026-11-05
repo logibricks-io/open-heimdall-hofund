@@ -120,16 +120,32 @@ pub fn parse_last(value: &str) -> Result<Duration, String> {
         }
         return Ok(Duration::seconds((days * 86_400.0).round() as i64));
     }
-    if !trimmed.chars().any(|ch| ch.is_ascii_alphabetic()) {
+    if !duration_has_unit(trimmed) {
         return Err(format!(
             "--last takes a duration greater than zero, not {value:?}"
         ));
     }
-    Ok(Duration::milliseconds(parse_go_duration(trimmed, "--last")?))
+    let ms = parse_go_duration(trimmed, "--last")?;
+    if ms <= 0 {
+        if trimmed.contains("ns") || trimmed.contains("us") {
+            return Err(format!(
+                "--last takes a duration greater than zero, not {value:?}"
+            ));
+        }
+        return Ok(Duration::milliseconds(1));
+    }
+    Ok(Duration::milliseconds(ms.max(1)))
+}
+
+fn duration_has_unit(trimmed: &str) -> bool {
+    trimmed
+        .chars()
+        .any(|ch| ch.is_ascii_alphabetic() || ch == 'µ' || ch == 'μ')
 }
 
 fn parse_go_duration(trimmed: &str, flag: &str) -> Result<i64, String> {
     let mut total_ms = 0i64;
+    let mut parsed_segments = 0u32;
     let mut rest = trimmed.trim();
     while !rest.is_empty() {
         let start = rest
@@ -155,6 +171,8 @@ fn parse_go_duration(trimmed: &str, flag: &str) -> Result<i64, String> {
             (value / 1_000.0, stripped)
         } else if let Some(stripped) = after.strip_prefix("µs") {
             (value / 1_000.0, stripped)
+        } else if let Some(stripped) = after.strip_prefix("μs") {
+            (value / 1_000.0, stripped)
         } else if let Some(stripped) = after.strip_prefix("ms") {
             (value, stripped)
         } else if let Some(stripped) = after.strip_prefix('h') {
@@ -169,12 +187,16 @@ fn parse_go_duration(trimmed: &str, flag: &str) -> Result<i64, String> {
             ));
         };
         total_ms += unit_ms.round() as i64;
+        parsed_segments += 1;
         rest = next;
     }
     if total_ms <= 0 {
-        return Err(format!(
-            "{flag} takes a duration greater than zero, not {trimmed:?}"
-        ));
+        if parsed_segments == 0 {
+            return Err(format!(
+                "{flag} takes a duration greater than zero, not {trimmed:?}"
+            ));
+        }
+        return Ok(0);
     }
     Ok(total_ms)
 }
@@ -415,7 +437,7 @@ pub struct SpeedTotals {
 #[must_use]
 pub fn speed_totals(rows: &[Row]) -> SpeedTotals {
     SpeedTotals {
-        mean_ttft_ms: mean_ttft_ms(rows.iter().map(|row| row.ttft_ms)),
+        mean_ttft_ms: mean_ttft_ms(rows.iter()),
         mean_tokens_per_second: mean_tokens_per_second(rows.iter()),
     }
 }
@@ -460,6 +482,14 @@ mod tests {
         assert!(parse_days("0").is_err());
         assert!(parse_last("").is_err());
         assert!(parse_last("90").is_err());
+        assert!(parse_last("0").is_err());
+        assert!(parse_last("1ns").is_err());
+        assert!(parse_last("1us").is_err());
+        assert_eq!(parse_last("1µs").expect("micro").num_milliseconds(), 1);
+        assert_eq!(
+            parse_last("1μs").expect("greek micro").num_milliseconds(),
+            1
+        );
     }
 
     #[test]

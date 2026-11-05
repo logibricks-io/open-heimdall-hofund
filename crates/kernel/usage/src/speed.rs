@@ -34,14 +34,17 @@ where
 
 /// Mean TTFT over rows with a positive streamed measurement.
 #[must_use]
-pub fn mean_ttft_ms<I>(rows: I) -> Option<f64>
+pub fn mean_ttft_ms<'a, I>(rows: I) -> Option<f64>
 where
-    I: IntoIterator<Item = Option<i64>>,
+    I: IntoIterator<Item = &'a crate::Row>,
 {
     let mut sum = 0.0;
     let mut count = 0.0;
-    for ttft in rows {
-        let Some(ms) = ttft.filter(|value| *value > 0) else {
+    for row in rows {
+        if row_failed(row) {
+            continue;
+        }
+        let Some(ms) = row.ttft_ms.filter(|value| *value > 0) else {
             continue;
         };
         sum += ms as f64;
@@ -57,7 +60,37 @@ mod tests {
 
     #[test]
     fn r10_mean_ttft_skips_missing() {
-        assert!((mean_ttft_ms([Some(100), None, Some(300)]).expect("mean") - 200.0).abs() < 0.001);
+        let a = Row {
+            ttft_ms: Some(100),
+            status: "200".to_owned(),
+            ..Default::default()
+        };
+        let b = Row {
+            ttft_ms: None,
+            status: "200".to_owned(),
+            ..Default::default()
+        };
+        let c = Row {
+            ttft_ms: Some(300),
+            status: "200".to_owned(),
+            ..Default::default()
+        };
+        assert!((mean_ttft_ms([&a, &b, &c]).expect("mean") - 200.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn r10_mean_ttft_skips_failed_rows() {
+        let ok = Row {
+            ttft_ms: Some(100),
+            status: "200".to_owned(),
+            ..Default::default()
+        };
+        let failed = Row {
+            ttft_ms: Some(900),
+            status: "502".to_owned(),
+            ..Default::default()
+        };
+        assert!((mean_ttft_ms([&ok, &failed]).expect("mean") - 100.0).abs() < 0.001);
     }
 
     #[test]

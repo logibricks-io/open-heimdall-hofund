@@ -56,7 +56,7 @@ use hofund_codec::{
     compacts_in_stream_client, conversation_key, turn_in,
 };
 use hofund_config::VisibleCatalog;
-use hofund_ir::{Request as ModelRequest, StreamEvent, too_long, words_of};
+use hofund_ir::{BlockStart, Request as ModelRequest, StreamEvent, too_long, words_of};
 use hofund_plugin_api::{
     BodyStream, InboundSurface, Method, PluginError, PluginErrorKind, ProtocolId,
 };
@@ -3445,7 +3445,12 @@ fn frame_closed(bytes: &[u8]) -> bool {
 }
 
 fn note_usage(event: &StreamEvent, record: &mut RecordOnEnd) {
-    let saw_reasoning = matches!(event, StreamEvent::ThinkingDelta(_));
+    let saw_reasoning = matches!(event, StreamEvent::ThinkingDelta(_))
+        || matches!(
+            event,
+            StreamEvent::ContentBlockStart(start)
+                if matches!(start.block, BlockStart::Thinking { redacted: true, .. })
+        );
     let usage = match event {
         StreamEvent::MessageStart(start) => start.usage.as_ref(),
         StreamEvent::MessageDelta(delta) => delta.usage.as_ref(),
@@ -3518,6 +3523,9 @@ fn write_usage(
 ) {
     let (input_tokens, output_tokens) = tokens.unwrap_or((None, None));
     let mut details = meta.details;
+    if meta.stream_timing.timing_hidden() {
+        details.reasoning_hidden = true;
+    }
     let ttft_ms = meta
         .stream_timing
         .finish_fields(details.reasoning_tokens.unwrap_or(0))
@@ -3771,6 +3779,7 @@ mod request_event_tests {
 #[cfg(test)]
 mod forwarded_token_tests {
     use super::{forwarded_details, forwarded_tokens, reasoning_hidden};
+    use std::time::Instant;
 
     #[test]
     fn u1a_13_forwarded_reasoning_is_read_for_chat_and_responses() {
@@ -3796,6 +3805,28 @@ mod forwarded_token_tests {
         assert!(reasoning_hidden(chat, true, Some(0)));
         assert!(!reasoning_hidden(chat, true, Some(5)));
         assert!(reasoning_hidden(responses, true, Some(5)));
+    }
+
+    #[test]
+    fn r10_timing_hidden_on_raw_encrypted_marks_decode_row_zero() {
+        use crate::stream_timing::StreamTiming;
+        use hofund_usage::decode_row;
+        let mut timing = StreamTiming::new(Instant::now());
+        timing.ingest_raw(
+            br#"event: response.output_item.added
+data: {"type":"response.output_item.added","item":{"type":"reasoning","encrypted_content":"sealed"}}
+
+"#,
+        );
+        assert!(timing.timing_hidden());
+        let row = hofund_usage::Row {
+            reasoning_hidden: true,
+            output_tokens: Some(10),
+            latency_ms: 2000,
+            ttft_ms: Some(100),
+            ..Default::default()
+        };
+        assert_eq!(decode_row(&row), (0, 0));
     }
 
     #[test]

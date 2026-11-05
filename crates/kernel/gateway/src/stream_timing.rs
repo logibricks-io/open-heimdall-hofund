@@ -20,6 +20,7 @@ pub(crate) struct StreamTiming {
     pending: Vec<u8>,
     read: usize,
     flow_discarded: bool,
+    timing_hidden: bool,
 }
 
 const FIRST_MOST: usize = 8 << 20;
@@ -39,7 +40,13 @@ impl StreamTiming {
             pending: Vec::new(),
             read: 0,
             flow_discarded: false,
+            timing_hidden: false,
         }
+    }
+
+    #[must_use]
+    pub(crate) fn timing_hidden(&self) -> bool {
+        self.timing_hidden
     }
 
     pub(crate) fn note_stream_event(&mut self, event: &StreamEvent, encoded_bytes: usize) {
@@ -47,18 +54,23 @@ impl StreamTiming {
             return;
         }
         let elapsed = self.elapsed_ms();
-        let (content, text, reasoning) = match event {
-            StreamEvent::TextDelta(_) => (true, true, false),
-            StreamEvent::ThinkingDelta(_) => (true, false, true),
-            StreamEvent::ToolArgumentsDelta(_) => (true, false, false),
+        let (content, text, reasoning, hidden) = match event {
+            StreamEvent::TextDelta(_) => (true, true, false, false),
+            StreamEvent::ThinkingDelta(_) => (true, false, true, false),
+            StreamEvent::ToolArgumentsDelta(_) => (true, false, false, false),
             StreamEvent::ContentBlockStart(start) => match &start.block {
-                BlockStart::ToolCall { .. } => (true, false, false),
+                BlockStart::ToolCall { .. } => (true, false, false, false),
+                BlockStart::Thinking { redacted: true, .. } => {
+                    self.timing_hidden = true;
+                    (false, false, false, true)
+                }
                 BlockStart::Text | BlockStart::Thinking { .. } | BlockStart::Unknown { .. } => {
-                    (false, false, false)
+                    (false, false, false, false)
                 }
             },
-            _ => (false, false, false),
+            _ => (false, false, false, false),
         };
+        self.timing_hidden = self.timing_hidden || hidden;
         if !content {
             return;
         }
@@ -100,7 +112,8 @@ impl StreamTiming {
                 self.flow.mark(elapsed, event.len() as i64);
                 continue;
             }
-            let (content, text, reasoning) = timing_kind(&event);
+            let (content, text, reasoning, hidden) = timing_kind(&event);
+            self.timing_hidden = self.timing_hidden || hidden;
             if !content {
                 continue;
             }
@@ -164,42 +177,136 @@ fn trim_left(bytes: &[u8]) -> &[u8] {
     &bytes[index..]
 }
 
+fn has(event: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+    event.windows(needle.len()).any(|window| window == needle)
+}
+
 fn event_end(pending: &[u8]) -> Option<usize> {
-    pending
-        .windows(2)
-        .position(|window| window == b"\n\n")
-        .map(|index| index + 2)
+    for index in 0..pending.len().saturating_sub(1) {
+        if pending[index] != b'\n' {
+            continue;
+        }
+        if pending.get(index + 1) == Some(&b'\n') {
+            return Some(index + 2);
+        }
+        if pending.get(index + 1) == Some(&b'\r') && pending.get(index + 2) == Some(&b'\n') {
+            return Some(index + 3);
+        }
+    }
+    None
 }
 
 fn flow_content(event: &[u8]) -> bool {
-    event.windows(5).any(|w| w == b"delta") || event.windows(6).any(|w| w == br#""parts""#)
+    has(event, b"delta") || has(event, br#""parts""#)
 }
 
-fn timing_kind(event: &[u8]) -> (bool, bool, bool) {
-    if event.windows(18).any(|w| w == b"content_block_start") {
-        let tool = event.windows(9).any(|w| w == b"tool_use")
-            || event.windows(15).any(|w| w == b"server_tool_use");
-        if tool {
-            return (true, false, false);
-        }
-        return (false, false, false);
+fn timing_data_marker(event: &[u8]) -> bool {
+    flow_content(event)
+        || has(event, b"content_block_start")
+        || has(event, b"output_item.added")
+        || has(event, b"encrypted_content")
+}
+
+fn timing_kind(event: &[u8]) -> (bool, bool, bool, bool) {
+    let hidden = has(event, b"encrypted_content") || has(event, b"redacted_thinking");
+    if has(event, b"content_block_start") {
+        let tool = has(event, b"tool_use") || has(event, b"server_tool_use");
+        return (tool, false, false, hidden);
     }
-    if !flow_content(event) && !event.windows(16).any(|w| w == b"output_item.added") {
-        return (false, false, false);
+    if has(event, b"output_item.added") {
+        let tool = has(event, b"function_call") || has(event, b"custom_tool_call");
+        return (tool, false, false, hidden);
     }
-    let text = event.windows(6).any(|w| w == b"\"text\"");
-    let reasoning =
-        event.windows(8).any(|w| w == b"thinking") || event.windows(9).any(|w| w == b"reasoning");
-    (true, text, reasoning)
+    if !timing_data_marker(event) {
+        return (false, false, false, hidden);
+    }
+    let text = has(event, br#""text""#);
+    let reasoning = has(event, b"thinking") || has(event, b"reasoning");
+    (true, text, reasoning, hidden)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::StreamTiming;
+    use super::{StreamTiming, event_end, flow_content, has, timing_kind};
     use hofund_ir::{
         BlockStart, ContentBlockStart, Extensions, StreamEvent, TextDelta, ToolArgumentsDelta,
     };
     use std::time::Instant;
+
+    #[test]
+    fn r10_has_uses_needle_length_for_windows() {
+        assert!(!has(b"abcde", b"abcdef"));
+        assert!(has(b"content_block_start", b"content_block_start"));
+        assert!(!has(b"content_block_star", b"content_block_start"));
+    }
+
+    #[test]
+    fn r10_event_end_whole_sse_frame() {
+        let complete = b"data: {}\n\n";
+        assert_eq!(event_end(complete), Some(complete.len()));
+        let partial = b"data: {}\n";
+        assert!(event_end(partial).is_none());
+        let crlf = b"data: y\r\n\r\n";
+        assert_eq!(event_end(crlf), Some(crlf.len()));
+    }
+
+    #[test]
+    fn r10_flow_content_delta_and_parts() {
+        assert!(flow_content(b"data: {\"delta\":{\"text\":\"a\"}}\n\n"));
+        assert!(flow_content(
+            b"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"a\"}]}}]}\n\n"
+        ));
+        assert!(!flow_content(b"data: {\"type\":\"message_start\"}\n\n"));
+    }
+
+    #[test]
+    fn r10_timing_kind_tool_content_block_start_is_content() {
+        let tool = br#"event: content_block_start
+data: {"type":"content_block_start","content_block":{"type":"tool_use","id":"t","name":"n"}}
+
+"#;
+        let (content, text, reasoning, hidden) = timing_kind(tool);
+        assert!(content);
+        assert!(!text);
+        assert!(!reasoning);
+        assert!(!hidden);
+    }
+
+    #[test]
+    fn r10_timing_kind_text_content_block_start_not_content() {
+        let text = br#"event: content_block_start
+data: {"type":"content_block_start","content_block":{"type":"text"}}
+
+"#;
+        let (content, _, _, _) = timing_kind(text);
+        assert!(!content);
+    }
+
+    #[test]
+    fn r10_timing_kind_encrypted_content_marks_hidden_not_content() {
+        let item = br#"event: response.output_item.added
+data: {"type":"response.output_item.added","item":{"type":"reasoning","encrypted_content":"sealed"}}
+
+"#;
+        let (content, _, _, hidden) = timing_kind(item);
+        assert!(!content);
+        assert!(hidden);
+    }
+
+    #[test]
+    fn r10_stream_timing_raw_tool_start_records_ttft() {
+        let mut timing = StreamTiming::new(Instant::now());
+        timing.ingest_raw(
+            br#"event: content_block_start
+data: {"type":"content_block_start","content_block":{"type":"tool_use","id":"t","name":"n"}}
+
+"#,
+        );
+        assert!(timing.finish_fields(0).expect("fields").0.is_some());
+    }
 
     #[test]
     fn r10_stream_timing_single_text_chunk_records_flow() {
@@ -241,5 +348,23 @@ mod tests {
         let fields = timing.finish_fields(0).expect("timing");
         assert!(fields.0.is_some(), "ttft from first tool content");
         assert!(fields.3.is_some_and(|flow| flow > 0));
+    }
+
+    #[test]
+    fn r10_stream_timing_redacted_thinking_start_is_hidden() {
+        let mut timing = StreamTiming::new(Instant::now());
+        timing.note_stream_event(
+            &StreamEvent::ContentBlockStart(ContentBlockStart {
+                index: 0,
+                block: BlockStart::Thinking {
+                    redacted: true,
+                    data: None,
+                },
+                extensions: Extensions::default(),
+            }),
+            64,
+        );
+        assert!(timing.timing_hidden());
+        assert!(timing.finish_fields(0).expect("fields").0.is_none());
     }
 }
