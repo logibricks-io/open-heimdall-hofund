@@ -2,7 +2,6 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::AgentError;
 use crate::credential::CredentialUndo;
@@ -17,13 +16,21 @@ pub struct SidecarCheckpoint {
     credentials: Vec<CredentialUndo>,
 }
 
-static FORCE_RESTORE_FAIL: AtomicBool = AtomicBool::new(false);
+#[cfg(feature = "test-fixtures")]
+const FAIL_RESTORE_SENTINEL: &str = ".hofund-test-fail-restore";
 
-/// Test-only toggle for integration tests that exercise restore failure paths.
-#[doc(hidden)]
-#[allow(dead_code)]
-pub fn test_force_sidecar_restore_fail(enable: bool) {
-    FORCE_RESTORE_FAIL.store(enable, Ordering::SeqCst);
+#[cfg(feature = "test-fixtures")]
+fn injected_restore_failure(prior: &BTreeMap<PathBuf, Option<Vec<u8>>>) -> bool {
+    prior.keys().any(|path| {
+        path.ancestors()
+            .any(|ancestor| ancestor.join(FAIL_RESTORE_SENTINEL).is_file())
+    })
+}
+
+fn is_connect_sidecar(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.contains(".hofund."))
 }
 
 impl SidecarCheckpoint {
@@ -73,13 +80,24 @@ impl SidecarCheckpoint {
     ///
     /// Returns [`AgentError`] when a path cannot be restored.
     pub fn restore(self) -> Result<(), AgentError> {
-        if FORCE_RESTORE_FAIL.load(Ordering::SeqCst) {
+        #[cfg(feature = "test-fixtures")]
+        if injected_restore_failure(&self.prior) {
             return Err(AgentError::message("injected sidecar restore failure"));
         }
         for undo in self.credentials.into_iter().rev() {
             undo.restore()?;
         }
-        for (path, prior) in self.prior {
+        let mut paths: Vec<(PathBuf, Option<Vec<u8>>)> = self.prior.into_iter().collect();
+        paths.sort_by(|(left, _), (right, _)| {
+            let left_sidecar = is_connect_sidecar(left);
+            let right_sidecar = is_connect_sidecar(right);
+            match (left_sidecar, right_sidecar) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => left.cmp(right),
+            }
+        });
+        for (path, prior) in paths {
             match prior {
                 None => {
                     if path.exists() {

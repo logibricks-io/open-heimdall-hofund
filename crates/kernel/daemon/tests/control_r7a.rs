@@ -1346,18 +1346,19 @@ async fn connect_claude_for_sidecars(client: &Client) {
     );
 }
 
-struct RestoreFailGuard;
+struct RestoreFailSentinel(PathBuf);
 
-impl RestoreFailGuard {
-    fn new() -> Self {
-        hofund_agent::test_force_sidecar_restore_fail(true);
-        Self
+impl RestoreFailSentinel {
+    fn install(home: &Path) -> Self {
+        let path = home.join(".hofund-test-fail-restore");
+        std::fs::write(&path, b"").expect("restore-failure sentinel");
+        Self(path)
     }
 }
 
-impl Drop for RestoreFailGuard {
+impl Drop for RestoreFailSentinel {
     fn drop(&mut self) {
-        hofund_agent::test_force_sidecar_restore_fail(false);
+        let _ = std::fs::remove_file(&self.0);
     }
 }
 
@@ -1471,6 +1472,7 @@ async fn r7a_group_rename_rolls_back_config_and_first_agent_when_second_write_fa
     )
     .await;
     let client = Client::new(&running, &scratch);
+    connect_claude_for_sidecars(&client).await;
     let sidecars_before = agent_connect_sidecar_snapshot(&claude_settings);
     std::fs::set_permissions(&codex_config, std::fs::Permissions::from_mode(0o000))
         .expect("codex inaccessible");
@@ -1497,8 +1499,9 @@ async fn r7a_group_rename_rolls_back_config_and_first_agent_when_second_write_fa
 
 #[tokio::test]
 async fn r7a_reseat_sidecar_restore_failure_rolls_back_config_and_scrubs_secrets() {
-    let _restore_fail = RestoreFailGuard::new();
     let scratch = Scratch::new("reseat-restore-fail");
+    let home = scratch.runtime_dir.join("home");
+    let _sentinel = RestoreFailSentinel::install(&home);
     let claude_settings = scratch
         .runtime_dir
         .join("home")

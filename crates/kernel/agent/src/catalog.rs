@@ -846,6 +846,22 @@ impl Engine {
             backup_once(&chosen.path)?;
             let after = render(chosen.kind, Some(text), &assignments)?;
             write_atomic(&chosen.path, &after)?;
+            if marker_present(&chosen.path) {
+                let after_text = utf8(&chosen.path, &after)?;
+                let pinned = if let Some(model) = self.model {
+                    self.pinned(
+                        &chosen.path,
+                        chosen.kind,
+                        Some(after_text),
+                        &after,
+                        model,
+                        Choice::Set(new_ref),
+                    )?
+                } else {
+                    Vec::new()
+                };
+                snapshot_wrote(&chosen.path, chosen.kind, &assignments, &[], &pinned)?;
+            }
             changed = true;
         }
         Ok(changed)

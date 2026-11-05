@@ -223,6 +223,7 @@ fn expected_dev_deps(package: &str) -> Option<&'static [&'static str]> {
         "hofund-control-proto" => &[],
         "hofund-desktop" => &[],
         "hofund-daemon" => &[
+            "hofund-agent",
             "hofund-control-client",
             "hofund-daemon",
             "hofund-plugin-registry",
