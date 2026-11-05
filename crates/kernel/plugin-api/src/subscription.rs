@@ -9,6 +9,7 @@ use crate::config::{BuildError, ConfigError, RawTable, Schema, ValidConfig};
 use crate::error::PluginError;
 use crate::host::HostContext;
 use crate::id::{AccountId, PluginId};
+use crate::quota_reset::{QuotaResetCredits, QuotaResetOutcome};
 use crate::records::{
     AccountStatus, ModelList, QuotaWindow, SignInChallenge, SignInCtx, SignInFlow, SignInProof,
     SubscriptionSpec,
@@ -175,6 +176,37 @@ pub trait Subscription: Send + Sync + 'static {
         account: &AccountId,
         host: &HostContext,
     ) -> Result<Vec<QuotaWindow>, PluginError>;
+
+    /// Reads credit-funded window resets for one account, when the vendor exposes them.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when the read fails. The default is `Ok(None)`.
+    async fn quota_reset_credits(
+        &self,
+        account: &AccountId,
+        host: &HostContext,
+    ) -> Result<Option<QuotaResetCredits>, PluginError> {
+        let _ = (account, host);
+        Ok(None)
+    }
+
+    /// Spends one window-reset credit. Call only from an explicit user action.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError::unsupported`] when this subscription has no reset API.
+    async fn consume_quota_reset(
+        &self,
+        account: &AccountId,
+        credit_id: Option<&str>,
+        host: &HostContext,
+    ) -> Result<QuotaResetOutcome, PluginError> {
+        let _ = (account, credit_id, host);
+        Err(PluginError::unsupported(
+            "this subscription does not spend window-reset credits",
+        ))
+    }
 
     /// Lists models for one account.
     ///

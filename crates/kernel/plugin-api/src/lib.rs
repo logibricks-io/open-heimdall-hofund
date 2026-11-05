@@ -44,6 +44,7 @@ mod checkin;
 #[cfg(not(feature = "kernel"))]
 mod kernel;
 mod plan;
+mod quota_reset;
 mod records;
 mod redaction;
 pub mod responses_ws;
@@ -71,8 +72,8 @@ pub use config::{BuildError, ConfigError, RawTable, RawValue, Schema, ValidConfi
 pub use error::{PluginError, PluginErrorKind};
 pub use forward::{Forward, RawAnswer, RawBody};
 pub use hofund_ir::{
-    ContentPart, Message, Request, Response, Role, Stop, StopReason, StreamEvent, too_long,
-    words_of,
+    ContentPart, Extensions, ImagePart, ImageSource, Message, Request, Response, Role, Stop,
+    StopReason, StreamEvent, TextPart, too_long, words_of,
 };
 pub use host::{
     AccountLease, AccountsHandle, AuthResult, BindBlocked, ClockHandle, DirHandle, GatewayHandle,
@@ -86,6 +87,7 @@ pub use id::{
 };
 pub use inbound::{InboundSurface, Method, RouteSpec};
 pub use plan::{PlanCard, PlanQuery, PlanQuota, PlanSupport, PlanWindow};
+pub use quota_reset::{QuotaResetCard, QuotaResetCredits, QuotaResetOutcome};
 pub use records::{
     Account, AccountStatus, AgentActiveProvider, AgentCredential, AgentDescription, AgentFile,
     AgentPath, AgentRemove, AgentRoute, AgentSet, AgentSignIn, AgentStatusCheck, AuthChoice,
