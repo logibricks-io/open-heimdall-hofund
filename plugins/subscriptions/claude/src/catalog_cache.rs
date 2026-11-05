@@ -84,6 +84,7 @@ mod tests {
     use super::*;
     use std::fs;
 
+    #[cfg(unix)]
     #[test]
     fn r5_41_symlink_at_cache_path_is_refused() {
         let dir = tempfile::tempdir().expect("dir");
@@ -91,10 +92,7 @@ mod tests {
         fs::write(&target, br#"{"catalog":{"anthropic":{"models":{}}}}"#).expect("target");
         let cache_path = dir.path().join(CACHE_FILE);
         fs::create_dir_all(cache_path.parent().expect("parent")).expect("mkdir");
-        #[cfg(unix)]
         std::os::unix::fs::symlink(&target, &cache_path).expect("symlink");
-        #[cfg(not(unix))]
-        return;
 
         let cache = DevCatalogCache { path: cache_path };
         let error = cache.read_catalog().expect_err("symlink refused");

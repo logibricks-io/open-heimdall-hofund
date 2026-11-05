@@ -406,6 +406,7 @@ mod tests {
         assert!(ids.contains(&"claude-mythos-5-1".to_owned()));
     }
 
+    #[cfg(unix)]
     #[test]
     fn r6_4_symlink_profile_ignored_for_code_models() {
         use std::fs;
@@ -418,10 +419,7 @@ mod tests {
         )
         .expect("target");
         let profile = dir.path().join(creds::PROFILE_FILE);
-        #[cfg(unix)]
         std::os::unix::fs::symlink(&target, &profile).expect("symlink");
-        #[cfg(not(unix))]
-        return;
 
         assert!(parse_code_models_file(&profile).is_none());
         assert!(read_code_models(&profile).extra.is_empty());
