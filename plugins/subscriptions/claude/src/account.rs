@@ -129,6 +129,7 @@ pub(crate) async fn read_usage(
     creds::private_dir(&dir)?;
     let file = dir.join(creds::CREDENTIALS_FILE);
     let now = host.clock().now();
+    let _cleanup = CredentialFileCleanup(&file);
     let parsed = async {
         creds::write_private(&file, &stored)?;
         let settings = dir.join(creds::PROFILE_FILE);
@@ -161,6 +162,15 @@ const WARM_ARGS: [&str; 11] = [
     "",
     "--no-session-persistence",
 ];
+
+/// Removes the landed credentials file even when the usage read is cancelled.
+struct CredentialFileCleanup<'a>(&'a Path);
+
+impl Drop for CredentialFileCleanup<'_> {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(self.0);
+    }
+}
 
 struct WarmupCleanup<'a> {
     file: &'a Path,
@@ -341,5 +351,22 @@ mod warmup_tests {
     fn a3a_20_claude_warmup_empty_output_fails() {
         assert!(finish_warmup_output("").is_err());
         assert!(finish_warmup_output("   \n").is_err());
+    }
+}
+
+#[cfg(test)]
+mod cleanup_tests {
+    use super::CredentialFileCleanup;
+
+    #[test]
+    fn r7_2_credential_file_removed_on_drop() {
+        let dir = tempfile::tempdir().expect("dir");
+        let file = dir.path().join(".credentials.json");
+        std::fs::write(&file, "{}").expect("write");
+        {
+            let _cleanup = CredentialFileCleanup(&file);
+            assert!(file.exists());
+        }
+        assert!(!file.exists());
     }
 }

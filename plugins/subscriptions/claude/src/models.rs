@@ -204,10 +204,9 @@ pub(crate) fn parse_code_models(text: &str) -> Option<CodeModels> {
             if entry.get("disabled").and_then(Value::as_bool) == Some(true) {
                 continue;
             }
-            let id = entry
-                .get("value")
-                .and_then(Value::as_str)
-                .and_then(api_id)?;
+            let Some(id) = entry.get("value").and_then(Value::as_str).and_then(api_id) else {
+                continue;
+            };
             let label = entry
                 .get("label")
                 .and_then(Value::as_str)
@@ -307,6 +306,27 @@ mod tests {
     }
 
     #[test]
+    fn r7_1_invalid_model_option_is_skipped_not_fatal() {
+        let text = r#"{
+            "additionalModelOptionsAnsweredAt": 2,
+            "additionalModelOptionsCache": [
+                {"value":null,"label":"Default"},
+                {"value":"default","label":"Default"},
+                {"value":"claude-mythos-5-1","label":"Mythos"}
+            ],
+            "modelAccessCache": [
+                {"apiName":"claude-sonnet-4-5","entitled":true},
+                {"apiName":"claude-opus-4-5","entitled":false}
+            ]
+        }"#;
+        let parsed = parse_code_models(text).expect("parsed");
+        assert!(parsed.extra.contains_key("claude-mythos-5-1"));
+        assert!(parsed.extra.contains_key("claude-sonnet-4-5"));
+        assert!(!parsed.extra.contains_key("default"));
+        assert_eq!(parsed.entitled.get("claude-opus-4-5"), Some(&false));
+    }
+
+    #[test]
     fn r5_8_api_id_strips_window_suffix() {
         assert_eq!(
             api_id("claude-mythos-5-1[1m]"),
@@ -380,7 +400,7 @@ mod tests {
         return;
 
         assert!(parse_code_models_file(&profile).is_none());
-        assert!(read_code_models(dir.path()).extra.is_empty());
+        assert!(read_code_models(&profile).extra.is_empty());
     }
 
     #[test]
