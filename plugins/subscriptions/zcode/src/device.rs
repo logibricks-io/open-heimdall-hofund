@@ -1,6 +1,5 @@
 //! Persistent X-Device-Mid for zcode.z.ai portal requests.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use hofund_plugin_api::{HostContext, PluginError};
@@ -30,6 +29,7 @@ fn write_private_file(path: &Path, bytes: &[u8]) -> Result<(), PluginError> {
     #[cfg(unix)]
     {
         use std::fs::OpenOptions;
+        use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
         let mut file = OpenOptions::new()
             .create(true)
