@@ -14,6 +14,9 @@ pub(crate) struct StreamTiming {
     first_content_ms: Option<i64>,
     first_text_ms: Option<i64>,
     first_reasoning_ms: Option<i64>,
+    last_reasoning_ms: Option<i64>,
+    /// True when the protocol paces its visible reasoning (Chat, Messages).
+    reasoning_paced: bool,
     flow: FlowTracker,
     /// False when the body is a single JSON value, not a stream.
     timed: bool,
@@ -35,6 +38,8 @@ impl StreamTiming {
             first_content_ms: None,
             first_text_ms: None,
             first_reasoning_ms: None,
+            last_reasoning_ms: None,
+            reasoning_paced: false,
             flow: FlowTracker::default(),
             timed: true,
             off: false,
@@ -51,11 +56,31 @@ impl StreamTiming {
         self.timing_hidden
     }
 
+    /// Sets whether `protocol` paces visible reasoning, so a reasoning
+    /// start time is kept for it. Responses and Generative Language
+    /// summaries do not.
+    pub(crate) fn set_protocol(&mut self, protocol: &str) {
+        self.reasoning_paced = protocol == hofund_plugin_api::ProtocolId::OPENAI_CHAT.as_str()
+            || protocol == hofund_plugin_api::ProtocolId::ANTHROPIC_MESSAGES.as_str();
+    }
+
     pub(crate) fn note_stream_event(&mut self, event: &StreamEvent, encoded_bytes: usize) {
         if !self.timed || self.off {
             return;
         }
         let elapsed = self.elapsed_ms();
+        if self.first_text_ms.is_some() {
+            // The first text is known: only when the rest came is left.
+            if matches!(
+                event,
+                StreamEvent::TextDelta(_)
+                    | StreamEvent::ThinkingDelta(_)
+                    | StreamEvent::ToolArgumentsDelta(_)
+            ) {
+                self.mark_flow(elapsed, encoded_bytes.max(1));
+            }
+            return;
+        }
         let (content, text, reasoning, hidden) = match event {
             StreamEvent::TextDelta(_) => (true, true, false, false),
             StreamEvent::ThinkingDelta(_) => (true, false, true, false),
@@ -76,10 +101,13 @@ impl StreamTiming {
             _ => (false, false, false, false),
         };
         self.timing_hidden = self.timing_hidden || hidden;
+        if reasoning {
+            self.note_reasoning(elapsed);
+        }
         if !content {
             return;
         }
-        self.note_content(elapsed, text, reasoning, encoded_bytes.max(1));
+        self.note_content(elapsed, text, encoded_bytes.max(1));
     }
 
     pub(crate) fn ingest_raw(&mut self, chunk: &[u8]) {
@@ -113,32 +141,63 @@ impl StreamTiming {
             };
             let event = self.pending[..end].to_vec();
             self.pending.drain(..end);
-            if self.first_text_ms.is_some() && flow_content(&event) {
-                self.flow.mark(elapsed, event.len() as i64);
+            if self.first_text_ms.is_some() {
+                // The first text is known: only when the rest came is left.
+                if flow_content(&event) {
+                    self.mark_flow(elapsed, event.len());
+                }
                 continue;
             }
             let (content, text, reasoning, hidden) = timing_kind(&event);
             self.timing_hidden = self.timing_hidden || hidden;
+            if reasoning {
+                self.note_reasoning(elapsed);
+            }
             if !content && !text {
                 continue;
             }
-            self.note_content(elapsed, text, reasoning, event.len().max(1));
+            self.note_content(elapsed, text, event.len().max(1));
         }
     }
 
-    fn note_content(&mut self, elapsed: i64, text: bool, reasoning: bool, nbytes: usize) {
+    fn note_reasoning(&mut self, elapsed: i64) {
+        if self.first_reasoning_ms.is_none() {
+            self.first_reasoning_ms = Some(elapsed);
+        }
+        self.last_reasoning_ms = Some(elapsed);
+    }
+
+    fn note_content(&mut self, elapsed: i64, text: bool, nbytes: usize) {
         if self.first_content_ms.is_none() {
             self.first_content_ms = Some(elapsed);
-        }
-        if reasoning && self.first_reasoning_ms.is_none() {
-            self.first_reasoning_ms = Some(elapsed);
         }
         if text && self.first_text_ms.is_none() {
             self.first_text_ms = Some(elapsed);
         }
+        self.mark_flow(elapsed, nbytes);
+    }
+
+    fn mark_flow(&mut self, elapsed: i64, nbytes: usize) {
         if !self.flow_discarded && self.first_content_ms.is_some() {
-            self.flow.mark(elapsed, nbytes as i64);
+            self.flow
+                .mark(elapsed, i64::try_from(nbytes).unwrap_or(i64::MAX));
         }
+    }
+
+    /// The reasoning start, kept only for a paced, visible reasoning
+    /// channel that opened the reply and ran for at least 100 ms.
+    fn reasoning_ms(&self) -> Option<i64> {
+        let first = self.first_reasoning_ms?;
+        let last = self.last_reasoning_ms?;
+        if !self.reasoning_paced
+            || self.timing_hidden
+            || self.off
+            || self.first_content_ms != Some(first)
+            || last.saturating_sub(first) < 100
+        {
+            return None;
+        }
+        Some(first)
     }
 
     fn elapsed_ms(&self) -> i64 {
@@ -168,7 +227,7 @@ impl StreamTiming {
         Some((
             self.first_content_ms,
             self.first_text_ms,
-            self.first_reasoning_ms,
+            self.reasoning_ms(),
             flow,
         ))
     }
@@ -745,5 +804,106 @@ data: {"type":"content_block_start","content_block":{"type":"tool_use","id":"t",
         );
         assert!(timing.timing_hidden());
         assert!(timing.finish_fields(0).expect("fields").0.is_none());
+    }
+
+    const CHAT_REASONING: &str =
+        "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"a\"}}]}\n\n";
+    const CHAT_TEXT: &str = "data: {\"choices\":[{\"delta\":{\"content\":\"b\"}}]}\n\n";
+    const CHAT_TOOL: &str = "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{}\"}}]}}]}\n\n";
+    const SEALED_ITEM: &str = "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"reasoning\",\"encrypted_content\":\"x\"}}\n\n";
+
+    #[test]
+    fn r10r6_1_sealed_frame_after_text_is_not_hidden() {
+        let mut alone = StreamTiming::new(Instant::now());
+        alone.ingest_raw(SEALED_ITEM.as_bytes());
+        assert!(alone.timing_hidden(), "a sealed frame before text hides");
+        let mut timing = StreamTiming::new(Instant::now());
+        timing.ingest_raw(CHAT_TEXT.as_bytes());
+        timing.ingest_raw(SEALED_ITEM.as_bytes());
+        assert!(!timing.timing_hidden());
+    }
+
+    #[test]
+    fn r10r6_2_redacted_start_after_text_is_not_hidden() {
+        let mut timing = StreamTiming::new(Instant::now());
+        timing.note_stream_event(
+            &StreamEvent::TextDelta(TextDelta {
+                index: 0,
+                text: "ok".to_owned(),
+                extensions: Extensions::default(),
+            }),
+            8,
+        );
+        timing.note_stream_event(
+            &StreamEvent::ContentBlockStart(ContentBlockStart {
+                index: 1,
+                block: BlockStart::Thinking {
+                    redacted: true,
+                    data: None,
+                },
+                extensions: Extensions::default(),
+            }),
+            8,
+        );
+        assert!(!timing.timing_hidden());
+    }
+
+    #[test]
+    fn r10r6_3_reasoning_burst_in_one_chunk_has_no_start() {
+        let mut timing = StreamTiming::new(Instant::now());
+        timing.set_protocol("openai-chat");
+        timing.ingest_raw(format!("{CHAT_REASONING}{CHAT_REASONING}{CHAT_TEXT}").as_bytes());
+        let fields = timing.finish_fields(10).expect("fields");
+        assert!(fields.0.is_some());
+        assert!(fields.2.is_none());
+    }
+
+    #[test]
+    fn r10r6_4_paced_reasoning_keeps_start_only_for_chat_and_messages() {
+        for (protocol, kept) in [
+            ("openai-chat", true),
+            ("anthropic-messages", true),
+            ("openai-responses", false),
+            ("generative-language", false),
+        ] {
+            let mut timing = StreamTiming::new(Instant::now());
+            timing.set_protocol(protocol);
+            timing.ingest_raw(CHAT_REASONING.as_bytes());
+            std::thread::sleep(std::time::Duration::from_millis(120));
+            timing.ingest_raw(CHAT_REASONING.as_bytes());
+            timing.ingest_raw(CHAT_TEXT.as_bytes());
+            let fields = timing.finish_fields(10).expect("fields");
+            assert_eq!(fields.2.is_some(), kept, "{protocol}");
+            if kept {
+                assert_eq!(fields.2, fields.0);
+            }
+        }
+    }
+
+    #[test]
+    fn r10r6_5_tool_before_reasoning_has_no_start() {
+        let mut timing = StreamTiming::new(Instant::now());
+        timing.set_protocol("openai-chat");
+        timing.ingest_raw(CHAT_TOOL.as_bytes());
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        timing.ingest_raw(CHAT_REASONING.as_bytes());
+        std::thread::sleep(std::time::Duration::from_millis(120));
+        timing.ingest_raw(CHAT_REASONING.as_bytes());
+        let fields = timing.finish_fields(10).expect("fields");
+        assert!(fields.0.is_some());
+        assert!(fields.2.is_none());
+    }
+
+    #[test]
+    fn r10r6_6_hidden_reasoning_has_no_start() {
+        let mut timing = StreamTiming::new(Instant::now());
+        timing.set_protocol("openai-chat");
+        timing.ingest_raw(CHAT_REASONING.as_bytes());
+        timing.ingest_raw(SEALED_ITEM.as_bytes());
+        std::thread::sleep(std::time::Duration::from_millis(120));
+        timing.ingest_raw(CHAT_REASONING.as_bytes());
+        timing.ingest_raw(CHAT_TEXT.as_bytes());
+        assert!(timing.timing_hidden());
+        assert!(timing.finish_fields(10).expect("fields").2.is_none());
     }
 }

@@ -2674,6 +2674,8 @@ async fn success(
                 }
             };
             // Move the track into the stream so finish runs when the body ends.
+            let mut meta = meta;
+            meta.stream_timing.set_protocol(codec.id());
             let record = RecordOnEnd {
                 usage: Arc::clone(&app.usage),
                 meta,
@@ -2731,6 +2733,8 @@ async fn success(
                                 )
                             }
                         };
+                        let mut meta = meta;
+                        meta.stream_timing.set_protocol(codec.id());
                         let record = RecordOnEnd {
                             usage: Arc::clone(&app.usage),
                             meta,
@@ -2805,6 +2809,7 @@ async fn raw_body(
         };
         let owned = track.take_for_stream();
         let event_stream = content_type == "text/event-stream";
+        meta.stream_timing.set_protocol(codec.id());
         let relay = RawRelay {
             body,
             meta,
