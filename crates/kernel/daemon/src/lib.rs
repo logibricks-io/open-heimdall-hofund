@@ -1385,6 +1385,8 @@ fn providers(
                     base_url: endpoint.base_url.clone(),
                     key: key_member,
                     key_id: key.id.clone(),
+                    http_profile: HttpProfile::direct(),
+                    http_limits: limits,
                 },
             );
             instances.insert(instance_id, instance);

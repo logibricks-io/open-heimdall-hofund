@@ -324,7 +324,7 @@ Agent-by-agent status is in [docs/coverage/agents.md](coverage/agents.md).
 | --- | --- | --- | --- | --- | --- | --- |
 | 15.1 | Menu bar tray | `internal/gui`; `magpie tray` | core | Partial | `apps/desktop/src-tauri/src/lib.rs` (start, stop, agent toggles, usage, open config, quit) | Add status, current route and quota in the menu. |
 | 15.2 | App window with pages: Agents, Providers, Routing, Usage, Sessions, Library, Masking, Plugins, Gateway, Settings | `internal/gui/assets/index.html` (`data-view`); `docs/subsystems/gui-shell.md` | auxiliary | Missing | `apps/desktop/ui` (tray only) | Tauri window over the local API (row 12.3). Pages ship in impact order: Providers, Routing, Usage, Agents. |
-| 15.3 | Terminal UI (`magpie tui`) | `internal/tui` | core | Missing | none | `ratatui` over the same local API. |
+| 15.3 | Terminal UI (`magpie tui`) | `internal/tui` | core | Missing | `docs/tui-design.md` | `ratatui` over the same local API. |
 | 15.4 | Browser UI (`magpie web`, `--lan`) | `internal/cli/main.go:38`; `ref.md:2380` | auxiliary | Missing | none | Serve the same frontend as the desktop window, behind the gateway token. |
 | 15.5 | Get started onboarding | `internal/gui/assets/i18n.js` ("Get started") | auxiliary | Missing | none | First-run wizard: add a provider, connect an agent, send a test request. |
 | 15.6 | UI languages: English, Simplified Chinese, Traditional Chinese, Japanese, German | `internal/gui/assets/i18n.js` | auxiliary | Missing | none | Fluent (`.ftl`) message files, English by default. Translations live only in locale files. |
