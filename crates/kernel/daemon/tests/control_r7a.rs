@@ -796,6 +796,108 @@ async fn deleting_provider_reseats_agent_and_leaves_loadable_config() {
     support::shutdown(running).await;
 }
 
+fn delete_reseat_fixture_config() -> String {
+    format!(
+        "listen = \"127.0.0.1:0\"\n\
+[[providers]]\nid = \"primary\"\nprotocol = \"openai-chat\"\nbase_url = \"http://127.0.0.1:9/v1\"\napi_key = \"{SECRET}\"\n\
+[[providers]]\nid = \"removed\"\nprotocol = \"openai-chat\"\nbase_url = \"http://127.0.0.1:9/v1\"\napi_key = \"{SECRET}\"\n\
+[[routes]]\nmodel = \"group/pair\"\nrouting = \"order\"\n\
+upstreams = [{{ provider = \"primary\", model = \"m\" }}, {{ provider = \"removed\", model = \"m\" }}]\n\
+[[routes]]\nmodel = \"on-removed\"\nupstreams = [\"removed\"]\n\
+[[routes]]\nmodel = \"safe\"\nupstreams = [\"primary\"]\n"
+    )
+}
+
+#[tokio::test]
+async fn deleting_provider_reseat_keeps_sendable_group_moves_exclusive_route() {
+    let scratch_group = Scratch::new("delete-reseat-group");
+    let settings_group = scratch_group
+        .runtime_dir
+        .join("home")
+        .join(".claude")
+        .join("settings.json");
+    std::fs::create_dir_all(settings_group.parent().expect("group parent")).expect("dir");
+    std::fs::write(&settings_group, "{\"model\": \"group/pair\"}\n").expect("group settings");
+    let session_group = Session::new(scratch_group.runtime_dir.join("home")).with_path("");
+    let running_group = support::within(
+        "start daemon group agent",
+        support::REQUEST,
+        start_with(
+            &scratch_group,
+            &delete_reseat_fixture_config(),
+            options_with(
+                &scratch_group,
+                StartOptions {
+                    agent_session: Some(session_group),
+                    ..StartOptions::default()
+                },
+            ),
+        ),
+    )
+    .await;
+    let client_group = Client::new(&running_group, &scratch_group);
+    let read_group = client_group.config().await;
+    let delete_group = provider_delete(&read_group.disk_revision);
+    let (status, body) = client_group
+        .delete("/v1/hofund/providers/removed", &delete_group)
+        .await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+    let group_settings = std::fs::read_to_string(&settings_group).expect("group after delete");
+    assert!(
+        group_settings.contains("group/pair"),
+        "agent on a still-sendable group must keep its model after one member provider is deleted, got: {group_settings}"
+    );
+    support::shutdown(running_group).await;
+
+    let scratch_solo = Scratch::new("delete-reseat-solo");
+    let settings_solo = scratch_solo
+        .runtime_dir
+        .join("home")
+        .join(".claude")
+        .join("settings.json");
+    std::fs::create_dir_all(settings_solo.parent().expect("solo parent")).expect("dir");
+    std::fs::write(&settings_solo, "{\"model\": \"on-removed\"}\n").expect("solo settings");
+    let session_solo = Session::new(scratch_solo.runtime_dir.join("home")).with_path("");
+    let running_solo = support::within(
+        "start daemon solo agent",
+        support::REQUEST,
+        start_with(
+            &scratch_solo,
+            &delete_reseat_fixture_config(),
+            options_with(
+                &scratch_solo,
+                StartOptions {
+                    agent_session: Some(session_solo),
+                    ..StartOptions::default()
+                },
+            ),
+        ),
+    )
+    .await;
+    let client_solo = Client::new(&running_solo, &scratch_solo);
+    let read_solo = client_solo.config().await;
+    let delete_solo = provider_delete(&read_solo.disk_revision);
+    let (status, _) = client_solo
+        .delete("/v1/hofund/providers/removed", &delete_solo)
+        .await;
+    assert_eq!(status, reqwest::StatusCode::OK);
+    let solo_settings = std::fs::read_to_string(&settings_solo).expect("solo after delete");
+    assert!(
+        !solo_settings.contains("on-removed"),
+        "agent must leave the deleted provider's exclusive route, got: {solo_settings}"
+    );
+    assert!(
+        solo_settings.contains("\"safe\"") || solo_settings.contains("group/pair"),
+        "agent must move to a still-sendable route, got: {solo_settings}"
+    );
+    support::shutdown(running_solo).await;
+}
+
 #[tokio::test]
 async fn disabling_exclusive_provider_rejects_requests_and_mixed_group_keeps_agent() {
     let server = MockServer::start().await;

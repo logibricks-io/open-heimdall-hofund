@@ -177,24 +177,28 @@ pub(crate) async fn delete_provider(
         return Err(not_found(id));
     }
     let backup = current.text.clone();
+    let pre_config = load(&current.text).map_err(config_failure)?;
     let edited = edit_provider_delete(&current.text, id).map_err(config_failure)?;
     let provider_id = id.to_owned();
-    let match_route_models =
-        affected_route_models(&load(&current.text).map_err(config_failure)?, id);
+    let pre_for_reseat = pre_config;
     let applied = ops
         .apply_with_sidecar_work(
             &request.expected_revision,
             edited,
             backup,
             move |_ops, text| {
+                let post_config = load(text).map_err(config_failure)?;
+                let matched =
+                    routes_newly_losing_sendable_hops(&pre_for_reseat, &post_config, &provider_id);
+                let fallback = sendable_fallback_routes(&post_config, &provider_id);
                 run_reseat_locked(
                     descriptions,
                     agent_session,
                     gateway_target,
                     &provider_id,
                     false,
-                    Some(&match_route_models),
-                    None,
+                    Some(&matched),
+                    Some(&fallback),
                     text,
                 )
             },
@@ -252,10 +256,10 @@ pub(crate) fn routes_newly_losing_sendable_hops(
 ) -> Vec<String> {
     let before_sendable = crate::routes_with_sendable_hops(before);
     let after_sendable = crate::routes_with_sendable_hops(after);
-    after
+    before
         .routes
         .iter()
-        .filter(|route| route_uses_provider(after, route, provider_id))
+        .filter(|route| route_uses_provider(before, route, provider_id))
         .filter(|route| before_sendable.contains(&route.model))
         .filter(|route| !after_sendable.contains(&route.model))
         .map(|route| route.model.clone())
@@ -289,15 +293,6 @@ fn resolve_reseat_target(
             "agent reseat requires a configured gateway target",
         )),
     }
-}
-
-fn affected_route_models(config: &Config, provider_id: &str) -> Vec<String> {
-    config
-        .routes
-        .iter()
-        .filter(|route| route_uses_provider(config, route, provider_id))
-        .map(|route| route.model.clone())
-        .collect()
 }
 
 fn route_uses_provider(config: &Config, route: &Route, provider_id: &str) -> bool {
@@ -382,11 +377,18 @@ fn internal(message: String) -> ControlFailure {
 
 #[cfg(test)]
 mod tests {
-    use hofund_config::load;
+    use hofund_config::{Config, load};
 
-    use super::{
-        affected_route_models, routes_newly_losing_sendable_hops, sendable_fallback_routes,
-    };
+    use super::{route_uses_provider, routes_newly_losing_sendable_hops, sendable_fallback_routes};
+
+    fn route_models_using_provider(config: &Config, provider_id: &str) -> Vec<String> {
+        config
+            .routes
+            .iter()
+            .filter(|route| route_uses_provider(config, route, provider_id))
+            .map(|route| route.model.clone())
+            .collect()
+    }
 
     const RESEAT_FIXTURE: &str = "\
 [[providers]]\nid = \"dead-off\"\nenabled = false\nprotocol = \"openai-chat\"\nbase_url = \"http://127.0.0.1/v1\"\napi_key = \"k\"\n\
@@ -421,9 +423,30 @@ mod tests {
 [[routes]]\nmodel = \"alias-a\"\nupstreams = [{ provider = \"a\", model = \"m\" }]\n\
 [[routes]]\nmodel = \"safe\"\nupstreams = [\"b\"]\n";
         let config = load(text).expect("config");
-        let affected = affected_route_models(&config, "a");
+        let affected = route_models_using_provider(&config, "a");
         assert_eq!(affected, ["on-a", "alias-a"]);
         let fallback = sendable_fallback_routes(&config, "a");
         assert_eq!(fallback, ["safe"]);
+    }
+
+    #[test]
+    fn r7a_delete_reseat_matches_only_routes_newly_losing_sendable_hops() {
+        use hofund_config::edit_provider_delete;
+
+        let before_text = "\
+[[providers]]\nid = \"a\"\nprotocol = \"openai-chat\"\nbase_url = \"http://127.0.0.1/v1\"\napi_key = \"k\"\n\
+[[providers]]\nid = \"b\"\nprotocol = \"openai-chat\"\nbase_url = \"http://127.0.0.1/v1\"\napi_key = \"k\"\n\
+[[routes]]\nmodel = \"group/pair\"\nrouting = \"order\"\n\
+upstreams = [{ provider = \"a\", model = \"m\" }, { provider = \"b\", model = \"m\" }]\n\
+[[routes]]\nmodel = \"on-b\"\nupstreams = [\"b\"]\n\
+[[routes]]\nmodel = \"safe\"\nupstreams = [\"a\"]\n";
+        let before = load(before_text).expect("before");
+        let after = load(&edit_provider_delete(before_text, "b").expect("delete")).expect("after");
+        let matched = routes_newly_losing_sendable_hops(&before, &after, "b");
+        assert_eq!(matched, ["on-b"]);
+        assert!(
+            crate::routes_with_sendable_hops(&after).contains("group/pair"),
+            "group must remain sendable after one member is deleted"
+        );
     }
 }
