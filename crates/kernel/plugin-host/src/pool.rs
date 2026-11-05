@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use hofund_plugin_api::kernel::{HttpBackend, HttpRequest, HttpResponse};
-use hofund_plugin_api::{Body, BodyStream, PluginError};
+use hofund_plugin_api::{Body, BodyStream, DuplexRequest, DuplexSession, PluginError, read_budget};
 
 const USER_AGENT: &str = "hofund/0.1.0";
 const MAX_IDLE_PER_HOST: usize = 8;
@@ -109,6 +109,13 @@ impl HttpLimits {
         self.read
     }
 
+    /// Same connect and idle-pool settings with a different read budget.
+    #[must_use]
+    pub const fn with_read(mut self, read: Duration) -> Self {
+        self.read = read;
+        self
+    }
+
     /// Idle connections retained per host.
     #[must_use]
     pub const fn max_idle_per_host(self) -> usize {
@@ -129,10 +136,25 @@ pub struct PooledHttp {
     limits: HttpLimits,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum ClientMode {
+    Unary,
+    Duplex,
+}
+
+/// Cleartext prior knowledge versus TLS ALPN for the duplex pool slot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum DuplexDial {
+    Alpn,
+    PriorKnowledge,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct ClientKey {
     profile: HttpProfile,
     limits: HttpLimits,
+    mode: ClientMode,
+    duplex_dial: DuplexDial,
 }
 
 impl PooledHttp {
@@ -161,7 +183,13 @@ impl PooledHttp {
     /// Returns [`PluginError`] when the proxy URL or the client cannot be built.
     #[cfg(test)]
     pub(crate) fn ensure(&self) -> Result<(), PluginError> {
-        client_for(&self.profile, self.limits).map(|_| ())
+        client_for(
+            &self.profile,
+            self.limits,
+            ClientMode::Unary,
+            DuplexDial::Alpn,
+        )
+        .map(|_| ())
     }
 
     /// Profile and limits that select this backend's pooled client.
@@ -192,6 +220,8 @@ pub fn close_idle_after_region(profile: &HttpProfile, limits: HttpLimits) {
     let key = ClientKey {
         profile: profile.clone(),
         limits,
+        mode: ClientMode::Unary,
+        duplex_dial: DuplexDial::Alpn,
     };
     let Ok(guard) = pool().lock() else {
         return;
@@ -214,8 +244,10 @@ pub fn fresh_pooled_client(
     let key = ClientKey {
         profile: profile.clone(),
         limits,
+        mode: ClientMode::Unary,
+        duplex_dial: DuplexDial::Alpn,
     };
-    let shared = client_handle(profile, limits)?;
+    let shared = client_handle(profile, limits, ClientMode::Unary, DuplexDial::Alpn)?;
     refresh_shared(&shared, &key)?;
     Ok(shared
         .read()
@@ -249,10 +281,14 @@ pub(crate) fn pooled_client_count() -> usize {
 fn client_handle(
     profile: &HttpProfile,
     limits: HttpLimits,
+    mode: ClientMode,
+    duplex_dial: DuplexDial,
 ) -> Result<Arc<RwLock<reqwest::Client>>, PluginError> {
     let key = ClientKey {
         profile: profile.clone(),
         limits,
+        mode,
+        duplex_dial,
     };
     let mut guard = pool()
         .lock()
@@ -265,12 +301,29 @@ fn client_handle(
     Ok(shared)
 }
 
-fn client_for(profile: &HttpProfile, limits: HttpLimits) -> Result<reqwest::Client, PluginError> {
-    let shared = client_handle(profile, limits)?;
+fn client_for(
+    profile: &HttpProfile,
+    limits: HttpLimits,
+    mode: ClientMode,
+    duplex_dial: DuplexDial,
+) -> Result<reqwest::Client, PluginError> {
+    let shared = client_handle(profile, limits, mode, duplex_dial)?;
     Ok(shared
         .read()
         .map_err(|_| PluginError::internal("http pool client lock is poisoned"))?
         .clone())
+}
+
+pub(crate) fn duplex_client_for(
+    profile: &HttpProfile,
+    dial: DuplexDial,
+) -> Result<reqwest::Client, PluginError> {
+    client_for(
+        profile,
+        crate::duplex::duplex_limits(),
+        ClientMode::Duplex,
+        dial,
+    )
 }
 
 fn build_client(key: &ClientKey) -> Result<reqwest::Client, PluginError> {
@@ -282,6 +335,17 @@ fn build_client(key: &ClientKey) -> Result<reqwest::Client, PluginError> {
         .connect_timeout(key.limits.connect())
         .read_timeout(key.limits.read())
         .danger_accept_invalid_certs(key.profile.insecure);
+    match key.mode {
+        ClientMode::Unary => {
+            builder = builder.http1_only();
+        }
+        ClientMode::Duplex => match key.duplex_dial {
+            DuplexDial::PriorKnowledge => {
+                builder = builder.http2_prior_knowledge();
+            }
+            DuplexDial::Alpn => {}
+        },
+    }
     if let Some(proxy) = &key.profile.proxy {
         let proxy = reqwest::Proxy::all(proxy)
             .map_err(|error| PluginError::config(format!("http proxy is invalid: {error}")))?;
@@ -290,6 +354,10 @@ fn build_client(key: &ClientKey) -> Result<reqwest::Client, PluginError> {
     builder
         .build()
         .map_err(|error| PluginError::connect(error.to_string()))
+}
+
+fn limits_for_request(default: HttpLimits, request: &HttpRequest<Body>) -> HttpLimits {
+    read_budget(request).map_or(default, |read| default.with_read(read))
 }
 
 fn map_error(error: reqwest::Error) -> PluginError {
@@ -318,7 +386,7 @@ fn map_body(error: reqwest::Error) -> PluginError {
 ///
 /// A read failure becomes one [`PluginError::interrupted`] chunk and ends the
 /// stream. Dropping the stream drops the response and closes the connection.
-fn live_body(response: reqwest::Response) -> BodyStream {
+pub(crate) fn live_body(response: reqwest::Response) -> BodyStream {
     BodyStream::from_stream(futures_util::stream::unfold(
         Some(response),
         |state| async move {
@@ -359,7 +427,8 @@ impl HttpBackend for PooledHttp {
     ) -> Result<HttpResponse<BodyStream>, PluginError> {
         #[cfg(test)]
         note_send();
-        let client = client_for(&self.profile, self.limits)?;
+        let limits = limits_for_request(self.limits, &request);
+        let client = client_for(&self.profile, limits, ClientMode::Unary, DuplexDial::Alpn)?;
         let method = reqwest::Method::from_bytes(request.method().as_str().as_bytes())
             .map_err(|error| PluginError::internal(error.to_string()))?;
         let url = request.uri().to_string();
@@ -419,12 +488,21 @@ impl HttpBackend for PooledHttp {
         Ok(output)
     }
 
+    async fn open_duplex(&self, request: DuplexRequest) -> Result<DuplexSession, PluginError> {
+        crate::duplex::open_duplex(self, request).await
+    }
+
     fn pooled_client(&self) -> Option<Arc<dyn Any + Send + Sync>> {
-        client_handle(&self.profile, self.limits)
-            .ok()
-            // Box the shared handle itself so consumers downcast to
-            // `Arc<RwLock<reqwest::Client>>` and see every later refresh.
-            .map(|shared| Arc::new(shared) as Arc<dyn Any + Send + Sync>)
+        client_handle(
+            &self.profile,
+            self.limits,
+            ClientMode::Unary,
+            DuplexDial::Alpn,
+        )
+        .ok()
+        // Box the shared handle itself so consumers downcast to
+        // `Arc<RwLock<reqwest::Client>>` and see every later refresh.
+        .map(|shared| Arc::new(shared) as Arc<dyn Any + Send + Sync>)
     }
 
     fn fresh_client(&self) -> Option<Result<Arc<dyn Any + Send + Sync>, PluginError>> {
@@ -1432,6 +1510,37 @@ mod tests {
         let client = shared.read().expect("lock").clone();
         client.get(&url).send().await.expect("after region close");
         wait_until(&accepts, 2).await;
+    }
+
+    #[tokio::test]
+    async fn per_call_read_budget_shorter_than_the_pool_default_fires_first() {
+        let _guard = exclusive().await;
+        let pool_limits = HttpLimits::new(Duration::from_secs(2), Duration::from_secs(60));
+        let (port, _) = stall();
+        let context = http(pool_limits);
+        let started = std::time::Instant::now();
+        let error = Call::get(format!("http://127.0.0.1:{port}/stall"))
+            .read_timeout(Duration::from_millis(400))
+            .send(context.http())
+            .await
+            .expect_err("short budget");
+        assert_eq!(error.kind(), PluginErrorKind::Interrupted);
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(started.elapsed() > Duration::from_millis(250));
+    }
+
+    #[tokio::test]
+    async fn per_call_read_budget_longer_than_the_pool_default_is_honoured() {
+        let _guard = exclusive().await;
+        let pool_limits = HttpLimits::new(Duration::from_secs(2), Duration::from_millis(400));
+        let (port, _) = drip(3, Duration::from_millis(250));
+        let context = http(pool_limits);
+        let reply = Call::get(format!("http://127.0.0.1:{port}/stream"))
+            .read_timeout(Duration::from_secs(2))
+            .send(context.http())
+            .await
+            .expect("longer budget");
+        assert_eq!(reply.body(), b"abc");
     }
 
     #[tokio::test]

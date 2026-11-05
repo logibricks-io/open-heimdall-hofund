@@ -17,6 +17,7 @@
 mod account_secrets;
 mod accounts;
 mod agent_credentials;
+mod duplex;
 mod loopback;
 mod piped;
 mod pool;

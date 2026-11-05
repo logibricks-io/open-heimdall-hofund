@@ -12,6 +12,7 @@ use std::time::{Duration, SystemTime};
 
 use crate::SecretString;
 use crate::body::{Body, BodyStream};
+use crate::duplex::{DuplexRequest, DuplexSession};
 use crate::error::PluginError;
 use crate::forward::{Forward, RawAnswer};
 #[cfg(feature = "kernel")]
@@ -50,6 +51,17 @@ impl HttpHandle {
         request: http::Request<Body>,
     ) -> Result<http::Response<BodyStream>, PluginError> {
         self.inner.send(request).await
+    }
+
+    /// Opens a bidirectional HTTP session on the host duplex client.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when the dial fails. Stable message prefixes on
+    /// [`PluginErrorKind::Timeout`], [`PluginErrorKind::Transport`], and
+    /// [`PluginErrorKind::Connect`] classify the failure for plugin fallback logic.
+    pub async fn open_duplex(&self, request: DuplexRequest) -> Result<DuplexSession, PluginError> {
+        self.inner.open_duplex(request).await
     }
 
     /// The pooled client behind this handle, when the kernel built one.
@@ -538,6 +550,18 @@ impl PipedChild {
         self.inner
             .take_stdout()
             .ok_or_else(|| PluginError::config("standard output was already taken"))
+    }
+
+    /// The process exit code after standard output reaches end of file.
+    ///
+    /// Waits until the child exits. Dropping the handle without calling this still
+    /// kills a child the caller abandoned.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when the wait fails.
+    pub async fn exit_code(&self) -> Result<i32, PluginError> {
+        self.inner.exit_code().await
     }
 }
 
@@ -1314,6 +1338,10 @@ mod tests {
 
         fn take_stdout(&self) -> Option<BodyStream> {
             self.stdout.lock().expect("stdout").take()
+        }
+
+        async fn exit_code(&self) -> Result<i32, PluginError> {
+            Ok(0)
         }
     }
 

@@ -10,6 +10,7 @@ use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -79,22 +80,50 @@ pub(crate) fn spawn(request: &SpawnRequest) -> Result<StdPipedChild, PluginError
         reap(child);
         return Err(PluginError::internal("child has no standard output pipe"));
     };
+    let id = child.id();
+    let child = Arc::new(Mutex::new(Some(child)));
     let (sender, receiver) = mpsc::channel(LINE_BUFFER);
+    let exit = Arc::new(Mutex::new(None));
+    let exit_store = Arc::clone(&exit);
+    let child_for_wait = Arc::clone(&child);
     let reader = std::thread::Builder::new()
         .name("hofund-piped-stdout".into())
-        .spawn(move || read_lines(stdout, &sender));
+        .spawn(move || {
+            read_lines(stdout, &sender);
+            let mut guard = match child_for_wait.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            let Some(mut child) = guard.take() else {
+                return;
+            };
+            let code = match child.wait() {
+                Ok(status) => status
+                    .code()
+                    .ok_or_else(|| PluginError::io("child exited without an exit code")),
+                Err(error) => Err(PluginError::io(error.to_string())),
+            };
+            if let Ok(mut slot) = exit_store.lock() {
+                *slot = Some(code);
+            }
+        });
     if let Err(error) = reader {
-        reap(child);
+        if let Ok(mut guard) = child.lock()
+            && let Some(child) = guard.take()
+        {
+            reap(child);
+        }
         return Err(PluginError::io(error.to_string()));
     }
     let stream = futures_util::stream::unfold(receiver, |mut receiver| async move {
         receiver.recv().await.map(|item| (item, receiver))
     });
     Ok(StdPipedChild {
-        id: child.id(),
-        child: Mutex::new(Some(child)),
+        id,
+        child,
         stdin: Arc::new(Mutex::new(stdin)),
         stdout: Mutex::new(Some(BodyStream::from_stream(stream))),
+        exit,
     })
 }
 
@@ -144,17 +173,16 @@ fn reap(mut child: Child) {
 /// A piped child spawned by [`crate::StdProcess`].
 pub(crate) struct StdPipedChild {
     id: u32,
-    child: Mutex<Option<Child>>,
+    child: Arc<Mutex<Option<Child>>>,
     stdin: Arc<Mutex<Option<ChildStdin>>>,
     stdout: Mutex<Option<BodyStream>>,
+    exit: Arc<Mutex<Option<Result<i32, PluginError>>>>,
 }
 
 impl Drop for StdPipedChild {
     fn drop(&mut self) {
-        // Kill first. A write blocked on a full pipe holds the stdin lock and
-        // only returns once the child is gone, so the lock is never awaited here.
-        let child = match self.child.get_mut() {
-            Ok(child) => child.take(),
+        let child = match self.child.lock() {
+            Ok(mut child) => child.take(),
             Err(poisoned) => poisoned.into_inner().take(),
         };
         if let Some(child) = child {
@@ -202,6 +230,21 @@ impl PipedChildBackend for StdPipedChild {
 
     fn take_stdout(&self) -> Option<BodyStream> {
         self.stdout.lock().ok()?.take()
+    }
+
+    async fn exit_code(&self) -> Result<i32, PluginError> {
+        let exit = Arc::clone(&self.exit);
+        accounts::run_blocking(move || {
+            loop {
+                if let Ok(mut slot) = exit.lock()
+                    && let Some(code) = slot.take()
+                {
+                    return code;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        })
+        .await
     }
 }
 
@@ -350,6 +393,14 @@ mod tests {
                 .status()
                 .expect("kill -0")
                 .success()
+        }
+
+        #[tokio::test]
+        async fn exit_code_is_visible_after_stdout_eof() {
+            let child = spawn("/bin/sh", &["-c", "exit 44"]).await;
+            let mut stdout = child.take_stdout().expect("stdout");
+            while stdout.next_chunk().await.is_some() {}
+            assert_eq!(child.exit_code().await.expect("exit code"), 44);
         }
 
         #[tokio::test]

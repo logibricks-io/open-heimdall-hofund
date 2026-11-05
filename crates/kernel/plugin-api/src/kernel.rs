@@ -19,6 +19,7 @@ use bytes::Bytes;
 use futures_util::future::BoxFuture;
 
 use crate::body::{Body, BodyStream};
+use crate::duplex::{DuplexRequest, DuplexSession};
 use crate::error::PluginError;
 use crate::forward::{Forward, RawAnswer};
 use crate::id::{AccountId, PluginKey};
@@ -53,6 +54,16 @@ pub trait HttpBackend: Send + Sync {
         &self,
         request: HttpRequest<Body>,
     ) -> Result<HttpResponse<BodyStream>, PluginError>;
+
+    /// Opens a bidirectional HTTP session.
+    ///
+    /// The default refuses with [`PluginErrorKind::Unsupported`].
+    async fn open_duplex(&self, request: DuplexRequest) -> Result<DuplexSession, PluginError> {
+        let _ = request;
+        Err(PluginError::unsupported(
+            "this HTTP backend has no duplex client",
+        ))
+    }
 
     /// The process-wide `reqwest` client, when this backend is the pool.
     ///
@@ -288,6 +299,26 @@ pub trait PipedChildBackend: Send + Sync {
     ///
     /// Returns `None` after the first call.
     fn take_stdout(&self) -> Option<BodyStream>;
+
+    /// The exit status after standard output reaches end of file.
+    ///
+    /// The default refuses.
+    async fn exit_code(&self) -> Result<i32, PluginError> {
+        Err(PluginError::unsupported(
+            "this piped child backend has no exit status",
+        ))
+    }
+}
+
+/// Writes the request body of an open duplex session.
+#[async_trait]
+#[doc(hidden)]
+pub trait DuplexWriterBackend: Send {
+    /// Queues `bytes` on the request body stream.
+    async fn write(&mut self, bytes: Bytes) -> Result<(), PluginError>;
+
+    /// Ends the request body stream.
+    async fn finish(&mut self) -> Result<(), PluginError>;
 }
 
 /// Loopback callback listeners for sign-in. The kernel owns the listener and
