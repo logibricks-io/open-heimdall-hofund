@@ -28,8 +28,12 @@ mod creds;
 mod discover;
 mod import;
 mod lock;
+mod models;
 mod run_lock;
+mod setup_token;
+mod usage;
 
+use account::{account_dir, remove_tree};
 use creds::{Credentials, Profile};
 
 /// The command Claude Code installs.
@@ -133,6 +137,17 @@ impl SubscriptionFactory for ClaudeFactory {
     }
 }
 
+/// How long an unfinished sign-in may sit idle before its process is stopped.
+#[cfg(not(test))]
+const PENDING_IDLE: Duration = Duration::from_secs(15 * 60);
+
+#[cfg(test)]
+const PENDING_IDLE: Duration = Duration::from_millis(50);
+
+fn pending_idle() -> Duration {
+    PENDING_IDLE
+}
+
 /// A `claude auth login` waiting for its code.
 struct Pending {
     program: PathBuf,
@@ -140,6 +155,7 @@ struct Pending {
     child: PipedChild,
     stdout: BodyStream,
     last: String,
+    started: Duration,
 }
 
 struct Claude {
@@ -155,6 +171,25 @@ impl Claude {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(session)
+    }
+
+    fn expire_idle(&self, host: &HostContext) {
+        let now = host.clock().monotonic();
+        let idle = pending_idle();
+        let expired: Vec<String> = self
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .filter(|(_, pending)| now.saturating_sub(pending.started) >= idle)
+            .map(|(session, _)| session.clone())
+            .collect();
+        for session in expired {
+            if let Some(pending) = self.take_pending(&session) {
+                drop(pending.child);
+                remove_dir(&pending.dir);
+            }
+        }
     }
 
     /// The `claude` program to run.
@@ -203,6 +238,7 @@ async fn start_login(
             child,
             stdout,
             last,
+            started: host.clock().monotonic(),
         },
         link,
     ))
@@ -260,7 +296,8 @@ async fn finish_login(
     };
     let mut profile = Profile::read(&pending.dir);
     if profile.email().is_none()
-        && let Some(status) = status(host, &pending.program, &pending.dir).await
+        && let Some(status) =
+            account::status(host, &pending.program, &pending.dir, &SecretObject::new()).await
     {
         profile.add_status(&status);
     }
@@ -280,21 +317,6 @@ fn signed_in_blob(credentials: &Credentials, profile: &Profile) -> SecretObject 
     }
 }
 
-/// `claude auth status --json` run in `dir`. `None` when it fails, prints
-/// something else, or takes too long.
-pub(crate) async fn status(
-    host: &HostContext,
-    program: &Path,
-    dir: &Path,
-) -> Option<hofund_plugin_sdk::json::Value> {
-    let request = cli::request(program, &cli::STATUS_ARGS, dir).ok()?;
-    let child = host.spawn_process().spawn_piped(&request).await.ok()?;
-    let mut stdout = child.stdout().ok()?;
-    let text = hofund_plugin_sdk::timeout(STATUS_WAIT, cli::collect(&mut stdout)).await?;
-    drop(child);
-    creds::parse_status(&text)
-}
-
 #[hofund_plugin_sdk::async_trait]
 impl Subscription for Claude {
     fn id(&self) -> &PluginId {
@@ -310,6 +332,7 @@ impl Subscription for Claude {
         ctx: &SignInCtx,
         host: &HostContext,
     ) -> Result<SignInChallenge, PluginError> {
+        self.expire_idle(host);
         let program = self.program()?;
         let dir = sign_in_dir(host, ctx)?;
         // A sign-in that restarts with the same session starts clean.
@@ -345,6 +368,12 @@ impl Subscription for Claude {
         proof: SignInProof,
         host: &HostContext,
     ) -> Result<AccountId, PluginError> {
+        self.expire_idle(host);
+        if let SignInProof::Token(token) = &proof
+            && setup_token::normalize(secret_text(token)).is_ok()
+        {
+            return setup_token::store(host, secret_text(token)).await;
+        }
         let Some(mut pending) = self.take_pending(ctx.session()) else {
             return Err(PluginError::config(
                 "no Claude Code sign-in is in progress for this session",
@@ -361,6 +390,7 @@ impl Subscription for Claude {
     }
 
     async fn cancel_sign_in(&self, ctx: &SignInCtx, host: &HostContext) -> Result<(), PluginError> {
+        self.expire_idle(host);
         if let Some(pending) = self.take_pending(ctx.session()) {
             let dir = pending.dir.clone();
             drop(pending);
@@ -389,6 +419,9 @@ impl Subscription for Claude {
         if blob.flag(creds::LAPSED) {
             return Ok(needs_sign_in(creds::LAPSED_REASON));
         }
+        if setup_token::is_setup_token(&blob) {
+            return Ok(AccountStatus::Ready);
+        }
         let credentials = blob
             .text(creds::CREDENTIALS)
             .and_then(creds::parse_credentials);
@@ -406,22 +439,40 @@ impl Subscription for Claude {
 
     async fn quota(
         &self,
-        _account: &AccountId,
-        _host: &HostContext,
+        account: &AccountId,
+        host: &HostContext,
     ) -> Result<Vec<QuotaWindow>, PluginError> {
-        Err(PluginError::unsupported(
-            "Claude subscription usage limits are not read yet",
-        ))
+        let Some(secret) = host.accounts().secret(account).await? else {
+            return Err(PluginError::auth(
+                "no Claude Code sign-in is stored for this account",
+            ));
+        };
+        let blob = SecretObject::parse(&secret)?;
+        if setup_token::is_setup_token(&blob) {
+            return Err(PluginError::auth(usage::SETUP_TOKEN_QUOTA));
+        }
+        let program = self.program()?;
+        let dir = account_dir(host, account)?;
+        creds::private_dir(&dir)?;
+        account::prepare_for_run(host, || Ok(program.clone()), account, &blob).await?;
+        usage::read(host, &program, &dir, host.clock().now(), &blob).await
     }
 
     async fn list_models(
         &self,
-        _account: &AccountId,
-        _host: &HostContext,
+        account: &AccountId,
+        host: &HostContext,
     ) -> Result<ModelList, PluginError> {
-        Err(PluginError::unsupported(
-            "the Claude Code model list is not read yet",
-        ))
+        let Some(secret) = host.accounts().secret(account).await? else {
+            return Err(PluginError::auth(
+                "no Claude Code sign-in is stored for this account",
+            ));
+        };
+        let _blob = SecretObject::parse(&secret)?;
+        let dir = account_dir(host, account)?;
+        creds::private_dir(&dir)?;
+        let quota = Vec::new();
+        models::list_for_account(host, &dir, &quota)
     }
 
     fn upstream(
@@ -473,6 +524,14 @@ impl Subscription for Claude {
         host: &HostContext,
     ) -> Result<AccountId, PluginError> {
         discover::import(home, reference, host).await
+    }
+
+    async fn remove_account(
+        &self,
+        account: &AccountId,
+        host: &HostContext,
+    ) -> Result<(), PluginError> {
+        remove_tree(host, account)
     }
 }
 

@@ -3,7 +3,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use hofund_kit_subscription::{PipedScript, PipedSpawn, TestHost, block_on};
+use hofund_kit_subscription::{
+    PipedScript, PipedSpawn, TestHost, advance_time, block_on, block_on_paused,
+};
 use hofund_plugin_api::{
     AccountId, AccountStatus, PluginErrorKind, PluginId, PluginKind, RawTable, RawValue,
     SecretString, SignInChallenge, SignInCtx, SignInProof, Subscription, SubscriptionFactory,
@@ -30,6 +32,10 @@ fn plugin() -> PluginId {
 
 fn host(dir: &tempfile::TempDir) -> TestHost {
     TestHost::open_for(PluginKind::Subscription, plugin(), dir.path())
+}
+
+fn host_tokio_clock(dir: &tempfile::TempDir) -> TestHost {
+    TestHost::open_for_with_tokio_monotonic(PluginKind::Subscription, plugin(), dir.path())
 }
 
 fn subscription(host: &TestHost) -> Arc<dyn Subscription> {
@@ -1207,4 +1213,56 @@ fn d36_21_heartbeat_refreshes_the_lock_directory_time() {
         .modified()
         .expect("modified");
     assert!(modified > old + Duration::from_secs(300), "{modified:?}");
+}
+
+#[test]
+fn r5_9_pending_sign_in_expires_after_idle() {
+    use std::time::Duration;
+
+    const IDLE_SESSION: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    block_on_paused(async {
+        let dir = tempfile::tempdir().expect("dir");
+        let host = host_tokio_clock(&dir);
+        let sub = subscription(&host);
+        host.process().script_piped(login_script(true));
+        host.process().script_piped(login_script(true));
+        let idle_ctx = SignInCtx::new(plugin())
+            .with_session(IDLE_SESSION)
+            .expect("session");
+        sub.start_sign_in(&idle_ctx, host.context())
+            .await
+            .expect("first start");
+        let idle_dir = state(&host).join("signin").join(IDLE_SESSION);
+        assert!(idle_dir.is_dir());
+        advance_time(Duration::from_millis(80)).await;
+        sub.start_sign_in(&ctx(), host.context())
+            .await
+            .expect("second start");
+        assert!(
+            !idle_dir.exists(),
+            "idle sign-in directory should be removed"
+        );
+    });
+}
+
+#[test]
+fn r5_10_remove_account_deletes_profile_dir() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let id = account_id_from(&["claude", UUID]);
+    let account_dir = crate::account::account_dir(host.context(), &id).expect("dir");
+    std::fs::create_dir_all(&account_dir).expect("create");
+    block_on(sub.remove_account(&id, host.context())).expect("remove");
+    assert!(!account_dir.exists());
+}
+
+#[test]
+fn r5_11_import_cli_proxy_claude_json() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let text = r#"{"type":"claude","access_token":"sk-ant-oat01-old","refresh_token":"sk-ant-ort01-cpa","email":"max@example.com"}"#;
+    let ids = block_on(sub.import_accounts(text, host.context())).expect("import");
+    assert_eq!(ids.len(), 1);
 }

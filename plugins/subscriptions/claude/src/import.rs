@@ -1,7 +1,7 @@
 //! Importing Claude accounts from external export files.
 
 use hofund_plugin_api::{AccountId, HostContext, PluginError};
-use hofund_plugin_sdk::json::Value;
+use hofund_plugin_sdk::json::{Map, Value};
 
 /// One account parsed from an export file.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -91,14 +91,17 @@ fn parse_swap_account(entry: &Value) -> Result<ImportedLogin, PluginError> {
     })
 }
 
-/// Stores every account in a swap export.
+/// Stores every account in a supported import file.
 ///
 /// # Errors
 ///
-/// Returns [`PluginError`] when the file is this format and cannot be stored.
-/// A file that is not a swap export is [`PluginErrorKind::Unsupported`](hofund_plugin_api::PluginErrorKind).
+/// Returns [`PluginError`] when the file is recognized and cannot be stored.
+/// A file that is not recognized is [`PluginErrorKind::Unsupported`](hofund_plugin_api::PluginErrorKind).
 pub async fn store(host: &HostContext, text: &str) -> Result<Vec<AccountId>, PluginError> {
     let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Err(PluginError::config("nothing to import"));
+    }
     let Ok(value) = hofund_plugin_sdk::json::from_str::<Value>(trimmed) else {
         return Err(PluginError::unsupported(
             "not an account export this subscription reads",
@@ -107,12 +110,19 @@ pub async fn store(host: &HostContext, text: &str) -> Result<Vec<AccountId>, Plu
     let is_swap = value
         .as_object()
         .is_some_and(|root| root.get("swapVersion").is_some());
-    if !is_swap {
-        return Err(PluginError::unsupported(
-            "not an account export this subscription reads",
-        ));
+    if is_swap {
+        return store_swap(host, trimmed).await;
     }
-    let rows = parse_export(trimmed)?;
+    if let Some(row) = parse_login_object(&value)? {
+        return Ok(vec![store_login(host, row).await?]);
+    }
+    Err(PluginError::unsupported(
+        "not an account export this subscription reads",
+    ))
+}
+
+async fn store_swap(host: &HostContext, text: &str) -> Result<Vec<AccountId>, PluginError> {
+    let rows = parse_export(text)?;
     let mut ids = Vec::new();
     for row in rows {
         let profile = crate::creds::Profile::parse(&row.profile);
@@ -142,6 +152,121 @@ pub async fn store(host: &HostContext, text: &str) -> Result<Vec<AccountId>, Plu
         ids.push(id);
     }
     Ok(ids)
+}
+
+const IMPORT_SCOPES: [&str; 4] = [
+    "user:inference",
+    "user:profile",
+    "user:sessions:claude_code",
+    "user:mcp_servers",
+];
+
+struct LoginRow {
+    email: String,
+    credentials: String,
+    profile: String,
+}
+
+fn parse_login_object(value: &Value) -> Result<Option<LoginRow>, PluginError> {
+    let Some(object) = value.as_object() else {
+        return Ok(None);
+    };
+    if object.contains_key("claudeAiOauth") {
+        return parse_credentials_root(object);
+    }
+    let typ = object
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if typ == "codex" {
+        return Err(PluginError::config("a ChatGPT sign-in, not Claude's"));
+    }
+    if typ != "claude" && !typ.is_empty() {
+        return Ok(None);
+    }
+    let email = object
+        .get("email")
+        .and_then(Value::as_str)
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| PluginError::config("the file doesn't say which Claude account this is; sign in to it from hofund instead"))?;
+    let src = object
+        .get("claudeAiOauth")
+        .and_then(Value::as_object)
+        .map(|_| object)
+        .unwrap_or(object);
+    let access = json_str(src, &["access_token", "accessToken"]);
+    let refresh = json_str(src, &["refresh_token", "refreshToken"]);
+    if refresh.is_empty() && !access.is_empty() {
+        return Err(PluginError::config(
+            "only an access token, no refresh_token: it would stop working within days and can't be renewed; sign in to this account instead",
+        ));
+    }
+    if refresh.is_empty() {
+        return Err(PluginError::config("no refresh_token in it"));
+    }
+    let expires = src
+        .get("expiresAt")
+        .or_else(|| src.get("expires_at"))
+        .and_then(Value::as_i64)
+        .unwrap_or(1);
+    let cred = format!(
+        r#"{{"claudeAiOauth":{{"accessToken":"{access}","refreshToken":"{refresh}","expiresAt":{expires},"scopes":{scopes}}}}}"#,
+        scopes = serde_scopes()
+    );
+    let profile = format!(r#"{{"emailAddress":"{email}"}}"#);
+    Ok(Some(LoginRow {
+        email: email.to_owned(),
+        credentials: cred,
+        profile,
+    }))
+}
+
+fn parse_credentials_root(object: &Map<String, Value>) -> Result<Option<LoginRow>, PluginError> {
+    let refresh = object
+        .get("claudeAiOauth")
+        .and_then(Value::as_object)
+        .and_then(|o| {
+            let text = json_str(o, &["refreshToken", "refresh_token"]);
+            (!text.is_empty()).then_some(text)
+        });
+    let _refresh = refresh
+        .filter(|r| !r.is_empty())
+        .ok_or_else(|| PluginError::config("no refresh_token in it"))?;
+    let cred = Value::Object(object.clone()).to_string();
+    Ok(Some(LoginRow {
+        email: "imported@claude.local".to_owned(),
+        credentials: cred,
+        profile: String::new(),
+    }))
+}
+
+fn json_str(object: &Map<String, Value>, keys: &[&str]) -> String {
+    keys.iter()
+        .find_map(|key| object.get(*key).and_then(Value::as_str))
+        .unwrap_or_default()
+        .to_owned()
+}
+
+fn serde_scopes() -> String {
+    let inner = IMPORT_SCOPES
+        .iter()
+        .map(|scope| format!("\"{scope}\""))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("[{inner}]")
+}
+
+async fn store_login(host: &HostContext, row: LoginRow) -> Result<AccountId, PluginError> {
+    let profile = crate::creds::Profile::parse(&row.profile);
+    let credentials = crate::creds::parse_credentials(&row.credentials)
+        .ok_or_else(|| PluginError::config("an imported account has no credentials"))?;
+    let id = profile.account_id()?;
+    let blob = crate::creds::blob(&credentials, &profile);
+    let label = profile.email().unwrap_or(&row.email).to_owned();
+    let account = host.accounts().account(id.clone(), label)?;
+    host.accounts().upsert(account, blob.to_secret()).await?;
+    Ok(id)
 }
 
 #[cfg(test)]

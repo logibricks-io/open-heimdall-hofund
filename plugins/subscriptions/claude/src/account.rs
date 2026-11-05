@@ -31,6 +31,26 @@ pub(crate) fn account_dir(host: &HostContext, account: &AccountId) -> Result<Pat
         .join(account.as_str()))
 }
 
+/// Deletes `<state>/accounts/<id>` when an account is removed.
+pub(crate) fn remove_tree(host: &HostContext, account: &AccountId) -> Result<(), PluginError> {
+    let dir = account_dir(host, account)?;
+    if dir.is_dir() {
+        std::fs::remove_dir_all(&dir)
+            .map_err(|_| PluginError::io("cannot remove the Claude account directory"))?;
+    }
+    Ok(())
+}
+
+pub(crate) fn run_env(blob: &SecretObject) -> Vec<(OsString, OsString)> {
+    let Some(token) = crate::setup_token::token_from_blob(blob) else {
+        return Vec::new();
+    };
+    vec![(
+        OsString::from(crate::cli::OAUTH_TOKEN_VAR),
+        OsString::from(token),
+    )]
+}
+
 /// Asks Claude Code for the account's status, which refreshes its tokens
 /// when they are due, and keeps what it wrote.
 pub(crate) async fn refresh(
@@ -39,8 +59,11 @@ pub(crate) async fn refresh(
     account: &AccountId,
 ) -> Result<(), PluginError> {
     let lease = host.accounts().lease(account, LEASE_WAIT).await?;
-    let _run = crate::run_lock::mark(account, host)?;
     let blob = SecretObject::parse(lease.secret())?;
+    if crate::setup_token::is_setup_token(&blob) {
+        return Ok(());
+    }
+    let _run = crate::run_lock::mark(account, host)?;
     if blob.flag(creds::LAPSED) {
         return Err(PluginError::auth(creds::LAPSED_REASON));
     }
@@ -55,7 +78,7 @@ pub(crate) async fn refresh(
     let dir = account_dir(host, account)?;
     creds::private_dir(&dir)?;
     let file = dir.join(creds::CREDENTIALS_FILE);
-    let ran = run(host, &program, &dir, &file, &stored, &profile).await;
+    let ran = run(host, &program, &dir, &file, &stored, &profile, &blob).await;
     let read_back = creds::read_credentials(&dir);
     let _ = std::fs::remove_file(&file);
     let status = ran?;
@@ -73,6 +96,34 @@ pub(crate) async fn refresh(
         return Err(PluginError::io(
             "Claude Code did not report the account status; the stored sign-in is kept",
         ));
+    }
+    Ok(())
+}
+
+/// Writes credentials (or setup-token onboarding) into the account directory before a CLI read.
+pub(crate) async fn prepare_for_run(
+    host: &HostContext,
+    program: impl FnOnce() -> Result<PathBuf, PluginError>,
+    account: &AccountId,
+    blob: &SecretObject,
+) -> Result<(), PluginError> {
+    let _program = program()?;
+    let dir = account_dir(host, account)?;
+    creds::private_dir(&dir)?;
+    if crate::setup_token::is_setup_token(blob) {
+        creds::write_onboarded(&dir)?;
+        return Ok(());
+    }
+    let Some(stored) = blob.text(creds::CREDENTIALS) else {
+        return Err(PluginError::auth(
+            "the stored Claude Code sign-in has no credentials",
+        ));
+    };
+    let profile = Profile::parse(blob.text(creds::PROFILE).unwrap_or_default());
+    creds::write_private(&dir.join(creds::CREDENTIALS_FILE), stored)?;
+    let settings = dir.join(creds::PROFILE_FILE);
+    if !settings.exists() {
+        creds::write_private(&settings, &profile.settings_text())?;
     }
     Ok(())
 }
@@ -221,13 +272,35 @@ async fn run(
     file: &Path,
     stored: &str,
     profile: &Profile,
+    blob: &SecretObject,
 ) -> Result<Option<hofund_plugin_sdk::json::Value>, PluginError> {
-    creds::write_private(file, stored)?;
-    let settings = dir.join(creds::PROFILE_FILE);
-    if !settings.exists() {
-        creds::write_private(&settings, &profile.settings_text())?;
+    if crate::setup_token::is_setup_token(blob) {
+        creds::write_onboarded(dir)?;
+    } else {
+        creds::write_private(file, stored)?;
+        let settings = dir.join(creds::PROFILE_FILE);
+        if !settings.exists() {
+            creds::write_private(&settings, &profile.settings_text())?;
+        }
     }
-    Ok(crate::status(host, program, dir).await)
+    Ok(status(host, program, dir, blob).await)
+}
+
+pub(crate) async fn status(
+    host: &HostContext,
+    program: &Path,
+    dir: &Path,
+    blob: &SecretObject,
+) -> Option<hofund_plugin_sdk::json::Value> {
+    let request =
+        crate::cli::request_with_extra(program, &crate::cli::STATUS_ARGS, dir, &run_env(blob))
+            .ok()?;
+    let child = host.spawn_process().spawn_piped(&request).await.ok()?;
+    let mut stdout = child.stdout().ok()?;
+    let text =
+        hofund_plugin_sdk::timeout(crate::STATUS_WAIT, crate::cli::collect(&mut stdout)).await?;
+    drop(child);
+    creds::parse_status(&text)
 }
 
 #[cfg(test)]

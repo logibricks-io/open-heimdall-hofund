@@ -228,6 +228,18 @@ pub(crate) fn private_dir(dir: &Path) -> Result<(), PluginError> {
     Ok(())
 }
 
+/// Writes onboarding metadata Claude Code expects before its first run.
+pub(crate) fn write_onboarded(dir: &Path) -> Result<(), PluginError> {
+    let settings = dir.join(PROFILE_FILE);
+    if settings.exists() {
+        return Ok(());
+    }
+    write_private(
+        &settings,
+        r#"{"hasCompletedOnboarding":true,"numStartups":1}"#,
+    )
+}
+
 /// Writes `text` to `path`, readable by this user only.
 pub(crate) fn write_private(path: &Path, text: &str) -> Result<(), PluginError> {
     use std::io::Write as _;
