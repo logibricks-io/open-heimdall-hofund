@@ -17,6 +17,26 @@ enum ParsedLine {
     Failed { code: String, message: String },
 }
 
+fn value_has_payload(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::String(text) => !text.is_empty(),
+        _ => true,
+    }
+}
+
+fn finish_reason_truthy(choice: &Value) -> bool {
+    choice.get("finish_reason").is_some_and(value_has_payload)
+}
+
+fn delta_has_content(delta: &hofund_plugin_sdk::json::Map<String, Value>) -> bool {
+    delta.get("content").is_some_and(value_has_payload)
+        || delta
+            .get("reasoning_content")
+            .is_some_and(value_has_payload)
+        || delta.get("reasoning").is_some_and(value_has_payload)
+}
+
 /// Reads all of `raw` NDJSON, wraps provider events as SSE, and returns one body stream.
 pub(crate) fn ndjson_to_sse_body(
     raw: &[u8],
@@ -64,48 +84,92 @@ pub(crate) async fn ndjson_to_sse_stream(
     let mut first_said: Option<Value> = None;
     loop {
         while let Some(line) = take_line(&mut buf) {
-            match parse_wrapped_line(&line)? {
-                ParsedLine::Ended => {
-                    ended = true;
-                    continue;
-                }
-                ParsedLine::Failed { code, message } => {
-                    if first_said.is_none() {
-                        let status = errors::failed_status(&code);
-                        return Err(format!("{status}:{message}"));
-                    }
-                    let mut out = Vec::new();
-                    let status = errors::failed_status(&code);
-                    write_sse_error(&mut out, wire, status, &message);
-                    return Ok(BodyStream::resume(
-                        Body::from_bytes(out).bytes().clone(),
-                        continue_wrapped(inner, buf, wire, ended, first_said, head, true),
-                    ));
-                }
-                ParsedLine::Event(event) => {
-                    if let Some(message) = event_error(wire, &event) {
-                        if first_said.is_none() {
-                            return Err(format!("502:{message}"));
-                        }
-                        head.push(json_error_event(wire, &message));
+            let line = line?;
+            match parse_wrapped_line(&line) {
+                Ok(parsed) => match parsed {
+                    ParsedLine::Ended => {
+                        ended = true;
                         continue;
                     }
-                    if first_said.is_none() {
-                        if said(wire, &event) {
-                            first_said = Some(event);
-                            break;
+                    ParsedLine::Failed { code, message } => {
+                        if first_said.is_none() {
+                            let status = errors::failed_status(&code);
+                            return Err(format!("{status}:{message}"));
                         }
-                        head.push(event);
-                    } else {
-                        head.push(event);
+                        let mut out = Vec::new();
+                        let status = errors::failed_status(&code);
+                        write_sse_error(&mut out, wire, status, &message);
+                        return Ok(BodyStream::resume(
+                            Body::from_bytes(out).bytes().clone(),
+                            continue_wrapped(inner, buf, wire, ended, first_said, head, true),
+                        ));
                     }
-                }
+                    ParsedLine::Event(event) => {
+                        if let Some(message) = event_error(wire, &event) {
+                            if first_said.is_none() {
+                                return Err(format!("502:{message}"));
+                            }
+                            head.push(json_error_event(wire, &message));
+                            continue;
+                        }
+                        if first_said.is_none() {
+                            if said(wire, &event) {
+                                first_said = Some(event);
+                                break;
+                            }
+                            head.push(event);
+                        } else {
+                            head.push(event);
+                        }
+                    }
+                },
+                Err(detail) if detail.is_empty() => continue,
+                Err(detail) => return Err(detail),
             }
         }
         if first_said.is_some() {
             break;
         }
         let Some(chunk) = inner.next_chunk().await else {
+            while let Some(line) = flush_line(&mut buf) {
+                let line = line?;
+                match parse_wrapped_line(&line) {
+                    Ok(parsed) => match parsed {
+                        ParsedLine::Ended => ended = true,
+                        ParsedLine::Failed { code, message } => {
+                            if first_said.is_none() {
+                                let status = errors::failed_status(&code);
+                                return Err(format!("{status}:{message}"));
+                            }
+                            let mut out = Vec::new();
+                            let status = errors::failed_status(&code);
+                            write_sse_error(&mut out, wire, status, &message);
+                            return Ok(BodyStream::resume(
+                                Body::from_bytes(out).bytes().clone(),
+                                continue_wrapped(inner, buf, wire, ended, first_said, head, true),
+                            ));
+                        }
+                        ParsedLine::Event(event) => {
+                            if let Some(message) = event_error(wire, &event) {
+                                if first_said.is_none() {
+                                    return Err(format!("502:{message}"));
+                                }
+                                head.push(json_error_event(wire, &message));
+                            } else if first_said.is_none() {
+                                if said(wire, &event) {
+                                    first_said = Some(event);
+                                } else {
+                                    head.push(event);
+                                }
+                            } else {
+                                head.push(event);
+                            }
+                        }
+                    },
+                    Err(detail) if detail.is_empty() => {}
+                    Err(detail) => return Err(detail),
+                }
+            }
             if !ended {
                 return Err("502:the reply ended before it was complete".to_owned());
             }
@@ -178,11 +242,17 @@ fn continue_wrapped(
             }
             loop {
                 while let Some(line) = take_line(&mut state.buf) {
+                    let line = match line {
+                        Ok(text) => text,
+                        Err(detail) => {
+                            return Some((Err(PluginError::status_error(502, detail)), state));
+                        }
+                    };
                     let parsed = match parse_wrapped_line(&line) {
                         Ok(line) => line,
                         Err(detail) if detail.is_empty() => continue,
                         Err(detail) => {
-                            return Some((Err(PluginError::internal(detail)), state));
+                            return Some((Err(PluginError::status_error(502, detail)), state));
                         }
                     };
                     match parsed {
@@ -191,6 +261,7 @@ fn continue_wrapped(
                             continue;
                         }
                         ParsedLine::Failed { code, message } => {
+                            state.tail_failed = true;
                             let status = errors::failed_status(&code);
                             let mut out = Vec::new();
                             write_sse_error(&mut out, state.wire, status, &message);
@@ -198,6 +269,7 @@ fn continue_wrapped(
                         }
                         ParsedLine::Event(event) => {
                             if let Some(message) = event_error(state.wire, &event) {
+                                state.tail_failed = true;
                                 let mut out = Vec::new();
                                 write_sse(
                                     &mut out,
@@ -216,6 +288,49 @@ fn continue_wrapped(
                     }
                 }
                 let Some(chunk) = state.inner.next_chunk().await else {
+                    while let Some(line) = flush_line(&mut state.buf) {
+                        let line = match line {
+                            Ok(text) => text,
+                            Err(detail) => {
+                                return Some((Err(PluginError::status_error(502, detail)), state));
+                            }
+                        };
+                        let parsed = match parse_wrapped_line(&line) {
+                            Ok(line) => line,
+                            Err(detail) if detail.is_empty() => continue,
+                            Err(detail) => {
+                                return Some((Err(PluginError::status_error(502, detail)), state));
+                            }
+                        };
+                        match parsed {
+                            ParsedLine::Ended => state.ended = true,
+                            ParsedLine::Failed { code, message } => {
+                                state.tail_failed = true;
+                                let status = errors::failed_status(&code);
+                                let mut out = Vec::new();
+                                write_sse_error(&mut out, state.wire, status, &message);
+                                return Some((Ok(out), state));
+                            }
+                            ParsedLine::Event(event) => {
+                                if let Some(message) = event_error(state.wire, &event) {
+                                    state.tail_failed = true;
+                                    let mut out = Vec::new();
+                                    write_sse(
+                                        &mut out,
+                                        state.wire,
+                                        &json_error_event(state.wire, &message),
+                                    );
+                                    return Some((Ok(out), state));
+                                }
+                                if state.wire == Wire::Chat {
+                                    state.chat.see(&event);
+                                }
+                                let mut out = Vec::new();
+                                write_sse(&mut out, state.wire, &event);
+                                return Some((Ok(out), state));
+                            }
+                        }
+                    }
                     return finish_incremental(state);
                 };
                 let chunk = match chunk {
@@ -231,16 +346,29 @@ fn continue_wrapped(
 }
 
 fn finish_incremental(
-    state: ContinueWrapped,
+    mut state: ContinueWrapped,
 ) -> Option<(Result<Vec<u8>, PluginError>, ContinueWrapped)> {
     if !state.ended {
         if state.wire == Wire::Chat {
             if let Some(frames) = state.chat.end_frames() {
+                state.tail_failed = true;
                 return Some((Ok(frames), state));
             }
+            if state.chat.has_open_tools() {
+                let mut out = Vec::new();
+                write_sse_error(
+                    &mut out,
+                    state.wire,
+                    502,
+                    "the reply ended before it was complete",
+                );
+                state.tail_failed = true;
+                return Some((Ok(out), state));
+            }
             return Some((
-                Err(PluginError::internal(
-                    "502:the reply ended before it was complete",
+                Err(PluginError::status_error(
+                    502,
+                    "the reply ended before it was complete",
                 )),
                 state,
             ));
@@ -252,9 +380,11 @@ fn finish_incremental(
             502,
             "the reply ended before it was complete",
         );
+        state.tail_failed = true;
         return Some((Ok(out), state));
     }
     if state.wire == Wire::Chat {
+        state.tail_failed = true;
         return Some((Ok(b"data: [DONE]\n\n".to_vec()), state));
     }
     None
@@ -280,6 +410,12 @@ fn unwrapped_incremental(inner: BodyStream, wire: Wire) -> BodyStream {
         |mut state| async move {
             loop {
                 while let Some(line) = take_line(&mut state.buf) {
+                    let line = match line {
+                        Ok(text) => text,
+                        Err(detail) => {
+                            return Some((Err(PluginError::status_error(502, detail)), state));
+                        }
+                    };
                     let trimmed = line.trim();
                     if trimmed.is_empty() {
                         continue;
@@ -288,7 +424,10 @@ fn unwrapped_incremental(inner: BodyStream, wire: Wire) -> BodyStream {
                         Ok(value) => value,
                         Err(_) => {
                             return Some((
-                                Err(PluginError::internal("Zed sent an unreadable line")),
+                                Err(PluginError::status_error(
+                                    502,
+                                    "Zed sent an unreadable line",
+                                )),
                                 state,
                             ));
                         }
@@ -299,9 +438,40 @@ fn unwrapped_incremental(inner: BodyStream, wire: Wire) -> BodyStream {
                     return Some((Ok(out), state));
                 }
                 let Some(chunk) = state.inner.next_chunk().await else {
+                    while let Some(line) = flush_line(&mut state.buf) {
+                        let line = match line {
+                            Ok(text) => text,
+                            Err(detail) => {
+                                return Some((Err(PluginError::status_error(502, detail)), state));
+                            }
+                        };
+                        let trimmed = line.trim();
+                        if trimmed.is_empty() {
+                            continue;
+                        }
+                        let event: Value = match hofund_plugin_sdk::json::from_str(trimmed) {
+                            Ok(value) => value,
+                            Err(_) => {
+                                return Some((
+                                    Err(PluginError::status_error(
+                                        502,
+                                        "Zed sent an unreadable line",
+                                    )),
+                                    state,
+                                ));
+                            }
+                        };
+                        let mut out = Vec::new();
+                        write_sse(&mut out, state.wire, &event);
+                        state.sent_any = true;
+                        return Some((Ok(out), state));
+                    }
                     if !state.sent_any {
                         return Some((
-                            Err(PluginError::internal("502:Zed ended without an answer")),
+                            Err(PluginError::status_error(
+                                502,
+                                "Zed ended without an answer",
+                            )),
                             state,
                         ));
                     }
@@ -321,13 +491,27 @@ fn unwrapped_incremental(inner: BodyStream, wire: Wire) -> BodyStream {
     )
 }
 
-fn take_line(buf: &mut Vec<u8>) -> Option<String> {
+fn take_line(buf: &mut Vec<u8>) -> Option<Result<String, String>> {
     let pos = buf.iter().position(|b| *b == b'\n')?;
     let line = buf.drain(..=pos).collect::<Vec<_>>();
-    let text = std::str::from_utf8(&line[..line.len().saturating_sub(1)])
-        .ok()?
-        .to_owned();
-    Some(text)
+    let text = &line[..line.len().saturating_sub(1)];
+    Some(
+        std::str::from_utf8(text)
+            .map(str::to_owned)
+            .map_err(|_| "Zed sent a non-UTF8 line".to_owned()),
+    )
+}
+
+fn flush_line(buf: &mut Vec<u8>) -> Option<Result<String, String>> {
+    if buf.is_empty() {
+        return None;
+    }
+    let line = std::mem::take(buf);
+    Some(
+        std::str::from_utf8(&line)
+            .map(str::to_owned)
+            .map_err(|_| "Zed sent a non-UTF8 line".to_owned()),
+    )
 }
 
 fn parse_wrapped_line(line: &str) -> Result<ParsedLine, String> {
@@ -357,6 +541,9 @@ fn parse_wrapped_line(line: &str) -> Result<ParsedLine, String> {
             .unwrap_or(&code)
             .to_owned();
         return Ok(ParsedLine::Failed { code, message });
+    }
+    if value.get("status").is_some() {
+        return Err(String::new());
     }
     Err("Zed sent an unreadable line".to_owned())
 }
@@ -390,15 +577,11 @@ impl ChatTracker {
             let delta = choice.get("delta").and_then(Value::as_object);
             if delta
                 .and_then(|d| d.get("content"))
-                .is_some_and(|c| !c.as_str().is_some_and(str::is_empty))
+                .is_some_and(value_has_payload)
             {
                 self.wrote.insert(index);
             }
-            if delta.is_some_and(|d| {
-                d.get("content").is_some()
-                    || d.get("reasoning_content").is_some()
-                    || d.get("reasoning").is_some()
-            }) {
+            if delta.is_some_and(delta_has_content) {
                 self.open.insert(index);
             }
             if delta
@@ -408,10 +591,14 @@ impl ChatTracker {
             {
                 self.tools.insert(index);
             }
-            if choice.get("finish_reason").is_some() {
+            if finish_reason_truthy(choice) {
                 self.done.insert(index);
             }
         }
+    }
+
+    fn has_open_tools(&self) -> bool {
+        self.tools.iter().any(|index| !self.done.contains(index))
     }
 
     fn end_frames(&self) -> Option<Vec<u8>> {
@@ -523,6 +710,9 @@ fn parse_lines(raw: &[u8], wrapped: bool) -> Result<Vec<ParsedLine>, String> {
                 .unwrap_or(&code)
                 .to_owned();
             out.push(ParsedLine::Failed { code, message });
+            continue;
+        }
+        if value.get("status").is_some() {
             continue;
         }
     }
@@ -657,28 +847,62 @@ fn streamed_wrapped(lines: Vec<ParsedLine>, wire: Wire) -> Result<BodyStream, St
     Ok(BodyStream::from_bytes(out))
 }
 
-fn json_error_event(wire: Wire, message: &str) -> Value {
-    match wire {
-        Wire::Anthropic => {
-            hofund_plugin_sdk::json::json!({"type":"error","error":{"type":"api_error","message": message}})
-        }
-        Wire::Responses => hofund_plugin_sdk::json::json!({"type":"error","message": message}),
-        Wire::Chat | Wire::Gemini => {
-            hofund_plugin_sdk::json::json!({"error":{"message": message}})
-        }
-    }
-}
-
 fn write_sse_error(out: &mut Vec<u8>, wire: Wire, status: u16, message: &str) {
-    let event = json_error_event(wire, message);
+    let event = stream_error_event(wire, status, message);
     match wire {
         Wire::Anthropic | Wire::Responses => {
             out.extend_from_slice(b"event: error\n");
         }
         Wire::Chat | Wire::Gemini => {}
     }
-    let _ = status;
     write_sse(out, wire, &event);
+}
+
+fn stream_error_event(wire: Wire, status: u16, message: &str) -> Value {
+    match wire {
+        Wire::Anthropic => hofund_plugin_sdk::json::json!({
+            "type": "error",
+            "error": {
+                "type": openai_style_error_type(status),
+                "message": message,
+            }
+        }),
+        Wire::Responses => hofund_plugin_sdk::json::json!({
+            "type": "response.failed",
+            "response": {
+                "status": "failed",
+                "error": {
+                    "code": status.to_string(),
+                    "message": message,
+                },
+                "output": [],
+            }
+        }),
+        Wire::Chat | Wire::Gemini => hofund_plugin_sdk::json::json!({
+            "error": {
+                "message": message,
+                "type": openai_style_error_type(status),
+                "param": null,
+                "code": status.to_string(),
+            }
+        }),
+    }
+}
+
+fn openai_style_error_type(status: u16) -> &'static str {
+    match status {
+        400 => "invalid_request_error",
+        401 => "authentication_error",
+        403 => "permission_error",
+        404 => "not_found_error",
+        429 => "rate_limit_error",
+        500..=599 => "server_error",
+        _ => "api_error",
+    }
+}
+
+fn json_error_event(wire: Wire, message: &str) -> Value {
+    stream_error_event(wire, 502, message)
 }
 
 fn write_sse(out: &mut Vec<u8>, wire: Wire, event: &Value) {
@@ -792,16 +1016,17 @@ fn said(wire: Wire, event: &Value) -> bool {
                 return false;
             };
             choices.iter().any(|choice| {
-                let delta = choice.get("delta").and_then(Value::as_object);
-                choice.get("finish_reason").is_some()
-                    || delta.is_some_and(|d| {
-                        d.get("content").is_some()
-                            || d.get("reasoning_content").is_some()
-                            || d.get("reasoning").is_some()
-                            || d.get("tool_calls")
-                                .and_then(Value::as_array)
-                                .is_some_and(|t| !t.is_empty())
-                    })
+                finish_reason_truthy(choice)
+                    || choice
+                        .get("delta")
+                        .and_then(Value::as_object)
+                        .is_some_and(|delta| {
+                            delta_has_content(delta)
+                                || delta
+                                    .get("tool_calls")
+                                    .and_then(Value::as_array)
+                                    .is_some_and(|t| !t.is_empty())
+                        })
             })
         }
         Wire::Gemini => {
@@ -813,16 +1038,16 @@ fn said(wire: Wire, event: &Value) -> bool {
                 .and_then(Value::as_array)
                 .is_some_and(|candidates| {
                     candidates.iter().any(|candidate| {
-                        candidate.get("finishReason").is_some()
+                        candidate.get("finishReason").is_some_and(value_has_payload)
                             || candidate
                                 .get("content")
                                 .and_then(|c| c.get("parts"))
                                 .and_then(Value::as_array)
                                 .is_some_and(|parts| {
                                     parts.iter().any(|part| {
-                                        part.get("text").is_some()
+                                        part.get("text").is_some_and(value_has_payload)
                                             || part.get("functionCall").is_some()
-                                            || part.get("thought").is_some()
+                                            || part.get("thought").is_some_and(value_has_payload)
                                     })
                                 })
                     })

@@ -21,6 +21,7 @@ pub(crate) fn failed_status(code: &str) -> u16 {
     for prefix in ["upstream_http_", "http_"] {
         if let Some(rest) = code.strip_prefix(prefix)
             && let Ok(n) = rest.parse::<u16>()
+            && (400..600).contains(&n)
         {
             return n;
         }

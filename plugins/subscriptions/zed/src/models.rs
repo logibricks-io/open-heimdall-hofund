@@ -133,6 +133,9 @@ pub(crate) async fn repick_and_apply(
     for (name, value) in headers::cloud_headers() {
         call = call.header(name, value);
     }
+    if !stored.credential.system_id.is_empty() {
+        call = call.header("x-zed-system-id", stored.credential.system_id.clone());
+    }
     let reply = match call.fetch(host.http()).await {
         Ok(reply) => reply,
         Err(_) => return Ok(false),
@@ -164,7 +167,7 @@ async fn fetch_live(
         let mut call = hofund_plugin_sdk::Call::get(url)
             .sensitive_header("authorization", format!("Bearer {token}"))
             .header("Accept", "application/json");
-        for (name, value) in headers::model_token_headers() {
+        for (name, value) in headers::model_list_headers() {
             call = call.header(name, value);
         }
         let response = call.open_raw(host.http(), 2).await?;
@@ -300,9 +303,7 @@ fn build_list(user_id: &str, items: &[Value]) -> Result<ModelList, PluginError> 
     Ok(ModelList::new(models, None))
 }
 
-#[cfg(test)]
-#[allow(dead_code)]
-pub(crate) fn clear_vendor_cache_for_tests(user_id: &str) {
+pub(crate) fn invalidate_vendor_cache(user_id: &str) {
     let prefix = format!("{user_id}:");
     vendors()
         .lock()
@@ -312,4 +313,10 @@ pub(crate) fn clear_vendor_cache_for_tests(user_id: &str) {
         .lock()
         .expect("lock")
         .retain(|key, _| !key.starts_with(&prefix));
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+pub(crate) fn clear_vendor_cache_for_tests(user_id: &str) {
+    invalidate_vendor_cache(user_id);
 }

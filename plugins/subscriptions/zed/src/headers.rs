@@ -16,11 +16,19 @@ pub(crate) fn cloud_headers() -> [(&'static str, String); 1] {
     [("User-Agent", user_agent())]
 }
 
-/// Headers on `/models` and `/completions` with a model token.
-pub(crate) fn model_token_headers() -> [(&'static str, String); 3] {
+/// Headers on GET `/models` with a model token.
+pub(crate) fn model_list_headers() -> [(&'static str, String); 3] {
     [
         ("User-Agent", user_agent()),
         ("x-zed-client-supports-x-ai", "true".to_owned()),
+        ("x-zed-version", VERSION.to_owned()),
+    ]
+}
+
+/// Headers on POST `/completions` with a model token.
+pub(crate) fn model_token_headers() -> [(&'static str, String); 2] {
+    [
+        ("User-Agent", user_agent()),
         ("x-zed-version", VERSION.to_owned()),
     ]
 }
