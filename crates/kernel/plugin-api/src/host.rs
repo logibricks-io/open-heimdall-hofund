@@ -65,6 +65,14 @@ impl HttpHandle {
     pub fn pooled_client(&self) -> Option<Arc<dyn Any + Send + Sync>> {
         self.inner.pooled_client()
     }
+
+    /// Shared backend handle. The kernel uses this to refresh pooled clients.
+    #[cfg(feature = "kernel-internal")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn backend_arc(&self) -> Arc<dyn HttpBackend> {
+        Arc::clone(&self.inner)
+    }
 }
 
 impl fmt::Debug for HttpHandle {

@@ -541,12 +541,22 @@ fn empty_schema() -> Schema {
 }
 
 fn attach_client(endpoint: &mut Endpoint, host: &HostContext) {
-    let Some(pooled) = host.http().pooled_client() else {
+    let handle = host.http();
+    let Some(pooled) = handle.pooled_client() else {
         return;
     };
-    if let Some(client) = hofund_provider::pooled_reqwest(pooled.as_ref()) {
-        endpoint.client = Some(client);
-    }
+    let Some(client) = hofund_provider::pooled_reqwest(pooled.as_ref()) else {
+        return;
+    };
+    endpoint.client = Some(client);
+    let Some(pooled_http) = hofund_plugin_host::pooled_http(handle.backend_arc()) else {
+        return;
+    };
+    let key = pooled_http.pool_key();
+    endpoint.client_refresh = Some(Arc::new(move || {
+        hofund_plugin_host::fresh_pooled_client(&key.profile, key.limits)
+            .map_err(|error| hofund_provider::ProviderError::connect(error.message()))
+    }));
 }
 
 fn read_endpoint(

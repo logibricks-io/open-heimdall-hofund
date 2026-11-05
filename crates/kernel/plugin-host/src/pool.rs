@@ -161,6 +161,24 @@ impl PooledHttp {
     pub(crate) fn ensure(&self) -> Result<(), PluginError> {
         client_for(&self.profile, self.limits).map(|_| ())
     }
+
+    /// Profile and limits that select this backend's pooled client.
+    #[must_use]
+    pub fn pool_key(&self) -> PooledClientKey {
+        PooledClientKey {
+            profile: self.profile.clone(),
+            limits: self.limits,
+        }
+    }
+}
+
+/// Selects one entry in the process-wide HTTP client pool.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PooledClientKey {
+    /// Proxy and TLS profile.
+    pub profile: HttpProfile,
+    /// Connect, read, and idle-pool limits.
+    pub limits: HttpLimits,
 }
 
 static POOL: OnceLock<Mutex<BTreeMap<ClientKey, reqwest::Client>>> = OnceLock::new();
@@ -176,11 +194,26 @@ pub fn close_idle_after_region(profile: &HttpProfile, limits: HttpLimits) {
     }
 }
 
-/// Evicts every pooled client so the next send on each profile dials fresh.
-pub fn close_all_pooled_idle_connections() {
-    if let Ok(mut guard) = pool().lock() {
-        guard.clear();
-    }
+/// Evicts `key` and returns a new pooled client with the same settings.
+///
+/// # Errors
+///
+/// Returns [`PluginError`] when the client cannot be built.
+pub fn fresh_pooled_client(
+    profile: &HttpProfile,
+    limits: HttpLimits,
+) -> Result<reqwest::Client, PluginError> {
+    close_idle_after_region(profile, limits);
+    client_for(profile, limits)
+}
+
+/// Returns the pooled backend when `backend` is one.
+#[must_use]
+pub fn pooled_http(backend: Arc<dyn HttpBackend>) -> Option<Arc<PooledHttp>> {
+    use std::any::Any;
+    (backend as Arc<dyn Any + Send + Sync>)
+        .downcast::<PooledHttp>()
+        .ok()
 }
 
 fn pool() -> &'static Mutex<BTreeMap<ClientKey, reqwest::Client>> {
@@ -1143,13 +1176,15 @@ mod tests {
                     break;
                 };
                 count.fetch_add(1, Ordering::SeqCst);
-                let _ = read_request(&mut stream, true);
-                let header = format!(
-                    "HTTP/1.1 400 Bad Request\r\ncontent-length: {}\r\nconnection: keep-alive\r\n\r\n",
-                    body.len()
-                );
-                let _ = stream.write_all(header.as_bytes());
-                let _ = stream.write_all(&body);
+                for _ in 0..2 {
+                    let _ = read_request(&mut stream, true);
+                    let header = format!(
+                        "HTTP/1.1 400 Bad Request\r\ncontent-length: {}\r\nconnection: keep-alive\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(header.as_bytes());
+                    let _ = stream.write_all(&body);
+                }
             }
         });
         (port, accepts)
@@ -1180,5 +1215,26 @@ mod tests {
         close_idle_after_region(&HttpProfile::direct(), limits);
         http.send(request("/third")).await.expect("third");
         wait_until(&accepts, 2).await;
+    }
+
+    #[tokio::test]
+    async fn region_evict_drops_only_matching_profile() {
+        let _guard = exclusive().await;
+        let limits = HttpLimits::default();
+        let proxy = HttpProfile::direct().with_proxy("http://127.0.0.1:9");
+        let direct = HttpProfile::direct();
+        close_idle_after_region(&proxy, limits);
+        close_idle_after_region(&direct, limits);
+        let base = pooled_client_count();
+        let proxy_http = PooledHttp::with_limits(proxy.clone(), limits);
+        let direct_http = PooledHttp::with_limits(direct, limits);
+        proxy_http.ensure().expect("proxy client");
+        assert_eq!(pooled_client_count(), base + 1);
+        direct_http.ensure().expect("direct client");
+        assert_eq!(pooled_client_count(), base + 2);
+        close_idle_after_region(&proxy, limits);
+        assert_eq!(pooled_client_count(), base + 1);
+        assert!(direct_http.pooled_client().is_some());
+        assert_eq!(pooled_client_count(), base + 1);
     }
 }

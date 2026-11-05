@@ -199,7 +199,7 @@ transport and `ir` to fold a stream into one response.
 `plugin-host` depends on `plugin-api`. Its tests also depend on
 `plugin-sdk` so the retry contract runs against the pooled client. The pooled
 HTTP client lives in `plugin-host`. `plugin-registry` depends on `plugin-api`,
-`plugin-sdk`, the plugin crates it composes, and `provider` and `quirks`
+`plugin-host`, `plugin-sdk`, the plugin crates it composes, and `provider` and `quirks`
 for the built-in factories. Those factories still call the `provider`
 adapters. `provider` depends on `plugin-sdk` for SigV4 and token parsing.
 `daemon` depends on `plugin-registry` and
@@ -247,7 +247,7 @@ This table covers normal and build dependencies, including their target-specific
 | `hofund-plugin-plan-quota` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-upstream` (tests) |
 | `hofund-plugin-relay` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-upstream` (tests) |
 | `hofund-plugin-retrieval` | `hofund-plugin-api`, `hofund-plugin-sdk` |
-| `hofund-plugin-registry` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-plugin-codex-catalog`, `hofund-plugin-echo`, `hofund-plugin-muse`, `hofund-plugin-ollama`, `hofund-plugin-plan-quota`, `hofund-plugin-relay`, `hofund-plugin-retrieval`, `hofund-plugin-subscription-claude`, `hofund-plugin-subscription-cline`, `hofund-plugin-subscription-codex`, `hofund-plugin-subscription-copilot`, `hofund-plugin-subscription-cursor`, `hofund-plugin-subscription-devin`, `hofund-plugin-subscription-factory`, `hofund-plugin-subscription-gemini`, `hofund-plugin-subscription-grok`, `hofund-plugin-subscription-kiro`, `hofund-plugin-subscription-qoder`, `hofund-plugin-subscription-workbuddy`, `hofund-plugin-subscription-zed`, `hofund-plugin-subscription-zcode`, `hofund-provider`, `hofund-quirks`, `hofund-agent` (tests), `hofund-kit-upstream` (tests), `hofund-kit-agent` (tests) |
+| `hofund-plugin-registry` | `hofund-plugin-api`, `hofund-plugin-host`, `hofund-plugin-sdk`, `hofund-plugin-codex-catalog`, `hofund-plugin-echo`, `hofund-plugin-muse`, `hofund-plugin-ollama`, `hofund-plugin-plan-quota`, `hofund-plugin-relay`, `hofund-plugin-retrieval`, `hofund-plugin-subscription-claude`, `hofund-plugin-subscription-cline`, `hofund-plugin-subscription-codex`, `hofund-plugin-subscription-copilot`, `hofund-plugin-subscription-cursor`, `hofund-plugin-subscription-devin`, `hofund-plugin-subscription-factory`, `hofund-plugin-subscription-gemini`, `hofund-plugin-subscription-grok`, `hofund-plugin-subscription-kiro`, `hofund-plugin-subscription-qoder`, `hofund-plugin-subscription-workbuddy`, `hofund-plugin-subscription-zed`, `hofund-plugin-subscription-zcode`, `hofund-provider`, `hofund-quirks`, `hofund-agent` (tests), `hofund-kit-upstream` (tests), `hofund-kit-agent` (tests) |
 | `hofund-plugin-subscription-devin` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
 | `hofund-plugin-subscription-factory` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
 | `hofund-plugin-subscription-kiro` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |

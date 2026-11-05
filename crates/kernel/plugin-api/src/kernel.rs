@@ -8,7 +8,6 @@
 //! kernel calls is `hofund_plugin_host::host_context`. `xtask` rejects
 //! `from_backends` outside that crate.
 
-#[cfg(feature = "kernel-internal")]
 use std::any::Any;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -44,7 +43,7 @@ pub fn expose_secret(secret: &SecretString) -> &str {
 /// Sends one HTTP call on the pooled client.
 #[async_trait]
 #[doc(hidden)]
-pub trait HttpBackend: Send + Sync {
+pub trait HttpBackend: Any + Send + Sync {
     /// Sends `request` and returns the response stream.
     ///
     /// A success body streams as the upstream sends it; a read failure is an

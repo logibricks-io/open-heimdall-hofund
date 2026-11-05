@@ -272,6 +272,8 @@ impl SubscriptionState {
                 base_url: String::new(),
                 key: None,
                 key_id: String::new(),
+                http_profile: hofund_plugin_host::HttpProfile::direct(),
+                http_limits: self.limits,
             },
             id,
             upstream,
