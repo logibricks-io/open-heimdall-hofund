@@ -27,6 +27,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **R-47b:** Codex subscription plugin reads and writes `auth.json` and macOS
+  Keychain (injected fake in tests), imports accounts from codexbar, Sub2API,
+  and CPA/Cockpit-shaped JSON, parses `config.toml` providers read-only via
+  `read_providers`, persists rotated refresh tokens back to the agent store
+  after switch, and adds `codex-catalog` `api_key_signed_in` for future native
+  compaction policy. Gateway `compactSigninHeld` and provider-list wiring remain
+  open.
+
 - `hofund-plugin-sdk::time::zone`: resolve IANA names, host local zone with a
   test hook, and map local wall-clock readings to `SystemTime` for subscription
   reset lines (R-5 fix round 3).
