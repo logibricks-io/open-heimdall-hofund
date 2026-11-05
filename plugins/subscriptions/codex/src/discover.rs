@@ -72,6 +72,13 @@ fn read_auth(home: &Path) -> Option<ParsedAuth> {
 
 fn parse_auth_text(text: &str) -> Option<ParsedAuth> {
     let root = hofund_plugin_sdk::json::from_str::<Value>(text).ok()?;
+    if root
+        .get("auth_mode")
+        .and_then(Value::as_str)
+        .is_some_and(|mode| mode == "apikey")
+    {
+        return None;
+    }
     let tokens = root.get("tokens")?.as_object()?;
     let access = token_field(tokens, "access_token")?;
     let id_token = token_field(tokens, "id_token")?;
@@ -241,6 +248,22 @@ mod tests {
         let error = hofund_kit_subscription::block_on(import(&home, REFERENCE, host.context()))
             .expect_err("refresh");
         assert!(error.to_string().contains("no refresh token"));
+    }
+
+    #[test]
+    fn r47a_a3_codex_discovery_drops_apikey_auth_mode() {
+        let dir = scratch("apikey-mode");
+        let home = dir.path().join("codex-home");
+        fs::create_dir_all(&home).expect("home");
+        let id = id_token("key@example.test", "sub-k", "acct-k", "plus");
+        let text = format!(
+            r#"{{"auth_mode":"apikey","tokens":{{"access_token":"sk-example","refresh_token":"refresh-example","id_token":"{id}"}}}}"#
+        );
+        fs::write(home.join("auth.json"), text).expect("auth");
+        assert!(
+            list(&home).expect("list").is_empty(),
+            "API-key mode is not a ChatGPT account"
+        );
     }
 
     #[test]

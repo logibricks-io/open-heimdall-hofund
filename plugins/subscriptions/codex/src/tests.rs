@@ -9,10 +9,12 @@ use hofund_kit_subscription::{
     TestHost, advance_time, block_on, block_on_paused, join_all, poll_once, yield_times,
 };
 use hofund_plugin_api::{
-    AccountId, AccountStatus, Completion, PluginErrorKind, PluginId, PluginKind, ProbeQuery,
-    ProtocolId, RawTable, Request, SecretString, SignInChallenge, SignInCtx, SignInProof,
-    Subscription, SubscriptionFactory, UpstreamProvider,
+    AccountId, AccountStatus, Completion, ContentPart, Extensions, ImagePart, ImageSource, Message,
+    PluginErrorKind, PluginId, PluginKind, ProbeQuery, ProtocolId, RawTable, Request, Role,
+    SecretString, SignInChallenge, SignInCtx, SignInProof, Subscription, SubscriptionFactory,
+    TextPart, UpstreamProvider,
 };
+use hofund_plugin_sdk::codex_zstd::codex_zstd_for_tests;
 use hofund_plugin_sdk::oauth::{Pkce, SecretObject, account_id_from, same_secret};
 
 use crate::tokens::{self, Need};
@@ -40,6 +42,7 @@ fn plugin() -> PluginId {
 }
 
 fn host(dir: &tempfile::TempDir) -> TestHost {
+    let _ = codex_zstd_for_tests(false);
     TestHost::open_for(PluginKind::Subscription, plugin(), dir.path())
 }
 
@@ -1515,6 +1518,7 @@ fn wham_usage_maps_windows() {
     let windows = block_on(subscription(&host).quota(&id, host.context())).expect("quota");
     let call = &host.http().calls()[0];
     assert_eq!(call.uri(), "https://codex.test/backend-api/wham/usage");
+    assert!(call.is_http11());
     assert!(
         call.sensitive_headers()
             .iter()
@@ -1795,4 +1799,112 @@ fn d58_7_expired_deadline_does_not_poll_after_device_wait() {
             }
         }
     });
+}
+
+#[test]
+fn r47a_e_codex_responses_turn_sends_zstd_body() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let _restore = codex_zstd_for_tests(true);
+    let id = seed(&host, &access_token("first", 10_000));
+    let mut request = streaming_request();
+    request.messages = vec![Message {
+        role: Role::User,
+        content: vec![ContentPart::Text(TextPart {
+            text: "fill ".repeat(4_000),
+            extensions: Extensions::new(),
+        })],
+        extensions: Extensions::new(),
+    }];
+    host.http()
+        .enqueue(b"event: response.completed\ndata: {}\n\n".to_vec());
+    block_on(upstream_for(&host, &id).execute(request, ProtocolId::OPENAI_RESPONSES))
+        .expect("execute");
+    let call = &host.http().calls()[0];
+    assert_eq!(call.uri(), format!("{BASE}/responses"));
+    assert_eq!(call.header("content-encoding"), Some("zstd"));
+    assert!(call.is_http11());
+    let plain = hofund_plugin_sdk::codex_zstd::decompress_turn(call.body(), 512 * 1024)
+        .expect("decompress");
+    let body = String::from_utf8(plain).expect("utf8");
+    assert!(body.contains(r#""stream":true"#), "{body}");
+}
+
+#[test]
+fn r47a_i_responses_image_reaches_upstream_body() {
+    let _restore = codex_zstd_for_tests(false);
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, &access_token("first", 10_000));
+    let mut request = streaming_request();
+    request.messages = vec![Message {
+        role: Role::User,
+        content: vec![ContentPart::Image(ImagePart {
+            source: ImageSource::Url {
+                url: "https://example.com/a.png".to_owned(),
+            },
+            detail: None,
+            extensions: Extensions::new(),
+        })],
+        extensions: Extensions::new(),
+    }];
+    host.http()
+        .enqueue(b"event: response.completed\ndata: {}\n\n".to_vec());
+    block_on(upstream_for(&host, &id).execute(request, ProtocolId::OPENAI_RESPONSES))
+        .expect("execute");
+    let body = String::from_utf8(host.http().calls()[0].body().to_vec()).expect("utf8");
+    assert!(body.contains(r#""type":"input_image""#), "{body}");
+    assert!(
+        body.contains(r#""image_url":"https://example.com/a.png""#),
+        "{body}"
+    );
+}
+
+#[test]
+fn r47a_k_quota_reset_credits_read_and_consume() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, &access_token("first", 10_000));
+    let usage = br#"{"rate_limit_reset_credits":{"available_count":1},"rate_limit":{"primary_window":{"used_percent":0,"limit_window_seconds":1}}}"#;
+    let credits =
+        br#"{"credits":[{"id":"c-1","status":"available","expires_at":"2030-01-01T00:00:00Z"}]}"#;
+    host.http()
+        .enqueue_response(200, &[("content-type", "application/json")], usage.to_vec());
+    host.http().enqueue_response(
+        200,
+        &[("content-type", "application/json")],
+        credits.to_vec(),
+    );
+    let reset = block_on(subscription(&host).quota_reset_credits(&id, host.context()))
+        .expect("credits")
+        .expect("some");
+    assert_eq!(reset.count(), 1);
+    assert_eq!(reset.each().len(), 1);
+    assert_eq!(reset.each()[0].id(), "c-1");
+
+    host.http().enqueue_response(
+        200,
+        &[("content-type", "application/json")],
+        credits.to_vec(),
+    );
+    host.http().enqueue_response(
+        200,
+        &[("content-type", "application/json")],
+        br#"{"code":"ok","windows_reset":2}"#.to_vec(),
+    );
+    let outcome = block_on(subscription(&host).consume_quota_reset(&id, None, host.context()))
+        .expect("consume");
+    assert_eq!(outcome.code(), "ok");
+    assert_eq!(outcome.windows(), 2);
+    let uris: Vec<_> = host
+        .http()
+        .calls()
+        .iter()
+        .map(|call| call.uri().to_string())
+        .collect();
+    assert!(
+        uris.iter()
+            .any(|uri| uri.ends_with("/wham/rate-limit-reset-credits/consume")),
+        "{uris:?}"
+    );
 }

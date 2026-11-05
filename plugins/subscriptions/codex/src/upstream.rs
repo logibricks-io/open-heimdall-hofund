@@ -83,6 +83,8 @@ impl CodexUpstream {
         let back = codex_tool_names::codex_tool_names_back(&declared);
         let mut target = Target::new(ProtocolId::OPENAI_RESPONSES, self.endpoints.base.clone())
             .credential(CredentialStyle::Bearer)
+            .chatgpt_codex_backend(true)
+            .chatgpt_codex_zstd(true)
             .headers(headers(access.account.as_deref()))
             .rewrite(Arc::new(move |body| shape::body(body, codex.as_deref())));
         if !back.is_empty() {
@@ -204,6 +206,7 @@ pub(crate) fn account_call(url: String, access: &Access) -> Call {
             |call, (name, value)| call.sensitive_header(name, value),
         )
         .header("accept", "application/json")
+        .http1_only()
 }
 
 /// The Codex CLI User-Agent for `os` on `arch`.
