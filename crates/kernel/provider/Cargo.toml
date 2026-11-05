@@ -31,8 +31,10 @@ hofund-config = { workspace = true }
 hofund-ir = { workspace = true }
 hofund-quirks = { workspace = true }
 futures-util = "0.3.32"
+rustls = { version = "0.23.36", default-features = false, features = ["ring", "std", "tls12"] }
 serde_json = { version = "1.0.154", features = ["preserve_order"] }
-tokio = { version = "1.52.2", features = ["macros", "rt-multi-thread", "test-util"] }
+tokio = { version = "1.52.2", features = ["io-util", "macros", "net", "rt-multi-thread", "test-util"] }
+tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring"] }
 wiremock = "0.6.5"
 
 [lints]

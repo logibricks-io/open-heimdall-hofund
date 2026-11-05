@@ -315,6 +315,12 @@ pub trait PipedChildBackend: Send + Sync {
 pub trait DuplexGuard: Send + Sync {
     /// Marks the request body finished without aborting the call.
     fn finish(&self);
+    /// Marks that [`crate::DuplexSession::into_split`] moved the live halves out.
+    fn mark_split(&self) {}
+    /// Whether dropping the session shell should call [`Self::abort_if_unfinished`].
+    fn session_should_abort_on_drop(&self) -> bool {
+        true
+    }
     /// Aborts the call when a half is dropped before [`Self::finish`].
     fn abort_if_unfinished(&self);
 }

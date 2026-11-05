@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use hofund_plugin_api::kernel::{DuplexGuard, DuplexWriterBackend};
 use hofund_plugin_api::{DuplexRequest, DuplexSession, DuplexWriter, HttpVersionPin, PluginError};
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 use url::Url;
 
 use crate::pool::{self, DuplexDial, HttpLimits, PooledHttp};
@@ -21,7 +21,9 @@ const DUPLEX_READ: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 
 struct ActiveDuplexGuard {
     finished: AtomicBool,
+    split: AtomicBool,
     aborted: Arc<AtomicBool>,
+    abort_notify: Arc<Notify>,
     body_tx: Arc<Mutex<Option<mpsc::Sender<Bytes>>>>,
 }
 
@@ -29,9 +31,15 @@ impl ActiveDuplexGuard {
     fn new(body_tx: mpsc::Sender<Bytes>) -> Self {
         Self {
             finished: AtomicBool::new(false),
+            split: AtomicBool::new(false),
             aborted: Arc::new(AtomicBool::new(false)),
+            abort_notify: Arc::new(Notify::new()),
             body_tx: Arc::new(Mutex::new(Some(body_tx))),
         }
+    }
+
+    fn abort_notify(&self) -> Arc<Notify> {
+        Arc::clone(&self.abort_notify)
     }
 
     fn shared_body_tx(&self) -> Arc<Mutex<Option<mpsc::Sender<Bytes>>>> {
@@ -48,6 +56,14 @@ impl DuplexGuard for ActiveDuplexGuard {
         self.finished.store(true, Ordering::SeqCst);
     }
 
+    fn mark_split(&self) {
+        self.split.store(true, Ordering::SeqCst);
+    }
+
+    fn session_should_abort_on_drop(&self) -> bool {
+        !self.split.load(Ordering::SeqCst)
+    }
+
     fn abort_if_unfinished(&self) {
         if self.finished.load(Ordering::SeqCst) {
             return;
@@ -58,6 +74,7 @@ impl DuplexGuard for ActiveDuplexGuard {
         if let Ok(mut slot) = self.body_tx.lock() {
             slot.take();
         }
+        self.abort_notify.notify_waiters();
     }
 }
 
@@ -92,23 +109,45 @@ impl DuplexWriterBackend for ChannelWriter {
 fn request_body_stream(
     body_rx: mpsc::Receiver<Bytes>,
     aborted: Arc<AtomicBool>,
+    abort_notify: Arc<Notify>,
 ) -> impl futures_util::Stream<Item = Result<Bytes, Box<dyn std::error::Error + Send + Sync>>> {
     futures_util::stream::unfold(body_rx, move |mut receiver| {
         let aborted = Arc::clone(&aborted);
+        let abort_notify = Arc::clone(&abort_notify);
         async move {
             if aborted.load(Ordering::Relaxed) {
-                return Some((
-                    Err(std::io::Error::new(
-                        std::io::ErrorKind::ConnectionReset,
-                        "duplex request aborted",
-                    )
-                    .into()),
-                    receiver,
-                ));
+                return Some((Err(aborted_body_error()), receiver));
             }
-            receiver.recv().await.map(|bytes| (Ok(bytes), receiver))
+            tokio::select! {
+                item = receiver.recv() => match item {
+                    Some(bytes) => Some((Ok(bytes), receiver)),
+                    None if aborted.load(Ordering::SeqCst) => {
+                        Some((Err(aborted_body_error()), receiver))
+                    }
+                    None => None,
+                },
+                () = wait_for_abort(&aborted, &abort_notify) => {
+                    Some((Err(aborted_body_error()), receiver))
+                }
+            }
         }
     })
+}
+
+fn aborted_body_error() -> Box<dyn std::error::Error + Send + Sync> {
+    Box::new(std::io::Error::new(
+        std::io::ErrorKind::ConnectionReset,
+        "duplex request aborted",
+    ))
+}
+
+async fn wait_for_abort(aborted: &AtomicBool, notify: &Notify) {
+    loop {
+        if aborted.load(Ordering::SeqCst) {
+            return;
+        }
+        notify.notified().await;
+    }
 }
 
 pub(crate) async fn open_duplex(
@@ -122,7 +161,7 @@ pub(crate) async fn open_duplex(
         .map_err(|error| PluginError::internal(error.to_string()))?;
     let (body_tx, body_rx) = mpsc::channel::<Bytes>(16);
     let guard = Arc::new(ActiveDuplexGuard::new(body_tx));
-    let body_stream = request_body_stream(body_rx, guard.abort_flag());
+    let body_stream = request_body_stream(body_rx, guard.abort_flag(), guard.abort_notify());
     let mut outbound = client
         .request(method, request.kernel_uri())
         .body(reqwest::Body::wrap_stream(body_stream));
@@ -263,15 +302,11 @@ pub(crate) fn duplex_limits() -> HttpLimits {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     use hofund_plugin_api::{DuplexRequest, PluginErrorKind};
-    use rustls::ServerConfig;
-    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio_rustls::TlsAcceptor;
 
     use super::{
         HEADERS_TIMED_OUT, HTTP2_UNAVAILABLE, STREAM_REFUSED, classify_duplex_failure,
@@ -345,42 +380,11 @@ mod tests {
     }
 
     async fn spawn_tls_http11_only_server() -> u16 {
-        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into(), "127.0.0.1".into()])
-            .expect("cert");
-        let cert_der = CertificateDer::from(cert.cert.der().to_vec());
-        let key_der = PrivateKeyDer::try_from(cert.signing_key.serialize_der()).expect("key");
-        let mut server_config = ServerConfig::builder_with_protocol_versions(&[
-            &rustls::version::TLS12,
-            &rustls::version::TLS13,
-        ])
-        .with_no_client_auth()
-        .with_single_cert(vec![cert_der], key_der)
-        .expect("server config");
-        server_config.alpn_protocols = vec![b"http/1.1".to_vec()];
-        let acceptor = TlsAcceptor::from(Arc::new(server_config));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind");
-        let port = listener.local_addr().expect("addr").port();
-        tokio::spawn(async move {
-            loop {
-                let Ok((stream, _)) = listener.accept().await else {
-                    break;
-                };
-                let acceptor = acceptor.clone();
-                tokio::spawn(async move {
-                    let Ok(mut tls) = acceptor.accept(stream).await else {
-                        return;
-                    };
-                    let mut buf = vec![0_u8; 4096];
-                    let _ = tls.read(&mut buf).await;
-                    let _ = tls
-                        .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n")
-                        .await;
-                });
-            }
-        });
-        port
+        crate::test_tls::spawn_tls_capture(
+            vec![b"http/1.1".to_vec()],
+            Arc::new(Mutex::new(Vec::new())),
+        )
+        .await
     }
 
     #[tokio::test]
@@ -509,6 +513,8 @@ mod tests {
             .await
             .expect("duplex session");
         let (mut reader, writer) = session.into_split();
+        // Leave the outbound body stream parked in recv while the server waits for bytes.
+        tokio::time::sleep(Duration::from_millis(150)).await;
         drop(writer);
         let _ = reader.reader().next_chunk().await;
         wait_for_reset(&reset).await;

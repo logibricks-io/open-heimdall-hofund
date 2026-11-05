@@ -569,4 +569,96 @@ mod fetch_client_tests {
             String::from_utf8_lossy(first_line)
         );
     }
+
+    #[test]
+    fn default_fetch_client_sends_an_http11_request_line_over_https_when_alpn_offers_h2_first() {
+        use std::sync::{Arc, Mutex};
+
+        use rustls::ServerConfig;
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio_rustls::TlsAcceptor;
+
+        const CERT_DER: &[u8] = include_bytes!("../../testdata/localhost.der");
+        const KEY_DER: &[u8] = include_bytes!("../../testdata/localhost.key.der");
+
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        *FETCH.lock().expect("fetch") = None;
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let port = rt.block_on(async {
+            let cert = CertificateDer::from(CERT_DER.to_vec());
+            let key = PrivateKeyDer::try_from(KEY_DER.to_vec()).expect("private key der");
+            let mut server_config = ServerConfig::builder_with_protocol_versions(&[
+                &rustls::version::TLS12,
+                &rustls::version::TLS13,
+            ])
+            .with_no_client_auth()
+            .with_single_cert(vec![cert], key)
+            .expect("server config");
+            server_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+            let acceptor = TlsAcceptor::from(Arc::new(server_config));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind");
+            let port = listener.local_addr().expect("addr").port();
+            let captured_server = Arc::clone(&captured);
+            tokio::spawn(async move {
+                loop {
+                    let Ok((stream, _)) = listener.accept().await else {
+                        break;
+                    };
+                    let acceptor = acceptor.clone();
+                    let captured_server = Arc::clone(&captured_server);
+                    tokio::spawn(async move {
+                        let Ok(mut tls) = acceptor.accept(stream).await else {
+                            return;
+                        };
+                        let mut buf = vec![0_u8; 512];
+                        let Ok(read) = tls.read(&mut buf).await else {
+                            return;
+                        };
+                        captured_server
+                            .lock()
+                            .expect("capture")
+                            .extend_from_slice(&buf[..read]);
+                        let _ = tls
+                            .write_all(
+                                b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}",
+                            )
+                            .await;
+                    });
+                }
+            });
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            port
+        });
+        let client = reqwest::blocking::Client::builder()
+            .http1_only()
+            .danger_accept_invalid_certs(true)
+            .timeout(Duration::from_secs(10))
+            .build()
+            .expect("client");
+        let url = format!("https://127.0.0.1:{port}/jwks");
+        let response = client.get(&url).send().expect("send");
+        assert!(response.status().is_success());
+        let bytes = captured.lock().expect("capture").clone();
+        assert!(
+            !bytes.starts_with(b"PRI * HTTP/2.0"),
+            "client must not send the HTTP/2 connection preface: {:?}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let first_line = bytes
+            .split(|byte| *byte == b'\n')
+            .next()
+            .expect("request line");
+        assert!(
+            first_line.ends_with(b" HTTP/1.1\r"),
+            "request line was {:?}",
+            String::from_utf8_lossy(first_line)
+        );
+    }
 }

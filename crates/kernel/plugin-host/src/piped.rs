@@ -65,6 +65,17 @@ pub(crate) fn command(request: &SpawnRequest) -> Command {
     command
 }
 
+fn write_exit_store(
+    exit_store: &Arc<Mutex<Option<Result<i32, String>>>>,
+    code: Result<i32, String>,
+) {
+    let mut slot = match exit_store.lock() {
+        Ok(slot) => slot,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    *slot = Some(code);
+}
+
 /// Spawns `request` with piped stdin and stdout. Blocking.
 pub(crate) fn spawn(request: &SpawnRequest) -> Result<StdPipedChild, PluginError> {
     let mut command = command(request);
@@ -103,9 +114,7 @@ pub(crate) fn spawn(request: &SpawnRequest) -> Result<StdPipedChild, PluginError
                     .ok_or_else(|| "child exited without an exit code".to_owned()),
                 Err(error) => Err(error.to_string()),
             };
-            if let Ok(mut slot) = exit_store.lock() {
-                *slot = Some(code);
-            }
+            write_exit_store(&exit_store, code);
         });
     if let Err(error) = reader {
         if let Ok(mut guard) = child.lock()
@@ -262,7 +271,26 @@ mod tests {
 
     use hofund_plugin_api::PluginErrorKind;
 
-    use super::{MAX_LINE, is_allowed, read_lines};
+    use super::{MAX_LINE, is_allowed, read_lines, write_exit_store};
+
+    #[test]
+    fn write_exit_store_records_through_a_poisoned_lock() {
+        let slot = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let slot_for_panic = std::sync::Arc::clone(&slot);
+        let poisoned = std::thread::spawn(move || {
+            let _guard = slot_for_panic.lock().expect("lock");
+            panic!("poison the exit slot lock");
+        })
+        .join();
+        assert!(poisoned.is_err());
+        assert!(slot.lock().is_err());
+        write_exit_store(&slot, Ok(44));
+        let stored = match slot.lock() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
+        assert_eq!(stored.as_ref().unwrap(), &Ok(44));
+    }
 
     fn lines(input: Vec<u8>) -> Vec<Result<Vec<u8>, PluginErrorKind>> {
         let (sender, mut receiver) = tokio::sync::mpsc::channel(4);

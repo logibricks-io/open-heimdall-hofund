@@ -392,11 +392,14 @@ fn map_error(error: reqwest::Error) -> PluginError {
 }
 
 fn map_body(error: reqwest::Error) -> PluginError {
-    let mut message = error.to_string();
-    if error.is_timeout() && !message.contains("timed out") {
-        message.push_str(": timed out");
+    if error.is_timeout() {
+        let mut message = error.to_string();
+        if !message.contains("timed out") {
+            message.push_str(": timed out");
+        }
+        return PluginError::timeout(message);
     }
-    PluginError::interrupted(message)
+    PluginError::interrupted(error.to_string())
 }
 
 /// A success body streamed chunk by chunk as the upstream sends it.
@@ -558,7 +561,7 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, RwLock};
+    use std::sync::{Arc, Mutex, RwLock};
     use std::time::Duration;
 
     use hofund_plugin_api::kernel::{HttpBackend, HttpRequest};
@@ -1045,7 +1048,7 @@ mod tests {
             .send(context.http())
             .await
             .expect_err("stall");
-        assert_eq!(error.kind(), PluginErrorKind::Interrupted);
+        assert_eq!(error.kind(), PluginErrorKind::Timeout);
         assert!(error.message().contains("timed out"), "{}", error.message());
         assert!(started.elapsed() < Duration::from_millis(1500));
     }
@@ -1259,6 +1262,42 @@ mod tests {
             .recv_timeout(Duration::from_secs(5))
             .expect("request bytes");
         let first_line = request
+            .split(|byte| *byte == b'\n')
+            .next()
+            .expect("request line");
+        assert!(
+            first_line.ends_with(b" HTTP/1.1\r"),
+            "request line was {:?}",
+            String::from_utf8_lossy(first_line)
+        );
+    }
+
+    #[tokio::test]
+    async fn pooled_client_sends_an_http11_request_line_over_https_when_alpn_offers_h2_first() {
+        let _guard = exclusive().await;
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let port = crate::test_tls::spawn_tls_capture(
+            vec![b"h2".to_vec(), b"http/1.1".to_vec()],
+            Arc::clone(&captured),
+        )
+        .await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let request = HttpRequest::builder()
+            .method("GET")
+            .uri(format!("https://127.0.0.1:{port}/probe"))
+            .body(Body::empty())
+            .expect("request");
+        PooledHttp::new(HttpProfile::direct().insecure())
+            .send(request)
+            .await
+            .expect("send");
+        let bytes = captured.lock().expect("capture").clone();
+        assert!(
+            !bytes.starts_with(b"PRI * HTTP/2.0"),
+            "client must not send the HTTP/2 connection preface: {:?}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let first_line = bytes
             .split(|byte| *byte == b'\n')
             .next()
             .expect("request line");
@@ -1593,7 +1632,7 @@ mod tests {
             .send(context.http())
             .await
             .expect_err("short budget");
-        assert_eq!(error.kind(), PluginErrorKind::Interrupted);
+        assert_eq!(error.kind(), PluginErrorKind::Timeout);
         assert!(started.elapsed() < Duration::from_millis(900));
         assert!(started.elapsed() > Duration::from_millis(250));
     }

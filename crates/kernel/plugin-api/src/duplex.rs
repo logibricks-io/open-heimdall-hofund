@@ -239,7 +239,9 @@ pub struct DuplexSession {
 
 impl Drop for DuplexSession {
     fn drop(&mut self) {
-        self.guard.abort_if_unfinished();
+        if self.guard.session_should_abort_on_drop() {
+            self.guard.abort_if_unfinished();
+        }
     }
 }
 
@@ -290,18 +292,18 @@ impl DuplexSession {
 
     /// Splits into independent reader and writer halves.
     #[must_use]
-    pub fn into_split(self) -> (DuplexReader, DuplexWriter) {
-        let mut this = std::mem::ManuallyDrop::new(self);
-        let writer = std::mem::replace(&mut this.writer, inert_duplex_writer());
+    pub fn into_split(mut self) -> (DuplexReader, DuplexWriter) {
+        self.guard.mark_split();
+        let writer = std::mem::replace(&mut self.writer, inert_duplex_writer());
         (
             DuplexReader {
-                status: this.status,
-                headers: std::mem::take(&mut this.headers),
+                status: self.status,
+                headers: std::mem::take(&mut self.headers),
                 reader: std::mem::replace(
-                    &mut this.reader,
+                    &mut self.reader,
                     BodyStream::from_stream(stream::empty()),
                 ),
-                guard: Arc::clone(&this.guard),
+                guard: Arc::clone(&self.guard),
             },
             writer,
         )

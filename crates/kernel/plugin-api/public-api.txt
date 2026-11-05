@@ -376,7 +376,7 @@ DuplexRequest::fn sensitive_header (mut self , name : impl Into < String > , val
 DuplexSession
 DuplexSession #[non_exhaustive]
 DuplexSession::fn headers (& self) -> & http :: HeaderMap
-DuplexSession::fn into_split (self) -> (DuplexReader , DuplexWriter)
+DuplexSession::fn into_split (mut self) -> (DuplexReader , DuplexWriter)
 DuplexSession::fn kernel_new (status : http :: StatusCode , headers : http :: HeaderMap , reader : BodyStream , writer : DuplexWriter , guard : Arc < dyn DuplexGuard > ,) -> Self
 DuplexSession::fn reader (& mut self) -> & mut BodyStream
 DuplexSession::fn status (& self) -> http :: StatusCode
@@ -1147,6 +1147,8 @@ kernel::DirBackend::fn state_dir (& self , plugin : & PluginKey) -> Result < Pat
 kernel::DuplexGuard
 kernel::DuplexGuard::fn abort_if_unfinished (& self)
 kernel::DuplexGuard::fn finish (& self)
+kernel::DuplexGuard::fn mark_split (& self)
+kernel::DuplexGuard::fn session_should_abort_on_drop (& self) -> bool
 kernel::DuplexWriterBackend
 kernel::DuplexWriterBackend::async fn finish (& mut self) -> Result < () , PluginError >
 kernel::DuplexWriterBackend::async fn write (& mut self , bytes : Bytes) -> Result < () , PluginError >
