@@ -18,14 +18,13 @@ Defer interactive TUI mode (`claudeTUIOn`, `claudetui` paths in `claude_subscrip
 
 ### 1.1 From HTTP request to Claude Code argv
 
-Entry on the reference side is `serveClaudeSubscription` (`claude_subscription.go:6041-6090`):
+Entry on the reference side is `serveClaudeSubscription` (`6041-6090`), which passes an inner **`start`** closure into **`serveSubscription`**:
 
-1. Parse body to an internal `Request` (Messages vs Chat/Responses branches at `6135-6148`).
-2. Apply effort/thinking rules in **stages** (parse → post-parse `outputConfigEffort` → fresh-start classifier `low` → CLI argv); see section 1.5 (`anthropic.go:281-291`, `6158-6161`, `6072-6076`, `6057-6058`, `2214`).
-3. Resolve account config directory via `p.Account.Token` (`6079-6085`).
-4. `resume` idle run if the turn continues a conversation (`6057-6058`; `1771-1897`).
-5. Else `unshelve` / branch session, `retire` competing runs (`6060-6071`; `2117+`).
-6. `start` → `startTrusted` → `startRun` (`880-915`, `918+`).
+1. **Parse** body to an internal `Request` (Messages vs Chat/Responses branches at `6135-6148`).
+2. **Post-parse stages A–B only** on the served request (Anthropic **`outputConfigEffort`** when allowed, `6158-6161`; model, lean prompt, remote caller, etc., `6163-6172`). **Do not** apply fresh-start classifier **`low`** (stage **D**) or build CLI argv (stage **F**) here — see §1.5.
+3. **`serveSubscription`** routing (tool **`match`**, continuation, `6128+`); when a run is needed, call inner **`start`**:
+   - **`resume`** first (stage **C**, `6057-6058`, `1771-1897`). **On hit**, return the idle run — **skip** stage **D**, **`p.Account.Token()`** (`6079-6085`), and **`startRun` / `claudeCLIArgs`** (stage **F**).
+   - **On miss:** **`unshelve` / branch / `retire`** (`6060-6071`), then stage **D** classifier **`low`** when applicable (`6072-6076`), then **`Token()`** (`6079-6085`), then **`subscription.start` → `startTrusted` → `startRun`** (stage **F**, `880-915`, `918+`).
 
 Hofund path: router selects a subscription member; daemon calls `UpstreamProvider::execute` with `hofund_ir::Request` and inbound `ProtocolId`. The Claude plugin’s `execute` performs the same ordering using an internal `Bridge` type (new module under `plugins/subscriptions/claude/src/`).
 
@@ -135,7 +134,7 @@ Parse may use **`parseAnthropicRequest(..., clientMarks)`** when header or class
 
 | Stage | When | Mutates `ThinkOff` / `Effort` |
 |-------|------|-------------------------------|
-| **A — Parse** | `parse` / `parseAnthropicRequest` (`anthropic.go:281-291`) | **`disabled` / `between_tools`** → **`ThinkOff`**, **`Effort` stays `""`**. **`enabled` / `adaptive`** → **`Effort = effortOfBudget(budget)`** (`285`, `ir.go:969-980`); if **`output_config.effort`** present, **`effortOf`** overrides (`287-288`). No thinking block → **`ThinkOff` false**, **`Effort` `""`** until stage B. |
+| **A — Parse** | `parse` / `parseAnthropicRequest` (`anthropic.go:281-291`) | **`disabled` / `between_tools`** → **`ThinkOff`**, **`Effort` stays `""`**. **`enabled` / `adaptive`** → **`Effort = effortOfBudget(budget)`** (`285`, `ir.go:969-980`); if **`output_config.effort`** is set, **`effortOf`** replaces **`Effort` only when it returns non-empty** (`287-288`) — empty or unmapped values **leave** the budget-mapped level. No thinking block → **`ThinkOff` false**, **`Effort` `""`** until stage B. |
 | **B — Post-parse** | `6158-6161` (Anthropic only) | If **`Effort == ""` && !ThinkOff && !autoModeClassifier(req)`** → **`Effort = outputConfigEffort(body)`** (`decide.go:711-720`). **Skipped** when **`autoModeClassifier`** (`6158`, `automode.go:119-133`) or **`ThinkOff`**. Does **not** set **`low`**. |
 | **C — Resume lookup** | `start` → **`resume`** before fresh-start tweaks (`6057-6058`, **`nextTurn` → `turnKey`**, `1909-1933`, `1772`) | Hashes **`Effort != ""` and `ThinkOff` after A+B only** — **not** stage D. **On resume hit**, **`start` returns**; stage D **does not run** (`6057-6058`). |
 | **D — Fresh start only** | After resume miss, before `subscription.start` (`6072-6076`) | If **`Effort == "" && autoModeClassifier(req)`** → **`Effort = "low"`** (classifier deadline `#250`). **Not** applied on resume hit. |
@@ -144,20 +143,23 @@ Parse may use **`parseAnthropicRequest(..., clientMarks)`** when header or class
 
 **Anthropic Messages edge matrix** (verify spawn argv + **`turnKey` effort bit** = **`Effort != ""` at hash stage**, `3143`):
 
-| `thinking.type` | `output_config.effort` | `autoModeClassifier` | After A+B `ThinkOff` | After A+B `Effort` | Resume key effort bit (C) | Fresh start adds `--effort` (D+F) | `--thinking disabled` (F) |
-|-------------------|------------------------|----------------------|----------------------|--------------------|---------------------------|-----------------------------------|---------------------------|
+| `thinking.type` | `output_config.effort` | `autoModeClassifier` | After A+B `ThinkOff` | After A+B `Effort` | Resume key effort bit (C) | Fresh start `--effort` (D+F) | `--thinking disabled` (F) |
+|-------------------|------------------------|----------------------|----------------------|--------------------|---------------------------|--------------------------------|---------------------------|
 | `disabled` | any | no | true | `""` | false | no | yes |
 | `between_tools` | any | no | true | `""` | false | no | yes |
-| `enabled` / `adaptive` | set (e.g. `high`) | no | false | normalized level | **true** | yes (`--effort` level) | no |
-| `enabled` / `adaptive` | absent; budget only | no | false | **`effortOfBudget`** | **true** if budget maps non-empty | yes | no |
+| `disabled` / `between_tools` | any | **yes** | true | `""` (B skipped) | false | yes **`low`** (D) | yes |
+| `enabled` / `adaptive` | set, **`effortOf` non-empty** (e.g. `high`) | no | false | that level | **true** | yes (that level) | no |
+| `enabled` / `adaptive` | set, **`effortOf` non-empty** (e.g. `high`) | **yes** | false | that level (A; B skipped) | **true** | yes (same level; **D** does not overwrite, `6072` only when `Effort == ""`) | no |
+| `enabled` / `adaptive` | absent; **`effortOfBudget` non-empty** | no | false | mapped level | **true** | yes **only if** mapped non-empty | no |
+| `enabled` / `adaptive` | absent; **budget maps empty** (`n <= 0`, `ir.go:969-972`) | no | false | `""` | false | no | no |
+| `enabled` / `adaptive` | absent; budget maps empty | **yes** | false | `""` | false | yes **`low`** (D only) | no |
+| `enabled` / `adaptive` | absent; budget maps **`high`** | **yes** | false | **`high`** | **true** | yes **`high`** | no |
 | absent | set (e.g. `max`) | no | false | level from B | **true** | yes (`claude_effort_test.go:59-64`) | no |
-| absent | set (e.g. `high`) | **yes** | false | **`""`** (B skipped) | **false** | yes **`low`** (D, `72-74`) | no* |
-| absent | absent | **yes** | false | **`""`** → **`low`** at D | **false** | yes **`low`** | no* |
+| absent | set (e.g. `high`) | **yes** | false | `""` (B skipped) | **false** | yes **`low`** (D, `72-74`) | no |
+| absent | absent | **yes** | false | `""` | **false** | yes **`low`** | no |
 | absent | absent | no | false | `""` | false | no (`77-79`) | no |
 
-\*Classifier bodies often have no **`thinking`** block; **`ThinkOff`** stays false unless the client sent **`disabled` / `between_tools`**. When the client **does** send thinking off on a classifier, stage D still sets **`low`** if **`Effort` was `""`**, so **`--effort low`** and **`--thinking disabled`** can both appear (`6072-6076`, `975-981`).
-
-**Chat Completions / OpenAI Responses** (no stages B/D on reference path for Anthropic-only helpers): parse sets **`Effort = effortOf(reasoning_effort)`** and **`ThinkOff = (effort == "none")`** (`chat.go:95-103`, `responses.go:355-358`, `ir.go:897-900`). **`minimal` → `low`**, **`ThinkOff` false**. Gateway sets **`hofund_think_off`** / effort label / **`hofund_effort_requested = (Effort != "")`** from that parse — **not** from **`Effort::None`**.
+**Chat Completions / OpenAI Responses** (no stages B/D on reference path for Anthropic-only helpers): parse sets **`Effort = effortOf(reasoning_effort)`** and **`ThinkOff = (literal effort == "none")`** (`chat.go:95-103`, `responses.go:355-358`, `ir.go:897-900`). Literal **`none` → `low`** with **`ThinkOff` true** — argv carries **`--effort low`** and **`--thinking disabled` together** (`3259-3262`, `975-981`). **`minimal` → `low`**, **`ThinkOff` false** (effort only). Gateway sets **`hofund_think_off`** / effort label / **`hofund_effort_requested = (Effort != "")`** from that parse — **not** from **`Effort::None`**.
 
 **Hofund plugin (R-6c):** Build **`claudeCLIArgs`** from stage **F** rules using gateway metadata (never **`--effort`** from raw **`Effort::None`**). Hash **`turnKey`** at stage **C** for resume/`nextTurn` and stage **E** for idle; use **`hofund_effort_requested`** reflecting **`Effort != ""` at that stage**, not a single collapsed flag from IR alone.
 
@@ -190,7 +192,7 @@ Parked on tools: `parkLongest = 5m`, `parkedMost = 16` (`138-159`).
 - **Rewind** on client cancel 499 (`22-28`; `letGo` paths in `retire` `2117+`).
 - **Effort change** on idle run: non-TUI may `setEffort`; TUI aborts (`1881-1891`).
 
-Hofund implements the same state machine in the plugin. **Idle/resume map key** is the reference `turnKey` SHA-256 (`3140-3146`, `1909-1933`, stored on the run at `2281`), not the owner string alone (`6043-6053` is only the owner prefix inside the hash). **Two effort snapshots matter:** **`nextTurn` / resume lookup** hashes after parse **+ post-parse `outputConfigEffort` only** (stage **C**, before fresh-start **`low`**, `6057-6058`, `1933`); **idle park** hashes after the run’s spawn path including fresh-start classifier **`low`** when that run started anew (stage **E**, `2214`, `6072-6076`). The hash covers owner, model, **`req.Effort != ""` at that snapshot** (**`hofund_effort_requested`**, `3143`), **`ThinkOff`** (**`hofund_think_off`**, `3143`), tool choice, system (billing header stripped), tools JSON, web search, JSON schema, **`cacheIdentity`** (`claude_cache.go:236-247`: **`client-cache` system marks** and **`lean-prompt` flag** only — per-message cache marks are excluded, `15-17`), and message bodies via `hashMessages` (tool ids excluded, `3205-3210`). After a matching idle run is found, apply effort with `setEffort` before the turn (`1881-1891`).
+Hofund implements the same state machine in the plugin. **Idle/resume map key** is the reference `turnKey` SHA-256 (`3140-3146`, `1909-1933`, stored on the run at `2281`), not the owner string alone (`6043-6053` is only the owner prefix inside the hash). **Three hash snapshots matter (do not fold D into C):** **`nextTurn` / resume lookup** uses **`Effort != ""` after stages A+B only** (stage **C**, `6057-6058`, `1933`); **idle park** after a completed turn uses the run’s spawn **`Effort` including stage D when that run started anew** (stage **E**, `2214`, `6072-6076`). A classifier fresh start can therefore park with the **D** effort bit set while the **next** turn’s resume lookup still sees the **C** snapshot — **reference behaviour**, not a hofund simplification. The hash covers owner, model, **`req.Effort != ""` at that snapshot** (**`hofund_effort_requested`**, `3143`), **`ThinkOff`** (**`hofund_think_off`**, `3143`), tool choice, system (billing header stripped), tools JSON, web search, JSON schema, **`cacheIdentity`** (`claude_cache.go:236-247`: **`client-cache` system marks** and **`lean-prompt` flag** only — per-message cache marks are excluded, `15-17`), and message bodies via `hashMessages` (tool ids excluded, `3205-3210`). After a matching idle run is found, apply effort with `setEffort` before the turn (`1881-1891`).
 
 ### 1.8 Concurrency and run lock
 
