@@ -83,6 +83,7 @@ impl CodexUpstream {
         let back = codex_tool_names::codex_tool_names_back(&declared);
         let mut target = Target::new(ProtocolId::OPENAI_RESPONSES, self.endpoints.base.clone())
             .credential(CredentialStyle::Bearer)
+            .chatgpt_codex_zstd(true)
             .headers(headers(access.account.as_deref()))
             .rewrite(Arc::new(move |body| shape::body(body, codex.as_deref())));
         if !back.is_empty() {
@@ -193,11 +194,25 @@ pub(crate) fn headers(account: Option<&str>) -> Vec<(String, String)> {
 /// A `GET` of `url` as Codex CLI sends one for the account: the bearer
 /// token and [`headers`], asking for JSON.
 pub(crate) fn account_call(url: String, access: &Access) -> Call {
+    account_request("GET", url, access)
+}
+
+/// A `POST` with the same bearer, account headers, and JSON accept line.
+pub(crate) fn account_post(url: String, access: &Access) -> Call {
+    account_request("POST", url, access)
+}
+
+fn account_request(method: &'static str, url: String, access: &Access) -> Call {
+    let start = if method == "POST" {
+        Call::post(url)
+    } else {
+        Call::get(url)
+    };
     headers(access.account.as_deref())
         .into_iter()
         .filter(|(name, _)| !name.eq_ignore_ascii_case("accept"))
         .fold(
-            Call::get(url).sensitive_header(
+            start.sensitive_header(
                 "authorization",
                 format!("Bearer {}", secret_text(&access.token)),
             ),

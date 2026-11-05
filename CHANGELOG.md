@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- R-10 round 1: non-streamed gateway replies no longer store TTFT; tokens/s uses
+  the reference `DecodeOf` and `flow_ms` burst rules; `--csv` matches the
+  reference ledger column order with empty cells where hofund does not record a field.
 - Router: a regional model refusal no longer rests the member; the provider is
   asked once more per model, then other accounts on that model are skipped and
   the agent sees a regional note on the final error (R-4 D-71).
@@ -23,6 +26,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (R-4 D-75).
 
 ### Added
+
+- `hofund-plugin-sdk::time::zone`: resolve IANA names, host local zone with a
+  test hook, and map local wall-clock readings to `SystemTime` for subscription
+  reset lines (R-5 fix round 3).
+
+- Claude Pro/Max subscription plugin (R-5 part a): `claude -p /usage` quota
+  windows with scoped model labels, model list from models.dev anthropic catalog
+  plus Claude Code `.claude.json` caches, setup-token (`sk-ant-oat…`) inference-only
+  accounts, CLIProxy-style credential import, pending sign-in idle expiry, and
+  account-directory cleanup on remove; tests `r5_1` through `r5_11` and fix-round
+  tests `r5_12` through `r5_33`.
+
+- Codex subscription parity slice **R-47a**: ignore `auth_mode: apikey` in agent discovery/import;
+  zstd-compressed POST bodies and HTTP/1.1 on the ChatGPT Codex backend wire; Responses image
+  parts on the upstream body; `/wham/rate-limit-reset-credits` read and explicit consume on
+  `Subscription` (`quota_reset_credits`, `consume_quota_reset`).
+- Usage reports (R-10, feature-parity rows 9.4 and 9.9): `hofund usage` period
+  presets, rolling `--days` / `--last`, `--since`, grouped `--group-by` (with
+  `--by` alias), `--csv`, `--json`, `--account`, and `--model`; control
+  `GET /v1/hofund/usage` query filters and additive TTFT / tokens-per-second
+  fields; ledger columns `first_text_ms`, `first_reasoning_ms`, `flow_ms`, and
+  `served_model`; documented speed edge cases in `crates/kernel/usage/src/decode.rs`.
 
 - Subscription plugins for Grok Build, Cursor, and Cline (feature-parity row 3.5,
   part 1): device or browser sign-in, agent auth import where supported, token
@@ -87,6 +112,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Claude subscription (R-5 fix round 3): `/usage` reset times use
+  `hofund-plugin-sdk::time::zone` (zones, yearless dates, time-only resets);
+  the Claude plugin reads `catalog/models.dev.json` beside the data root
+  without `hofund-model-catalog`. Quota holds the account lease and run lock,
+  reads rotated credentials back, and always removes the on-disk credentials
+  file; classify usage errors as auth, quota, transport, or unsupported; build
+  import JSON with the Value API; refuse bare `.credentials.json` imports without
+  an email; expire idle pending sign-in in `complete_sign_in`; daemon sign-out
+  invokes subscription `remove_account`.
 - Provider key spend caps use the key fingerprint carried by the serving
   member, including a provider with one key. Usage rows record that id, and
   routing skips a capped key before failover (D-61).

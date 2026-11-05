@@ -57,10 +57,10 @@ fn u1a_1_old_database_gains_cache_and_reasoning_columns() {
         .summary(Window::All.since_now(), 10)
         .expect("summary");
     assert_eq!(rows.len(), 2);
-    assert_eq!(rows[1].cache_read_tokens, Some(5));
-    assert_eq!(rows[1].cache_write_5m_tokens, Some(7));
-    assert_eq!(rows[1].reasoning_tokens, Some(3));
-    assert!(rows[1].reasoning_hidden);
+    assert_eq!(rows[0].cache_read_tokens, Some(5));
+    assert_eq!(rows[0].cache_write_5m_tokens, Some(7));
+    assert_eq!(rows[0].reasoning_tokens, Some(3));
+    assert!(rows[0].reasoning_hidden);
     assert_eq!(
         totals,
         Totals {

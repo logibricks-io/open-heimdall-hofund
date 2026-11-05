@@ -2,6 +2,7 @@
 
 use std::ffi::OsString;
 use std::path::Path;
+use std::time::Duration;
 
 use hofund_plugin_api::{BodyStream, PluginError, SpawnRequest};
 
@@ -10,6 +11,15 @@ pub(crate) const LOGIN_ARGS: [&str; 3] = ["auth", "login", "--claudeai"];
 
 /// Reports the signed-in account as JSON.
 pub(crate) const STATUS_ARGS: [&str; 3] = ["auth", "status", "--json"];
+
+/// Reads subscription usage without calling a model.
+pub(crate) const USAGE_ARGS: [&str; 2] = ["-p", "/usage"];
+
+/// How long `/usage` gets to finish.
+pub(crate) const USAGE_WAIT: Duration = Duration::from_secs(30);
+
+/// Setup-token runs pass the token in this variable (value is never logged).
+pub(crate) const OAUTH_TOKEN_VAR: &str = "CLAUDE_CODE_OAUTH_TOKEN";
 
 /// Where Claude Code keeps its sign-in and settings.
 pub(crate) const CONFIG_DIR_VAR: &str = "CLAUDE_CONFIG_DIR";
@@ -52,12 +62,19 @@ pub(crate) fn request(
     args: &[&str],
     dir: &Path,
 ) -> Result<SpawnRequest, PluginError> {
-    SpawnRequest::new(
-        program,
-        args.iter().map(OsString::from).collect(),
-        vec![(OsString::from(CONFIG_DIR_VAR), dir.as_os_str().to_owned())],
-        dir,
-    )
+    request_with_extra(program, args, dir, &[])
+}
+
+/// Like [`request`], with extra environment pairs copied into the spawn.
+pub(crate) fn request_with_extra(
+    program: &Path,
+    args: &[&str],
+    dir: &Path,
+    extra: &[(OsString, OsString)],
+) -> Result<SpawnRequest, PluginError> {
+    let mut env = vec![(OsString::from(CONFIG_DIR_VAR), dir.as_os_str().to_owned())];
+    env.extend_from_slice(extra);
+    SpawnRequest::new(program, args.iter().map(OsString::from).collect(), env, dir)
 }
 
 /// The next printed line without colour codes or surrounding space. `None`
@@ -137,7 +154,7 @@ pub(crate) fn strip_ansi(text: &str) -> String {
     let mut chars = text.chars().peekable();
     while let Some(ch) = chars.next() {
         if ch != '\u{1b}' {
-            if !ch.is_control() || ch == '\t' {
+            if !ch.is_control() || ch == '\t' || ch == '\n' {
                 out.push(ch);
             }
             continue;
@@ -165,4 +182,15 @@ pub(crate) fn strip_ansi(text: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_ansi;
+
+    #[test]
+    fn r5_29_strip_ansi_keeps_newlines() {
+        let text = "line one\n\x1b[32mgreen\x1b[0m\nline two";
+        assert_eq!(strip_ansi(text), "line one\ngreen\nline two");
+    }
 }

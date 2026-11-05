@@ -131,6 +131,7 @@ pub struct Target {
     unwrap: Option<Unwrap>,
     state: Arc<hofund_quirks::RequestState>,
     allocation_quota_rate: bool,
+    chatgpt_codex_zstd: bool,
 }
 
 impl Target {
@@ -152,7 +153,15 @@ impl Target {
             unwrap: None,
             state: Arc::new(hofund_quirks::RequestState::default()),
             allocation_quota_rate: false,
+            chatgpt_codex_zstd: false,
         }
+    }
+
+    /// Zstd-compresses POST bodies to `{base_url}/responses` on Codex backend turns.
+    #[must_use]
+    pub const fn chatgpt_codex_zstd(mut self, enabled: bool) -> Self {
+        self.chatgpt_codex_zstd = enabled;
+        self
     }
 
     /// Treats this target's allocated-quota wording as a short rate limit.
@@ -256,6 +265,7 @@ impl fmt::Debug for Target {
             .field("unwrap", &self.unwrap.is_some())
             .field("state", &self.state)
             .field("allocation_quota_rate", &self.allocation_quota_rate)
+            .field("chatgpt_codex_zstd", &self.chatgpt_codex_zstd)
             .finish()
     }
 }
@@ -557,9 +567,18 @@ pub async fn send(
         };
         let body = prepare_body(target, codec, request, prepare, inbound)?;
         let (body, added) = rewritten(target.rewrite.as_ref(), body);
-        let mut call = call(target, codec, secret, url)?;
+        let mut call = call(target, codec, secret, url.clone())?;
         for (name, value) in added {
             call = call.replace_header(&name, value, true);
+        }
+        let mut body = body;
+        if target.chatgpt_codex_zstd {
+            let (compressed, ok) =
+                crate::codex_zstd::maybe_compress_turn("POST", &url, None, &body);
+            if ok {
+                body = compressed;
+                call = call.replace_header("content-encoding", "zstd", false);
+            }
         }
         call.header("content-type", "application/json").bytes(body)
     };

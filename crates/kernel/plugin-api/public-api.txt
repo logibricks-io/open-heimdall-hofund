@@ -371,6 +371,7 @@ DynUpstreamFactory::fn spec (& self) -> & 'static UpstreamSpec
 DynUpstreamFactory::fn validate (& self , raw : & RawTable) -> Result < () , ConfigError >
 DynUpstreamFactory::fn validate_and_build (& self , raw : & RawTable , host : & HostContext ,) -> Result < Arc < dyn UpstreamProvider > , BuildError >
 DynUpstreamFactory::fn validate_and_build_with (& self , raw : & RawTable , host : & HostContext , ctx : & BuildContext ,) -> Result < Arc < dyn UpstreamProvider > , BuildError >
+Extensions
 FileChange
 FileChange #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 FileChange::fn after (& self) -> & [u8]
@@ -431,6 +432,8 @@ HttpHandle::fn pooled_client (& self) -> Option < Arc < dyn Any + Send + Sync > 
 IdError
 IdError #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq, Error)
 IdError::const fn reason (self) -> & 'static str
+ImagePart
+ImageSource
 ImportCtx
 ImportCtx #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 ImportCtx::fn link (& self) -> & str
@@ -805,6 +808,28 @@ QuotaQuery #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 QuotaQuery::fn account (& self) -> Option < & AccountId >
 QuotaQuery::fn for_account (account : AccountId) -> Self
 QuotaQuery::fn new () -> Self
+QuotaResetCard
+QuotaResetCard #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
+QuotaResetCard::const fn expires_at (& self) -> Option < SystemTime >
+QuotaResetCard::const fn with_expires_at (mut self , at : Option < SystemTime >) -> Self
+QuotaResetCard::fn id (& self) -> & str
+QuotaResetCard::fn new (id : impl Into < String >) -> Self
+QuotaResetCredits
+QuotaResetCredits #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
+QuotaResetCredits::const fn count (& self) -> u32
+QuotaResetCredits::const fn new (count : u32) -> Self
+QuotaResetCredits::const fn until (& self) -> Option < SystemTime >
+QuotaResetCredits::const fn until_unread (& self) -> bool
+QuotaResetCredits::const fn with_until (mut self , at : Option < SystemTime >) -> Self
+QuotaResetCredits::const fn with_until_unread (mut self , unread : bool) -> Self
+QuotaResetCredits::fn each (& self) -> & [QuotaResetCard]
+QuotaResetCredits::fn with_each (mut self , each : Vec < QuotaResetCard >) -> Self
+QuotaResetOutcome
+QuotaResetOutcome #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
+QuotaResetOutcome::const fn windows (& self) -> u32
+QuotaResetOutcome::const fn with_windows (mut self , windows : u32) -> Self
+QuotaResetOutcome::fn code (& self) -> & str
+QuotaResetOutcome::fn new (code : impl Into < String >) -> Self
 QuotaWindow
 QuotaWindow #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 QuotaWindow::const fn blocking (& self) -> bool
@@ -949,6 +974,7 @@ Subscription
 Subscription::async fn account_status (& self , account : & AccountId , host : & HostContext ,) -> Result < AccountStatus , PluginError >
 Subscription::async fn cancel_sign_in (& self , ctx : & SignInCtx , host : & HostContext) -> Result < () , PluginError >
 Subscription::async fn complete_sign_in (& self , ctx : & SignInCtx , proof : SignInProof , host : & HostContext ,) -> Result < AccountId , PluginError >
+Subscription::async fn consume_quota_reset (& self , account : & AccountId , credit_id : Option < & str > , host : & HostContext ,) -> Result < QuotaResetOutcome , PluginError >
 Subscription::async fn daily_checkin (& self , account : & AccountId , host : & HostContext ,) -> Result < crate :: CheckinResult , PluginError >
 Subscription::async fn daily_warmup (& self , account : & AccountId , host : & HostContext ,) -> Result < () , PluginError >
 Subscription::async fn discover_agent_sign_in (& self , home : & std :: path :: Path ,) -> Result < Vec < crate :: DiscoveredAgentAccount > , PluginError >
@@ -957,7 +983,9 @@ Subscription::async fn import_accounts (& self , text : & str , host : & HostCon
 Subscription::async fn import_agent_sign_in (& self , home : & std :: path :: Path , reference : & str , host : & HostContext ,) -> Result < AccountId , PluginError >
 Subscription::async fn list_models (& self , account : & AccountId , host : & HostContext ,) -> Result < ModelList , PluginError >
 Subscription::async fn quota (& self , account : & AccountId , host : & HostContext ,) -> Result < Vec < QuotaWindow > , PluginError >
+Subscription::async fn quota_reset_credits (& self , account : & AccountId , host : & HostContext ,) -> Result < Option < QuotaResetCredits > , PluginError >
 Subscription::async fn refresh (& self , account : & AccountId , host : & HostContext) -> Result < () , PluginError >
+Subscription::async fn remove_account (& self , account : & AccountId , host : & HostContext ,) -> Result < () , PluginError >
 Subscription::async fn shutdown (& self , deadline : Duration) -> Result < () , PluginError >
 Subscription::async fn start_sign_in (& self , ctx : & SignInCtx , host : & HostContext ,) -> Result < SignInChallenge , PluginError >
 Subscription::async fn write_agent_sign_in (& self , account : & AccountId , home : & std :: path :: Path , host : & HostContext ,) -> Result < () , PluginError >
@@ -996,6 +1024,7 @@ SurfaceHost::fn protocols (& self) -> & [ProtocolId]
 SurfaceId
 SurfaceId::as_str
 SurfaceId::from_static
+TextPart
 TierId
 TierId #[non_exhaustive] derives(Clone, Debug)
 TierId::const fn from_static (value : & 'static str) -> Self

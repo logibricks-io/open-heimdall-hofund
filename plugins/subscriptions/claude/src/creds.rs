@@ -109,10 +109,13 @@ impl Profile {
         }
     }
 
-    /// The account this profile names. The UUID is stable; the email is the
-    /// fallback when Claude Code did not say it.
+    /// The account this profile names. The UUID is stable; when an organization
+    /// UUID is present it separates Team seats that share one account UUID.
     pub(crate) fn account_id(&self) -> Result<AccountId, PluginError> {
         if let Some(uuid) = self.uuid() {
+            if let Some(org) = non_empty(&self.fields, "organizationUuid") {
+                return Ok(account_id_from(&["claude", org, uuid]));
+            }
             return Ok(account_id_from(&["claude", uuid]));
         }
         let email = self.email().ok_or_else(|| {
@@ -207,7 +210,7 @@ pub(crate) fn write_credentials_cas(
     write_private(path, text)
 }
 
-fn read_capped(path: &Path) -> Option<String> {
+pub(crate) fn read_capped(path: &Path) -> Option<String> {
     let meta = std::fs::metadata(path).ok()?;
     if !meta.is_file() || meta.len() > FILE_CAP {
         return None;
@@ -226,6 +229,18 @@ pub(crate) fn private_dir(dir: &Path) -> Result<(), PluginError> {
             .map_err(|_| PluginError::io("cannot restrict the Claude Code directory"))?;
     }
     Ok(())
+}
+
+/// Writes onboarding metadata Claude Code expects before its first run.
+pub(crate) fn write_onboarded(dir: &Path) -> Result<(), PluginError> {
+    let settings = dir.join(PROFILE_FILE);
+    if settings.exists() {
+        return Ok(());
+    }
+    write_private(
+        &settings,
+        r#"{"hasCompletedOnboarding":true,"numStartups":1}"#,
+    )
 }
 
 /// Writes `text` to `path`, readable by this user only.

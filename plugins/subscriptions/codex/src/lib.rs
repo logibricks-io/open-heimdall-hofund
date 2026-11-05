@@ -12,9 +12,10 @@ use std::sync::{Arc, Mutex};
 
 use hofund_plugin_api::{
     AccountId, AccountStatus, AgentSignIn, BuildError, ConfigError, HostContext, LoopbackSpec,
-    ModelList, PluginError, PluginId, QuotaWindow, RawTable, RedirectHost, Schema, SecretString,
-    SignInChallenge, SignInCtx, SignInFlow, SignInFlowKind, SignInProof, Subscription,
-    SubscriptionFactory, SubscriptionSpec, UpstreamProvider, ValidConfig,
+    ModelList, PluginError, PluginId, QuotaResetCredits, QuotaResetOutcome, QuotaWindow, RawTable,
+    RedirectHost, Schema, SecretString, SignInChallenge, SignInCtx, SignInFlow, SignInFlowKind,
+    SignInProof, Subscription, SubscriptionFactory, SubscriptionSpec, UpstreamProvider,
+    ValidConfig,
 };
 use hofund_plugin_sdk::Contribution;
 use hofund_plugin_sdk::oauth::{Pkce, SecretObject, constant_time_eq, new_state};
@@ -24,6 +25,7 @@ mod device_sign_in;
 mod discover;
 mod limits;
 mod models;
+mod resets;
 mod shape;
 mod sign_in;
 mod tokens;
@@ -335,6 +337,27 @@ impl Subscription for Codex {
         let access =
             tokens::access(host, &self.endpoints, account, tokens::Need::IfExpiring).await?;
         usage::read(host, &self.endpoints, &access).await
+    }
+
+    async fn quota_reset_credits(
+        &self,
+        account: &AccountId,
+        host: &HostContext,
+    ) -> Result<Option<QuotaResetCredits>, PluginError> {
+        let access =
+            tokens::access(host, &self.endpoints, account, tokens::Need::IfExpiring).await?;
+        resets::read(host, &self.endpoints, &access).await
+    }
+
+    async fn consume_quota_reset(
+        &self,
+        account: &AccountId,
+        credit_id: Option<&str>,
+        host: &HostContext,
+    ) -> Result<QuotaResetOutcome, PluginError> {
+        let access =
+            tokens::access(host, &self.endpoints, account, tokens::Need::IfExpiring).await?;
+        resets::consume(host, &self.endpoints, &access, credit_id).await
     }
 
     async fn list_models(
