@@ -68,6 +68,8 @@ mod yaml_edit;
 
 pub use catalog::{Catalog, Compiled, catalog, catalog_from, resolve, resolve_agent_path};
 pub use checkpoint::SidecarCheckpoint;
+#[doc(hidden)]
+pub use checkpoint::test_force_sidecar_restore_fail;
 pub use credential::CREDENTIAL_CHANGE_PREFIX;
 pub use profile::{
     ApplyOutcome, ProfileFields, apply_fields, in_use, is_profile_secret, snapshot_fields,

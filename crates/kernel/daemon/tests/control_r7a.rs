@@ -5,15 +5,16 @@ use std::os::unix::fs::PermissionsExt;
 
 mod support;
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use hofund_agent::Session;
 use hofund_control_proto::{
-    API_VERSION, ConfigResponse, ControlErrorKind, GroupCreateRequest, GroupListResponse,
-    GroupMemberCandidatesResponse, GroupPatchRequest, GroupRestoreRequest, GroupWriteResponse,
-    PresetListResponse, ProfileRenameRequest, ProfileSaveRequest, ProviderCreateRequest,
-    ProviderDeleteRequest, ProviderDeleteResponse, ProviderListResponse, ProviderPatchRequest,
-    ProviderWriteResponse, RouteModelListResponse, ServeRole, StatusResponse,
+    API_VERSION, AgentConnectRequest, ConfigResponse, ControlErrorKind, GroupCreateRequest,
+    GroupListResponse, GroupMemberCandidatesResponse, GroupPatchRequest, GroupRestoreRequest,
+    GroupWriteResponse, PresetListResponse, ProfileRenameRequest, ProfileSaveRequest,
+    ProviderCreateRequest, ProviderDeleteRequest, ProviderDeleteResponse, ProviderListResponse,
+    ProviderPatchRequest, ProviderWriteResponse, RouteModelListResponse, ServeRole, StatusResponse,
     decode_error_envelope, decode_response,
 };
 use hofund_daemon::{ControlRuntime, Running, StartOptions, start_with_options};
@@ -1307,6 +1308,59 @@ fn reseat_sidecar_rollback_fixture() -> String {
     )
 }
 
+fn read_optional_file_bytes(path: &Path) -> Option<Vec<u8>> {
+    std::fs::read(path).ok()
+}
+
+fn agent_connect_sidecar_snapshot(main: &Path) -> BTreeMap<String, Option<Vec<u8>>> {
+    let mut snapshot = BTreeMap::new();
+    snapshot.insert("main".to_owned(), read_optional_file_bytes(main));
+    for suffix in [
+        ".hofund.bak",
+        ".hofund.absent",
+        ".hofund.wrote",
+        ".hofund.credential",
+    ] {
+        let mut name = main.as_os_str().to_os_string();
+        name.push(suffix);
+        snapshot.insert(
+            suffix.to_owned(),
+            read_optional_file_bytes(&PathBuf::from(name)),
+        );
+    }
+    snapshot
+}
+
+async fn connect_claude_for_sidecars(client: &Client) {
+    let (status, body) = client
+        .post(
+            "/v1/hofund/agents/claude-code/connect",
+            &AgentConnectRequest::new(None),
+        )
+        .await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+}
+
+struct RestoreFailGuard;
+
+impl RestoreFailGuard {
+    fn new() -> Self {
+        hofund_agent::test_force_sidecar_restore_fail(true);
+        Self
+    }
+}
+
+impl Drop for RestoreFailGuard {
+    fn drop(&mut self) {
+        hofund_agent::test_force_sidecar_restore_fail(false);
+    }
+}
+
 #[tokio::test]
 async fn r7a_provider_disable_reseat_rolls_back_config_and_first_agent_when_second_write_fails() {
     let scratch = Scratch::new("reseat-sidecar-rollback");
@@ -1328,8 +1382,6 @@ async fn r7a_provider_disable_reseat_rolls_back_config_and_first_agent_when_seco
         "model = \"on-spare\"\nmodel_provider = \"openai\"\n",
     )
     .expect("codex config");
-    std::fs::set_permissions(&codex_config, std::fs::Permissions::from_mode(0o000))
-        .expect("codex inaccessible");
     let config_before = reseat_sidecar_rollback_fixture();
     let session = Session::new(scratch.runtime_dir.join("home")).with_path("");
     let running = support::within(
@@ -1349,6 +1401,10 @@ async fn r7a_provider_disable_reseat_rolls_back_config_and_first_agent_when_seco
     )
     .await;
     let client = Client::new(&running, &scratch);
+    connect_claude_for_sidecars(&client).await;
+    let sidecars_before = agent_connect_sidecar_snapshot(&claude_settings);
+    std::fs::set_permissions(&codex_config, std::fs::Permissions::from_mode(0o000))
+        .expect("codex inaccessible");
     let read = client.config().await;
     let disable = provider_patch(json!({
         "version": API_VERSION,
@@ -1362,10 +1418,10 @@ async fn r7a_provider_disable_reseat_rolls_back_config_and_first_agent_when_seco
         config_after, config_before,
         "config must roll back on reseat failure"
     );
-    let claude_text = std::fs::read_to_string(&claude_settings).expect("claude after failure");
-    assert!(
-        claude_text.contains("on-spare"),
-        "first agent file must roll back, got: {claude_text}"
+    assert_eq!(
+        agent_connect_sidecar_snapshot(&claude_settings),
+        sidecars_before,
+        "first agent main file and connect sidecars must roll back"
     );
     support::shutdown(running).await;
 }
@@ -1396,8 +1452,6 @@ async fn r7a_group_rename_rolls_back_config_and_first_agent_when_second_write_fa
         "model = \"group/old\"\nmodel_provider = \"openai\"\n",
     )
     .expect("codex config");
-    std::fs::set_permissions(&codex_config, std::fs::Permissions::from_mode(0o000))
-        .expect("codex inaccessible");
     let config_before = text.clone();
     let session = Session::new(scratch.runtime_dir.join("home")).with_path("");
     let running = support::within(
@@ -1417,6 +1471,9 @@ async fn r7a_group_rename_rolls_back_config_and_first_agent_when_second_write_fa
     )
     .await;
     let client = Client::new(&running, &scratch);
+    let sidecars_before = agent_connect_sidecar_snapshot(&claude_settings);
+    std::fs::set_permissions(&codex_config, std::fs::Permissions::from_mode(0o000))
+        .expect("codex inaccessible");
     let read = client.config().await;
     let patch = group_patch(json!({
         "version": API_VERSION,
@@ -1430,10 +1487,78 @@ async fn r7a_group_rename_rolls_back_config_and_first_agent_when_second_write_fa
         config_after, config_before,
         "config must roll back on rename failure"
     );
-    let claude_text = std::fs::read_to_string(&claude_settings).expect("claude after failure");
+    assert_eq!(
+        agent_connect_sidecar_snapshot(&claude_settings),
+        sidecars_before,
+        "first agent main file and connect sidecars must roll back"
+    );
+    support::shutdown(running).await;
+}
+
+#[tokio::test]
+async fn r7a_reseat_sidecar_restore_failure_rolls_back_config_and_scrubs_secrets() {
+    let _restore_fail = RestoreFailGuard::new();
+    let scratch = Scratch::new("reseat-restore-fail");
+    let claude_settings = scratch
+        .runtime_dir
+        .join("home")
+        .join(".claude")
+        .join("settings.json");
+    std::fs::create_dir_all(claude_settings.parent().expect("claude parent")).expect("dir");
+    std::fs::write(&claude_settings, "{\"model\": \"on-spare\"}\n").expect("claude settings");
+    let codex_config = scratch
+        .runtime_dir
+        .join("home")
+        .join(".codex")
+        .join("config.toml");
+    std::fs::create_dir_all(codex_config.parent().expect("codex parent")).expect("dir");
+    std::fs::write(
+        &codex_config,
+        "model = \"on-spare\"\nmodel_provider = \"openai\"\n",
+    )
+    .expect("codex config");
+    let config_before = reseat_sidecar_rollback_fixture();
+    let session = Session::new(scratch.runtime_dir.join("home")).with_path("");
+    let running = support::within(
+        "start daemon for restore failure",
+        support::REQUEST,
+        start_with(
+            &scratch,
+            &config_before,
+            options_with(
+                &scratch,
+                StartOptions {
+                    agent_session: Some(session),
+                    ..StartOptions::default()
+                },
+            ),
+        ),
+    )
+    .await;
+    let client = Client::new(&running, &scratch);
+    std::fs::set_permissions(&codex_config, std::fs::Permissions::from_mode(0o000))
+        .expect("codex inaccessible");
+    let read = client.config().await;
+    let disable = provider_patch(json!({
+        "version": API_VERSION,
+        "expected_revision": read.disk_revision,
+        "enabled": false,
+    }));
+    let (status, body) = client.patch("/v1/hofund/providers/spare", &disable).await;
+    assert_eq!(status, reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+    let config_after = std::fs::read_to_string(scratch.path()).expect("config after");
+    assert_eq!(
+        config_after, config_before,
+        "config must roll back when sidecar restore fails"
+    );
+    let text = String::from_utf8_lossy(&body);
     assert!(
-        claude_text.contains("group/old"),
-        "first agent file must roll back, got: {claude_text}"
+        !text.contains(SECRET),
+        "response must not contain provider secret"
+    );
+    assert!(
+        !text.contains(&client.token),
+        "response must not contain gateway bearer token"
     );
     support::shutdown(running).await;
 }

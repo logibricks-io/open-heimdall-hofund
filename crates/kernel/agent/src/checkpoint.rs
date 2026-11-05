@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::AgentError;
 use crate::credential::CredentialUndo;
@@ -14,6 +15,15 @@ use crate::store::{
 pub struct SidecarCheckpoint {
     prior: BTreeMap<PathBuf, Option<Vec<u8>>>,
     credentials: Vec<CredentialUndo>,
+}
+
+static FORCE_RESTORE_FAIL: AtomicBool = AtomicBool::new(false);
+
+/// Test-only toggle for integration tests that exercise restore failure paths.
+#[doc(hidden)]
+#[allow(dead_code)]
+pub fn test_force_sidecar_restore_fail(enable: bool) {
+    FORCE_RESTORE_FAIL.store(enable, Ordering::SeqCst);
 }
 
 impl SidecarCheckpoint {
@@ -63,6 +73,9 @@ impl SidecarCheckpoint {
     ///
     /// Returns [`AgentError`] when a path cannot be restored.
     pub fn restore(self) -> Result<(), AgentError> {
+        if FORCE_RESTORE_FAIL.load(Ordering::SeqCst) {
+            return Err(AgentError::message("injected sidecar restore failure"));
+        }
         for undo in self.credentials.into_iter().rev() {
             undo.restore()?;
         }
