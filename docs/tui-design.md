@@ -52,7 +52,7 @@ Empty machine: the reference quits with "no supported agents found" (`tui.go:Run
 | Key | Action | Control |
 |---|---|---|
 | `j`/`k`, `up`/`down` | Row | `GET /v1/hofund/providers` |
-| `enter`, space | Model list. `enter` toggles a model on or off and the list stays open (`openProviderModels`). The TUI refuses to turn off the last exposed model before any request (`pages.go` toggle) | `GET /v1/hofund/providers/{id}/models` (`ModelEntry` has id and labels only; no on/off flag). On/off marks come from whether each id appears in `GET .../picks`. PUT uses `expected_picks_revision`. Picks alone omit switched-off models; the picker needs both. `PicksForm::Replace` may send an empty id list; `422` with `empty_result` applies only to `PicksForm::Edit` when a removal leaves no exposed model (`models.rs` `next_picks`) |
+| `enter`, space | Model list. `enter` toggles a model on or off and the list stays open (`openProviderModels`). The TUI refuses to turn off the last **enabled** id before PUT (`pages.go`) | `GET /v1/hofund/providers/{id}/models` plus `GET/PUT .../picks` (`expected_picks_revision`). **Enabled set:** when `picks` is non-empty, enabled ids are `picks`; when empty, enabled ids are **`default_exposed`** (listed chat models only: not image, video, or router; `models.rs`). Other listed ids show off. Toggle updates the enabled set locally; **Replace** sends the full enabled id list. Server **Replace** with an empty list clears explicit picks and agents fall back to **`default_exposed`**, never all-off. `422` **`empty_result`** applies only to **`PicksForm::Edit`**, not Replace |
 | picker `ctrl+r` | Fetch that provider's models again | `POST .../models/refresh` |
 | `e` | Replace one upstream key. Password echo. Refused only for a signed-in **account** row and for the **google-vertex** preset (`IsVertex`; credentials live in options). Other presets, including local presets that need no key, still open the password ask (`pages.go`) | `GET .../keys` for fingerprints (`id`, `masked`, `on`). `POST .../keys` with `ProviderKeyAction::Replace` (`provider_keys.rs`): required `key_id` (fingerprint from GET) and exactly one new credential in `keys`. One key: replace it. Several keys: the user picks the fingerprint in a picker first; the TUI never guesses. The new secret goes only in the request body, never in a toast, status line, or log |
 | `w` | Address (`pages.go` `w`). Opens the address ask only for a **local** preset (`KindLocal` → `localAddressAsk`), a custom provider with `customURLs`, or a preset that declares an **endpoint** (`endpointAsk`). **Vertex** (`IsVertex`) and presets **without** an endpoint only flash a hint (project/location or vendor URL); they do not PATCH `base_url`. Presets with **`needs_project`** (G-3) change project through add/`a`, not `w` | Gap G-2 `PATCH … base_url` when the ask applies |
@@ -67,19 +67,20 @@ Empty machine: the reference quits with "no supported agents found" (`tui.go:Run
 | `d` `d` | Delete provider (`provider.Delete` via `reseatCmd`) | Gap G-2 `DELETE` with reseat in the same daemon write, not a follow-up `POST .../model`. On an account-type provider this hides the provider row; subscription sign-out stays Accounts `d d` → G-6 remove only |
 | `r` | Reload | GET |
 
-Row text the reference draws in one pass (`viewProviders`). G-1 adds display fields the list GET still omits (`name`, `enabled`, `family`, `listed`, `list_error`, and the account or key columns below). `ProviderSummary.ready` **already exists** (`control-proto`); the daemon sets it to `planned.is_ok() && !resting` (`control.rs`). Do not add `ready` again in G-1 and do not use it for the status column.
+Row text the reference draws in one pass (`viewProviders`). G-1 adds display fields the list GET still omits (`name`, `enabled`, `family`, `listed`, `list_error`, account columns, optional **vertex_address_ready** / impersonation hint, and `signed_out` with the semantics below). `ProviderSummary.ready` **already exists** (`control-proto`); the daemon sets it to `planned.is_ok() && !resting` (`control.rs`). Do not add `ready` again in G-1 and do not use it for the status column.
 
-Derive the **status** column first-match-wins (same order as the reference):
+Derive the **status** column first-match-wins (aligned with `viewProviders`, `Ready`, `keyOptional`, `SignedOut`):
 
 1. `enabled: false` → switched off
-2. signed-in account (`account_label` set) and `signed_out` → signed out (show `account_label`)
-3. signed-in account with `account_label` → that label
-4. preset `needs_project` (G-3) and required project **not** set → needs a project
-5. `key_masked` non-empty → show the masked key
-6. **configuration complete** and `key_masked` empty → no key needed
-7. else → no key
+2. account row and `signed_out` → signed out (show `account_label`). **`signed_out`** matches the reference: account provider, at least one login that is on or active, and every such login has lapsed (`logins.go:SignedOut`)
+3. account row with `account_label` → that label
+4. Vertex (or preset **`needs_project`**) and the Vertex **base URL cannot be formed** (missing or invalid project/location, including mismatch) → needs a project
+5. Vertex row whose project and location **do** form an address → **Google credentials**, plus ` as <impersonate>` when impersonation is set. This branch shows **no masked key** even if a key exists; never show the credentials path in the column
+6. `key_masked` non-empty → show the masked key
+7. **`key_not_required`** is true → **no key needed**. Derive **`key_not_required`** like the reference **`keyOptional`**: preset **`needs_key: false`** (G-3 `NoKey`), or the provider **`base_url`** host is localhost, `127.0.0.1`, `0.0.0.0`, private, loopback, link-local, `100.64/10` (CGNAT), or ends in `.local` (`provider.go:keyOptional`, `ownNetwork`)
+8. else → **no key**
 
-**Configuration complete** is derived in the TUI from `key_masked`, `account_label`, `signed_out`, the preset's `needs_project`, and whether the project option is set (G-1 may expose `project` or an equivalent non-secret hint for display; do not overload `ready`). Multi-key replace still uses `GET .../keys` per id when needed. Do not feed this page from `GET /config` text. That body can contain credentials.
+Multi-key replace still uses `GET .../keys` per id when needed. Do not feed this page from `GET /config` text. That body can contain credentials.
 
 ### Routing (page 3) — R-17
 
@@ -124,7 +125,7 @@ Fallback in the reference group screen is "the first member that can take the re
 | `c` | Check in every account that has a daily check-in (`checkinCmd`) | `GET /v1/hofund/checkins`, then `POST /v1/hofund/checkins/run` per row `{subscription, account}`. One toast joins the `outcome` and `detail` lines |
 | `r` | Drop quotas and read again | `GET /v1/hofund/quotas` with no `kept=1` |
 | open page | Asked read unless the last ask was under 30s (`quotasOpenGap`). While a read is in flight, retry every 1.5s, 20 times (`gotQuotas`) | Same GET. `standings` is not the card list. Cards are `data` |
-| sparkline, agent table, model table | Built from the summary (`usageBlock`) | Row `GET /v1/hofund/usage?period=…` is capped at **10_000** newest rows (`USAGE_ROW_LIMIT`, `control.rs`); `rows_truncated` means older rows were omitted while **`totals` still cover the whole period**. The **agents table** uses **`by=agent` only** (`UsageQuery` breakdown). `by=provider-key` and `by=gateway-key` are complete groupings elsewhere (CLI); this page does not draw them. The **sparkline** and **by-model table** use only Gap **G-11** (daily series and per-model totals). When `rows_truncated` is true, mark those two blocks **incomplete** |
+| sparkline, agent table, model table | Built from the summary (`usageBlock`) | **`rows_truncated`** on `GET /v1/hofund/usage?period=…` applies only to the capped **row list** (**10_000** newest, `USAGE_ROW_LIMIT`, `control.rs`); **`totals`** and **`by=agent`** breakdown still cover the whole period. The **agents table** uses **`by=agent` only**. `by=provider-key` and `by=gateway-key` are CLI-only groupings; this page does not draw them. The **sparkline** and **by-model table** use whole-period **G-11** data (daily series and model totals), like totals and breakdown; **`rows_truncated` does not mark them incomplete** |
 | currency | `fmtCost` | `UsageResponse.currency` is `USD` or `CNY` with `cny_per_usd`. Settings stores `usd` or `cny` (G-5) |
 | alerts | Not a usage key in the reference. The plan puts alerts on this page | `GET /v1/hofund/quotas/alerts`, `POST /v1/hofund/quotas/alerts/settings`. Also a `quota_alert` event toast |
 | direct calls | Second block, "not through" the gateway, from session files | Not in `GET /usage`. Shown when R-30 stats exist. R-15 ships the gateway block alone |
@@ -161,12 +162,12 @@ Sections, in order: instructions, MCP servers, skills, MCP servers found in agen
 |---|---|
 | `j`/`k`, `up`/`down` | Row; list window keeps at least **4** body rows visible (`visible := max(4, h-6)`, `library.go:spend`) |
 | `enter`, space | Agent toggles for instructions, MCP, skill, RTK (`openLibAgents`). Found rows explain `i` and `d` |
-| `a` | Add MCP server or skills (`openLibAdd`, `probeCmd`) |
-| `e` | Edit instructions in `$EDITOR` or `vi` (`editInstructions`), or retype an MCP server (`openServer`) |
-| `u` | Update one skill from its source |
-| `i` | Bring a found server or skill into the library. Refused when the agent owns it |
+| `a` | Add MCP server or skills (`openLibAdd`, `probeCmd`). Spec only; gated until security review |
+| `e` | Edit instructions in `$EDITOR` or `vi` (`editInstructions`), or retype an MCP server (`openServer`). Spec only; gated until security review |
+| `u` | Update one skill from its source. Spec only; gated until security review |
+| `i` | Bring a found server or skill into the library. Refused when the agent owns it. Spec only; gated until security review |
 | `d` `d` | Remove from the library and from agents. Found rows say backups keep the files. Spec only; gated per Library section until security review |
-| `s` | Write the library into agents (`library.Sync`) |
+| `s` | Write the library into agents (`library.Sync`). Spec only; gated until security review |
 | `r` | Reload |
 | footer path | Directory from the view (`viewLibrary`) |
 
@@ -255,7 +256,7 @@ Event application, without a refetch when the payload is enough:
 | `quota_alert` | Toast `title` and `body` |
 | `token_rotated` | Re-read the token file (`hofund-secrets`; discovery JSON has endpoints only, no token). Drop the event stream and reconnect with the new bearer. `TokenRotatedEvent` is empty |
 | `resync_required` | Reopen the stream with no cursor |
-| `request_started`, `request_finished` | Logs page and Usage sparkline only |
+| `request_started`, `request_finished` | Logs page only. On Usage, **`request_finished`** may trigger a **G-11** refetch for the sparkline; it does not edit the sparkline from row data directly |
 
 ### Layout
 
@@ -281,7 +282,7 @@ Every new JSON body has `"version": 1` and `deny_unknown_fields` on requests. Re
 
 ### G-1 Provider list fields
 
-Extend `ProviderSummary` additively: `name`, `enabled` (default true), `family`, `base_url`, `preset`, `account_label`, `signed_out`, `listed` (default true), `list_error`, `key_masked`, and when the preset needs it a non-secret **project** (or equivalent) hint so the TUI can tell project-not-set without overloading `ready`. **`ready` is already on `ProviderSummary`**; keep its daemon meaning (`planned.is_ok() && !resting`). No secret. `GET /v1/hofund/providers` returns the new fields. Omitting a new field means the old meaning. Status text follows the Providers section; it does not read `ready`.
+Extend `ProviderSummary` additively: `name`, `enabled` (default true), `family`, `base_url`, `preset`, `account_label`, `signed_out` (daemon semantics above), `listed` (default true), `list_error`, `key_masked`, and when Vertex needs it non-secret hints that the TUI can tell whether the Vertex base URL is formable and whether impersonation is set (without showing credentials paths). **`ready` is already on `ProviderSummary`**; keep its daemon meaning (`planned.is_ok() && !resting`). No secret. Status text follows the Providers section; it does not read `ready`. The TUI derives **`key_not_required`** locally from G-3 `needs_key` and `base_url` host rules matching `keyOptional`.
 
 ### G-2 Provider writes
 
@@ -366,7 +367,7 @@ Additive on `StatusResponse`: `serves` (`tui`, `serve`, `desktop`, or empty) and
 
 ### G-11 Usage period summary
 
-Gap for the Usage page sparkline and by-model table. `GET /usage` row caps and `rows_truncated` behavior stay as today (`control.rs`, `USAGE_ROW_LIMIT`). Add a period-scoped summary (shape TBD) with at least a daily **series** for the sparkline and **by-model** totals for the model table. The Usage page agents table uses **`by=agent` only**; other breakdown dimensions stay CLI-only unless a later page asks for them.
+Gap for the Usage page sparkline and by-model table. `GET /usage` **`rows_truncated`** still describes only the row list cap (`USAGE_ROW_LIMIT`). Add a period-scoped summary (shape TBD) with a daily **series** and **by-model** totals covering the **whole period**, independent of row truncation. The Usage page agents table uses **`by=agent` only**.
 
 ## 4. Gateway handoff
 
