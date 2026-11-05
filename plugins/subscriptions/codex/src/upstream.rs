@@ -34,6 +34,7 @@ pub(crate) struct CodexUpstream {
     host: HostContext,
     endpoints: Arc<Endpoints>,
     prompts: Arc<Prompts>,
+    skip_keychain: bool,
 }
 
 impl CodexUpstream {
@@ -42,12 +43,14 @@ impl CodexUpstream {
         host: HostContext,
         endpoints: Arc<Endpoints>,
         prompts: Arc<Prompts>,
+        skip_keychain: bool,
     ) -> Self {
         Self {
             account,
             host,
             endpoints,
             prompts,
+            skip_keychain,
         }
     }
 
@@ -131,8 +134,14 @@ impl UpstreamProvider for CodexUpstream {
         inbound: ProtocolId,
     ) -> Result<Completion, PluginError> {
         shape(&mut request);
-        let access =
-            tokens::access(&self.host, &self.endpoints, &self.account, Need::IfExpiring).await?;
+        let access = tokens::access(
+            &self.host,
+            &self.endpoints,
+            &self.account,
+            Need::IfExpiring,
+            self.skip_keychain,
+        )
+        .await?;
         match self.send(&access, request.clone(), inbound).await {
             Err(error) if error.status() == Some(401) && token_expired(error.message()) => {
                 // The backend called the token expired before its `exp`:
@@ -142,6 +151,7 @@ impl UpstreamProvider for CodexUpstream {
                     &self.endpoints,
                     &self.account,
                     Need::Replace(access.token),
+                    self.skip_keychain,
                 )
                 .await?;
                 self.send(&renewed, request, inbound).await

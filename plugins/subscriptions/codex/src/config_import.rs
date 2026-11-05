@@ -144,12 +144,11 @@ fn string_field(table: &Map<String, Value>, key: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// Gateway-written model catalog file name under a Codex home (skip importing its models).
+pub(crate) const GATEWAY_MODEL_CATALOG: &str = "hofund-models.json";
+
 fn gateway_catalog_in_codex_home(home: &Path) -> PathBuf {
-    let name = format!(
-        "{}-models.json",
-        core::str::from_utf8(&[109, 97, 103, 112, 105, 101]).expect("ascii")
-    );
-    home.join(".codex").join(name)
+    home.join(GATEWAY_MODEL_CATALOG)
 }
 
 fn import_models(config_path: &Path, catalog_path: Option<&str>) -> Vec<String> {

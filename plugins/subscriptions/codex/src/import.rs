@@ -43,11 +43,14 @@ pub(crate) async fn import_accounts(
     let mut ids = Vec::new();
     let mut seen_refresh = std::collections::HashSet::new();
     for row in rows {
-        if let Some(message) = row.error {
-            return Err(PluginError::config(message));
+        if row.error.is_some() {
+            continue;
+        }
+        if row.refresh_token.is_empty() {
+            continue;
         }
         if !seen_refresh.insert(row.refresh_token.clone()) {
-            return Err(PluginError::config("in the files twice"));
+            continue;
         }
         ids.push(store_row(host, token_url, row).await?);
     }
@@ -199,7 +202,7 @@ fn parse_sub2api(entry: &Map<String, Value>) -> Result<LoginRow, PluginError> {
         row.error = Some(format!("a {platform} account, not Codex's"));
     } else if typ == "apikey" {
         row.error = Some("an API key, not a sign-in; add it as a key instead".to_owned());
-    } else if typ != "oauth" && !typ.is_empty() {
+    } else if typ != "oauth" {
         row.error = Some("not a Codex sign-in".to_owned());
     } else if row.refresh_token.is_empty() && row.access_token.is_some() {
         row.error = Some(ACCESS_ONLY.to_owned());
@@ -373,6 +376,59 @@ fn cmp_str(primary: String, secondary: Option<String>, fallback: String) -> Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn r47b_import_sub2api_rejects_empty_type() {
+        let text = r#"{"platform":"openai","credentials":{"refresh_token":"r1","access_token":"a","id_token":"x"}}"#;
+        let value: Value = hofund_plugin_sdk::json::from_str(text).expect("json");
+        let rows = collect_rows(&value).expect("rows");
+        assert_eq!(rows.len(), 1);
+        assert!(
+            rows[0]
+                .error
+                .as_deref()
+                .is_some_and(|msg| msg.contains("not a Codex sign-in"))
+        );
+    }
+
+    #[test]
+    fn r47b_import_skips_duplicate_refresh_in_one_file() {
+        let text = r#"[{"type":"codex","refresh_token":"same","email":"a@test"},
+            {"type":"codex","refresh_token":"same","email":"b@test"},
+            {"type":"codex","refresh_token":"unique","email":"c@test"}]"#;
+        let value: Value = hofund_plugin_sdk::json::from_str(text).expect("json");
+        let rows = collect_rows(&value).expect("rows");
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].refresh_token, "same");
+        assert_eq!(rows[2].refresh_token, "unique");
+    }
+
+    #[test]
+    fn r47b_import_reads_cliproxyapi_codex_shape() {
+        let text = r#"{"type":"codex","id_token":"x","access_token":"y","refresh_token":"r-cpa","account_id":"acct-cpa","email":"cpa@example.com"}"#;
+        let value: Value = hofund_plugin_sdk::json::from_str(text).expect("json");
+        let rows = collect_rows(&value).expect("rows");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].email, "cpa@example.com");
+        assert_eq!(rows[0].refresh_token, "r-cpa");
+        assert!(rows[0].error.is_none());
+    }
+
+    #[test]
+    fn r47b_import_reads_cockpit_and_team_dual_seats() {
+        let cockpit = r#"[{"id":"1","type":"codex","email":"cockpit@example.com","id_token":"x","access_token":"y","refresh_token":"r-cockpit","account_id":"acct-cockpit"}]"#;
+        let seat1 = r#"{"OPENAI_API_KEY":null,"tokens":{"id_token":"x","access_token":"y","refresh_token":"r-seat1","account_id":"acct-t1"},"type":"codex"}"#;
+        let seat2 = r#"{"OPENAI_API_KEY":null,"tokens":{"id_token":"x","access_token":"y","refresh_token":"r-seat2","account_id":"acct-t2"},"type":"codex"}"#;
+        for text in [cockpit, seat1, seat2] {
+            let value: Value = hofund_plugin_sdk::json::from_str(text).expect("json");
+            let rows = collect_rows(&value).expect("rows");
+            assert!(
+                rows.iter()
+                    .any(|row| row.error.is_none() && !row.refresh_token.is_empty()),
+                "expected a row from {text}"
+            );
+        }
+    }
 
     #[test]
     fn r47b_import_rejects_claude_swap_shape() {

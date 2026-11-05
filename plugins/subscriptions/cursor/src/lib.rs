@@ -383,6 +383,7 @@ impl Subscription for Cursor {
     async fn discover_agent_sign_in(
         &self,
         home: &Path,
+        _host: &HostContext,
     ) -> Result<Vec<hofund_plugin_api::DiscoveredAgentAccount>, PluginError> {
         discover::list(home)
     }

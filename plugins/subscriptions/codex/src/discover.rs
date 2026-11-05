@@ -18,8 +18,21 @@ pub(crate) const REFERENCE: &str = "agent-sign-in";
 const FILE_CAP: u64 = 1024 * 1024;
 
 /// Lists the account named in `home`, when a sign-in is present.
-pub(crate) fn list(home: &Path) -> Result<Vec<DiscoveredAgentAccount>, PluginError> {
-    let Some(parsed) = read_auth_file(home)? else {
+pub(crate) async fn list(
+    home: &Path,
+    host: &HostContext,
+    skip_keychain: bool,
+) -> Result<Vec<DiscoveredAgentAccount>, PluginError> {
+    list_with_keychain(home, host, skip_keychain, None).await
+}
+
+async fn list_with_keychain(
+    home: &Path,
+    host: &HostContext,
+    skip_keychain: bool,
+    fake: Option<&crate::store::FakeKeychain>,
+) -> Result<Vec<DiscoveredAgentAccount>, PluginError> {
+    let Some(parsed) = read_auth_with_store(home, host, skip_keychain, fake).await? else {
         return Ok(Vec::new());
     };
     let identity = sign_in::identity(&parsed.id_token)?;
@@ -39,7 +52,7 @@ pub(crate) async fn import(
             "unknown agent sign-in reference `{reference}`"
         )));
     }
-    let Some(parsed) = read_auth_with_store(home, host, skip_keychain).await? else {
+    let Some(parsed) = read_auth_with_store(home, host, skip_keychain, None).await? else {
         return Err(PluginError::auth(
             "Codex has no readable sign-in in that directory",
         ));
@@ -48,7 +61,7 @@ pub(crate) async fn import(
     if host.accounts().secret(&identity.id).await?.is_some() {
         return Ok(identity.id);
     }
-    let secret = secret_from_parsed(&parsed, host)?;
+    let secret = secret_from_parsed(&parsed, host, home)?;
     let account = host
         .accounts()
         .account(identity.id.clone(), identity.label)?;
@@ -62,32 +75,13 @@ struct ParsedAuth {
     refresh_token: Option<SecretString>,
 }
 
-fn read_auth_file(home: &Path) -> Result<Option<ParsedAuth>, PluginError> {
-    let path = home.join("auth.json");
-    let meta = match std::fs::metadata(&path) {
-        Ok(meta) => meta,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            if let Err(StoreError::ConfigParse(message)) = crate::store::read_store_setting(home) {
-                return Err(PluginError::config(message));
-            }
-            return Ok(None);
-        }
-        Err(_) => return Ok(None),
-    };
-    if !meta.is_file() || meta.len() > FILE_CAP {
-        return Ok(None);
-    }
-    let text = std::fs::read_to_string(&path)
-        .map_err(|_| PluginError::io("cannot read Codex auth.json"))?;
-    Ok(parse_auth_text(&text))
-}
-
 async fn read_auth_with_store(
     home: &Path,
     host: &HostContext,
     skip_keychain: bool,
+    fake: Option<&crate::store::FakeKeychain>,
 ) -> Result<Option<ParsedAuth>, PluginError> {
-    let reader = StoreReader::new(Some(host), skip_keychain, None);
+    let reader = StoreReader::new(Some(host), skip_keychain, fake);
     let bytes = match reader.read_login(home, false).await {
         Ok((bytes, _)) => bytes,
         Err(StoreError::SignedOut) => return Ok(None),
@@ -135,6 +129,7 @@ fn token_field(tokens: &Map<String, Value>, key: &str) -> Option<SecretString> {
 fn secret_from_parsed(
     parsed: &ParsedAuth,
     host: &HostContext,
+    home: &Path,
 ) -> Result<SecretString, PluginError> {
     let identity = sign_in::identity(&parsed.id_token)?;
     let refresh = parsed
@@ -147,6 +142,7 @@ fn secret_from_parsed(
         .with_secret("access_token", &parsed.access_token)
         .with_secret("refresh_token", refresh)
         .with_text("account_id", &identity.chatgpt_account)
+        .with_text("codex_home", &home.to_string_lossy())
         .with_number("last_refresh", tokens::unix_seconds(host.clock().now()));
     Ok(blob.to_secret())
 }
@@ -201,8 +197,73 @@ mod tests {
         fs::write(home.join("auth.json"), text).expect("auth");
     }
 
-    fn list_sync(home: &Path) -> Vec<DiscoveredAgentAccount> {
-        list(home).expect("list")
+    fn test_host(dir: &tempfile::TempDir) -> hofund_kit_subscription::TestHost {
+        hofund_kit_subscription::TestHost::open_for(
+            hofund_plugin_api::PluginKind::Subscription,
+            hofund_plugin_api::PluginId::from_static("codex"),
+            dir.path(),
+        )
+    }
+
+    fn list_sync(home: &Path, dir: &tempfile::TempDir) -> Vec<DiscoveredAgentAccount> {
+        let host = test_host(dir);
+        list_at(home, host.context(), false)
+    }
+
+    fn list_at(
+        home: &Path,
+        host: &HostContext,
+        skip_keychain: bool,
+    ) -> Vec<DiscoveredAgentAccount> {
+        hofund_kit_subscription::block_on(list(home, host, skip_keychain)).expect("list")
+    }
+
+    #[test]
+    fn r47b_r1_discover_lists_keyring_only_home() {
+        use crate::store::{CodexKeychain, FakeKeychain, KEYCHAIN_SERVICE, keychain_account};
+
+        let dir = scratch("keyring-discover");
+        let home = dir.path().join("codex-home");
+        std::fs::create_dir_all(&home).expect("home");
+        std::fs::write(
+            home.join("config.toml"),
+            "cli_auth_credentials_store = \"keyring\"\n",
+        )
+        .expect("config");
+        let id = id_token("keyring@example.test", "sub-kr", "acct-kr", "plus");
+        let auth = format!(
+            r#"{{"auth_mode":"chatgpt","tokens":{{"access_token":"access-kr","refresh_token":"refresh-kr","id_token":"{id}"}}}}"#
+        );
+        let host = test_host(&dir);
+        let fake = FakeKeychain::default();
+        fake.set(&keychain_account(&home), auth.as_bytes());
+        assert!(
+            hofund_kit_subscription::block_on(read_auth_with_store(
+                &home,
+                host.context(),
+                false,
+                Some(&fake),
+            ))
+            .expect("read")
+            .is_some()
+        );
+        assert_eq!(
+            list_at(&home, host.context(), false).len(),
+            0,
+            "list without fake cannot read keychain-only home"
+        );
+        let rows = hofund_kit_subscription::block_on(list_with_keychain(
+            &home,
+            host.context(),
+            false,
+            Some(&fake),
+        ))
+        .expect("discover path");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].label(), "keyring@example.test");
+        let _ = fake
+            .find(KEYCHAIN_SERVICE, &keychain_account(&home))
+            .expect("still there");
     }
 
     #[test]
@@ -210,13 +271,13 @@ mod tests {
         let dir = scratch("large");
         let home = dir.path().join("codex-home");
         write_auth(&home);
-        assert_eq!(list_sync(&home).len(), 1, "valid file is listed");
+        assert_eq!(list_sync(&home, &dir).len(), 1, "valid file is listed");
         let path = home.join("auth.json");
         let mut data = fs::read(&path).expect("read");
         let cap = usize::try_from(FILE_CAP).expect("cap");
         data.resize(cap + 1, b' ');
         fs::write(&path, data).expect("pad");
-        let rows = list_sync(&home);
+        let rows = list_sync(&home, &dir);
         assert!(rows.is_empty(), "valid JSON over the size cap is ignored");
     }
 
@@ -250,7 +311,7 @@ mod tests {
             hofund_plugin_api::PluginId::from_static("codex"),
             dir.path(),
         );
-        let rows = list_sync(&home);
+        let rows = list_sync(&home, &dir);
         let id = rows[0].id().clone();
         let marker = SecretObject::new()
             .with_text("account_id", "marker-unchanged")
@@ -301,7 +362,7 @@ mod tests {
         );
         fs::write(home.join("auth.json"), text).expect("auth");
         assert!(
-            list_sync(&home).is_empty(),
+            list_sync(&home, &dir).is_empty(),
             "API-key mode is not a ChatGPT account"
         );
     }
@@ -332,7 +393,7 @@ mod tests {
         let dir = scratch("list");
         let home = dir.path().join("codex-home");
         write_auth(&home);
-        let rows = list_sync(&home);
+        let rows = list_sync(&home, &dir);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].label(), "u@example.test");
         let text = format!("{rows:?}");

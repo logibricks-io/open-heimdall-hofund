@@ -82,6 +82,7 @@ pub(crate) async fn access(
     endpoints: &Endpoints,
     account: &AccountId,
     need: Need,
+    skip_keychain: bool,
 ) -> Result<Access, PluginError> {
     let secret = host
         .accounts()
@@ -108,6 +109,7 @@ pub(crate) async fn access(
         endpoints.token.clone(),
         account.clone(),
         token,
+        skip_keychain,
     );
     detached(host.scheduler(), "codex-refresh", job).await
 }
@@ -119,8 +121,9 @@ pub(crate) async fn rotate_for_test(
     token_url: String,
     account: AccountId,
     stale: SecretString,
+    skip_keychain: bool,
 ) -> Result<Access, PluginError> {
-    rotate(host, token_url, account, stale).await
+    rotate(host, token_url, account, stale, skip_keychain).await
 }
 
 /// Refreshes `account` unless another caller already replaced `stale`.
@@ -129,6 +132,7 @@ async fn rotate(
     token_url: String,
     account: AccountId,
     stale: SecretString,
+    skip_keychain: bool,
 ) -> Result<Access, PluginError> {
     let lease = host.accounts().lease(&account, LEASE_WAIT).await?;
     let blob = stored(lease.secret())?;
@@ -176,7 +180,7 @@ async fn rotate(
     lease.commit(None, next.to_secret()).await?;
     if let Some(home) = next.text("codex_home") {
         let path = std::path::PathBuf::from(home);
-        crate::agent_sign_in::persist_refresh(&path, &host, false, &next).await;
+        crate::agent_sign_in::persist_refresh(&path, &host, skip_keychain, &next, &stale).await;
     }
     Ok(Access {
         token: set.access().clone(),

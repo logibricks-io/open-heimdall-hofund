@@ -334,8 +334,9 @@ pub trait Subscription: Send + Sync + 'static {
     async fn discover_agent_sign_in(
         &self,
         home: &std::path::Path,
+        host: &crate::HostContext,
     ) -> Result<Vec<crate::DiscoveredAgentAccount>, PluginError> {
-        let _ = home;
+        let _ = (home, host);
         Ok(Vec::new())
     }
 

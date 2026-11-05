@@ -9,6 +9,11 @@ use hofund_plugin_api::{HostContext, PluginError};
 use hofund_plugin_sdk::digest::sha256;
 use hofund_plugin_sdk::json::{Map, Value};
 
+#[cfg(target_os = "macos")]
+use crate::security_io::{
+    SecurityExit, append_capped, classify_security_exit, decode_keychain_password,
+};
+
 pub(crate) const KEYCHAIN_SERVICE: &str = "Codex Auth";
 
 const FILE_CAP: u64 = 1024 * 1024;
@@ -194,12 +199,18 @@ impl<'a> StoreReader<'a> {
         home: &Path,
         fresh: bool,
     ) -> Result<(Vec<u8>, StoreLocation), StoreError> {
-        let setting = read_store_setting(home)?;
+        let config = home.join("config.toml");
         let loc = StoreLocation {
             home: home.to_path_buf(),
             keychain: false,
         };
-        let config = home.join("config.toml");
+        let setting = match read_store_setting(home) {
+            Ok(setting) => setting,
+            Err(StoreError::ConfigParse(_)) => {
+                return read_auth_file(&loc.auth_path()).map(|bytes| (bytes, loc));
+            }
+            Err(error) => return Err(error),
+        };
         match setting.mode {
             StoreMode::Ephemeral => Err(StoreError::Unreadable {
                 setting,
@@ -235,13 +246,17 @@ impl<'a> StoreReader<'a> {
                         ));
                     }
                     Err(KeychainError::Missing) => {}
-                    Err(cause) if !fresh => {
-                        return Err(StoreError::Unreadable {
-                            setting,
-                            config,
-                            cause: Some(cause),
-                        });
-                    }
+                    Err(cause) if !fresh => match read_auth_file(&loc.auth_path()) {
+                        Ok(bytes) => return Ok((bytes, loc)),
+                        Err(StoreError::SignedOut) | Err(StoreError::InvalidJson) => {
+                            return Err(StoreError::Unreadable {
+                                setting,
+                                config,
+                                cause: Some(cause),
+                            });
+                        }
+                        Err(error) => return Err(error),
+                    },
                     Err(_) => {}
                 }
                 read_auth_file(&loc.auth_path()).map(|bytes| (bytes, loc))
@@ -257,6 +272,7 @@ impl<'a> StoreReader<'a> {
     }
 
     pub(crate) async fn save_login(&self, home: &Path, auth: &[u8]) -> Result<(), StoreError> {
+        let _ = compact_json(auth)?;
         let setting = read_store_setting(home)?;
         let config = home.join("config.toml");
         if setting.mode == StoreMode::Ephemeral {
@@ -271,23 +287,27 @@ impl<'a> StoreReader<'a> {
             keychain: false,
         };
         if self.uses_keychain(&setting) {
-            let missing = matches!(
-                self.find_keychain(home, true).await,
-                Err(KeychainError::Missing)
-            );
-            if !missing {
-                loc.keychain = true;
-            } else if setting.mode == StoreMode::Keyring {
-                return Err(StoreError::SignedOut);
+            let kerr = self.find_keychain(home, true).await;
+            if let Err(cause) = &kerr
+                && !matches!(cause, KeychainError::Missing)
+            {
+                return Err(StoreError::Unreadable {
+                    setting,
+                    config,
+                    cause: Some(cause.clone()),
+                });
             }
-            if loc.keychain || setting.mode == StoreMode::Keyring || !missing {
-                self.write_location(&loc, auth).await?;
-                if loc.keychain || setting.mode == StoreMode::Keyring {
-                    return Ok(());
+            loc.keychain = true;
+            match self.write_location(&loc, auth).await {
+                Ok(()) => return Ok(()),
+                Err(error) if setting.mode == StoreMode::Keyring || kerr.is_ok() => {
+                    return Err(error);
                 }
+                Err(_) => loc.keychain = false,
             }
-        }
-        if setting.mode == StoreMode::Auto && !loc.keychain && !loc.auth_path().is_file() {
+        } else if setting.mode == StoreMode::Keyring
+            || (setting.mode == StoreMode::Auto && !loc.auth_path().is_file())
+        {
             return Err(StoreError::Unreadable {
                 setting,
                 config,
@@ -529,8 +549,13 @@ pub(crate) fn write_atomic_private(path: &Path, body: &[u8]) -> Result<(), Plugi
             std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).ok();
         }
     }
-    let mut temporary = path.to_path_buf();
-    temporary.set_extension("tmp");
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("auth.json");
+    let unique = hofund_plugin_sdk::uuid::v4()
+        .map_err(|_| PluginError::io("cannot write Codex auth.json"))?;
+    let temporary = path.with_file_name(format!("{file_name}.{unique}.tmp"));
     write_private_once(&temporary, body)?;
     std::fs::rename(&temporary, path).map_err(|_| PluginError::io("cannot write Codex auth.json"))
 }
@@ -619,13 +644,26 @@ pub(crate) fn parse_toml(text: &str) -> (Map<String, Value>, HashMap<String, Map
 }
 
 fn trim_toml_value(raw: &str) -> &str {
-    let mut value = raw.trim();
-    if let Some(idx) = value.find(" #")
-        && !value.starts_with('"')
-    {
-        value = value[..idx].trim();
+    let raw = raw.trim();
+    if raw.starts_with('"') {
+        let mut end = 1;
+        while end < raw.len() {
+            if raw.as_bytes()[end] == b'"' && raw.as_bytes()[end - 1] != b'\\' {
+                return trim_quotes(&raw[..=end]);
+            }
+            end += 1;
+        }
+        return trim_quotes(raw);
     }
-    trim_quotes(value)
+    if let Some(rest) = raw.strip_prefix('\'')
+        && let Some(end) = rest.find('\'')
+    {
+        return trim_quotes(&raw[..=end + 1]);
+    }
+    if let Some(idx) = raw.find(" #") {
+        return raw[..idx].trim();
+    }
+    raw
 }
 
 fn trim_quotes(raw: &str) -> &str {
@@ -732,30 +770,37 @@ async fn spawn_security(host: &HostContext, args: &[&str]) -> Result<Vec<u8>, Ke
         .spawn_piped(&request)
         .await
         .map_err(|_| KeychainError::Unreadable)?;
-    let code = child.exit_code().unwrap_or(-1);
-    let stdout = collect_stdout(child).await.unwrap_or_default();
-    match code {
-        44 => Err(KeychainError::Missing),
-        51 | 128 => Err(KeychainError::Refused),
-        0 => Ok(stdout),
-        _ => Err(KeychainError::Unreadable),
-    }
+    let stdout = read_piped_stdout(host, child).await?;
+    Ok(decode_keychain_password(&stdout))
 }
 
 #[cfg(target_os = "macos")]
-async fn collect_stdout(mut child: hofund_plugin_api::PipedChild) -> Option<Vec<u8>> {
-    let mut stdout = child.stdout().ok()?;
+async fn read_piped_stdout(
+    host: &HostContext,
+    child: hofund_plugin_api::PipedChild,
+) -> Result<Vec<u8>, KeychainError> {
+    let mut stream = child.stdout().map_err(|_| KeychainError::Unreadable)?;
     let mut out = Vec::new();
-    while let Some(chunk) = stdout.next_chunk().await {
-        let Ok(chunk) = chunk else {
-            break;
-        };
-        if out.len() + chunk.len() > 4096 {
-            break;
-        }
-        out.extend_from_slice(&chunk);
+    while let Some(chunk) = stream.next_chunk().await {
+        let chunk = chunk.map_err(|_| KeychainError::Unreadable)?;
+        append_capped(&mut out, &chunk).map_err(|_| KeychainError::Unreadable)?;
     }
-    Some(out)
+    let code = piped_exit_code(child).await?;
+    match classify_security_exit(code) {
+        SecurityExit::Ok => Ok(out),
+        SecurityExit::Missing => Err(KeychainError::Missing),
+        SecurityExit::Refused => Err(KeychainError::Refused),
+        SecurityExit::Failed => Err(KeychainError::Unreadable),
+    }
+}
+
+/// Waits for exit after stdout EOF via [`PipedChild::exit_code`] (kernel sup/r-8a).
+#[cfg(target_os = "macos")]
+async fn piped_exit_code(child: hofund_plugin_api::PipedChild) -> Result<i32, KeychainError> {
+    child
+        .exit_code()
+        .await
+        .map_err(|_| KeychainError::Unreadable)
 }
 
 #[cfg(target_os = "macos")]
@@ -774,7 +819,29 @@ fn keychain_mdat(output: &[u8]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use hofund_plugin_sdk::json::Value;
+
     use super::*;
+
+    #[test]
+    fn r47b_r1_toml_inline_comment_after_quoted_value() {
+        let (top, _) = parse_toml(r#"cli_auth_credentials_store = "keyring" # comment"#);
+        assert_eq!(
+            top.get("cli_auth_credentials_store")
+                .and_then(Value::as_str),
+            Some("keyring")
+        );
+        let dir = tempfile::tempdir().expect("dir");
+        let home = dir.path().join("codex");
+        std::fs::create_dir_all(&home).expect("home");
+        std::fs::write(
+            home.join("config.toml"),
+            "cli_auth_credentials_store = \"keyring\" # comment\n",
+        )
+        .expect("config");
+        let setting = read_store_setting(&home).expect("parse");
+        assert!(matches!(setting.mode, StoreMode::Keyring));
+    }
 
     #[test]
     fn r47b_keychain_account_matches_codex_store_key() {

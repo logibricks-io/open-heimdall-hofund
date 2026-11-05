@@ -116,7 +116,7 @@ async fn discover_opened(
         let home = agent_home(&decl)?;
         let found = entry
             .instance
-            .discover_agent_sign_in(&home)
+            .discover_agent_sign_in(&home, &entry.host)
             .await
             .map_err(show)?;
         for row in found {

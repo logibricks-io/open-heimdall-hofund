@@ -21,6 +21,7 @@ use hofund_plugin_sdk::Contribution;
 use hofund_plugin_sdk::oauth::{Pkce, SecretObject, constant_time_eq, new_state};
 
 mod agent_sign_in;
+mod codex_lock;
 mod config_import;
 pub use config_import::{ImportedCodexProvider, read_providers};
 mod device_sign_in;
@@ -29,6 +30,7 @@ mod import;
 mod limits;
 mod models;
 mod resets;
+mod security_io;
 mod shape;
 mod sign_in;
 mod store;
@@ -334,9 +336,15 @@ impl Subscription for Codex {
     }
 
     async fn refresh(&self, account: &AccountId, host: &HostContext) -> Result<(), PluginError> {
-        tokens::access(host, &self.endpoints, account, tokens::Need::Always)
-            .await
-            .map(|_| ())
+        tokens::access(
+            host,
+            &self.endpoints,
+            account,
+            tokens::Need::Always,
+            self.skip_keychain,
+        )
+        .await
+        .map(|_| ())
     }
 
     async fn quota(
@@ -344,8 +352,14 @@ impl Subscription for Codex {
         account: &AccountId,
         host: &HostContext,
     ) -> Result<Vec<QuotaWindow>, PluginError> {
-        let access =
-            tokens::access(host, &self.endpoints, account, tokens::Need::IfExpiring).await?;
+        let access = tokens::access(
+            host,
+            &self.endpoints,
+            account,
+            tokens::Need::IfExpiring,
+            self.skip_keychain,
+        )
+        .await?;
         usage::read(host, &self.endpoints, &access).await
     }
 
@@ -354,8 +368,14 @@ impl Subscription for Codex {
         account: &AccountId,
         host: &HostContext,
     ) -> Result<Option<QuotaResetCredits>, PluginError> {
-        let access =
-            tokens::access(host, &self.endpoints, account, tokens::Need::IfExpiring).await?;
+        let access = tokens::access(
+            host,
+            &self.endpoints,
+            account,
+            tokens::Need::IfExpiring,
+            self.skip_keychain,
+        )
+        .await?;
         resets::read(host, &self.endpoints, &access).await
     }
 
@@ -365,8 +385,14 @@ impl Subscription for Codex {
         credit_id: Option<&str>,
         host: &HostContext,
     ) -> Result<QuotaResetOutcome, PluginError> {
-        let access =
-            tokens::access(host, &self.endpoints, account, tokens::Need::IfExpiring).await?;
+        let access = tokens::access(
+            host,
+            &self.endpoints,
+            account,
+            tokens::Need::IfExpiring,
+            self.skip_keychain,
+        )
+        .await?;
         resets::consume(host, &self.endpoints, &access, credit_id).await
     }
 
@@ -375,8 +401,14 @@ impl Subscription for Codex {
         account: &AccountId,
         host: &HostContext,
     ) -> Result<ModelList, PluginError> {
-        let access =
-            tokens::access(host, &self.endpoints, account, tokens::Need::IfExpiring).await?;
+        let access = tokens::access(
+            host,
+            &self.endpoints,
+            account,
+            tokens::Need::IfExpiring,
+            self.skip_keychain,
+        )
+        .await?;
         models::list(host, &self.endpoints, &access, &self.prompts).await
     }
 
@@ -390,6 +422,7 @@ impl Subscription for Codex {
             host.clone(),
             Arc::clone(&self.endpoints),
             Arc::clone(&self.prompts),
+            self.skip_keychain,
         )))
     }
 
@@ -421,8 +454,9 @@ impl Subscription for Codex {
     async fn discover_agent_sign_in(
         &self,
         home: &Path,
+        host: &HostContext,
     ) -> Result<Vec<hofund_plugin_api::DiscoveredAgentAccount>, PluginError> {
-        discover::list(home)
+        discover::list(home, host, self.skip_keychain).await
     }
 
     async fn import_agent_sign_in(

@@ -400,8 +400,20 @@ fn refresh_posts_once_under_concurrency() {
         .enqueue(token_reply(&fresh, Some("refresh-2"), None));
     let ep = endpoints();
     let results = block_on(join_all(vec![
-        Box::pin(tokens::access(host.context(), &ep, &id, Need::IfExpiring)),
-        Box::pin(tokens::access(host.context(), &ep, &id, Need::IfExpiring)),
+        Box::pin(tokens::access(
+            host.context(),
+            &ep,
+            &id,
+            Need::IfExpiring,
+            false,
+        )),
+        Box::pin(tokens::access(
+            host.context(),
+            &ep,
+            &id,
+            Need::IfExpiring,
+            false,
+        )),
     ]));
     for result in results {
         let access = result.expect("access");
@@ -435,6 +447,7 @@ fn fresh_token_skips_the_refresh() {
         &endpoints(),
         &id,
         Need::IfExpiring,
+        false,
     ))
     .expect("access");
     assert!(same_secret(
@@ -457,6 +470,7 @@ fn refresh_uses_token_rotated_by_other_process() {
         &endpoints(),
         &id,
         Need::Replace(secret(&access_token("old", 100))),
+        false,
     ))
     .expect("access");
     assert!(same_secret(&access.token, &secret(&rotated)));
@@ -468,6 +482,7 @@ fn refresh_uses_token_rotated_by_other_process() {
         TOKEN_URL.to_owned(),
         id,
         secret(&access_token("old", 100)),
+        false,
     ))
     .expect("rotate");
     assert!(same_secret(&access.token, &secret(&rotated)));
@@ -485,7 +500,13 @@ fn refresh_commits_when_waiter_dropped() {
     let ep = endpoints();
     block_on(async {
         {
-            let mut call = pin!(tokens::access(host.context(), &ep, &id, Need::IfExpiring));
+            let mut call = pin!(tokens::access(
+                host.context(),
+                &ep,
+                &id,
+                Need::IfExpiring,
+                false
+            ));
             let mut polls = 0;
             // Poll until the refresh job is handed to the scheduler.
             while host.scheduler().running_once().is_empty() {
@@ -552,6 +573,7 @@ fn server_error_keeps_the_sign_in() {
         &endpoints(),
         &id,
         Need::Always,
+        false,
     ))
     .expect_err("server error");
     assert_eq!(error.status(), Some(503));
@@ -564,6 +586,7 @@ fn upstream_for(host: &TestHost, id: &AccountId) -> CodexUpstream {
         host.context().clone(),
         Arc::new(endpoints()),
         Arc::default(),
+        false,
     )
 }
 

@@ -2,10 +2,11 @@
 
 use std::path::Path;
 
-use hofund_plugin_api::{AccountId, HostContext, PluginError};
-use hofund_plugin_sdk::oauth::{SecretObject, secret_text};
+use hofund_plugin_api::{AccountId, HostContext, PluginError, SecretString};
+use hofund_plugin_sdk::oauth::{SecretObject, same_secret, secret_text};
 
-use crate::store::{AuthPatch, StoreError, StoreReader, merge_auth_tokens};
+use crate::codex_lock;
+use crate::store::{AuthPatch, StoreError, StoreReader, is_valid_auth_json, merge_auth_tokens};
 
 /// Writes Codex's credential store from the stored account.
 pub(crate) async fn write(
@@ -29,10 +30,14 @@ pub(crate) async fn write(
     let refresh = blob.secret("refresh_token");
     let id_token = blob.secret("id_token");
     let reader = StoreReader::new(Some(host), skip_keychain, None);
-    let base = match reader.read_login(home, false).await {
+    let base = match reader.read_login(home, true).await {
         Ok((bytes, _)) => bytes,
         Err(StoreError::SignedOut) => Vec::new(),
-        Err(StoreError::InvalidJson) => Vec::new(),
+        Err(StoreError::InvalidJson) => {
+            return Err(PluginError::decode(
+                "Codex sign-in on disk is not JSON; nothing was changed",
+            ));
+        }
         Err(StoreError::Unreadable { .. }) => {
             return Err(PluginError::auth(
                 "Codex keeps its sign-in where it cannot be written from here",
@@ -43,6 +48,11 @@ pub(crate) async fn write(
             return Err(PluginError::io("cannot read Codex sign-in before writing"));
         }
     };
+    if !base.is_empty() && !is_valid_auth_json(&base) {
+        return Err(PluginError::decode(
+            "Codex sign-in on disk is not JSON; nothing was changed",
+        ));
+    }
     let patch = AuthPatch {
         access_token: Some(secret_text(&access).to_owned()),
         refresh_token: refresh.map(|token| secret_text(&token).to_owned()),
@@ -82,13 +92,28 @@ fn map_store(error: StoreError) -> PluginError {
     }
 }
 
-/// Writes rotated tokens back to Codex's store for `home`.
+/// Writes rotated tokens back to Codex's store for `home` when the on-disk access token still matches `stale`.
 pub(crate) async fn persist_refresh(
     home: &Path,
     host: &HostContext,
     skip_keychain: bool,
     blob: &SecretObject,
+    stale: &SecretString,
 ) {
+    let _lock = match codex_lock::acquire(home).await {
+        Ok(lock) => lock,
+        Err(_) => return,
+    };
+    let reader = StoreReader::new(Some(host), skip_keychain, None);
+    let Ok((base, _)) = reader.read_login(home, true).await else {
+        return;
+    };
+    let Some(current_access) = access_token_from_auth(&base) else {
+        return;
+    };
+    if !same_secret(&current_access, stale) {
+        return;
+    }
     let patch = AuthPatch {
         access_token: blob
             .secret("access_token")
@@ -101,12 +126,15 @@ pub(crate) async fn persist_refresh(
             .map(|token| secret_text(&token).to_owned()),
         chatgpt_mode: true,
     };
-    let reader = StoreReader::new(Some(host), skip_keychain, None);
-    let Ok((base, _)) = reader.read_login(home, true).await else {
-        return;
-    };
     let Ok(merged) = merge_auth_tokens(&base, &patch) else {
         return;
     };
     let _ = reader.save_login(home, &merged).await;
+}
+
+fn access_token_from_auth(bytes: &[u8]) -> Option<SecretString> {
+    let value =
+        hofund_plugin_sdk::json::from_slice::<hofund_plugin_sdk::json::Value>(bytes).ok()?;
+    let token = value.get("tokens")?.get("access_token")?.as_str()?;
+    Some(SecretString::from(token.to_owned()))
 }
