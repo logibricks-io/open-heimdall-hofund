@@ -460,6 +460,13 @@ fn rewrite_group_refs_in_document(
         }
     }
     if let Some(agents) = document.get_mut("agents").and_then(Item::as_table_like_mut) {
+        if let Some(map) = agents.get_mut("visible").and_then(Item::as_table_like_mut) {
+            for (_, item) in map.iter_mut() {
+                if let Some(array) = item.as_array_mut() {
+                    rename_group_route_exact_in_array(array, &old_ref, &new_ref);
+                }
+            }
+        }
         for field in ["hidden_models", "picked_models"] {
             let Some(map) = agents.get_mut(field).and_then(Item::as_table_like_mut) else {
                 continue;
@@ -471,7 +478,63 @@ fn rewrite_group_refs_in_document(
             }
         }
     }
+    rewrite_catalog_group_route_refs(document, &old_ref, &new_ref);
     Ok(())
+}
+
+fn rewrite_catalog_group_route_refs(document: &mut DocumentMut, old_ref: &str, new_ref: &str) {
+    let Some(catalog) = document
+        .get_mut("catalog")
+        .and_then(Item::as_table_like_mut)
+    else {
+        return;
+    };
+    for field in ["disabled", "retired"] {
+        let Some(array) = catalog.get_mut(field).and_then(Item::as_array_mut) else {
+            continue;
+        };
+        rename_group_route_exact_in_array(array, old_ref, new_ref);
+    }
+    let Some(overrides) = catalog
+        .get_mut("overrides")
+        .and_then(Item::as_array_of_tables_mut)
+    else {
+        return;
+    };
+    for table in overrides.iter_mut() {
+        let Some(model) = table.get_mut("model") else {
+            continue;
+        };
+        let Item::Value(Value::String(text)) = model else {
+            continue;
+        };
+        if group_route_pattern_matches(text.value(), old_ref) {
+            let decor = text.decor().clone();
+            *text = Formatted::new(new_ref.to_owned());
+            *text.decor_mut() = decor;
+        }
+    }
+}
+
+fn group_route_pattern_matches(entry: &str, old_ref: &str) -> bool {
+    if entry.contains(['*', '?']) {
+        return false;
+    }
+    entry.eq_ignore_ascii_case(old_ref)
+}
+
+/// Replaces qualified group route ids in a string array; wildcards and bare ids stay put.
+fn rename_group_route_exact_in_array(array: &mut Array, old_ref: &str, new_ref: &str) {
+    for entry in array.iter_mut() {
+        let Value::String(text) = entry else {
+            continue;
+        };
+        if group_route_pattern_matches(text.value(), old_ref) {
+            let decor = text.decor().clone();
+            *text = Formatted::new(new_ref.to_owned());
+            *text.decor_mut() = decor;
+        }
+    }
 }
 
 /// Replaces string entries equal to `old_ref` with `new_ref`, keeping decor.
@@ -840,5 +903,105 @@ listen = \"127.0.0.1:0\"\n\
             "{error}"
         );
         assert_eq!(before, with_classifier);
+    }
+
+    #[test]
+    fn r7a_rr11_group_rename_rewrites_agents_visible_exact_group_route() {
+        let (text, id) = edit_group_create(BASE, "Old Team", "chat/m").expect("create");
+        let bare = id.to_ascii_uppercase();
+        let text =
+            format!("{text}\n[agents.visible]\nclaude = [\"group/{id}\", \"chat\", \"{bare}\"]\n");
+        let (renamed, _) = edit_group_patch(
+            &text,
+            &id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("new"),
+        )
+        .expect("rename");
+        let config = load(&renamed).expect("load");
+        assert_eq!(
+            config.agents.visible.get("claude"),
+            Some(&vec![
+                "group/new".to_owned(),
+                "chat".to_owned(),
+                bare.clone()
+            ])
+        );
+        let before = text.clone();
+        let error = edit_group_patch(
+            &text,
+            &id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(Some(&format!("group/{id}"))),
+            None,
+            None,
+            Some("new"),
+        )
+        .expect_err("classifier self-reference blocks rename");
+        assert!(
+            error.to_string().contains("classify with itself"),
+            "{error}"
+        );
+        assert_eq!(before, text);
+    }
+
+    #[test]
+    fn r7a_rr11_group_rename_rewrites_catalog_disabled_retired_and_overrides() {
+        let (text, id) = edit_group_create(BASE, "Old Team", "chat/m").expect("create");
+        let text = format!(
+            "{text}\n[catalog]\ndisabled = [\"group/{id}\", \"group/*\"]\nretired = [\"GROUP/{id}\"]\n\n[[catalog.overrides]]\nmodel = \"group/{id}\"\ncontext = 8192\n"
+        );
+        let (renamed, _) = edit_group_patch(
+            &text,
+            &id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("new"),
+        )
+        .expect("rename");
+        let config = load(&renamed).expect("load");
+        assert_eq!(
+            config.catalog.disabled,
+            vec!["group/new".to_owned(), "group/*".to_owned()]
+        );
+        assert_eq!(config.catalog.retired, vec!["group/new".to_owned()]);
+        assert_eq!(
+            config
+                .catalog
+                .overrides
+                .lookup("group/new")
+                .and_then(|entry| entry.context),
+            Some(8192)
+        );
+        let route = "group/new";
+        assert!(catalog_pattern_matches_route(&config.catalog.disabled, route));
+        assert!(catalog_pattern_matches_route(&config.catalog.retired, route));
+        assert!(!renamed.contains(&format!("group/{id}\"")));
+    }
+
+    fn catalog_pattern_matches_route(patterns: &[String], route: &str) -> bool {
+        patterns.iter().any(|pattern| {
+            let trimmed = pattern.trim();
+            !trimmed.is_empty()
+                && !trimmed.contains(['*', '?'])
+                && trimmed.eq_ignore_ascii_case(route)
+        })
     }
 }

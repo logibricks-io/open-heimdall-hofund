@@ -1,6 +1,7 @@
 //! Routing group control handlers.
 
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use hofund_agent::{GatewayTarget, SidecarCheckpoint, catalog};
 use hofund_config::{
@@ -15,10 +16,35 @@ use hofund_control_proto::{
 };
 use hofund_gateway::control::ControlFailure;
 use hofund_plugin_api::AgentDescription;
+use hofund_secrets::KeyStore;
 
-use crate::config_ops::ConfigOps;
+use crate::config_ops::{ConfigOps, scrub_config_message};
 use crate::models::ModelsHost;
 use crate::route_stays;
+
+/// Injected failure point for group-rename integration tests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupRenameFailAfter {
+    /// Fail while rewriting gateway key model scopes.
+    Keys,
+}
+
+static GROUP_RENAME_FAIL_AFTER: Mutex<Option<GroupRenameFailAfter>> = Mutex::new(None);
+
+/// Sets a one-shot failure injection for group rename key moves.
+#[doc(hidden)]
+pub fn set_group_rename_fail_after(step: Option<GroupRenameFailAfter>) {
+    *GROUP_RENAME_FAIL_AFTER
+        .lock()
+        .expect("group rename fail hook") = step;
+}
+
+fn group_rename_fail_after(step: GroupRenameFailAfter) -> bool {
+    *GROUP_RENAME_FAIL_AFTER
+        .lock()
+        .expect("group rename fail hook")
+        == Some(step)
+}
 
 pub(crate) async fn list_groups(ops: &Arc<ConfigOps>) -> Result<GroupListResponse, ControlFailure> {
     let current = ops.get().await?;
@@ -53,6 +79,7 @@ pub(crate) async fn create_group(
 
 pub(crate) async fn patch_group(
     ops: &Arc<ConfigOps>,
+    keys: &Arc<KeyStore>,
     descriptions: &'static [&'static AgentDescription],
     agent_session: Option<hofund_agent::Session>,
     gateway_target: Option<GatewayTarget>,
@@ -113,38 +140,64 @@ pub(crate) async fn patch_group(
         let effective = effective_id.clone();
         let session = agent_session.unwrap_or_else(crate::agent_session);
         let gateway = gateway_target.clone();
-        ops.apply_with_sidecar_work(
-            &request.expected_revision,
-            edited,
-            backup,
-            move |_ops, staged_text| {
-                let mut checkpoint = SidecarCheckpoint::new();
-                match rename_group_agents(
-                    descriptions,
-                    &session,
-                    &rename_from,
-                    &effective,
-                    gateway.as_ref(),
-                    staged_text,
-                    &mut checkpoint,
-                ) {
-                    Ok(()) => Ok(()),
-                    Err(error) => {
-                        if checkpoint.restore().is_err() {
-                            return Err(crate::control_provider_write::agent_sidecar_failure(
-                                hofund_agent::AgentError::Rejected(
-                                    "agent sidecar restore failed during group rename".to_owned(),
-                                ),
-                                gateway.as_ref(),
-                                staged_text,
-                            ));
+        let old_route = format!("group/{rename_from}");
+        let new_route = format!("group/{effective}");
+        let keys_backup = keys.export().map_err(group_key_failure)?;
+        let keys_for_work = Arc::clone(keys);
+        let old_route_for_keys = old_route.clone();
+        let new_route_for_keys = new_route.clone();
+        let sidecar_result = ops
+            .apply_with_sidecar_work(
+                &request.expected_revision,
+                edited,
+                backup,
+                move |_ops, staged_text| {
+                    let mut checkpoint = SidecarCheckpoint::new();
+                    match rename_group_agents(
+                        descriptions,
+                        &session,
+                        &rename_from,
+                        &effective,
+                        gateway.as_ref(),
+                        staged_text,
+                        &mut checkpoint,
+                    ) {
+                        Ok(()) => {}
+                        Err(error) => {
+                            if checkpoint.restore().is_err() {
+                                return Err(crate::control_provider_write::agent_sidecar_failure(
+                                    hofund_agent::AgentError::Rejected(
+                                        "agent sidecar restore failed during group rename"
+                                            .to_owned(),
+                                    ),
+                                    gateway.as_ref(),
+                                    staged_text,
+                                ));
+                            }
+                            return Err(error);
                         }
-                        Err(error)
                     }
-                }
-            },
-        )
-        .await?
+                    if group_rename_fail_after(GroupRenameFailAfter::Keys) {
+                        let _ = checkpoint.restore();
+                        return Err(group_key_failure_message(
+                            "injected group-rename keys failure",
+                            staged_text,
+                        ));
+                    }
+                    match keys_for_work.move_model(&old_route_for_keys, &new_route_for_keys) {
+                        Ok(()) => Ok(()),
+                        Err(error) => {
+                            let _ = checkpoint.restore();
+                            Err(group_key_failure_scrubbed(error, staged_text))
+                        }
+                    }
+                },
+            )
+            .await;
+        if sidecar_result.is_err() {
+            let _ = keys.restore(&keys_backup);
+        }
+        sidecar_result?
     } else {
         ops.apply(&request.expected_revision, edited).await?
     };
@@ -373,5 +426,32 @@ fn internal(message: String) -> ControlFailure {
         ControlErrorKind::Internal,
         message,
         "control",
+    ))
+}
+
+fn group_key_failure(error: hofund_secrets::SecretError) -> ControlFailure {
+    ControlFailure::from(ControlError::new(
+        ControlErrorKind::Internal,
+        scrub_config_message(&error.to_string(), ""),
+        "gateway_keys",
+    ))
+}
+
+fn group_key_failure_scrubbed(
+    error: hofund_secrets::SecretError,
+    config_text: &str,
+) -> ControlFailure {
+    ControlFailure::from(ControlError::new(
+        ControlErrorKind::Internal,
+        scrub_config_message(&error.to_string(), config_text),
+        "gateway_keys",
+    ))
+}
+
+fn group_key_failure_message(message: &str, config_text: &str) -> ControlFailure {
+    ControlFailure::from(ControlError::new(
+        ControlErrorKind::Internal,
+        scrub_config_message(message, config_text),
+        "gateway_keys",
     ))
 }

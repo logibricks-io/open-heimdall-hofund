@@ -1015,6 +1015,7 @@ impl ControlState for DaemonControl {
         Box::pin(async move {
             super::control_groups::patch_group(
                 &self.ops,
+                &self.keys,
                 descriptions,
                 session,
                 target,
