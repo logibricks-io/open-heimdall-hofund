@@ -265,3 +265,9 @@ fn a2c_account_id_uses_uid() {
     credential.email = "someone-else@example.test".to_owned();
     assert_eq!(id, creds::account_id(&credential));
 }
+
+#[test]
+fn a2c_11b_quota_without_total_is_empty() {
+    let windows = quota::windows(br#"{"quota":{"used":25}}"#).expect("windows");
+    assert!(windows.is_empty());
+}

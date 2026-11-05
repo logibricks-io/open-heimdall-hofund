@@ -302,3 +302,15 @@ fn a2c_27_daily_checkin_cn_only() {
         block_on(subscription(&host, None).daily_checkin(&id, host.context())).expect("run");
     assert_eq!(result.outcome(), hofund_plugin_api::CheckinOutcome::Claimed);
 }
+
+#[test]
+fn a2c_22c_agent_home_dir_is_codebuddy_extension_data() {
+    let expected = if cfg!(target_os = "macos") {
+        "Library/Application Support/CodeBuddyExtension/Data"
+    } else if cfg!(target_os = "windows") {
+        "AppData/Local/CodeBuddyExtension/Data"
+    } else {
+        ".local/share/CodeBuddyExtension/Data"
+    };
+    assert_eq!(crate::auth_store::AGENT_HOME_DIR, expected);
+}
