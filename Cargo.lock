@@ -2209,7 +2209,6 @@ dependencies = [
  "regex",
  "sha2",
  "tempfile",
- "tokio",
 ]
 
 [[package]]

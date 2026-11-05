@@ -1535,6 +1535,7 @@ fn plugin_tree_violations(plugins: &Path) -> Vec<String> {
             if manifest_enables_kernel(&manifest) {
                 violations.push(format!("{kind}/{id} enables the kernel feature"));
             }
+            let package = super::try_package_name(&manifest);
             for dep in manifest_dependencies(&manifest) {
                 if dep.name == "hofund-plugin-api" && dep.key != "hofund-plugin-api" {
                     violations.push(format!("{kind}/{id} renames hofund-plugin-api"));
@@ -1557,13 +1558,16 @@ fn plugin_tree_violations(plugins: &Path) -> Vec<String> {
                     &dep.features,
                     dev,
                     own_kit(kind.as_ref()),
+                    package.as_deref(),
                 ) {
                     violations.push(format!("{kind}/{id} {hit}"));
                 }
             }
-            if let Ok(errors) =
-                xtask::boundary::manifest_dependency_errors(&manifest, own_kit(kind.as_ref()))
-            {
+            if let Ok(errors) = xtask::boundary::manifest_dependency_errors(
+                &manifest,
+                own_kit(kind.as_ref()),
+                package.as_deref(),
+            ) {
                 for error in errors {
                     violations.push(format!("{kind}/{id} {error}"));
                 }

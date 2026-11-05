@@ -1,7 +1,7 @@
 //! Model list from models.dev anthropic entries and Claude Code `.claude.json` caches.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use hofund_model_catalog::CacheFile;
 use hofund_plugin_api::{HostContext, ModelList, ModelSpec, PluginError, QuotaWindow};
@@ -57,13 +57,7 @@ pub(crate) fn list_for_account(
 }
 
 fn anthropic_catalog(host: &HostContext) -> Result<Vec<ModelSpec>, PluginError> {
-    let state = host.dirs().state_dir()?;
-    let root = state
-        .parent()
-        .and_then(|p| p.parent())
-        .and_then(|p| p.parent())
-        .ok_or_else(|| PluginError::io("cannot locate the hofund data directory"))?;
-    let cache = CacheFile::beside_data_root(root);
+    let cache = CacheFile::beside_data_root(&catalog_data_root(host)?);
     let Some(envelope) = cache
         .read()
         .map_err(|error| PluginError::io(error.to_string()))?
@@ -109,6 +103,20 @@ fn anthropic_catalog(host: &HostContext) -> Result<Vec<ModelSpec>, PluginError> 
         out.push(spec);
     }
     Ok(out)
+}
+
+/// Locates the hofund data root from this plugin's state directory layout
+/// (`<data_root>/state/<kind>/<plugin_id>`). There is no catalog handle on
+/// [`HostContext`]; subscription plugins read the on-disk models.dev cache
+/// the daemon maintains beside that root.
+fn catalog_data_root(host: &HostContext) -> Result<PathBuf, PluginError> {
+    let state = host.dirs().state_dir()?;
+    state
+        .parent()
+        .and_then(|p| p.parent())
+        .and_then(|p| p.parent())
+        .map(Path::to_path_buf)
+        .ok_or_else(|| PluginError::io("cannot locate the hofund data directory"))
 }
 
 fn micros(value: f64) -> u64 {
@@ -271,5 +279,22 @@ mod tests {
             Some("claude-mythos-5-1".to_owned())
         );
         assert_eq!(api_id("default"), None);
+    }
+
+    #[test]
+    fn r5_27_catalog_data_root_from_state_layout() {
+        use hofund_kit_subscription::TestHost;
+        use hofund_plugin_api::{PluginId, PluginKind};
+
+        let dir = tempfile::tempdir().expect("dir");
+        let host = TestHost::open_for(
+            PluginKind::Subscription,
+            PluginId::from_static("claude"),
+            dir.path(),
+        );
+        let root = catalog_data_root(host.context()).expect("root");
+        assert_eq!(root, dir.path());
+        let cache = hofund_model_catalog::CacheFile::beside_data_root(&root);
+        assert_eq!(cache.path, dir.path().join("catalog/models.dev.json"));
     }
 }

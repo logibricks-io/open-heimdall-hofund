@@ -183,3 +183,14 @@ pub(crate) fn strip_ansi(text: &str) -> String {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::strip_ansi;
+
+    #[test]
+    fn r5_29_strip_ansi_keeps_newlines() {
+        let text = "line one\n\x1b[32mgreen\x1b[0m\nline two";
+        assert_eq!(strip_ansi(text), "line one\ngreen\nline two");
+    }
+}

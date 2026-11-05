@@ -12,7 +12,7 @@ use hofund_plugin_api::{
 };
 use hofund_plugin_sdk::oauth::{SecretObject, account_id_from};
 
-use crate::{ClaudeFactory, cli, creds, pasted_code};
+use crate::{ClaudeFactory, account, cli, creds, pasted_code, setup_token};
 
 const SESSION: &str = "0123456789abcdef0123456789abcdef";
 // Config needs an absolute path, which on Windows starts with a drive.
@@ -1265,4 +1265,193 @@ fn r5_11_import_cli_proxy_claude_json() {
     let text = r#"{"type":"claude","access_token":"sk-ant-oat01-old","refresh_token":"sk-ant-ort01-cpa","email":"max@example.com"}"#;
     let ids = block_on(sub.import_accounts(text, host.context())).expect("import");
     assert_eq!(ids.len(), 1);
+}
+
+const SETUP_TOKEN: &str = "sk-ant-oat01-abcdefghijklmnopqrstuvwxyz0123456789";
+
+fn usage_script(rotate_to: Option<&'static str>) -> PipedScript {
+    PipedScript::new().exits(move |spawn| {
+        let dir = config_dir(spawn);
+        if let Some(rotated) = rotate_to {
+            std::fs::write(dir.join(creds::CREDENTIALS_FILE), rotated).expect("rotate");
+        }
+        vec![
+            "Current session: 5% used · resets 3pm (UTC)\n".to_owned(),
+            "Current week (all models): 5% used · resets Nov 6 at 11am (UTC)\n".to_owned(),
+        ]
+    })
+}
+
+#[test]
+fn r5_18_complete_sign_in_rejects_idle_pending() {
+    use std::time::Duration;
+
+    block_on_paused(async {
+        let dir = tempfile::tempdir().expect("dir");
+        let host = host_tokio_clock(&dir);
+        let sub = subscription(&host);
+        host.process().script_piped(login_script(true));
+        sub.start_sign_in(&ctx(), host.context())
+            .await
+            .expect("start");
+        advance_time(Duration::from_millis(80)).await;
+        let error = sub
+            .complete_sign_in(
+                &ctx(),
+                SignInProof::Token(SecretString::from("code#state".to_owned())),
+                host.context(),
+            )
+            .await
+            .expect_err("expired");
+        assert_eq!(error.kind(), PluginErrorKind::Config);
+    });
+}
+
+#[test]
+fn r5_19_quota_removes_credentials_file() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let id = account_id_from(&["claude", UUID]);
+    store(&host, &id, &signed_in_blob());
+    host.process().script_piped(usage_script(None));
+    block_on(sub.quota(&id, host.context())).expect("quota");
+    let creds_path = crate::account::account_dir(host.context(), &id)
+        .expect("dir")
+        .join(creds::CREDENTIALS_FILE);
+    assert!(!creds_path.exists());
+}
+
+#[test]
+fn r5_20_quota_commits_rotated_credentials() {
+    const ROTATED: &str = r#"{"claudeAiOauth":{"accessToken":"at-new","refreshToken":"rt-new","expiresAt":1900000000000}}"#;
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let id = account_id_from(&["claude", UUID]);
+    store(&host, &id, &signed_in_blob());
+    host.process().script_piped(usage_script(Some(ROTATED)));
+    block_on(sub.quota(&id, host.context())).expect("quota");
+    let blob = stored(&host, &id);
+    assert!(
+        blob.text(creds::CREDENTIALS)
+            .is_some_and(|t| t.contains("rt-new"))
+    );
+}
+
+#[test]
+fn r5_21_setup_token_dedupes_same_token() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let first = block_on(sub.complete_sign_in(
+        &ctx(),
+        SignInProof::Token(SecretString::from(SETUP_TOKEN.to_owned())),
+        host.context(),
+    ))
+    .expect("first");
+    let second = block_on(sub.complete_sign_in(
+        &ctx(),
+        SignInProof::Token(SecretString::from(SETUP_TOKEN.to_owned())),
+        host.context(),
+    ))
+    .expect("second");
+    assert_eq!(first, second);
+}
+
+#[test]
+fn r5_22_refresh_no_op_for_setup_token() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let id = block_on(sub.complete_sign_in(
+        &ctx(),
+        SignInProof::Token(SecretString::from(SETUP_TOKEN.to_owned())),
+        host.context(),
+    ))
+    .expect("store");
+    block_on(sub.refresh(&id, host.context())).expect("refresh");
+    assert!(host.process().piped_spawns().is_empty());
+}
+
+#[test]
+fn r5_23_agent_switch_refuses_setup_token() {
+    let dir = tempfile::tempdir().expect("dir");
+    let agent_home = dir.path().join("claude");
+    std::fs::create_dir_all(&agent_home).expect("home");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let id = block_on(sub.complete_sign_in(
+        &ctx(),
+        SignInProof::Token(SecretString::from(SETUP_TOKEN.to_owned())),
+        host.context(),
+    ))
+    .expect("store");
+    let error =
+        block_on(sub.write_agent_sign_in(&id, &agent_home, host.context())).expect_err("switch");
+    assert!(
+        error.to_string().contains(crate::setup_token::AGENT_SWITCH),
+        "{error}"
+    );
+}
+
+#[test]
+fn r5_24_setup_token_account_status_ready() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let id = block_on(sub.complete_sign_in(
+        &ctx(),
+        SignInProof::Token(SecretString::from(SETUP_TOKEN.to_owned())),
+        host.context(),
+    ))
+    .expect("store");
+    let status = block_on(sub.account_status(&id, host.context())).expect("status");
+    assert!(matches!(status, AccountStatus::Ready));
+}
+
+#[test]
+fn r5_25_setup_token_run_env_sets_oauth_var() {
+    let blob = setup_token::blob(SETUP_TOKEN);
+    let env = account::run_env(&blob);
+    assert_eq!(env.len(), 1);
+    assert_eq!(env[0].0, cli::OAUTH_TOKEN_VAR);
+
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let id = block_on(sub.complete_sign_in(
+        &ctx(),
+        SignInProof::Token(SecretString::from(SETUP_TOKEN.to_owned())),
+        host.context(),
+    ))
+    .expect("store");
+    let account_dir = account::account_dir(host.context(), &id).expect("account dir");
+    creds::private_dir(&account_dir).expect("private");
+    host.process().script_piped(
+        PipedScript::new().exits(|_| vec![r#"{"loggedIn":true,"email":"setup@test"}"#.to_owned()]),
+    );
+    let blob = stored(&host, &id);
+    block_on(account::status(
+        host.context(),
+        &PathBuf::from(PROGRAM),
+        &account_dir,
+        &blob,
+    ))
+    .expect("status json");
+    let spawn = &host.process().piped_spawns()[0];
+    assert!(spawn.env.iter().any(|(k, _)| k == cli::OAUTH_TOKEN_VAR));
+}
+
+#[test]
+fn r5_26_oauth_env_absent_for_oauth_account_quota() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let id = account_id_from(&["claude", UUID]);
+    store(&host, &id, &signed_in_blob());
+    host.process().script_piped(usage_script(None));
+    block_on(sub.quota(&id, host.context())).expect("quota");
+    let spawn = &host.process().piped_spawns()[0];
+    assert!(!spawn.env.iter().any(|(k, _)| k == cli::OAUTH_TOKEN_VAR));
 }

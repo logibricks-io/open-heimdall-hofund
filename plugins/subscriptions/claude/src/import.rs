@@ -210,11 +210,8 @@ fn parse_login_object(value: &Value) -> Result<Option<LoginRow>, PluginError> {
         .or_else(|| src.get("expires_at"))
         .and_then(Value::as_i64)
         .unwrap_or(1);
-    let cred = format!(
-        r#"{{"claudeAiOauth":{{"accessToken":"{access}","refreshToken":"{refresh}","expiresAt":{expires},"scopes":{scopes}}}}}"#,
-        scopes = serde_scopes()
-    );
-    let profile = format!(r#"{{"emailAddress":"{email}"}}"#);
+    let cred = build_import_credentials(&access, &refresh, expires)?;
+    let profile = build_profile_email(email);
     Ok(Some(LoginRow {
         email: email.to_owned(),
         credentials: cred,
@@ -222,23 +219,43 @@ fn parse_login_object(value: &Value) -> Result<Option<LoginRow>, PluginError> {
     }))
 }
 
-fn parse_credentials_root(object: &Map<String, Value>) -> Result<Option<LoginRow>, PluginError> {
-    let refresh = object
-        .get("claudeAiOauth")
-        .and_then(Value::as_object)
-        .and_then(|o| {
-            let text = json_str(o, &["refreshToken", "refresh_token"]);
-            (!text.is_empty()).then_some(text)
-        });
-    let _refresh = refresh
-        .filter(|r| !r.is_empty())
-        .ok_or_else(|| PluginError::config("no refresh_token in it"))?;
-    let cred = Value::Object(object.clone()).to_string();
-    Ok(Some(LoginRow {
-        email: "imported@claude.local".to_owned(),
-        credentials: cred,
-        profile: String::new(),
-    }))
+fn parse_credentials_root(_object: &Map<String, Value>) -> Result<Option<LoginRow>, PluginError> {
+    Err(PluginError::config(
+        "the file doesn't say which Claude account this is; sign in to it from hofund instead",
+    ))
+}
+
+fn build_import_credentials(
+    access: &str,
+    refresh: &str,
+    expires: i64,
+) -> Result<String, PluginError> {
+    let scopes = Value::Array(
+        IMPORT_SCOPES
+            .iter()
+            .map(|scope| Value::String((*scope).to_owned()))
+            .collect(),
+    );
+    let mut oauth = Map::new();
+    oauth.insert("accessToken".to_owned(), Value::String(access.to_owned()));
+    oauth.insert("refreshToken".to_owned(), Value::String(refresh.to_owned()));
+    oauth.insert(
+        "expiresAt".to_owned(),
+        Value::Number(
+            hofund_plugin_sdk::json::Number::from_i128(i128::from(expires))
+                .ok_or_else(|| PluginError::config("invalid expiresAt"))?,
+        ),
+    );
+    oauth.insert("scopes".to_owned(), scopes);
+    let mut root = Map::new();
+    root.insert("claudeAiOauth".to_owned(), Value::Object(oauth));
+    Ok(Value::Object(root).to_string())
+}
+
+fn build_profile_email(email: &str) -> String {
+    let mut profile = Map::new();
+    profile.insert("emailAddress".to_owned(), Value::String(email.to_owned()));
+    Value::Object(profile).to_string()
 }
 
 fn json_str(object: &Map<String, Value>, keys: &[&str]) -> String {
@@ -246,15 +263,6 @@ fn json_str(object: &Map<String, Value>, keys: &[&str]) -> String {
         .find_map(|key| object.get(*key).and_then(Value::as_str))
         .unwrap_or_default()
         .to_owned()
-}
-
-fn serde_scopes() -> String {
-    let inner = IMPORT_SCOPES
-        .iter()
-        .map(|scope| format!("\"{scope}\""))
-        .collect::<Vec<_>>()
-        .join(",");
-    format!("[{inner}]")
 }
 
 async fn store_login(host: &HostContext, row: LoginRow) -> Result<AccountId, PluginError> {
@@ -424,5 +432,44 @@ mod tests {
         assert_eq!(accounts[0].email, "alpha@example.test");
         assert_eq!(accounts[1].alias.as_deref(), Some("work"));
         assert!(accounts[0].credentials.contains("claudeAiOauth"));
+    }
+
+    #[test]
+    fn r5_30_import_escapes_quotes_in_email() {
+        let dir = tempfile::tempdir().expect("dir");
+        let host = host(&dir);
+        let text = r#"{"type":"claude","access_token":"at","refresh_token":"rt-quote","email":"a\"@example.com"}"#;
+        let ids = block_on(store(host.context(), text)).expect("import");
+        assert_eq!(ids.len(), 1);
+        let secret = block_on(host.context().accounts().secret(&ids[0]))
+            .expect("read")
+            .expect("stored");
+        let blob = SecretObject::parse(&secret).expect("blob");
+        let profile = crate::creds::Profile::parse(blob.text(creds::PROFILE).unwrap_or_default());
+        assert_eq!(profile.email(), Some("a\"@example.com"));
+    }
+
+    #[test]
+    fn r5_31_bare_credentials_root_is_refused() {
+        let dir = tempfile::tempdir().expect("dir");
+        let host = host(&dir);
+        let text = r#"{"claudeAiOauth":{"accessToken":"a","refreshToken":"rt-a","expiresAt":1}}"#;
+        let error = block_on(store(host.context(), text)).expect_err("bare");
+        assert!(
+            error
+                .to_string()
+                .contains("doesn't say which Claude account")
+        );
+    }
+
+    #[test]
+    fn r5_32_two_typed_imports_get_distinct_accounts() {
+        let dir = tempfile::tempdir().expect("dir");
+        let host = host(&dir);
+        let a = r#"{"type":"claude","access_token":"at-a","refresh_token":"rt-a","email":"a@example.com"}"#;
+        let b = r#"{"type":"claude","access_token":"at-b","refresh_token":"rt-b","email":"b@example.com"}"#;
+        let id_a = block_on(store(host.context(), a)).expect("a")[0].clone();
+        let id_b = block_on(store(host.context(), b)).expect("b")[0].clone();
+        assert_ne!(id_a, id_b);
     }
 }

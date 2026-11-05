@@ -32,6 +32,7 @@ mod models;
 mod run_lock;
 mod setup_token;
 mod usage;
+mod usage_reset;
 
 use account::{account_dir, remove_tree};
 use creds::{Credentials, Profile};
@@ -190,6 +191,29 @@ impl Claude {
                 remove_dir(&pending.dir);
             }
         }
+    }
+
+    fn pending_expired(&self, ctx: &SignInCtx, host: &HostContext) -> bool {
+        let now = host.clock().monotonic();
+        let idle = pending_idle();
+        let dir = {
+            let guard = self
+                .pending
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let Some(pending) = guard.get(ctx.session()) else {
+                return false;
+            };
+            if now.saturating_sub(pending.started) < idle {
+                return false;
+            }
+            pending.dir.clone()
+        };
+        if let Some(pending) = self.take_pending(ctx.session()) {
+            drop(pending.child);
+        }
+        remove_dir(&dir);
+        true
     }
 
     /// The `claude` program to run.
@@ -374,6 +398,11 @@ impl Subscription for Claude {
         {
             return setup_token::store(host, secret_text(token)).await;
         }
+        if self.pending_expired(ctx, host) {
+            return Err(PluginError::config(
+                "this Claude Code sign-in timed out; start again",
+            ));
+        }
         let Some(mut pending) = self.take_pending(ctx.session()) else {
             return Err(PluginError::config(
                 "no Claude Code sign-in is in progress for this session",
@@ -449,13 +478,9 @@ impl Subscription for Claude {
         };
         let blob = SecretObject::parse(&secret)?;
         if setup_token::is_setup_token(&blob) {
-            return Err(PluginError::auth(usage::SETUP_TOKEN_QUOTA));
+            return Err(PluginError::unsupported(usage::SETUP_TOKEN_QUOTA));
         }
-        let program = self.program()?;
-        let dir = account_dir(host, account)?;
-        creds::private_dir(&dir)?;
-        account::prepare_for_run(host, || Ok(program.clone()), account, &blob).await?;
-        usage::read(host, &program, &dir, host.clock().now(), &blob).await
+        account::read_usage(host, || self.program(), account).await
     }
 
     async fn list_models(

@@ -1165,13 +1165,17 @@ fn workspace_members(manifest: &str) -> BTreeSet<String> {
 }
 
 fn package_name(manifest: &str) -> String {
+    try_package_name(manifest).unwrap_or_else(|| panic!("manifest has no package name"))
+}
+
+fn try_package_name(manifest: &str) -> Option<String> {
     for line in manifest.lines() {
         let trimmed = strip_comment(line).trim();
         if let Some(rest) = trimmed.strip_prefix("name = ") {
-            return rest.trim().trim_matches('"').to_string();
+            return Some(rest.trim().trim_matches('"').to_string());
         }
     }
-    panic!("manifest has no package name");
+    None
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

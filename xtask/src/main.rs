@@ -175,7 +175,7 @@ fn audit_manifest(package: &str, text: &str, own_kit: Option<&str>) -> Result<()
             return Err(format!("{package} depends on a std shim"));
         }
     }
-    let errors = boundary::manifest_dependency_errors(text, own_kit)?;
+    let errors = boundary::manifest_dependency_errors(text, own_kit, Some(package))?;
     if !errors.is_empty() {
         return Err(format!("{package} {}", errors.join("; ")));
     }

@@ -2047,4 +2047,17 @@ mod tests {
             .await
             .expect("cancel");
     }
+
+    #[tokio::test]
+    async fn r5_33_default_remove_account_is_no_op() {
+        use hofund_plugin_api::Subscription as _;
+        let root = root();
+        let host = lease_host(&root);
+        let subscription = MinimalSubscription(hofund_plugin_api::SignInFlow::TokenFile);
+        let account = AccountId::from_static("a-00000000000000ff");
+        subscription
+            .remove_account(&account, host.context())
+            .await
+            .expect("default remove");
+    }
 }

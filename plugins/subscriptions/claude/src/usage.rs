@@ -1,17 +1,13 @@
 //! Claude Code `/usage` output parsed into quota windows.
 
-use std::str::FromStr;
 use std::sync::OnceLock;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime};
 
-use chrono::{Datelike, NaiveDateTime, NaiveTime, TimeZone, Timelike, Utc};
 use hofund_plugin_api::{PluginError, QuotaWindow};
 use regex::{Regex, RegexSet};
 
 use crate::cli;
-
-/// How long a reset time may read ahead of its window (clock slack).
-const RESET_SLACK: Duration = Duration::from_secs(2 * 60 * 60);
+use crate::usage_reset::reset_time;
 
 /// Seven-day window span for reset parsing.
 const WEEK: Duration = Duration::from_secs(7 * 24 * 60 * 60);
@@ -32,7 +28,7 @@ fn usage_line() -> &'static Regex {
     })
 }
 
-fn usage_denied() -> &'static RegexSet {
+fn usage_sign_in_denied() -> &'static RegexSet {
     static RE: OnceLock<RegexSet> = OnceLock::new();
     RE.get_or_init(|| {
         RegexSet::new([
@@ -44,10 +40,26 @@ fn usage_denied() -> &'static RegexSet {
             r"(?i)forbidden",
             r"(?i)authentication (failed|required)",
             r"(?i)invalid (access )?token",
-            r"(?i)(session|usage) limit",
-            r"(?i)hit your limit",
         ])
-        .expect("denied patterns")
+        .expect("sign-in denied patterns")
+    })
+}
+
+fn usage_limit_denied() -> &'static RegexSet {
+    static RE: OnceLock<RegexSet> = OnceLock::new();
+    RE.get_or_init(|| {
+        RegexSet::new([r"(?i)(session|usage) limit", r"(?i)hit your limit"])
+            .expect("limit denied patterns")
+    })
+}
+
+fn usage_unknown() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"(?m)^(?:Claude Code: )?(?:Claude Code's /usage is temporarily unavailable|/usage couldn't load the plan's usage)",
+        )
+        .expect("unknown usage")
     })
 }
 
@@ -56,30 +68,19 @@ fn overages_line() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"(?i)using your overages").expect("overages"))
 }
 
-/// Runs `claude -p /usage` in the account config directory and parses windows.
-pub(crate) async fn read(
+/// Runs `claude -p /usage` in `dir` and returns stdout text.
+pub(crate) async fn run_usage_cli(
     host: &hofund_plugin_api::HostContext,
     program: &std::path::Path,
     dir: &std::path::Path,
-    now: SystemTime,
-    blob: &hofund_plugin_sdk::oauth::SecretObject,
-) -> Result<Vec<QuotaWindow>, PluginError> {
-    let request = cli::request_with_extra(
-        program,
-        &cli::USAGE_ARGS,
-        dir,
-        &crate::account::run_env(blob),
-    )?;
+    extra_env: &[(std::ffi::OsString, std::ffi::OsString)],
+) -> Result<String, PluginError> {
+    let request = cli::request_with_extra(program, &cli::USAGE_ARGS, dir, extra_env)?;
     let child = host.spawn_process().spawn_piped(&request).await?;
     let mut stdout = child.stdout()?;
     let text = hofund_plugin_sdk::timeout(cli::USAGE_WAIT, cli::collect(&mut stdout)).await;
     drop(child);
-    let Some(text) = text else {
-        return Err(PluginError::timeout(
-            "Claude Code did not finish reading usage in time",
-        ));
-    };
-    parse(&text, now)
+    text.ok_or_else(|| PluginError::timeout("Claude Code did not finish reading usage in time"))
 }
 
 /// Parses `/usage` text into quota windows.
@@ -87,11 +88,22 @@ pub(crate) fn parse(text: &str, now: SystemTime) -> Result<Vec<QuotaWindow>, Plu
     let text = cli::strip_ansi(text).trim().to_owned();
     for line in text.lines() {
         let line = line.trim();
-        if usage_denied().is_match(line) {
+        if usage_limit_denied().is_match(line) {
+            return Err(PluginError::quota(format!(
+                "Claude Code's /usage told no allowance: {}",
+                clip_line(line)
+            )));
+        }
+        if usage_sign_in_denied().is_match(line) {
             return Err(PluginError::auth(format!(
                 "Claude Code's /usage told no allowance: {}",
                 clip_line(line)
             )));
+        }
+        if usage_unknown().is_match(line) {
+            return Err(PluginError::transport(
+                "Claude Code's /usage is temporarily unavailable",
+            ));
         }
     }
     let mut out = Vec::new();
@@ -192,134 +204,26 @@ fn clip_line(s: &str) -> String {
     }
 }
 
-fn reset_time(reset: Option<&str>, now: SystemTime, span: Duration) -> Option<SystemTime> {
-    let reset = reset.map(str::trim).filter(|s| !s.is_empty())?;
-    let (zone_name, rest) = split_zone(reset);
-    let loc = zone_name
-        .and_then(|name| chrono_tz::Tz::from_str(name).ok())
-        .unwrap_or(chrono_tz::UTC);
-    let now_dt = datetime_from_system(now)?.with_timezone(&loc);
-    let slack = chrono::Duration::from_std(span + RESET_SLACK)
-        .unwrap_or_else(|_| chrono::Duration::hours(2));
-    let latest = now_dt + slack;
-    let rest = rest
-        .replace("AM", "am")
-        .replace("PM", "pm")
-        .replace("Am", "am")
-        .replace("Pm", "pm");
-    for layout in [
-        "Jan 2 at 3:04pm",
-        "Jan 2 at 3pm",
-        "Jan 2, 2006 at 3:04pm",
-        "Jan 2, 2006 at 3pm",
-        "Jan 2, 3:04pm",
-        "Jan 2, 3pm",
-        "Jan 2, 2006, 3:04pm",
-        "Jan 2, 2006, 3pm",
-    ] {
-        if let Ok(parsed) = NaiveDateTime::parse_from_str(&rest, layout) {
-            if parsed.year() != 0 {
-                return system_from_datetime(parsed.and_utc());
-            }
-            let ref_year = now_dt.year();
-            for year in (ref_year - 1)..=(ref_year + 1) {
-                let Some(candidate) = loc
-                    .with_ymd_and_hms(
-                        year,
-                        parsed.month(),
-                        parsed.day(),
-                        parsed.hour(),
-                        parsed.minute(),
-                        0,
-                    )
-                    .single()
-                else {
-                    continue;
-                };
-                if candidate >= now_dt - chrono::Duration::days(1) && candidate <= latest {
-                    return system_from_datetime(candidate);
-                }
-            }
-            let Some(past) = loc
-                .with_ymd_and_hms(
-                    ref_year,
-                    parsed.month(),
-                    parsed.day(),
-                    parsed.hour(),
-                    parsed.minute(),
-                    0,
-                )
-                .single()
-            else {
-                continue;
-            };
-            if past < now_dt {
-                return system_from_datetime(past);
-            }
-        }
-    }
-    for layout in ["3:04pm", "3pm"] {
-        let Ok(parsed) = NaiveTime::parse_from_str(&rest, layout) else {
-            continue;
-        };
-        let ref_date = now_dt.date_naive();
-        for day_offset in 0..=2i64 {
-            let day = ref_date + chrono::Duration::days(day_offset);
-            let Some(candidate) = loc.from_local_datetime(&day.and_time(parsed)).single() else {
-                continue;
-            };
-            if candidate.time() == parsed && candidate >= now_dt && candidate <= latest {
-                return system_from_datetime(candidate);
-            }
-        }
-        for day_offset in 0..=2i64 {
-            let day = ref_date - chrono::Duration::days(day_offset);
-            let Some(candidate) = loc.from_local_datetime(&day.and_time(parsed)).single() else {
-                continue;
-            };
-            if candidate.time() == parsed && candidate < now_dt {
-                return system_from_datetime(candidate);
-            }
-        }
-    }
-    None
-}
-
-fn split_zone(s: &str) -> (Option<&str>, String) {
-    let Some(open) = s.rfind('(') else {
-        return (None, s.to_owned());
-    };
-    if !s.ends_with(')') {
-        return (None, s.to_owned());
-    }
-    (
-        Some(s[open + 1..s.len() - 1].trim()),
-        s[..open].trim().to_owned(),
-    )
-}
-
-fn datetime_from_system(now: SystemTime) -> Option<chrono::DateTime<Utc>> {
-    let dur = now.duration_since(UNIX_EPOCH).ok()?;
-    Utc.timestamp_opt(dur.as_secs() as i64, dur.subsec_nanos())
-        .single()
-}
-
-fn system_from_datetime<Tz: TimeZone>(dt: chrono::DateTime<Tz>) -> Option<SystemTime> {
-    let secs = dt.timestamp();
-    if secs < 0 {
-        return None;
-    }
-    UNIX_EPOCH.checked_add(Duration::from_secs(secs as u64))
-}
-
 #[cfg(test)]
 mod tests {
-    use std::time::SystemTime;
+    use std::time::{Duration, UNIX_EPOCH};
+
+    use chrono::TimeZone;
+    use chrono_tz::Asia::Shanghai;
+    use hofund_plugin_api::PluginErrorKind;
 
     use super::*;
 
     fn utc(y: i32, m: u32, d: u32, h: u32, min: u32) -> SystemTime {
         let dt = chrono::Utc
+            .with_ymd_and_hms(y, m, d, h, min, 0)
+            .single()
+            .expect("time");
+        UNIX_EPOCH + Duration::from_secs(dt.timestamp() as u64)
+    }
+
+    fn shanghai(y: i32, m: u32, d: u32, h: u32, min: u32) -> SystemTime {
+        let dt = Shanghai
             .with_ymd_and_hms(y, m, d, h, min, 0)
             .single()
             .expect("time");
@@ -342,18 +246,36 @@ What's contributing to your limits usage?
         assert_eq!(windows.len(), 4);
         assert_eq!(windows[0].name(), "5 hours");
         assert_eq!(windows[0].used(), 13);
+        assert_eq!(windows[0].resets_at(), Some(shanghai(2026, 10, 1, 15, 30)));
         assert_eq!(windows[1].name(), "7 days");
+        assert_eq!(windows[1].resets_at(), Some(shanghai(2026, 10, 3, 14, 0)));
         assert_eq!(windows[2].name(), "7 days · Opus");
         assert_eq!(windows[2].scope_model(), Some("opus"));
+        assert_eq!(windows[2].resets_at(), Some(shanghai(2026, 1, 2, 14, 0)));
         assert_eq!(windows[3].name(), "7 days · Fable");
         assert_eq!(windows[3].scope_model(), Some("fable"));
+        assert_eq!(windows[3].resets_at(), None);
     }
 
     #[test]
     fn r5_2_signed_out_usage_is_auth_error() {
         let now = utc(2026, 10, 1, 4, 0);
         let error = parse("Error: not logged in", now).expect_err("denied");
-        assert_eq!(error.kind(), hofund_plugin_api::PluginErrorKind::Auth);
+        assert_eq!(error.kind(), PluginErrorKind::Auth);
+    }
+
+    #[test]
+    fn r5_16_limit_line_is_quota_not_auth() {
+        let now = utc(2026, 10, 1, 4, 0);
+        let error = parse("You've hit your limit · resets 3:30am (UTC)", now).expect_err("limit");
+        assert_eq!(error.kind(), PluginErrorKind::Quota);
+    }
+
+    #[test]
+    fn r5_17_usage_unknown_is_transport() {
+        let now = utc(2026, 10, 1, 4, 0);
+        let error = parse("/usage couldn't load the plan's usage", now).expect_err("unknown");
+        assert_eq!(error.kind(), PluginErrorKind::Transport);
     }
 
     #[test]
@@ -372,7 +294,10 @@ Current week (all models): 40% used · resets Nov 6 at 11am (UTC)
 ";
         let windows = parse(text, now).expect("windows");
         assert_eq!(windows.len(), 3);
+        assert_eq!(windows[0].resets_at(), Some(utc(2026, 11, 1, 15, 0)));
+        assert_eq!(windows[1].resets_at(), Some(utc(2026, 11, 6, 11, 0)));
         assert_eq!(windows[2].name(), "Extra usage");
         assert_eq!(windows[2].used(), 100);
+        assert_eq!(windows[2].resets_at(), Some(utc(2026, 11, 1, 15, 0)));
     }
 }

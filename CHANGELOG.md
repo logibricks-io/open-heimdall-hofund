@@ -13,7 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   windows with scoped model labels, model list from models.dev anthropic catalog
   plus Claude Code `.claude.json` caches, setup-token (`sk-ant-oat…`) inference-only
   accounts, CLIProxy-style credential import, pending sign-in idle expiry, and
-  account-directory cleanup on remove; tests `r5_1` through `r5_11`.
+  account-directory cleanup on remove; tests `r5_1` through `r5_11` and fix-round
+  tests `r5_12` through `r5_33`.
 - Subscription plugins for Grok Build, Cursor, and Cline (feature-parity row 3.5,
   part 1): device or browser sign-in, agent auth import where supported, token
   refresh, model lists, quota reads, and chat or Responses upstream for Grok
@@ -77,6 +78,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Claude subscription (R-5 fix round 1): parse `/usage` reset times with the
+  same rules as the reference (zones, yearless dates, time-only resets); quota
+  holds the account lease and run lock, reads rotated credentials back, and
+  always removes the on-disk credentials file; classify usage errors as auth,
+  quota, transport, or unsupported; build import JSON with the Value API; refuse
+  bare `.credentials.json` imports without an email; expire idle pending sign-in
+  in `complete_sign_in`; daemon sign-out invokes subscription `remove_account`.
 - Provider key spend caps use the key fingerprint carried by the serving
   member, including a provider with one key. Usage rows record that id, and
   routing skips a capped key before failover (D-61).

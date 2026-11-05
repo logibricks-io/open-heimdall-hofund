@@ -17,6 +17,24 @@ use syn::ext::IdentExt;
 use syn::visit::Visit;
 
 const ALLOWED_DEPS: &[&str] = &["hofund-plugin-api", "hofund-plugin-sdk"];
+
+/// Extra runtime dependencies reviewed for one plugin package.
+const PLUGIN_EXTRA_DEPS: &[(&str, &[&str])] = &[(
+    "hofund-plugin-subscription-claude",
+    &[
+        "chrono",
+        "chrono-tz",
+        "hofund-model-catalog",
+        "regex",
+        "sha2",
+    ],
+)];
+
+fn plugin_allows_dep(package: &str, name: &str) -> bool {
+    PLUGIN_EXTRA_DEPS
+        .iter()
+        .any(|(pkg, deps)| *pkg == package && deps.contains(&name))
+}
 const TOKIO_BANNED_FEATURES: &[&str] = &["full", "net", "process", "signal"];
 const WORKSPACE_CRATES: &[&str] = &["hofund-plugin-api", "hofund-plugin-sdk"];
 const FOREIGN_DEP_KEYS: &[&str] = &["path", "git", "version", "registry", "branch", "rev", "tag"];
@@ -110,6 +128,7 @@ pub fn dependency_error(
     features: &[String],
     dev: bool,
     own_kit: Option<&str>,
+    package: Option<&str>,
 ) -> Option<String> {
     if name == "tokio" {
         let banned: Vec<&str> = TOKIO_BANNED_FEATURES
@@ -129,6 +148,9 @@ pub fn dependency_error(
     if ALLOWED_DEPS.contains(&name) {
         return None;
     }
+    if package.is_some_and(|pkg| plugin_allows_dep(pkg, name)) {
+        return None;
+    }
     if dev && (own_kit == Some(name) || name == "tempfile") {
         return None;
     }
@@ -143,17 +165,23 @@ pub fn dependency_error(
 pub fn manifest_dependency_errors(
     text: &str,
     own_kit: Option<&str>,
+    package: Option<&str>,
 ) -> Result<Vec<String>, String> {
     let value: toml::Value =
         toml::from_str(text).map_err(|error| format!("manifest is not valid toml: {error}"))?;
     let mut errors = Vec::new();
-    collect_dependency_errors(&value, own_kit, &mut errors);
+    collect_dependency_errors(&value, own_kit, package, &mut errors);
     errors.sort();
     errors.dedup();
     Ok(errors)
 }
 
-fn collect_dependency_errors(value: &toml::Value, own_kit: Option<&str>, errors: &mut Vec<String>) {
+fn collect_dependency_errors(
+    value: &toml::Value,
+    own_kit: Option<&str>,
+    package: Option<&str>,
+    errors: &mut Vec<String>,
+) {
     let Some(table) = value.as_table() else {
         return;
     };
@@ -170,10 +198,11 @@ fn collect_dependency_errors(value: &toml::Value, own_kit: Option<&str>, errors:
                 child,
                 dev || section.contains("dev-dependencies"),
                 own_kit,
+                package,
                 errors,
             );
         } else {
-            collect_dependency_errors(child, own_kit, errors);
+            collect_dependency_errors(child, own_kit, package, errors);
         }
     }
 }
@@ -182,6 +211,7 @@ fn push_dependency_errors(
     value: &toml::Value,
     dev: bool,
     own_kit: Option<&str>,
+    package: Option<&str>,
     errors: &mut Vec<String>,
 ) {
     let Some(table) = value.as_table() else {
@@ -216,7 +246,7 @@ fn push_dependency_errors(
         {
             errors.push(error);
         }
-        if let Some(error) = dependency_error(&name, &features, dev, own_kit) {
+        if let Some(error) = dependency_error(&name, &features, dev, own_kit, package) {
             errors.push(error);
         }
     }
@@ -1763,7 +1793,7 @@ tokio = { version = "1", features = ["rt", "net", "process"] }
 [build-dependencies]
 cc = "1"
 "#;
-        let errors = manifest_dependency_errors(text, Some("hofund-kit-upstream"))
+        let errors = manifest_dependency_errors(text, Some("hofund-kit-upstream"), None)
             .expect("toml")
             .join("\n");
         for needle in [
@@ -1781,7 +1811,7 @@ cc = "1"
             assert!(errors.contains(needle), "{needle} missing in:\n{errors}");
         }
         assert_eq!(
-            dependency_error("hofund-plugin-sdk", &[], false, None),
+            dependency_error("hofund-plugin-sdk", &[], false, None, None),
             None
         );
         assert_eq!(
@@ -1789,14 +1819,29 @@ cc = "1"
                 "hofund-kit-upstream",
                 &[],
                 true,
-                Some("hofund-kit-upstream")
+                Some("hofund-kit-upstream"),
+                None,
             ),
             None
         );
-        assert_eq!(dependency_error("tempfile", &[], true, None), None);
+        assert_eq!(dependency_error("tempfile", &[], true, None, None), None);
         assert_eq!(
-            dependency_error("tempfile", &[], false, None).as_deref(),
+            dependency_error("tempfile", &[], false, None, None).as_deref(),
             Some("depends on tempfile")
+        );
+        assert_eq!(
+            dependency_error(
+                "chrono",
+                &[],
+                false,
+                None,
+                Some("hofund-plugin-subscription-claude")
+            ),
+            None
+        );
+        assert_eq!(
+            dependency_error("chrono", &[], false, None, Some("hofund-plugin-echo")).as_deref(),
+            Some("depends on chrono")
         );
     }
 
@@ -1956,7 +2001,7 @@ cc = "1"
         let manifest =
             "hofund-plugin-api = { path = \"/tmp/fakeapi\" }\nhofund-plugin-sdk = \"0.9\"\n";
         let text = format!("[dependencies]\n{manifest}");
-        let errors = manifest_dependency_errors(&text, None)
+        let errors = manifest_dependency_errors(&text, None, None)
             .expect("toml")
             .join("\n");
         assert!(

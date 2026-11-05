@@ -116,6 +116,7 @@ hofund-quirks = { version = "0.1.0", path = "crates/kernel/quirks" }
 hofund-router = { version = "0.1.0", path = "crates/kernel/router" }
 hofund-secrets = { version = "0.1.0", path = "crates/kernel/secrets" }
 hofund-usage = { version = "0.1.0", path = "crates/kernel/usage" }
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 sha2 = "0.10.9"
 tempfile = "3.27.0"
 

@@ -100,32 +100,52 @@ pub(crate) async fn refresh(
     Ok(())
 }
 
-/// Writes credentials (or setup-token onboarding) into the account directory before a CLI read.
-pub(crate) async fn prepare_for_run(
+/// Reads subscription quota via `claude -p /usage`, with the same lease, run
+/// mark, credential materialization, rotation read-back, and file cleanup as
+/// [`refresh`].
+pub(crate) async fn read_usage(
     host: &HostContext,
     program: impl FnOnce() -> Result<PathBuf, PluginError>,
     account: &AccountId,
-    blob: &SecretObject,
-) -> Result<(), PluginError> {
-    let _program = program()?;
-    let dir = account_dir(host, account)?;
-    creds::private_dir(&dir)?;
-    if crate::setup_token::is_setup_token(blob) {
-        creds::write_onboarded(&dir)?;
-        return Ok(());
+) -> Result<Vec<hofund_plugin_api::QuotaWindow>, PluginError> {
+    let lease = host.accounts().lease(account, LEASE_WAIT).await?;
+    let blob = SecretObject::parse(lease.secret())?;
+    if crate::setup_token::is_setup_token(&blob) {
+        return Err(PluginError::unsupported(crate::usage::SETUP_TOKEN_QUOTA));
+    }
+    let _run = crate::run_lock::mark(account, host)?;
+    if blob.flag(creds::LAPSED) {
+        return Err(PluginError::auth(creds::LAPSED_REASON));
     }
     let Some(stored) = blob.text(creds::CREDENTIALS) else {
         return Err(PluginError::auth(
             "the stored Claude Code sign-in has no credentials",
         ));
     };
+    let stored = stored.to_owned();
     let profile = Profile::parse(blob.text(creds::PROFILE).unwrap_or_default());
-    creds::write_private(&dir.join(creds::CREDENTIALS_FILE), stored)?;
-    let settings = dir.join(creds::PROFILE_FILE);
-    if !settings.exists() {
-        creds::write_private(&settings, &profile.settings_text())?;
+    let program = program()?;
+    let dir = account_dir(host, account)?;
+    creds::private_dir(&dir)?;
+    let file = dir.join(creds::CREDENTIALS_FILE);
+    let now = host.clock().now();
+    let parsed = async {
+        creds::write_private(&file, &stored)?;
+        let settings = dir.join(creds::PROFILE_FILE);
+        if !settings.exists() {
+            creds::write_private(&settings, &profile.settings_text())?;
+        }
+        let text = crate::usage::run_usage_cli(host, &program, &dir, &run_env(&blob)).await?;
+        crate::usage::parse(&text, now)
     }
-    Ok(())
+    .await;
+    let read_back = creds::read_credentials(&dir);
+    let _ = std::fs::remove_file(&file);
+    if let Some(rotated) = read_back.filter(|rotated| rotated.text != stored) {
+        let updated = blob.with_text(creds::CREDENTIALS, &rotated.text);
+        lease.commit(None, updated.to_secret()).await?;
+    }
+    parsed
 }
 
 const WARM_ARGS: [&str; 11] = [

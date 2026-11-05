@@ -14,11 +14,10 @@ rust-version.workspace = true
 hofund-model-catalog = { workspace = true }
 hofund-plugin-api = { workspace = true }
 hofund-plugin-sdk = { workspace = true }
-chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+chrono = { workspace = true }
 chrono-tz = "0.10.4"
 regex = "1.13.1"
 sha2 = { workspace = true }
-tokio = { version = "1.52.2", features = ["time"] }
 
 [dev-dependencies]
 hofund-kit-subscription = { workspace = true }
