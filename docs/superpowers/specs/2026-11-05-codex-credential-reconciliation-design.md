@@ -1,6 +1,6 @@
 # R-47b: Codex credential reconciliation (design spec)
 
-**Status:** **Written-review draft** — **explicit Palmer written spec approval required** before any implementation plan (supervisor comment alone is not approval). **STOP** here until then.
+**Status:** **Written-review draft** — **explicit Palmer written spec approval required** before any implementation plan (supervisor comment alone is not approval). Core protocol acceptable as draft; **not** implementation approval. **STOP** before `writing-plans`.
 
 **Branch:** `sup/r-47b-codex-store`; rr3: `/workspace/hofund-review/r-47b-grok-rr3.md`.
 
@@ -8,128 +8,134 @@
 
 ## Review assumptions (nothing pre-approved)
 
-1. Codex plugin only; production entrypoints: `tokens::access` / `rotate`, `discover`, `agent_sign_in::write`, `rotate_for_test` (production lock/order).
+1. Codex plugin only; entrypoints: `tokens::access` / `rotate`, `discover`, `agent_sign_in::write`, `rotate_for_test` (production lock/order).
 2. Durable stores: **protected account secret** (daemon via `lease`/`commit`, existing plugin-host contract), Codex `auth.json`, Keychain, `config.toml` — no new files/APIs/plaintext journals.
-3. **Requires explicit Palmer approval** for: (a) in-blob protocol fields (`RefreshInFlight`, `CandidatePending`, fingerprints), (b) **home-owner** enforcement via **Codex-plugin-only** `list()` + each row’s secret metadata scan — **no other plugins, no new permissions**, (c) conservative **`RefreshInFlight` ⇒ reauth** when rotation ambiguous. Approval is **not** granted by this draft.
-4. OAuth + Keychain + account **not atomic**; **no zero-loss**; external pre-write recheck **not atomic** (TOCTOU); fail-closed on mismatch.
-5. R-8a / restriction holds unchanged.
+3. **Requires explicit Palmer approval** for: (a) in-blob fields below, (b) home-owner via **Codex-plugin-only** `list()` + secret metadata scan — **no other plugins, no new permissions**, (c) conservative **`RefreshInFlight` ⇒ reauth** when rotation ambiguous. **Not** pre-approved.
+4. OAuth + Keychain + account **not atomic**; **no zero-loss**; external recheck **not CAS** (TOCTOU).
+5. R-8a / restriction holds unchanged; no new features/access beyond this spec.
 
 ---
 
-## Scope / alternatives
+## Scope / alternatives (tradeoffs)
 
-Single reconciliation state machine: home owner, in-blob flight/pending, adopt vs OAuth, store write-back. No new product features or releases.
+Single state machine: home owner, markers, adopt vs OAuth, store write-back. No releases.
 
-| Option | Verdict |
-|--------|---------|
-| **A.** One transaction + in-blob flight/pending | **Recommend** |
-| **B.** Patch #4 | Reject (rr3) |
-| **C.** Daemon OAuth | Reject (scope) |
+| Option | Tradeoff | Verdict |
+|--------|----------|---------|
+| **A** Single transaction + in-blob markers | Better crash recoverability; cost = internal blob states + protocol complexity | **Recommend** |
+| **B** Local patch #4 | Smaller diff; rr3 proved cross-cutting invariants still fail | Reject |
+| **C** Daemon-owned OAuth | Clear lock owner; boundary + scope expansion vs plugin-host | Reject |
+
+---
+
+## In-blob fields and marker precedence
+
+Non-secret JSON inside existing account secret (exact keys = implementation detail):
+
+| Field | When set |
+|-------|----------|
+| `refresh_attempt_id` | Step 1 RefreshInFlight |
+| `refresh_canonical_home` | Step 1 |
+| `refresh_store_location_fp` | Step 1 (file vs keychain + mode) |
+| `refresh_baseline_tuple_fp` | Step 1; literal **ABSENT** when store signed out |
+| `refresh_candidate_tuple_fp` | Step 3 CandidatePending |
+| Candidate secrets | access, refresh, id_token, store account_id in blob at Step 3 |
+| `refresh_invalid` | Unrecoverable conflict marker; **fail-closed** on refresh until operator clears via re-sign-in |
+
+**Phases (mutually exclusive active marker):** at most one of InFlight-only, CandidatePending (includes candidate tuple + fps), or INVALID. If legacy blob has both InFlight and Pending, **CandidatePending wins**; repair uses Pending tuple; clear both when done.
+
+**Fingerprints:** store location + hashed full tuple (access, refresh, id_token, store account_id). Never log secrets or fp values.
 
 ---
 
 ## Canonical home & Keychain contract
 
-- **Missing home:** validate ancestors + unsafe-parent rules; create **new** home **0700** only; **do not** `chmod` an **existing** safe home. Re-resolve to canonical absolute path (symlink target).
-- **Locking key:** canonical home coordinates **local mutex + flock** and home-owner metadata — **must not** change existing Keychain **service** string or `keychain_account(home)` derivation; reads/writes use **existing** lookup contract only (no new items/queries for migration).
-- **Alias regression:** two paths resolving to same canonical home → same lock slot + same owner binding; **no credential migration** between aliases.
-- Inode/path change under composite lock → abort store write (non-CAS external TOCTOU acknowledged).
+Missing home: validate ancestors + unsafe parent; create **new** home **0700** only; do not chmod existing safe home. Canonical absolute path (symlink target) keys mutex/flock/owner metadata. **Do not** change Keychain service or `keychain_account(home)` derivation. Alias paths → same canonical lock + owner. Inode/path change under composite lock → abort store write.
 
 ---
 
-## UNIQUE home owner (composite-guard atomicity)
+## UNIQUE home owner
 
-**Invariant:** One canonical home → at most one Codex `AccountId` may refresh/OAuth/bind.
-
-**Protocol join (all binding writers):** `upsert`, agent sign-in, reconciliation OAuth/adopt — each must run home-owner check **under the same home composite guard** (lease → local mutex → flock) after **caller’s account lease** is taken. **Do not** acquire a **second** account lease while holding the home composite guard.
-
-**Check:** Codex-scoped `list()` + secret `codex_home` canonical compare. **Publication:** bind/reject home in secret only while composite guard held so two concurrent “0 owner” upserts cannot both succeed.
+One canonical home → at most one Codex `AccountId`. Binding writers (`upsert`, agent sign-in, reconcile) run owner scan + publication **under same home composite guard** after caller **account lease** only; **no second account lease** while home guard held. Codex `list()` + secret `codex_home` canonical compare.
 
 | Owners | Action |
 |--------|--------|
-| 0 | Bind allowed only for caller under guard (agent rules) |
-| 1 | Must be lease `AccountId` |
-| ≥2 | Fail-closed refresh/OAuth for that home |
+| 0 | Bind caller under guard only |
+| 1 | Must equal lease AccountId |
+| ≥2 | Fail-closed refresh/OAuth |
 
-**Escalation:** If existing host APIs cannot enforce guard+publication without new permissions/interfaces → **STOP implementation**, escalate to Palmer (design blocker). **M1** below is **required future test design**, not evidence this doc executed tests.
-
----
-
-## Lock, timeout, cancellation vs crash
-
-**Order:** lease → local mutex → flock → cache mutex (brief cache ops only).
-
-**Full composite required for:** pending restore/clear, fresh store read, OAuth POST, store write, adopt commit, home-owner scan/bind.
-
-**Timeout Busy:** zero POST, write, commit, adopt.
-
-**Cancellation:** After OAuth/request start, **detached refresh transaction** continues durability steps (InFlight → POST → CandidatePending → store write → clear attempts) **before** releasing composite guard; caller may cancel waiting **without** stopping an already-started durability job mid-protocol.
-
-**Crash / kill:** surviving `RefreshInFlight` without proof POST unsent → **reauth**; **no** old-refresh retry. Distinct from cooperative cancel of waiter only.
-
-**Logging:** **No** access, refresh, id_token, or fingerprint material in logs/errors (redaction regression).
-
-**POST retry:** No automatic refresh POST retries unless provably unsent; conservative InFlight handling.
+Cannot enforce with existing APIs → **STOP implementation**, escalate Palmer. **M1** = required future test, not executed by this doc.
 
 ---
 
-## Store states: SignedOut, Missing, Noop
+## Lock, waits, flock, cancellation
 
-Under **full guard + unique owner + safe home + account refresh present**:
+**Order:** lease (wait **30s**) → local mutex → directory **flock** on codex_home inode → cache mutex (brief).
 
-| Live store read | Meaning | OAuth? |
-|-----------------|---------|--------|
-| **SignedOut / absent selected store** | Valid **ABSENT** baseline | Yes **after** InFlight commit; baseline fp = **ABSENT** |
-| **Was present at baseline, now absent** | Deleted conflict | **No** POST; fail-closed |
-| **InvalidJson / Unreadable** | Never → ABSENT | **No** POST; bytes unchanged |
-| **Keychain Refused** | Fail-closed | **No** POST |
-| **Tuple matches account; `Need` satisfied** | **Noop** | **No** POST (`IfExpiring` fresh, `Replace` mismatch) |
-| **Tuple matches; only `Need` requires rotate** | Stale per Need | OAuth path |
+**Waits:** home composite **10s** total, **50ms** retry; on Busy/Io → release partial guards → retryable Busy with **zero** POST/write/commit/adopt.
 
-**CandidatePending** may **create** missing store **only** if live baseline fp was **ABSENT** and step 4 baseline still ABSENT/match. Baseline had credentials → disappearance is conflict, not auto-seed.
+**Lifetime:** full guard spans fresh baseline read → OAuth POST → **both** durable account commits **and** store write attempts before release.
 
----
+**Flock:** directory lock stable across `.codex.lock` delete/recreate; second cross-process taker **Busy** while inode lock held. macOS + Linux same-process mutex required (second taker Busy).
 
-## Fingerprints & protocol (ordered)
+**Cancellation:** waiter may drop; **detached** refresh job continues durability (InFlight → POST → Pending → store → clear) before guard release — cancel is wait-safe, not protocol-abort mid-flight.
 
-Fp = store location + **full tuple** (access, refresh, id_token, store `account_id` hashes). Same access, different refresh → different fp → adopt/readopt + **401 `Replace`** uses **current** lease access after wait.
+**Crash/kill:** InFlight without proof POST unsent → reauth; no old-refresh retry.
 
-| Step | Action | Fail |
-|------|--------|------|
-| 0 | Pending restore/clear (locked, live) | conflict → stop |
-| 1 | `commit RefreshInFlight` | **0 POST** |
-| 2 | Single POST | ambiguous → InFlight + reauth |
-| 3 | `commit CandidatePending` + tuple | keep InFlight; reauth if candidate lost |
-| 4 | Conditional store write (baseline match) | repair later |
-| 5 | Clear markers commit | retry clear; failed clear **regression** |
-
-Restart: InFlight ambiguous → reauth; CandidatePending → repair **0 POST** then clear.
+**Reconcile reads:** **fresh** under full guard; bypass Keychain **positive and negative** cache; no cache fallback for POST/adopt.
 
 ---
 
-## Adopt & expired store access
+## Store states (baseline fresh under full guard)
 
-Usable store access → `commit` full tuple → success **0 POST**. Expired access → `commit` full tuple → **retryable refresh-needed** this call (**no** POST); next `access`/`rotate` POST with **adopted refresh** under full guard. Full-tuple readopt on 401 after adopt.
+| Live read | OAuth in same call? |
+|-----------|---------------------|
+| SignedOut / absent store (ABSENT baseline fp) | Yes after InFlight commit |
+| Was credentialed at baseline, now absent | No; deleted conflict |
+| InvalidJson / Unreadable / Keychain Refused | No; bytes unchanged |
+| Tuple matches account; Need satisfied | **Noop**; no POST |
+| Need requires rotate; tuple stale vs Need | OAuth after markers |
+
+Pending may create store only if baseline fp was **ABSENT** and step 4 still ABSENT/match.
 
 ---
 
-## Keychain cache (discover / non-reconcile)
+## OAuth protocol (ordered)
 
-Post-TTL validation: **Missing** → error, no stale secret; **fresh** reconcile bypasses pos/neg cache. **Refused/Unreadable** on reconcile → 0 POST. Same home, two `FakeKeychain` providers → isolated cache (regression on `StoreReader` + entrypoints).
+Prerequisite: lease + full guard + fresh baseline + owner OK. **Noop/adopt must not bypass** CandidatePending/INVALID (step 0 first).
+
+| Step | Durable / network | On failure |
+|------|-------------------|------------|
+| 0 | **CandidatePending repair** (table below) | conflict → stop; **no generic OAuth in same call after repair branch** |
+| 1 | commit RefreshInFlight + fps above | **0 POST** |
+| 2 | Single OAuth POST (guard held) | definitive auth fail may clear InFlight; else keep → reauth |
+| 3 | commit CandidatePending + candidate tuple | **Keep InFlight**; no claim recoverable candidate if commit fails; reauth if tokens lost in memory |
+| 4 | Re-read store; if baseline fp match → conditional write candidate | if third tuple vs baseline → **skip write**, **keep Pending** |
+| 5 | commit clear markers + full tuple secrets | failed clear **retains Pending**; store may hold candidate; next call verify + clear |
+
+Restart: ambiguous InFlight → reauth; Pending → step 0 repair only (**0 POST**).
+
+### CandidatePending repair (step 0; full guard + fresh read)
+
+| Live store vs pending | Action | Same-call OAuth after? |
+|-----------------------|--------|------------------------|
+| Matches **candidate** fp | Clear markers if needed; return candidate access | No |
+| Matches **baseline** fp or explicit **ABSENT** | Conditional write candidate; clear; return candidate | No |
+| Third tuple / unexpected missing / invalid / unreadable / refused / unsafe | **Conflict**; set INVALID if unrecoverable; no adopt-back | No |
+
+Failed step 5: Pending + candidate remain; next entry repeats step 0 before noop/adopt/OAuth.
 
 ---
 
-## State flow
+## Adopt & expired access
 
-```text
-lease → composite (or Busy)
-  → owner scan/bind under guard
-  → pending restore (locked)
-  → fresh read → refuse/invalid fail
-  → noop if Need satisfied
-  → adopt paths (0 POST rules)
-  → else InFlight → POST → Pending → write → clear
-```
+Usable access → commit full tuple → success **0 POST**. Expired → commit full tuple → **retryable refresh-needed** (**no** POST); next call OAuth with adopted refresh under full guard. **Need::Replace** compares **current** lease access. Full tuple readopt on 401.
+
+---
+
+## Keychain cache (non-reconcile)
+
+**Missing** observed: never return prior **successful** bytes again; negative cache TTL expiry permits **live find** retry. After TTL, validation that observes Missing → error. **Fresh** (`fresh: true`) bypasses positive **and** negative caches. Reconcile always fresh under guard. Same canonical home, two `FakeKeychain` providers → isolated cache (M13).
 
 ---
 
@@ -137,55 +143,45 @@ lease → composite (or Busy)
 
 | Condition | POST | write | commit* |
 |-----------|------|-------|---------|
-| InvalidJson / Unreadable / Refused | No | No | No |
+| Invalid / unreadable / refused | No | No | No |
 | Deleted-after-baseline | No | No | No |
 | Lock Busy | No | No | No |
-| Owner conflict | No | No | No |
-| Pending conflict | No | No | No |
+| Owner / pending / INVALID conflict | No | No | No |
 
-\*Protocol steps 1/3/5 when prior step succeeded.
+\*Steps 1/3/5 when prior step succeeded.
 
 ---
 
-## Regression matrix (production entrypoints; not yet executed)
+## Regression matrix (not executed)
 
-| ID | Must prove | Entry |
-|----|------------|-------|
-| M1 | Two accounts, same home → fail before POST | `rotate_for_test` |
-| M2 | InFlight before POST; step-1 fail → 0 POST | `rotate_for_test` + hooks |
-| M3 | Ambiguous OAuth → reauth | `access` detached |
-| M4 | Candidate commit fail; clear fail; crash each step | `rotate_for_test` / `access` |
+| ID | Prove | Entry |
+|----|-------|-------|
+| M1 | Two accounts same home fail before POST | `rotate_for_test` |
+| M2–M4 | Protocol steps + clear fail + crash hooks | `rotate_for_test`, `access` |
 | M5 | Pending repair; no rollback | `access` |
-| M6 | Expired adopt then next refresh uses new refresh | `access` |
-| M7 | 401 Replace + full tuple readopt | `access` |
+| M6–M7 | Expired adopt; 401 Replace + readopt | `access` |
 | M8 | Lock timeout zero side effects | `rotate_for_test` |
-| M9 | Double POST prevented | `rotate_for_test` |
+| M9 | No double POST | `rotate_for_test` |
 | M10 | Invalid/unreadable/refused 0 POST | `rotate_for_test` |
-| M11 | Unsafe home; preserve existing perms | agent + write-back |
-| M12 | macOS Busy; alias same lock | lock + M1 path |
-| M13 | Cache Missing post-TTL; dual FakeKeychain | `StoreReader` + discover |
+| M11 | Unsafe home; preserve perms | agent + write-back |
+| M12 | macOS **same-process Busy**; **cross-process** lock-file recreate Busy; home inode change abort; alias same coordination | lock tests + reconcile |
+| M13 | Missing post-TTL; dual FakeKeychain same home | `StoreReader`, discover |
 | M14 | Error redaction | all entrypoints |
 | M15 | rr3 #1–#6 | map above |
 
 ---
 
-## After Palmer approves spec (not executed for this doc)
+## After Palmer approves spec (not executed)
 
-1. **`writing-plans`** → implementation.  
-2. **Fresh implementation context** (do not reuse author design chat for code review).  
-3. **Read-only adversarial reviewer ≠ author**; supervisor **full-diff** review.  
-4. Merge only with **GATES_FAILED=0**, **ALL_KILLED** (timeouts **not** killed), green CI, merge **`origin/main`** without rebase/force-push, R-8a dependency satisfied, security signoff, no sensitive-feature bypass, **no release**.  
-5. This document **does not** claim any gate or test has been run.
+1. `writing-plans` then **fresh implementation context** (no author design chat for review).
+2. Read-only adversarial reviewer **≠ author**; supervisor full-diff.
+3. Merge only: **GATES_FAILED=0**, **ALL_KILLED** (timeouts not killed), green CI, merge **origin/main** without rebase/force-push, R-8a + security signoff, no release.
 
 ---
 
 ## Self-review
 
-- §3: explicit Palmer required; no “assumed approval.”  
-- SignedOut **ABSENT** vs deleted; Noop; Refused fail-closed.  
-- Owner check under composite guard; no second lease; binding writers listed; M1 = future proof only.  
-- Keychain derivation unchanged; existing home perms preserved.  
-- Cancel vs crash; redaction; entrypoint tests specified.
+Markers + repair table restored; step 0 blocks same-call OAuth; step 3 fail keeps InFlight; step 4 skip on third tuple; Missing allows live retry after TTL without stale success; waits 30s/10s/50ms; M12 expanded; no trailing whitespace.
 
 ---
 
