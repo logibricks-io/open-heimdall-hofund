@@ -1,0 +1,33 @@
+[package]
+name = "hofund-tui"
+description = "Terminal UI for the hofund local LLM gateway."
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+autobins = false
+
+[[bin]]
+name = "hofund-tui"
+path = "src/main.rs"
+
+[dependencies]
+crossterm = { workspace = true, features = ["event-stream"] }
+hofund-config = { workspace = true }
+hofund-control-client = { workspace = true }
+hofund-secrets = { workspace = true }
+ratatui = { workspace = true }
+futures-util = "0.3.31"
+tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread", "sync", "time", "process", "io-util"] }
+
+[dev-dependencies]
+hofund-control-proto = { workspace = true }
+tempfile = { workspace = true }
+tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread", "net", "time", "test-util"] }
+
+[lints]
+workspace = true

@@ -20,6 +20,7 @@ mod provider_edit;
 mod quota;
 mod serve;
 mod subscription;
+mod tui;
 mod usage;
 mod visible;
 mod warmup;
@@ -61,6 +62,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Command::Serve => hand_over(serve::run(&config)),
+        Command::Tui { no_color } => hand_over(tui::run(&config, no_color)),
         Command::Help(topic) => {
             println!("{}", help_text(topic));
             ExitCode::SUCCESS
@@ -184,6 +186,7 @@ fn run_control(config: &Path, command: Command) -> Result<String, String> {
             Command::Version
             | Command::Help(_)
             | Command::Serve
+            | Command::Tui { .. }
             | Command::TokenShow
             | Command::Subscription(_)
             | Command::Quota(_)
@@ -199,6 +202,9 @@ enum Command {
     Help(HelpTopic),
     Version,
     Serve,
+    Tui {
+        no_color: bool,
+    },
     Check,
     ConfigApply {
         source: PathBuf,
@@ -397,6 +403,7 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
     let mut dry_run = false;
     let mut force = false;
     let mut requests = false;
+    let mut no_color = false;
     let mut read_only = false;
     let mut help = false;
     let mut own_secret = None;
@@ -436,6 +443,7 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
             "--dry-run" => dry_run = true,
             "--force" => force = true,
             "--requests" => requests = true,
+            "--no-color" => no_color = true,
             "--read-only" => read_only = true,
             "--json" => flags.json = true,
             "--key" => {
@@ -492,6 +500,7 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
     let command = match words.as_slice() {
         [] | ["version"] | ["--version"] | ["-V"] => Command::Version,
         ["serve"] => Command::Serve,
+        ["tui"] => Command::Tui { no_color },
         ["config", "check"] => Command::Check,
         ["config", "apply", source] => Command::ConfigApply {
             source: PathBuf::from(source),
