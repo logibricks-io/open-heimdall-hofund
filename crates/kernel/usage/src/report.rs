@@ -4,7 +4,7 @@ use std::fmt::Write as _;
 
 use chrono::{DateTime, Duration, Local, NaiveDate, NaiveTime, TimeZone, Utc};
 
-use crate::speed::{mean_tokens_per_second, mean_ttft_ms, tokens_per_second};
+use crate::speed::{mean_tokens_per_second, mean_ttft_ms};
 use crate::{Ledger, Row, Totals, UsageError};
 
 /// Subscription account label parsed from an `account:provider:name` upstream id.
@@ -67,7 +67,7 @@ impl ReportWindow {
         }
     }
 
-    /// Maps calendar presets to [`Window`] values.
+    /// Maps calendar presets to [`crate::Window`] values.
     #[must_use]
     pub const fn calendar_window(self) -> Option<crate::Window> {
         match self {
@@ -179,25 +179,55 @@ fn parse_hms_duration(trimmed: &str, flag: &str) -> Result<Duration, String> {
     Ok(Duration::seconds(seconds.round() as i64))
 }
 
-/// CSV column order for `hofund usage --csv`.
+/// CSV column order for `hofund usage --csv` (matches the reference ledger header).
 pub const CSV_HEADER: &[&str] = &[
     "time",
     "agent",
-    "model_asked",
+    "requested_model",
     "provider",
-    "model_served",
+    "host",
+    "model",
+    "served_model",
+    "swapped",
+    "effort",
     "input_tokens",
     "output_tokens",
+    "cache_write_tokens",
     "cache_read_tokens",
-    "cache_write_5m_tokens",
-    "cache_write_1h_tokens",
     "reasoning_tokens",
     "cost_usd",
     "duration_ms",
     "ttft_ms",
-    "tokens_per_second",
     "status",
-    "account",
+    "error",
+    "session",
+    "kind",
+    "provider_key_id",
+    "provider_key_name",
+    "provider_account",
+    "route_id",
+    "request_id",
+    "endpoint",
+    "error_message",
+    "error_type",
+    "source",
+    "rejected",
+    "session_provider",
+    "session_account",
+    "session_official_login",
+    "caller_key_id",
+    "caller_key_name",
+    "response_id",
+    "upstream",
+    "cache_write_5m_tokens",
+    "cache_write_1h_tokens",
+    "tries",
+    "handed_on",
+    "tier_asked",
+    "tier_sent",
+    "tier_served",
+    "upstream_stop",
+    "credits",
 ];
 
 /// Escapes one CSV field (RFC4180-style quoting).
@@ -257,20 +287,24 @@ fn write_csv_row(
         .map(convert_cost)
         .map(|value| format!("{value:.6}"))
         .unwrap_or_default();
-    let speed = tokens_per_second(row.output_tokens, row.latency_ms, row.ttft_ms)
-        .map(|value| format!("{value:.6}"))
-        .unwrap_or_default();
+    let cache_write_5m = row.cache_write_5m_tokens.unwrap_or(0);
+    let cache_write_1h = row.cache_write_1h_tokens.unwrap_or(0);
+    let cache_write_total = cache_write_5m + cache_write_1h;
+    let failed = !row.status.starts_with('2');
     let cells = [
         time,
         row.client_agent.clone(),
         row.model.clone(),
-        row.upstream.clone(),
-        row.model.clone(),
+        String::new(),
+        String::new(),
+        String::new(),
+        row.served_model.clone(),
+        "false".to_owned(),
+        String::new(),
         opt_i64(row.input_tokens),
         opt_i64(row.output_tokens),
+        cache_write_total.to_string(),
         opt_i64(row.cache_read_tokens),
-        opt_i64(row.cache_write_5m_tokens),
-        opt_i64(row.cache_write_1h_tokens),
         opt_i64(row.reasoning_tokens),
         cost,
         row.latency_ms.to_string(),
@@ -278,10 +312,38 @@ fn write_csv_row(
             .filter(|ms| *ms > 0)
             .map(|ms| ms.to_string())
             .unwrap_or_default(),
-        speed,
         row.status.clone(),
+        failed.to_string(),
+        row.session_id.clone(),
+        String::new(),
+        row.provider_key_id.clone(),
+        String::new(),
         account.to_owned(),
+        String::new(),
+        String::new(),
+        String::new(),
+        String::new(),
+        String::new(),
+        String::new(),
+        "false".to_owned(),
+        String::new(),
+        String::new(),
+        "false".to_owned(),
+        row.caller_key_id.clone(),
+        row.caller_key_name.clone(),
+        String::new(),
+        row.upstream.clone(),
+        opt_i64(row.cache_write_5m_tokens),
+        opt_i64(row.cache_write_1h_tokens),
+        String::new(),
+        "false".to_owned(),
+        String::new(),
+        String::new(),
+        String::new(),
+        String::new(),
+        String::new(),
     ];
+    debug_assert_eq!(cells.len(), CSV_HEADER.len());
     for (index, cell) in cells.iter().enumerate() {
         if index > 0 {
             out.push(',');
@@ -330,18 +392,15 @@ pub struct SpeedTotals {
 pub fn speed_totals(rows: &[Row]) -> SpeedTotals {
     SpeedTotals {
         mean_ttft_ms: mean_ttft_ms(rows.iter().map(|row| row.ttft_ms)),
-        mean_tokens_per_second: mean_tokens_per_second(
-            rows.iter()
-                .map(|row| (row.output_tokens, row.latency_ms, row.ttft_ms)),
-        ),
+        mean_tokens_per_second: mean_tokens_per_second(rows.iter()),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        ReportWindow, account_of_upstream, csv_field, format_csv, parse_days, parse_last,
-        parse_since, row_matches_filter,
+        CSV_HEADER, ReportWindow, account_of_upstream, csv_field, format_csv, parse_days,
+        parse_last, parse_since, row_matches_filter,
     };
     use crate::{Ledger, Row, UsageDetails};
     use chrono::TimeZone;
@@ -421,8 +480,20 @@ mod tests {
         assert_eq!(rows.first().map(|row| row.model.as_str()), Some("a"));
         let csv = format_csv(&rows, |usd| usd).expect("csv");
         let header = csv.lines().next().expect("header");
-        assert!(header.starts_with("time,agent,model_asked"));
-        assert!(header.contains("tokens_per_second"));
+        assert_eq!(
+            header,
+            CSV_HEADER
+                .iter()
+                .copied()
+                .map(csv_field)
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let row_line = csv.lines().nth(1).expect("row");
+        let fields: Vec<_> = row_line.split(',').collect();
+        assert_eq!(fields.len(), CSV_HEADER.len());
+        assert_eq!(fields[1], "agent");
+        assert_eq!(fields[2], "a");
     }
 
     #[test]

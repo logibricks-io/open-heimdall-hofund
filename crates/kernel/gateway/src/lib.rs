@@ -20,6 +20,7 @@ mod readonly;
 mod refusal_handover;
 mod relisten;
 mod responses_ws;
+mod stream_timing;
 mod usage_handoff;
 
 pub use endpoints::{GENERATIVE_LIST, GENERATIVE_STREAM, GENERATIVE_UNARY};
@@ -3024,6 +3025,7 @@ struct UsageMeta {
     ttft_ms: Option<i64>,
     details: hofund_usage::UsageDetails,
     saw_reasoning: bool,
+    stream_timing: stream_timing::StreamTiming,
 }
 
 impl UsageMeta {
@@ -3050,13 +3052,7 @@ impl UsageMeta {
             ttft_ms: None,
             details: hofund_usage::UsageDetails::default(),
             saw_reasoning: false,
-        }
-    }
-
-    fn note_first_content(&mut self) {
-        if self.ttft_ms.is_none() {
-            self.ttft_ms =
-                Some(i64::try_from(self.started.elapsed().as_millis()).unwrap_or(i64::MAX));
+            stream_timing: stream_timing::StreamTiming::new(started),
         }
     }
 }
@@ -3157,17 +3153,16 @@ fn sse_body(
                     }
                     Some(Ok(event)) => {
                         note_usage(&event, &mut record);
-                        if matches!(
-                            event,
-                            StreamEvent::TextDelta(_)
-                                | StreamEvent::ThinkingDelta(_)
-                                | StreamEvent::ToolArgumentsDelta(_)
-                        ) {
-                            record.meta.note_first_content();
-                        }
                         match encoder.push(&event) {
-                            Ok(bytes) if bytes.is_empty() => {}
+                            Ok(bytes) if bytes.is_empty() => {
+                                record.meta.stream_timing.note_stream_event(&event, 0);
+                                continue;
+                            }
                             Ok(bytes) => {
+                                record
+                                    .meta
+                                    .stream_timing
+                                    .note_stream_event(&event, bytes.len());
                                 let boundary = frame_closed(&bytes);
                                 return Some((
                                     Ok(Bytes::from(bytes)),
@@ -3350,7 +3345,7 @@ where
                 Some(Bytes::from(out))
             }
             Some(Ok(chunk)) => {
-                self.meta.note_first_content();
+                self.meta.stream_timing.ingest_raw(&chunk);
                 let mut forwarded = self.tap.push(&chunk);
                 self.note_tokens();
                 if let Some(lines) = self.lines.as_mut() {
@@ -3522,6 +3517,17 @@ fn write_usage(
     provider_free: bool,
 ) {
     let (input_tokens, output_tokens) = tokens.unwrap_or((None, None));
+    let mut details = meta.details;
+    let ttft_ms = meta
+        .stream_timing
+        .finish_fields(details.reasoning_tokens.unwrap_or(0))
+        .and_then(|(ttft, first_text, first_reasoning, flow)| {
+            details.first_text_ms = first_text;
+            details.first_reasoning_ms = first_reasoning;
+            details.flow_ms = flow;
+            ttft
+        })
+        .or(meta.ttft_ms);
     if let Some(tokens) = input_tokens.and_then(|value| u64::try_from(value).ok()) {
         metrics::counter!("hofund_tokens", "direction" => "input").increment(tokens);
     }
@@ -3548,9 +3554,12 @@ fn write_usage(
         provider_key_id: meta.provider_key_id.clone(),
         client_agent: meta.client_agent.clone(),
         session_id: meta.session_id.clone(),
+        served_model: meta.served_model.clone(),
+        first_text_ms: details.first_text_ms,
+        first_reasoning_ms: details.first_reasoning_ms,
+        flow_ms: details.flow_ms,
         ..Default::default()
     };
-    let mut details = meta.details;
     if details.uncached_input_tokens.is_none() {
         details.uncached_input_tokens = input_tokens;
     }
@@ -3574,7 +3583,6 @@ fn write_usage(
             price: token_price,
         })
     });
-    let ttft_ms = meta.ttft_ms.or(Some(row.latency_ms));
     let _ = usage.record_with_details(&row, ttft_ms, details, pricing);
 }
 

@@ -12,6 +12,7 @@ use rusqlite::{Connection, params};
 use thiserror::Error;
 
 mod attribution;
+mod decode;
 mod fx;
 mod key;
 mod limits;
@@ -23,6 +24,7 @@ pub use attribution::{
     BreakdownDimension, BreakdownGroup, NO_GATEWAY_KEY, NO_PROVIDER_KEY, UNKNOWN_CLIENT_AGENT,
     masked_provider_key_id, normalize_client_agent,
 };
+pub use decode::{FlowTracker, decode_of, decode_window, row_tokens_per_second};
 pub use fx::{CnyRate, DisplayCurrency, Fx, RateFetcher};
 pub use key::{CallerModel, CallerTotals};
 pub use limits::{KeyUsage, UsageDetails};
@@ -31,7 +33,7 @@ pub use report::{
     CSV_HEADER, ReportWindow, SpeedTotals, account_of_upstream, csv_field, format_csv, parse_days,
     parse_last, parse_since, row_matches_filter, speed_totals,
 };
-pub use speed::{mean_tokens_per_second, mean_ttft_ms, tokens_per_second};
+pub use speed::{mean_tokens_per_second, mean_ttft_ms};
 pub use spent::{KeySpent, SpendCapPeriod, spend_cap_retry_after, spend_cap_since};
 
 /// A reporting window over the ledger.
@@ -166,6 +168,14 @@ pub struct Row {
     pub client_agent: String,
     /// Time to first content in milliseconds when measured.
     pub ttft_ms: Option<i64>,
+    /// First visible text on the stream, in milliseconds from start.
+    pub first_text_ms: Option<i64>,
+    /// First reasoning delta on the stream, in milliseconds from start.
+    pub first_reasoning_ms: Option<i64>,
+    /// Content delivery span used for burst detection, in milliseconds.
+    pub flow_ms: Option<i64>,
+    /// Model id reported by the upstream reply when recorded.
+    pub served_model: String,
     /// Client session id from gateway headers when recorded.
     pub session_id: String,
 }
@@ -254,6 +264,10 @@ impl Ledger {
             ("provider_key_id", "TEXT NOT NULL DEFAULT ''"),
             ("client_agent", "TEXT NOT NULL DEFAULT ''"),
             ("session_id", "TEXT NOT NULL DEFAULT ''"),
+            ("first_text_ms", "INTEGER"),
+            ("first_reasoning_ms", "INTEGER"),
+            ("flow_ms", "INTEGER"),
+            ("served_model", "TEXT NOT NULL DEFAULT ''"),
         ] {
             ensure_column(&connection, column, declaration)?;
         }
@@ -306,7 +320,8 @@ impl Ledger {
                         reasoning_tokens, reasoning_hidden,
                         priced, cost_usd, price_input, price_output, price_cache_read,
                         price_cache_write, price_cache_write_1h, outcome, provider_key_id,
-                        client_agent, ttft_ms, session_id
+                        client_agent, ttft_ms, session_id, first_text_ms, first_reasoning_ms,
+                        flow_ms, served_model
                  FROM requests ORDER BY id",
             )
             .map_err(|error| UsageError(error.to_string()))?;
@@ -442,7 +457,8 @@ impl Ledger {
                         reasoning_tokens, reasoning_hidden,
                         priced, cost_usd, price_input, price_output, price_cache_read,
                         price_cache_write, price_cache_write_1h, outcome, provider_key_id,
-                        client_agent, ttft_ms, session_id
+                        client_agent, ttft_ms, session_id, first_text_ms, first_reasoning_ms,
+                        flow_ms, served_model
                  FROM requests WHERE created_unix >= ?1 ORDER BY id DESC LIMIT ?2",
             )
             .map_err(|error| UsageError(error.to_string()))?;
@@ -544,6 +560,10 @@ fn read_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Row> {
         client_agent: normalize_client_agent(&row.get::<_, String>(24)?),
         ttft_ms: row.get(25)?,
         session_id: row.get(26)?,
+        first_text_ms: row.get(27)?,
+        first_reasoning_ms: row.get(28)?,
+        flow_ms: row.get(29)?,
+        served_model: row.get(30)?,
     })
 }
 

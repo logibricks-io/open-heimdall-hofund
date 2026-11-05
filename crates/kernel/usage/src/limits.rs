@@ -21,6 +21,12 @@ pub struct UsageDetails {
     pub reasoning_tokens: Option<i64>,
     /// The stream carried reasoning but the usage block did not count it.
     pub reasoning_hidden: bool,
+    /// First visible text on the stream, in milliseconds from start.
+    pub first_text_ms: Option<i64>,
+    /// First reasoning delta on the stream, in milliseconds from start.
+    pub first_reasoning_ms: Option<i64>,
+    /// Content delivery span used for burst detection, in milliseconds.
+    pub flow_ms: Option<i64>,
 }
 
 /// One key's forwarded calls and token sums at or after a window start.
@@ -82,8 +88,9 @@ impl Ledger {
                     uncached_input_tokens, cache_read_tokens, cache_write_tokens,
                     cache_write_5m_tokens, cache_write_1h_tokens, reasoning_tokens, reasoning_hidden,
                     priced, cost_usd, price_input, price_output, price_cache_read, price_cache_write,
-                    price_cache_write_1h, outcome, provider_key_id, client_agent, session_id
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29)",
+                    price_cache_write_1h, outcome, provider_key_id, client_agent, session_id,
+                    first_text_ms, first_reasoning_ms, flow_ms, served_model
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33)",
                 params![
                     row.created_unix,
                     row.model,
@@ -116,6 +123,10 @@ impl Ledger {
                     row.provider_key_id,
                     row.client_agent,
                     row.session_id,
+                    details.first_text_ms,
+                    details.first_reasoning_ms,
+                    details.flow_ms,
+                    row.served_model,
                 ],
             )
             .map(|_| ())

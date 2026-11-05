@@ -1,41 +1,20 @@
-//! Output speed derived from stored latency and time to first content.
+//! Output speed derived from stored timing and flow.
 
-/// Tokens per second while the model was writing output.
-///
-/// Uses `output_tokens / ((latency_ms - ttft_ms) / 1000)` when every input is
-/// present and the writing window is positive. Returns `None` when:
-///
-/// - `output_tokens` is missing or zero (nothing to measure),
-/// - `ttft_ms` is missing (streaming start was not recorded),
-/// - `latency_ms - ttft_ms` is zero or negative (no distinct writing phase).
-#[must_use]
-pub fn tokens_per_second(
-    output_tokens: Option<i64>,
-    latency_ms: i64,
-    ttft_ms: Option<i64>,
-) -> Option<f64> {
-    let output = output_tokens.filter(|tokens| *tokens > 0)?;
-    let ttft = ttft_ms.filter(|ms| *ms >= 0)?;
-    let writing_ms = latency_ms.saturating_sub(ttft);
-    if writing_ms <= 0 {
-        return None;
-    }
-    Some(output as f64 / (writing_ms as f64 / 1000.0))
-}
+use crate::decode::row_tokens_per_second;
 
-/// Weighted mean of [`tokens_per_second`] over rows that yield a speed.
+/// Weighted mean output tokens per second over rows that yield a speed.
 #[must_use]
-pub fn mean_tokens_per_second<I>(rows: I) -> Option<f64>
+pub fn mean_tokens_per_second<'a, I>(rows: I) -> Option<f64>
 where
-    I: IntoIterator<Item = (Option<i64>, i64, Option<i64>)>,
+    I: IntoIterator<Item = &'a crate::Row>,
 {
     let mut sum = 0.0;
     let mut weight = 0.0;
-    for (output, latency_ms, ttft_ms) in rows {
-        let Some(speed) = tokens_per_second(output, latency_ms, ttft_ms) else {
+    for row in rows {
+        let Some(speed) = row_tokens_per_second(row) else {
             continue;
         };
-        let w = output.filter(|tokens| *tokens > 0).unwrap_or(1) as f64;
+        let w = row.output_tokens.filter(|tokens| *tokens > 0).unwrap_or(1) as f64;
         sum += speed * w;
         weight += w;
     }
@@ -46,7 +25,7 @@ where
     }
 }
 
-/// Mean TTFT over rows with a positive measurement.
+/// Mean TTFT over rows with a positive streamed measurement.
 #[must_use]
 pub fn mean_ttft_ms<I>(rows: I) -> Option<f64>
 where
@@ -66,30 +45,23 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{mean_tokens_per_second, mean_ttft_ms, tokens_per_second};
+    use super::{mean_tokens_per_second, mean_ttft_ms};
+    use crate::Row;
 
     #[test]
-    fn r10_tokens_per_second_divides_output_by_writing_window() {
-        let speed = tokens_per_second(Some(100), 2500, Some(500)).expect("speed");
-        assert!((speed - 50.0).abs() < 0.001);
-    }
-
-    #[test]
-    fn r10_tokens_per_second_missing_ttft_is_none() {
-        assert!(tokens_per_second(Some(10), 1000, None).is_none());
-    }
-
-    #[test]
-    fn r10_tokens_per_second_zero_writing_window_is_none() {
-        assert!(tokens_per_second(Some(10), 500, Some(500)).is_none());
-        assert!(tokens_per_second(Some(10), 400, Some(500)).is_none());
-    }
-
-    #[test]
-    fn r10_mean_helpers_skip_empty_inputs() {
+    fn r10_mean_ttft_skips_missing() {
         assert!((mean_ttft_ms([Some(100), None, Some(300)]).expect("mean") - 200.0).abs() < 0.001);
-        let mean = mean_tokens_per_second([(Some(100), 2500, Some(500)), (None, 1000, Some(0))])
-            .expect("mean speed");
+    }
+
+    #[test]
+    fn r10_mean_speed_uses_decode_of() {
+        let steady = Row {
+            output_tokens: Some(100),
+            latency_ms: 2500,
+            ttft_ms: Some(500),
+            ..Default::default()
+        };
+        let mean = mean_tokens_per_second([&steady]).expect("mean speed");
         assert!((mean - 50.0).abs() < 0.001);
     }
 }

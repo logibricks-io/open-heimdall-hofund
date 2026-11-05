@@ -662,6 +662,8 @@ mod tests {
         row.input_tokens = Some(3);
         row.output_tokens = None;
         row.duration_ms = 12;
+        row.ttft_ms = Some(4);
+        row.tokens_per_second = Some(25.0);
         row.status = "200".to_owned();
         row.created_at_ms = 1_700_000_000_000;
         response.rows.push(row);
@@ -671,17 +673,17 @@ mod tests {
         let mut lines = table.lines();
         assert_eq!(
             lines.next(),
-            Some("MODEL  UPSTREAM  IN  OUT  LATENCY_MS  STATUS  TIME")
+            Some("MODEL  UPSTREAM  IN  OUT  LATENCY_MS  TTFT_MS  TOKENS_S  STATUS  TIME")
         );
         let row = lines.next().expect("row");
         assert!(
-            row.starts_with("m      p         3   -    12          200     "),
+            row.starts_with("m      p         3   -    12          4       25.0      200     "),
             "{row:?}"
         );
         assert_eq!(
             lines.next(),
             Some(
-                "totals  requests=1  in=3  out=0  cache_read=0  cache_write_5m=0  cache_write_1h=0  reasoning=0  cost=0.0000 USD  unpriced=0"
+                "totals  requests=1  in=3  out=0  cache_read=0  cache_write_5m=0  cache_write_1h=0  reasoning=0  cost=0.0000 USD  unpriced=0  mean_ttft_ms=-  mean_tokens_per_second=-"
             )
         );
         assert_eq!(lines.next(), None);

@@ -1725,6 +1725,7 @@ fn breakdown_group_id(row: &hofund_usage::Row, by: UsageBreakdownBy) -> String {
 }
 
 fn usage_row(row: hofund_usage::Row, convert: impl Fn(f64) -> f64 + Copy) -> UsageRow {
+    let tokens_per_second = hofund_usage::row_tokens_per_second(&row);
     let mut out = UsageRow::default();
     out.created_at_ms = u64::try_from(row.created_unix)
         .unwrap_or(0)
@@ -1763,8 +1764,7 @@ fn usage_row(row: hofund_usage::Row, convert: impl Fn(f64) -> f64 + Copy) -> Usa
         .ttft_ms
         .and_then(|ms| u64::try_from(ms).ok())
         .filter(|ms| *ms > 0);
-    out.tokens_per_second =
-        hofund_usage::tokens_per_second(row.output_tokens, row.latency_ms, row.ttft_ms);
+    out.tokens_per_second = tokens_per_second;
     out.account = hofund_usage::account_of_upstream(&row.upstream)
         .unwrap_or_default()
         .to_owned();
