@@ -12,7 +12,7 @@ use std::time::Duration;
 use hofund_control_client::hofund_control_proto::{
     AgentAction, AgentConnectRequest, AgentDisconnectRequest, AgentModelRequest, AgentPlanRequest,
     AgentState, ConfigApplyRequest, ConfigValidateRequest, FieldIssue, ReloadRequest, RouteQuery,
-    ShutdownRequest, TokenRotateRequest, UsageBreakdownBy, UsagePeriod, UsageQuery, UsageResponse,
+    ShutdownRequest, TokenRotateRequest, UsageResponse,
 };
 use hofund_control_client::{Client, ClientError, probe_model_health, resolve_config_id};
 
@@ -210,19 +210,53 @@ pub(crate) async fn healthcheck(config: &Path) -> Result<String, String> {
         .map_err(|error| error.to_string())
 }
 
-/// `hofund usage`: the usage table with local times and a totals line.
-pub(crate) async fn usage(config: &Path, by: Option<UsageBreakdownBy>) -> Result<String, String> {
+use crate::usage::{UsageOutputFormat, UsageReportOptions, options_to_query, usage_json};
+
+/// `hofund usage`: usage table, CSV, or JSON from the control API.
+pub(crate) async fn usage(config: &Path, options: UsageReportOptions) -> Result<String, String> {
     let client = client(config).await?;
-    let query = match by {
-        Some(by) => UsageQuery::with_breakdown(UsagePeriod::All, by),
-        None => UsageQuery::new(UsagePeriod::All),
-    };
+    let query = options_to_query(&options);
     let response = client.usage(query).await.map_err(failure)?;
-    if response.breakdown_by.is_some() {
-        Ok(usage_breakdown_table(&response))
-    } else {
-        Ok(usage_table(&response))
+    match options.format {
+        UsageOutputFormat::Json => usage_json(&response),
+        UsageOutputFormat::Csv => usage_csv(&response),
+        UsageOutputFormat::Table if response.breakdown_by.is_some() => {
+            Ok(usage_breakdown_table(&response))
+        }
+        UsageOutputFormat::Table => Ok(usage_table(&response)),
     }
+}
+
+fn usage_csv(response: &UsageResponse) -> Result<String, String> {
+    let convert = |usd: f64| usd;
+    let rows: Vec<hofund_usage::Row> = response
+        .rows
+        .iter()
+        .map(|row| hofund_usage::Row {
+            created_unix: i64::try_from(row.created_at_ms / 1000).unwrap_or(0),
+            model: row.model.clone(),
+            upstream: row.provider.clone(),
+            input_tokens: row.input_tokens.and_then(|v| i64::try_from(v).ok()),
+            output_tokens: row.output_tokens.and_then(|v| i64::try_from(v).ok()),
+            latency_ms: i64::try_from(row.duration_ms).unwrap_or(0),
+            status: row.status.clone(),
+            cache_read_tokens: row.cache_read_tokens.and_then(|v| i64::try_from(v).ok()),
+            cache_write_5m_tokens: row
+                .cache_write_5m_tokens
+                .and_then(|v| i64::try_from(v).ok()),
+            cache_write_1h_tokens: row
+                .cache_write_1h_tokens
+                .and_then(|v| i64::try_from(v).ok()),
+            reasoning_tokens: row.reasoning_tokens.and_then(|v| i64::try_from(v).ok()),
+            priced: row.priced,
+            cost_usd: row.cost,
+            client_agent: row.client_agent.clone(),
+            ttft_ms: row.ttft_ms.and_then(|v| i64::try_from(v).ok()),
+            session_id: row.session_id.clone(),
+            ..Default::default()
+        })
+        .collect();
+    hofund_usage::format_csv(&rows, convert).map_err(|error| error.to_string())
 }
 
 /// `hofund route`: the latest routing decisions from the daemon trace.
@@ -273,10 +307,12 @@ pub(crate) fn usage_table(response: &UsageResponse) -> String {
         "IN",
         "OUT",
         "LATENCY_MS",
+        "TTFT_MS",
+        "TOKENS_S",
         "STATUS",
         "TIME",
     ];
-    let body: Vec<[String; 7]> = response
+    let body: Vec<[String; 9]> = response
         .rows
         .iter()
         .map(|row| {
@@ -286,6 +322,10 @@ pub(crate) fn usage_table(response: &UsageResponse) -> String {
                 tokens(row.input_tokens),
                 tokens(row.output_tokens),
                 row.duration_ms.to_string(),
+                row.ttft_ms.map(|ms| ms.to_string()).unwrap_or_default(),
+                row.tokens_per_second
+                    .map(|speed| format!("{speed:.1}"))
+                    .unwrap_or_default(),
                 row.status.clone(),
                 local_stamp(row.created_at_ms),
             ]
@@ -304,7 +344,7 @@ pub(crate) fn usage_table(response: &UsageResponse) -> String {
     }
     let totals = &response.totals;
     out.push_str(&format!(
-        "totals  requests={}  in={}  out={}  cache_read={}  cache_write_5m={}  cache_write_1h={}  reasoning={}  cost={:.4} {}  unpriced={}\n",
+        "totals  requests={}  in={}  out={}  cache_read={}  cache_write_5m={}  cache_write_1h={}  reasoning={}  cost={:.4} {}  unpriced={}  mean_ttft_ms={}  mean_tokens_per_second={}\n",
         totals.requests,
         totals.input_tokens,
         totals.output_tokens,
@@ -315,6 +355,14 @@ pub(crate) fn usage_table(response: &UsageResponse) -> String {
         totals.cost,
         response.currency,
         totals.unpriced,
+        totals
+            .mean_ttft_ms
+            .map(|value| format!("{value:.0}"))
+            .unwrap_or_else(|| "-".to_owned()),
+        totals
+            .mean_tokens_per_second
+            .map(|value| format!("{value:.1}"))
+            .unwrap_or_else(|| "-".to_owned()),
     ));
     if response.rows_truncated {
         out.push_str("(older rows omitted; totals cover every request)\n");
@@ -328,8 +376,18 @@ pub(crate) fn usage_breakdown_table(response: &UsageResponse) -> String {
         .breakdown_by
         .map(|dimension| dimension.as_query_value())
         .unwrap_or("unknown");
-    let header = ["ID", "LABEL", "REQUESTS", "IN", "OUT", "COST", "UNPRICED"];
-    let body: Vec<[String; 7]> = response
+    let header = [
+        "ID",
+        "LABEL",
+        "REQUESTS",
+        "IN",
+        "OUT",
+        "COST",
+        "UNPRICED",
+        "MEAN_TTFT_MS",
+        "MEAN_TOKENS_S",
+    ];
+    let body: Vec<[String; 9]> = response
         .breakdown
         .iter()
         .map(|group| {
@@ -341,6 +399,14 @@ pub(crate) fn usage_breakdown_table(response: &UsageResponse) -> String {
                 group.output_tokens.to_string(),
                 format!("{:.4} {}", group.cost, response.currency),
                 group.unpriced.to_string(),
+                group
+                    .mean_ttft_ms
+                    .map(|value| format!("{value:.0}"))
+                    .unwrap_or_else(|| "-".to_owned()),
+                group
+                    .mean_tokens_per_second
+                    .map(|value| format!("{value:.1}"))
+                    .unwrap_or_else(|| "-".to_owned()),
             ]
         })
         .collect();
@@ -386,7 +452,7 @@ fn local_stamp(unix_ms: u64) -> String {
         )
 }
 
-fn push_line(out: &mut String, cells: &[String; 7], widths: &[usize; 7]) {
+fn push_line(out: &mut String, cells: &[String], widths: &[usize]) {
     for (index, (cell, width)) in cells.iter().zip(widths).enumerate() {
         if index > 0 {
             out.push_str("  ");

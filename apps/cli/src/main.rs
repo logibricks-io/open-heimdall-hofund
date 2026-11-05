@@ -24,6 +24,20 @@ mod usage;
 mod visible;
 mod warmup;
 
+fn default_usage_options() -> usage::UsageReportOptions {
+    usage::UsageReportOptions {
+        window: hofund_usage::ReportWindow::All,
+        period: hofund_control_client::hofund_control_proto::UsagePeriod::All,
+        group_by: None,
+        account: None,
+        model: None,
+        since_text: None,
+        days_text: None,
+        last_text: None,
+        format: usage::UsageOutputFormat::Table,
+    }
+}
+
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -89,7 +103,7 @@ fn run_control(config: &Path, command: Command) -> Result<String, String> {
             Command::EventsTail { requests } => events::tail(config, requests).await,
             Command::Healthcheck => commands::healthcheck(config).await,
             Command::TokenRotate => commands::token_rotate(config).await,
-            Command::Usage { by } => commands::usage(config, by)
+            Command::Usage { options } => commands::usage(config, options)
                 .await
                 .map(|table| table.trim_end_matches('\n').to_owned()),
             Command::Route => commands::route(config)
@@ -201,7 +215,7 @@ enum Command {
     TokenRotate,
     GatewayKey(gateway_key::Command),
     Usage {
-        by: Option<hofund_control_client::hofund_control_proto::UsageBreakdownBy>,
+        options: usage::UsageReportOptions,
     },
     Route,
     AgentList,
@@ -489,9 +503,11 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
         ["events", "tail"] => Command::EventsTail { requests },
         ["token", "show"] => Command::TokenShow,
         ["token", "rotate"] => Command::TokenRotate,
-        ["usage"] => Command::Usage { by: None },
+        ["usage"] => Command::Usage {
+            options: default_usage_options(),
+        },
         ["usage", rest @ ..] => match usage::parse(rest) {
-            Ok(usage::UsageCommand::Report { by }) => Command::Usage { by },
+            Ok(usage::UsageCommand::Report(options)) => Command::Usage { options },
             Err(message) => return Err(message),
         },
         ["route"] => Command::Route,
@@ -1081,7 +1097,7 @@ agent file cannot be updated, the command prints `hofund agent connect <name>`.
 ";
 
 const USAGE_HELP: &str = "\
-usage: hofund usage [--by agent|provider-key|gateway-key] [--config PATH]
+usage: hofund usage [today|7d|30d|all] [--days <n>] [--last <dur>] [--since <time>] [--group-by agent|model|provider|provider-key|gateway-key|account|session|day] [--account <name>] [--model <id>] [--csv] [--json] [--config PATH]
 
 Print one row per recorded request, with local time, plus a totals line.
 The newest rows are shown when there are too many to list. --by groups

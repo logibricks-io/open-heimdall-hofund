@@ -1723,6 +1723,7 @@ dependencies = [
  "hofund-control-proto",
  "hofund-model-catalog",
  "hofund-secrets",
+ "hofund-usage",
  "http",
  "serde",
  "serde_json",
