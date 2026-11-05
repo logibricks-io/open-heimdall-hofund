@@ -118,6 +118,32 @@ impl Catalog {
         Ok(moved)
     }
 
+    /// Rewrites agent model settings that pointed at `group/<from>` to `group/<to>`.
+    pub fn rename_group_refs(
+        &self,
+        session: &Session,
+        from: &str,
+        to: &str,
+    ) -> Result<Vec<String>, AgentError> {
+        let from = from.trim().to_ascii_lowercase();
+        let to = to.trim().to_ascii_lowercase();
+        if from == to {
+            return Ok(Vec::new());
+        }
+        let old_ref = format!("group/{from}");
+        let new_ref = format!("group/{to}");
+        let mut moved = Vec::new();
+        for adapter in &self.adapters {
+            if !adapter.detect(session) {
+                continue;
+            }
+            if adapter.rename_group_refs(session, &old_ref, &new_ref)? {
+                moved.push(adapter.id().to_owned());
+            }
+        }
+        Ok(moved)
+    }
+
     pub(crate) fn profile_snapshot(&self, session: &Session) -> Result<ProfileFields, AgentError> {
         let mut fields = ProfileFields::new();
         for description in self.descriptions {
@@ -719,6 +745,59 @@ impl Engine {
                     raw_json: false,
                     shared: None,
                 });
+            }
+            if assignments.is_empty() {
+                continue;
+            }
+            backup_once(&chosen.path)?;
+            let after = render(chosen.kind, Some(text), &assignments)?;
+            write_atomic(&chosen.path, &after)?;
+            changed = true;
+        }
+        Ok(changed)
+    }
+
+    fn rename_group_refs(
+        &self,
+        session: &Session,
+        old_ref: &str,
+        new_ref: &str,
+    ) -> Result<bool, AgentError> {
+        if !self.detect(session) {
+            return Ok(false);
+        }
+        let mut changed = false;
+        for chosen in self.chosen()? {
+            let Some(before) = read_optional(&chosen.path)? else {
+                continue;
+            };
+            let text = utf8(&chosen.path, &before)?;
+            let mut assignments = Vec::new();
+            if let Some(model) = self.model
+                && let Some(value) = get(chosen.kind, text, model.key)?
+                && let Some(updated) = rewrite_group_ref_value(&value, old_ref, new_ref)
+            {
+                assignments.push(Assignment {
+                    key: model.key,
+                    value: updated,
+                    raw_json: false,
+                    shared: None,
+                });
+            }
+            for set in &self.sets {
+                if chosen.file != set.file {
+                    continue;
+                }
+                if let Some(value) = get(chosen.kind, text, set.key)?
+                    && let Some(updated) = rewrite_group_ref_value(&value, old_ref, new_ref)
+                {
+                    assignments.push(Assignment {
+                        key: set.key,
+                        value: updated,
+                        raw_json: false,
+                        shared: None,
+                    });
+                }
             }
             if assignments.is_empty() {
                 continue;
@@ -2005,6 +2084,16 @@ impl AgentAdapter for Compiled {
             .rename_provider_refs(session, from, to)
     }
 
+    fn rename_group_refs(
+        &self,
+        session: &Session,
+        old_ref: &str,
+        new_ref: &str,
+    ) -> Result<bool, AgentError> {
+        self.engine(session)?
+            .rename_group_refs(session, old_ref, new_ref)
+    }
+
     fn configured_model(&self, session: &Session) -> Result<Option<String>, AgentError> {
         self.engine(session)?.configured_model()
     }
@@ -2039,6 +2128,16 @@ fn rewrite_provider_model_value(
         return None;
     }
     Some(format!("{prefix}{renamed}"))
+}
+
+fn rewrite_group_ref_value(value: &str, old_ref: &str, new_ref: &str) -> Option<String> {
+    if value == old_ref {
+        return Some(new_ref.to_owned());
+    }
+    if value.starts_with(&format!("{old_ref}/")) {
+        return Some(value.replacen(old_ref, new_ref, 1));
+    }
+    None
 }
 
 fn model_route(

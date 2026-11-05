@@ -1,17 +1,33 @@
-//! R-7a control routes against a live daemon (presets and status serve role).
+//! R-7a control routes against a live daemon (presets, status, providers, groups, profiles).
 
 mod support;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use hofund_control_proto::{API_VERSION, PresetListResponse, decode_response};
+use hofund_control_proto::{
+    API_VERSION, ConfigResponse, ControlErrorKind, GroupCreateRequest, GroupListResponse,
+    GroupMemberCandidatesResponse, GroupPatchRequest, GroupRestoreRequest, GroupWriteResponse,
+    PresetListResponse, ProfileRenameRequest, ProfileSaveRequest, ProviderCreateRequest,
+    ProviderListResponse, ProviderPatchRequest, ProviderWriteResponse, ServeRole, StatusResponse,
+    decode_error_envelope, decode_response,
+};
 use hofund_daemon::{ControlRuntime, Running, StartOptions, start_with_options};
+use serde_json::json;
+use sha2::{Digest, Sha256};
 
-fn config() -> String {
-    "listen = \"127.0.0.1:0\"\n\
-[[providers]]\nid = \"chat\"\nprotocol = \"openai-chat\"\nbase_url = \"http://127.0.0.1:9/v1\"\n\
+const SECRET: &str = "sk-control-r7a-provider-secret";
+
+fn config(extra: &str) -> String {
+    format!(
+        "listen = \"127.0.0.1:0\"\n{extra}\
+[[providers]]\nid = \"chat\"\nprotocol = \"openai-chat\"\nbase_url = \"http://127.0.0.1:9/v1\"\napi_key = \"{SECRET}\"\n\
 [[routes]]\nmodel = \"m\"\nupstreams = [\"chat\"]\n"
-        .to_owned()
+    )
+}
+
+fn revision(text: &str) -> String {
+    let digest = Sha256::digest(text.as_bytes());
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 struct Scratch {
@@ -21,15 +37,16 @@ struct Scratch {
 }
 
 impl Scratch {
-    fn new() -> Self {
+    fn new(label: &str) -> Self {
         let make = |kind: &str| {
             tempfile::Builder::new()
-                .prefix(&format!("hofund-daemon-r7a-{kind}-"))
+                .prefix(&format!("hofund-daemon-r7a-{label}-{kind}-"))
                 .tempdir()
                 .expect("scratch dir")
         };
         let config = make("config");
         let runtime = make("runtime");
+        std::fs::create_dir_all(runtime.path().join("home")).expect("scratch home");
         Self {
             config_dir: config.path().to_path_buf(),
             runtime_dir: runtime.path().to_path_buf(),
@@ -42,16 +59,25 @@ impl Scratch {
     }
 }
 
+fn options(scratch: &Scratch) -> StartOptions {
+    options_with(scratch, StartOptions::default())
+}
+
+fn options_with(scratch: &Scratch, mut base: StartOptions) -> StartOptions {
+    base.control_listen = Some("127.0.0.1:0".parse().expect("control address"));
+    base.control_runtime = Some(ControlRuntime::new(None, scratch.runtime_dir.clone()));
+    base.skip_config_watch = true;
+    base.hofund_addr = Some(String::new());
+    base
+}
+
 async fn start(scratch: &Scratch, text: &str) -> Running {
+    start_with(scratch, text, options(scratch)).await
+}
+
+async fn start_with(scratch: &Scratch, text: &str, options: StartOptions) -> Running {
     let path = scratch.path();
     std::fs::write(&path, text).expect("config");
-    let options = StartOptions {
-        control_listen: Some("127.0.0.1:0".parse().expect("control address")),
-        control_runtime: Some(ControlRuntime::new(None, scratch.runtime_dir.clone())),
-        skip_config_watch: true,
-        hofund_addr: Some(String::new()),
-        ..StartOptions::default()
-    };
     start_with_options(&path, options).await.expect("daemon")
 }
 
@@ -75,24 +101,165 @@ impl Client {
         }
     }
 
-    async fn get(&self, path: &str) -> (reqwest::StatusCode, Vec<u8>) {
-        let response = self
-            .http
-            .get(format!("{}{path}", self.base))
-            .bearer_auth(&self.token)
-            .send()
-            .await
-            .expect("send");
+    async fn send(&self, request: reqwest::RequestBuilder) -> (reqwest::StatusCode, Vec<u8>) {
+        let response = request.bearer_auth(&self.token).send().await.expect("send");
         let status = response.status();
         (status, response.bytes().await.expect("body").to_vec())
     }
+
+    async fn get(&self, path: &str) -> (reqwest::StatusCode, Vec<u8>) {
+        self.send(self.http.get(format!("{}{path}", self.base)))
+            .await
+    }
+
+    async fn post<T: serde::Serialize>(
+        &self,
+        path: &str,
+        body: &T,
+    ) -> (reqwest::StatusCode, Vec<u8>) {
+        self.send(self.http.post(format!("{}{path}", self.base)).json(body))
+            .await
+    }
+
+    async fn post_raw(&self, path: &str, body: Vec<u8>) -> (reqwest::StatusCode, Vec<u8>) {
+        self.send(
+            self.http
+                .post(format!("{}{path}", self.base))
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(body),
+        )
+        .await
+    }
+
+    async fn patch<T: serde::Serialize>(
+        &self,
+        path: &str,
+        body: &T,
+    ) -> (reqwest::StatusCode, Vec<u8>) {
+        self.send(self.http.patch(format!("{}{path}", self.base)).json(body))
+            .await
+    }
+
+    async fn config(&self) -> ConfigResponse {
+        let (status, body) = self.get("/v1/hofund/config").await;
+        assert_eq!(status, reqwest::StatusCode::OK);
+        decode_response(API_VERSION, &body).expect("config DTO")
+    }
+
+    async fn status(&self) -> StatusResponse {
+        let (status, body) = self.get("/v1/hofund/status").await;
+        assert_eq!(status, reqwest::StatusCode::OK);
+        decode_response(API_VERSION, &body).expect("status DTO")
+    }
+
+    async fn groups(&self) -> GroupListResponse {
+        let (status, body) = self.get("/v1/hofund/groups").await;
+        assert_eq!(status, reqwest::StatusCode::OK);
+        decode_response(API_VERSION, &body).expect("groups DTO")
+    }
+}
+
+fn failure(status: reqwest::StatusCode, body: &[u8], expected: u16) -> ControlErrorKind {
+    assert_eq!(
+        status.as_u16(),
+        expected,
+        "{}",
+        String::from_utf8_lossy(body)
+    );
+    decode_error_envelope(API_VERSION, body)
+        .expect("error envelope")
+        .error
+        .kind
+}
+
+fn field_issue(body: &[u8], field: &str) -> bool {
+    decode_error_envelope(API_VERSION, body)
+        .expect("error envelope")
+        .error
+        .details
+        .iter()
+        .any(|issue| issue.field == field)
+}
+
+fn provider_create(value: serde_json::Value) -> ProviderCreateRequest {
+    serde_json::from_value(value).expect("provider create request")
+}
+
+fn provider_patch(value: serde_json::Value) -> ProviderPatchRequest {
+    serde_json::from_value(value).expect("provider patch request")
+}
+
+fn group_create(value: serde_json::Value) -> GroupCreateRequest {
+    serde_json::from_value(value).expect("group create request")
+}
+
+fn group_patch(value: serde_json::Value) -> GroupPatchRequest {
+    serde_json::from_value(value).expect("group patch request")
+}
+
+fn group_restore(value: serde_json::Value) -> GroupRestoreRequest {
+    serde_json::from_value(value).expect("group restore request")
+}
+
+fn profile_save(name: &str) -> ProfileSaveRequest {
+    serde_json::from_value(json!({
+        "version": API_VERSION,
+        "name": name,
+        "from_current": false,
+        "fields": {},
+    }))
+    .expect("profile save request")
+}
+
+fn profile_rename(from: &str, to: &str) -> ProfileRenameRequest {
+    serde_json::from_value(json!({
+        "version": API_VERSION,
+        "from": from,
+        "to": to,
+    }))
+    .expect("profile rename request")
+}
+
+fn seed_models(dir: &Path, provider: &str, models: serde_json::Value) {
+    let root = dir.join(".hofund/host/models");
+    std::fs::create_dir_all(&root).expect("model state directory");
+    let slug = provider
+        .to_lowercase()
+        .chars()
+        .map(|character| {
+            if character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-' {
+                character
+            } else {
+                '-'
+            }
+        })
+        .take(40)
+        .collect::<String>();
+    let hash = format!("{:x}", Sha256::digest(provider.as_bytes()));
+    let path = root.join(format!("{slug}-{}.json", &hash[..16]));
+    let state = json!({
+        "version": 1,
+        "id": provider,
+        "fetched_at": 1234,
+        "list": models,
+        "delisted": []
+    });
+    std::fs::write(
+        &path,
+        serde_json::to_vec_pretty(&state).expect("state JSON"),
+    )
+    .expect("model state");
 }
 
 #[tokio::test]
-async fn presets_route_returns_catalog_rows() {
-    let scratch = Scratch::new();
-    let running =
-        support::within("start daemon", support::REQUEST, start(&scratch, &config())).await;
+async fn presets_google_vertex_row_lists_project_options() {
+    let scratch = Scratch::new("presets-vertex");
+    let running = support::within(
+        "start daemon",
+        support::REQUEST,
+        start(&scratch, &config("")),
+    )
+    .await;
     let client = Client::new(&running, &scratch);
     let (status, body) = support::within(
         "GET presets",
@@ -102,10 +269,303 @@ async fn presets_route_returns_catalog_rows() {
     .await;
     assert_eq!(status, reqwest::StatusCode::OK);
     let response: PresetListResponse = decode_response(API_VERSION, &body).expect("presets body");
-    assert_eq!(response.version, API_VERSION);
-    assert!(
-        !response.presets.is_empty(),
-        "preset catalog should not be empty"
+    let vertex = response
+        .presets
+        .iter()
+        .find(|entry| entry.id == "google-vertex")
+        .expect("google-vertex preset");
+    assert!(vertex.needs_project);
+    for key in ["project", "location", "credentials", "impersonate"] {
+        assert!(
+            vertex.option_keys.iter().any(|option| option == key),
+            "missing option key `{key}`"
+        );
+    }
+    support::shutdown(running).await;
+}
+
+#[tokio::test]
+async fn status_reports_serve_role_from_environment() {
+    let scratch = Scratch::new("status-serve");
+    let text = config("");
+    let serve_options = options_with(
+        &scratch,
+        StartOptions {
+            hofund_serves: Some("serve".to_owned()),
+            hofund_owner_pid: Some(424_242),
+            ..StartOptions::default()
+        },
     );
+    let running = support::within(
+        "start daemon",
+        support::REQUEST,
+        start_with(&scratch, &text, serve_options),
+    )
+    .await;
+    let client = Client::new(&running, &scratch);
+    let status = support::within("GET status", support::REQUEST, client.status()).await;
+    assert_eq!(status.serves, Some(ServeRole::Serve));
+    assert_eq!(status.owned_by_pid, 424_242);
+    assert_eq!(status.disk_revision, revision(&text));
+    assert_eq!(status.runtime_revision, status.disk_revision);
+    assert!(status.pid > 0);
+    assert!(status.started_at_ms > 0);
+    support::shutdown(running).await;
+}
+
+#[tokio::test]
+async fn provider_list_json_has_no_credential_fields() {
+    let scratch = Scratch::new("providers-list");
+    let running = support::within(
+        "start daemon",
+        support::REQUEST,
+        start(&scratch, &config("")),
+    )
+    .await;
+    let client = Client::new(&running, &scratch);
+    let (status, body) = support::within(
+        "GET providers",
+        support::REQUEST,
+        client.get("/v1/hofund/providers"),
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::OK);
+    let text = String::from_utf8_lossy(&body);
+    assert!(!text.contains("api_key"));
+    assert!(!text.contains("credentials"));
+    assert!(!text.contains(SECRET));
+    let list: ProviderListResponse = decode_response(API_VERSION, &body).expect("provider list");
+    assert_eq!(list.providers.len(), 1);
+    assert_eq!(list.providers[0].id, "chat");
+    support::shutdown(running).await;
+}
+
+#[tokio::test]
+async fn provider_create_patch_and_validation_errors() {
+    let scratch = Scratch::new("providers-write");
+    let text = config("");
+    let running = support::within("start daemon", support::REQUEST, start(&scratch, &text)).await;
+    let client = Client::new(&running, &scratch);
+    let read = client.config().await;
+    let disk_revision = read.disk_revision.clone();
+
+    let unknown = format!(
+        r#"{{"version":{},"expected_revision":"{}","preset":"openai","extra":true}}"#,
+        API_VERSION, read.disk_revision
+    );
+    let (status, body) = client
+        .post_raw("/v1/hofund/providers", unknown.into_bytes())
+        .await;
+    assert_eq!(failure(status, &body, 400), ControlErrorKind::BadRequest);
+
+    let stale = provider_create(json!({
+        "version": API_VERSION,
+        "expected_revision": "0".repeat(64),
+        "preset": "openai",
+        "id": "added",
+        "base_url": "http://127.0.0.1:9/v1",
+        "api_key": "sk-added",
+    }));
+    let (status, body) = client.post("/v1/hofund/providers", &stale).await;
+    assert_eq!(failure(status, &body, 409), ControlErrorKind::Conflict);
+
+    let bad_url = provider_create(json!({
+        "version": API_VERSION,
+        "expected_revision": disk_revision,
+        "preset": "openai",
+        "id": "bad-url",
+        "base_url": "http://user:pass@127.0.0.1/v1",
+        "api_key": "sk-added",
+    }));
+    let (status, body) = client.post("/v1/hofund/providers", &bad_url).await;
+    assert_eq!(failure(status, &body, 422), ControlErrorKind::Unprocessable);
+
+    let create = provider_create(json!({
+        "version": API_VERSION,
+        "expected_revision": disk_revision,
+        "preset": "openai",
+        "id": "added",
+        "name": "Added",
+        "base_url": "http://127.0.0.1:9/v1",
+        "api_key": "sk-added",
+    }));
+    let (status, body) = client.post("/v1/hofund/providers", &create).await;
+    assert_eq!(status, reqwest::StatusCode::OK);
+    let created: ProviderWriteResponse = decode_response(API_VERSION, &body).expect("create body");
+    assert_eq!(created.provider.id, "added");
+    assert_eq!(created.provider.preset.as_deref(), Some("openai"));
+
+    let disable = provider_patch(json!({
+        "version": API_VERSION,
+        "expected_revision": created.disk_revision,
+        "enabled": false,
+    }));
+    let (status, body) = client.patch("/v1/hofund/providers/added", &disable).await;
+    assert_eq!(failure(status, &body, 422), ControlErrorKind::Unprocessable);
+    assert!(field_issue(&body, "agent"));
+
+    let list: ProviderListResponse =
+        decode_response(API_VERSION, &client.get("/v1/hofund/providers").await.1)
+            .expect("providers after rollback");
+    assert!(
+        list.providers
+            .iter()
+            .find(|provider| provider.id == "added")
+            .is_some_and(|provider| provider.enabled),
+        "disable without agent session must roll back"
+    );
+
+    support::shutdown(running).await;
+}
+
+#[tokio::test]
+async fn groups_create_patch_rename_restore_and_candidates() {
+    let scratch = Scratch::new("groups");
+    seed_models(
+        &scratch.config_dir,
+        "chat",
+        json!([
+            {"id": "plain"},
+            {"id": "classifier", "decides": true}
+        ]),
+    );
+    let text = config("");
+    let running = support::within("start daemon", support::REQUEST, start(&scratch, &text)).await;
+    let client = Client::new(&running, &scratch);
+    let revision_before = client.groups().await.disk_revision;
+
+    let create = group_create(json!({
+        "version": API_VERSION,
+        "expected_revision": revision_before,
+        "name": "Team One",
+        "first_member": "chat/plain",
+    }));
+    let (status, body) = client.post("/v1/hofund/groups", &create).await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+    let created: GroupWriteResponse = decode_response(API_VERSION, &body).expect("group create");
+    assert_eq!(created.group.id, "team-one");
+
+    let invalid_rules = group_patch(json!({
+        "version": API_VERSION,
+        "expected_revision": created.disk_revision,
+        "rules": ["not-a-clause=yes"],
+    }));
+    let (status, body) = client
+        .patch("/v1/hofund/groups/team-one", &invalid_rules)
+        .await;
+    assert_eq!(failure(status, &body, 422), ControlErrorKind::Unprocessable);
+    assert!(field_issue(&body, "rules"));
+
+    let rename = group_patch(json!({
+        "version": API_VERSION,
+        "expected_revision": client.groups().await.disk_revision,
+        "rename_to": "team-alpha",
+    }));
+    let (status, body) = client.patch("/v1/hofund/groups/team-one", &rename).await;
+    assert_eq!(status, reqwest::StatusCode::OK);
+    let renamed: GroupWriteResponse = decode_response(API_VERSION, &body).expect("group rename");
+    assert_eq!(renamed.group.id, "team-alpha");
+
+    let restore = group_restore(json!({
+        "version": API_VERSION,
+        "expected_revision": renamed.disk_revision,
+    }));
+    let (status, body) = client
+        .post("/v1/hofund/groups/no-such-group/restore", &restore)
+        .await;
+    assert_eq!(failure(status, &body, 404), ControlErrorKind::NotFound);
+
+    let (status, body) = client.get("/v1/hofund/groups/member-candidates").await;
+    assert_eq!(status, reqwest::StatusCode::OK);
+    let candidates: GroupMemberCandidatesResponse =
+        decode_response(API_VERSION, &body).expect("member candidates");
+    assert!(
+        candidates
+            .deciders
+            .iter()
+            .any(|entry| entry.reference == "chat/classifier"),
+        "expected classifier model in deciders"
+    );
+    assert!(
+        candidates
+            .served
+            .iter()
+            .any(|entry| entry.reference == "chat/plain"),
+        "expected plain model in served"
+    );
+    for decider in &candidates.deciders {
+        assert!(
+            !candidates
+                .served
+                .iter()
+                .any(|served| served.reference == decider.reference),
+            "decider `{}` must not appear in served",
+            decider.reference
+        );
+    }
+
+    support::shutdown(running).await;
+}
+
+#[tokio::test]
+async fn group_patch_empty_members_is_rejected() {
+    let scratch = Scratch::new("groups-members");
+    let text = config("");
+    let running = support::within("start daemon", support::REQUEST, start(&scratch, &text)).await;
+    let client = Client::new(&running, &scratch);
+    let revision_before = client.groups().await.disk_revision;
+    let create = group_create(json!({
+        "version": API_VERSION,
+        "expected_revision": revision_before,
+        "name": "Solo",
+        "first_member": "chat/m",
+    }));
+    let (status, body) = client.post("/v1/hofund/groups", &create).await;
+    assert_eq!(status, reqwest::StatusCode::OK);
+    let created: GroupWriteResponse = decode_response(API_VERSION, &body).expect("group create");
+
+    let strip = group_patch(json!({
+        "version": API_VERSION,
+        "expected_revision": created.disk_revision,
+        "members": [],
+    }));
+    let (status, body) = client.patch("/v1/hofund/groups/solo", &strip).await;
+    assert_eq!(failure(status, &body, 422), ControlErrorKind::Unprocessable);
+    assert!(field_issue(&body, "members"));
+
+    support::shutdown(running).await;
+}
+
+#[tokio::test]
+async fn profile_rename_collision_returns_422() {
+    let scratch = Scratch::new("profiles-rename");
+    let running = support::within(
+        "start daemon",
+        support::REQUEST,
+        start(&scratch, &config("")),
+    )
+    .await;
+    let client = Client::new(&running, &scratch);
+
+    for name in ["alpha", "beta"] {
+        let save = profile_save(name);
+        let (status, body) = client.post("/v1/hofund/profiles/save", &save).await;
+        assert_eq!(
+            status,
+            reqwest::StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&body)
+        );
+    }
+
+    let rename = profile_rename("alpha", "beta");
+    let (status, body) = client.post("/v1/hofund/profiles/rename", &rename).await;
+    assert_eq!(failure(status, &body, 422), ControlErrorKind::Unprocessable);
+
     support::shutdown(running).await;
 }

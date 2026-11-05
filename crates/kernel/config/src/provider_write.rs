@@ -1,8 +1,43 @@
 //! Format-preserving provider create, patch, and delete edits.
 
-use toml_edit::{Array, DocumentMut, Item, Table, value};
+use toml_edit::{Array, DocumentMut, Formatted, InlineTable, Item, Table, Value, value};
 
 use crate::{ConfigError, load, parse_fallback, provider_id_valid};
+
+const FORBIDDEN_OPTION_KEYS: &[&str] = &["id", "preset", "api_key", "protocol", "base_url"];
+
+/// Validates a provider `base_url` before it is stored.
+///
+/// # Errors
+///
+/// Returns [`ConfigError::Invalid`] when the URL is empty, malformed, or embeds credentials.
+pub fn validate_provider_base_url(url: &str) -> Result<(), ConfigError> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return Err(ConfigError::Invalid(
+            "base_url must not be empty".to_owned(),
+        ));
+    }
+    if trimmed.contains('@') {
+        if let Some(after_scheme) = trimmed.split("://").nth(1) {
+            if after_scheme.contains('@') {
+                return Err(ConfigError::Invalid(
+                    "base_url must not embed credentials".to_owned(),
+                ));
+            }
+        } else {
+            return Err(ConfigError::Invalid(
+                "base_url must not embed credentials".to_owned(),
+            ));
+        }
+    }
+    if !trimmed.contains("://") {
+        return Err(ConfigError::Invalid(
+            "base_url must include a scheme and host".to_owned(),
+        ));
+    }
+    Ok(())
+}
 
 /// Creates one provider table from a preset-driven add request.
 ///
@@ -18,6 +53,7 @@ pub fn edit_provider_create(
     base_url: Option<&str>,
     api_key: Option<&str>,
     family: Option<&str>,
+    allowed_options: &[&str],
     options: &[(String, String)],
 ) -> Result<String, ConfigError> {
     if !provider_id_valid(id) {
@@ -30,6 +66,12 @@ pub fn edit_provider_create(
         return Err(ConfigError::Invalid(format!(
             "provider `{id}` already exists"
         )));
+    }
+    for (key, _) in options {
+        validate_option_key(key, allowed_options)?;
+    }
+    if let Some(url) = base_url.filter(|url| !url.trim().is_empty()) {
+        validate_provider_base_url(url)?;
     }
     let mut document = text
         .parse::<DocumentMut>()
@@ -55,12 +97,7 @@ pub fn edit_provider_create(
     if let Some(family) = family.filter(|family| !family.trim().is_empty()) {
         table.insert("family", value(family));
     }
-    for (key, val) in options {
-        if key.trim().is_empty() {
-            continue;
-        }
-        table.insert(key, value(val));
-    }
+    insert_provider_options(&mut table, options);
     array.push(table);
     Ok(document.to_string())
 }
@@ -101,11 +138,7 @@ pub fn edit_provider_patch(
         }
     }
     if let Some(url) = base_url {
-        if url.trim().is_empty() {
-            return Err(ConfigError::Invalid(
-                "base_url must not be empty".to_owned(),
-            ));
-        }
+        validate_provider_base_url(url)?;
         table.insert("base_url", value(url));
     }
     if let Some(entries) = fallback {
@@ -136,6 +169,35 @@ pub fn edit_provider_delete(text: &str, provider_id: &str) -> Result<String, Con
         .ok_or_else(|| ConfigError::Invalid(format!("unknown provider `{provider_id}`")))?;
     providers.remove(index);
     Ok(document.to_string())
+}
+
+fn validate_option_key(key: &str, allowed: &[&str]) -> Result<(), ConfigError> {
+    let trimmed = key.trim();
+    if trimmed.is_empty() {
+        return Err(ConfigError::Invalid("option key is empty".to_owned()));
+    }
+    if FORBIDDEN_OPTION_KEYS.contains(&trimmed) {
+        return Err(ConfigError::Invalid(format!(
+            "option `{trimmed}` cannot replace a provider field"
+        )));
+    }
+    if !allowed.contains(&trimmed) {
+        return Err(ConfigError::Invalid(format!(
+            "option `{trimmed}` is not declared by the preset catalog"
+        )));
+    }
+    Ok(())
+}
+
+fn insert_provider_options(table: &mut Table, options: &[(String, String)]) {
+    if options.is_empty() {
+        return;
+    }
+    let mut inline = InlineTable::new();
+    for (key, val) in options {
+        inline.insert(key.as_str(), Value::String(Formatted::new(val.clone())));
+    }
+    table.insert("options", value(Value::InlineTable(inline)));
 }
 
 fn find_provider_table<'a>(

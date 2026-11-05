@@ -71,6 +71,8 @@ pub(crate) struct DaemonControl {
     quotas: Option<Arc<DaemonQuotas>>,
     runtime: Option<Arc<crate::runtime::Runtime>>,
     route_trace: Option<Arc<hofund_router::RouteTraceBook>>,
+    status_serves: Option<ServeRole>,
+    status_owner_pid: Option<u32>,
 }
 
 impl DaemonControl {
@@ -121,7 +123,19 @@ impl DaemonControl {
             quotas: None,
             runtime: None,
             route_trace: None,
+            status_serves: None,
+            status_owner_pid: None,
         }
+    }
+
+    pub(crate) fn with_status_metadata(
+        mut self,
+        serves: Option<ServeRole>,
+        owner_pid: Option<u32>,
+    ) -> Self {
+        self.status_serves = serves;
+        self.status_owner_pid = owner_pid;
+        self
     }
 
     pub(crate) fn with_runtime(mut self, runtime: Arc<crate::runtime::Runtime>) -> Self {
@@ -429,8 +443,8 @@ impl ControlState for DaemonControl {
         status.model_listener.effective = listener.effective.to_string();
         status.model_listener.running = listener.running.map(|running| running.to_string());
         status.model_listener.effective_source = listener.source;
-        status.serves = serve_role_from_env();
-        status.owned_by_pid = owned_by_pid_from_env();
+        status.serves = self.status_serves.or_else(serve_role_from_env);
+        status.owned_by_pid = self.status_owner_pid.unwrap_or_else(owned_by_pid_from_env);
         status
     }
 
@@ -990,7 +1004,20 @@ impl ControlState for DaemonControl {
         id: String,
         request: GroupPatchRequest,
     ) -> ControlFuture<'_, GroupWriteResponse> {
-        Box::pin(async move { super::control_groups::patch_group(&self.ops, &id, request).await })
+        let descriptions = self.registry.agents();
+        let session = self.agents.session();
+        let target = self.agents.gateway_target().ok();
+        Box::pin(async move {
+            super::control_groups::patch_group(
+                &self.ops,
+                descriptions,
+                session,
+                target,
+                &id,
+                request,
+            )
+            .await
+        })
     }
 
     fn delete_group(
@@ -1842,15 +1869,18 @@ pub(crate) fn revision(bytes: &[u8]) -> String {
 }
 
 fn serve_role_from_env() -> Option<ServeRole> {
-    match std::env::var("HOFUND_SERVES")
+    std::env::var("HOFUND_SERVES")
         .ok()
         .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        Some("tui") => Some(ServeRole::Tui),
-        Some("serve") => Some(ServeRole::Serve),
-        Some("desktop") => Some(ServeRole::Desktop),
+        .and_then(serve_role_from_label)
+}
+
+pub(crate) fn serve_role_from_label(value: &str) -> Option<ServeRole> {
+    match value.trim() {
+        "" => None,
+        "tui" => Some(ServeRole::Tui),
+        "serve" => Some(ServeRole::Serve),
+        "desktop" => Some(ServeRole::Desktop),
         _ => None,
     }
 }

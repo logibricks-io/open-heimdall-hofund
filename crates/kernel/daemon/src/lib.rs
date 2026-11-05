@@ -318,6 +318,12 @@ pub struct StartOptions {
     /// Runs before each relisten bind, for tests that need a bind to fail.
     #[doc(hidden)]
     pub relisten_hook: Option<hofund_gateway::BindHook>,
+    /// Overrides `HOFUND_SERVES` on the status response, for tests.
+    #[doc(hidden)]
+    pub hofund_serves: Option<String>,
+    /// Overrides `HOFUND_OWNER_PID` on the status response, for tests.
+    #[doc(hidden)]
+    pub hofund_owner_pid: Option<u32>,
 }
 
 /// Binds the model address and serves until shutdown.
@@ -599,6 +605,10 @@ async fn start_inner(
         if !options.skip_config_watch {
             running = running.with_task(watch::spawn(Arc::clone(&ops), path.to_path_buf()));
         }
+        let status_serves = options
+            .hofund_serves
+            .as_deref()
+            .and_then(control::serve_role_from_label);
         let state = Arc::new(
             control::DaemonControl::new(
                 path,
@@ -612,6 +622,7 @@ async fn start_inner(
                 token_path.clone(),
                 shutdown_request,
             )
+            .with_status_metadata(status_serves, options.hofund_owner_pid)
             .with_router(snapshot)
             .with_agent_hooks(options.agent_session, Some(token_generation))
             .with_quotas(Arc::clone(&quotas))

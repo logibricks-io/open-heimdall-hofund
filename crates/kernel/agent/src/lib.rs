@@ -474,6 +474,16 @@ pub trait AgentAdapter: Sync {
         Ok(false)
     }
 
+    /// Rewrites model settings that pointed at one group route id.
+    fn rename_group_refs(
+        &self,
+        _session: &Session,
+        _old_ref: &str,
+        _new_ref: &str,
+    ) -> Result<bool, AgentError> {
+        Ok(false)
+    }
+
     /// The model string the tool stored, when that key exists and is a string.
     ///
     /// # Errors

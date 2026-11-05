@@ -5,6 +5,7 @@ use std::sync::Arc;
 use hofund_agent::{GatewayTarget, catalog, reseat_after_provider_change};
 use hofund_config::{
     edit_provider_create, edit_provider_delete, edit_provider_patch, load, validate_fallback_list,
+    validate_provider_base_url,
 };
 use hofund_control_proto::{
     ControlError, ControlErrorKind, ProviderCreateRequest, ProviderDeleteRequest,
@@ -15,6 +16,7 @@ use hofund_plugin_api::AgentDescription;
 
 use crate::DaemonRegistry;
 use crate::config_ops::ConfigOps;
+use crate::control_presets::option_keys_for;
 use crate::control_provider_summary::summarize_provider;
 use crate::models::ModelsHost;
 
@@ -26,8 +28,11 @@ pub(crate) async fn create_provider(
     request: ProviderCreateRequest,
 ) -> Result<ProviderWriteResponse, ControlFailure> {
     request.validate().map_err(ControlFailure::from)?;
-    if registry.find_preset(&request.preset).is_none() {
-        return Err(unprocessable("preset", "unknown preset"));
+    let (preset, _) = registry
+        .find_preset(&request.preset)
+        .ok_or_else(|| unprocessable("preset", "unknown preset"))?;
+    if let Some(url) = request.base_url.as_deref() {
+        validate_provider_base_url(url).map_err(config_failure)?;
     }
     let id = request
         .id
@@ -43,6 +48,7 @@ pub(crate) async fn create_provider(
                 .filter(|id| hofund_config::provider_id_valid(id))
                 .unwrap_or_else(|| format!("provider-{}", request.preset))
         });
+    let allowed = option_keys_for(preset);
     let options: Vec<(String, String)> = request
         .options
         .iter()
@@ -57,16 +63,15 @@ pub(crate) async fn create_provider(
         request.base_url.as_deref(),
         request.api_key.as_deref(),
         request.family.as_deref(),
+        &allowed,
         &options,
     )
     .map_err(config_failure)?;
     let applied = ops.apply(&request.expected_revision, edited).await?;
     let config = load(&applied.text).map_err(config_failure)?;
-    let provider = config
-        .providers
-        .iter()
-        .find(|provider| provider.id == id)
-        .expect("provider just added");
+    let Some(provider) = config.providers.iter().find(|provider| provider.id == id) else {
+        return Err(internal("provider create did not persist".to_owned()));
+    };
     Ok(write_response(
         provider, &config, models, registry, cooldowns, &applied,
     ))
@@ -88,6 +93,9 @@ pub(crate) async fn patch_provider(
     if let Some(fallback) = &request.fallback {
         validate_fallback_list(id, fallback).map_err(config_failure)?;
     }
+    if let Some(url) = request.base_url.as_deref() {
+        validate_provider_base_url(url).map_err(config_failure)?;
+    }
     let current = ops.get().await?;
     if !load(&current.text)
         .map_err(config_failure)?
@@ -98,6 +106,8 @@ pub(crate) async fn patch_provider(
         return Err(not_found(id));
     }
     let reseat = request.enabled == Some(false);
+    let backup = current.text.clone();
+    let backup_revision = current.disk_revision.clone();
     let edited = edit_provider_patch(
         &current.text,
         id,
@@ -109,8 +119,8 @@ pub(crate) async fn patch_provider(
     )
     .map_err(config_failure)?;
     let applied = ops.apply(&request.expected_revision, edited).await?;
-    if reseat {
-        reseat_provider(
+    if reseat
+        && let Err(error) = reseat_provider(
             descriptions,
             agent_session,
             gateway_target,
@@ -118,14 +128,19 @@ pub(crate) async fn patch_provider(
             true,
             &applied,
         )
-        .await?;
+        .await
+    {
+        let current = ops.get().await?;
+        let _ = ops.apply(&current.disk_revision, backup.clone()).await;
+        return Err(error);
     }
     let config = load(&applied.text).map_err(config_failure)?;
-    let provider = config
-        .providers
-        .iter()
-        .find(|provider| provider.id == id)
-        .expect("provider exists");
+    let Some(provider) = config.providers.iter().find(|provider| provider.id == id) else {
+        let current = ops.get().await?;
+        let _ = ops.apply(&current.disk_revision, backup).await;
+        return Err(not_found(id));
+    };
+    let _ = backup_revision;
     Ok(write_response(
         provider, &config, models, registry, cooldowns, &applied,
     ))
@@ -149,9 +164,10 @@ pub(crate) async fn delete_provider(
     {
         return Err(not_found(id));
     }
+    let backup = current.text.clone();
     let edited = edit_provider_delete(&current.text, id).map_err(config_failure)?;
     let applied = ops.apply(&request.expected_revision, edited).await?;
-    reseat_provider(
+    if let Err(error) = reseat_provider(
         descriptions,
         agent_session,
         gateway_target,
@@ -159,7 +175,12 @@ pub(crate) async fn delete_provider(
         false,
         &applied,
     )
-    .await?;
+    .await
+    {
+        let current = ops.get().await?;
+        let _ = ops.apply(&current.disk_revision, backup).await?;
+        return Err(error);
+    }
     let mut response = ProviderDeleteResponse::default();
     response.disk_revision = applied.disk_revision;
     response.removed = id.to_owned();
@@ -191,10 +212,14 @@ async fn reseat_provider(
     applied: &hofund_control_proto::ConfigResponse,
 ) -> Result<(), ControlFailure> {
     let (Some(session), Some(target)) = (session, target) else {
-        return Ok(());
+        return Err(unprocessable(
+            "agent",
+            "agent reseat requires a configured agent session",
+        ));
     };
     let config = load(&applied.text).map_err(config_failure)?;
-    let route_models: Vec<String> = config
+    let served_refs = provider_served_refs(&config, provider_id);
+    let fallback_routes: Vec<String> = config
         .routes
         .iter()
         .map(|route| route.model.clone())
@@ -208,13 +233,46 @@ async fn reseat_provider(
             &target,
             &provider_id,
             provider_still_present,
-            &route_models,
+            &served_refs,
+            &fallback_routes,
         )
         .map_err(|error| internal(error.to_string()))
     })
     .await
     .map_err(|_| internal("reseat task failed".to_owned()))??;
     Ok(())
+}
+
+fn provider_served_refs(config: &hofund_config::Config, provider_id: &str) -> Vec<String> {
+    let mut refs = vec![provider_id.to_owned()];
+    for route in &config.routes {
+        for upstream in &route.upstreams {
+            let reference = upstream_reference(upstream, provider_id);
+            if reference.starts_with(&format!("{provider_id}/")) || reference == provider_id {
+                refs.push(reference);
+            }
+        }
+    }
+    refs.sort();
+    refs.dedup();
+    refs
+}
+
+fn upstream_reference(upstream: &hofund_config::Upstream, provider_id: &str) -> String {
+    let _ = provider_id;
+    match &upstream.target {
+        hofund_config::UpstreamTarget::Provider(id) => upstream
+            .model
+            .as_ref()
+            .map(|model| format!("{id}/{model}"))
+            .unwrap_or_else(|| id.clone()),
+        hofund_config::UpstreamTarget::Subscription(id) => upstream
+            .model
+            .as_ref()
+            .map(|model| format!("{id}/{model}"))
+            .unwrap_or_else(|| id.clone()),
+        hofund_config::UpstreamTarget::Group(id) => format!("group/{id}"),
+    }
 }
 
 fn not_found(id: &str) -> ControlFailure {

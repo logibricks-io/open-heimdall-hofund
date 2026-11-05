@@ -2,17 +2,19 @@
 
 use std::sync::Arc;
 
+use hofund_agent::{GatewayTarget, catalog};
 use hofund_config::{
     Stays, edit_group_create, edit_group_delete, edit_group_patch, edit_group_restore, load,
     validate_group_rules,
 };
 use hofund_control_proto::{
-    ControlError, ControlErrorKind, Group, GroupCreateRequest, GroupDeleteRequest,
+    ControlError, ControlErrorKind, FieldIssue, Group, GroupCreateRequest, GroupDeleteRequest,
     GroupDeleteResponse, GroupListResponse, GroupMember, GroupMemberCandidate,
     GroupMemberCandidatesResponse, GroupPatchRequest, GroupRestoreRequest, GroupRule,
     GroupWriteResponse,
 };
 use hofund_gateway::control::ControlFailure;
+use hofund_plugin_api::AgentDescription;
 
 use crate::config_ops::ConfigOps;
 use crate::models::ModelsHost;
@@ -45,21 +47,28 @@ pub(crate) async fn create_group(
         .routes
         .iter()
         .find(|route| route.model == format!("group/{id}"))
-        .expect("group route");
+        .ok_or_else(|| internal("group create did not persist".to_owned()))?;
     Ok(group_write_response(route, &config, &applied))
 }
 
 pub(crate) async fn patch_group(
     ops: &Arc<ConfigOps>,
+    descriptions: &'static [&'static AgentDescription],
+    agent_session: Option<hofund_agent::Session>,
+    _gateway_target: Option<GatewayTarget>,
     group_id: &str,
     request: GroupPatchRequest,
 ) -> Result<GroupWriteResponse, ControlFailure> {
     request.validate().map_err(ControlFailure::from)?;
     if let Some(rules) = &request.rules {
-        validate_group_rules(rules).map_err(config_failure)?;
+        validate_group_rules(rules).map_err(rules_failure)?;
     }
     let current = ops.get().await?;
-    let stays = request.stays.as_deref().and_then(parse_stays);
+    let stays = request
+        .stays
+        .as_deref()
+        .map(|name| parse_stays(name).ok_or_else(|| stays_failure(name)))
+        .transpose()?;
     let family = request.family.as_ref().map(|value| value.as_deref());
     let context = request.context;
     let classifier = request.classifier.as_ref().map(|value| {
@@ -82,7 +91,8 @@ pub(crate) async fn patch_group(
             })
             .collect::<Vec<_>>()
     });
-    let edited = edit_group_patch(
+    let rename_from = group_id.to_owned();
+    let (edited, effective_id) = edit_group_patch(
         &current.text,
         group_id,
         request.routing.as_deref(),
@@ -96,14 +106,25 @@ pub(crate) async fn patch_group(
         request.rename_to.as_deref(),
     )
     .map_err(config_failure)?;
+    let backup = current.text.clone();
     let applied = ops.apply(&request.expected_revision, edited).await?;
+    if request.rename_to.is_some()
+        && effective_id != rename_from
+        && let Some(session) = agent_session
+        && let Err(error) =
+            rename_group_agents(descriptions, &session, &rename_from, &effective_id).await
+    {
+        let current = ops.get().await?;
+        let _ = ops.apply(&current.disk_revision, backup).await?;
+        return Err(error);
+    }
     let config = load(&applied.text).map_err(config_failure)?;
-    let model = format!("group/{group_id}");
+    let model = format!("group/{effective_id}");
     let route = config
         .routes
         .iter()
         .find(|route| route.model == model)
-        .ok_or_else(|| not_found(group_id))?;
+        .ok_or_else(|| not_found(&effective_id))?;
     Ok(group_write_response(route, &config, &applied))
 }
 
@@ -129,12 +150,13 @@ pub(crate) async fn restore_group(
 ) -> Result<GroupWriteResponse, ControlFailure> {
     request.validate().map_err(ControlFailure::from)?;
     let current = ops.get().await?;
-    let edited = edit_group_restore(&current.text, group_id).map_err(|error| {
-        if error.to_string().contains("not hidden") {
+    let edited = edit_group_restore(&current.text, group_id).map_err(|error| match error {
+        hofund_config::ConfigError::Invalid(message)
+            if message.contains("unknown group") || message.contains("not hidden") =>
+        {
             not_found(group_id)
-        } else {
-            config_failure(error)
         }
+        other => config_failure(other),
     })?;
     let applied = ops.apply(&request.expected_revision, edited).await?;
     let config = load(&applied.text).map_err(config_failure)?;
@@ -158,15 +180,16 @@ pub(crate) fn member_candidates(
         }
         let cached = models.cached(&provider.id);
         for model in &cached.models {
-            if model.draws() || model.films() {
-                continue;
-            }
             let reference = format!("{}/{}", provider.id, model.id());
-            response.served.push(candidate(reference, model.decides()));
+            if model.decides() {
+                response.deciders.push(candidate(reference, true));
+            } else {
+                response.served.push(candidate(reference, false));
+            }
         }
     }
     for route in &config.routes {
-        if route.hidden {
+        if route.hidden || !route.model.starts_with("group/") {
             continue;
         }
         response.served.push(candidate(route.model.clone(), false));
@@ -174,13 +197,31 @@ pub(crate) fn member_candidates(
     response
         .served
         .sort_by(|left, right| left.reference.cmp(&right.reference));
-    response.deciders = response
-        .served
-        .iter()
-        .filter(|entry| entry.decision)
-        .cloned()
-        .collect();
     response
+        .deciders
+        .sort_by(|left, right| left.reference.cmp(&right.reference));
+    response
+}
+
+async fn rename_group_agents(
+    descriptions: &'static [&'static AgentDescription],
+    session: &hofund_agent::Session,
+    from: &str,
+    to: &str,
+) -> Result<(), ControlFailure> {
+    let from = from.to_owned();
+    let to = to.to_owned();
+    let session = session.clone();
+    tokio::task::spawn_blocking(move || {
+        let catalog = catalog(descriptions).map_err(|error| internal(error.to_string()))?;
+        catalog
+            .rename_group_refs(&session, &from, &to)
+            .map_err(|error| internal(error.to_string()))?;
+        Ok::<(), ControlFailure>(())
+    })
+    .await
+    .map_err(|_| internal("group rename agent task failed".to_owned()))??;
+    Ok(())
 }
 
 fn candidate(reference: String, decision: bool) -> GroupMemberCandidate {
@@ -274,10 +315,36 @@ fn not_found(id: &str) -> ControlFailure {
     ))
 }
 
+fn rules_failure(error: hofund_config::ConfigError) -> ControlFailure {
+    let message = error.to_string();
+    let mut control = ControlError::new(ControlErrorKind::Unprocessable, &message, "control");
+    control
+        .details
+        .push(FieldIssue::new("rules", "invalid", &message));
+    ControlFailure::from(control)
+}
+
+fn stays_failure(name: &str) -> ControlFailure {
+    let message = format!("unknown stays `{name}`");
+    let mut control = ControlError::new(ControlErrorKind::Unprocessable, &message, "control");
+    control
+        .details
+        .push(FieldIssue::new("stays", "invalid", &message));
+    ControlFailure::from(control)
+}
+
 fn config_failure(error: hofund_config::ConfigError) -> ControlFailure {
     ControlFailure::from(ControlError::new(
         ControlErrorKind::Unprocessable,
         error.to_string(),
+        "control",
+    ))
+}
+
+fn internal(message: String) -> ControlFailure {
+    ControlFailure::from(ControlError::new(
+        ControlErrorKind::Internal,
+        message,
         "control",
     ))
 }

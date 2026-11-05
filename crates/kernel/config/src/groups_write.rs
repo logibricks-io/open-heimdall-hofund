@@ -2,7 +2,9 @@
 
 use toml_edit::{Array, DocumentMut, Formatted, InlineTable, Item, Table, Value, value};
 
-use crate::{ConfigError, ROUTING_NAMES, Stays, load, parse_rule_line, provider_id_valid};
+use crate::{
+    ConfigError, ROUTING_NAMES, Stays, load, parse_rule_line, provider_id_valid, rule_without_line,
+};
 
 /// Derives a group id from a display name.
 #[must_use]
@@ -102,10 +104,18 @@ pub fn edit_group_patch(
     members: Option<&[(String, String, bool, bool)]>,
     rules: Option<&[String]>,
     rename_to: Option<&str>,
-) -> Result<String, ConfigError> {
+) -> Result<(String, String), ConfigError> {
     if let Some(lines) = rules {
         validate_group_rules(lines)?;
     }
+    let before = load(text)?;
+    let old_model = format!("group/{group_id}");
+    let old_route = before
+        .routes
+        .iter()
+        .find(|route| route.model == old_model)
+        .ok_or_else(|| ConfigError::Invalid(format!("unknown group `{group_id}`")))?;
+    let old_member_refs = member_refs_from_route(old_route);
     let mut document = text
         .parse::<DocumentMut>()
         .map_err(|error| ConfigError::Syntax(error.to_string()))?;
@@ -165,6 +175,43 @@ pub fn edit_group_patch(
                 "a group must keep at least one member".to_owned(),
             ));
         }
+        let new_refs: Vec<String> = entries
+            .iter()
+            .map(|(reference, _, _, _)| reference.clone())
+            .collect();
+        if rules.is_none() {
+            let removed: Vec<String> = old_member_refs
+                .iter()
+                .filter(|reference| !new_refs.iter().any(|left| left == *reference))
+                .cloned()
+                .collect();
+            if !removed.is_empty() && !old_route.rules.is_empty() {
+                let mut rewritten = Vec::new();
+                for line in &old_route.rules {
+                    let mut current = line.clone();
+                    for reference in &removed {
+                        if let Some(next) = rule_without_line(&current, reference) {
+                            current = next;
+                        } else {
+                            current.clear();
+                            break;
+                        }
+                    }
+                    if !current.trim().is_empty() {
+                        rewritten.push(current);
+                    }
+                }
+                let mut array = Array::new();
+                for line in &rewritten {
+                    array.push(line.as_str());
+                }
+                if array.is_empty() {
+                    table.remove("rules");
+                } else {
+                    table.insert("rules", value(array));
+                }
+            }
+        }
         let mut array = Array::new();
         for (reference, effort, fast, enabled) in entries {
             array.push(member_value(reference, effort, *fast, *enabled));
@@ -182,6 +229,7 @@ pub fn edit_group_patch(
             table.insert("rules", value(array));
         }
     }
+    let mut effective_id = group_id.to_owned();
     if let Some(new_id) = rename_to {
         let new_id = new_id.trim();
         if !provider_id_valid(new_id) {
@@ -189,12 +237,38 @@ pub fn edit_group_patch(
                 "group id `{new_id}` is not valid kebab-case"
             )));
         }
-        let new_model = format!("group/{new_id}");
-        if let Some(model) = table.get_mut("model") {
-            *model = value(new_model.as_str());
+        if new_id == group_id {
+            return Ok((document.to_string(), effective_id));
         }
+        let new_model = format!("group/{new_id}");
+        let old_model = format!("group/{group_id}");
+        if document
+            .get("routes")
+            .and_then(Item::as_array_of_tables)
+            .is_some_and(|routes| {
+                routes.iter().any(|table| {
+                    table.get("model").and_then(Item::as_str) == Some(new_model.as_str())
+                })
+            })
+        {
+            return Err(ConfigError::Invalid(format!(
+                "there is a group `{new_id}` already"
+            )));
+        }
+        rewrite_group_refs_in_document(&mut document, group_id, new_id)?;
+        if let Some(routes) = document
+            .get_mut("routes")
+            .and_then(Item::as_array_of_tables_mut)
+        {
+            for table in routes.iter_mut() {
+                if table.get("model").and_then(Item::as_str) == Some(old_model.as_str()) {
+                    table.insert("model", value(new_model.as_str()));
+                }
+            }
+        }
+        effective_id = new_id.to_owned();
     }
-    Ok(document.to_string())
+    Ok((document.to_string(), effective_id))
 }
 
 /// Deletes a group route.
@@ -263,12 +337,94 @@ fn validate_member_ref(config: &crate::Config, reference: &str) -> Result<(), Co
     )))
 }
 
+fn member_refs_from_route(route: &crate::Route) -> Vec<String> {
+    route
+        .upstreams
+        .iter()
+        .map(|upstream| match &upstream.target {
+            crate::UpstreamTarget::Provider(id) => upstream
+                .model
+                .as_ref()
+                .map(|model| format!("{id}/{model}"))
+                .unwrap_or_else(|| id.clone()),
+            crate::UpstreamTarget::Subscription(id) => upstream
+                .model
+                .as_ref()
+                .map(|model| format!("{id}/{model}"))
+                .unwrap_or_else(|| id.clone()),
+            crate::UpstreamTarget::Group(id) => format!("group/{id}"),
+        })
+        .collect()
+}
+
+fn rewrite_group_refs_in_document(
+    document: &mut DocumentMut,
+    from_id: &str,
+    to_id: &str,
+) -> Result<(), ConfigError> {
+    let old_ref = format!("group/{from_id}");
+    let new_ref = format!("group/{to_id}");
+    let Some(routes) = document
+        .get_mut("routes")
+        .and_then(Item::as_array_of_tables_mut)
+    else {
+        return Ok(());
+    };
+    for table in routes.iter_mut() {
+        let model = table
+            .get("model")
+            .and_then(Item::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        if let Some(classifier) = table.get_mut("classifier")
+            && classifier.as_str() == Some(old_ref.as_str())
+        {
+            *classifier = value(new_ref.as_str());
+        }
+        if let Some(upstreams) = table.get_mut("upstreams").and_then(Item::as_array_mut) {
+            for entry in upstreams.iter_mut() {
+                rewrite_upstream_group_ref(entry, &old_ref, &new_ref);
+            }
+        }
+        if model.starts_with("group/")
+            && let Some(rules) = table.get_mut("rules").and_then(Item::as_array_mut)
+        {
+            for entry in rules.iter_mut() {
+                if let Some(line) = entry.as_str() {
+                    *entry = Value::String(Formatted::new(line.replace(&old_ref, &new_ref)));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn rewrite_upstream_group_ref(entry: &mut Value, old_ref: &str, new_ref: &str) {
+    if let Some(text) = entry.as_str()
+        && text == old_ref
+    {
+        *entry = Value::String(Formatted::new(new_ref.to_owned()));
+        return;
+    }
+    if let Value::InlineTable(table) = entry
+        && let Some(group) = table.get("group").and_then(|value| value.as_str())
+        && format!("group/{group}") == old_ref
+    {
+        table.insert(
+            "group",
+            Value::String(Formatted::new(
+                new_ref.strip_prefix("group/").unwrap_or(new_ref).to_owned(),
+            )),
+        );
+    }
+}
+
 fn member_array(reference: &str) -> Item {
     value(Array::from_iter([member_value(reference, "", false, true)]))
 }
 
 fn member_value(reference: &str, effort: &str, fast: bool, enabled: bool) -> Value {
-    if effort.is_empty() && !fast && enabled {
+    if effort.is_empty() && !fast && enabled && !reference.contains('/') {
         return Value::String(Formatted::new(reference.to_owned()));
     }
     let mut table = InlineTable::new();

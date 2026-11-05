@@ -177,8 +177,12 @@ pub struct GroupMemberWire {
     #[serde(default)]
     pub fast: bool,
     /// Whether the member takes requests.
-    #[serde(default)]
+    #[serde(default = "default_member_enabled")]
     pub enabled: bool,
+}
+
+fn default_member_enabled() -> bool {
+    true
 }
 
 impl GroupPatchRequest {
@@ -202,6 +206,18 @@ impl GroupPatchRequest {
         }
         if let Some(rename) = &self.rename_to {
             validate_group_id("rename_to", rename)?;
+        }
+        if let Some(stays) = &self.stays
+            && !matches!(
+                stays.as_str(),
+                "auto" | "session" | "turn" | "off" | "strict"
+            )
+        {
+            return Err(group_field_error(
+                "stays",
+                "invalid",
+                "stays must be auto, session, turn, off, or strict",
+            ));
         }
         Ok(())
     }

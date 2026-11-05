@@ -8,12 +8,13 @@ use hofund_router::Cooldowns;
 
 use crate::membership;
 use crate::models::{Cached, ModelsHost};
+use crate::provider_keys;
 use crate::{DaemonRegistry, plugin_for, protocol_of};
 
 pub(crate) fn summarize_provider(
     provider: &Provider,
     config: &Config,
-    models: &ModelsHost,
+    models: &Arc<ModelsHost>,
     registry: &Arc<dyn DaemonRegistry>,
     cooldowns: &Cooldowns,
 ) -> ProviderSummary {
@@ -41,7 +42,7 @@ pub(crate) fn summarize_provider(
         summary.kind = plugin_for(provider, &planned, registry);
         summary.protocol = protocol_of(planned.wire).to_owned();
     }
-    summary.key_masked = mask_key(&provider.api_key);
+    summary.key_masked = provider_keys::masked(&provider.api_key);
     summary.list_error = list_error(&cached);
     fill_vertex_hints(provider, &mut summary);
     fill_account_row(config, provider, &mut summary);
@@ -52,23 +53,10 @@ fn list_error(_cached: &Cached) -> String {
     String::new()
 }
 
-fn mask_key(spec: &str) -> String {
-    let trimmed = spec.trim();
-    if trimmed.is_empty() || trimmed.starts_with("env:") {
-        return String::new();
-    }
-    let tail: String = trimmed
-        .chars()
-        .rev()
-        .take(4)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
-    format!("…{tail}")
-}
-
 fn fill_vertex_hints(provider: &Provider, summary: &mut ProviderSummary) {
+    if provider.preset.as_deref() != Some("google-vertex") {
+        return;
+    }
     let project = provider
         .options
         .get("project")
@@ -85,9 +73,51 @@ fn fill_vertex_hints(provider: &Provider, summary: &mut ProviderSummary) {
         .and_then(|value| value.as_str())
         .unwrap_or_default()
         .to_owned();
-    summary.project_address_ready =
-        !project.trim().is_empty() && provider.preset.as_deref() == Some("google-vertex");
-    let _ = location;
+    summary.project_address_ready = vertex_address_formable(project, location);
+}
+
+fn vertex_address_formable(project: &str, location: &str) -> bool {
+    let project = project.trim().to_ascii_lowercase();
+    let mut location = location.trim().to_ascii_lowercase();
+    if project.is_empty() || !project_ok(&project) {
+        return false;
+    }
+    if location.is_empty() {
+        location = "global".to_owned();
+    }
+    location_ok(&location)
+}
+
+fn project_ok(project: &str) -> bool {
+    let bytes = project.as_bytes();
+    let [first, .., last] = bytes else {
+        return false;
+    };
+    project_char(*first) && project_char(*last) && bytes.iter().all(|byte| project_byte(*byte))
+}
+
+fn project_char(byte: u8) -> bool {
+    byte.is_ascii_lowercase() || byte.is_ascii_digit()
+}
+
+fn project_byte(byte: u8) -> bool {
+    project_char(byte) || matches!(byte, b'.' | b':' | b'-')
+}
+
+fn location_ok(location: &str) -> bool {
+    let mut parts = location.split('-');
+    let Some(first) = parts.next() else {
+        return false;
+    };
+    if first.is_empty() || !first.bytes().all(|byte| byte.is_ascii_lowercase()) {
+        return false;
+    }
+    parts.all(|part| {
+        !part.is_empty()
+            && part
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+    })
 }
 
 fn fill_account_row(_config: &Config, provider: &Provider, summary: &mut ProviderSummary) {

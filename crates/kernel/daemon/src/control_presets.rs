@@ -2,7 +2,10 @@
 
 use hofund_control_proto::{PresetEntry, PresetKind, PresetListResponse};
 
+use crate::registry::CompiledPreset;
 use crate::registry::DaemonRegistry;
+
+const VERTEX_OPTIONS: &[&str] = &["project", "location", "credentials", "impersonate"];
 
 pub(crate) fn list_presets(registry: &dyn DaemonRegistry) -> PresetListResponse {
     let mut response = PresetListResponse::default();
@@ -12,12 +15,11 @@ pub(crate) fn list_presets(registry: &dyn DaemonRegistry) -> PresetListResponse 
         entry.name = preset.name.to_owned();
         entry.kind = map_kind(preset.kind);
         entry.needs_key = !preset.no_key;
-        entry.needs_address = !preset.endpoint.is_empty();
-        entry.needs_project = preset.config.iter().any(|(key, _)| *key == "project");
-        entry.option_keys = preset
-            .config
-            .iter()
-            .map(|(key, _)| (*key).to_owned())
+        entry.needs_address = !preset.endpoint.is_empty() || preset.options_base;
+        entry.needs_project = preset.id == "google-vertex";
+        entry.option_keys = option_keys_for(preset)
+            .into_iter()
+            .map(str::to_owned)
             .collect();
         response.presets.push(entry);
     }
@@ -25,6 +27,13 @@ pub(crate) fn list_presets(registry: &dyn DaemonRegistry) -> PresetListResponse 
         .presets
         .sort_by(|left, right| left.id.cmp(&right.id));
     response
+}
+
+pub(crate) fn option_keys_for(preset: &CompiledPreset) -> Vec<&'static str> {
+    if preset.id == "google-vertex" {
+        return VERTEX_OPTIONS.to_vec();
+    }
+    preset.config.iter().map(|(key, _)| *key).collect()
 }
 
 fn map_kind(kind: &str) -> PresetKind {
