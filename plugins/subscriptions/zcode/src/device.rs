@@ -69,3 +69,18 @@ fn uuid_v4(text: &str) -> bool {
     }
     true
 }
+
+#[cfg(all(test, unix))]
+mod private_file_tests {
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn a2d_25_device_id_file_is_owner_only() {
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("zcode-device-mid");
+        let id = super::device_mid(&path).expect("device id");
+        assert!(super::uuid_v4(&id));
+        let mode = std::fs::metadata(&path).expect("meta").permissions().mode();
+        assert_eq!(mode & 0o077, 0, "device id file mode {mode:o}");
+    }
+}
