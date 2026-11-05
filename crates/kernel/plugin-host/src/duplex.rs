@@ -260,8 +260,10 @@ fn error_chain_message(error: &reqwest::Error) -> String {
 
 fn stream_refused_message(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
-    // h2 0.4.20: "stream error received: refused stream before processing any application logic"
-    lower.contains("stream error received:") && lower.contains("refused stream")
+    // h2 0.4.20 stream RST Display prefixes (any reason, including PROTOCOL_ERROR).
+    lower.contains("stream error received:")
+        || lower.contains("stream error detected:")
+        || lower.contains("stream error sent by user:")
 }
 
 fn http2_unavailable_message(message: &str) -> bool {
@@ -269,8 +271,18 @@ fn http2_unavailable_message(message: &str) -> bool {
         return false;
     }
     let lower = message.to_ascii_lowercase();
-    lower.contains("protocol error:")
-        || lower.contains("endpoint requires http/1.1")
+    if lower.contains("protocol error:") {
+        return true;
+    }
+    if (lower.contains("connection error received:")
+        || lower.contains("connection error detected:")
+        || lower.contains("connection error sent by user:"))
+        && (lower.contains("unspecific protocol error detected")
+            || lower.contains("endpoint requires http/1.1"))
+    {
+        return true;
+    }
+    lower.contains("endpoint requires http/1.1")
         || lower.contains("h2 is not supported")
         || lower.contains("alpn")
         || lower.contains("nghttp2")
@@ -294,10 +306,6 @@ pub(crate) fn classify_duplex_failure(
     }
     if is_timeout {
         return PluginError::timeout(format!("{HEADERS_TIMED_OUT}: {message}"));
-    }
-    let lower = message.to_ascii_lowercase();
-    if lower.contains("stream error") && !lower.contains("refused") {
-        return PluginError::transport(format!("{STREAM_REFUSED}: {message}"));
     }
     PluginError::transport(message.to_owned())
 }
@@ -380,6 +388,45 @@ mod tests {
         assert_eq!(error.kind(), PluginErrorKind::Transport);
         assert!(
             error.message().starts_with(HTTP2_UNAVAILABLE),
+            "{}",
+            error.message()
+        );
+    }
+
+    #[test]
+    fn native_h2_goaway_protocol_error_uses_http2_unavailable_prefix() {
+        for tail in [
+            "connection error received: unspecific protocol error detected",
+            "connection error detected: unspecific protocol error detected",
+        ] {
+            let message = format!(
+                "error sending request for url (http://127.0.0.1:9/duplex): http2 error: {tail}"
+            );
+            let error = classify_duplex_failure(false, true, &message);
+            assert_eq!(error.kind(), PluginErrorKind::Transport, "{message}");
+            assert!(
+                error.message().starts_with(HTTP2_UNAVAILABLE),
+                "{}",
+                error.message()
+            );
+        }
+    }
+
+    #[test]
+    fn stream_rst_protocol_error_stays_stream_refused_not_http2_unavailable() {
+        let message = concat!(
+            "error sending request for url (http://127.0.0.1:9/duplex): http2 error: ",
+            "stream error received: unspecific protocol error detected"
+        );
+        let error = classify_duplex_failure(false, true, message);
+        assert_eq!(error.kind(), PluginErrorKind::Transport);
+        assert!(
+            error.message().starts_with(STREAM_REFUSED),
+            "{}",
+            error.message()
+        );
+        assert!(
+            !error.message().starts_with(HTTP2_UNAVAILABLE),
             "{}",
             error.message()
         );
