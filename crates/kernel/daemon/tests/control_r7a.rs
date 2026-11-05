@@ -898,6 +898,109 @@ async fn deleting_provider_reseat_keeps_sendable_group_moves_exclusive_route() {
     support::shutdown(running_solo).await;
 }
 
+fn unlisted_reseat_fixture_config() -> String {
+    format!(
+        "listen = \"127.0.0.1:0\"\n\
+[[providers]]\nid = \"hidden\"\nlisted = false\nprotocol = \"openai-chat\"\nbase_url = \"http://127.0.0.1:9/v1\"\napi_key = \"{SECRET}\"\n\
+[[providers]]\nid = \"chat\"\nprotocol = \"openai-chat\"\nbase_url = \"http://127.0.0.1:9/v1\"\napi_key = \"{SECRET}\"\n\
+[[providers]]\nid = \"spare\"\nprotocol = \"openai-chat\"\nbase_url = \"http://127.0.0.1:9/v1\"\napi_key = \"{SECRET}\"\n\
+[[routes]]\nmodel = \"secret-route\"\nupstreams = [\"hidden\"]\n\
+[[routes]]\nmodel = \"on-spare\"\nupstreams = [\"spare\"]\n\
+[[routes]]\nmodel = \"normal\"\nupstreams = [\"chat\"]\n"
+    )
+}
+
+#[tokio::test]
+async fn reseat_skips_unlisted_exclusive_routes_on_disable_and_delete() {
+    let scratch = Scratch::new("unlisted-reseat-disable");
+    let settings = scratch
+        .runtime_dir
+        .join("home")
+        .join(".claude")
+        .join("settings.json");
+    std::fs::create_dir_all(settings.parent().expect("settings parent")).expect("dir");
+    std::fs::write(&settings, "{\"model\": \"on-spare\"}\n").expect("agent settings");
+    let session = Session::new(scratch.runtime_dir.join("home")).with_path("");
+    let running = support::within(
+        "start daemon for disable reseat",
+        support::REQUEST,
+        start_with(
+            &scratch,
+            &unlisted_reseat_fixture_config(),
+            options_with(
+                &scratch,
+                StartOptions {
+                    agent_session: Some(session),
+                    ..StartOptions::default()
+                },
+            ),
+        ),
+    )
+    .await;
+    let client = Client::new(&running, &scratch);
+    let read = client.config().await;
+    let disable = provider_patch(json!({
+        "version": API_VERSION,
+        "expected_revision": read.disk_revision,
+        "enabled": false,
+    }));
+    let (status, _) = client.patch("/v1/hofund/providers/spare", &disable).await;
+    assert_eq!(status, reqwest::StatusCode::OK);
+    let settings_text = std::fs::read_to_string(&settings).expect("settings after disable");
+    assert!(
+        settings_text.contains("\"normal\""),
+        "agent must reseat to a visible route, got: {settings_text}"
+    );
+    assert!(
+        !settings_text.contains("secret-route"),
+        "agent settings must not contain the unlisted exclusive route, got: {settings_text}"
+    );
+    support::shutdown(running).await;
+
+    let scratch_delete = Scratch::new("unlisted-reseat-delete");
+    let settings_delete = scratch_delete
+        .runtime_dir
+        .join("home")
+        .join(".claude")
+        .join("settings.json");
+    std::fs::create_dir_all(settings_delete.parent().expect("settings parent")).expect("dir");
+    std::fs::write(&settings_delete, "{\"model\": \"on-spare\"}\n").expect("agent settings");
+    let session_delete = Session::new(scratch_delete.runtime_dir.join("home")).with_path("");
+    let running_delete = support::within(
+        "start daemon for delete reseat",
+        support::REQUEST,
+        start_with(
+            &scratch_delete,
+            &unlisted_reseat_fixture_config(),
+            options_with(
+                &scratch_delete,
+                StartOptions {
+                    agent_session: Some(session_delete),
+                    ..StartOptions::default()
+                },
+            ),
+        ),
+    )
+    .await;
+    let client_delete = Client::new(&running_delete, &scratch_delete);
+    let read_delete = client_delete.config().await;
+    let delete = provider_delete(&read_delete.disk_revision);
+    let (status, _) = client_delete
+        .delete("/v1/hofund/providers/spare", &delete)
+        .await;
+    assert_eq!(status, reqwest::StatusCode::OK);
+    let settings_text = std::fs::read_to_string(&settings_delete).expect("settings after delete");
+    assert!(
+        settings_text.contains("\"normal\""),
+        "agent must reseat to a visible route after delete, got: {settings_text}"
+    );
+    assert!(
+        !settings_text.contains("secret-route"),
+        "agent settings must not contain the unlisted exclusive route after delete, got: {settings_text}"
+    );
+    support::shutdown(running_delete).await;
+}
+
 #[tokio::test]
 async fn disabling_exclusive_provider_rejects_requests_and_mixed_group_keeps_agent() {
     let server = MockServer::start().await;

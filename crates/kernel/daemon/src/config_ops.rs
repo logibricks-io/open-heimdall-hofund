@@ -204,6 +204,15 @@ impl ConfigOps {
         }
     }
 
+    /// Rebuilds the agent visibility catalog for a staged config during reseat.
+    pub(crate) fn reseat_sync_visible_catalog(&self, config: Arc<Config>) {
+        crate::agent_visible::rebuild_catalog(
+            &self.routing.visible_catalog,
+            config,
+            &self.routing.snapshot,
+        );
+    }
+
     /// Route model ids an agent is shown, after visibility filters.
     pub(crate) fn agent_route_models(
         &self,

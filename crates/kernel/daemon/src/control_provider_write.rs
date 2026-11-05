@@ -126,19 +126,19 @@ pub(crate) async fn patch_provider(
             &request.expected_revision,
             edited,
             backup.clone(),
-            move |_ops, text| {
+            move |ops, text| {
                 let post_config = load(text).map_err(config_failure)?;
                 let matched =
                     routes_newly_losing_sendable_hops(&pre_for_reseat, &post_config, &provider_id);
-                let fallback = sendable_fallback_routes(&post_config, &provider_id);
                 run_reseat_locked(
+                    ops,
                     descriptions,
                     agent_session,
                     gateway_target,
                     &provider_id,
                     false,
                     Some(&matched),
-                    Some(&fallback),
+                    None,
                     text,
                 )
             },
@@ -186,19 +186,19 @@ pub(crate) async fn delete_provider(
             &request.expected_revision,
             edited,
             backup,
-            move |_ops, text| {
+            move |ops, text| {
                 let post_config = load(text).map_err(config_failure)?;
                 let matched =
                     routes_newly_losing_sendable_hops(&pre_for_reseat, &post_config, &provider_id);
-                let fallback = sendable_fallback_routes(&post_config, &provider_id);
                 run_reseat_locked(
+                    ops,
                     descriptions,
                     agent_session,
                     gateway_target,
                     &provider_id,
                     false,
                     Some(&matched),
-                    Some(&fallback),
+                    None,
                     text,
                 )
             },
@@ -212,6 +212,7 @@ pub(crate) async fn delete_provider(
 
 #[allow(clippy::too_many_arguments)]
 fn run_reseat_locked(
+    ops: &ConfigOps,
     descriptions: &'static [&'static AgentDescription],
     configured_session: Option<hofund_agent::Session>,
     gateway_target: Option<GatewayTarget>,
@@ -221,20 +222,19 @@ fn run_reseat_locked(
     fallback_route_models: Option<&[String]>,
     config_text: &str,
 ) -> Result<(), ControlFailure> {
-    let config = load(config_text).map_err(config_failure)?;
-    let route_models: Vec<String> = config
-        .routes
-        .iter()
-        .map(|route| route.model.clone())
-        .collect();
+    let config = Arc::new(load(config_text).map_err(config_failure)?);
+    ops.reseat_sync_visible_catalog(Arc::clone(&config));
+    let route_models = agent_visible_sendable_route_models(ops, config.as_ref());
     let target = resolve_reseat_target(gateway_target, configured_session.as_ref(), &route_models)?;
     let session = configured_session.unwrap_or_else(crate::agent_session);
     let matched = match_route_models
         .map(<[String]>::to_vec)
-        .unwrap_or_else(|| crate::routes_without_sendable_hops(&config));
+        .unwrap_or_else(|| crate::routes_without_sendable_hops(config.as_ref()));
     let fallback = fallback_route_models
         .map(<[String]>::to_vec)
-        .unwrap_or_else(|| sendable_fallback_routes(&config, provider_id));
+        .unwrap_or_else(|| {
+            agent_visible_sendable_fallback_routes(ops, config.as_ref(), provider_id)
+        });
     let catalog = catalog(descriptions).map_err(|error| internal(error.to_string()))?;
     reseat_after_provider_change(
         &catalog,
@@ -247,6 +247,26 @@ fn run_reseat_locked(
     )
     .map_err(|error| internal(error.to_string()))
     .map(|_| ())
+}
+
+fn agent_visible_sendable_route_models(ops: &ConfigOps, config: &Config) -> Vec<String> {
+    let sendable = crate::routes_with_sendable_hops(config);
+    ops.agent_route_models(None, None)
+        .into_iter()
+        .filter(|model| sendable.contains(model))
+        .collect()
+}
+
+fn agent_visible_sendable_fallback_routes(
+    ops: &ConfigOps,
+    config: &Config,
+    provider_id: &str,
+) -> Vec<String> {
+    let visible: HashSet<String> = ops.agent_route_models(None, None).into_iter().collect();
+    sendable_fallback_routes(config, provider_id)
+        .into_iter()
+        .filter(|model| visible.contains(model))
+        .collect()
 }
 
 pub(crate) fn routes_newly_losing_sendable_hops(
