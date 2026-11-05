@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use chrono::TimeZone;
 use hofund_agent::Session;
 use hofund_config::Config;
 use hofund_control_proto::{
@@ -1138,38 +1139,108 @@ impl ControlState for DaemonControl {
         let ledger = Arc::clone(&self.usage);
         let config = self.ops.live().config.clone();
         Box::pin(async move {
-            let window = window_of(query.period)?;
-            let since = window.since_now();
+            let (since, period, window_label) = resolve_usage_query(&query)?;
+            let model_owned = query.model.clone();
+            let account_owned = query.account.clone();
+            let row_limit = if query.unlimited {
+                usize::MAX
+            } else {
+                USAGE_ROW_LIMIT
+            };
             if let Some(by) = query.by {
                 let dimension = breakdown_dimension(by)?;
                 let ledger_for_groups = Arc::clone(&ledger);
+                let since_for_groups = since;
+                let model_filter = model_owned.clone();
+                let account_filter = account_owned.clone();
                 let groups = tokio::task::spawn_blocking(move || {
-                    ledger_for_groups.breakdown(since, dimension)
+                    ledger_for_groups.breakdown(
+                        since_for_groups,
+                        dimension,
+                        model_filter.as_deref(),
+                        account_filter.as_deref(),
+                    )
                 })
                 .await
                 .map_err(|error| internal(format!("usage breakdown task failed: {error}")))?
                 .map_err(|error| internal(format!("usage breakdown failed: {error}")))?;
                 let ledger_for_summary = Arc::clone(&ledger);
+                let model_filter = model_owned.clone();
+                let account_filter = account_owned.clone();
                 let summary = tokio::task::spawn_blocking(move || {
-                    ledger_for_summary.summary(since, USAGE_ROW_LIMIT)
+                    ledger_for_summary.summary_filtered(
+                        since,
+                        model_filter.as_deref(),
+                        account_filter.as_deref(),
+                        row_limit,
+                    )
+                })
+                .await
+                .map_err(|error| internal(format!("usage query task failed: {error}")))?
+                .map_err(|error| internal(format!("usage query failed: {error}")))?;
+                let ledger_for_speed = Arc::clone(&ledger);
+                let model_filter = model_owned.clone();
+                let account_filter = account_owned.clone();
+                let all_rows = tokio::task::spawn_blocking(move || {
+                    ledger_for_speed
+                        .summary_filtered(
+                            since,
+                            model_filter.as_deref(),
+                            account_filter.as_deref(),
+                            usize::MAX,
+                        )
+                        .map(|(rows, _)| rows)
                 })
                 .await
                 .map_err(|error| internal(format!("usage query task failed: {error}")))?
                 .map_err(|error| internal(format!("usage query failed: {error}")))?;
                 return Ok(usage_breakdown_response(
-                    query.period,
+                    period,
                     by,
                     groups,
                     summary,
+                    &all_rows,
                     &config,
+                    window_label,
                 ));
             }
-            let summary =
-                tokio::task::spawn_blocking(move || ledger.summary(since, USAGE_ROW_LIMIT))
-                    .await
-                    .map_err(|error| internal(format!("usage query task failed: {error}")))?
-                    .map_err(|error| internal(format!("usage query failed: {error}")))?;
-            Ok::<_, ControlFailure>(usage_response(query.period, summary, &config))
+            let ledger_for_summary = Arc::clone(&ledger);
+            let model_filter = model_owned.clone();
+            let account_filter = account_owned.clone();
+            let summary = tokio::task::spawn_blocking(move || {
+                ledger_for_summary.summary_filtered(
+                    since,
+                    model_filter.as_deref(),
+                    account_filter.as_deref(),
+                    row_limit,
+                )
+            })
+            .await
+            .map_err(|error| internal(format!("usage query task failed: {error}")))?
+            .map_err(|error| internal(format!("usage query failed: {error}")))?;
+            let ledger_for_speed = Arc::clone(&ledger);
+            let model_filter = model_owned;
+            let account_filter = account_owned;
+            let all_rows = tokio::task::spawn_blocking(move || {
+                ledger_for_speed
+                    .summary_filtered(
+                        since,
+                        model_filter.as_deref(),
+                        account_filter.as_deref(),
+                        usize::MAX,
+                    )
+                    .map(|(rows, _)| rows)
+            })
+            .await
+            .map_err(|error| internal(format!("usage query task failed: {error}")))?
+            .map_err(|error| internal(format!("usage query failed: {error}")))?;
+            Ok::<_, ControlFailure>(usage_response(
+                period,
+                summary,
+                &all_rows,
+                &config,
+                window_label,
+            ))
         })
     }
 
@@ -1457,6 +1528,41 @@ fn window_of(period: UsagePeriod) -> Result<Window, ControlError> {
     }
 }
 
+fn resolve_usage_query(
+    query: &UsageQuery,
+) -> Result<(Option<i64>, UsagePeriod, String), ControlFailure> {
+    use chrono::Local;
+    use hofund_usage::{ReportWindow, parse_days, parse_last, parse_since};
+    let now = Local::now();
+    if let Some(value) = query.days.as_deref().filter(|value| !value.is_empty()) {
+        let duration = parse_days(value).map_err(usage_bad_request)?;
+        return Ok((
+            ReportWindow::Rolling(duration).since_unix(now),
+            UsagePeriod::All,
+            format!("last {value} days"),
+        ));
+    }
+    if let Some(value) = query.last.as_deref().filter(|value| !value.is_empty()) {
+        let duration = parse_last(value).map_err(usage_bad_request)?;
+        return Ok((
+            ReportWindow::Rolling(duration).since_unix(now),
+            UsagePeriod::All,
+            format!("last {value}"),
+        ));
+    }
+    if let Some(value) = query.since.as_deref().filter(|value| !value.is_empty()) {
+        let since = parse_since(value).map_err(usage_bad_request)?;
+        return Ok((Some(since), UsagePeriod::All, format!("since {value}")));
+    }
+    let period = query.period;
+    let window = window_of(period)?;
+    Ok((window.since_now(), period, String::new()))
+}
+
+fn usage_bad_request(message: String) -> ControlFailure {
+    ControlError::new(ControlErrorKind::BadRequest, message, "validate").into()
+}
+
 fn breakdown_dimension(
     by: UsageBreakdownBy,
 ) -> Result<hofund_usage::BreakdownDimension, ControlFailure> {
@@ -1464,10 +1570,15 @@ fn breakdown_dimension(
         UsageBreakdownBy::Agent => hofund_usage::BreakdownDimension::Agent,
         UsageBreakdownBy::ProviderKey => hofund_usage::BreakdownDimension::ProviderKey,
         UsageBreakdownBy::GatewayKey => hofund_usage::BreakdownDimension::GatewayKey,
+        UsageBreakdownBy::Model => hofund_usage::BreakdownDimension::Model,
+        UsageBreakdownBy::Provider => hofund_usage::BreakdownDimension::Provider,
+        UsageBreakdownBy::Account => hofund_usage::BreakdownDimension::Account,
+        UsageBreakdownBy::Session => hofund_usage::BreakdownDimension::Session,
+        UsageBreakdownBy::Day => hofund_usage::BreakdownDimension::Day,
         UsageBreakdownBy::Unknown => {
             return Err(ControlError::new(
                 ControlErrorKind::BadRequest,
-                "unknown usage breakdown; expected agent, provider-key, or gateway-key",
+                "unknown usage breakdown; expected agent, provider-key, gateway-key, model, provider, account, session, or day",
                 "validate",
             )
             .into());
@@ -1475,7 +1586,7 @@ fn breakdown_dimension(
         _ => {
             return Err(ControlError::new(
                 ControlErrorKind::BadRequest,
-                "unknown usage breakdown; expected agent, provider-key, or gateway-key",
+                "unknown usage breakdown; expected agent, provider-key, gateway-key, model, provider, account, session, or day",
                 "validate",
             )
             .into());
@@ -1488,9 +1599,11 @@ fn usage_breakdown_response(
     by: UsageBreakdownBy,
     groups: Vec<hofund_usage::BreakdownGroup>,
     (rows, totals): (Vec<hofund_usage::Row>, hofund_usage::Totals),
+    all_rows: &[hofund_usage::Row],
     config: &hofund_config::Config,
+    window_label: String,
 ) -> UsageResponse {
-    let mut response = usage_response(period, (rows, totals), config);
+    let mut response = usage_response(period, (rows, totals), all_rows, config, window_label);
     response.breakdown_by = Some(by);
     let convert = |usd: f64| match config.usage.currency {
         hofund_config::UsageCurrency::Usd => usd,
@@ -1505,6 +1618,12 @@ fn usage_breakdown_response(
     response.breakdown = groups
         .into_iter()
         .map(|group| {
+            let group_rows: Vec<_> = all_rows
+                .iter()
+                .filter(|row| breakdown_group_id(row, by) == group.id)
+                .cloned()
+                .collect();
+            let speed = hofund_usage::speed_totals(&group_rows);
             let mut out = UsageBreakdownGroup::default();
             out.id = group.id;
             out.label = group.label;
@@ -1513,6 +1632,8 @@ fn usage_breakdown_response(
             out.output_tokens = group.totals.output_tokens;
             out.cost = convert(group.totals.cost_usd);
             out.unpriced = group.totals.unpriced;
+            out.mean_ttft_ms = speed.mean_ttft_ms;
+            out.mean_tokens_per_second = speed.mean_tokens_per_second;
             out
         })
         .collect();
@@ -1522,10 +1643,13 @@ fn usage_breakdown_response(
 fn usage_response(
     period: UsagePeriod,
     (rows, totals): (Vec<hofund_usage::Row>, hofund_usage::Totals),
+    all_rows: &[hofund_usage::Row],
     config: &hofund_config::Config,
+    window_label: String,
 ) -> UsageResponse {
     let mut response = UsageResponse::default();
     response.period = period;
+    response.window_label = window_label;
     response.rows_truncated = totals.requests > u64::try_from(rows.len()).unwrap_or(u64::MAX);
     let cny_per_usd = config
         .usage
@@ -1557,17 +1681,64 @@ fn usage_response(
     summary.reasoning_tokens = totals.reasoning_tokens;
     summary.cost = convert(totals.cost_usd);
     summary.unpriced = totals.unpriced;
+    let speed = hofund_usage::speed_totals(all_rows);
+    summary.mean_ttft_ms = speed.mean_ttft_ms;
+    summary.mean_tokens_per_second = speed.mean_tokens_per_second;
     response.totals = summary;
     response
 }
 
+fn breakdown_group_id(row: &hofund_usage::Row, by: UsageBreakdownBy) -> String {
+    match by {
+        UsageBreakdownBy::Agent => hofund_usage::normalize_client_agent(&row.client_agent),
+        UsageBreakdownBy::ProviderKey => {
+            if row.provider_key_id.is_empty() {
+                hofund_usage::NO_PROVIDER_KEY.to_owned()
+            } else {
+                row.provider_key_id.clone()
+            }
+        }
+        UsageBreakdownBy::GatewayKey => {
+            if row.caller_key_id.is_empty() {
+                hofund_usage::NO_GATEWAY_KEY.to_owned()
+            } else {
+                row.caller_key_id.clone()
+            }
+        }
+        UsageBreakdownBy::Model => row.model.clone(),
+        UsageBreakdownBy::Provider => row.upstream.clone(),
+        UsageBreakdownBy::Account => {
+            if row.upstream.starts_with("account:") {
+                row.upstream.clone()
+            } else {
+                "none".to_owned()
+            }
+        }
+        UsageBreakdownBy::Session => {
+            if row.session_id.is_empty() {
+                "none".to_owned()
+            } else {
+                row.session_id.clone()
+            }
+        }
+        UsageBreakdownBy::Day => chrono::Local
+            .timestamp_opt(row.created_unix, 0)
+            .single()
+            .map(|time| time.date_naive().to_string())
+            .unwrap_or_else(|| "unknown".to_owned()),
+        UsageBreakdownBy::Unknown => String::new(),
+        _ => String::new(),
+    }
+}
+
 fn usage_row(row: hofund_usage::Row, convert: impl Fn(f64) -> f64 + Copy) -> UsageRow {
+    let tokens_per_second = hofund_usage::row_tokens_per_second(&row);
     let mut out = UsageRow::default();
     out.created_at_ms = u64::try_from(row.created_unix)
         .unwrap_or(0)
         .saturating_mul(1000);
-    out.model = row.model;
-    out.provider = row.upstream;
+    out.model = row.model.clone();
+    out.provider = row.upstream.clone();
     out.input_tokens = row
         .input_tokens
         .map(|tokens| u64::try_from(tokens).unwrap_or(0));
@@ -1575,7 +1746,7 @@ fn usage_row(row: hofund_usage::Row, convert: impl Fn(f64) -> f64 + Copy) -> Usa
         .output_tokens
         .map(|tokens| u64::try_from(tokens).unwrap_or(0));
     out.duration_ms = u64::try_from(row.latency_ms).unwrap_or(0);
-    out.status = row.status;
+    out.status = row.status.clone();
     out.caller_key_id = row.caller_key_id;
     out.caller_key_name = row.caller_key_name;
     out.caller_issuer_id = row.caller_issuer_id;
@@ -1593,9 +1764,18 @@ fn usage_row(row: hofund_usage::Row, convert: impl Fn(f64) -> f64 + Copy) -> Usa
         .map(|tokens| u64::try_from(tokens).unwrap_or(0));
     out.reasoning_hidden = row.reasoning_hidden;
     out.priced = row.priced;
-    out.cost = row.cost_usd.filter(|_| row.priced).map(convert);
-    out.outcome = row.outcome;
+    out.cost_usd = row.cost_usd.filter(|_| row.priced);
+    out.cost = out.cost_usd.map(convert);
+    out.outcome = row.outcome.clone();
+    out.provider_key_id = row.provider_key_id.clone();
+    out.served_model = row.served_model.clone();
     out.client_agent = row.client_agent;
+    out.ttft_ms = row.ttft_ms.and_then(|ms| u64::try_from(ms).ok());
+    out.tokens_per_second = tokens_per_second;
+    out.account = hofund_usage::account_of_upstream(&row.upstream)
+        .unwrap_or_default()
+        .to_owned();
+    out.session_id = row.session_id;
     out
 }
 

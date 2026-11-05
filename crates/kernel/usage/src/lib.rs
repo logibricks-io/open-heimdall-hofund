@@ -12,19 +12,28 @@ use rusqlite::{Connection, params};
 use thiserror::Error;
 
 mod attribution;
+mod decode;
 mod fx;
 mod key;
 mod limits;
 mod price;
+mod report;
+mod speed;
 mod spent;
 pub use attribution::{
     BreakdownDimension, BreakdownGroup, NO_GATEWAY_KEY, NO_PROVIDER_KEY, UNKNOWN_CLIENT_AGENT,
     masked_provider_key_id, normalize_client_agent,
 };
+pub use decode::{FlowTracker, decode_of, decode_row, decode_window, row_tokens_per_second};
 pub use fx::{CnyRate, DisplayCurrency, Fx, RateFetcher};
 pub use key::{CallerModel, CallerTotals};
 pub use limits::{KeyUsage, UsageDetails};
 pub use price::{RowPricing, TokenPrice, token_bearing};
+pub use report::{
+    CSV_HEADER, ReportWindow, SpeedTotals, account_of_upstream, csv_field, format_csv, parse_days,
+    parse_last, parse_since, row_matches_filter, speed_totals,
+};
+pub use speed::{mean_tokens_per_second, mean_ttft_ms};
 pub use spent::{KeySpent, SpendCapPeriod, spend_cap_retry_after, spend_cap_since};
 
 /// A reporting window over the ledger.
@@ -157,6 +166,18 @@ pub struct Row {
     pub provider_key_id: String,
     /// Client agent that sent the request, or [`UNKNOWN_CLIENT_AGENT`] when unset.
     pub client_agent: String,
+    /// Time to first content in milliseconds when measured.
+    pub ttft_ms: Option<i64>,
+    /// First visible text on the stream, in milliseconds from start.
+    pub first_text_ms: Option<i64>,
+    /// First reasoning delta on the stream, in milliseconds from start.
+    pub first_reasoning_ms: Option<i64>,
+    /// Content delivery span used for burst detection, in milliseconds.
+    pub flow_ms: Option<i64>,
+    /// Model id reported by the upstream reply when recorded.
+    pub served_model: String,
+    /// Client session id from gateway headers when recorded.
+    pub session_id: String,
 }
 
 /// One successful request as routing measurements read it.
@@ -242,6 +263,11 @@ impl Ledger {
             ("outcome", "TEXT NOT NULL DEFAULT ''"),
             ("provider_key_id", "TEXT NOT NULL DEFAULT ''"),
             ("client_agent", "TEXT NOT NULL DEFAULT ''"),
+            ("session_id", "TEXT NOT NULL DEFAULT ''"),
+            ("first_text_ms", "INTEGER"),
+            ("first_reasoning_ms", "INTEGER"),
+            ("flow_ms", "INTEGER"),
+            ("served_model", "TEXT NOT NULL DEFAULT ''"),
         ] {
             ensure_column(&connection, column, declaration)?;
         }
@@ -294,7 +320,8 @@ impl Ledger {
                         reasoning_tokens, reasoning_hidden,
                         priced, cost_usd, price_input, price_output, price_cache_read,
                         price_cache_write, price_cache_write_1h, outcome, provider_key_id,
-                        client_agent
+                        client_agent, ttft_ms, session_id, first_text_ms, first_reasoning_ms,
+                        flow_ms, served_model
                  FROM requests ORDER BY id",
             )
             .map_err(|error| UsageError(error.to_string()))?;
@@ -365,7 +392,7 @@ impl Ledger {
             .map_err(|error| UsageError(error.to_string()))
     }
 
-    /// The newest `row_limit` rows at or after `since` (oldest first), and
+    /// The newest `row_limit` rows at or after `since` (newest first), and
     /// totals over every row in the window.
     ///
     /// Totals come from one SQL aggregate, so they stay complete when the row
@@ -430,18 +457,45 @@ impl Ledger {
                         reasoning_tokens, reasoning_hidden,
                         priced, cost_usd, price_input, price_output, price_cache_read,
                         price_cache_write, price_cache_write_1h, outcome, provider_key_id,
-                        client_agent
+                        client_agent, ttft_ms, session_id, first_text_ms, first_reasoning_ms,
+                        flow_ms, served_model
                  FROM requests WHERE created_unix >= ?1 ORDER BY id DESC LIMIT ?2",
             )
             .map_err(|error| UsageError(error.to_string()))?;
         let rows = statement
             .query_map(params![since, limit], read_row)
             .map_err(|error| UsageError(error.to_string()))?;
-        let mut rows = rows
+        let rows = rows
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| UsageError(error.to_string()))?;
-        rows.reverse();
         Ok((rows, totals))
+    }
+
+    /// Like [`Self::summary`], with optional model and account filters.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UsageError`] when a query fails.
+    pub fn summary_filtered(
+        &self,
+        since: Option<i64>,
+        model: Option<&str>,
+        account: Option<&str>,
+        row_limit: usize,
+    ) -> Result<(Vec<Row>, Totals), UsageError> {
+        if model.filter(|value| !value.is_empty()).is_none()
+            && account.filter(|value| !value.is_empty()).is_none()
+        {
+            return self.summary(since, row_limit);
+        }
+        let (all_rows, _) = self.summary(since, usize::MAX)?;
+        let filtered: Vec<Row> = all_rows
+            .into_iter()
+            .filter(|row| row_matches_filter(row, model, account))
+            .collect();
+        let totals = totals_of_rows(&filtered);
+        let keep = row_limit.min(filtered.len());
+        Ok((filtered[..keep].to_vec(), totals))
     }
 
     /// A text table of every row.
@@ -502,7 +556,40 @@ fn read_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Row> {
         outcome: row.get(22)?,
         provider_key_id: row.get(23)?,
         client_agent: normalize_client_agent(&row.get::<_, String>(24)?),
+        ttft_ms: row.get(25)?,
+        session_id: row.get(26)?,
+        first_text_ms: row.get(27)?,
+        first_reasoning_ms: row.get(28)?,
+        flow_ms: row.get(29)?,
+        served_model: row.get(30)?,
     })
+}
+
+fn totals_of_rows(rows: &[Row]) -> Totals {
+    let mut totals = Totals::default();
+    for row in rows {
+        if matches!(
+            row.outcome.as_str(),
+            "handed_on" | "refusal" | "turned_away"
+        ) {
+            continue;
+        }
+        totals.requests += 1;
+        totals.input_tokens += row.input_tokens.filter(|t| *t > 0).unwrap_or(0) as u64;
+        totals.output_tokens += row.output_tokens.filter(|t| *t > 0).unwrap_or(0) as u64;
+        totals.cache_read_tokens += row.cache_read_tokens.filter(|t| *t > 0).unwrap_or(0) as u64;
+        totals.cache_write_5m_tokens +=
+            row.cache_write_5m_tokens.filter(|t| *t > 0).unwrap_or(0) as u64;
+        totals.cache_write_1h_tokens +=
+            row.cache_write_1h_tokens.filter(|t| *t > 0).unwrap_or(0) as u64;
+        totals.reasoning_tokens += row.reasoning_tokens.filter(|t| *t > 0).unwrap_or(0) as u64;
+        if row.priced {
+            totals.cost_usd += row.cost_usd.unwrap_or(0.0);
+        } else if row.input_tokens.unwrap_or(0) + row.output_tokens.unwrap_or(0) > 0 {
+            totals.unpriced += 1;
+        }
+    }
+    totals
 }
 
 impl Ledger {
@@ -717,7 +804,7 @@ mod tests {
         let (rows, totals) = ledger.summary(Some(10), 2).expect("summary");
         assert_eq!(
             rows.iter().map(|row| row.created_unix).collect::<Vec<_>>(),
-            [11, 12]
+            [12, 11]
         );
         assert_eq!(
             totals,
@@ -732,7 +819,7 @@ mod tests {
         );
         let (rows, totals) = ledger.summary(None, 10).expect("all");
         assert_eq!(rows.len(), 4);
-        assert_eq!(rows[0].created_unix, 5);
+        assert_eq!(rows[0].created_unix, 12);
         assert_eq!(totals.requests, 4);
         assert_eq!(totals.input_tokens, 101);
         let (rows, totals) = ledger.summary(Some(13), 10).expect("empty");

@@ -22,7 +22,7 @@ use hofund_control_proto::{
     QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryQuery, QuotaHistoryResponse,
     QuotaQuery, QuotaResponse, ReloadRequest, RouteListResponse, RouteModelListResponse,
     RouteQuery, SessionRouteResponse, ShutdownRequest, ShutdownResponse, StatusResponse,
-    TokenRotateRequest, TokenRotateResponse, Topic, UnroutedListResponse, UsagePeriod, UsageQuery,
+    TokenRotateRequest, TokenRotateResponse, Topic, UnroutedListResponse, UsageQuery,
     UsageResponse, WarmupListResponse, WarmupRunRequest, WarmupRunResponse, decode_error_envelope,
     decode_response,
 };
@@ -745,18 +745,7 @@ impl Client {
 
     /// Reports usage for a period.
     pub async fn usage(&self, query: UsageQuery) -> Result<UsageResponse, ClientError> {
-        let period = match query.period {
-            UsagePeriod::Day => "day",
-            UsagePeriod::Week => "week",
-            UsagePeriod::Month => "month",
-            UsagePeriod::All => "all",
-            _ => "unknown",
-        };
-        let mut url = format!("/v1/hofund/usage?period={period}");
-        if let Some(by) = query.by {
-            url.push_str("&by=");
-            url.push_str(by.as_query_value());
-        }
+        let url = format!("/v1/hofund/usage?{}", query.encode());
         self.get(&url).await
     }
 
