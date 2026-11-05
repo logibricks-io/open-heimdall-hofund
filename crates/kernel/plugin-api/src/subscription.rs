@@ -356,4 +356,18 @@ pub trait Subscription: Send + Sync + 'static {
             "this subscription does not import an agent sign-in",
         ))
     }
+
+    /// Cleans up plugin-owned state when an account is removed from the store.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when on-disk state cannot be removed.
+    async fn remove_account(
+        &self,
+        account: &AccountId,
+        host: &HostContext,
+    ) -> Result<(), PluginError> {
+        let _ = (account, host);
+        Ok(())
+    }
 }

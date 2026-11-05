@@ -18,6 +18,15 @@ apply_quirks
 async_trait
 bedrock::fn fit_headers (headers : & [(String , String)]) -> Vec < (String , String) >
 bedrock::fn fit_request (request : & mut Request)
+checkin::CheckinTransport
+checkin::CheckinTransport::fn send (& self , call : Call ,) -> impl std :: future :: Future < Output = Result < Reply , PluginError > > + Send
+checkin::MiniMaxSite
+checkin::QoderSite
+checkin::WorkBuddySite
+checkin::run_minimax
+checkin::run_qoder
+checkin::run_trae
+checkin::run_workbuddy
 classify::ModelTags #[non_exhaustive] derives(Clone, Copy, Debug, Default, PartialEq, Eq)
 classify::ModelTags::const fn decides (self) -> bool
 classify::ModelTags::const fn draws (self) -> bool
@@ -83,6 +92,7 @@ mod process
 mod register
 mod sigv4
 mod time
+mod time::zone
 mod transport
 mod uuid
 mod wire
@@ -194,6 +204,16 @@ string_items
 text_response
 time::fn format_rfc3339 (instant : SystemTime) -> String
 time::fn parse_rfc3339 (text : & str) -> Option < SystemTime >
+time::zone::HostLocalGuard
+time::zone::Zone derives(Clone, Copy, Debug)
+time::zone::Zone::fn host_local () -> Self
+time::zone::Zone::fn resolve (name : Option < & str >) -> Self
+time::zone::fn host_local () -> Zone
+time::zone::fn local_wall_instant (zone : & Zone , year : i32 , month : u32 , day : u32 , hour : u32 , minute : u32 ,) -> Option < SystemTime >
+time::zone::fn override_host_local (iana : & str) -> HostLocalGuard
+time::zone::fn pick_time_only_wall (zone : & Zone , now : SystemTime , window : Duration , slack : Duration , hour : u32 , minute : u32 ,) -> Option < SystemTime >
+time::zone::fn pick_yearless_wall (zone : & Zone , now : SystemTime , window : Duration , slack : Duration , month : u32 , day : u32 , hour : u32 , minute : u32 ,) -> Option < SystemTime >
+time::zone::fn resolve_iana (name : Option < & str >) -> Zone
 tracing
 transport::Call derives(Clone)
 transport::Call::async fn fetch (self , http : & HttpHandle) -> Result < Reply , PluginError >

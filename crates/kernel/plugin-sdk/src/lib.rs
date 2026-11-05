@@ -9,6 +9,7 @@
 //! [`sigv4`] signs one AWS request. [`bedrock`] fits Anthropic betas for
 //! Bedrock's Messages wire. [`oauth`] parses a token response and
 //! builds a form body. [`page`] reads cursors and walks bounded model lists.
+//! [`time::zone`] resolves IANA zones and local wall-clock instants.
 //! PKCE, the loopback callback, and device flow are not here. The host handle
 //! streams a 2xx body. [`transport::Call::send`] still reads all of it, and
 //! [`transport::Call::open`] returns it unread. [`wire`] sends Chat Completions
