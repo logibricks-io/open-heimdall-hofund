@@ -9,8 +9,8 @@ use hofund_control_proto::{
     API_VERSION, ConfigResponse, ControlErrorKind, GroupCreateRequest, GroupListResponse,
     GroupMemberCandidatesResponse, GroupPatchRequest, GroupRestoreRequest, GroupWriteResponse,
     PresetListResponse, ProfileRenameRequest, ProfileSaveRequest, ProviderCreateRequest,
-    ProviderListResponse, ProviderPatchRequest, ProviderWriteResponse, ServeRole, StatusResponse,
-    decode_error_envelope, decode_response,
+    ProviderDeleteRequest, ProviderDeleteResponse, ProviderListResponse, ProviderPatchRequest,
+    ProviderWriteResponse, ServeRole, StatusResponse, decode_error_envelope, decode_response,
 };
 use hofund_daemon::{ControlRuntime, Running, StartOptions, start_with_options};
 use serde_json::json;
@@ -141,6 +141,15 @@ impl Client {
             .await
     }
 
+    async fn delete<T: serde::Serialize>(
+        &self,
+        path: &str,
+        body: &T,
+    ) -> (reqwest::StatusCode, Vec<u8>) {
+        self.send(self.http.delete(format!("{}{path}", self.base)).json(body))
+            .await
+    }
+
     async fn config(&self) -> ConfigResponse {
         let (status, body) = self.get("/v1/hofund/config").await;
         assert_eq!(status, reqwest::StatusCode::OK);
@@ -188,6 +197,14 @@ fn provider_create(value: serde_json::Value) -> ProviderCreateRequest {
 
 fn provider_patch(value: serde_json::Value) -> ProviderPatchRequest {
     serde_json::from_value(value).expect("provider patch request")
+}
+
+fn provider_delete(expected_revision: &str) -> ProviderDeleteRequest {
+    serde_json::from_value(json!({
+        "version": API_VERSION,
+        "expected_revision": expected_revision,
+    }))
+    .expect("provider delete request")
 }
 
 fn group_create(value: serde_json::Value) -> GroupCreateRequest {
@@ -701,6 +718,77 @@ async fn disabling_provider_reseats_agent_off_route_alias() {
     assert!(
         settings_text.contains("\"safe\""),
         "agent must move to a route that no longer uses the disabled provider, got: {settings_text}"
+    );
+    let gateway_origin = format!("http://{}", running.listen_addr());
+    assert!(
+        !gateway_origin.is_empty() && gateway_origin != "http://",
+        "expected a live listen origin"
+    );
+    let settings_json: serde_json::Value =
+        serde_json::from_str(&settings_text).expect("settings JSON");
+    assert_eq!(
+        settings_json
+            .get("env")
+            .and_then(|env| env.get("ANTHROPIC_BASE_URL"))
+            .and_then(|value| value.as_str()),
+        Some(gateway_origin.as_str()),
+        "gateway slot must use the listening address, got: {settings_text}"
+    );
+    support::shutdown(running).await;
+}
+
+#[tokio::test]
+async fn deleting_provider_reseats_agent_and_leaves_loadable_config() {
+    let scratch = Scratch::new("providers-delete");
+    let settings = scratch
+        .runtime_dir
+        .join("home")
+        .join(".claude")
+        .join("settings.json");
+    std::fs::create_dir_all(settings.parent().expect("settings parent")).expect("claude dir");
+    std::fs::write(&settings, "{\"model\": \"on-added\"}\n").expect("agent settings");
+    let session = Session::new(scratch.runtime_dir.join("home")).with_path("");
+    let options = options_with(
+        &scratch,
+        StartOptions {
+            agent_session: Some(session),
+            ..StartOptions::default()
+        },
+    );
+    let text = config_with_added_routes();
+    let running = support::within(
+        "start daemon",
+        support::REQUEST,
+        start_with(&scratch, &text, options),
+    )
+    .await;
+    let client = Client::new(&running, &scratch);
+    let read = client.config().await;
+    let delete = provider_delete(&read.disk_revision);
+    let (status, body) = client.delete("/v1/hofund/providers/added", &delete).await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+    let _: ProviderDeleteResponse = decode_response(API_VERSION, &body).expect("delete body");
+    let list: ProviderListResponse =
+        decode_response(API_VERSION, &client.get("/v1/hofund/providers").await.1)
+            .expect("providers after delete");
+    assert!(
+        list.providers.iter().all(|provider| provider.id != "added"),
+        "deleted provider must disappear from the list"
+    );
+    let config = client.config().await;
+    assert!(
+        !config.text.contains("on-added"),
+        "route alias for the deleted provider must be removed"
+    );
+    let settings_text = std::fs::read_to_string(&settings).expect("settings after delete");
+    assert!(
+        settings_text.contains("\"safe\""),
+        "agent must reseat off the deleted provider's route, got: {settings_text}"
     );
     support::shutdown(running).await;
 }

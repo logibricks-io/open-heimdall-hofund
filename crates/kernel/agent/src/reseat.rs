@@ -6,23 +6,22 @@ use crate::{AgentError, Catalog, GatewayTarget, Session};
 /// `provider_id`.
 ///
 /// Agents store routed model ids (optionally prefixed; see `model_prefix`).
-/// `affected_route_models` lists those route ids whose upstreams still use the
-/// provider. `fallback_route_models` lists route ids that do not.
-///
-/// Returns agent ids that were touched.
+/// `match_route_models` lists routed model ids whose upstreams used the
+/// provider before this edit (include removed routes when deleting a provider).
+/// `fallback_route_models` lists route ids that do not.
 pub fn reseat_after_provider_change(
     catalog: &Catalog,
     session: &Session,
     target: &GatewayTarget,
     provider_id: &str,
     provider_still_present: bool,
-    affected_route_models: &[String],
+    match_route_models: &[String],
     fallback_route_models: &[String],
 ) -> Result<Vec<String>, AgentError> {
     let provider_id = provider_id.trim();
     let prefix = format!("{provider_id}/");
     let same_provider: Vec<String> = if provider_still_present {
-        affected_route_models.to_vec()
+        match_route_models.to_vec()
     } else {
         Vec::new()
     };
@@ -42,7 +41,7 @@ pub fn reseat_after_provider_change(
                 .is_some_and(|model| model.starts_with(&prefix))
             || route_model
                 .as_deref()
-                .is_some_and(|model| affected_route_models.iter().any(|route| route == model));
+                .is_some_and(|model| match_route_models.iter().any(|route| route == model));
         if !on_provider {
             continue;
         }

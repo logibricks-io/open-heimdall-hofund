@@ -150,8 +150,9 @@ impl AgentOps {
     }
 
     pub(crate) fn gateway_target(&self) -> Result<GatewayTarget, ControlError> {
-        let token = self.parts.token()?;
-        Ok(self.parts.target(token))
+        let parts = self.parts(None);
+        let token = parts.token()?;
+        Ok(parts.target(token))
     }
 
     /// Publishes token rotations on `sender`. L6 subscribes to close event
@@ -681,6 +682,7 @@ fn internal(message: String) -> ControlError {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::sync::Arc;
 
     use hofund_agent::{ConfigFile, GatewayTarget};
     use hofund_control_proto::AgentAction;
@@ -689,6 +691,26 @@ mod tests {
 
     fn target(token: &str) -> GatewayTarget {
         GatewayTarget::new("http://127.0.0.1:3425", token, vec!["m".to_owned()])
+    }
+
+    #[test]
+    fn r7a_gateway_target_uses_live_listen_origin_not_stale_parts() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let token_path = dir.path().join("hofund.token");
+        std::fs::write(&token_path, "test-token\n").expect("token");
+        let config = dir.path().join("hofund.toml");
+        std::fs::write(&config, "listen = \"127.0.0.1:0\"\n").expect("config");
+        let listen = Arc::new(|| "http://127.0.0.1:8765".to_owned());
+        let routes = Arc::new(|_: Option<&str>, _: Option<&str>| vec!["m".to_owned()]);
+        let ops = AgentOps::new(
+            crate::agent_descriptions(),
+            &config,
+            listen,
+            routes,
+            token_path,
+        );
+        let target = ops.gateway_target().expect("gateway target");
+        assert_eq!(target.base_url(), "http://127.0.0.1:8765");
     }
 
     fn file(bytes: Option<&[u8]>) -> Vec<ConfigFile> {

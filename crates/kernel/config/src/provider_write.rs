@@ -154,8 +154,9 @@ pub fn edit_provider_patch(
     Ok(document.to_string())
 }
 
-/// Removes one provider table.
+/// Removes one provider table and every config reference to it.
 pub fn edit_provider_delete(text: &str, provider_id: &str) -> Result<String, ConfigError> {
+    load(text)?;
     let mut document = text
         .parse::<DocumentMut>()
         .map_err(|error| ConfigError::Syntax(error.to_string()))?;
@@ -168,7 +169,123 @@ pub fn edit_provider_delete(text: &str, provider_id: &str) -> Result<String, Con
         .position(|table| table.get("id").and_then(Item::as_str) == Some(provider_id))
         .ok_or_else(|| ConfigError::Invalid(format!("unknown provider `{provider_id}`")))?;
     providers.remove(index);
-    Ok(document.to_string())
+    strip_provider_references(&mut document, provider_id)?;
+    let edited = document.to_string();
+    load(&edited)?;
+    Ok(edited)
+}
+
+fn strip_provider_references(
+    document: &mut DocumentMut,
+    provider_id: &str,
+) -> Result<(), ConfigError> {
+    loop {
+        let mut changed = false;
+        if let Some(routes) = document
+            .get_mut("routes")
+            .and_then(Item::as_array_of_tables_mut)
+        {
+            let groups = group_ids_in_routes(routes);
+            let mut remove = Vec::new();
+            for (index, route) in routes.iter_mut().enumerate() {
+                if let Some(upstreams) = route.get_mut("upstreams").and_then(Item::as_array_mut) {
+                    let before = upstreams.len();
+                    upstreams.retain(|entry| {
+                        !upstream_targets_provider(entry, provider_id)
+                            && !upstream_targets_missing_group(entry, &groups)
+                    });
+                    if upstreams.len() != before {
+                        changed = true;
+                    }
+                }
+                let empty = route
+                    .get("upstreams")
+                    .and_then(Item::as_array)
+                    .is_none_or(|array| array.is_empty());
+                if empty {
+                    remove.push(index);
+                }
+            }
+            for index in remove.into_iter().rev() {
+                routes.remove(index);
+                changed = true;
+            }
+        }
+        if let Some(providers) = document
+            .get_mut("providers")
+            .and_then(Item::as_array_of_tables_mut)
+        {
+            for table in providers.iter_mut() {
+                if let Some(fallback) = table.get_mut("fallback").and_then(Item::as_array_mut) {
+                    let before = fallback.len();
+                    fallback.retain(|entry| {
+                        entry
+                            .as_str()
+                            .is_none_or(|value| !fallback_targets_provider(value, provider_id))
+                    });
+                    if fallback.len() != before {
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    Ok(())
+}
+
+fn group_ids_in_routes(routes: &toml_edit::ArrayOfTables) -> std::collections::BTreeSet<String> {
+    let mut out = std::collections::BTreeSet::new();
+    for route in routes.iter() {
+        if let Some(model) = route.get("model").and_then(Item::as_str)
+            && let Some(id) = model.strip_prefix("group/")
+        {
+            out.insert(id.to_owned());
+        }
+    }
+    out
+}
+
+fn upstream_targets_provider(entry: &Value, provider_id: &str) -> bool {
+    if let Some(text) = entry.as_str() {
+        if text == provider_id {
+            return true;
+        }
+        if let Some((provider, _)) = text.split_once('/') {
+            return provider == provider_id;
+        }
+        return false;
+    }
+    if let Value::InlineTable(table) = entry
+        && table.get("provider").and_then(|value| value.as_str()) == Some(provider_id)
+    {
+        return true;
+    }
+    false
+}
+
+fn upstream_targets_missing_group(
+    entry: &Value,
+    groups: &std::collections::BTreeSet<String>,
+) -> bool {
+    if let Value::InlineTable(table) = entry
+        && let Some(group) = table.get("group").and_then(|value| value.as_str())
+    {
+        return !groups.contains(group);
+    }
+    false
+}
+
+fn fallback_targets_provider(entry: &str, provider_id: &str) -> bool {
+    if entry.starts_with("group/") {
+        return false;
+    }
+    if let Some((provider, _)) = entry.split_once('/') {
+        return provider == provider_id;
+    }
+    entry == provider_id
 }
 
 fn validate_option_key(key: &str, allowed: &[&str]) -> Result<(), ConfigError> {
@@ -221,4 +338,34 @@ pub fn validate_fallback_list(provider_id: &str, fallback: &[String]) -> Result<
         parse_fallback(provider_id, entry)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::edit_provider_delete;
+    use crate::load;
+
+    const BASE: &str = "\
+[[providers]]\nid = \"chat\"\nprotocol = \"openai-chat\"\nbase_url = \"http://127.0.0.1/v1\"\napi_key = \"k\"\n\
+[[providers]]\nid = \"added\"\nprotocol = \"openai-chat\"\nbase_url = \"http://127.0.0.1/v1\"\napi_key = \"k\"\n\
+[[routes]]\nmodel = \"on-added\"\nupstreams = [\"added\"]\n\
+[[routes]]\nmodel = \"safe\"\nupstreams = [\"chat\"]\n";
+
+    #[test]
+    fn r7a_provider_delete_strips_routes_and_fallbacks_then_loads() {
+        let text = format!(
+            "{BASE}[[providers]]\nid = \"other\"\nprotocol = \"openai-chat\"\nbase_url = \"http://127.0.0.1/v1\"\napi_key = \"k\"\nfallback = [\"added/m\", \"chat/x\"]\n"
+        );
+        let edited = edit_provider_delete(&text, "added").expect("delete");
+        assert!(!edited.contains("id = \"added\""));
+        assert!(!edited.contains("on-added"));
+        let config = load(&edited).expect("edited config loads");
+        let other = config
+            .providers
+            .iter()
+            .find(|provider| provider.id == "other")
+            .expect("other provider");
+        assert_eq!(other.fallback.len(), 1);
+        assert_eq!(other.fallback[0].route_model(), "chat/x");
+    }
 }

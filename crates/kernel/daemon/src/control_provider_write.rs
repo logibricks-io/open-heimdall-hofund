@@ -131,6 +131,7 @@ pub(crate) async fn patch_provider(
                     gateway_target,
                     &provider_id,
                     false,
+                    None,
                     text,
                 )
             },
@@ -171,6 +172,8 @@ pub(crate) async fn delete_provider(
     let backup = current.text.clone();
     let edited = edit_provider_delete(&current.text, id).map_err(config_failure)?;
     let provider_id = id.to_owned();
+    let match_route_models =
+        affected_route_models(&load(&current.text).map_err(config_failure)?, id);
     let applied = ops
         .apply_with_sidecar_work(
             &request.expected_revision,
@@ -183,6 +186,7 @@ pub(crate) async fn delete_provider(
                     gateway_target,
                     &provider_id,
                     false,
+                    Some(&match_route_models),
                     text,
                 )
             },
@@ -200,6 +204,7 @@ fn run_reseat_locked(
     gateway_target: Option<GatewayTarget>,
     provider_id: &str,
     provider_still_present: bool,
+    match_route_models: Option<&[String]>,
     config_text: &str,
 ) -> Result<(), ControlFailure> {
     let config = load(config_text).map_err(config_failure)?;
@@ -210,7 +215,9 @@ fn run_reseat_locked(
         .collect();
     let target = resolve_reseat_target(gateway_target, configured_session.as_ref(), &route_models)?;
     let session = configured_session.unwrap_or_else(crate::agent_session);
-    let affected = affected_route_models(&config, provider_id);
+    let matched = match_route_models
+        .map(<[String]>::to_vec)
+        .unwrap_or_else(|| affected_route_models(&config, provider_id));
     let fallback = fallback_route_models(&config, provider_id);
     let catalog = catalog(descriptions).map_err(|error| internal(error.to_string()))?;
     reseat_after_provider_change(
@@ -219,7 +226,7 @@ fn run_reseat_locked(
         &target,
         provider_id,
         provider_still_present,
-        &affected,
+        &matched,
         &fallback,
     )
     .map_err(|error| internal(error.to_string()))

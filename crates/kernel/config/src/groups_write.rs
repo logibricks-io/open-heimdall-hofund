@@ -431,14 +431,14 @@ fn member_value(reference: &str, effort: &str, fast: bool, enabled: bool) -> Val
         return Value::String(Formatted::new(reference.to_owned()));
     }
     let mut table = InlineTable::new();
-    if let Some((provider, model)) = reference.split_once('/') {
+    if let Some(group) = reference.strip_prefix("group/") {
+        table.insert("group", Value::String(Formatted::new(group.to_owned())));
+    } else if let Some((provider, model)) = reference.split_once('/') {
         table.insert(
             "provider",
             Value::String(Formatted::new(provider.to_owned())),
         );
         table.insert("model", Value::String(Formatted::new(model.to_owned())));
-    } else if let Some(group) = reference.strip_prefix("group/") {
-        table.insert("group", Value::String(Formatted::new(group.to_owned())));
     } else {
         table.insert(
             "provider",
@@ -455,4 +455,64 @@ fn member_value(reference: &str, effort: &str, fast: bool, enabled: bool) -> Val
         table.insert("on", Value::Boolean(Formatted::new(false)));
     }
     Value::InlineTable(table)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{edit_group_create, edit_group_patch};
+    use crate::{UpstreamTarget, load};
+
+    const BASE: &str = "\
+listen = \"127.0.0.1:0\"\n\
+[[providers]]\nid = \"chat\"\nprotocol = \"openai-chat\"\nbase_url = \"http://127.0.0.1/v1\"\napi_key = \"k\"\n\
+[[routes]]\nmodel = \"m\"\nupstreams = [\"chat\"]\n";
+
+    #[test]
+    fn r7a_group_create_and_patch_keep_group_member_refs() {
+        let (inner_text, _) = edit_group_create(BASE, "Inner", "chat/m").expect("inner group");
+        let (with_outer, _) =
+            edit_group_create(&inner_text, "Outer", "group/inner").expect("outer group");
+        let config = load(&with_outer).expect("load after create");
+        let outer = config
+            .routes
+            .iter()
+            .find(|route| route.model == "group/outer")
+            .expect("outer route");
+        assert_eq!(outer.upstreams.len(), 1);
+        assert!(matches!(
+            &outer.upstreams[0].target,
+            UpstreamTarget::Group(id) if id == "inner"
+        ));
+
+        let (patched, _) = edit_group_patch(
+            &with_outer,
+            "outer",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&[
+                ("group/inner".to_owned(), "high".to_owned(), true, true),
+                ("chat/m".to_owned(), String::new(), false, true),
+            ]),
+            None,
+            None,
+        )
+        .expect("patch members");
+        let config = load(&patched).expect("load after patch");
+        let outer = config
+            .routes
+            .iter()
+            .find(|route| route.model == "group/outer")
+            .expect("outer route");
+        assert_eq!(outer.upstreams.len(), 2);
+        assert!(matches!(
+            &outer.upstreams[0].target,
+            UpstreamTarget::Group(id) if id == "inner"
+        ));
+        assert_eq!(outer.upstreams[0].effort.as_deref(), Some("high"));
+        assert!(outer.upstreams[0].fast);
+    }
 }
