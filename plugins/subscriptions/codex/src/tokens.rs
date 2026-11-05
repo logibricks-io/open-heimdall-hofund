@@ -174,6 +174,10 @@ async fn rotate(
         next = next.with_secret("id_token", id_token);
     }
     lease.commit(None, next.to_secret()).await?;
+    if let Some(home) = next.text("codex_home") {
+        let path = std::path::PathBuf::from(home);
+        crate::agent_sign_in::persist_refresh(&path, &host, false, &next).await;
+    }
     Ok(Access {
         token: set.access().clone(),
         account: account_id,

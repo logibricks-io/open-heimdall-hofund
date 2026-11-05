@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "providers": [
+    {
+      "id": "openai",
+      "kind": "openai_oauth",
+      "accounts": [
+        {
+          "email": "user@example.test",
+          "kind": "oauth_tokens",
+          "openAIAccountId": "acct-codexbar",
+          "accessToken": "access-codexbar",
+          "refreshToken": "refresh-codexbar",
+          "idToken": "e30.e30.sig"
+        }
+      ]
+    }
+  ]
+}

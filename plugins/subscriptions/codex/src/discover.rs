@@ -1,4 +1,4 @@
-//! Reading Codex CLI's auth.json for account discovery.
+//! Reading Codex CLI's sign-in for account discovery.
 
 use std::path::Path;
 
@@ -9,6 +9,7 @@ use hofund_plugin_sdk::json::{Map, Value};
 use hofund_plugin_sdk::oauth::SecretObject;
 
 use crate::sign_in;
+use crate::store::{StoreError, StoreReader};
 use crate::tokens;
 
 /// Opaque import handle for the one sign-in Codex keeps in its home.
@@ -16,9 +17,9 @@ pub(crate) const REFERENCE: &str = "agent-sign-in";
 
 const FILE_CAP: u64 = 1024 * 1024;
 
-/// Lists the account named in `home`, when auth.json is present.
+/// Lists the account named in `home`, when a sign-in is present.
 pub(crate) fn list(home: &Path) -> Result<Vec<DiscoveredAgentAccount>, PluginError> {
-    let Some(parsed) = read_auth(home) else {
+    let Some(parsed) = read_auth_file(home)? else {
         return Ok(Vec::new());
     };
     let identity = sign_in::identity(&parsed.id_token)?;
@@ -31,13 +32,14 @@ pub(crate) async fn import(
     home: &Path,
     reference: &str,
     host: &HostContext,
+    skip_keychain: bool,
 ) -> Result<AccountId, PluginError> {
     if reference != REFERENCE {
         return Err(PluginError::config(format!(
             "unknown agent sign-in reference `{reference}`"
         )));
     }
-    let Some(parsed) = read_auth(home) else {
+    let Some(parsed) = read_auth_with_store(home, host, skip_keychain).await? else {
         return Err(PluginError::auth(
             "Codex has no readable sign-in in that directory",
         ));
@@ -60,23 +62,55 @@ struct ParsedAuth {
     refresh_token: Option<SecretString>,
 }
 
-fn read_auth(home: &Path) -> Option<ParsedAuth> {
+fn read_auth_file(home: &Path) -> Result<Option<ParsedAuth>, PluginError> {
     let path = home.join("auth.json");
-    let meta = std::fs::metadata(&path).ok()?;
+    let meta = match std::fs::metadata(&path) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if let Err(StoreError::ConfigParse(message)) = crate::store::read_store_setting(home) {
+                return Err(PluginError::config(message));
+            }
+            return Ok(None);
+        }
+        Err(_) => return Ok(None),
+    };
     if !meta.is_file() || meta.len() > FILE_CAP {
-        return None;
+        return Ok(None);
     }
-    let text = std::fs::read_to_string(&path).ok()?;
-    parse_auth_text(&text)
+    let text = std::fs::read_to_string(&path)
+        .map_err(|_| PluginError::io("cannot read Codex auth.json"))?;
+    Ok(parse_auth_text(&text))
+}
+
+async fn read_auth_with_store(
+    home: &Path,
+    host: &HostContext,
+    skip_keychain: bool,
+) -> Result<Option<ParsedAuth>, PluginError> {
+    let reader = StoreReader::new(Some(host), skip_keychain, None);
+    let bytes = match reader.read_login(home, false).await {
+        Ok((bytes, _)) => bytes,
+        Err(StoreError::SignedOut) => return Ok(None),
+        Err(StoreError::InvalidJson) => return Ok(None),
+        Err(StoreError::Unreadable { .. }) => return Ok(None),
+        Err(StoreError::ConfigParse(message)) => {
+            return Err(PluginError::config(message));
+        }
+        Err(StoreError::FileWrite | StoreError::KeychainWrite) => {
+            return Err(PluginError::io("cannot read Codex sign-in"));
+        }
+    };
+    if bytes.len() > usize::try_from(FILE_CAP).unwrap_or(usize::MAX) {
+        return Ok(None);
+    }
+    let text = std::str::from_utf8(&bytes)
+        .map_err(|_| PluginError::decode("Codex sign-in is not UTF-8"))?;
+    Ok(parse_auth_text(text))
 }
 
 fn parse_auth_text(text: &str) -> Option<ParsedAuth> {
     let root = hofund_plugin_sdk::json::from_str::<Value>(text).ok()?;
-    if root
-        .get("auth_mode")
-        .and_then(Value::as_str)
-        .is_some_and(|mode| mode == "apikey")
-    {
+    if crate::store::auth_mode_apikey(text.as_bytes()) {
         return None;
     }
     let tokens = root.get("tokens")?.as_object()?;
@@ -167,18 +201,22 @@ mod tests {
         fs::write(home.join("auth.json"), text).expect("auth");
     }
 
+    fn list_sync(home: &Path) -> Vec<DiscoveredAgentAccount> {
+        list(home).expect("list")
+    }
+
     #[test]
     fn a1_19_codex_ignores_oversized_auth_json() {
         let dir = scratch("large");
         let home = dir.path().join("codex-home");
         write_auth(&home);
-        assert_eq!(list(&home).expect("list").len(), 1, "valid file is listed");
+        assert_eq!(list_sync(&home).len(), 1, "valid file is listed");
         let path = home.join("auth.json");
         let mut data = fs::read(&path).expect("read");
         let cap = usize::try_from(FILE_CAP).expect("cap");
         data.resize(cap + 1, b' ');
         fs::write(&path, data).expect("pad");
-        let rows = list(&home).expect("list");
+        let rows = list_sync(&home);
         assert!(rows.is_empty(), "valid JSON over the size cap is ignored");
     }
 
@@ -192,8 +230,9 @@ mod tests {
             hofund_plugin_api::PluginId::from_static("codex"),
             dir.path(),
         );
-        let error = hofund_kit_subscription::block_on(import(&home, "other", host.context()))
-            .expect_err("ref");
+        let error =
+            hofund_kit_subscription::block_on(import(&home, "other", host.context(), false))
+                .expect_err("ref");
         assert!(
             error
                 .to_string()
@@ -211,7 +250,7 @@ mod tests {
             hofund_plugin_api::PluginId::from_static("codex"),
             dir.path(),
         );
-        let rows = list(&home).expect("list");
+        let rows = list_sync(&home);
         let id = rows[0].id().clone();
         let marker = SecretObject::new()
             .with_text("account_id", "marker-unchanged")
@@ -223,7 +262,7 @@ mod tests {
             .expect("account");
         hofund_kit_subscription::block_on(host.context().accounts().upsert(account, marker))
             .expect("upsert");
-        hofund_kit_subscription::block_on(import(&home, REFERENCE, host.context()))
+        hofund_kit_subscription::block_on(import(&home, REFERENCE, host.context(), false))
             .expect("import");
         let after = hofund_kit_subscription::block_on(host.context().accounts().secret(&id))
             .expect("read")
@@ -245,8 +284,9 @@ mod tests {
             hofund_plugin_api::PluginId::from_static("codex"),
             dir.path(),
         );
-        let error = hofund_kit_subscription::block_on(import(&home, REFERENCE, host.context()))
-            .expect_err("refresh");
+        let error =
+            hofund_kit_subscription::block_on(import(&home, REFERENCE, host.context(), false))
+                .expect_err("refresh");
         assert!(error.to_string().contains("no refresh token"));
     }
 
@@ -261,7 +301,7 @@ mod tests {
         );
         fs::write(home.join("auth.json"), text).expect("auth");
         assert!(
-            list(&home).expect("list").is_empty(),
+            list_sync(&home).is_empty(),
             "API-key mode is not a ChatGPT account"
         );
     }
@@ -281,8 +321,9 @@ mod tests {
             hofund_plugin_api::PluginId::from_static("codex"),
             dir.path(),
         );
-        let error = hofund_kit_subscription::block_on(import(&home, REFERENCE, host.context()))
-            .expect_err("apikey");
+        let error =
+            hofund_kit_subscription::block_on(import(&home, REFERENCE, host.context(), false))
+                .expect_err("apikey");
         assert_eq!(error.kind(), hofund_plugin_api::PluginErrorKind::Auth);
     }
 
@@ -291,7 +332,7 @@ mod tests {
         let dir = scratch("list");
         let home = dir.path().join("codex-home");
         write_auth(&home);
-        let rows = list(&home).expect("list");
+        let rows = list_sync(&home);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].label(), "u@example.test");
         let text = format!("{rows:?}");

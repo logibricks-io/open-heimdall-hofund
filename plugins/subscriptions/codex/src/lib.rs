@@ -21,13 +21,17 @@ use hofund_plugin_sdk::Contribution;
 use hofund_plugin_sdk::oauth::{Pkce, SecretObject, constant_time_eq, new_state};
 
 mod agent_sign_in;
+mod config_import;
+pub use config_import::{ImportedCodexProvider, read_providers};
 mod device_sign_in;
 mod discover;
+mod import;
 mod limits;
 mod models;
 mod resets;
 mod shape;
 mod sign_in;
+mod store;
 mod tokens;
 mod upstream;
 mod usage;
@@ -100,6 +104,7 @@ impl Default for Endpoints {
 pub fn factory_with_endpoints(endpoints: Endpoints) -> CodexFactory {
     CodexFactory {
         endpoints: Arc::new(endpoints),
+        skip_keychain: false,
     }
 }
 
@@ -108,6 +113,9 @@ pub fn factory_with_endpoints(endpoints: Endpoints) -> CodexFactory {
 #[derive(Clone, Debug)]
 pub struct CodexFactory {
     endpoints: Arc<Endpoints>,
+    /// When true, macOS keychain reads and writes are skipped (tests).
+    #[doc(hidden)]
+    pub skip_keychain: bool,
 }
 
 /// The validated config: the subscription takes no options yet.
@@ -148,6 +156,7 @@ impl SubscriptionFactory for CodexFactory {
             flow: SignInFlow::Pkce,
             pending: Mutex::new(HashMap::new()),
             prompts: Arc::default(),
+            skip_keychain: self.skip_keychain,
         }))
     }
 }
@@ -169,6 +178,7 @@ struct Codex {
     pending: Mutex<HashMap<String, Pending>>,
     /// The instructions each model is sent with.
     prompts: Arc<models::Prompts>,
+    skip_keychain: bool,
 }
 
 impl Codex {
@@ -389,7 +399,7 @@ impl Subscription for Codex {
         home: &Path,
         host: &HostContext,
     ) -> Result<(), PluginError> {
-        agent_sign_in::write(account, home, host).await
+        agent_sign_in::write(account, home, host, self.skip_keychain).await
     }
 
     async fn daily_warmup(
@@ -398,6 +408,14 @@ impl Subscription for Codex {
         host: &HostContext,
     ) -> Result<(), PluginError> {
         warmup::run(&self.endpoints, &self.prompts, account, host).await
+    }
+
+    async fn import_accounts(
+        &self,
+        text: &str,
+        host: &HostContext,
+    ) -> Result<Vec<AccountId>, PluginError> {
+        import::import_accounts(host, text, &self.endpoints.token).await
     }
 
     async fn discover_agent_sign_in(
@@ -413,7 +431,7 @@ impl Subscription for Codex {
         reference: &str,
         host: &HostContext,
     ) -> Result<AccountId, PluginError> {
-        discover::import(home, reference, host).await
+        discover::import(home, reference, host, self.skip_keychain).await
     }
 }
 

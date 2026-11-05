@@ -21,6 +21,7 @@ use hofund_plugin_sdk::{
 };
 
 use crate::account_refusal;
+use crate::agent_sign_in;
 use crate::input::{self, sealed};
 use crate::{
     Kernel, capped_models, client_version, entry, error_response, ids, json_response,
@@ -165,6 +166,23 @@ pub(crate) async fn serve_with_state(
         }
         if request.headers().contains_key(ACCOUNT_HEADER) {
             return error(400, &format!("{ACCOUNT_HEADER} {ACCOUNT_MESSAGE}"));
+        }
+        if compact {
+            let model = json::from_slice::<Value>(request.body().bytes())
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("model")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+                .unwrap_or_default();
+            if agent_sign_in::compact_account_hold_blocks(&model) {
+                return error(
+                    403,
+                    "native compaction is blocked by gateway key account holds",
+                );
+            }
         }
         let tool_back = input::tool_names_back(request.body().bytes());
         if let Some(body) = input::for_backend(request.body().bytes()) {

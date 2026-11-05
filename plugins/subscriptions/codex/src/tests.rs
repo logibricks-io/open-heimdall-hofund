@@ -2084,3 +2084,27 @@ fn r47a_k3_consume_rejected_is_status_error_on_wham_url() {
         "https://codex.test/backend-api/wham/rate-limit-reset-credits/consume"
     );
 }
+
+#[test]
+fn r47b_config_import_reads_providers_from_codex_home() {
+    let dir = tempfile::tempdir().expect("dir");
+    let home = dir.path().join("codex");
+    std::fs::create_dir_all(&home).expect("home");
+    std::fs::write(
+        home.join("config.toml"),
+        r#"
+model_provider = "relay"
+model = "gpt-5"
+
+[model_providers.relay]
+name = "Relay"
+base_url = "https://relay.test/v1"
+wire_api = "responses"
+"#,
+    )
+    .expect("config");
+    let rows = crate::read_providers(&home).expect("read");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "relay");
+    assert_eq!(rows[0].models, vec!["gpt-5".to_owned()]);
+}
