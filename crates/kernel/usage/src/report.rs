@@ -121,10 +121,8 @@ pub fn parse_last(value: &str) -> Result<Duration, String> {
             ));
         }
         let seconds_f = days * 86_400.0;
-        if !(seconds_f.is_finite()) || seconds_f <= 0.0 || seconds_f >= i64::MAX as f64 {
-            return Err(format!(
-                "--last takes a duration greater than zero, not {value:?}"
-            ));
+        if !seconds_f.is_finite() || seconds_f >= i64::MAX as f64 {
+            return Err(format!("--last takes at most 100 years, not {value:?}"));
         }
         return finish_last_seconds(seconds_f.round() as i64, value);
     }
@@ -142,10 +140,13 @@ fn max_last_seconds() -> i64 {
 }
 
 fn finish_last_seconds(seconds: i64, value: &str) -> Result<Duration, String> {
-    if seconds <= 0 || seconds > max_last_seconds() {
+    if seconds <= 0 {
         return Err(format!(
             "--last takes a duration greater than zero, not {value:?}"
         ));
+    }
+    if seconds > max_last_seconds() {
+        return Err(format!("--last takes at most 100 years, not {value:?}"));
     }
     Duration::try_seconds(seconds)
         .ok_or_else(|| format!("--last takes a duration greater than zero, not {value:?}"))
@@ -153,10 +154,13 @@ fn finish_last_seconds(seconds: i64, value: &str) -> Result<Duration, String> {
 
 fn finish_last_milliseconds(ms: i64, value: &str) -> Result<Duration, String> {
     let max_ms = max_last_seconds().saturating_mul(1000);
-    if ms <= 0 || ms > max_ms {
+    if ms <= 0 {
         return Err(format!(
             "--last takes a duration greater than zero, not {value:?}"
         ));
+    }
+    if ms > max_ms {
+        return Err(format!("--last takes at most 100 years, not {value:?}"));
     }
     Duration::try_milliseconds(ms)
         .ok_or_else(|| format!("--last takes a duration greater than zero, not {value:?}"))
@@ -515,8 +519,18 @@ mod tests {
             parse_last("1μs").expect("greek micro").num_milliseconds(),
             1
         );
-        assert!(parse_last("200000000000d").is_err());
-        assert!(parse_last("200000000000h").is_err());
+        assert!(
+            parse_last("200000000000d")
+                .expect_err("days overflow")
+                .contains("at most 100 years")
+        );
+        assert!(
+            parse_last("200000000000h")
+                .expect_err("hours overflow")
+                .contains("at most 100 years")
+        );
+        assert!(parse_last("36500d").is_ok());
+        assert!(parse_last("36501d").is_err());
     }
 
     #[test]

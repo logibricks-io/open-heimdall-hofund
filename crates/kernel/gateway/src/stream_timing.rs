@@ -225,9 +225,7 @@ fn parse_sse_event(event: &[u8]) -> (String, Vec<u8>) {
         if let Some(rest) = line.strip_prefix(b"event:") {
             name = String::from_utf8_lossy(rest.trim_ascii()).into_owned();
         } else if let Some(rest) = line.strip_prefix(b"data:") {
-            if !data.is_empty() {
-                data.push(b' ');
-            }
+            // The reference joins data lines with nothing between them.
             data.extend_from_slice(rest.trim_ascii());
         }
     }
@@ -255,87 +253,97 @@ fn filled(raw: &Value) -> bool {
     }
 }
 
+/// A JSON `null` decodes as the field's zero value, as the reference's
+/// typed decode leaves a field it reads `null` for untouched.
+fn null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
+}
+
 #[derive(Debug, Deserialize)]
 struct TimingEnvelope {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     r#type: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     delta: Value,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     content_block: Option<TypedBlock>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     item: Option<TimingItem>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     choices: Vec<ChatChoice>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     candidates: Vec<GeminiCandidate>,
 }
 
 #[derive(Debug, Deserialize)]
 struct TypedBlock {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     r#type: String,
 }
 
 #[derive(Debug, Deserialize)]
 struct TimingItem {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     r#type: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     encrypted_content: String,
 }
 
 #[derive(Debug, Deserialize)]
 struct ChatChoice {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     delta: ChatDelta,
 }
 
 #[derive(Debug, Default, Deserialize)]
 struct ChatDelta {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     content: Value,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     refusal: Value,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     reasoning_content: Value,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     reasoning: Value,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     tool_calls: Value,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     function_call: Value,
 }
 
 #[derive(Debug, Deserialize)]
 struct GeminiCandidate {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     content: GeminiContent,
 }
 
 #[derive(Debug, Default, Deserialize)]
 struct GeminiContent {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     parts: Vec<GeminiPart>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 struct GeminiPart {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     text: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     thought: bool,
-    #[serde(default, rename = "functionCall")]
+    #[serde(default, rename = "functionCall", deserialize_with = "null_as_default")]
     function_call: Value,
 }
 
 #[derive(Debug, Default, Deserialize)]
 struct AnthropicDelta {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     text: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     thinking: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     partial_json: String,
 }
 
@@ -491,6 +499,24 @@ data: {"type":"response.completed","response":{"output":[{"type":"output_text","
 
 "#
         ));
+    }
+
+    #[test]
+    fn r10_timing_kind_null_fields_read_as_empty() {
+        let added = br#"data: {"type":"response.output_item.added","item":{"type":"function_call","encrypted_content":null}}"#;
+        assert_eq!(timing_kind(added), (true, false, false, false));
+        let gemini =
+            br#"data: {"candidates":[{"content":{"parts":[{"text":"hi","thought":null}]}}]}"#;
+        assert_eq!(timing_kind(gemini), (true, true, false, false));
+        let chat = br#"data: {"choices":[{"delta":{"content":"hi","refusal":null}}]}"#;
+        assert_eq!(timing_kind(chat), (true, true, false, false));
+    }
+
+    #[test]
+    fn r10_timing_kind_joins_data_lines_like_the_reference() {
+        let split = b"data: {\"type\":\"response.output_text.delta\",\"del\n\
+data: ta\":\"hi\"}";
+        assert_eq!(timing_kind(split), (true, true, false, false));
     }
 
     #[test]
