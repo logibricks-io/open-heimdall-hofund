@@ -1,244 +1,208 @@
 # R-47b: Codex credential reconciliation transaction (design spec)
 
-**Status:** Draft for Palmer / supervisor written approval — **no implementation** until approved.
+**Status:** Draft — **Palmer written spec approval required** before any implementation (supervisor review alone is not approval).
 
-**Branch context:** `sup/r-47b-codex-store`; prior passes r1–r3 and Grok rr3 (`/workspace/hofund-review/r-47b-grok-rr3.md`) document six production defects around split locking, partial adopt, unsafe writes, and Keychain cache after deletion.
+**Revision:** Addresses supervisor self-review of `5622276` (lock timeout, pending sync, cache Missing, adopt tuple, matrix, approval gates).
+
+**Branch:** `sup/r-47b-codex-store`; rr3 defects in `/workspace/hofund-review/r-47b-grok-rr3.md`.
 
 ---
 
-## Review assumptions (explicit; not open questions)
+## Review assumptions (explicit)
 
-1. **Scope is Codex subscription plugin only** (`plugins/subscriptions/codex`): refresh, agent sign-in write-back, discover/import read paths that touch the same credential store — not gateway, router, or other subscriptions.
-2. **Allowed durable stores** remain: hofund account secret (lease commit), Codex `auth.json`, macOS Keychain item keyed by stable home-derived account id, existing `config.toml` store mode — no new files, journals, or credential APIs.
-3. **Production entrypoints** for regression are unchanged: `tokens::access` / internal `rotate`, `discover::list` / `discover::import`, `agent_sign_in::write`, and test hook `tokens::rotate_for_test` (must mirror production lock/reconcile ordering).
-4. **Account lease** (`HostContext::accounts().lease` / `commit`) stays the sole writer to hofund account secrets; reconciliation may read store under lock but commits only through an held lease.
-5. **OAuth token endpoint** is external; success means a new access (and usually refresh) in memory — not atomic with local disk or Keychain.
-6. **R-8a merge ordering** and **restriction holds** stay: this spec does not relax CI, `ALL_KILLED`, timeout-failure gates, or merge-before-R-8a policy.
-7. **Optional rr3 follow-ups** (account_id precedence in import, chmod on existing home, `security -w` argv) are **out of scope** unless listed below as non-goals.
+1. **Scope:** Codex subscription plugin only (`plugins/subscriptions/codex`); same production entrypoints (`tokens::access` / `rotate`, `discover`, `agent_sign_in::write`, `rotate_for_test` mirroring production ordering).
+2. **Durable stores:** account lease secret, Codex `auth.json`, Keychain (home-derived account id), `config.toml` — **no new files, APIs, or plaintext journals**.
+3. **Pending sync metadata** may live **inside the existing encrypted account secret blob** (non-secret fields: canonical home path, store-location fingerprint, pre-write baseline access fingerprint, candidate tuple version marker). **Await Palmer written approval** for this encoding; it is not a new store.
+4. OAuth, Keychain, and account commit are **not one atomic transaction**; ambiguous OAuth success (response lost, crash before first durable candidate record) may require **re-sign-in** — **do not** automatically retry the pre-OAuth refresh token.
+5. R-8a merge hold, restriction holds, `ALL_KILLED`, timeout-as-failure CI — unchanged. rr3 optional follow-ups (import account_id, chmod, argv) remain out of scope.
+6. hofund does **not** exclude non-cooperating external writers of `codex_home`; design assumes recheck-under-lock and fail-closed on conflict.
 
 ---
 
 ## Bounded scope and non-goals
 
-**In scope**
+**In scope:** One reconciliation state machine per `(AccountId, canonical codex_home)` owning compare, pending repair, OAuth vs adopt, ordered durable steps, composite lock lifetime.
 
-- One **credential reconciliation transaction** (state machine) per `(AccountId, codex_home path)` refresh or equivalent mutate path, owning:
-  - store read + compare (file / Keychain / mode from `config.toml`),
-  - decision: OAuth refresh vs adopt external store vs no-op,
-  - ordered persistence to account lease and Codex store,
-  - lock lifetime for in-process and cross-process writers.
+**Non-goals:** New sign-in flows, features, secondary DBs, claiming cross-process exclusion against arbitrary third parties, tag/release/merge without gates below.
 
-**Non-goals**
-
-- New sign-in flows, subscription features, plaintext secret logs, or secondary credential databases.
-- Perfect atomicity across OAuth HTTP, Keychain, and account store (see **Recovery**).
-- Fixing unrelated import/discover UX except where the same `StoreReader` / cache / fail-closed rules apply.
-- Tag, release, or merge without independent security signoff (see **Security review**).
+**Recommendation (unchanged):** Single transaction (option A) vs patch #4 vs daemon OAuth — **A only**; see prior table in git history if needed.
 
 ---
 
-## Alternatives (2–3) and recommendation
+## Canonical identity and path safety
 
-| | **A. Single reconciliation transaction (recommended)** | **B. Narrow patch #4 on current split functions** | **C. OAuth-only in daemon; plugin read-only store** |
-|---|--------------------------------------------------------|-----------------------------------------------------|-----------------------------------------------------|
-| Idea | Replace `reconcile_before_refresh` + unguarded POST + `persist_refresh` with one state machine and one lock guard type held for the whole critical section. | Extend rr3 fixes (cache Missing, lease on Adopt, widen lock) without restructuring call graph. | Move refresh POST to daemon; Codex plugin only mirrors store. |
-| Correctness | Fixes root cause: one ordering story for lock, compare, OAuth, commit, write-back. | High risk of a fourth pass missing a gap (rr3 already failed twice on lock span). | Violates current plugin-host boundary and duplicates OAuth in daemon. |
-| Testability | One matrix maps states → assertions on POST count, lease secret, file/Keychain bytes. | Tests stay scattered across three modules. | Large architecture drift; out of R-47b budget. |
-| **Recommend** | **Yes** — matches architecture decision memo option A. | No — systematic-debugging stop rule. | No — scope explosion. |
+- **Canonical codex_home:** `canonicalize` (or equivalent) at reconciliation boundary; lock key, Keychain account id, and metadata use **canonical path**. Symlink/alias pairs that resolve to the same directory share one lock slot; divergent resolution after re-read → **fail-closed conflict**.
+- **Inode / home replacement:** After composite lock, record `(dev, ino)` (or platform equivalent) of `codex_home` directory; before any store write, re-stat; change while lock held → **abort write**, fail-closed (possible external rename/replace).
+- **SignedOut / create paths:** `ensure_codex_home` + unsafe-parent check run **before** any path treats store as absent or creates home/auth (read, OAuth eligibility, write-back, agent write).
 
 ---
 
-## Canonical identities
+## Lock hierarchy, acquisition order, lifetime
 
-| Identity | Definition | Use |
-|----------|------------|-----|
-| **codex_home** | Resolved absolute path stored in account blob `codex_home` (agent sign-in) or discover/import home argument | Lock key, `ensure_codex_home` target, Keychain account derivation (`keychain_account(home)`) |
-| **store account id** | `tokens.account_id` inside auth JSON when present | Upstream ChatGPT workspace selection after adopt/refresh |
-| **hofund AccountId** | Plugin account row id | Lease key only |
-| **Keychain cache key** | Stable string from home (existing `keychain_account`) | Process-global cache; tests must use isolated `FakeKeychain` + home paths so cache entries do not cross tests |
+**Overall acquisition order (never invert):**
 
-Reconciliation must treat **store access + refresh + store account id** as one logical credential set when adopting or after OAuth.
+1. **Account lease** (`LEASE_WAIT` 30s) — held for entire transaction including all commits and OAuth.
+2. **Local mutex** — keyed by canonical `codex_home` (same-process serialization; macOS `flock` reentrancy fix).
+3. **Cross-process flock** — directory lock on `codex_home` inode (survives `.codex.lock` file recreate).
+4. **Keychain cache mutex** — only while updating/reading cache structs; **never** across OAuth HTTP.
 
----
+**Composite rule:** OAuth POST and any Codex store **write** require **lease + local mutex + flock** all held. Keychain cache reads during reconciliation use **fresh/live** path (below); no lock held on cache during POST.
 
-## Lock hierarchy and lifetime
+**Lifetime:** Hold composite lock from first authoritative store read through final store write or explicit skip, including all `lease.commit` steps that are part of the same transaction (candidate + clear-marker commits).
 
-**Layers ( acquire order )**
+**Composite lock timeout (bounded, retryable, fail-closed):**
 
-1. **Account lease** — existing `LEASE_WAIT` (30s); held for entire reconciliation including OAuth and all commits (unchanged outer guard).
-2. **Codex home reconciliation lock** — new composite guard replacing ad hoc double `acquire`:
-   - **Cross-process:** keep directory `flock` on `codex_home` (inode-stable; survives `.codex.lock` file recreate).
-   - **In-process:** mutex keyed by canonical `codex_home` path so second `try_take` in the same process returns **Busy** on Linux and macOS (fixes macOS same-process `flock` reentrancy).
-3. **Keychain cache mutex** — existing global lock; only for cache struct, never held across OAuth HTTP.
+- Retry local→flock acquisition until deadline (10s / 50ms unchanged).
+- On **Busy** or **Io** at deadline: **release any partial composite guards**; return retryable error to caller (`Busy`-class). **No OAuth. No store write.**
+- Under **lease only**, caller may **`fresh` re-read** store (bypass Keychain positive/negative cache) and, if store presents a **full usable credential tuple** strictly newer/different from account lease with **valid non-expired access** (or within policy below), perform **Adopt** via `lease.commit` **without** composite lock — **0 POST**. This is the **only** lock-timeout side effect; it does **not** serialize with other account leases on the same home (hence no OAuth without lock).
+- **Never:** POST on timeout, even if store is SignedOut; “same decisions as locked path” is **removed**.
 
-**Lifetime rule:** From first store read for compare until **both** (a) account `lease.commit` when reconciliation mutates secrets and (b) Codex store write-back attempt finishes or is skipped with explicit reason — the reconciliation lock **must** remain held. OAuth POST runs **inside** this span. Dropping the lock mid-POST is forbidden.
-
-**Lock unavailable (`acquire` timeout → none)**
-
-- Do **not** blind POST. Re-read store (without holding cross-process lock if timeout, but still under account lease): if access ≠ stale account secret → **Adopt path** (commit lease from store, zero POST). If still stale and store is **SignedOut** only → may POST once lease already held (see fail-closed). If store **InvalidJson** / **Unreadable** / unsafe home → **fail closed**, no POST.
-
-**Cancellation**
-
-- Detached refresh job (`codex-refresh`): if OAuth succeeded and `lease.commit` completed, write-back must still run (existing intent). If cancelled before commit, account secret unchanged; store may lag — next refresh reconciles. No partial OAuth token written to disk without commit.
-
-**Bounded waits**
-
-- Cross-process lock: keep 10s wait / 50ms retry; timeout behavior above.
-- Lease: 30s unchanged.
+**External writers:** No guarantee other processes respect flock; reconciliation **re-reads store under full composite lock** immediately before conditional write; baseline fingerprint mismatch → pending repair or conflict, not blind overwrite.
 
 ---
 
-## State machine (single owner)
+## Reconciliation store reads (authoritative path)
 
-States are internal to the reconciliation module; callers invoke one entry (e.g. `reconcile_refresh`) instead of separate reconcile + rotate body + persist.
+Under **full composite lock**, every reconciliation **store read is fresh:**
+
+- Bypass Keychain **positive** secret cache and **negative** error cache for that read path.
+- **No** cached or transient Keychain fallback may authorize OAuth or adoption on this path.
+- Discover/import may keep TTL reads; **refresh/adopt/OAuth/write-back** use the fresh locked read only.
+
+---
+
+## Keychain cache semantics (non-reconciliation reads)
+
+For ordinary `read_login(..., fresh: false)` (discover, etc.):
+
+| Event | Rule |
+|-------|------|
+| **`Missing` observed** (stat or find) | Record Missing in cache; **zero** reuse of prior cached bytes **forever** until a successful live read replaces cache entry |
+| **After success TTL expires** | Next read that **requires validation** (mdat check) runs stat; if **Missing** → error, no stale secret (deletion detected at validation boundary, not “within one non-fresh read” colloquially) |
+| **`Refused` / `Unreadable`** | Classified errors; cache with existing TTL constants; **not** treated as transient stat success |
+| **Transient stat failure** (I/O flake, not Missing/Refused/Unreadable) | May reuse last **successful** bytes **only** on non-reconciliation reads, and never after Missing was recorded |
+
+**Reconciliation:** always fresh under lock — table above does not authorize POST/adopt on stale cache.
+
+**Tests:** Same canonical home, **two distinct `FakeKeychain` provider instances** — cache must not cross providers (not merely distinct home paths).
+
+**No new 10m Unreadable TTL policy** in this redesign; negative TTL must not block pending repair under lease.
+
+---
+
+## Pending store sync (eliminate adopt rollback)
+
+**Problem:** Account-first commit then failed store write lets a later transaction **adopt stale store** and effectively roll back new credentials.
+
+**Protocol (existing stores only):**
+
+After OAuth yields an accepted in-memory **candidate tuple** (access, refresh, id_token, account_id, exp-derived freshness):
+
+1. **`lease.commit`** candidate plus **pending marker** in account blob: canonical `codex_home`, selected store mode/location fingerprint, **baseline fingerprint** (access hash/id at lock-time read), marker id/version.
+2. Under **full composite lock**, re-read store; if baseline still matches (same stale access as at OAuth start) → conditional **store write** of candidate; on success → **`lease.commit`** same secrets **without** pending marker (clear).
+3. If store access already changed by cooperating writer → skip overwrite; clear pending only if store tuple matches candidate; else **conflict** (below).
+
+**Pending recovery (runs before generic Adopt or OAuth on every refresh entry, under lease):**
+
+| Observed store vs marker | Action |
+|--------------------------|--------|
+| Matches **candidate** tuple | Clear marker if store already written; else finish write under lock, then clear |
+| Matches **baseline**, not candidate | **Repair:** write candidate to store under lock; clear marker — **0 POST** |
+| **Third** tuple, missing when baseline expected, invalid/unreadable JSON, unsafe home | **Fail-closed conflict** — error; **no** adopt-back; **no** POST with old refresh |
+| Marker present, OAuth never durably recorded | Treat as incomplete prior attempt; repair path only if candidate fields present in blob |
+
+**Failure precision:**
+
+| Point | Durable state | Next entry |
+|-------|---------------|------------|
+| OAuth OK, **first commit (candidate+pending) fails** | Issuer may have rotated; blob unchanged | Retry transaction; **no** blind old-refresh POST if ambiguous rotation |
+| Pending commit OK, **store write fails** | Account has candidate+pending; store old | **Pending recovery** repair (0 POST) |
+| Store OK, **clear-marker commit fails** | Account pending+candidate; store new | Retry clear; do not adopt baseline |
+| Crash / cancel before step 1 | Old account+store | Normal reconcile; no pending |
+| Crash after pending, before store | Pending+candidate in account | Repair path |
+| OAuth response lost / crash before step 1 with suspected issuer rotation | Ambiguous | **Fail closed toward re-sign-in**; **no** automatic old-refresh retry |
+
+---
+
+## State machine (single entry)
 
 ```text
-                    ┌──────────────┐
-                    │   Start      │
-                    │ (lease held) │
-                    └──────┬───────┘
-                           │ take reconciliation lock (or timeout path)
-                           ▼
-                    ┌──────────────┐
-              ┌─────│ ReadStore    │───── fail-closed: InvalidJson,
-              │     │ + compare    │       Unreadable, unsafe home
-              │     └──────┬───────┘
-              │            │
-              │     access ≠ stale secret
-              │            ├──────────────────► Adopt: build SecretObject
-              │            │                    from store (access, refresh,
-              │            │                    id_token, account_id); commit
-              │            │                    lease; release lock; Done (0 POST)
-              │            │
-              │     access = stale, SignedOut
-              │            ├──────────────────► OAuthRefresh ──► PersistOrdered
-              │            │
-              │     access = stale, valid store
-              │            └──────────────────► OAuthRefresh ──► PersistOrdered
-              │
-              └─ timeout: re-read without lock; same decisions, no overwrite
+Start (lease) → PendingRecovery? → take composite lock (or timeout adopt-only path)
+  → fresh ReadStore + home inode check
+  → Invalid/Unreadable/unsafe → FAIL
+  → usable store tuple ≠ lease → AdoptFull (0 POST) if access fresh enough
+  → else stale match + pending clear path / OAuth (lock required)
+  → OAuth → candidate+pending commit → locked write → clear marker
+  → release composite → Done
 ```
 
-**OAuth vs adopt**
+**OAuth:** Only with composite lock, SignedOut or valid JSON with access matching account stale, pending recovery clear, home valid.
 
-- **Adopt:** Store already has a different access than account lease; load full token set from store; **`lease.commit`** with access, refresh, id_token, account_id, `codex_home`; return access to caller; **no OAuth POST**.
-- **OAuth refresh:** Only when compare says stale matches account **and** store state is **SignedOut** or readable valid JSON with matching stale access; POST; then **PersistOrdered**.
+**Adopt full tuple:** Commit access, refresh, id_token, account_id, `codex_home`, expiry-related fields needed for `fresh()` / `Need::*`; **0 POST** only if adopted access is **usable** (not known-expired per `REFRESH_MARGIN` policy — if store access expired, **must OAuth or fail**, never return success with dead access).
 
-**Fail-closed (no POST, no account commit, disk bytes unchanged where unsafe)**
+**Adopt `lease.commit` fails / cancelled:** No mutation; caller gets error; **Need::Replace** on retry compares **current** lease access (post-wait), not pre-adoption stale from an earlier read.
 
-| Store read result | Action |
-|-------------------|--------|
-| `SignedOut` | Allow OAuth if account still has refresh token |
-| `InvalidJson` | Error to caller; no POST; no `auth.json` rewrite |
-| `Unreadable` (mode/ephemeral/permission) | Error; no POST |
-| `ensure_codex_home` / parent unsafe | Error on any write path; no create home/auth under unsafe parent |
-| Keychain `Refused` | Propagate; no silent Proceed |
+**Need semantics (after successful reconcile):**
+
+- **`IfExpiring`:** POST path uses **account** refresh after adopt/repair; adopted pair then near expiry → POST uses **store/account refresh**, not pre-adopt refresh.
+- **`Replace(stale)`:** Compare backend-stale to **issued tuple’s current access** at reconcile entry (after lease wait), not a cached pre-adopt value; if different candidate already in lease, 0 POST.
 
 ---
 
-## Store read, Keychain cache, and invalidation
+## Fail-closed summary
 
-**`fresh` flag**
-
-- `fresh: true` — bypass positive secret cache; still honor error cache TTL where specified.
-- `fresh: false` — TTL reuse allowed only when stat proves entry unchanged.
-
-**Keychain stat / cache (fix rr3 #1)**
-
-| `keychain_stat` outcome | Non-fresh behavior |
-|-------------------------|-------------------|
-| **Missing** | Cache **error** (Missing) with `KEYCHAIN_TTL`; return error; **never** return previous cached secret |
-| **Refused** | Cached error TTL; return error |
-| **Unreadable** (stat/find) | Prefer 10m error cache (optional follow-up alignment); do not treat as unchanged secret |
-| **Ok, mdat unchanged** | Return cached bytes; touch `checked` |
-| **Ok, mdat changed** | Live `find`; refresh cache |
-| **Stat fails (transient)** | May reuse last known secret **only if** last successful read exists and error is not Missing |
-
-**Deletion:** Removing Keychain entry must invalidate cached bytes within one non-fresh read (test: two `StoreReader`s, delete between reads).
-
-**File store:** `read_auth_file` already maps missing/invalid; reconciliation must not downgrade InvalidJson to Proceed.
+| Condition | OAuth | Store write | Adopt from store |
+|-----------|-------|-------------|------------------|
+| InvalidJson | No | No | No |
+| Unreadable | No | No | No |
+| Unsafe home / parent | No | No | No |
+| Composite lock timeout | No | No | Only full fresh tuple, non-expired |
+| Pending conflict / third tuple | No | No | No |
+| Keychain Refused | No | No | No |
 
 ---
 
-## Persistence order and partial-failure recovery
+## Regression matrix (production entrypoints)
 
-**No claim:** OAuth success + Keychain write + `auth.json` + account commit cannot be one atomic transaction.
+| # | Invariant | Entry |
+|---|-----------|-------|
+| M1 | Adopted pair; later expiry refresh POST uses **new** refresh | `access` / `rotate_for_test` |
+| M2 | 401 `Need::Replace` after adopt compares **current** lease access | `access` |
+| M3 | Missing at validation after TTL; fresh reconcile never serves deleted secret | `StoreReader` + reconcile |
+| M4 | InvalidJson + Unreadable: 0 POST, bytes unchanged | `rotate_for_test` |
+| M5 | Unsafe home: **all** write paths (incl. write-back, agent write) | reconciliation + `persist_refresh` |
+| M6 | macOS same-process Busy; cross-process lock recreate; home alias/inode replace aborts write | lock tests + reconcile |
+| M7 | Every durability failure: pending repair, no adopt-rollback | simulated fail/crash hooks |
+| M8 | OAuth cancel/response-loss: no silent old-refresh retry | detached job tests |
+| M9 | Lock timeout: **never POST**, even SignedOut; optional lease-only adopt if fresh tuple | `rotate_for_test` |
+| M10 | Same home, two FakeKeychain providers — no cache cross-talk | parallel tests |
+| M11 | Full-lock OAuth: second taker Busy, 0 double POST | `rotate_for_test` |
+| M12 | Error redaction | auth errors |
+| M13 | rr3 #1–#6 behaviors explicitly covered | map to tests above |
 
-**Ordered steps after successful OAuth (200 + parseable token set)**
-
-1. Build `next` SecretObject in memory (access, refresh if rotated, id_token, preserve `codex_home`, `account_id`, `last_refresh`).
-2. **`lease.commit(None, next)`** — authoritative for hofund; must succeed before caller returns fresh access for upstream.
-3. **Codex store write-back** under reconciliation lock: compare on-disk access to **pre-OAuth stale**; if still stale, `save_login` / Keychain put; if another writer changed access, skip overwrite (keep rr2 behavior).
-
-**Failure matrix**
-
-| Failure point | Durable state | User-visible / recovery |
-|---------------|---------------|-------------------------|
-| OAuth fails (4xx auth) | Account unchanged or `lapsed` flag on auth error (existing) | Sign in again |
-| OAuth succeeds, **commit fails** | New tokens only in memory — **lost if process dies** | Retry refresh; account still stale; store may still have old refresh — **no secret loss** if old refresh valid |
-| Commit succeeds, **Keychain/file write fails** | Account has new tokens; Codex CLI store stale | Next `access` uses account secret; adopt path can push to store on agent write; refresh may POST again only if store stale matches **old** stale — reconciliation must re-read store under lock before POST |
-| Crash after commit, before write-back | Same as row above | Recoverable from account lease |
-| Crash after OAuth, before commit | OAuth may have rotated refresh at issuer | Account+store still old pair; next POST uses old refresh — if issuer invalidated old refresh, user must sign in (existing OAuth risk) |
-| Lock timeout + stale store | No POST if invalid store; if SignedOut POST allowed under lease only | Documented in timeout path |
-| Adopt commit fails | Store newer than account | Retry; no POST |
-
-**No plaintext rollback journal.** Recovery uses only account secret, Codex files, and Keychain.
+Prior R1–R13 rows superseded by M1–M13 where overlapping.
 
 ---
 
-## macOS concurrency notes
+## Security review and approval gates
 
-- Directory `flock` does not block same-process second acquirer — **in-process mutex required** (rr3 #5).
-- Lock file recreate while held must still block second cross-process writer (existing test `r47b_rr3_lock_recreate_while_held_blocks_second_writer`).
-- **`write_atomic_private` / `save_login`** must call the same **`ensure_codex_home` / unsafe-parent check** as lock acquire; no `create_dir_all` bypass (rr3 #6).
-
----
-
-## Regression matrix (must hit production entrypoints)
-
-| # | Scenario | Entry | Pass criteria |
-|---|----------|-------|---------------|
-| R1 | Store already rotated | `rotate_for_test` / `access` | 0 token POST; returned access = store |
-| R2 | Second POST while OAuth in flight | `rotate_for_test` + concurrent lock | Second taker Busy or 0 POST after re-read |
-| R3 | Lock timeout, store changed | `acquire` none path | 0 POST; no overwrite |
-| R4 | Adopt | store ≠ lease | 0 POST; lease secrets = store (access+refresh+account_id) |
-| R5 | Invalid `auth.json` | `rotate_for_test` | 0 POST; bytes unchanged |
-| R6 | Keychain entry deleted | two `StoreReader`, non-fresh | error/Missing; no stale secret |
-| R7 | Unsafe parent 0777 | `persist_refresh` / reconciliation write | no home/auth created |
-| R8 | 401 Replace | `Need::Replace` | uses adopted lease token; refresh works next |
-| R9 | Discover/import | `discover::list`, import | read paths respect cache + fail-closed |
-| R10 | Detached refresh completes on cancel | `access` + drop waiter | commit + write-back if OAuth done |
-| R11 | Partial crash simulation | test hooks | account vs store divergence recoverable per matrix |
-| R12 | Error redaction | auth errors | no refresh/access in logs |
-| R13 | FakeKeychain isolation | parallel tests | distinct homes; no cross-test cache bleed |
-
-Extend existing `r47b_*` tests where possible; add rows for Adopt+commit, full-lock OAuth, Missing cache, unsafe home on write path.
-
----
-
-## Security review criteria and gates
-
-Independent of implementation PR:
-
-1. **Author ≠ adversarial reviewer** — implementer cannot be sole security approver.
-2. **Supervisor reviews full diff** against this spec and rr3 defect list (all six must be explicitly closed or waived with rationale).
-3. **No merge** until: written spec approval (this document) **and** security signoff **and** unchanged full gates including `ALL_KILLED` (timeout failures treated as failures) **and** green CI **and** main merge policy (R-8a hold unchanged).
-4. Tests must prove fail-closed paths and fake Keychain isolation (R12–R13).
-5. **No tag/release** for R-47b.
+1. **Independent read-only adversarial reviewer** — **not the implementer**; review runs **after** implementation exists (fresh code context), against this spec + rr3 list.
+2. **Supervisor full-diff review** — mandatory; **cannot waive** rr3 security defects by rationale alone; each must be **closed in code** with test evidence.
+3. **Merge blocked** until: **Palmer explicit written spec approval** + adversarial security signoff + supervisor full diff + unchanged CI gates (`ALL_KILLED`, timeouts fail) + R-8a policy.
+4. **Supervisor comment or spec commit alone ≠ Palmer approval.**
 
 ---
 
 ## Spec self-review (inline)
 
-- **Placeholders:** None; state names and orders are binding for implementation planning.
-- **Contradictions:** Lock timeout allows POST only under lease + SignedOut or re-read stale match; aligns with fail-closed for InvalidJson/Unreadable.
-- **Ambiguity:** “Unreadable” store does not authorize OAuth; only SignedOut or valid JSON with matching stale access does.
-- **Scope:** Single plugin module refactor + tests; no daemon OAuth move.
+- **Contradictions removed:** Lock timeout no OAuth/SignedOut POST; diagram timeout branch deleted; reconciliation never uses cache fallback for POST/adopt.
+- **Rollback:** Pending marker + repair-before-adopt/POST is concrete; “account authoritative” vague wording removed.
+- **Missing cache:** Aligned to post-TTL validation + Missing poisons cache; fresh locked reads bypass negatives.
+- **Placeholders:** None; pending field names are illustrative — exact JSON keys are implementation detail inside blob.
+- **Scope:** No new stores; metadata-in-blob assumption flagged for Palmer.
 
 ---
 
 ## ─── Written Spec Approval Required ───
 
-**STOP.** Palmer authorized scoped redesign at 2026-11-05 17:07 ET subject to **review and approval of this written spec**. Do **not** start patch #4, implementation plans, or code changes until explicit approval is recorded (e.g. supervisor comment or amended spec commit).
-
-**Next step after approval:** implementation plan via `writing-plans` skill — **not part of this document**.
+**STOP.** Implementation plan and patch #4 are **forbidden** until **Palmer’s explicit written spec approval** (not supervisor-only). Next step after Palmer approval: `writing-plans` — not in this document.
