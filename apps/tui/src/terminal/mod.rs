@@ -209,9 +209,6 @@ async fn run_handoff_worker_loop<D, R>(
                 }
             }
             _ = watch.tick() => {
-                if *handoff_stop.borrow() {
-                    break;
-                }
                 let outcome = run_handoff_tick(
                     deps.as_ref(),
                     &config,

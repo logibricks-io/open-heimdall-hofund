@@ -71,9 +71,6 @@ pub fn record_attach<D: HandoffDeps>(
         } else if daemon_pid == child {
             state.client = Some(client);
             return;
-        } else if deps.process_alive(daemon_pid) {
-            state.spawned = false;
-            state.child_pid = None;
         }
     }
 
