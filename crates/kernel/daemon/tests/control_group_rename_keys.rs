@@ -84,8 +84,10 @@ impl MoveModelBlockSentinel {
         std::fs::write(&path, b"").expect("block-move-model sentinel");
         Self(path)
     }
+}
 
-    fn release(self) {
+impl Drop for MoveModelBlockSentinel {
+    fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
     }
 }
@@ -290,7 +292,7 @@ async fn r7a_rr12_concurrent_key_edit_survives_failed_group_rename() {
         .set_models(&key_id, &models)
         .expect("concurrent key edit");
     let _fail = MoveModelFailSentinel::install(scratch.sentinel_root());
-    block.release();
+    drop(block);
     let error = support::within(
         "group rename after concurrent key edit",
         support::REQUEST,

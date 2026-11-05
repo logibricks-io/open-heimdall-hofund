@@ -231,6 +231,7 @@ fn expected_dev_deps(package: &str) -> Option<&'static [&'static str]> {
             "hofund-control-client",
             "hofund-daemon",
             "hofund-plugin-registry",
+            "hofund-secrets",
         ],
         "hofund-daemon-bin" => &[],
         "hofund-gateway" => &[
@@ -450,6 +451,15 @@ fn dependency_graph_matches_architecture() {
             legacy_agent_consts_feature_is_absent(&package_manifest),
             "package {name} declares or enables legacy-agent-consts"
         );
+        if matches!(
+            name.as_str(),
+            "hofund-daemon" | "hofund-daemon-bin" | "hofund-desktop"
+        ) {
+            assert!(
+                !runtime_key_store_test_fixtures_on_normal_deps(&package_manifest),
+                "package {name} must not enable hofund-secrets or hofund-agent test-fixtures on normal dependencies"
+            );
+        }
         assert!(seen.insert(name), "duplicate package name");
     }
 
@@ -1323,6 +1333,132 @@ default = ["agent/other-feature"]
 hofund-agent = { workspace = true, features = ["other-feature"] }
 "#;
     assert!(legacy_agent_consts_feature_is_absent(unrelated));
+}
+
+/// Shipping runtime crates must not pull key-store or agent fault injection through
+/// normal `[dependencies]` or `default` features.
+fn runtime_key_store_test_fixtures_on_normal_deps(manifest: &str) -> bool {
+    fn mentions_test_fixtures(value: &toml::Value) -> bool {
+        match value {
+            toml::Value::String(text) => {
+                text == "test-fixtures" || text.ends_with("/test-fixtures")
+            }
+            toml::Value::Array(values) => values.iter().any(mentions_test_fixtures),
+            toml::Value::Table(table) => {
+                table.keys().any(|key| key == "test-fixtures")
+                    || table.values().any(mentions_test_fixtures)
+            }
+            _ => false,
+        }
+    }
+
+    fn normal_dep_enables_fixtures(table: &toml::map::Map<String, toml::Value>) -> bool {
+        table.iter().any(|(name, spec)| {
+            matches!(name.as_str(), "hofund-secrets" | "hofund-agent")
+                && mentions_test_fixtures(spec)
+        })
+    }
+
+    let parsed = parse_manifest(manifest);
+    if parsed
+        .get("dependencies")
+        .and_then(toml::Value::as_table)
+        .is_some_and(normal_dep_enables_fixtures)
+    {
+        return true;
+    }
+    if let Some(default) = parsed
+        .get("features")
+        .and_then(|features| features.get("default"))
+        .and_then(toml::Value::as_array)
+    {
+        for item in default {
+            let Some(text) = item.as_str() else {
+                continue;
+            };
+            if text == "test-util" || text.contains("test-fixtures") || text.contains("test-util") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+#[test]
+fn runtime_key_store_test_fixtures_are_rejected_on_shipping_manifests() {
+    for manifest in [
+        r#"
+[dependencies]
+hofund-secrets = { workspace = true, features = ["test-fixtures"] }
+"#,
+        r#"
+[features]
+default = ["test-util"]
+test-util = ["hofund-secrets/test-fixtures"]
+"#,
+        r#"
+[dependencies]
+hofund-agent = { workspace = true, features = ["test-fixtures"] }
+"#,
+    ] {
+        assert!(
+            runtime_key_store_test_fixtures_on_normal_deps(manifest),
+            "fixture manifest must be detected: {manifest}"
+        );
+    }
+
+    let allowed_daemon = r#"
+[features]
+default = []
+test-util = ["hofund-secrets/test-fixtures"]
+
+[dependencies]
+hofund-secrets = { workspace = true }
+
+[dev-dependencies]
+hofund-secrets = { workspace = true, features = ["test-fixtures"] }
+"#;
+    assert!(
+        !runtime_key_store_test_fixtures_on_normal_deps(allowed_daemon),
+        "test-util forward and dev-only fixtures must stay allowed"
+    );
+}
+
+#[test]
+fn shipping_binaries_do_not_resolve_hofund_secrets_test_fixtures() {
+    for package in ["hofund-daemon", "hofund-daemon-bin", "hofund-desktop"] {
+        assert!(
+            !secrets_test_fixtures_in_normal_feature_tree(package).expect("cargo tree"),
+            "{package} must not resolve hofund-secrets with the test-fixtures feature in normal deps"
+        );
+    }
+}
+
+fn secrets_test_fixtures_in_normal_feature_tree(package: &str) -> Result<bool, String> {
+    let output = std::process::Command::new("cargo")
+        .args([
+            "tree",
+            "-p",
+            package,
+            "-e",
+            "normal,features",
+            "-i",
+            "hofund-secrets",
+            "--prefix",
+            "none",
+        ])
+        .current_dir(workspace_root())
+        .output()
+        .map_err(|error| format!("cargo tree -p {package}: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "cargo tree -p {package} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .any(|line| line.contains("hofund-secrets feature \"test-fixtures\"")))
 }
 
 #[test]

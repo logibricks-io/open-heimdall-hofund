@@ -137,15 +137,9 @@ pub(crate) async fn patch_group(
                 ) {
                     Ok(()) => {}
                     Err(error) => {
-                        if checkpoint.restore().is_err() {
-                            return Err(crate::control_provider_write::agent_sidecar_failure(
-                                hofund_agent::AgentError::Rejected(
-                                    "agent sidecar restore failed during group rename".to_owned(),
-                                ),
-                                gateway.as_ref(),
-                                staged_text,
-                            ));
-                        }
+                        let checkpoint =
+                            std::mem::replace(&mut checkpoint, SidecarCheckpoint::new());
+                        rollback_agents_after_failure(checkpoint, gateway.as_ref(), staged_text)?;
                         return Err(error);
                     }
                 }
