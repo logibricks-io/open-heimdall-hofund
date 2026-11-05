@@ -344,6 +344,11 @@ async fn sign_out_in(
         )
         .await?;
     }
+    entry
+        .instance
+        .remove_account(target, &entry.host)
+        .await
+        .map_err(show)?;
     entry.host.accounts().remove(target).await.map_err(show)
 }
 
