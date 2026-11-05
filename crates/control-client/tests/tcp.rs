@@ -79,3 +79,62 @@ async fn client_health_and_status_round_trip_over_tcp() {
     );
     server.await.expect("server task");
 }
+
+const NOT_FOUND: &[u8] = br#"{"version":1,"error":{"kind":"not_found","message":"missing","request_id":"test","retry_after_ms":null,"details":[]}}"#;
+const SESSIONS_OK: &[u8] = br#"{"version":1,"consent":{"asked":false,"enabled":[]},"sessions":[]}"#;
+
+#[tokio::test]
+async fn get_http_status_returns_404_and_200() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind server");
+    let addr = listener.local_addr().expect("server address");
+    let server = tokio::spawn(async move {
+        loop {
+            let (stream, _) = listener.accept().await.expect("accept");
+            tokio::spawn(async move {
+                let service = service_fn(
+                    move |request: http::Request<hyper::body::Incoming>| async move {
+                        let authorized = request
+                            .headers()
+                            .get(http::header::AUTHORIZATION)
+                            .and_then(|value| value.to_str().ok())
+                            == Some(format!("Bearer {TOKEN}").as_str());
+                        let (status, body) = if !authorized {
+                            (http::StatusCode::UNAUTHORIZED, UNAUTHORIZED)
+                        } else if request.uri().path() == "/v1/hofund/sessions" {
+                            (http::StatusCode::NOT_FOUND, NOT_FOUND)
+                        } else if request.uri().path() == "/v1/hofund/library" {
+                            (http::StatusCode::OK, SESSIONS_OK)
+                        } else {
+                            panic!("unexpected path {}", request.uri().path())
+                        };
+                        let response = http::Response::builder()
+                            .status(status)
+                            .header(http::header::CONTENT_TYPE, "application/json")
+                            .body(Full::new(body))
+                            .expect("response");
+                        Ok::<_, Infallible>(response)
+                    },
+                );
+                hyper::server::conn::http1::Builder::new()
+                    .serve_connection(TokioIo::new(stream), service)
+                    .await
+                    .expect("serve connection");
+            });
+        }
+    });
+
+    let client = Client::tcp(addr, TOKEN);
+    let missing = client
+        .get_http_status("/v1/hofund/sessions?days=7")
+        .await
+        .expect_err("404");
+    assert_eq!(missing.http_status(), Some(http::StatusCode::NOT_FOUND));
+
+    let ok = client
+        .get_http_status("/v1/hofund/library")
+        .await
+        .expect("200");
+    assert_eq!(ok, http::StatusCode::OK);
+
+    server.abort();
+}

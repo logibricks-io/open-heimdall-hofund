@@ -1,0 +1,30 @@
+  ◉ hofund   1 agents   2 providers   3 routing   4 usage   5 sessions   6 library                  
+  No agents loaded yet.                                                                             
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+  attached to daemon                                                                                
+  ↑↓  agent  ←→  field  ↵  change  1–6  pages  ?  help  q  quit                                     
