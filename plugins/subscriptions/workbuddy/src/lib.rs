@@ -1,7 +1,7 @@
 //! WorkBuddy subscription plugin.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use hofund_plugin_api::{
@@ -37,7 +37,7 @@ static SPEC: SubscriptionSpec = SubscriptionSpec::from_static(
 /// Registers the WorkBuddy subscription.
 #[must_use]
 pub fn contribute() -> Contribution {
-    Contribution::new().subscription(factory_with_endpoints(Endpoints::default()))
+    Contribution::new().subscription(factory_with_extension_data(Endpoints::default(), None))
 }
 
 /// HTTP endpoints for China and international WorkBuddy builds.
@@ -70,8 +70,18 @@ impl Default for Endpoints {
 /// Builds the factory against `endpoints`.
 #[must_use]
 pub fn factory_with_endpoints(endpoints: Endpoints) -> WorkBuddyFactory {
+    factory_with_extension_data(endpoints, None)
+}
+
+/// Builds the factory with an optional CodeBuddyExtension data root (tests).
+#[must_use]
+pub fn factory_with_extension_data(
+    endpoints: Endpoints,
+    extension_data: Option<PathBuf>,
+) -> WorkBuddyFactory {
     WorkBuddyFactory {
         endpoints: Arc::new(endpoints),
+        extension_data,
     }
 }
 
@@ -79,6 +89,7 @@ pub fn factory_with_endpoints(endpoints: Endpoints) -> WorkBuddyFactory {
 #[derive(Clone, Debug)]
 pub struct WorkBuddyFactory {
     endpoints: Arc<Endpoints>,
+    extension_data: Option<PathBuf>,
 }
 
 /// Validated config: no options yet.
@@ -113,6 +124,7 @@ impl SubscriptionFactory for WorkBuddyFactory {
     ) -> Result<Arc<dyn Subscription>, BuildError> {
         Ok(Arc::new(WorkBuddy {
             endpoints: Arc::clone(&self.endpoints),
+            extension_data: self.extension_data.clone(),
             flow: SignInFlow::Bridge {
                 command: hofund_plugin_api::BinaryName::new("workbuddy"),
             },
@@ -123,8 +135,21 @@ impl SubscriptionFactory for WorkBuddyFactory {
 
 struct WorkBuddy {
     endpoints: Arc<Endpoints>,
+    extension_data: Option<PathBuf>,
     flow: SignInFlow,
     pending: Mutex<HashMap<String, site::Site>>,
+}
+
+impl WorkBuddy {
+    fn data_root(&self, home: Option<&Path>) -> Result<PathBuf, PluginError> {
+        if let Some(dir) = &self.extension_data {
+            return Ok(dir.clone());
+        }
+        if let Some(home) = home {
+            return Ok(home.to_path_buf());
+        }
+        auth_store::extension_data_dir()
+    }
 }
 
 #[hofund_plugin_sdk::async_trait]
@@ -147,12 +172,8 @@ impl Subscription for WorkBuddy {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(ctx.session());
         let site = site::Site::China;
-        let path = auth_store::auth_path(site).map_err(|error| {
-            PluginError::auth(format!(
-                "WorkBuddy desktop auth is not available: {}",
-                error.message()
-            ))
-        })?;
+        let root = self.data_root(None)?;
+        let path = auth_store::auth_path_in(&root, site);
         if !path.is_file() {
             return Err(PluginError::auth(format!(
                 "WorkBuddy desktop auth file is missing at {}",
@@ -190,11 +211,12 @@ impl Subscription for WorkBuddy {
                 "no WorkBuddy sign-in is in progress for this session",
             ));
         };
-        let path = auth_store::auth_path(site)?;
+        let root = self.data_root(None)?;
+        let path = auth_store::auth_path_in(&root, site);
         let text = std::fs::read_to_string(&path).map_err(|error| {
             PluginError::auth(format!("{} can't be read ({error})", path.display()))
         })?;
-        let credential = creds::parse_desktop_info(&text, site)?;
+        let credential = creds::parse_desktop_info(&text, site, &path)?;
         discover::store(&credential, host).await
     }
 

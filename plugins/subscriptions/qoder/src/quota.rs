@@ -13,8 +13,12 @@ pub(crate) fn windows(body: &[u8]) -> Result<Vec<QuotaWindow>, PluginError> {
     let Some(quota) = quota else {
         return Ok(Vec::new());
     };
-    let total = number_field(quota, &["total", "limit"]).unwrap_or(100);
-    let used = number_field(quota, &["used", "consumed"]).unwrap_or(0);
+    let Some(total) = number_field(quota, &["total", "limit"]) else {
+        return Ok(Vec::new());
+    };
+    let Some(used) = number_field(quota, &["used", "consumed"]) else {
+        return Ok(Vec::new());
+    };
     let percent = if total == 0 {
         0
     } else {

@@ -7,14 +7,6 @@ pub(crate) enum Site {
 }
 
 impl Site {
-    pub(crate) fn from_domain(domain: &str) -> Self {
-        if domain.contains("workbuddy.ai") || domain.contains("codebuddy.ai") {
-            Self::International
-        } else {
-            Self::China
-        }
-    }
-
     pub(crate) const fn plugin_id(self) -> &'static str {
         match self {
             Self::China => "workbuddy",

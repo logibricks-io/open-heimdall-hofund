@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use hofund_kit_subscription::{TestHost, block_on};
 use hofund_plugin_api::{
-    AccountId, PluginId, PluginKind, ProbeQuery, ProtocolId, RawTable, SecretString, Subscription,
-    SubscriptionFactory,
+    AccountId, AccountStatus, PluginId, PluginKind, ProbeQuery, ProtocolId, RawTable, SecretString,
+    Subscription, SubscriptionFactory,
 };
 use hofund_plugin_sdk::json;
 use hofund_plugin_sdk::oauth::{SecretObject, secret_text};
@@ -14,7 +14,7 @@ use crate::creds::{self, Credential};
 use crate::discover::{self, REFERENCE_CN};
 use crate::quota;
 use crate::site::Site;
-use crate::{Endpoints, factory_with_endpoints};
+use crate::{Endpoints, factory_with_extension_data};
 
 const CN: &str = "https://workbuddy-cn.test";
 const TOKEN: &str = "wb-access-test";
@@ -34,8 +34,11 @@ fn host(dir: &tempfile::TempDir) -> TestHost {
     )
 }
 
-fn subscription(host: &TestHost) -> Arc<dyn Subscription> {
-    let factory = factory_with_endpoints(endpoints());
+fn subscription(
+    host: &TestHost,
+    extension_data: Option<std::path::PathBuf>,
+) -> Arc<dyn Subscription> {
+    let factory = factory_with_extension_data(endpoints(), extension_data);
     let cfg = factory.validate(&RawTable::new()).expect("config");
     factory.build(&cfg, host.context()).expect("build")
 }
@@ -52,6 +55,7 @@ fn seed(host: &TestHost, expires: i64) -> AccountId {
         label: "wb-user".to_owned(),
         site: Site::China,
         desktop: false,
+        auth_path: String::new(),
     };
     let id = creds::account_id(&credential);
     block_on(async {
@@ -67,10 +71,8 @@ fn seed(host: &TestHost, expires: i64) -> AccountId {
     id
 }
 
-#[test]
-fn a2c_22_discover_import_desktop_auth() {
-    let dir = tempfile::tempdir().expect("dir");
-    let data = dir.path().join("CodeBuddyExtension").join("Data");
+fn setup_desktop_auth(dir: &tempfile::TempDir) -> std::path::PathBuf {
+    let data = dir.path().join("extension-data");
     let auth_dir = data.join("Public").join("auth");
     std::fs::create_dir_all(&auth_dir).expect("dir");
     std::fs::copy(
@@ -81,12 +83,17 @@ fn a2c_22_discover_import_desktop_auth() {
         auth_dir.join("workbuddy-desktop.info"),
     )
     .expect("copy");
-    crate::auth_store::set_test_extension_data(Some(data.clone()));
-    let rows = discover::list(dir.path()).expect("list");
+    data
+}
+
+#[test]
+fn a2c_22_discover_import_desktop_auth() {
+    let dir = tempfile::tempdir().expect("dir");
+    let data = setup_desktop_auth(&dir);
+    let rows = discover::list(&data).expect("list");
     assert_eq!(rows.len(), 1);
     let host = host(&dir);
-    let id = block_on(discover::import(dir.path(), REFERENCE_CN, host.context())).expect("import");
-    crate::auth_store::set_test_extension_data(None);
+    let id = block_on(discover::import(&data, REFERENCE_CN, host.context())).expect("import");
     let secret = block_on(host.context().accounts().secret(&id))
         .expect("read")
         .expect("stored");
@@ -103,7 +110,7 @@ fn a2c_22_discover_import_desktop_auth() {
 #[test]
 fn a2c_22b_desktop_expired_reports_needs_sign_in() {
     let dir = tempfile::tempdir().expect("dir");
-    let data = dir.path().join("data");
+    let data = dir.path().join("extension-data");
     let auth_dir = data.join("Public").join("auth");
     std::fs::create_dir_all(&auth_dir).expect("dir");
     let mut info = std::fs::read_to_string(concat!(
@@ -113,15 +120,42 @@ fn a2c_22b_desktop_expired_reports_needs_sign_in() {
     .expect("read");
     info = info.replace("4102444800000", "1");
     std::fs::write(auth_dir.join("workbuddy-desktop.info"), info).expect("write");
-    crate::auth_store::set_test_extension_data(Some(data.clone()));
     let host = host(&dir);
-    let id = block_on(discover::import(dir.path(), REFERENCE_CN, host.context())).expect("import");
-    crate::auth_store::set_test_extension_data(None);
-    let status = block_on(subscription(&host).account_status(&id, host.context())).expect("status");
-    assert!(matches!(
-        status,
-        hofund_plugin_api::AccountStatus::NeedsSignIn { .. }
-    ));
+    let id = block_on(discover::import(&data, REFERENCE_CN, host.context())).expect("import");
+    let status =
+        block_on(subscription(&host, None).account_status(&id, host.context())).expect("status");
+    assert!(matches!(status, AccountStatus::NeedsSignIn { .. }));
+}
+
+#[test]
+fn a2c_36_desktop_rereads_rotated_token_on_upstream() {
+    let dir = tempfile::tempdir().expect("dir");
+    let data = setup_desktop_auth(&dir);
+    let host = host(&dir);
+    let id = block_on(discover::import(&data, REFERENCE_CN, host.context())).expect("import");
+    let auth_file = data.join("Public/auth/workbuddy-desktop.info");
+    let mut info = std::fs::read_to_string(&auth_file).expect("read");
+    info = info.replace("wb-access-fixture", "wb-access-rotated-on-disk");
+    std::fs::write(&auth_file, info).expect("write");
+    let stored = block_on(creds::Stored::load(host.context(), &id)).expect("load");
+    assert_eq!(
+        secret_text(&stored.credential.access),
+        "wb-access-rotated-on-disk"
+    );
+    host.http().enqueue(
+        br#"{"id":"chatcmpl-1","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"ok"}}]}"#,
+    );
+    let upstream = subscription(&host, None)
+        .upstream(&id, host.context())
+        .expect("upstream");
+    let query = ProbeQuery::new(ProtocolId::OPENAI_CHAT, "deepseek-v3").expect("query");
+    block_on(upstream.probe(&query)).expect("probe");
+    assert!(
+        host.http().calls()[0]
+            .sensitive_headers()
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case("authorization"))
+    );
 }
 
 #[test]
@@ -130,6 +164,12 @@ fn a2c_28_models_from_config_json() {
         crate::models::parse_config(br#"{"models":[{"id":"deepseek-v3","name":"DeepSeek V3"}]}"#)
             .expect("parse");
     assert_eq!(list.models()[0].id(), "deepseek-v3");
+}
+
+#[test]
+fn a2c_37_quota_without_credit_fields_is_empty() {
+    let windows = quota::windows(br#"{"data":{"other":1}}"#).expect("q");
+    assert!(windows.is_empty());
 }
 
 #[test]
@@ -146,7 +186,7 @@ fn a2c_23_refresh_on_expiry() {
         .to_string()
         .into_bytes(),
     );
-    block_on(subscription(&host).refresh(&id, host.context())).expect("refresh");
+    block_on(subscription(&host, None).refresh(&id, host.context())).expect("refresh");
     assert!(host.http().calls()[0].uri().contains("/token/refresh"));
 }
 
@@ -158,7 +198,7 @@ fn a2c_24_upstream_sends_workbuddy_user_agent() {
     host.http().enqueue(
         br#"{"id":"chatcmpl-1","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"ok"}}]}"#,
     );
-    let upstream = subscription(&host)
+    let upstream = subscription(&host, None)
         .upstream(&id, host.context())
         .expect("upstream");
     let query = ProbeQuery::new(ProtocolId::OPENAI_CHAT, "deepseek-v3").expect("query");
@@ -196,6 +236,7 @@ fn a2c_26_secrets_not_in_debug() {
         label: String::new(),
         site: Site::China,
         desktop: false,
+        auth_path: String::new(),
     };
     assert!(!format!("{credential:?}").contains(key));
 }
@@ -211,6 +252,7 @@ fn a2c_27_daily_checkin_cn_only() {
     host.http().enqueue(
         br#"{"code":0,"msg":"ok","data":{"credit":"5","streak_days":"2","message":"ok"}}"#,
     );
-    let result = block_on(subscription(&host).daily_checkin(&id, host.context())).expect("run");
+    let result =
+        block_on(subscription(&host, None).daily_checkin(&id, host.context())).expect("run");
     assert_eq!(result.outcome(), hofund_plugin_api::CheckinOutcome::Claimed);
 }

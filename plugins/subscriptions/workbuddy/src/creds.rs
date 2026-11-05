@@ -1,10 +1,12 @@
 //! WorkBuddy desktop auth and stored secrets.
 
+use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use hofund_plugin_api::{AccountId, HostContext, PluginError, SecretString};
 use hofund_plugin_sdk::json::{self, Value};
 use hofund_plugin_sdk::oauth::{SecretObject, account_id_from, secret_text};
 
-use crate::auth_store;
 use crate::site::Site;
 
 #[derive(Clone, Debug)]
@@ -19,6 +21,7 @@ pub(crate) struct Credential {
     pub label: String,
     pub site: Site,
     pub desktop: bool,
+    pub auth_path: String,
 }
 
 #[derive(Clone, Debug)]
@@ -40,11 +43,11 @@ impl Stored {
         Ok(stored)
     }
 
-    pub(crate) fn fresh_at(&self, now: std::time::SystemTime) -> bool {
+    pub(crate) fn fresh_at(&self, now: SystemTime) -> bool {
         if self.credential.expires_at <= 0 {
             return !self.credential.desktop;
         }
-        let Ok(now_ms) = now.duration_since(std::time::UNIX_EPOCH) else {
+        let Ok(now_ms) = now.duration_since(UNIX_EPOCH) else {
             return false;
         };
         now_ms.as_millis() as i64 + 60_000 < self.credential.expires_at
@@ -52,15 +55,26 @@ impl Stored {
 }
 
 fn hydrate_desktop(stored: &Credential) -> Result<Credential, PluginError> {
-    let path = auth_store::auth_path(stored.site)?;
-    let text = std::fs::read_to_string(&path).map_err(|error| {
+    if stored.auth_path.is_empty() {
+        return Err(PluginError::auth(
+            "the stored WorkBuddy desktop sign-in has no auth file path",
+        ));
+    }
+    let path = Path::new(&stored.auth_path);
+    let text = std::fs::read_to_string(path).map_err(|error| {
         PluginError::auth(format!(
             "WorkBuddy desktop auth at {} can't be read ({error})",
             path.display()
         ))
     })?;
-    let mut fresh = parse_desktop_info(&text, stored.site)?;
+    let mut fresh = parse_desktop_info(&text, stored.site, path)?;
+    if fresh.uid != stored.uid {
+        return Err(PluginError::auth(
+            "WorkBuddy desktop is signed in to a different account than the one stored here",
+        ));
+    }
     fresh.label = stored.label.clone();
+    fresh.auth_path = stored.auth_path.clone();
     Ok(fresh)
 }
 
@@ -91,6 +105,7 @@ pub(crate) fn parse_secret(secret: &SecretString) -> Result<Stored, PluginError>
             label: blob.text("label").unwrap_or(uid).to_owned(),
             site,
             desktop: blob.flag("desktop"),
+            auth_path: blob.text("auth_path").unwrap_or("").to_owned(),
         },
     })
 }
@@ -110,6 +125,7 @@ pub(crate) fn secret_blob(credential: &Credential) -> SecretObject {
         .with_text("token_type", &credential.token_type)
         .with_text("label", &credential.label)
         .with_text("site", credential.site.plugin_id())
+        .with_text("auth_path", &credential.auth_path)
         .with_flag("desktop", credential.desktop)
 }
 
@@ -117,7 +133,11 @@ pub(crate) fn account_id(credential: &Credential) -> AccountId {
     account_id_from(&[credential.site.plugin_id(), &credential.uid])
 }
 
-pub(crate) fn parse_desktop_info(text: &str, site: Site) -> Result<Credential, PluginError> {
+pub(crate) fn parse_desktop_info(
+    text: &str,
+    site: Site,
+    auth_path: &Path,
+) -> Result<Credential, PluginError> {
     let root: Value = json::from_str(text.trim())
         .map_err(|_| PluginError::auth("WorkBuddy auth file is invalid JSON"))?;
     let account = root.get("account").and_then(Value::as_object);
@@ -140,24 +160,35 @@ pub(crate) fn parse_desktop_info(text: &str, site: Site) -> Result<Credential, P
         .and_then(|map| map.get("refreshToken"))
         .and_then(string_value)
         .unwrap_or_default();
-    let expires_at = auth
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let mut expires_at = auth
         .and_then(|map| map.get("expiresAt"))
         .and_then(json_i64)
         .unwrap_or(0);
-    let refresh_expires_at = auth
+    if expires_at == 0
+        && let Some(expires_in) = auth.and_then(|map| map.get("expiresIn")).and_then(json_i64)
+    {
+        expires_at = now_ms + expires_in.saturating_mul(1_000);
+    }
+    let mut refresh_expires_at = auth
         .and_then(|map| map.get("refreshExpiresAt"))
         .and_then(json_i64)
         .unwrap_or(0);
+    if refresh_expires_at == 0
+        && let Some(refresh_in) = auth
+            .and_then(|map| map.get("refreshExpiresIn"))
+            .and_then(json_i64)
+    {
+        refresh_expires_at = now_ms + refresh_in.saturating_mul(1_000);
+    }
     let domain = auth
         .and_then(|map| map.get("domain"))
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_owned();
-    let site = if domain.is_empty() {
-        site
-    } else {
-        Site::from_domain(&domain)
-    };
     let label = account
         .and_then(|map| map.get("nickname"))
         .and_then(string_value)
@@ -177,6 +208,7 @@ pub(crate) fn parse_desktop_info(text: &str, site: Site) -> Result<Credential, P
         label,
         site,
         desktop: true,
+        auth_path: auth_path.display().to_string(),
     })
 }
 
@@ -206,4 +238,50 @@ pub(crate) fn bearer_headers(credential: &Credential) -> Vec<(String, String)> {
             credential.site.user_agent().to_owned(),
         ),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Credential, Site, hydrate_desktop, parse_desktop_info};
+    use hofund_plugin_api::SecretString;
+    use std::path::Path;
+
+    #[test]
+    fn a2c_34_desktop_uid_mismatch_is_auth() {
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("auth.info");
+        std::fs::write(&path, include_str!("fixtures/workbuddy-desktop.info")).expect("write");
+        let stored = Credential {
+            uid: "other-uid".to_owned(),
+            access: SecretString::from("x".to_owned()),
+            refresh: SecretString::from(String::new()),
+            expires_at: 0,
+            refresh_expires_at: 0,
+            domain: String::new(),
+            token_type: String::new(),
+            label: String::new(),
+            site: Site::China,
+            desktop: true,
+            auth_path: path.display().to_string(),
+        };
+        assert!(hydrate_desktop(&stored).is_err());
+    }
+
+    #[test]
+    fn a2c_35_desktop_expires_in_sets_expiry() {
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("auth.info");
+        std::fs::write(
+            &path,
+            r#"{"account":{"uid":"u1","nickname":"n"},"auth":{"accessToken":"tok","expiresIn":3600}}"#,
+        )
+        .expect("write");
+        let cred = parse_desktop_info(
+            &std::fs::read_to_string(&path).expect("read"),
+            Site::China,
+            Path::new(&path),
+        )
+        .expect("parse");
+        assert!(cred.expires_at > 0);
+    }
 }

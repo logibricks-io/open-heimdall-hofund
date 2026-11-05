@@ -7,16 +7,20 @@ pub(crate) fn windows(body: &[u8]) -> Result<Vec<QuotaWindow>, PluginError> {
     let root: Value = hofund_plugin_sdk::json::from_slice(body)
         .map_err(|_| PluginError::decode("WorkBuddy billing JSON is invalid"))?;
     let data = root.get("data").unwrap_or(&root);
-    let used = data
+    let Some(used) = data
         .get("usedCredits")
         .or_else(|| data.get("used"))
         .and_then(as_f64)
-        .unwrap_or(0.0);
-    let total = data
+    else {
+        return Ok(Vec::new());
+    };
+    let Some(total) = data
         .get("totalCredits")
         .or_else(|| data.get("total"))
         .and_then(as_f64)
-        .unwrap_or(100.0);
+    else {
+        return Ok(Vec::new());
+    };
     let percent = if total <= 0.0 {
         0
     } else {

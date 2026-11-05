@@ -11,17 +11,17 @@ use crate::site::Site;
 pub(crate) const REFERENCE_CN: &str = "desktop-auth-cn";
 pub(crate) const REFERENCE_AI: &str = "desktop-auth-ai";
 
-pub(crate) fn list(_home: &Path) -> Result<Vec<DiscoveredAgentAccount>, PluginError> {
+pub(crate) fn list(home: &Path) -> Result<Vec<DiscoveredAgentAccount>, PluginError> {
     let mut out = Vec::new();
     for (site, reference) in [
         (Site::China, REFERENCE_CN),
         (Site::International, REFERENCE_AI),
     ] {
-        let path = auth_store::auth_path(site)?;
+        let path = auth_store::auth_path_in(home, site);
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
         };
-        let Ok(credential) = creds::parse_desktop_info(&text, site) else {
+        let Ok(credential) = creds::parse_desktop_info(&text, site, &path) else {
             continue;
         };
         let id = creds::account_id(&credential);
@@ -32,7 +32,7 @@ pub(crate) fn list(_home: &Path) -> Result<Vec<DiscoveredAgentAccount>, PluginEr
 }
 
 pub(crate) async fn import(
-    _home: &Path,
+    home: &Path,
     reference: &str,
     host: &HostContext,
 ) -> Result<AccountId, PluginError> {
@@ -45,11 +45,11 @@ pub(crate) async fn import(
             )));
         }
     };
-    let path = auth_store::auth_path(site)?;
+    let path = auth_store::auth_path_in(home, site);
     let text = std::fs::read_to_string(&path).map_err(|error| {
         PluginError::auth(format!("{} can't be read ({error})", path.display()))
     })?;
-    let credential = creds::parse_desktop_info(&text, site)?;
+    let credential = creds::parse_desktop_info(&text, site, &path)?;
     store(&credential, host).await
 }
 

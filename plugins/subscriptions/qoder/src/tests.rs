@@ -239,6 +239,21 @@ fn a2c_9_daily_checkin_uses_bearer() {
 }
 
 #[test]
+fn a2c_10_account_status_ready_with_refresh_when_access_expired() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_with_expiry(&host, 1);
+    let status = block_on(subscription(&host).account_status(&id, host.context())).expect("status");
+    assert!(matches!(status, hofund_plugin_api::AccountStatus::Ready));
+}
+
+#[test]
+fn a2c_11_quota_without_usage_fields_is_empty() {
+    let windows = quota::windows(br#"{"quota":{"name":"plan"}}"#).expect("windows");
+    assert!(windows.is_empty());
+}
+
+#[test]
 fn a2c_account_id_uses_uid() {
     let text = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),

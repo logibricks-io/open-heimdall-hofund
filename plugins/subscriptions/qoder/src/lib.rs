@@ -187,6 +187,12 @@ impl Subscription for Qoder {
     ) -> Result<AccountStatus, PluginError> {
         match creds::Stored::load(host, account).await {
             Ok(stored) if stored.ready_at(host.clock().now()) => Ok(AccountStatus::Ready),
+            Ok(stored)
+                if !hofund_plugin_sdk::oauth::secret_text(&stored.credential.refresh_token)
+                    .is_empty() =>
+            {
+                Ok(AccountStatus::Ready)
+            }
             Ok(_) => Ok(AccountStatus::NeedsSignIn {
                 reason: "the Qoder sign-in has expired".to_owned(),
             }),
