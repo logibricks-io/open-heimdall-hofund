@@ -211,7 +211,7 @@ fn seen(request: &wiremock::Request) -> Seen {
             let value = String::from_utf8_lossy(value.as_bytes()).into_owned();
             (name.as_str().to_owned(), value)
         })
-        .filter(|(name, _)| name != "host" && !name.eq_ignore_ascii_case("user-agent"))
+        .filter(|(name, _)| name != "host")
         .collect();
     headers.sort();
     Seen {

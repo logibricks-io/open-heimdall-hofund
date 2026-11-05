@@ -415,7 +415,9 @@ impl HttpBackend for PooledHttp {
     fn pooled_client(&self) -> Option<Arc<dyn Any + Send + Sync>> {
         client_handle(&self.profile, self.limits)
             .ok()
-            .map(|shared| shared as Arc<dyn Any + Send + Sync>)
+            // Box the shared handle itself so consumers downcast to
+            // `Arc<RwLock<reqwest::Client>>` and see every later refresh.
+            .map(|shared| Arc::new(shared) as Arc<dyn Any + Send + Sync>)
     }
 
     fn fresh_client(&self) -> Option<Result<Arc<dyn Any + Send + Sync>, PluginError>> {
@@ -1264,7 +1266,13 @@ mod tests {
         close_idle_after_region(&proxy, limits);
         assert_eq!(pooled_client_count(), count);
         assert!(direct_http.pooled_client().is_some());
-        assert!(proxy_http.pooled_client().is_some());
+        let handle = proxy_http.pooled_client().expect("proxy handle");
+        assert!(
+            handle
+                .downcast_ref::<Arc<std::sync::RwLock<reqwest::Client>>>()
+                .is_some(),
+            "the pooled handle must be the shared slot"
+        );
     }
 
     #[test]
