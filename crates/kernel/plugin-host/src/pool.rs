@@ -11,7 +11,9 @@
 
 use std::any::Any;
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex, OnceLock};
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -161,12 +163,81 @@ impl PooledHttp {
     pub(crate) fn ensure(&self) -> Result<(), PluginError> {
         client_for(&self.profile, self.limits).map(|_| ())
     }
+
+    /// Profile and limits that select this backend's pooled client.
+    #[must_use]
+    pub fn pool_key(&self) -> PooledClientKey {
+        PooledClientKey {
+            profile: self.profile.clone(),
+            limits: self.limits,
+        }
+    }
 }
 
-static POOL: OnceLock<Mutex<BTreeMap<ClientKey, reqwest::Client>>> = OnceLock::new();
+/// Selects one entry in the process-wide HTTP client pool.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PooledClientKey {
+    /// Proxy and TLS profile.
+    pub profile: HttpProfile,
+    /// Connect, read, and idle-pool limits.
+    pub limits: HttpLimits,
+}
 
-fn pool() -> &'static Mutex<BTreeMap<ClientKey, reqwest::Client>> {
+static POOL: OnceLock<Mutex<BTreeMap<ClientKey, Arc<RwLock<reqwest::Client>>>>> = OnceLock::new();
+
+#[cfg(test)]
+static TEST_REFRESH_CALLS: AtomicUsize = AtomicUsize::new(0);
+/// Replaces the pooled client for `profile` so the next send uses a new connection.
+pub fn close_idle_after_region(profile: &HttpProfile, limits: HttpLimits) {
+    let key = ClientKey {
+        profile: profile.clone(),
+        limits,
+    };
+    let Ok(guard) = pool().lock() else {
+        return;
+    };
+    let Some(shared) = guard.get(&key) else {
+        return;
+    };
+    let _ = refresh_shared(shared, &key);
+}
+
+/// Evicts `key` and returns a new pooled client with the same settings.
+///
+/// # Errors
+///
+/// Returns [`PluginError`] when the client cannot be built.
+pub fn fresh_pooled_client(
+    profile: &HttpProfile,
+    limits: HttpLimits,
+) -> Result<reqwest::Client, PluginError> {
+    let key = ClientKey {
+        profile: profile.clone(),
+        limits,
+    };
+    let shared = client_handle(profile, limits)?;
+    refresh_shared(&shared, &key)?;
+    Ok(shared
+        .read()
+        .map_err(|_| PluginError::internal("http pool client lock is poisoned"))?
+        .clone())
+}
+
+fn pool() -> &'static Mutex<BTreeMap<ClientKey, Arc<RwLock<reqwest::Client>>>> {
     POOL.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+fn refresh_shared(
+    shared: &Arc<RwLock<reqwest::Client>>,
+    key: &ClientKey,
+) -> Result<(), PluginError> {
+    #[cfg(test)]
+    TEST_REFRESH_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let fresh = build_client(key)?;
+    *shared
+        .write()
+        .map_err(|_| PluginError::internal("http pool client lock is poisoned"))? = fresh;
+    Ok(())
 }
 
 /// Clients currently in the pool. Tests use this to show one profile is one client.
@@ -175,7 +246,10 @@ pub(crate) fn pooled_client_count() -> usize {
     pool().lock().map(|guard| guard.len()).unwrap_or(0)
 }
 
-fn client_for(profile: &HttpProfile, limits: HttpLimits) -> Result<reqwest::Client, PluginError> {
+fn client_handle(
+    profile: &HttpProfile,
+    limits: HttpLimits,
+) -> Result<Arc<RwLock<reqwest::Client>>, PluginError> {
     let key = ClientKey {
         profile: profile.clone(),
         limits,
@@ -183,12 +257,20 @@ fn client_for(profile: &HttpProfile, limits: HttpLimits) -> Result<reqwest::Clie
     let mut guard = pool()
         .lock()
         .map_err(|_| PluginError::internal("http pool lock is poisoned"))?;
-    if let Some(client) = guard.get(&key) {
-        return Ok(client.clone());
+    if let Some(shared) = guard.get(&key) {
+        return Ok(Arc::clone(shared));
     }
-    let client = build_client(&key)?;
-    guard.insert(key, client.clone());
-    Ok(client)
+    let shared = Arc::new(RwLock::new(build_client(&key)?));
+    guard.insert(key, Arc::clone(&shared));
+    Ok(shared)
+}
+
+fn client_for(profile: &HttpProfile, limits: HttpLimits) -> Result<reqwest::Client, PluginError> {
+    let shared = client_handle(profile, limits)?;
+    Ok(shared
+        .read()
+        .map_err(|_| PluginError::internal("http pool client lock is poisoned"))?
+        .clone())
 }
 
 fn build_client(key: &ClientKey) -> Result<reqwest::Client, PluginError> {
@@ -338,9 +420,18 @@ impl HttpBackend for PooledHttp {
     }
 
     fn pooled_client(&self) -> Option<Arc<dyn Any + Send + Sync>> {
-        client_for(&self.profile, self.limits)
+        client_handle(&self.profile, self.limits)
             .ok()
-            .map(|client| Arc::new(client) as Arc<dyn Any + Send + Sync>)
+            // Box the shared handle itself so consumers downcast to
+            // `Arc<RwLock<reqwest::Client>>` and see every later refresh.
+            .map(|shared| Arc::new(shared) as Arc<dyn Any + Send + Sync>)
+    }
+
+    fn fresh_client(&self) -> Option<Result<Arc<dyn Any + Send + Sync>, PluginError>> {
+        Some(
+            fresh_pooled_client(&self.profile, self.limits)
+                .map(|client| Arc::new(client) as Arc<dyn Any + Send + Sync>),
+        )
     }
 }
 
@@ -348,20 +439,28 @@ impl HttpBackend for PooledHttp {
 mod tests {
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, RwLock};
     use std::time::Duration;
 
     use hofund_plugin_api::kernel::{HttpBackend, HttpRequest};
     use hofund_plugin_api::{Body, PluginErrorKind};
     use hofund_plugin_sdk::Call;
 
-    use super::{HttpLimits, HttpProfile, PooledHttp, pooled_client_count, take_sends};
+    use super::{
+        HttpLimits, HttpProfile, PooledHttp, close_idle_after_region, pooled_client_count,
+        take_sends,
+    };
     use crate::context_for_http;
 
     async fn exclusive() -> tokio::sync::MutexGuard<'static, ()> {
         static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        super::TEST_REFRESH_CALLS.store(0, Ordering::SeqCst);
         LOCK.lock().await
+    }
+
+    fn refresh_calls() -> usize {
+        super::TEST_REFRESH_CALLS.load(Ordering::SeqCst)
     }
 
     fn serve(scripts: Vec<(String, Vec<u8>)>) -> u16 {
@@ -1141,5 +1240,231 @@ mod tests {
         assert_eq!(error.status(), Some(429));
         assert_eq!(error.retry_after(), Some(Duration::from_secs(3)));
         assert_eq!(error.message(), "busy");
+    }
+
+    fn serve_two_on_keepalive(body: Vec<u8>) -> (u16, Arc<AtomicUsize>) {
+        serve_keepalive(2, body)
+    }
+
+    fn serve_keepalive(requests_per_connection: usize, body: Vec<u8>) -> (u16, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let accepts = Arc::new(AtomicUsize::new(0));
+        let count = Arc::clone(&accepts);
+        let body = Arc::new(body);
+        std::thread::spawn(move || {
+            loop {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
+                count.fetch_add(1, Ordering::SeqCst);
+                let body = Arc::clone(&body);
+                std::thread::spawn(move || {
+                    for _ in 0..requests_per_connection {
+                        let _ = read_request(&mut stream, true);
+                        let header = format!(
+                            "HTTP/1.1 400 Bad Request\r\ncontent-length: {}\r\nconnection: keep-alive\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = stream.write_all(header.as_bytes());
+                        let _ = stream.write_all(&body);
+                    }
+                });
+            }
+        });
+        (port, accepts)
+    }
+
+    #[tokio::test]
+    async fn r4_71_region_fresh_closes_idle_before_reuse() {
+        let _guard = exclusive().await;
+        let limits = HttpLimits::default().with_max_idle_per_host(4);
+        let http = PooledHttp::with_limits(HttpProfile::direct(), limits);
+        let body = b"User location is not supported for the API use.".to_vec();
+        let (port, accepts) = serve_two_on_keepalive(body);
+        let url = format!("http://127.0.0.1:{port}/v1");
+        let request = |path: &str| {
+            HttpRequest::builder()
+                .method("GET")
+                .uri(format!("{url}{path}"))
+                .body(Body::empty())
+                .expect("request")
+        };
+        http.send(request("/first")).await.expect("first");
+        http.send(request("/second")).await.expect("reuse");
+        assert_eq!(
+            accepts.load(Ordering::SeqCst),
+            1,
+            "idle reuse should stay on one connection"
+        );
+        close_idle_after_region(&HttpProfile::direct(), limits);
+        http.send(request("/third")).await.expect("third");
+        wait_until(&accepts, 2).await;
+    }
+
+    #[tokio::test]
+    async fn region_evict_drops_only_matching_profile() {
+        let _guard = exclusive().await;
+        let limits = HttpLimits::default();
+        let proxy = HttpProfile::direct().with_proxy("http://127.0.0.1:9");
+        let direct = HttpProfile::direct();
+        close_idle_after_region(&proxy, limits);
+        close_idle_after_region(&direct, limits);
+        let proxy_http = PooledHttp::with_limits(proxy.clone(), limits);
+        let direct_http = PooledHttp::with_limits(direct, limits);
+        proxy_http.ensure().expect("proxy client");
+        direct_http.ensure().expect("direct client");
+        let count = pooled_client_count();
+        close_idle_after_region(&proxy, limits);
+        assert_eq!(pooled_client_count(), count);
+        assert!(direct_http.pooled_client().is_some());
+        let handle = proxy_http.pooled_client().expect("proxy handle");
+        assert!(
+            handle
+                .downcast_ref::<Arc<std::sync::RwLock<reqwest::Client>>>()
+                .is_some(),
+            "the pooled handle must be the shared slot"
+        );
+    }
+
+    #[test]
+    fn recording_http_has_no_fresh_client() {
+        use hofund_plugin_api::PluginId;
+
+        let root = tempfile::tempdir().expect("temp dir");
+        let host = crate::test_host(PluginId::try_from("echo").expect("id"), root.path());
+        assert!(host.http().pooled_client().is_none());
+        assert!(host.http().fresh_client().is_none());
+    }
+
+    #[tokio::test]
+    async fn fresh_client_evicts_its_pool_key() {
+        let _guard = exclusive().await;
+        let limits = HttpLimits::default();
+        let profile = HttpProfile::direct();
+        close_idle_after_region(&profile, limits);
+        let http = PooledHttp::with_limits(profile, limits);
+        http.ensure().expect("seed pool");
+        let count = pooled_client_count();
+        http.fresh_client()
+            .expect("pooled backend")
+            .expect("fresh client");
+        assert_eq!(pooled_client_count(), count);
+    }
+
+    fn shared_slot(http: &PooledHttp) -> Arc<RwLock<reqwest::Client>> {
+        let handle = http.pooled_client().expect("pooled handle");
+        Arc::clone(
+            handle
+                .downcast_ref::<Arc<RwLock<reqwest::Client>>>()
+                .expect("shared slot type"),
+        )
+    }
+
+    async fn get_via_slot(shared: &Arc<RwLock<reqwest::Client>>, url: &str) {
+        let client = shared.read().expect("client lock").clone();
+        let _ = client.get(url).send().await.expect("request");
+    }
+
+    #[tokio::test]
+    async fn r4_72_fresh_client_refreshes_shared_slot_connection() {
+        let _guard = exclusive().await;
+        let limits = HttpLimits::default().with_max_idle_per_host(4);
+        let profile = HttpProfile::direct();
+        close_idle_after_region(&profile, limits);
+        let http = PooledHttp::with_limits(profile, limits);
+        let body = b"keep-alive body".to_vec();
+        let (port, accepts) = serve_keepalive(8, body);
+        let url = format!("http://127.0.0.1:{port}/v1");
+        let shared = shared_slot(&http);
+        let client = shared.read().expect("lock").clone();
+
+        client.get(&url).send().await.expect("first");
+        client.get(&url).send().await.expect("second");
+        assert_eq!(
+            accepts.load(Ordering::SeqCst),
+            1,
+            "two keep-alive requests should reuse one connection before refresh"
+        );
+
+        let refreshes = refresh_calls();
+        http.fresh_client()
+            .expect("pooled backend")
+            .expect("fresh client");
+        assert_eq!(
+            refresh_calls(),
+            refreshes + 1,
+            "fresh_client must refresh the shared slot"
+        );
+
+        let client = shared.read().expect("lock").clone();
+        client.get(&url).send().await.expect("after fresh");
+        wait_until(&accepts, 2).await;
+    }
+
+    #[tokio::test]
+    async fn r4_72_close_idle_after_region_refreshes_pooled_slot() {
+        let _guard = exclusive().await;
+        let limits = HttpLimits::default().with_max_idle_per_host(4);
+        let profile = HttpProfile::direct();
+        close_idle_after_region(&profile, limits);
+        let http = PooledHttp::with_limits(profile.clone(), limits);
+        let body = b"region body".to_vec();
+        let (port, accepts) = serve_keepalive(4, body);
+        let url = format!("http://127.0.0.1:{port}/v1");
+        let shared = shared_slot(&http);
+
+        get_via_slot(&shared, &url).await;
+        get_via_slot(&shared, &url).await;
+        assert_eq!(
+            accepts.load(Ordering::SeqCst),
+            1,
+            "reuse should stay on one TCP connection before region close"
+        );
+
+        let refreshes = refresh_calls();
+        close_idle_after_region(&profile, limits);
+        assert_eq!(
+            refresh_calls(),
+            refreshes + 1,
+            "close_idle_after_region must refresh the pooled slot"
+        );
+        let client = shared.read().expect("lock").clone();
+        client.get(&url).send().await.expect("after region close");
+        wait_until(&accepts, 2).await;
+    }
+
+    #[tokio::test]
+    async fn r4_72_close_idle_after_region_refreshes_only_matching_profile() {
+        let _guard = exclusive().await;
+        let limits_a = HttpLimits::default().with_max_idle_per_host(4);
+        let limits_b = HttpLimits::new(Duration::from_secs(11), Duration::from_secs(61))
+            .with_max_idle_per_host(4);
+        let direct = HttpProfile::direct();
+        let proxy = HttpProfile::direct().with_proxy("http://127.0.0.1:9");
+        close_idle_after_region(&direct, limits_a);
+        close_idle_after_region(&proxy, limits_b);
+        let http_a = PooledHttp::with_limits(direct, limits_a);
+        let http_b = PooledHttp::with_limits(proxy, limits_b);
+        let body = b"region body".to_vec();
+        let (port, accepts) = serve_keepalive(4, body);
+        let url = format!("http://127.0.0.1:{port}/v1");
+        let shared_a = shared_slot(&http_a);
+        let shared_b_before = shared_slot(&http_b);
+        let pool_keys = pooled_client_count();
+
+        get_via_slot(&shared_a, &url).await;
+        get_via_slot(&shared_a, &url).await;
+        assert_eq!(accepts.load(Ordering::SeqCst), 1);
+
+        close_idle_after_region(&HttpProfile::direct(), limits_a);
+        assert_eq!(pooled_client_count(), pool_keys);
+        let shared_b_after = shared_slot(&http_b);
+        assert!(
+            Arc::ptr_eq(&shared_b_before, &shared_b_after),
+            "refresh must not replace the other profile pool slot"
+        );
+        get_via_slot(&shared_a, &url).await;
+        wait_until(&accepts, 2).await;
     }
 }

@@ -1,8 +1,8 @@
 //! Early failover and the continuation used for thinking-only refusal handover.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -18,8 +18,10 @@ use hofund_router::{
 
 struct Fake {
     route_id: &'static str,
+    scope_provider: Option<&'static str>,
     member_id: MemberId,
     hits: Arc<AtomicUsize>,
+    idle_drops: Arc<AtomicUsize>,
     kind: Kind,
 }
 
@@ -47,6 +49,7 @@ enum Kind {
     ResponsesCreatedThenEnd,
     ResponsesNothing,
     ResponsesPartialThenError,
+    RegionFailThenOk,
 }
 
 #[async_trait]
@@ -57,6 +60,10 @@ impl Member for Fake {
 
     fn route_id(&self) -> &str {
         self.route_id
+    }
+
+    fn scope_provider(&self) -> &str {
+        self.scope_provider.unwrap_or(self.route_id)
     }
 
     fn protocol(&self) -> &str {
@@ -75,10 +82,25 @@ impl Member for Fake {
         }
     }
 
+    fn close_idle_connections(&self) {
+        self.idle_drops.fetch_add(1, Ordering::SeqCst);
+    }
+
     async fn execute(&self, _request: Request, _inbound: &str) -> Result<Completion, PluginError> {
         self.hits.fetch_add(1, Ordering::SeqCst);
         match self.kind {
             Kind::Status(status, message) => Err(PluginError::status_error(status, message)),
+            Kind::RegionFailThenOk => {
+                let hit = self.hits.load(Ordering::SeqCst);
+                if hit == 1 {
+                    Err(PluginError::status_error(
+                        400,
+                        "User location is not supported for the API use.",
+                    ))
+                } else {
+                    Ok(Completion::Unary(Box::new(reply())))
+                }
+            }
             Kind::Connect(message) => Err(PluginError::connect(message)),
             Kind::Transport(message) => Err(PluginError::transport(message)),
             Kind::Auth => Err(PluginError::auth("denied")),
@@ -222,11 +244,33 @@ fn fake_on(
 ) -> Arc<dyn Member> {
     Arc::new(Fake {
         route_id,
+        scope_provider: None,
         member_id: MemberId::from_preset(
             PresetId::try_from(id).expect("preset"),
             MemberKey::from_static("row"),
         ),
         hits: Arc::clone(hits),
+        idle_drops: Arc::new(AtomicUsize::new(0)),
+        kind,
+    })
+}
+
+fn fake_scoped(
+    route_id: &'static str,
+    scope: &'static str,
+    preset: &'static str,
+    hits: &Arc<AtomicUsize>,
+    kind: Kind,
+) -> Arc<dyn Member> {
+    Arc::new(Fake {
+        route_id,
+        scope_provider: Some(scope),
+        member_id: MemberId::from_preset(
+            PresetId::try_from(preset).expect("preset"),
+            MemberKey::from_static("row"),
+        ),
+        hits: Arc::clone(hits),
+        idle_drops: Arc::new(AtomicUsize::new(0)),
         kind,
     })
 }
@@ -826,6 +870,216 @@ async fn c10_region_refusal_asks_the_next_member_as_any_failure() {
     let routed = dispatch(&router, "demo").await.expect("region failover");
     assert_eq!(routed.upstream_id, "shared");
     assert_eq!(mate.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn r4_71_region_refusal_rests_no_account() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let member = fake_on(
+        "prov",
+        "prov",
+        &hits,
+        Kind::Status(400, "User location is not supported for the API use."),
+    );
+    let book = Cooldowns::new(CooldownPolicy::default());
+    let error = PluginError::status_error(400, "User location is not supported for the API use.");
+    assert_eq!(book.record_failure(member.id(), &error), None);
+    let router = router(vec![member]);
+    let _ = dispatch(&router, "demo").await;
+    assert_eq!(hits.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn r4_71_second_region_refusal_skips_provider_mates() {
+    let first = Arc::new(AtomicUsize::new(0));
+    let second = Arc::new(AtomicUsize::new(0));
+    let other = Arc::new(AtomicUsize::new(0));
+    let router = router(vec![
+        fake_on(
+            "shared",
+            "a1",
+            &first,
+            Kind::Status(400, "User location is not supported for the API use."),
+        ),
+        fake_on(
+            "shared",
+            "a2",
+            &second,
+            Kind::Status(400, "User location is not supported for the API use."),
+        ),
+        fake_on("other", "b1", &other, Kind::Status(502, "down")),
+    ]);
+    let error = match dispatch(&router, "demo").await {
+        Ok(_) => panic!("expected failure"),
+        Err(RouterError::Upstream { error, .. }) => error,
+        Err(other) => panic!("{other:?}"),
+    };
+    assert_eq!(first.load(Ordering::SeqCst), 1);
+    assert_eq!(second.load(Ordering::SeqCst), 1);
+    assert_eq!(other.load(Ordering::SeqCst), 1);
+    assert!(error.message().contains("down"));
+    assert_eq!(error.status(), Some(502));
+    assert!(
+        !error
+            .message()
+            .contains("regional restriction on the model")
+    );
+}
+
+#[tokio::test]
+async fn r4_71_single_account_is_asked_once_more_on_region_refusal() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let router = router(vec![fake("solo", &hits, Kind::RegionFailThenOk)]);
+    dispatch(&router, "demo").await.expect("second try");
+    assert_eq!(hits.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn r4_71_region_refusal_drops_idle_before_reask() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let idle = Arc::new(AtomicUsize::new(0));
+    let member = Arc::new(Fake {
+        route_id: "solo",
+        scope_provider: None,
+        member_id: MemberId::from_preset(
+            PresetId::try_from("solo").expect("preset"),
+            MemberKey::from_static("row"),
+        ),
+        hits: Arc::clone(&hits),
+        idle_drops: Arc::clone(&idle),
+        kind: Kind::RegionFailThenOk,
+    });
+    let router = router(vec![member]);
+    dispatch(&router, "demo").await.expect("second try");
+    assert_eq!(hits.load(Ordering::SeqCst), 2);
+    assert_eq!(idle.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn r4_71_region_closed_skip_keeps_refusal_status() {
+    let first = Arc::new(AtomicUsize::new(0));
+    let second = Arc::new(AtomicUsize::new(0));
+    let third = Arc::new(AtomicUsize::new(0));
+    let router = router(vec![
+        fake_on(
+            "shared",
+            "a1",
+            &first,
+            Kind::Status(403, "unsupported_country_region_territory"),
+        ),
+        fake_on(
+            "shared",
+            "a2",
+            &second,
+            Kind::Status(403, "unsupported_country_region_territory"),
+        ),
+        fake_on("shared", "a3", &third, Kind::Unary),
+        fake_on("other", "b1", &Arc::new(AtomicUsize::new(0)), Kind::Unary),
+    ]);
+    let book = RouteTraceBook::new();
+    let _ = dispatch_traced(&router, "demo", &book).await;
+    assert_eq!(third.load(Ordering::SeqCst), 0);
+    let skip = book.list(&Default::default()).decisions[0]
+        .candidates
+        .iter()
+        .find(|candidate| candidate.member.contains("a3"))
+        .and_then(|candidate| candidate.skip.clone())
+        .expect("mate skipped");
+    assert_eq!(
+        skip,
+        hofund_control_proto::SkipReason::Failure {
+            status: Some(403),
+            message: "regional model refusal".to_owned(),
+        }
+    );
+}
+
+#[tokio::test]
+async fn r4_region_scope_provider_skips_peer_accounts() {
+    let first = Arc::new(AtomicUsize::new(0));
+    let second = Arc::new(AtomicUsize::new(0));
+    let third = Arc::new(AtomicUsize::new(0));
+    let router = router(vec![
+        fake_scoped(
+            "sub-a1",
+            "antigravity",
+            "a1",
+            &first,
+            Kind::Status(400, "User location is not supported for the API use."),
+        ),
+        fake_scoped(
+            "sub-a2",
+            "antigravity",
+            "a2",
+            &second,
+            Kind::Status(400, "User location is not supported for the API use."),
+        ),
+        fake_scoped("sub-a3", "antigravity", "a3", &third, Kind::Unary),
+    ]);
+    let _ = dispatch(&router, "demo").await;
+    assert_eq!(first.load(Ordering::SeqCst), 1, "first account asked once");
+    assert_eq!(
+        second.load(Ordering::SeqCst),
+        1,
+        "second account asked once"
+    );
+    assert_eq!(
+        third.load(Ordering::SeqCst),
+        0,
+        "third account skipped after provider closed"
+    );
+}
+
+#[tokio::test]
+async fn r4_region_final_failure_carries_agent_note() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let router = router(vec![fake(
+        "solo",
+        &hits,
+        Kind::Status(400, "User location is not supported for the API use."),
+    )]);
+    let error = match dispatch(&router, "demo").await {
+        Ok(_) => panic!("region refusal should fail dispatch"),
+        Err(error) => error,
+    };
+    let RouterError::Upstream { error, .. } = error else {
+        panic!("expected upstream failure");
+    };
+    assert!(
+        error
+            .message()
+            .contains("regional restriction on the model"),
+        "{}",
+        error.message()
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn r4_71_region_reask_waits_one_second_with_wait_hook() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let waits = Arc::new(Mutex::new(Vec::new()));
+    let record = Arc::clone(&waits);
+    let router = router(vec![fake("solo", &hits, Kind::RegionFailThenOk)]);
+    struct Record(Arc<Mutex<Vec<std::time::Duration>>>);
+    impl hofund_router::WaitHook for Record {
+        fn wait(
+            &self,
+            duration: std::time::Duration,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+            self.0.lock().expect("waits").push(duration);
+            Box::pin(async {})
+        }
+    }
+    let request = Request::new("demo");
+    router
+        .dispatch_with_wait(&request, "inbound", None, Some(Arc::new(Record(record))))
+        .await
+        .expect("reask");
+    assert_eq!(hits.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        waits.lock().expect("waits").as_slice(),
+        [std::time::Duration::from_secs(1)]
+    );
 }
 
 #[tokio::test]

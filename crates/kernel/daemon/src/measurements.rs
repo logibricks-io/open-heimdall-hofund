@@ -127,6 +127,7 @@ fn fill_allowance(
     seat.known = !allowance.windows.is_empty();
     seat.learns &= !seat.known;
     seat.used = allowance.used_for_routing(model, now);
+    seat.week_low = allowance.week_low(model, seat.used, now);
     seat.soon = allowance.routing_renewals(model, now);
     seat.lapse = allowance.lapse(model, now);
     seat.pace = allowance.pace(model, now);

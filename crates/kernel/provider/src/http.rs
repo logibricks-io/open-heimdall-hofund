@@ -1,9 +1,5 @@
 //! Shared HTTP execution for the protocol adapters.
 
-use std::collections::HashSet;
-use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
-
 use futures_util::StreamExt;
 use hofund_codec::{Codec, CodecError, UNMAPPED_TOOLS};
 use hofund_ir::Request;
@@ -12,6 +8,9 @@ use hofund_plugin_sdk::transport::{
 };
 use hofund_quirks::Profile;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
 use crate::Completion;
 
@@ -101,7 +100,19 @@ pub struct Endpoint {
     /// The registry factory sets this from [`pooled_reqwest`] so connect and
     /// idle-read timeouts are the daemon's `HttpLimits`.
     pub client: Option<reqwest::Client>,
+    /// Shared handle for a host-pooled client. Every upstream on this pool key
+    /// must use the same slot so a regional refresh reaches every holder.
+    pub client_slot: Option<PooledClientSlot>,
+    /// Rebuilds the pooled client after a regional refusal. Set with the client
+    /// when the host pool supplied it.
+    pub client_refresh: Option<ClientRefresh>,
 }
+
+/// Shared host-pool client for one profile and limits pair.
+pub type PooledClientSlot = Arc<std::sync::RwLock<reqwest::Client>>;
+
+/// Replaces an upstream HTTP client without changing its settings.
+pub type ClientRefresh = Arc<dyn Fn() -> Result<reqwest::Client, ProviderError> + Send + Sync>;
 
 impl std::fmt::Debug for Endpoint {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -150,6 +161,8 @@ impl Endpoint {
             quirks: None,
             timeout: Duration::from_secs(60),
             client: None,
+            client_slot: None,
+            client_refresh: None,
         }
     }
 }
@@ -160,12 +173,90 @@ impl Endpoint {
 /// downcast it here so the registry crate does not depend on `reqwest`.
 #[must_use]
 pub fn pooled_reqwest(value: &dyn std::any::Any) -> Option<reqwest::Client> {
+    if let Some(slot) = pooled_client_slot(value) {
+        return slot.read().ok().map(|guard| guard.clone());
+    }
+    if let Some(client) = value.downcast_ref::<Arc<reqwest::Client>>() {
+        return Some((**client).clone());
+    }
     value.downcast_ref::<reqwest::Client>().cloned()
+}
+
+/// The shared pooled client behind a host handle, when `value` is one.
+#[must_use]
+pub fn pooled_client_slot(value: &dyn std::any::Any) -> Option<PooledClientSlot> {
+    value.downcast_ref::<PooledClientSlot>().cloned()
+}
+
+#[derive(Debug)]
+enum ClientStore {
+    Private(Mutex<reqwest::Client>),
+    Pooled(PooledClientSlot),
+}
+
+impl ClientStore {
+    fn current(&self) -> Result<reqwest::Client, ProviderError> {
+        match self {
+            Self::Private(mutex) => mutex
+                .lock()
+                .map_err(|_| ProviderError::internal("upstream client lock is poisoned"))
+                .map(|guard| guard.clone()),
+            Self::Pooled(slot) => slot
+                .read()
+                .map_err(|_| ProviderError::internal("upstream client lock is poisoned"))
+                .map(|guard| guard.clone()),
+        }
+    }
+
+    fn replace(&self, client: reqwest::Client) -> Result<(), ProviderError> {
+        match self {
+            Self::Private(mutex) => {
+                *mutex
+                    .lock()
+                    .map_err(|_| ProviderError::internal("upstream client lock is poisoned"))? =
+                    client;
+            }
+            Self::Pooled(slot) => {
+                *slot
+                    .write()
+                    .map_err(|_| ProviderError::internal("upstream client lock is poisoned"))? =
+                    client;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Upstream {
+    pub(crate) fn close_idle_connections(&self) {
+        let fresh = if let Some(refresh) = &self.client_refresh {
+            refresh()
+        } else {
+            build_private_client(self.connect_timeout, self.read_timeout)
+        };
+        if let Ok(client) = fresh {
+            let _ = self.client.replace(client);
+        }
+    }
+}
+
+fn build_private_client(
+    connect_timeout: Duration,
+    read_timeout: Duration,
+) -> Result<reqwest::Client, ProviderError> {
+    reqwest::Client::builder()
+        .connect_timeout(connect_timeout)
+        .read_timeout(read_timeout)
+        .build()
+        .map_err(|error| ProviderError::connect(error.to_string()))
 }
 
 pub(crate) struct Upstream {
     pub id: String,
-    client: reqwest::Client,
+    client: ClientStore,
+    client_refresh: Option<ClientRefresh>,
+    connect_timeout: Duration,
+    read_timeout: Duration,
     url: String,
     headers: HeaderMap,
     pass_headers: Vec<String>,
@@ -237,17 +328,23 @@ impl Upstream {
             header_value.set_sensitive(true);
             headers.insert(header_name, header_value);
         }
-        let client = match endpoint.client.clone() {
-            Some(client) => client,
-            None => reqwest::Client::builder()
-                .connect_timeout(endpoint.timeout)
-                .read_timeout(socket_backstop(endpoint.timeout))
-                .build()
-                .map_err(|error| ProviderError::connect(error.to_string()))?,
+        let client_refresh = endpoint.client_refresh.clone();
+        let client = if let Some(slot) = endpoint.client_slot {
+            ClientStore::Pooled(slot)
+        } else if let Some(client) = endpoint.client {
+            ClientStore::Private(Mutex::new(client))
+        } else {
+            ClientStore::Private(Mutex::new(build_private_client(
+                endpoint.timeout,
+                socket_backstop(endpoint.timeout),
+            )?))
         };
         Ok(Self {
             id: endpoint.id,
             client,
+            client_refresh,
+            connect_timeout: endpoint.timeout,
+            read_timeout: socket_backstop(endpoint.timeout),
             url,
             headers,
             pass_headers: endpoint.pass_headers.clone(),
@@ -401,6 +498,8 @@ async fn send_json(
 ) -> Result<reqwest::Response, ProviderError> {
     let builder = upstream
         .client
+        .current()
+        .map_err(|_| ProviderError::internal("upstream client lock is poisoned"))?
         .post(url)
         .headers(headers)
         .header(reqwest::header::CONTENT_TYPE, "application/json")
@@ -969,5 +1068,246 @@ mod tests {
             })
             .unwrap_or(0);
         request.len() >= header_end + 4 + length
+    }
+
+    #[tokio::test]
+    async fn d71_injected_client_keeps_marker_after_idle_close() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+        use tokio::io::AsyncWriteExt;
+
+        fn build_client() -> reqwest::Client {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                HeaderName::from_static("x-hofund-marker"),
+                HeaderValue::from_static("injected"),
+            );
+            reqwest::Client::builder()
+                .default_headers(headers)
+                .pool_max_idle_per_host(4)
+                .build()
+                .expect("client")
+        }
+        let generation = Arc::new(AtomicUsize::new(0));
+        let make_refresh = {
+            let generation = Arc::clone(&generation);
+            move || {
+                generation.fetch_add(1, Ordering::SeqCst);
+                Ok(build_client())
+            }
+        };
+        let marked = Arc::new(AtomicUsize::new(0));
+        let accepts = Arc::new(AtomicUsize::new(0));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let address = listener.local_addr().expect("address");
+        let marked_server = Arc::clone(&marked);
+        let accepts_server = Arc::clone(&accepts);
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                accepts_server.fetch_add(1, Ordering::SeqCst);
+                let mut request = Vec::new();
+                let mut chunk = [0_u8; 2048];
+                while let Ok(read) = socket.read(&mut chunk).await {
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&chunk[..read]);
+                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let text = String::from_utf8_lossy(&request);
+                if text.contains("x-hofund-marker: injected") {
+                    marked_server.fetch_add(1, Ordering::SeqCst);
+                }
+                let body = b"ok";
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
+                    body.len()
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.write_all(body).await;
+            }
+        });
+        let mut endpoint = super::Endpoint::new("demo", format!("http://{address}"));
+        endpoint.client = Some(build_client());
+        endpoint.client_refresh = Some(Arc::new(make_refresh));
+        let upstream = super::Upstream::open(endpoint, "v1/chat/completions", HeaderMap::new())
+            .expect("upstream");
+        let url = format!("http://{address}/v1/chat/completions");
+        for _ in 0..2 {
+            super::post_json(&upstream, &url, br#"{"model":"demo"}"#.to_vec())
+                .await
+                .expect("request");
+        }
+        upstream.close_idle_connections();
+        super::post_json(&upstream, &url, br#"{"model":"demo"}"#.to_vec())
+            .await
+            .expect("after close");
+        assert_eq!(marked.load(Ordering::SeqCst), 3);
+        assert!(generation.load(Ordering::SeqCst) >= 1);
+    }
+
+    #[tokio::test]
+    async fn d71_keepalive_works_after_idle_close_rebuild() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use reqwest::header::HeaderMap;
+
+        let accepts = Arc::new(AtomicUsize::new(0));
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let address = listener.local_addr().expect("address");
+        let accepts_server = Arc::clone(&accepts);
+        std::thread::spawn(move || {
+            for _ in 0..2 {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
+                accepts_server.fetch_add(1, Ordering::SeqCst);
+                for _ in 0..2 {
+                    let mut request = Vec::new();
+                    let mut chunk = [0_u8; 2048];
+                    loop {
+                        let Ok(read) = stream.read(&mut chunk) else {
+                            return;
+                        };
+                        if read == 0 {
+                            return;
+                        }
+                        request.extend_from_slice(&chunk[..read]);
+                        if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    let body = b"ok";
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                    let _ = stream.write_all(body);
+                }
+            }
+        });
+        fn build_client() -> reqwest::Client {
+            reqwest::Client::builder()
+                .pool_max_idle_per_host(4)
+                .build()
+                .expect("client")
+        }
+        let mut endpoint = super::Endpoint::new("demo", format!("http://{address}"));
+        endpoint.client = Some(build_client());
+        endpoint.client_refresh = Some(Arc::new(|| Ok(build_client())));
+        let upstream = super::Upstream::open(endpoint, "v1/chat/completions", HeaderMap::new())
+            .expect("upstream");
+        let url = format!("http://{address}/v1/chat/completions");
+        for _ in 0..2 {
+            let response = super::post_json(&upstream, &url, br#"{"model":"demo"}"#.to_vec())
+                .await
+                .expect("request");
+            let _ = response.bytes().await;
+        }
+        assert_eq!(accepts.load(Ordering::SeqCst), 1);
+        upstream.close_idle_connections();
+        for _ in 0..2 {
+            let response = super::post_json(&upstream, &url, br#"{"model":"demo"}"#.to_vec())
+                .await
+                .expect("request");
+            let _ = response.bytes().await;
+        }
+        assert_eq!(accepts.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn d71_shared_pool_slot_refresh_reaches_second_upstream() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use reqwest::header::HeaderMap;
+        use std::sync::RwLock;
+
+        let accepts = Arc::new(AtomicUsize::new(0));
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let address = listener.local_addr().expect("address");
+        let accepts_server = Arc::clone(&accepts);
+        std::thread::spawn(move || {
+            for _ in 0..2 {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
+                accepts_server.fetch_add(1, Ordering::SeqCst);
+                let mut request = Vec::new();
+                let mut chunk = [0_u8; 2048];
+                loop {
+                    let Ok(read) = stream.read(&mut chunk) else {
+                        return;
+                    };
+                    if read == 0 {
+                        return;
+                    }
+                    request.extend_from_slice(&chunk[..read]);
+                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let body = b"ok";
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.write_all(body);
+            }
+        });
+        let slot = Arc::new(RwLock::new(
+            reqwest::Client::builder()
+                .pool_max_idle_per_host(4)
+                .build()
+                .expect("client"),
+        ));
+        let open_on = |id: &str| {
+            let mut endpoint = super::Endpoint::new(id, format!("http://{address}"));
+            endpoint.client_slot = Some(Arc::clone(&slot));
+            endpoint.client = Some(slot.read().expect("read").clone());
+            endpoint.client_refresh = Some(Arc::new(|| {
+                let fresh = reqwest::Client::builder()
+                    .pool_max_idle_per_host(4)
+                    .build()
+                    .expect("client");
+                Ok(fresh)
+            }));
+            super::Upstream::open(endpoint, "v1/chat/completions", HeaderMap::new())
+                .expect("upstream")
+        };
+        let first = open_on("first");
+        let second = open_on("second");
+        let url = format!("http://{address}/v1/chat/completions");
+        let response = super::post_json(&first, &url, br#"{"model":"demo"}"#.to_vec())
+            .await
+            .expect("first");
+        let _ = response.bytes().await;
+        assert_eq!(accepts.load(Ordering::SeqCst), 1);
+        first.close_idle_connections();
+        let response = super::post_json(&second, &url, br#"{"model":"demo"}"#.to_vec())
+            .await
+            .expect("second after refresh");
+        let _ = response.bytes().await;
+        assert_eq!(
+            accepts.load(Ordering::SeqCst),
+            2,
+            "second upstream must dial after shared refresh"
+        );
     }
 }
