@@ -11,8 +11,29 @@ use hofund_control_proto::{API_VERSION, AgentConnectRequest, ControlErrorKind, G
 use hofund_daemon::{ControlRuntime, Running, StartOptions, start_with_options};
 use hofund_secrets::{BLOCK_MOVE_MODEL_SENTINEL, FAIL_MOVE_MODEL_SENTINEL, KeyStore};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 
 const SECRET: &str = "sk-group-rename-keys";
+
+fn config_revision(text: &str) -> String {
+    let digest = Sha256::digest(text.as_bytes());
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn assert_runtime_matches_restored_disk(
+    status: &hofund_control_proto::StatusResponse,
+    config_before: &str,
+) {
+    assert_eq!(
+        status.runtime_revision, status.disk_revision,
+        "published runtime revision must match disk after rollback"
+    );
+    assert_eq!(
+        status.disk_revision,
+        config_revision(config_before),
+        "disk revision must match restored config"
+    );
+}
 
 fn config(extra: &str) -> String {
     format!(
@@ -228,11 +249,8 @@ async fn r7a_rr12_move_model_save_failure_restores_config_agent_tree_and_key_sco
         std::fs::read_to_string(scratch.config_path()).expect("config"),
         config_before
     );
-    let runtime = client.config().await.expect("runtime config after failure");
-    assert_eq!(
-        runtime.text, config_before,
-        "runtime must publish rolled config after sidecar work failure, not staged rename text"
-    );
+    let status = client.status().await.expect("status after failure");
+    assert_runtime_matches_restored_disk(&status, &config_before);
     assert_eq!(
         std::fs::read_to_string(&settings).expect("settings"),
         "{\"model\": \"group/old\"}\n"
@@ -395,11 +413,8 @@ async fn r7a_rr12_agent_rename_failure_restores_config_disk_runtime_and_agent_tr
         std::fs::read_to_string(scratch.config_path()).expect("config"),
         config_before
     );
-    let runtime = client.config().await.expect("runtime config after failure");
-    assert_eq!(
-        runtime.text, config_before,
-        "runtime must match rolled disk after agent rename failure"
-    );
+    let status = client.status().await.expect("status after failure");
+    assert_runtime_matches_restored_disk(&status, &config_before);
     assert_eq!(agent_tree_snapshot(&settings), tree_before);
     support::shutdown(running).await;
 }
