@@ -1894,15 +1894,87 @@ fn r47a_k_quota_reset_credits_read_and_consume() {
         .expect("consume");
     assert_eq!(outcome.code(), "ok");
     assert_eq!(outcome.windows(), 2);
-    let uris: Vec<_> = host
-        .http()
-        .calls()
+    let calls = host.http().calls();
+    let consume_call = calls
         .iter()
-        .map(|call| call.uri().to_string())
-        .collect();
+        .find(|call| {
+            call.uri()
+                .ends_with("/wham/rate-limit-reset-credits/consume")
+        })
+        .expect("consume call");
+    assert_eq!(consume_call.method(), "POST");
+    let posted: Value = json::from_slice(consume_call.body()).expect("consume json");
+    assert_eq!(posted.get("credit_id").and_then(Value::as_str), Some("c-1"));
     assert!(
-        uris.iter()
-            .any(|uri| uri.ends_with("/wham/rate-limit-reset-credits/consume")),
-        "{uris:?}"
+        posted
+            .get("redeem_request_id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| !id.is_empty())
+    );
+    assert!(
+        consume_call
+            .sensitive_headers()
+            .iter()
+            .any(|name| name == "authorization")
+    );
+    assert!(
+        consume_call
+            .sensitive_headers()
+            .iter()
+            .any(|name| name == "chatgpt-account-id")
+    );
+}
+
+#[test]
+fn r47a_k2_read_keeps_until_without_each_when_count_mismatch() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, &access_token("first", 10_000));
+    let usage = br#"{"rate_limit_reset_credits":{"available_count":2},"rate_limit":{"primary_window":{"used_percent":0,"limit_window_seconds":1}}}"#;
+    let credits = br#"{"credits":[
+        {"id":"a","status":"available","expires_at":"2029-01-01T00:00:00Z"},
+        {"id":"b","status":"available","expires_at":"2029-06-01T00:00:00Z"},
+        {"id":"c","status":"available","expires_at":"2030-01-01T00:00:00Z"}
+    ]}"#;
+    host.http()
+        .enqueue_response(200, &[("content-type", "application/json")], usage.to_vec());
+    host.http().enqueue_response(
+        200,
+        &[("content-type", "application/json")],
+        credits.to_vec(),
+    );
+    let reset = block_on(subscription(&host).quota_reset_credits(&id, host.context()))
+        .expect("credits")
+        .expect("some");
+    assert_eq!(reset.count(), 2);
+    assert!(reset.each().is_empty());
+    assert!(reset.until().is_some());
+    assert!(!reset.until_unread());
+}
+
+#[test]
+fn r47a_k2_unreadable_usage_is_decode_not_empty() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, &access_token("first", 10_000));
+    host.http()
+        .enqueue_response(200, &[("content-type", "text/html")], b"<html>".to_vec());
+    let error =
+        block_on(subscription(&host).quota_reset_credits(&id, host.context())).expect_err("usage");
+    assert_eq!(error.kind(), PluginErrorKind::Decode);
+}
+
+#[test]
+fn r47a_a3_agent_sign_in_writes_chatgpt_auth_mode() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, &access_token("first", 10_000));
+    let home = dir.path().join(".codex");
+    block_on(subscription(&host).write_agent_sign_in(&id, &home, host.context())).expect("write");
+    let text = std::fs::read_to_string(home.join("auth.json")).expect("auth.json");
+    let root: Value = json::from_str(&text).expect("json");
+    assert_eq!(
+        root.get("auth_mode").and_then(Value::as_str),
+        Some("chatgpt")
     );
 }

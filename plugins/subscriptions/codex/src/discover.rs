@@ -267,6 +267,26 @@ mod tests {
     }
 
     #[test]
+    fn r47a_a3_codex_import_rejects_apikey_auth_mode() {
+        let dir = scratch("apikey-import");
+        let home = dir.path().join("codex-home");
+        fs::create_dir_all(&home).expect("home");
+        let id = id_token("key@example.test", "sub-k", "acct-k", "plus");
+        let text = format!(
+            r#"{{"auth_mode":"apikey","tokens":{{"access_token":"sk-example","refresh_token":"refresh-example","id_token":"{id}"}}}}"#
+        );
+        fs::write(home.join("auth.json"), text).expect("auth");
+        let host = hofund_kit_subscription::TestHost::open_for(
+            hofund_plugin_api::PluginKind::Subscription,
+            hofund_plugin_api::PluginId::from_static("codex"),
+            dir.path(),
+        );
+        let error = hofund_kit_subscription::block_on(import(&home, REFERENCE, host.context()))
+            .expect_err("apikey");
+        assert_eq!(error.kind(), hofund_plugin_api::PluginErrorKind::Auth);
+    }
+
+    #[test]
     fn a1_4_lists_codex_sign_in_from_temp_home() {
         let dir = scratch("list");
         let home = dir.path().join("codex-home");
