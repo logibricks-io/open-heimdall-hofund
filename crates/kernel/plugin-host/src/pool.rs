@@ -289,6 +289,9 @@ impl HttpBackend for PooledHttp {
             outbound = outbound.header(name.as_str(), header);
         }
         let bytes = request.body().bytes().clone();
+        if request.version() == http::Version::HTTP_11 {
+            outbound = outbound.version(reqwest::Version::HTTP_11);
+        }
         let mut response = outbound.body(bytes).send().await.map_err(map_error)?;
         let status = response.status();
         let mut headers = response.headers().clone();

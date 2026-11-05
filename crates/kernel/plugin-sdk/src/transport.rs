@@ -81,6 +81,7 @@ pub struct Call {
     headers: Vec<Header>,
     body: Vec<u8>,
     idempotent: bool,
+    http1_only: bool,
 }
 
 #[derive(Clone)]
@@ -110,6 +111,7 @@ impl Call {
             headers: Vec::new(),
             body: Vec::new(),
             idempotent: false,
+            http1_only: false,
         }
     }
 
@@ -123,6 +125,13 @@ impl Call {
     #[must_use]
     pub fn idempotent(mut self, idempotent: bool) -> Self {
         self.idempotent = idempotent;
+        self
+    }
+
+    /// Sends the request over HTTP/1.1 only (Codex backend calls).
+    #[must_use]
+    pub fn http1_only(mut self) -> Self {
+        self.http1_only = true;
         self
     }
 
@@ -367,6 +376,9 @@ impl Call {
 
     fn request(self) -> Result<HttpRequest, PluginError> {
         let mut builder = http::Request::builder().method(self.method).uri(&self.uri);
+        if self.http1_only {
+            builder = builder.version(http::Version::HTTP_11);
+        }
         for header in &self.headers {
             builder = builder.header(&header.name, header_value(header)?);
         }
@@ -390,6 +402,7 @@ impl fmt::Debug for Call {
             .field("header_names", &names)
             .field("body_len", &self.body.len())
             .field("idempotent", &self.idempotent)
+            .field("http1_only", &self.http1_only)
             .finish()
     }
 }

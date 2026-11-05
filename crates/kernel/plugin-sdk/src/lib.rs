@@ -47,6 +47,7 @@ pub mod bedrock;
 pub mod checkin;
 pub mod classify;
 pub mod codex_tool_names;
+pub mod codex_zstd;
 pub mod daily_checkin;
 pub mod daily_warmup;
 pub mod digest;

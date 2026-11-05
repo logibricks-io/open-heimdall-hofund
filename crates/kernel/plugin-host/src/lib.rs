@@ -753,6 +753,7 @@ pub struct RecordedRequest {
     body: Vec<u8>,
     headers: Vec<(String, String)>,
     sensitive_headers: Vec<String>,
+    http_version: http::Version,
 }
 
 impl RecordedRequest {
@@ -793,6 +794,18 @@ impl RecordedRequest {
     #[must_use]
     pub fn sensitive_headers(&self) -> &[String] {
         &self.sensitive_headers
+    }
+
+    /// The HTTP version on the outbound request.
+    #[must_use]
+    pub const fn http_version(&self) -> http::Version {
+        self.http_version
+    }
+
+    /// Whether the request used HTTP/1.1.
+    #[must_use]
+    pub fn is_http11(&self) -> bool {
+        self.http_version == http::Version::HTTP_11
     }
 }
 
@@ -880,6 +893,7 @@ fn recorded(request: &HttpRequest<Body>) -> RecordedRequest {
         body: request.body().bytes().to_vec(),
         headers,
         sensitive_headers,
+        http_version: request.version(),
     }
 }
 
