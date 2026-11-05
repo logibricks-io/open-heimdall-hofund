@@ -1,25 +1,25 @@
 //! Output speed derived from stored timing and flow.
 
-use crate::decode::row_tokens_per_second;
+use crate::decode::decode_row;
 
-/// Weighted mean output tokens per second over rows that yield a speed.
+/// Mean output tokens per second: sum of decode tokens over sum of decode windows.
 #[must_use]
 pub fn mean_tokens_per_second<'a, I>(rows: I) -> Option<f64>
 where
     I: IntoIterator<Item = &'a crate::Row>,
 {
-    let mut sum = 0.0;
-    let mut weight = 0.0;
+    let mut tokens = 0i64;
+    let mut window_ms = 0i64;
     for row in rows {
-        let Some(speed) = row_tokens_per_second(row) else {
+        let (row_tokens, row_window) = decode_row(row);
+        if row_tokens <= 0 || row_window <= 0 {
             continue;
-        };
-        let w = row.output_tokens.filter(|tokens| *tokens > 0).unwrap_or(1) as f64;
-        sum += speed * w;
-        weight += w;
+        }
+        tokens += row_tokens;
+        window_ms += row_window;
     }
-    if weight > 0.0 {
-        Some(sum / weight)
+    if window_ms > 0 {
+        Some(tokens as f64 / (window_ms as f64 / 1000.0))
     } else {
         None
     }
@@ -54,14 +54,20 @@ mod tests {
     }
 
     #[test]
-    fn r10_mean_speed_uses_decode_of() {
-        let steady = Row {
+    fn r10_mean_speed_sums_tokens_over_windows() {
+        let fast = Row {
             output_tokens: Some(100),
             latency_ms: 2500,
             ttft_ms: Some(500),
             ..Default::default()
         };
-        let mean = mean_tokens_per_second([&steady]).expect("mean speed");
-        assert!((mean - 50.0).abs() < 0.001);
+        let slow = Row {
+            output_tokens: Some(10),
+            latency_ms: 1500,
+            ttft_ms: Some(500),
+            ..Default::default()
+        };
+        let mean = mean_tokens_per_second([&fast, &slow]).expect("mean");
+        assert!((mean - 36.666).abs() < 0.1, "mean={mean}");
     }
 }

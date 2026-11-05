@@ -24,7 +24,7 @@ pub use attribution::{
     BreakdownDimension, BreakdownGroup, NO_GATEWAY_KEY, NO_PROVIDER_KEY, UNKNOWN_CLIENT_AGENT,
     masked_provider_key_id, normalize_client_agent,
 };
-pub use decode::{FlowTracker, decode_of, decode_window, row_tokens_per_second};
+pub use decode::{FlowTracker, decode_of, decode_row, decode_window, row_tokens_per_second};
 pub use fx::{CnyRate, DisplayCurrency, Fx, RateFetcher};
 pub use key::{CallerModel, CallerTotals};
 pub use limits::{KeyUsage, UsageDetails};
@@ -392,7 +392,7 @@ impl Ledger {
             .map_err(|error| UsageError(error.to_string()))
     }
 
-    /// The newest `row_limit` rows at or after `since` (oldest first), and
+    /// The newest `row_limit` rows at or after `since` (newest first), and
     /// totals over every row in the window.
     ///
     /// Totals come from one SQL aggregate, so they stay complete when the row
@@ -465,10 +465,9 @@ impl Ledger {
         let rows = statement
             .query_map(params![since, limit], read_row)
             .map_err(|error| UsageError(error.to_string()))?;
-        let mut rows = rows
+        let rows = rows
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| UsageError(error.to_string()))?;
-        rows.reverse();
         Ok((rows, totals))
     }
 
@@ -496,8 +495,7 @@ impl Ledger {
             .collect();
         let totals = totals_of_rows(&filtered);
         let keep = row_limit.min(filtered.len());
-        let start = filtered.len().saturating_sub(keep);
-        Ok((filtered[start..].to_vec(), totals))
+        Ok((filtered[..keep].to_vec(), totals))
     }
 
     /// A text table of every row.

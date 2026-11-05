@@ -1,5 +1,7 @@
 //! Usage breakdown by agent, provider key, or gateway key.
 
+use rusqlite::params;
+
 use super::{Ledger, Totals, UsageError};
 
 /// Stored when no client agent was identified.
@@ -76,8 +78,12 @@ impl Ledger {
         &self,
         since: Option<i64>,
         dimension: BreakdownDimension,
+        model: Option<&str>,
+        account: Option<&str>,
     ) -> Result<Vec<BreakdownGroup>, UsageError> {
         let since = since.unwrap_or(i64::MIN);
+        let model_filter = model.filter(|value| !value.is_empty());
+        let account_filter = account.filter(|value| !value.is_empty());
         let connection = self
             .connection
             .lock()
@@ -130,6 +136,11 @@ impl Ledger {
                     COALESCE(SUM(CASE WHEN priced = 0 AND (MAX(COALESCE(input_tokens, 0), 0) + MAX(COALESCE(output_tokens, 0), 0)) > 0 THEN 1 ELSE 0 END), 0)
              FROM requests
              WHERE created_unix >= ?1
+               AND (?2 = '' OR model = ?2 COLLATE NOCASE)
+               AND (?3 = '' OR (
+                    upstream LIKE 'account:%:%'
+                    AND LOWER(substr(upstream, 9 + instr(substr(upstream, 9), ':') + 1)) = LOWER(?3)
+               ))
              GROUP BY {group_expr}
              ORDER BY (COALESCE(SUM(MAX(input_tokens, 0)), 0) + COALESCE(SUM(MAX(output_tokens, 0)), 0)) DESC,
                       COUNT(CASE WHEN outcome NOT IN ('handed_on', 'refusal', 'turned_away') OR outcome = '' THEN 1 END) DESC,
@@ -138,8 +149,10 @@ impl Ledger {
         let mut statement = connection
             .prepare(&sql)
             .map_err(|error| UsageError(error.to_string()))?;
+        let model_param = model_filter.unwrap_or("");
+        let account_param = account_filter.unwrap_or("");
         let rows = statement
-            .query_map([since], |row| {
+            .query_map(params![since, model_param, account_param], |row| {
                 let id: String = row.get(0)?;
                 let label_hint: String = row.get(1)?;
                 let requests: i64 = row.get(2)?;
@@ -295,7 +308,7 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].client_agent, UNKNOWN_CLIENT_AGENT);
         let groups = ledger
-            .breakdown(None, BreakdownDimension::Agent)
+            .breakdown(None, BreakdownDimension::Agent, None, None)
             .expect("breakdown");
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].id, UNKNOWN_CLIENT_AGENT);
@@ -313,7 +326,7 @@ mod tests {
         second.input_tokens = Some(100);
         let ledger = ledger_with(&[first, second]);
         let groups = ledger
-            .breakdown(None, BreakdownDimension::ProviderKey)
+            .breakdown(None, BreakdownDimension::ProviderKey, None, None)
             .expect("breakdown");
         assert_eq!(groups.len(), 2);
         assert_eq!(groups[0].id, "0011223344");
@@ -332,7 +345,7 @@ mod tests {
         anonymous.caller_key_id = String::new();
         let ledger = ledger_with(&[named, anonymous]);
         let groups = ledger
-            .breakdown(None, BreakdownDimension::GatewayKey)
+            .breakdown(None, BreakdownDimension::GatewayKey, None, None)
             .expect("breakdown");
         assert_eq!(groups.len(), 2);
         assert_eq!(groups[1].id, NO_GATEWAY_KEY);
@@ -347,7 +360,7 @@ mod tests {
         handed.outcome = crate::OUTCOME_HANDED_ON.to_owned();
         let ledger = ledger_with(&[handed]);
         let groups = ledger
-            .breakdown(None, BreakdownDimension::Agent)
+            .breakdown(None, BreakdownDimension::Agent, None, None)
             .expect("breakdown");
         assert_eq!(groups[0].totals.requests, 0);
     }
@@ -387,7 +400,7 @@ mod tests {
             .execute("UPDATE requests SET cost_usd = 2.0 WHERE priced = 0", [])
             .expect("update");
         let groups = ledger
-            .breakdown(None, BreakdownDimension::Agent)
+            .breakdown(None, BreakdownDimension::Agent, None, None)
             .expect("groups");
         let mixed = groups
             .iter()
@@ -425,7 +438,7 @@ mod tests {
         open.client_agent = "open".to_owned();
         ledger.record(&open).expect("open");
         let groups = ledger
-            .breakdown(None, BreakdownDimension::Agent)
+            .breakdown(None, BreakdownDimension::Agent, None, None)
             .expect("groups");
         assert_eq!(groups.len(), 2);
         let priced_group = groups

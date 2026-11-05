@@ -228,7 +228,6 @@ pub(crate) async fn usage(config: &Path, options: UsageReportOptions) -> Result<
 }
 
 fn usage_csv(response: &UsageResponse) -> Result<String, String> {
-    let convert = |usd: f64| usd;
     let rows: Vec<hofund_usage::Row> = response
         .rows
         .iter()
@@ -248,15 +247,25 @@ fn usage_csv(response: &UsageResponse) -> Result<String, String> {
                 .cache_write_1h_tokens
                 .and_then(|v| i64::try_from(v).ok()),
             reasoning_tokens: row.reasoning_tokens.and_then(|v| i64::try_from(v).ok()),
+            reasoning_hidden: row.reasoning_hidden,
             priced: row.priced,
-            cost_usd: row.cost,
+            cost_usd: row.cost_usd.or(row.cost),
+            caller_key_id: row.caller_key_id.clone(),
+            caller_key_name: row.caller_key_name.clone(),
+            caller_issuer_id: row.caller_issuer_id.clone(),
+            provider_key_id: row.provider_key_id.clone(),
+            outcome: row.outcome.clone(),
             client_agent: row.client_agent.clone(),
             ttft_ms: row.ttft_ms.and_then(|v| i64::try_from(v).ok()),
             session_id: row.session_id.clone(),
+            served_model: row.served_model.clone(),
+            flow_ms: None,
+            first_text_ms: None,
+            first_reasoning_ms: None,
             ..Default::default()
         })
         .collect();
-    hofund_usage::format_csv(&rows, convert).map_err(|error| error.to_string())
+    hofund_usage::format_csv(&rows).map_err(|error| error.to_string())
 }
 
 /// `hofund route`: the latest routing decisions from the daemon trace.

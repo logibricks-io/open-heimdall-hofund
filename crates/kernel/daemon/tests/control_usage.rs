@@ -161,16 +161,18 @@ async fn usage_route_filters_period_and_totals() {
     assert_eq!(all.period, UsagePeriod::All);
     assert_eq!(all.rows.len(), 4);
     assert!(!all.rows_truncated);
-    assert_eq!(all.rows[0].model, "ancient");
+    assert_eq!(all.rows[0].model, "unreported");
     assert_eq!(
         all.rows[0].created_at_ms,
-        u64::try_from(now - 40 * 86_400).expect("positive") * 1000
+        u64::try_from(now).expect("positive") * 1000
     );
     assert_eq!(all.rows[0].duration_ms, 7);
     assert_eq!(all.rows[0].provider, "primary");
     assert_eq!(all.rows[0].status, "200");
-    assert_eq!(all.rows[2].input_tokens, Some(0), "negative counts clamp");
-    assert_eq!(all.rows[3].input_tokens, None);
+    assert_eq!(all.rows[0].input_tokens, None);
+    assert_eq!(all.rows[1].input_tokens, Some(0), "negative counts clamp");
+    assert_eq!(all.rows[3].input_tokens, Some(1_000));
+    assert_eq!(all.rows[3].model, "ancient");
     assert_eq!(all.totals.requests, 4);
     assert_eq!(all.totals.input_tokens, 1_100);
     assert_eq!(all.totals.output_tokens, 1_103);
@@ -186,7 +188,7 @@ async fn usage_route_filters_period_and_totals() {
             .iter()
             .map(|row| row.model.as_str())
             .collect::<Vec<_>>(),
-        ["older", "fresh", "unreported"]
+        ["unreported", "fresh", "older"]
     );
     assert_eq!(month.totals.requests, 3);
     assert_eq!(month.totals.input_tokens, 100);
@@ -208,7 +210,7 @@ async fn usage_route_filters_period_and_totals() {
 async fn usage_route_rejects_unknown_period_and_key() {
     let dir = Scratch::new("reject");
     let running = start_tcp(&dir.0, CONFIG).await;
-    for query in ["?period=year"] {
+    for query in ["?period=year", "?period=all&extra=1"] {
         let response = usage(&running, &dir.0, query).await;
         assert_eq!(
             response.status(),
@@ -244,8 +246,8 @@ async fn usage_row_cap_keeps_totals_complete() {
     let all = decoded_usage(usage(&running, &dir.0, "?period=all").await).await;
     assert_eq!(all.rows.len(), 10_000);
     assert!(all.rows_truncated);
-    assert_eq!(all.rows[0].model, "m3", "the oldest rows are dropped");
-    assert_eq!(all.rows[9_999].model, "m10002");
+    assert_eq!(all.rows[0].model, "m10002", "newest rows are kept");
+    assert_eq!(all.rows[9_999].model, "m3");
     assert_eq!(all.totals.requests, 10_003);
     assert_eq!(all.totals.input_tokens, 10_003);
     assert_eq!(all.totals.output_tokens, 20_006);
@@ -450,8 +452,8 @@ async fn u1b_11_control_usage_summary_includes_cost_and_unpriced() {
     assert!((all.totals.cost - 0.5).abs() < f64::EPSILON);
     assert_eq!(all.totals.unpriced, 1);
     assert_eq!(all.currency, "USD");
-    assert_eq!(all.rows[0].cost, Some(0.5));
-    assert!(all.rows[1].cost.is_none());
+    assert_eq!(all.rows[0].cost, None);
+    assert_eq!(all.rows[1].cost, Some(0.5));
     support::shutdown(running).await;
 }
 
@@ -542,5 +544,35 @@ async fn r10_usage_report_exposes_ttft_speed_and_model_filter() {
     assert!((row.tokens_per_second.expect("speed") - 66.666).abs() < 0.1);
     assert_eq!(row.account, "me@x.test");
     assert!(body.totals.mean_ttft_ms.is_some());
+    support::shutdown(running).await;
+}
+
+#[tokio::test]
+async fn r10_group_by_model_applies_model_filter_to_breakdown() {
+    let dir = Scratch::new("r10-group-model");
+    let now = now_unix();
+    {
+        let ledger = Ledger::open(&dir.0.join("usage.sqlite")).expect("ledger");
+        for (model, input) in [("keep", 10), ("drop", 99)] {
+            ledger
+                .record(&row(now, model, Some(input), Some(1)))
+                .expect("row");
+        }
+    }
+    let running = start_tcp(&dir.0, CONFIG).await;
+    let body = decoded_usage(
+        usage(
+            &running,
+            &dir.0,
+            "?period=all&by=model&model=keep&unlimited=1",
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(body.breakdown.len(), 1);
+    assert_eq!(body.breakdown[0].id, "keep");
+    assert_eq!(body.breakdown[0].requests, 1);
+    assert_eq!(body.breakdown[0].input_tokens, 10);
+    assert_eq!(body.totals.requests, 1);
     support::shutdown(running).await;
 }

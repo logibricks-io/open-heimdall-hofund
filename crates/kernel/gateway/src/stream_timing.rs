@@ -2,7 +2,7 @@
 
 use std::time::Instant;
 
-use hofund_ir::StreamEvent;
+use hofund_ir::{BlockStart, StreamEvent};
 use hofund_usage::FlowTracker;
 
 /// Tracks a streamed reply for TTFT and flow_ms.
@@ -19,6 +19,7 @@ pub(crate) struct StreamTiming {
     began: bool,
     pending: Vec<u8>,
     read: usize,
+    flow_discarded: bool,
 }
 
 const FIRST_MOST: usize = 8 << 20;
@@ -37,6 +38,7 @@ impl StreamTiming {
             began: false,
             pending: Vec::new(),
             read: 0,
+            flow_discarded: false,
         }
     }
 
@@ -49,12 +51,17 @@ impl StreamTiming {
             StreamEvent::TextDelta(_) => (true, true, false),
             StreamEvent::ThinkingDelta(_) => (true, false, true),
             StreamEvent::ToolArgumentsDelta(_) => (true, false, false),
+            StreamEvent::ContentBlockStart(start) => match &start.block {
+                BlockStart::ToolCall { .. } | BlockStart::Text => (true, false, false),
+                BlockStart::Thinking { .. } => (true, false, true),
+                BlockStart::Unknown { .. } => (false, false, false),
+            },
             _ => (false, false, false),
         };
         if !content {
             return;
         }
-        self.note_content(elapsed, text, reasoning, encoded_bytes);
+        self.note_content(elapsed, text, reasoning, encoded_bytes.max(1));
     }
 
     pub(crate) fn ingest_raw(&mut self, chunk: &[u8]) {
@@ -76,6 +83,7 @@ impl StreamTiming {
         self.read += chunk.len();
         if self.read > FIRST_MOST {
             self.off = true;
+            self.flow_discarded = true;
             self.pending.clear();
             return;
         }
@@ -95,7 +103,7 @@ impl StreamTiming {
             if !content {
                 continue;
             }
-            self.note_content(elapsed, text, reasoning, event.len());
+            self.note_content(elapsed, text, reasoning, event.len().max(1));
         }
     }
 
@@ -106,10 +114,10 @@ impl StreamTiming {
         if reasoning && self.first_reasoning_ms.is_none() {
             self.first_reasoning_ms = Some(elapsed);
         }
-        if self.first_text_ms.is_some() {
-            self.flow.mark(elapsed, nbytes as i64);
-        } else if text {
+        if text && self.first_text_ms.is_none() {
             self.first_text_ms = Some(elapsed);
+        }
+        if !self.flow_discarded && self.first_content_ms.is_some() {
             self.flow.mark(elapsed, nbytes as i64);
         }
     }
@@ -128,16 +136,21 @@ impl StreamTiming {
         if !self.timed || (self.off && self.first_content_ms.is_none()) {
             return None;
         }
-        let flow = self.flow.flow_for(
-            reasoning_tokens,
-            self.first_text_ms.unwrap_or(0),
-            self.first_content_ms.unwrap_or(0),
-        );
+        let flow = if self.flow_discarded {
+            None
+        } else {
+            let flow = self.flow.flow_for(
+                reasoning_tokens,
+                self.first_text_ms.unwrap_or(0),
+                self.first_content_ms.unwrap_or(0),
+            );
+            (flow > 0).then_some(flow)
+        };
         Some((
             self.first_content_ms,
             self.first_text_ms,
             self.first_reasoning_ms,
-            (flow > 0).then_some(flow),
+            flow,
         ))
     }
 }
@@ -162,14 +175,71 @@ fn flow_content(event: &[u8]) -> bool {
 }
 
 fn timing_kind(event: &[u8]) -> (bool, bool, bool) {
-    if !flow_content(event)
-        && !event.windows(18).any(|w| w == b"content_block_start")
-        && !event.windows(16).any(|w| w == b"output_item.added")
-    {
+    if event.windows(18).any(|w| w == b"content_block_start") {
+        let tool = event.windows(9).any(|w| w == b"tool_use")
+            || event.windows(15).any(|w| w == b"server_tool_use");
+        return (
+            true,
+            false,
+            !tool && event.windows(8).any(|w| w == b"thinking"),
+        );
+    }
+    if !flow_content(event) && !event.windows(16).any(|w| w == b"output_item.added") {
         return (false, false, false);
     }
     let text = event.windows(6).any(|w| w == b"\"text\"");
     let reasoning =
         event.windows(8).any(|w| w == b"thinking") || event.windows(9).any(|w| w == b"reasoning");
     (true, text, reasoning)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::StreamTiming;
+    use hofund_ir::{
+        BlockStart, ContentBlockStart, Extensions, StreamEvent, TextDelta, ToolArgumentsDelta,
+    };
+    use std::time::Instant;
+
+    #[test]
+    fn r10_stream_timing_single_text_chunk_records_flow() {
+        let mut timing = StreamTiming::new(Instant::now());
+        timing.note_stream_event(
+            &StreamEvent::TextDelta(TextDelta {
+                index: 0,
+                text: "ok".to_owned(),
+                extensions: Extensions::default(),
+            }),
+            64,
+        );
+        let fields = timing.finish_fields(0).expect("timing");
+        assert!(fields.3.is_some_and(|flow| flow > 0));
+    }
+
+    #[test]
+    fn r10_stream_timing_tool_burst_records_flow() {
+        let mut timing = StreamTiming::new(Instant::now());
+        timing.note_stream_event(
+            &StreamEvent::ContentBlockStart(ContentBlockStart {
+                index: 0,
+                block: BlockStart::ToolCall {
+                    id: "call".to_owned(),
+                    name: "demo".to_owned(),
+                },
+                extensions: Extensions::default(),
+            }),
+            128,
+        );
+        timing.note_stream_event(
+            &StreamEvent::ToolArgumentsDelta(ToolArgumentsDelta {
+                index: 0,
+                partial_json: r#"{"x":1}"#.to_owned(),
+                extensions: Extensions::default(),
+            }),
+            32,
+        );
+        let fields = timing.finish_fields(0).expect("timing");
+        assert!(fields.0.is_some(), "ttft from first tool content");
+        assert!(fields.3.is_some_and(|flow| flow > 0));
+    }
 }

@@ -11,12 +11,12 @@ use futures_util::stream;
 use hofund_codec::{Codec, OpenAiChat};
 use hofund_gateway::Gateway;
 use hofund_ir::{
-    ContentPart, Extensions, Message, Request as ModelRequest, Response, Role, StreamEvent,
-    TextDelta,
+    BlockStart, ContentBlockStart, ContentPart, Extensions, Message, Request as ModelRequest,
+    Response, Role, StreamEvent, TextDelta, ToolArgumentsDelta,
 };
 use hofund_plugin_api::{MemberId, MemberKey, PluginError, PresetId};
 use hofund_router::{Completion, FailoverPolicy, Member, Router, Snapshot};
-use hofund_usage::Ledger;
+use hofund_usage::{Ledger, row_tokens_per_second};
 use tokio::time::sleep;
 use tower::ServiceExt;
 
@@ -24,6 +24,13 @@ struct Reply {
     id: MemberId,
     stream: bool,
     delay: Duration,
+    mode: ReplyMode,
+}
+
+#[derive(Clone, Copy)]
+enum ReplyMode {
+    Text,
+    ToolBurst,
 }
 
 #[async_trait]
@@ -46,23 +53,42 @@ impl Member for Reply {
         _inbound_protocol: &str,
     ) -> Result<Completion, PluginError> {
         sleep(self.delay).await;
-        let mut message = Message::new(Role::Assistant);
-        message.content.push(ContentPart::text("ok"));
         if self.stream {
-            Ok(Completion::Stream(Box::pin(stream::iter(vec![Ok(
-                StreamEvent::TextDelta(TextDelta {
+            let events = match self.mode {
+                ReplyMode::Text => vec![Ok(StreamEvent::TextDelta(TextDelta {
                     index: 0,
                     text: "ok".to_owned(),
                     extensions: Extensions::default(),
-                }),
-            )]))))
-        } else {
-            Ok(Completion::Unary(Box::new(Response::new(message))))
+                }))],
+                ReplyMode::ToolBurst => vec![
+                    Ok(StreamEvent::ContentBlockStart(ContentBlockStart {
+                        index: 0,
+                        block: BlockStart::ToolCall {
+                            id: "call".to_owned(),
+                            name: "demo".to_owned(),
+                        },
+                        extensions: Extensions::default(),
+                    })),
+                    Ok(StreamEvent::ToolArgumentsDelta(ToolArgumentsDelta {
+                        index: 0,
+                        partial_json: r#"{"x":1}"#.to_owned(),
+                        extensions: Extensions::default(),
+                    })),
+                ],
+            };
+            return Ok(Completion::Stream(Box::pin(stream::iter(events))));
         }
+        let mut message = Message::new(Role::Assistant);
+        message.content.push(ContentPart::text("ok"));
+        Ok(Completion::Unary(Box::new(Response::new(message))))
     }
 }
 
-fn app(stream: bool, delay: Duration) -> (axum::Router, Arc<Ledger>, tempfile::TempDir) {
+fn app(
+    stream: bool,
+    delay: Duration,
+    mode: ReplyMode,
+) -> (axum::Router, Arc<Ledger>, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("temp dir");
     let usage = Arc::new(Ledger::open(&dir.path().join("usage.sqlite")).expect("usage"));
     let mut routes = BTreeMap::new();
@@ -75,6 +101,7 @@ fn app(stream: bool, delay: Duration) -> (axum::Router, Arc<Ledger>, tempfile::T
             ),
             stream,
             delay,
+            mode,
         }) as Arc<dyn Member>],
     );
     let codecs = HashMap::from([(
@@ -117,18 +144,39 @@ async fn chat(app: axum::Router, stream: bool) -> StatusCode {
 
 #[tokio::test]
 async fn r10_gateway_records_ttft_for_non_streamed_chat() {
-    let (app, usage, _dir) = app(false, Duration::from_millis(40));
+    let (app, usage, _dir) = app(false, Duration::from_millis(40), ReplyMode::Text);
     assert_eq!(chat(app, false).await, StatusCode::OK);
     let row = usage.rows().expect("rows").pop().expect("one row");
     assert!(row.ttft_ms.is_none());
+    assert!(row.flow_ms.is_none());
 }
 
 #[tokio::test]
 async fn r10_gateway_records_ttft_before_streamed_body_finishes() {
-    let (app, usage, _dir) = app(true, Duration::from_millis(50));
+    let (app, usage, _dir) = app(true, Duration::from_millis(50), ReplyMode::Text);
     assert_eq!(chat(app, true).await, StatusCode::OK);
     let row = usage.rows().expect("rows").pop().expect("one row");
     let ttft = row.ttft_ms.expect("ttft");
     assert!(ttft >= 40, "ttft={ttft} latency={}", row.latency_ms);
     assert!(row.latency_ms >= ttft);
+}
+
+#[tokio::test]
+async fn r10_gateway_single_chunk_stream_stores_flow_without_speed() {
+    let (app, usage, _dir) = app(true, Duration::from_millis(20), ReplyMode::Text);
+    assert_eq!(chat(app, true).await, StatusCode::OK);
+    let row = usage.rows().expect("rows").pop().expect("one row");
+    assert!(row.flow_ms.is_some_and(|flow| flow > 0));
+    assert!(row_tokens_per_second(&row).is_none());
+}
+
+#[tokio::test]
+async fn r10_gateway_tool_burst_stream_stores_flow_without_speed() {
+    let (app, usage, _dir) = app(true, Duration::from_millis(20), ReplyMode::ToolBurst);
+    assert_eq!(chat(app, true).await, StatusCode::OK);
+    let row = usage.rows().expect("rows").pop().expect("one row");
+    assert!(
+        row.flow_ms.is_none() || row_tokens_per_second(&row).is_none(),
+        "burst tool replies must not report a steady tokens-per-second"
+    );
 }

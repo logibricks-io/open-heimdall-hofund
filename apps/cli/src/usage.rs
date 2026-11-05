@@ -32,7 +32,13 @@ pub(crate) struct UsageReportOptions {
     pub format: UsageOutputFormat,
 }
 
-const USAGE: &str = "usage: hofund usage [today|7d|30d|all] [--days <n>] [--last <dur>] [--since <time>] [--group-by agent|model|provider|provider-key|gateway-key|account|session|day] [--by <same>] [--account <name>] [--model <id>] [--csv] [--json] [--config PATH]";
+const USAGE: &str = "usage: hofund usage [today|7d|30d|all] [--days <n>] [--last <dur>] [--since <time>] [--group-by agent|model|provider|provider-key|gateway-key|account|session|day] [--by <same>] [--account <name>] [--model <id>] [--csv] [--json] [--config PATH]
+
+Period presets count from local midnight (default: last 30 days / 30d). Rolling --days and --last end at now.
+
+--group-by dimensions: agent (client agent id), model (requested model), provider (upstream member), provider-key (API key fingerprint), gateway-key (caller key), account (subscription account), session (client session id), day (local calendar day).
+
+--json emits UsageResponse with stable fields: period, window_label, currency, totals (requests, input_tokens, output_tokens, cache_read_tokens, cache_write_5m_tokens, cache_write_1h_tokens, reasoning_tokens, cost, unpriced, mean_ttft_ms, mean_tokens_per_second), rows (created_at_ms, model, provider, input_tokens, output_tokens, duration_ms, status, caller_key_id, caller_key_name, caller_issuer_id, cache_* , reasoning_*, priced, cost, cost_usd, outcome, client_agent, ttft_ms, tokens_per_second, account, session_id, provider_key_id, served_model), rows_truncated, breakdown_by, breakdown (id, label, requests, input_tokens, output_tokens, cache_*, reasoning_tokens, cost, unpriced, mean_ttft_ms, mean_tokens_per_second).";
 
 /// Parses flags after the `usage` verb.
 ///
@@ -118,7 +124,7 @@ pub(crate) fn parse(args: &[&str]) -> Result<UsageCommand, String> {
         let unix = parse_since(value)?;
         (ReportWindow::Since(unix), UsagePeriod::All)
     } else {
-        let period = positional_period.unwrap_or(UsagePeriod::All);
+        let period = positional_period.unwrap_or(UsagePeriod::Month);
         let window = match period {
             UsagePeriod::Day => ReportWindow::Today,
             UsagePeriod::Week => ReportWindow::Week,
@@ -226,6 +232,14 @@ mod tests {
                 assert_eq!(options.format, UsageOutputFormat::Csv)
             }
         }
+    }
+
+    #[test]
+    fn r10_usage_default_period_is_month() {
+        let super::UsageCommand::Report(options) = parse(&[]).expect("default");
+        assert_eq!(options.period, UsagePeriod::Month);
+        let query = options_to_query(&options);
+        assert_eq!(query.period, UsagePeriod::Month);
     }
 
     #[test]

@@ -99,13 +99,58 @@ pub fn parse_since(value: &str) -> Result<i64, String> {
         .map(|dt| dt.timestamp())
 }
 
-/// Parses `--last` as a positive Go-style duration (`24h`, `90m`, `1.5d`).
+/// Parses `--last` as a positive Go-style duration (`24h`, `90m`, `1h30m`, `1.5d`).
 ///
 /// # Errors
 ///
 /// Returns a message when the duration is missing or not positive.
 pub fn parse_last(value: &str) -> Result<Duration, String> {
     parse_duration_value(value, "--last")
+}
+
+fn parse_go_duration(trimmed: &str, flag: &str) -> Result<i64, String> {
+    let mut total_seconds = 0i64;
+    let mut rest = trimmed.trim();
+    while !rest.is_empty() {
+        let start = rest
+            .find(|ch: char| !ch.is_ascii_digit() && ch != '.')
+            .unwrap_or(rest.len());
+        if start == 0 {
+            return Err(format!(
+                "{flag} takes a duration greater than zero, not {trimmed:?}"
+            ));
+        }
+        let (number, after) = rest.split_at(start);
+        let value: f64 = number
+            .parse()
+            .map_err(|_| format!("{flag} takes a duration greater than zero, not {trimmed:?}"))?;
+        if !(value.is_finite()) || value <= 0.0 {
+            return Err(format!(
+                "{flag} takes a duration greater than zero, not {trimmed:?}"
+            ));
+        }
+        let (unit, next) = if let Some(stripped) = after.strip_prefix("ms") {
+            (0.001, stripped)
+        } else if let Some(stripped) = after.strip_prefix('h') {
+            (3600.0, stripped)
+        } else if let Some(stripped) = after.strip_prefix('m') {
+            (60.0, stripped)
+        } else if let Some(stripped) = after.strip_prefix('s') {
+            (1.0, stripped)
+        } else {
+            return Err(format!(
+                "{flag} takes a duration greater than zero, not {trimmed:?}"
+            ));
+        };
+        total_seconds += (value * unit).round() as i64;
+        rest = next;
+    }
+    if total_seconds <= 0 {
+        return Err(format!(
+            "{flag} takes a duration greater than zero, not {trimmed:?}"
+        ));
+    }
+    Ok(total_seconds)
 }
 
 /// Parses `--days` as a positive number of days (fractions allowed).
@@ -142,6 +187,9 @@ fn parse_duration_value(value: &str, flag: &str) -> Result<Duration, String> {
             ));
         }
         return Ok(Duration::seconds((days * 86_400.0).round() as i64));
+    }
+    if trimmed.chars().any(|ch| ch.is_ascii_alphabetic()) {
+        return Ok(Duration::seconds(parse_go_duration(trimmed, flag)?));
     }
     parse_hms_duration(trimmed, flag)
 }
@@ -255,7 +303,7 @@ pub fn csv_field(value: &str) -> String {
 /// # Errors
 ///
 /// Returns [`UsageError`] when formatting fails.
-pub fn format_csv(rows: &[Row], convert_cost: impl Fn(f64) -> f64) -> Result<String, UsageError> {
+pub fn format_csv(rows: &[Row]) -> Result<String, UsageError> {
     let mut out = String::new();
     out.push_str(
         &CSV_HEADER
@@ -266,17 +314,13 @@ pub fn format_csv(rows: &[Row], convert_cost: impl Fn(f64) -> f64) -> Result<Str
             .join(","),
     );
     out.push('\n');
-    for row in rows.iter().rev() {
-        write_csv_row(&mut out, row, &convert_cost)?;
+    for row in rows {
+        write_csv_row(&mut out, row)?;
     }
     Ok(out)
 }
 
-fn write_csv_row(
-    out: &mut String,
-    row: &Row,
-    convert_cost: &impl Fn(f64) -> f64,
-) -> Result<(), UsageError> {
+fn write_csv_row(out: &mut String, row: &Row) -> Result<(), UsageError> {
     let time = DateTime::<Utc>::from_timestamp(row.created_unix, 0)
         .map(|ts| ts.to_rfc3339())
         .unwrap_or_default();
@@ -284,13 +328,14 @@ fn write_csv_row(
     let cost = row
         .cost_usd
         .filter(|_| row.priced)
-        .map(convert_cost)
         .map(|value| format!("{value:.6}"))
         .unwrap_or_default();
     let cache_write_5m = row.cache_write_5m_tokens.unwrap_or(0);
     let cache_write_1h = row.cache_write_1h_tokens.unwrap_or(0);
     let cache_write_total = cache_write_5m + cache_write_1h;
-    let failed = !row.status.starts_with('2');
+    let status_code = row.status.parse::<u16>().ok();
+    let failed = status_code.is_some_and(|code| code >= 400);
+    let handed_on = row.outcome == crate::OUTCOME_HANDED_ON;
     let cells = [
         time,
         row.client_agent.clone(),
@@ -299,21 +344,18 @@ fn write_csv_row(
         String::new(),
         String::new(),
         row.served_model.clone(),
-        "false".to_owned(),
+        String::new(),
         String::new(),
         opt_i64(row.input_tokens),
         opt_i64(row.output_tokens),
-        cache_write_total.to_string(),
+        opt_i64(Some(cache_write_total)),
         opt_i64(row.cache_read_tokens),
         opt_i64(row.reasoning_tokens),
         cost,
         row.latency_ms.to_string(),
-        row.ttft_ms
-            .filter(|ms| *ms > 0)
-            .map(|ms| ms.to_string())
-            .unwrap_or_default(),
+        opt_i64(row.ttft_ms),
         row.status.clone(),
-        failed.to_string(),
+        bool_cell(failed),
         row.session_id.clone(),
         String::new(),
         row.provider_key_id.clone(),
@@ -325,10 +367,10 @@ fn write_csv_row(
         String::new(),
         String::new(),
         String::new(),
-        "false".to_owned(),
         String::new(),
         String::new(),
-        "false".to_owned(),
+        String::new(),
+        String::new(),
         row.caller_key_id.clone(),
         row.caller_key_name.clone(),
         String::new(),
@@ -336,14 +378,20 @@ fn write_csv_row(
         opt_i64(row.cache_write_5m_tokens),
         opt_i64(row.cache_write_1h_tokens),
         String::new(),
-        "false".to_owned(),
+        bool_cell(handed_on),
         String::new(),
         String::new(),
         String::new(),
         String::new(),
         String::new(),
     ];
-    debug_assert_eq!(cells.len(), CSV_HEADER.len());
+    assert_eq!(
+        cells.len(),
+        CSV_HEADER.len(),
+        "csv columns {} vs header {}",
+        cells.len(),
+        CSV_HEADER.len()
+    );
     for (index, cell) in cells.iter().enumerate() {
         if index > 0 {
             out.push(',');
@@ -355,10 +403,15 @@ fn write_csv_row(
 }
 
 fn opt_i64(value: Option<i64>) -> String {
-    value
-        .filter(|tokens| *tokens > 0)
-        .map(|tokens| tokens.to_string())
-        .unwrap_or_default()
+    value.map(|tokens| tokens.to_string()).unwrap_or_default()
+}
+
+fn bool_cell(value: bool) -> String {
+    if value {
+        "true".to_owned()
+    } else {
+        String::new()
+    }
 }
 
 impl Ledger {
@@ -431,8 +484,10 @@ mod tests {
     fn r10_period_parsing_days_and_last() {
         assert_eq!(parse_days("1.5").expect("days").num_seconds(), 129_600);
         assert_eq!(parse_last("90m").expect("last").num_minutes(), 90);
+        assert_eq!(parse_last("1h30m").expect("last").num_seconds(), 5400);
         assert!(parse_days("0").is_err());
         assert!(parse_last("").is_err());
+        assert!(parse_last("90").is_err());
     }
 
     #[test]
@@ -478,7 +533,7 @@ mod tests {
         }
         let (rows, _) = ledger.report(None, None, None, 100).expect("report");
         assert_eq!(rows.first().map(|row| row.model.as_str()), Some("a"));
-        let csv = format_csv(&rows, |usd| usd).expect("csv");
+        let csv = format_csv(&rows).expect("csv");
         let header = csv.lines().next().expect("header");
         assert_eq!(
             header,
@@ -494,6 +549,95 @@ mod tests {
         assert_eq!(fields.len(), CSV_HEADER.len());
         assert_eq!(fields[1], "agent");
         assert_eq!(fields[2], "a");
+    }
+
+    #[test]
+    fn r10_csv_full_row_values() {
+        let dir = tempfile::tempdir().expect("dir");
+        let ledger = Ledger::open(&dir.path().join("u.sqlite")).expect("ledger");
+        let row = Row {
+            created_unix: 1_700_000_000,
+            model: "asked".to_owned(),
+            upstream: "account:relay:me@x.test".to_owned(),
+            input_tokens: Some(0),
+            output_tokens: Some(7),
+            latency_ms: 1200,
+            status: "502".to_owned(),
+            outcome: crate::OUTCOME_HANDED_ON.to_owned(),
+            caller_key_id: "gk".to_owned(),
+            caller_key_name: "Guest".to_owned(),
+            provider_key_id: "pk".to_owned(),
+            client_agent: "fixture".to_owned(),
+            session_id: "sess".to_owned(),
+            served_model: "served-id".to_owned(),
+            ttft_ms: Some(0),
+            priced: true,
+            cost_usd: Some(0.25),
+            ..Default::default()
+        };
+        ledger
+            .record_with_details(
+                &row,
+                Some(0),
+                UsageDetails::default(),
+                Some(crate::RowPricing {
+                    priced: true,
+                    cost_usd: 0.25,
+                    price: crate::TokenPrice {
+                        input: 1.0,
+                        output: 1.0,
+                        cache_read: 0.0,
+                        cache_write: 0.0,
+                        cache_write_1h: 0.0,
+                    },
+                }),
+            )
+            .expect("row");
+        let (rows, _) = ledger.report(None, None, None, 10).expect("report");
+        let csv = format_csv(&rows).expect("csv");
+        let data: Vec<&str> = csv.lines().nth(1).expect("row").split(',').collect();
+        assert_eq!(data.len(), CSV_HEADER.len());
+        assert_eq!(data[1], "fixture");
+        assert_eq!(data[2], "asked");
+        assert_eq!(data[6], "served-id");
+        assert_eq!(data[9], "0");
+        assert_eq!(data[10], "7");
+        assert_eq!(data[14], "0.250000");
+        assert_eq!(data[16], "0");
+        assert_eq!(data[17], "502");
+        assert_eq!(data[18], "true");
+        assert_eq!(data[19], "sess");
+        assert_eq!(data[21], "pk");
+        assert_eq!(data[23], "me@x.test");
+        assert_eq!(data[34], "gk");
+        assert_eq!(data[35], "Guest");
+        assert_eq!(data[37], "account:relay:me@x.test");
+        assert_eq!(data[41], "true");
+    }
+
+    #[test]
+    fn r10_filtered_summary_keeps_newest_matching_rows() {
+        let dir = tempfile::tempdir().expect("dir");
+        let ledger = Ledger::open(&dir.path().join("u.sqlite")).expect("ledger");
+        let base = 1_700_000_000;
+        for index in 0..5 {
+            ledger
+                .record(&Row {
+                    created_unix: base + index,
+                    model: if index % 2 == 0 { "keep" } else { "drop" }.to_owned(),
+                    upstream: "m".to_owned(),
+                    latency_ms: 1,
+                    status: "200".to_owned(),
+                    ..Default::default()
+                })
+                .expect("row");
+        }
+        let (rows, _) = ledger
+            .summary_filtered(None, Some("keep"), None, 2)
+            .expect("filtered");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].model, "keep");
+        assert!(rows[0].created_unix >= rows[1].created_unix);
     }
 
     #[test]

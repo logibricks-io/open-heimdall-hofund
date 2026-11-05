@@ -138,6 +138,9 @@ pub struct UsageQuery {
     /// When true, return every row in the window instead of the row cap.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unlimited: bool,
+    /// Query keys that are not part of the usage API.
+    #[serde(skip)]
+    pub unknown_keys: Vec<String>,
 }
 
 impl UsageQuery {
@@ -181,7 +184,7 @@ impl UsageQuery {
                 "unlimited" if value == "1" || value.eq_ignore_ascii_case("true") => {
                     out.unlimited = true;
                 }
-                _ => {}
+                _ => out.unknown_keys.push(key),
             }
         }
         out
@@ -219,6 +222,16 @@ impl UsageQuery {
     /// Returns a `BadRequest` error with an `unknown_variant` detail for
     /// unrecognized period or breakdown values.
     pub fn validate(&self) -> Result<(), ControlError> {
+        if !self.unknown_keys.is_empty() {
+            let message = "unknown usage query parameter";
+            let mut error = ControlError::new(ControlErrorKind::BadRequest, message, "validate");
+            error.details.push(FieldIssue::new(
+                &self.unknown_keys[0],
+                "unknown_field",
+                message,
+            ));
+            return Err(error);
+        }
         if self.period == UsagePeriod::Unknown {
             let message = "unknown usage period; expected day, week, month, or all";
             let mut error = ControlError::new(ControlErrorKind::BadRequest, message, "validate");
@@ -328,6 +341,15 @@ pub struct UsageRow {
     /// Client session id when recorded.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub session_id: String,
+    /// Provider API key fingerprint when recorded.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub provider_key_id: String,
+    /// Upstream model id when recorded.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub served_model: String,
+    /// Stored USD cost when the row was priced (always USD on the wire).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
 }
 
 /// Aggregated usage totals.
@@ -517,5 +539,7 @@ mod tests {
             ..UsageQuery::default()
         };
         assert!(conflict.validate().is_err());
+        let unknown = UsageQuery::parse(Some("period=all&extra=1"));
+        assert!(unknown.validate().is_err());
     }
 }

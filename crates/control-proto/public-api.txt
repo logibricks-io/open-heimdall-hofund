@@ -865,6 +865,7 @@ UsageQuery.last
 UsageQuery.model
 UsageQuery.period
 UsageQuery.since
+UsageQuery.unknown_keys
 UsageQuery.unlimited
 UsageQuery::fn encode (& self) -> String
 UsageQuery::fn new (period : UsagePeriod) -> Self
@@ -892,6 +893,7 @@ UsageRow.caller_key_id
 UsageRow.caller_key_name
 UsageRow.client_agent
 UsageRow.cost
+UsageRow.cost_usd
 UsageRow.created_at_ms
 UsageRow.duration_ms
 UsageRow.input_tokens
@@ -900,8 +902,10 @@ UsageRow.outcome
 UsageRow.output_tokens
 UsageRow.priced
 UsageRow.provider
+UsageRow.provider_key_id
 UsageRow.reasoning_hidden
 UsageRow.reasoning_tokens
+UsageRow.served_model
 UsageRow.session_id
 UsageRow.status
 UsageRow.tokens_per_second

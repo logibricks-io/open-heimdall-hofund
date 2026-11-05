@@ -1151,8 +1151,15 @@ impl ControlState for DaemonControl {
                 let dimension = breakdown_dimension(by)?;
                 let ledger_for_groups = Arc::clone(&ledger);
                 let since_for_groups = since;
+                let model_filter = model_owned.clone();
+                let account_filter = account_owned.clone();
                 let groups = tokio::task::spawn_blocking(move || {
-                    ledger_for_groups.breakdown(since_for_groups, dimension)
+                    ledger_for_groups.breakdown(
+                        since_for_groups,
+                        dimension,
+                        model_filter.as_deref(),
+                        account_filter.as_deref(),
+                    )
                 })
                 .await
                 .map_err(|error| internal(format!("usage breakdown task failed: {error}")))?
@@ -1739,7 +1746,7 @@ fn usage_row(row: hofund_usage::Row, convert: impl Fn(f64) -> f64 + Copy) -> Usa
         .output_tokens
         .map(|tokens| u64::try_from(tokens).unwrap_or(0));
     out.duration_ms = u64::try_from(row.latency_ms).unwrap_or(0);
-    out.status = row.status;
+    out.status = row.status.clone();
     out.caller_key_id = row.caller_key_id;
     out.caller_key_name = row.caller_key_name;
     out.caller_issuer_id = row.caller_issuer_id;
@@ -1757,8 +1764,11 @@ fn usage_row(row: hofund_usage::Row, convert: impl Fn(f64) -> f64 + Copy) -> Usa
         .map(|tokens| u64::try_from(tokens).unwrap_or(0));
     out.reasoning_hidden = row.reasoning_hidden;
     out.priced = row.priced;
-    out.cost = row.cost_usd.filter(|_| row.priced).map(convert);
-    out.outcome = row.outcome;
+    out.cost_usd = row.cost_usd.filter(|_| row.priced);
+    out.cost = out.cost_usd.map(convert);
+    out.outcome = row.outcome.clone();
+    out.provider_key_id = row.provider_key_id.clone();
+    out.served_model = row.served_model.clone();
     out.client_agent = row.client_agent;
     out.ttft_ms = row
         .ttft_ms
