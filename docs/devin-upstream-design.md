@@ -28,7 +28,7 @@ Attack: treating `list_models` as a static JSON fixture. The reference refreshes
 | Model configs | `/exa.api_server_pb.ApiServerService/GetCliModelConfigs` | `application/proto` | `MODEL_CONFIGS_RPC`, `index.mjs:349` |
 | Account identity / quota JSON | `/exa.seat_management_pb.SeatManagementService/GetUserStatus` | `application/json` | `userStatus`, `index.mjs:2987-2995` |
 | PKCE token exchange | `/exa.seat_management_pb.SeatManagementService/ExchangeDevinCLIPKCECode` | `application/json` | `EXCHANGE`, `index.mjs:30`; `exchange`, `index.mjs:908-914` |
-| Browser PKCE start | `https://app.devin.ai/auth/cli/continue` | redirect | `AUTHORIZE`, `index.mjs:29`; `browserSignIn`, `index.mjs:945-1008` (`code_challenge`, `code_challenge_method=S256`, `cli_pkce_marker=1` at `index.mjs:999-1001`) |
+| Browser PKCE start | `https://app.devin.ai/auth/cli/continue` | redirect | `AUTHORIZE`, `index.mjs:29`; `browserSignIn`, `index.mjs:945-1008` (`code_challenge`, `code_challenge_method=S256`, `cli_pkce_marker=1` at `index.mjs:999-1001`; authorize query also `redirect_uri`, `state`, `prompt=select_account` at `index.mjs:995-998`; callback verifies `state` before exchange at `index.mjs:974`; `exchange` always posts to fixed `SERVER` at `index.mjs:908-909`; success uses `SERVER` only and ignores returned API host URLs at `index.mjs:976-977`) |
 
 Default API origin: `https://server.codeium.com` (`SERVER`, `index.mjs:28`). Stored accounts carry `api_server` from `credentials.toml` (`windsurf_api_key`, `api_server_url`, `devin_api_url`; `plugins/subscriptions/devin/src/creds.rs:111-147`). The reference also honors `WINDSURF_API_SERVER_URL` at request time (`live`, `index.mjs:3084`). Hofund reads the env var only during `execute` / `list_models` for the account being billed, not process-wide.
 
@@ -42,7 +42,7 @@ Only **`GetChatMessage`** uses Connect framing. **`GetCliModelConfigs`** and its
 
 For chat, `frame` / `frames` (`index.mjs:1138-1177`). Same 5-byte header as Cursor (`docs/cursor-upstream-design.md` section 1.1): flags, big-endian length, payload. Flag bit 0: gzip payload. Flag bit 2: stream end with JSON error body, not protobuf (`frames` yield `{ end, data }`; `failure`, `index.mjs:1684-1705`).
 
-Request gzip threshold: `GZIP_AT = 8 << 10` (8192 bytes) (`index.mjs:1138-1146`). When set, flag byte is 1 and header `Connect-Content-Encoding: gzip` is added (`rpcHeaders`, `index.mjs:1813-1814`). The CLI does not send `Connect-Accept-Encoding` on the request (`gzip-request.test.mjs` lines 51-52). Response frames may still arrive gzip-compressed (flag bit 0); inflate before parsing.
+Request gzip threshold: `GZIP_AT = 8 << 10` (8192 bytes) (`index.mjs:1138-1146`). When set, flag byte is 1 and header `Connect-Content-Encoding: gzip` is added (`rpcHeaders`, `index.mjs:1813-1814`). The CLI does not send `Connect-Accept-Encoding` on the request (`gzip-request.test.mjs` lines 51-52). Response frames may still arrive gzip-compressed (flag bit 0); inflate through the shared SDK helper (`docs/cursor-upstream-design.md` section 1.1) with **decompressed output capped at 64 MiB** (same bound as compressed frame length at `index.mjs:1157`; `gunzipSync` alone does not cap expanded size).
 
 Oversize wire body: nginx returns 413 above ~10 MiB (`README.md` lines 78-79; `gzip-request.test.mjs` lines 1-4). Hofund gzips before send when over 8192 bytes; do not send 10 MiB plain.
 
@@ -72,14 +72,14 @@ Response: read the full HTTP body as protobuf; parse with `parseModelConfigs` / 
 |---|---|
 | `Content-Type` | `application/connect+proto` |
 | `Connect-Protocol-Version` | `1` |
-| `Authorization` | `Basic ` plus the session token (not Bearer) |
+| `Authorization` | Literal `Basic ` concatenated with the raw session token (not Bearer, not RFC 7617 base64; `opencode2.test.mjs` expects `Basic account-a`, `index.mjs:1814`) |
 | `Connect-Content-Encoding` | `gzip` only when frame flag bit 0 is set |
 
-Chat uses `fetch(server + CHAT_RPC, { method: "POST", body, signal })` (`index.mjs:1827-1831`). No HTTP/2 pin is required; the reference uses ordinary HTTPS POST with a full body buffer.
+Chat uses `fetch(server + CHAT_RPC, { method: "POST", body, signal })` (`index.mjs:1827-1831`). No HTTP/2 pin is required; the reference uses ordinary HTTPS POST with a full body buffer. Only the caller **`signal`** bounds idle time on the wire (no separate 60 s idle cap in the reference).
 
-Timeouts: `userStatus` and `GetCliModelConfigs` use 15 s (`index.mjs:2994`, `index.mjs:492`). PKCE `exchange` uses 30 s (`index.mjs:913`). Sign-in loopback uses `SIGN_IN_TIMEOUT = 10 * 60 * 1000` (`index.mjs:37`, `browserSignIn`). Hofund should use `Call` with explicit per-RPC budgets matching those values rather than relying on the default 60 s read idle alone for unary JSON RPCs.
+Per-RPC budgets (section 3.2) replace the pooled client’s fixed **60 s** read idle (`crates/kernel/plugin-host/src/pool.rs:26`, `70-74`) for Devin calls. Until then, a thinking model silent for more than 60 s before the first frame would surface as `Interrupted` from the pool (`pool.rs:309-314`), not as Devin’s own `failure` mapping.
 
-Non-OK HTTP before streaming: read body capped at 1 MiB (`index.mjs:1836`) and pass through `failure`.
+Non-OK HTTP before streaming: read body capped at **1 MiB** (`index.mjs:1836`), then classify with section 6’s `failure` table—not `Call::open`’s generic `status_failure` (`plugin-sdk/src/transport.rs:290-297`, `461-480`, **256**-char snippet).
 
 ### 1.4 Client metadata protobuf (`metadata`)
 
@@ -91,7 +91,7 @@ Built in `metadata(key)` (`index.mjs:1414-1415`), embedded as field 1 bytes of t
 | 2 | string | `CLI_VERSION` (`3000.11.3`) |
 | 3 | string | session token (same as Basic auth secret) |
 | 4 | string | `en` |
-| 5 | string | OS name (`windows` on win32, else `process.platform`) |
+| 5 | string | OS name: send **`darwin`** on macOS (`std::env::consts::OS` is `macos`; reference `osName` uses `process.platform`, `index.mjs:1410-1415`), **`windows`** on Windows |
 | 7 | string | `CLI_VERSION` again |
 | 12 | string | `chisel` |
 | 28 | string | `chisel` |
@@ -172,7 +172,7 @@ If usage reports zero output but content was seen, estimate output as `floor((sa
 - Immediate end frame with error JSON → map through `failure`, return error without opening a success stream (`errors.test.mjs` lines 87-91).
 - Immediate end with `{}` on a metadata-only success → 502 with **`EMPTY_REPLY_MESSAGE`** (`errors.test.mjs` lines 95-101).
 - EOF before content → 502 (`errors.test.mjs` lines 81-85).
-- Before returning `Ok(Completion::Stream)`, wait for the first **`events`** yield (`roundtrip`, `index.mjs:1851-1858`), not field 3 alone: a reasoning-only first frame (field 9) counts as content (`index.mjs:1738-1740`). Only after that may hofund emit stream events to the router; failover before the first yielded client byte is only safe when nothing was yielded.
+- Before returning `Ok(Completion::Stream)`, wait until **`events`** yields **text (field 3), reasoning (field 9), or a tool call (field 6)**—the same set that increments `said` (`index.mjs:1734-1740`, `1774-1776`). **Field 10 (signature) and field 7 (usage) alone do not open the stream**; skip them and keep reading (`index.mjs:1741-1744`, `1763-1771`). Only after that may hofund emit stream events to the router; failover before the first yielded client byte is only safe when nothing was yielded (`roundtrip`, `index.mjs:1851-1858`).
 
 Both empty-reply paths (post-stream `events` check and metadata-only end frame) use **`EMPTY_REPLY_MESSAGE`** exactly. The reference plugin's shorter `"an empty reply"` substring would incorrectly **rest** the member (`decision.rs` `rests`, `docs/cursor-upstream-design.md` section 4.2).
 
@@ -205,7 +205,7 @@ Reuse the Cursor design's direction (`docs/cursor-upstream-design.md` section 2)
 |---|---|---|
 | `fields`, malformed-tail rule | Shared SDK module | Same algorithm as `index.mjs:1091-1129` and Cursor `index.mjs:1511-1560` |
 | `frame` / deframe / `frames` iterator | Shared SDK | Identical framing; Devin request gzip is chosen before `frame`, not inside it |
-| `gzip` inflate for flag bit 0 | `hofund_plugin_sdk::inflate::gzip` (Cursor R-8) | `flate2` with pure backend; boundary-legal |
+| `gzip` inflate for flag bit 0 | `hofund_plugin_sdk::inflate::gzip` (Cursor R-8) | `flate2` with pure backend; **64 MiB** decompressed cap (section 1.2) |
 | Chat-specific messages | `plugins/subscriptions/devin/src/connect/` | Field numbers in section 1; no Codeium names in SDK |
 
 Attack: copying the JavaScript `PB` class twice. Defense: SDK exports `ProtoBuf` builder and `Field` parser only; Devin and Cursor plugins each own message assembly tables with golden round trips.
@@ -226,15 +226,28 @@ Numeric range: decode varints as `u64`. Tool stop reasons and usage counts are s
 
 No `open_duplex`, no HTTP/2 pin, no client heartbeats on the wire.
 
-`Call::open` (`plugin-sdk/src/transport.rs:7-10`) keeps a 2xx body unread; use it for `GetChatMessage` so empty-reply and Connect end-frame errors can be handled before emitting stream events. Do **not** use `Call::send`, which buffers the entire response and hides streaming backpressure until complete—acceptable for **`GetCliModelConfigs`** (unframed body via `Call::send` or read-all), not for chat.
+**Do not use `Call::open` for Devin.** On status ≥ 400 it reads the full body without a cap (`transport.rs:1258-1260`) and maps through generic `status_failure` (`transport.rs:290-297`, `461-480`), which truncates messages to **256** characters and never runs the Devin **`failure`** table (section 6).
 
-Request compression: gzip the protobuf **before** framing when `msg.len() > 8192` (`index.mjs:1139-1146`). The kernel need not expose a separate compression API; the plugin compresses with the same SDK helper Cursor uses for inflate (symmetric gzip in SDK, or `flate2` encode in the Devin plugin only if encode stays plugin-local—prefer SDK `gzip::compress` mirroring inflate to keep `flate2` in one workspace place).
+Use **`Call::open_raw(http, 1)`** (`transport.rs:307-311`) for **`GetChatMessage`** and for failed **`GetCliModelConfigs`** / **`GetUserStatus`** responses. The plugin reads error bodies up to **1 MiB** (`index.mjs:1836`), parses JSON or Connect end JSON when applicable, and classifies with section 6. On **2xx**, stream the body with `Call::open_raw` and deframe for chat; buffer-unary bodies for model-config RPCs.
+
+Set **`Authorization`** via `Call::sensitive_header` with the literal `Basic ` + raw token (`CredentialStyle` has no matching preset; `index.mjs:1814`).
+
+Request compression: gzip the protobuf **before** framing when `msg.len() > 8192` (`index.mjs:1139-1146`). Prefer SDK `gzip::compress` mirroring the shared inflate helper (section 2).
 
 Streaming read: poll `BodyStream` on the execute task. If the socket goes silent **after** stream bytes were already yielded to the router, return `PluginError::status_error(502, "the reply broke off: …")` with the same wording as `events` (`index.mjs:1720-1722`): **rest** applies, **no** failover (`allows` is false once output started). If the break happens **before** any stream byte is returned from `execute`, use the same `status_error(502, …)` wording; failover may still apply. Do not use `PluginErrorKind::Interrupted` for Devin mid-stream breaks (section 6 aligns with `docs/cursor-upstream-design.md` section 6).
 
-### 3.2 Minimal kernel extension
+### 3.2 Kernel extension (shared with Cursor R-8)
 
-**None required for R-12 chat**, if `Call::open` is available to subscription plugins.
+Devin R-12 **depends** on the same vendor-neutral unary transport extension as Cursor (`docs/cursor-upstream-design.md` section 3.2): optional **`Call::read_timeout(Duration)`** (and `plugin-host` honouring it instead of the pool’s fixed **60 s** idle, `pool.rs:26`, `70-74`). Land that API in the SDK/host **with or before** Devin R-12; do not ship Devin upstream on today’s uncapped pool idle alone.
+
+| RPC | Read budget | Why |
+|---|---|---|
+| `GetCliModelConfigs` | **15 s** | Matches reference `AbortSignal.timeout(15_000)` (`index.mjs:492`) |
+| `GetUserStatus` | **15 s** | `index.mjs:2994` |
+| PKCE `exchange` | **30 s** | `index.mjs:913` |
+| `GetChatMessage` (2xx stream) | **300 s** per-call idle | Reference follows only the caller **`signal`** (`index.mjs:1827-1831`); the pool’s **60 s** idle would cut off long “thinking” gaps before the first frame and mis-map to `Interrupted` / false “reply broke off” 502s |
+
+Sign-in loopback still uses **`SIGN_IN_TIMEOUT = 10 * 60 * 1000`** (`index.mjs:37`, `browserSignIn`). Duplex `open_duplex` remains Cursor-only; Devin does not use it.
 
 Optional later (R-13 keepalive reporting): record ping usage **until the daemon exposes a usage hook**—mirrors `reportPing` (`index.mjs:2435-2440`). Defer until keepalive lands; do not block R-12 on daemon usage plumbing.
 
@@ -258,29 +271,32 @@ System and developer text: prepend to the first user message (`build`, `index.mj
 
 Default user nudge when the transcript ends on assistant without pending calls: `"Please proceed with the task."` (`index.mjs:1570-1570`).
 
-Structured output, images, tool calls, and thinking replay beyond plain text: **R-13** (section 4.3), except **`response_format` is refused in R-12** (section 4.2).
+Structured output and other R-13-only wire fields: section 4.2 refusals (not a field on `hofund_ir::Request`, `crates/kernel/ir/src/request.rs:16-40`).
 
 ### 4.2 Part 1 (R-12): text stream and model configs
 
 **Successful execute** returns:
 
 1. `MessageStart` with generated id and the **requested** model id from the inbound request (`chat.model` in the reference stream, `index.mjs:1887`), not the resolved wire uid alone.
-2. `ContentBlockStart` text, `TextDelta` for each field-3 string; field-9 reasoning counts toward opening the stream in R-13 (R-12 may map reasoning only after full R-13; still wait on `events` first yield per section 1.7).
+2. `ContentBlockStart` text and/or thinking blocks: **`TextDelta` for field 3**; **R-12 forwards field-9 reasoning to the client** (same `said` accounting as text, `index.mjs:1738-1740`) using the gateway’s reasoning stream shape for the inbound protocol. Skip field-10 signature and field-7 usage until open (section 1.7).
 3. On clean end: map stop varint **3** to `StopReason::MaxTokens`; tool stop **10** and default stop to `EndTurn` / tool-use as in `events` (`index.mjs:1781`).
-4. Omit usage in R-12 even if field 7 arrives (R-13).
+4. Omit usage in R-12 even if field 7 arrives (R-13 billing path).
 
 Before `Ok(Completion::Stream)`, buffer until the first **`events`** output or a terminal error (`roundtrip`, `index.mjs:1851-1858`; section 1.7).
 
-**list_models (R-12)** calls `GetCliModelConfigs` (section 1.3a), parses with `parseConfigFamilies`, merges image flags via `parseModelConfigs`, applies `listed()` catalog rules (`index.mjs:274-320`). Fallback order matches **`familiesFor`** (`index.mjs:856-858`): RPC → CLI JSON (`devin models list --format json`, `parseFamilies` `index.mjs:112-134`) when `cliAnswersFor` is true → **`familiesOf(SNAPSHOT)`**. CLI subprocesses use `HostContext::spawn_process().spawn_piped` (`crates/kernel/plugin-api/src/host.rs:562-567`) with **`XDG_DATA_HOME` and `APPDATA`** set to an isolated directory in `SpawnRequest::env`; plugin source must not use `std::process` or `std::net` (`xtask/plugin-boundary`, `clippy.toml`).
+**list_models (R-12)** calls `GetCliModelConfigs` (section 1.3a), parses with `parseConfigFamilies`, merges image flags via `parseModelConfigs`, applies `listed()` catalog rules (`index.mjs:274-320`). Fallback order matches **`familiesFor`** (`index.mjs:856-858`): RPC → CLI JSON (`devin models list --format json`, `parseFamilies` `index.mjs:112-134`) when `cliAnswersFor` is true → **`familiesOf(SNAPSHOT)`**. CLI subprocesses use `HostContext::spawn_process().spawn_piped` (`crates/kernel/plugin-api/src/host.rs:570-575`) with **`XDG_DATA_HOME` and `APPDATA`** set to an isolated directory in `SpawnRequest::env`; plugin source must not use `std::process` or `std::net` (`xtask/plugin-boundary`, `clippy.toml`). **`spawn_piped` caps each stdout line at 1 MiB** (`host.rs:572-575`); a single-line `models list --format json` larger than that is truncated, JSON parse fails, and the chain falls through to **`SNAPSHOT`**—document this in tests.
 
-**Refusals (R-12)** before RPC when the IR contains:
+**Refusals (R-12)** before RPC when the IR or leftover protocol JSON requests structured output or other R-13-only shapes:
 
 - any tool definition, tool call, or tool result;
 - any image part;
-- **`response_format` / structured output** (same pattern as tools/images);
-- thinking blocks that require signature replay (R-13).
+- thinking blocks that require signature replay (R-13);
+- **structured output**, detected from **`request.extensions`** (there is no top-level `response_format` on `Request`, `request.rs:16-40`):
+  - **Chat** inbound: extension key **`response_format`** with `type` **`json_object`** or **`json_schema`** (codec leaves the rest of the Chat object in extensions, `openai_chat.rs:586-592`). **`type: "text"`** or absent type is allowed (`formatText` returns `""`, `index.mjs:1435-1437`).
+  - **Responses** inbound: extension object **`text`** with nested **`format`** requesting JSON schema or JSON object (remaining top-level fields after decode, `openai_responses.rs:320`).
+  - **Messages** inbound: extension **`output_config`** whose **`format`** sub-object requests structured output (`json_schema` / `json_object`). Do **not** reject **`output_config` that carries only `effort`** (`anthropic.rs:358-366`).
 
-Return `PluginError::status_error(404, …).without_cooldown()` with fixed phrases (pattern from Cursor R-8 section 4.2). Status 404 keeps default failover without resting the account.
+Return `PluginError::status_error(404, …).without_cooldown()` with one fixed phrase for tools, one for images, one for structured output. Wording must **not** contain the too-long substring (`hofund_ir::too_long`, `error.rs:12-14`) or match **`UNSERVED_WORDS`** (`decision.rs:49-51`)—for example: **"structured output is not served on Devin until R-13"** (no **model** + **not supported** pattern). Status 404 keeps default failover without resting the account.
 
 Attack: passing tools with empty field 10 but tool calls still in history—still unsafe. Refuse when history contains tool calls or results, not only when `tools` is non-empty.
 
@@ -438,7 +454,7 @@ cargo test --workspace
 | Area | Files | Notes |
 |---|---|---|
 | Connect codec (Devin messages) | `plugins/subscriptions/devin/src/connect/{mod,chat,configs}.rs` | Field tables in section 1 |
-| Shared Connect helpers (if not from Cursor merge) | `crates/kernel/plugin-sdk/src/connect/{frame,proto,gzip}.rs` | Coordinate with Cursor R-8 to avoid duplicate `flate2` policy |
+| Shared Connect + read_timeout | `plugin-sdk` `Call::read_timeout`, `plugin-host` `pool.rs` | **Blocker**: same API as Cursor R-8 section 3.2; Devin R-12 must not ship on 60 s pool idle alone |
 | Upstream execute + probe | `upstream.rs`, `stream.rs` | Replace `unsupported()` |
 | Model list + variant picker | `models.rs`, `discover.rs` touch | Wire `list_models` to RPC |
 | PKCE sign-in | `sign_in.rs` (new), `lib.rs` | Loopback server via host loopback handle |
@@ -481,9 +497,10 @@ cargo test --workspace
 6. **Empty reply string** must match `EMPTY_REPLY_MESSAGE` exactly on both paths.
 7. **GetCliModelConfigs** must not use Connect frames or Basic auth—only chat does.
 8. **Hand-written codec drift**—require golden binaries from reference testdata in CI (frame vs raw).
+9. **`Call::open` vs `open_raw`**—error bodies must use `open_raw` + 1 MiB cap + section 6 `failure`, not SDK `status_failure`.
 
 ---
 
 ## Summary
 
-Devin chat is one Connect+proto POST per turn on `{api_server}/…/GetChatMessage`, Basic auth, optional gzip request bodies over 8 KiB, and a framed protobuf stream of text (R-12) plus tools, images, reasoning, usage, quota, errors, and optional cache keepalive (R-13). Reuse a vendor-neutral Connect codec in `hofund-plugin-sdk` (as Cursor R-8) with Devin-specific message tables in the plugin. `HttpHandle::send` plus `Call::open` suffices; no duplex API. Tokens come from PKCE or CLI TOML; identity from `GetUserStatus` with isolated CLI fallback; serialize renewal with `accounts().lease`. Test with the kit fake server and golden bytes from the reference plugin tests (Connect frames for chat, raw protobuf for model configs). R-12 ships text streaming and live model configs; R-13 ships the rest of the reference request mapper and operational features.
+Devin chat is one Connect+proto POST per turn on `{api_server}/…/GetChatMessage`, literal Basic auth, optional gzip request bodies over 8 KiB, and a framed protobuf stream of text and reasoning (R-12) plus tools, images, usage, quota, errors, and optional cache keepalive (R-13). Reuse a vendor-neutral Connect codec and **`Call::read_timeout`** in `hofund-plugin-sdk` (Cursor R-8) with Devin-specific message tables in the plugin. Use **`Call::open_raw`**, not `Call::open`, so HTTP errors map through section 6. Tokens come from PKCE or CLI TOML; identity from `GetUserStatus` with isolated CLI fallback; serialize renewal with `accounts().lease`. Test with the kit fake server and golden bytes from the reference plugin tests (Connect frames for chat, raw protobuf for model configs). R-12 ships text/reasoning streaming and live model configs; R-13 ships the rest of the reference request mapper and operational features.
