@@ -1,6 +1,6 @@
 //! Terminal entry, async loop, and live gateway dependencies.
 
-mod deps;
+pub(crate) mod deps;
 pub(crate) mod spawn;
 
 use std::io;
@@ -22,7 +22,7 @@ use tokio::sync::mpsc;
 use crate::app::{App, AppAction};
 use crate::gateway::{HandoffState, WATCH_INTERVAL, run_handoff_tick};
 use crate::pages::read_path;
-use crate::quit::perform_quit;
+use crate::quit::{QuitAction, perform_quit};
 use crate::runtime::{
     HandoffSnapshot, WorkerMsg, apply_control_followup, apply_worker_msg, open_event_stream,
     schedule_page_probe,
@@ -49,10 +49,17 @@ pub fn run(config: &Path, no_color: bool) -> Result<(), String> {
     let result = run_async(config, no_color);
     let _ = disable_raw_mode();
     let _ = execute!(stdout, LeaveAlternateScreen, crossterm::cursor::Show);
-    result
+    match result {
+        Ok(QuitAction::LeaveRunningNotice(message)) => {
+            eprintln!("{message}");
+            Ok(())
+        }
+        Ok(QuitAction::None) => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
-fn run_async(config: &Path, no_color: bool) -> Result<(), String> {
+fn run_async(config: &Path, no_color: bool) -> Result<QuitAction, String> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -60,7 +67,7 @@ fn run_async(config: &Path, no_color: bool) -> Result<(), String> {
     runtime.block_on(async_main(config, no_color))
 }
 
-async fn async_main(config: &Path, no_color: bool) -> Result<(), String> {
+async fn async_main(config: &Path, no_color: bool) -> Result<QuitAction, String> {
     let theme = Theme::new(no_color);
     let mut app = App::new(PageId::Agents);
     app.gateway = GatewayPresence::Unknown;
@@ -90,7 +97,7 @@ async fn async_main(config: &Path, no_color: bool) -> Result<(), String> {
             biased;
             msg = work_rx.recv() => {
                 let Some(msg) = msg else { break };
-                if let WorkerMsg::Handoff { snapshot, .. } = &msg {
+                if let WorkerMsg::Handoff { snapshot, .. } | WorkerMsg::HandoffProgress { snapshot } = &msg {
                     handoff_snapshot = snapshot.clone();
                 }
                 apply_worker_msg(&mut app, msg);
@@ -144,7 +151,7 @@ async fn async_main(config: &Path, no_color: bool) -> Result<(), String> {
         }
     }
 
-    perform_quit(config, &handoff_snapshot, live.client().as_ref()).await
+    perform_quit(config, &handoff_snapshot, live.client(), live.as_ref()).await
 }
 
 fn spawn_handoff_worker(
@@ -166,6 +173,13 @@ fn spawn_handoff_worker(
                 &mut || tokens.read(),
                 listen,
                 &mut state,
+                &mut |state| {
+                    let snapshot = HandoffSnapshot {
+                        spawned: state.spawned,
+                        child_pid: state.child_pid,
+                    };
+                    let _ = work_tx.try_send(WorkerMsg::HandoffProgress { snapshot });
+                },
             )
             .await;
             let snapshot = HandoffSnapshot {

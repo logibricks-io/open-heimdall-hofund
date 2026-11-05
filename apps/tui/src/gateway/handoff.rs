@@ -54,8 +54,30 @@ pub struct HandoffState {
 }
 
 /// Updates attach state without clearing `spawned` for our own child pid.
-pub fn record_attach(state: &mut HandoffState, daemon_pid: u32, client: Client) {
-    let own = state.spawned && state.child_pid == Some(daemon_pid);
+pub fn record_attach<D: HandoffDeps>(
+    state: &mut HandoffState,
+    daemon_pid: u32,
+    client: Client,
+    deps: &D,
+) {
+    if state.spawned
+        && let Some(child) = state.child_pid
+    {
+        if daemon_pid == 0 {
+            if deps.process_alive(child) {
+                state.client = Some(client);
+                return;
+            }
+        } else if daemon_pid == child {
+            state.client = Some(client);
+            return;
+        } else if deps.process_alive(daemon_pid) {
+            state.spawned = false;
+            state.child_pid = None;
+        }
+    }
+
+    let own = state.spawned && state.child_pid == Some(daemon_pid) && daemon_pid != 0;
     if !own {
         state.spawned = false;
         state.child_pid = None;
@@ -73,12 +95,17 @@ pub enum HandoffOutcome {
 }
 
 /// Runs steps 1–4 of section 4 once.
-pub async fn run_handoff_tick<D: HandoffDeps, R: FnMut() -> String>(
+pub async fn run_handoff_tick<
+    D: HandoffDeps,
+    R: FnMut() -> String,
+    N: for<'a> FnMut(&'a HandoffState),
+>(
     deps: &D,
     config: &Path,
     read_token: &mut R,
     listen: SocketAddr,
     state: &mut HandoffState,
+    notify: &mut N,
 ) -> HandoffOutcome {
     let locks = match deps.held_locks(config) {
         Ok(locks) => locks,
@@ -92,7 +119,7 @@ pub async fn run_handoff_tick<D: HandoffDeps, R: FnMut() -> String>(
             Ok(client) => {
                 let status = deps.fetch_status(&client).await.ok();
                 let daemon_pid = status.as_ref().map(|s| s.pid).unwrap_or(0);
-                record_attach(state, daemon_pid, client.clone());
+                record_attach(state, daemon_pid, client.clone(), deps);
                 let line = status_line_from_status(status.as_ref(), &client, deps).await;
                 return HandoffOutcome::Update(GatewayPresence::Attached { line });
             }
@@ -117,11 +144,12 @@ pub async fn run_handoff_tick<D: HandoffDeps, R: FnMut() -> String>(
         Ok(pid) => {
             state.spawned = true;
             state.child_pid = Some(pid);
+            notify(state);
             match wait_for_daemon(deps, config, read_token).await {
                 Ok(client) => {
                     let status = deps.fetch_status(&client).await.ok();
                     let daemon_pid = status.as_ref().map(|s| s.pid).unwrap_or(pid);
-                    record_attach(state, daemon_pid, client);
+                    record_attach(state, daemon_pid, client, deps);
                     HandoffOutcome::Update(GatewayPresence::Spawned {
                         line: format!("served while the UI is open (pid {pid})"),
                         pid,
@@ -236,6 +264,7 @@ mod tests {
         lock_probe_fails: Mutex<bool>,
         discover_calls: AtomicU32,
         discover_succeeds: Mutex<bool>,
+        status_fails: Mutex<bool>,
         status_pid: u32,
     }
 
@@ -249,6 +278,7 @@ mod tests {
                 lock_probe_fails: Mutex::new(false),
                 discover_calls: AtomicU32::new(0),
                 discover_succeeds: Mutex::new(false),
+                status_fails: Mutex::new(false),
                 status_pid: 999,
             }
         }
@@ -289,6 +319,11 @@ mod tests {
         }
 
         async fn fetch_status(&self, _client: &Client) -> Result<StatusResponse, ClientError> {
+            if *self.status_fails.lock().expect("status") {
+                return Err(ClientError::ConnectionUnavailable(
+                    "status failed".to_owned(),
+                ));
+            }
             let mut status = StatusResponse::default();
             status.pid = self.status_pid;
             Ok(status)
@@ -316,12 +351,14 @@ mod tests {
         *deps.locks.lock().expect("locks") = vec![PathBuf::from("/tmp/x.lock")];
         let mut state = HandoffState::default();
         let mut token = || "t".to_owned();
+        let mut notify = |_: &HandoffState| {};
         let outcome = run_handoff_tick(
             &deps,
             Path::new("/tmp/x.toml"),
             &mut token,
             listen(),
             &mut state,
+            &mut notify,
         )
         .await;
         assert!(matches!(
@@ -337,12 +374,14 @@ mod tests {
         *deps.lock_probe_fails.lock().expect("f") = true;
         let mut state = HandoffState::default();
         let mut token = || "t".to_owned();
+        let mut notify = |_: &HandoffState| {};
         let _ = run_handoff_tick(
             &deps,
             Path::new("/tmp/x.toml"),
             &mut token,
             listen(),
             &mut state,
+            &mut notify,
         )
         .await;
         assert_eq!(*deps.spawn_count.lock().expect("spawn"), 0);
@@ -355,12 +394,14 @@ mod tests {
         *deps.discover_succeeds.lock().expect("d") = true;
         let mut state = HandoffState::default();
         let mut token = || "t".to_owned();
+        let mut notify = |_: &HandoffState| {};
         let _ = run_handoff_tick(
             &deps,
             Path::new("/tmp/x.toml"),
             &mut token,
             listen(),
             &mut state,
+            &mut notify,
         )
         .await;
         assert!(state.spawned);
@@ -371,6 +412,7 @@ mod tests {
             &mut token,
             listen(),
             &mut state,
+            &mut notify,
         )
         .await;
         assert!(state.spawned);
@@ -396,5 +438,61 @@ mod tests {
         tokio::time::advance(Duration::from_millis(200)).await;
         let _ = worker.await.expect("join");
         assert!(reads.load(Ordering::SeqCst) >= 2);
+    }
+
+    #[tokio::test]
+    async fn status_failure_keeps_spawned_when_child_still_alive() {
+        let mut deps = FakeDeps::new();
+        deps.status_pid = 999;
+        *deps.discover_succeeds.lock().expect("d") = true;
+        let mut state = HandoffState::default();
+        let mut token = || "t".to_owned();
+        let mut notify = |_: &HandoffState| {};
+        let _ = run_handoff_tick(
+            &deps,
+            Path::new("/tmp/x.toml"),
+            &mut token,
+            listen(),
+            &mut state,
+            &mut notify,
+        )
+        .await;
+        assert!(state.spawned);
+        *deps.locks.lock().expect("locks") = vec![PathBuf::from("/tmp/x.lock")];
+        *deps.status_fails.lock().expect("status") = true;
+        let _ = run_handoff_tick(
+            &deps,
+            Path::new("/tmp/x.toml"),
+            &mut token,
+            listen(),
+            &mut state,
+            &mut notify,
+        )
+        .await;
+        assert!(state.spawned);
+        assert_eq!(state.child_pid, Some(999));
+    }
+
+    #[tokio::test]
+    async fn dead_recorded_spawn_pid_allows_another_spawn() {
+        let deps = FakeDeps::new();
+        *deps.alive.lock().expect("alive") = false;
+        let mut state = HandoffState {
+            spawned: true,
+            child_pid: Some(999),
+            client: None,
+        };
+        let mut token = || "t".to_owned();
+        let mut notify = |_: &HandoffState| {};
+        let _ = run_handoff_tick(
+            &deps,
+            Path::new("/tmp/x.toml"),
+            &mut token,
+            listen(),
+            &mut state,
+            &mut notify,
+        )
+        .await;
+        assert_eq!(*deps.spawn_count.lock().expect("spawn"), 1);
     }
 }

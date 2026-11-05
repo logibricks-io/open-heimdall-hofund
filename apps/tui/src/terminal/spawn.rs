@@ -108,6 +108,31 @@ fn detach(command: &mut Command) {
 #[cfg(not(any(unix, windows)))]
 fn detach(_command: &mut Command) {}
 
+/// Returns whether `tasklist` CSV output lists `pid` as a data row.
+#[must_use]
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn tasklist_csv_shows_pid(output: &str, pid: u32) -> bool {
+    let needle = pid.to_string();
+    for line in output.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with("INFO:") {
+            continue;
+        }
+        let fields: Vec<&str> = line.split(',').collect();
+        let pid_field = fields
+            .get(1)
+            .or_else(|| fields.first())
+            .map(|field| field.trim().trim_matches('"'));
+        if pid_field == Some(needle.as_str()) {
+            return true;
+        }
+    }
+    false
+}
+
 /// Best-effort liveness check for a spawned pid.
 pub fn process_alive(pid: u32) -> bool {
     #[cfg(unix)]
@@ -119,23 +144,15 @@ pub fn process_alive(pid: u32) -> bool {
     }
     #[cfg(windows)]
     {
-        use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
-        use windows_sys::Win32::System::Threading::{
-            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
-        };
-        // SAFETY: Win32 process query; invalid handles yield false.
-        unsafe {
-            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-            if handle == 0 {
-                return false;
+        match Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
+            .output()
+        {
+            Ok(output) if output.status.success() => {
+                let text = String::from_utf8_lossy(&output.stdout);
+                tasklist_csv_shows_pid(&text, pid)
             }
-            let mut code = 0_u32;
-            if GetExitCodeProcess(handle, &mut code) == 0 {
-                CloseHandle(handle);
-                return false;
-            }
-            CloseHandle(handle);
-            code == STILL_ACTIVE as u32
+            _ => false,
         }
     }
     #[cfg(not(any(unix, windows)))]
@@ -163,12 +180,25 @@ mod unix_tests {
     }
 }
 
-#[cfg(windows)]
-mod windows_tests {
-    use super::process_alive;
+#[cfg(test)]
+mod tasklist_tests {
+    use super::tasklist_csv_shows_pid;
 
     #[test]
-    fn missing_pid_is_not_alive() {
-        assert!(!process_alive(4_194_304));
+    fn csv_row_with_matching_pid_is_alive() {
+        let sample = "\"hofundd.exe\",\"4242\",\"Console\",\"1\",\"12,345 K\"\n";
+        assert!(tasklist_csv_shows_pid(sample, 4242));
+    }
+
+    #[test]
+    fn info_no_tasks_is_not_alive() {
+        let sample = "INFO: No tasks are running which match the specified criteria.\n";
+        assert!(!tasklist_csv_shows_pid(sample, 4242));
+    }
+
+    #[test]
+    fn different_pid_in_csv_is_not_alive() {
+        let sample = "\"hofundd.exe\",\"9999\",\"Console\",\"1\",\"12,345 K\"\n";
+        assert!(!tasklist_csv_shows_pid(sample, 4242));
     }
 }

@@ -19,6 +19,11 @@ pub enum WorkerMsg {
         /// Quit-related ownership snapshot.
         snapshot: HandoffSnapshot,
     },
+    /// Spawn recorded before discovery finishes.
+    HandoffProgress {
+        /// Quit-related ownership snapshot.
+        snapshot: HandoffSnapshot,
+    },
     /// Deferred page GET finished.
     PageProbe {
         page: PageId,
@@ -51,6 +56,7 @@ pub async fn open_event_stream(
 pub fn apply_worker_msg(app: &mut App, msg: WorkerMsg) {
     match msg {
         WorkerMsg::Handoff { outcome, .. } => apply_handoff_outcome(app, outcome),
+        WorkerMsg::HandoffProgress { .. } => {}
         WorkerMsg::PageProbe {
             page,
             generation,
@@ -131,11 +137,61 @@ mod tests {
         EventPayload, ResyncRequiredEvent, TokenRotatedEvent,
     };
 
-    use hofund_control_client::Client;
+    use std::net::SocketAddr;
+    use std::path::{Path, PathBuf};
+
     use super::{apply_control_and_take_resync, apply_control_and_take_token_reread};
     use crate::app::App;
-    use crate::gateway::{HandoffState, record_attach};
+    use crate::gateway::{HandoffDeps, HandoffState, record_attach};
     use crate::state::PageId;
+    use hofund_control_client::Client;
+
+    struct AliveDeps;
+
+    impl HandoffDeps for AliveDeps {
+        fn held_locks(&self, _config: &Path) -> Result<Vec<PathBuf>, String> {
+            Ok(Vec::new())
+        }
+
+        async fn discover_attached(
+            &self,
+            _config: &Path,
+            _token: &str,
+        ) -> Result<Client, hofund_control_client::ClientError> {
+            Err(hofund_control_client::ClientError::ConnectionUnavailable(
+                "unused".to_owned(),
+            ))
+        }
+
+        async fn probe_model_port(
+            &self,
+            _listen: SocketAddr,
+        ) -> Result<(), hofund_control_client::ClientError> {
+            Err(hofund_control_client::ClientError::ConnectionUnavailable(
+                "unused".to_owned(),
+            ))
+        }
+
+        fn spawn_daemon(&self, _config: &Path) -> Result<u32, String> {
+            Err("unused".to_owned())
+        }
+
+        async fn fetch_status(
+            &self,
+            _client: &Client,
+        ) -> Result<
+            hofund_control_client::hofund_control_proto::StatusResponse,
+            hofund_control_client::ClientError,
+        > {
+            Err(hofund_control_client::ClientError::ConnectionUnavailable(
+                "unused".to_owned(),
+            ))
+        }
+
+        fn process_alive(&self, _pid: u32) -> bool {
+            true
+        }
+    }
 
     #[test]
     fn token_rotated_requests_token_reread() {
@@ -157,6 +213,7 @@ mod tests {
 
     #[test]
     fn own_spawn_stays_spawned_on_attach() {
+        let deps = AliveDeps;
         let mut state = HandoffState {
             spawned: true,
             child_pid: Some(42),
@@ -166,6 +223,7 @@ mod tests {
             &mut state,
             42,
             Client::tcp("127.0.0.1:9".parse().unwrap(), "t"),
+            &deps,
         );
         assert!(state.spawned);
         assert_eq!(state.child_pid, Some(42));
