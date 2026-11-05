@@ -20,6 +20,16 @@ pub enum BreakdownDimension {
     ProviderKey,
     /// Authenticated gateway key id.
     GatewayKey,
+    /// Client-facing model id.
+    Model,
+    /// Provider member id that answered.
+    Provider,
+    /// Subscription account parsed from an `account:` upstream id.
+    Account,
+    /// Client session id from gateway headers.
+    Session,
+    /// Local calendar day of `created_unix`.
+    Day,
 }
 
 /// One group's totals in a breakdown report.
@@ -91,6 +101,20 @@ impl Ledger {
             BreakdownDimension::GatewayKey => (
                 format!("CASE WHEN caller_key_id = '' THEN {no_gateway} ELSE caller_key_id END"),
                 "MAX(caller_key_name)".to_owned(),
+            ),
+            BreakdownDimension::Model => ("model".to_owned(), "model".to_owned()),
+            BreakdownDimension::Provider => ("upstream".to_owned(), "upstream".to_owned()),
+            BreakdownDimension::Account => (
+                "CASE WHEN upstream LIKE 'account:%' THEN upstream ELSE 'none' END".to_owned(),
+                "CASE WHEN upstream LIKE 'account:%' THEN upstream ELSE 'none' END".to_owned(),
+            ),
+            BreakdownDimension::Session => (
+                "CASE WHEN session_id = '' THEN 'none' ELSE session_id END".to_owned(),
+                "CASE WHEN session_id = '' THEN 'none' ELSE session_id END".to_owned(),
+            ),
+            BreakdownDimension::Day => (
+                "date(created_unix, 'unixepoch', 'localtime')".to_owned(),
+                "date(created_unix, 'unixepoch', 'localtime')".to_owned(),
             ),
         };
         let sql = format!(
@@ -186,6 +210,23 @@ fn label_for(dimension: BreakdownDimension, id: &str, hint: &str) -> (String, St
                 label.to_owned()
             };
             (id, label)
+        }
+        BreakdownDimension::Model | BreakdownDimension::Provider | BreakdownDimension::Day => {
+            (id.to_owned(), id.to_owned())
+        }
+        BreakdownDimension::Account => {
+            let label = crate::report::account_of_upstream(id)
+                .unwrap_or(id)
+                .to_owned();
+            (id.to_owned(), label)
+        }
+        BreakdownDimension::Session => {
+            let id = if id.is_empty() || id == "none" {
+                "none".to_owned()
+            } else {
+                id.to_owned()
+            };
+            (id.clone(), id)
         }
     }
 }
