@@ -208,32 +208,22 @@ fn clip_line(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::time::{Duration, UNIX_EPOCH};
-
     use hofund_plugin_api::PluginErrorKind;
-    use hofund_plugin_sdk::time::zone::{TimeZone, chrono_tz::Asia::Shanghai};
+    use hofund_plugin_sdk::time::parse_rfc3339;
 
     use super::*;
 
-    fn utc(y: i32, m: u32, d: u32, h: u32, min: u32) -> SystemTime {
-        let dt = hofund_plugin_sdk::time::zone::chrono::Utc
-            .with_ymd_and_hms(y, m, d, h, min, 0)
-            .single()
-            .expect("time");
-        UNIX_EPOCH + Duration::from_secs(dt.timestamp() as u64)
+    fn utc_at(text: &str) -> SystemTime {
+        parse_rfc3339(text).expect("utc")
     }
 
-    fn shanghai(y: i32, m: u32, d: u32, h: u32, min: u32) -> SystemTime {
-        let dt = Shanghai
-            .with_ymd_and_hms(y, m, d, h, min, 0)
-            .single()
-            .expect("time");
-        UNIX_EPOCH + Duration::from_secs(dt.timestamp() as u64)
+    fn shanghai_at(text: &str) -> SystemTime {
+        parse_rfc3339(text).expect("shanghai")
     }
 
     #[test]
     fn r5_1_parse_usage_golden() {
-        let now = utc(2026, 10, 1, 4, 0);
+        let now = utc_at("2026-10-01T04:00:00Z");
         let text = "You are currently using your subscription to power your Claude Code usage
 
 Current session: 13% used · resets Oct 1 at 3:30pm (Asia/Shanghai)
@@ -247,12 +237,21 @@ What's contributing to your limits usage?
         assert_eq!(windows.len(), 4);
         assert_eq!(windows[0].name(), "5 hours");
         assert_eq!(windows[0].used(), 13);
-        assert_eq!(windows[0].resets_at(), Some(shanghai(2026, 10, 1, 15, 30)));
+        assert_eq!(
+            windows[0].resets_at(),
+            Some(shanghai_at("2026-10-01T15:30:00+08:00"))
+        );
         assert_eq!(windows[1].name(), "7 days");
-        assert_eq!(windows[1].resets_at(), Some(shanghai(2026, 10, 3, 14, 0)));
+        assert_eq!(
+            windows[1].resets_at(),
+            Some(shanghai_at("2026-10-03T14:00:00+08:00"))
+        );
         assert_eq!(windows[2].name(), "7 days · Opus");
         assert_eq!(windows[2].scope_model(), Some("opus"));
-        assert_eq!(windows[2].resets_at(), Some(shanghai(2026, 1, 2, 14, 0)));
+        assert_eq!(
+            windows[2].resets_at(),
+            Some(shanghai_at("2026-01-02T14:00:00+08:00"))
+        );
         assert_eq!(windows[3].name(), "7 days · Fable");
         assert_eq!(windows[3].scope_model(), Some("fable"));
         assert_eq!(windows[3].resets_at(), None);
@@ -260,21 +259,21 @@ What's contributing to your limits usage?
 
     #[test]
     fn r5_2_signed_out_usage_is_auth_error() {
-        let now = utc(2026, 10, 1, 4, 0);
+        let now = utc_at("2026-10-01T04:00:00Z");
         let error = parse("Error: not logged in", now).expect_err("denied");
         assert_eq!(error.kind(), PluginErrorKind::Auth);
     }
 
     #[test]
     fn r5_16_limit_line_is_quota_not_auth() {
-        let now = utc(2026, 10, 1, 4, 0);
+        let now = utc_at("2026-10-01T04:00:00Z");
         let error = parse("You've hit your limit · resets 3:30am (UTC)", now).expect_err("limit");
         assert_eq!(error.kind(), PluginErrorKind::Quota);
     }
 
     #[test]
     fn r5_17_usage_unknown_is_transport() {
-        let now = utc(2026, 10, 1, 4, 0);
+        let now = utc_at("2026-10-01T04:00:00Z");
         let error = parse("/usage couldn't load the plan's usage", now).expect_err("unknown");
         assert_eq!(error.kind(), PluginErrorKind::Transport);
     }
@@ -287,7 +286,7 @@ What's contributing to your limits usage?
 
     #[test]
     fn r5_4_overages_adds_extra_usage_window() {
-        let now = utc(2026, 11, 1, 13, 0);
+        let now = utc_at("2026-11-01T13:00:00Z");
         let text = "You are currently using your overages to power your Claude Code usage. We will automatically switch you back to your subscription rate limits when they reset
 
 Current session: 100% used · resets 3pm (UTC)
@@ -295,16 +294,16 @@ Current week (all models): 40% used · resets Nov 6 at 11am (UTC)
 ";
         let windows = parse(text, now).expect("windows");
         assert_eq!(windows.len(), 3);
-        assert_eq!(windows[0].resets_at(), Some(utc(2026, 11, 1, 15, 0)));
-        assert_eq!(windows[1].resets_at(), Some(utc(2026, 11, 6, 11, 0)));
+        assert_eq!(windows[0].resets_at(), Some(utc_at("2026-11-01T15:00:00Z")));
+        assert_eq!(windows[1].resets_at(), Some(utc_at("2026-11-06T11:00:00Z")));
         assert_eq!(windows[2].name(), "Extra usage");
         assert_eq!(windows[2].used(), 100);
-        assert_eq!(windows[2].resets_at(), Some(utc(2026, 11, 1, 15, 0)));
+        assert_eq!(windows[2].resets_at(), Some(utc_at("2026-11-01T15:00:00Z")));
     }
 
     #[test]
     fn r5_36_unknown_line_with_session_still_returns_windows() {
-        let now = utc(2026, 10, 1, 4, 0);
+        let now = utc_at("2026-10-01T04:00:00Z");
         let text = "/usage couldn't load the plan's usage
 Current session: 5% used · resets 3pm (UTC)
 ";
@@ -315,7 +314,7 @@ Current session: 5% used · resets 3pm (UTC)
 
     #[test]
     fn r5_37_scope_only_suffix_is_case_insensitive() {
-        let now = utc(2026, 10, 1, 4, 0);
+        let now = utc_at("2026-10-01T04:00:00Z");
         let text = "Current week (Sonnet ONLY): 10% used
 ";
         let windows = parse(text, now).expect("windows");

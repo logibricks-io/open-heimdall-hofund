@@ -1,7 +1,7 @@
 //! Time stamps as vendors write them.
 //!
 //! [`zone`] resolves IANA names and converts local wall-clock readings to
-//! [`SystemTime`](std::time::SystemTime) for subscription reset lines.
+//! `SystemTime` for subscription reset lines.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 

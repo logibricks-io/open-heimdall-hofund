@@ -1,8 +1,8 @@
 //! Inference-only accounts from a pasted `claude setup-token` value.
 
 use hofund_plugin_api::{AccountId, HostContext, PluginError};
+use hofund_plugin_sdk::digest::sha256;
 use hofund_plugin_sdk::oauth::{SecretObject, account_id_from, constant_time_eq};
-use sha2::{Digest, Sha256};
 
 use crate::account;
 use crate::creds;
@@ -103,8 +103,10 @@ pub(crate) async fn store(host: &HostContext, token: &str) -> Result<AccountId, 
 }
 
 fn hex_hash(token: &str) -> String {
-    let digest = Sha256::digest(token.as_bytes());
-    digest.iter().map(|b| format!("{b:02x}")).collect()
+    sha256(token.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 fn short_hash(token: &str) -> String {
@@ -127,5 +129,16 @@ mod tests {
     fn r5_6_setup_token_strips_env_prefix() {
         let token = normalize("CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-abc").expect("token");
         assert_eq!(token, "sk-ant-oat01-abc");
+    }
+
+    #[test]
+    fn r5_38_setup_token_fingerprint_matches_sha256() {
+        let token = "sk-ant-oat01-abc";
+        assert_eq!(
+            hex_hash(token),
+            "e4eed51bd6b8bc08df488bbccc92d40abff7ed1d248836a9f0321a1b702583b0"
+        );
+        assert_eq!(short_hash(token), "e4eed5");
+        assert_eq!(version(token), "setup-token:e4eed51bd6b8bc08");
     }
 }

@@ -4,7 +4,7 @@ use std::sync::OnceLock;
 use std::time::{Duration, SystemTime};
 
 use hofund_plugin_sdk::time::zone::{
-    chrono_span, local_wall_instant, pick_time_only, pick_yearless, resolve_iana, utc_datetime,
+    Zone, local_wall_instant, pick_time_only_wall, pick_yearless_wall,
 };
 use regex::Regex;
 
@@ -33,10 +33,7 @@ pub(super) fn reset_time(
 ) -> Option<SystemTime> {
     let reset = reset.map(str::trim).filter(|s| !s.is_empty())?;
     let (zone_name, rest) = split_zone(reset);
-    let loc = resolve_iana(zone_name);
-    let ref_dt = utc_datetime(now)?.with_timezone(&loc);
-    let slack = chrono_span(span + RESET_SLACK);
-    let latest = ref_dt + slack;
+    let zone = Zone::resolve(zone_name);
     let rest = rest
         .replace("AM", "am")
         .replace("PM", "pm")
@@ -52,9 +49,9 @@ pub(super) fn reset_time(
             .and_then(|m| m.as_str().parse().ok())
             .unwrap_or(0);
         if let Some(year) = year {
-            return local_wall_instant(&loc, year, month, day, hour, minute);
+            return local_wall_instant(&zone, year, month, day, hour, minute);
         }
-        return pick_yearless(month, day, hour, minute, ref_dt, latest, &loc);
+        return pick_yearless_wall(&zone, now, span, RESET_SLACK, month, day, hour, minute);
     }
     if let Some(caps) = time_only().captures(&rest) {
         let hour = hour12(caps.get(1)?.as_str().parse().ok()?, caps.get(3)?.as_str())?;
@@ -62,7 +59,7 @@ pub(super) fn reset_time(
             .get(2)
             .and_then(|m| m.as_str().parse().ok())
             .unwrap_or(0);
-        return pick_time_only(hour, minute, ref_dt, latest, &loc);
+        return pick_time_only_wall(&zone, now, span, RESET_SLACK, hour, minute);
     }
     None
 }
@@ -115,35 +112,20 @@ pub(super) fn split_zone(s: &str) -> (Option<&str>, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hofund_plugin_sdk::time::zone::{
-        TimeZone, chrono_tz::America::Los_Angeles, chrono_tz::Asia::Shanghai, chrono_tz::Tz,
-        set_test_host_local,
-    };
-    use std::time::{Duration, UNIX_EPOCH};
+    use hofund_plugin_sdk::time::parse_rfc3339;
+    use hofund_plugin_sdk::time::zone::override_host_local;
 
-    fn utc(y: i32, m: u32, d: u32, h: u32, min: u32) -> SystemTime {
-        let dt = hofund_plugin_sdk::time::zone::chrono::Utc
-            .with_ymd_and_hms(y, m, d, h, min, 0)
-            .single()
-            .expect("time");
-        UNIX_EPOCH + Duration::from_secs(dt.timestamp() as u64)
-    }
-
-    fn tz_time(tz: Tz, y: i32, m: u32, d: u32, h: u32, min: u32) -> SystemTime {
-        let dt = tz
-            .with_ymd_and_hms(y, m, d, h, min, 0)
-            .single()
-            .expect("time");
-        UNIX_EPOCH + Duration::from_secs(dt.timestamp() as u64)
+    fn utc_at(text: &str) -> SystemTime {
+        parse_rfc3339(text).expect("utc")
     }
 
     #[test]
     fn r5_12_reset_golden_matches_reference_parse_test() {
-        let now = utc(2026, 10, 1, 4, 0);
+        let now = utc_at("2026-10-01T04:00:00Z");
         let text = "Oct 1 at 3:30pm (Asia/Shanghai)";
         assert_eq!(
             reset_time(Some(text), now, Duration::from_secs(5 * 3600)),
-            Some(tz_time(Shanghai, 2026, 10, 1, 15, 30))
+            Some(utc_at("2026-10-01T15:30:00+08:00"))
         );
         assert_eq!(
             reset_time(
@@ -151,7 +133,7 @@ mod tests {
                 now,
                 Duration::from_secs(7 * 86400)
             ),
-            Some(tz_time(Shanghai, 2026, 10, 3, 14, 0))
+            Some(utc_at("2026-10-03T14:00:00+08:00"))
         );
         assert_eq!(
             reset_time(
@@ -159,80 +141,71 @@ mod tests {
                 now,
                 Duration::from_secs(7 * 86400)
             ),
-            Some(tz_time(Shanghai, 2026, 1, 2, 14, 0))
+            Some(utc_at("2026-01-02T14:00:00+08:00"))
         );
         assert_eq!(
             reset_time(Some("3am (UTC)"), now, Duration::from_secs(7 * 86400)),
-            Some(utc(2026, 10, 2, 3, 0))
+            Some(utc_at("2026-10-02T03:00:00Z"))
         );
     }
 
     #[test]
     fn r5_13_time_only_reset_at_three_pm_utc() {
-        let now = utc(2026, 11, 1, 13, 0);
+        let now = utc_at("2026-11-01T13:00:00Z");
         assert_eq!(
             reset_time(Some("3pm (UTC)"), now, Duration::from_secs(5 * 3600)),
-            Some(utc(2026, 11, 1, 15, 0))
+            Some(utc_at("2026-11-01T15:00:00Z"))
         );
     }
 
     #[test]
     fn r5_14_unknown_zone_uses_host_local_not_utc() {
-        set_test_host_local(Some("America/Los_Angeles"));
-        let _guard = RestoreTz;
-        let now = tz_time(Los_Angeles, 2026, 9, 28, 10, 0);
+        let _guard = override_host_local("America/Los_Angeles");
+        let now = utc_at("2026-09-28T10:00:00-07:00");
         assert_eq!(
             reset_time(
                 Some("Oct 1, 2026 at 3:30pm (Not/AZone)"),
                 now,
                 Duration::from_secs(7 * 86400)
             ),
-            Some(tz_time(Los_Angeles, 2026, 10, 1, 15, 30))
+            Some(utc_at("2026-10-01T15:30:00-07:00"))
         );
     }
 
     #[test]
     fn r5_34_time_only_without_zone_uses_host_local() {
-        set_test_host_local(Some("America/Los_Angeles"));
-        let _guard = RestoreTz;
-        let now = tz_time(Los_Angeles, 2026, 6, 15, 10, 0);
+        let _guard = override_host_local("America/Los_Angeles");
+        let now = utc_at("2026-06-15T10:00:00-07:00");
         assert_eq!(
             reset_time(Some("3pm"), now, Duration::from_secs(5 * 3600)),
-            Some(tz_time(Los_Angeles, 2026, 6, 15, 15, 0))
+            Some(utc_at("2026-06-15T15:00:00-07:00"))
         );
-    }
-
-    struct RestoreTz;
-    impl Drop for RestoreTz {
-        fn drop(&mut self) {
-            set_test_host_local(None);
-        }
     }
 
     #[test]
     fn r5_15_dec_to_jan_year_rollover() {
-        let now = utc(2026, 12, 31, 23, 0);
+        let now = utc_at("2026-12-31T23:00:00Z");
         assert_eq!(
             reset_time(
                 Some("Jan 2 at 2pm (UTC)"),
                 now,
                 Duration::from_secs(7 * 86400)
             ),
-            Some(utc(2027, 1, 2, 14, 0))
+            Some(utc_at("2027-01-02T14:00:00Z"))
         );
     }
 
     #[test]
     fn r5_35_dst_fall_back_nov_1_new_york() {
         let week = Duration::from_secs(7 * 86400);
-        let now = utc(2026, 11, 1, 6, 20);
+        let now = utc_at("2026-11-01T06:20:00Z");
         assert_eq!(
             reset_time(Some("Nov 1, 1:30am (America/New_York)"), now, week),
-            Some(utc(2026, 11, 1, 6, 30))
+            Some(utc_at("2026-11-01T06:30:00Z"))
         );
         assert_eq!(
             reset_time(Some("1:30am (America/New_York)"), now, week),
-            Some(utc(2026, 11, 1, 6, 30))
+            Some(utc_at("2026-11-01T06:30:00Z"))
         );
     }
 }

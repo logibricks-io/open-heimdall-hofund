@@ -263,7 +263,7 @@ fn expected_dev_deps(package: &str) -> Option<&'static [&'static str]> {
         "hofund-plugin-google-vertex" => &["hofund-kit-upstream"],
         "hofund-plugin-relay" => &["hofund-kit-upstream"],
         "hofund-plugin-remote-gateway" => &["hofund-kit-upstream"],
-        "hofund-plugin-subscription-claude" => &["hofund-kit-subscription"],
+        "hofund-plugin-subscription-claude" => &["hofund-kit-subscription", "hofund-plugin-sdk"],
         "hofund-plugin-subscription-cline" => &["hofund-kit-subscription"],
         "hofund-plugin-subscription-codex" => &["hofund-kit-subscription"],
         "hofund-plugin-subscription-copilot" => &["hofund-kit-subscription"],

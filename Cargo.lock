@@ -2207,7 +2207,6 @@ dependencies = [
  "hofund-plugin-api",
  "hofund-plugin-sdk",
  "regex",
- "sha2",
  "tempfile",
 ]
 

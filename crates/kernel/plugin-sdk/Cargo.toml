@@ -36,6 +36,7 @@ url = "2.5.8"
 
 [features]
 enc-v1-test = []
+test-host-local = []
 
 [dev-dependencies]
 quote = "1.0.45"

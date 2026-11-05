@@ -58,6 +58,12 @@ fn surface(src: &Path) -> String {
     for entry in fs::read_dir(src).expect("src") {
         let path = entry.expect("entry").path();
         if path.extension().is_none_or(|ext| ext != "rs") {
+            if path.is_dir() {
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if public_modules.contains(name) && path.join("mod.rs").is_file() {
+                    collect_module_dir(&path, name, &exported, &mut lines);
+                }
+            }
             continue;
         }
         let stem = path
@@ -75,6 +81,39 @@ fn surface(src: &Path) -> String {
     let mut text = lines.into_iter().collect::<Vec<_>>().join("\n");
     text.push('\n');
     text
+}
+
+fn collect_module_dir(
+    dir: &Path,
+    name: &str,
+    exported: &BTreeSet<String>,
+    lines: &mut BTreeSet<String>,
+) {
+    let mod_rs = dir.join("mod.rs");
+    let file = parse(&mod_rs);
+    collect_file(&file.items, Some(name), exported, lines);
+    for item in &file.items {
+        if is_cfg_test(item_attrs(item)) {
+            continue;
+        }
+        let syn::Item::Mod(child) = item else {
+            continue;
+        };
+        if child.ident == "tests" || !is_pub(&child.vis) {
+            continue;
+        }
+        if child.content.is_some() {
+            continue;
+        }
+        let child_path = dir.join(format!("{}.rs", child.ident));
+        if !child_path.is_file() {
+            continue;
+        }
+        let child_name = format!("{name}::{}", child.ident);
+        lines.insert(format!("mod {child_name}"));
+        let file = parse(&child_path);
+        collect_file(&file.items, Some(&child_name), exported, lines);
+    }
 }
 
 fn collect_file(
