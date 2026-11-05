@@ -3160,14 +3160,11 @@ fn sse_body(
                         note_usage(&event, &mut record);
                         match encoder.push(&event) {
                             Ok(bytes) if bytes.is_empty() => {
-                                record.meta.stream_timing.note_stream_event(&event, 0);
+                                record.meta.stream_timing.note_encoded(&event, &[]);
                                 continue;
                             }
                             Ok(bytes) => {
-                                record
-                                    .meta
-                                    .stream_timing
-                                    .note_stream_event(&event, bytes.len());
+                                record.meta.stream_timing.note_encoded(&event, &bytes);
                                 let boundary = frame_closed(&bytes);
                                 return Some((
                                     Ok(Bytes::from(bytes)),

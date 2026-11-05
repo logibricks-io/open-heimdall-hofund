@@ -26,6 +26,9 @@ pub(crate) struct StreamTiming {
     read: usize,
     flow_discarded: bool,
     timing_hidden: bool,
+    /// Content bytes passed to the flow tracker, for tests.
+    #[cfg(test)]
+    flow_bytes: usize,
 }
 
 const FIRST_MOST: usize = 8 << 20;
@@ -48,6 +51,8 @@ impl StreamTiming {
             read: 0,
             flow_discarded: false,
             timing_hidden: false,
+            #[cfg(test)]
+            flow_bytes: 0,
         }
     }
 
@@ -64,23 +69,40 @@ impl StreamTiming {
             || protocol == hofund_plugin_api::ProtocolId::ANTHROPIC_MESSAGES.as_str();
     }
 
+    /// Notes one decoded event and the bytes encoded for the client.
+    /// After the first text, each encoded frame counts toward flow by the
+    /// raw path's rule (`delta` or `"parts"` in its data); empty output
+    /// counts nothing.
+    pub(crate) fn note_encoded(&mut self, event: &StreamEvent, encoded: &[u8]) {
+        if !self.timed || self.off {
+            return;
+        }
+        if self.first_text_ms.is_none() {
+            self.note_stream_event(event, encoded.len());
+            return;
+        }
+        let elapsed = self.elapsed_ms();
+        let mut rest = encoded;
+        while !rest.is_empty() {
+            let end = event_end(rest).unwrap_or(rest.len());
+            let frame = &rest[..end];
+            if flow_content(frame) {
+                self.mark_flow(elapsed, frame.len());
+            }
+            rest = &rest[end..];
+        }
+    }
+
     pub(crate) fn note_stream_event(&mut self, event: &StreamEvent, encoded_bytes: usize) {
         if !self.timed || self.off {
             return;
         }
-        let elapsed = self.elapsed_ms();
         if self.first_text_ms.is_some() {
-            // The first text is known: only when the rest came is left.
-            if matches!(
-                event,
-                StreamEvent::TextDelta(_)
-                    | StreamEvent::ThinkingDelta(_)
-                    | StreamEvent::ToolArgumentsDelta(_)
-            ) {
-                self.mark_flow(elapsed, encoded_bytes.max(1));
-            }
+            // The first text is known: flow is counted from the encoded
+            // frames by `note_encoded`, the same way the raw path does.
             return;
         }
+        let elapsed = self.elapsed_ms();
         let (content, text, reasoning, hidden) = match event {
             StreamEvent::TextDelta(_) => (true, true, false, false),
             StreamEvent::ThinkingDelta(_) => (true, false, true, false),
@@ -179,6 +201,10 @@ impl StreamTiming {
 
     fn mark_flow(&mut self, elapsed: i64, nbytes: usize) {
         if !self.flow_discarded && self.first_content_ms.is_some() {
+            #[cfg(test)]
+            {
+                self.flow_bytes += nbytes;
+            }
             self.flow
                 .mark(elapsed, i64::try_from(nbytes).unwrap_or(i64::MAX));
         }
@@ -811,6 +837,59 @@ data: {"type":"content_block_start","content_block":{"type":"tool_use","id":"t",
     const CHAT_TEXT: &str = "data: {\"choices\":[{\"delta\":{\"content\":\"b\"}}]}\n\n";
     const CHAT_TOOL: &str = "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{}\"}}]}}]}\n\n";
     const SEALED_ITEM: &str = "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"reasoning\",\"encrypted_content\":\"x\"}}\n\n";
+
+    fn text_event() -> StreamEvent {
+        StreamEvent::TextDelta(TextDelta {
+            index: 0,
+            text: "ok".to_owned(),
+            extensions: Extensions::default(),
+        })
+    }
+
+    #[test]
+    fn r10r7_1_encoded_frame_without_delta_after_text_adds_no_flow() {
+        let mut timing = StreamTiming::new(Instant::now());
+        let text = b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n";
+        timing.note_encoded(&text_event(), text);
+        let before = timing.flow_bytes;
+        assert_eq!(before, text.len());
+        let start = br#"event: content_block_start
+data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"t","name":"n","input":{}}}
+
+"#;
+        timing.note_encoded(
+            &StreamEvent::ContentBlockStart(ContentBlockStart {
+                index: 1,
+                block: BlockStart::ToolCall {
+                    id: "t".to_owned(),
+                    name: "n".to_owned(),
+                },
+                extensions: Extensions::default(),
+            }),
+            start,
+        );
+        assert_eq!(timing.flow_bytes, before);
+        timing.note_encoded(&text_event(), &[]);
+        assert_eq!(timing.flow_bytes, before, "empty output counts nothing");
+    }
+
+    #[test]
+    fn r10r7_2_encoded_delta_frames_after_text_add_their_length() {
+        let mut timing = StreamTiming::new(Instant::now());
+        timing.note_encoded(&text_event(), CHAT_TEXT.as_bytes());
+        let before = timing.flow_bytes;
+        let message_delta = b"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":3}}\n\n";
+        let stop = b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+        let mut both = message_delta.to_vec();
+        both.extend_from_slice(stop);
+        timing.note_encoded(&text_event(), &both);
+        assert_eq!(timing.flow_bytes, before + message_delta.len());
+        timing.note_encoded(&text_event(), CHAT_TOOL.as_bytes());
+        assert_eq!(
+            timing.flow_bytes,
+            before + message_delta.len() + CHAT_TOOL.len()
+        );
+    }
 
     #[test]
     fn r10r6_1_sealed_frame_after_text_is_not_hidden() {
