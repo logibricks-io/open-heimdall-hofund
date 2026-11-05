@@ -21,7 +21,7 @@ Defer interactive TUI mode (`claudeTUIOn`, `claudetui` paths in `claude_subscrip
 Entry on the reference side is `serveClaudeSubscription` (`claude_subscription.go:6041-6090`):
 
 1. Parse body to an internal `Request` (Messages vs Chat/Responses branches at `6135-6148`).
-2. Apply effort/thinking rules (`6152-6161`, `6072-6076`).
+2. Apply effort/thinking rules in **stages** (parse → post-parse `outputConfigEffort` → fresh-start classifier `low` → CLI argv); see section 1.5 (`anthropic.go:281-291`, `6158-6161`, `6072-6076`, `6057-6058`, `2214`).
 3. Resolve account config directory via `p.Account.Token` (`6079-6085`).
 4. `resume` idle run if the turn continues a conversation (`6057-6058`; `1771-1897`).
 5. Else `unshelve` / branch session, `retire` competing runs (`6060-6071`; `2117+`).
@@ -116,20 +116,50 @@ Prompt and system files: paths passed to Claude Code use `binary.file(path)` (`8
 
 Environment: start from the **host inherited environment** with a **deny-list scrub** (reference `cleanClaudeEnv`, blocked keys `3293-3305` on `os.Environ()` at `1152`), not `env_clear()` plus only `PATH`/locale. Block vendor override keys and setup-token duplicates; **keep** `HOME`, locale, and on Windows **`SYSTEMROOT`** (socket stack, `piped.rs:32-33`). **Always append** after scrub (`3311-3320`): `ENABLE_CLAUDEAI_MCP_SERVERS=0`, `DISABLE_AUTO_COMPACT=1`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, `CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS=1`, `CLAUDE_CODE_PROMPT_CACHE_TTL=1h`. The last three are **not** in `claudeEnvVars` (`773-776`) — do **not** add them to **`WSLENV`**. Append `inClaudeDir`, `asRoot`, Bun proxy helper output, and **`WSLENV`** as in section 1.2. Proxy variables come **only** from the Bun helper (`799-804`), not from piped spawn’s automatic proxy allowlist (`piped.rs:42-45`, `61-63`).
 
-**Client cache opt-in:** `DISABLE_PROMPT_CACHING=1` only when the client **opted in** to client-side cache marks (request header opt-in or auto-mode classifier body, `claude_cache.go:36-51`, `1157-1161`) — **not** merely because Messages `cache_control` survived in IR. Reference header opt-in uses **`wantsClientCache(r, …)`** on the HTTP request (`36-38`); **`Codec::decode_request` sees only the body** (`crates/kernel/codec/src/lib.rs:61`). **Anthropic codec** may set **`hofund_client_cache_marks`** when **`classifierClientCache`** matches the raw body (`47-51`). The **gateway** must set or clear **`hofund_client_cache_marks` on `Request.extensions` after decode** from the header (and merge classifier detection from the codec path), **overwriting** any client-supplied same-name key — the plugin reads **only** that trusted value. **Remote caller:** gateway overwrites **`hofund_remote_caller`** after decode (section 1.3). **Lean prompt** is **`true` only when client-cache mode is off and the subscription setting is on** (`6169`: reference `leanPrompt = clientCache == nil && setting`). Message-level cache marks stay out of `turnKey` (`claude_cache.go:15-17`).
+**Client cache opt-in (trusted boolean only):** `DISABLE_PROMPT_CACHING=1` when **`req.clientCache != nil`** at spawn (`1157-1161`); **`leanPrompt`** off when client-cache mode is on (`6169`). Opt-in is **header OR classifier body**, never **`cache_control` alone** in IR.
 
-**Effort, thinking, and argv (by inbound protocol):** IR **`params.effort`** alone does not match reference **`turnKey`** / CLI behaviour. Reference **`turnKey`** hashes **`req.Effort != ""`** separately from **`req.ThinkOff`** (`3143`). Today hofund maps Anthropic **`thinking.type == "disabled"`** (and **`between_tools`**) to **`Effort::None`** while **`thinking` stays in `extensions`** (`crates/kernel/codec/src/anthropic.rs:358-374`); reference Anthropic parse sets **`ThinkOff` only** and leaves **`Effort` empty** (`anthropic.go:281-291`; **`6158-6161`** skips filling effort when **`ThinkOff`**). Chat / Responses map literal **`none`** through **`effortOf` → `low`** with **`ThinkOff = true`** (`ir.go:897-900`, `chat.go:95-103`, `responses.go:355-358`); **`minimal`** → **`low`** with **`ThinkOff` false**. After decode, the **gateway** (knowing **`ProtocolId`**) sets vendor-neutral **`Request.extensions`**, e.g. **`hofund_think_off`** and **`hofund_effort_requested`** (names finalized in R-6c), mirroring reference flags:
+**Header (vendor-neutral):** hofund reads **`X-Hofund-Cache-Marks: client`** on the inbound HTTP request (reference **`wantsClientCache`** uses a vendor-prefixed header at `claude_cache.go:36-38` — hofund gateway uses the neutral name above; parity note in `docs/coverage/subscription-parity.md` Claude row **j**). **`Codec::decode_request` has no request handle** (`crates/kernel/codec/src/lib.rs:61`). Decoding keeps unknown JSON fields in **`Request.extensions`** (`anthropic.rs:152`), so a client can inject **`hofund_client_cache_marks: true`** before the gateway runs.
 
-| Inbound protocol | Client signal | `--thinking disabled` | `--effort` / `--thinking-display summarized` | **`hofund_effort_requested` (turnKey bit)** |
-|------------------|---------------|------------------------|-----------------------------------------------|---------------------------------------------|
-| Anthropic Messages | `thinking.type` disabled / between_tools | yes (`975-981`) | no — **`Effort` stays empty** (`281-291`, `3259-3262` only when `effort != ""`) | **false** |
-| Anthropic Messages | `output_config.effort` with thinking enabled | no | yes (normalized label; auto classifier → low, `6152-6161`) | **true** when effort string set |
-| Chat Completions | `reasoning_effort: none` | yes | **`--effort low`** (after **`effortOf`**, `897-900`) | **true** (`Effort != ""` after parse) |
-| Chat Completions | `minimal` / other levels | no | **`--effort`** with normalized level | **true** when level non-empty |
-| OpenAI Responses | `reasoning.effort: none` | yes | **`--effort low`** | **true** |
-| OpenAI Responses | `minimal` / other levels | no | **`--effort`** with normalized level | **true** when level non-empty |
+**Gateway algorithm (after decode, before `execute`):**
 
-The Claude plugin builds **`claudeCLIArgs`** from **`hofund_effort_requested`** + normalized effort label (never pass **`Effort::None`** as **`--effort`**), **`hofund_think_off`** for **`--thinking disabled`**, and hashes **`turnKey`** with the same two booleans as reference (`3143`).
+1. **Discard** any existing **`hofund_client_cache_marks`** entry from **`extensions`** (untrusted).
+2. **`header_opt_in`** ← Anthropic inbound and **`X-Hofund-Cache-Marks: client`** (same predicate as `wantsClientCache`, neutral header name).
+3. **`classifier_hit`** ← **`classifierClientCache(from, raw_body)`** on the **original body bytes** (`47-51`, `autoModeClassifierAsk`) — **do not** read **`extensions`** for this bit.
+4. Write **`hofund_client_cache_marks = header_opt_in || classifier_hit`** into **`extensions`** (overwrite). Body-only injection with no header and no classifier shape → **`false`**. **`hofund_remote_caller`** is set the same way: overwrite **`true` or `false`** from transport **`local`** rules (section 1.3), including **`false` on loopback**, so injected **`true`** cannot stick.
+
+Parse may use **`parseAnthropicRequest(..., clientMarks)`** when header or classifier path applies (`6135-6145`); that only affects **mark placement**, not the trusted boolean above. Plugin reads **`hofund_client_cache_marks`** only.
+
+**Effort / thinking — staged reference behaviour (Anthropic Messages):** Do **not** infer **`ThinkOff`** or **`turnKey`** effort bit from hofund **`Effort::None`** alone (`anthropic.rs:368-374` maps only **`disabled`**, not **`between_tools`**). The **gateway** (with **`ProtocolId`**) supplies **`hofund_think_off`** and records **`Effort` string + effort bit at each hash stage** below.
+
+**Ordered stages (reference `serveSubscription` → `start`):**
+
+| Stage | When | Mutates `ThinkOff` / `Effort` |
+|-------|------|-------------------------------|
+| **A — Parse** | `parse` / `parseAnthropicRequest` (`anthropic.go:281-291`) | **`disabled` / `between_tools`** → **`ThinkOff`**, **`Effort` stays `""`**. **`enabled` / `adaptive`** → **`Effort = effortOfBudget(budget)`** (`285`, `ir.go:969-980`); if **`output_config.effort`** present, **`effortOf`** overrides (`287-288`). No thinking block → **`ThinkOff` false**, **`Effort` `""`** until stage B. |
+| **B — Post-parse** | `6158-6161` (Anthropic only) | If **`Effort == ""` && !ThinkOff && !autoModeClassifier(req)`** → **`Effort = outputConfigEffort(body)`** (`decide.go:711-720`). **Skipped** when **`autoModeClassifier`** (`6158`, `automode.go:119-133`) or **`ThinkOff`**. Does **not** set **`low`**. |
+| **C — Resume lookup** | `start` → **`resume`** before fresh-start tweaks (`6057-6058`, **`nextTurn` → `turnKey`**, `1909-1933`, `1772`) | Hashes **`Effort != ""` and `ThinkOff` after A+B only** — **not** stage D. **On resume hit**, **`start` returns**; stage D **does not run** (`6057-6058`). |
+| **D — Fresh start only** | After resume miss, before `subscription.start` (`6072-6076`) | If **`Effort == "" && autoModeClassifier(req)`** → **`Effort = "low"`** (classifier deadline `#250`). **Not** applied on resume hit. |
+| **E — Idle park key** | End of turn (`2214`) | **`turnKey`** uses **`Effort` / `ThinkOff` as for that run** (includes D when the run was a fresh start). |
+| **F — CLI argv** | `claudeCLIArgs` + **`ThinkOff` append** (`3259-3262`, `975-981`) | **`--effort`** only if **`Effort != ""`** after stages through **D** for the spawned run. **`--thinking disabled`** only if **`ThinkOff`**. |
+
+**Anthropic Messages edge matrix** (verify spawn argv + **`turnKey` effort bit** = **`Effort != ""` at hash stage**, `3143`):
+
+| `thinking.type` | `output_config.effort` | `autoModeClassifier` | After A+B `ThinkOff` | After A+B `Effort` | Resume key effort bit (C) | Fresh start adds `--effort` (D+F) | `--thinking disabled` (F) |
+|-------------------|------------------------|----------------------|----------------------|--------------------|---------------------------|-----------------------------------|---------------------------|
+| `disabled` | any | no | true | `""` | false | no | yes |
+| `between_tools` | any | no | true | `""` | false | no | yes |
+| `enabled` / `adaptive` | set (e.g. `high`) | no | false | normalized level | **true** | yes (`--effort` level) | no |
+| `enabled` / `adaptive` | absent; budget only | no | false | **`effortOfBudget`** | **true** if budget maps non-empty | yes | no |
+| absent | set (e.g. `max`) | no | false | level from B | **true** | yes (`claude_effort_test.go:59-64`) | no |
+| absent | set (e.g. `high`) | **yes** | false | **`""`** (B skipped) | **false** | yes **`low`** (D, `72-74`) | no* |
+| absent | absent | **yes** | false | **`""`** → **`low`** at D | **false** | yes **`low`** | no* |
+| absent | absent | no | false | `""` | false | no (`77-79`) | no |
+
+\*Classifier bodies often have no **`thinking`** block; **`ThinkOff`** stays false unless the client sent **`disabled` / `between_tools`**. When the client **does** send thinking off on a classifier, stage D still sets **`low`** if **`Effort` was `""`**, so **`--effort low`** and **`--thinking disabled`** can both appear (`6072-6076`, `975-981`).
+
+**Chat Completions / OpenAI Responses** (no stages B/D on reference path for Anthropic-only helpers): parse sets **`Effort = effortOf(reasoning_effort)`** and **`ThinkOff = (effort == "none")`** (`chat.go:95-103`, `responses.go:355-358`, `ir.go:897-900`). **`minimal` → `low`**, **`ThinkOff` false**. Gateway sets **`hofund_think_off`** / effort label / **`hofund_effort_requested = (Effort != "")`** from that parse — **not** from **`Effort::None`**.
+
+**Hofund plugin (R-6c):** Build **`claudeCLIArgs`** from stage **F** rules using gateway metadata (never **`--effort`** from raw **`Effort::None`**). Hash **`turnKey`** at stage **C** for resume/`nextTurn` and stage **E** for idle; use **`hofund_effort_requested`** reflecting **`Effort != ""` at that stage**, not a single collapsed flag from IR alone.
 
 Bridge spawn uses **`LongLivedChild`** / `SpawnRequest` via `cli::request_with_extra` (`cli.rs:68-77`) with the scrubbed host env plus explicit pairs above.
 
@@ -160,7 +190,7 @@ Parked on tools: `parkLongest = 5m`, `parkedMost = 16` (`138-159`).
 - **Rewind** on client cancel 499 (`22-28`; `letGo` paths in `retire` `2117+`).
 - **Effort change** on idle run: non-TUI may `setEffort`; TUI aborts (`1881-1891`).
 
-Hofund implements the same state machine in the plugin. **Idle/resume map key** is the reference `turnKey` SHA-256 (`3140-3146`, `1909-1933`, stored on the run at `2281`), not the owner string alone (`6043-6053` is only the owner prefix inside the hash). The hash covers owner, model, **whether effort was requested** (**`hofund_effort_requested`**, reference **`req.Effort != ""`**, not the level — `3143`), **think-off** (**`hofund_think_off`**, reference **`req.ThinkOff`**), tool choice, system (billing header stripped), tools JSON, web search, JSON schema, **`cacheIdentity`** (`claude_cache.go:236-247`: **`client-cache` system marks** and **`lean-prompt` flag** only — per-message cache marks are excluded, `15-17`), and message bodies via `hashMessages` (tool ids excluded, `3205-3210`). After a matching idle run is found, apply effort with `setEffort` before the turn (`1881-1891`).
+Hofund implements the same state machine in the plugin. **Idle/resume map key** is the reference `turnKey` SHA-256 (`3140-3146`, `1909-1933`, stored on the run at `2281`), not the owner string alone (`6043-6053` is only the owner prefix inside the hash). **Two effort snapshots matter:** **`nextTurn` / resume lookup** hashes after parse **+ post-parse `outputConfigEffort` only** (stage **C**, before fresh-start **`low`**, `6057-6058`, `1933`); **idle park** hashes after the run’s spawn path including fresh-start classifier **`low`** when that run started anew (stage **E**, `2214`, `6072-6076`). The hash covers owner, model, **`req.Effort != ""` at that snapshot** (**`hofund_effort_requested`**, `3143`), **`ThinkOff`** (**`hofund_think_off`**, `3143`), tool choice, system (billing header stripped), tools JSON, web search, JSON schema, **`cacheIdentity`** (`claude_cache.go:236-247`: **`client-cache` system marks** and **`lean-prompt` flag** only — per-message cache marks are excluded, `15-17`), and message bodies via `hashMessages` (tool ids excluded, `3205-3210`). After a matching idle run is found, apply effort with `setEffort` before the turn (`1881-1891`).
 
 ### 1.8 Concurrency and run lock
 
@@ -302,14 +332,14 @@ Fields to honor on the internal request (reference `Request` struct usage in `60
 | Field | Source | Reference lines |
 |-------|--------|-----------------|
 | Model id | Provider `OwnModelID` | `6086-6088` |
-| Effort | body / protocol-specific; **`hofund_effort_requested`** + normalized label for CLI | `6072-6076`, `6152-6161`, `3143`, section 1.5 table |
-| Think off | **`hofund_think_off`** → `--thinking disabled` | `975-981`, `281-291`, section 1.5 table |
+| Effort | Staged **`Effort` string** + **`hofund_effort_requested` at resume vs idle snapshot** | `6072-6076`, `6158-6161`, `3143`, section 1.5 |
+| Think off | **`hofund_think_off`** (`disabled`, **`between_tools`**, Chat/Responses **`none`**) | `281-291`, `975-981`, section 1.5 |
 | Tools + tool_choice | `bridgeTools`, `allowedTools`; disallowed names get **immediate MCP error** on callback (`5426-5432`) | `951`, `1873`, `5426-5432` |
 | Images | URL fetch in TUI; `-p` uses blocks | `6187-6192`; `claude_images.go` |
 | JSON schema / structured output | `--json-schema`, answer tool in TUI | `982-984`, `6194-6202` |
 | Web search | inject search tool | `6204-6210` |
 | Safeguards beta | header | `6178-6185` |
-| Client cache marks | Header + classifier body → gateway **`hofund_client_cache_marks`** | `36-51`, `6164-6169`, section 1.5 |
+| Client cache marks | **`X-Hofund-Cache-Marks`** or classifier raw-body scan → gateway **`hofund_client_cache_marks`** | `36-51`, `1157-1161`, `6169`, section 1.5 |
 | Remote caller | Trusted transport **`local`** inverse (`6170-6172`, `lan.go:792-808`) | Gateway **overwrites** **`hofund_remote_caller`** after decode (section 1.3); plugin **`envUnknown`** |
 
 ### 3.2 Prompt construction

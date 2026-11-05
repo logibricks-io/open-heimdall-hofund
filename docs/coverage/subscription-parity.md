@@ -63,7 +63,7 @@ Every other gap below maps to an existing plan item.
 | g | streaming | Bridge streams Claude Code stdout/SSE to caller (`claude_subscription.go` run loop) | Not served | Missing | Stream bridge events to IR |
 | h | tool calls | MCP `tools/call` blocks; results on next HTTP request (`claude_subscription.go:9-13`, `mcp.go:36-48`) | Not served | Missing | Tool parking protocol (`R-6`) |
 | i | images | Gateway image tests pass through bridge (`claude_images_test.go` cited in tree) | Not served | Missing | Image blocks via bridge |
-| j | reasoning / thinking | Effort / think-off handling in gateway (`claude_subscription.go:6158`) | Not served | Missing | Effort and extended thinking via CLI |
+| j | reasoning / thinking | Effort / think-off **staged** in gateway (`6158-6161`, `6072-6076`, `anthropic.go:281-291`) | Not served | Missing | Effort and extended thinking via CLI; hofund uses **`X-Hofund-Cache-Marks`** (neutral header) instead of reference vendor-prefixed cache opt-in header (`claude_cache.go:36-38`) |
 | k | quota / usage | `claude -p /usage` parse (`claude_usage_cli.go:50-57`); plus `NoteClaudeLimits` from stream headers (`claude_limits.go:69-71`) | `quota()` unsupported (`lib.rs:407-414`) | Missing | `/usage` CLI + header-derived windows (`R-5`) |
 | l | model list | From Claude Code / catalog in gateway context (unverified detail); usage scopes per model in limits | `list_models()` unsupported (`lib.rs:417-424`) | Missing | Model list + scoped week windows (`R-5`) |
 | m | multi-account | Multiple saved logins, routing, agent switch (`claude_routed_signin_test.go` etc.) | Daemon multi-account + agent switch with locks | Partial | Quota-aware routing needs row k |
