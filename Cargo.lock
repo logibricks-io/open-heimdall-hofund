@@ -2098,7 +2098,6 @@ dependencies = [
  "hofund-plugin-codex-catalog",
  "hofund-plugin-echo",
  "hofund-plugin-google-vertex",
- "hofund-plugin-host",
  "hofund-plugin-muse",
  "hofund-plugin-ollama",
  "hofund-plugin-plan-quota",

@@ -207,15 +207,6 @@ pub fn fresh_pooled_client(
     client_for(profile, limits)
 }
 
-/// Returns the pooled backend when `backend` is one.
-#[must_use]
-pub fn pooled_http(backend: Arc<dyn HttpBackend>) -> Option<Arc<PooledHttp>> {
-    use std::any::Any;
-    (backend as Arc<dyn Any + Send + Sync>)
-        .downcast::<PooledHttp>()
-        .ok()
-}
-
 fn pool() -> &'static Mutex<BTreeMap<ClientKey, reqwest::Client>> {
     POOL.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
@@ -392,6 +383,13 @@ impl HttpBackend for PooledHttp {
         client_for(&self.profile, self.limits)
             .ok()
             .map(|client| Arc::new(client) as Arc<dyn Any + Send + Sync>)
+    }
+
+    fn fresh_client(&self) -> Option<Result<Arc<dyn Any + Send + Sync>, PluginError>> {
+        Some(
+            fresh_pooled_client(&self.profile, self.limits)
+                .map(|client| Arc::new(client) as Arc<dyn Any + Send + Sync>),
+        )
     }
 }
 
@@ -1235,6 +1233,32 @@ mod tests {
         close_idle_after_region(&proxy, limits);
         assert_eq!(pooled_client_count(), base + 1);
         assert!(direct_http.pooled_client().is_some());
+        assert_eq!(pooled_client_count(), base + 1);
+    }
+
+    #[test]
+    fn recording_http_has_no_fresh_client() {
+        use hofund_plugin_api::PluginId;
+
+        let root = tempfile::tempdir().expect("temp dir");
+        let host = crate::test_host(PluginId::try_from("echo").expect("id"), root.path());
+        assert!(host.http().pooled_client().is_none());
+        assert!(host.http().fresh_client().is_none());
+    }
+
+    #[tokio::test]
+    async fn fresh_client_evicts_its_pool_key() {
+        let _guard = exclusive().await;
+        let limits = HttpLimits::default();
+        let profile = HttpProfile::direct();
+        close_idle_after_region(&profile, limits);
+        let base = pooled_client_count();
+        let http = PooledHttp::with_limits(profile, limits);
+        http.ensure().expect("seed pool");
+        assert_eq!(pooled_client_count(), base + 1);
+        http.fresh_client()
+            .expect("pooled backend")
+            .expect("fresh client");
         assert_eq!(pooled_client_count(), base + 1);
     }
 }

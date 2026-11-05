@@ -45,7 +45,7 @@ pub use hofund_plugin_api::kernel::{GatewayBackend, HttpBackend, ObserveBackend}
 pub use loopback::LoopbackRegistry;
 pub use pool::{
     HttpLimits, HttpProfile, PooledClientKey, PooledHttp, close_idle_after_region,
-    fresh_pooled_client, pooled_http,
+    fresh_pooled_client,
 };
 pub use scripted::{PipedScript, PipedSpawn};
 

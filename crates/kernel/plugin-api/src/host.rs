@@ -66,12 +66,12 @@ impl HttpHandle {
         self.inner.pooled_client()
     }
 
-    /// Shared backend handle. The kernel uses this to refresh pooled clients.
+    /// Rebuilds the pooled HTTP client with the same profile and limits.
     #[cfg(feature = "kernel-internal")]
     #[doc(hidden)]
     #[must_use]
-    pub fn backend_arc(&self) -> Arc<dyn HttpBackend> {
-        Arc::clone(&self.inner)
+    pub fn fresh_client(&self) -> Option<Result<Arc<dyn Any + Send + Sync>, PluginError>> {
+        self.inner.fresh_client()
     }
 }
 

@@ -43,7 +43,7 @@ pub fn expose_secret(secret: &SecretString) -> &str {
 /// Sends one HTTP call on the pooled client.
 #[async_trait]
 #[doc(hidden)]
-pub trait HttpBackend: Any + Send + Sync {
+pub trait HttpBackend: Send + Sync {
     /// Sends `request` and returns the response stream.
     ///
     /// A success body streams as the upstream sends it; a read failure is an
@@ -61,6 +61,16 @@ pub trait HttpBackend: Any + Send + Sync {
     #[cfg(feature = "kernel-internal")]
     #[must_use]
     fn pooled_client(&self) -> Option<Arc<dyn Any + Send + Sync>> {
+        None
+    }
+
+    /// Rebuilds the pooled client after a regional refusal.
+    ///
+    /// The default is `None`. The host pool backend evicts its profile and
+    /// limits and returns a new client.
+    #[cfg(feature = "kernel-internal")]
+    #[must_use]
+    fn fresh_client(&self) -> Option<Result<Arc<dyn Any + Send + Sync>, PluginError>> {
         None
     }
 }

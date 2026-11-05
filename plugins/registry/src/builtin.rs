@@ -549,13 +549,17 @@ fn attach_client(endpoint: &mut Endpoint, host: &HostContext) {
         return;
     };
     endpoint.client = Some(client);
-    let Some(pooled_http) = hofund_plugin_host::pooled_http(handle.backend_arc()) else {
+    if handle.fresh_client().is_none() {
         return;
-    };
-    let key = pooled_http.pool_key();
-    endpoint.client_refresh = Some(Arc::new(move || {
-        hofund_plugin_host::fresh_pooled_client(&key.profile, key.limits)
-            .map_err(|error| hofund_provider::ProviderError::connect(error.message()))
+    }
+    let refresh = handle.clone();
+    endpoint.client_refresh = Some(Arc::new(move || match refresh.fresh_client() {
+        Some(Ok(any)) => hofund_provider::pooled_reqwest(any.as_ref())
+            .ok_or_else(|| hofund_provider::ProviderError::connect("pooled client type mismatch")),
+        Some(Err(error)) => Err(hofund_provider::ProviderError::connect(error.message())),
+        None => Err(hofund_provider::ProviderError::connect(
+            "no pooled client refresh",
+        )),
     }));
 }
 
