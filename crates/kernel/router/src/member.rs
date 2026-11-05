@@ -170,4 +170,10 @@ pub trait Member: Send + Sync {
         let _ = model;
         self.forward(path, body).await
     }
+
+    /// Drops idle keep-alive connections before the next upstream attempt.
+    ///
+    /// After a regional model refusal, the next try must not reuse the
+    /// connection the edge refused on.
+    fn close_idle_connections(&self) {}
 }

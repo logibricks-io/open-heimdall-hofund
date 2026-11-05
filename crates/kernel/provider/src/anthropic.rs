@@ -67,6 +67,10 @@ impl Provider for Anthropic {
         http::id_of(&self.upstream)
     }
 
+    fn close_idle_connections(&self) {
+        self.upstream.close_idle_connections();
+    }
+
     async fn count_input(
         &self,
         mut request: Request,

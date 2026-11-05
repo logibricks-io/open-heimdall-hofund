@@ -647,6 +647,26 @@ impl Allowance {
             .fold(0.0, f64::max)
     }
 
+    /// Greatest used share among short windows that count `model`, excluding
+    /// budget spans of a day or longer (`reference: provider.Allowance.CapUsed`).
+    #[must_use]
+    pub fn cap_used(&self, model: &str, now: SystemTime) -> f64 {
+        self.windows
+            .iter()
+            .filter(|window| window.counts(model))
+            .filter(|window| !window.window_span.is_some_and(|span| span >= BUDGET_SPAN))
+            .filter(|window| !window.expired(now))
+            .map(|window| window.used)
+            .fold(0.0, f64::max)
+    }
+
+    /// Whether `used` is at the low band for budget windows alone, not for a
+    /// nearly full rate cap (`reference: routes.Seat.WeekLow`).
+    #[must_use]
+    pub fn week_low(&self, model: &str, used: f64, now: SystemTime) -> bool {
+        (90.0..98.0).contains(&used) && self.cap_used(model, now) < 90.0
+    }
+
     /// Applicable reset deadlines, earliest first.
     #[must_use]
     pub fn renewals(&self, model: &str, now: SystemTime) -> Vec<SystemTime> {
@@ -2318,6 +2338,32 @@ mod tests {
     }
 
     const H: u64 = 3600;
+
+    #[test]
+    fn r4_72_cap_used_and_week_low_from_allowance_windows() {
+        let now = at(1_900_000_000);
+        let week = info("Weekly", 92.0, Some(now + Duration::from_secs(168 * H)))
+            .with_window_span(Duration::from_secs(168 * H));
+        let allowance = allowance_of(vec![week.clone()], now);
+        assert!(allowance.week_low("model", 92.0, now));
+        assert!((allowance.cap_used("model", now) - 0.0).abs() < f64::EPSILON);
+
+        let short = info("5h", 92.0, Some(now + Duration::from_secs(4 * H)))
+            .with_window_span(Duration::from_secs(5 * H));
+        let allowance = allowance_of(vec![short, week], now);
+        assert!(!allowance.week_low("model", 92.0, now));
+        assert!((allowance.cap_used("model", now) - 92.0).abs() < f64::EPSILON);
+
+        let unknown = info("burst", 92.0, Some(now + Duration::from_secs(H)));
+        let allowance = allowance_of(vec![unknown], now);
+        assert!(!allowance.week_low("model", 92.0, now));
+        assert!((allowance.cap_used("model", now) - 92.0).abs() < f64::EPSILON);
+
+        let spent_week = info("Weekly", 98.0, Some(now + Duration::from_secs(168 * H)))
+            .with_window_span(Duration::from_secs(168 * H));
+        let allowance = allowance_of(vec![spent_week], now);
+        assert!(!allowance.week_low("model", 98.0, now));
+    }
 
     #[test]
     fn b3b_pace_takes_the_tightest_budget_with_an_hour_floor() {
