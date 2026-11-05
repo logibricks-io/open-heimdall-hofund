@@ -26,7 +26,7 @@ Legend: **Done** = matches the reference at checklist granularity; **Partial** =
 | SuperGrok (`grok`) | 10 | 6 | 0 | 2 | 0 |
 | Qoder (international + Qoder CN) | 1 | 10 | 9 | 0 | 0 |
 | CodeBuddy / WorkBuddy (CN + international) | 7 | 6 | 3 | 0 | 3 |
-| Z Code (`zcode`) | 8 | 7 | 2 | 0 | 2 |
+| Z Code (`zcode`) | 6 | 9 | 2 | 0 | 2 |
 
 Gaps that had no plan item before this audit (the supervisor's v0.2.0 plan and backlog now carry them under the item named):
 
@@ -211,7 +211,7 @@ Every other gap below maps to an existing plan item.
 | a3 | sign-in: API key `ksk_` | Plugin + core treat as API key | unverified — method `apikey` in upstream headers (`upstream.rs:54-55`) | Partial | Explicit API key sign-in UX |
 | b | import | IDE cache file; CLI DB | Token file discover | Partial | CLI DB path (**R-51**) |
 | c | token storage | Write-back to CLI DB or IDE file on refresh (`kiro/index.mjs:183-200`) | `creds.rs` write-back helpers for IDE path | Partial | SQLite write-back (**R-51**) |
-| d | refresh | CLI first, else OIDC/refreshToken (`kiro.go:301-374`; plugin `refresh.test.mjs`) | `refresh.rs` lease + social/IDC; external-idp refused (`refresh.rs:88-91`) | Partial | kiro-cli delegated refresh; 400 lapsed mapping (**R-25**, **R-51**) |
+| d | refresh | CLI first, else OIDC/refreshToken (`kiro.go:301-374`; plugin `refresh.test.mjs`) | `refresh.rs` lease + social/IDC; external-idp refused (`refresh.rs:88-91`) | Partial | kiro-cli delegated refresh; 400 lapsed mapping (**R-24**, **R-51**) |
 | e | upstream wire | Event-stream `generateAssistantResponse` (`kiro/index.mjs:16-18`; `upstream.rs:44-48`) | Same endpoint, unary decode only | Partial | Streaming request/response (**R-51**) |
 | f | inbound shapes | Anthropic Messages only (`kiro/index.mjs:14-18`) | Messages only (`upstream.rs:109-112`) | Partial | Chat/Responses N/A |
 | g | streaming | AWS event stream to Messages SSE | `kiro_body.rs` rejects `stream: true` (`kiro_body.rs:9-11`) | Missing | Stream decode to IR (**R-51**) |
@@ -220,8 +220,8 @@ Every other gap below maps to an existing plan item.
 | j | reasoning / effort | `effort.test.mjs` | unverified | Missing | **R-51** |
 | k | quota / usage | `Get-Usage-Limits` (`kiro.go` comments; plugin `usage.test.mjs`) | `quota.rs` with profile ARN (`lib.rs:63-69`) | Partial | Builder ID profile ARN defaults (**R-51**) |
 | l | model list | Plugin lists from API | `models.rs` | Partial | Profile-scoped list refresh |
-| m | multi-account | uid by login provider (`kiro/index.mjs:53-65`) | Account ids from label/provider | Partial | Stable ids (#607) (**R-25**) |
-| n | error classification | Plugin `errors.test.mjs`; refresh 400 → lapsed | Generic auth on 401/403 (`upstream.rs:60-63`) | Partial | **R-25** |
+| m | multi-account | uid by login provider (`kiro/index.mjs:53-65`) | Account ids from label/provider | Partial | Stable ids (#607) (**R-24**) |
+| n | error classification | Plugin `errors.test.mjs`; refresh 400 → lapsed | Generic auth on 401/403 (`upstream.rs:60-63`) | Partial | **R-24** |
 | o | check-in / warmup | N/A | N/A | N/A | — |
 | p | agent sign-in | IDE cache discover | `agent_sign_in.rs` + discover | Partial | CLI DB discover |
 | q | extras | Builder ID profile ARN constant (`kiro/index.mjs:50-51`) | `BUILDER_ID_PROFILE` in `creds.rs:25-26` | Partial | External-idp refresh (**R-51**) |
@@ -232,7 +232,7 @@ Every other gap below maps to an existing plan item.
 - kiro-cli SQLite import + refresh delegation + write-back — **L**, **R-51**
 - Browser/portal sign-in — **L**, **R-51**
 - external-idp refresh — **M**, **R-51**
-- Refresh 400 lapsed + stable account ids — **S**, **R-25**
+- Refresh 400 lapsed + stable account ids — **S**, **R-24**
 
 ---
 
@@ -244,7 +244,7 @@ Every other gap below maps to an existing plan item.
 
 | # | capability | reference v0.1.3005 behaviour | hofund 08035c9 | status | gap to close |
 |---|------------|------------------------------|----------------|--------|--------------|
-| a1 | sign-in: WorkOS device | Plugin WorkOS device + `CLIENT_ID` (`factory/index.mjs:12-16`) | `SignInFlowKind::Device` + `WORKOS_CLIENT_ID` (`lib.rs:28-35`) | Partial | Client id differs from plugin (`factory/index.mjs:16` vs hofund `lib.rs:29`) — verify production id |
+| a1 | sign-in: WorkOS device | Plugin WorkOS device + `CLIENT_ID` (`factory/index.mjs:12-16`) | `SignInFlowKind::Device` + `WORKOS_CLIENT_ID` (`lib.rs:28-35`) | Partial | Port the droid production WorkOS client from the plugin (`factory/index.mjs:15-16`); hofund `lib.rs:29` carries the Cline WorkOS client (`cline/index.mjs:16`) instead |
 | a2 | sign-in: API key `fk-` | `factoryCreds.Key` (`factory.go:68-71`); plugin whoami | `import_api_key` (`sign_in.rs:138+`) | Done | — |
 | a3 | browser OAuth loopback | N/A (device) | N/A | N/A | — |
 | b | import | Mover reads built-in accounts | API key + device completes to store | Partial | — |
@@ -269,7 +269,7 @@ Every other gap below maps to an existing plan item.
 - Fast mode / service_tier / anthropic speed mapping — **M**, **R-52**
 - Prem/custom host per org — **M**, **R-52**
 - Promotions on model rates — **S**, **R-52**
-- WorkOS client id alignment with droid production — **S**, **R-52**
+- Use the droid production WorkOS client (hofund uses the Cline one) — **S**, **R-52**
 
 ---
 
@@ -286,7 +286,7 @@ Every other gap below maps to an existing plan item.
 | a3 | browser loopback | N/A | N/A | N/A | — |
 | b | import | Preset/key plan in core | OAuth/API key via sign-in only | Partial | — |
 | c | token storage | Plugin session; core uses key | Secret blob + `workos:` prefix handling in tokens | Partial | Retryable grace window (`cline/index.mjs:27-30`) |
-| d | refresh | WorkOS refresh + grace (`cline/index.mjs:25-30`) | `tokens::refresh_account` on 401 | Partial | Renew serialization (**R-25**, **R-53**) |
+| d | refresh | WorkOS refresh + grace (`cline/index.mjs:25-30`) | `tokens::refresh_account` on 401 | Partial | Renew serialization (**R-24**, **R-53**) |
 | e | upstream wire | OpenAI chat to `api.cline.bot` (`cline.go:43-49`; plugin) | `upstream.rs` OPENAI_CHAT + envelope unwrap | Partial | — |
 | f | inbound shapes | Chat completions + desktop headers (`cline.go:15-31`) | Same headers `client.rs:4-18` (desktop 3.5.54) | Partial | Plugin uses **cline-cli** 3.0.68 identity (`cline/index.mjs:38-74`) — intentional mismatch to audit |
 | g | streaming | Plugin stream chat | `wire::execute` | Partial | unverified parity |
@@ -296,7 +296,7 @@ Every other gap below maps to an existing plan item.
 | k | quota / usage | GET `/users/me/plan/usage-limits` + credits (`cline_usage.go:39-67`) | `quota.rs` | Partial | 404 without ClinePass handling |
 | l | model list | `recommended-models` clinePass + free (`cline.go:56-61`) | `models.rs` filters clinePass/free | Partial | cloud-models feed if any (unverified) |
 | m | multi-account | Multiple keys/accounts | Daemon multi-account | Done | — |
-| n | error classification | NeedsSignIn on hard expire (`cline/index.mjs:27-30`) | 401 refresh path | Partial | **R-25** `#612` |
+| n | error classification | NeedsSignIn on hard expire (`cline/index.mjs:27-30`) | 401 refresh path | Partial | **R-53** |
 | o | check-in | N/A | N/A | N/A | — |
 | p | agent sign-in discovery | N/A (agent uses provider JSON) | No discover (`subscriptions.md:100`) | N/A | — |
 | q | extras | Task id header (`cline/index.mjs:62-75`) | Optional `X-Task-ID` in `client.rs:20-22` | Partial | Session→task id hook (**R-53**) |
@@ -305,7 +305,7 @@ Every other gap below maps to an existing plan item.
 
 - Client identity parity (desktop vs CLI headers/version) — **M**, **R-53**
 - Task/session headers on chat — **S**, **R-53**
-- Retryable token grace + NeedsSignIn mapping — **S**, **R-25**, **R-53**
+- Retryable token grace + NeedsSignIn mapping — **S**, **R-24**, **R-53**
 - OAuth register path parity with Cline app — **M**, **R-53**
 - Image input per model catalog — **S**, **R-53**
 
@@ -477,7 +477,7 @@ Every other gap below maps to an existing plan item.
 | a2 | browser / API key / paste | device via CLI only | N/A | N/A | — |
 | b | import sources | Read CLI `auth.json`; reference-owned homes (`index.mjs:48-56`) | `discover.rs`, `creds.rs` import paths | Done | — |
 | c | token storage | CLI home + plugin store | account secret + CLI home path in blob | Done | — |
-| d | refresh | CLI `grok models` renew (`index.mjs:6-7`, `refresh.test.mjs`) | `refresh.rs:16-29` same | Partial | Serialized renew vs concurrent callers (R-25 / R-50) |
+| d | refresh | CLI `grok models` renew (`index.mjs:6-7`, `refresh.test.mjs`) | `refresh.rs:16-29` same | Partial | Serialized renew vs concurrent callers (R-24 / R-50) |
 | e | upstream wire | `https://cli-chat-proxy.grok.com/v1` OpenAI Responses + signed headers | `lib.rs:64-66`, `upstream.rs:73-80` | Done | — |
 | f | inbound shapes | Responses upstream; body rewrite in plugin | `ProtocolId::OPENAI_RESPONSES`, `shape.rs` | Done | — |
 | g | streaming | SSE | wire streaming | Done | — |
@@ -495,7 +495,7 @@ Every other gap below maps to an existing plan item.
 **Gaps**
 
 - CLI install discovery helper like the reference — **S**, **R-50**.
-- Renew serialization under concurrent refresh (R-25) — **S**, **R-25**.
+- Renew serialization under concurrent refresh — **S**, **R-24**, **R-50**.
 - Tool-type allowlist and x_search config parity — **M**, **R-50**.
 
 ---
@@ -514,7 +514,7 @@ Every other gap below maps to an existing plan item.
 | a4 | agent credential discovery | plugin reads agent `credential.json` | none | Missing | Agent home discover (R-54) |
 | b | import sources | legacy `qoder.json` migrate (`qoder.go:47-74`) | JSON import only | Partial | Legacy file migrate (R-54) |
 | c | token storage | plugin-owned; job + refresh tokens | `creds.rs` SecretObject | Done | — |
-| d | refresh | job token refresh; single-use refresh token (`index.mjs:9-10`) | `refresh.rs:16-46` lease + forced renew on 401 | Partial | `RELOGIN_GAP` / renew serialization (R-25) |
+| d | refresh | job token refresh; single-use refresh token (`index.mjs:9-10`) | `refresh.rs:16-46` lease + forced renew on 401 | Partial | `RELOGIN_GAP` / renew serialization (R-54) |
 | e | upstream wire | SSE `agent_chat_generation` + COSY envelope (`index.mjs:45-54`) | OpenAI Chat `.../chat/completions` (`upstream.rs:43-47`) | Missing | COSY SSE wire (R-54) |
 | f | inbound shapes | OpenAI chat in IR → Qoder codec in plugin | Chat completions passthrough | Missing | R-54 |
 | g | streaming | COSY SSE `agent_chat_generation` (`packages/qoder/index.mjs:13-18`, `CHAT_PATH` line 45) | OpenAI Chat to `{base}/chat/completions` (`upstream.rs:43-54`) | Missing | COSY SSE stream (**R-54**) |
@@ -525,7 +525,7 @@ Every other gap below maps to an existing plan item.
 | l | model list | `/algo/api/v2/model/list` with device headers in plugin | `/api/v1/models` openapi (`models.rs:19-21`) | Partial | COSY/device headers on list (R-54) |
 | m | multi-account | separate subscriptions `qoder` and `qoder-cn` (`qoder.go:28-31`) | one plugin, `Site` in creds (`creds.rs:10-38`) | Partial | Split config ids or document unified id (R-54) |
 | n | error classification | lapsed / NeedsSignIn in plugin | 401 → refresh (`upstream.rs:68-71`) | Partial | NeedsSignIn on 400 refresh (R-25 #612) |
-| o | daily check-in | `qoder_checkin.go` + plugin campaigns | `checkin.rs` + `with_daily_checkin` | Partial | 30-minute recheck campaigns (`plugin_checkin.go:274`) (R-25) |
+| o | daily check-in | `qoder_checkin.go` + plugin campaigns | `checkin.rs` + `with_daily_checkin` | Partial | 30-minute recheck for `qoder`, Qoder CN and `zcode` (`plugin_checkin.go:274` `pluginRechecks`; interval `wbCheckinEvery` `workbuddy_checkin.go:55`, used in `checkin.go:110-117`) (R-54) |
 | p | agent sign-in | plugin device identity | none | Missing | R-54 |
 | q | extras | Qoder CN VPC instance hosts (`index.mjs:29-36`); COSY_VERSION desktop | CN/global endpoints only (`lib.rs:37-71`) | Missing | VPC enterprise sign-in (R-54) |
 
@@ -534,7 +534,7 @@ Every other gap below maps to an existing plan item.
 - Replace Chat Completions stub with COSY SSE upstream — **L**, **R-54**.
 - Native device PKCE sign-in + agent credential discover — **L**, **R-54**.
 - Qoder CN VPC instance URLs — **M**, **R-54**.
-- Refresh renew serialization + NeedsSignIn mapping — **S**, **R-25**.
+- Refresh renew serialization (**R-54**) + NeedsSignIn mapping (**R-25** `#612`) — **S**.
 
 ---
 
@@ -592,7 +592,7 @@ Every other gap below maps to an existing plan item.
 | b | import sources | encrypted `~/.zcode/v2/credentials.json` (`zcode.go:14-18`) | `creds.rs` decrypt + `discover.rs` | Done | — |
 | c | token storage | logins.json for reference-added; encrypted agent store read | SecretObject + device mid (`creds.rs:459+`) | Done | — |
 | d | refresh | JWT refresh near expiry in plugin | `refresh.rs` business API refresh | Partial | unverified vs plugin JWT rules |
-| e | upstream wire | Anthropic plan API bases (`zcode.go:47-48`) | `upstream.rs:66-74` Messages on plan base | Done | — |
+| e | upstream wire | Anthropic plan API bases (`zcode.go:47-48`); Start Plan accounts go to `START_BASE` (`zcode/index.mjs:33`, used at `:2371`) | `upstream.rs:66-74` Messages on plan base; JWT-only Start Plan import refused (`tests.rs:424`) | Partial | Start Plan routing (R-57) |
 | f | inbound shapes | Messages only upstream | `upstream.rs:60-63` rejects non-Messages | Done | — |
 | g | streaming | Anthropic SSE | wire streaming | Done | — |
 | h | tool calls | Anthropic tools | standard Messages wire | Partial | unverified |
@@ -602,9 +602,9 @@ Every other gap below maps to an existing plan item.
 | l | model list | portal + plan APIs in plugin | `models.rs` | Partial | Gift/check-in tied models unverified |
 | m | multi-account | team seats from `setting.json` (`zcode_team.go`) | `team.rs` project keys | Done | — |
 | n | error classification | ZCodeRestricted hint code 3012 (`workbuddy.go:254-260` shared pattern) | unverified in zcode plugin | Partial | R-57 |
-| o | daily check-in | plugin `auth.checkin` gift plans (`index.mjs:2740+`) | no check-in in zcode plugin | Missing | Daily gift check-in (R-57) |
+| o | daily check-in | plugin `auth.checkin` gift plans (`index.mjs:2740+`) | no check-in in zcode plugin | Missing | Daily gift check-in, with the 30-minute recheck the reference applies to `zcode` (`plugin_checkin.go:274`) (R-57) |
 | p | agent sign-in switch | agent switching into Z Code config (reference gap in subscriptions.md) | `agent_sign_in.rs` write | Partial | Agent connect for zcode (R-57) |
-| q | extras | `X-Device-Mid`, `APP_VERSION` 3.14.3 (`zcode.go:54-55`, `api.rs:80`) | `device.rs`, `APP_VERSION` in `lib.rs:45` | Done | — |
+| q | extras | `X-Device-Mid`, `X-Device-Mid` (`api.rs:80` on the hofund side); plugin pins `APP_VERSION` 3.17.2 for User-Agent and `X-ZCode-App-Version`, and the vendor gates on it (`zcode/index.mjs:34-38`); core `zcode.go:55` still says 3.14.3 | `device.rs`; `APP_VERSION` 3.14.3 in `lib.rs:45` | Partial | Send 3.17.2 in User-Agent and `X-ZCode-App-Version` (R-57) |
 
 **Gaps**
 
@@ -612,5 +612,7 @@ Every other gap below maps to an existing plan item.
 - Native portal sign-in (not import-only) — **M**, **R-57**.
 - Risk-control / restricted account handling (3012) — **S**, **R-57**.
 - Agent switching parity — **S**, **R-57**.
+- Start Plan routing to the plan base (`START_BASE`) — **S**, **R-57**.
+- Send app version 3.17.2 in User-Agent and `X-ZCode-App-Version` — **S**, **R-57**.
 
 ---
