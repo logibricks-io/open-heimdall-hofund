@@ -4,9 +4,11 @@ use std::sync::Arc;
 
 use hofund_kit_subscription::{TestHost, block_on};
 use hofund_plugin_api::{
-    AccountId, PluginErrorKind, PluginId, PluginKind, ProbeQuery, ProtocolId, RawTable,
-    SecretString, Subscription, SubscriptionFactory,
+    AccountId, Completion, ContentPart, PluginErrorKind, PluginId, PluginKind, ProbeQuery,
+    ProtocolId, RawTable, Request, SecretString, Subscription, SubscriptionFactory,
+    UpstreamProvider,
 };
+use hofund_plugin_sdk::json::{self, json};
 use hofund_plugin_sdk::oauth::{SecretObject, secret_text};
 
 use crate::body;
@@ -69,6 +71,62 @@ fn seed_named(host: &TestHost, name: &str) -> AccountId {
             .expect("upsert");
     });
     id
+}
+
+fn seed_with_models_json(host: &TestHost, name: &str, models_json: &str) -> AccountId {
+    let n = SEED_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let user_id = format!("u-{name}-{n}");
+    let credential = Credential {
+        user_id,
+        access: SecretString::from(format!("{ACCESS}-{n}")),
+        system_id: "sys".to_owned(),
+        org: "org1".to_owned(),
+        login: "zed-user".to_owned(),
+        name: String::new(),
+        plan: String::new(),
+        models_json: models_json.to_owned(),
+    };
+    let id = creds::account_id(&credential);
+    block_on(async {
+        let accounts = host.context().accounts();
+        let account = accounts
+            .account(id.clone(), "zed-user".to_owned())
+            .expect("account");
+        accounts
+            .upsert(account, creds::secret_blob(&credential).to_secret())
+            .await
+            .expect("upsert");
+    });
+    models::parse_stored_models(&creds::Stored {
+        credential: credential.clone(),
+    })
+    .expect("parse models");
+    id
+}
+
+fn enqueue_model_token(host: &TestHost) {
+    host.http().enqueue_response(
+        200,
+        &[("content-type", "application/json")],
+        br#"{"token":"model-token-test"}"#,
+    );
+}
+
+fn enqueue_wrapped_completion(host: &TestHost, body: &[u8]) {
+    host.http().enqueue_response(
+        200,
+        &[
+            ("content-type", "application/json"),
+            ("x-zed-server-supports-status-messages", "true"),
+        ],
+        body,
+    );
+}
+
+fn upstream_for(host: &TestHost, id: &AccountId) -> Arc<dyn UpstreamProvider> {
+    subscription(host)
+        .upstream(id, host.context())
+        .expect("upstream")
 }
 
 #[test]
@@ -542,4 +600,169 @@ fn a2c_33_capabilities_default_false_without_flags() {
     let caps = models::capabilities(&stored, "m");
     assert!(!caps.supports_images);
     assert!(!caps.supports_thinking);
+}
+
+#[test]
+fn a2c_34_tools_execute_round_trip_ids_name_and_arguments() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let models_json = r#"{"models":[{"id":"gpt-5","provider":"open_ai","supports_images":false}]}"#;
+    let id = seed_with_models_json(&host, "tools-e2e", models_json);
+    enqueue_model_token(&host);
+    enqueue_wrapped_completion(
+        &host,
+        br#"{"event":{"type":"response.created","response":{"id":"resp_tools","object":"response","status":"in_progress","output":[]}}}
+{"event":{"type":"response.completed","response":{"id":"resp_tools","object":"response","status":"completed","output":[{"type":"function_call","call_id":"call_weather_1","name":"get_weather","arguments":"{\"city\":\"Paris\"}"}],"usage":{"input_tokens":4,"output_tokens":6,"total_tokens":10}}}}
+{"status":"stream_ended"}
+"#,
+    );
+    let request: Request = json::from_value(json!({
+        "model": "gpt-5",
+        "stream": false,
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "Weather in Paris?"}]}],
+        "tools": [{
+            "name": "get_weather",
+            "input_schema": {"type": "object", "properties": {"city": {"type": "string"}}}
+        }]
+    }))
+    .expect("request");
+    let completion =
+        block_on(upstream_for(&host, &id).execute(request, ProtocolId::OPENAI_RESPONSES))
+            .expect("execute");
+    let envelope = last_completion_body(&host);
+    let tool_decl = envelope
+        .get("provider_request")
+        .and_then(|pr| pr.get("tools"))
+        .and_then(|t| t.as_array())
+        .and_then(|items| items.first())
+        .expect("tool declaration");
+    assert_eq!(
+        tool_decl.get("type").and_then(|v| v.as_str()),
+        Some("function")
+    );
+    assert_eq!(
+        tool_decl.get("name").and_then(|v| v.as_str()),
+        Some("get_weather")
+    );
+    let Completion::Unary(response) = completion else {
+        panic!("expected unary completion");
+    };
+    let tool = response
+        .message
+        .content
+        .iter()
+        .find_map(|part| match part {
+            ContentPart::ToolCall(call) => Some(call),
+            _ => None,
+        })
+        .expect("tool call part");
+    assert_eq!(tool.id, "call_weather_1");
+    assert_eq!(tool.name, "get_weather");
+    let args = tool.arguments.as_object().expect("json arguments");
+    assert_eq!(args.get("city").and_then(|v| v.as_str()), Some("Paris"));
+}
+
+#[test]
+fn a2c_35_thinking_enabled_when_catalog_allows() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let models_json =
+        r#"{"models":[{"id":"claude-sonnet-4","provider":"anthropic","supports_thinking":true}]}"#;
+    let id = seed_with_models_json(&host, "think-on", models_json);
+    enqueue_model_token(&host);
+    let (headers, body) = completion_ok_anthropic();
+    host.http().enqueue_response(200, headers, body);
+    let mut request: Request = json::from_value(json!({
+        "model": "claude-sonnet-4",
+        "stream": true,
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+    }))
+    .expect("request");
+    request
+        .extensions
+        .insert("thinking", json!({"type":"enabled","budget_tokens":1024}));
+    block_on(upstream_for(&host, &id).execute(request, ProtocolId::ANTHROPIC_MESSAGES))
+        .expect("execute");
+    let envelope = last_completion_body(&host);
+    assert!(
+        envelope
+            .get("provider_request")
+            .and_then(|pr| pr.get("thinking"))
+            .is_some(),
+        "thinking block should remain when supported"
+    );
+}
+
+#[test]
+fn a2c_35b_thinking_stripped_when_catalog_disallows() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let models_json =
+        r#"{"models":[{"id":"claude-sonnet-4","provider":"anthropic","supports_thinking":false}]}"#;
+    let id = seed_with_models_json(&host, "think-off", models_json);
+    enqueue_model_token(&host);
+    let (headers, body) = completion_ok_anthropic();
+    host.http().enqueue_response(200, headers, body);
+    let mut request: Request = json::from_value(json!({
+        "model": "claude-sonnet-4",
+        "stream": true,
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+    }))
+    .expect("request");
+    request
+        .extensions
+        .insert("thinking", json!({"type":"enabled","budget_tokens":1024}));
+    block_on(upstream_for(&host, &id).execute(request, ProtocolId::ANTHROPIC_MESSAGES))
+        .expect("execute");
+    let envelope = last_completion_body(&host);
+    let pr = envelope.get("provider_request").expect("provider_request");
+    assert!(
+        pr.get("thinking").is_none(),
+        "thinking must be stripped when supports_thinking is false"
+    );
+}
+
+#[test]
+fn a2c_36_unary_fold_preserves_text_and_usage() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let models_json = r#"{"models":[{"id":"gpt-5","provider":"open_ai"}]}"#;
+    let id = seed_with_models_json(&host, "unary-fold", models_json);
+    enqueue_model_token(&host);
+    enqueue_wrapped_completion(
+        &host,
+        br#"{"event":{"type":"response.created","response":{"id":"resp_fold","object":"response","status":"in_progress","output":[]}}}
+{"event":{"type":"response.output_item.added","output_index":0,"item":{"type":"message","role":"assistant","content":[]}}}
+{"event":{"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":"Hel"}}
+{"event":{"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":"lo"}}
+{"event":{"type":"response.completed","response":{"id":"resp_fold","object":"response","status":"completed","output":[],"usage":{"input_tokens":11,"output_tokens":7,"total_tokens":18}}}}
+{"status":"stream_ended"}
+"#,
+    );
+    let request: Request = json::from_value(json!({
+        "model": "gpt-5",
+        "stream": false,
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "Say hi"}]}],
+    }))
+    .expect("request");
+    let completion =
+        block_on(upstream_for(&host, &id).execute(request, ProtocolId::OPENAI_RESPONSES))
+            .expect("execute");
+    let Completion::Unary(response) = completion else {
+        panic!("expected unary folded completion");
+    };
+    let text: String = response
+        .message
+        .content
+        .iter()
+        .filter_map(|part| match part {
+            ContentPart::Text(text) => Some(text.text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(text, "Hello");
+    assert_eq!(response.id.as_deref(), Some("resp_fold"));
+    let usage = response.usage.expect("usage");
+    assert_eq!(usage.input_tokens, Some(11));
+    assert_eq!(usage.output_tokens, Some(7));
 }
