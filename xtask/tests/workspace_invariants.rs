@@ -7,6 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use syn::visit::Visit;
+use xtask::boundary::cargo_tree_stdout_includes_secrets_test_fixtures;
 
 #[path = "support/plugin_rules.rs"]
 mod plugin_rules;
@@ -1456,9 +1457,20 @@ fn secrets_test_fixtures_in_normal_feature_tree(package: &str) -> Result<bool, S
             String::from_utf8_lossy(&output.stderr)
         ));
     }
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .any(|line| line.contains("hofund-secrets feature \"test-fixtures\"")))
+    Ok(cargo_tree_stdout_includes_secrets_test_fixtures(
+        &String::from_utf8_lossy(&output.stdout),
+    ))
+}
+
+#[test]
+fn cargo_tree_stdout_parser_detects_secrets_test_fixtures_line() {
+    assert!(cargo_tree_stdout_includes_secrets_test_fixtures(
+        "hofund-secrets v0.1.0 (/path/hofund-secrets)\n\
+         hofund-secrets feature \"test-fixtures\"\n"
+    ));
+    assert!(!cargo_tree_stdout_includes_secrets_test_fixtures(
+        "hofund-secrets feature \"default\"\n"
+    ));
 }
 
 #[test]

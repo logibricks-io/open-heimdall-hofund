@@ -1753,6 +1753,13 @@ fn contains_manifest(dir: &Path) -> Result<bool, String> {
     Ok(false)
 }
 
+/// Whether `cargo tree -e normal,features` output shows `hofund-secrets` test fixtures.
+pub fn cargo_tree_stdout_includes_secrets_test_fixtures(stdout: &str) -> bool {
+    stdout
+        .lines()
+        .any(|line| line.contains("hofund-secrets feature \"test-fixtures\""))
+}
+
 #[cfg(test)]
 mod tests {
     fn scratch() -> std::path::PathBuf {
@@ -1766,7 +1773,20 @@ mod tests {
             path
         })
     }
-    use super::{dependency_error, manifest_dependency_errors, source_violations};
+    use super::{
+        cargo_tree_stdout_includes_secrets_test_fixtures, dependency_error,
+        manifest_dependency_errors, source_violations,
+    };
+
+    #[test]
+    fn cargo_tree_stdout_includes_secrets_test_fixtures_detects_feature_line() {
+        assert!(cargo_tree_stdout_includes_secrets_test_fixtures(
+            "hofund-secrets v0.1.0\nhofund-secrets feature \"test-fixtures\"\n"
+        ));
+        assert!(!cargo_tree_stdout_includes_secrets_test_fixtures(
+            "hofund-secrets feature \"default\"\n"
+        ));
+    }
 
     #[test]
     fn the_allow_list_rejects_sockets_process_helpers_and_tokio_net() {

@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use hofund_agent::Session;
 use hofund_control_client::{Client as HttpClient, ClientError};
-use hofund_control_proto::{API_VERSION, ControlErrorKind, GroupPatchRequest};
+use hofund_control_proto::{API_VERSION, AgentConnectRequest, ControlErrorKind, GroupPatchRequest};
 use hofund_daemon::{ControlRuntime, Running, StartOptions, start_with_options};
 use hofund_secrets::{BLOCK_MOVE_MODEL_SENTINEL, FAIL_MOVE_MODEL_SENTINEL, KeyStore};
 use serde_json::json;
@@ -161,7 +161,7 @@ fn agent_tree_snapshot(main: &Path) -> BTreeMap<String, Option<Vec<u8>>> {
 async fn r7a_rr11_group_rename_moves_exact_key_scope_and_keeps_wildcard() {
     let scratch = Scratch::new("keys-success");
     let running = start(&scratch, &group_fixture(), None).await;
-    scope_gateway_key(&scratch, &["group/old", "group/*", "m"]);
+    scope_gateway_key(&scratch, &["GROUP/old", "group/*", "m"]);
     let token = std::fs::read_to_string(scratch.token_path())
         .expect("token")
         .trim()
@@ -227,6 +227,11 @@ async fn r7a_rr12_move_model_save_failure_restores_config_agent_tree_and_key_sco
     assert_eq!(
         std::fs::read_to_string(scratch.config_path()).expect("config"),
         config_before
+    );
+    let runtime = client.config().await.expect("runtime config after failure");
+    assert_eq!(
+        runtime.text, config_before,
+        "runtime must publish rolled config after sidecar work failure, not staged rename text"
     );
     assert_eq!(
         std::fs::read_to_string(&settings).expect("settings"),
@@ -334,5 +339,67 @@ async fn r7a_rr12_concurrent_key_edit_survives_failed_group_rename() {
             .any(|model| model.eq_ignore_ascii_case("group/new")),
         "move_model save failure must not persist new scope"
     );
+    support::shutdown(running).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn r7a_rr12_agent_rename_failure_restores_config_disk_runtime_and_agent_tree() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let scratch = Scratch::new("agent-rename-fail");
+    let config_before = group_fixture();
+    let settings = agent_settings(&scratch);
+    std::fs::create_dir_all(settings.parent().expect("parent")).expect("dir");
+    std::fs::write(&settings, "{\"model\": \"group/old\"}\n").expect("settings");
+    let codex_config = scratch
+        .runtime_dir
+        .join("home")
+        .join(".codex")
+        .join("config.toml");
+    std::fs::create_dir_all(codex_config.parent().expect("parent")).expect("dir");
+    std::fs::write(
+        &codex_config,
+        "model = \"group/old\"\nmodel_provider = \"openai\"\n",
+    )
+    .expect("codex config");
+    let session = Session::new(scratch.runtime_dir.join("home")).with_path("");
+    let running = start(&scratch, &config_before, Some(session)).await;
+    let token = std::fs::read_to_string(scratch.token_path())
+        .expect("token")
+        .trim()
+        .to_owned();
+    let client = HttpClient::tcp(running.control_local_addr().expect("control"), token);
+    client
+        .connect_agent("claude-code", AgentConnectRequest::new(None))
+        .await
+        .expect("connect claude");
+    let tree_before = agent_tree_snapshot(&settings);
+    std::fs::set_permissions(&codex_config, std::fs::Permissions::from_mode(0o000))
+        .expect("codex inaccessible");
+    let read = client.config().await.expect("config");
+    let patch = group_patch(json!({
+        "version": API_VERSION,
+        "expected_revision": read.disk_revision,
+        "rename_to": "new",
+    }));
+    let error = client
+        .patch_group("old", &patch)
+        .await
+        .expect_err("rename must fail during agent rewrite");
+    match error {
+        ClientError::Server { .. } => {}
+        other => panic!("expected server error, got {other}"),
+    }
+    assert_eq!(
+        std::fs::read_to_string(scratch.config_path()).expect("config"),
+        config_before
+    );
+    let runtime = client.config().await.expect("runtime config after failure");
+    assert_eq!(
+        runtime.text, config_before,
+        "runtime must match rolled disk after agent rename failure"
+    );
+    assert_eq!(agent_tree_snapshot(&settings), tree_before);
     support::shutdown(running).await;
 }
