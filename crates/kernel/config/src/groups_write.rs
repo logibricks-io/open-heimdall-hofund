@@ -3,7 +3,8 @@
 use toml_edit::{Array, DocumentMut, Formatted, InlineTable, Item, Table, Value, value};
 
 use crate::{
-    ConfigError, ROUTING_NAMES, Stays, load, parse_rule_line, provider_id_valid, rule_without_line,
+    ConfigError, ROUTING_NAMES, Stays, load, parse_rule_line, provider_id_valid,
+    rule_rename_group_ref, rule_without_line,
 };
 
 /// Derives a group id from a display name.
@@ -391,7 +392,9 @@ fn rewrite_group_refs_in_document(
         {
             for entry in rules.iter_mut() {
                 if let Some(line) = entry.as_str() {
-                    *entry = Value::String(Formatted::new(line.replace(&old_ref, &new_ref)));
+                    *entry = Value::String(Formatted::new(rule_rename_group_ref(
+                        line, &old_ref, &new_ref,
+                    )));
                 }
             }
         }

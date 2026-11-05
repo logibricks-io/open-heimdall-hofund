@@ -4,6 +4,7 @@ mod support;
 
 use std::path::{Path, PathBuf};
 
+use hofund_agent::Session;
 use hofund_control_proto::{
     API_VERSION, ConfigResponse, ControlErrorKind, GroupCreateRequest, GroupListResponse,
     GroupMemberCandidatesResponse, GroupPatchRequest, GroupRestoreRequest, GroupWriteResponse,
@@ -275,6 +276,7 @@ async fn presets_google_vertex_row_lists_project_options() {
         .find(|entry| entry.id == "google-vertex")
         .expect("google-vertex preset");
     assert!(vertex.needs_project);
+    assert!(!vertex.needs_address);
     for key in ["project", "location", "credentials", "impersonate"] {
         assert!(
             vertex.option_keys.iter().any(|option| option == key),
@@ -401,18 +403,20 @@ async fn provider_create_patch_and_validation_errors() {
         "enabled": false,
     }));
     let (status, body) = client.patch("/v1/hofund/providers/added", &disable).await;
-    assert_eq!(failure(status, &body, 422), ControlErrorKind::Unprocessable);
-    assert!(field_issue(&body, "agent"));
+    assert_eq!(status, reqwest::StatusCode::OK);
+    let disabled: ProviderWriteResponse =
+        decode_response(API_VERSION, &body).expect("disable body");
+    assert!(!disabled.provider.enabled);
 
     let list: ProviderListResponse =
         decode_response(API_VERSION, &client.get("/v1/hofund/providers").await.1)
-            .expect("providers after rollback");
+            .expect("providers after disable");
     assert!(
         list.providers
             .iter()
             .find(|provider| provider.id == "added")
-            .is_some_and(|provider| provider.enabled),
-        "disable without agent session must roll back"
+            .is_some_and(|provider| !provider.enabled),
+        "disable must persist when agent session falls back to the process environment"
     );
 
     support::shutdown(running).await;
@@ -567,5 +571,136 @@ async fn profile_rename_collision_returns_422() {
     let (status, body) = client.post("/v1/hofund/profiles/rename", &rename).await;
     assert_eq!(failure(status, &body, 422), ControlErrorKind::Unprocessable);
 
+    support::shutdown(running).await;
+}
+
+#[tokio::test]
+async fn hidden_group_list_marks_found_true() {
+    let scratch = Scratch::new("groups-hidden-found");
+    let text = format!(
+        "{}\n[[routes]]\nmodel = \"group/discovered\"\nhidden = true\nname = \"Discovered\"\nupstreams = [\"chat\"]\n",
+        config("")
+    );
+    let running = support::within("start daemon", support::REQUEST, start(&scratch, &text)).await;
+    let client = Client::new(&running, &scratch);
+    let groups = support::within("GET groups", support::REQUEST, client.groups()).await;
+    let group = groups
+        .groups
+        .iter()
+        .find(|group| group.id == "discovered")
+        .expect("hidden group row");
+    assert!(group.hidden);
+    assert!(group.found);
+    support::shutdown(running).await;
+}
+
+#[tokio::test]
+async fn group_rename_rewrites_agent_group_ref_in_scratch_home() {
+    let scratch = Scratch::new("groups-agent-rename");
+    let settings = scratch
+        .runtime_dir
+        .join("home")
+        .join(".claude")
+        .join("settings.json");
+    std::fs::create_dir_all(settings.parent().expect("settings parent")).expect("claude dir");
+    std::fs::write(&settings, "{\"model\": \"group/team-one\"}\n").expect("agent settings");
+    let session = Session::new(scratch.runtime_dir.join("home")).with_path("");
+    let options = options_with(
+        &scratch,
+        StartOptions {
+            agent_session: Some(session),
+            ..StartOptions::default()
+        },
+    );
+    let text = config("");
+    let running = support::within(
+        "start daemon",
+        support::REQUEST,
+        start_with(&scratch, &text, options),
+    )
+    .await;
+    let client = Client::new(&running, &scratch);
+    let revision_before = client.groups().await.disk_revision;
+    let create = group_create(json!({
+        "version": API_VERSION,
+        "expected_revision": revision_before,
+        "name": "Team One",
+        "first_member": "chat/plain",
+    }));
+    let (status, body) = client.post("/v1/hofund/groups", &create).await;
+    assert_eq!(status, reqwest::StatusCode::OK);
+    let created: GroupWriteResponse = decode_response(API_VERSION, &body).expect("group create");
+    assert_eq!(created.group.id, "team-one");
+
+    let rename = group_patch(json!({
+        "version": API_VERSION,
+        "expected_revision": created.disk_revision,
+        "rename_to": "team-alpha",
+    }));
+    let (status, _body) = client.patch("/v1/hofund/groups/team-one", &rename).await;
+    assert_eq!(status, reqwest::StatusCode::OK);
+
+    let settings_text = std::fs::read_to_string(&settings).expect("settings after rename");
+    assert!(
+        settings_text.contains("group/team-alpha"),
+        "expected renamed group ref in agent settings, got: {settings_text}"
+    );
+    support::shutdown(running).await;
+}
+
+fn config_with_added_routes() -> String {
+    format!(
+        "listen = \"127.0.0.1:0\"\n\
+[[providers]]\nid = \"chat\"\nprotocol = \"openai-chat\"\nbase_url = \"http://127.0.0.1:9/v1\"\napi_key = \"{SECRET}\"\n\
+[[providers]]\nid = \"added\"\nprotocol = \"openai-chat\"\nbase_url = \"http://127.0.0.1:9/v1\"\napi_key = \"{SECRET}\"\n\
+[[routes]]\nmodel = \"on-added\"\nupstreams = [\"added\"]\n\
+[[routes]]\nmodel = \"safe\"\nupstreams = [\"chat\"]\n"
+    )
+}
+
+#[tokio::test]
+async fn disabling_provider_reseats_agent_off_route_alias() {
+    let scratch = Scratch::new("providers-reseat");
+    let settings = scratch
+        .runtime_dir
+        .join("home")
+        .join(".claude")
+        .join("settings.json");
+    std::fs::create_dir_all(settings.parent().expect("settings parent")).expect("claude dir");
+    std::fs::write(&settings, "{\"model\": \"on-added\"}\n").expect("agent settings");
+    let session = Session::new(scratch.runtime_dir.join("home")).with_path("");
+    let options = options_with(
+        &scratch,
+        StartOptions {
+            agent_session: Some(session),
+            ..StartOptions::default()
+        },
+    );
+    let text = config_with_added_routes();
+    let running = support::within(
+        "start daemon",
+        support::REQUEST,
+        start_with(&scratch, &text, options),
+    )
+    .await;
+    let client = Client::new(&running, &scratch);
+    let read = client.config().await;
+    let disable = provider_patch(json!({
+        "version": API_VERSION,
+        "expected_revision": read.disk_revision,
+        "enabled": false,
+    }));
+    let (status, body) = client.patch("/v1/hofund/providers/added", &disable).await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+    let settings_text = std::fs::read_to_string(&settings).expect("settings after disable");
+    assert!(
+        settings_text.contains("\"safe\""),
+        "agent must move to a route that no longer uses the disabled provider, got: {settings_text}"
+    );
     support::shutdown(running).await;
 }

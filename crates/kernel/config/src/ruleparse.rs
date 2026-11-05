@@ -174,6 +174,31 @@ pub fn parse_rule_line(line: &str) -> Result<ParsedRule, ConfigError> {
     Ok(parsed)
 }
 
+/// Rewrites one stored rule line after a group ref was renamed.
+///
+/// Only whole `use=` / `pause=` targets equal to `old_ref` are replaced.
+#[must_use]
+pub fn rule_rename_group_ref(line: &str, old_ref: &str, new_ref: &str) -> String {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return line.to_owned();
+    }
+    let Ok(mut parsed) = parse_rule_line(trimmed) else {
+        return line.to_owned();
+    };
+    let mut changed = false;
+    for target in &mut parsed.uses {
+        if refs_equal(target, old_ref) {
+            *target = new_ref.to_owned();
+            changed = true;
+        }
+    }
+    if !changed {
+        return line.to_owned();
+    }
+    rebuild_rule_line(trimmed, &parsed)
+}
+
 /// Rewrites one stored rule line after a member ref was removed (`Rule.Without`).
 ///
 /// Returns `None` when the line should be dropped.
@@ -353,7 +378,7 @@ fn rule_error(message: impl Into<String>) -> ConfigError {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_rule_line, rule_without_line};
+    use super::{parse_rule_line, rule_rename_group_ref, rule_without_line};
 
     #[test]
     fn r7a_ruleparse_accepts_reference_clauses() {
@@ -376,5 +401,23 @@ mod tests {
     fn r7a_rule_without_rewrites_use_list() {
         let line = rule_without_line("use=a/m,b/big tokens=5", "a/m").expect("line");
         assert!(line.starts_with("use=b/big"));
+    }
+
+    #[test]
+    fn r7a_rule_rename_group_ref_replaces_whole_use_targets_only() {
+        let old_ref = "group/team";
+        let new_ref = "group/alpha";
+        assert_eq!(
+            rule_rename_group_ref("use=group/team tokens=128k", old_ref, new_ref),
+            "use=group/alpha tokens=128k"
+        );
+        assert_eq!(
+            rule_rename_group_ref("use=group/team-one effort=high", old_ref, new_ref),
+            "use=group/team-one effort=high"
+        );
+        assert_eq!(
+            rule_rename_group_ref("pause=group/team days=mon", old_ref, new_ref),
+            "pause=group/alpha days=mon"
+        );
     }
 }

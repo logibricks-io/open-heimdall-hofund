@@ -108,15 +108,15 @@ pub(crate) async fn patch_group(
     .map_err(config_failure)?;
     let backup = current.text.clone();
     let applied = ops.apply(&request.expected_revision, edited).await?;
-    if request.rename_to.is_some()
-        && effective_id != rename_from
-        && let Some(session) = agent_session
-        && let Err(error) =
+    if request.rename_to.is_some() && effective_id != rename_from {
+        let session = agent_session.unwrap_or_else(crate::agent_session);
+        if let Err(error) =
             rename_group_agents(descriptions, &session, &rename_from, &effective_id).await
-    {
-        let current = ops.get().await?;
-        let _ = ops.apply(&current.disk_revision, backup).await?;
-        return Err(error);
+        {
+            let current = ops.get().await?;
+            ops.apply(&current.disk_revision, backup).await?;
+            return Err(error);
+        }
     }
     let config = load(&applied.text).map_err(config_failure)?;
     let model = format!("group/{effective_id}");
@@ -253,7 +253,7 @@ fn group_from_route(route: &hofund_config::Route, config: &hofund_config::Config
         })
         .collect();
     group.hidden = route.hidden;
-    group.found = false;
+    group.found = route.hidden;
     Some(group)
 }
 

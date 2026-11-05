@@ -33,7 +33,7 @@ pub use provider_write::{
     edit_provider_create, edit_provider_delete, edit_provider_patch, validate_fallback_list,
     validate_provider_base_url,
 };
-pub use ruleparse::{ParsedRule, parse_rule_line, rule_without_line};
+pub use ruleparse::{ParsedRule, parse_rule_line, rule_rename_group_ref, rule_without_line};
 pub use visible::{
     AgentModels, CatalogEntry, VisibleCatalog, build_catalog_index, catalog_for_agent,
     edit_agent_hidden_models, edit_agent_picked_models, edit_agent_picked_only, edit_agent_visible,
