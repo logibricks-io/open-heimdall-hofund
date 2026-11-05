@@ -1978,3 +1978,109 @@ fn r47a_a3_agent_sign_in_writes_chatgpt_auth_mode() {
         Some("chatgpt")
     );
 }
+
+const RESET_USAGE_ONE: &[u8] = br#"{"rate_limit_reset_credits":{"available_count":1},"rate_limit":{"primary_window":{"used_percent":0,"limit_window_seconds":1}}}"#;
+const RESET_CREDITS_ONE: &[u8] =
+    br#"{"credits":[{"id":"c-1","status":"available","expires_at":"2029-01-01T00:00:00Z"}]}"#;
+
+fn enqueue_json(host: &TestHost, status: u16, body: &[u8]) {
+    host.http().enqueue_response(
+        status,
+        &[("content-type", "application/json")],
+        body.to_vec(),
+    );
+}
+
+#[test]
+fn r47a_k3_usage_non_200_is_status_error() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, &access_token("first", 10_000));
+    enqueue_json(&host, 403, b"{}");
+    let error = block_on(subscription(&host).quota_reset_credits(&id, host.context()))
+        .expect_err("usage 403");
+    assert_eq!(error.kind(), PluginErrorKind::Status);
+}
+
+#[test]
+fn r47a_k3_unparsable_credits_marks_until_unread() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, &access_token("first", 10_000));
+    enqueue_json(&host, 200, RESET_USAGE_ONE);
+    enqueue_json(&host, 200, b"<html>");
+    let reset = block_on(subscription(&host).quota_reset_credits(&id, host.context()))
+        .expect("credits")
+        .expect("some");
+    assert_eq!(reset.count(), 1);
+    assert!(reset.until_unread());
+}
+
+#[test]
+fn r47a_k3_failed_credits_fetch_marks_until_unread() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, &access_token("first", 10_000));
+    enqueue_json(&host, 200, RESET_USAGE_ONE);
+    enqueue_json(&host, 500, b"{}");
+    let reset = block_on(subscription(&host).quota_reset_credits(&id, host.context()))
+        .expect("credits")
+        .expect("some");
+    assert!(reset.until_unread());
+}
+
+#[test]
+fn r47a_k3_consume_without_credits_is_no_credit_and_posts_nothing() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, &access_token("first", 10_000));
+    enqueue_json(&host, 200, br#"{"credits":[]}"#);
+    let outcome = block_on(subscription(&host).consume_quota_reset(&id, None, host.context()))
+        .expect("consume");
+    assert_eq!(outcome.code(), "no_credit");
+    assert!(
+        host.http()
+            .calls()
+            .iter()
+            .all(|call| call.method() != "POST")
+    );
+}
+
+#[test]
+fn r47a_k3_consume_unknown_credit_is_quota_and_posts_nothing() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, &access_token("first", 10_000));
+    enqueue_json(&host, 200, RESET_CREDITS_ONE);
+    let error =
+        block_on(subscription(&host).consume_quota_reset(&id, Some("gone"), host.context()))
+            .expect_err("unknown credit");
+    assert_eq!(error.kind(), PluginErrorKind::Quota);
+    assert!(
+        host.http()
+            .calls()
+            .iter()
+            .all(|call| call.method() != "POST")
+    );
+}
+
+#[test]
+fn r47a_k3_consume_rejected_is_status_error_on_wham_url() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, &access_token("first", 10_000));
+    enqueue_json(&host, 200, RESET_CREDITS_ONE);
+    enqueue_json(&host, 409, br#"{"code":"already_reset"}"#);
+    let error = block_on(subscription(&host).consume_quota_reset(&id, Some("c-1"), host.context()))
+        .expect_err("rejected");
+    assert_eq!(error.kind(), PluginErrorKind::Status);
+    let calls = host.http().calls();
+    let post = calls
+        .iter()
+        .find(|call| call.method() == "POST")
+        .expect("consume call");
+    assert_eq!(
+        post.uri(),
+        "https://codex.test/backend-api/wham/rate-limit-reset-credits/consume"
+    );
+}
