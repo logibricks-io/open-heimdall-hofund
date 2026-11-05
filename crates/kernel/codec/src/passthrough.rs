@@ -15,7 +15,7 @@
 //! `hofund_model_rewrite_skipped_total` counts the reason. A final event with
 //! complete JSON data is spliced even without its blank-line terminator.
 
-use hofund_ir::{StreamEvent, Usage};
+use hofund_ir::{BlockStart, StreamEvent, Usage};
 
 use crate::StreamDecoder;
 
@@ -248,7 +248,13 @@ impl DecoderTap {
 
     fn note(&mut self, events: &[StreamEvent]) {
         for event in events {
-            if matches!(event, StreamEvent::ThinkingDelta(_)) {
+            if matches!(event, StreamEvent::ThinkingDelta(_))
+                || matches!(
+                    event,
+                    StreamEvent::ContentBlockStart(start)
+                        if matches!(start.block, BlockStart::Thinking { redacted: true, .. })
+                )
+            {
                 self.supplemental.saw_reasoning = true;
             }
             let usage = match event {
@@ -2234,5 +2240,16 @@ mod tests {
             "application/vnd.amazon.eventstream"
         );
         assert_eq!(Converse.response_content_type(false), "application/json");
+    }
+
+    #[test]
+    fn r10_supplemental_saw_reasoning_on_redacted_thinking_start() {
+        let mut tap = AnthropicMessages.raw_tap("demo", "demo");
+        let event = br#"event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"redacted_thinking"}}
+
+"#;
+        tap.push(event);
+        assert!(tap.supplemental_usage().saw_reasoning);
     }
 }

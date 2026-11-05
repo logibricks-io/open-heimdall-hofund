@@ -20,6 +20,7 @@ mod readonly;
 mod refusal_handover;
 mod relisten;
 mod responses_ws;
+mod stream_timing;
 mod usage_handoff;
 
 pub use endpoints::{GENERATIVE_LIST, GENERATIVE_STREAM, GENERATIVE_UNARY};
@@ -55,7 +56,7 @@ use hofund_codec::{
     compacts_in_stream_client, conversation_key, turn_in,
 };
 use hofund_config::VisibleCatalog;
-use hofund_ir::{Request as ModelRequest, StreamEvent, too_long, words_of};
+use hofund_ir::{BlockStart, Request as ModelRequest, StreamEvent, too_long, words_of};
 use hofund_plugin_api::{
     BodyStream, InboundSurface, Method, PluginError, PluginErrorKind, ProtocolId,
 };
@@ -2001,6 +2002,7 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
                     started,
                     identity,
                     &client_agent,
+                    &session,
                     track,
                     capture,
                     dispatch,
@@ -2025,6 +2027,7 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
                 started,
                 &identity,
                 &client_agent,
+                &session,
                 &mut track,
                 capture,
             )
@@ -2073,6 +2076,7 @@ struct HeldResponse {
     started: Instant,
     identity: Identity,
     client_agent: String,
+    session_id: String,
     track: Option<RequestTrack>,
     capture: Option<prev_response::Capture>,
     incoming: Option<BytesStream>,
@@ -2088,6 +2092,7 @@ fn held_response(
     started: Instant,
     identity: Identity,
     client_agent: &str,
+    session_id: &str,
     track: RequestTrack,
     capture: Option<prev_response::Capture>,
     dispatch: DispatchFuture,
@@ -2101,6 +2106,7 @@ fn held_response(
         started,
         identity,
         client_agent: client_agent.to_owned(),
+        session_id: session_id.to_owned(),
         track: Some(track),
         capture,
         incoming: None,
@@ -2150,6 +2156,7 @@ fn held_response(
                                 state.started,
                                 &state.identity,
                                 &state.client_agent,
+                                &state.session_id,
                                 state.track.as_mut().expect("held request track"),
                                 state.capture.take(),
                             )
@@ -2602,6 +2609,7 @@ async fn success(
     started: Instant,
     identity: &Identity,
     client_agent: &str,
+    session_id: &str,
     track: &mut RequestTrack,
     capture: Option<prev_response::Capture>,
 ) -> Response {
@@ -2615,6 +2623,7 @@ async fn success(
         client_agent,
     );
     meta.provider_key_id = provider_key_id.to_owned();
+    meta.session_id = session_id.to_owned();
     let member = Some(upstream.to_owned());
     let capture = prev_response::ReplyCapture::new(capture);
     match completion {
@@ -2665,6 +2674,8 @@ async fn success(
                 }
             };
             // Move the track into the stream so finish runs when the body ends.
+            let mut meta = meta;
+            meta.stream_timing.set_protocol(codec.id());
             let record = RecordOnEnd {
                 usage: Arc::clone(&app.usage),
                 meta,
@@ -2722,6 +2733,8 @@ async fn success(
                                 )
                             }
                         };
+                        let mut meta = meta;
+                        meta.stream_timing.set_protocol(codec.id());
                         let record = RecordOnEnd {
                             usage: Arc::clone(&app.usage),
                             meta,
@@ -2796,6 +2809,7 @@ async fn raw_body(
         };
         let owned = track.take_for_stream();
         let event_stream = content_type == "text/event-stream";
+        meta.stream_timing.set_protocol(codec.id());
         let relay = RawRelay {
             body,
             meta,
@@ -3010,11 +3024,13 @@ struct UsageMeta {
     started: Instant,
     identity: Identity,
     client_agent: String,
+    session_id: String,
     input: Option<i64>,
     output: Option<i64>,
     ttft_ms: Option<i64>,
     details: hofund_usage::UsageDetails,
     saw_reasoning: bool,
+    stream_timing: stream_timing::StreamTiming,
 }
 
 impl UsageMeta {
@@ -3035,18 +3051,13 @@ impl UsageMeta {
             started,
             identity: identity.clone(),
             client_agent: client_agent.to_owned(),
+            session_id: String::new(),
             input: None,
             output: None,
             ttft_ms: None,
             details: hofund_usage::UsageDetails::default(),
             saw_reasoning: false,
-        }
-    }
-
-    fn note_first_content(&mut self) {
-        if self.ttft_ms.is_none() {
-            self.ttft_ms =
-                Some(i64::try_from(self.started.elapsed().as_millis()).unwrap_or(i64::MAX));
+            stream_timing: stream_timing::StreamTiming::new(started),
         }
     }
 }
@@ -3147,17 +3158,13 @@ fn sse_body(
                     }
                     Some(Ok(event)) => {
                         note_usage(&event, &mut record);
-                        if matches!(
-                            event,
-                            StreamEvent::TextDelta(_)
-                                | StreamEvent::ThinkingDelta(_)
-                                | StreamEvent::ToolArgumentsDelta(_)
-                        ) {
-                            record.meta.note_first_content();
-                        }
                         match encoder.push(&event) {
-                            Ok(bytes) if bytes.is_empty() => {}
+                            Ok(bytes) if bytes.is_empty() => {
+                                record.meta.stream_timing.note_encoded(&event, &[]);
+                                continue;
+                            }
                             Ok(bytes) => {
+                                record.meta.stream_timing.note_encoded(&event, &bytes);
                                 let boundary = frame_closed(&bytes);
                                 return Some((
                                     Ok(Bytes::from(bytes)),
@@ -3340,7 +3347,7 @@ where
                 Some(Bytes::from(out))
             }
             Some(Ok(chunk)) => {
-                self.meta.note_first_content();
+                self.meta.stream_timing.ingest_raw(&chunk);
                 let mut forwarded = self.tap.push(&chunk);
                 self.note_tokens();
                 if let Some(lines) = self.lines.as_mut() {
@@ -3440,7 +3447,12 @@ fn frame_closed(bytes: &[u8]) -> bool {
 }
 
 fn note_usage(event: &StreamEvent, record: &mut RecordOnEnd) {
-    let saw_reasoning = matches!(event, StreamEvent::ThinkingDelta(_));
+    let saw_reasoning = matches!(event, StreamEvent::ThinkingDelta(_))
+        || matches!(
+            event,
+            StreamEvent::ContentBlockStart(start)
+                if matches!(start.block, BlockStart::Thinking { redacted: true, .. })
+        );
     let usage = match event {
         StreamEvent::MessageStart(start) => start.usage.as_ref(),
         StreamEvent::MessageDelta(delta) => delta.usage.as_ref(),
@@ -3512,6 +3524,20 @@ fn write_usage(
     provider_free: bool,
 ) {
     let (input_tokens, output_tokens) = tokens.unwrap_or((None, None));
+    let mut details = meta.details;
+    if meta.stream_timing.timing_hidden() {
+        details.reasoning_hidden = true;
+    }
+    let ttft_ms = meta
+        .stream_timing
+        .finish_fields(details.reasoning_tokens.unwrap_or(0))
+        .and_then(|(ttft, first_text, first_reasoning, flow)| {
+            details.first_text_ms = first_text;
+            details.first_reasoning_ms = first_reasoning;
+            details.flow_ms = flow;
+            ttft
+        })
+        .or(meta.ttft_ms);
     if let Some(tokens) = input_tokens.and_then(|value| u64::try_from(value).ok()) {
         metrics::counter!("hofund_tokens", "direction" => "input").increment(tokens);
     }
@@ -3537,9 +3563,13 @@ fn write_usage(
         caller_issuer_id: meta.identity.issuer.clone(),
         provider_key_id: meta.provider_key_id.clone(),
         client_agent: meta.client_agent.clone(),
+        session_id: meta.session_id.clone(),
+        served_model: meta.served_model.clone(),
+        first_text_ms: details.first_text_ms,
+        first_reasoning_ms: details.first_reasoning_ms,
+        flow_ms: details.flow_ms,
         ..Default::default()
     };
-    let mut details = meta.details;
     if details.uncached_input_tokens.is_none() {
         details.uncached_input_tokens = input_tokens;
     }
@@ -3563,7 +3593,7 @@ fn write_usage(
             price: token_price,
         })
     });
-    let _ = usage.record_with_details(&row, meta.ttft_ms, details, pricing);
+    let _ = usage.record_with_details(&row, ttft_ms, details, pricing);
 }
 
 fn as_i64(value: Option<u64>) -> Option<i64> {
@@ -3751,6 +3781,7 @@ mod request_event_tests {
 #[cfg(test)]
 mod forwarded_token_tests {
     use super::{forwarded_details, forwarded_tokens, reasoning_hidden};
+    use std::time::Instant;
 
     #[test]
     fn u1a_13_forwarded_reasoning_is_read_for_chat_and_responses() {
@@ -3776,6 +3807,28 @@ mod forwarded_token_tests {
         assert!(reasoning_hidden(chat, true, Some(0)));
         assert!(!reasoning_hidden(chat, true, Some(5)));
         assert!(reasoning_hidden(responses, true, Some(5)));
+    }
+
+    #[test]
+    fn r10_timing_hidden_on_raw_encrypted_marks_decode_row_zero() {
+        use crate::stream_timing::StreamTiming;
+        use hofund_usage::decode_row;
+        let mut timing = StreamTiming::new(Instant::now());
+        timing.ingest_raw(
+            br#"event: response.output_item.added
+data: {"type":"response.output_item.added","item":{"type":"reasoning","encrypted_content":"sealed"}}
+
+"#,
+        );
+        assert!(timing.timing_hidden());
+        let row = hofund_usage::Row {
+            reasoning_hidden: true,
+            output_tokens: Some(10),
+            latency_ms: 2000,
+            ttft_ms: Some(100),
+            ..Default::default()
+        };
+        assert_eq!(decode_row(&row), (0, 0));
     }
 
     #[test]

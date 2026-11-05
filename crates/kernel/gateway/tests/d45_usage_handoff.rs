@@ -183,10 +183,10 @@ async fn d45_1_streamed_billed_failure_writes_handed_on_then_success() {
     assert_eq!(second.hits(), 1, "second hits; body={body}");
     let (rows, totals) = usage.summary(Window::All.since_now(), 10).expect("summary");
     assert_eq!(rows.len(), 2);
-    assert_eq!(rows[0].outcome, OUTCOME_HANDED_ON);
-    assert_eq!(rows[0].input_tokens, Some(5));
-    assert_eq!(rows[0].cache_write_5m_tokens, Some(2));
-    assert_eq!(rows[1].status, "200");
+    assert_eq!(rows[0].status, "200");
+    assert_eq!(rows[1].outcome, OUTCOME_HANDED_ON);
+    assert_eq!(rows[1].input_tokens, Some(5));
+    assert_eq!(rows[1].cache_write_5m_tokens, Some(2));
     assert_eq!(totals.requests, 1);
 }
 
@@ -211,8 +211,9 @@ async fn d45_2_unary_billed_failure_writes_handed_on_then_success() {
     assert_eq!(status, StatusCode::OK);
     let (rows, totals) = usage.summary(Window::All.since_now(), 10).expect("summary");
     assert_eq!(rows.len(), 2);
-    assert_eq!(rows[0].outcome, OUTCOME_HANDED_ON);
-    assert_eq!(rows[0].input_tokens, Some(4));
+    assert_eq!(rows[0].status, "200");
+    assert_eq!(rows[1].outcome, OUTCOME_HANDED_ON);
+    assert_eq!(rows[1].input_tokens, Some(4));
     assert_eq!(totals.requests, 1);
 }
 

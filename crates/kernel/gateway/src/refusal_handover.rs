@@ -319,6 +319,7 @@ impl State {
         note_usage(event, &mut self.record);
         match self.encoder.push(event) {
             Ok(bytes) => {
+                self.record.meta.stream_timing.note_encoded(event, &bytes);
                 if !bytes.is_empty() {
                     self.boundary = frame_closed(&bytes);
                     self.ready.extend(bytes);

@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- R-10 round 1: non-streamed gateway replies no longer store TTFT; tokens/s uses
+  the reference `DecodeOf` and `flow_ms` burst rules; `--csv` matches the
+  reference ledger column order with empty cells where hofund does not record a field.
 - Router: a regional model refusal no longer rests the member; the provider is
   asked once more per model, then other accounts on that model are skipped and
   the agent sees a regional note on the final error (R-4 D-71).
@@ -39,6 +42,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   zstd-compressed POST bodies and HTTP/1.1 on the ChatGPT Codex backend wire; Responses image
   parts on the upstream body; `/wham/rate-limit-reset-credits` read and explicit consume on
   `Subscription` (`quota_reset_credits`, `consume_quota_reset`).
+- Usage reports (R-10, feature-parity rows 9.4 and 9.9): `hofund usage` period
+  presets, rolling `--days` / `--last`, `--since`, grouped `--group-by` (with
+  `--by` alias), `--csv`, `--json`, `--account`, and `--model`; control
+  `GET /v1/hofund/usage` query filters and additive TTFT / tokens-per-second
+  fields; ledger columns `first_text_ms`, `first_reasoning_ms`, `flow_ms`, and
+  `served_model`; documented speed edge cases in `crates/kernel/usage/src/decode.rs`.
+
 - Subscription plugins for Grok Build, Cursor, and Cline (feature-parity row 3.5,
   part 1): device or browser sign-in, agent auth import where supported, token
   refresh, model lists, quota reads, and chat or Responses upstream for Grok
