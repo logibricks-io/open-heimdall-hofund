@@ -20,8 +20,7 @@ pub(crate) async fn run(
         ));
     };
     let blob = SecretObject::parse(&secret)?;
-    let auth = creds::parse_secret(&secret)?;
-    if auth.follow_agent
+    if blob.flag("follow_agent")
         && let Some(path) = blob.text("agent_credentials").filter(|p| !p.is_empty())
     {
         let home = agent_home_from_credentials(path);
@@ -46,6 +45,7 @@ pub(crate) async fn run(
             .await?;
         return Ok(());
     }
+    let auth = creds::parse_secret(&secret)?;
     if auth.api_key.is_some() || auth.team() {
         return Ok(());
     }

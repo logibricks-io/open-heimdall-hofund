@@ -674,3 +674,44 @@ fn a2d_13_team_bigmodel_bare_auth_and_monitor_quota() {
             .contains(&"authorization".to_owned())
     );
 }
+
+#[test]
+fn a2d_24_lapsed_team_seat_recovers_after_fresh_sign_in() {
+    let dir = tempfile::tempdir().expect("dir");
+    let home = dir.path().join(".zcode");
+    write_team_agent_credentials(&home, "team-biz-old", "org-a", "proj-a", "u-team-lapse");
+    let host = host(&dir);
+    let id =
+        block_on(discover::import(&home, discover::REFERENCE, host.context())).expect("import");
+    let sub = subscription(&host);
+    host.http().enqueue_response(
+        401,
+        &[],
+        json!({"code": 401, "msg": "token expired"}).to_string(),
+    );
+    let quota_error = block_on(sub.quota(&id, host.context())).expect_err("quota");
+    assert_eq!(quota_error.kind(), PluginErrorKind::Auth);
+    let secret = block_on(host.context().accounts().secret(&id))
+        .expect("read")
+        .expect("stored");
+    assert!(
+        SecretObject::parse(&secret)
+            .expect("blob")
+            .flag(creds::LAPSED)
+    );
+    write_team_agent_credentials(&home, "team-biz-new", "org-a", "proj-a", "u-team-lapse");
+    let calls_before = host.http().calls().len();
+    block_on(sub.refresh(&id, host.context())).expect("refresh");
+    let secret = block_on(host.context().accounts().secret(&id))
+        .expect("read")
+        .expect("stored");
+    let blob = SecretObject::parse(&secret).expect("blob");
+    assert!(!blob.flag(creds::LAPSED));
+    assert_eq!(
+        blob.secret("team_token").as_ref().map(secret_text),
+        Some("team-biz-new")
+    );
+    let status = block_on(sub.account_status(&id, host.context())).expect("status");
+    assert!(matches!(status, AccountStatus::Ready));
+    assert_eq!(host.http().calls().len(), calls_before);
+}
