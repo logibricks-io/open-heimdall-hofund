@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Claude Pro/Max subscription plugin (R-5 part a): `claude -p /usage` quota
+  windows with scoped model labels, model list from models.dev anthropic catalog
+  plus Claude Code `.claude.json` caches, setup-token (`sk-ant-oat…`) inference-only
+  accounts, CLIProxy-style credential import, pending sign-in idle expiry, and
+  account-directory cleanup on remove; tests `r5_1` through `r5_11`.
 - Subscription plugins for Grok Build, Cursor, and Cline (feature-parity row 3.5,
   part 1): device or browser sign-in, agent auth import where supported, token
   refresh, model lists, quota reads, and chat or Responses upstream for Grok
