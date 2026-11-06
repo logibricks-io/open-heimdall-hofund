@@ -24,9 +24,11 @@ mod agent;
 mod body;
 mod completion;
 mod config;
+mod duplex;
 mod error;
 mod forward;
 mod host;
+mod http_budget;
 mod id;
 mod inbound;
 /// Kernel backends. Plugins do not implement these traits.
@@ -69,6 +71,7 @@ pub use body::{Body, BodyStream};
 pub use checkin::{CheckinAccountStatus, CheckinOutcome, CheckinRecord, CheckinResult};
 pub use completion::{Completion, CountOutcome, PROBE_CAP, ProbeReport};
 pub use config::{BuildError, ConfigError, RawTable, RawValue, Schema, ValidConfig};
+pub use duplex::{DuplexReader, DuplexRequest, DuplexSession, DuplexWriter, HttpVersionPin};
 pub use error::{PluginError, PluginErrorKind};
 pub use forward::{Forward, RawAnswer, RawBody};
 pub use hofund_ir::{
@@ -81,6 +84,7 @@ pub use host::{
     LoopbackHandle, LoopbackSpec, ObserveHandle, PipedChild, ProcessHandle, RedirectHost,
     SchedulerHandle, SecretsHandle, SpawnRequest, Spawned, SurfaceHost,
 };
+pub use http_budget::{HostReadBudget, read_budget, set_read_budget};
 pub use id::{
     AccountId, IdError, MemberId, MemberKey, PluginId, PluginKey, PluginKind, PresetId, ProtocolId,
     SurfaceId, TierId,

@@ -21,8 +21,10 @@ tokio = { version = "1.54.1", features = ["macros", "rt", "sync", "time"] }
 tracing = "0.1.41"
 
 [dev-dependencies]
+rustls = { version = "0.23.36", default-features = false, features = ["ring", "std", "tls12"] }
 tempfile = { workspace = true }
-tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1.54.1", features = ["io-util", "macros", "net", "rt-multi-thread"] }
+tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring"] }
 
 [lints]
 workspace = true

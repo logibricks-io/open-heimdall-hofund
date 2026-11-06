@@ -373,6 +373,16 @@ constant-time `x-api-key` (row 10.2).
 9. **Several keys per provider (row 2.12).** Config holds one `api_key`. Keys should be router members so every strategy applies to them.
 10. **Terminal UI (row 15.3).** It is stage 1. The first pull request is `docs/tui-design.md`. The UI is a client of the management API in item 6.
 
+## Cursor upstream (documented deviations)
+
+These rows track intentional differences from the Cursor agent upstream design
+([docs/cursor-upstream-design.md](cursor-upstream-design.md)), not magpie. Each
+step that ships behavior updates the rows it touches.
+
+| Topic | Reference | Hofund | When |
+| --- | --- | --- | --- |
+| Inflated gzip frame output | Synchronous gunzip with no output cap | `hofund_plugin_sdk::gzip` caps inflated output at 64 MiB (`crates/kernel/plugin-sdk/src/inflate.rs`, tests `gzip_output_at_the_cap_is_accepted`, `gzip_output_one_byte_over_the_cap_is_rejected`) | R-8 kernel step 1 |
+
 ## Phase plan
 
 The execution order is [docs/roadmap.md](roadmap.md). The table below is the original

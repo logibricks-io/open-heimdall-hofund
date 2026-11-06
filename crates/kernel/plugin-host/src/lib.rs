@@ -17,10 +17,13 @@
 mod account_secrets;
 mod accounts;
 mod agent_credentials;
+mod duplex;
 mod loopback;
 mod piped;
 mod pool;
 mod scripted;
+#[cfg(test)]
+mod test_tls;
 
 use std::collections::{BTreeMap, VecDeque};
 use std::ffi::OsString;

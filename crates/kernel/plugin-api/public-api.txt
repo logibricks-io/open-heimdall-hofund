@@ -356,6 +356,36 @@ DiscoveredAgentAccount::fn id (& self) -> & AccountId
 DiscoveredAgentAccount::fn label (& self) -> & str
 DiscoveredAgentAccount::fn new (id : AccountId , label : impl Into < String > , reference : impl Into < String > ,) -> Result < Self , PluginError >
 DiscoveredAgentAccount::fn reference (& self) -> & str
+DuplexReader
+DuplexReader #[non_exhaustive]
+DuplexReader::fn headers (& self) -> & http :: HeaderMap
+DuplexReader::fn reader (& mut self) -> & mut BodyStream
+DuplexReader::fn status (& self) -> http :: StatusCode
+DuplexRequest
+DuplexRequest #[non_exhaustive] derives(Clone)
+DuplexRequest::const fn kernel_header_wait (& self) -> Duration
+DuplexRequest::const fn kernel_version_pin (& self) -> HttpVersionPin
+DuplexRequest::fn header (mut self , name : impl Into < String > , value : impl Into < String >) -> Self
+DuplexRequest::fn header_timeout (mut self , timeout : Duration) -> Self
+DuplexRequest::fn kernel_header_triples (& self) -> Vec < (& str , & str , bool) >
+DuplexRequest::fn kernel_method (& self) -> & str
+DuplexRequest::fn kernel_uri (& self) -> & str
+DuplexRequest::fn pin (mut self , pin : HttpVersionPin) -> Self
+DuplexRequest::fn post (uri : impl Into < String >) -> Self
+DuplexRequest::fn sensitive_header (mut self , name : impl Into < String > , value : impl Into < String >) -> Self
+DuplexSession
+DuplexSession #[non_exhaustive]
+DuplexSession::fn headers (& self) -> & http :: HeaderMap
+DuplexSession::fn into_split (mut self) -> (DuplexReader , DuplexWriter)
+DuplexSession::fn kernel_new (status : http :: StatusCode , headers : http :: HeaderMap , reader : BodyStream , writer : DuplexWriter , guard : Arc < dyn DuplexGuard > ,) -> Self
+DuplexSession::fn reader (& mut self) -> & mut BodyStream
+DuplexSession::fn status (& self) -> http :: StatusCode
+DuplexSession::fn writer (& mut self) -> & mut DuplexWriter
+DuplexWriter
+DuplexWriter #[non_exhaustive]
+DuplexWriter::async fn finish (mut self) -> Result < () , PluginError >
+DuplexWriter::async fn write (& mut self , bytes : Bytes) -> Result < () , PluginError >
+DuplexWriter::fn kernel_new (inner : Box < dyn DuplexWriterBackend > , guard : Arc < dyn DuplexGuard >) -> Self
 DynAgentFactory
 DynAgentFactory::fn config_schema (& self) -> Schema
 DynAgentFactory::fn description (& self) -> & 'static AgentDescription
@@ -424,11 +454,18 @@ HostContext::fn scheduler (& self) -> & SchedulerHandle
 HostContext::fn secrets (& self) -> & SecretsHandle
 HostContext::fn spawn_process (& self) -> & ProcessHandle
 HostContext::fn with_loopback (mut self , loopback : Arc < dyn LoopbackBackend >) -> Self
+HostReadBudget
+HostReadBudget derives(Clone, Copy, Debug, PartialEq, Eq)
 HttpHandle
 HttpHandle #[non_exhaustive] derives(Clone)
+HttpHandle::async fn open_duplex (& self , request : DuplexRequest) -> Result < DuplexSession , PluginError >
 HttpHandle::async fn send (& self , request : http :: Request < Body > ,) -> Result < http :: Response < BodyStream > , PluginError >
 HttpHandle::fn fresh_client (& self) -> Option < Result < Arc < dyn Any + Send + Sync > , PluginError > >
 HttpHandle::fn pooled_client (& self) -> Option < Arc < dyn Any + Send + Sync > >
+HttpVersionPin
+HttpVersionPin #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
+HttpVersionPin::Http1
+HttpVersionPin::Http2
 IdError
 IdError #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq, Error)
 IdError::const fn reason (self) -> & 'static str
@@ -618,6 +655,7 @@ PROBE_CAP
 PipedChild
 PipedChild #[non_exhaustive]
 PipedChild::async fn close_stdin (& self) -> Result < () , PluginError >
+PipedChild::async fn exit_code (& self) -> Result < i32 , PluginError >
 PipedChild::async fn write_stdin (& self , bytes : Bytes) -> Result < () , PluginError >
 PipedChild::fn id (& self) -> u32
 PipedChild::fn stdout (& self) -> Result < BodyStream , PluginError >
@@ -1086,8 +1124,10 @@ WriteCtx::fn new (home : impl Into < PathBuf >) -> Self
 const API
 const LOOPBACK_CANCEL_PATH
 const PROBE_CAP
+fn read_budget (request : & http :: Request < crate :: Body >) -> Option < Duration >
 fn redact_token (text : & str , secret : & str) -> String
 fn safe_url (url : & str) -> String
+fn set_read_budget (request : & mut http :: Request < crate :: Body > , budget : Duration)
 kernel::AccountBackend
 kernel::AccountBackend::async fn lease (& self , plugin : & PluginKey , id : & AccountId , wait : Duration ,) -> Result < Box < dyn AccountLeaseBackend > , PluginError >
 kernel::AccountBackend::async fn list (& self , plugin : & PluginKey) -> Result < Vec < Account > , PluginError >
@@ -1104,10 +1144,19 @@ kernel::ClockBackend::fn now (& self) -> SystemTime
 kernel::DirBackend
 kernel::DirBackend::fn cache_dir (& self , plugin : & PluginKey) -> Result < PathBuf , PluginError >
 kernel::DirBackend::fn state_dir (& self , plugin : & PluginKey) -> Result < PathBuf , PluginError >
+kernel::DuplexGuard
+kernel::DuplexGuard::fn abort_if_unfinished (& self)
+kernel::DuplexGuard::fn finish (& self)
+kernel::DuplexGuard::fn mark_split (& self)
+kernel::DuplexGuard::fn session_should_abort_on_drop (& self) -> bool
+kernel::DuplexWriterBackend
+kernel::DuplexWriterBackend::async fn finish (& mut self) -> Result < () , PluginError >
+kernel::DuplexWriterBackend::async fn write (& mut self , bytes : Bytes) -> Result < () , PluginError >
 kernel::GatewayBackend
 kernel::GatewayBackend::async fn call (& self , request : http :: Request < Body > ,) -> Result < http :: Response < BodyStream > , PluginError >
 kernel::GatewayBackend::async fn forward (& self , call : Forward) -> Result < RawAnswer , PluginError >
 kernel::HttpBackend
+kernel::HttpBackend::async fn open_duplex (& self , request : DuplexRequest) -> Result < DuplexSession , PluginError >
 kernel::HttpBackend::async fn send (& self , request : HttpRequest < Body > ,) -> Result < HttpResponse < BodyStream > , PluginError >
 kernel::HttpBackend::fn fresh_client (& self) -> Option < Result < Arc < dyn Any + Send + Sync > , PluginError > >
 kernel::HttpBackend::fn pooled_client (& self) -> Option < Arc < dyn Any + Send + Sync > >
@@ -1121,6 +1170,7 @@ kernel::ObserveBackend
 kernel::ObserveBackend::fn observe (& self , observation : QuotaObservation) -> Result < () , PluginError >
 kernel::PipedChildBackend
 kernel::PipedChildBackend::async fn close_stdin (& self) -> Result < () , PluginError >
+kernel::PipedChildBackend::async fn exit_code (& self) -> Result < i32 , PluginError >
 kernel::PipedChildBackend::async fn write_stdin (& self , bytes : Bytes) -> Result < () , PluginError >
 kernel::PipedChildBackend::fn id (& self) -> u32
 kernel::PipedChildBackend::fn take_stdout (& self) -> Option < BodyStream >
@@ -1139,7 +1189,9 @@ kernel::SecretsBackend::async fn get (& self , plugin : & PluginKey , id : & str
 kernel::fn expose_secret (secret : & SecretString) -> & str
 mod kernel
 mod responses_ws
+read_budget
 redact_token
 safe_url
+set_read_budget
 too_long
 words_of
