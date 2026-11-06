@@ -162,45 +162,10 @@ pub(crate) async fn persist_refresh(
     stale: &SecretString,
     fake: Option<&crate::store::FakeKeychain>,
 ) {
-    let _lock = codex_lock::acquire(home).await;
-    let reader = StoreReader::new(Some(host), skip_keychain, fake);
-    let patch = AuthPatch {
-        access_token: blob
-            .secret("access_token")
-            .map(|token| secret_text(&token).to_owned()),
-        refresh_token: blob
-            .secret("refresh_token")
-            .map(|token| secret_text(&token).to_owned()),
-        id_token: blob
-            .secret("id_token")
-            .map(|token| secret_text(&token).to_owned()),
-        chatgpt_mode: true,
-    };
-    match reader.read_login(home, true).await {
-        Ok((base, _)) => {
-            let Some(current_access) = access_token_from_auth(&base) else {
-                return;
-            };
-            if !same_secret(&current_access, stale) {
-                return;
-            }
-            let Ok(merged) = merge_auth_tokens(&base, &patch) else {
-                return;
-            };
-            let _ = reader.save_login(home, &merged).await;
-        }
-        Err(StoreError::SignedOut) => {
-            let Ok(merged) = merge_auth_tokens(br#"{"auth_mode":"chatgpt","tokens":{}}"#, &patch)
-            else {
-                return;
-            };
-            let _ = reader.save_login(home, &merged).await;
-        }
-        Err(_) => {}
-    }
+    crate::reconcile_rotate::persist_refresh(home, host, skip_keychain, blob, stale, fake).await;
 }
 
-fn account_id_from_auth(bytes: &[u8]) -> Option<String> {
+pub(crate) fn account_id_from_auth(bytes: &[u8]) -> Option<String> {
     let value =
         hofund_plugin_sdk::json::from_slice::<hofund_plugin_sdk::json::Value>(bytes).ok()?;
     value
@@ -210,7 +175,7 @@ fn account_id_from_auth(bytes: &[u8]) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn access_token_from_auth(bytes: &[u8]) -> Option<SecretString> {
+pub(crate) fn access_token_from_auth(bytes: &[u8]) -> Option<SecretString> {
     let value =
         hofund_plugin_sdk::json::from_slice::<hofund_plugin_sdk::json::Value>(bytes).ok()?;
     let token = value.get("tokens")?.get("access_token")?.as_str()?;

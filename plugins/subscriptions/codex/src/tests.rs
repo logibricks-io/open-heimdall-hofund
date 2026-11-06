@@ -17,8 +17,13 @@ use hofund_plugin_api::{
 use hofund_plugin_sdk::codex_zstd::codex_zstd_for_tests;
 use hofund_plugin_sdk::oauth::{Pkce, SecretObject, account_id_from, same_secret};
 
-use crate::tokens::{self, Need};
+use crate::tokens::{self, Need, REFRESH_NEEDED};
 use crate::upstream::{self, CodexUpstream};
+use crate::reconcile::{
+    fingerprint_location, fingerprint_tuple, fingerprint_tuple_absent, parse_markers, with_inflight,
+    with_pending, RefreshMarkers,
+};
+use crate::store::{self, StoreMode, write_atomic_private};
 use crate::{Endpoints, factory_with_endpoints, sign_in};
 use crate::{device_sign_in, models, shape};
 use hofund_plugin_sdk::json::{self, Value, json};
@@ -508,6 +513,362 @@ fn m1_two_accounts_same_home_fail_before_post() {
         true,
     ))
     .expect_err("two owners");
+    assert_eq!(error.kind(), PluginErrorKind::Auth);
+    assert_eq!(token_posts(&host), 0);
+}
+
+fn codex_file_home(dir: &tempfile::TempDir) -> std::path::PathBuf {
+    let home = dir.path().join("codex-home");
+    std::fs::create_dir_all(&home).expect("home");
+    std::fs::write(
+        home.join("config.toml"),
+        "cli_auth_credentials_store = \"file\"\n",
+    )
+    .expect("config");
+    home
+}
+
+fn bind_codex_home(host: &TestHost, id: &AccountId, home: &std::path::Path) {
+    let row = block_on(host.context().accounts().list())
+        .expect("list")
+        .into_iter()
+        .find(|row| row.id() == id)
+        .expect("row");
+    let blob = stored(host, id).with_text("codex_home", &home.to_string_lossy());
+    let account = host
+        .context()
+        .accounts()
+        .account(id.clone(), row.label())
+        .expect("account");
+    block_on(host.context().accounts().upsert(account, blob.to_secret())).expect("upsert");
+}
+
+#[test]
+fn m2_oauth_happy_path_clears_markers_and_writes_store() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let home = codex_file_home(&dir);
+    let stale = access_token("stale", 100);
+    let id = seed(&host, &stale);
+    bind_codex_home(&host, &id, &home);
+    let fresh = access_token("fresh", 10_000);
+    host.http()
+        .enqueue(token_reply(&fresh, Some("refresh-2"), None));
+    let access = block_on(tokens::rotate_for_test(
+        host.context().clone(),
+        TOKEN_URL.to_owned(),
+        id.clone(),
+        secret(&stale),
+        true,
+    ))
+    .expect("rotate");
+    assert!(same_secret(&access.token, &secret(&fresh)));
+    assert_eq!(token_posts(&host), 1);
+    assert!(parse_markers(&stored(&host, &id)).is_none());
+    let text = std::fs::read_to_string(home.join("auth.json")).expect("auth");
+    assert!(text.contains("fresh"));
+}
+
+#[test]
+fn m3_pending_retained_when_repair_sees_third_tuple() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let home = codex_file_home(&dir);
+    let third = access_token("third-party", 10_000);
+    write_atomic_private(
+        &home.join("auth.json"),
+        format!(
+            r#"{{"auth_mode":"chatgpt","tokens":{{"access_token":"{third}","refresh_token":"refresh-other","account_id":"acct-9"}}}}"#
+        )
+        .as_bytes(),
+    )
+    .expect("third tuple");
+    let stale = access_token("stale", 100);
+    let id = seed(&host, &stale);
+    bind_codex_home(&host, &id, &home);
+    let canonical = store::canonical_codex_home(&home);
+    let candidate = access_token("candidate", 10_000);
+    let candidate_fp = fingerprint_tuple(
+        Some(&secret(&candidate)),
+        Some(&secret("refresh-cand")),
+        None,
+        Some("acct-1"),
+    );
+    let blob = with_pending(
+        with_inflight(
+            stored(&host, &id),
+            "pending-attempt",
+            &canonical,
+            &fingerprint_location(false, StoreMode::File),
+            fingerprint_tuple_absent(),
+        ),
+        &candidate_fp,
+        &secret(&candidate),
+        Some(&secret("refresh-cand")),
+        None,
+        Some("acct-1"),
+    );
+    let row = block_on(host.context().accounts().list())
+        .expect("list")
+        .into_iter()
+        .find(|row| row.id() == &id)
+        .expect("row");
+    let account = host
+        .context()
+        .accounts()
+        .account(id.clone(), row.label())
+        .expect("account");
+    block_on(host.context().accounts().upsert(account, blob.to_secret())).expect("upsert");
+    let error = block_on(tokens::rotate_for_test(
+        host.context().clone(),
+        TOKEN_URL.to_owned(),
+        id.clone(),
+        secret(&stale),
+        true,
+    ))
+    .expect_err("conflict");
+    assert_eq!(error.kind(), PluginErrorKind::Auth);
+    assert!(matches!(
+        parse_markers(&stored(&host, &id)),
+        Some(RefreshMarkers::CandidatePending { .. })
+    ));
+    assert_eq!(token_posts(&host), 0);
+}
+
+#[test]
+fn m4_inflight_marker_reauth_without_post() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let home = codex_file_home(&dir);
+    let stale = access_token("stale", 100);
+    let id = seed(&host, &stale);
+    bind_codex_home(&host, &id, &home);
+    let canonical = store::canonical_codex_home(&home);
+    let blob = with_inflight(
+        stored(&host, &id),
+        "crash-attempt",
+        &canonical,
+        &fingerprint_location(false, StoreMode::File),
+        fingerprint_tuple_absent(),
+    );
+    let row = block_on(host.context().accounts().list())
+        .expect("list")
+        .into_iter()
+        .find(|row| row.id() == &id)
+        .expect("row");
+    let account = host
+        .context()
+        .accounts()
+        .account(id.clone(), row.label())
+        .expect("account");
+    block_on(host.context().accounts().upsert(account, blob.to_secret())).expect("upsert");
+    let error = block_on(tokens::rotate_for_test(
+        host.context().clone(),
+        TOKEN_URL.to_owned(),
+        id,
+        secret(&stale),
+        true,
+    ))
+    .expect_err("inflight");
+    assert_eq!(error.kind(), PluginErrorKind::Auth);
+    assert!(error.to_string().contains("interrupted"));
+    assert_eq!(token_posts(&host), 0);
+}
+
+#[test]
+fn m5_pending_repair_matches_store_candidate_without_post() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let home = codex_file_home(&dir);
+    let store_access = access_token("store-access", 10_000);
+    write_atomic_private(
+        &home.join("auth.json"),
+        format!(
+            r#"{{"auth_mode":"chatgpt","tokens":{{"access_token":"{store_access}","refresh_token":"refresh-store","account_id":"acct-1"}}}}"#
+        )
+        .as_bytes(),
+    )
+    .expect("auth");
+    let stale = access_token("stale", 100);
+    let id = seed(&host, &stale);
+    bind_codex_home(&host, &id, &home);
+    let canonical = store::canonical_codex_home(&home);
+    let candidate_fp = fingerprint_tuple(
+        Some(&secret(&store_access)),
+        Some(&secret("refresh-store")),
+        None,
+        Some("acct-1"),
+    );
+    let blob = with_pending(
+        with_inflight(
+            stored(&host, &id),
+            "repair-attempt",
+            &canonical,
+            &fingerprint_location(false, StoreMode::File),
+            fingerprint_tuple_absent(),
+        ),
+        &candidate_fp,
+        &secret(&store_access),
+        Some(&secret("refresh-store")),
+        None,
+        Some("acct-1"),
+    );
+    let row = block_on(host.context().accounts().list())
+        .expect("list")
+        .into_iter()
+        .find(|row| row.id() == &id)
+        .expect("row");
+    let account = host
+        .context()
+        .accounts()
+        .account(id.clone(), row.label())
+        .expect("account");
+    block_on(host.context().accounts().upsert(account, blob.to_secret())).expect("upsert");
+    let access = block_on(tokens::rotate_for_test(
+        host.context().clone(),
+        TOKEN_URL.to_owned(),
+        id.clone(),
+        secret(&stale),
+        true,
+    ))
+    .expect("repair");
+    assert!(same_secret(&access.token, &secret(&store_access)));
+    assert_eq!(token_posts(&host), 0);
+    assert!(parse_markers(&stored(&host, &id)).is_none());
+}
+
+#[test]
+fn m6_expired_adopt_returns_refresh_needed_without_post() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let home = codex_file_home(&dir);
+    let expired = access_token("expired-on-disk", 100);
+    write_atomic_private(
+        &home.join("auth.json"),
+        format!(
+            r#"{{"auth_mode":"chatgpt","tokens":{{"access_token":"{expired}","refresh_token":"refresh-store","account_id":"acct-1"}}}}"#
+        )
+        .as_bytes(),
+    )
+    .expect("auth");
+    let stale = access_token("stale", 100);
+    let id = seed(&host, &stale);
+    bind_codex_home(&host, &id, &home);
+    let error = block_on(tokens::rotate_for_test(
+        host.context().clone(),
+        TOKEN_URL.to_owned(),
+        id.clone(),
+        secret(&stale),
+        true,
+    ))
+    .expect_err("refresh needed");
+    assert_eq!(error.message(), REFRESH_NEEDED);
+    assert_eq!(token_posts(&host), 0);
+    assert!(same_secret(
+        &stored(&host, &id)
+            .secret("access_token")
+            .expect("access"),
+        &secret(&expired)
+    ));
+    let fresh = access_token("refreshed", 10_000);
+    host.http()
+        .enqueue(token_reply(&fresh, Some("refresh-2"), None));
+    let access = block_on(tokens::rotate_for_test(
+        host.context().clone(),
+        TOKEN_URL.to_owned(),
+        id,
+        secret(&expired),
+        true,
+    ))
+    .expect("oauth after adopt");
+    assert!(same_secret(&access.token, &secret(&fresh)));
+    assert_eq!(token_posts(&host), 1);
+}
+
+#[test]
+fn m7_full_tuple_readopt_on_401_without_token_post() {
+    use crate::store::write_atomic_private;
+
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let home = codex_file_home(&dir);
+    let lease_token = access_token("lease-token", 10_000);
+    let store_token = access_token("store-token", 10_000);
+    let id = seed(&host, &lease_token);
+    bind_codex_home(&host, &id, &home);
+    write_atomic_private(
+        &home.join("auth.json"),
+        format!(
+            r#"{{"auth_mode":"chatgpt","tokens":{{"access_token":"{store_token}","refresh_token":"refresh-store","account_id":"acct-1"}}}}"#
+        )
+        .as_bytes(),
+    )
+    .expect("auth");
+    let json = [("content-type", "application/json")];
+    host.http()
+        .enqueue_response(401, &json, EXPIRED_401.to_vec());
+    host.http()
+        .enqueue_response(200, &json, br#"{"output":[]}"#.to_vec());
+    let upstream = upstream_for(&host, &id);
+    block_on(upstream.execute(streaming_request(), ProtocolId::OPENAI_RESPONSES)).expect("retry");
+    assert_eq!(token_posts(&host), 0);
+    assert!(same_secret(
+        &stored(&host, &id)
+            .secret("access_token")
+            .expect("access"),
+        &secret(&store_token)
+    ));
+}
+
+#[test]
+fn m8_home_busy_skips_post_and_commit() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let home = codex_file_home(&dir);
+    let stale = access_token("stale", 100);
+    let id = seed(&host, &stale);
+    bind_codex_home(&host, &id, &home);
+    let guard = block_on(crate::codex_lock::try_acquire_home(&home)).expect("lock");
+    host.http()
+        .enqueue(token_reply(&access_token("fresh", 10_000), None, None));
+    let error = block_on(tokens::rotate_for_test(
+        host.context().clone(),
+        TOKEN_URL.to_owned(),
+        id,
+        secret(&stale),
+        true,
+    ))
+    .expect_err("busy");
+    assert_eq!(error.kind(), PluginErrorKind::Auth);
+    assert!(error.to_string().contains("busy"));
+    assert_eq!(token_posts(&host), 0);
+    drop(guard);
+}
+
+#[test]
+fn m9_no_double_post_under_concurrency() {
+    refresh_posts_once_under_concurrency();
+}
+
+#[test]
+fn m10_unreadable_store_skips_oauth_post() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let home = codex_file_home(&dir);
+    std::fs::write(home.join("auth.json"), b"{not-json").expect("invalid");
+    let stale = access_token("stale", 100);
+    let id = seed(&host, &stale);
+    bind_codex_home(&host, &id, &home);
+    host.http()
+        .enqueue(token_reply(&access_token("fresh", 10_000), None, None));
+    let error = block_on(tokens::rotate_for_test(
+        host.context().clone(),
+        TOKEN_URL.to_owned(),
+        id,
+        secret(&stale),
+        true,
+    ))
+    .expect_err("blocked store");
     assert_eq!(error.kind(), PluginErrorKind::Auth);
     assert_eq!(token_posts(&host), 0);
 }

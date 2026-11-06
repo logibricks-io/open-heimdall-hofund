@@ -30,6 +30,7 @@ mod import;
 mod limits;
 mod models;
 mod reconcile;
+mod reconcile_rotate;
 mod resets;
 mod security_io;
 mod shape;

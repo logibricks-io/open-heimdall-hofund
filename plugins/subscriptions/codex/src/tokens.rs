@@ -2,14 +2,8 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use hofund_plugin_api::{AccountId, HostContext, PluginError, PluginErrorKind, SecretString};
-use hofund_plugin_sdk::Call;
-use hofund_plugin_sdk::oauth::{
-    SecretObject, detached, parse_token_set, same_secret, token_error, unverified_claims,
-};
-
-use crate::codex_lock::HomeGuardError;
-use crate::{CLIENT_ID, Endpoints, REFRESH_SCOPE};
+use hofund_plugin_api::{AccountId, HostContext, PluginError, SecretString};
+use hofund_plugin_sdk::oauth::{SecretObject, detached, same_secret, unverified_claims};
 
 /// The secret field set once ChatGPT refuses the refresh token.
 pub(crate) const LAPSED: &str = "lapsed";
@@ -17,11 +11,12 @@ pub(crate) const LAPSED: &str = "lapsed";
 /// Why a lapsed account needs a new sign-in.
 pub(crate) const LAPSED_REASON: &str = "ChatGPT refused the stored sign-in; sign in again";
 
+/// Adopted or repaired access is still inside the refresh margin; caller should retry refresh.
+pub(crate) const REFRESH_NEEDED: &str =
+    "ChatGPT access token still needs refresh after Codex store sync";
+
 /// How close to expiry an access token is refreshed, as Codex CLI does.
 pub(crate) const REFRESH_MARGIN: Duration = Duration::from_secs(5 * 60);
-
-/// How long a refresh waits for another holder of the account lease.
-const LEASE_WAIT: Duration = Duration::from_secs(30);
 
 /// The token to send and the ChatGPT account it belongs to.
 #[derive(Debug)]
@@ -31,6 +26,7 @@ pub(crate) struct Access {
 }
 
 /// When the stored access token is replaced.
+#[derive(Clone)]
 pub(crate) enum Need {
     /// Only when it is within [`REFRESH_MARGIN`] of expiry.
     IfExpiring,
@@ -59,7 +55,7 @@ pub(crate) fn fresh(token: &SecretString, now: SystemTime) -> bool {
     UNIX_EPOCH + Duration::from_secs(exp) > now + REFRESH_MARGIN
 }
 
-fn stored(secret: &SecretString) -> Result<SecretObject, PluginError> {
+pub(crate) fn stored(secret: &SecretString) -> Result<SecretObject, PluginError> {
     let blob = SecretObject::parse(secret)?;
     if blob.flag(LAPSED) {
         return Err(PluginError::auth(LAPSED_REASON));
@@ -67,12 +63,12 @@ fn stored(secret: &SecretString) -> Result<SecretObject, PluginError> {
     Ok(blob)
 }
 
-fn access_of(blob: &SecretObject) -> Result<SecretString, PluginError> {
+pub(crate) fn access_of(blob: &SecretObject) -> Result<SecretString, PluginError> {
     blob.secret("access_token")
         .ok_or_else(|| PluginError::auth("the stored ChatGPT sign-in has no access token"))
 }
 
-fn account_of(blob: &SecretObject) -> Option<String> {
+pub(crate) fn account_of(blob: &SecretObject) -> Option<String> {
     blob.text("account_id").map(str::to_owned)
 }
 
@@ -103,19 +99,20 @@ pub(crate) async fn access(
             account: account_of(&blob),
         });
     }
-    // Run detached: a rotated refresh token must be stored even when the
-    // request that needed it is cancelled.
-    let job = rotate(
+    let stale = token.clone();
+    let job = reconcile_rotate(
         host.clone(),
         endpoints.token.clone(),
         account.clone(),
-        token,
+        stale,
+        need,
         skip_keychain,
+        None,
     );
     detached(host.scheduler(), "codex-refresh", job).await
 }
 
-/// [`rotate`] for the unit tests.
+/// [`reconcile_rotate`] for the unit tests.
 #[cfg(test)]
 pub(crate) async fn rotate_for_test(
     host: HostContext,
@@ -124,89 +121,37 @@ pub(crate) async fn rotate_for_test(
     stale: SecretString,
     skip_keychain: bool,
 ) -> Result<Access, PluginError> {
-    rotate(host, token_url, account, stale, skip_keychain).await
+    reconcile_rotate(
+        host,
+        token_url,
+        account,
+        stale,
+        Need::Always,
+        skip_keychain,
+        None,
+    )
+    .await
 }
 
-/// Refreshes `account` unless another caller already replaced `stale`.
-async fn rotate(
+async fn reconcile_rotate(
     host: HostContext,
     token_url: String,
     account: AccountId,
     stale: SecretString,
+    need: Need,
     skip_keychain: bool,
+    fake: Option<&crate::store::FakeKeychain>,
 ) -> Result<Access, PluginError> {
-    let lease = host.accounts().lease(&account, LEASE_WAIT).await?;
-    let blob = stored(lease.secret())?;
-    let current = access_of(&blob)?;
-    if !same_secret(&current, &stale) {
-        // Another caller refreshed while this one waited for the lease.
-        return Ok(Access {
-            token: current,
-            account: account_of(&blob),
-        });
-    }
-    if let Some(home_text) = blob.text("codex_home") {
-        let home = std::path::PathBuf::from(home_text);
-        let canonical = crate::store::canonical_codex_home(&home);
-        let _guard =
-            crate::codex_lock::try_acquire_home(&home)
-                .await
-                .map_err(|error| match error {
-                    HomeGuardError::Busy => PluginError::auth("Codex home directory is busy"),
-                    HomeGuardError::Io => PluginError::io("Codex home directory lock failed"),
-                })?;
-        let owners = crate::reconcile::home_owners(&host, &canonical).await?;
-        crate::reconcile::assert_unique_owner(&owners, &account)?;
-        if let Some(crate::agent_sign_in::RefreshReconcile::Adopt { access, account }) =
-            crate::agent_sign_in::adopt_from_store(&home, &host, skip_keychain, &stale, None).await
-        {
-            return Ok(Access {
-                token: access,
-                account,
-            });
-        }
-    }
-    let refresh_token = blob
-        .secret("refresh_token")
-        .ok_or_else(|| PluginError::auth("the stored ChatGPT sign-in has no refresh token"))?;
-    let body = SecretObject::new()
-        .with_text("client_id", CLIENT_ID)
-        .with_text("grant_type", "refresh_token")
-        .with_secret("refresh_token", &refresh_token)
-        .with_text("scope", REFRESH_SCOPE)
-        .to_body();
-    let reply = Call::post(token_url).json(body).fetch(host.http()).await?;
-    if !(200..300).contains(&reply.status()) {
-        let error = token_error(reply.status(), reply.body());
-        if error.kind() == PluginErrorKind::Auth {
-            lease
-                .commit(None, blob.with_flag(LAPSED, true).to_secret())
-                .await?;
-        }
-        return Err(error);
-    }
-    let now = host.clock().now();
-    let set = parse_token_set(reply.body(), now)
-        .map_err(|error| PluginError::decode(error.message()))?
-        .or_refresh(Some(&refresh_token));
-    let account_id = account_of(&blob);
-    let mut next = blob
-        .with_secret("access_token", set.access())
-        .with_number("last_refresh", unix_seconds(now));
-    if let Some(refresh) = set.refresh() {
-        next = next.with_secret("refresh_token", refresh);
-    }
-    if let Some(id_token) = set.id_token() {
-        next = next.with_secret("id_token", id_token);
-    }
-    lease.commit(None, next.to_secret()).await?;
-    if let Some(home) = next.text("codex_home") {
-        let path = std::path::PathBuf::from(home);
-        crate::agent_sign_in::persist_refresh(&path, &host, skip_keychain, &next, &stale, None)
-            .await;
-    }
-    Ok(Access {
-        token: set.access().clone(),
-        account: account_id,
-    })
+    crate::reconcile_rotate::reconcile_rotate(
+        host,
+        token_url,
+        account,
+        stale,
+        need,
+        skip_keychain,
+        fake,
+    )
+    .await
 }
+
+use crate::Endpoints;

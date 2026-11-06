@@ -1,5 +1,4 @@
 //! In-blob refresh markers, fingerprints, and Codex home ownership (R-47b reconcile).
-#![expect(dead_code, reason = "OAuth protocol steps 0-5 wire these in Task 4")]
 
 use std::path::Path;
 
