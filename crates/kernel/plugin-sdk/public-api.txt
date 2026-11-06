@@ -3,6 +3,7 @@ BODY_CAP
 Call
 Contribution
 ERROR_RUNES
+FuturesUnordered
 HeaderMap
 HttpRequest
 HttpResponse
@@ -11,6 +12,7 @@ MAX_PAGES
 PAGE_LIMIT
 PageError
 PageErrorKind
+Race
 Reply
 TokenError
 after_id
@@ -45,6 +47,7 @@ codex_zstd::fn decompress_turn (body : & [u8] , limit : usize) -> Option < Vec <
 codex_zstd::fn maybe_compress_turn (method : & str , url : & str , content_encoding : Option < & str > , body : & [u8] ,) -> (Vec < u8 > , bool)
 const daily_checkin::ENABLED_KEY
 const daily_warmup::TIMES_KEY
+const inflate::GZIP_OUTPUT_CAP
 const page::BODY_CAP
 const page::ERROR_RUNES
 const page::LIST_BUDGET
@@ -63,8 +66,15 @@ digest::fn sha256 (bytes : & [u8]) -> [u8 ; 32]
 enc_v1::fn decrypt (key : & [u8] , value : & str) -> Option < String >
 enc_v1::fn encrypt_for_test (key : & [u8] , plain : & str) -> String
 form_body
+futures::FuturesUnordered
+futures::Race derives(Clone, Copy, Debug, PartialEq, Eq)
+futures::Race::Left
+futures::Race::Right
+futures::async fn race < A , B > (left : A , right : B) -> Race < A :: Output , B :: Output > where A : std :: future :: Future , B : std :: future :: Future ,
 gemini_models
 gemini_models_with_dropped
+gzip
+inflate::fn gzip (input : & [u8]) -> Result < Vec < u8 > , PluginError >
 json
 json_error_message
 jwt::KeyError #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
@@ -84,6 +94,8 @@ mod daily_checkin
 mod daily_warmup
 mod digest
 mod enc_v1
+mod futures
+mod inflate
 mod jwt
 mod oauth
 mod page
@@ -161,6 +173,7 @@ probe::fn status_hint (body : & [u8]) -> String
 probe::fn stream_report (body : & [u8]) -> Result < ProbeReport , PluginError >
 process::fn find_in (name : BinaryName , path : Option < & OsStr > , pathext : Option < & OsStr >) -> Option < PathBuf >
 process::fn find_program (name : BinaryName) -> Option < PathBuf >
+race
 refresh_form
 refused_passthrough
 register::Contribution derives(Default)
@@ -229,6 +242,7 @@ transport::Call::fn header (mut self , name : impl Into < String > , value : imp
 transport::Call::fn idempotent (mut self , idempotent : bool) -> Self
 transport::Call::fn json (self , body : impl AsRef < [u8] >) -> Self
 transport::Call::fn post (uri : impl Into < String >) -> Self
+transport::Call::fn read_timeout (mut self , budget : Duration) -> Self
 transport::Call::fn sensitive_header (mut self , name : impl Into < String > , value : impl Into < String >) -> Self
 transport::HttpRequest
 transport::HttpResponse

@@ -29,4 +29,13 @@ if ((${#failed[@]} > 0)); then
     exit 1
 fi
 
+echo "::group::hofund-plugin-api-duplex_split"
+if "$cargo_bin" test --locked -p hofund-plugin-api --features kernel,kernel-internal --test duplex_split; then
+    echo "::endgroup::"
+else
+    echo "::endgroup::"
+    echo "hofund-plugin-api duplex_split (kernel features) failed" >&2
+    exit 1
+fi
+
 printf 'All %d workspace packages passed.\n' "${#packages[@]}"
