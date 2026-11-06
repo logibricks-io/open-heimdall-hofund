@@ -19,6 +19,7 @@ use bytes::Bytes;
 use futures_util::future::BoxFuture;
 
 use crate::body::{Body, BodyStream};
+use crate::duplex::{DuplexRequest, DuplexSession};
 use crate::error::PluginError;
 use crate::forward::{Forward, RawAnswer};
 use crate::id::{AccountId, PluginKey};
@@ -53,6 +54,16 @@ pub trait HttpBackend: Send + Sync {
         &self,
         request: HttpRequest<Body>,
     ) -> Result<HttpResponse<BodyStream>, PluginError>;
+
+    /// Opens a bidirectional HTTP session.
+    ///
+    /// The default refuses with [`PluginErrorKind::Unsupported`](crate::PluginErrorKind::Unsupported).
+    async fn open_duplex(&self, request: DuplexRequest) -> Result<DuplexSession, PluginError> {
+        let _ = request;
+        Err(PluginError::unsupported(
+            "this HTTP backend has no duplex client",
+        ))
+    }
 
     /// The process-wide `reqwest` client, when this backend is the pool.
     ///
@@ -288,6 +299,41 @@ pub trait PipedChildBackend: Send + Sync {
     ///
     /// Returns `None` after the first call.
     fn take_stdout(&self) -> Option<BodyStream>;
+
+    /// The exit status after standard output reaches end of file.
+    ///
+    /// The default refuses.
+    async fn exit_code(&self) -> Result<i32, PluginError> {
+        Err(PluginError::unsupported(
+            "this piped child backend has no exit status",
+        ))
+    }
+}
+
+/// Host hook that aborts an open duplex call when a session half is dropped.
+#[doc(hidden)]
+pub trait DuplexGuard: Send + Sync {
+    /// Marks the request body finished without aborting the call.
+    fn finish(&self);
+    /// Marks that [`crate::DuplexSession::into_split`] moved the live halves out.
+    fn mark_split(&self) {}
+    /// Whether dropping the session shell should call [`Self::abort_if_unfinished`].
+    fn session_should_abort_on_drop(&self) -> bool {
+        true
+    }
+    /// Aborts the call when a half is dropped before [`Self::finish`].
+    fn abort_if_unfinished(&self);
+}
+
+/// Writes the request body of an open duplex session.
+#[async_trait]
+#[doc(hidden)]
+pub trait DuplexWriterBackend: Send {
+    /// Queues `bytes` on the request body stream.
+    async fn write(&mut self, bytes: Bytes) -> Result<(), PluginError>;
+
+    /// Ends the request body stream.
+    async fn finish(&mut self) -> Result<(), PluginError>;
 }
 
 /// Loopback callback listeners for sign-in. The kernel owns the listener and

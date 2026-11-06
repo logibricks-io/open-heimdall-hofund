@@ -13,12 +13,13 @@ use std::any::Any;
 use std::collections::BTreeMap;
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use hofund_plugin_api::kernel::{HttpBackend, HttpRequest, HttpResponse};
-use hofund_plugin_api::{Body, BodyStream, PluginError};
+use hofund_plugin_api::{Body, BodyStream, DuplexRequest, DuplexSession, PluginError, read_budget};
 
 const USER_AGENT: &str = "hofund/0.1.0";
 const MAX_IDLE_PER_HOST: usize = 8;
@@ -109,6 +110,13 @@ impl HttpLimits {
         self.read
     }
 
+    /// Same connect and idle-pool settings with a different read budget.
+    #[must_use]
+    pub const fn with_read(mut self, read: Duration) -> Self {
+        self.read = read;
+        self
+    }
+
     /// Idle connections retained per host.
     #[must_use]
     pub const fn max_idle_per_host(self) -> usize {
@@ -129,10 +137,25 @@ pub struct PooledHttp {
     limits: HttpLimits,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum ClientMode {
+    Unary,
+    Duplex,
+}
+
+/// Cleartext prior knowledge versus TLS ALPN for the duplex pool slot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum DuplexDial {
+    Alpn,
+    PriorKnowledge,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct ClientKey {
     profile: HttpProfile,
     limits: HttpLimits,
+    mode: ClientMode,
+    duplex_dial: DuplexDial,
 }
 
 impl PooledHttp {
@@ -161,7 +184,13 @@ impl PooledHttp {
     /// Returns [`PluginError`] when the proxy URL or the client cannot be built.
     #[cfg(test)]
     pub(crate) fn ensure(&self) -> Result<(), PluginError> {
-        client_for(&self.profile, self.limits).map(|_| ())
+        client_for(
+            &self.profile,
+            self.limits,
+            ClientMode::Unary,
+            DuplexDial::Alpn,
+        )
+        .map(|_| ())
     }
 
     /// Profile and limits that select this backend's pooled client.
@@ -192,6 +221,8 @@ pub fn close_idle_after_region(profile: &HttpProfile, limits: HttpLimits) {
     let key = ClientKey {
         profile: profile.clone(),
         limits,
+        mode: ClientMode::Unary,
+        duplex_dial: DuplexDial::Alpn,
     };
     let Ok(guard) = pool().lock() else {
         return;
@@ -214,8 +245,10 @@ pub fn fresh_pooled_client(
     let key = ClientKey {
         profile: profile.clone(),
         limits,
+        mode: ClientMode::Unary,
+        duplex_dial: DuplexDial::Alpn,
     };
-    let shared = client_handle(profile, limits)?;
+    let shared = client_handle(profile, limits, ClientMode::Unary, DuplexDial::Alpn)?;
     refresh_shared(&shared, &key)?;
     Ok(shared
         .read()
@@ -249,10 +282,14 @@ pub(crate) fn pooled_client_count() -> usize {
 fn client_handle(
     profile: &HttpProfile,
     limits: HttpLimits,
+    mode: ClientMode,
+    duplex_dial: DuplexDial,
 ) -> Result<Arc<RwLock<reqwest::Client>>, PluginError> {
     let key = ClientKey {
         profile: profile.clone(),
         limits,
+        mode,
+        duplex_dial,
     };
     let mut guard = pool()
         .lock()
@@ -265,12 +302,43 @@ fn client_handle(
     Ok(shared)
 }
 
-fn client_for(profile: &HttpProfile, limits: HttpLimits) -> Result<reqwest::Client, PluginError> {
-    let shared = client_handle(profile, limits)?;
+fn client_for(
+    profile: &HttpProfile,
+    limits: HttpLimits,
+    mode: ClientMode,
+    duplex_dial: DuplexDial,
+) -> Result<reqwest::Client, PluginError> {
+    let shared = client_handle(profile, limits, mode, duplex_dial)?;
     Ok(shared
         .read()
         .map_err(|_| PluginError::internal("http pool client lock is poisoned"))?
         .clone())
+}
+
+pub(crate) fn duplex_client_for(
+    profile: &HttpProfile,
+    dial: DuplexDial,
+) -> Result<reqwest::Client, PluginError> {
+    client_for(
+        profile,
+        crate::duplex::duplex_limits(),
+        ClientMode::Duplex,
+        dial,
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn duplex_client_for_read(
+    profile: &HttpProfile,
+    dial: DuplexDial,
+    read: Duration,
+) -> Result<reqwest::Client, PluginError> {
+    client_for(
+        profile,
+        crate::duplex::duplex_limits().with_read(read),
+        ClientMode::Duplex,
+        dial,
+    )
 }
 
 fn build_client(key: &ClientKey) -> Result<reqwest::Client, PluginError> {
@@ -282,6 +350,16 @@ fn build_client(key: &ClientKey) -> Result<reqwest::Client, PluginError> {
         .connect_timeout(key.limits.connect())
         .read_timeout(key.limits.read())
         .danger_accept_invalid_certs(key.profile.insecure);
+    match key.mode {
+        ClientMode::Unary => {
+            builder = builder.http1_only();
+        }
+        ClientMode::Duplex => match key.duplex_dial {
+            DuplexDial::PriorKnowledge | DuplexDial::Alpn => {
+                builder = builder.http2_prior_knowledge();
+            }
+        },
+    }
     if let Some(proxy) = &key.profile.proxy {
         let proxy = reqwest::Proxy::all(proxy)
             .map_err(|error| PluginError::config(format!("http proxy is invalid: {error}")))?;
@@ -290,6 +368,27 @@ fn build_client(key: &ClientKey) -> Result<reqwest::Client, PluginError> {
     builder
         .build()
         .map_err(|error| PluginError::connect(error.to_string()))
+}
+
+fn limits_for_request(default: HttpLimits, request: &HttpRequest<Body>) -> HttpLimits {
+    read_budget(request).map_or(default, |read| default.with_read(read))
+}
+
+fn client_for_unary(
+    profile: &HttpProfile,
+    pool_limits: HttpLimits,
+    request: &HttpRequest<Body>,
+) -> Result<reqwest::Client, PluginError> {
+    let effective = limits_for_request(pool_limits, request);
+    if effective.read() == pool_limits.read() {
+        return client_for(profile, pool_limits, ClientMode::Unary, DuplexDial::Alpn);
+    }
+    build_client(&ClientKey {
+        profile: profile.clone(),
+        limits: effective,
+        mode: ClientMode::Unary,
+        duplex_dial: DuplexDial::Alpn,
+    })
 }
 
 fn map_error(error: reqwest::Error) -> PluginError {
@@ -307,18 +406,32 @@ fn map_error(error: reqwest::Error) -> PluginError {
 }
 
 fn map_body(error: reqwest::Error) -> PluginError {
-    let mut message = error.to_string();
-    if error.is_timeout() && !message.contains("timed out") {
-        message.push_str(": timed out");
+    if error.is_timeout() {
+        let mut message = error.to_string();
+        if !message.contains("timed out") {
+            message.push_str(": timed out");
+        }
+        return PluginError::timeout(message);
     }
-    PluginError::interrupted(message)
+    PluginError::interrupted(error.to_string())
+}
+
+fn map_duplex_body(error: reqwest::Error) -> PluginError {
+    if error.is_timeout() {
+        let mut message = error.to_string();
+        if !message.contains("timed out") {
+            message.push_str(": timed out");
+        }
+        return PluginError::interrupted(message);
+    }
+    PluginError::interrupted(error.to_string())
 }
 
 /// A success body streamed chunk by chunk as the upstream sends it.
 ///
 /// A read failure becomes one [`PluginError::interrupted`] chunk and ends the
 /// stream. Dropping the stream drops the response and closes the connection.
-fn live_body(response: reqwest::Response) -> BodyStream {
+pub(crate) fn live_body(response: reqwest::Response) -> BodyStream {
     BodyStream::from_stream(futures_util::stream::unfold(
         Some(response),
         |state| async move {
@@ -330,6 +443,30 @@ fn live_body(response: reqwest::Response) -> BodyStream {
             }
         },
     ))
+}
+
+/// Response body for an open duplex session; aborts with an error chunk when the guard fires.
+pub(crate) fn live_duplex_body(
+    response: reqwest::Response,
+    aborted: Arc<AtomicBool>,
+) -> BodyStream {
+    BodyStream::from_stream(futures_util::stream::unfold(Some(response), move |state| {
+        let aborted = Arc::clone(&aborted);
+        async move {
+            if aborted.load(Ordering::Relaxed) {
+                return Some((
+                    Err(PluginError::interrupted("duplex response aborted")),
+                    None,
+                ));
+            }
+            let mut response = state?;
+            match response.chunk().await {
+                Ok(Some(chunk)) => Some((Ok(chunk), Some(response))),
+                Ok(None) => None,
+                Err(error) => Some((Err(map_duplex_body(error)), None)),
+            }
+        }
+    }))
 }
 
 #[cfg(test)]
@@ -359,7 +496,7 @@ impl HttpBackend for PooledHttp {
     ) -> Result<HttpResponse<BodyStream>, PluginError> {
         #[cfg(test)]
         note_send();
-        let client = client_for(&self.profile, self.limits)?;
+        let client = client_for_unary(&self.profile, self.limits, &request)?;
         let method = reqwest::Method::from_bytes(request.method().as_str().as_bytes())
             .map_err(|error| PluginError::internal(error.to_string()))?;
         let url = request.uri().to_string();
@@ -419,12 +556,21 @@ impl HttpBackend for PooledHttp {
         Ok(output)
     }
 
+    async fn open_duplex(&self, request: DuplexRequest) -> Result<DuplexSession, PluginError> {
+        crate::duplex::open_duplex(self, request).await
+    }
+
     fn pooled_client(&self) -> Option<Arc<dyn Any + Send + Sync>> {
-        client_handle(&self.profile, self.limits)
-            .ok()
-            // Box the shared handle itself so consumers downcast to
-            // `Arc<RwLock<reqwest::Client>>` and see every later refresh.
-            .map(|shared| Arc::new(shared) as Arc<dyn Any + Send + Sync>)
+        client_handle(
+            &self.profile,
+            self.limits,
+            ClientMode::Unary,
+            DuplexDial::Alpn,
+        )
+        .ok()
+        // Box the shared handle itself so consumers downcast to
+        // `Arc<RwLock<reqwest::Client>>` and see every later refresh.
+        .map(|shared| Arc::new(shared) as Arc<dyn Any + Send + Sync>)
     }
 
     fn fresh_client(&self) -> Option<Result<Arc<dyn Any + Send + Sync>, PluginError>> {
@@ -439,8 +585,8 @@ impl HttpBackend for PooledHttp {
 mod tests {
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, RwLock};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex, RwLock};
     use std::time::Duration;
 
     use hofund_plugin_api::kernel::{HttpBackend, HttpRequest};
@@ -735,13 +881,21 @@ mod tests {
     }
 
     fn raw(response: &'static [u8]) -> u16 {
+        raw_accepts(response, 1)
+    }
+
+    fn raw_accepts(response: &'static [u8], connections: usize) -> u16 {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let port = listener.local_addr().expect("addr").port();
         std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept");
-            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-            let _ = read_request(&mut stream, false);
-            let _ = stream.write_all(response);
+            for _ in 0..connections {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                let _ = read_request(&mut stream, false);
+                let _ = stream.write_all(response);
+            }
         });
         port
     }
@@ -919,7 +1073,7 @@ mod tests {
             .send(context.http())
             .await
             .expect_err("stall");
-        assert_eq!(error.kind(), PluginErrorKind::Interrupted);
+        assert_eq!(error.kind(), PluginErrorKind::Timeout);
         assert!(error.message().contains("timed out"), "{}", error.message());
         assert!(started.elapsed() < Duration::from_millis(1500));
     }
@@ -942,6 +1096,27 @@ mod tests {
                 let _ = stream.write_all(&[b'a' + u8::try_from(index).unwrap_or(b'a')]);
                 let _ = stream.flush();
                 std::thread::sleep(gap);
+            }
+        });
+        (port, hits)
+    }
+
+    fn hold_after_headers() -> (u16, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let hits = Arc::new(AtomicUsize::new(0));
+        std::thread::spawn({
+            let hits = Arc::clone(&hits);
+            move || {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
+                hits.fetch_add(1, Ordering::SeqCst);
+                let _ = read_request(&mut stream, false);
+                let _ = stream.write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-length: 4\r\nconnection: close\r\n\r\n",
+                );
+                std::thread::sleep(Duration::from_secs(30));
             }
         });
         (port, hits)
@@ -1040,6 +1215,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn duplex_response_body_read_timeout_is_interrupted_not_timeout() {
+        let _guard = exclusive().await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    let Ok(mut connection) = h2::server::handshake(stream).await else {
+                        return;
+                    };
+                    while let Some(result) = connection.accept().await {
+                        let Ok((request, mut respond)) = result else {
+                            continue;
+                        };
+                        tokio::spawn(async move {
+                            let response = http::Response::builder()
+                                .status(200)
+                                .body(())
+                                .expect("response");
+                            let Ok(mut send) = respond.send_response(response, false) else {
+                                return;
+                            };
+                            let _ = send.send_data(bytes::Bytes::from_static(b"hold"), false);
+                            let _ = request.into_body();
+                            tokio::time::sleep(Duration::from_secs(30)).await;
+                        });
+                    }
+                });
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let client = super::duplex_client_for_read(
+            &HttpProfile::direct(),
+            super::DuplexDial::PriorKnowledge,
+            Duration::from_millis(400),
+        )
+        .expect("client");
+        let response = client
+            .post(format!("http://127.0.0.1:{port}/duplex"))
+            .body(reqwest::Body::from("x"))
+            .send()
+            .await
+            .expect("headers");
+        let mut body = super::live_duplex_body(response, Arc::new(AtomicBool::new(false)));
+        let first = body.next_chunk().await.expect("first chunk").expect("ok");
+        assert_eq!(&first[..], b"hold");
+        let started = std::time::Instant::now();
+        let error = body
+            .next_chunk()
+            .await
+            .expect("timeout chunk")
+            .expect_err("stall");
+        assert_eq!(
+            error.kind(),
+            PluginErrorKind::Interrupted,
+            "{}",
+            error.message()
+        );
+        assert_ne!(error.kind(), PluginErrorKind::Timeout);
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[tokio::test]
     async fn a_success_body_break_is_an_interrupted_chunk_after_the_data() {
         let _guard = exclusive().await;
         let (port, release) = gated(b"data: one\n\n", None, 64);
@@ -1112,6 +1355,42 @@ mod tests {
             .recv_timeout(Duration::from_secs(5))
             .expect("request bytes");
         let first_line = request
+            .split(|byte| *byte == b'\n')
+            .next()
+            .expect("request line");
+        assert!(
+            first_line.ends_with(b" HTTP/1.1\r"),
+            "request line was {:?}",
+            String::from_utf8_lossy(first_line)
+        );
+    }
+
+    #[tokio::test]
+    async fn pooled_client_sends_an_http11_request_line_over_https_when_alpn_offers_h2_first() {
+        let _guard = exclusive().await;
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let port = crate::test_tls::spawn_tls_capture(
+            vec![b"h2".to_vec(), b"http/1.1".to_vec()],
+            Arc::clone(&captured),
+        )
+        .await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let request = HttpRequest::builder()
+            .method("GET")
+            .uri(format!("https://127.0.0.1:{port}/probe"))
+            .body(Body::empty())
+            .expect("request");
+        PooledHttp::new(HttpProfile::direct().insecure())
+            .send(request)
+            .await
+            .expect("send");
+        let bytes = captured.lock().expect("capture").clone();
+        assert!(
+            !bytes.starts_with(b"PRI * HTTP/2.0"),
+            "client must not send the HTTP/2 connection preface: {:?}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let first_line = bytes
             .split(|byte| *byte == b'\n')
             .next()
             .expect("request line");
@@ -1432,6 +1711,64 @@ mod tests {
         let client = shared.read().expect("lock").clone();
         client.get(&url).send().await.expect("after region close");
         wait_until(&accepts, 2).await;
+    }
+
+    #[tokio::test]
+    async fn per_call_read_budget_shorter_than_the_pool_default_fires_first() {
+        let _guard = exclusive().await;
+        let pool_limits = HttpLimits::new(Duration::from_secs(2), Duration::from_secs(60));
+        let (port, _) = hold_after_headers();
+        let context = http(pool_limits);
+        let started = std::time::Instant::now();
+        let error = Call::get(format!("http://127.0.0.1:{port}/stall"))
+            .read_timeout(Duration::from_millis(400))
+            .send(context.http())
+            .await
+            .expect_err("short budget");
+        assert_eq!(error.kind(), PluginErrorKind::Timeout);
+        assert!(started.elapsed() < Duration::from_millis(900));
+        assert!(started.elapsed() > Duration::from_millis(250));
+    }
+
+    #[tokio::test]
+    async fn per_call_read_budget_longer_than_the_pool_default_is_honoured() {
+        let _guard = exclusive().await;
+        let pool_limits = HttpLimits::new(Duration::from_secs(2), Duration::from_millis(400));
+        let (port, _) = drip(4, Duration::from_millis(550));
+        let context = http(pool_limits);
+        let reply = Call::get(format!("http://127.0.0.1:{port}/stream"))
+            .read_timeout(Duration::from_secs(2))
+            .send(context.http())
+            .await
+            .expect("longer budget");
+        assert_eq!(reply.body(), b"abcd");
+    }
+
+    #[tokio::test]
+    async fn per_call_read_budget_does_not_add_pool_entries() {
+        let _guard = exclusive().await;
+        let pool_limits = HttpLimits::default();
+        let before = pooled_client_count();
+        PooledHttp::with_limits(HttpProfile::direct(), pool_limits)
+            .ensure()
+            .expect("seed");
+        let settled = pooled_client_count();
+        assert!(settled >= before);
+        let context = http(pool_limits);
+        const OK: &[u8] = b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok";
+        let port = raw_accepts(OK, 2);
+        let url = format!("http://127.0.0.1:{port}/a");
+        let _ = Call::get(url.clone())
+            .read_timeout(Duration::from_millis(500))
+            .send(context.http())
+            .await
+            .expect("first");
+        let _ = Call::get(url)
+            .read_timeout(Duration::from_secs(90))
+            .send(context.http())
+            .await
+            .expect("second");
+        assert_eq!(pooled_client_count(), settled);
     }
 
     #[tokio::test]

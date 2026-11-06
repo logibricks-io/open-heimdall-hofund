@@ -10,6 +10,7 @@ use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -64,6 +65,17 @@ pub(crate) fn command(request: &SpawnRequest) -> Command {
     command
 }
 
+fn write_exit_store(
+    exit_store: &Arc<Mutex<Option<Result<i32, String>>>>,
+    code: Result<i32, String>,
+) {
+    let mut slot = match exit_store.lock() {
+        Ok(slot) => slot,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    *slot = Some(code);
+}
+
 /// Spawns `request` with piped stdin and stdout. Blocking.
 pub(crate) fn spawn(request: &SpawnRequest) -> Result<StdPipedChild, PluginError> {
     let mut command = command(request);
@@ -79,22 +91,48 @@ pub(crate) fn spawn(request: &SpawnRequest) -> Result<StdPipedChild, PluginError
         reap(child);
         return Err(PluginError::internal("child has no standard output pipe"));
     };
+    let id = child.id();
+    let child = Arc::new(Mutex::new(Some(child)));
     let (sender, receiver) = mpsc::channel(LINE_BUFFER);
+    let exit = Arc::new(Mutex::new(None::<Result<i32, String>>));
+    let exit_store = Arc::clone(&exit);
+    let child_for_wait = Arc::clone(&child);
     let reader = std::thread::Builder::new()
         .name("hofund-piped-stdout".into())
-        .spawn(move || read_lines(stdout, &sender));
+        .spawn(move || {
+            read_lines(stdout, &sender);
+            let mut guard = match child_for_wait.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            let Some(mut child) = guard.take() else {
+                return;
+            };
+            let code = match child.wait() {
+                Ok(status) => status
+                    .code()
+                    .ok_or_else(|| "child exited without an exit code".to_owned()),
+                Err(error) => Err(error.to_string()),
+            };
+            write_exit_store(&exit_store, code);
+        });
     if let Err(error) = reader {
-        reap(child);
+        if let Ok(mut guard) = child.lock()
+            && let Some(child) = guard.take()
+        {
+            reap(child);
+        }
         return Err(PluginError::io(error.to_string()));
     }
     let stream = futures_util::stream::unfold(receiver, |mut receiver| async move {
         receiver.recv().await.map(|item| (item, receiver))
     });
     Ok(StdPipedChild {
-        id: child.id(),
-        child: Mutex::new(Some(child)),
+        id,
+        child,
         stdin: Arc::new(Mutex::new(stdin)),
         stdout: Mutex::new(Some(BodyStream::from_stream(stream))),
+        exit,
     })
 }
 
@@ -144,17 +182,16 @@ fn reap(mut child: Child) {
 /// A piped child spawned by [`crate::StdProcess`].
 pub(crate) struct StdPipedChild {
     id: u32,
-    child: Mutex<Option<Child>>,
+    child: Arc<Mutex<Option<Child>>>,
     stdin: Arc<Mutex<Option<ChildStdin>>>,
     stdout: Mutex<Option<BodyStream>>,
+    exit: Arc<Mutex<Option<Result<i32, String>>>>,
 }
 
 impl Drop for StdPipedChild {
     fn drop(&mut self) {
-        // Kill first. A write blocked on a full pipe holds the stdin lock and
-        // only returns once the child is gone, so the lock is never awaited here.
-        let child = match self.child.get_mut() {
-            Ok(child) => child.take(),
+        let child = match self.child.lock() {
+            Ok(mut child) => child.take(),
             Err(poisoned) => poisoned.into_inner().take(),
         };
         if let Some(child) = child {
@@ -203,15 +240,69 @@ impl PipedChildBackend for StdPipedChild {
     fn take_stdout(&self) -> Option<BodyStream> {
         self.stdout.lock().ok()?.take()
     }
+
+    async fn exit_code(&self) -> Result<i32, PluginError> {
+        let exit = Arc::clone(&self.exit);
+        accounts::run_blocking(move || {
+            loop {
+                match exit.lock() {
+                    Ok(slot) => {
+                        if let Some(stored) = slot.as_ref() {
+                            return stored
+                                .as_ref()
+                                .map_err(|message| PluginError::io(message.clone()))
+                                .copied();
+                        }
+                    }
+                    Err(poisoned) => {
+                        let slot = poisoned.into_inner();
+                        if let Some(stored) = slot.as_ref() {
+                            return stored
+                                .as_ref()
+                                .map_err(|message| PluginError::io(message.clone()))
+                                .copied();
+                        }
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        })
+        .await
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::io::Cursor;
 
-    use hofund_plugin_api::PluginErrorKind;
+    use std::sync::{Arc, Mutex};
 
-    use super::{MAX_LINE, is_allowed, read_lines};
+    use hofund_plugin_api::PluginErrorKind;
+    use hofund_plugin_api::kernel::PipedChildBackend;
+
+    use super::{MAX_LINE, StdPipedChild, is_allowed, read_lines, write_exit_store};
+
+    #[tokio::test]
+    async fn write_exit_store_records_through_a_poisoned_lock() {
+        let slot = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let slot_for_panic = std::sync::Arc::clone(&slot);
+        let poisoned = std::thread::spawn(move || {
+            let _guard = slot_for_panic.lock().expect("lock");
+            panic!("poison the exit slot lock");
+        })
+        .join();
+        assert!(poisoned.is_err());
+        assert!(slot.lock().is_err());
+        write_exit_store(&slot, Ok(44));
+        let child = StdPipedChild {
+            id: 0,
+            child: Arc::new(Mutex::new(None)),
+            stdin: Arc::new(Mutex::new(None)),
+            stdout: Mutex::new(None),
+            exit: slot,
+        };
+        assert_eq!(child.exit_code().await.expect("exit code"), 44);
+    }
 
     fn lines(input: Vec<u8>) -> Vec<Result<Vec<u8>, PluginErrorKind>> {
         let (sender, mut receiver) = tokio::sync::mpsc::channel(4);
@@ -350,6 +441,15 @@ mod tests {
                 .status()
                 .expect("kill -0")
                 .success()
+        }
+
+        #[tokio::test]
+        async fn exit_code_is_visible_after_stdout_eof() {
+            let child = spawn("/bin/sh", &["-c", "exit 44"]).await;
+            let mut stdout = child.take_stdout().expect("stdout");
+            while stdout.next_chunk().await.is_some() {}
+            assert_eq!(child.exit_code().await.expect("exit code"), 44);
+            assert_eq!(child.exit_code().await.expect("second read"), 44);
         }
 
         #[tokio::test]
