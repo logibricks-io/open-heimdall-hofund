@@ -35,24 +35,25 @@ pub(crate) async fn reconcile_rotate(
     skip_keychain: bool,
     fake: Option<&FakeKeychain>,
 ) -> Result<Access, PluginError> {
-    let blob = loop {
-        let lease = host.accounts().lease(&account, LEASE_WAIT).await?;
-        let blob = stored(lease.secret())?;
-        if !same_secret(&access_of(&blob)?, &stale) {
-            return Ok(Access {
-                token: access_of(&blob)?,
-                account: account_of(&blob),
-            });
-        }
-        let inflight = matches!(parse_markers(&blob), Some(RefreshMarkers::InFlight { .. }));
-        drop(lease);
-        if !inflight {
-            break blob;
-        }
-        hofund_plugin_sdk::sleep(std::time::Duration::from_millis(50)).await;
-    };
+    let lease = host.accounts().lease(&account, LEASE_WAIT).await?;
+    let blob = stored(lease.secret())?;
+    let markers = parse_markers(&blob);
+    let protocol_pending = matches!(markers, Some(RefreshMarkers::CandidatePending { .. }));
+    let protocol_blocked = matches!(
+        markers,
+        Some(RefreshMarkers::CandidatePending { .. })
+            | Some(RefreshMarkers::Invalid)
+            | Some(RefreshMarkers::InFlight { .. })
+    );
+    if !protocol_blocked && !same_secret(&access_of(&blob)?, &stale) {
+        return Ok(Access {
+            token: access_of(&blob)?,
+            account: account_of(&blob),
+        });
+    }
+    drop(lease);
 
-    if matches!(parse_markers(&blob), Some(RefreshMarkers::Invalid)) {
+    if matches!(markers, Some(RefreshMarkers::Invalid)) {
         return Err(PluginError::auth(REAUTH));
     }
 
@@ -62,7 +63,7 @@ pub(crate) async fn reconcile_rotate(
         None => None,
     };
 
-    if matches!(parse_markers(&blob), Some(RefreshMarkers::CandidatePending { .. })) {
+    if protocol_pending {
         return repair_pending(&host, &account, home.as_deref(), skip_keychain, fake).await;
     }
 
@@ -70,8 +71,8 @@ pub(crate) async fn reconcile_rotate(
         return Err(PluginError::auth(INTERRUPTED));
     }
 
-    if let Some(path) = home.as_deref() {
-        if let Some(access) = try_adopt_or_noop(
+    if let Some(path) = home.as_deref()
+        && let Some(access) = try_adopt_or_noop(
             &host,
             &account,
             &blob,
@@ -82,10 +83,9 @@ pub(crate) async fn reconcile_rotate(
             fake,
         )
         .await?
-        {
-            let _ = guard;
-            return Ok(access);
-        }
+    {
+        let _ = guard;
+        return Ok(access);
     }
 
     oauth_protocol(
@@ -102,6 +102,8 @@ pub(crate) async fn reconcile_rotate(
     .await
 }
 
+/// Best-effort Codex store write-back when the on-disk access still matches `stale`.
+#[allow(dead_code)]
 pub(crate) async fn persist_refresh(
     home: &Path,
     host: &HostContext,
@@ -154,7 +156,6 @@ async fn acquire_guard(
 enum LiveStore {
     Absent,
     Present {
-        bytes: Vec<u8>,
         access: SecretString,
         refresh: Option<SecretString>,
         id_token: Option<SecretString>,
@@ -187,7 +188,6 @@ async fn read_live_store(
                 store_account.as_deref(),
             );
             Ok(LiveStore::Present {
-                bytes,
                 access,
                 refresh,
                 id_token,
@@ -214,17 +214,14 @@ async fn read_live_store(
     }
 }
 
-fn tuple_fields_from_auth(
-    bytes: &[u8],
-) -> Result<
-    (
-        SecretString,
-        Option<SecretString>,
-        Option<SecretString>,
-        Option<String>,
-    ),
-    PluginError,
-> {
+type AuthTupleFields = (
+    SecretString,
+    Option<SecretString>,
+    Option<SecretString>,
+    Option<String>,
+);
+
+fn tuple_fields_from_auth(bytes: &[u8]) -> Result<AuthTupleFields, PluginError> {
     let access = access_token_from_auth(bytes)
         .ok_or_else(|| PluginError::auth("Codex sign-in on disk has no access token"))?;
     let value = hofund_plugin_sdk::json::from_slice::<hofund_plugin_sdk::json::Value>(bytes)
@@ -263,6 +260,7 @@ fn need_requires_refresh(need: &Need, access: &SecretString, now: std::time::Sys
     }
 }
 
+#[expect(clippy::too_many_arguments, reason = "reconcile adopt path mirrors spec inputs")]
 async fn try_adopt_or_noop(
     host: &HostContext,
     account: &AccountId,
@@ -394,6 +392,7 @@ async fn finish_repair_clear(
     })
 }
 
+#[expect(clippy::too_many_arguments, reason = "OAuth steps 1–5 share one guard scope")]
 async fn oauth_protocol(
     host: &HostContext,
     account: &AccountId,
@@ -554,6 +553,7 @@ async fn write_store_from_blob(
     reader.save_login(home, &merged).await.map_err(map_store)
 }
 
+#[allow(dead_code)]
 async fn write_store_when_stale_matches(
     home: &Path,
     host: &HostContext,

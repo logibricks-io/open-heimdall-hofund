@@ -3,9 +3,8 @@
 use std::path::Path;
 
 use hofund_plugin_api::{AccountId, HostContext, PluginError, SecretString};
-use hofund_plugin_sdk::oauth::{SecretObject, same_secret, secret_text};
+use hofund_plugin_sdk::oauth::{SecretObject, secret_text};
 
-use crate::codex_lock;
 use crate::store::{AuthPatch, StoreError, StoreReader, is_valid_auth_json, merge_auth_tokens};
 
 /// Writes Codex's credential store from the stored account.
@@ -104,56 +103,8 @@ fn map_store(error: StoreError) -> PluginError {
     }
 }
 
-/// Outcome of reading Codex's on-disk store before spending a refresh token.
-pub(crate) enum RefreshReconcile {
-    #[expect(dead_code, reason = "Task 4 protocol uses Proceed after step 0")]
-    Proceed,
-    Adopt {
-        access: SecretString,
-        account: Option<String>,
-    },
-}
-
-/// Reads the Codex store under an already-held home guard (no second lock).
-pub(crate) async fn adopt_from_store(
-    home: &Path,
-    host: &HostContext,
-    skip_keychain: bool,
-    stale: &SecretString,
-    fake: Option<&crate::store::FakeKeychain>,
-) -> Option<RefreshReconcile> {
-    let reader = StoreReader::new(Some(host), skip_keychain, fake);
-    match reader.read_login(home, true).await {
-        Ok((bytes, _)) => {
-            let access = access_token_from_auth(&bytes)?;
-            if !same_secret(&access, stale) {
-                return Some(RefreshReconcile::Adopt {
-                    access,
-                    account: account_id_from_auth(&bytes),
-                });
-            }
-            None
-        }
-        Err(StoreError::SignedOut) | Err(StoreError::Unreadable { .. }) | Err(_) => None,
-    }
-}
-
-/// Locks when possible, then compares the Codex store access token to `stale`.
-#[expect(dead_code, reason = "legacy entrypoint; Task 4 consolidates on reconcile_rotate")]
-pub(crate) async fn reconcile_before_refresh(
-    home: &Path,
-    host: &HostContext,
-    skip_keychain: bool,
-    stale: &SecretString,
-    fake: Option<&crate::store::FakeKeychain>,
-) -> RefreshReconcile {
-    let _lock = codex_lock::acquire(home).await;
-    adopt_from_store(home, host, skip_keychain, stale, fake)
-        .await
-        .unwrap_or(RefreshReconcile::Proceed)
-}
-
 /// Writes rotated tokens back to Codex's store for `home` when the on-disk access token still matches `stale`.
+#[allow(dead_code)]
 pub(crate) async fn persist_refresh(
     home: &Path,
     host: &HostContext,

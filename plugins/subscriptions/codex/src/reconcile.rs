@@ -134,6 +134,7 @@ pub(crate) fn clear_markers(blob: SecretObject) -> SecretObject {
         .without(FIELD_INVALID)
 }
 
+#[expect(dead_code, reason = "Task 4 conflict paths set INVALID in follow-up")]
 pub(crate) fn set_invalid(blob: SecretObject) -> SecretObject {
     clear_markers(blob).with_flag(FIELD_INVALID, true)
 }

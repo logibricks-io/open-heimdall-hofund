@@ -95,6 +95,7 @@ pub(crate) async fn try_acquire_home(home: &Path) -> Result<HomeGuard, HomeGuard
 
 /// Waits for and takes the directory flock only, or returns [`None`] after 10s.
 /// Write-back paths that do not yet hold the process-local home mutex use this.
+#[allow(dead_code)]
 pub(crate) async fn acquire(home: &Path) -> Option<CodexLock> {
     if ensure_codex_home(home).is_err() {
         return None;
