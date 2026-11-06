@@ -5,6 +5,7 @@ use std::os::unix::fs::PermissionsExt;
 
 mod support;
 
+#[cfg(unix)]
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -1298,6 +1299,7 @@ async fn r7a_reseat_honors_agent_hidden_models_on_provider_disable() {
     support::shutdown(running).await;
 }
 
+#[cfg(unix)]
 fn reseat_sidecar_rollback_fixture() -> String {
     format!(
         "listen = \"127.0.0.1:0\"\n\
@@ -1308,10 +1310,12 @@ fn reseat_sidecar_rollback_fixture() -> String {
     )
 }
 
+#[cfg(unix)]
 fn read_optional_file_bytes(path: &Path) -> Option<Vec<u8>> {
     std::fs::read(path).ok()
 }
 
+#[cfg(unix)]
 fn agent_connect_sidecar_snapshot(main: &Path) -> BTreeMap<String, Option<Vec<u8>>> {
     let mut snapshot = BTreeMap::new();
     snapshot.insert("main".to_owned(), read_optional_file_bytes(main));
@@ -1331,6 +1335,7 @@ fn agent_connect_sidecar_snapshot(main: &Path) -> BTreeMap<String, Option<Vec<u8
     snapshot
 }
 
+#[cfg(unix)]
 async fn connect_claude_for_sidecars(client: &Client) {
     let (status, body) = client
         .post(
@@ -1346,8 +1351,10 @@ async fn connect_claude_for_sidecars(client: &Client) {
     );
 }
 
+#[cfg(unix)]
 struct RestoreFailSentinel(PathBuf);
 
+#[cfg(unix)]
 impl RestoreFailSentinel {
     fn install(home: &Path) -> Self {
         let path = home.join(".hofund-test-fail-restore");
@@ -1356,12 +1363,14 @@ impl RestoreFailSentinel {
     }
 }
 
+#[cfg(unix)]
 impl Drop for RestoreFailSentinel {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn r7a_provider_disable_reseat_rolls_back_config_and_first_agent_when_second_write_fails() {
     let scratch = Scratch::new("reseat-sidecar-rollback");
@@ -1427,6 +1436,7 @@ async fn r7a_provider_disable_reseat_rolls_back_config_and_first_agent_when_seco
     support::shutdown(running).await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn r7a_group_rename_rolls_back_config_and_first_agent_when_second_write_fails() {
     let scratch = Scratch::new("group-rename-sidecar-rollback");
@@ -1497,6 +1507,7 @@ async fn r7a_group_rename_rolls_back_config_and_first_agent_when_second_write_fa
     support::shutdown(running).await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn r7a_reseat_sidecar_restore_failure_rolls_back_config_and_scrubs_secrets() {
     let scratch = Scratch::new("reseat-restore-fail");
