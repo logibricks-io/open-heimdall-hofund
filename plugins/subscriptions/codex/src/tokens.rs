@@ -8,6 +8,7 @@ use hofund_plugin_sdk::oauth::{
     SecretObject, detached, parse_token_set, same_secret, token_error, unverified_claims,
 };
 
+use crate::codex_lock::HomeGuardError;
 use crate::{CLIENT_ID, Endpoints, REFRESH_SCOPE};
 
 /// The secret field set once ChatGPT refuses the refresh token.
@@ -146,22 +147,23 @@ async fn rotate(
     }
     if let Some(home_text) = blob.text("codex_home") {
         let home = std::path::PathBuf::from(home_text);
-        match crate::agent_sign_in::reconcile_before_refresh(
-            &home,
-            &host,
-            skip_keychain,
-            &stale,
-            None,
-        )
-        .await
+        let canonical = crate::store::canonical_codex_home(&home);
+        let _guard =
+            crate::codex_lock::try_acquire_home(&home)
+                .await
+                .map_err(|error| match error {
+                    HomeGuardError::Busy => PluginError::auth("Codex home directory is busy"),
+                    HomeGuardError::Io => PluginError::io("Codex home directory lock failed"),
+                })?;
+        let owners = crate::reconcile::home_owners(&host, &canonical).await?;
+        crate::reconcile::assert_unique_owner(&owners, &account)?;
+        if let Some(crate::agent_sign_in::RefreshReconcile::Adopt { access, account }) =
+            crate::agent_sign_in::adopt_from_store(&home, &host, skip_keychain, &stale, None).await
         {
-            crate::agent_sign_in::RefreshReconcile::Adopt { access, account } => {
-                return Ok(Access {
-                    token: access,
-                    account,
-                });
-            }
-            crate::agent_sign_in::RefreshReconcile::Proceed => {}
+            return Ok(Access {
+                token: access,
+                account,
+            });
         }
     }
     let refresh_token = blob

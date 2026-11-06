@@ -24,6 +24,19 @@ pub(crate) async fn write(
     if blob.flag(crate::tokens::LAPSED) {
         return Err(PluginError::auth(crate::tokens::LAPSED_REASON));
     }
+    let canonical = crate::store::canonical_codex_home(home);
+    let _guard = crate::codex_lock::try_acquire_home(home)
+        .await
+        .map_err(|error| match error {
+            crate::codex_lock::HomeGuardError::Busy => {
+                PluginError::auth("Codex home directory is busy")
+            }
+            crate::codex_lock::HomeGuardError::Io => {
+                PluginError::io("Codex home directory lock failed")
+            }
+        })?;
+    let owners = crate::reconcile::home_owners(host, &canonical).await?;
+    crate::reconcile::assert_unique_owner(&owners, account)?;
     let access = blob
         .secret("access_token")
         .ok_or_else(|| PluginError::auth("the stored ChatGPT sign-in has no access token"))?;
@@ -93,6 +106,7 @@ fn map_store(error: StoreError) -> PluginError {
 
 /// Outcome of reading Codex's on-disk store before spending a refresh token.
 pub(crate) enum RefreshReconcile {
+    #[expect(dead_code, reason = "Task 4 protocol uses Proceed after step 0")]
     Proceed,
     Adopt {
         access: SecretString,
@@ -100,7 +114,32 @@ pub(crate) enum RefreshReconcile {
     },
 }
 
+/// Reads the Codex store under an already-held home guard (no second lock).
+pub(crate) async fn adopt_from_store(
+    home: &Path,
+    host: &HostContext,
+    skip_keychain: bool,
+    stale: &SecretString,
+    fake: Option<&crate::store::FakeKeychain>,
+) -> Option<RefreshReconcile> {
+    let reader = StoreReader::new(Some(host), skip_keychain, fake);
+    match reader.read_login(home, true).await {
+        Ok((bytes, _)) => {
+            let access = access_token_from_auth(&bytes)?;
+            if !same_secret(&access, stale) {
+                return Some(RefreshReconcile::Adopt {
+                    access,
+                    account: account_id_from_auth(&bytes),
+                });
+            }
+            None
+        }
+        Err(StoreError::SignedOut) | Err(StoreError::Unreadable { .. }) | Err(_) => None,
+    }
+}
+
 /// Locks when possible, then compares the Codex store access token to `stale`.
+#[expect(dead_code, reason = "legacy entrypoint; Task 4 consolidates on reconcile_rotate")]
 pub(crate) async fn reconcile_before_refresh(
     home: &Path,
     host: &HostContext,
@@ -109,24 +148,9 @@ pub(crate) async fn reconcile_before_refresh(
     fake: Option<&crate::store::FakeKeychain>,
 ) -> RefreshReconcile {
     let _lock = codex_lock::acquire(home).await;
-    let reader = StoreReader::new(Some(host), skip_keychain, fake);
-    match reader.read_login(home, true).await {
-        Ok((bytes, _)) => {
-            let Some(access) = access_token_from_auth(&bytes) else {
-                return RefreshReconcile::Proceed;
-            };
-            if !same_secret(&access, stale) {
-                return RefreshReconcile::Adopt {
-                    access,
-                    account: account_id_from_auth(&bytes),
-                };
-            }
-            RefreshReconcile::Proceed
-        }
-        Err(StoreError::SignedOut) | Err(StoreError::Unreadable { .. }) | Err(_) => {
-            RefreshReconcile::Proceed
-        }
-    }
+    adopt_from_store(home, host, skip_keychain, stale, fake)
+        .await
+        .unwrap_or(RefreshReconcile::Proceed)
 }
 
 /// Writes rotated tokens back to Codex's store for `home` when the on-disk access token still matches `stale`.

@@ -459,6 +459,60 @@ fn fresh_token_skips_the_refresh() {
 }
 
 #[test]
+fn m1_two_accounts_same_home_fail_before_post() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let home = dir.path().join("shared-codex-home");
+    std::fs::create_dir_all(&home).expect("home");
+    std::fs::write(
+        home.join("config.toml"),
+        "cli_auth_credentials_store = \"file\"\n",
+    )
+    .expect("config");
+    let stale = access_token("stale-a", 100);
+    let id_a = AccountId::from_static("a-0000000000000001");
+    let id_b = AccountId::from_static("a-0000000000000002");
+    for (id, label, tag) in [
+        (id_a.clone(), "user-a", "stale-a"),
+        (id_b.clone(), "user-b", "stale-b"),
+    ] {
+        let blob = SecretObject::new()
+            .with_number("v", 1)
+            .with_secret(
+                "id_token",
+                &secret(&id_token(
+                    &format!("{label}@example.test"),
+                    "sub-1",
+                    "acct-1",
+                    "plus",
+                )),
+            )
+            .with_secret("access_token", &secret(&access_token(tag, 100)))
+            .with_secret("refresh_token", &secret("refresh-1"))
+            .with_text("account_id", "acct-1")
+            .with_text("codex_home", &home.to_string_lossy());
+        block_on(async {
+            let accounts = host.context().accounts();
+            let account = accounts.account(id.clone(), label).expect("account");
+            accounts
+                .upsert(account, blob.to_secret())
+                .await
+                .expect("upsert");
+        });
+    }
+    let error = block_on(tokens::rotate_for_test(
+        host.context().clone(),
+        TOKEN_URL.to_owned(),
+        id_a,
+        secret(&stale),
+        true,
+    ))
+    .expect_err("two owners");
+    assert_eq!(error.kind(), PluginErrorKind::Auth);
+    assert_eq!(token_posts(&host), 0);
+}
+
+#[test]
 fn r47b_rr3_rotate_skips_token_post_when_codex_store_already_rotated() {
     use crate::store::write_atomic_private;
 
