@@ -1,6 +1,6 @@
 # R-47b: Codex credential reconciliation (design spec)
 
-**Status:** **Written-review draft** — **explicit Palmer written spec approval required** before any implementation plan (supervisor comment alone is not approval). Core protocol acceptable as draft; **not** implementation approval. **STOP** before `writing-plans`.
+**Status:** **Approved for implementation** — Palmer explicit written-spec approval recorded 2026-11-05 ~21:40 ET (America/New_York). Approved items: (a) in-blob fields, (b) Codex-plugin-only home-owner scan via `list()` + secret metadata (no other plugins / no new permissions), (c) conservative RefreshInFlight ⇒ reauth when rotation is ambiguous. Independent security review required before merge. Proceed with `writing-plans` then fresh implementation context.
 
 **Branch:** `sup/r-47b-codex-store`; rr3: `/workspace/hofund-review/r-47b-grok-rr3.md`.
 
@@ -187,4 +187,4 @@ Final five mechanical fixes in this revision (doc text only; **not** runtime pro
 
 ## ─── Written Spec Approval Required ───
 
-**STOP.** Palmer **explicit written spec approval** → then `writing-plans` only.
+**Approved.** Palmer explicit written-spec approval received 2026-11-05 ~21:40 ET. Proceed with the post-approval sequence in the previous section.
