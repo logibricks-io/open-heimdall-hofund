@@ -129,6 +129,18 @@ fn optional(map: &json::Map<String, Value>, key: &str) -> String {
         .unwrap_or("")
         .to_owned()
 }
+pub(crate) async fn persist(
+    host: &HostContext,
+    account: &AccountId,
+    credential: &Credential,
+) -> Result<(), PluginError> {
+    let label = label(credential);
+    let account = host.accounts().account(account.clone(), label)?;
+    host.accounts()
+        .upsert(account, secret_blob(credential).to_secret())
+        .await
+}
+
 pub(crate) fn auth_header(credential: &Credential) -> String {
     format!("{} {}", credential.user_id, secret_text(&credential.access))
 }
