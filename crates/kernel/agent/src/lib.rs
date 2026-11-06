@@ -55,21 +55,25 @@ pub use hofund_plugin_api::{
 
 mod active_provider;
 mod catalog;
+mod checkpoint;
 mod credential;
 mod edit;
 mod go_binary;
 mod jsonc_edit;
 mod profile;
 mod request_agent;
+mod reseat;
 mod store;
 mod yaml_edit;
 
 pub use catalog::{Catalog, Compiled, catalog, catalog_from, resolve, resolve_agent_path};
+pub use checkpoint::SidecarCheckpoint;
 pub use credential::CREDENTIAL_CHANGE_PREFIX;
 pub use profile::{
     ApplyOutcome, ProfileFields, apply_fields, in_use, is_profile_secret, snapshot_fields,
 };
 pub use request_agent::request_agent_id;
+pub use reseat::reseat_after_provider_change;
 
 /// The operating system path template selected by a compiled adapter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -456,6 +460,17 @@ pub trait AgentAdapter: Sync {
         model: Option<&str>,
     ) -> Result<Plan, AgentError>;
 
+    /// Like [`Self::set_model`], recording sidecar files for rollback on failure.
+    fn set_model_tracked(
+        &self,
+        session: &Session,
+        target: &GatewayTarget,
+        model: Option<&str>,
+        _checkpoint: &mut SidecarCheckpoint,
+    ) -> Result<Plan, AgentError> {
+        self.set_model(session, target, model)
+    }
+
     /// Rewrites model and provider references after a configured provider id changes.
     ///
     /// Returns `Ok(true)` when this agent's files were updated.
@@ -468,6 +483,31 @@ pub trait AgentAdapter: Sync {
         _session: &Session,
         _from: &str,
         _to: &str,
+    ) -> Result<bool, AgentError> {
+        Ok(false)
+    }
+
+    /// Records paths this adapter would touch on a model or reference rewrite.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentError`] when managed paths cannot be resolved.
+    fn record_sidecar_paths(
+        &self,
+        session: &Session,
+        checkpoint: &mut SidecarCheckpoint,
+    ) -> Result<(), AgentError> {
+        let _ = (session, checkpoint);
+        Ok(())
+    }
+
+    /// Rewrites model settings that pointed at one group route id.
+    fn rename_group_refs(
+        &self,
+        _session: &Session,
+        _old_ref: &str,
+        _new_ref: &str,
+        _checkpoint: &mut SidecarCheckpoint,
     ) -> Result<bool, AgentError> {
         Ok(false)
     }

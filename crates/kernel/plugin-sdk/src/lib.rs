@@ -53,6 +53,8 @@ pub mod daily_checkin;
 pub mod daily_warmup;
 pub mod digest;
 pub mod enc_v1;
+pub mod futures;
+pub mod inflate;
 pub mod jwt;
 pub mod oauth;
 pub mod page;
@@ -65,6 +67,8 @@ pub mod transport;
 pub mod uuid;
 pub mod wire;
 
+pub use futures::{FuturesUnordered, Race, race};
+pub use inflate::gzip;
 pub use oauth::{AccessToken, TokenError, form_body, parse_access_token, refresh_form};
 pub use page::{
     BODY_CAP, ERROR_RUNES, LIST_BUDGET, MAX_PAGES, PAGE_LIMIT, PageError, PageErrorKind, after_id,

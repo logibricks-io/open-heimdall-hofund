@@ -118,6 +118,27 @@ impl ProfileSwitchRequest {
     }
 }
 
+/// Renames a stored profile.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+#[serde(deny_unknown_fields)]
+pub struct ProfileRenameRequest {
+    /// Body wire version.
+    pub version: u32,
+    /// Current profile name.
+    pub from: String,
+    /// New profile name.
+    pub to: String,
+}
+
+impl ProfileRenameRequest {
+    /// Validates both profile names.
+    pub fn validate(&self) -> Result<(), ControlError> {
+        validate_profile_name(&self.from)?;
+        validate_profile_name(&self.to)
+    }
+}
+
 /// Removes a stored profile.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]

@@ -124,6 +124,11 @@ struct Staged {
     changed: Vec<String>,
 }
 
+struct SidecarWorkOutcome {
+    staged: Staged,
+    error: Option<ControlFailure>,
+}
+
 /// What the blocking part of a reload produced.
 enum Reloaded {
     /// Nothing to publish; respond with this.
@@ -197,6 +202,11 @@ impl ConfigOps {
             live: RwLock::new(Arc::new(live)),
             routing,
         }
+    }
+
+    /// Route model ids from the published router snapshot.
+    pub(crate) fn snapshot_route_models(&self) -> Vec<String> {
+        self.routing.snapshot.load().models()
     }
 
     /// Route model ids an agent is shown, after visibility filters.
@@ -377,6 +387,44 @@ impl ConfigOps {
         let expected = expected.to_owned();
         let staged = run_blocking(move || ops.apply_locked(&expected, text, key_moves)).await?;
         Ok(self.finish(staged).await)
+    }
+
+    /// Applies `text`, runs `work` before the sidecar lock is released, and
+    /// rewrites `backup` when `work` fails.
+    pub(crate) async fn apply_with_sidecar_work(
+        self: &Arc<Self>,
+        expected: &str,
+        text: String,
+        backup: String,
+        work: impl FnOnce(&Self, &str) -> Result<(), ControlFailure> + Send + 'static,
+    ) -> Result<ConfigResponse, ControlFailure> {
+        let _gate = self.gate.lock().await;
+        let ops = Arc::clone(self);
+        let expected = expected.to_owned();
+        let outcome = run_blocking(move || {
+            let _lock = ops.lock()?;
+            let staged = ops.apply_with_lock_held(&expected, text, Vec::new())?;
+            match work(&ops, &staged.text) {
+                Ok(()) => Ok(SidecarWorkOutcome {
+                    staged,
+                    error: None,
+                }),
+                Err(error) => {
+                    let (disk_revision, _) = ops.read_disk()?;
+                    let rolled = ops.apply_with_lock_held(&disk_revision, backup, Vec::new())?;
+                    Ok(SidecarWorkOutcome {
+                        staged: rolled,
+                        error: Some(error),
+                    })
+                }
+            }
+        })
+        .await?;
+        let response = self.finish(outcome.staged).await;
+        if let Some(error) = outcome.error {
+            return Err(error);
+        }
+        Ok(response)
     }
 
     pub(crate) async fn reload(
@@ -650,6 +698,11 @@ fn config_issue(error: &ConfigError, text: &str) -> FieldIssue {
         ConfigError::Invalid(message) => FieldIssue::new("config", "invalid", scrub(message, text)),
         ConfigError::Read(message) => FieldIssue::new("config", "read", scrub(message, text)),
     }
+}
+
+/// Removes quoted secret-like values from `message` when they appear in `text`.
+pub(crate) fn scrub_config_message(message: &str, text: &str) -> String {
+    scrub(message, text)
 }
 
 /// Removes any quoted value from `message` that appears verbatim in `text`

@@ -144,8 +144,7 @@ async fn provider_list_is_secret_free() {
     let bytes = response.bytes().await.expect("provider body");
     let text = String::from_utf8_lossy(&bytes);
     assert!(!text.contains("never-return-this-key"));
-    assert!(!text.contains("base_url"));
-    assert!(!text.contains(&server.uri()));
+    assert!(!text.contains("api_key"));
     let list: ProviderListResponse = decode_response(API_VERSION, &bytes).expect("provider list");
     assert_eq!(list.providers.len(), 1);
     let provider = &list.providers[0];
@@ -154,6 +153,10 @@ async fn provider_list_is_secret_free() {
     assert_eq!(provider.protocol, "openai-chat");
     assert!(provider.ready);
     assert_eq!(provider.model_count, 2);
+    assert!(
+        provider.base_url.contains(&server.uri()),
+        "G-1 exposes base_url without credential material"
+    );
     support::shutdown(running).await;
 }
 

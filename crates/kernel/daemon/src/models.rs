@@ -662,6 +662,9 @@ impl ModelsHost {
         let now = system_ms(now);
         let mut asked = Vec::new();
         for provider in &config.providers {
+            if !provider.enabled {
+                continue;
+            }
             let Some(interval) = provider.model_list.refresh_interval() else {
                 continue;
             };
@@ -678,7 +681,6 @@ impl ModelsHost {
                 );
                 continue;
             };
-            // Disabled and decide-only providers do not exist in hofund yet.
             if matches!(kind, ListKind::Catalog | ListKind::Unsupported) {
                 continue;
             }
@@ -859,6 +861,16 @@ impl ModelsHost {
         provider_id: &str,
     ) -> Result<Refreshed, DaemonError> {
         let provider = provider(config, provider_id)?;
+        if !provider.enabled {
+            let cached = self.cached(provider_id);
+            return Ok(Refreshed {
+                models: cached.models.clone(),
+                added: Vec::new(),
+                removed: Vec::new(),
+                delisted: cached.delisted.clone(),
+                fetched_at: cached.fetched_at,
+            });
+        }
         let planned = self.planned(provider)?;
         let endpoint = endpoint_for(provider, &planned)?;
         let redactor = Redactor::new(provider, &endpoint, None);
@@ -2913,5 +2925,36 @@ mod tests {
             }
             other => panic!("expected two models_refreshed, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn disabled_provider_manual_refresh_does_not_hit_upstream() {
+        use std::time::Duration;
+
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{"id": "never"}]
+            })))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().expect("dir");
+        let host = super::ModelsHost::new(Duration::from_secs(2), Duration::from_secs(2))
+            .with_state_root(dir.path().join(".hofund"));
+        let config = hofund_config::load(&format!(
+            "[[providers]]\nid = \"off\"\nenabled = false\nprotocol = \"openai-chat\"\nbase_url = \"{}/v1\"\napi_key = \"k\"\n[providers.models]\nrefresh = \"10m\"\n",
+            server.uri()
+        ))
+        .expect("config");
+        let config_path = dir.path().join("hofund.toml");
+        host.refresh(&config, &config_path, "off")
+            .await
+            .expect("manual refresh returns cache without dialing upstream");
+        server.verify().await;
     }
 }

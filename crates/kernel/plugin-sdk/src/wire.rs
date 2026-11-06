@@ -1643,6 +1643,53 @@ fn is_key_byte(byte: u8) -> bool {
     byte.is_ascii_alphabetic() || byte == b'_'
 }
 
+/// Encodes `request` for `outbound` the way [`send`] would before it picks a URL.
+///
+/// # Errors
+///
+/// Returns [`PluginError`] when the protocol has no SDK transport or the
+/// request cannot be encoded.
+pub fn encode_outbound(
+    outbound: ProtocolId,
+    inbound: ProtocolId,
+    request: Request,
+) -> Result<Vec<u8>, PluginError> {
+    let target = Target::new(outbound, "https://invalid.example");
+    let (codec, prepare, _) = route(outbound)?;
+    prepare_body(&target, codec, request, prepare, inbound)
+}
+
+/// Decodes a successful upstream HTTP response the way [`Sent::complete`] or
+/// [`Sent::fold`] would after the body matches `outbound`'s stream shape.
+///
+/// # Errors
+///
+/// Returns [`PluginError`] when the protocol has no SDK transport or the body
+/// cannot be read or decoded.
+pub async fn decode_upstream_response(
+    response: HttpResponse,
+    outbound: ProtocolId,
+    inbound: ProtocolId,
+    client_stream: bool,
+) -> Result<Completion, PluginError> {
+    let (codec, _, _) = route(outbound)?;
+    let cross_protocol = codec.id() != inbound.as_str();
+    let sent = Sent {
+        response,
+        codec,
+        cross_protocol,
+        streaming: true,
+        unwrap: None,
+        watch: None,
+        allocation_quota_rate: false,
+    };
+    if client_stream {
+        sent.complete().await
+    } else {
+        sent.fold().await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use hofund_codec::{AnthropicMessages, Codec, GenerativeLanguage, OpenAiChat};

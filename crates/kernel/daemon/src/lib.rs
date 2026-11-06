@@ -41,9 +41,13 @@ mod config_ops;
 mod config_write;
 mod control;
 mod control_agents;
+mod control_groups;
 mod control_local;
 pub(crate) mod control_map;
+mod control_presets;
 mod control_profiles;
+mod control_provider_summary;
+mod control_provider_write;
 mod credits_modes;
 mod events;
 mod measurements;
@@ -314,6 +318,12 @@ pub struct StartOptions {
     /// Runs before each relisten bind, for tests that need a bind to fail.
     #[doc(hidden)]
     pub relisten_hook: Option<hofund_gateway::BindHook>,
+    /// Overrides `HOFUND_SERVES` on the status response, for tests.
+    #[doc(hidden)]
+    pub hofund_serves: Option<String>,
+    /// Overrides `HOFUND_OWNER_PID` on the status response, for tests.
+    #[doc(hidden)]
+    pub hofund_owner_pid: Option<u32>,
 }
 
 /// Binds the model address and serves until shutdown.
@@ -595,6 +605,10 @@ async fn start_inner(
         if !options.skip_config_watch {
             running = running.with_task(watch::spawn(Arc::clone(&ops), path.to_path_buf()));
         }
+        let status_serves = options
+            .hofund_serves
+            .as_deref()
+            .and_then(control::serve_role_from_label);
         let state = Arc::new(
             control::DaemonControl::new(
                 path,
@@ -608,6 +622,7 @@ async fn start_inner(
                 token_path.clone(),
                 shutdown_request,
             )
+            .with_status_metadata(status_serves, options.hofund_owner_pid)
             .with_router(snapshot)
             .with_agent_hooks(options.agent_session, Some(token_generation))
             .with_quotas(Arc::clone(&quotas))
@@ -955,6 +970,80 @@ fn route_plan(
     (routes, policy)
 }
 
+pub(crate) fn routes_without_sendable_hops(config: &Config) -> Vec<String> {
+    let (planned, _) = route_plan(config, None, None, &BTreeMap::new());
+    planned
+        .into_iter()
+        .filter(|(_, hops)| hops.is_empty())
+        .map(|(model, _)| model)
+        .collect()
+}
+
+pub(crate) fn routes_with_sendable_hops(config: &Config) -> BTreeSet<String> {
+    let (planned, _) = route_plan(config, None, None, &BTreeMap::new());
+    planned
+        .into_iter()
+        .filter(|(_, hops)| !hops.is_empty())
+        .map(|(model, _)| model)
+        .collect()
+}
+
+pub(crate) fn validate_route_targets(config: &Config) -> Result<(), DaemonError> {
+    let providers: BTreeSet<&str> = config.providers.iter().map(|p| p.id.as_str()).collect();
+    let mut seen = BTreeSet::new();
+    for route in &config.routes {
+        validate_route_upstream_targets(config, route, &providers, &mut seen)?;
+    }
+    Ok(())
+}
+
+fn validate_route_upstream_targets(
+    config: &Config,
+    route: &hofund_config::Route,
+    providers: &BTreeSet<&str>,
+    seen: &mut BTreeSet<String>,
+) -> Result<(), DaemonError> {
+    if !seen.insert(route.model.clone()) {
+        return Ok(());
+    }
+    for upstream in &route.upstreams {
+        if !upstream.enabled {
+            continue;
+        }
+        match &upstream.target {
+            UpstreamTarget::Provider(id) if !providers.contains(id.as_str()) => {
+                return Err(DaemonError::new(format!(
+                    "route `{}` names unknown provider `{id}`",
+                    route.model
+                )));
+            }
+            UpstreamTarget::Group(id) => {
+                let name = format!("group/{id}");
+                let Some(group) = config.routes.iter().find(|entry| entry.model == name) else {
+                    return Err(DaemonError::new(format!(
+                        "route `{}` names unknown group `{id}`",
+                        route.model
+                    )));
+                };
+                validate_route_upstream_targets(config, group, providers, seen)?;
+            }
+            UpstreamTarget::Subscription(id)
+                if !config
+                    .subscriptions
+                    .iter()
+                    .any(|subscription| subscription.id == *id) =>
+            {
+                return Err(DaemonError::new(format!(
+                    "route `{}` names unknown subscription `{id}`",
+                    route.model
+                )));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 struct RoutePlanContext<'a> {
     providers: BTreeMap<&'a str, &'a hofund_config::Provider>,
     subscriptions: BTreeMap<&'a str, &'a hofund_config::Subscription>,
@@ -977,8 +1066,17 @@ fn expand_route(
 ) -> Vec<membership::PlannedHop> {
     let mut out = Vec::new();
     for upstream in &route.upstreams {
+        if !upstream.enabled {
+            continue;
+        }
         match &upstream.target {
             UpstreamTarget::Provider(provider) => {
+                let Some(config) = context.providers.get(provider.as_str()) else {
+                    continue;
+                };
+                if !config.enabled {
+                    continue;
+                }
                 push_provider(
                     root,
                     bare,
@@ -998,19 +1096,29 @@ fn expand_route(
                             Fallback::Model {
                                 provider: fallback_provider,
                                 model,
-                            } => push_provider(
-                                root,
-                                bare,
-                                fallback_provider,
-                                Some(model.clone()),
-                                None,
-                                1,
-                                true,
-                                parents.clone(),
-                                context,
-                                seen,
-                                &mut out,
-                            ),
+                            } => {
+                                let Some(fallback_config) =
+                                    context.providers.get(fallback_provider.as_str())
+                                else {
+                                    continue;
+                                };
+                                if !fallback_config.enabled {
+                                    continue;
+                                }
+                                push_provider(
+                                    root,
+                                    bare,
+                                    fallback_provider,
+                                    Some(model.clone()),
+                                    None,
+                                    1,
+                                    true,
+                                    parents.clone(),
+                                    context,
+                                    seen,
+                                    &mut out,
+                                );
+                            }
                             Fallback::Group(group) => expand_group(
                                 group,
                                 1,
@@ -1096,7 +1204,9 @@ fn expand_group(
     out: &mut Vec<membership::PlannedHop>,
 ) {
     let name = format!("group/{id}");
-    let group = context.routes[name.as_str()];
+    let Some(group) = context.routes.get(name.as_str()) else {
+        return;
+    };
     parents.push(Unit {
         key: name.clone(),
         pool: name,
@@ -2405,6 +2515,24 @@ mod tests {
         assert_eq!(hops[1].context_window, None);
         let (routes, _) = super::route_plan(&config, None, None, &BTreeMap::new());
         assert_eq!(routes["Demo"][0].context_window, None);
+    }
+
+    #[test]
+    fn r7a_disabled_provider_produces_no_sendable_hops_for_exclusive_route() {
+        let config = hofund_config::load(
+            "[[providers]]\nid = \"off\"\npreset = \"openai\"\nenabled = false\n\
+             [[providers]]\nid = \"on\"\npreset = \"openai\"\n\
+             [[routes]]\nmodel = \"solo\"\nupstreams = [{ provider = \"off\" }]\n\
+             [[routes]]\nmodel = \"group/pair\"\nrouting = \"order\"\n\
+             upstreams = [{ provider = \"off\" }, { provider = \"on\" }]\n",
+        )
+        .expect("config");
+        let empty = super::routes_without_sendable_hops(&config);
+        assert!(empty.iter().any(|model| model == "solo"));
+        assert!(!empty.iter().any(|model| model == "group/pair"));
+        let (plan, _) = super::route_plan(&config, None, None, &BTreeMap::new());
+        assert!(plan["solo"].is_empty());
+        assert!(!plan["group/pair"].is_empty());
     }
 
     #[test]

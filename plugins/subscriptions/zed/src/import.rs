@@ -3,6 +3,7 @@
 use hofund_plugin_api::{AccountId, HostContext, PluginError};
 
 use crate::creds::{self, Credential};
+use crate::models;
 
 pub(crate) async fn import_accounts(
     host: &HostContext,
@@ -26,5 +27,6 @@ pub(crate) async fn store(
     host.accounts()
         .upsert(account, creds::secret_blob(credential).to_secret())
         .await?;
+    models::invalidate_vendor_cache(&credential.user_id);
     Ok(id)
 }

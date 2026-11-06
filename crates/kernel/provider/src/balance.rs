@@ -149,11 +149,11 @@ impl BalanceReader {
     pub fn new(endpoint: Endpoint, options: BalanceOptions) -> Result<Self, ProviderError> {
         let client = match endpoint.client.clone() {
             Some(client) => client,
-            None => reqwest::Client::builder()
-                .connect_timeout(endpoint.timeout)
-                .read_timeout(crate::http::socket_backstop(endpoint.timeout))
-                .build()
-                .map_err(|error| ProviderError::connect(error.to_string()))?,
+            None => crate::http::build_private_client(
+                endpoint.timeout,
+                crate::http::socket_backstop(endpoint.timeout),
+            )
+            .map_err(|error| ProviderError::connect(error.to_string()))?,
         };
         Ok(Self {
             endpoint,

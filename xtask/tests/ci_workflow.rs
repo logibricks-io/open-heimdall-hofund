@@ -39,9 +39,17 @@ fn ci_workflow_enforces_timeouts_and_per_package_tests() {
     assert!(script.contains(" test "), "script must run Cargo tests");
     assert!(script.contains(" -p "), "script must select each package");
     assert!(
-        !script.contains("--all-features") && !script.contains("--features"),
-        "per-package tests must use only default features"
+        !script.contains("--all-features"),
+        "per-package tests must not use --all-features"
     );
+    if script.contains("--features") {
+        assert!(
+            script.contains("hofund-plugin-api")
+                && script.contains("duplex_split")
+                && script.contains("kernel,kernel-internal"),
+            "only the hofund-plugin-api duplex_split job may pass --features"
+        );
+    }
 }
 
 #[test]

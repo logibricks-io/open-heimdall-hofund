@@ -9,17 +9,20 @@ use crate::{
     CheckinRunRequest, CheckinRunResponse, ConfigApplyRequest, ConfigResponse,
     ConfigValidateRequest, ConfigValidationResponse, ControlError, ControlErrorKind, ErrorEnvelope,
     EventEnvelope, FieldIssue, GatewayKeyRequest, GatewayKeyResponse, GatewayKeyRestoreRequest,
+    GroupCreateRequest, GroupDeleteRequest, GroupDeleteResponse, GroupListResponse,
+    GroupMemberCandidatesResponse, GroupPatchRequest, GroupRestoreRequest, GroupWriteResponse,
     HealthResponse, MAX_REQUEST_BODY_BYTES, MAX_RESPONSE_BODY_BYTES, ModelListResponse,
-    PicksResponse, PicksSetRequest, ProfileDeleteRequest, ProfileDetailResponse,
-    ProfileListResponse, ProfileSaveRequest, ProfileSwitchRequest, ProfileSwitchResponse,
-    ProviderKeyRequest, ProviderKeysResponse, ProviderListResponse, ProviderRenameRequest,
-    ProviderRenameResponse, ProviderSpendCapRequest, ProviderSpendCapsResponse,
-    ProviderTestRequest, ProviderTestResponse, QuotaAlertsResponse, QuotaAlertsSetRequest,
-    QuotaAlertsSetResponse, QuotaCreditsModesResponse, QuotaCreditsSetRequest,
-    QuotaCreditsSetResponse, QuotaHistoryResponse, QuotaResponse, ReloadRequest, RouteListResponse,
-    RouteModelListResponse, SessionRouteResponse, ShutdownRequest, ShutdownResponse,
-    StatusResponse, TokenRotateRequest, TokenRotateResponse, UnroutedListResponse, UsageResponse,
-    WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
+    PicksResponse, PicksSetRequest, PresetListResponse, ProfileDeleteRequest,
+    ProfileDetailResponse, ProfileListResponse, ProfileRenameRequest, ProfileSaveRequest,
+    ProfileSwitchRequest, ProfileSwitchResponse, ProviderCreateRequest, ProviderDeleteRequest,
+    ProviderDeleteResponse, ProviderKeyRequest, ProviderKeysResponse, ProviderListResponse,
+    ProviderPatchRequest, ProviderRenameRequest, ProviderRenameResponse, ProviderSpendCapRequest,
+    ProviderSpendCapsResponse, ProviderTestRequest, ProviderTestResponse, ProviderWriteResponse,
+    QuotaAlertsResponse, QuotaAlertsSetRequest, QuotaAlertsSetResponse, QuotaCreditsModesResponse,
+    QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryResponse, QuotaResponse,
+    ReloadRequest, RouteListResponse, RouteModelListResponse, SessionRouteResponse,
+    ShutdownRequest, ShutdownResponse, StatusResponse, TokenRotateRequest, TokenRotateResponse,
+    UnroutedListResponse, UsageResponse, WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
 };
 
 mod sealed {
@@ -248,6 +251,14 @@ request!(ProviderSpendCapRequest);
 request!(ProfileSaveRequest, validate);
 request!(ProfileSwitchRequest, validate);
 request!(ProfileDeleteRequest, validate);
+request!(ProfileRenameRequest, validate);
+request!(ProviderCreateRequest, validate);
+request!(ProviderPatchRequest, validate);
+request!(ProviderDeleteRequest, validate);
+request!(GroupCreateRequest, validate);
+request!(GroupPatchRequest, validate);
+request!(GroupDeleteRequest, validate);
+request!(GroupRestoreRequest, validate);
 
 impl sealed::Sealed for ConfigResponse {}
 impl Response for ConfigResponse {
@@ -330,6 +341,13 @@ response!(
     ProfileListResponse,
     ProfileDetailResponse,
     ProfileSwitchResponse,
+    PresetListResponse,
+    ProviderWriteResponse,
+    ProviderDeleteResponse,
+    GroupListResponse,
+    GroupWriteResponse,
+    GroupDeleteResponse,
+    GroupMemberCandidatesResponse,
 );
 
 #[cfg(test)]

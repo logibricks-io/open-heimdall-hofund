@@ -16,7 +16,7 @@ use axum::http::{HeaderMap, Method, StatusCode, Uri, header};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, patch, post};
 use futures_util::future::BoxFuture;
 use futures_util::stream::{BoxStream, StreamExt};
 use hofund_control_proto::{
@@ -26,18 +26,21 @@ use hofund_control_proto::{
     CatalogDisabledListResponse, CatalogModelRequest, CheckinListResponse, CheckinRunRequest,
     CheckinRunResponse, ConfigApplyRequest, ConfigResponse, ConfigValidateRequest,
     ConfigValidationResponse, ControlError, ControlErrorKind, ErrorEnvelope, GatewayKeyRequest,
-    GatewayKeyResponse, GatewayKeyRestoreRequest, HealthResponse, MAX_ID_BYTES,
-    MAX_REQUEST_BODY_BYTES, ModelListResponse, PicksResponse, PicksSetRequest,
-    ProfileDeleteRequest, ProfileDetailResponse, ProfileListResponse, ProfileSaveRequest,
-    ProfileSwitchRequest, ProfileSwitchResponse, ProviderKeyRequest, ProviderKeysResponse,
-    ProviderListResponse, ProviderRenameRequest, ProviderRenameResponse, ProviderTestRequest,
-    ProviderTestResponse, QuotaAlertsResponse, QuotaAlertsSetRequest, QuotaAlertsSetResponse,
-    QuotaCreditsModesResponse, QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryQuery,
-    QuotaHistoryResponse, QuotaQuery, QuotaResponse, ReloadRequest, RouteListResponse,
-    RouteModelListResponse, RouteQuery, SessionRouteResponse, ShutdownRequest, ShutdownResponse,
-    StatusResponse, TokenRotateRequest, TokenRotateResponse, Topic, UnroutedListResponse,
-    UsageQuery, UsageResponse, WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
-    decode_request,
+    GatewayKeyResponse, GatewayKeyRestoreRequest, GroupCreateRequest, GroupDeleteRequest,
+    GroupDeleteResponse, GroupListResponse, GroupMemberCandidatesResponse, GroupPatchRequest,
+    GroupRestoreRequest, GroupWriteResponse, HealthResponse, MAX_ID_BYTES, MAX_REQUEST_BODY_BYTES,
+    ModelListResponse, PicksResponse, PicksSetRequest, PresetListResponse, ProfileDeleteRequest,
+    ProfileDetailResponse, ProfileListResponse, ProfileRenameRequest, ProfileSaveRequest,
+    ProfileSwitchRequest, ProfileSwitchResponse, ProviderCreateRequest, ProviderDeleteRequest,
+    ProviderDeleteResponse, ProviderKeyRequest, ProviderKeysResponse, ProviderListResponse,
+    ProviderPatchRequest, ProviderRenameRequest, ProviderRenameResponse, ProviderTestRequest,
+    ProviderTestResponse, ProviderWriteResponse, QuotaAlertsResponse, QuotaAlertsSetRequest,
+    QuotaAlertsSetResponse, QuotaCreditsModesResponse, QuotaCreditsSetRequest,
+    QuotaCreditsSetResponse, QuotaHistoryQuery, QuotaHistoryResponse, QuotaQuery, QuotaResponse,
+    ReloadRequest, RouteListResponse, RouteModelListResponse, RouteQuery, SessionRouteResponse,
+    ShutdownRequest, ShutdownResponse, StatusResponse, TokenRotateRequest, TokenRotateResponse,
+    Topic, UnroutedListResponse, UsageQuery, UsageResponse, WarmupListResponse, WarmupRunRequest,
+    WarmupRunResponse, decode_request,
 };
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
@@ -242,6 +245,153 @@ pub trait ControlState: Send + Sync {
             Err(ControlError::new(
                 ControlErrorKind::BadRequest,
                 "provider rename is not supported by this control state",
+                "control",
+            )
+            .into())
+        })
+    }
+    /// Creates a configured provider.
+    fn create_provider(
+        &self,
+        _request: ProviderCreateRequest,
+    ) -> ControlFuture<'_, ProviderWriteResponse> {
+        Box::pin(async {
+            Err(ControlError::new(
+                ControlErrorKind::BadRequest,
+                "provider create is not supported by this control state",
+                "control",
+            )
+            .into())
+        })
+    }
+    /// Patches one configured provider.
+    fn patch_provider(
+        &self,
+        _id: String,
+        _request: ProviderPatchRequest,
+    ) -> ControlFuture<'_, ProviderWriteResponse> {
+        Box::pin(async {
+            Err(ControlError::new(
+                ControlErrorKind::BadRequest,
+                "provider patch is not supported by this control state",
+                "control",
+            )
+            .into())
+        })
+    }
+    /// Deletes one configured provider.
+    fn delete_provider(
+        &self,
+        _id: String,
+        _request: ProviderDeleteRequest,
+    ) -> ControlFuture<'_, ProviderDeleteResponse> {
+        Box::pin(async {
+            Err(ControlError::new(
+                ControlErrorKind::BadRequest,
+                "provider delete is not supported by this control state",
+                "control",
+            )
+            .into())
+        })
+    }
+    /// Lists preset catalog rows.
+    fn presets(&self) -> ControlFuture<'_, PresetListResponse> {
+        Box::pin(async {
+            Err(ControlError::new(
+                ControlErrorKind::BadRequest,
+                "presets are not supported by this control state",
+                "control",
+            )
+            .into())
+        })
+    }
+    /// Lists routing groups.
+    fn groups(&self) -> ControlFuture<'_, GroupListResponse> {
+        Box::pin(async {
+            Err(ControlError::new(
+                ControlErrorKind::BadRequest,
+                "groups are not supported by this control state",
+                "control",
+            )
+            .into())
+        })
+    }
+    /// Creates a routing group.
+    fn create_group(&self, _request: GroupCreateRequest) -> ControlFuture<'_, GroupWriteResponse> {
+        Box::pin(async {
+            Err(ControlError::new(
+                ControlErrorKind::BadRequest,
+                "groups are not supported by this control state",
+                "control",
+            )
+            .into())
+        })
+    }
+    /// Patches one routing group.
+    fn patch_group(
+        &self,
+        _id: String,
+        _request: GroupPatchRequest,
+    ) -> ControlFuture<'_, GroupWriteResponse> {
+        Box::pin(async {
+            Err(ControlError::new(
+                ControlErrorKind::BadRequest,
+                "groups are not supported by this control state",
+                "control",
+            )
+            .into())
+        })
+    }
+    /// Deletes one routing group.
+    fn delete_group(
+        &self,
+        _id: String,
+        _request: GroupDeleteRequest,
+    ) -> ControlFuture<'_, GroupDeleteResponse> {
+        Box::pin(async {
+            Err(ControlError::new(
+                ControlErrorKind::BadRequest,
+                "groups are not supported by this control state",
+                "control",
+            )
+            .into())
+        })
+    }
+    /// Restores a hidden found group.
+    fn restore_group(
+        &self,
+        _id: String,
+        _request: GroupRestoreRequest,
+    ) -> ControlFuture<'_, GroupWriteResponse> {
+        Box::pin(async {
+            Err(ControlError::new(
+                ControlErrorKind::BadRequest,
+                "groups are not supported by this control state",
+                "control",
+            )
+            .into())
+        })
+    }
+    /// Lists routing member picker candidates.
+    fn group_member_candidates(&self) -> ControlFuture<'_, GroupMemberCandidatesResponse> {
+        Box::pin(async {
+            Err(ControlError::new(
+                ControlErrorKind::BadRequest,
+                "groups are not supported by this control state",
+                "control",
+            )
+            .into())
+        })
+    }
+    /// Renames a stored profile.
+    fn rename_profile(
+        &self,
+        _request: ProfileRenameRequest,
+    ) -> ControlFuture<'_, ProfileListResponse> {
+        Box::pin(async {
+            Err(ControlError::new(
+                ControlErrorKind::BadRequest,
+                "profiles are not supported by this control state",
                 "control",
             )
             .into())
@@ -702,8 +852,35 @@ impl Control {
             .route("/v1/hofund/status", get(status).head(method_not_allowed))
             .route(
                 "/v1/hofund/providers",
-                get(providers).head(method_not_allowed),
+                get(providers)
+                    .post(create_provider)
+                    .head(method_not_allowed),
             )
+            .route(
+                "/v1/hofund/providers/{id}",
+                patch(patch_provider)
+                    .delete(delete_provider)
+                    .head(method_not_allowed),
+            )
+            .route(
+                "/v1/hofund/presets",
+                get(list_presets).head(method_not_allowed),
+            )
+            .route(
+                "/v1/hofund/groups",
+                get(list_groups).post(create_group).head(method_not_allowed),
+            )
+            .route(
+                "/v1/hofund/groups/member-candidates",
+                get(group_member_candidates).head(method_not_allowed),
+            )
+            .route(
+                "/v1/hofund/groups/{id}",
+                patch(patch_group)
+                    .delete(delete_group)
+                    .head(method_not_allowed),
+            )
+            .route("/v1/hofund/groups/{id}/restore", post(restore_group))
             .route(
                 "/v1/hofund/providers/{id}/keys",
                 get(provider_keys)
@@ -777,6 +954,7 @@ impl Control {
             )
             .route("/v1/hofund/profiles/save", post(save_profile))
             .route("/v1/hofund/profiles/switch", post(switch_profile))
+            .route("/v1/hofund/profiles/rename", post(rename_profile))
             .route("/v1/hofund/usage", get(usage).head(method_not_allowed))
             .route(
                 "/v1/hofund/gateway-keys",
@@ -1285,6 +1463,122 @@ async fn rename_provider(
         Err(failure) => return failure_response(failure),
     };
     operation_response!(state.control.state.rename_provider(id, request).await)
+}
+
+async fn create_provider(State(state): State<HttpState>, body: Bytes) -> Response {
+    let request = match decode_body::<ProviderCreateRequest>(&body) {
+        Ok(request) => request,
+        Err(failure) => return failure_response(failure),
+    };
+    operation_response!(state.control.state.create_provider(request).await)
+}
+
+async fn patch_provider(
+    State(state): State<HttpState>,
+    id: Result<AxumPath<String>, PathRejection>,
+    body: Bytes,
+) -> Response {
+    let id = match path_id(id) {
+        Ok(id) => id,
+        Err(failure) => return failure_response(failure),
+    };
+    let request = match decode_body::<ProviderPatchRequest>(&body) {
+        Ok(request) => request,
+        Err(failure) => return failure_response(failure),
+    };
+    operation_response!(state.control.state.patch_provider(id, request).await)
+}
+
+async fn delete_provider(
+    State(state): State<HttpState>,
+    id: Result<AxumPath<String>, PathRejection>,
+    body: Bytes,
+) -> Response {
+    let id = match path_id(id) {
+        Ok(id) => id,
+        Err(failure) => return failure_response(failure),
+    };
+    let request = match decode_body::<ProviderDeleteRequest>(&body) {
+        Ok(request) => request,
+        Err(failure) => return failure_response(failure),
+    };
+    operation_response!(state.control.state.delete_provider(id, request).await)
+}
+
+async fn list_presets(State(state): State<HttpState>) -> Response {
+    operation_response!(state.control.state.presets().await)
+}
+
+async fn list_groups(State(state): State<HttpState>) -> Response {
+    operation_response!(state.control.state.groups().await)
+}
+
+async fn create_group(State(state): State<HttpState>, body: Bytes) -> Response {
+    let request = match decode_body::<GroupCreateRequest>(&body) {
+        Ok(request) => request,
+        Err(failure) => return failure_response(failure),
+    };
+    operation_response!(state.control.state.create_group(request).await)
+}
+
+async fn patch_group(
+    State(state): State<HttpState>,
+    id: Result<AxumPath<String>, PathRejection>,
+    body: Bytes,
+) -> Response {
+    let id = match path_id(id) {
+        Ok(id) => id,
+        Err(failure) => return failure_response(failure),
+    };
+    let request = match decode_body::<GroupPatchRequest>(&body) {
+        Ok(request) => request,
+        Err(failure) => return failure_response(failure),
+    };
+    operation_response!(state.control.state.patch_group(id, request).await)
+}
+
+async fn delete_group(
+    State(state): State<HttpState>,
+    id: Result<AxumPath<String>, PathRejection>,
+    body: Bytes,
+) -> Response {
+    let id = match path_id(id) {
+        Ok(id) => id,
+        Err(failure) => return failure_response(failure),
+    };
+    let request = match decode_body::<GroupDeleteRequest>(&body) {
+        Ok(request) => request,
+        Err(failure) => return failure_response(failure),
+    };
+    operation_response!(state.control.state.delete_group(id, request).await)
+}
+
+async fn restore_group(
+    State(state): State<HttpState>,
+    id: Result<AxumPath<String>, PathRejection>,
+    body: Bytes,
+) -> Response {
+    let id = match path_id(id) {
+        Ok(id) => id,
+        Err(failure) => return failure_response(failure),
+    };
+    let request = match decode_body::<GroupRestoreRequest>(&body) {
+        Ok(request) => request,
+        Err(failure) => return failure_response(failure),
+    };
+    operation_response!(state.control.state.restore_group(id, request).await)
+}
+
+async fn group_member_candidates(State(state): State<HttpState>) -> Response {
+    operation_response!(state.control.state.group_member_candidates().await)
+}
+
+async fn rename_profile(State(state): State<HttpState>, body: Bytes) -> Response {
+    let request = match decode_body::<ProfileRenameRequest>(&body) {
+        Ok(request) => request,
+        Err(failure) => return failure_response(failure),
+    };
+    operation_response!(state.control.state.rename_profile(request).await)
 }
 
 async fn route_models(State(state): State<HttpState>) -> Response {

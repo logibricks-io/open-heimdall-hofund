@@ -11,9 +11,13 @@ use hofund_control_proto::{
     API_VERSION, AgentAction, AgentChangeResponse, AgentConnectRequest, AgentDisconnectRequest,
     AgentListResponse, AgentModelRequest, AgentPlanRequest, AgentPlanResponse, AgentStatusResponse,
     CheckinListResponse, CheckinRunRequest, CheckinRunResponse, ControlError, ControlErrorKind,
-    ErrorEnvelope, HealthResponse, MAX_REQUEST_BODY_BYTES, ModelListResponse, PicksResponse,
-    PicksSetRequest, ProviderListResponse, ProviderTestRequest, ProviderTestResponse,
-    QuotaAlertsResponse, QuotaAlertsSetRequest, QuotaAlertsSetResponse, QuotaCreditsModesResponse,
+    ErrorEnvelope, GroupCreateRequest, GroupDeleteRequest, GroupDeleteResponse, GroupListResponse,
+    GroupMemberCandidatesResponse, GroupPatchRequest, GroupRestoreRequest, GroupWriteResponse,
+    HealthResponse, MAX_REQUEST_BODY_BYTES, ModelListResponse, PicksResponse, PicksSetRequest,
+    PresetListResponse, ProfileListResponse, ProfileRenameRequest, ProviderCreateRequest,
+    ProviderDeleteRequest, ProviderDeleteResponse, ProviderListResponse, ProviderPatchRequest,
+    ProviderTestRequest, ProviderTestResponse, ProviderWriteResponse, QuotaAlertsResponse,
+    QuotaAlertsSetRequest, QuotaAlertsSetResponse, QuotaCreditsModesResponse,
     QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryQuery, QuotaHistoryResponse,
     QuotaQuery, QuotaResponse, RouteModelListResponse, ShutdownRequest, ShutdownResponse,
     StatusResponse, TokenRotateRequest, TokenRotateResponse, UsageQuery, UsageResponse,
@@ -253,6 +257,76 @@ impl ControlState for FakeControlState {
         self.reply("config_reload")
     }
 
+    fn create_provider(
+        &self,
+        _request: ProviderCreateRequest,
+    ) -> ControlFuture<'_, ProviderWriteResponse> {
+        self.reply("create_provider")
+    }
+
+    fn patch_provider(
+        &self,
+        id: String,
+        _request: ProviderPatchRequest,
+    ) -> ControlFuture<'_, ProviderWriteResponse> {
+        self.reply(format!("patch_provider:{id}"))
+    }
+
+    fn delete_provider(
+        &self,
+        id: String,
+        _request: ProviderDeleteRequest,
+    ) -> ControlFuture<'_, ProviderDeleteResponse> {
+        self.reply(format!("delete_provider:{id}"))
+    }
+
+    fn presets(&self) -> ControlFuture<'_, PresetListResponse> {
+        self.reply("presets")
+    }
+
+    fn groups(&self) -> ControlFuture<'_, GroupListResponse> {
+        self.reply("groups")
+    }
+
+    fn create_group(&self, _request: GroupCreateRequest) -> ControlFuture<'_, GroupWriteResponse> {
+        self.reply("create_group")
+    }
+
+    fn patch_group(
+        &self,
+        id: String,
+        _request: GroupPatchRequest,
+    ) -> ControlFuture<'_, GroupWriteResponse> {
+        self.reply(format!("patch_group:{id}"))
+    }
+
+    fn delete_group(
+        &self,
+        id: String,
+        _request: GroupDeleteRequest,
+    ) -> ControlFuture<'_, GroupDeleteResponse> {
+        self.reply(format!("delete_group:{id}"))
+    }
+
+    fn restore_group(
+        &self,
+        id: String,
+        _request: GroupRestoreRequest,
+    ) -> ControlFuture<'_, GroupWriteResponse> {
+        self.reply(format!("restore_group:{id}"))
+    }
+
+    fn group_member_candidates(&self) -> ControlFuture<'_, GroupMemberCandidatesResponse> {
+        self.reply("group_member_candidates")
+    }
+
+    fn rename_profile(
+        &self,
+        _request: ProfileRenameRequest,
+    ) -> ControlFuture<'_, ProfileListResponse> {
+        self.reply("rename_profile")
+    }
+
     /// One frame, then an open stream so heartbeats can be observed.
     fn events(&self, query: EventsQuery) -> Result<EventSubscription, ControlFailure> {
         self.calls.lock().expect("calls").push("events".to_owned());
@@ -273,10 +347,58 @@ macro_rules! json {
     };
 }
 
+const EXPECTED_REV: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+
+fn revision_json(fields: &str) -> Vec<u8> {
+    format!(r#"{{"version":{API_VERSION},"expected_revision":"{EXPECTED_REV}"{fields}}}"#)
+        .into_bytes()
+}
+
 fn operation_routes() -> Vec<(Method, &'static str, Vec<u8>)> {
+    let create_provider = format!(
+        r#"{{"version":{API_VERSION},"expected_revision":"{EXPECTED_REV}","preset":"fixture"}}"#
+    )
+    .into_bytes();
+    let patch_provider = revision_json(r#","enabled":false"#);
+    let delete_provider = revision_json("");
+    let create_group = format!(
+        r#"{{"version":{API_VERSION},"expected_revision":"{EXPECTED_REV}","name":"team","first_member":"chat/model"}}"#
+    )
+    .into_bytes();
+    let patch_group = revision_json("");
+    let delete_group = revision_json("");
+    let restore_group = revision_json("");
+    let rename_profile = br#"{"version":1,"from":"work","to":"home"}"#.to_vec();
     vec![
         (Method::GET, "/v1/hofund/status", Vec::new()),
         (Method::GET, "/v1/hofund/providers", Vec::new()),
+        (Method::POST, "/v1/hofund/providers", create_provider),
+        (
+            Method::PATCH,
+            "/v1/hofund/providers/provider",
+            patch_provider,
+        ),
+        (
+            Method::DELETE,
+            "/v1/hofund/providers/provider",
+            delete_provider,
+        ),
+        (Method::GET, "/v1/hofund/presets", Vec::new()),
+        (Method::GET, "/v1/hofund/groups", Vec::new()),
+        (Method::POST, "/v1/hofund/groups", create_group),
+        (Method::PATCH, "/v1/hofund/groups/group", patch_group),
+        (Method::DELETE, "/v1/hofund/groups/group", delete_group),
+        (
+            Method::POST,
+            "/v1/hofund/groups/group/restore",
+            restore_group,
+        ),
+        (
+            Method::GET,
+            "/v1/hofund/groups/member-candidates",
+            Vec::new(),
+        ),
+        (Method::POST, "/v1/hofund/profiles/rename", rename_profile),
         (
             Method::GET,
             "/v1/hofund/providers/provider/models",
@@ -461,6 +583,17 @@ async fn control_routes_success_and_error_envelopes_against_fake_state() {
         state.calls.lock().expect("calls").as_slice(),
         [
             "providers",
+            "create_provider",
+            "patch_provider:provider",
+            "delete_provider:provider",
+            "presets",
+            "groups",
+            "create_group",
+            "patch_group:group",
+            "delete_group:group",
+            "restore_group:group",
+            "group_member_candidates",
+            "rename_profile",
             "provider_models:provider",
             "refresh_models:provider",
             "test_provider:provider",
@@ -521,7 +654,7 @@ async fn control_routes_success_and_error_envelopes_against_fake_state() {
     let (status, headers, body) = call(
         app(&state),
         Method::POST,
-        "/v1/hofund/providers",
+        "/v1/hofund/presets",
         Vec::new(),
         true,
         true,

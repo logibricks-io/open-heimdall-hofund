@@ -15,7 +15,7 @@ Legend: **Done** = matches the reference at checklist granularity; **Partial** =
 | Claude Pro/Max (`claude`) | 1 | 11 | 9 | 2 | 0 |
 | Cursor (`cursor`) | 1 | 11 | 7 | 2 | 0 |
 | Devin (`devin`) | 2 | 5 | 11 | 1 | 0 |
-| Zed (`zed`) | 0 | 11 | 5 | 3 | 0 |
+| Zed (`zed`) | 0 | 6 | 1 | 3 | 0 |
 | Kiro (`kiro`) | 0 | 13 | 5 | 1 | 0 |
 | Factory / Droid (`factory`) | 1 | 15 | 0 | 3 | 0 |
 | Cline / ClinePass (`cline`) | 2 | 12 | 1 | 3 | 1 |
@@ -174,27 +174,27 @@ Every other gap below maps to an existing plan item.
 | a3 | API key / device | N/A | N/A | N/A | — |
 | b | import | Built-in side logins | `hofund subscription import` | Partial | — |
 | c | token storage | Plugin holds user id + access + system id | `creds.rs` stored secret | Partial | — |
-| d | refresh | POST `/client/llm_tokens` on 401 (`zed/index.mjs:14-16`) | `refresh.rs` against cloud API | Partial | Outdated-token headers (`x-zed-expired-token`) |
-| e | upstream wire | POST `/completions` NDJSON envelope (`zed/index.mjs:17-20`) | `upstream.rs` unsupported (`zed/upstream.rs:28-38`) | Missing | Completions stream (**R-16**) |
-| f | inbound shapes | Per-provider SDK body in `provider_request` (`zed/index.mjs:22-25`) | `body.rs` shapes Responses maps only (offline) | Partial | Wire completions + unwrap stream (**R-16**) |
-| g | streaming | NDJSON `event` lines | Not served | Missing | **R-16** |
-| h | tool calls | Provider-native in envelope | Body transform only | Partial | End-to-end with upstream |
-| i | images | Model flags `supports_images` (`zed/index.mjs:57-62`) | unverified | Missing | **R-16** |
-| j | thinking | `supports_thinking` in catalog | `body.rs` reasoning item tweaks | Partial | **R-16** |
-| k | quota / usage | Plan limits via Zed cloud (plugin); core reader minimal | `quota()` empty (`lib.rs:162-167`) | Missing | Usage/plan endpoints (**R-16**) |
-| l | model list | GET `/models` (`zed/index.mjs:17-18`) | `models.rs` from cloud | Partial | Snapshot fallback vs live merge |
-| m | multi-account | Org id on creds (`zed.go:21-22`) | Stored org field | Partial | Org-scoped requests |
-| n | error classification | `SignInExpired`, 402 plan (`zed/index.mjs:83-147`) | Refresh auth errors | Partial | Lapsed vs retry (**R-16**) |
+| d | refresh | POST `/client/llm_tokens` on 401 (`zed/index.mjs:14-16`) | `refresh.rs`, `tokens.rs`, stale headers on `/models` and `/completions` | Done | — |
+| e | upstream wire | POST `/completions` NDJSON envelope (`zed/index.mjs:17-20`) | `upstream.rs` POST `/completions` | Done | — |
+| f | inbound shapes | Per-provider SDK body in `provider_request` (`zed/index.mjs:22-25`) | `body.rs` + `wire::encode_outbound` | Done | — |
+| g | streaming | NDJSON `event` lines | `stream.rs` → wire decode; unary fold | Done | — |
+| h | tool calls | Provider-native in envelope | End-to-end via encoded provider bodies | Done | — |
+| i | images | Model flags `supports_images` (`zed/index.mjs:57-62`) | `prepare_provider` strips images when disabled | Done | — |
+| j | thinking | `supports_thinking` in catalog | Anthropic/Gemini/OpenAI body shaping | Done | — |
+| k | quota / usage | Plan limits via Zed cloud (plugin); core reader minimal | `quota.rs` plan window from `/client/users/me` | Partial | No allowance meters (reference has none) |
+| l | model list | GET `/models` (`zed/index.mjs:17-18`) | Live fetch with snapshot fallback (`models.rs`) | Done | — |
+| m | multi-account | Org id on creds (`zed.go:21-22`) | Org on token mint, repick on 402 or empty list, persisted via `apply_org` | Partial | No org picker UI |
+| n | error classification | `SignInExpired`, 402 plan (`zed/index.mjs:83-147`) | `errors.rs` auth/quota/status mapping | Done | — |
 | o | warmup | N/A | N/A | N/A | — |
 | p | agent sign-in | N/A (Zed editor sign-in, not agent file) | No agent discover | N/A | — |
-| q | extras | User-Agent `Zed/1.23.0` (`zed/index.mjs:35-69`) | unverified on refresh | Partial | Client version parity (**R-16**) |
+| q | extras | User-Agent `Zed/1.23.0` (`zed/index.mjs:35-69`) | `headers.rs` on client and model calls | Done | — |
 
 ### Gaps (Zed)
 
 - Native app sign-in (RSA loopback) — **L**, **R-56**
-- Cloud `/completions` upstream + streaming — **L**, **R-16**
-- Quota/plan display — **M**, **R-16**
-- Token stale/outdated handling — **S**, **R-16**
+- Org picker UI for multi-account (stored org + automatic repick only)
+- Plan-only quota windows (no allowance meters; matches reference)
+- Gateway-facing Zed client API shapes beyond subscription upstream (parity doc only; not in R-16 scope)
 
 ---
 

@@ -23,6 +23,7 @@ use std::time::Duration;
 
 use hofund_plugin_api::{
     Body, BodyStream, CredentialStyle, HttpHandle, PluginError, PluginErrorKind, SecretString,
+    set_read_budget,
 };
 use secrecy::ExposeSecret;
 
@@ -81,6 +82,7 @@ pub struct Call {
     headers: Vec<Header>,
     body: Vec<u8>,
     idempotent: bool,
+    read_timeout: Option<Duration>,
 }
 
 #[derive(Clone)]
@@ -110,7 +112,15 @@ impl Call {
             headers: Vec::new(),
             body: Vec::new(),
             idempotent: false,
+            read_timeout: None,
         }
+    }
+
+    /// Sets the host idle read budget for this call, replacing the pool default.
+    #[must_use]
+    pub fn read_timeout(mut self, budget: Duration) -> Self {
+        self.read_timeout = Some(budget);
+        self
     }
 
     /// Marks whether a non-idempotent method may be retried after the body was sent.
@@ -370,9 +380,13 @@ impl Call {
         for header in &self.headers {
             builder = builder.header(&header.name, header_value(header)?);
         }
-        builder
+        let mut request = builder
             .body(Body::from_bytes(self.body))
-            .map_err(|error| PluginError::internal(error.to_string()))
+            .map_err(|error| PluginError::internal(error.to_string()))?;
+        if let Some(budget) = self.read_timeout {
+            set_read_budget(&mut request, budget);
+        }
+        Ok(request)
     }
 }
 
@@ -390,6 +404,7 @@ impl fmt::Debug for Call {
             .field("header_names", &names)
             .field("body_len", &self.body.len())
             .field("idempotent", &self.idempotent)
+            .field("read_timeout", &self.read_timeout)
             .finish()
     }
 }

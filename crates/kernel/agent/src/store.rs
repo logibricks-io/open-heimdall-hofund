@@ -73,6 +73,11 @@ pub(crate) fn credential_record(path: &Path) -> PathBuf {
     sibling(path, ".hofund.credential")
 }
 
+/// Path to a connect sidecar file beside `path`.
+pub(crate) fn sidecar_marker_path(path: &Path, suffix: &str) -> PathBuf {
+    sibling(path, suffix)
+}
+
 /// Whether connect saved a backup or an absent marker beside `path`.
 pub(crate) fn marker_present(path: &Path) -> bool {
     sibling(path, ".hofund.bak").is_file() || sibling(path, ".hofund.absent").is_file()

@@ -108,6 +108,7 @@ async fn listen(text: &str) -> Live {
 
 async fn ask(live: &Live) -> reqwest::Response {
     reqwest::Client::builder()
+        .http1_only()
         .timeout(std::time::Duration::from_secs(5))
         .build()
         .expect("client")
@@ -201,6 +202,7 @@ key = \"{beta}\"
         .trim()
         .to_owned();
     let response = reqwest::Client::builder()
+        .http1_only()
         .timeout(std::time::Duration::from_secs(5))
         .build()
         .expect("client")
@@ -257,6 +259,7 @@ api_key = \"{secret}\"
         .trim()
         .to_owned();
     let response = reqwest::Client::builder()
+        .http1_only()
         .timeout(std::time::Duration::from_secs(5))
         .build()
         .expect("client")
@@ -323,6 +326,7 @@ api_key = \"{backup}\"
         .trim()
         .to_owned();
     let response = reqwest::Client::builder()
+        .http1_only()
         .timeout(std::time::Duration::from_secs(5))
         .build()
         .expect("client")

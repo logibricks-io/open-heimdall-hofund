@@ -19,6 +19,16 @@ use crate::{AgentError, Credential, CredentialError, CredentialStore, FileChange
 /// than a file.
 pub const CREDENTIAL_CHANGE_PREFIX: &str = "credential store: ";
 
+/// Reverses one tracked [`EngineCredential::put`].
+#[derive(Clone)]
+pub(crate) struct CredentialUndo {
+    store: Arc<dyn CredentialStore>,
+    item: Credential,
+    prior_item_secret: Option<String>,
+    removed_item: Option<Credential>,
+    removed_secret: Option<String>,
+}
+
 pub(crate) struct EngineCredential<'a> {
     agent: &'static str,
     spec: &'a AgentCredential,
@@ -203,10 +213,60 @@ impl<'a> EngineCredential<'a> {
         Ok((true, warnings))
     }
 
+    /// Captures credential-store state before [`Self::put`].
+    pub(crate) fn capture_put_undo(
+        &self,
+        target: &GatewayTarget,
+    ) -> Result<Option<CredentialUndo>, AgentError> {
+        let Some(store) = self.store.cloned() else {
+            return Ok(None);
+        };
+        let item = self.item(target);
+        let prior_item_secret = store
+            .read(&item)
+            .map_err(failure)?
+            .map(|secret| secret.expose_secret().to_owned());
+        let mut removed_item = None;
+        let mut removed_secret = None;
+        if let Some(previous) = self.read_record()?
+            && previous.item != item
+            && secret_matches(store.as_ref(), &previous.item, &previous.digest)?
+        {
+            removed_item = Some(previous.item.clone());
+            removed_secret = store
+                .read(&previous.item)
+                .map_err(failure)?
+                .map(|secret| secret.expose_secret().to_owned());
+        }
+        Ok(Some(CredentialUndo {
+            store,
+            item,
+            prior_item_secret,
+            removed_item,
+            removed_secret,
+        }))
+    }
+
     fn read_record(&self) -> Result<Option<Record>, AgentError> {
         read_optional(&self.record)?
             .map(|bytes| Record::parse(&self.record, &bytes))
             .transpose()
+    }
+}
+
+impl CredentialUndo {
+    pub(crate) fn restore(self) -> Result<(), AgentError> {
+        if let Some(secret) = self.prior_item_secret {
+            self.store.write(&self.item, &secret).map_err(failure)?;
+        } else {
+            let _ = self.store.delete(&self.item);
+        }
+        if let Some(item) = self.removed_item
+            && let Some(secret) = self.removed_secret
+        {
+            self.store.write(&item, &secret).map_err(failure)?;
+        }
+        Ok(())
     }
 }
 

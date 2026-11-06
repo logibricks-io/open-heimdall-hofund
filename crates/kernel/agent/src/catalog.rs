@@ -25,7 +25,7 @@ use crate::store::{
 };
 use crate::{
     AgentAdapter, AgentError, ConfigFile, ConnectionStatus, CredentialStore, FileChange,
-    GatewayTarget, Plan, Session, TargetOs,
+    GatewayTarget, Plan, Session, SidecarCheckpoint, TargetOs,
 };
 use crate::{DisconnectOutcome, usable_override};
 use crate::{active_provider, go_binary};
@@ -112,6 +112,33 @@ impl Catalog {
                 continue;
             }
             if adapter.rename_provider_refs(session, &from, &to)? {
+                moved.push(adapter.id().to_owned());
+            }
+        }
+        Ok(moved)
+    }
+
+    /// Rewrites agent model settings that pointed at `group/<from>` to `group/<to>`.
+    pub fn rename_group_refs(
+        &self,
+        session: &Session,
+        from: &str,
+        to: &str,
+        checkpoint: &mut SidecarCheckpoint,
+    ) -> Result<Vec<String>, AgentError> {
+        let from = from.trim().to_ascii_lowercase();
+        let to = to.trim().to_ascii_lowercase();
+        if from == to {
+            return Ok(Vec::new());
+        }
+        let old_ref = format!("group/{from}");
+        let new_ref = format!("group/{to}");
+        let mut moved = Vec::new();
+        for adapter in &self.adapters {
+            if !adapter.detect(session) {
+                continue;
+            }
+            if adapter.rename_group_refs(session, &old_ref, &new_ref, checkpoint)? {
                 moved.push(adapter.id().to_owned());
             }
         }
@@ -614,12 +641,27 @@ impl Engine {
     }
 
     fn apply(&self, target: &GatewayTarget) -> Result<Plan, AgentError> {
-        self.apply_with(target, Choice::Keep)
+        self.apply_with(target, Choice::Keep, None)
     }
 
-    fn apply_with(&self, target: &GatewayTarget, choice: Choice<'_>) -> Result<Plan, AgentError> {
+    fn apply_with(
+        &self,
+        target: &GatewayTarget,
+        choice: Choice<'_>,
+        checkpoint: Option<&mut SidecarCheckpoint>,
+    ) -> Result<Plan, AgentError> {
         let rendered = self.render_all(target, choice)?;
         let plan = plan_of(&rendered);
+        if let Some(checkpoint) = checkpoint {
+            for change in plan.changes() {
+                checkpoint.record_agent_tree(change.path())?;
+            }
+            if let Some(credential) = self.credential()?
+                && let Some(undo) = credential.capture_put_undo(target)?
+            {
+                checkpoint.push_credential_undo(undo);
+            }
+        }
         // The item goes in before any file names the gateway, so the agent
         // never reads a gateway URL without a key; an item alone is inert.
         let stored = match self.credential()? {
@@ -647,6 +689,15 @@ impl Engine {
     }
 
     fn set_model(&self, target: &GatewayTarget, model: Option<&str>) -> Result<Plan, AgentError> {
+        self.set_model_tracked(target, model, None)
+    }
+
+    fn set_model_tracked(
+        &self,
+        target: &GatewayTarget,
+        model: Option<&str>,
+        checkpoint: Option<&mut SidecarCheckpoint>,
+    ) -> Result<Plan, AgentError> {
         let Some(key) = self.model else {
             return Err(AgentError::rejected(format!(
                 "`{}` has no model setting",
@@ -654,7 +705,7 @@ impl Engine {
             )));
         };
         let Some(id) = model else {
-            return self.clear_model(target, key);
+            return self.clear_model_tracked(target, key, checkpoint);
         };
         if !self.models(target).iter().any(|route| route == id) {
             return Err(AgentError::rejected(format!(
@@ -662,7 +713,21 @@ impl Engine {
                 self.id
             )));
         }
-        self.apply_with(target, Choice::Set(id))
+        self.apply_with(target, Choice::Set(id), checkpoint)
+    }
+
+    fn record_sidecar_paths(
+        &self,
+        session: &Session,
+        checkpoint: &mut SidecarCheckpoint,
+    ) -> Result<(), AgentError> {
+        if !self.detect(session) {
+            return Ok(());
+        }
+        for chosen in self.chosen()? {
+            checkpoint.record_agent_tree(&chosen.path)?;
+        }
+        Ok(())
     }
 
     fn rename_provider_refs(
@@ -731,9 +796,85 @@ impl Engine {
         Ok(changed)
     }
 
+    fn rename_group_refs(
+        &self,
+        session: &Session,
+        old_ref: &str,
+        new_ref: &str,
+        checkpoint: &mut SidecarCheckpoint,
+    ) -> Result<bool, AgentError> {
+        if !self.detect(session) {
+            return Ok(false);
+        }
+        let mut changed = false;
+        for chosen in self.chosen()? {
+            let Some(before) = read_optional(&chosen.path)? else {
+                continue;
+            };
+            let text = utf8(&chosen.path, &before)?;
+            let mut assignments = Vec::new();
+            if let Some(model) = self.model
+                && let Some(value) = get(chosen.kind, text, model.key)?
+                && let Some(updated) = rewrite_group_ref_value(&value, old_ref, new_ref)
+            {
+                assignments.push(Assignment {
+                    key: model.key,
+                    value: updated,
+                    raw_json: false,
+                    shared: None,
+                });
+            }
+            for set in &self.sets {
+                if chosen.file != set.file {
+                    continue;
+                }
+                if let Some(value) = get(chosen.kind, text, set.key)?
+                    && let Some(updated) = rewrite_group_ref_value(&value, old_ref, new_ref)
+                {
+                    assignments.push(Assignment {
+                        key: set.key,
+                        value: updated,
+                        raw_json: false,
+                        shared: None,
+                    });
+                }
+            }
+            if assignments.is_empty() {
+                continue;
+            }
+            checkpoint.record_agent_tree(&chosen.path)?;
+            backup_once(&chosen.path)?;
+            let after = render(chosen.kind, Some(text), &assignments)?;
+            write_atomic(&chosen.path, &after)?;
+            if marker_present(&chosen.path) {
+                let after_text = utf8(&chosen.path, &after)?;
+                let pinned = if let Some(model) = self.model {
+                    self.pinned(
+                        &chosen.path,
+                        chosen.kind,
+                        Some(after_text),
+                        &after,
+                        model,
+                        Choice::Set(new_ref),
+                    )?
+                } else {
+                    Vec::new()
+                };
+                snapshot_wrote(&chosen.path, chosen.kind, &assignments, &[], &pinned)?;
+            }
+            changed = true;
+        }
+        Ok(changed)
+    }
+
     /// Clears the route pick. A connected agent is re-applied so the snapshot
     /// follows; a disconnected one only drops the key, without a backup.
-    fn clear_model(&self, target: &GatewayTarget, model: ModelKey) -> Result<Plan, AgentError> {
+    fn clear_model_tracked(
+        &self,
+        target: &GatewayTarget,
+        model: ModelKey,
+        checkpoint: Option<&mut SidecarCheckpoint>,
+    ) -> Result<Plan, AgentError> {
         let chosen = self
             .chosen()?
             .into_iter()
@@ -742,7 +883,7 @@ impl Engine {
                 AgentError::message(format!("`{}` has no config location", model.file))
             })?;
         if marker_present(&chosen.path) {
-            return self.apply_with(target, Choice::Clear);
+            return self.apply_with(target, Choice::Clear, checkpoint);
         }
         let Some(before) = read_optional(&chosen.path)? else {
             return Ok(Plan::new(Vec::new()));
@@ -753,6 +894,9 @@ impl Engine {
                 .map_err(|error| annotate(&chosen.path, error))?;
             if after == before {
                 return Ok(Plan::new(Vec::new()));
+            }
+            if let Some(checkpoint) = checkpoint {
+                checkpoint.record_agent_tree(&chosen.path)?;
             }
             write_atomic(&chosen.path, &after)?;
             let diff = unified_diff(&chosen.path, &before, &after);
@@ -770,6 +914,9 @@ impl Engine {
         }
         let after = remove_keys(chosen.kind, text, &[model.key])
             .map_err(|error| annotate(&chosen.path, error))?;
+        if let Some(checkpoint) = checkpoint {
+            checkpoint.record_agent_tree(&chosen.path)?;
+        }
         write_atomic(&chosen.path, &after)?;
         let diff = unified_diff(&chosen.path, &before, &after);
         Ok(Plan::new(vec![FileChange::new(
@@ -1995,6 +2142,17 @@ impl AgentAdapter for Compiled {
         self.engine(session)?.set_model(target, model)
     }
 
+    fn set_model_tracked(
+        &self,
+        session: &Session,
+        target: &GatewayTarget,
+        model: Option<&str>,
+        checkpoint: &mut SidecarCheckpoint,
+    ) -> Result<Plan, AgentError> {
+        self.engine(session)?
+            .set_model_tracked(target, model, Some(checkpoint))
+    }
+
     fn rename_provider_refs(
         &self,
         session: &Session,
@@ -2003,6 +2161,26 @@ impl AgentAdapter for Compiled {
     ) -> Result<bool, AgentError> {
         self.engine(session)?
             .rename_provider_refs(session, from, to)
+    }
+
+    fn record_sidecar_paths(
+        &self,
+        session: &Session,
+        checkpoint: &mut SidecarCheckpoint,
+    ) -> Result<(), AgentError> {
+        self.engine(session)?
+            .record_sidecar_paths(session, checkpoint)
+    }
+
+    fn rename_group_refs(
+        &self,
+        session: &Session,
+        old_ref: &str,
+        new_ref: &str,
+        checkpoint: &mut SidecarCheckpoint,
+    ) -> Result<bool, AgentError> {
+        self.engine(session)?
+            .rename_group_refs(session, old_ref, new_ref, checkpoint)
     }
 
     fn configured_model(&self, session: &Session) -> Result<Option<String>, AgentError> {
@@ -2039,6 +2217,16 @@ fn rewrite_provider_model_value(
         return None;
     }
     Some(format!("{prefix}{renamed}"))
+}
+
+fn rewrite_group_ref_value(value: &str, old_ref: &str, new_ref: &str) -> Option<String> {
+    if value == old_ref {
+        return Some(new_ref.to_owned());
+    }
+    if value.starts_with(&format!("{old_ref}/")) {
+        return Some(value.replacen(old_ref, new_ref, 1));
+    }
+    None
 }
 
 fn model_route(
