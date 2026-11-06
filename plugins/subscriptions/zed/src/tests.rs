@@ -1067,6 +1067,10 @@ fn a2c_46_eof_flushes_final_ndjson_line_without_newline() {
     let text = std::str::from_utf8(&bytes).expect("utf8");
     assert!(text.contains("response.output_text.delta"));
     assert!(text.contains("response.completed"));
+    assert!(
+        text.contains("ok"),
+        "final flushed NDJSON line must expose its delta text"
+    );
 }
 
 #[test]
@@ -1232,6 +1236,275 @@ fn a2c_52_reimport_refreshes_vendor_from_models_json() {
             .expect("load")
     });
     assert_eq!(models::vendor_of(&stored, "custom-vision-pro"), "google");
+}
+
+#[test]
+fn a2c_53_finish_reason_null_does_not_emit_done_without_cut_short() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let models_json = r#"{"models":[{"id":"grok-2","provider":"x_ai"}]}"#;
+    let id = seed_with_models_json(&host, "null-fr-cut", models_json);
+    enqueue_model_token(&host);
+    host.http().enqueue_response(
+        200,
+        &[
+            ("content-type", "application/json"),
+            ("x-zed-server-supports-status-messages", "true"),
+        ],
+        br#"{"event":{"id":"c1","object":"chat.completion.chunk","created":1,"model":"grok-2","choices":[{"index":0,"delta":{"content":"partial"}}]}}
+{"event":{"id":"c1","object":"chat.completion.chunk","created":1,"model":"grok-2","choices":[{"index":0,"delta":{},"finish_reason":null}]}}
+"#,
+    );
+    let request: Request = json::from_value(json!({
+        "model": "grok-2",
+        "stream": true,
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+    }))
+    .expect("request");
+    let bytes = execute_stream_sse(&host, &id, request, ProtocolId::OPENAI_CHAT);
+    let text = std::str::from_utf8(&bytes).expect("utf8");
+    assert!(text.contains("partial"));
+    assert!(
+        text.contains("cut short"),
+        "finish_reason null must not close the stream before cut-short handling"
+    );
+}
+
+#[test]
+fn a2c_54_empty_string_content_delta_before_429_stays_request_status() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let models_json = r#"{"models":[{"id":"grok-2","provider":"x_ai"}]}"#;
+    let id = seed_with_models_json(&host, "empty-delta-429", models_json);
+    enqueue_model_token(&host);
+    host.http().enqueue_response(
+        200,
+        &[
+            ("content-type", "application/json"),
+            ("x-zed-server-supports-status-messages", "true"),
+        ],
+        br#"{"event":{"id":"c1","object":"chat.completion.chunk","created":1,"model":"grok-2","choices":[{"index":0,"delta":{"content":""},"finish_reason":null}]}}
+{"status":{"failed":{"code":"upstream_http_429","message":"slow down"}}}
+{"status":"stream_ended"}
+"#,
+    );
+    let request: Request = json::from_value(json!({
+        "model": "grok-2",
+        "stream": true,
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+    }))
+    .expect("request");
+    let err = match block_on(upstream_for(&host, &id).execute(request, ProtocolId::OPENAI_CHAT)) {
+        Err(error) => error,
+        Ok(_) => panic!("empty content must not start a stream before 429"),
+    };
+    assert_eq!(err.kind(), PluginErrorKind::Status);
+    assert_eq!(err.status(), Some(429));
+
+    use hofund_plugin_api::BodyStream;
+    let inner = BodyStream::from_bytes(
+        br#"{"event":{"id":"c1","object":"chat.completion.chunk","created":1,"model":"grok-2","choices":[{"index":0,"delta":{"content":""},"finish_reason":null}]}}
+{"status":{"failed":{"code":"upstream_http_429","message":"slow down"}}}
+{"status":"stream_ended"}
+"#
+        .to_vec(),
+    );
+    let stream_err = block_on(stream::ndjson_to_sse_stream(inner, body::Wire::Chat, true))
+        .expect_err("429 before first real content");
+    assert!(
+        stream_err.starts_with("429:"),
+        "expected request-level 429, got {stream_err:?}"
+    );
+}
+
+#[test]
+fn a2c_55_eof_flush_unterminated_responses_completed_line_execute() {
+    const MARKER: &str = "rr5_eof_completed_marker";
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let models_json = r#"{"models":[{"id":"gpt-5","provider":"open_ai"}]}"#;
+    let id = seed_with_models_json(&host, "eof-completed-nl", models_json);
+    enqueue_model_token(&host);
+    let body = format!(
+        r#"{{"status":"started"}}
+{{"event":{{"type":"response.created","response":{{"id":"r","object":"response","status":"in_progress","output":[]}}}}}}
+{{"event":{{"type":"response.output_text.delta","delta":"{MARKER}","output_index":0,"content_index":0}}}}
+{{"event":{{"type":"response.completed","response":{{"id":"r","object":"response","status":"completed","output":[]}}}}}}"#
+    );
+    host.http().enqueue_response(
+        200,
+        &[
+            ("content-type", "application/json"),
+            ("x-zed-server-supports-status-messages", "true"),
+        ],
+        body.as_bytes(),
+    );
+    let request: Request = json::from_value(json!({
+        "model": "gpt-5",
+        "stream": true,
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+    }))
+    .expect("request");
+    let bytes = execute_stream_sse(&host, &id, request, ProtocolId::OPENAI_RESPONSES);
+    let text = std::str::from_utf8(&bytes).expect("utf8");
+    assert!(
+        text.contains(MARKER),
+        "unterminated final NDJSON line must flush through EOF"
+    );
+    assert!(text.contains("response.completed"));
+}
+
+#[test]
+fn a2c_56_unwrapped_incremental_eof_flush_emits_event() {
+    use hofund_plugin_api::BodyStream;
+
+    let inner = BodyStream::from_bytes(
+        br#"{"type":"message_start","message":{"id":"m1","type":"message","role":"assistant","content":[]}}"#
+            .to_vec(),
+    );
+    let out = block_on(stream::ndjson_to_sse_stream(
+        inner,
+        body::Wire::Anthropic,
+        false,
+    ))
+    .expect("stream");
+    let bytes = collect_stream_bounded(out, 8);
+    let text = std::str::from_utf8(&bytes).expect("utf8");
+    assert!(text.contains("message_start"));
+}
+
+#[test]
+fn a2c_57_invalid_utf8_unary_without_newline_fails_closed() {
+    let err = stream::ndjson_to_sse_body(b"\xff\xfe", body::Wire::Responses, true, false)
+        .expect_err("utf8");
+    assert!(err.contains("non-UTF8"));
+}
+
+#[test]
+fn a2c_58_vendor_cache_precedence_over_stored_catalog() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let stored_json =
+        r#"{"models":[{"id":"custom-vision-pro","provider":"google","supports_images":false}]}"#;
+    let id = seed_with_models_json(&host, "cache-wins", stored_json);
+    let stored = block_on(async {
+        creds::Stored::load(host.context(), &id)
+            .await
+            .expect("load")
+    });
+    let user_id = stored.credential.user_id.clone();
+    models::clear_vendor_cache_for_tests(&user_id);
+    models::parse_list_for(
+        &user_id,
+        br#"{"models":[{"id":"custom-vision-pro","provider":"anthropic","supports_images":false}]}"#,
+    )
+    .expect("parse list");
+    assert_eq!(
+        models::vendor_of(
+            &block_on(async {
+                creds::Stored::load(host.context(), &id)
+                    .await
+                    .expect("load")
+            }),
+            "custom-vision-pro"
+        ),
+        "anthropic",
+        "live catalog cache must win over stored models_json"
+    );
+}
+
+#[test]
+fn a2c_59_reimport_clears_stale_vendor_cache_from_list_models() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let stored_json =
+        r#"{"models":[{"id":"custom-vision-pro","provider":"anthropic","supports_images":false}]}"#;
+    let id = seed_with_models_json(&host, "reimport-cache", stored_json);
+    host.http().enqueue(br#"{"token":"tok"}"#);
+    host.http().enqueue_response(
+        200,
+        &[],
+        br#"{"models":[{"id":"custom-vision-pro","provider":"google","supports_images":false}]}"#,
+    );
+    block_on(subscription(&host).list_models(&id, host.context())).expect("list");
+    let stored = block_on(async {
+        creds::Stored::load(host.context(), &id)
+            .await
+            .expect("load")
+    });
+    assert_eq!(models::vendor_of(&stored, "custom-vision-pro"), "google");
+    let credential = Credential {
+        user_id: stored.credential.user_id.clone(),
+        access: stored.credential.access.clone(),
+        system_id: stored.credential.system_id.clone(),
+        org: stored.credential.org.clone(),
+        login: stored.credential.login.clone(),
+        name: stored.credential.name.clone(),
+        plan: stored.credential.plan.clone(),
+        models_json: stored_json.to_owned(),
+    };
+    block_on(import::store(&credential, host.context())).expect("reimport");
+    let stored = block_on(async {
+        creds::Stored::load(host.context(), &id)
+            .await
+            .expect("load")
+    });
+    assert_eq!(
+        models::vendor_of(&stored, "custom-vision-pro"),
+        "anthropic",
+        "reimport must invalidate vendor cache populated by list_models"
+    );
+}
+
+#[test]
+fn a2c_60_tail_failed_stream_terminates_within_chunk_bound() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let models_json = r#"{"models":[{"id":"grok-2","provider":"x_ai"}]}"#;
+    let id = seed_with_models_json(&host, "tail-bound", models_json);
+    enqueue_model_token(&host);
+    host.http().enqueue_response(
+        200,
+        &[
+            ("content-type", "application/json"),
+            ("x-zed-server-supports-status-messages", "true"),
+        ],
+        br#"{"event":{"id":"c1","object":"chat.completion.chunk","created":1,"model":"grok-2","choices":[{"index":0,"delta":{"content":"partial"}}]}}
+{"status":{"failed":{"code":"upstream_http_429","message":"slow down"}}}
+{"status":"stream_ended"}
+"#,
+    );
+    let request: Request = json::from_value(json!({
+        "model": "grok-2",
+        "stream": true,
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+    }))
+    .expect("request");
+    let completion = block_on(upstream_for(&host, &id).execute(request, ProtocolId::OPENAI_CHAT))
+        .expect("execute");
+    let Completion::Raw(body) = completion else {
+        panic!("expected raw stream");
+    };
+    let bytes = collect_stream_bounded(body, 24);
+    let text = std::str::from_utf8(&bytes).expect("utf8");
+    assert!(text.contains("429"));
+    assert!(!text.contains("[DONE]"));
+}
+
+fn collect_stream_bounded(mut stream: hofund_plugin_api::BodyStream, max_chunks: usize) -> Vec<u8> {
+    block_on(async {
+        let mut out = Vec::new();
+        let mut chunks = 0_usize;
+        while let Some(chunk) = stream.next_chunk().await {
+            chunks += 1;
+            assert!(
+                chunks <= max_chunks,
+                "stream exceeded {max_chunks} chunks without terminating (tail_failed gate open?)"
+            );
+            out.extend_from_slice(&chunk.expect("chunk"));
+        }
+        out
+    })
 }
 
 fn collect_stream(mut stream: hofund_plugin_api::BodyStream) -> Vec<u8> {
