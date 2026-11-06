@@ -1,20 +1,47 @@
 //! Cross-process lock beside a Codex home, matching the reference codex refresh lock.
 
+use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
-use crate::store::ensure_codex_home;
+use crate::store::{canonical_codex_home, ensure_codex_home};
 
 const WAIT: Duration = Duration::from_secs(10);
 const RETRY: Duration = Duration::from_millis(50);
 
-/// Holds the Codex home lock until dropped.
+static HOME_HELD: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+
+/// Why a composite home guard could not be taken.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HomeGuardError {
+    Busy,
+    Io,
+}
+
+/// Process-local mutex plus directory flock on the canonical Codex home inode.
+pub(crate) struct HomeGuard {
+    canonical: String,
+    #[expect(dead_code, reason = "held until Drop runs CodexLock unlock")]
+    flock: CodexLock,
+}
+
+impl Drop for HomeGuard {
+    fn drop(&mut self) {
+        HOME_HELD
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.canonical);
+    }
+}
+
+/// Holds the directory flock half of [`HomeGuard`] (legacy write-back paths).
 pub(crate) struct CodexLock {
-    file: File,
+    pub(crate) file: File,
     #[cfg(unix)]
     #[allow(dead_code)]
-    lock_path: std::path::PathBuf,
+    lock_path: PathBuf,
 }
 
 impl Drop for CodexLock {
@@ -23,8 +50,51 @@ impl Drop for CodexLock {
     }
 }
 
-/// Waits for and takes the Codex home lock, or returns [`None`] when another
-/// holder does not release in time (refresh write-back still proceeds).
+/// Waits for and takes the composite home guard, or returns an error after 10s.
+pub(crate) async fn try_acquire_home(home: &Path) -> Result<HomeGuard, HomeGuardError> {
+    if ensure_codex_home(home).is_err() {
+        return Err(HomeGuardError::Io);
+    }
+    let canonical = canonical_codex_home(home);
+    let lock_path = home.join(".codex.lock");
+    let _ = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path);
+    let deadline = std::time::Instant::now() + WAIT;
+    loop {
+        if !try_local_mark(&canonical) {
+            if std::time::Instant::now() >= deadline {
+                return Err(HomeGuardError::Busy);
+            }
+            hofund_plugin_sdk::sleep(RETRY).await;
+            continue;
+        };
+        match try_take(home, &lock_path) {
+            Ok(flock) => {
+                return Ok(HomeGuard { canonical, flock });
+            }
+            Err(TakeError::Busy) => {
+                release_local_mark(&canonical);
+                if std::time::Instant::now() >= deadline {
+                    return Err(HomeGuardError::Busy);
+                }
+                hofund_plugin_sdk::sleep(RETRY).await;
+            }
+            Err(TakeError::Io) => {
+                release_local_mark(&canonical);
+                if std::time::Instant::now() >= deadline {
+                    return Err(HomeGuardError::Io);
+                }
+                hofund_plugin_sdk::sleep(RETRY).await;
+            }
+        }
+    }
+}
+
+/// Waits for and takes the directory flock only, or returns [`None`] after 10s.
+/// Write-back paths that do not yet hold the process-local home mutex use this.
 pub(crate) async fn acquire(home: &Path) -> Option<CodexLock> {
     if ensure_codex_home(home).is_err() {
         return None;
@@ -45,6 +115,27 @@ pub(crate) async fn acquire(home: &Path) -> Option<CodexLock> {
             Err(TakeError::Busy) | Err(TakeError::Io) => return None,
         }
     }
+}
+
+impl HomeGuard {
+    #[expect(dead_code, reason = "Task 4 inode/path checks use this")]
+    pub(crate) fn canonical_home(&self) -> &str {
+        &self.canonical
+    }
+}
+
+fn try_local_mark(canonical: &str) -> bool {
+    HOME_HELD
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(canonical.to_owned())
+}
+
+fn release_local_mark(canonical: &str) {
+    HOME_HELD
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(canonical);
 }
 
 #[derive(Debug)]
@@ -84,7 +175,10 @@ fn try_take(home: &Path, lock_path: &Path) -> Result<CodexLock, TakeError> {
         options.create(true).read(true).write(true);
         let file = options.open(lock_path).map_err(|_| TakeError::Io)?;
         match file.try_lock() {
-            Ok(()) => Ok(CodexLock { file }),
+            Ok(()) => Ok(CodexLock {
+                file,
+                lock_path: lock_path.to_path_buf(),
+            }),
             Err(std::fs::TryLockError::WouldBlock) => Err(TakeError::Busy),
             Err(std::fs::TryLockError::Error(_)) => Err(TakeError::Io),
         }
@@ -114,6 +208,33 @@ mod tests {
         assert!(matches!(try_take(&home, &path), Err(TakeError::Busy)));
         drop(first);
         assert!(path.is_file(), "lock file stays after release");
+    }
+
+    #[test]
+    fn same_process_second_taker_is_busy() {
+        let (_dir, home) = lock_home("same-proc");
+        std::fs::create_dir_all(&home).expect("home");
+        let first = hofund_kit_subscription::block_on(try_acquire_home(&home)).expect("first");
+        assert!(matches!(
+            hofund_kit_subscription::block_on(try_acquire_home(&home)),
+            Err(HomeGuardError::Busy)
+        ));
+        drop(first);
+    }
+
+    #[test]
+    fn lock_file_recreate_stays_busy_while_inode_held() {
+        let (_dir, home) = lock_home("recreate-guard");
+        assert!(ensure_codex_home(&home).is_ok());
+        let path = home.join(".codex.lock");
+        let first = hofund_kit_subscription::block_on(try_acquire_home(&home)).expect("first");
+        let _ = std::fs::remove_file(&path);
+        std::fs::write(&path, b"replaced").expect("recreate lock file");
+        assert!(matches!(
+            hofund_kit_subscription::block_on(try_acquire_home(&home)),
+            Err(HomeGuardError::Busy)
+        ));
+        drop(first);
     }
 
     #[test]
