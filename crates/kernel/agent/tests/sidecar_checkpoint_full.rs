@@ -1,5 +1,7 @@
 //! Full agent-tree checkpoint rollback (main file and connect sidecars).
 
+#![cfg(unix)]
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;

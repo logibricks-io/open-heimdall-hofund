@@ -10,12 +10,14 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use hofund_agent::Session;
+#[cfg(unix)]
+use hofund_control_proto::AgentConnectRequest;
 use hofund_control_proto::{
-    API_VERSION, AgentConnectRequest, ConfigResponse, ControlErrorKind, GroupCreateRequest,
-    GroupListResponse, GroupMemberCandidatesResponse, GroupPatchRequest, GroupRestoreRequest,
-    GroupWriteResponse, PresetListResponse, ProfileRenameRequest, ProfileSaveRequest,
-    ProviderCreateRequest, ProviderDeleteRequest, ProviderDeleteResponse, ProviderListResponse,
-    ProviderPatchRequest, ProviderWriteResponse, RouteModelListResponse, ServeRole, StatusResponse,
+    API_VERSION, ConfigResponse, ControlErrorKind, GroupCreateRequest, GroupListResponse,
+    GroupMemberCandidatesResponse, GroupPatchRequest, GroupRestoreRequest, GroupWriteResponse,
+    PresetListResponse, ProfileRenameRequest, ProfileSaveRequest, ProviderCreateRequest,
+    ProviderDeleteRequest, ProviderDeleteResponse, ProviderListResponse, ProviderPatchRequest,
+    ProviderWriteResponse, RouteModelListResponse, ServeRole, StatusResponse,
     decode_error_envelope, decode_response,
 };
 use hofund_daemon::{ControlRuntime, Running, StartOptions, start_with_options};

@@ -1,5 +1,7 @@
 //! Sidecar checkpoint rollback when a multi-agent edit fails partway through.
 
+#![cfg(unix)]
+
 use std::os::unix::fs::PermissionsExt;
 
 use hofund_agent::{
