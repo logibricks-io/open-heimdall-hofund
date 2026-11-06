@@ -287,10 +287,12 @@ wire::Target::fn unwrap (mut self , unwrap : Unwrap) -> Self
 wire::Unwrap
 wire::Watch
 wire::async fn count_input (http : & HttpHandle , target : & Target , secret : Option < & SecretString > , mut request : Request , inbound : ProtocolId ,) -> Result < CountOutcome , PluginError >
+wire::async fn decode_upstream_response (response : HttpResponse , outbound : ProtocolId , inbound : ProtocolId , client_stream : bool ,) -> Result < Completion , PluginError >
 wire::async fn execute (http : & HttpHandle , target : & Target , secret : Option < & SecretString > , request : Request , inbound : ProtocolId ,) -> Result < Completion , PluginError >
 wire::async fn forward (http : & HttpHandle , target : & Target , secret : Option < & SecretString > , path : & str , body : RawBody ,) -> Result < RawAnswer , PluginError >
 wire::async fn send (http : & HttpHandle , target : & Target , secret : Option < & SecretString > , request : Request , inbound : ProtocolId ,) -> Result < Sent , PluginError >
 wire::fn converse_call (target : & Target , model : & str , stream : bool , body : Vec < u8 > ,) -> Result < (String , Call) , PluginError >
+wire::fn encode_outbound (outbound : ProtocolId , inbound : ProtocolId , request : Request ,) -> Result < Vec < u8 > , PluginError >
 wire::fn model_segment (model : & str) -> Result < String , PluginError >
 wire::fn path_segment (text : & str) -> String
 without_passthrough

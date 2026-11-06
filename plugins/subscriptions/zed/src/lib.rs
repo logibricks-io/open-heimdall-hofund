@@ -12,9 +12,16 @@ use hofund_plugin_sdk::Contribution;
 
 mod body;
 mod creds;
+mod errors;
+mod headers;
 mod import;
 mod models;
+mod org;
+mod quota;
 mod refresh;
+mod stream;
+mod thread;
+mod tokens;
 mod upstream;
 
 static SPEC: SubscriptionSpec = SubscriptionSpec::from_static(
@@ -161,10 +168,11 @@ impl Subscription for Zed {
 
     async fn quota(
         &self,
-        _account: &AccountId,
-        _host: &HostContext,
+        account: &AccountId,
+        host: &HostContext,
     ) -> Result<Vec<QuotaWindow>, PluginError> {
-        Ok(Vec::new())
+        let stored = creds::Stored::load(host, account).await?;
+        quota::windows(host, Arc::clone(&self.endpoints), &stored).await
     }
 
     async fn list_models(
