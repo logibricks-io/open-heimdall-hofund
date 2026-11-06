@@ -176,6 +176,39 @@ async fn refresh_due_uses_fetched_at_and_skips_off_and_static_providers() {
 }
 
 #[tokio::test]
+async fn disabled_provider_skips_scheduled_and_manual_model_refresh() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(rows(&["listed-model"]))
+        .expect(2)
+        .mount(&server)
+        .await;
+    let directory = scratch("disabled-refresh");
+    let config_path = directory.join("hofund.toml");
+    let host = host(&directory);
+    let config = hofund_config::load(&format!(
+        "[[providers]]\nid = \"off\"\nenabled = false\nprotocol = \"openai-chat\"\nbase_url = \"{}/v1\"\napi_key = \"test-key\"\n[providers.models]\nrefresh = \"10m\"\n\
+         [[providers]]\nid = \"chat\"\nprotocol = \"openai-chat\"\nbase_url = \"{}/v1\"\napi_key = \"test-key\"\n[providers.models]\nrefresh = \"10m\"\n",
+        server.uri(),
+        server.uri()
+    ))
+    .expect("config");
+
+    assert_eq!(
+        host.refresh_due(&config, &config_path, at(NOW)).await,
+        ["chat"]
+    );
+    assert_eq!(
+        host.refresh_due(&config, &config_path, at(NOW + 600_000))
+            .await,
+        ["chat"]
+    );
+    server.verify().await;
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+#[tokio::test]
 async fn catalog_bound_never_dials_models_url_or_schedules_a_fetch() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))

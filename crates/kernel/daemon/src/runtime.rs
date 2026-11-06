@@ -421,6 +421,7 @@ impl Runtime {
             }
             fingerprints.insert(member, provider.fingerprint.clone());
         }
+        crate::validate_route_targets(config)?;
         let (routes, policy) = route_plan(
             config,
             self.models.get().map(AsRef::as_ref),

@@ -68,6 +68,22 @@ pub enum ShutdownState {
     Unknown,
 }
 
+/// Process role that started this daemon, when set by the parent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+#[serde(rename_all = "snake_case")]
+pub enum ServeRole {
+    /// Started by the terminal UI.
+    Tui,
+    /// Started by `hofund serve` or an equivalent launcher.
+    Serve,
+    /// Started by the menu-bar app.
+    Desktop,
+    /// A newer peer supplied an unknown role.
+    #[serde(other)]
+    Unknown,
+}
+
 /// Daemon status response.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -94,6 +110,16 @@ pub struct StatusResponse {
     pub in_flight: u64,
     /// Shutdown state.
     pub shutdown: ShutdownState,
+    /// Parent-declared serve role, when set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serves: Option<ServeRole>,
+    /// Parent process id that spawned this daemon, or zero when unknown.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub owned_by_pid: u32,
+}
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
 }
 
 impl Default for StatusResponse {
@@ -110,6 +136,8 @@ impl Default for StatusResponse {
             not_applied: Vec::new(),
             in_flight: 0,
             shutdown: ShutdownState::Running,
+            serves: None,
+            owned_by_pid: 0,
         }
     }
 }

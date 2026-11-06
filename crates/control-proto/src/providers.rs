@@ -40,17 +40,57 @@ impl ProviderTestRequest {
 pub struct ProviderSummary {
     /// Configured provider id.
     pub id: String,
+    /// Display name.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
     /// Implementation kind label.
     pub kind: String,
     /// Protocol label.
     pub protocol: String,
     /// Whether the provider is ready for calls.
     pub ready: bool,
+    /// Whether the provider accepts requests.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Optional visibility family tag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub family: Option<String>,
+    /// Configured API root, when set.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub base_url: String,
+    /// Preset id, when configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<String>,
+    /// Subscription account label for account-type rows.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub account_label: String,
+    /// Account row with every active login lapsed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub signed_out: bool,
+    /// Whether the provider appears in agent model pickers.
+    #[serde(default = "default_true")]
+    pub listed: bool,
+    /// Last model-list error, sanitized.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub list_error: String,
+    /// Masked primary key fingerprint, when present.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub key_masked: String,
+    /// Whether a project-style base URL can be formed from configured options.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub project_address_ready: bool,
+    /// Service account impersonation target, when configured.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub impersonate_account: String,
     /// Number of currently listed models.
     pub model_count: u64,
     /// Models with an active model-specific rest on this provider.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub resting_models: Vec<String>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Provider list response.
@@ -392,4 +432,193 @@ impl Default for ProviderRenameResponse {
             agents: Vec::new(),
         }
     }
+}
+
+/// Adds a configured provider.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+#[serde(deny_unknown_fields)]
+pub struct ProviderCreateRequest {
+    /// Body wire version.
+    pub version: u32,
+    /// Expected SHA-256 host-state content revision.
+    pub expected_revision: String,
+    /// Preset id from the preset catalog.
+    pub preset: String,
+    /// Optional provider id; generated when absent.
+    #[serde(default)]
+    pub id: Option<String>,
+    /// Optional display name.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Optional API root.
+    #[serde(default)]
+    pub base_url: Option<String>,
+    /// Write-only credential material.
+    #[serde(default)]
+    pub api_key: Option<String>,
+    /// Optional visibility family.
+    #[serde(default)]
+    pub family: Option<String>,
+    /// Preset-specific options named by the catalog.
+    #[serde(default)]
+    pub options: std::collections::BTreeMap<String, String>,
+}
+
+impl ProviderCreateRequest {
+    /// Validates revision and ids.
+    pub fn validate(&self) -> Result<(), ControlError> {
+        validate_revision("expected_revision", &self.expected_revision)?;
+        if self.preset.trim().is_empty() {
+            return Err(provider_field_error(
+                "preset",
+                "empty",
+                "a preset id is required",
+            ));
+        }
+        if let Some(id) = &self.id {
+            validate_provider_id("id", id)?;
+        }
+        Ok(())
+    }
+}
+
+/// Patches one configured provider.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+#[serde(deny_unknown_fields)]
+pub struct ProviderPatchRequest {
+    /// Body wire version.
+    pub version: u32,
+    /// Expected SHA-256 host-state content revision.
+    pub expected_revision: String,
+    /// Enables or disables the provider for requests and agent pickers.
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    /// Sets or clears the visibility family tag.
+    #[serde(default)]
+    pub family: Option<Option<String>>,
+    /// Keeps the provider routable but hides it from agent model pickers.
+    #[serde(default)]
+    pub listed: Option<bool>,
+    /// Sets the API root.
+    #[serde(default)]
+    pub base_url: Option<String>,
+    /// Replaces fallback route ids (`provider/model` or `group/id`).
+    #[serde(default)]
+    pub fallback: Option<Vec<String>>,
+}
+
+impl ProviderPatchRequest {
+    /// Validates revision and fallback entries when present.
+    pub fn validate(&self) -> Result<(), ControlError> {
+        validate_revision("expected_revision", &self.expected_revision)?;
+        if let Some(fallback) = &self.fallback {
+            validate_id_count("fallback", fallback.len())?;
+            for entry in fallback {
+                if entry.trim().is_empty() {
+                    return Err(provider_field_error(
+                        "fallback",
+                        "empty",
+                        "a fallback entry must not be empty",
+                    ));
+                }
+                if entry.len() > MAX_ID_BYTES {
+                    return Err(provider_field_error(
+                        "fallback",
+                        "too_large",
+                        "a fallback entry exceeds the 256-byte limit",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Removes one configured provider.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+#[serde(deny_unknown_fields)]
+pub struct ProviderDeleteRequest {
+    /// Body wire version.
+    pub version: u32,
+    /// Expected SHA-256 host-state content revision.
+    pub expected_revision: String,
+}
+
+impl ProviderDeleteRequest {
+    /// Validates the expected revision.
+    pub fn validate(&self) -> Result<(), ControlError> {
+        validate_revision("expected_revision", &self.expected_revision)
+    }
+}
+
+/// Outcome of a provider create or patch.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct ProviderWriteResponse {
+    /// Body wire version.
+    pub version: u32,
+    /// Updated provider summary.
+    pub provider: ProviderSummary,
+    /// SHA-256 disk-content revision.
+    pub disk_revision: String,
+    /// SHA-256 published runtime revision.
+    pub runtime_revision: String,
+    /// Restart-only fields not yet active.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_restart: Vec<String>,
+}
+
+impl Default for ProviderWriteResponse {
+    fn default() -> Self {
+        Self {
+            version: API_VERSION,
+            provider: ProviderSummary::default(),
+            disk_revision: String::new(),
+            runtime_revision: String::new(),
+            pending_restart: Vec::new(),
+        }
+    }
+}
+
+/// Outcome of a provider delete.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct ProviderDeleteResponse {
+    /// Body wire version.
+    pub version: u32,
+    /// SHA-256 disk-content revision.
+    pub disk_revision: String,
+    /// Removed provider id.
+    pub removed: String,
+}
+
+impl Default for ProviderDeleteResponse {
+    fn default() -> Self {
+        Self {
+            version: API_VERSION,
+            disk_revision: String::new(),
+            removed: String::new(),
+        }
+    }
+}
+
+fn validate_provider_id(field: &str, id: &str) -> Result<(), ControlError> {
+    let trimmed = id.trim();
+    if trimmed.is_empty() || trimmed.len() > MAX_ID_BYTES {
+        return Err(provider_field_error(
+            field,
+            "invalid",
+            "a provider id is missing or too long",
+        ));
+    }
+    Ok(())
+}
+
+fn provider_field_error(field: &str, reason: &str, message: &str) -> ControlError {
+    let mut error = ControlError::new(ControlErrorKind::Unprocessable, message, "validate");
+    error.details.push(FieldIssue::new(field, reason, message));
+    error
 }

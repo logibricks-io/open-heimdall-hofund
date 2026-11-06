@@ -34,6 +34,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- R-7a control-plane gaps G-1 through G-4, G-9, and G-10: extended provider
+  summaries, preset catalog, provider create/patch/delete with agent reseat,
+  routing group CRUD and member-candidate list, profile rename, and status
+  `serves` / `owned_by_pid` from the environment (`hofund-control-proto`,
+  daemon, gateway, control-client; tests `control_r7a`).
 - `hofund-plugin-sdk::time::zone`: resolve IANA names, host local zone with a
   test hook, and map local wall-clock readings to `SystemTime` for subscription
   reset lines (R-5 fix round 3).

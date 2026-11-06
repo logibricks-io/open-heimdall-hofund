@@ -6,6 +6,8 @@
       "kind": "built-in",
       "protocol": "example-protocol",
       "ready": true,
+      "enabled": false,
+      "listed": false,
       "model_count": 2
     }
   ]

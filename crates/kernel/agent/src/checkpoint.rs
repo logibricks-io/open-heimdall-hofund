@@ -1,0 +1,139 @@
+//! Restores agent config files when a multi-step sidecar edit fails partway through.
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+use crate::AgentError;
+use crate::credential::CredentialUndo;
+use crate::store::{
+    credential_record, delete_file, read_optional, sidecar_marker_path, write_atomic,
+};
+
+/// Bytes that belonged to a path before a sidecar edit touched it.
+#[derive(Clone)]
+pub struct SidecarCheckpoint {
+    prior: BTreeMap<PathBuf, Option<Vec<u8>>>,
+    credentials: Vec<CredentialUndo>,
+}
+
+#[cfg(feature = "test-fixtures")]
+const FAIL_RESTORE_SENTINEL: &str = ".hofund-test-fail-restore";
+
+#[cfg(feature = "test-fixtures")]
+fn injected_restore_failure(prior: &BTreeMap<PathBuf, Option<Vec<u8>>>) -> bool {
+    prior.keys().any(|path| {
+        path.ancestors()
+            .any(|ancestor| ancestor.join(FAIL_RESTORE_SENTINEL).is_file())
+    })
+}
+
+fn is_connect_sidecar(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.contains(".hofund."))
+}
+
+impl SidecarCheckpoint {
+    /// Creates an empty checkpoint.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            prior: BTreeMap::new(),
+            credentials: Vec::new(),
+        }
+    }
+
+    /// Records the current contents of `path` the first time it is seen.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentError`] when the file cannot be read.
+    pub fn record(&mut self, path: &Path) -> Result<(), AgentError> {
+        if self.prior.contains_key(path) {
+            return Ok(());
+        }
+        self.prior.insert(path.to_path_buf(), read_optional(path)?);
+        Ok(())
+    }
+
+    /// Records an agent file and the connect sidecars beside it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentError`] when a path cannot be read.
+    pub fn record_agent_tree(&mut self, path: &Path) -> Result<(), AgentError> {
+        self.record(path)?;
+        for suffix in [".hofund.bak", ".hofund.absent", ".hofund.wrote"] {
+            self.record(&sidecar_marker_path(path, suffix))?;
+        }
+        self.record(&credential_record(path))?;
+        Ok(())
+    }
+
+    pub(crate) fn push_credential_undo(&mut self, undo: CredentialUndo) {
+        self.credentials.push(undo);
+    }
+
+    /// Puts every recorded path back to its captured state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentError`] when a path cannot be restored.
+    pub fn restore(self) -> Result<(), AgentError> {
+        #[cfg(feature = "test-fixtures")]
+        if injected_restore_failure(&self.prior) {
+            return Err(AgentError::message("injected sidecar restore failure"));
+        }
+        for undo in self.credentials.into_iter().rev() {
+            undo.restore()?;
+        }
+        let mut paths: Vec<(PathBuf, Option<Vec<u8>>)> = self.prior.into_iter().collect();
+        paths.sort_by(|(left, _), (right, _)| {
+            let left_sidecar = is_connect_sidecar(left);
+            let right_sidecar = is_connect_sidecar(right);
+            match (left_sidecar, right_sidecar) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => left.cmp(right),
+            }
+        });
+        for (path, prior) in paths {
+            match prior {
+                None => {
+                    if path.exists() {
+                        delete_file(&path)?;
+                    }
+                }
+                Some(bytes) => write_atomic(&path, &bytes)?,
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Default for SidecarCheckpoint {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SidecarCheckpoint;
+
+    #[test]
+    fn sidecar_checkpoint_restores_prior_bytes_and_absence() {
+        let dir = tempfile::tempdir().expect("dir");
+        let kept = dir.path().join("kept.json");
+        let created = dir.path().join("created.json");
+        std::fs::write(&kept, b"before").expect("kept");
+        let mut checkpoint = SidecarCheckpoint::new();
+        checkpoint.record(&kept).expect("record kept");
+        checkpoint.record(&created).expect("record absence");
+        std::fs::write(&kept, b"after").expect("mutate kept");
+        std::fs::write(&created, b"new").expect("create during edit");
+        checkpoint.restore().expect("restore");
+        assert_eq!(std::fs::read(&kept).expect("kept bytes"), b"before");
+        assert!(!created.exists());
+    }
+}

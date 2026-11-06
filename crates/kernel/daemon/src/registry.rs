@@ -35,6 +35,11 @@ pub trait DaemonRegistry: Send + Sync {
     /// Resolves a compiled preset id or alias and its default region.
     fn find_preset(&self, id: &str) -> Option<(&'static CompiledPreset, Option<&'static str>)>;
 
+    /// Every compiled preset row for control catalog listing.
+    fn compiled_presets(&self) -> &'static [CompiledPreset] {
+        &[]
+    }
+
     /// Returns static coding-agent descriptions.
     fn agents(&self) -> &'static [&'static AgentDescription];
 
@@ -120,6 +125,10 @@ impl DaemonRegistry for RegistryAdapter {
 
     fn find_preset(&self, id: &str) -> Option<(&'static CompiledPreset, Option<&'static str>)> {
         hofund_plugin_registry::find_preset(id)
+    }
+
+    fn compiled_presets(&self) -> &'static [CompiledPreset] {
+        hofund_plugin_registry::compiled_presets()
     }
 
     fn agents(&self) -> &'static [&'static AgentDescription] {

@@ -21,6 +21,36 @@ const OWN_PREFIX: &str = "hofund_";
 const STORE_NAME: &str = "caller-keys.json";
 static STORE_LOCK: Mutex<()> = Mutex::new(());
 
+#[cfg(feature = "test-fixtures")]
+/// Blocks [`KeyStore::move_model`] while this file exists beside the key store.
+pub const BLOCK_MOVE_MODEL_SENTINEL: &str = ".hofund-test-block-move-model";
+#[cfg(feature = "test-fixtures")]
+/// Makes the next [`KeyStore::move_model`] save return an error when this file exists.
+pub const FAIL_MOVE_MODEL_SENTINEL: &str = ".hofund-test-fail-move-model";
+
+#[cfg(feature = "test-fixtures")]
+const MOVE_MODEL_BLOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
+
+#[cfg(feature = "test-fixtures")]
+fn wait_while_move_model_blocked(root: &Path) -> Result<(), SecretError> {
+    let block = root.join(BLOCK_MOVE_MODEL_SENTINEL);
+    let deadline = std::time::Instant::now() + MOVE_MODEL_BLOCK_WAIT;
+    while block.is_file() {
+        if std::time::Instant::now() >= deadline {
+            return Err(SecretError::File(
+                "move_model block sentinel timed out".to_owned(),
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "test-fixtures")]
+fn move_model_save_failure_injected(root: &Path) -> bool {
+    root.join(FAIL_MOVE_MODEL_SENTINEL).is_file()
+}
+
 mod issue;
 pub use issue::*;
 
@@ -548,6 +578,10 @@ impl KeyStore {
 
     /// Rewrites exact model ids after a model move; wildcard patterns stay unchanged.
     pub fn move_model(&self, from: &str, to: &str) -> Result<(), SecretError> {
+        #[cfg(feature = "test-fixtures")]
+        if let Some(root) = self.path.parent() {
+            wait_while_move_model_blocked(root)?;
+        }
         let _guard = self.lock()?;
         let mut keys = self.load_migrated()?;
         let mut changed = false;
@@ -574,6 +608,14 @@ impl KeyStore {
             }
         }
         if changed {
+            #[cfg(feature = "test-fixtures")]
+            if let Some(root) = self.path.parent()
+                && move_model_save_failure_injected(root)
+            {
+                return Err(SecretError::File(
+                    "injected move_model save failure".to_owned(),
+                ));
+            }
             self.save(&keys)?;
         }
         Ok(())
@@ -1340,5 +1382,33 @@ mod tests {
         assert_eq!(fs::read_to_string(path).expect("store still"), unchanged);
         store.replace_provider("chat", "chat").expect("identity");
         assert_eq!(fs::read_to_string(path).expect("store still"), unchanged);
+    }
+
+    #[cfg(feature = "test-fixtures")]
+    #[test]
+    fn move_model_injected_save_failure_leaves_store_bytes_unchanged() {
+        let dir = tempfile::tempdir().expect("dir");
+        let token = dir.path().join("hofund.token");
+        std::fs::write(&token, "legacy-token\n").expect("token");
+        let store = KeyStore::beside_token(&token);
+        store.add("Scoped", None).expect("add");
+        let id = store.list().expect("list")[0].id.clone();
+        store
+            .set_models(&id, &["group/old".to_owned()])
+            .expect("models");
+        let before = fs::read_to_string(store.path()).expect("store before");
+        let _fail = dir.path().join(FAIL_MOVE_MODEL_SENTINEL);
+        std::fs::write(&_fail, b"").expect("sentinel");
+        let error = store
+            .move_model("group/old", "group/new")
+            .expect_err("injected save failure");
+        assert!(
+            error.to_string().contains("move_model save failure"),
+            "{error}"
+        );
+        assert_eq!(
+            fs::read_to_string(store.path()).expect("store after"),
+            before
+        );
     }
 }

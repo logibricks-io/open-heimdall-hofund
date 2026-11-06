@@ -13,11 +13,15 @@ use hofund_control_proto::{
     CatalogDisabledListResponse, CatalogModelRequest, CheckinListResponse, CheckinRunRequest,
     CheckinRunResponse, ConfigApplyRequest, ConfigResponse, ConfigValidateRequest,
     ConfigValidationResponse, ControlError, ErrorEnvelope, EventEnvelope, GatewayKeyRequest,
-    GatewayKeyResponse, GatewayKeyRestoreRequest, HealthResponse, MAX_RESPONSE_BODY_BYTES,
-    ModelListResponse, PicksResponse, PicksSetRequest, ProfileDetailResponse, ProfileListResponse,
-    ProfileSaveRequest, ProfileSwitchRequest, ProfileSwitchResponse, ProviderKeyRequest,
-    ProviderKeysResponse, ProviderListResponse, ProviderRenameRequest, ProviderRenameResponse,
-    ProviderSpendCapRequest, ProviderSpendCapsResponse, ProviderTestRequest, ProviderTestResponse,
+    GatewayKeyResponse, GatewayKeyRestoreRequest, GroupCreateRequest, GroupDeleteRequest,
+    GroupDeleteResponse, GroupListResponse, GroupMemberCandidatesResponse, GroupPatchRequest,
+    GroupRestoreRequest, GroupWriteResponse, HealthResponse, MAX_RESPONSE_BODY_BYTES,
+    ModelListResponse, PicksResponse, PicksSetRequest, PresetListResponse, ProfileDetailResponse,
+    ProfileListResponse, ProfileRenameRequest, ProfileSaveRequest, ProfileSwitchRequest,
+    ProfileSwitchResponse, ProviderCreateRequest, ProviderDeleteRequest, ProviderDeleteResponse,
+    ProviderKeyRequest, ProviderKeysResponse, ProviderListResponse, ProviderPatchRequest,
+    ProviderRenameRequest, ProviderRenameResponse, ProviderSpendCapRequest,
+    ProviderSpendCapsResponse, ProviderTestRequest, ProviderTestResponse, ProviderWriteResponse,
     QuotaAlertsResponse, QuotaAlertsSetRequest, QuotaAlertsSetResponse, QuotaCreditsModesResponse,
     QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryQuery, QuotaHistoryResponse,
     QuotaQuery, QuotaResponse, ReloadRequest, RouteListResponse, RouteModelListResponse,
@@ -427,6 +431,132 @@ impl Client {
             http::Method::POST,
             &format!("/v1/hofund/providers/{}/rename", encode_segment(id)),
             Some(json_body(&ProviderRenameRequest::new(new_id))?),
+        )
+        .await
+    }
+
+    /// Lists preset catalog rows.
+    pub async fn presets(&self) -> Result<PresetListResponse, ClientError> {
+        self.get("/v1/hofund/presets").await
+    }
+
+    /// Creates a configured provider.
+    pub async fn create_provider(
+        &self,
+        request: &ProviderCreateRequest,
+    ) -> Result<ProviderWriteResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            "/v1/hofund/providers",
+            Some(json_body(request)?),
+        )
+        .await
+    }
+
+    /// Patches one configured provider.
+    pub async fn patch_provider(
+        &self,
+        id: &str,
+        request: &ProviderPatchRequest,
+    ) -> Result<ProviderWriteResponse, ClientError> {
+        self.request(
+            http::Method::PATCH,
+            &format!("/v1/hofund/providers/{}", encode_segment(id)),
+            Some(json_body(request)?),
+        )
+        .await
+    }
+
+    /// Deletes one configured provider.
+    pub async fn delete_provider(
+        &self,
+        id: &str,
+        request: &ProviderDeleteRequest,
+    ) -> Result<ProviderDeleteResponse, ClientError> {
+        self.request(
+            http::Method::DELETE,
+            &format!("/v1/hofund/providers/{}", encode_segment(id)),
+            Some(json_body(request)?),
+        )
+        .await
+    }
+
+    /// Lists routing groups.
+    pub async fn groups(&self) -> Result<GroupListResponse, ClientError> {
+        self.get("/v1/hofund/groups").await
+    }
+
+    /// Creates a routing group.
+    pub async fn create_group(
+        &self,
+        request: &GroupCreateRequest,
+    ) -> Result<GroupWriteResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            "/v1/hofund/groups",
+            Some(json_body(request)?),
+        )
+        .await
+    }
+
+    /// Patches one routing group.
+    pub async fn patch_group(
+        &self,
+        id: &str,
+        request: &GroupPatchRequest,
+    ) -> Result<GroupWriteResponse, ClientError> {
+        self.request(
+            http::Method::PATCH,
+            &format!("/v1/hofund/groups/{}", encode_segment(id)),
+            Some(json_body(request)?),
+        )
+        .await
+    }
+
+    /// Deletes one routing group.
+    pub async fn delete_group(
+        &self,
+        id: &str,
+        request: &GroupDeleteRequest,
+    ) -> Result<GroupDeleteResponse, ClientError> {
+        self.request(
+            http::Method::DELETE,
+            &format!("/v1/hofund/groups/{}", encode_segment(id)),
+            Some(json_body(request)?),
+        )
+        .await
+    }
+
+    /// Restores a hidden found group.
+    pub async fn restore_group(
+        &self,
+        id: &str,
+        request: &GroupRestoreRequest,
+    ) -> Result<GroupWriteResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            &format!("/v1/hofund/groups/{}/restore", encode_segment(id)),
+            Some(json_body(request)?),
+        )
+        .await
+    }
+
+    /// Lists routing member picker candidates.
+    pub async fn group_member_candidates(
+        &self,
+    ) -> Result<GroupMemberCandidatesResponse, ClientError> {
+        self.get("/v1/hofund/groups/member-candidates").await
+    }
+
+    /// Renames a stored profile.
+    pub async fn rename_profile(
+        &self,
+        request: &ProfileRenameRequest,
+    ) -> Result<ProfileListResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            "/v1/hofund/profiles/rename",
+            Some(json_body(request)?),
         )
         .await
     }

@@ -184,12 +184,23 @@ All routes except `GET /health` require authentication. DTO names below are sket
 | Method and path | Request DTO | Response DTO | Initial caller |
 | --- | --- | --- | --- |
 | `GET /v1/hofund/health` | `EmptyRequest` | `HealthResponse` with API and daemon versions | Desktop reachability and optional additional CLI diagnostics; not the container healthcheck target |
-| `GET /v1/hofund/status` | `EmptyRequest` | `StatusResponse` with PID, start time, configured, effective, and running model listener labels, effective-listener source (`environment` or `config`), generation, disk and runtime revisions, pending-restart and not-applied fields, in-flight count, shutdown state | CLI `status`, desktop |
+| `GET /v1/hofund/status` | `EmptyRequest` | `StatusResponse` with PID, start time, configured, effective, and running model listener labels, effective-listener source (`environment` or `config`), generation, disk and runtime revisions, pending-restart and not-applied fields, in-flight count, shutdown state, optional `serves` role and `owned_by_pid` from the environment (R-7a G-10) | CLI `status`, desktop |
 | `GET /v1/hofund/config` | `EmptyRequest` | `ConfigResponse` | CLI and desktop editor |
 | `POST /v1/hofund/config/validate` | `ConfigValidateRequest` | `ConfigValidationResponse` with issues and fields that would await restart | CLI `config check`, desktop save preview |
 | `POST /v1/hofund/config/apply` | `ConfigApplyRequest` | `ConfigResponse` | Desktop save; CLI explicit apply |
 | `POST /v1/hofund/config/reload` | `ReloadRequest` with expected revision | `ConfigResponse` | CLI `config reload` and the file watcher use the same internal operation |
-| `GET /v1/hofund/providers` | `EmptyRequest` | `ProviderListResponse` | CLI and desktop Providers page |
+| `GET /v1/hofund/providers` | `EmptyRequest` | `ProviderListResponse` with extended secret-free summaries (`enabled`, `listed`, masked key, preset hints) | CLI and desktop Providers page |
+| `GET /v1/hofund/presets` | `EmptyRequest` | `PresetListResponse` | TUI preset picker (R-7a) |
+| `POST /v1/hofund/providers` | `ProviderCreateRequest` with expected disk revision | `ProviderWriteResponse` | TUI add provider (R-7a) |
+| `PATCH /v1/hofund/providers/{id}` | `ProviderPatchRequest` with expected disk revision | `ProviderWriteResponse`; agent reseat when disabled | TUI provider field edits (R-7a) |
+| `DELETE /v1/hofund/providers/{id}` | `ProviderDeleteRequest` with expected disk revision | `ProviderDeleteResponse`; agent reseat in the same write | TUI delete provider (R-7a) |
+| `GET /v1/hofund/groups` | `EmptyRequest` | `GroupListResponse` | TUI routing groups (R-7a) |
+| `POST /v1/hofund/groups` | `GroupCreateRequest` with expected disk revision | `GroupWriteResponse` | TUI new group (R-7a) |
+| `PATCH /v1/hofund/groups/{id}` | `GroupPatchRequest` with expected disk revision | `GroupWriteResponse` | TUI group edits (R-7a) |
+| `DELETE /v1/hofund/groups/{id}` | `GroupDeleteRequest` with expected disk revision | `GroupDeleteResponse` | TUI delete group (R-7a) |
+| `POST /v1/hofund/groups/{id}/restore` | `GroupRestoreRequest` with expected disk revision | `GroupWriteResponse` | TUI restore hidden found group (R-7a) |
+| `GET /v1/hofund/groups/member-candidates` | `EmptyRequest` | `GroupMemberCandidatesResponse` | TUI member picker (R-7a) |
+| `POST /v1/hofund/profiles/rename` | `ProfileRenameRequest` | `ProfileListResponse` | TUI profile rename (R-7a G-9) |
 | `POST /v1/hofund/providers/{id}/test` | `ProviderTestRequest` with optional model ids | `ProviderTestResponse` | CLI `provider test`, preserving the #28 operation through L |
 | `GET /v1/hofund/providers/{id}/models` | `EmptyRequest` | `ModelListResponse` | Desktop cached-list view |
 | `POST /v1/hofund/providers/{id}/models/refresh` | `EmptyRequest` | `ModelListResponse` with refreshed ids and pick changes | CLI `provider models <id>` with no ids, `provider refresh` or `fetch`, desktop refresh |

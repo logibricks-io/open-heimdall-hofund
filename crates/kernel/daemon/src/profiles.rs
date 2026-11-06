@@ -74,6 +74,27 @@ impl ProfileStore {
         self.store(profiles)
     }
 
+    pub(crate) fn rename(&self, from: &str, to: &str) -> Result<(), String> {
+        let from = from.trim();
+        let to = to.trim();
+        if from.is_empty() || to.is_empty() {
+            return Err("profile name is empty".to_owned());
+        }
+        if from == to {
+            return Ok(());
+        }
+        let mut profiles = self.load()?;
+        if !profiles.contains_key(from) {
+            return Err(format!("no profile named `{from}`"));
+        }
+        if profiles.contains_key(to) {
+            return Err(format!("there is a profile `{to}` already"));
+        }
+        let fields = profiles.remove(from).expect("checked");
+        profiles.insert(to.to_owned(), fields);
+        self.store(profiles)
+    }
+
     pub(crate) fn snapshot(&self, session: &Session) -> Result<ProfileFields, String> {
         let catalog =
             catalog(self.descriptions).map_err(|error| format!("agent catalog: {error}"))?;

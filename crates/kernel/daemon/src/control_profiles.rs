@@ -5,8 +5,8 @@ use std::sync::Arc;
 use hofund_agent::{ProfileFields, apply_fields, catalog, in_use};
 use hofund_control_proto::{
     ControlError, ControlErrorKind, ProfileDeleteRequest, ProfileDetailResponse,
-    ProfileListResponse, ProfileSaveRequest, ProfileSummary, ProfileSwitchRequest,
-    ProfileSwitchResponse,
+    ProfileListResponse, ProfileRenameRequest, ProfileSaveRequest, ProfileSummary,
+    ProfileSwitchRequest, ProfileSwitchResponse,
 };
 use hofund_plugin_api::AgentDescription;
 
@@ -109,6 +109,28 @@ impl ProfileOps {
         let name = request.name;
         self.blocking(move |store, _catalog, _session| store.delete(&name).map_err(internal))
             .await
+    }
+
+    pub(crate) async fn rename(
+        &self,
+        request: ProfileRenameRequest,
+    ) -> Result<ProfileListResponse, ControlError> {
+        request.validate()?;
+        let from = request.from.trim().to_owned();
+        let to = request.to.trim().to_owned();
+        self.blocking(move |store, _catalog, _session| {
+            store.rename(&from, &to).map_err(|message| {
+                if message.contains("already") {
+                    ControlError::new(ControlErrorKind::Unprocessable, message, "profiles")
+                } else if message.contains("no profile") {
+                    not_found(&from)
+                } else {
+                    internal(message)
+                }
+            })
+        })
+        .await?;
+        self.list().await
     }
 
     async fn blocking<T, F>(&self, work: F) -> Result<T, ControlError>
