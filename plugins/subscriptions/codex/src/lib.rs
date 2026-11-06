@@ -29,6 +29,7 @@ mod discover;
 mod import;
 mod limits;
 mod models;
+mod reconcile;
 mod resets;
 mod security_io;
 mod shape;

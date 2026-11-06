@@ -629,9 +629,13 @@ pub(crate) fn keychain_account(home: &Path) -> String {
     format!("cli|{}", hex16(&sum[..8]))
 }
 
-fn canonical_home(home: &Path) -> String {
+pub(crate) fn canonical_codex_home(home: &Path) -> String {
     let abs = home.canonicalize().unwrap_or_else(|_| home.to_path_buf());
     abs.to_string_lossy().into_owned()
+}
+
+fn canonical_home(home: &Path) -> String {
+    canonical_codex_home(home)
 }
 
 fn hex16(bytes: &[u8]) -> String {
