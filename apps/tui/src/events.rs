@@ -30,10 +30,10 @@ pub fn apply_control_event(app: &mut App, payload: &EventPayload) {
             app.set_flash(Flash::new(message, ok));
             let _ = app.reload_open_page();
         }
-        EventPayload::ModelsRefreshed(ModelsRefreshedEvent { provider, .. }) => {
+        EventPayload::ModelsRefreshed(ModelsRefreshedEvent { .. }) => {
             if app.page == PageId::Providers {
-                let _ = provider;
                 let _ = app.reload_open_page();
+                app.refresh_open_picker();
             }
         }
         EventPayload::AgentChanged(_) => {
