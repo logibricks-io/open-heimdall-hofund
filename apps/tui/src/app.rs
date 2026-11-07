@@ -324,6 +324,7 @@ impl App {
         self.pending = Some(PendingOp {
             label: label.into(),
             started: Instant::now(),
+            generation: self.generation,
         });
         true
     }
@@ -464,25 +465,40 @@ impl App {
             result,
             flash,
         } = apply;
-        if generation != self.generation {
-            return;
-        }
-        match result {
-            Ok(view) => {
-                let allow = !open || self.providers.accepts_open(&id, token);
-                if allow {
-                    self.providers
-                        .apply_models(&id, &view.models, &view.picks, open);
+        // models_refreshed and a config reload bump the read generation while
+        // this refresh still owns the keyboard. The stale list stays unused.
+        // The release is limited to the generation that took the slot, so an
+        // older completion cannot clear a mutation that started later.
+        if generation == self.generation {
+            match result {
+                Ok(view) => {
+                    let allow = !open || self.providers.accepts_open(&id, token);
+                    if allow {
+                        self.providers
+                            .apply_models(&id, &view.models, &view.picks, open);
+                    }
                 }
+                Err(message) => self.set_flash_ttl(message, false),
             }
-            Err(message) => self.set_flash_ttl(message, false),
+            if let Some((text, ok)) = flash {
+                self.set_flash_ttl(text, ok);
+            }
+        } else if owns_pending && self.pending_generation_is(generation) {
+            if let Some((text, ok)) = flash {
+                self.set_flash_ttl(text, ok);
+            } else if let Err(message) = result {
+                self.set_flash_ttl(message, false);
+            }
         }
-        if let Some((text, ok)) = flash {
-            self.set_flash_ttl(text, ok);
-        }
-        if owns_pending {
+        if owns_pending && self.pending_generation_is(generation) {
             self.finish_pending();
         }
+    }
+
+    fn pending_generation_is(&self, generation: Generation) -> bool {
+        self.pending
+            .as_ref()
+            .is_some_and(|pending| pending.generation == generation)
     }
 
     fn apply_keys(&mut self, id: String, token: u64, result: Result<Vec<ProviderKey>, String>) {
