@@ -1,7 +1,7 @@
 //! Regressions for the reviewed TUI gaps: a matching key read, read timeouts
 //! that do not own the pending slot, picks timeout rollback, a saved hidden
-//! list, profile reopen, and optional-network boundaries (the last is in
-//! `pages::status`).
+//! list, profile reopen, a catalog timeout that keeps another mutation, and
+//! optional-network boundaries (the last is in `pages::status`).
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use hofund_control_client::hofund_control_proto::{
@@ -396,5 +396,56 @@ fn saved_hidden_models_survive_the_next_failed_toggle() {
         hidden_ids(&app.take_intents()),
         vec!["a".to_owned(), "b".to_owned()],
         "the saved hide of a must still be in the list after the failed toggle of b"
+    );
+}
+
+#[test]
+fn catalog_timeout_clears_the_sync_flag_and_keeps_another_mutation() {
+    let mut app = App::for_test(PageId::Providers);
+    load_providers(&mut app, &["first"]);
+    app.handle_key(key('1'));
+    load_agents(&mut app);
+    app.handle_key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT));
+    assert!(
+        app.catalog_syncing,
+        "shift+s must mark the catalog read in flight"
+    );
+    let catalog = app
+        .take_intents()
+        .into_iter()
+        .find(|intent| matches!(intent, ControlIntent::CatalogSync { force: true }))
+        .expect("shift+s queues a forced catalog sync");
+    assert!(
+        app.catalog_syncing,
+        "taking the queued catalog intent must not clear the sync flag"
+    );
+    app.handle_key(key('2'));
+    assert!(
+        app.catalog_syncing,
+        "returning to providers must not clear the catalog flag"
+    );
+    app.handle_key(key('t'));
+    let intents = app.take_intents();
+    assert!(
+        intents
+            .iter()
+            .any(|intent| matches!(intent, ControlIntent::TestProvider { .. })),
+        "t must start a provider test while the catalog read is outstanding, got {intents:?}"
+    );
+    pending_is_the_other(&app, "catalog still in flight");
+    app.apply_session(catalog.timed_out());
+    assert!(
+        !app.catalog_syncing,
+        "a catalog timeout must drop the sync flag"
+    );
+    pending_is_the_other(&app, "catalog timeout");
+    assert_eq!(
+        app.flash.as_ref().map(|flash| flash.text.as_str()),
+        Some("timed out")
+    );
+    app.handle_key(key('t'));
+    assert!(
+        app.take_intents().is_empty(),
+        "the provider test must still hold the keyboard after the catalog timeout"
     );
 }
