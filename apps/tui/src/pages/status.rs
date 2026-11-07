@@ -113,6 +113,7 @@ fn optional_network(base_url: &str) -> bool {
             address.is_loopback()
                 || address.is_unspecified()
                 || is_ipv6_link_local(address)
+                || is_ipv6_unique_local(address)
                 || address.to_ipv4_mapped().is_some_and(|mapped| {
                     mapped.is_loopback()
                         || mapped.is_private()
@@ -132,6 +133,10 @@ fn is_cgnat(address: Ipv4Addr) -> bool {
 
 fn is_ipv6_link_local(address: Ipv6Addr) -> bool {
     (address.segments()[0] & 0xffc0) == 0xfe80
+}
+
+fn is_ipv6_unique_local(address: Ipv6Addr) -> bool {
+    (address.segments()[0] & 0xfe00) == 0xfc00
 }
 
 fn host_of(base_url: &str) -> Option<String> {
@@ -226,6 +231,7 @@ mod tests {
         assert!(key_not_required(true, "http://10.1.2.3/v1"));
         assert!(key_not_required(true, "http://100.64.0.1:1"));
         assert!(key_not_required(true, "http://host.local/v1"));
+        assert!(key_not_required(true, "http://[fd12::1]:11434/v1"));
         assert!(key_not_required(false, "https://example.test"));
         assert!(!key_not_required(true, "https://example.test/v1"));
         let presets = vec![preset("ollama", false, false, PresetKind::Local)];

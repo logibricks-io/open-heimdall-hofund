@@ -22,6 +22,8 @@ pub struct AgentPage {
     rows: Vec<AgentRow>,
     mode: AgentMode,
     profiles: Vec<ProfileSummary>,
+    profile_token: u64,
+    profile_request: Option<u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -56,6 +58,7 @@ enum AgentMode {
         cursor: usize,
         ids: Vec<String>,
         hidden: Vec<String>,
+        committed: Vec<String>,
     },
     Confirm {
         agent: String,
@@ -173,12 +176,97 @@ impl AgentPage {
                     ids.push(id.clone());
                 }
             }
+            let committed = hidden.clone();
             self.mode = AgentMode::Visibility {
                 agent: agent.to_owned(),
                 cursor: 0,
                 ids,
                 hidden,
+                committed,
             };
+        }
+    }
+
+    /// Records shown and hidden ids on the list without opening a picker.
+    pub fn remember_visibility(&mut self, agent: &str, shown: Vec<String>, hidden: Vec<String>) {
+        if let Some(row) = self.rows.iter_mut().find(|row| row.summary.id == agent) {
+            row.shown = Some(shown);
+            row.hidden = Some(hidden);
+        }
+    }
+
+    /// Agent ids in list order.
+    #[must_use]
+    pub fn agent_ids(&self) -> Vec<String> {
+        self.rows.iter().map(|row| row.summary.id.clone()).collect()
+    }
+
+    /// Starts another profile read and shows the picker.
+    pub fn reopen_profiles(&mut self) -> u64 {
+        self.profile_token = self.profile_token.saturating_add(1);
+        let token = self.profile_token;
+        self.profile_request = Some(token);
+        if !matches!(self.mode, AgentMode::Profiles { .. }) {
+            self.mode = AgentMode::Profiles {
+                cursor: 0,
+                filter: String::new(),
+            };
+        }
+        token
+    }
+
+    /// Drops an outstanding profile read. Escape and page changes call this.
+    pub fn cancel_profile_request(&mut self) {
+        self.profile_request = None;
+        if matches!(self.mode, AgentMode::Profiles { .. }) {
+            self.mode = AgentMode::List;
+        }
+    }
+
+    /// Applies a profile list when `token` is still the outstanding request.
+    pub fn accept_profiles(&mut self, profiles: Vec<ProfileSummary>, token: u64) {
+        if self.profile_request != Some(token) {
+            return;
+        }
+        self.profiles = profiles;
+        if !matches!(self.mode, AgentMode::Profiles { .. }) {
+            self.mode = AgentMode::Profiles {
+                cursor: 0,
+                filter: String::new(),
+            };
+        }
+    }
+
+    /// Replaces the profile rows without opening the picker.
+    pub fn replace_profiles(&mut self, profiles: Vec<ProfileSummary>) {
+        self.profiles = profiles;
+    }
+
+    /// Keeps a hidden-model edit that the server accepted.
+    pub fn commit_hidden(&mut self, agent: &str) {
+        if let AgentMode::Visibility {
+            agent: current,
+            hidden,
+            committed,
+            ..
+        } = &mut self.mode
+            && current == agent
+        {
+            *committed = hidden.clone();
+        }
+    }
+
+    /// Restores the hidden-model list from before the rejected edit.
+    pub fn revert_hidden(&mut self, agent: &str) {
+        if let AgentMode::Visibility {
+            agent: current,
+            hidden,
+            committed,
+            ..
+        } = &mut self.mode
+            && current == agent
+        {
+            *hidden = committed.clone();
         }
     }
 
@@ -200,15 +288,13 @@ impl AgentPage {
         }
     }
 
-    /// Stores profiles and opens the picker.
+    /// Stores profiles and opens the picker when a request is still outstanding.
     pub fn apply_profiles(&mut self, profiles: Vec<ProfileSummary>, open: bool) {
-        self.profiles = profiles;
         if open {
-            self.mode = AgentMode::Profiles {
-                cursor: 0,
-                filter: String::new(),
-            };
+            self.accept_profiles(profiles, self.profile_request.unwrap_or(0));
+            return;
         }
+        self.profiles = profiles;
     }
 
     /// Whether the loaded list is empty.
@@ -244,6 +330,7 @@ impl AgentPage {
                 cursor,
                 ids,
                 hidden,
+                ..
             } => visibility_lines(agent, ids, hidden, *cursor, area.height, theme),
             AgentMode::Confirm {
                 agent,
@@ -300,13 +387,7 @@ impl AgentPage {
                 };
                 PageEffect::none()
             }
-            KeyCode::Char('p') => {
-                self.mode = AgentMode::Profiles {
-                    cursor: 0,
-                    filter: String::new(),
-                };
-                PageEffect::read(ControlIntent::LoadProfiles)
-            }
+            KeyCode::Char('p') => self.request_profiles(),
             _ => PageEffect::none(),
         }
     }
@@ -329,15 +410,18 @@ impl AgentPage {
                 })
             }
             Field::Visibility => {
+                let hidden = row.hidden.clone().unwrap_or_default();
                 self.mode = AgentMode::Visibility {
                     agent: row.summary.id.clone(),
                     cursor: 0,
                     ids: Vec::new(),
-                    hidden: row.hidden.clone().unwrap_or_default(),
+                    committed: hidden.clone(),
+                    hidden,
                 };
                 PageEffect::read(ControlIntent::LoadAgentModels {
                     agent: row.summary.id,
                     generation: 0,
+                    open: true,
                 })
             }
             Field::Connection => {
@@ -415,6 +499,7 @@ impl AgentPage {
             cursor,
             ids,
             hidden,
+            ..
         } = &mut self.mode
         else {
             return PageEffect::none();
@@ -539,7 +624,7 @@ impl AgentPage {
         let visible = filtered(&labels, &filter);
         let effect = match key.code {
             KeyCode::Esc => {
-                self.mode = AgentMode::List;
+                self.cancel_profile_request();
                 return PageEffect::none();
             }
             KeyCode::Char('j') | KeyCode::Down | KeyCode::Char('n')
@@ -644,17 +729,19 @@ impl AgentPage {
         self.rows.get(self.cursor)
     }
 
+    fn request_profiles(&mut self) -> PageEffect {
+        self.profile_token = self.profile_token.saturating_add(1);
+        let token = self.profile_token;
+        self.profile_request = Some(token);
+        self.mode = AgentMode::Profiles {
+            cursor: 0,
+            filter: String::new(),
+        };
+        PageEffect::read(ControlIntent::LoadProfiles { token })
+    }
+
     fn profile_labels(&self) -> Vec<String> {
-        self.profiles
-            .iter()
-            .map(|profile| {
-                if profile.in_use {
-                    format!("{}  in use", profile.name)
-                } else {
-                    profile.name.clone()
-                }
-            })
-            .collect()
+        self.profiles.iter().map(profile_label).collect()
     }
 
     fn profile_at_cursor(&self) -> Option<String> {
@@ -715,6 +802,14 @@ impl Field {
             Self::Visibility => Self::Model,
             Self::Connection => Self::Visibility,
         }
+    }
+}
+
+fn profile_label(profile: &ProfileSummary) -> String {
+    if profile.in_use {
+        format!("{}  in use", profile.name)
+    } else {
+        profile.name.clone()
     }
 }
 
@@ -859,10 +954,7 @@ fn profile_lines(
     height: u16,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
-    let labels: Vec<String> = profiles
-        .iter()
-        .map(|profile| profile.name.clone())
-        .collect();
+    let labels: Vec<String> = profiles.iter().map(profile_label).collect();
     let visible = filtered(&labels, filter);
     let shown: Vec<String> = visible
         .iter()
@@ -953,6 +1045,21 @@ mod tests {
         entry.state = state;
         entry.model = Some(model.to_owned());
         entry
+    }
+
+    #[test]
+    fn profile_rows_show_in_use() {
+        let mut page = loaded();
+        page.on_key(character('p'));
+        let mut profile = hofund_control_client::hofund_control_proto::ProfileSummary::default();
+        profile.name = "work".to_owned();
+        profile.in_use = true;
+        page.apply_profiles(vec![profile], true);
+        let area = ratatui::layout::Rect::new(0, 0, 40, 8);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        page.draw(area, &mut buf, &crate::theme::Theme::monochrome());
+        let text: String = buf.content().iter().map(|cell| cell.symbol()).collect();
+        assert!(text.contains("in use"), "{text}");
     }
 
     fn loaded() -> AgentPage {

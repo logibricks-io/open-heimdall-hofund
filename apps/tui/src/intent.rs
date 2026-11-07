@@ -73,6 +73,8 @@ pub enum ControlIntent {
         id: String,
         /// Read generation.
         generation: u64,
+        /// Identifies this open so a slower response cannot replace it.
+        token: u64,
     },
     /// `PUT` picks as a full replacement.
     ReplacePicks {
@@ -131,6 +133,8 @@ pub enum ControlIntent {
     LoadKeys {
         /// Provider id.
         id: String,
+        /// Identifies this read so a slower response cannot replace it.
+        token: u64,
     },
     /// `POST .../keys` replace.
     ReplaceKey {
@@ -156,6 +160,8 @@ pub enum ControlIntent {
         agent: String,
         /// Read generation.
         generation: u64,
+        /// Whether this read may open the visibility picker.
+        open: bool,
     },
     /// `POST .../model`.
     SetAgentModel {
@@ -200,7 +206,10 @@ pub enum ControlIntent {
         revision: Option<String>,
     },
     /// `GET /profiles`.
-    LoadProfiles,
+    LoadProfiles {
+        /// Identifies this read so escape can ignore it.
+        token: u64,
+    },
     /// `POST /profiles/save` from the current agents.
     SaveProfile {
         /// Profile name.
@@ -250,10 +259,15 @@ impl fmt::Debug for ControlIntent {
                 .debug_struct("TestProvider")
                 .field("id", id)
                 .finish(),
-            Self::OpenModels { id, generation } => formatter
+            Self::OpenModels {
+                id,
+                generation,
+                token,
+            } => formatter
                 .debug_struct("OpenModels")
                 .field("id", id)
                 .field("generation", generation)
+                .field("token", token)
                 .finish(),
             Self::ReplacePicks { id, revision, ids } => formatter
                 .debug_struct("ReplacePicks")
@@ -303,7 +317,11 @@ impl fmt::Debug for ControlIntent {
                 .field("id", id)
                 .field("revision", revision)
                 .finish(),
-            Self::LoadKeys { id } => formatter.debug_struct("LoadKeys").field("id", id).finish(),
+            Self::LoadKeys { id, token } => formatter
+                .debug_struct("LoadKeys")
+                .field("id", id)
+                .field("token", token)
+                .finish(),
             Self::ReplaceKey { id, key_id, secret } => formatter
                 .debug_struct("ReplaceKey")
                 .field("id", id)
@@ -316,10 +334,15 @@ impl fmt::Debug for ControlIntent {
                 .field("agent", agent)
                 .field("generation", generation)
                 .finish(),
-            Self::LoadAgentModels { agent, generation } => formatter
+            Self::LoadAgentModels {
+                agent,
+                generation,
+                open,
+            } => formatter
                 .debug_struct("LoadAgentModels")
                 .field("agent", agent)
                 .field("generation", generation)
+                .field("open", open)
                 .finish(),
             Self::SetAgentModel { agent, model } => formatter
                 .debug_struct("SetAgentModel")
@@ -351,7 +374,10 @@ impl fmt::Debug for ControlIntent {
                 .field("agent", agent)
                 .field("revision", revision)
                 .finish(),
-            Self::LoadProfiles => formatter.write_str("LoadProfiles"),
+            Self::LoadProfiles { token } => formatter
+                .debug_struct("LoadProfiles")
+                .field("token", token)
+                .finish(),
             Self::SaveProfile { name } => formatter
                 .debug_struct("SaveProfile")
                 .field("name", name)
@@ -390,7 +416,7 @@ impl ControlIntent {
             | Self::LoadRouteModels { .. }
             | Self::LoadAgentModels { .. }
             | Self::LoadBalances
-            | Self::LoadProfiles
+            | Self::LoadProfiles { .. }
             | Self::LoadKeys { .. } => Duration::from_secs(15),
             _ => Duration::from_secs(30),
         }
@@ -407,7 +433,7 @@ impl ControlIntent {
                 | Self::LoadRouteModels { .. }
                 | Self::LoadAgentModels { .. }
                 | Self::LoadBalances
-                | Self::LoadProfiles
+                | Self::LoadProfiles { .. }
                 | Self::LoadKeys { .. }
         )
     }

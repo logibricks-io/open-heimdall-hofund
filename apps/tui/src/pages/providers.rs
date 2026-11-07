@@ -1,6 +1,7 @@
 //! Providers page: list, model picks, preset add, and field edits.
 
 use std::collections::BTreeMap;
+use std::fmt;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use hofund_control_client::hofund_control_proto::{
@@ -29,6 +30,9 @@ pub struct ProviderPage {
     mode: Mode,
     balances: Vec<String>,
     confirm: bool,
+    read_token: u64,
+    models_token: Option<u64>,
+    keys_token: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -61,7 +65,7 @@ struct Models {
     read_only: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 struct Ask {
     title: String,
     buffer: String,
@@ -86,7 +90,7 @@ struct CreateDraft {
     needs_address: bool,
     needs_project: bool,
     option_keys: Vec<String>,
-    api_key: Option<String>,
+    api_key: Option<Secret>,
     base_url: Option<String>,
     project: Option<String>,
     location: Option<String>,
@@ -134,11 +138,45 @@ impl ProviderPage {
         }
     }
 
-    /// Remembers a disk revision from a snapshot when this page has none.
+    /// Stores a 64-character disk revision from a list or a successful write.
     pub fn note_revision(&mut self, revision: &str) {
-        if self.disk_revision.len() != REVISION_LEN && revision.len() == REVISION_LEN {
+        if revision.len() == REVISION_LEN {
             self.disk_revision = revision.to_owned();
         }
+    }
+
+    /// Forgets a pending `dd` confirmation.
+    pub fn disarm_confirm(&mut self) {
+        self.confirm = false;
+    }
+
+    /// Whether an open-models response may replace the current screen.
+    #[must_use]
+    pub fn accepts_open(&self, id: &str, token: u64) -> bool {
+        if self.models_token != Some(token) {
+            return false;
+        }
+        if self.selected().is_none_or(|row| row.id != id) {
+            return false;
+        }
+        match &self.mode {
+            Mode::List => true,
+            Mode::Models(models) => models.provider == id,
+            Mode::Presets { .. } | Mode::Keys { .. } | Mode::Ask(_) => false,
+        }
+    }
+
+    /// Re-reads models for the open picker and retires any older open.
+    pub fn reopen_models(&mut self) -> Option<ControlIntent> {
+        let id = self.picker_provider()?.to_owned();
+        let token = self.next_token();
+        self.models_token = Some(token);
+        self.keys_token = None;
+        Some(ControlIntent::OpenModels {
+            id,
+            generation: 0,
+            token,
+        })
     }
 
     /// Applies a provider list. Keeps the cursor when the same id is still present.
@@ -243,7 +281,10 @@ impl ProviderPage {
     }
 
     /// Opens the key picker, or the password line when there is one key.
-    pub fn apply_keys(&mut self, id: &str, keys: Vec<ProviderKey>) -> PageEffect {
+    pub fn apply_keys(&mut self, id: &str, token: u64, keys: Vec<ProviderKey>) -> PageEffect {
+        if self.keys_token != Some(token) || !matches!(self.mode, Mode::List) {
+            return PageEffect::none();
+        }
         if self.selected().is_none_or(|row| row.id != id) {
             return PageEffect::none();
         }
@@ -508,7 +549,22 @@ impl ProviderPage {
     }
 
     fn open_models(&mut self) -> PageEffect {
-        self.with_selected(|id| PageEffect::read(ControlIntent::OpenModels { id, generation: 0 }))
+        let Some(id) = self.selected().map(|row| row.id.clone()) else {
+            return PageEffect::flash("no provider selected", false);
+        };
+        let token = self.next_token();
+        self.models_token = Some(token);
+        self.keys_token = None;
+        PageEffect::read(ControlIntent::OpenModels {
+            id,
+            generation: 0,
+            token,
+        })
+    }
+
+    fn next_token(&mut self) -> u64 {
+        self.read_token = self.read_token.saturating_add(1);
+        self.read_token
     }
 
     fn begin_replace(&mut self) -> PageEffect {
@@ -521,7 +577,10 @@ impl ProviderPage {
         if is_project_preset(&row, &self.presets) {
             return PageEffect::flash("set Vertex credentials with a, not a key", false);
         }
-        PageEffect::read(ControlIntent::LoadKeys { id: row.id })
+        let token = self.next_token();
+        self.keys_token = Some(token);
+        self.models_token = None;
+        PageEffect::read(ControlIntent::LoadKeys { id: row.id, token })
     }
 
     fn begin_address(&mut self) -> PageEffect {
@@ -627,7 +686,7 @@ impl ProviderPage {
                 revision,
                 name: None,
                 base_url: draft.base_url,
-                api_key: draft.api_key.map(Secret::new),
+                api_key: draft.api_key,
                 options,
             },
         )
@@ -646,7 +705,7 @@ impl ProviderPage {
                         if buffer.trim().is_empty() {
                             return PageEffect::flash("a key is required", false);
                         }
-                        draft.api_key = Some(buffer);
+                        draft.api_key = Some(Secret::new(buffer));
                     }
                     CreateStep::Project => {
                         if buffer.trim().is_empty() {
@@ -828,6 +887,12 @@ impl ProviderPage {
         let Mode::Models(models) = &self.mode else {
             return PageEffect::none();
         };
+        if models.read_only {
+            return PageEffect::flash(
+                "model list is read-only until default exposure is known",
+                false,
+            );
+        }
         if models.revision.len() != REVISION_LEN {
             return PageEffect::flash("picks revision is unknown; press r", false);
         }
@@ -1045,6 +1110,23 @@ fn picker_lines(
     lines
 }
 
+impl fmt::Debug for Ask {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let buffer = if self.secret {
+            format!("[redacted len={}]", self.buffer.chars().count())
+        } else {
+            self.buffer.clone()
+        };
+        formatter
+            .debug_struct("Ask")
+            .field("title", &self.title)
+            .field("buffer", &buffer)
+            .field("secret", &self.secret)
+            .field("then", &self.then)
+            .finish()
+    }
+}
+
 fn ask_lines(ask: &Ask, theme: &Theme) -> Vec<Line<'static>> {
     let value = if ask.secret {
         "•".repeat(ask.buffer.chars().count())
@@ -1149,6 +1231,45 @@ mod tests {
         let effect = page.on_key(key(KeyCode::Enter));
         assert!(effect.intents.is_empty());
         assert!(effect.flash.unwrap().0.contains("read-only"));
+    }
+
+    #[test]
+    fn read_only_picker_does_not_reset_picks() {
+        let mut page = loaded();
+        page.apply_models("first", &[model("a")], &picks(&[], &[]), true);
+        let effect = page.on_key(character('x'));
+        assert!(effect.intents.is_empty(), "{effect:?}");
+        assert!(effect.flash.unwrap().0.contains("read-only"));
+    }
+
+    #[test]
+    fn debug_output_omits_a_typed_key() {
+        let mut page = loaded();
+        page.on_key(character('a'));
+        page.on_key(key(KeyCode::Enter));
+        for character in ['s', 'e', 'c', 'r', 'e', 't'] {
+            page.on_key(KeyEvent::new(
+                KeyCode::Char(character),
+                KeyModifiers::empty(),
+            ));
+        }
+        let while_typing = format!("{page:?}");
+        assert!(
+            !while_typing.contains("buffer: \"secret\""),
+            "{while_typing}"
+        );
+        assert!(while_typing.contains("[redacted len=6]"), "{while_typing}");
+        page.on_key(key(KeyCode::Enter));
+        let while_address = format!("{page:?}");
+        assert!(
+            !while_address.contains("buffer: \"secret\"")
+                && !while_address.contains("api_key: Some(\"secret\")"),
+            "{while_address}"
+        );
+        assert!(
+            while_address.contains("[redacted len=6]"),
+            "{while_address}"
+        );
     }
 
     #[test]

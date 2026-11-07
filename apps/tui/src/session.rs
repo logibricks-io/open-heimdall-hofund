@@ -70,6 +70,10 @@ pub struct Finished {
     pub picks: Option<(String, PicksResponse)>,
     /// Provider whose optimistic picks edit must be undone.
     pub revert_picks: Option<String>,
+    /// Agent whose optimistic hidden-model edit must be undone.
+    pub revert_hidden: Option<String>,
+    /// Agent whose optimistic hidden-model edit landed.
+    pub commit_hidden: Option<String>,
     /// Profile list returned by rename or delete.
     pub profiles: Option<Vec<ProfileSummary>>,
 }
@@ -99,6 +103,10 @@ pub enum SessionOutcome {
         id: String,
         /// Whether the picker should open.
         open: bool,
+        /// Open request token. Ignored unless `open` is set.
+        token: u64,
+        /// Whether this call owns the pending slot.
+        owns_pending: bool,
         /// Models, or a redacted error.
         result: Result<ModelView, String>,
         /// Short toast, such as a refresh count.
@@ -108,13 +116,20 @@ pub enum SessionOutcome {
     Keys {
         /// Provider id.
         id: String,
+        /// Read token.
+        token: u64,
         /// Keys, or a redacted error.
         result: Result<Vec<ProviderKey>, String>,
     },
     /// Balance lines.
     Balances(Result<Vec<String>, String>),
     /// Profiles.
-    Profiles(Result<Vec<ProfileSummary>, String>),
+    Profiles {
+        /// Read token.
+        token: u64,
+        /// Profiles, or a redacted error.
+        result: Result<Vec<ProfileSummary>, String>,
+    },
     /// Route model ids.
     RouteModels {
         /// Read generation.
@@ -130,6 +145,8 @@ pub enum SessionOutcome {
         generation: u64,
         /// Agent id.
         agent: String,
+        /// Whether this read may open the visibility picker.
+        open: bool,
         /// Shown and hidden, or a redacted error.
         result: Result<AgentModelsResponse, String>,
     },
@@ -162,29 +179,51 @@ impl ControlIntent {
                 generation: *generation,
                 result: Err(message),
             },
-            Self::OpenModels { id, generation } | Self::RefreshModels { id, generation } => {
-                SessionOutcome::Models {
-                    generation: *generation,
-                    id: id.clone(),
-                    open: false,
-                    result: Err(message),
-                    flash: Some(("timed out".to_owned(), false)),
-                }
-            }
-            Self::LoadKeys { id } => SessionOutcome::Keys {
+            Self::OpenModels {
+                id,
+                generation,
+                token,
+            } => SessionOutcome::Models {
+                generation: *generation,
                 id: id.clone(),
+                open: false,
+                token: *token,
+                owns_pending: false,
+                result: Err(message),
+                flash: Some(("timed out".to_owned(), false)),
+            },
+            Self::RefreshModels { id, generation } => SessionOutcome::Models {
+                generation: *generation,
+                id: id.clone(),
+                open: false,
+                token: 0,
+                owns_pending: true,
+                result: Err(message),
+                flash: Some(("timed out".to_owned(), false)),
+            },
+            Self::LoadKeys { id, token } => SessionOutcome::Keys {
+                id: id.clone(),
+                token: *token,
                 result: Err(message),
             },
             Self::LoadBalances => SessionOutcome::Balances(Err(message)),
-            Self::LoadProfiles => SessionOutcome::Profiles(Err(message)),
+            Self::LoadProfiles { token } => SessionOutcome::Profiles {
+                token: *token,
+                result: Err(message),
+            },
             Self::LoadRouteModels { agent, generation } => SessionOutcome::RouteModels {
                 generation: *generation,
                 agent: agent.clone(),
                 result: Err(message),
             },
-            Self::LoadAgentModels { agent, generation } => SessionOutcome::AgentModels {
+            Self::LoadAgentModels {
+                agent,
+                generation,
+                open,
+            } => SessionOutcome::AgentModels {
                 generation: *generation,
                 agent: agent.clone(),
+                open: *open,
                 result: Err(message),
             },
             Self::PlanAgent { agent, action } => SessionOutcome::Plan {
@@ -202,9 +241,12 @@ impl ControlIntent {
                     disk_revision: None,
                     picks: None,
                     revert_picks: Some(id.clone()),
+                    revert_hidden: None,
+                    commit_hidden: None,
                     profiles: None,
                 })
             }
+            Self::SetHiddenModels { agent, .. } => hidden_failure(agent.clone(), message),
             _ => SessionOutcome::Finished(Finished {
                 flash: ("timed out".to_owned(), false),
                 reload_providers: false,
@@ -213,6 +255,8 @@ impl ControlIntent {
                 disk_revision: None,
                 picks: None,
                 revert_picks: None,
+                revert_hidden: None,
+                commit_hidden: None,
                 profiles: None,
             }),
         }
@@ -235,7 +279,11 @@ pub async fn execute(client: &Client, intent: ControlIntent) -> SessionOutcome {
             refresh_models(client, id, generation).await
         }
         ControlIntent::TestProvider { id } => test_provider(client, id).await,
-        ControlIntent::OpenModels { id, generation } => open_models(client, id, generation).await,
+        ControlIntent::OpenModels {
+            id,
+            generation,
+            token,
+        } => open_models(client, id, generation, token).await,
         ControlIntent::ReplacePicks { id, revision, ids } => {
             let request = PicksSetRequest::replace(revision, ids);
             write_picks(client, id, request).await
@@ -280,13 +328,15 @@ pub async fn execute(client: &Client, intent: ControlIntent) -> SessionOutcome {
             let request = ProviderDeleteRequest::new(revision);
             delete_provider(client, &id, request).await
         }
-        ControlIntent::LoadKeys { id } => match client.provider_keys(&id).await {
+        ControlIntent::LoadKeys { id, token } => match client.provider_keys(&id).await {
             Ok(response) => SessionOutcome::Keys {
                 id,
+                token,
                 result: Ok(response.keys),
             },
             Err(error) => SessionOutcome::Keys {
                 id,
+                token,
                 result: Err(explain(error, None)),
             },
         },
@@ -317,20 +367,24 @@ pub async fn execute(client: &Client, intent: ControlIntent) -> SessionOutcome {
                 result: Err(explain(error, None)),
             },
         },
-        ControlIntent::LoadAgentModels { agent, generation } => {
-            match client.agent_models(&agent).await {
-                Ok(response) => SessionOutcome::AgentModels {
-                    generation,
-                    agent,
-                    result: Ok(response),
-                },
-                Err(error) => SessionOutcome::AgentModels {
-                    generation,
-                    agent,
-                    result: Err(explain(error, None)),
-                },
-            }
-        }
+        ControlIntent::LoadAgentModels {
+            agent,
+            generation,
+            open,
+        } => match client.agent_models(&agent).await {
+            Ok(response) => SessionOutcome::AgentModels {
+                generation,
+                agent,
+                open,
+                result: Ok(response),
+            },
+            Err(error) => SessionOutcome::AgentModels {
+                generation,
+                agent,
+                open,
+                result: Err(explain(error, None)),
+            },
+        },
         ControlIntent::SetAgentModel { agent, model } => {
             match client
                 .set_agent_model(&agent, AgentModelRequest::new(model))
@@ -345,14 +399,8 @@ pub async fn execute(client: &Client, intent: ControlIntent) -> SessionOutcome {
                 .set_agent_hidden_models(&agent, AgentHiddenSetRequest::new(ids))
                 .await
             {
-                Ok(_) => finished(
-                    format!("saved visibility for {agent}"),
-                    true,
-                    false,
-                    true,
-                    None,
-                ),
-                Err(error) => finished(explain(error, None), false, false, false, None),
+                Ok(_) => hidden_saved(agent),
+                Err(error) => hidden_failure(agent, explain(error, None)),
             }
         }
         ControlIntent::SetPickedOnly { agent, only } => {
@@ -406,9 +454,15 @@ pub async fn execute(client: &Client, intent: ControlIntent) -> SessionOutcome {
             Ok(_) => finished(format!("disconnected {agent}"), true, false, true, None),
             Err(error) => finished(explain(error, None), false, false, false, None),
         },
-        ControlIntent::LoadProfiles => match client.profiles().await {
-            Ok(response) => SessionOutcome::Profiles(Ok(response.profiles)),
-            Err(error) => SessionOutcome::Profiles(Err(explain(error, None))),
+        ControlIntent::LoadProfiles { token } => match client.profiles().await {
+            Ok(response) => SessionOutcome::Profiles {
+                token,
+                result: Ok(response.profiles),
+            },
+            Err(error) => SessionOutcome::Profiles {
+                token,
+                result: Err(explain(error, None)),
+            },
         },
         ControlIntent::SaveProfile { name } => match client.save_profile(&name).await {
             Ok(_) => finished_reload(format!("saved profile {name}"), false, false, true, None),
@@ -488,12 +542,14 @@ async fn load_agents(client: &Client) -> Result<AgentSnapshot, String> {
     })
 }
 
-async fn open_models(client: &Client, id: String, generation: u64) -> SessionOutcome {
+async fn open_models(client: &Client, id: String, generation: u64, token: u64) -> SessionOutcome {
     match read_models(client, &id, false).await {
         Ok(view) => SessionOutcome::Models {
             generation,
             id,
             open: true,
+            token,
+            owns_pending: false,
             result: Ok(view),
             flash: None,
         },
@@ -501,6 +557,8 @@ async fn open_models(client: &Client, id: String, generation: u64) -> SessionOut
             generation,
             id,
             open: true,
+            token,
+            owns_pending: false,
             result: Err(error),
             flash: None,
         },
@@ -515,6 +573,8 @@ async fn refresh_models(client: &Client, id: String, generation: u64) -> Session
                 generation,
                 id,
                 open: false,
+                token: 0,
+                owns_pending: true,
                 result: Ok(view),
                 flash: Some((format!("refreshed {count} models"), true)),
             }
@@ -523,6 +583,8 @@ async fn refresh_models(client: &Client, id: String, generation: u64) -> Session
             generation,
             id,
             open: false,
+            token: 0,
+            owns_pending: true,
             result: Err(error.clone()),
             flash: Some((error, false)),
         },
@@ -581,6 +643,8 @@ async fn write_picks(client: &Client, id: String, request: PicksSetRequest) -> S
             disk_revision: None,
             picks: Some((id, picks)),
             revert_picks: None,
+            revert_hidden: None,
+            commit_hidden: None,
             profiles: None,
         }),
         Err(error) => SessionOutcome::Finished(Finished {
@@ -591,6 +655,8 @@ async fn write_picks(client: &Client, id: String, request: PicksSetRequest) -> S
             disk_revision: None,
             picks: None,
             revert_picks: Some(id),
+            revert_hidden: None,
+            commit_hidden: None,
             profiles: None,
         }),
     }
@@ -682,6 +748,38 @@ fn finished(
         disk_revision,
         picks: None,
         revert_picks: None,
+        revert_hidden: None,
+        commit_hidden: None,
+        profiles: None,
+    })
+}
+
+fn hidden_saved(agent: String) -> SessionOutcome {
+    SessionOutcome::Finished(Finished {
+        flash: (format!("saved visibility for {agent}"), true),
+        reload_providers: false,
+        reload_agents: true,
+        reload_profiles: false,
+        disk_revision: None,
+        picks: None,
+        revert_picks: None,
+        revert_hidden: None,
+        commit_hidden: Some(agent),
+        profiles: None,
+    })
+}
+
+fn hidden_failure(agent: String, message: String) -> SessionOutcome {
+    SessionOutcome::Finished(Finished {
+        flash: (message, false),
+        reload_providers: false,
+        reload_agents: false,
+        reload_profiles: false,
+        disk_revision: None,
+        picks: None,
+        revert_picks: None,
+        revert_hidden: Some(agent),
+        commit_hidden: None,
         profiles: None,
     })
 }
@@ -701,6 +799,8 @@ fn finished_reload(
         disk_revision,
         picks: None,
         revert_picks: None,
+        revert_hidden: None,
+        commit_hidden: None,
         profiles: None,
     })
 }
@@ -714,6 +814,8 @@ fn finished_profiles(text: impl Into<String>, profiles: Vec<ProfileSummary>) -> 
         disk_revision: None,
         picks: None,
         revert_picks: None,
+        revert_hidden: None,
+        commit_hidden: None,
         profiles: Some(profiles),
     })
 }
