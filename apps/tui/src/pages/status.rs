@@ -240,4 +240,20 @@ mod tests {
         row.base_url = "https://example.test".to_owned();
         assert_eq!(provider_status_line(&row, &presets), "no key needed");
     }
+
+    #[test]
+    fn optional_network_boundaries_keep_their_meaning() {
+        assert!(key_not_required(true, "http://0.0.0.0/v1"));
+        assert!(key_not_required(true, "http://169.254.1.1/v1"));
+        assert!(key_not_required(true, "http://[::1]/v1"));
+        assert!(key_not_required(true, "http://[fe80::1]/v1"));
+        assert!(key_not_required(true, "http://[::ffff:127.0.0.1]/v1"));
+        assert!(key_not_required(true, "http://[::ffff:10.1.2.3]/v1"));
+        assert!(key_not_required(true, "http://[::ffff:169.254.1.1]/v1"));
+        assert!(key_not_required(true, "http://[::ffff:0.0.0.0]/v1"));
+        assert!(
+            !key_not_required(true, "http://[2001:db8::1]/v1"),
+            "a public address still needs a key"
+        );
+    }
 }
