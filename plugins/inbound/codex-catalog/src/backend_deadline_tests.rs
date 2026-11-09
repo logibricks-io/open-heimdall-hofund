@@ -285,3 +285,9 @@ fn d84_5_an_already_expired_budget_does_not_poll_the_text_retry() {
     assert_eq!(kernel.dropped.load(Ordering::SeqCst), 0);
     assert!(kernel.markers()[0].is_stopped());
 }
+
+#[test]
+fn d84_6_state_debug_names_the_state_without_its_clock() {
+    let shown = format!("{:?}", State::default());
+    assert_eq!(shown, "State { .. }");
+}
