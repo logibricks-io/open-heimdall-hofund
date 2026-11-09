@@ -269,6 +269,15 @@ mod tests {
     }
 
     #[test]
+    fn r22_short_ipv6_prefix_over_mapped_range_stays_ipv6() {
+        let network = IpNetwork::parse("::ffff:0:0/64").expect("IPv6 /64");
+        assert_eq!(network.to_string(), "::/64");
+        assert!(network.contains(ip("::5")));
+        assert!(!network.contains(ip("2001:db8::5")));
+        assert!(IpNetwork::parse("10.0.0.0/8/9").is_err());
+    }
+
+    #[test]
     fn r22_invalid_config_entry_names_the_entry() {
         for entry in ["not-an-ip", "10.0.0.0/33", "2001:db8::/129", "[::1"] {
             let error = load(&format!("allow_ips = [\"{entry}\"]\n"))
