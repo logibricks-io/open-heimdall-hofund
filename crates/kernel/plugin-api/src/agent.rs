@@ -597,3 +597,19 @@ where
         self.build(&cfg, host)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_status_row_has_no_warnings_until_some_are_attached() {
+        let row = ConnectionStatus::new("zed", "Zed", true, false, true, Vec::new());
+        assert!(row.warnings().is_empty());
+        let warned = row.with_warnings(vec!["store locked".to_owned()]);
+        assert_eq!(warned.warnings(), ["store locked".to_owned()]);
+        assert_eq!(warned.id(), "zed");
+        assert!(!warned.connected());
+        assert!(warned.managed());
+    }
+}
