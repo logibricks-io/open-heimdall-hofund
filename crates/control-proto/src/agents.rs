@@ -405,8 +405,10 @@ mod tests {
     /// body, and a body without them still decodes.
     #[test]
     fn status_entry_warnings_are_optional_on_the_wire() {
-        let mut entry = AgentStatusEntry::default();
-        entry.id = "zed".to_owned();
+        let mut entry = AgentStatusEntry {
+            id: "zed".to_owned(),
+            ..AgentStatusEntry::default()
+        };
         let quiet = serde_json::to_value(&entry).expect("encode");
         assert!(quiet.get("warnings").is_none(), "{quiet}");
         let back: AgentStatusEntry = serde_json::from_value(quiet).expect("decode");
