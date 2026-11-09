@@ -605,7 +605,7 @@ mod tests {
     #[test]
     fn a_status_row_has_no_warnings_until_some_are_attached() {
         let row = ConnectionStatus::new("zed", "Zed", true, false, true, Vec::new());
-        assert!(row.warnings().is_empty());
+        assert!(row.warnings().is_empty(), "{:?}", row.warnings());
         let warned = row.with_warnings(vec!["store locked".to_owned()]);
         assert_eq!(warned.warnings(), ["store locked".to_owned()]);
         assert_eq!(warned.id(), "zed");
