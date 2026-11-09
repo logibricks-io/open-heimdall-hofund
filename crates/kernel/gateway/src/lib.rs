@@ -614,7 +614,7 @@ impl Gateway {
     }
 
     /// Mounts inbound surfaces. A request that matches one is authenticated,
-    /// then handled inside the inbound span with the [`SURFACE_TIMEOUT`] deadline.
+    /// then handled inside the inbound span with a 285 second deadline.
     ///
     /// Codec routes stay on their own paths. A surface is reached from the
     /// fallback, so a codec path wins when both could match.
