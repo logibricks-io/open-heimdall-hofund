@@ -515,7 +515,7 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_path_is_not_present_but_an_unreadable_one_fails() {
+    fn a_missing_path_is_not_present() {
         let dir = tempfile::tempdir().expect("temp dir");
         let mut report = String::new();
         assert!(!super::remove_owned(
@@ -524,6 +524,14 @@ mod tests {
             &mut report
         ));
         assert!(report.contains("not present"), "{report}");
+    }
+
+    // A path below a regular file reads as ENOTDIR on Unix. Windows reports
+    // the same lookup as not found, so this case is Unix-only.
+    #[cfg(unix)]
+    #[test]
+    fn a_path_that_cannot_be_inspected_fails_the_removal() {
+        let dir = tempfile::tempdir().expect("temp dir");
         let file = dir.path().join("plain");
         std::fs::write(&file, "x").expect("file");
         let mut report = String::new();
