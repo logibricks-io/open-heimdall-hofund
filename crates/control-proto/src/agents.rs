@@ -222,6 +222,10 @@ pub struct AgentStatusEntry {
     pub model: Option<String>,
     /// Managed paths inspected by the status operation.
     pub paths: Vec<String>,
+    /// Problems that kept the check from seeing everything, such as an OS
+    /// credential store that could not be read. Absent when there are none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 /// Agent status response.

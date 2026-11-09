@@ -205,6 +205,7 @@ pub struct ConnectionStatus {
     connected: bool,
     managed: bool,
     paths: Vec<PathBuf>,
+    warnings: Vec<String>,
 }
 
 impl ConnectionStatus {
@@ -225,7 +226,15 @@ impl ConnectionStatus {
             connected,
             managed,
             paths,
+            warnings: Vec::new(),
         }
+    }
+
+    /// The same row with `warnings` attached.
+    #[must_use]
+    pub fn with_warnings(mut self, warnings: Vec<String>) -> Self {
+        self.warnings = warnings;
+        self
     }
 
     /// Stable id, such as `example-agent`.
@@ -262,6 +271,13 @@ impl ConnectionStatus {
     #[must_use]
     pub fn paths(&self) -> &[PathBuf] {
         &self.paths
+    }
+
+    /// Problems that kept the check from seeing everything, such as an OS
+    /// credential store that could not be read. Secrets never appear here.
+    #[must_use]
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
     }
 }
 

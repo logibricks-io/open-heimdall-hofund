@@ -504,7 +504,11 @@ pub(crate) async fn agent_status(config: &Path, only: Option<&str>) -> Result<St
         return Err(format!("unknown agent `{id}`"));
     }
     let mut out = String::from("id\tstate\tmodel");
+    let mut warnings = String::new();
     for entry in rows {
+        for warning in &entry.warnings {
+            warnings.push_str(&format!("\nwarning: {}: {warning}", entry.id));
+        }
         let state = match entry.state {
             AgentState::Connected => "connected",
             AgentState::Disconnected => "disconnected",
@@ -517,6 +521,7 @@ pub(crate) async fn agent_status(config: &Path, only: Option<&str>) -> Result<St
             entry.model.as_deref().unwrap_or("-")
         ));
     }
+    out.push_str(&warnings);
     Ok(out)
 }
 

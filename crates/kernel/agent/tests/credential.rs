@@ -415,6 +415,36 @@ fn an_unreachable_store_does_not_block_disconnect() {
     assert!(!record(&home).exists());
 }
 
+/// #463: a store that cannot be read makes status report not connected with
+/// a warning naming the store, instead of failing the whole status call.
+#[test]
+fn an_unreadable_store_reports_not_connected_with_a_warning() {
+    let (_home, store, session) = setup();
+    let agent = Compiled::new(&KEYED);
+    agent.apply(&session, &local()).expect("apply");
+    let healthy = agent.status(&session, &local()).expect("status");
+    assert!(healthy.connected());
+    assert!(healthy.warnings().is_empty(), "{:?}", healthy.warnings());
+
+    store.broken.store(true, Ordering::SeqCst);
+    let status = agent
+        .status(&session, &local())
+        .expect("status still answers");
+    assert!(!status.connected());
+    assert!(status.managed(), "the files hofund wrote are still marked");
+    assert_eq!(status.warnings().len(), 1, "{:?}", status.warnings());
+    let warning = &status.warnings()[0];
+    assert!(warning.contains("OS credential store"), "{warning}");
+    assert!(warning.contains("store locked"), "{warning}");
+    assert!(warning.contains(URL), "{warning}");
+    assert!(!warning.contains(TOKEN), "{warning}");
+
+    store.broken.store(false, Ordering::SeqCst);
+    let back = agent.status(&session, &local()).expect("status");
+    assert!(back.connected());
+    assert!(back.warnings().is_empty());
+}
+
 #[test]
 fn route_none_stores_no_key() {
     let (_home, store, session) = setup();
