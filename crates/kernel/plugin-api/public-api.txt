@@ -1007,6 +1007,11 @@ Spawned #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
 Spawned::const fn id (self) -> u32
 Stop
 StopReason
+StoppedWaiting
+StoppedWaiting derives(Clone, Debug, Default)
+StoppedWaiting::fn is_stopped (& self) -> bool
+StoppedWaiting::fn new () -> Self
+StoppedWaiting::fn stop (& self)
 StreamEvent
 Subscription
 Subscription::async fn account_status (& self , account : & AccountId , host : & HostContext ,) -> Result < AccountStatus , PluginError >
