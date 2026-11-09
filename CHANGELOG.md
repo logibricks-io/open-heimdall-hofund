@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- R-22: LAN allow list and trusted proxy. Top-level `allow_ips` (IPs and CIDRs)
+  and `trust_proxy`, overridable by `HOFUND_ALLOW_IPS` / `HOFUND_TRUST_PROXY`;
+  non-listed peers get a JSON 403 before authentication, loopback is always
+  allowed, a malformed environment list fails closed to loopback only, and
+  apply/reload replace the settings without a restart. `hofund status` shows
+  the effective list.
 - R-16: Zed subscription upstream via POST `/completions` (provider envelope,
   NDJSON event unwrap, unary fold), model-token refresh with stale headers,
   live `/models` with snapshot fallback, plan quota from `/client/users/me`,
