@@ -39,6 +39,7 @@ pub async fn tray_status(running: &Running, config_path: &Path) -> TrayStatus {
                     &decision.asked,
                     &decision.served_provider,
                     &decision.served_member,
+                    decision.done,
                     decision.status,
                 )
             },
@@ -100,8 +101,12 @@ fn route_line(
     asked: &str,
     served_provider: &str,
     served_member: &str,
+    done: bool,
     status: Option<u16>,
 ) -> String {
+    if served_provider.is_empty() && !done {
+        return format!("Route: {asked} → routing");
+    }
     if served_provider.is_empty() {
         let status =
             status.map_or_else(|| "unknown status".to_owned(), |status| status.to_string());
@@ -225,16 +230,24 @@ mod tests {
     #[test]
     fn route_text_names_the_serving_provider_and_member() {
         assert_eq!(
-            route_line("demo", "provider", "member", Some(200)),
+            route_line("demo", "provider", "member", true, Some(200)),
             "Route: demo → provider/member"
         );
         assert_eq!(
-            route_line("demo", "", "", Some(404)),
+            route_line("demo", "", "", true, Some(404)),
             "Route: demo → not served (404)"
         );
         assert_eq!(
-            route_line("demo", "", "", None),
+            route_line("demo", "", "", true, None),
             "Route: demo → not served (unknown status)"
+        );
+        assert_eq!(
+            route_line("demo", "", "", false, None),
+            "Route: demo → routing"
+        );
+        assert_eq!(
+            route_line("demo", "provider", "member", false, None),
+            "Route: demo → provider/member"
         );
     }
 
