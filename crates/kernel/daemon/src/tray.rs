@@ -421,6 +421,18 @@ mod tests {
     }
 
     #[test]
+    fn quota_omits_a_reset_that_is_due_now() {
+        let mut due = span(9.0);
+        reset(&mut due, "2026-11-10T12:00:00Z");
+        let quota = Quota {
+            name: "Plan".to_owned(),
+            windows: vec![due],
+            ..Quota::default()
+        };
+        assert_eq!(quota_line(&quota, now()).as_deref(), Some("Plan: 9%"));
+    }
+
+    #[test]
     fn waits_use_the_largest_two_units() {
         for (seconds, text) in [
             (3 * 86_400 + 4 * 3_600, "3d 4h"),
