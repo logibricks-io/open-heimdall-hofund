@@ -518,6 +518,11 @@ async fn start_inner(
         }
     });
     let route_trace = hofund_router::RouteTraceBook::new();
+    let network_access = hofund_gateway::NetworkAccess::new(hofund_config::effective_network(
+        &config,
+        hofund_config::allow_ips_env().as_deref(),
+        hofund_config::trust_proxy_env().as_deref(),
+    ));
     let mut gateway = Gateway::with_token_file(
         snapshot.clone(),
         token.clone(),
@@ -525,6 +530,7 @@ async fn start_inner(
         inbound_codecs(),
         Arc::clone(&usage),
     )
+    .with_network_access(network_access.clone())
     .with_route_trace(Arc::clone(&route_trace))
     .with_key_store(Arc::clone(&key_store))
     .with_surfaces(registry.surfaces())
@@ -598,6 +604,7 @@ async fn start_inner(
             runtime_revision,
             config_ops::ConfigOpsRouting {
                 listener,
+                network_access,
                 visible_catalog: Arc::clone(&visible_catalog),
                 snapshot: snapshot.clone(),
             },

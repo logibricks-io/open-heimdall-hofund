@@ -156,6 +156,12 @@ pub(crate) async fn status(config: &Path) -> Result<String, String> {
         listener.running.as_deref().unwrap_or(&listener.effective),
         listen_source(listener.effective_source),
     );
+    push_network_status(
+        &mut out,
+        &listener.allow_ips,
+        listener.trust_proxy,
+        listener.allow_ips_invalid,
+    );
     out.push_str(&format!(
         "\ngeneration: {}\ndisk revision: {}\nruntime revision: {}\nin flight: {}",
         status.generation, status.disk_revision, status.runtime_revision, status.in_flight
@@ -178,6 +184,18 @@ fn listen_source(
     }
 }
 
+fn push_network_status(out: &mut String, allow_ips: &[String], trust_proxy: bool, invalid: bool) {
+    let list = if allow_ips.is_empty() {
+        "unrestricted".to_owned()
+    } else {
+        allow_ips.join(", ")
+    };
+    out.push_str(&format!("\nallow list: {list}\ntrust proxy: {trust_proxy}"));
+    if invalid {
+        out.push_str("\nallow list is invalid; only loopback peers are allowed");
+    }
+}
+
 /// The offline status report: config path and id, disk revision, and the
 /// effective model address with its source.
 async fn offline_status(config: &Path) -> Result<String, String> {
@@ -188,11 +206,19 @@ async fn offline_status(config: &Path) -> Result<String, String> {
         Ok(client) => client.config().await.map_err(failure)?.disk_revision,
         Err(_) => "unknown (hofundd is unavailable)".to_owned(),
     };
-    Ok(format!(
+    let network = local::network_settings(config)?;
+    let mut out = format!(
         "daemon not running\nconfig: {}\nconfig id: {id}\ndisk revision: {revision}\nmodel address: {listen} ({})",
         config.display(),
         local::source_label(source),
-    ))
+    );
+    push_network_status(
+        &mut out,
+        &network.allow_ips,
+        network.trust_proxy,
+        network.invalid_allow_ips,
+    );
+    Ok(out)
 }
 
 /// `hofund healthcheck`: GET the model listener's `/health` directly.
