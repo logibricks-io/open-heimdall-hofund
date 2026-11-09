@@ -1,11 +1,13 @@
 //! Status text for the menu-bar tray, read without contacting upstreams.
 
+use std::future::Future;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Local, TimeZone, Utc};
 use hofund_control_proto::{Quota, QuotaQuery, RouteQuery};
-use hofund_gateway::Running;
+use hofund_gateway::{QuotaSource, Running};
 use hofund_usage::{Ledger, Totals};
 
 /// What the menu-bar tray shows beside the gateway state.
@@ -20,7 +22,14 @@ pub struct TrayStatus {
 }
 
 /// Builds tray status from retained daemon state and the usage ledger.
-pub async fn tray_status(running: &Running, config_path: &Path) -> TrayStatus {
+///
+/// The handles are taken from `running` before the returned future starts,
+/// so the future is `Send + 'static` and never borrows the server, which is
+/// not `Sync`.
+pub fn tray_status(
+    running: &Running,
+    config_path: &Path,
+) -> impl Future<Output = TrayStatus> + Send + 'static {
     let route = running
         .route_trace_book()
         .and_then(|book| {
@@ -44,8 +53,18 @@ pub async fn tray_status(running: &Running, config_path: &Path) -> TrayStatus {
                 )
             },
         );
+    let source = running.quota_source();
+    let config_path = config_path.to_path_buf();
+    async move { tray_report(route, source, &config_path).await }
+}
+
+async fn tray_report(
+    route: String,
+    source: Option<Arc<dyn QuotaSource>>,
+    config_path: &Path,
+) -> TrayStatus {
     let today = today(config_path).await;
-    let quotas = match running.quota_source() {
+    let quotas = match source {
         Some(source) => {
             match tokio::time::timeout(Duration::from_secs(2), source.report(QuotaQuery::kept()))
                 .await

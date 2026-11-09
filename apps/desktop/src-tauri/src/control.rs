@@ -223,8 +223,14 @@ impl Control {
 
     /// Refreshes the retained route, daily usage, and quota text.
     pub(crate) async fn refresh_tray(&mut self) {
-        self.tray = match self.server.as_ref() {
-            Some(server) => hofund_daemon::tray_status(server, &self.config_path).await,
+        // Build the future before awaiting so no `&Running` (not `Sync`)
+        // is held across the await; Tauri commands need `Send` futures.
+        let pending = self
+            .server
+            .as_ref()
+            .map(|server| hofund_daemon::tray_status(server, &self.config_path));
+        self.tray = match pending {
+            Some(pending) => pending.await,
             None => hofund_daemon::TrayStatus::default(),
         };
     }
