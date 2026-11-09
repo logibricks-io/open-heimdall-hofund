@@ -873,6 +873,17 @@ impl Running {
         None
     }
 
+    /// Returns the quota report source stored with [`Self::with_resource`].
+    #[must_use]
+    pub fn quota_source(&self) -> Option<Arc<dyn QuotaSource>> {
+        for resource in &self.resources {
+            if let Some(source) = resource.downcast_ref::<Arc<dyn QuotaSource>>() {
+                return Some(Arc::clone(source));
+            }
+        }
+        None
+    }
+
     /// Links a control listener to this server's lifetime.
     #[doc(hidden)]
     #[must_use]
