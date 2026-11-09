@@ -347,6 +347,7 @@ Agent-by-agent status is in [docs/coverage/agents.md](coverage/agents.md).
 | 16.7 | Mirrors for GitHub and the model catalog | `internal/source`; `ref.md:2954` | auxiliary | Missing | none | A mirror base URL setting used by the updater and the catalog. |
 | 16.8 | Agent CLI install helpers (`claude-code install`) | `internal/cli/main.go:38` | auxiliary | Missing | none | Low priority. |
 | 16.9 | Daily anonymous usage ping (off with `DO_NOT_TRACK=1`) | `internal/stats`; `ref.md:3079` | — | Not planned | none | hofund sends no telemetry. That is a deliberate privacy improvement. |
+| 16.10 | Clean uninstall, installer uninstall, and optional data purge | `internal/cli/uninstall_cli.go`; `internal/uninstall`; `install.sh` | core | Done | `apps/cli/src/uninstall.rs`; parser/help in `apps/cli/src/main.rs`; `apps/cli/tests/uninstall.rs`; `docs/release.md` and README uninstall sections | Every adapter is disconnected through the existing non-force API, preserving later user edits and continuing past failures. Live-daemon and non-terminal guards run before writes. Purge is limited to resolved hofund paths, never follows symlinks, and never removes home/XDG roots or sibling files. cargo-dist installers are generated, so documentation delegates to `hofund uninstall [--purge]` instead of editing generated scripts. |
 
 ## Top 10 gaps
 
