@@ -33,6 +33,7 @@ pub use relisten::{Relisten, RelistenError};
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
+use std::future::Future;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -398,6 +399,9 @@ fn unix_ms_now() -> u64 {
 #[doc(hidden)]
 pub const CONTROL_DRAIN: std::time::Duration = std::time::Duration::from_secs(4);
 
+/// Hook run after the HTTP drain, before [`Running`] is dropped.
+type AfterDrainHook = Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send>;
+
 /// A bound server.
 pub struct Running {
     /// The address the listener accepted at start. After a relisten,
@@ -415,6 +419,7 @@ pub struct Running {
     sockets: Option<Arc<responses_ws::SocketRegistry>>,
     relisten: Option<Relisten>,
     fatal: Option<watch::Receiver<Option<String>>>,
+    after_drain: Option<AfterDrainHook>,
 }
 
 /// The listener could not be bound.
@@ -743,6 +748,7 @@ impl Running {
             sockets: None,
             relisten: None,
             fatal: None,
+            after_drain: None,
         }
     }
 
@@ -862,6 +868,21 @@ impl Running {
         self
     }
 
+    /// Runs `hook` after the HTTP drain, before this server is dropped.
+    ///
+    /// The daemon uses this to shut constructed upstream providers down so
+    /// parked children are not orphaned.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_after_drain<F, Fut>(mut self, hook: F) -> Self
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        self.after_drain = Some(Box::new(move || Box::pin(hook())));
+        self
+    }
+
     /// Returns the routing trace book stored with [`Self::with_resource`].
     #[must_use]
     pub fn route_trace_book(&self) -> Option<Arc<hofund_router::RouteTraceBook>> {
@@ -914,6 +935,8 @@ impl Running {
     /// Asks the server to stop, aborts attached tasks, and waits for the server.
     /// Control listeners close connections that outlast their drain deadline.
     /// Responses sockets close after their turns; dropping a bounded drain cuts them.
+    /// After the HTTP drain, any [`Self::with_after_drain`] hook runs so
+    /// constructed upstream providers can shut down before they are dropped.
     pub async fn shutdown(mut self) {
         self.request_shutdown();
         for task in self.attached.drain(..) {
@@ -943,6 +966,9 @@ impl Running {
                     let _ = task.await;
                 }
             }
+        }
+        if let Some(hook) = self.after_drain.take() {
+            hook().await;
         }
     }
 }
