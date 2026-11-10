@@ -1,8 +1,7 @@
 //! Decode Claude Code stream-json lines into IR events and bridge signals.
 //!
-//! This slice parses golden fixtures only. A later slice feeds a live
-//! `LongLivedChild` stdout into the same decoder and may return an
-//! upstream provider once a text-only turn succeeds.
+//! A text-only turn feeds Claude Code stdout into this decoder and returns
+//! an upstream provider. Tool parking and error mapping stay in later slices.
 
 use hofund_plugin_api::{Stop, StopReason, StreamEvent};
 use serde::Deserialize;

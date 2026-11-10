@@ -1,26 +1,13 @@
 //! Test-only runner that records a spawn plan and replays a fixture.
 //!
-//! Production spawn through `LongLivedChild` lands in a later slice. This
-//! runner wraps [`hofund_kit_subscription::FakeClaude`] so plugin tests can
-//! inject a program without talking to the network or a real binary.
+//! This runner wraps [`hofund_kit_subscription::FakeClaude`] so plugin tests
+//! can inject a program without talking to the network or a real binary.
 
-use std::collections::BTreeMap;
 use std::ffi::OsString;
 
 use hofund_kit_subscription::{FakeClaude, FakeClaudeError, RunRecord};
 
-/// Arguments, environment, and stdin a later slice will hand to Claude Code.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct SpawnPlan {
-    /// Program and arguments, already rewritten for WSL when the caller
-    /// expects that.
-    pub argv: Vec<OsString>,
-    /// Environment after the caller's scrub and append, including proxy
-    /// variables when the account has proxy metadata.
-    pub env: BTreeMap<OsString, OsString>,
-    /// stream-json lines written to stdin.
-    pub stdin: String,
-}
+use super::run::SpawnPlan;
 
 /// Replays a scripted Claude Code stdout fixture and records the plan.
 #[derive(Debug)]

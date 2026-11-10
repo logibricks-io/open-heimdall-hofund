@@ -168,7 +168,7 @@ struct Claude {
     flow: SignInFlow,
     /// Sign-ins in progress, by session id.
     pending: Mutex<HashMap<String, Pending>>,
-    /// Bridge run table. This slice constructs it but does not serve requests.
+    /// Bridge run table. This slice serves text-only turns through `upstream()`.
     bridge: Mutex<bridge::Bridge>,
 }
 
@@ -513,17 +513,19 @@ impl Subscription for Claude {
 
     fn upstream(
         &self,
-        _account: &AccountId,
-        _host: &HostContext,
+        account: &AccountId,
+        host: &HostContext,
     ) -> Result<Arc<dyn UpstreamProvider>, PluginError> {
-        // The table is constructed with the instance; serving it is a later slice.
+        // The table is constructed with the instance; this slice serves text-only turns.
         let _bridge = self
             .bridge
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        Err(PluginError::unsupported(
-            "requests through Claude Code are not served yet",
-        ))
+        Ok(std::sync::Arc::new(upstream::ClaudeUpstream::new(
+            account.clone(),
+            host.clone(),
+            self.command.clone(),
+        )))
     }
 
     async fn write_agent_sign_in(

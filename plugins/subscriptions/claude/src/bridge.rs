@@ -1,19 +1,17 @@
-//! Claude Code bridge state and stream-json codec.
-//!
-//! This slice lands the [`Bridge`] stub, the stream-json decoder, and a
-//! test-only fake runner. `Subscription::upstream` stays unsupported
-//! until a later slice completes a text-only turn on the fake runner.
+//! Claude Code bridge state, stream-json codec, and text-only start.
 
 pub mod decode;
+pub mod run;
+pub mod wsl;
 
 #[cfg(test)]
 pub(crate) mod runner;
 
 /// Owns Claude Code bridge runs for one plugin instance.
 ///
-/// Later slices hold child handles, idle runs, and callback registrations
-/// here. This slice only constructs an empty table and does not serve
-/// requests.
+/// This slice may return an [`hofund_plugin_api::UpstreamProvider`] for a
+/// text-only turn. Child handles, idle runs, and callback registrations
+/// land in later slices.
 #[derive(Debug, Default)]
 pub struct Bridge {}
 
