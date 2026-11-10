@@ -63,6 +63,7 @@ pub struct Http1Response {
     chunked: bool,
     chunk_delay: Duration,
     hold_open: bool,
+    park: Option<watch::Receiver<bool>>,
 }
 
 impl Http1Response {
@@ -76,6 +77,7 @@ impl Http1Response {
             chunked: false,
             chunk_delay: Duration::ZERO,
             hold_open: false,
+            park: None,
         }
     }
 
@@ -114,6 +116,17 @@ impl Http1Response {
     #[must_use]
     pub fn hold_open(mut self) -> Self {
         self.hold_open = true;
+        self
+    }
+
+    /// Parks the response until `gate` becomes `true`.
+    ///
+    /// The request is recorded first. A dropped sender without a release
+    /// never writes the response, so a test can assert a concurrency
+    /// barrier without a delayed sleep that later races the client.
+    #[must_use]
+    pub fn park(mut self, gate: watch::Receiver<bool>) -> Self {
+        self.park = Some(gate);
         self
     }
 }
@@ -219,6 +232,21 @@ async fn serve_http1(
         .expect("response scripts")
         .pop_front()
         .unwrap_or_else(|| Http1Response::new(200));
+    if let Some(mut gate) = response.park.clone() {
+        loop {
+            if *gate.borrow() {
+                break;
+            }
+            tokio::select! {
+                _ = stopped.changed() => return,
+                changed = gate.changed() => {
+                    if changed.is_err() {
+                        return;
+                    }
+                }
+            }
+        }
+    }
     let reason = http::StatusCode::from_u16(response.status)
         .ok()
         .and_then(|status| status.canonical_reason())
