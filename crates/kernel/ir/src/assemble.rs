@@ -105,7 +105,10 @@ pub fn assemble(events: &[StreamEvent]) -> Response {
                     .extensions
                     .absorb(&stop.extensions);
             }
-            StreamEvent::Ping(_) | StreamEvent::Unknown(_) | StreamEvent::MessageStop(_) => {}
+            StreamEvent::Ping(_)
+            | StreamEvent::StillWorking(_)
+            | StreamEvent::Unknown(_)
+            | StreamEvent::MessageStop(_) => {}
             StreamEvent::MessageDelta(delta) => {
                 if delta.stop.is_some() {
                     stop.clone_from(&delta.stop);

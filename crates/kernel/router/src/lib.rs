@@ -2412,6 +2412,7 @@ fn stream_commits(event: &StreamEvent) -> bool {
         | StreamEvent::ContentBlockStart(_)
         | StreamEvent::ContentBlockStop(_)
         | StreamEvent::Ping(_) => false,
+        StreamEvent::StillWorking(_) => true,
         StreamEvent::MessageDelta(delta) => delta.stop.is_some(),
         _ => true,
     }
@@ -2477,4 +2478,24 @@ fn result_status(error: Option<&PluginError>) -> String {
 
 fn u128_as_u64(value: u128) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod stream_commits_tests {
+    use super::stream_commits;
+    use hofund_ir::{MessageStart, Ping, StillWorking, StreamEvent};
+
+    #[test]
+    fn still_working_commits_and_start_or_ping_do_not() {
+        assert!(stream_commits(&StreamEvent::StillWorking(
+            StillWorking::default()
+        )));
+        assert!(!stream_commits(&StreamEvent::Ping(Ping::default())));
+        assert!(!stream_commits(&StreamEvent::MessageStart(MessageStart {
+            id: None,
+            model: None,
+            usage: None,
+            extensions: Default::default(),
+        })));
+    }
 }

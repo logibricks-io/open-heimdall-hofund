@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use hofund_plugin_api::{ContentPart, PluginError, Request, Role, StreamEvent};
+use hofund_plugin_api::{ContentPart, PluginError, Request, StreamEvent};
 
 use super::decode::{Decoder, Step};
 use super::wsl::wrap_argv;
@@ -70,13 +70,8 @@ pub(crate) struct SpawnPlan {
     pub stdin: String,
 }
 
-/// Rejects inbound images. Tool calls are served by the parking slice.
-pub(crate) fn reject_non_text(request: &Request) -> Result<(), PluginError> {
-    if has_image(request) {
-        return Err(PluginError::unsupported(
-            "images through Claude Code are not served yet",
-        ));
-    }
+/// Images are served as stream-json blocks. Kept as a hook for later fail-closed checks.
+pub(crate) fn reject_non_text(_request: &Request) -> Result<(), PluginError> {
     Ok(())
 }
 
@@ -107,6 +102,9 @@ pub(crate) fn start_plan(spec: &StartSpec, request: &Request) -> Result<SpawnPla
         os("--dangerously-skip-permissions"),
         os("--no-session-persistence"),
     ]);
+    for flag in super::flags::cli_flag_args(request) {
+        args.push(os(&flag));
+    }
     if let Some(session) = &spec.resume_session
         && spec.wsl_distro.is_none()
     {
@@ -216,34 +214,22 @@ pub(crate) fn events_allowing_tools(
     Ok((events, calls))
 }
 
-/// Stream-json stdin for the user and system text in `request`.
+/// Stream-json stdin for the user and system text (and image blocks) in `request`.
 pub(crate) fn stdin_from_request(request: &Request) -> String {
     let mut out = String::new();
     for message in &request.messages {
-        let text: String = message
-            .content
-            .iter()
-            .filter_map(|part| match part {
-                ContentPart::Text(part) => Some(part.text.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join(
-                "
-",
-            );
-        if text.is_empty() {
+        if !super::images::is_prompt_message(message) {
             continue;
         }
-        let role = match message.role {
-            Role::Assistant | Role::Tool => continue,
-            Role::System | Role::Developer | Role::User => "user",
-        };
+        let content = super::images::content_blocks(message);
+        if content.is_empty() {
+            continue;
+        }
         let line = serde_json::json!({
             "type": "user",
             "message": {
-                "role": role,
-                "content": [{"type": "text", "text": text}]
+                "role": "user",
+                "content": content
             }
         });
         out.push_str(&line.to_string());
@@ -294,6 +280,7 @@ fn os(value: impl AsRef<str>) -> OsString {
 }
 
 /// True when `request` carries an image part.
+#[allow(dead_code)]
 pub(crate) fn has_image(request: &Request) -> bool {
     request.messages.iter().any(|message| {
         message
@@ -384,7 +371,7 @@ mod tests {
     }
 
     #[test]
-    fn tools_and_images_are_rejected() {
+    fn tools_and_images_are_accepted() {
         let tools = request_from(json!({
             "model": "claude-sonnet-4-5",
             "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
@@ -404,8 +391,13 @@ mod tests {
             }]
         }));
         assert!(has_image(&image));
-        let error = reject_non_text(&image).expect_err("images");
-        assert_eq!(error.kind(), PluginErrorKind::Unsupported);
+        assert!(reject_non_text(&image).is_ok(), "images are served in R-6f");
+        let stdin = stdin_from_request(&image);
+        assert!(stdin.contains("https://example.test/a.png"), "{stdin}");
+        assert!(
+            stdin.contains("\"type\":\"url\"") || stdin.contains("\"type\": \"url\""),
+            "{stdin}"
+        );
 
         assert!(reject_non_text(&text_request("hello")).is_ok());
     }

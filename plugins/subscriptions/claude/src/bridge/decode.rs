@@ -38,6 +38,23 @@ pub struct RateLimitInfo {
     pub status: Option<String>,
     /// `rateLimitType` when present.
     pub rate_limit_type: Option<String>,
+    /// `utilization` when present, in `[0, 1]`.
+    pub utilization: Option<f64>,
+    /// `resetsAt` unix timestamp when present.
+    pub resets_at: Option<u64>,
+}
+
+impl RateLimitInfo {
+    /// How long until `resetsAt`, if that instant is still in the future.
+    #[must_use]
+    pub fn resets_in(&self) -> Option<std::time::Duration> {
+        let at = self.resets_at?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_secs();
+        at.checked_sub(now).map(std::time::Duration::from_secs)
+    }
 }
 
 /// Terminal error carried by a failed `result` envelope.
@@ -228,6 +245,8 @@ fn rate_limit_info(envelope: &Envelope) -> RateLimitInfo {
                 .and_then(|s| s.as_str())
                 .map(ToOwned::to_owned)
         }),
+        utilization: info.and_then(|v| v.get("utilization").and_then(|s| s.as_f64())),
+        resets_at: info.and_then(|v| v.get("resetsAt").and_then(|s| s.as_u64())),
     }
 }
 

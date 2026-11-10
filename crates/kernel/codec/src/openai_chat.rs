@@ -511,6 +511,7 @@ fn survives(event: &StreamEvent) -> bool {
         StreamEvent::MessageStart(_)
         | StreamEvent::MessageDelta(_)
         | StreamEvent::Ping(_)
+        | StreamEvent::StillWorking(_)
         | StreamEvent::Unknown(_) => true,
     }
 }
@@ -534,6 +535,7 @@ fn event_extensions_mut(event: &mut StreamEvent) -> Option<&mut Extensions> {
         StreamEvent::MessageDelta(event) => &mut event.extensions,
         StreamEvent::MessageStop(event) => &mut event.extensions,
         StreamEvent::Ping(event) => &mut event.extensions,
+        StreamEvent::StillWorking(event) => &mut event.extensions,
         StreamEvent::Unknown(_) => return None,
     })
 }
@@ -1458,6 +1460,8 @@ struct Encoder {
     include_usage: bool,
     usage: Option<Usage>,
     usage_sent: bool,
+    /// A first assistant chunk has already gone on the wire.
+    start_written: bool,
 }
 
 impl OpenAiChat {
@@ -1500,13 +1504,17 @@ fn encode_stream_event(
 ) -> Result<(), CodecError> {
     match event {
         StreamEvent::MessageStart(start) => {
+            Usage::merge_patch(&mut encoder.usage, start.usage.as_ref());
+            if encoder.start_written {
+                return Ok(());
+            }
             if start.id.is_some() {
                 encoder.id.clone_from(&start.id);
             }
             if start.model.is_some() {
                 encoder.model.clone_from(&start.model);
             }
-            Usage::merge_patch(&mut encoder.usage, start.usage.as_ref());
+            encoder.start_written = true;
             write_chunk(
                 out,
                 encoder.id.as_deref(),
@@ -1626,6 +1634,10 @@ fn encode_stream_event(
             object.insert("type".to_owned(), Value::String("ping".to_owned()));
             ping.extensions.merge_into(&mut object);
             write_data(out, &Value::Object(object))
+        }
+        StreamEvent::StillWorking(_) => {
+            crate::sse::write_comment(out, "keepalive");
+            Ok(())
         }
         StreamEvent::Unknown(event) => write_data(out, &encode_unknown(event)),
     }

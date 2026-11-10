@@ -3,8 +3,8 @@
 //! The idle/resume map key is a SHA-256 `turnKey` over the account, model,
 //! effort/think-off bits, tool choice, system prompt, tools, and messages
 //! (tool-call ids excluded). A one-off turn (stop, no tools, no prior
-//! assistant reply) is aborted, not idled. `setEffort`, images, and
-//! StillWorking stay in R-6f.
+//! assistant reply) is aborted, not idled. Effort bits follow `hofund_bridge_effort`; `setEffort` and
+//! `lostMedia` are applied in this slice.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -61,6 +61,9 @@ struct RunMeta {
     session_id: Option<String>,
     session_paths: Vec<PathBuf>,
     told: String,
+    told_messages: Vec<Message>,
+    /// Effort last applied to this run (`--effort` or `setEffort`).
+    effort: String,
     resuming: bool,
     closed: bool,
     segment: bool,
@@ -142,7 +145,25 @@ impl Bridge {
         let told = history_key(messages);
         if let Some(meta) = self.sessions.lock_meta().get_mut(&run_id) {
             meta.told = told;
+            meta.told_messages = messages.to_vec();
         }
+    }
+
+    /// Records the effort this run was started at, or last told via `setEffort`.
+    pub(crate) fn set_effort(&self, run_id: u64, effort: impl Into<String>) {
+        if let Some(meta) = self.sessions.lock_meta().get_mut(&run_id) {
+            meta.effort = effort.into();
+        }
+    }
+
+    /// Effort last applied to this run.
+    #[must_use]
+    pub(crate) fn effort(&self, run_id: u64) -> String {
+        self.sessions
+            .lock_meta()
+            .get(&run_id)
+            .map(|meta| meta.effort.clone())
+            .unwrap_or_default()
     }
 
     /// Stores a Claude Code session id captured from the stream.
@@ -185,18 +206,18 @@ impl Bridge {
     /// Whether `messages` go on from the conversation the run last heard.
     ///
     /// An empty `told` (tests that never called [`Bridge::heard`]) follows.
-    /// Image-only rewrites (`lostMedia`) stay in R-6f.
+    /// Image-only rewrites (`lostMedia`) also follow.
     pub(crate) fn follows(&self, run_id: u64, messages: &[Message]) -> bool {
-        let told = self
+        let (told, told_messages) = self
             .sessions
             .lock_meta()
             .get(&run_id)
-            .map(|m| m.told.clone())
+            .map(|m| (m.told.clone(), m.told_messages.clone()))
             .unwrap_or_default();
         if told.is_empty() {
             return true;
         }
-        follows_told(&told, messages)
+        follows_told(&told, messages) || super::lost_media::lost_media(&told_messages, messages)
     }
 
     /// Looks up an idle run for this request's next turn (stage C).
@@ -613,12 +634,9 @@ fn assistant_message(said: &str) -> Message {
 }
 
 fn write_settings(hasher: &mut Hasher, owner: &str, request: &Request) {
-    let effort = request.params.effort.is_some();
-    let think_off = request
-        .extensions
-        .get("hofund_think_off")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
+    let flags = super::flags::from_request(request);
+    let effort = flags.bit();
+    let think_off = flags.think_off;
     let tool_choice = tool_choice_label(request);
     let system = without_billing_header(&system_text(request));
     let tools = serde_json::to_string(&request.tools).unwrap_or_else(|_| "[]".into());

@@ -75,8 +75,8 @@ pub use duplex::{DuplexReader, DuplexRequest, DuplexSession, DuplexWriter, HttpV
 pub use error::{PluginError, PluginErrorKind};
 pub use forward::{Forward, RawAnswer, RawBody};
 pub use hofund_ir::{
-    ContentPart, Extensions, ImagePart, ImageSource, Message, Request, Response, Role, Stop,
-    StopReason, StreamEvent, TextPart, too_long, words_of,
+    ContentPart, Extensions, ImagePart, ImageSource, Message, MessageStart, Request, Response,
+    Role, StillWorking, Stop, StopReason, StreamEvent, TextPart, too_long, words_of,
 };
 pub use host::{
     AccountLease, AccountsHandle, AuthResult, BRIDGE_CALLBACK_PATH_PREFIX, BindBlocked,

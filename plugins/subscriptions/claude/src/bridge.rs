@@ -1,6 +1,10 @@
 //! Claude Code bridge state, stream-json codec, and tool parking.
 
 pub mod decode;
+pub(crate) mod flags;
+pub(crate) mod images;
+pub(crate) mod keepalive;
+pub(crate) mod lost_media;
 pub mod park;
 pub(crate) mod room;
 pub mod run;

@@ -168,6 +168,9 @@ impl UpstreamProvider for ClaudeUpstream {
         if let Some(resume) = self.bridge.resume(&request, &self.account) {
             return self.continue_resume(resume, &request).await;
         }
+        // Stage D only on a resume miss.
+        let mut request = request;
+        crate::bridge::flags::apply_stage_d(&mut request);
         let unshelved = self.bridge.unshelve(&request, &self.account);
         self.bridge.retire(&self.account, &request);
         let room = self
@@ -209,6 +212,8 @@ impl UpstreamProvider for ClaudeUpstream {
             self.bridge
                 .ensure_session_run(id, &self.account, tool_names);
             self.bridge.heard(id, &request.messages);
+            self.bridge
+                .set_effort(id, crate::bridge::flags::from_request(&request).effort);
             self.bridge.set_room_guard(id, room);
             run_id = Some(id);
             let token = park::new_callback_token()?;
@@ -326,6 +331,16 @@ impl ClaudeUpstream {
         };
         let mut plan = start_plan(&spec, request)?;
         plan.stdin = stdin_from_since(&resume.since);
+        let wanted = crate::bridge::flags::from_request(request).effort;
+        let current = self.bridge.effort(resume.run_id);
+        if wanted != current {
+            let prefix = crate::bridge::flags::set_effort_line(
+                &wanted,
+                &crate::bridge::flags::set_effort_request_id(),
+            );
+            plan.stdin = format!("{prefix}{}", plan.stdin);
+            self.bridge.set_effort(resume.run_id, wanted);
+        }
         let stdout = self.stdout_for(&plan, &spec).await?;
         self.finish_stdout(stdout, Some(resume.run_id), has_tools(request), request)
     }
@@ -337,6 +352,7 @@ impl ClaudeUpstream {
         allow_tools: bool,
         request: &Request,
     ) -> Result<Completion, PluginError> {
+        self.observe_rate_limits(&stdout);
         let result = if !allow_tools {
             let events = events_from_stdout(&stdout)?;
             Ok((events, Vec::new(), session_id_from(&stdout)))
@@ -378,6 +394,35 @@ impl ClaudeUpstream {
             events.into_iter().map(Ok),
         ))))
     }
+
+    fn observe_rate_limits(&self, stdout: &str) {
+        let mut decoder = crate::bridge::decode::Decoder::new();
+        for line in stdout.lines() {
+            let Some(crate::bridge::decode::Step::RateLimit(info)) = decoder.push_line(line) else {
+                continue;
+            };
+            if let Some(observation) = rate_limit_observation(&self.host, &info) {
+                let _ = self.host.observe().observe(observation);
+            }
+        }
+    }
+}
+
+fn rate_limit_observation(
+    host: &hofund_plugin_api::HostContext,
+    info: &crate::bridge::decode::RateLimitInfo,
+) -> Option<hofund_plugin_api::QuotaObservation> {
+    let mut observation = host.observe().observation();
+    let mut any = false;
+    if let Some(kind) = &info.rate_limit_type {
+        observation = observation.with_window(kind.clone());
+        any = true;
+    }
+    if let Some(reset) = info.resets_in() {
+        observation = observation.with_window_reset(reset);
+        any = true;
+    }
+    any.then_some(observation)
 }
 
 fn assistant_text(events: &[hofund_plugin_api::StreamEvent]) -> String {

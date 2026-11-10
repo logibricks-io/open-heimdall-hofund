@@ -1496,7 +1496,7 @@ impl StreamEncoder for Encoder {
                     self.wrote_usage = true;
                 }
             }
-            StreamEvent::Ping(_) => {}
+            StreamEvent::Ping(_) | StreamEvent::StillWorking(_) => {}
             StreamEvent::Unknown(event) => encode_unknown(&mut out, event)?,
         }
         Ok(out)
