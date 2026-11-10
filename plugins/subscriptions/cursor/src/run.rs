@@ -577,7 +577,7 @@ mod tests {
 
     use hofund_kit_subscription::{
         Http1Response, Http1Server, Http2Response, Http2Server, TestHost, advance_time, block_on,
-        block_on_paused, yield_times,
+        block_on_paused, header_park, yield_times,
     };
     use hofund_plugin_api::{PluginId, PluginKind, SecretString};
     use hofund_plugin_sdk::{Race, race};
@@ -671,6 +671,14 @@ mod tests {
 
     fn token() -> SecretString {
         SecretString::from("dummy-access-token".to_owned())
+    }
+
+    fn run_sse_count(server: &Http1Server) -> usize {
+        server
+            .requests()
+            .iter()
+            .filter(|request| request.path() == "/agent.v1.AgentService/RunSSE")
+            .count()
     }
 
     fn assert_clean_http1(server: &Http1Server) {
@@ -783,8 +791,13 @@ mod tests {
         let _guard = http2_memory::test_lock();
         http2_memory::reset_for_tests();
         block_on_paused(async {
+            // Park headers behind a gate so the first stream cannot later
+            // complete as an empty HTTP/2 200 (header_delay + no DATA + no
+            // hold_open sends END_STREAM). The test clock then expires only
+            // the client header wait.
+            let (header_release, header_gate) = header_park();
             let h2 = Http2Server::start(vec![
-                Http2Response::new(200).header_delay(Duration::from_secs(60)),
+                Http2Response::new(200).park_headers(header_gate),
                 Http2Response::new(200).data(text_frame("after")),
             ])
             .await;
@@ -824,6 +837,8 @@ mod tests {
                     1,
                     "HTTP/2 handshake must finish before the header wait expires"
                 );
+                // Let the server enter the header gate before the clock jumps.
+                yield_times(10).await;
                 advance_time(limits.header_wait + Duration::from_millis(1)).await;
                 std::future::pending::<()>().await;
             };
@@ -831,6 +846,21 @@ mod tests {
                 unreachable!("the control future stays pending after the clock advances");
             };
             first.expect("fallback");
+            assert!(
+                blocked(host.context(), Duration::from_secs(600)),
+                "first header timeout must set HTTP/2 memory"
+            );
+            assert_eq!(
+                run_sse_count(&h1),
+                1,
+                "first fallback must open RunSSE; paths: {:?}",
+                h1.requests()
+                    .iter()
+                    .map(|request| request.path().to_owned())
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(h2.requests().len(), 1);
+
             run(
                 host.context(),
                 &endpoints,
@@ -845,11 +875,13 @@ mod tests {
             .expect("fallback");
             assert_eq!(h2.requests().len(), 1);
             assert_eq!(
+                run_sse_count(&h1),
+                2,
+                "remembered HTTP/2 unavailability must send a second RunSSE; paths: {:?}",
                 h1.requests()
                     .iter()
-                    .filter(|request| request.path() == "/agent.v1.AgentService/RunSSE")
-                    .count(),
-                2
+                    .map(|request| request.path().to_owned())
+                    .collect::<Vec<_>>()
             );
             assert!(blocked(host.context(), Duration::from_secs(600)));
 
@@ -868,10 +900,10 @@ mod tests {
             .expect("http2 retry");
             assert_eq!(output.events, [ServerEvent::TextDelta("after".into())]);
             assert_eq!(h2.requests().len(), 2);
+            drop(header_release);
         });
     }
 
-    #[test]
     fn connection_refused_falls_back_once_without_setting_memory() {
         let _guard = http2_memory::test_lock();
         http2_memory::reset_for_tests();

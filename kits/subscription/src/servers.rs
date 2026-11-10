@@ -363,6 +363,25 @@ impl RecordedHttp2Request {
     }
 }
 
+/// Keeps parked HTTP/2 HEADERS unreleased until dropped or [`HeaderPark::release`].
+pub struct HeaderPark {
+    tx: watch::Sender<bool>,
+}
+
+impl HeaderPark {
+    /// Lets the waiting stream send HEADERS.
+    pub fn release(self) {
+        let _ = self.tx.send(true);
+    }
+}
+
+/// A park handle and the gate consumed by [`Http2Response::park_headers`].
+#[must_use]
+pub fn header_park() -> (HeaderPark, watch::Receiver<bool>) {
+    let (tx, rx) = watch::channel(false);
+    (HeaderPark { tx }, rx)
+}
+
 /// A scripted response to one HTTP/2 stream.
 #[derive(Clone, Debug)]
 pub struct Http2Response {
@@ -370,6 +389,7 @@ pub struct Http2Response {
     headers: Vec<(String, String)>,
     data: Vec<Vec<u8>>,
     header_delay: Duration,
+    header_gate: Option<watch::Receiver<bool>>,
     refused: bool,
     hold_open: bool,
 }
@@ -383,6 +403,7 @@ impl Http2Response {
             headers: Vec::new(),
             data: Vec::new(),
             header_delay: Duration::ZERO,
+            header_gate: None,
             refused: false,
             hold_open: false,
         }
@@ -406,6 +427,17 @@ impl Http2Response {
     #[must_use]
     pub fn header_delay(mut self, delay: Duration) -> Self {
         self.header_delay = delay;
+        self
+    }
+
+    /// Parks response HEADERS until `gate` becomes `true`.
+    ///
+    /// A dropped sender without a release never sends HEADERS, so a header
+    /// timeout can be driven by the test clock without a delayed sleep that
+    /// later completes the stream as an empty 200.
+    #[must_use]
+    pub fn park_headers(mut self, gate: watch::Receiver<bool>) -> Self {
+        self.header_gate = Some(gate);
         self
     }
 
@@ -580,7 +612,21 @@ async fn serve_http2_stream(
         respond.send_reset(h2::Reason::REFUSED_STREAM);
         return;
     }
-    if !response.header_delay.is_zero() {
+    if let Some(mut gate) = response.header_gate {
+        loop {
+            if *gate.borrow() {
+                break;
+            }
+            tokio::select! {
+                _ = stopped.changed() => return,
+                changed = gate.changed() => {
+                    if changed.is_err() {
+                        return;
+                    }
+                }
+            }
+        }
+    } else if !response.header_delay.is_zero() {
         tokio::time::sleep(response.header_delay).await;
     }
     let mut builder = http::Response::builder().status(response.status);
