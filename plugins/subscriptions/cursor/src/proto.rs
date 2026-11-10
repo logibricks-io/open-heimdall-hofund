@@ -586,7 +586,7 @@ pub(crate) fn mcp_tool_name(field1: &str, field5: &str) -> String {
 pub(crate) enum ServerEvent {
     /// Interaction field 1, text delta (inner field 1 string).
     TextDelta(String),
-    /// Interaction field 4. R-8 ignores the bytes when emitting, but still parses.
+    /// Interaction field 4, inner field 1 string. Emitted as a thinking block.
     ThinkingDelta(String),
     /// Interaction field 5.
     ThinkingCompleted,

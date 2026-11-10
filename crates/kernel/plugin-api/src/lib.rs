@@ -77,8 +77,8 @@ pub use forward::{Forward, RawAnswer, RawBody};
 pub use hofund_ir::{
     BlockStart, ContentBlockStart, ContentBlockStop, ContentPart, Extensions, ImagePart,
     ImageSource, Message, MessageDelta, MessageStart, MessageStop, Request, Response, Role, Stop,
-    StopReason, StreamEvent, TextDelta, TextPart, ToolArguments, ToolArgumentsDelta, ToolChoice,
-    ToolChoiceMode, ToolResultPart, too_long, words_of,
+    StopReason, StreamEvent, TextDelta, TextPart, ThinkingDelta, ToolArguments, ToolArgumentsDelta,
+    ToolChoice, ToolChoiceMode, ToolResultPart, too_long, words_of,
 };
 pub use host::{
     AccountLease, AccountsHandle, AuthResult, BindBlocked, ClockHandle, DirHandle, GatewayHandle,
