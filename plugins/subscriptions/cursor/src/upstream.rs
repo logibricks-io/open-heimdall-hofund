@@ -80,29 +80,46 @@ impl UpstreamProvider for CursorUpstream {
             .map_err(|error| PluginError::io(format!("cannot create a response id: {error}")))?;
         let mut args = mapped.into_args();
         args.limits = self.limits;
-        let mut run = run_stream(
-            &self.host,
-            &self.endpoints,
-            &self.agent_host,
-            &token,
-            args,
-        )
-        .await?;
+        let mut retried = false;
+        'runs: loop {
+            let attempt = run_stream(
+                &self.host,
+                &self.endpoints,
+                &self.agent_host,
+                &token,
+                args.clone(),
+            )
+            .await?;
+            let http1 = attempt.http1;
+            let agent_url = attempt.agent_url;
+            let mut run = attempt.stream;
 
-        while let Some(event) = run.next().await {
-            match event? {
-                RunEvent::Server(ServerEvent::TextDelta(text)) => {
-                    return Ok(text_stream(run, response_id, model, text));
+            while let Some(event) = run.next().await {
+                let error = match event {
+                    Ok(RunEvent::Server(ServerEvent::TextDelta(text))) => {
+                        return Ok(text_stream(run, response_id, model, text));
+                    }
+                    Ok(RunEvent::Server(ServerEvent::TurnEnd(_))) => return Err(empty_reply()),
+                    Ok(RunEvent::Server(_)) => continue,
+                    Ok(RunEvent::Trailer(frame)) => failure::trailer(&frame.payload),
+                    Ok(RunEvent::ErrorBody { status, body }) => failure::body(status, &body),
+                    Err(error) => error,
+                };
+                if !retried && failure::regional(error.message()) {
+                    crate::http2_memory::clear();
+                    let fresh = self
+                        .agent_host
+                        .resolve(&self.host, &self.endpoints, &token, true, args.team_id)
+                        .await;
+                    if http1 || fresh != agent_url {
+                        retried = true;
+                        continue 'runs;
+                    }
                 }
-                RunEvent::Server(ServerEvent::TurnEnd(_)) => return Err(empty_reply()),
-                RunEvent::Server(_) => {}
-                RunEvent::Trailer(frame) => return Err(failure::trailer(&frame.payload)),
-                RunEvent::ErrorBody { status, body } => {
-                    return Err(failure::body(status, &body));
-                }
+                return Err(error);
             }
+            return Err(empty_reply());
         }
-        Err(empty_reply())
     }
 
     async fn probe(&self, query: &ProbeQuery) -> Result<ProbeReport, PluginError> {
@@ -740,6 +757,147 @@ mod tests {
             assert!(error.message().contains("the upstream stopped sending"));
             assert!(!error.message().contains("an empty reply"));
             assert!(!http2_memory::blocked(host.context(), Duration::from_secs(600)));
+        });
+    }
+
+    #[test]
+    fn regional_http1_failure_clears_memory_and_retries_once_at_the_fresh_host() {
+        let _guard = http2_memory::test_lock();
+        http2_memory::reset_for_tests();
+        block_on(async {
+            let old = Http2Server::start(Vec::new()).await;
+            let regional = Http2Server::start(vec![
+                Http2Response::new(200).data([text_frame("regional text"), turn_end_frame()].concat()),
+            ])
+            .await;
+            let h1 = Http1Server::start(vec![
+                config_reply(old.base_url()),
+                Http1Response::new(401).body(b"account is in another region".to_vec()),
+                config_reply(regional.base_url()),
+            ])
+            .await;
+            let host = pooled_host();
+            let account = store_account(&host).await;
+            let upstream = upstream(&host, &h1, old.base_url(), account);
+            let token = SecretString::from("loopback-access-token".to_owned());
+            assert_eq!(
+                upstream
+                    .agent_host
+                    .resolve(host.context(), &upstream.endpoints, &token, false, None)
+                    .await,
+                old.base_url()
+            );
+            http2_memory::remember(host.context());
+
+            let events = collect(
+                upstream
+                    .execute(text_request(), ProtocolId::OPENAI_CHAT)
+                    .await
+                    .expect("one regional retry"),
+            )
+            .await
+            .expect("regional stream");
+            assert!(events.iter().any(|event| matches!(
+                event,
+                StreamEvent::TextDelta(TextDelta { text, .. }) if text == "regional text"
+            )));
+            assert_eq!(old.requests().len(), 0);
+            assert_eq!(regional.requests().len(), 1);
+            assert_eq!(h1.requests().len(), 3);
+            assert_eq!(h1.requests()[2].path(), "/aiserver.v1.ServerConfigService/GetServerConfig");
+            assert!(!http2_memory::blocked(host.context(), Duration::from_secs(600)));
+        });
+    }
+
+    #[test]
+    fn a_second_regional_failure_is_403_without_a_third_attempt() {
+        let _guard = http2_memory::test_lock();
+        http2_memory::reset_for_tests();
+        block_on(async {
+            let old = Http2Server::start(Vec::new()).await;
+            let regional = Http2Server::start(vec![
+                Http2Response::new(401).data(b"still the wrong region".to_vec()),
+            ])
+            .await;
+            let h1 = Http1Server::start(vec![
+                config_reply(old.base_url()),
+                Http1Response::new(401).body(b"account is in another region".to_vec()),
+                config_reply(regional.base_url()),
+            ])
+            .await;
+            let host = pooled_host();
+            let account = store_account(&host).await;
+            let upstream = upstream(&host, &h1, old.base_url(), account);
+            let token = SecretString::from("loopback-access-token".to_owned());
+            upstream
+                .agent_host
+                .resolve(host.context(), &upstream.endpoints, &token, false, None)
+                .await;
+            http2_memory::remember(host.context());
+
+            let error = upstream
+                .execute(text_request(), ProtocolId::OPENAI_CHAT)
+                .await
+                .map(|_| ())
+                .expect_err("second regional failure");
+            assert_eq!(error.status(), Some(403));
+            assert!(error.message().contains("still the wrong region"));
+            assert_eq!(regional.requests().len(), 1);
+            assert_eq!(h1.requests().len(), 3);
+        });
+    }
+
+    #[test]
+    fn regional_http2_at_an_unchanged_host_refreshes_without_retrying() {
+        let _guard = http2_memory::test_lock();
+        http2_memory::reset_for_tests();
+        block_on(async {
+            let h2 = Http2Server::start(vec![
+                Http2Response::new(401).data(b"regional account".to_vec()),
+            ])
+            .await;
+            let h1 = Http1Server::start(vec![
+                config_reply(h2.base_url()),
+                config_reply(h2.base_url()),
+            ])
+            .await;
+            let host = pooled_host();
+            let account = store_account(&host).await;
+            let upstream = upstream(&host, &h1, h2.base_url(), account);
+            let error = upstream
+                .execute(text_request(), ProtocolId::OPENAI_CHAT)
+                .await
+                .map(|_| ())
+                .expect_err("unchanged host is not retried");
+            assert_eq!(error.status(), Some(403));
+            assert!(error.message().contains("regional account"));
+            assert_eq!(h2.requests().len(), 1);
+            assert_eq!(h1.requests().len(), 2, "initial and fresh discovery");
+        });
+    }
+
+    #[test]
+    fn a_non_regional_failure_does_not_refresh_or_retry() {
+        let _guard = http2_memory::test_lock();
+        http2_memory::reset_for_tests();
+        block_on(async {
+            let h2 = Http2Server::start(Vec::new()).await;
+            let h1 = Http1Server::start(vec![
+                Http1Response::new(400).body(b"bad run".to_vec()),
+            ])
+            .await;
+            let host = pooled_host();
+            http2_memory::remember(host.context());
+            let account = store_account(&host).await;
+            let upstream = upstream(&host, &h1, h2.base_url(), account);
+            let error = upstream
+                .execute(text_request(), ProtocolId::OPENAI_CHAT)
+                .await
+                .map(|_| ())
+                .expect_err("ordinary failure");
+            assert_eq!(error.status(), Some(400));
+            assert_eq!(h1.requests().len(), 1);
+            assert_eq!(h2.requests().len(), 0);
         });
     }
 }

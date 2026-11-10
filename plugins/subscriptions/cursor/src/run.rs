@@ -54,6 +54,7 @@ impl Default for Limits {
 }
 
 /// Inputs for one Run transport session.
+#[derive(Clone)]
 pub(crate) struct RunArgs<'a> {
     /// First client payload.
     pub opening: Vec<u8>,
@@ -97,6 +98,16 @@ pub(crate) enum RunEvent {
 pub(crate) type RunStream<'a> =
     Pin<Box<dyn Stream<Item = Result<RunEvent, PluginError>> + Send + 'a>>;
 
+/// One opened attempt and the routing facts needed by regional retry.
+pub(crate) struct RunAttempt<'a> {
+    /// Incremental events for this attempt.
+    pub stream: RunStream<'a>,
+    /// Whether this attempt used RunSSE/BidiAppend.
+    pub http1: bool,
+    /// Agent origin considered by this attempt, before the Run path.
+    pub agent_url: String,
+}
+
 /// Collects a Run for transport tests and callers that want the whole body.
 #[cfg(test)]
 pub(crate) async fn run(
@@ -106,7 +117,9 @@ pub(crate) async fn run(
     token: &SecretString,
     args: RunArgs<'_>,
 ) -> Result<RunOutput, PluginError> {
-    let mut stream = run_stream(host, endpoints, agent_host, token, args).await?;
+    let mut stream = run_stream(host, endpoints, agent_host, token, args)
+        .await?
+        .stream;
     let mut output = RunOutput::default();
     while let Some(event) = stream.next().await {
         match event? {
@@ -126,14 +139,15 @@ pub(crate) async fn run_stream<'a>(
     agent_host: &AgentHost,
     token: &SecretString,
     args: RunArgs<'a>,
-) -> Result<RunStream<'a>, PluginError> {
+) -> Result<RunAttempt<'a>, PluginError> {
     let request_id = hofund_plugin_sdk::uuid::v4()
         .map_err(|error| PluginError::io(format!("cannot create a Run request id: {error}")))?;
+    let mut agent_url = endpoints.agent.trim_end_matches('/').to_owned();
     if !http2_memory::blocked(host, args.limits.http2_memory) {
-        let agent = agent_host
+        agent_url = agent_host
             .resolve(host, endpoints, token, false, args.team_id)
             .await;
-        let url = format!("{}/agent.v1.AgentService/Run", agent.trim_end_matches('/'));
+        let url = format!("{}/agent.v1.AgentService/Run", agent_url.trim_end_matches('/'));
         let request = run_duplex(
             url,
             endpoints,
@@ -144,7 +158,12 @@ pub(crate) async fn run_stream<'a>(
         );
         match host.http().open_duplex(request).await {
             Ok(session) => {
-                return run_http2(host, session, args).await;
+                let stream = run_http2(host, session, args).await?;
+                return Ok(RunAttempt {
+                    stream,
+                    http1: false,
+                    agent_url,
+                });
             }
             Err(error) => {
                 if http2_memory::should_remember(&error) {
@@ -153,7 +172,12 @@ pub(crate) async fn run_stream<'a>(
             }
         }
     }
-    run_http1(host, endpoints, token, request_id, args).await
+    let stream = run_http1(host, endpoints, token, request_id, args).await?;
+    Ok(RunAttempt {
+        stream,
+        http1: true,
+        agent_url,
+    })
 }
 
 fn one_event(event: RunEvent) -> RunStream<'static> {
