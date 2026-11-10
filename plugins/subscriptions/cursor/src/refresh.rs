@@ -90,7 +90,7 @@ pub(crate) async fn oauth_check(
 ) -> Result<(), PluginError> {
     let lease = host.accounts().lease(account, LEASE_WAIT).await?;
     let blob = tokens::parse_blob(lease.secret())?;
-    if tokens::is_agent(&blob) {
+    if tokens::is_agent(&blob) || tokens::is_api_key(&blob) {
         return Ok(());
     }
     let now = host.clock().now();

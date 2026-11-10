@@ -41,6 +41,13 @@ impl Endpoints {
         format!("{}/auth/refresh", self.api.trim_end_matches('/'))
     }
 
+    pub(crate) fn exchange_user_api_key(&self) -> String {
+        format!(
+            "{}/auth/exchange_user_api_key",
+            self.api.trim_end_matches('/')
+        )
+    }
+
     pub(crate) fn dashboard(&self, method: &str) -> String {
         format!(
             "{}/aiserver.v1.DashboardService/{method}",

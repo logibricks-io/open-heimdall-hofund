@@ -23,6 +23,9 @@ pub(crate) async fn access_token(
         .await?
         .ok_or_else(|| PluginError::auth("no Cursor sign-in is stored for this account"))?;
     let blob = tokens::parse_blob(&secret)?;
+    if tokens::is_api_key(&blob) {
+        return crate::exchange::access_token(host, endpoints, account).await;
+    }
     if is_agent(&blob) {
         return crate::refresh::renew_agent(
             host,

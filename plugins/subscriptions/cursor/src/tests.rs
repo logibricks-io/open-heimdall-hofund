@@ -7,8 +7,8 @@ use hofund_kit_subscription::{
     PipedScript, TestHost, advance_time, block_on, block_on_paused, join_all, yield_times,
 };
 use hofund_plugin_api::{
-    PluginId, PluginKind, RawTable, RawValue, SignInCtx, SignInProof, Subscription,
-    SubscriptionFactory,
+    PluginErrorKind, PluginId, PluginKind, RawTable, RawValue, SignInCtx, SignInProof,
+    Subscription, SubscriptionFactory,
 };
 use hofund_plugin_sdk::oauth::{SecretObject, account_id_from};
 
@@ -113,6 +113,59 @@ fn jwt(email: &str, exp: i64) -> String {
 fn write_auth(path: &Path, token: &str) {
     std::fs::create_dir_all(path.parent().expect("parent")).expect("dir");
     std::fs::write(path, format!(r#"{{"accessToken":"{token}"}}"#)).expect("auth");
+}
+
+struct ApiKeyTest;
+impl Drop for ApiKeyTest {
+    fn drop(&mut self) {
+        crate::exchange::set_test_api_key(None);
+    }
+}
+
+fn api_key_test() -> ApiKeyTest {
+    crate::exchange::set_test_api_key(None);
+    ApiKeyTest
+}
+
+fn enqueue_exchange(host: &TestHost, token: &str) {
+    host.http().enqueue_response(
+        200,
+        &[("content-type", "application/json")],
+        format!(r#"{{"accessToken":"{token}"}}"#).into_bytes(),
+    );
+}
+
+fn exchange_url() -> String {
+    endpoints().exchange_user_api_key()
+}
+
+macro_rules! assert_exchange_request {
+    ($call:expr, $key:expr) => {{
+        let call = $call;
+        let key = $key;
+        assert_eq!(call.method(), "POST");
+        assert_eq!(call.uri(), &exchange_url());
+        assert_eq!(call.body(), b"{}");
+        assert!(
+            call.header("connect-protocol-version").is_none(),
+            "exchange omits Connect-Protocol-Version, got {:?}",
+            call.headers()
+        );
+        assert_eq!(call.header("content-type"), Some("application/json"));
+        assert_eq!(call.header("x-cursor-client-type"), Some("cli"));
+        assert_eq!(call.header("x-ghost-mode"), Some("true"));
+        assert!(
+            call.sensitive_headers()
+                .iter()
+                .any(|name| name.eq_ignore_ascii_case("authorization")),
+            "authorization must be marked sensitive"
+        );
+        let debug = format!("{call:?}");
+        assert!(
+            !debug.contains(key),
+            "recorded request must not contain the API key"
+        );
+    }};
 }
 
 #[test]
@@ -856,4 +909,259 @@ fn r8b_overlapping_oauth_refresh_posts_once() {
         posts, 1,
         "overlapping near-expiry refreshes must renew once"
     );
+}
+
+#[test]
+fn r8c_import_api_key_stores_key_not_access_token() {
+    let _guard = api_key_test();
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let key = "cursor-test-api-key-alpha";
+    let token = jwt("api@example.test", 4_000_000_000);
+    enqueue_exchange(&host, &token);
+    let ids = block_on(sub.import_accounts(key, host.context())).expect("import");
+    assert_eq!(ids.len(), 1);
+    assert_eq!(ids[0], account_id_from(&["cursor", "api@example.test"]));
+    let secret = block_on(host.context().accounts().secret(&ids[0]))
+        .expect("read")
+        .expect("stored");
+    let blob = SecretObject::parse(&secret).expect("parse");
+    assert!(tokens::is_api_key(&blob));
+    assert_eq!(
+        blob.secret(tokens::API_KEY)
+            .as_ref()
+            .map(hofund_plugin_sdk::oauth::secret_text),
+        Some(key)
+    );
+    assert!(
+        blob.secret(tokens::ACCESS).is_none(),
+        "exchanged accessToken must not be written into the account secret"
+    );
+    let calls = host.http().calls();
+    assert_eq!(calls.len(), 1);
+    assert_exchange_request!(&calls[0], key);
+    let debug = format!("{blob:?}");
+    assert!(!debug.contains(key), "blob Debug must redact the API key");
+}
+
+#[test]
+fn r8c_import_reads_cursor_api_key_env_once() {
+    let _guard = api_key_test();
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let key = "cursor-test-api-key-env";
+    let token = jwt("env@example.test", 4_000_000_000);
+    crate::exchange::set_test_api_key(Some(key));
+    enqueue_exchange(&host, &token);
+    let ids = block_on(sub.import_accounts("  ", host.context())).expect("import env");
+    assert_eq!(ids[0], account_id_from(&["cursor", "env@example.test"]));
+    crate::exchange::set_test_api_key(Some("cursor-test-api-key-other"));
+    enqueue_period(&host);
+    block_on(sub.quota(&ids[0], host.context())).expect("quota uses stored key");
+    let exchanges: Vec<_> = host
+        .http()
+        .calls()
+        .into_iter()
+        .filter(|call| call.uri() == exchange_url())
+        .collect();
+    assert_eq!(
+        exchanges.len(),
+        1,
+        "execute/quota must not read CURSOR_API_KEY or re-exchange a fresh cache"
+    );
+    assert_exchange_request!(&exchanges[0], key);
+}
+
+#[test]
+fn r8c_sign_in_token_stores_key_not_access_token() {
+    let _guard = api_key_test();
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let key = "cursor-test-api-key-sign-in";
+    let token = jwt("token@example.test", 4_000_000_000);
+    enqueue_exchange(&host, &token);
+    let id = block_on(sub.complete_sign_in(
+        &ctx(),
+        SignInProof::Token(hofund_plugin_api::SecretString::from(key.to_owned())),
+        host.context(),
+    ))
+    .expect("complete");
+    assert_eq!(id, account_id_from(&["cursor", "token@example.test"]));
+    let secret = block_on(host.context().accounts().secret(&id))
+        .expect("read")
+        .expect("stored");
+    let blob = SecretObject::parse(&secret).expect("parse");
+    assert!(blob.secret(tokens::ACCESS).is_none());
+    assert!(tokens::is_api_key(&blob));
+}
+
+#[test]
+fn r8c_sign_in_reads_env_key_and_hides_it_from_challenge() {
+    let _guard = api_key_test();
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let key = "cursor-test-api-key-challenge";
+    let token = jwt("challenge@example.test", 4_000_000_000);
+    crate::exchange::set_test_api_key(Some(key));
+    let challenge = block_on(sub.start_sign_in(&ctx(), host.context())).expect("start");
+    match challenge {
+        hofund_plugin_api::SignInChallenge::Instructions { text } => {
+            assert!(text.contains("CURSOR_API_KEY"));
+            assert!(!text.contains(key));
+        }
+        other => panic!("expected instructions, got {other:?}"),
+    }
+    enqueue_exchange(&host, &token);
+    let id = block_on(sub.complete_sign_in(&ctx(), SignInProof::Await, host.context()))
+        .expect("complete");
+    assert_eq!(id, account_id_from(&["cursor", "challenge@example.test"]));
+}
+
+#[test]
+fn r8c_cached_exchange_is_reused_until_near_expiry() {
+    let _guard = api_key_test();
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let key = "cursor-test-api-key-cache";
+    let fresh = jwt("cache@example.test", 4_000_000_000);
+    enqueue_exchange(&host, &fresh);
+    let ids = block_on(sub.import_accounts(key, host.context())).expect("import");
+    enqueue_period(&host);
+    enqueue_period(&host);
+    block_on(sub.quota(&ids[0], host.context())).expect("first");
+    block_on(sub.quota(&ids[0], host.context())).expect("second");
+    let exchanges = host
+        .http()
+        .calls()
+        .into_iter()
+        .filter(|call| call.uri() == exchange_url())
+        .count();
+    assert_eq!(exchanges, 1, "a fresh exchanged token must be reused");
+}
+
+#[test]
+fn r8c_near_expiry_cache_exchanges_again() {
+    let _guard = api_key_test();
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let key = "cursor-test-api-key-soon";
+    // TestHost clock is UNIX_EPOCH; exp=100s is inside the 5-minute margin.
+    let soon = jwt("soon@example.test", 100);
+    let later = jwt("soon@example.test", 4_000_000_000);
+    enqueue_exchange(&host, &soon);
+    let ids = block_on(sub.import_accounts(key, host.context())).expect("import");
+    enqueue_exchange(&host, &later);
+    enqueue_period(&host);
+    block_on(sub.quota(&ids[0], host.context())).expect("quota");
+    let exchanges = host
+        .http()
+        .calls()
+        .into_iter()
+        .filter(|call| call.uri() == exchange_url())
+        .count();
+    assert_eq!(
+        exchanges, 2,
+        "a token within the 5-minute margin must be exchanged again"
+    );
+}
+
+#[test]
+fn r8c_exchange_http_500_and_connect_are_status_502() {
+    let _guard = api_key_test();
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let key = "cursor-test-api-key-502";
+    host.http()
+        .enqueue_response(500, &[("content-type", "application/json")], b"{}");
+    let error = block_on(sub.import_accounts(key, host.context())).expect_err("500");
+    assert_eq!(error.kind(), PluginErrorKind::Status);
+    assert_eq!(error.status(), Some(502));
+    host.http().enqueue_connect("offline");
+    let error = block_on(sub.import_accounts(key, host.context())).expect_err("connect");
+    assert_eq!(error.kind(), PluginErrorKind::Status);
+    assert_eq!(error.status(), Some(502));
+    assert!(error.message().contains("couldn't reach Cursor's API"));
+}
+
+#[test]
+fn r8c_exchange_without_access_token_is_status_401() {
+    let _guard = api_key_test();
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let key = "cursor-test-api-key-401";
+    host.http().enqueue_response(
+        200,
+        &[("content-type", "application/json")],
+        br#"{"ok":true}"#,
+    );
+    let error = block_on(sub.import_accounts(key, host.context())).expect_err("no token");
+    assert_eq!(error.kind(), PluginErrorKind::Status);
+    assert_eq!(error.status(), Some(401));
+    host.http()
+        .enqueue_response(400, &[("content-type", "application/json")], b"{}");
+    let error = block_on(sub.import_accounts(key, host.context())).expect_err("400");
+    assert_eq!(error.kind(), PluginErrorKind::Status);
+    assert_eq!(error.status(), Some(401));
+}
+
+#[test]
+fn r8c_refresh_updates_cache_without_writing_access_token() {
+    let _guard = api_key_test();
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let key = "cursor-test-api-key-refresh";
+    // TestHost clock is UNIX_EPOCH; exp=100s is inside the 5-minute margin.
+    let soon = jwt("refresh-api@example.test", 100);
+    let later = jwt("refresh-api@example.test", 4_000_000_000);
+    enqueue_exchange(&host, &soon);
+    let ids = block_on(sub.import_accounts(key, host.context())).expect("import");
+    enqueue_exchange(&host, &later);
+    block_on(sub.refresh(&ids[0], host.context())).expect("refresh");
+    let secret = block_on(host.context().accounts().secret(&ids[0]))
+        .expect("read")
+        .expect("stored");
+    let blob = SecretObject::parse(&secret).expect("parse");
+    assert!(blob.secret(tokens::ACCESS).is_none());
+    assert_eq!(
+        blob.secret(tokens::API_KEY)
+            .as_ref()
+            .map(hofund_plugin_sdk::oauth::secret_text),
+        Some(key)
+    );
+}
+
+#[test]
+fn r8c_account_status_ready_for_api_key() {
+    let _guard = api_key_test();
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let key = "cursor-test-api-key-status";
+    let token = jwt("status@example.test", 4_000_000_000);
+    enqueue_exchange(&host, &token);
+    let ids = block_on(sub.import_accounts(key, host.context())).expect("import");
+    let status = block_on(sub.account_status(&ids[0], host.context())).expect("status");
+    assert_eq!(status, hofund_plugin_api::AccountStatus::Ready);
+}
+
+#[test]
+fn r8c_upstream_stays_unsupported() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let id = account_id_from(&["cursor", "api@example.test"]);
+    let error = match sub.upstream(&id, host.context()) {
+        Ok(_) => panic!("upstream must stay unsupported"),
+        Err(error) => error,
+    };
+    assert_eq!(error.kind(), PluginErrorKind::Unsupported);
 }
