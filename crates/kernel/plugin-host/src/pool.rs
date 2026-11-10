@@ -233,6 +233,27 @@ pub fn close_idle_after_region(profile: &HttpProfile, limits: HttpLimits) {
     let _ = refresh_shared(shared, &key);
 }
 
+/// Replaces the duplex client for `profile` and `dial`.
+///
+/// A header-timeout abort can leave the HTTP/2 connection active on the
+/// server (no idle slot; the first stream is still open). The next Run
+/// would otherwise multiplex onto that session and can read garbage as
+/// Connect frames. A new client forces a fresh dial.
+pub(crate) fn refresh_duplex_client(
+    profile: &HttpProfile,
+    limits: HttpLimits,
+    dial: DuplexDial,
+) -> Result<(), PluginError> {
+    let key = ClientKey {
+        profile: profile.clone(),
+        limits,
+        mode: ClientMode::Duplex,
+        duplex_dial: dial,
+    };
+    let shared = client_handle(profile, limits, ClientMode::Duplex, dial)?;
+    refresh_shared(&shared, &key)
+}
+
 /// Evicts `key` and returns a new pooled client with the same settings.
 ///
 /// # Errors
