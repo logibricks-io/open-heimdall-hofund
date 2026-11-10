@@ -42,25 +42,6 @@ impl MappedRequest {
     }
 }
 
-/// Max Mode flags used by each [`map_with_mode`] call, in call order (tests only).
-#[cfg(test)]
-pub(crate) fn take_mapped_max_mode() -> Vec<bool> {
-    std::mem::take(
-        &mut *MAPPED_MAX_MODE
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner),
-    )
-}
-
-#[cfg(test)]
-static MAPPED_MAX_MODE: std::sync::Mutex<Vec<bool>> = std::sync::Mutex::new(Vec::new());
-
-/// Maps a request with a fresh conversation, message, and per-execute temp path.
-#[cfg(test)]
-pub(crate) fn map(request: &Request) -> Result<MappedRequest, PluginError> {
-    map_with_mode(request, None, false)
-}
-
 /// Maps a request, optionally reusing a conversation id and setting Max Mode bits.
 pub(crate) fn map_with_mode(
     request: &Request,
@@ -93,6 +74,25 @@ pub(crate) fn map_with_mode(
     }
     Ok(mapped)
 }
+
+/// Maps a request with a fresh conversation, message, and per-execute temp path.
+#[cfg(test)]
+pub(crate) fn map(request: &Request) -> Result<MappedRequest, PluginError> {
+    map_with_mode(request, None, false)
+}
+
+/// Max Mode flags used by each [`map_with_mode`] call, in call order (tests only).
+#[cfg(test)]
+pub(crate) fn take_mapped_max_mode() -> Vec<bool> {
+    std::mem::take(
+        &mut *MAPPED_MAX_MODE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    )
+}
+
+#[cfg(test)]
+static MAPPED_MAX_MODE: std::sync::Mutex<Vec<bool>> = std::sync::Mutex::new(Vec::new());
 
 fn new_uuid() -> Result<String, PluginError> {
     hofund_plugin_sdk::uuid::v4()
