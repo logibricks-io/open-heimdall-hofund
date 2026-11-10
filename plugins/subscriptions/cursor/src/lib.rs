@@ -25,6 +25,7 @@ mod quota;
 mod refresh;
 mod session;
 mod sign_in;
+mod team;
 mod tokens;
 
 pub use endpoints::Endpoints;
