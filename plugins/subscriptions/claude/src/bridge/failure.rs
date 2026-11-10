@@ -340,4 +340,71 @@ mod tests {
             r#"{"type":"assistant","message":{"content":[]}}"#
         ));
     }
+
+    #[test]
+    fn a_non_error_status_from_the_stream_is_treated_as_502() {
+        for status in [0, 200, 399] {
+            let error = classify(&result_error(Some(status), "something went wrong", None));
+            assert_eq!(error.status(), Some(502), "status {status}");
+        }
+    }
+
+    #[test]
+    fn third_party_wording_is_also_extra_usage() {
+        for message in [
+            "this account cannot use third-party billing",
+            "this account cannot use third party billing",
+        ] {
+            let error = classify(&result_error(Some(400), message, None));
+            assert_eq!(error.status(), Some(400), "{message}");
+            assert!(!error.cools(), "{message}");
+        }
+    }
+
+    #[test]
+    fn extra_usage_replaces_each_quota_shaped_word() {
+        for message in [
+            "extra usage quota for this organization",
+            "extra usage hit a rate limit for this organization",
+            "extra usage hit a rate-limit for this organization",
+            "extra usage usage limit for this organization",
+            "extra usage exceeded for this organization",
+            "extra usage too many requests for this organization",
+        ] {
+            let error = classify(&result_error(Some(400), message, None));
+            assert_eq!(error.status(), Some(400), "{message}");
+            assert!(!error.cools(), "{message}");
+            assert_eq!(error.message(), EXTRA_USAGE_SAID, "{message}");
+        }
+    }
+
+    #[test]
+    fn each_too_long_phrase_is_400() {
+        for message in [
+            "prompt too long for this request",
+            "context_length_exceeded for this request",
+            "maximum context length for this request",
+            "context window exceeds the allowed size",
+        ] {
+            let error = classify(&result_error(None, message, None));
+            assert_eq!(error.status(), Some(400), "{message}");
+            assert_eq!(error.kind(), PluginErrorKind::Status, "{message}");
+        }
+    }
+
+    #[test]
+    fn a_too_long_phrase_does_not_win_when_the_message_is_a_rate_limit() {
+        for message in [
+            "Prompt is too long because of the rate limit",
+            "Prompt is too long because of the rate-limit",
+            "Prompt is too long; try again later",
+            "Prompt is too long per minute",
+            "Prompt is too long per hour",
+            "Prompt is too long: max_tokens",
+            "Prompt is too long: max_output_tokens",
+        ] {
+            let error = classify(&result_error(None, message, None));
+            assert_ne!(error.status(), Some(400), "{message}");
+        }
+    }
 }
