@@ -379,7 +379,7 @@ pub(crate) struct AgentRunParams<'a> {
     pub temp_dir: &'a str,
     /// MCP tool definitions (context field 7 and wrapper field 1).
     pub tools: &'a [ToolDef],
-    /// When true, set field 19 to 1 (inline images). R-8 leaves this false.
+    /// When true, set field 19 to 1 (inline images were sent in this Run).
     pub inline_images: bool,
     /// When true, set model-details field 7 and requested-model field 2 to 1.
     pub max_mode: bool,

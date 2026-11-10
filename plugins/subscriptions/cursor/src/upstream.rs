@@ -1328,12 +1328,13 @@ mod tests {
     }
 
     #[test]
-    fn images_fail_before_opening_a_tool_bearing_run() {
+    fn images_open_a_tool_bearing_run() {
         let _guard = crate::http2_memory::test_lock();
         crate::http2_memory::reset_for_tests();
         block_on(async {
-            let h2 = Http2Server::start(Vec::new()).await;
-            let h1 = Http1Server::start(Vec::new()).await;
+            let body = [text_frame("seen"), turn_end_frame()].concat();
+            let h2 = Http2Server::start(vec![Http2Response::new(200).data(body)]).await;
+            let h1 = Http1Server::start(vec![config_reply(h2.base_url())]).await;
             let host = pooled_host();
             let account = store_account(&host).await;
             let upstream = upstream(&host, &h1, h2.base_url(), account);
@@ -1346,17 +1347,23 @@ mod tests {
                 "tools": [{"name": "lookup", "input_schema": {"type": "object"}}]
             }))
             .expect("request");
-            let error = upstream
-                .execute(request, ProtocolId::OPENAI_CHAT)
-                .await
-                .map(|_| ())
-                .expect_err("unsupported image");
-            assert_eq!(error.status(), Some(404));
-            assert!(error.message().contains("images are not served"));
-            assert!(!error.message().contains("tools are not served"));
-            assert!(!error.cools());
-            assert_eq!(h2.requests().len(), 0);
-            assert_eq!(h1.requests().len(), 0, "not even agent discovery");
+            let events = collect(
+                upstream
+                    .execute(request, ProtocolId::OPENAI_CHAT)
+                    .await
+                    .expect("images are served"),
+            )
+            .await
+            .expect("stream");
+            assert!(
+                events.iter().any(|event| matches!(
+                    event,
+                    StreamEvent::TextDelta(TextDelta { text, .. }) if text == "seen"
+                )),
+                "{events:?}"
+            );
+            assert_eq!(h2.requests().len(), 1);
+            assert_eq!(h2.requests()[0].path(), "/agent.v1.AgentService/Run");
         });
     }
 
