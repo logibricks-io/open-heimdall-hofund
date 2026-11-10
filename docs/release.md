@@ -1,5 +1,12 @@
 # Releasing hofund
 
+The general tag, dry-run, desktop, and signing process is in this file.
+The v0.2.0-specific cut — including what is still unmerged and which
+smoke stays with Palmer — is
+[docs/release-v0.2.0-checklist.md](release-v0.2.0-checklist.md). That
+checklist does not bump the version or create a tag. **v0.2.0 is not
+tagged, and no GitHub Release has been published from this tree.**
+
 Version 0.1.0 is prepared in the tree: the workspace version, this process,
 and the changelog. Pushing a tag publishes a GitHub release. Do not push a
 tag until the changelog and the version agree.

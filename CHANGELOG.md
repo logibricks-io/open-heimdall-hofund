@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- v0.2.0 release checklist and runbook (Must #12): preflight of unmerged
+  must-list work, dry-run including the still-open Windows `hofund.exe serve`
+  check (#357), version-bump and tag steps that this tree has not performed,
+  and real-account smoke deferred to Palmer (#58, #304, #310). This entry
+  does not bump the crate version or ship a tag.
+
 - R-16: Zed subscription upstream via POST `/completions` (provider envelope,
   NDJSON event unwrap, unary fold), model-token refresh with stale headers,
   live `/models` with snapshot fallback, plan quota from `/client/users/me`,
