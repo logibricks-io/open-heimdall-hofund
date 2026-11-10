@@ -22,8 +22,8 @@ use crate::id::{AccountId, MemberId, PluginId, PluginKey, ProtocolId};
 use crate::kernel::NoLoopback;
 use crate::kernel::{
     AccountBackend, AccountLeaseBackend, ClockBackend, DirBackend, GatewayBackend, HttpBackend,
-    LoopbackBackend, ObserveBackend, PipedChildBackend, ProcessBackend, SchedulerBackend,
-    SecretsBackend,
+    LongLivedChildBackend, LoopbackBackend, ObserveBackend, PipedChildBackend, ProcessBackend,
+    SchedulerBackend, SecretsBackend,
 };
 use crate::records::{Account, QuotaObservation, SignInCtx};
 use bytes::Bytes;
@@ -566,6 +566,115 @@ impl PipedChild {
     }
 }
 
+/// A long-lived child with piped standard input, output, and error.
+///
+/// Dropping it does not kill the child and does not close standard input.
+/// Call [`Self::kill`] to stop it, or [`Self::wait`] to reap a child that has
+/// already exited. [`Self::wait`] returns the same `i32` exit status as
+/// [`PipedChild::exit_code`].
+#[non_exhaustive]
+pub struct LongLivedChild {
+    inner: Box<dyn LongLivedChildBackend>,
+    on_kill: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+}
+
+impl std::fmt::Debug for LongLivedChild {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LongLivedChild")
+            .field("id", &self.inner.id())
+            .finish_non_exhaustive()
+    }
+}
+
+impl LongLivedChild {
+    /// The process id.
+    #[must_use]
+    pub fn id(&self) -> u32 {
+        self.inner.id()
+    }
+
+    /// Writes `bytes` to standard input and flushes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when standard input is closed or the write fails.
+    pub async fn write_stdin(&self, bytes: Bytes) -> Result<(), PluginError> {
+        self.inner.write_stdin(bytes).await
+    }
+
+    /// Closes standard input so the child reads end of file.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when closing fails. Closing twice is not an error.
+    pub async fn close_stdin(&self) -> Result<(), PluginError> {
+        self.inner.close_stdin().await
+    }
+
+    /// Standard output, one chunk per line with the newline kept.
+    ///
+    /// A line longer than 64 MiB ends the stream with an `Io` error.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when standard output was already taken.
+    pub fn stdout_stream(&self) -> Result<BodyStream, PluginError> {
+        self.inner
+            .take_stdout()
+            .ok_or_else(|| PluginError::config("standard output was already taken"))
+    }
+
+    /// Waits until the child exits and returns its exit code.
+    ///
+    /// Waiting does not kill the child. A second call returns the same code.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when the wait fails.
+    pub async fn wait(&self) -> Result<i32, PluginError> {
+        self.inner.wait().await
+    }
+
+    /// Signals the child to exit and runs the hook registered with
+    /// [`Self::on_kill`], if any. Does not wait for the child to reap.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when the signal cannot be sent. The hook still
+    /// runs once `kill` is called.
+    pub fn kill(&self) -> Result<(), PluginError> {
+        let result = self.inner.kill();
+        if let Some(hook) = self
+            .on_kill
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            hook();
+        }
+        result
+    }
+
+    /// Replaces the hook invoked from [`Self::kill`].
+    ///
+    /// The hook is not called when the child exits on its own or when this
+    /// handle is dropped. A plugin can use it for cleanup such as stopping a
+    /// process that lives behind a helper parent.
+    pub fn on_kill(&self, hook: Box<dyn FnOnce() + Send>) {
+        *self
+            .on_kill
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(hook);
+    }
+
+    /// The most recent 1 MiB of standard error.
+    #[must_use]
+    pub fn stderr_tail(&self) -> Bytes {
+        self.inner.stderr_tail()
+    }
+}
+
 /// Process spawn. The SDK resolves the binary. This handle does not invoke a shell.
 #[derive(Clone)]
 #[non_exhaustive]
@@ -614,6 +723,40 @@ impl ProcessHandle {
             )
             .await?;
         Ok(PipedChild { inner })
+    }
+
+    /// Spawns `request` as a long-lived piped child.
+    ///
+    /// The child inherits the host environment after names in `env_deny` are
+    /// removed, then the pairs in `request` are applied. This is not the
+    /// allowlist used by [`Self::spawn_piped`]. Standard output lines are
+    /// capped at 64 MiB. Standard error is retained up to 1 MiB (the tail).
+    /// Dropping the [`LongLivedChild`] does not kill the child and does not
+    /// close standard input.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when the process cannot be started, or with
+    /// kind `Unsupported` when the host has no long-lived spawn.
+    pub async fn spawn_long_lived(
+        &self,
+        request: &SpawnRequest,
+        env_deny: &[OsString],
+    ) -> Result<LongLivedChild, PluginError> {
+        let inner = self
+            .inner
+            .spawn_long_lived(
+                request.program.clone(),
+                request.args.clone(),
+                request.env.clone(),
+                request.cwd.clone(),
+                env_deny.to_vec(),
+            )
+            .await?;
+        Ok(LongLivedChild {
+            inner,
+            on_kill: Mutex::new(None),
+        })
     }
 
     /// Waits for `spawned` and reaps it.
@@ -1283,10 +1426,10 @@ mod tests {
     use async_trait::async_trait;
     use bytes::Bytes;
 
-    use super::{PipedChild, ProcessHandle, SpawnRequest};
+    use super::{LongLivedChild, PipedChild, ProcessHandle, SpawnRequest};
     use crate::body::BodyStream;
     use crate::error::{PluginError, PluginErrorKind};
-    use crate::kernel::{PipedChildBackend, ProcessBackend};
+    use crate::kernel::{LongLivedChildBackend, PipedChildBackend, ProcessBackend};
 
     struct NoPipes;
 
@@ -1360,6 +1503,11 @@ mod tests {
         let request = SpawnRequest::new(program, Vec::new(), Vec::new(), cwd).expect("request");
         let error = handle.spawn_piped(&request).await.expect_err("unsupported");
         assert_eq!(error.kind(), PluginErrorKind::Unsupported);
+        let error = handle
+            .spawn_long_lived(&request, &[])
+            .await
+            .expect_err("unsupported");
+        assert_eq!(error.kind(), PluginErrorKind::Unsupported);
     }
 
     #[tokio::test]
@@ -1387,6 +1535,90 @@ mod tests {
         assert_eq!(&chunk[..], b"line\n");
         let error = child.stdout().expect_err("second stdout");
         assert_eq!(error.kind(), PluginErrorKind::Config);
+    }
+
+    #[derive(Default)]
+    struct FakeLongLived {
+        written: Arc<Mutex<Vec<u8>>>,
+        closed: Arc<Mutex<bool>>,
+        killed: Arc<Mutex<bool>>,
+        stdout: Mutex<Option<BodyStream>>,
+        stderr: Bytes,
+    }
+
+    #[async_trait]
+    impl LongLivedChildBackend for FakeLongLived {
+        fn id(&self) -> u32 {
+            7
+        }
+
+        async fn write_stdin(&self, bytes: Bytes) -> Result<(), PluginError> {
+            self.written
+                .lock()
+                .expect("written")
+                .extend_from_slice(&bytes);
+            Ok(())
+        }
+
+        async fn close_stdin(&self) -> Result<(), PluginError> {
+            *self.closed.lock().expect("closed") = true;
+            Ok(())
+        }
+
+        fn take_stdout(&self) -> Option<BodyStream> {
+            self.stdout.lock().expect("stdout").take()
+        }
+
+        async fn wait(&self) -> Result<i32, PluginError> {
+            Ok(44)
+        }
+
+        fn kill(&self) -> Result<(), PluginError> {
+            *self.killed.lock().expect("killed") = true;
+            Ok(())
+        }
+
+        fn stderr_tail(&self) -> Bytes {
+            self.stderr.clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn long_lived_child_delegates_and_hands_out_stdout_once() {
+        let pipe = FakeLongLived {
+            stdout: Mutex::new(Some(BodyStream::from_bytes("line\n"))),
+            stderr: Bytes::from_static(b"err"),
+            ..FakeLongLived::default()
+        };
+        let written = Arc::clone(&pipe.written);
+        let closed = Arc::clone(&pipe.closed);
+        let killed = Arc::clone(&pipe.killed);
+        let child = LongLivedChild {
+            inner: Box::new(pipe),
+            on_kill: Mutex::new(None),
+        };
+        assert_eq!(child.id(), 7);
+        assert_eq!(format!("{child:?}"), "LongLivedChild { id: 7, .. }");
+        child
+            .write_stdin(Bytes::from_static(b"hello"))
+            .await
+            .expect("write");
+        assert_eq!(*written.lock().expect("written"), b"hello");
+        child.close_stdin().await.expect("close");
+        assert!(*closed.lock().expect("closed"));
+        assert_eq!(&child.stderr_tail()[..], b"err");
+        assert_eq!(child.wait().await.expect("wait"), 44);
+        let mut stdout = child.stdout_stream().expect("first stdout");
+        let chunk = stdout.next_chunk().await.expect("a chunk").expect("ok");
+        assert_eq!(&chunk[..], b"line\n");
+        let error = child.stdout_stream().expect_err("second stdout");
+        assert_eq!(error.kind(), PluginErrorKind::Config);
+        let ran = Arc::new(Mutex::new(false));
+        let flag = Arc::clone(&ran);
+        child.on_kill(Box::new(move || *flag.lock().expect("flag") = true));
+        child.kill().expect("kill");
+        assert!(*killed.lock().expect("killed"));
+        assert!(*ran.lock().expect("ran"));
     }
 
     #[test]

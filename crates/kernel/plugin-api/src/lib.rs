@@ -80,9 +80,9 @@ pub use hofund_ir::{
 };
 pub use host::{
     AccountLease, AccountsHandle, AuthResult, BindBlocked, ClockHandle, DirHandle, GatewayHandle,
-    HostContext, HttpHandle, Job, JobId, JobSpec, LOOPBACK_CANCEL_PATH, LoopbackBinding,
-    LoopbackHandle, LoopbackSpec, ObserveHandle, PipedChild, ProcessHandle, RedirectHost,
-    SchedulerHandle, SecretsHandle, SpawnRequest, Spawned, SurfaceHost,
+    HostContext, HttpHandle, Job, JobId, JobSpec, LOOPBACK_CANCEL_PATH, LongLivedChild,
+    LoopbackBinding, LoopbackHandle, LoopbackSpec, ObserveHandle, PipedChild, ProcessHandle,
+    RedirectHost, SchedulerHandle, SecretsHandle, SpawnRequest, Spawned, SurfaceHost,
 };
 pub use http_budget::{HostReadBudget, read_budget, set_read_budget};
 pub use id::{
@@ -131,6 +131,7 @@ mod tests {
         assert_impl_all!(crate::ClockHandle: Send, Sync);
         assert_impl_all!(crate::SchedulerHandle: Send, Sync);
         assert_impl_all!(crate::ProcessHandle: Send, Sync);
+        assert_impl_all!(crate::LongLivedChild: Send, Sync);
         assert_impl_all!(crate::DirHandle: Send, Sync);
         assert_impl_all!(crate::ObserveHandle: Send, Sync);
         assert_impl_all!(crate::LoopbackHandle: Send, Sync);

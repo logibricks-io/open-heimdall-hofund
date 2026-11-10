@@ -18,6 +18,7 @@ mod account_secrets;
 mod accounts;
 mod agent_credentials;
 mod duplex;
+mod long_lived;
 mod loopback;
 mod piped;
 mod pool;
@@ -34,8 +35,9 @@ use std::time::{Duration, Instant, SystemTime};
 
 use async_trait::async_trait;
 use hofund_plugin_api::kernel::{
-    AccountBackend, ClockBackend, DirBackend, HttpRequest, HttpResponse, Job, LoopbackBackend,
-    PipedChildBackend, ProcessBackend, SchedulerBackend, SecretsBackend,
+    AccountBackend, ClockBackend, DirBackend, HttpRequest, HttpResponse, Job,
+    LongLivedChildBackend, LoopbackBackend, PipedChildBackend, ProcessBackend, SchedulerBackend,
+    SecretsBackend,
 };
 use hofund_plugin_api::{
     AuthResult, Body, BodyStream, HostContext, MemberId, PluginError, PluginId, PluginKey,
@@ -741,6 +743,19 @@ impl ProcessBackend for StdProcess {
     ) -> Result<Box<dyn PipedChildBackend>, PluginError> {
         let request = SpawnRequest::new(program, args, env, cwd)?;
         let child = accounts::run_blocking(move || piped::spawn(&request)).await?;
+        Ok(Box::new(child))
+    }
+
+    async fn spawn_long_lived(
+        &self,
+        program: PathBuf,
+        args: Vec<OsString>,
+        env: Vec<(OsString, OsString)>,
+        cwd: PathBuf,
+        env_deny: Vec<OsString>,
+    ) -> Result<Box<dyn LongLivedChildBackend>, PluginError> {
+        let request = SpawnRequest::new(program, args, env, cwd)?;
+        let child = accounts::run_blocking(move || long_lived::spawn(&request, &env_deny)).await?;
         Ok(Box::new(child))
     }
 }
