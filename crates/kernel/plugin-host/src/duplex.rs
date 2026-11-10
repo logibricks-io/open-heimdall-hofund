@@ -178,6 +178,7 @@ pub(crate) async fn open_duplex(
         Ok(Err(error)) => return Err(map_duplex_open_error(error)),
         Err(_) => {
             guard.abort_if_unfinished();
+            let _ = pool::refresh_duplex_client(&http.pool_key().profile, duplex_limits(), dial);
             return Err(PluginError::timeout(format!(
                 "{HEADERS_TIMED_OUT}: no response headers within {header_wait:?}"
             )));
