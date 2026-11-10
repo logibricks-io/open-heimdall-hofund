@@ -1232,11 +1232,21 @@ mod tests {
                 collect(completion).await
             };
             let control = async {
+                // Wait until the HTTP/2 Run is accepted (response headers
+                // are immediate; DATA is delayed 1s). Then expire only the
+                // data delay and the 2s tool-count wait. A further 20s jump
+                // can also complete idle/quiet and is not needed to prove
+                // that heartbeats do not extend the count wait.
+                for _ in 0..100 {
+                    if !h2.requests().is_empty() {
+                        break;
+                    }
+                    yield_times(2).await;
+                }
                 advance_time(Duration::from_secs(1)).await;
                 yield_times(10).await;
-                advance_time(Duration::from_millis(1_001)).await;
+                advance_time(Duration::from_millis(2_001)).await;
                 yield_times(10).await;
-                advance_time(Duration::from_secs(20)).await;
                 std::future::pending::<()>().await;
             };
             let Race::Left(events) = race(attempt, control).await else {
