@@ -37,6 +37,16 @@ const KEYCHAIN_ABSENT: i32 = 44;
 /// macOS `security(1)` used for keychain reads.
 const SECURITY: &str = "/usr/bin/security";
 
+/// Absolute `security` path on every OS, including Windows where a
+/// leading `/` is not absolute. Tests with `force_keychain` spawn this.
+fn security_program() -> PathBuf {
+    if cfg!(windows) {
+        PathBuf::from(r"C:\usr\bin\security")
+    } else {
+        PathBuf::from(SECURITY)
+    }
+}
+
 /// Cached macOS keychain token reads for one subscription instance.
 #[derive(Default)]
 pub(crate) struct KeychainCache {
@@ -225,7 +235,7 @@ enum ReadResult {
 
 async fn read_keychain(host: &HostContext) -> ReadResult {
     let Ok(request) = SpawnRequest::new(
-        PathBuf::from(SECURITY),
+        security_program(),
         [
             "find-generic-password",
             "-s",
@@ -323,4 +333,24 @@ pub(crate) fn program(configured: Option<&PathBuf>) -> Result<PathBuf, PluginErr
                 "cursor-agent is not installed: it is not on PATH; install it or set `command`",
             )
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::security_program;
+
+    #[test]
+    fn security_program_is_absolute_and_named_security() {
+        let path = security_program();
+        assert!(
+            path.is_absolute(),
+            "keychain program must be absolute on this OS, got {}",
+            path.display()
+        );
+        assert!(
+            path.file_name().is_some_and(|name| name == "security"),
+            "keychain program must be named security, got {}",
+            path.display()
+        );
+    }
 }
