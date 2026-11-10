@@ -437,8 +437,7 @@ fn start_block_type(event: &StreamEvent) -> Option<String> {
 }
 
 /// Tool-call id and name on a `content_block_start`, when `event` is one.
-#[cfg(test)]
-fn start_tool_call(event: &StreamEvent) -> Option<(u32, String, String)> {
+pub(crate) fn start_tool_call(event: &StreamEvent) -> Option<(u32, String, String)> {
     let StreamEvent::ContentBlockStart(start) = event else {
         return None;
     };

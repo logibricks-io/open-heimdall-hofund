@@ -137,7 +137,7 @@ impl SubscriptionFactory for ClaudeFactory {
             command: cfg.command.clone(),
             flow: SignInFlow::Bridge { command: COMMAND },
             pending: Mutex::new(HashMap::new()),
-            bridge: Mutex::new(bridge::Bridge::new()),
+            bridge: bridge::Bridge::new(),
         }))
     }
 }
@@ -168,8 +168,8 @@ struct Claude {
     flow: SignInFlow,
     /// Sign-ins in progress, by session id.
     pending: Mutex<HashMap<String, Pending>>,
-    /// Bridge run table. This slice serves text-only turns through `upstream()`.
-    bridge: Mutex<bridge::Bridge>,
+    /// Bridge run table, shared across `upstream()` providers for this instance.
+    bridge: bridge::Bridge,
 }
 
 impl Claude {
@@ -516,15 +516,11 @@ impl Subscription for Claude {
         account: &AccountId,
         host: &HostContext,
     ) -> Result<Arc<dyn UpstreamProvider>, PluginError> {
-        // The table is constructed with the instance; this slice serves text-only turns.
-        let _bridge = self
-            .bridge
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         Ok(std::sync::Arc::new(upstream::ClaudeUpstream::new(
             account.clone(),
             host.clone(),
             self.command.clone(),
+            self.bridge.clone(),
         )))
     }
 

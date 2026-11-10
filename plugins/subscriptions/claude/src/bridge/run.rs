@@ -1,4 +1,4 @@
-//! Text-only Claude Code spawn plan, stdin, and stream-json turn.
+//! Claude Code spawn plan, stdin, and stream-json turn.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -51,6 +51,8 @@ pub(crate) struct StartSpec {
     pub proxy: Vec<(OsString, OsString)>,
     /// Optional WSL distro. When set, the program is wrapped in `wsl.exe`.
     pub wsl_distro: Option<String>,
+    /// `--mcp-config` path when the turn offers tools.
+    pub mcp_config: Option<PathBuf>,
 }
 
 /// Arguments, environment, and stdin handed to Claude Code.
@@ -66,13 +68,8 @@ pub(crate) struct SpawnPlan {
     pub stdin: String,
 }
 
-/// Rejects inbound images and tools. A later slice serves those.
+/// Rejects inbound images. Tool calls are served by the parking slice.
 pub(crate) fn reject_non_text(request: &Request) -> Result<(), PluginError> {
-    if has_tools(request) {
-        return Err(PluginError::unsupported(
-            "tool calls through Claude Code are not served yet",
-        ));
-    }
     if has_image(request) {
         return Err(PluginError::unsupported(
             "images through Claude Code are not served yet",
@@ -84,7 +81,7 @@ pub(crate) fn reject_non_text(request: &Request) -> Result<(), PluginError> {
 /// Builds the argv, env, and stdin for a text-only start (no resume, no MCP).
 pub(crate) fn start_plan(spec: &StartSpec, request: &Request) -> Result<SpawnPlan, PluginError> {
     reject_non_text(request)?;
-    let args: Vec<OsString> = vec![
+    let mut args: Vec<OsString> = vec![
         os("-p"),
         os("--output-format"),
         os("stream-json"),
@@ -96,11 +93,18 @@ pub(crate) fn start_plan(spec: &StartSpec, request: &Request) -> Result<SpawnPla
         OsString::from(&spec.model),
         os("--tools"),
         os(""),
+    ];
+    if let Some(config) = &spec.mcp_config {
+        args.push(os("--strict-mcp-config"));
+        args.push(os("--mcp-config"));
+        args.push(config.as_os_str().to_owned());
+    }
+    args.extend([
         os("--setting-sources"),
         os(""),
         os("--dangerously-skip-permissions"),
         os("--no-session-persistence"),
-    ];
+    ]);
     let argv = if let Some(distro) = &spec.wsl_distro {
         wrap_argv(
             PathBuf::from(r"C:\Windows\System32\wsl.exe").as_path(),
@@ -171,6 +175,38 @@ pub(crate) fn events_from_stdout(stdout: &str) -> Result<Vec<StreamEvent>, Plugi
     Ok(events)
 }
 
+/// Tool-call id and name pairs decoded from a stream-json turn.
+pub(crate) type DecodedCalls = Vec<(String, String)>;
+
+/// Decodes a stream-json script, keeping tool-call events for parking.
+pub(crate) fn events_allowing_tools(
+    stdout: &str,
+) -> Result<(Vec<StreamEvent>, DecodedCalls), PluginError> {
+    let mut decoder = Decoder::new();
+    let mut events = Vec::new();
+    let mut calls = Vec::new();
+    for line in stdout.lines() {
+        match decoder.push_line(line) {
+            Some(Step::Events(batch)) => {
+                for event in &batch {
+                    if let Some((_, id, name)) = super::decode::start_tool_call(event) {
+                        calls.push((id, name));
+                    }
+                }
+                events.extend(batch);
+            }
+            Some(Step::ResultError(error)) => {
+                return Err(PluginError::status_error(
+                    error.api_error_status.unwrap_or(502),
+                    error.message,
+                ));
+            }
+            Some(Step::Session(_) | Step::RateLimit(_) | Step::Completed) | None => {}
+        }
+    }
+    Ok((events, calls))
+}
+
 /// Stream-json stdin for the user and system text in `request`.
 pub(crate) fn stdin_from_request(request: &Request) -> String {
     let mut out = String::new();
@@ -205,6 +241,21 @@ pub(crate) fn stdin_from_request(request: &Request) -> String {
         out.push('\n');
     }
     out
+}
+
+/// Stream-json stdin for `saidWithResults` user text.
+pub(crate) fn stdin_from_said(said: &str) -> String {
+    if said.is_empty() {
+        return String::new();
+    }
+    let line = serde_json::json!({
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": [{"type": "text", "text": said}]
+        }
+    });
+    format!("{line}\n")
 }
 
 fn event_is_tool(event: &StreamEvent) -> bool {
@@ -311,6 +362,7 @@ mod tests {
                 OsString::from("http://127.0.0.1:8080"),
             )],
             wsl_distro: None,
+            mcp_config: None,
         }
     }
 
@@ -322,8 +374,7 @@ mod tests {
             "tools": [{"name": "lookup", "input_schema": {"type": "object"}}]
         }));
         assert!(has_tools(&tools));
-        let error = reject_non_text(&tools).expect_err("tools");
-        assert_eq!(error.kind(), PluginErrorKind::Unsupported);
+        assert!(reject_non_text(&tools).is_ok(), "tools are served in R-6d");
 
         let image = request_from(json!({
             "model": "claude-sonnet-4-5",

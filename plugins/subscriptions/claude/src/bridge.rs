@@ -1,27 +1,14 @@
-//! Claude Code bridge state, stream-json codec, and text-only start.
+//! Claude Code bridge state, stream-json codec, and tool parking.
 
 pub mod decode;
+pub mod park;
 pub mod run;
 pub mod wsl;
 
 #[cfg(test)]
 pub(crate) mod runner;
 
-/// Owns Claude Code bridge runs for one plugin instance.
-///
-/// This slice may return an [`hofund_plugin_api::UpstreamProvider`] for a
-/// text-only turn. Child handles, idle runs, and callback registrations
-/// land in later slices.
-#[derive(Debug, Default)]
-pub struct Bridge {}
-
-impl Bridge {
-    /// Builds an empty bridge table.
-    #[must_use]
-    pub fn new() -> Self {
-        Self {}
-    }
-}
+pub use park::Bridge;
 
 #[cfg(test)]
 mod tests {
