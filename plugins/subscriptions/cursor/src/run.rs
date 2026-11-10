@@ -40,6 +40,14 @@ pub(crate) struct Limits {
     pub http2_memory: Duration,
     /// Maximum non-2xx response body retained for later error classification.
     pub error_drain: usize,
+    /// Wait before the first GetFilteredUsageEvents poll after a tool step.
+    pub usage_first_wait: Duration,
+    /// Gap between dashboard usage polls.
+    pub usage_interval: Duration,
+    /// Overall budget for the dashboard usage poll loop.
+    pub usage_give_up: Duration,
+    /// Per-request read timeout for one dashboard usage poll.
+    pub usage_request: Duration,
 }
 
 impl Default for Limits {
@@ -52,6 +60,10 @@ impl Default for Limits {
             tool_count_wait: Duration::from_secs(60),
             http2_memory: Duration::from_secs(10 * 60),
             error_drain: 1024 * 1024,
+            usage_first_wait: Duration::from_millis(1500),
+            usage_interval: Duration::from_millis(500),
+            usage_give_up: Duration::from_secs(6),
+            usage_request: Duration::from_secs(5),
         }
     }
 }
@@ -62,7 +74,7 @@ pub(crate) struct RunArgs<'a> {
     /// First client payload.
     pub opening: Vec<u8>,
     /// Optional team header forwarded to both transports.
-    pub team_id: Option<&'a str>,
+    pub team_id: Option<String>,
     /// Blob bytes indexed by their raw digest.
     pub blobs: Cow<'a, HashMap<Vec<u8>, Vec<u8>>>,
     /// GOOS-compatible operating-system name.
@@ -155,7 +167,7 @@ pub(crate) async fn run_stream<'a>(
     let mut agent_url = endpoints.agent.trim_end_matches('/').to_owned();
     if !http2_memory::blocked(host, args.limits.http2_memory) {
         agent_url = agent_host
-            .resolve(host, endpoints, token, false, args.team_id)
+            .resolve(host, endpoints, token, false, args.team_id.as_deref())
             .await;
         let url = format!(
             "{}/agent.v1.AgentService/Run",
@@ -166,7 +178,7 @@ pub(crate) async fn run_stream<'a>(
             endpoints,
             token,
             &request_id,
-            args.team_id,
+            args.team_id.as_deref(),
             args.limits.header_wait,
         );
         match host.http().open_duplex(request).await {
@@ -586,7 +598,7 @@ async fn next_http2(state: &mut Http2State<'_>) -> Result<Option<RunEvent>, Plug
 
 struct Http1State<'a> {
     response: HttpResponse,
-    context: AppendContext<'a>,
+    context: AppendContext,
     appends: AppendState<'a>,
     decoder: Option<FrameDecoder>,
     heartbeat: Heartbeat<'a>,
@@ -617,7 +629,7 @@ async fn run_http1<'a>(
         endpoints,
         token,
         &request_id,
-        args.team_id,
+        args.team_id.as_deref(),
     )
     .bytes(frame::encode(0, &down_payload)?)
     .open_raw(host.http(), 1)
@@ -650,7 +662,7 @@ async fn run_http1<'a>(
         endpoints: endpoints.clone(),
         token: token.clone(),
         request_id,
-        team_id: args.team_id,
+        team_id: args.team_id.clone(),
     };
     if let Err(failure) = append(context.clone(), args.opening.clone(), 0).await {
         return Ok(one_event(RunEvent::Trailer(synthetic_end(failure)?)));
@@ -763,12 +775,12 @@ async fn next_http1(state: &mut Http1State<'_>) -> Result<Option<RunEvent>, Plug
 const MAX_IN_FLIGHT_KV: usize = 16;
 
 #[derive(Clone)]
-struct AppendContext<'a> {
+struct AppendContext {
     host: HostContext,
     endpoints: Endpoints,
     token: SecretString,
     request_id: std::sync::Arc<str>,
-    team_id: Option<&'a str>,
+    team_id: Option<String>,
 }
 
 type AppendFuture<'a> =
@@ -789,7 +801,7 @@ impl<'a> AppendState<'a> {
         }
     }
 
-    async fn send_ready(&mut self, context: AppendContext<'a>) -> Result<(), AppendFailure> {
+    async fn send_ready(&mut self, context: AppendContext) -> Result<(), AppendFailure> {
         loop {
             let Some(payload) = self.pending.front() else {
                 return Ok(());
@@ -813,7 +825,7 @@ impl<'a> AppendState<'a> {
         }
     }
 
-    async fn flush(&mut self, context: AppendContext<'a>) -> Result<(), AppendFailure> {
+    async fn flush(&mut self, context: AppendContext) -> Result<(), AppendFailure> {
         loop {
             self.send_ready(context.clone()).await?;
             if self.pending.is_empty() && self.in_flight.is_empty() {
@@ -861,7 +873,7 @@ impl From<PluginError> for AppendFailure {
 }
 
 async fn append(
-    context: AppendContext<'_>,
+    context: AppendContext,
     payload: Vec<u8>,
     sequence: u64,
 ) -> Result<(), AppendFailure> {
@@ -877,7 +889,7 @@ async fn append(
         &context.endpoints,
         &context.token,
         &context.request_id,
-        context.team_id,
+        context.team_id.as_deref(),
     )
     .read_timeout(append_deadline(body.len()))
     .bytes(&body)
@@ -1308,7 +1320,7 @@ mod tests {
                 &AgentHost::default(),
                 &token(),
                 RunArgs {
-                    team_id: Some("42"),
+                    team_id: Some("42".to_owned()),
                     ..empty_run_args()
                 },
             )

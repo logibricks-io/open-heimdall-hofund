@@ -1107,6 +1107,7 @@ UpstreamSpec::const fn max_accounts (& self) -> u64
 UpstreamSpec::const fn plugin (& self) -> & PluginId
 UpstreamSpec::const fn protocols (& self) -> & 'static [ProtocolId]
 UpstreamSpec::const fn with_max_accounts (mut self , max_accounts : u64) -> Self
+Usage
 ValidConfig
 Visible
 Visible #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)

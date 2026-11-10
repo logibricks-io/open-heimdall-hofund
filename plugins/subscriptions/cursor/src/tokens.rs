@@ -74,6 +74,16 @@ pub(crate) fn jwt_expiry_ms(token: &str) -> Option<u64> {
         .and_then(|exp| u64::try_from((exp * 1000.0) as i64).ok())
 }
 
+pub(crate) fn jwt_sub(token: &str) -> Option<String> {
+    let claims = unverified_claims(&SecretString::from(token.to_owned())).ok()?;
+    claims
+        .get("sub")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
 pub(crate) fn jwt_identity(token: &str) -> Option<(String, AccountId)> {
     let claims = unverified_claims(&SecretString::from(token.to_owned())).ok()?;
     let email = claims
