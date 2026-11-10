@@ -381,9 +381,12 @@ pub(crate) struct AgentRunParams<'a> {
     pub tools: &'a [ToolDef],
     /// When true, set field 19 to 1 (inline images). R-8 leaves this false.
     pub inline_images: bool,
+    /// When true, set model-details field 7 and requested-model field 2 to 1.
+    pub max_mode: bool,
 }
 
-/// Builds an `AgentRunRequest`. R-8 does not set Max Mode or effort parameters.
+/// Builds an `AgentRunRequest`. Max Mode bits are set when `max_mode` is true;
+/// effort parameters remain deferred with the picker.
 ///
 /// Field 4 (the MCP wrapper) is always present; when `tools` is empty it is an
 /// empty message, not omitted. Field 19 is written only when `inline_images`.
@@ -404,10 +407,17 @@ pub(crate) fn encode_agent_run_request(params: &AgentRunParams<'_>) -> Vec<u8> {
         context = context.bytes(7, &tool_def_bytes(tool));
     }
     let action = Pb::new().message(2, Pb::new().bytes(2, &context.finish()));
-    let model = Pb::new()
+    let mut model = Pb::new()
         .string(1, params.model_id)
         .string(3, params.model_id)
         .string(4, params.model_id);
+    if params.max_mode {
+        model = model.varint(7, 1);
+    }
+    let mut requested = Pb::new().string(1, params.model_id);
+    if params.max_mode {
+        requested = requested.varint(2, 1);
+    }
     let mut wrapper = Pb::new();
     for tool in params.tools {
         wrapper = wrapper.bytes(1, &tool_def_bytes(tool));
@@ -418,7 +428,7 @@ pub(crate) fn encode_agent_run_request(params: &AgentRunParams<'_>) -> Vec<u8> {
         .message(3, model)
         .message(4, wrapper)
         .string(5, params.conversation_id)
-        .message(9, Pb::new().string(1, params.model_id));
+        .message(9, requested);
     if params.inline_images {
         request = request.varint(19, 1);
     }
@@ -1048,6 +1058,7 @@ mod tests {
             temp_dir: "/tmp/r8e",
             tools: &[],
             inline_images: false,
+            max_mode: false,
         });
         let top = fields(&encoded);
         let action = top
@@ -1090,6 +1101,71 @@ mod tests {
         assert!(
             !lower.contains(&reference_name),
             "outbound run bytes must not contain the reference product name"
+        );
+    }
+
+    #[test]
+    fn agent_run_request_sets_max_mode_bits_only_when_requested() {
+        let blob = [0x11_u8; 32];
+        let user = [0x22_u8; 32];
+        let mut params = AgentRunParams {
+            conversation_id: "conv-1",
+            model_id: "composer-2",
+            transcript_blob_ids: &[blob],
+            user_turn_blob_id: &user,
+            os: "linux",
+            temp_dir: "/tmp/r9d",
+            tools: &[],
+            inline_images: false,
+            max_mode: false,
+        };
+        let off = fields(&encode_agent_run_request(&params));
+        let details = off
+            .iter()
+            .find(|field| field.number == 3)
+            .and_then(Field::as_message)
+            .expect("model details");
+        let requested = off
+            .iter()
+            .find(|field| field.number == 9)
+            .and_then(Field::as_message)
+            .expect("requested model");
+        assert!(details.iter().all(|field| field.number != 7));
+        assert!(requested.iter().all(|field| field.number != 2));
+
+        params.max_mode = true;
+        let on = fields(&encode_agent_run_request(&params));
+        let details = on
+            .iter()
+            .find(|field| field.number == 3)
+            .and_then(Field::as_message)
+            .expect("model details");
+        let requested = on
+            .iter()
+            .find(|field| field.number == 9)
+            .and_then(Field::as_message)
+            .expect("requested model");
+        assert_eq!(
+            details
+                .iter()
+                .find(|field| field.number == 7)
+                .and_then(Field::as_varint),
+            Some(1)
+        );
+        assert_eq!(
+            requested
+                .iter()
+                .find(|field| field.number == 2)
+                .and_then(Field::as_varint),
+            Some(1)
+        );
+        assert_eq!(
+            requested
+                .iter()
+                .find(|field| field.number == 1)
+                .and_then(Field::as_string)
+                .as_deref(),
+            Some("composer-2")
         );
     }
 

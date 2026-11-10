@@ -41,40 +41,56 @@ impl MappedRequest {
     }
 }
 
+/// Max Mode flags used by each [`map_with_mode`] call, in call order (tests only).
+#[cfg(test)]
+pub(crate) fn take_mapped_max_mode() -> Vec<bool> {
+    std::mem::take(
+        &mut *MAPPED_MAX_MODE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    )
+}
+
+#[cfg(test)]
+static MAPPED_MAX_MODE: std::sync::Mutex<Vec<bool>> = std::sync::Mutex::new(Vec::new());
+
 /// Maps a request with a fresh conversation, message, and per-execute temp path.
+#[cfg(test)]
 pub(crate) fn map(request: &Request) -> Result<MappedRequest, PluginError> {
+    map_with_mode(request, None, false)
+}
+
+/// Maps a request, optionally reusing a conversation id and setting Max Mode bits.
+pub(crate) fn map_with_mode(
+    request: &Request,
+    conversation_id: Option<&str>,
+    max_mode: bool,
+) -> Result<MappedRequest, PluginError> {
     let message_id = new_uuid()?;
-    let conversation_id = new_uuid()?;
+    let conversation_id = match conversation_id {
+        Some(id) => id.to_owned(),
+        None => new_uuid()?,
+    };
     let temp_dir = std::env::temp_dir()
         .join(format!("cursor-{message_id}"))
         .to_string_lossy()
         .into_owned();
-    build(
+    let mapped = build(
         request,
         &conversation_id,
         &message_id,
         std::env::consts::OS,
         &temp_dir,
-    )
-}
-
-#[cfg(test)]
-pub(crate) fn map_with_conversation(
-    request: &Request,
-    conversation_id: &str,
-) -> Result<MappedRequest, PluginError> {
-    let message_id = new_uuid()?;
-    let temp_dir = std::env::temp_dir()
-        .join(format!("cursor-{message_id}"))
-        .to_string_lossy()
-        .into_owned();
-    build(
-        request,
-        conversation_id,
-        &message_id,
-        std::env::consts::OS,
-        &temp_dir,
-    )
+        max_mode,
+    )?;
+    #[cfg(test)]
+    {
+        MAPPED_MAX_MODE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(max_mode);
+    }
+    Ok(mapped)
 }
 
 fn new_uuid() -> Result<String, PluginError> {
@@ -88,6 +104,7 @@ fn build(
     message_id: &str,
     os: &str,
     temp_dir: &str,
+    max_mode: bool,
 ) -> Result<MappedRequest, PluginError> {
     reject_unsupported(request)?;
     let tools = tools_of(request);
@@ -186,6 +203,7 @@ fn build(
         temp_dir,
         tools: &tools,
         inline_images: false,
+        max_mode,
     }));
     Ok(MappedRequest {
         opening,
@@ -486,6 +504,7 @@ struct MapOptions<'a> {
     temp_dir: &'a str,
     conversation_id: &'a str,
     message_id: &'a str,
+    max_mode: bool,
 }
 
 #[cfg(test)]
@@ -496,6 +515,7 @@ fn map_with(request: &Request, options: MapOptions<'_>) -> Result<MappedRequest,
         options.message_id,
         options.os,
         options.temp_dir,
+        options.max_mode,
     )
 }
 
@@ -517,6 +537,7 @@ mod tests {
             temp_dir: "/tmp/cursor-request-test",
             conversation_id: CONVERSATION_ID,
             message_id: MESSAGE_ID,
+            max_mode: false,
         }
     }
 
@@ -682,6 +703,23 @@ mod tests {
         );
         assert!(request.iter().all(|field| field.number != 19));
         assert_eq!(mapped.into_args(None).os, "darwin");
+        let details = field(&request, 3).as_message().expect("model details");
+        let requested = field(&request, 9).as_message().expect("requested model");
+        assert!(details.iter().all(|field| field.number != 7));
+        assert!(requested.iter().all(|field| field.number != 2));
+    }
+
+    #[test]
+    fn mapping_sets_max_mode_bits_on_model_details_and_requested_model() {
+        let mut options = options();
+        options.max_mode = true;
+        let mapped = map_with(&Request::new("auto"), options).expect("mapping");
+        let request = agent_request(&mapped.opening);
+        let details = field(&request, 3).as_message().expect("model details");
+        let requested = field(&request, 9).as_message().expect("requested model");
+        assert_eq!(field(&details, 7).as_varint(), Some(1));
+        assert_eq!(field(&requested, 2).as_varint(), Some(1));
+        assert_eq!(field(&requested, 1).as_string().as_deref(), Some("auto"));
     }
 
     #[test]

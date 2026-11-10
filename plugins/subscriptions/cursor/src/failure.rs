@@ -26,6 +26,14 @@ pub(crate) fn after_output(error: PluginError) -> PluginError {
     PluginError::status_error(502, format!("{STALL_AFTER_TEXT}: {diagnostic}"))
 }
 
+/// Cursor's refusal of a model asked for without Max Mode.
+///
+/// Matches `max[ _]mode[ _]required` or `requires max mode`, case-insensitive.
+pub(crate) fn max_required(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("requires max mode") || lower.replace('_', " ").contains("max mode required")
+}
+
 /// Maps a Connect trailer without requiring a socket or a transport error.
 pub(crate) fn trailer(payload: &[u8]) -> PluginError {
     let parsed = hofund_plugin_sdk::json::from_slice::<Value>(payload).ok();
@@ -199,7 +207,7 @@ fn status_text(status: u16) -> &'static str {
 mod tests {
     use hofund_plugin_api::PluginErrorKind;
 
-    use super::{body, classify, trailer};
+    use super::{body, classify, max_required, trailer};
 
     #[test]
     fn connect_failures_follow_the_documented_order() {
@@ -371,5 +379,25 @@ mod tests {
             assert_eq!(error.kind(), PluginErrorKind::Status);
             assert!(error.message().contains(expected));
         }
+    }
+
+    #[test]
+    fn max_required_recognises_cursor_refusal_wording() {
+        assert!(max_required(
+            r#"Max Mode Required: The model "gpt-5.6-luna-low" requires Max Mode to be enabled. Please enable M"#
+        ));
+        assert!(max_required("MAX_MODE_REQUIRED"));
+        assert!(max_required("max_mode required"));
+        assert!(!max_required("usage limit reached: slow down"));
+        assert!(!max_required("the region is unavailable"));
+    }
+
+    #[test]
+    fn trailer_details_surface_a_max_mode_required_message() {
+        let error = trailer(
+            br#"{"error":{"code":"failed_precondition","message":"Error","details":[{"debug":{"error":"ERROR_MAX_MODE_REQUIRED","details":{"title":"Max Mode Required","detail":"The model \"gpt-5.6-luna-high\" requires Max Mode to be enabled. Please enable Max Mode and try again."}}}]}}"#,
+        );
+        assert!(max_required(error.message()), "{}", error.message());
+        assert_eq!(error.status(), Some(502));
     }
 }
