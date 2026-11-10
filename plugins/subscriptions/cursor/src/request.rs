@@ -41,29 +41,11 @@ impl MappedRequest {
     }
 }
 
-/// Maps a request with a fresh conversation, message, and per-execute temp path.
-pub(crate) fn map(request: &Request) -> Result<MappedRequest, PluginError> {
-    let message_id = new_uuid()?;
-    let conversation_id = new_uuid()?;
-    let temp_dir = std::env::temp_dir()
-        .join(format!("cursor-{message_id}"))
-        .to_string_lossy()
-        .into_owned();
-    build(
-        request,
-        &conversation_id,
-        &message_id,
-        std::env::consts::OS,
-        &temp_dir,
-    )
-}
-
-#[cfg(test)]
-pub(crate) fn map_with_conversation(
+fn map_ids(
     request: &Request,
     conversation_id: &str,
+    message_id: &str,
 ) -> Result<MappedRequest, PluginError> {
-    let message_id = new_uuid()?;
     let temp_dir = std::env::temp_dir()
         .join(format!("cursor-{message_id}"))
         .to_string_lossy()
@@ -71,10 +53,25 @@ pub(crate) fn map_with_conversation(
     build(
         request,
         conversation_id,
-        &message_id,
+        message_id,
         std::env::consts::OS,
         &temp_dir,
     )
+}
+
+/// Maps a request with a fresh conversation, message, and per-execute temp path.
+pub(crate) fn map(request: &Request) -> Result<MappedRequest, PluginError> {
+    map_ids(request, &new_uuid()?, &new_uuid()?)
+}
+
+/// Maps a request onto a known conversation id. The temp path is still chosen
+/// by the product helper above, so test code does not call `std::env::temp_dir`.
+#[cfg(test)]
+pub(crate) fn map_with_conversation(
+    request: &Request,
+    conversation_id: &str,
+) -> Result<MappedRequest, PluginError> {
+    map_ids(request, conversation_id, &new_uuid()?)
 }
 
 fn new_uuid() -> Result<String, PluginError> {
