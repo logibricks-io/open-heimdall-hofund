@@ -70,6 +70,7 @@ futures::FuturesUnordered
 futures::Race derives(Clone, Copy, Debug, PartialEq, Eq)
 futures::Race::Left
 futures::Race::Right
+futures::async fn next_ready < F > (futures : & mut FuturesUnordered < F >) -> F :: Output where F : std :: future :: Future ,
 futures::async fn race < A , B > (left : A , right : B) -> Race < A :: Output , B :: Output > where A : std :: future :: Future , B : std :: future :: Future ,
 gemini_models
 gemini_models_with_dropped
@@ -109,6 +110,7 @@ mod transport
 mod uuid
 mod wire
 next_cursor
+next_ready
 oauth::AccessToken
 oauth::AccessToken::const fn expires_in (& self) -> Duration
 oauth::AccessToken::fn expose_secret (& self) -> & str

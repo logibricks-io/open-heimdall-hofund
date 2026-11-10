@@ -1,5 +1,6 @@
 //! One Cursor Run over bidirectional HTTP/2 or the HTTP/1.1 fallback.
 
+use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 
 use hofund_plugin_api::{
@@ -8,7 +9,7 @@ use hofund_plugin_api::{
 };
 use hofund_plugin_sdk::json::json;
 use hofund_plugin_sdk::oauth::secret_text;
-use hofund_plugin_sdk::{Call, Race, race, sleep};
+use hofund_plugin_sdk::{Call, FuturesUnordered, Race, next_ready, race, sleep};
 
 use crate::agent_host::AgentHost;
 use crate::endpoints::Endpoints;
@@ -40,6 +41,22 @@ impl Default for Limits {
     }
 }
 
+/// Inputs for one Run transport session.
+pub(crate) struct RunArgs<'a> {
+    /// First client payload.
+    pub opening: Vec<u8>,
+    /// Optional team header forwarded to both transports.
+    pub team_id: Option<&'a str>,
+    /// Blob bytes indexed by their raw digest.
+    pub blobs: &'a HashMap<Vec<u8>, Vec<u8>>,
+    /// GOOS-compatible operating-system name.
+    pub os: &'a str,
+    /// Temporary directory returned to environment execs.
+    pub temp_dir: &'a str,
+    /// Transport limits.
+    pub limits: Limits,
+}
+
 /// Events and terminal frames collected from one transport session.
 #[derive(Debug, Default)]
 pub(crate) struct RunOutput {
@@ -51,21 +68,19 @@ pub(crate) struct RunOutput {
     pub error_body: Option<Vec<u8>>,
 }
 
-/// Opens a Run, writes `opening`, reads server events, and sends heartbeats.
+/// Opens a Run, answers server questions, reads events, and sends heartbeats.
 pub(crate) async fn run(
     host: &HostContext,
     endpoints: &Endpoints,
     agent_host: &AgentHost,
     token: &SecretString,
-    opening: Vec<u8>,
-    team_id: Option<&str>,
-    limits: Limits,
+    args: RunArgs<'_>,
 ) -> Result<RunOutput, PluginError> {
     let request_id = hofund_plugin_sdk::uuid::v4()
         .map_err(|error| PluginError::io(format!("cannot create a Run request id: {error}")))?;
-    if !http2_memory::blocked(host, limits.http2_memory) {
+    if !http2_memory::blocked(host, args.limits.http2_memory) {
         let agent = agent_host
-            .resolve(host, endpoints, token, false, team_id)
+            .resolve(host, endpoints, token, false, args.team_id)
             .await;
         let url = format!("{}/agent.v1.AgentService/Run", agent.trim_end_matches('/'));
         let request = run_duplex(
@@ -73,12 +88,12 @@ pub(crate) async fn run(
             endpoints,
             token,
             &request_id,
-            team_id,
-            limits.header_wait,
+            args.team_id,
+            args.limits.header_wait,
         );
         match host.http().open_duplex(request).await {
             Ok(session) => {
-                return run_http2(session, opening, limits).await;
+                return run_http2(session, &args).await;
             }
             Err(error) => {
                 if http2_memory::should_remember(&error) {
@@ -87,16 +102,7 @@ pub(crate) async fn run(
             }
         }
     }
-    run_http1(
-        host,
-        endpoints,
-        token,
-        opening,
-        &request_id,
-        team_id,
-        limits,
-    )
-    .await
+    run_http1(host, endpoints, token, &request_id, &args).await
 }
 
 fn run_duplex(
@@ -163,27 +169,34 @@ fn run_call(
 
 async fn run_http2(
     mut session: hofund_plugin_api::DuplexSession,
-    opening: Vec<u8>,
-    limits: Limits,
+    args: &RunArgs<'_>,
 ) -> Result<RunOutput, PluginError> {
     if !(200..300).contains(&session.status().as_u16()) {
-        let body = drain(session.reader(), limits.error_drain).await?;
+        let body = drain(session.reader(), args.limits.error_drain).await?;
         return Ok(RunOutput {
             error_body: Some(body),
             ..RunOutput::default()
         });
     }
     let (mut reader, mut writer) = session.into_split();
-    writer.write(frame::encode(0, &opening)?.into()).await?;
+    writer
+        .write(frame::encode(0, &args.opening)?.into())
+        .await?;
     let mut output = RunOutput::default();
     let mut decoder = FrameDecoder::new();
-    let mut heartbeat = std::pin::pin!(sleep(limits.heartbeat));
+    let mut heartbeat = std::pin::pin!(sleep(args.limits.heartbeat));
     loop {
         match race(reader.reader().next_chunk(), &mut heartbeat).await {
-            Race::Left(Some(Ok(chunk))) => decode_chunk(&mut decoder, &chunk, &mut output)?,
+            Race::Left(Some(Ok(chunk))) => {
+                for payload in decode_chunk(&mut decoder, &chunk, &mut output, args)? {
+                    writer.write(frame::encode(0, &payload)?.into()).await?;
+                }
+            }
             Race::Left(Some(Err(error))) => return Err(error),
             Race::Left(None) => {
-                finish_decoder(decoder, &mut output)?;
+                for payload in finish_decoder(decoder, &mut output, args)? {
+                    writer.write(frame::encode(0, &payload)?.into()).await?;
+                }
                 writer.finish().await?;
                 return Ok(output);
             }
@@ -191,7 +204,7 @@ async fn run_http2(
                 writer
                     .write(frame::encode(0, &proto::heartbeat())?.into())
                     .await?;
-                heartbeat.as_mut().set(sleep(limits.heartbeat));
+                heartbeat.as_mut().set(sleep(args.limits.heartbeat));
             }
         }
     }
@@ -201,10 +214,8 @@ async fn run_http1(
     host: &HostContext,
     endpoints: &Endpoints,
     token: &SecretString,
-    opening: Vec<u8>,
     request_id: &str,
-    team_id: Option<&str>,
-    limits: Limits,
+    args: &RunArgs<'_>,
 ) -> Result<RunOutput, PluginError> {
     let down_url = format!(
         "{}/agent.v1.AgentService/RunSSE",
@@ -218,7 +229,7 @@ async fn run_http1(
         endpoints,
         token,
         request_id,
-        team_id,
+        args.team_id,
     )
     .bytes(frame::encode(0, &down_payload)?)
     .open_raw(host.http(), 1)
@@ -234,7 +245,7 @@ async fn run_http1(
     };
     let status = response.status().as_u16();
     if !(200..300).contains(&status) {
-        let body = drain(response.body_mut(), limits.error_drain).await?;
+        let body = drain(response.body_mut(), args.limits.error_drain).await?;
         let message = error_message(status, &body);
         output
             .trailers
@@ -242,50 +253,127 @@ async fn run_http1(
         return Ok(output);
     }
 
-    let mut sequence = 0_u64;
-    if let Err(failure) = append(
-        host, endpoints, token, request_id, team_id, &opening, sequence,
-    )
-    .await
-    {
+    let context = AppendContext {
+        host,
+        endpoints,
+        token,
+        request_id,
+        team_id: args.team_id,
+    };
+    if let Err(failure) = append(context, args.opening.clone(), 0).await {
         output.trailers.push(synthetic_end(failure)?);
         return Ok(output);
     }
-    sequence += 1;
 
-    let mut cancelled = false;
+    let mut state = AppendState::new(1);
     let mut decoder = FrameDecoder::new();
-    let mut heartbeat = std::pin::pin!(sleep(limits.heartbeat));
+    let mut heartbeat = std::pin::pin!(sleep(args.limits.heartbeat));
     loop {
-        match race(response.body_mut().next_chunk(), &mut heartbeat).await {
-            Race::Left(Some(Ok(chunk))) => decode_chunk(&mut decoder, &chunk, &mut output)?,
-            Race::Left(Some(Err(error))) => return Err(error),
-            Race::Left(None) => {
-                finish_decoder(decoder, &mut output)?;
+        if let Err(failure) = state.send_ready(context).await {
+            output.trailers.push(synthetic_end(failure)?);
+            return Ok(output);
+        }
+        match race(
+            race(response.body_mut().next_chunk(), &mut heartbeat),
+            next_ready(&mut state.in_flight),
+        )
+        .await
+        {
+            Race::Left(Race::Left(Some(Ok(chunk)))) => {
+                state
+                    .pending
+                    .extend(decode_chunk(&mut decoder, &chunk, &mut output, args)?);
+            }
+            Race::Left(Race::Left(Some(Err(error)))) => return Err(error),
+            Race::Left(Race::Left(None)) => {
+                state
+                    .pending
+                    .extend(finish_decoder(decoder, &mut output, args)?);
+                if let Err(failure) = state.flush(context).await {
+                    output.trailers.push(synthetic_end(failure)?);
+                }
                 return Ok(output);
             }
-            Race::Right(()) => {
-                if let Err(failure) = append(
-                    host,
-                    endpoints,
-                    token,
-                    request_id,
-                    team_id,
-                    &proto::heartbeat(),
-                    sequence,
-                )
-                .await
-                {
-                    output.trailers.push(synthetic_end(failure)?);
-                    cancelled = true;
-                }
-                sequence += 1;
-                if cancelled {
-                    return Ok(output);
-                }
-                heartbeat.as_mut().set(sleep(limits.heartbeat));
+            Race::Left(Race::Right(())) => {
+                state.pending.push_back(proto::heartbeat());
+                heartbeat.as_mut().set(sleep(args.limits.heartbeat));
+            }
+            Race::Right(Ok(())) => {}
+            Race::Right(Err(failure)) => {
+                output.trailers.push(synthetic_end(failure)?);
+                return Ok(output);
             }
         }
+    }
+}
+
+const MAX_IN_FLIGHT_KV: usize = 16;
+
+#[derive(Clone, Copy)]
+struct AppendContext<'a> {
+    host: &'a HostContext,
+    endpoints: &'a Endpoints,
+    token: &'a SecretString,
+    request_id: &'a str,
+    team_id: Option<&'a str>,
+}
+
+type AppendFuture<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), AppendFailure>> + 'a>>;
+
+struct AppendState<'a> {
+    sequence: u64,
+    pending: VecDeque<Vec<u8>>,
+    in_flight: FuturesUnordered<AppendFuture<'a>>,
+}
+
+impl<'a> AppendState<'a> {
+    fn new(sequence: u64) -> Self {
+        Self {
+            sequence,
+            pending: VecDeque::new(),
+            in_flight: FuturesUnordered::new(),
+        }
+    }
+
+    async fn send_ready(&mut self, context: AppendContext<'a>) -> Result<(), AppendFailure> {
+        loop {
+            let Some(payload) = self.pending.front() else {
+                return Ok(());
+            };
+            if payload.first() == Some(&0x1a) {
+                if self.in_flight.len() >= MAX_IN_FLIGHT_KV {
+                    return Ok(());
+                }
+                let payload = self.pending.pop_front().unwrap_or_default();
+                let sequence = self.take_sequence();
+                self.in_flight
+                    .push(Box::pin(append(context, payload, sequence)));
+            } else {
+                if !self.in_flight.is_empty() {
+                    return Ok(());
+                }
+                let payload = self.pending.pop_front().unwrap_or_default();
+                let sequence = self.take_sequence();
+                append(context, payload, sequence).await?;
+            }
+        }
+    }
+
+    async fn flush(&mut self, context: AppendContext<'a>) -> Result<(), AppendFailure> {
+        loop {
+            self.send_ready(context).await?;
+            if self.pending.is_empty() && self.in_flight.is_empty() {
+                return Ok(());
+            }
+            next_ready(&mut self.in_flight).await?;
+        }
+    }
+
+    fn take_sequence(&mut self) -> u64 {
+        let sequence = self.sequence;
+        self.sequence += 1;
+        sequence
     }
 }
 
@@ -319,33 +407,28 @@ impl From<PluginError> for AppendFailure {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn append(
-    host: &HostContext,
-    endpoints: &Endpoints,
-    token: &SecretString,
-    request_id: &str,
-    team_id: Option<&str>,
-    payload: &[u8],
+    context: AppendContext<'_>,
+    payload: Vec<u8>,
     sequence: u64,
 ) -> Result<(), AppendFailure> {
     let url = format!(
         "{}/aiserver.v1.BidiService/BidiAppend",
-        endpoints.api.trim_end_matches('/')
+        context.endpoints.api.trim_end_matches('/')
     );
-    let body = proto::bidi_append(payload, request_id, sequence);
+    let body = proto::bidi_append(&payload, context.request_id, sequence);
     let reply = run_call(
         url,
         "application/proto",
         true,
-        endpoints,
-        token,
-        request_id,
-        team_id,
+        context.endpoints,
+        context.token,
+        context.request_id,
+        context.team_id,
     )
     .read_timeout(append_deadline(body.len()))
     .bytes(&body)
-    .fetch(host.http())
+    .fetch(context.host.http())
     .await
     .map_err(AppendFailure::from)?;
     if (200..300).contains(&reply.status()) {
@@ -415,32 +498,81 @@ fn decode_chunk(
     decoder: &mut FrameDecoder,
     chunk: &[u8],
     output: &mut RunOutput,
-) -> Result<(), PluginError> {
+    args: &RunArgs<'_>,
+) -> Result<Vec<Vec<u8>>, PluginError> {
+    let mut replies = Vec::new();
     for decoded in decoder.push(chunk)? {
-        push_frame(decoded, output);
+        push_frame(decoded, output, args, &mut replies);
     }
-    Ok(())
+    Ok(replies)
 }
 
-fn finish_decoder(decoder: FrameDecoder, output: &mut RunOutput) -> Result<(), PluginError> {
+fn finish_decoder(
+    decoder: FrameDecoder,
+    output: &mut RunOutput,
+    args: &RunArgs<'_>,
+) -> Result<Vec<Vec<u8>>, PluginError> {
+    let mut replies = Vec::new();
     for decoded in decoder.finish()? {
-        push_frame(decoded, output);
+        push_frame(decoded, output, args, &mut replies);
     }
-    Ok(())
+    Ok(replies)
 }
 
-fn push_frame(decoded: Frame, output: &mut RunOutput) {
+fn push_frame(
+    decoded: Frame,
+    output: &mut RunOutput,
+    args: &RunArgs<'_>,
+    replies: &mut Vec<Vec<u8>>,
+) {
     if decoded.is_trailer() {
         output.trailers.push(decoded);
-    } else {
-        output
-            .events
-            .extend(proto::decode_server(&decoded.payload).0);
+        return;
+    }
+    for event in proto::decode_server(&decoded.payload).0 {
+        reply_for(&event, args, replies);
+        output.events.push(event);
+    }
+}
+
+fn reply_for(event: &ServerEvent, args: &RunArgs<'_>, replies: &mut Vec<Vec<u8>>) {
+    match event {
+        ServerEvent::Kv(request) => match &request.kind {
+            proto::KvKind::Get { digest } => {
+                if let Some(blob) = args.blobs.get(digest) {
+                    replies.push(proto::kv_get_found(&request.id, blob));
+                } else {
+                    replies.push(proto::kv_get_missing(&request.id));
+                }
+            }
+            proto::KvKind::Store => replies.push(proto::kv_store_ack(&request.id)),
+        },
+        ServerEvent::Exec(request) => match request.kind {
+            proto::ExecKind::Environment => {
+                replies.push(proto::exec_env_result(
+                    request.id,
+                    &request.exec_id,
+                    args.os,
+                    args.temp_dir,
+                ));
+                replies.push(proto::close_exec(request.id));
+            }
+            proto::ExecKind::ListTools => {
+                replies.push(proto::exec_tools_result(request.id, &request.exec_id, &[]));
+                replies.push(proto::close_exec(request.id));
+            }
+            proto::ExecKind::McpArguments { .. } | proto::ExecKind::Other => {
+                replies.push(proto::refuse_exec(request.id));
+                replies.push(proto::close_exec(request.id));
+            }
+        },
+        _ => {}
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::time::Duration;
 
     use hofund_kit_subscription::{
@@ -450,7 +582,7 @@ mod tests {
     use hofund_plugin_api::{PluginId, PluginKind, SecretString};
     use hofund_plugin_sdk::{Race, race};
 
-    use super::{Limits, append_deadline, connect_code, run};
+    use super::{Limits, RunArgs, append_deadline, connect_code, run};
     use crate::agent_host::AgentHost;
     use crate::endpoints::Endpoints;
     use crate::frame;
@@ -475,6 +607,57 @@ mod tests {
             .message(1, Pb::new().message(1, Pb::new().string(1, text)))
             .finish();
         frame::encode(0, &payload).expect("text frame")
+    }
+
+    static EMPTY_BLOBS: std::sync::LazyLock<HashMap<Vec<u8>, Vec<u8>>> =
+        std::sync::LazyLock::new(HashMap::new);
+
+    fn run_args(blobs: &HashMap<Vec<u8>, Vec<u8>>) -> RunArgs<'_> {
+        RunArgs {
+            opening: proto::client_run(b"opening"),
+            team_id: None,
+            blobs,
+            os: "linux",
+            temp_dir: "/tmp/r8f2",
+            limits: Limits::default(),
+        }
+    }
+
+    fn empty_run_args() -> RunArgs<'static> {
+        run_args(&EMPTY_BLOBS)
+    }
+
+    fn server_frame(payload: Vec<u8>) -> Vec<u8> {
+        frame::encode(0, &payload).expect("server frame")
+    }
+
+    fn server_kv_get(id: &[u8], digest: &[u8]) -> Vec<u8> {
+        Pb::new()
+            .message(
+                4,
+                Pb::new()
+                    .bytes(1, id)
+                    .message(2, Pb::new().bytes(1, digest)),
+            )
+            .finish()
+    }
+
+    fn server_kv_store(id: &[u8]) -> Vec<u8> {
+        Pb::new()
+            .message(4, Pb::new().bytes(1, id).bytes(3, &[]))
+            .finish()
+    }
+
+    fn server_exec(id: u32, exec_id: &str, field: u32) -> Vec<u8> {
+        Pb::new()
+            .message(
+                2,
+                Pb::new()
+                    .varint(1, u64::from(id))
+                    .string(15, exec_id)
+                    .bytes(field, &[]),
+            )
+            .finish()
     }
 
     fn endpoints(api: &Http1Server, agent: &str) -> Endpoints {
@@ -521,9 +704,7 @@ mod tests {
                 &endpoints,
                 &AgentHost::default(),
                 &token(),
-                proto::client_run(b"opening"),
-                None,
-                Limits::default(),
+                empty_run_args(),
             )
             .await
             .expect("run");
@@ -586,9 +767,10 @@ mod tests {
                 &endpoints(&h1, h2.base_url()),
                 &AgentHost::default(),
                 &token(),
-                proto::client_run(b"opening"),
-                Some("42"),
-                Limits::default(),
+                RunArgs {
+                    team_id: Some("42"),
+                    ..empty_run_args()
+                },
             )
             .await
             .expect("run");
@@ -628,9 +810,10 @@ mod tests {
                     &endpoints,
                     &resolver,
                     &token(),
-                    proto::client_run(b"opening"),
-                    None,
-                    limits,
+                    RunArgs {
+                        limits,
+                        ..empty_run_args()
+                    },
                 )
                 .await
                 .expect("fallback");
@@ -651,9 +834,10 @@ mod tests {
                 &endpoints,
                 &resolver,
                 &token(),
-                proto::client_run(b"opening"),
-                None,
-                limits,
+                RunArgs {
+                    limits,
+                    ..empty_run_args()
+                },
             )
             .await
             .expect("http2 retry");
@@ -685,9 +869,7 @@ mod tests {
                 &endpoints,
                 &resolver,
                 &token(),
-                proto::client_run(b"opening"),
-                None,
-                Limits::default(),
+                empty_run_args(),
             )
             .await
             .expect("fallback");
@@ -699,9 +881,7 @@ mod tests {
                 &endpoints,
                 &resolver,
                 &token(),
-                proto::client_run(b"opening"),
-                None,
-                Limits::default(),
+                empty_run_args(),
             )
             .await
             .expect("second run");
@@ -741,9 +921,7 @@ mod tests {
                     &endpoints,
                     &resolver,
                     &token(),
-                    proto::client_run(b"opening"),
-                    None,
-                    Limits::default(),
+                    empty_run_args(),
                 )
                 .await
                 .expect("run");
@@ -767,9 +945,10 @@ mod tests {
                 &endpoints(&h1, h2.base_url()),
                 &AgentHost::default(),
                 &token(),
-                proto::client_run(b"must-not-be-written"),
-                None,
-                Limits::default(),
+                RunArgs {
+                    opening: proto::client_run(b"must-not-be-written"),
+                    ..empty_run_args()
+                },
             )
             .await
             .expect("error body");
@@ -804,9 +983,10 @@ mod tests {
                 &endpoints,
                 &resolver,
                 &token,
-                proto::client_run(b"opening"),
-                None,
-                limits,
+                RunArgs {
+                    limits,
+                    ..empty_run_args()
+                },
             );
             let control = async {
                 for _ in 0..100 {
@@ -882,11 +1062,12 @@ mod tests {
                 &endpoints,
                 &resolver,
                 &token,
-                proto::client_run(b"opening"),
-                None,
-                Limits {
-                    heartbeat: Duration::from_secs(1),
-                    ..Limits::default()
+                RunArgs {
+                    limits: Limits {
+                        heartbeat: Duration::from_secs(1),
+                        ..Limits::default()
+                    },
+                    ..empty_run_args()
                 },
             );
             let control = async {
@@ -940,9 +1121,7 @@ mod tests {
                 &endpoints(&h1, "http://127.0.0.1:9"),
                 &AgentHost::default(),
                 &token(),
-                proto::client_run(b"opening"),
-                None,
-                Limits::default(),
+                empty_run_args(),
             )
             .await
             .expect("synthetic trailer");
@@ -954,6 +1133,249 @@ mod tests {
             assert_eq!(body["error"]["code"], "invalid_argument");
             assert_eq!(body["error"]["message"], "bad opening");
             assert_eq!(h1.requests().len(), 1);
+        });
+    }
+
+    #[test]
+    fn http2_answers_kv_and_exec_requests_before_finishing() {
+        let _guard = http2_memory::test_lock();
+        http2_memory::reset_for_tests();
+        block_on(async {
+            let digest = b"digest-found".to_vec();
+            let found = Pb::new()
+                .message(
+                    3,
+                    Pb::new()
+                        .wire(1, &proto::WireValue::Bytes(b"kv-found".to_vec()))
+                        .bytes(2, &Pb::new().bytes(1, b"exact blob bytes").finish()),
+                )
+                .finish();
+            let server_payloads = [
+                server_kv_get(b"kv-found", &digest),
+                server_kv_get(b"kv-missing", b"digest-missing"),
+                server_kv_store(b"kv-store"),
+                server_exec(10, "exec-env", 10),
+                server_exec(36, "exec-tools", 36),
+                server_exec(11, "exec-mcp", 11),
+                server_exec(12, "exec-other", 99),
+            ];
+            let body = server_payloads
+                .iter()
+                .flat_map(|payload| server_frame(payload.clone()))
+                .collect();
+            let h2 = Http2Server::start(vec![Http2Response::new(200).data(body)]).await;
+            let h1 = Http1Server::start(vec![config_reply(h2.base_url())]).await;
+            let host = pooled_host();
+            let endpoints = endpoints(&h1, h2.base_url());
+            let mut blobs = HashMap::new();
+            blobs.insert(digest, b"exact blob bytes".to_vec());
+            let output = run(
+                host.context(),
+                &endpoints,
+                &AgentHost::default(),
+                &token(),
+                run_args(&blobs),
+            )
+            .await
+            .expect("run");
+            let expected_events = server_payloads
+                .iter()
+                .flat_map(|payload| proto::decode_server(payload).0)
+                .collect::<Vec<_>>();
+            assert_eq!(output.events, expected_events);
+            assert!(output.trailers.is_empty());
+
+            let expected = vec![
+                proto::kv_get_found(
+                    &proto::WireValue::Bytes(b"kv-found".to_vec()),
+                    b"exact blob bytes",
+                ),
+                proto::kv_get_missing(&proto::WireValue::Bytes(b"kv-missing".to_vec())),
+                proto::kv_store_ack(&proto::WireValue::Bytes(b"kv-store".to_vec())),
+                proto::exec_env_result(10, "exec-env", "linux", "/tmp/r8f2"),
+                proto::close_exec(10),
+                proto::exec_tools_result(36, "exec-tools", &[]),
+                proto::close_exec(36),
+                proto::refuse_exec(11),
+                proto::close_exec(11),
+                proto::refuse_exec(12),
+                proto::close_exec(12),
+            ];
+            assert_eq!(found, expected[0]);
+            let expected_written = std::iter::once(proto::client_run(b"opening"))
+                .chain(expected)
+                .flat_map(|payload| frame::encode(0, &payload).expect("client frame"))
+                .collect::<Vec<_>>();
+            for _ in 0..100 {
+                if h2.requests()[0].data().concat().len() >= expected_written.len() {
+                    break;
+                }
+                yield_times(2).await;
+            }
+            let request = &h2.requests()[0];
+            let written = request.data().concat();
+            assert_eq!(written, expected_written);
+            let mut outbound = written;
+            for (name, value) in request.headers() {
+                outbound.extend_from_slice(name.as_bytes());
+                outbound.extend_from_slice(value.as_bytes());
+            }
+            let lower = String::from_utf8_lossy(&outbound).to_ascii_lowercase();
+            let mut reference_name = String::from("mag");
+            reference_name.push_str("pie");
+            assert!(!lower.contains("hofund"));
+            assert!(!lower.contains(&reference_name));
+            assert_clean_http1(&h1);
+        });
+    }
+
+    #[test]
+    fn http1_answers_kv_and_exec_requests_with_ordered_appends() {
+        let _guard = http2_memory::test_lock();
+        http2_memory::reset_for_tests();
+        block_on(async {
+            let digest = b"digest-http1".to_vec();
+            let server_payloads = [
+                server_kv_get(b"kv-found", &digest),
+                server_kv_get(b"kv-missing", b"digest-missing"),
+                server_kv_store(b"kv-store"),
+                server_exec(20, "exec-env", 10),
+                server_exec(21, "exec-refused", 12),
+            ];
+            let body = server_payloads
+                .iter()
+                .flat_map(|payload| server_frame(payload.clone()))
+                .collect();
+            let h1 = Http1Server::start(vec![Http1Response::chunked(vec![body])]).await;
+            let host = pooled_host();
+            http2_memory::remember(host.context());
+            let mut blobs = HashMap::new();
+            blobs.insert(digest, b"http1 blob".to_vec());
+            let output = run(
+                host.context(),
+                &endpoints(&h1, "http://127.0.0.1:9"),
+                &AgentHost::default(),
+                &token(),
+                run_args(&blobs),
+            )
+            .await
+            .expect("run");
+            assert_eq!(output.events.len(), 5);
+            assert!(output.trailers.is_empty());
+
+            let expected = vec![
+                proto::client_run(b"opening"),
+                proto::kv_get_found(
+                    &proto::WireValue::Bytes(b"kv-found".to_vec()),
+                    b"http1 blob",
+                ),
+                proto::kv_get_missing(&proto::WireValue::Bytes(b"kv-missing".to_vec())),
+                proto::kv_store_ack(&proto::WireValue::Bytes(b"kv-store".to_vec())),
+                proto::exec_env_result(20, "exec-env", "linux", "/tmp/r8f2"),
+                proto::close_exec(20),
+                proto::refuse_exec(21),
+                proto::close_exec(21),
+            ];
+            let requests = h1.requests();
+            let appends = requests
+                .iter()
+                .filter(|request| request.path() == "/aiserver.v1.BidiService/BidiAppend")
+                .collect::<Vec<_>>();
+            assert_eq!(appends.len(), expected.len());
+            for (sequence, (request, payload)) in appends.into_iter().zip(expected).enumerate() {
+                let fields = proto::fields(request.body());
+                assert_eq!(
+                    fields[0].as_string().as_deref(),
+                    Some(proto::to_hex(&payload).as_str())
+                );
+                assert_eq!(fields[2].as_varint(), Some(sequence as u64));
+            }
+            assert_clean_http1(&h1);
+        });
+    }
+
+    #[test]
+    fn http1_pipelines_sixteen_kv_replies_and_barriers_the_next_writes() {
+        let _guard = http2_memory::test_lock();
+        http2_memory::reset_for_tests();
+        block_on_paused(async {
+            let digest = b"digest-window".to_vec();
+            let mut server_payloads = (0..17)
+                .map(|id| server_kv_get(format!("kv-{id}").as_bytes(), &digest))
+                .collect::<Vec<_>>();
+            server_payloads.push(server_exec(30, "exec-after-kv", 12));
+            let body = server_payloads
+                .iter()
+                .flat_map(|payload| server_frame(payload.clone()))
+                .collect();
+            let mut responses = vec![Http1Response::chunked(vec![body]), Http1Response::new(200)];
+            responses.extend((0..16).map(|_| {
+                Http1Response::new(200)
+                    .body(b"delayed".to_vec())
+                    .chunk_delay(Duration::from_secs(5))
+            }));
+            let h1 = Http1Server::start(responses).await;
+            let host = pooled_host();
+            http2_memory::remember(host.context());
+            let mut blobs = HashMap::new();
+            blobs.insert(digest, b"window blob".to_vec());
+            let mut args = run_args(&blobs);
+            args.limits.heartbeat = Duration::from_secs(60);
+            let endpoints = endpoints(&h1, "http://127.0.0.1:9");
+            let resolver = AgentHost::default();
+            let token = token();
+            let session = run(host.context(), &endpoints, &resolver, &token, args);
+            let control = async {
+                for _ in 0..200 {
+                    if h1.requests().len() >= 18 {
+                        break;
+                    }
+                    yield_times(2).await;
+                }
+                assert_eq!(h1.requests().len(), 18);
+                for request in &h1.requests()[2..] {
+                    let fields = proto::fields(request.body());
+                    assert!(
+                        fields[0]
+                            .as_string()
+                            .is_some_and(|hex| hex.starts_with("1a"))
+                    );
+                }
+                yield_times(20).await;
+                assert_eq!(h1.requests().len(), 18, "a 17th KV must wait");
+                advance_time(Duration::from_secs(5)).await;
+                std::future::pending::<()>().await;
+            };
+            let output = match race(session, control).await {
+                Race::Left(output) => output.expect("run"),
+                Race::Right(()) => panic!("control finished before the session"),
+            };
+            assert_eq!(output.events.len(), 18);
+            assert!(output.trailers.is_empty());
+
+            let expected = std::iter::once(proto::client_run(b"opening"))
+                .chain((0..17).map(|id| {
+                    proto::kv_get_found(
+                        &proto::WireValue::Bytes(format!("kv-{id}").into_bytes()),
+                        b"window blob",
+                    )
+                }))
+                .chain([proto::refuse_exec(30), proto::close_exec(30)])
+                .collect::<Vec<_>>();
+            let requests = h1.requests();
+            let appends = requests
+                .iter()
+                .filter(|request| request.path() == "/aiserver.v1.BidiService/BidiAppend")
+                .collect::<Vec<_>>();
+            assert_eq!(appends.len(), expected.len());
+            for (sequence, (request, payload)) in appends.into_iter().zip(expected).enumerate() {
+                let fields = proto::fields(request.body());
+                assert_eq!(
+                    fields[0].as_string().as_deref(),
+                    Some(proto::to_hex(&payload).as_str())
+                );
+                assert_eq!(fields[2].as_varint(), Some(sequence as u64));
+            }
         });
     }
 
