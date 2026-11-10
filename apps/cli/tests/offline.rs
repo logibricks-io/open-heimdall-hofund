@@ -13,7 +13,7 @@ use std::net::{SocketAddr, TcpListener};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 /// The longest any single CLI or build step may run.
@@ -57,6 +57,17 @@ fn hofundd() -> &'static Path {
     })
 }
 
+/// One offline case at a time. Each case may spawn several `hofund` /
+/// `hofundd` processes, and one-shot `edit_picks` starts a fresh `hofundd`
+/// per GET and PUT. Running those in parallel on a 3-core macOS CI runner
+/// oversubscribed the machine and pushed
+/// `concurrent_one_shot_picks_serialize_on_state_lock` past the 120s child
+/// deadline on #768 and #771 (earlier runs logged >60s and then passed).
+/// The deadline itself is unchanged. The lock is held for the Scratch
+/// lifetime so a case cannot wait for the suite lock while already holding
+/// child processes.
+static SUITE: Mutex<()> = Mutex::new(());
+
 /// Spawns `command`, retrying while another test's fork still holds a
 /// freshly written executable open.
 fn spawn(command: &mut Command) -> Child {
@@ -91,6 +102,7 @@ fn finish(mut child: Child, deadline: Duration) -> Output {
 
 /// A scratch install: config, token, home, and runtime roots.
 struct Scratch {
+    _suite: std::sync::MutexGuard<'static, ()>,
     _dir: tempfile::TempDir,
     root: PathBuf,
     config: PathBuf,
@@ -102,6 +114,7 @@ struct Scratch {
 
 impl Scratch {
     fn new(listen: &str, extra: &str) -> Self {
+        let suite = SUITE.lock().unwrap_or_else(|error| error.into_inner());
         // Under /tmp so the control socket path stays within the Unix
         // socket length limit (104 bytes on macOS, whose default temporary
         // directory is long); a daemon that cannot bind it falls back to
@@ -125,6 +138,7 @@ impl Scratch {
         )
         .expect("config");
         Self {
+            _suite: suite,
             _dir: dir,
             root,
             config,
@@ -656,6 +670,9 @@ fn healthcheck_probes_model_gateway_not_control() {
     assert!(!scratch.config.parent().expect("cfg").join("token").exists());
 
     // A 200 from something that is not hofund fails.
+    // Drop the first scratch first: Scratch holds the suite lock,
+    // and a shadowing `let scratch` would lock again on this thread.
+    drop(scratch);
     let other = fake_health("{\"status\":\"ok\"}");
     let scratch = Scratch::new(&other.addr.to_string(), ROUTED);
     let out = scratch.hofund_with(hofund(), &["healthcheck"]);
