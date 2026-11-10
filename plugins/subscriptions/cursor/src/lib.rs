@@ -19,8 +19,14 @@ mod cli;
 mod connect;
 mod discover;
 mod endpoints;
+/// Connect framing. Wired into a Run session in a later R-8 slice.
+#[allow(dead_code)]
+mod frame;
 mod import;
 mod models;
+/// Hand-written protobuf codec. Wired into a Run session in a later R-8 slice.
+#[allow(dead_code)]
+mod proto;
 mod quota;
 mod refresh;
 mod session;
