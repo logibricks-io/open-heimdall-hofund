@@ -459,6 +459,7 @@ HostContext::const fn key (& self) -> & PluginKey
 HostContext::const fn plugin (& self) -> & PluginId
 HostContext::fn accounts (& self) -> & AccountsHandle
 HostContext::fn bridge_callback (& self) -> & BridgeCallbackHandle
+HostContext::fn bridge_mcp_helper (& self) -> Result < SpawnRequest , PluginError >
 HostContext::fn clock (& self) -> & ClockHandle
 HostContext::fn dirs (& self) -> & DirHandle
 HostContext::fn from_backends (plugin : PluginId , http : Arc < dyn HttpBackend > , secrets : Arc < dyn SecretsBackend > , accounts : Arc < dyn AccountBackend > , clock : Arc < dyn ClockBackend > , scheduler : Arc < dyn SchedulerBackend > , process : Arc < dyn ProcessBackend > , dirs : Arc < dyn DirBackend > , observe : Arc < dyn ObserveBackend > ,) -> Self
@@ -470,6 +471,7 @@ HostContext::fn scheduler (& self) -> & SchedulerHandle
 HostContext::fn secrets (& self) -> & SecretsHandle
 HostContext::fn spawn_process (& self) -> & ProcessHandle
 HostContext::fn with_bridge_callback (mut self , bridge : Arc < dyn BridgeCallbackBackend >) -> Self
+HostContext::fn with_bridge_mcp_program (mut self , program : PathBuf) -> Self
 HostContext::fn with_loopback (mut self , loopback : Arc < dyn LoopbackBackend >) -> Self
 HostReadBudget
 HostReadBudget derives(Clone, Copy, Debug, PartialEq, Eq)
