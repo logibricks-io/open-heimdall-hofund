@@ -616,7 +616,6 @@ async fn serve_http2_stream(
                         let _ = body.flow_control().release_capacity(chunk.len());
                         if end_after_request {
                             let _ = send.send_data(Bytes::new(), true);
-                            break;
                         }
                     }
                     Some(Err(_)) | None => break,
@@ -667,6 +666,38 @@ mod tests {
         assert_eq!(requests[0].path(), "/v1/test");
         assert_eq!(requests[0].header("x-test-request"), Some("seen"));
         assert_eq!(requests[0].body(), b"ping");
+    }
+
+    #[tokio::test]
+    async fn http2_records_all_client_data_after_a_success_response() {
+        let server =
+            Http2Server::start(vec![Http2Response::new(200).data(b"reply".to_vec())]).await;
+        let tcp = TcpStream::connect(server.base_url().trim_start_matches("http://"))
+            .await
+            .expect("connect");
+        let (mut client, connection) = h2::client::handshake(tcp).await.expect("handshake");
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
+        let request = http::Request::builder()
+            .method("POST")
+            .uri(format!("{}/v1/bidi", server.base_url()))
+            .body(())
+            .expect("request");
+        let (response, mut send) = client.send_request(request, false).expect("send request");
+        send.send_data(Bytes::from_static(b"first"), false)
+            .expect("first data");
+        send.send_data(Bytes::from_static(b"second"), true)
+            .expect("second data");
+        let response = response.await.expect("response");
+        assert_eq!(response.status(), 200);
+        let mut body = response.into_body();
+        while body.data().await.transpose().expect("body").is_some() {}
+
+        assert_eq!(
+            server.requests()[0].data(),
+            [b"first".to_vec(), b"second".to_vec()]
+        );
     }
 
     #[tokio::test]
