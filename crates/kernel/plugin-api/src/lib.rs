@@ -79,10 +79,12 @@ pub use hofund_ir::{
     StopReason, StreamEvent, TextPart, too_long, words_of,
 };
 pub use host::{
-    AccountLease, AccountsHandle, AuthResult, BindBlocked, ClockHandle, DirHandle, GatewayHandle,
-    HostContext, HttpHandle, Job, JobId, JobSpec, LOOPBACK_CANCEL_PATH, LongLivedChild,
-    LoopbackBinding, LoopbackHandle, LoopbackSpec, ObserveHandle, PipedChild, ProcessHandle,
-    RedirectHost, SchedulerHandle, SecretsHandle, SpawnRequest, Spawned, SurfaceHost,
+    AccountLease, AccountsHandle, AuthResult, BRIDGE_CALLBACK_PATH_PREFIX, BindBlocked,
+    BridgeCallbackGuard, BridgeCallbackHandle, BridgeCallbackHandler, BridgeCallbackReply,
+    ClockHandle, DirHandle, GatewayHandle, HostContext, HttpHandle, Job, JobId, JobSpec,
+    LOOPBACK_CANCEL_PATH, LongLivedChild, LoopbackBinding, LoopbackHandle, LoopbackSpec,
+    ObserveHandle, PipedChild, ProcessHandle, RedirectHost, SchedulerHandle, SecretsHandle,
+    SpawnRequest, Spawned, SurfaceHost,
 };
 pub use http_budget::{HostReadBudget, read_budget, set_read_budget};
 pub use id::{
@@ -135,6 +137,9 @@ mod tests {
         assert_impl_all!(crate::DirHandle: Send, Sync);
         assert_impl_all!(crate::ObserveHandle: Send, Sync);
         assert_impl_all!(crate::LoopbackHandle: Send, Sync);
+        assert_impl_all!(crate::BridgeCallbackHandle: Send, Sync);
+        assert_impl_all!(crate::BridgeCallbackGuard: Send);
+        assert_impl_all!(crate::BridgeCallbackReply: Send, Sync);
         assert_impl_all!(crate::SurfaceHost: Send, Sync);
         assert_impl_all!(crate::PluginError: Send, Sync);
         assert_impl_all!(Arc<dyn crate::DynUpstreamFactory>: Send, Sync);
