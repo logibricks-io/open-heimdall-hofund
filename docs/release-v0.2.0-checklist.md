@@ -9,7 +9,7 @@ The general tag, dry-run, desktop, and signing process is
 happens. This page is the v0.2.0-specific preflight: what is still
 unmerged, what a dry-run must prove, and which smoke stays with Palmer.
 
-The reference freeze for this release is magpie `v0.1.3005` (`6abacd46`).
+The reference freeze for this release is the inspiration project's `v0.1.3005` (`6abacd46`).
 hofund `main` at the time of writing is `318912ff` (R-6: Claude Code bridge
 design, #736). Workspace version strings still say `0.1.0`. **v0.2.0 is not
 tagged, and no GitHub Release has been published from this tree.**
