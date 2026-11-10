@@ -800,24 +800,49 @@ mod tests {
             let host = pooled_host();
             let endpoints = endpoints(&h1, h2.base_url());
             let resolver = AgentHost::default();
-            let limits = Limits {
-                header_wait: Duration::from_millis(10),
-                ..Limits::default()
+            let token = token();
+            let limits = Limits::default();
+            let first = run(
+                host.context(),
+                &endpoints,
+                &resolver,
+                &token,
+                RunArgs {
+                    limits,
+                    ..empty_run_args()
+                },
+            );
+            let expire_after_http2_is_recorded = async {
+                for _ in 0..100 {
+                    if !h2.requests().is_empty() {
+                        break;
+                    }
+                    yield_times(2).await;
+                }
+                assert_eq!(
+                    h2.requests().len(),
+                    1,
+                    "HTTP/2 handshake must finish before the header wait expires"
+                );
+                advance_time(limits.header_wait + Duration::from_millis(1)).await;
+                std::future::pending::<()>().await;
             };
-            for _ in 0..2 {
-                run(
-                    host.context(),
-                    &endpoints,
-                    &resolver,
-                    &token(),
-                    RunArgs {
-                        limits,
-                        ..empty_run_args()
-                    },
-                )
-                .await
-                .expect("fallback");
-            }
+            let Race::Left(first) = race(first, expire_after_http2_is_recorded).await else {
+                unreachable!("the control future stays pending after the clock advances");
+            };
+            first.expect("fallback");
+            run(
+                host.context(),
+                &endpoints,
+                &resolver,
+                &token,
+                RunArgs {
+                    limits,
+                    ..empty_run_args()
+                },
+            )
+            .await
+            .expect("fallback");
             assert_eq!(h2.requests().len(), 1);
             assert_eq!(
                 h1.requests()
@@ -833,7 +858,7 @@ mod tests {
                 host.context(),
                 &endpoints,
                 &resolver,
-                &token(),
+                &token,
                 RunArgs {
                     limits,
                     ..empty_run_args()
