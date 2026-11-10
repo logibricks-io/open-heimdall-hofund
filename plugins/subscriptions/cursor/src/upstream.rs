@@ -14,6 +14,7 @@ use hofund_plugin_sdk::futures::{self, StreamExt};
 use crate::agent_host::AgentHost;
 use crate::cli::KeychainCache;
 use crate::endpoints::Endpoints;
+use crate::failure::{self, EMPTY_REPLY};
 use crate::proto::ServerEvent;
 use crate::run::{RunEvent, RunStream, run_stream};
 use crate::{request, session};
@@ -89,15 +90,15 @@ impl UpstreamProvider for CursorUpstream {
                 RunEvent::Server(ServerEvent::TextDelta(text)) => {
                     return Ok(text_stream(run, response_id, model, text));
                 }
-                RunEvent::Server(ServerEvent::TurnEnd(_)) => {
-                    return Ok(Completion::Stream(Box::pin(futures::empty())));
-                }
+                RunEvent::Server(ServerEvent::TurnEnd(_)) => return Err(empty_reply()),
                 RunEvent::Server(_) => {}
-                RunEvent::Trailer(frame) => return Err(trailer_failure(&frame.payload)),
-                RunEvent::ErrorBody(body) => return Err(body_failure(&body)),
+                RunEvent::Trailer(frame) => return Err(failure::trailer(&frame.payload)),
+                RunEvent::ErrorBody { status, body } => {
+                    return Err(failure::body(status, &body));
+                }
             }
         }
-        Ok(Completion::Stream(Box::pin(futures::empty())))
+        Err(empty_reply())
     }
 
     async fn probe(&self, query: &ProbeQuery) -> Result<ProbeReport, PluginError> {
@@ -181,11 +182,11 @@ async fn next_text_event(state: &mut TextStreamState) -> Result<Option<StreamEve
             Some(Ok(RunEvent::Server(_))) => {}
             Some(Ok(RunEvent::Trailer(frame))) => {
                 state.finished = true;
-                return Err(trailer_failure(&frame.payload));
+                return Err(failure::trailer(&frame.payload));
             }
-            Some(Ok(RunEvent::ErrorBody(body))) => {
+            Some(Ok(RunEvent::ErrorBody { status, body })) => {
                 state.finished = true;
-                return Err(body_failure(&body));
+                return Err(failure::body(status, &body));
             }
             Some(Err(error)) => {
                 state.finished = true;
@@ -204,27 +205,8 @@ fn text_delta(text: String) -> StreamEvent {
     })
 }
 
-fn trailer_failure(payload: &[u8]) -> PluginError {
-    let body = hofund_plugin_sdk::json::from_slice::<hofund_plugin_sdk::json::Value>(payload).ok();
-    let message = body
-        .as_ref()
-        .and_then(|body| body.get("error").unwrap_or(body).get("message"))
-        .and_then(hofund_plugin_sdk::json::Value::as_str)
-        .map(str::to_owned)
-        .unwrap_or_else(|| String::from_utf8_lossy(payload).trim().to_owned());
-    body_failure(message.as_bytes())
-}
-
-fn body_failure(body: &[u8]) -> PluginError {
-    let message = String::from_utf8_lossy(body).trim().to_owned();
-    PluginError::status_error(
-        502,
-        if message.is_empty() {
-            "upstream Run failed".to_owned()
-        } else {
-            message
-        },
-    )
+fn empty_reply() -> PluginError {
+    PluginError::status_error(502, format!("upstream Run returned {EMPTY_REPLY}"))
 }
 
 #[cfg(test)]
@@ -501,24 +483,30 @@ mod tests {
     }
 
     #[test]
-    fn a_turn_without_text_returns_an_empty_stream_not_an_empty_reply_error() {
+    fn a_turn_without_text_returns_the_empty_reply_error() {
         let _guard = crate::http2_memory::test_lock();
         crate::http2_memory::reset_for_tests();
         block_on(async {
-            let h2 = Http2Server::start(vec![Http2Response::new(200).data(turn_end_frame())]).await;
-            let h1 = Http1Server::start(vec![config_reply(h2.base_url())]).await;
-            let host = pooled_host();
-            let account = store_account(&host).await;
-            let upstream = upstream(&host, &h1, h2.base_url(), account);
-            let events = collect(
-                upstream
+            for response in [
+                Http2Response::new(200).data(turn_end_frame()),
+                Http2Response::new(200),
+            ] {
+                let h2 = Http2Server::start(vec![response]).await;
+                let h1 = Http1Server::start(vec![config_reply(h2.base_url())]).await;
+                let host = pooled_host();
+                let account = store_account(&host).await;
+                let upstream = upstream(&host, &h1, h2.base_url(), account);
+                let error = upstream
                     .execute(text_request(), ProtocolId::OPENAI_CHAT)
                     .await
-                    .expect("empty stream is allowed in this slice"),
-            )
-            .await
-            .expect("empty stream");
-            assert!(events.is_empty());
+                    .map(|_| ())
+                    .expect_err("an empty successful stream is not allowed");
+                assert_eq!(error.status(), Some(502));
+                assert!(error
+                    .message()
+                    .contains("an empty reply (the model answered nothing; try again)"));
+                assert!(!error.message().contains("the upstream stopped sending"));
+            }
         });
     }
 
@@ -584,7 +572,7 @@ mod tests {
                 .await
                 .map(|_| ())
                 .expect_err("terminal failure before Ok");
-            assert_eq!(error.status(), Some(502));
+            assert_eq!(error.status(), Some(503));
             assert!(error.message().contains("unavailable"));
         });
     }
@@ -605,7 +593,7 @@ mod tests {
                 .await
                 .map(|_| ())
                 .expect_err("synthetic end frame");
-            assert_eq!(error.status(), Some(502));
+            assert_eq!(error.status(), Some(400));
             assert!(error.message().contains("bad run"));
             assert_eq!(h1.requests().len(), 1);
         });

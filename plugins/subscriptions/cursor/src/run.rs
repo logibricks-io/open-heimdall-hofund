@@ -82,8 +82,8 @@ pub(crate) enum RunEvent {
     Server(ServerEvent),
     /// A Connect trailer, including a synthetic HTTP/1.1 failure.
     Trailer(Frame),
-    /// A drained non-2xx HTTP/2 response body.
-    ErrorBody(Vec<u8>),
+    /// A drained non-2xx HTTP/2 response body and its status.
+    ErrorBody { status: u16, body: Vec<u8> },
 }
 
 /// The live Run event stream. Dropping it cancels the transport.
@@ -105,7 +105,7 @@ pub(crate) async fn run(
         match event? {
             RunEvent::Server(event) => output.events.push(event),
             RunEvent::Trailer(trailer) => output.trailers.push(trailer),
-            RunEvent::ErrorBody(body) => output.error_body = Some(body),
+            RunEvent::ErrorBody { body, .. } => output.error_body = Some(body),
         }
     }
     Ok(output)
@@ -237,9 +237,10 @@ async fn run_http2<'a>(
     mut session: hofund_plugin_api::DuplexSession,
     args: RunArgs<'a>,
 ) -> Result<RunStream<'a>, PluginError> {
-    if !(200..300).contains(&session.status().as_u16()) {
+    let status = session.status().as_u16();
+    if !(200..300).contains(&status) {
         let body = drain(session.reader(), args.limits.error_drain).await?;
-        return Ok(one_event(RunEvent::ErrorBody(body)));
+        return Ok(one_event(RunEvent::ErrorBody { status, body }));
     }
     let (reader, mut writer) = session.into_split();
     writer
