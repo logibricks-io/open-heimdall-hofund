@@ -20,6 +20,7 @@ mod cli;
 mod connect;
 mod discover;
 mod endpoints;
+mod failure;
 mod frame;
 mod http2_memory;
 mod import;
