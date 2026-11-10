@@ -296,6 +296,70 @@ mod tests {
     }
 
     #[test]
+    fn unserved_model_phrases_cool_and_nearby_wording_does_not() {
+        for message in [
+            "model_not_found",
+            "no such model",
+            "unknown model",
+            "invalid model",
+            "unsupported model",
+            "model is not supported",
+            "model is not accessible",
+            "model is not available",
+            "model is not found",
+            "model is not enabled",
+            "model is not allowed",
+            "model does not exist",
+            "model doesn't exist",
+        ] {
+            let error = classify(400, "invalid_argument", message);
+            assert_eq!(error.status(), Some(400), "{message}");
+            assert_eq!(error.message(), message, "{message}");
+            assert!(error.cools(), "{message}");
+        }
+
+        for message in [
+            "the feature is not available",
+            "model name rejected",
+            "bad Run shape",
+        ] {
+            let error = classify(400, "invalid_argument", message);
+            assert_eq!(error.status(), Some(400), "{message}");
+            assert!(!error.cools(), "{message}");
+        }
+    }
+
+    #[test]
+    fn empty_http_bodies_use_the_status_text() {
+        for (status, text) in [
+            (400, "Bad Request"),
+            (401, "Unauthorized"),
+            (402, "Payment Required"),
+            (403, "Forbidden"),
+            (404, "Not Found"),
+            (408, "Request Timeout"),
+            (409, "Conflict"),
+            (410, "Gone"),
+            (413, "Payload Too Large"),
+            (422, "Unprocessable Entity"),
+            (429, "Too Many Requests"),
+            (500, "Internal Server Error"),
+            (501, "Not Implemented"),
+            (502, "Bad Gateway"),
+            (503, "Service Unavailable"),
+            (504, "Gateway Timeout"),
+        ] {
+            let error = body(status, b"");
+            assert_eq!(error.status(), Some(status), "{status}");
+            assert!(
+                error.message().contains(text),
+                "{status}: {}",
+                error.message()
+            );
+        }
+    }
+
+    #[test]
     fn http_failures_without_a_connect_code_keep_the_http_status() {
         for (status, bytes, expected) in [
             (429, b"".as_slice(), "Too Many Requests"),

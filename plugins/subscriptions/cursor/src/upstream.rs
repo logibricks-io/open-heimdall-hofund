@@ -842,6 +842,56 @@ mod tests {
     }
 
     #[test]
+    fn regional_http1_failure_retries_http2_even_when_the_agent_url_is_unchanged() {
+        let _guard = http2_memory::test_lock();
+        http2_memory::reset_for_tests();
+        block_on(async {
+            let h2 = Http2Server::start(vec![
+                Http2Response::new(200)
+                    .data([text_frame("same host retry"), turn_end_frame()].concat()),
+            ])
+            .await;
+            let h1 = Http1Server::start(vec![
+                config_reply(h2.base_url()),
+                Http1Response::new(401).body(b"account is in another region".to_vec()),
+                config_reply(h2.base_url()),
+            ])
+            .await;
+            let host = pooled_host();
+            let account = store_account(&host).await;
+            let upstream = upstream(&host, &h1, h2.base_url(), account);
+            let token = SecretString::from("loopback-access-token".to_owned());
+            assert_eq!(
+                upstream
+                    .agent_host
+                    .resolve(host.context(), &upstream.endpoints, &token, false, None)
+                    .await,
+                h2.base_url()
+            );
+            http2_memory::remember(host.context());
+
+            let events = collect(
+                upstream
+                    .execute(text_request(), ProtocolId::OPENAI_CHAT)
+                    .await
+                    .expect("http1 regional retry at the same host"),
+            )
+            .await
+            .expect("retried stream");
+            assert!(events.iter().any(|event| matches!(
+                event,
+                StreamEvent::TextDelta(TextDelta { text, .. }) if text == "same host retry"
+            )));
+            assert_eq!(h2.requests().len(), 1);
+            assert_eq!(h1.requests().len(), 3);
+            assert_eq!(
+                h1.requests()[2].path(),
+                "/aiserver.v1.ServerConfigService/GetServerConfig"
+            );
+        });
+    }
+
+    #[test]
     fn a_second_regional_failure_is_403_without_a_third_attempt() {
         let _guard = http2_memory::test_lock();
         http2_memory::reset_for_tests();
