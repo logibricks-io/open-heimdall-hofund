@@ -65,14 +65,14 @@ fn subscription_factory(
     factory.build(&cfg, host.context()).expect("build")
 }
 
-fn models_dir_name(id: &hofund_plugin_api::AccountId) -> PathBuf {
+fn models_hash_name(id: &hofund_plugin_api::AccountId) -> String {
     let digest = hofund_plugin_sdk::digest::sha256(id.to_string().as_bytes());
     let mut name = String::new();
     for byte in digest {
         use std::fmt::Write as _;
         write!(name, "{byte:02x}").expect("hex");
     }
-    std::env::temp_dir().join(name)
+    name
 }
 
 fn enqueue_period(host: &TestHost) {
@@ -511,7 +511,6 @@ fn a2a_42_list_models_spawn_uses_isolated_models_dir() {
             .line("auto - Auto (default)")
             .exits(|_| vec![]),
     );
-    let expected_dir = models_dir_name(&id);
     let list = block_on(sub.list_models(&id, host.context())).expect("models");
     assert!(!list.models().is_empty());
     let spawn = host
@@ -520,9 +519,12 @@ fn a2a_42_list_models_spawn_uses_isolated_models_dir() {
         .into_iter()
         .next()
         .expect("models spawn");
+    let expected_dir = PathBuf::from(spawn.env_var("CURSOR_CONFIG_DIR").expect("config dir"));
     assert_eq!(
-        spawn.env_var("CURSOR_CONFIG_DIR"),
-        Some(expected_dir.as_os_str())
+        expected_dir
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned()),
+        Some(models_hash_name(&id))
     );
     assert_eq!(spawn.cwd, expected_dir);
     assert_ne!(
@@ -562,9 +564,21 @@ fn r8b_list_models_removes_temp_dir_when_the_cli_fails() {
     block_on(host.context().accounts().upsert(account, blob.to_secret())).expect("upsert");
     host.process()
         .script_piped(PipedScript::new().exits(|_| vec![]));
-    let expected_dir = models_dir_name(&id);
     let error = block_on(sub.list_models(&id, host.context())).expect_err("empty models");
     assert!(error.to_string().contains("model list"));
+    let spawn = host
+        .process()
+        .piped_spawns()
+        .into_iter()
+        .next()
+        .expect("models spawn");
+    let expected_dir = PathBuf::from(spawn.env_var("CURSOR_CONFIG_DIR").expect("config dir"));
+    assert_eq!(
+        expected_dir
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned()),
+        Some(models_hash_name(&id))
+    );
     assert!(
         !expected_dir.exists(),
         "models temp dir must be removed after a failing CLI"
