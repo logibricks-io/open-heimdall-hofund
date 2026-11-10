@@ -11,9 +11,12 @@ homepage.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+hofund-ir = { workspace = true }
 hofund-plugin-api = { workspace = true }
 hofund-plugin-sdk = { workspace = true }
 regex = "1.13.1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
 
 [dev-dependencies]
 hofund-kit-subscription = { workspace = true }

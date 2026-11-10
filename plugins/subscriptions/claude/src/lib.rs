@@ -23,6 +23,7 @@ use hofund_plugin_sdk::oauth::{SecretObject, secret_text};
 
 mod account;
 mod agent_sign_in;
+pub mod bridge;
 mod catalog_cache;
 mod cli;
 mod creds;
@@ -32,6 +33,7 @@ mod lock;
 mod models;
 mod run_lock;
 mod setup_token;
+mod upstream;
 mod usage;
 mod usage_reset;
 
@@ -135,6 +137,7 @@ impl SubscriptionFactory for ClaudeFactory {
             command: cfg.command.clone(),
             flow: SignInFlow::Bridge { command: COMMAND },
             pending: Mutex::new(HashMap::new()),
+            bridge: Mutex::new(bridge::Bridge::new()),
         }))
     }
 }
@@ -165,6 +168,8 @@ struct Claude {
     flow: SignInFlow,
     /// Sign-ins in progress, by session id.
     pending: Mutex<HashMap<String, Pending>>,
+    /// Bridge run table. This slice constructs it but does not serve requests.
+    bridge: Mutex<bridge::Bridge>,
 }
 
 impl Claude {
@@ -511,6 +516,11 @@ impl Subscription for Claude {
         _account: &AccountId,
         _host: &HostContext,
     ) -> Result<Arc<dyn UpstreamProvider>, PluginError> {
+        // The table is constructed with the instance; serving it is a later slice.
+        let _bridge = self
+            .bridge
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         Err(PluginError::unsupported(
             "requests through Claude Code are not served yet",
         ))
