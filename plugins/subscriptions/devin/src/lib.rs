@@ -1,4 +1,5 @@
-//! Devin subscription plugin.
+//! Devin subscription plugin: import CLI credentials, models, and quota.
+//! Subscription chat is not implemented.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

@@ -1653,3 +1653,212 @@ fn s10_docs_cover_short_lived_keys_stats_routes_and_parity() {
     assert!(comparison.contains("| Short-lived gateway keys |"));
     assert!(read("CHANGELOG.md").contains("Short-lived gateway keys and issuers (P0-4d)"));
 }
+
+/// Counts in `docs/feature-parity.md` `## Summary` must match the `## Matrix`
+/// rows (issue #274). A naive split on `|` fails when an evidence cell
+/// contains an unescaped pipe, so the parser finds the stage/status pair
+/// instead of counting cells.
+#[test]
+fn feature_parity_summary_matches_the_table() {
+    let text = read_to_string(&workspace_root().join("docs/feature-parity.md"));
+    let counted = count_feature_parity_matrix(&text);
+    let summary = parse_feature_parity_summary(&text);
+    assert_eq!(
+        summary, counted,
+        "docs/feature-parity.md Summary does not match the Matrix (issue #274)"
+    );
+    assert_eq!(
+        counted.done + counted.partial + counted.missing,
+        counted.counted,
+        "counted total must be Done + Partial + Missing"
+    );
+    assert_eq!(
+        counted.core + counted.auxiliary,
+        counted.counted,
+        "core + auxiliary must equal the counted total"
+    );
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ParityCounts {
+    done: u32,
+    partial: u32,
+    missing: u32,
+    not_planned: u32,
+    counted: u32,
+    core: u32,
+    auxiliary: u32,
+}
+
+fn count_feature_parity_matrix(text: &str) -> ParityCounts {
+    let matrix = text
+        .split_once("## Matrix")
+        .unwrap_or_else(|| panic!("docs/feature-parity.md is missing ## Matrix"))
+        .1;
+    let matrix = matrix.split("\n## ").next().expect("matrix section");
+    let mut counts = ParityCounts {
+        done: 0,
+        partial: 0,
+        missing: 0,
+        not_planned: 0,
+        counted: 0,
+        core: 0,
+        auxiliary: 0,
+    };
+    let mut ids = BTreeSet::new();
+    for line in matrix.lines() {
+        let Some((id, stage, status)) = matrix_row(line) else {
+            continue;
+        };
+        assert!(
+            ids.insert(id.clone()),
+            "duplicate feature-parity row id {id}"
+        );
+        match status {
+            "Done" => counts.done += 1,
+            "Partial" => counts.partial += 1,
+            "Missing" => counts.missing += 1,
+            "Not planned" => {
+                counts.not_planned += 1;
+                continue;
+            }
+            other => panic!("row {id}: unknown status {other}"),
+        }
+        counts.counted += 1;
+        match stage {
+            "core" => counts.core += 1,
+            "auxiliary" => counts.auxiliary += 1,
+            other => panic!("row {id}: unexpected counted stage {other}"),
+        }
+    }
+    assert!(
+        !ids.is_empty(),
+        "docs/feature-parity.md Matrix contained no rows"
+    );
+    counts
+}
+
+fn matrix_row(line: &str) -> Option<(String, &'static str, &'static str)> {
+    let rest = line.strip_prefix('|')?;
+    let (id_cell, rest) = rest.split_once('|')?;
+    let id = id_cell.trim();
+    if !is_parity_row_id(id) {
+        return None;
+    }
+    let (stage, status) = stage_and_status(rest)?;
+    Some((id.to_owned(), stage, status))
+}
+
+fn is_parity_row_id(id: &str) -> bool {
+    let mut chars = id.chars();
+    let mut saw_digit = false;
+    let mut saw_dot = false;
+    let mut saw_frac = false;
+    for ch in chars.by_ref() {
+        if ch.is_ascii_digit() {
+            if saw_dot {
+                saw_frac = true;
+            } else {
+                saw_digit = true;
+            }
+            continue;
+        }
+        if ch == '.' && saw_digit && !saw_dot {
+            saw_dot = true;
+            continue;
+        }
+        if ch.is_ascii_lowercase() && saw_frac {
+            return chars.next().is_none();
+        }
+        return false;
+    }
+    saw_digit && saw_dot && saw_frac
+}
+
+fn stage_and_status(line: &str) -> Option<(&'static str, &'static str)> {
+    let mut search_from = 0;
+    while let Some(rel) = line[search_from..].find('|') {
+        let after_pipe = search_from + rel + 1;
+        let trimmed = line[after_pipe..].trim_start();
+        let stage = if let Some(rest) = trimmed.strip_prefix("core") {
+            if !cell_ended(rest) {
+                search_from = after_pipe;
+                continue;
+            }
+            "core"
+        } else if let Some(rest) = trimmed.strip_prefix("auxiliary") {
+            if !cell_ended(rest) {
+                search_from = after_pipe;
+                continue;
+            }
+            "auxiliary"
+        } else if let Some(rest) = trimmed.strip_prefix('\u{2014}') {
+            if !cell_ended(rest) {
+                search_from = after_pipe;
+                continue;
+            }
+            "\u{2014}"
+        } else {
+            search_from = after_pipe;
+            continue;
+        };
+        let after_stage = match stage {
+            "core" => trimmed["core".len()..].trim_start(),
+            "auxiliary" => trimmed["auxiliary".len()..].trim_start(),
+            "\u{2014}" => trimmed['\u{2014}'.len_utf8()..].trim_start(),
+            _ => unreachable!(),
+        };
+        let after_stage = after_stage.strip_prefix('|')?;
+        let status_cell = after_stage.trim_start();
+        for status in ["Not planned", "Done", "Partial", "Missing"] {
+            if let Some(rest) = status_cell.strip_prefix(status)
+                && cell_ended(rest)
+            {
+                return Some((stage, status));
+            }
+        }
+        search_from = after_pipe;
+    }
+    None
+}
+
+fn cell_ended(after_token: &str) -> bool {
+    after_token.is_empty()
+        || after_token.starts_with('|')
+        || after_token.starts_with(char::is_whitespace)
+}
+
+fn parse_feature_parity_summary(text: &str) -> ParityCounts {
+    let summary = text
+        .split_once("## Summary")
+        .unwrap_or_else(|| panic!("docs/feature-parity.md is missing ## Summary"))
+        .1;
+    let summary = summary
+        .split_once("### ")
+        .map(|(before, _)| before)
+        .unwrap_or(summary);
+    let read = |label: &str| summary_count(summary, label);
+    ParityCounts {
+        done: read("Done"),
+        partial: read("Partial"),
+        missing: read("Missing"),
+        not_planned: read("Not planned (not counted)"),
+        counted: read("Total counted"),
+        core: read("core"),
+        auxiliary: read("auxiliary"),
+    }
+}
+
+fn summary_count(summary: &str, label: &str) -> u32 {
+    let needle = format!("| {label} |");
+    for line in summary.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix(&needle) {
+            let rest = rest.trim().trim_end_matches('|').trim();
+            return rest.parse().unwrap_or_else(|_| {
+                panic!("docs/feature-parity.md Summary has a non-numeric count for {label}")
+            });
+        }
+    }
+    panic!("docs/feature-parity.md Summary is missing {label}");
+}

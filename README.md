@@ -23,13 +23,31 @@ Heimdall is the gate. Hofund is the sword that guards it.
 
 ## Status
 
-**0.1.0 is prepared.** The canonical IR, the Anthropic Messages, OpenAI Chat
-Completions, OpenAI Responses, and Generative Language codecs, quirk profiles,
-upstream adapters, ordered failover, the local HTTP server, config adapters
-for Claude Code, Codex CLI, Gemini CLI, and OpenCode, and the menu-bar app
-are implemented. See [docs/codecs.md](docs/codecs.md). This tree does not
-publish a GitHub release; the tag step is described in
-[docs/release.md](docs/release.md).
+**v0.2.0 is not tagged.** This tree is scored against a frozen reference
+(magpie `v0.1.3005`). No GitHub Release has been published; the tag step is
+in [docs/release.md](docs/release.md). What follows is what is on `main`
+(`318912ff`), not what lives only on open pull requests. Most subscription
+and routing work is verified with mocks only; real-account smoke is not done.
+
+The canonical IR, the Anthropic Messages, OpenAI Chat Completions, OpenAI
+Responses, and Generative Language codecs, quirk profiles, upstream adapters,
+ordered failover, the local HTTP server, config adapters for Claude Code,
+Codex CLI, Gemini CLI, and OpenCode, and the menu-bar app are implemented.
+See [docs/codecs.md](docs/codecs.md). Fourteen subscription plugins ship
+under `plugins/subscriptions`. Request serving is not uniform:
+
+- **Cursor:** sign-in, cursor-agent import, models, and usage only. Requests
+  through Cursor's agent API are not served on this tree.
+- **Claude Pro/Max:** sign-in, refresh, models, and quota. Requests through
+  Claude Code are not served on this tree (the bridge design is on `main`;
+  the implementation is unmerged).
+- **Devin:** sign-in and account work only. Subscription chat is not
+  implemented.
+- **Kiro:** unary text-only requests (no stream, tools, or images).
+- **Zed:** POST `/completions` upstream is on this tree (mocks only).
+
+See [docs/feature-parity.md](docs/feature-parity.md) for the scored matrix
+and for what is still unmerged.
 
 `hofund serve` listens on `127.0.0.1:3425` unless the config says otherwise.
 Every `/v1` request needs the bearer token from `hofund token show`. The
@@ -37,7 +55,11 @@ commands are `serve`, `config check`, `token show`, `token rotate`, `usage`,
 `agent list`, `agent connect`, `agent disconnect`, `agent status`, and
 `subscription list`, `sign-in`, `sign-out`, `refresh`, and `quota`.
 
-## Planned features
+## Scope
+
+These items are implemented on `main` except where
+[docs/feature-parity.md](docs/feature-parity.md) marks a row Partial or
+Missing. v0.2.0 is not tagged.
 
 - Hub-and-spoke translation between LLM API protocols: Anthropic Messages,
   OpenAI Chat Completions, OpenAI Responses, and the Generative Language API.

@@ -1,6 +1,6 @@
 [package]
 name = "hofund-plugin-subscription-cursor"
-description = "Cursor subscription: browser PKCE sign-in, cursor-agent import, models, and usage."
+description = "Cursor subscription: browser PKCE sign-in, cursor-agent import, models, and usage. Agent-API requests are not served."
 version.workspace = true
 authors.workspace = true
 edition.workspace = true

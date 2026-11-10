@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Documentation honesty for the v0.2.0 freeze (Must #11, #274):
+  `docs/feature-parity.md` snapshot and Summary counts now match the Matrix
+  (an xtask invariant refuses drift); README, CLI help, and subscription crate
+  docs describe what `main` actually serves versus unmerged open work. Cursor
+  and Claude Code request serving, and Devin chat, are not claimed as shipped.
+  Kiro is documented as unary text-only. Zed's POST `/completions` path on
+  `main` is documented. A truncated A-2c Unreleased bullet is closed so it no
+  longer contradicts R-16. Later Unreleased `### Added` blocks stay in
+  historical order so existing bullets do not move.
+
 - R-16: Zed subscription upstream via POST `/completions` (provider envelope,
   NDJSON event unwrap, unary fold), model-token refresh with stale headers,
   live `/models` with snapshot fallback, plan quota from `/client/users/me`,
@@ -77,8 +87,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Qoder, Zed, and WorkBuddy subscription plugins (`hofund-plugin-subscription-qoder`,
   `-zed`, `-workbuddy`): user-supplied credential import for Qoder and Zed, WorkBuddy
   desktop auth from CodeBuddyExtension, refresh, model lists, OpenAI chat upstream
-  (Zed cloud completions remain unsupported), WorkBuddy billing quota, Qoder and
-  WorkBuddy daily check-in, and deterministic `a2c_*` tests (A-2c, feature-parity
+  (Zed POST `/completions` landed later in R-16; this slice did not serve them),
+  WorkBuddy billing quota, Qoder and WorkBuddy daily check-in, and deterministic
+  `a2c_*` tests (A-2c, feature-parity row 3.5 partial).
 - Z Code subscription plugin (`hofund-plugin-subscription-zcode`): agent
   `credentials.json` import with AES-GCM decryption, team plan key resolution,
   monitor usage quota, GLM model list, Anthropic Messages upstream on Z.ai or

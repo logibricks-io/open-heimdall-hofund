@@ -1,6 +1,6 @@
 [package]
 name = "hofund-plugin-subscription-zed"
-description = "Zed subscription: import credentials, mint model tokens, and serve OpenAI Responses upstream."
+description = "Zed subscription: import credentials, mint model tokens, and serve POST /completions upstream."
 version.workspace = true
 authors.workspace = true
 edition.workspace = true

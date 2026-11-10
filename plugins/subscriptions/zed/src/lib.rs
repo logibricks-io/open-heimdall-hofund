@@ -1,4 +1,5 @@
-//! Zed subscription plugin.
+//! Zed subscription plugin: import credentials, mint model tokens, and serve
+//! POST `/completions` upstream.
 
 use std::sync::Arc;
 

@@ -1,4 +1,5 @@
 //! Cursor subscription: browser sign-in, cursor-agent import, models, and usage.
+//! Requests through Cursor's agent API are not served yet.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
