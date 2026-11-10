@@ -1074,6 +1074,11 @@ TierId
 TierId #[non_exhaustive] derives(Clone, Debug)
 TierId::const fn from_static (value : & 'static str) -> Self
 TierId::fn as_str (& self) -> & str
+ToolArguments
+ToolArgumentsDelta
+ToolChoice
+ToolChoiceMode
+ToolResultPart
 UpstreamFactory
 UpstreamFactory::Config
 UpstreamFactory::fn build (& self , cfg : & Self :: Config , host : & HostContext ,) -> Result < Arc < dyn UpstreamProvider > , BuildError >
