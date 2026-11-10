@@ -1,13 +1,13 @@
-//! Claude bridge stages A–B: trusted effort / think-off / classifier bits.
+//! Subscription-bridge stages A–B: trusted effort / think-off / classifier bits.
 //!
 //! Written onto `Request.extensions` after decode and before `execute`.
-//! See `docs/claude-bridge-design.md` §1.5.
+//! See the H8b subscription-bridge design §1.5.
 
 use hofund_ir::Request;
 use hofund_plugin_api::ProtocolId;
 use serde_json::{Value, json};
 
-/// Extension keys consumed by the Claude subscription plugin.
+/// Extension keys consumed by the H8b subscription plugin.
 pub const BRIDGE_EFFORT: &str = "hofund_bridge_effort";
 pub const THINK_OFF: &str = "hofund_think_off";
 pub const AUTO_MODE_CLASSIFIER: &str = "hofund_auto_mode_classifier";
@@ -207,7 +207,7 @@ mod tests {
     use hofund_ir::{ContentPart, Message, Role};
 
     fn req() -> Request {
-        Request::new("claude")
+        Request::new("model")
     }
 
     #[test]

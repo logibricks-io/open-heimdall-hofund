@@ -209,7 +209,7 @@ pub struct Ping {
 /// Neutral signal that the provider is still working.
 ///
 /// Analogous to the reference `KAlive`. Encoders map this to a protocol
-/// keepalive (a throttled Anthropic `ping`, a Chat Completions SSE comment,
+/// keepalive (a throttled Messages `ping`, a Chat Completions SSE comment,
 /// or a repeated Responses `response.in_progress`).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct StillWorking {

@@ -583,6 +583,7 @@ MemberKey #[non_exhaustive] derives(Clone, Debug)
 MemberKey::const fn from_static (value : & 'static str) -> Self
 MemberKey::fn as_str (& self) -> & str
 Message
+MessageStart
 Method
 Method #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
 Method::Delete
@@ -871,6 +872,7 @@ QuotaObservation::const fn with_window_reset (mut self , after : Duration) -> Se
 QuotaObservation::fn from_stored (plugin : PluginId) -> Self
 QuotaObservation::fn plugin (& self) -> & PluginId
 QuotaObservation::fn window (& self) -> Option < & str >
+QuotaObservation::fn with_window (mut self , window : impl Into < String >) -> Self
 QuotaQuery
 QuotaQuery #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 QuotaQuery::fn account (& self) -> Option < & AccountId >
@@ -1035,6 +1037,7 @@ SpawnRequest::fn program (& self) -> & Path
 Spawned
 Spawned #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
 Spawned::const fn id (self) -> u32
+StillWorking
 Stop
 StopReason
 StreamEvent
