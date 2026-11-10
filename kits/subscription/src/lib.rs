@@ -15,7 +15,9 @@ pub use hofund_plugin_host::{
     PipedScript, PipedSpawn, RecordingHttp, RecordingObserve, RecordingProcess, RecordingScheduler,
     RecordingSecrets, TestHost, test_host,
 };
-pub use servers::{Http1Response, Http1Server, Http2Response, Http2Server};
+pub use servers::{
+    HeaderPark, Http1Response, Http1Server, Http2Response, Http2Server, header_park,
+};
 
 /// Runs `future` on a paused Tokio clock so tests can [`advance_time`].
 ///
