@@ -719,6 +719,7 @@ mod tests {
         });
     }
 
+    #[test]
     fn connection_refused_falls_back_once_without_setting_memory() {
         let _guard = http2_memory::test_lock();
         http2_memory::reset_for_tests();
