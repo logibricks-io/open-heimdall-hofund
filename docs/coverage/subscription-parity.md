@@ -13,7 +13,7 @@ Legend: **Done** = matches the reference at checklist granularity; **Partial** =
 | Vendor section | Done | Partial | Missing | N/A | Unverified |
 |---|---|---|---|---|---|
 | Claude Pro/Max (`claude`) | 1 | 11 | 9 | 2 | 0 |
-| Cursor (`cursor`) | 1 | 14 | 4 | 2 | 0 |
+| Cursor (`cursor`) | 1 | 15 | 3 | 2 | 0 |
 | Devin (`devin`) | 2 | 5 | 11 | 1 | 0 |
 | Zed (`zed`) | 0 | 6 | 1 | 3 | 0 |
 | Kiro (`kiro`) | 0 | 13 | 5 | 1 | 0 |
@@ -99,10 +99,10 @@ Every other gap below maps to an existing plan item.
 | b | import sources | Agent home `.cursor` auth + keychain | `AgentSignIn` + discover (`lib.rs:37-41`) | Partial | Team id from cli-config for billing (`cursor/index.mjs:120-177`) |
 | c | token storage | Plugin session store; core mover side logins | Daemon secret blob + optional agent read-only | Partial | Persist team/active org metadata if needed for quota |
 | d | refresh | `cursor-agent status` / token TTL (`cursor/index.mjs:182-194`, CLI_MARK) | `refresh.rs` + `session.rs` spawn status | Partial | Serialize refresh like plugin; API key token refresh |
-| e | upstream wire | Connect bidi `AgentService/Run` + HTTP/1 RunSSE + BidiAppend (`cursor/index.mjs:13-17`, `44-46`) | `run.rs` incrementally reads either transport, answers KV/exec, sends heartbeats, and enforces monotonic idle/quiet limits; `upstream.rs` opens one stateless Run per execute and retries one regional failure after fresh host discovery | Partial | Tools (**R-9**) |
-| f | inbound shapes | OpenAI-compatible chat to plugin fetch (`cursor/index.mjs:29-30`) | Canonical IR text history maps to stable JSON transcript blobs plus the protobuf user turn in `request.rs`; gateway codecs supply the IR | Partial | Tools and images (**R-9**) |
-| g | streaming | Connect stream / RunSSE (`cursor/index.mjs:13-17`) | `Completion::Stream` starts only after the first text delta, then emits text and the clean EndTurn trio; an empty turn is a non-cooling 502, pre-text stalls have idle/quiet diagnostics, and post-text stalls say the upstream stopped sending | Partial | Usage, reasoning, and tools (**R-9**) |
-| h | tool calls | MCP `CallDynamicTool` (`cursor/index.mjs:21-26`, `51`) | Not served | Missing | **R-9** |
+| e | upstream wire | Connect bidi `AgentService/Run` + HTTP/1 RunSSE + BidiAppend (`cursor/index.mjs:13-17`, `44-46`) | `run.rs` incrementally reads either transport, answers KV/exec and selected field-36 tool lists, sends heartbeats, and enforces monotonic idle/quiet/tool-count limits; `upstream.rs` opens one stateless Run per execute and retries one regional failure after fresh host discovery | Partial | Reasoning, usage, images, effort, and Max Mode (**R-9**) |
+| f | inbound shapes | OpenAI-compatible chat to plugin fetch (`cursor/index.mjs:29-30`) | Canonical IR text and tool history maps to stable JSON transcript blobs plus the protobuf user turn in `request.rs`; selected tools become context/wrapper definitions and the dynamic catalog; gateway codecs supply the IR | Partial | Images (**R-9**) |
+| g | streaming | Connect stream / RunSSE (`cursor/index.mjs:13-17`) | `Completion::Stream` starts after the first text delta or caller tool event, then emits text or full-argument tool blocks and the clean EndTurn/ToolUse ending; an empty turn is a non-cooling 502, pre-output stalls have idle/quiet diagnostics, and post-output stalls say the upstream stopped sending | Partial | Usage and reasoning (**R-9**) |
+| h | tool calls | MCP `CallDynamicTool` (`cursor/index.mjs:21-26`, `51`) | Selected MCP execs emit caller tool blocks; unknown/Cursor-owned execs stay refused; server-completed calls are not emitted; counts, checkpoints, and the 60-second count wait seal steps | Partial | Streaming argument deltas and Cursor-owned tools are deferred |
 | i | images | unverified in core; plugin native session handles blobs | Not served | Missing | **R-9** |
 | j | reasoning | Plugin tests `reasoning.test.mjs`; max mode | Not served | Missing | **R-9** |
 | k | quota / usage | Connect `GetCurrentPeriodUsage`, team header (`cursor/index.mjs:171-176`, `connect.rs` parity) | `quota()` via Connect unary (`lib.rs:306-322`, `connect.rs:9-38`) | Partial | Deferred/step usage, credit events (`cursor/deferred-usage.test.mjs`) — **R-9** |
@@ -115,7 +115,7 @@ Every other gap below maps to an existing plan item.
 
 ### Gaps (Cursor)
 
-- Tools, reasoning, images, usage detail, effort, and Max Mode — **L**, **R-9**
+- Reasoning, images, usage detail, effort, and Max Mode — **L**, **R-9**
 - CURSOR_API_KEY exchange sign-in — **M**, **R-8**
 - Team billing header — **S**, **R-8**
 
