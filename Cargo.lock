@@ -2008,8 +2008,11 @@ dependencies = [
 name = "hofund-kit-subscription"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "futures-util",
+ "h2",
  "hofund-plugin-host",
+ "http",
  "tokio",
 ]
 

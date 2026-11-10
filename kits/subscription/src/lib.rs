@@ -9,10 +9,13 @@ use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll, Waker};
 
+mod servers;
+
 pub use hofund_plugin_host::{
     PipedScript, PipedSpawn, RecordingHttp, RecordingObserve, RecordingProcess, RecordingScheduler,
     RecordingSecrets, TestHost, test_host,
 };
+pub use servers::{Http1Response, Http1Server, Http2Response, Http2Server};
 
 /// Runs `future` on a paused Tokio clock so tests can [`advance_time`].
 ///
