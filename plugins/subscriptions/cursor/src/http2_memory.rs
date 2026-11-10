@@ -35,6 +35,7 @@ pub(crate) fn remember(host: &HostContext) {
 }
 
 /// Forgets HTTP/2 unavailability, allowing a later region retry to dial it.
+#[allow(dead_code)]
 pub(crate) fn clear() {
     *BLOCKED_AT
         .lock()

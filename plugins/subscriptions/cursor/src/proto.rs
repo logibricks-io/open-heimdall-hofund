@@ -144,6 +144,7 @@ pub(crate) struct Pb {
     buf: Vec<u8>,
 }
 
+#[allow(dead_code)]
 impl Pb {
     /// Empty message.
     #[must_use]
@@ -219,6 +220,7 @@ impl Pb {
 }
 
 /// Encodes a `google.protobuf.Value`. Struct keys are sorted.
+#[allow(dead_code)]
 #[must_use]
 pub(crate) fn pb_value(value: &Value) -> Vec<u8> {
     match value {
@@ -322,6 +324,7 @@ fn decode_struct(buf: &[u8]) -> Map<String, Value> {
 /// Maps Rust `std::env::consts::OS` onto the Node `platform()` names the wire
 /// uses: `macos` → `darwin`, `windows` unchanged, otherwise pass through when
 /// the name already matches a Node platform, else `linux`.
+#[allow(dead_code)]
 #[must_use]
 pub(crate) fn goos_name_for(os: &str) -> &str {
     match os {
@@ -340,12 +343,14 @@ pub(crate) fn heartbeat() -> Vec<u8> {
 }
 
 /// Wraps an `AgentRunRequest` as client field 1.
+#[allow(dead_code)]
 #[must_use]
 pub(crate) fn client_run(request: &[u8]) -> Vec<u8> {
     Pb::new().bytes(1, request).finish()
 }
 
 /// One MCP tool definition in the request context (namespace is always `tools`).
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub(crate) struct ToolDef {
     /// Tool name.
@@ -357,6 +362,7 @@ pub(crate) struct ToolDef {
 }
 
 /// Inputs for [`encode_agent_run_request`].
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub(crate) struct AgentRunParams<'a> {
     /// Conversation id (field 5).
@@ -381,6 +387,7 @@ pub(crate) struct AgentRunParams<'a> {
 ///
 /// Field 4 (the MCP wrapper) is always present; when `tools` is empty it is an
 /// empty message, not omitted. Field 19 is written only when `inline_images`.
+#[allow(dead_code)]
 #[must_use]
 pub(crate) fn encode_agent_run_request(params: &AgentRunParams<'_>) -> Vec<u8> {
     let mut state = Pb::new();
@@ -419,6 +426,7 @@ pub(crate) fn encode_agent_run_request(params: &AgentRunParams<'_>) -> Vec<u8> {
 }
 
 /// Environment message: OS, temp directory, and `"UTC"`.
+#[allow(dead_code)]
 #[must_use]
 pub(crate) fn environment(os: &str, temp_dir: &str) -> Vec<u8> {
     Pb::new()
@@ -428,6 +436,7 @@ pub(crate) fn environment(os: &str, temp_dir: &str) -> Vec<u8> {
         .finish()
 }
 
+#[allow(dead_code)]
 fn tool_def_bytes(tool: &ToolDef) -> Vec<u8> {
     let schema_text = tool.schema.to_string();
     Pb::new()
@@ -441,6 +450,7 @@ fn tool_def_bytes(tool: &ToolDef) -> Vec<u8> {
 }
 
 /// Client field 3: blob found (inner field 1 = KV id, field 2 = result field 1).
+#[allow(dead_code)]
 #[must_use]
 pub(crate) fn kv_get_found(id: &WireValue, blob: &[u8]) -> Vec<u8> {
     let result = Pb::new().bytes(1, blob).finish();
@@ -450,6 +460,7 @@ pub(crate) fn kv_get_found(id: &WireValue, blob: &[u8]) -> Vec<u8> {
 }
 
 /// Client field 3: blob missing (`"blob not found"`).
+#[allow(dead_code)]
 #[must_use]
 pub(crate) fn kv_get_missing(id: &WireValue) -> Vec<u8> {
     let missing = Pb::new().string(1, "blob not found").finish();
@@ -460,6 +471,7 @@ pub(crate) fn kv_get_missing(id: &WireValue) -> Vec<u8> {
 }
 
 /// Client field 3: store ack (inner field 3 empty).
+#[allow(dead_code)]
 #[must_use]
 pub(crate) fn kv_store_ack(id: &WireValue) -> Vec<u8> {
     Pb::new()
@@ -468,6 +480,7 @@ pub(crate) fn kv_store_ack(id: &WireValue) -> Vec<u8> {
 }
 
 /// Client field 5, inner field 1: close an exec.
+#[allow(dead_code)]
 #[must_use]
 pub(crate) fn close_exec(id: u32) -> Vec<u8> {
     Pb::new()
@@ -476,6 +489,7 @@ pub(crate) fn close_exec(id: u32) -> Vec<u8> {
 }
 
 /// Client field 5, inner field 2: refuse an exec with `"not available"`.
+#[allow(dead_code)]
 #[must_use]
 pub(crate) fn refuse_exec(id: u32) -> Vec<u8> {
     Pb::new()
@@ -493,6 +507,7 @@ pub(crate) fn refuse_exec(id: u32) -> Vec<u8> {
 
 /// Client field 2: exec result for field 10 (environment), to be followed by
 /// [`close_exec`].
+#[allow(dead_code)]
 #[must_use]
 pub(crate) fn exec_env_result(id: u32, exec_id: &str, os: &str, temp_dir: &str) -> Vec<u8> {
     let inner = Pb::new().bytes(1, &Pb::new().bytes(4, &environment(os, temp_dir)).finish());
@@ -503,6 +518,7 @@ pub(crate) fn exec_env_result(id: u32, exec_id: &str, os: &str, temp_dir: &str) 
 ///
 /// The inner message is never a bare empty message, even when no tool defs are
 /// repeated on field 5.
+#[allow(dead_code)]
 #[must_use]
 pub(crate) fn exec_tools_result(id: u32, exec_id: &str, tools: &[ToolDef]) -> Vec<u8> {
     let mut server = Pb::new()
@@ -518,6 +534,7 @@ pub(crate) fn exec_tools_result(id: u32, exec_id: &str, tools: &[ToolDef]) -> Ve
     exec_result(id, exec_id, 36, &wrapped)
 }
 
+#[allow(dead_code)]
 fn exec_result(id: u32, exec_id: &str, result_field: u32, result: &[u8]) -> Vec<u8> {
     Pb::new()
         .message(

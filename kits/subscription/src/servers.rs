@@ -595,8 +595,10 @@ async fn serve_http2_stream(
         return;
     };
     let data_len = response.data.len();
+    let end_after_request =
+        !response.hold_open && !response.data.is_empty() && (200..300).contains(&response.status);
     for (position, data) in response.data.into_iter().enumerate() {
-        let end = !response.hold_open && position + 1 == data_len;
+        let end = !end_after_request && !response.hold_open && position + 1 == data_len;
         if send.send_data(Bytes::from(data), end).is_err() {
             return;
         }
@@ -612,6 +614,10 @@ async fn serve_http2_stream(
                             .data
                             .push(chunk.to_vec());
                         let _ = body.flow_control().release_capacity(chunk.len());
+                        if end_after_request {
+                            let _ = send.send_data(Bytes::new(), true);
+                            break;
+                        }
                     }
                     Some(Err(_)) | None => break,
                 }

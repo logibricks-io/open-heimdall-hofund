@@ -84,6 +84,7 @@ async fn fetch(
     let mut call = Call::post(endpoints.server_config())
         .header("content-type", "application/json")
         .header("connect-protocol-version", "1")
+        .header("user-agent", "")
         .sensitive_header("authorization", format!("Bearer {}", secret_text(token)))
         .header("x-cursor-client-version", &endpoints.client_version)
         .header("x-cursor-client-type", "cli")
