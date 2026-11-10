@@ -542,4 +542,19 @@ mod tests {
 
         assert!(matches!(error, RelistenError::Stopped), "{error:?}");
     }
+
+    #[tokio::test]
+    async fn after_drain_hook_runs_when_the_server_shuts_down() {
+        let called = Arc::new(AtomicUsize::new(0));
+        let hook = Arc::clone(&called);
+        let running = serve(loopback(0)).await.with_after_drain(move || {
+            let hook = Arc::clone(&hook);
+            async move {
+                hook.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        assert_eq!(called.load(Ordering::SeqCst), 0);
+        running.shutdown().await;
+        assert_eq!(called.load(Ordering::SeqCst), 1);
+    }
 }
