@@ -60,6 +60,7 @@ pub mod oauth;
 pub mod page;
 pub mod probe;
 pub mod process;
+pub mod protobuf;
 pub mod register;
 pub mod sigv4;
 pub mod time;
