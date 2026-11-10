@@ -4,6 +4,7 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 #[cfg(test)]
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures_util::stream;
 use hofund_plugin_api::{
@@ -113,7 +114,17 @@ impl ClaudeUpstream {
             let chunk = chunk?;
             text.push_str(&String::from_utf8_lossy(&chunk));
         }
-        let _ = child.wait().await;
+        let status = child.wait().await.unwrap_or(-1);
+        if status != 0 && !crate::bridge::failure::stream_finished(&text) {
+            let stderr = String::from_utf8_lossy(&child.stderr_tail()).into_owned();
+            let secrets: Vec<&str> = plan
+                .env
+                .values()
+                .filter_map(|value| value.to_str())
+                .filter(|value| value.chars().count() >= 8)
+                .collect();
+            return Err(crate::bridge::failure::process_ended(&stderr, &secrets));
+        }
         Ok(text)
     }
 }
@@ -184,6 +195,7 @@ impl UpstreamProvider for ClaudeUpstream {
             );
         };
         let blob = SecretObject::parse(&secret)?;
+        let login_version = blob.number(creds::VERSION);
         if blob.flag(creds::LAPSED) {
             return Err(PluginError::auth(creds::LAPSED_REASON).without_cooldown());
         }
@@ -211,6 +223,7 @@ impl UpstreamProvider for ClaudeUpstream {
                 .park_run(self.account.clone(), tool_names.clone());
             self.bridge
                 .ensure_session_run(id, &self.account, tool_names);
+            self.bridge.set_login_version(id, login_version);
             self.bridge.heard(id, &request.messages);
             self.bridge
                 .set_effort(id, crate::bridge::flags::from_request(&request).effort);
@@ -245,7 +258,8 @@ impl UpstreamProvider for ClaudeUpstream {
         }
         let stdout = self.stdout_for(&plan, &spec).await?;
         let _ = callback_guard;
-        self.finish_stdout(stdout, run_id, has_tools(&request), &request)
+        self.finish_stdout(stdout, run_id, has_tools(&request), &request, login_version)
+            .await
     }
 }
 
@@ -283,7 +297,15 @@ impl ClaudeUpstream {
         };
         let _remapped = found.remapped;
         if let Some(stdout) = self.bridge.take_continuation(found.run_id) {
-            return self.finish_stdout(stdout, Some(found.run_id), true, request);
+            return self
+                .finish_stdout(
+                    stdout,
+                    Some(found.run_id),
+                    true,
+                    request,
+                    self.bridge.login_version(found.run_id),
+                )
+                .await;
         }
         // Fake-runner tests (and any runner hook) serve the next script here.
         let config_dir = account_dir(&self.host, &self.account)?;
@@ -306,7 +328,14 @@ impl ClaudeUpstream {
             plan.stdin = stdin_from_said(&said);
         }
         let stdout = self.stdout_for(&plan, &spec).await?;
-        self.finish_stdout(stdout, Some(found.run_id), true, request)
+        self.finish_stdout(
+            stdout,
+            Some(found.run_id),
+            true,
+            request,
+            self.bridge.login_version(found.run_id),
+        )
+        .await
     }
 
     async fn continue_resume(
@@ -342,23 +371,30 @@ impl ClaudeUpstream {
             self.bridge.set_effort(resume.run_id, wanted);
         }
         let stdout = self.stdout_for(&plan, &spec).await?;
-        self.finish_stdout(stdout, Some(resume.run_id), has_tools(request), request)
+        self.finish_stdout(
+            stdout,
+            Some(resume.run_id),
+            has_tools(request),
+            request,
+            self.bridge.login_version(resume.run_id),
+        )
+        .await
     }
 
-    fn finish_stdout(
+    async fn finish_stdout(
         &self,
         stdout: String,
         run_id: Option<u64>,
         allow_tools: bool,
         request: &Request,
+        login_version: Option<u64>,
     ) -> Result<Completion, PluginError> {
         self.observe_rate_limits(&stdout);
         let result = if !allow_tools {
-            let events = events_from_stdout(&stdout)?;
-            Ok((events, Vec::new(), session_id_from(&stdout)))
+            events_from_stdout(&stdout).map(|events| (events, Vec::new(), session_id_from(&stdout)))
         } else {
-            let (events, calls) = events_allowing_tools(&stdout)?;
-            Ok((events, calls, session_id_from(&stdout)))
+            events_allowing_tools(&stdout)
+                .map(|(events, calls)| (events, calls, session_id_from(&stdout)))
         };
         let (events, calls, session) = match result {
             Ok(decoded) => decoded,
@@ -366,6 +402,9 @@ impl ClaudeUpstream {
                 if let Some(run_id) = run_id {
                     self.bridge
                         .ended(run_id, &self.account, request, "", TurnStop::Other, false);
+                }
+                if crate::bridge::failure::is_sign_in_required(error.message()) {
+                    let _ = self.mark_lapsed_if_current(login_version).await;
                 }
                 return Err(error);
             }
@@ -393,6 +432,23 @@ impl ClaudeUpstream {
         Ok(Completion::Stream(Box::pin(stream::iter(
             events.into_iter().map(Ok),
         ))))
+    }
+
+    async fn mark_lapsed_if_current(&self, captured: Option<u64>) -> Result<(), PluginError> {
+        let lease = self
+            .host
+            .accounts()
+            .lease(&self.account, Duration::from_secs(30))
+            .await?;
+        let blob = SecretObject::parse(lease.secret())?;
+        if !crate::bridge::failure::should_mark_lapsed(captured, blob.number(creds::VERSION)) {
+            return Ok(());
+        }
+        if blob.flag(creds::LAPSED) {
+            return Ok(());
+        }
+        let lapsed = blob.with_flag(creds::LAPSED, true);
+        lease.commit(None, lapsed.to_secret()).await
     }
 
     fn observe_rate_limits(&self, stdout: &str) {
@@ -746,5 +802,90 @@ mod tests {
             .expect("one-off");
         let _ = collect_events(completion);
         assert_eq!(bridge.idle_len(), 0);
+    }
+
+    fn stored_blob(host: &TestHost, id: &AccountId) -> SecretObject {
+        let secret = block_on(host.context().accounts().secret(id))
+            .expect("secret")
+            .expect("present");
+        SecretObject::parse(&secret).expect("blob")
+    }
+
+    const SIGN_IN_RESULT: &str = r#"{"type":"result","subtype":"error","is_error":true,"result":"OAuth token revoked","session_id":"sess_x"}"#;
+
+    #[test]
+    fn a_stream_sign_in_error_marks_the_account_lapsed() {
+        let dir = tempfile::tempdir().expect("dir");
+        let host = TestHost::open_for(
+            PluginKind::Subscription,
+            PluginId::from_static("claude"),
+            dir.path(),
+        );
+        let id = AccountId::from_static("a-00000000000000aa");
+        seed_account(&host, &id);
+        let provider = ClaudeUpstream::new(
+            id.clone(),
+            host.context().clone(),
+            Some(program()),
+            crate::bridge::Bridge::new(),
+        )
+        .with_runner(Arc::new(move |_plan| Ok(SIGN_IN_RESULT.to_string())));
+        let error = match block_on(provider.execute(text_request(), ProtocolId::AnthropicMessages))
+        {
+            Err(error) => error,
+            Ok(_) => panic!("expected a sign-in failure"),
+        };
+        assert_eq!(error.status(), Some(502));
+        assert!(!error.cools());
+        assert!(stored_blob(&host, &id).flag(creds::LAPSED));
+    }
+
+    #[test]
+    fn a_rotated_sign_in_is_not_marked_lapsed() {
+        let dir = tempfile::tempdir().expect("dir");
+        let host = TestHost::open_for(
+            PluginKind::Subscription,
+            PluginId::from_static("claude"),
+            dir.path(),
+        );
+        let id = AccountId::from_static("a-00000000000000aa");
+        seed_account(&host, &id);
+        let ctx = host.context().clone();
+        let owner = id.clone();
+        let provider = ClaudeUpstream::new(
+            id.clone(),
+            host.context().clone(),
+            Some(program()),
+            crate::bridge::Bridge::new(),
+        )
+        .with_runner(Arc::new(move |_plan| {
+            let ctx = ctx.clone();
+            let owner = owner.clone();
+            std::thread::spawn(move || {
+                let secret = block_on(ctx.accounts().secret(&owner))
+                    .expect("secret")
+                    .expect("present");
+                let blob = SecretObject::parse(&secret)
+                    .expect("blob")
+                    .with_number(creds::VERSION, 2);
+                let account = ctx
+                    .accounts()
+                    .account(owner, "ada@example.test")
+                    .expect("account");
+                block_on(ctx.accounts().upsert(account, blob.to_secret())).expect("rotate");
+            })
+            .join()
+            .expect("rotate thread");
+            Ok(SIGN_IN_RESULT.to_string())
+        }));
+        let error = match block_on(provider.execute(text_request(), ProtocolId::AnthropicMessages))
+        {
+            Err(error) => error,
+            Ok(_) => panic!("expected a sign-in failure"),
+        };
+        assert_eq!(error.status(), Some(502));
+        let blob = stored_blob(&host, &id);
+        assert!(!blob.flag(creds::LAPSED));
+        assert_eq!(blob.number(creds::VERSION), Some(2));
     }
 }

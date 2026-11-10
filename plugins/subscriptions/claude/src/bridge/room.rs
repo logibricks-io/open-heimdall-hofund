@@ -222,6 +222,7 @@ Set how many may run with `claude-runs-most`"
         ),
     )
     .without_cooldown()
+    .skip_failover_same_plugin()
 }
 
 /// How many Claude Code processes `limit_bytes` of memory hold.
@@ -320,6 +321,7 @@ mod tests {
             error.message()
         );
         assert!(error.message().contains("claude-runs-most"));
+        assert!(error.skips_failover_same_plugin());
     }
 
     #[test]

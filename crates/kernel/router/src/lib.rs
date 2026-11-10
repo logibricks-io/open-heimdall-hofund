@@ -793,6 +793,7 @@ impl Router {
             input_tokens,
             last: None,
             refused_providers: BTreeSet::new(),
+            skipped_plugins: BTreeSet::new(),
             region_attempts: BTreeMap::new(),
             region_closed: BTreeMap::new(),
             region_reask: Vec::new(),
@@ -1589,6 +1590,8 @@ struct DispatchState {
     input_tokens: u64,
     last: Option<(String, PluginError)>,
     refused_providers: BTreeSet<String>,
+    /// Plugin ids that must not be asked again on this request.
+    skipped_plugins: BTreeSet<String>,
     region_attempts: BTreeMap<String, u32>,
     region_closed: BTreeMap<String, u16>,
     region_reask: Vec<usize>,
@@ -1811,7 +1814,9 @@ impl DispatchState {
             let mut attempt = self.request.clone();
             apply_wire(&mut attempt, &hop, &self.resolved.bare);
             let upstream_model = attempt.model.clone();
+            let plugin_id = hop.member.plugin_id();
             if self.refused_providers.contains(hop.member.route_id())
+                || (!plugin_id.is_empty() && self.skipped_plugins.contains(plugin_id))
                 || self.region_closed_for(&hop)
                 || self.outgrown.iter().any(|(route, model)| {
                     route == hop.member.route_id() && *model == upstream_model
@@ -1823,6 +1828,14 @@ impl DispatchState {
             {
                 if self.refused_providers.contains(hop.member.route_id()) {
                     self.note_skip(index as u32, SkipReason::ProviderRefused);
+                } else if !plugin_id.is_empty() && self.skipped_plugins.contains(plugin_id) {
+                    self.note_skip(
+                        index as u32,
+                        SkipReason::Failure {
+                            status: None,
+                            message: "the same plugin already declined this request".to_owned(),
+                        },
+                    );
                 } else if self.region_closed_for(&hop) {
                     self.note_skip(
                         index as u32,
@@ -2001,6 +2014,12 @@ impl DispatchState {
                         self.last = Some((upstream_id, error));
                         *ending = Ending::Other;
                         continue;
+                    }
+                    if error.skips_failover_same_plugin() {
+                        let plugin = hop.member.plugin_id();
+                        if !plugin.is_empty() {
+                            self.skipped_plugins.insert(plugin.to_owned());
+                        }
                     }
                     if decision::skips_provider(&error) {
                         // Every account of the provider refuses the same

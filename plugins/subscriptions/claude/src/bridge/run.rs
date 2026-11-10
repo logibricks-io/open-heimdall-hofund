@@ -171,10 +171,7 @@ pub(crate) fn events_from_stdout(stdout: &str) -> Result<Vec<StreamEvent>, Plugi
                 events.extend(batch);
             }
             Some(Step::ResultError(error)) => {
-                return Err(PluginError::status_error(
-                    error.api_error_status.unwrap_or(502),
-                    error.message,
-                ));
+                return Err(super::failure::classify(&error));
             }
             Some(Step::Session(_) | Step::RateLimit(_) | Step::Completed) | None => {}
         }
@@ -203,10 +200,7 @@ pub(crate) fn events_allowing_tools(
                 events.extend(batch);
             }
             Some(Step::ResultError(error)) => {
-                return Err(PluginError::status_error(
-                    error.api_error_status.unwrap_or(502),
-                    error.message,
-                ));
+                return Err(super::failure::classify(&error));
             }
             Some(Step::Session(_) | Step::RateLimit(_) | Step::Completed) | None => {}
         }

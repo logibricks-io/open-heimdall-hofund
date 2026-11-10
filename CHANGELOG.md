@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- R-6g: Claude Code bridge error mapping and a vendor-neutral
+  `skip_failover_same_plugin` flag so a room-full 503 skips later members of
+  the same plugin only. Sign-in lapses, extra-usage 400s, too-long prompts,
+  quota-shaped results, and process crashes map to `PluginError` without
+  cooling the account where the reference does not. Real-account smoke stays
+  on #304.
 - R-16: Zed subscription upstream via POST `/completions` (provider envelope,
   NDJSON event unwrap, unary fold), model-token refresh with stale headers,
   live `/models` with snapshot fallback, plan quota from `/client/users/me`,

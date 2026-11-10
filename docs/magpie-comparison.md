@@ -264,6 +264,12 @@ Official references, checked 2026-10-25:
 | --- | --- | --- | --- | --- |
 | Deployment list | `GET {root}/deployments?api-version=2022-12-01` with `api-key` and no bearer token. A refusal or an empty list tries `{base}/models`. The id is the deployment name. Non-chat ids are dropped. A failure tells the user to type the names. The list is not filtered by status. Pages follow `has_more` and `last_id`. | Adopt the two URLs, the header, and the id. | The `azure` plugin (`plugins/providers/azure`) does that against the v1 root from `azure_base`, for preset `azure` and for a custom Chat or Responses base on an Azure host. Extra headers replace a header of the same name. The gateway does not call it on a schedule (row 2.9). Verified with mocks only. CI run 40178604119 on `73656ae` executed the tests. | The data-plane list is the one an `api-key` can still read. The v1 model list is only the deployments' ids when each deployment is named after its model, so it stays the fallback. |
 
+## Claude subscription bridge
+
+| Topic | Magpie | Verdict | Hofund | Why this is better |
+| --- | --- | --- | --- | --- |
+| Claude Pro/Max runtime | The gateway drives a local Claude Code process with `-p` stream-json, a stdio MCP helper, loopback tool callbacks, idle resume, and room caps (`internal/claudebridge`, `internal/gateway/claude_subscription.go`). Errors use English message matching in the gateway, including a room-full 503 that skips later Claude accounts. | Adopt the process model, parking, resume, and no-cooldown cases. Redesign the kernel/plugin split and failover flag. | The Claude subscription plugin owns the bridge, decoder, parking, resume, images, effort, and `failure.rs` mapping. The kernel adds a generic 127.0.0.1 callback listener, `LongLivedChild`, and a vendor-neutral `PluginError::skip_failover_same_plugin` flag that the router applies by plugin id, never by message text. Extra-usage 400 wording avoids quota and rate-limit words so default failover does not ask another member. | Vendor words stay out of the router. Room-full 503 skips only later members of the same plugin and still allows another vendor to answer. Tests use a fake runner; a real Claude Code account remains #304. |
+
 ## Devin, Kiro, and Factory subscription plugins
 
 Read from yetone/magpie `internal/provider/{devin,kiro,factory}.go` and agent

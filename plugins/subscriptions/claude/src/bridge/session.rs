@@ -72,6 +72,8 @@ struct RunMeta {
     tools: Vec<String>,
     /// Room slot held for this process, released when the run is aborted.
     room: Option<super::room::RoomGuard>,
+    /// Sign-in version captured when the run started.
+    login_version: Option<u64>,
 }
 
 /// Idle map, shelf, and claim state for one [`Bridge`].
@@ -164,6 +166,22 @@ impl Bridge {
             .get(&run_id)
             .map(|meta| meta.effort.clone())
             .unwrap_or_default()
+    }
+
+    /// Records the sign-in version captured when this run started.
+    pub(crate) fn set_login_version(&self, run_id: u64, version: Option<u64>) {
+        if let Some(meta) = self.sessions.lock_meta().get_mut(&run_id) {
+            meta.login_version = version;
+        }
+    }
+
+    /// Sign-in version captured when this run started.
+    #[must_use]
+    pub(crate) fn login_version(&self, run_id: u64) -> Option<u64> {
+        self.sessions
+            .lock_meta()
+            .get(&run_id)
+            .and_then(|meta| meta.login_version)
     }
 
     /// Stores a Claude Code session id captured from the stream.
