@@ -370,6 +370,7 @@ pub struct Http2Response {
     headers: Vec<(String, String)>,
     data: Vec<Vec<u8>>,
     header_delay: Duration,
+    data_delay: Duration,
     refused: bool,
     hold_open: bool,
 }
@@ -383,6 +384,7 @@ impl Http2Response {
             headers: Vec::new(),
             data: Vec::new(),
             header_delay: Duration::ZERO,
+            data_delay: Duration::ZERO,
             refused: false,
             hold_open: false,
         }
@@ -406,6 +408,13 @@ impl Http2Response {
     #[must_use]
     pub fn header_delay(mut self, delay: Duration) -> Self {
         self.header_delay = delay;
+        self
+    }
+
+    /// Waits before each outbound DATA payload.
+    #[must_use]
+    pub fn data_delay(mut self, delay: Duration) -> Self {
+        self.data_delay = delay;
         self
     }
 
@@ -598,6 +607,9 @@ async fn serve_http2_stream(
     let end_after_request =
         !response.hold_open && !response.data.is_empty() && (200..300).contains(&response.status);
     for (position, data) in response.data.into_iter().enumerate() {
+        if !response.data_delay.is_zero() {
+            tokio::time::sleep(response.data_delay).await;
+        }
         let end = !end_after_request && !response.hold_open && position + 1 == data_len;
         if send.send_data(Bytes::from(data), end).is_err() {
             return;

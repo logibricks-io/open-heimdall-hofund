@@ -16,7 +16,7 @@ use crate::cli::KeychainCache;
 use crate::endpoints::Endpoints;
 use crate::failure::{self, EMPTY_REPLY};
 use crate::proto::ServerEvent;
-use crate::run::{RunEvent, RunStream, run_stream};
+use crate::run::{Limits, RunEvent, RunStream, run_stream};
 use crate::{request, session};
 
 /// Account and process facilities needed by one stateless Cursor Run.
@@ -29,6 +29,7 @@ pub(crate) struct CursorUpstream {
     keychain: Arc<Mutex<KeychainCache>>,
     skip_keychain: bool,
     agent_host: AgentHost,
+    limits: Limits,
 }
 
 impl CursorUpstream {
@@ -50,6 +51,7 @@ impl CursorUpstream {
             keychain,
             skip_keychain,
             agent_host: AgentHost::default(),
+            limits: Limits::default(),
         }
     }
 }
@@ -76,12 +78,14 @@ impl UpstreamProvider for CursorUpstream {
         let response_id = hofund_plugin_sdk::uuid::v4()
             .map(|id| format!("msg_{id}"))
             .map_err(|error| PluginError::io(format!("cannot create a response id: {error}")))?;
+        let mut args = mapped.into_args();
+        args.limits = self.limits;
         let mut run = run_stream(
             &self.host,
             &self.endpoints,
             &self.agent_host,
             &token,
-            mapped.into_args(),
+            args,
         )
         .await?;
 
@@ -190,7 +194,7 @@ async fn next_text_event(state: &mut TextStreamState) -> Result<Option<StreamEve
             }
             Some(Err(error)) => {
                 state.finished = true;
-                return Err(error);
+                return Err(failure::after_output(error));
             }
             None => state.finished = true,
         }
@@ -213,9 +217,11 @@ fn empty_reply() -> PluginError {
 mod tests {
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     use hofund_kit_subscription::{
-        Http1Response, Http1Server, Http2Response, Http2Server, TestHost, block_on, yield_times,
+        Http1Response, Http1Server, Http2Response, Http2Server, TestHost, advance_time, block_on,
+        block_on_paused, yield_times,
     };
     use hofund_plugin_api::{
         AccountId, BlockStart, Completion, ContentBlockStart, ContentBlockStop, Extensions,
@@ -224,12 +230,15 @@ mod tests {
     };
     use hofund_plugin_sdk::futures::StreamExt;
     use hofund_plugin_sdk::json::{from_value, json};
+    use hofund_plugin_sdk::{Race, race};
 
     use super::CursorUpstream;
     use crate::cli::KeychainCache;
     use crate::endpoints::Endpoints;
     use crate::frame;
+    use crate::http2_memory;
     use crate::proto::{self, Pb};
+    use crate::run::Limits;
     use crate::tokens;
 
     fn pooled_host() -> TestHost {
@@ -596,6 +605,141 @@ mod tests {
             assert_eq!(error.status(), Some(400));
             assert!(error.message().contains("bad run"));
             assert_eq!(h1.requests().len(), 1);
+        });
+    }
+
+    #[test]
+    fn idle_before_text_is_a_stall_without_http2_memory() {
+        let _guard = http2_memory::test_lock();
+        http2_memory::reset_for_tests();
+        block_on_paused(async {
+            let h2 = Http2Server::start(vec![Http2Response::new(200).hold_open()]).await;
+            let h1 = Http1Server::start(vec![config_reply(h2.base_url())]).await;
+            let host = pooled_host();
+            let account = store_account(&host).await;
+            let mut upstream = upstream(&host, &h1, h2.base_url(), account);
+            upstream.limits = Limits {
+                idle: Duration::from_secs(2),
+                quiet: Duration::from_secs(20),
+                heartbeat: Duration::from_secs(60),
+                ..Limits::default()
+            };
+            let attempt = upstream.execute(text_request(), ProtocolId::OPENAI_CHAT);
+            let control = async {
+                for _ in 0..100 {
+                    if h2.requests().first().is_some_and(|request| !request.data().is_empty()) {
+                        break;
+                    }
+                    yield_times(2).await;
+                }
+                advance_time(Duration::from_millis(2_001)).await;
+                std::future::pending::<()>().await;
+            };
+            let Race::Left(result) = race(attempt, control).await else {
+                unreachable!("control remains pending")
+            };
+            let error = result.map(|_| ()).expect_err("idle stall");
+            assert_eq!(error.status(), Some(502));
+            assert!(error.message().contains("idle"));
+            assert!(!error.message().contains("an empty reply"));
+            assert!(!error.message().contains("the upstream stopped sending"));
+            assert!(!http2_memory::blocked(host.context(), Duration::from_secs(600)));
+        });
+    }
+
+    #[test]
+    fn heartbeat_only_quiet_time_is_a_stall_without_http2_memory() {
+        let _guard = http2_memory::test_lock();
+        http2_memory::reset_for_tests();
+        block_on_paused(async {
+            let heartbeat = interaction(13, Pb::new());
+            let h2 = Http2Server::start(vec![Http2Response::new(200)
+                .data(heartbeat.clone())
+                .data(heartbeat.clone())
+                .data(heartbeat)
+                .data_delay(Duration::from_secs(1))
+                .hold_open()])
+            .await;
+            let h1 = Http1Server::start(vec![config_reply(h2.base_url())]).await;
+            let host = pooled_host();
+            let account = store_account(&host).await;
+            let mut upstream = upstream(&host, &h1, h2.base_url(), account);
+            upstream.limits = Limits {
+                idle: Duration::from_secs(20),
+                quiet: Duration::from_secs(3),
+                heartbeat: Duration::from_secs(60),
+                ..Limits::default()
+            };
+            let attempt = upstream.execute(text_request(), ProtocolId::OPENAI_CHAT);
+            let control = async {
+                for _ in 0..100 {
+                    if h2.requests().first().is_some_and(|request| !request.data().is_empty()) {
+                        break;
+                    }
+                    yield_times(2).await;
+                }
+                for _ in 0..3 {
+                    advance_time(Duration::from_secs(1)).await;
+                    yield_times(10).await;
+                }
+                advance_time(Duration::from_millis(100)).await;
+                std::future::pending::<()>().await;
+            };
+            let Race::Left(result) = race(attempt, control).await else {
+                unreachable!("control remains pending")
+            };
+            let error = result.map(|_| ()).expect_err("quiet stall");
+            assert_eq!(error.status(), Some(502));
+            assert!(error.message().contains("quiet"));
+            assert!(error.message().contains("heartbeat"));
+            assert!(!error.message().contains("an empty reply"));
+            assert!(!error.message().contains("the upstream stopped sending"));
+            assert!(!http2_memory::blocked(host.context(), Duration::from_secs(600)));
+        });
+    }
+
+    #[test]
+    fn idle_after_text_uses_the_after_output_wording() {
+        let _guard = http2_memory::test_lock();
+        http2_memory::reset_for_tests();
+        block_on_paused(async {
+            let h2 = Http2Server::start(vec![Http2Response::new(200)
+                .data(text_frame("started"))
+                .hold_open()])
+            .await;
+            let h1 = Http1Server::start(vec![config_reply(h2.base_url())]).await;
+            let host = pooled_host();
+            let account = store_account(&host).await;
+            let mut upstream = upstream(&host, &h1, h2.base_url(), account);
+            upstream.limits = Limits {
+                idle: Duration::from_secs(2),
+                quiet: Duration::from_secs(20),
+                heartbeat: Duration::from_secs(60),
+                ..Limits::default()
+            };
+            let Completion::Stream(mut stream) = upstream
+                .execute(text_request(), ProtocolId::OPENAI_CHAT)
+                .await
+                .expect("text stream")
+            else {
+                panic!("stream")
+            };
+            for _ in 0..3 {
+                stream.next().await.expect("event").expect("initial event");
+            }
+            let next = stream.next();
+            let control = async {
+                advance_time(Duration::from_millis(2_001)).await;
+                std::future::pending::<()>().await;
+            };
+            let Race::Left(event) = race(next, control).await else {
+                unreachable!("control remains pending")
+            };
+            let error = event.expect("terminal event").expect_err("after-text stall");
+            assert_eq!(error.status(), Some(502));
+            assert!(error.message().contains("the upstream stopped sending"));
+            assert!(!error.message().contains("an empty reply"));
+            assert!(!http2_memory::blocked(host.context(), Duration::from_secs(600)));
         });
     }
 }

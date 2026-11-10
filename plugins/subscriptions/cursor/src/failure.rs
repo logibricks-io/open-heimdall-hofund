@@ -8,6 +8,24 @@ pub(crate) const EMPTY_REPLY: &str = "an empty reply (the model answered nothing
 /// A later stall is distinct from a Run that never produced text.
 pub(crate) const STALL_AFTER_TEXT: &str = "the upstream stopped sending";
 
+const STALL_PREFIX: &str = "upstream Run ";
+
+/// A pre-output idle or quiet deadline, including the last observed frame kind.
+pub(crate) fn stall(kind: &str, last_frame: &str) -> PluginError {
+    PluginError::status_error(
+        502,
+        format!("{STALL_PREFIX}{kind} stall; last server frame: {last_frame}"),
+    )
+}
+
+/// Rewords only a transport stall after the caller has received text.
+pub(crate) fn after_output(error: PluginError) -> PluginError {
+    let Some(diagnostic) = error.message().strip_prefix(STALL_PREFIX) else {
+        return error;
+    };
+    PluginError::status_error(502, format!("{STALL_AFTER_TEXT}: {diagnostic}"))
+}
+
 /// Maps a Connect trailer without requiring a socket or a transport error.
 pub(crate) fn trailer(payload: &[u8]) -> PluginError {
     let parsed = hofund_plugin_sdk::json::from_slice::<Value>(payload).ok();
