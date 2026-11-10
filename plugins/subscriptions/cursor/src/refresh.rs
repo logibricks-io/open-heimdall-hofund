@@ -1,6 +1,8 @@
 //! Refreshing sign-ins: cursor-agent status and stored OAuth checks.
 
 use std::path::Path;
+use std::sync::Mutex;
+use std::time::Duration;
 
 use hofund_plugin_api::{AccountId, HostContext, PluginError, SecretString};
 use hofund_plugin_sdk::Call;
@@ -8,10 +10,13 @@ use hofund_plugin_sdk::json::Value;
 use hofund_plugin_sdk::oauth::secret_text;
 use hofund_plugin_sdk::timeout;
 
-use crate::cli::{self, STATUS_WAIT};
+use crate::cli::{self, KeychainCache, STATUS_WAIT};
 use crate::connect;
 use crate::endpoints::Endpoints;
 use crate::tokens::{self, REFRESH};
+
+/// How long a renew waits for the per-account lease.
+const LEASE_WAIT: Duration = Duration::from_secs(30);
 
 /// Runs `cursor-agent status` so the CLI refreshes an almost-expired token.
 pub(crate) async fn agent_status(
@@ -34,17 +39,57 @@ pub(crate) async fn agent_status(
 }
 
 /// Renews a stored OAuth access token when it is near expiry.
+pub(crate) async fn renew_agent(
+    host: &HostContext,
+    account: &AccountId,
+    program: Option<&Path>,
+    agent_home: &Path,
+    keychain: &Mutex<KeychainCache>,
+    keychain_enabled: bool,
+) -> Result<SecretString, PluginError> {
+    let _lease = host.accounts().lease(account, LEASE_WAIT).await?;
+    let now = host.clock().now();
+    let mut token = cli::live_access(host, agent_home, false, keychain, keychain_enabled)
+        .await?
+        .unwrap_or_default();
+    if token.is_empty() || tokens::near_expiry(now, tokens::jwt_expiry_ms(&token)) {
+        let program = program.ok_or_else(|| {
+            PluginError::config(
+                "cursor-agent is not installed: it is not on PATH; install it or set `command`",
+            )
+        })?;
+        agent_status(host, program, agent_home).await?;
+        token = cli::live_access(host, agent_home, true, keychain, keychain_enabled)
+            .await?
+            .unwrap_or_default();
+    }
+    if token.is_empty() {
+        return Err(PluginError::auth(
+            "cursor-agent is not signed in; run cursor-agent login",
+        ));
+    }
+    if let Some(exp) = tokens::jwt_expiry_ms(&token) {
+        let expires = tokens::ms_from_now(
+            std::time::UNIX_EPOCH,
+            i64::try_from(exp).unwrap_or(i64::MAX),
+        );
+        if now >= expires {
+            return Err(PluginError::auth(
+                "cursor-agent's sign-in has run out; sign in again",
+            ));
+        }
+    }
+    Ok(SecretString::from(token))
+}
+
+/// Renews a stored OAuth access token when it is near expiry.
 pub(crate) async fn oauth_check(
     host: &HostContext,
     endpoints: &Endpoints,
     account: &AccountId,
 ) -> Result<(), PluginError> {
-    let Some(secret) = host.accounts().secret(account).await? else {
-        return Err(PluginError::auth(
-            "no Cursor sign-in is stored for this account",
-        ));
-    };
-    let blob = tokens::parse_blob(&secret)?;
+    let lease = host.accounts().lease(account, LEASE_WAIT).await?;
+    let blob = tokens::parse_blob(lease.secret())?;
     if tokens::is_agent(&blob) {
         return Ok(());
     }
@@ -98,10 +143,7 @@ pub(crate) async fn oauth_check(
     let expires_ms = tokens::jwt_expiry_ms(access)
         .unwrap_or_else(|| tokens::unix_ms(host.clock().now()) as u64 + 30 * 24 * 3600 * 1000);
     let updated = tokens::blob_oauth(&access_secret, &next_refresh, expires_ms, &label, plan);
-    let account_row = host.accounts().account(account.clone(), label)?;
-    host.accounts()
-        .upsert(account_row, updated.to_secret())
-        .await?;
+    lease.commit(Some(label), updated.to_secret()).await?;
     let _ = connect::who_is(host, endpoints, &access_secret).await;
     Ok(())
 }

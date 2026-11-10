@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use crate::cli::{self, KeychainCache};
+use crate::cli::KeychainCache;
 use crate::tokens::{self, is_agent};
 use hofund_plugin_api::{AccountId, HostContext, PluginError, SecretString};
 
@@ -15,7 +15,7 @@ pub(crate) async fn access_token(
     agent_home: &Path,
     program: Option<PathBuf>,
     keychain: &Mutex<KeychainCache>,
-    skip_keychain: bool,
+    keychain_enabled: bool,
 ) -> Result<SecretString, PluginError> {
     let secret = host
         .accounts()
@@ -24,12 +24,13 @@ pub(crate) async fn access_token(
         .ok_or_else(|| PluginError::auth("no Cursor sign-in is stored for this account"))?;
     let blob = tokens::parse_blob(&secret)?;
     if is_agent(&blob) {
-        return agent_token(
+        return crate::refresh::renew_agent(
             host,
-            agent_home,
+            account,
             program.as_deref(),
+            agent_home,
             keychain,
-            skip_keychain,
+            keychain_enabled,
         )
         .await;
     }
@@ -50,45 +51,4 @@ pub(crate) async fn access_token(
             .ok_or_else(|| PluginError::auth("the stored Cursor sign-in has no access token"));
     }
     Ok(access)
-}
-
-async fn agent_token(
-    host: &HostContext,
-    agent_home: &Path,
-    program: Option<&Path>,
-    keychain: &Mutex<KeychainCache>,
-    skip_keychain: bool,
-) -> Result<SecretString, PluginError> {
-    let now = host.clock().now();
-    let mut token = cli::live_access(host, agent_home, false, keychain, skip_keychain)
-        .await?
-        .unwrap_or_default();
-    if token.is_empty() || tokens::near_expiry(now, tokens::jwt_expiry_ms(&token)) {
-        let program = program.ok_or_else(|| {
-            PluginError::config(
-                "cursor-agent is not installed: it is not on PATH; install it or set `command`",
-            )
-        })?;
-        crate::refresh::agent_status(host, program, agent_home).await?;
-        token = cli::live_access(host, agent_home, true, keychain, skip_keychain)
-            .await?
-            .unwrap_or_default();
-    }
-    if token.is_empty() {
-        return Err(PluginError::auth(
-            "cursor-agent is not signed in; run cursor-agent login",
-        ));
-    }
-    if let Some(exp) = tokens::jwt_expiry_ms(&token) {
-        let expires = tokens::ms_from_now(
-            std::time::UNIX_EPOCH,
-            i64::try_from(exp).unwrap_or(i64::MAX),
-        );
-        if now >= expires {
-            return Err(PluginError::auth(
-                "cursor-agent's sign-in has run out; sign in again",
-            ));
-        }
-    }
-    Ok(SecretString::from(token))
 }

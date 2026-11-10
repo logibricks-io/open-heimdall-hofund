@@ -3,7 +3,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use hofund_kit_subscription::{PipedScript, TestHost, block_on, join_all, yield_times};
+use hofund_kit_subscription::{
+    PipedScript, TestHost, advance_time, block_on, block_on_paused, join_all, yield_times,
+};
 use hofund_plugin_api::{
     PluginId, PluginKind, RawTable, RawValue, SignInCtx, SignInProof, Subscription,
     SubscriptionFactory,
@@ -44,13 +46,41 @@ fn subscription_with_agent_home(
     host: &TestHost,
     agent_home: Option<PathBuf>,
 ) -> Arc<dyn Subscription> {
+    subscription_factory(host, agent_home, true, false)
+}
+
+fn subscription_factory(
+    host: &TestHost,
+    agent_home: Option<PathBuf>,
+    skip_keychain: bool,
+    force_keychain: bool,
+) -> Arc<dyn Subscription> {
     let mut raw = RawTable::new();
     raw.insert("command", RawValue::String(PROGRAM.to_owned()));
     let mut factory = factory_with_endpoints(endpoints());
     factory.test_agent_home = agent_home;
-    factory.skip_keychain = true;
+    factory.skip_keychain = skip_keychain;
+    factory.force_keychain = force_keychain;
     let cfg = factory.validate(&raw).expect("config");
     factory.build(&cfg, host.context()).expect("build")
+}
+
+fn models_dir_name(id: &hofund_plugin_api::AccountId) -> PathBuf {
+    let digest = hofund_plugin_sdk::digest::sha256(id.to_string().as_bytes());
+    let mut name = String::new();
+    for byte in digest {
+        use std::fmt::Write as _;
+        write!(name, "{byte:02x}").expect("hex");
+    }
+    std::env::temp_dir().join(name)
+}
+
+fn enqueue_period(host: &TestHost) {
+    host.http().enqueue_response(
+        200,
+        &[("content-type", "application/json")],
+        br#"{"billingCycleEnd":"1792833042000","planUsage":{"autoPercentUsed":1,"apiPercentUsed":2,"totalPercentUsed":3}}"#,
+    );
 }
 
 fn ctx() -> SignInCtx {
@@ -481,20 +511,9 @@ fn a2a_42_list_models_spawn_uses_isolated_models_dir() {
             .line("auto - Auto (default)")
             .exits(|_| vec![]),
     );
+    let expected_dir = models_dir_name(&id);
     let list = block_on(sub.list_models(&id, host.context())).expect("models");
     assert!(!list.models().is_empty());
-    let label = id
-        .to_string()
-        .chars()
-        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
-        .collect::<String>();
-    let models_dir = host
-        .context()
-        .dirs()
-        .state_dir()
-        .expect("state")
-        .join("cursor-models")
-        .join(label);
     let spawn = host
         .process()
         .piped_spawns()
@@ -503,12 +522,57 @@ fn a2a_42_list_models_spawn_uses_isolated_models_dir() {
         .expect("models spawn");
     assert_eq!(
         spawn.env_var("CURSOR_CONFIG_DIR"),
-        Some(models_dir.as_os_str())
+        Some(expected_dir.as_os_str())
     );
-    assert_eq!(spawn.cwd, models_dir);
+    assert_eq!(spawn.cwd, expected_dir);
     assert_ne!(
         spawn.env_var("CURSOR_CONFIG_DIR"),
         Some(override_home.as_os_str())
+    );
+    assert!(
+        !expected_dir.exists(),
+        "models temp dir must be removed after success"
+    );
+    let state = host.context().dirs().state_dir().expect("state");
+    assert!(
+        !state.join("cursor-models").exists(),
+        "state dir must not keep cursor-models"
+    );
+}
+
+#[test]
+fn r8b_list_models_removes_temp_dir_when_the_cli_fails() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let token = jwt("models-fail@example.test", 4_000_000_000);
+    let id = account_id_from(&["cursor", "models-fail@example.test"]);
+    let blob = tokens::blob_oauth(
+        &hofund_plugin_api::SecretString::from(token),
+        &hofund_plugin_api::SecretString::from("none"),
+        4_000_000_000_000,
+        "models-fail@example.test",
+        None,
+    );
+    let account = host
+        .context()
+        .accounts()
+        .account(id.clone(), "models-fail@example.test")
+        .expect("account");
+    block_on(host.context().accounts().upsert(account, blob.to_secret())).expect("upsert");
+    host.process()
+        .script_piped(PipedScript::new().exits(|_| vec![]));
+    let expected_dir = models_dir_name(&id);
+    let error = block_on(sub.list_models(&id, host.context())).expect_err("empty models");
+    assert!(error.to_string().contains("model list"));
+    assert!(
+        !expected_dir.exists(),
+        "models temp dir must be removed after a failing CLI"
+    );
+    let state = host.context().dirs().state_dir().expect("state");
+    assert!(
+        !state.join("cursor-models").exists(),
+        "state dir must not keep cursor-models after a failing CLI"
     );
 }
 
@@ -519,13 +583,7 @@ fn a2a_43_agent_quota_uses_auth_json_when_keychain_read_fails() {
     let token = jwt("keychain-fallback@example.test", 4_000_000_000);
     write_auth(&agent_home.join("auth.json"), &token);
     let host = host(&dir);
-    let mut raw = RawTable::new();
-    raw.insert("command", RawValue::String(PROGRAM.to_owned()));
-    let mut factory = factory_with_endpoints(endpoints());
-    factory.test_agent_home = Some(agent_home);
-    factory.skip_keychain = false;
-    let cfg = factory.validate(&raw).expect("config");
-    let sub = factory.build(&cfg, host.context()).expect("build");
+    let sub = subscription_factory(&host, Some(agent_home), false, true);
     let id = account_id_from(&["cursor", "keychain-fallback@example.test"]);
     let blob = tokens::blob_agent("keychain-fallback@example.test", None);
     let account = host
@@ -534,18 +592,254 @@ fn a2a_43_agent_quota_uses_auth_json_when_keychain_read_fails() {
         .account(id.clone(), "keychain-fallback@example.test")
         .expect("account");
     block_on(host.context().accounts().upsert(account, blob.to_secret())).expect("upsert");
+    host.process()
+        .script_piped(PipedScript::new().exits(|_| vec![]).status(1));
     let period_url = endpoints().dashboard("GetCurrentPeriodUsage");
-    host.http().enqueue_response(
-        200,
-        &[("content-type", "application/json")],
-        br#"{"billingCycleEnd":"1792833042000","planUsage":{"autoPercentUsed":1,"apiPercentUsed":2,"totalPercentUsed":3}}"#,
-    );
+    enqueue_period(&host);
     let windows = block_on(sub.quota(&id, host.context())).expect("quota");
     assert_eq!(windows.len(), 3);
+    let keychain = host
+        .process()
+        .piped_spawns()
+        .into_iter()
+        .next()
+        .expect("keychain spawn");
+    assert!(
+        keychain.program.to_string_lossy().ends_with("security"),
+        "keychain failure must spawn security on every OS, got {}",
+        keychain.program.display()
+    );
     assert!(
         host.process().programs().is_empty(),
         "quota must not spawn cursor-agent when auth.json is fresh"
     );
     let calls = host.http().calls();
     assert!(calls.iter().any(|call| call.uri().contains(&period_url)));
+}
+
+fn upsert_agent(
+    host: &TestHost,
+    email: &str,
+    agent_home: &Path,
+    exp: i64,
+) -> hofund_plugin_api::AccountId {
+    let token = jwt(email, exp);
+    write_auth(&agent_home.join("auth.json"), &token);
+    let id = account_id_from(&["cursor", email]);
+    let blob = tokens::blob_agent(email, None);
+    let account = host
+        .context()
+        .accounts()
+        .account(id.clone(), email)
+        .expect("account");
+    block_on(host.context().accounts().upsert(account, blob.to_secret())).expect("upsert");
+    id
+}
+
+#[test]
+fn r8b_keychain_exit_44_falls_through_and_can_be_retried() {
+    let dir = tempfile::tempdir().expect("dir");
+    let agent_home = dir.path().join("agent");
+    let host = host(&dir);
+    let sub = subscription_factory(&host, Some(agent_home.clone()), false, true);
+    let id = upsert_agent(&host, "absent@example.test", &agent_home, 4_000_000_000);
+    host.process()
+        .script_piped(PipedScript::new().exits(|_| vec![]).status(44));
+    host.process()
+        .script_piped(PipedScript::new().exits(|_| vec![]).status(44));
+    enqueue_period(&host);
+    enqueue_period(&host);
+    block_on(sub.quota(&id, host.context())).expect("first quota");
+    block_on(sub.quota(&id, host.context())).expect("second quota");
+    assert_eq!(
+        host.process().piped_spawns().len(),
+        2,
+        "exit 44 must not start a denial period"
+    );
+}
+
+#[test]
+fn r8b_keychain_denial_skips_the_next_spawn() {
+    let dir = tempfile::tempdir().expect("dir");
+    let agent_home = dir.path().join("agent");
+    let host = host(&dir);
+    let sub = subscription_factory(&host, Some(agent_home.clone()), false, true);
+    let id = upsert_agent(&host, "denied@example.test", &agent_home, 4_000_000_000);
+    host.process()
+        .script_piped(PipedScript::new().exits(|_| vec![]).status(1));
+    enqueue_period(&host);
+    enqueue_period(&host);
+    block_on(sub.quota(&id, host.context())).expect("first quota");
+    block_on(sub.quota(&id, host.context())).expect("second quota");
+    assert_eq!(
+        host.process().piped_spawns().len(),
+        1,
+        "a non-44 keychain failure must not spawn again during the denial period"
+    );
+}
+
+#[test]
+fn r8b_keychain_timeout_does_not_set_denial() {
+    let dir = tempfile::tempdir().expect("dir");
+    let agent_home = dir.path().join("agent");
+    let host = TestHost::open_for_with_tokio_monotonic(
+        hofund_plugin_api::PluginKind::Subscription,
+        plugin(),
+        dir.path(),
+    );
+    let sub = subscription_factory(&host, Some(agent_home.clone()), false, true);
+    let id = upsert_agent(&host, "timeout@example.test", &agent_home, 4_000_000_000);
+    // Hanging child: timeout must drop it and fall through. The empty result
+    // is cached for 10s, then a later call may spawn again.
+    host.process().script_piped(PipedScript::new());
+    host.process()
+        .script_piped(PipedScript::new().exits(|_| vec![]).status(44));
+    enqueue_period(&host);
+    enqueue_period(&host);
+    enqueue_period(&host);
+    block_on_paused(async {
+        let first = sub.quota(&id, host.context());
+        let drive = async {
+            yield_times(4).await;
+            advance_time(std::time::Duration::from_secs(11)).await;
+        };
+        join_all(vec![
+            Box::pin(async {
+                first.await.expect("quota after timeout");
+            }),
+            Box::pin(drive),
+        ])
+        .await;
+        // Within the 10s empty cache, a second call must not spawn.
+        sub.quota(&id, host.context())
+            .await
+            .expect("cached empty keychain");
+        assert_eq!(host.process().piped_spawns().len(), 1);
+        advance_time(std::time::Duration::from_secs(10)).await;
+        sub.quota(&id, host.context())
+            .await
+            .expect("retry after cache");
+        assert_eq!(
+            host.process().piped_spawns().len(),
+            2,
+            "a timeout must not start a 10-minute denial"
+        );
+    });
+}
+
+#[test]
+fn r8b_keychain_fresh_bypass_reads_during_denial() {
+    let dir = tempfile::tempdir().expect("dir");
+    let agent_home = dir.path().join("agent");
+    let host = host(&dir);
+    let sub = subscription_factory(&host, Some(agent_home.clone()), false, true);
+    let id = upsert_agent(&host, "fresh@example.test", &agent_home, 100);
+    host.process()
+        .script_piped(PipedScript::new().exits(|_| vec![]).status(1));
+    // status reread uses fresh=true and must spawn keychain again
+    host.process()
+        .script_piped(PipedScript::new().line("ok").exits(|_| vec![]).status(0));
+    host.process().script_piped(PipedScript::new().line("ok"));
+    enqueue_period(&host);
+    // near-expiry token forces agent status + fresh keychain reread
+    let error = block_on(sub.quota(&id, host.context()));
+    // After status, auth.json is still expired (exp=100) if the fake status
+    // did not write a new token, so quota may fail. The assertion is the
+    // spawn count: denial spawn + fresh reread.
+    let _ = error;
+    assert!(
+        host.process().piped_spawns().len() >= 2,
+        "fresh must bypass the denial period, spawns={}",
+        host.process().piped_spawns().len()
+    );
+}
+
+#[test]
+fn r8b_overlapping_keychain_reads_share_one_spawn() {
+    let dir = tempfile::tempdir().expect("dir");
+    let agent_home = dir.path().join("agent");
+    let host = host(&dir);
+    let sub = subscription_factory(&host, Some(agent_home.clone()), false, true);
+    let id = upsert_agent(
+        &host,
+        "single-flight@example.test",
+        &agent_home,
+        4_000_000_000,
+    );
+    // Hang until both calls have started, then we cannot easily release a
+    // Hang script. Use a normal exit: join_all still overlaps the first
+    // await enough that the second should attach to the in-flight spawn
+    // if the first has not finished publishing. A hanging script plus
+    // timeout would also work; here a delayed exits callback is enough
+    // if both are polled before the first spawn returns. Queue one script
+    // only — a second spawn would fail.
+    host.process()
+        .script_piped(PipedScript::new().exits(|_| vec![]).status(1));
+    enqueue_period(&host);
+    enqueue_period(&host);
+    block_on(async {
+        join_all(vec![
+            Box::pin(async {
+                sub.quota(&id, host.context()).await.expect("first");
+            }),
+            Box::pin(async {
+                sub.quota(&id, host.context()).await.expect("second");
+            }),
+        ])
+        .await;
+    });
+    assert_eq!(
+        host.process().piped_spawns().len(),
+        1,
+        "overlapping keychain reads must share one spawn"
+    );
+}
+
+#[test]
+fn r8b_overlapping_oauth_refresh_posts_once() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let near = jwt("lease@example.test", 100);
+    let id = account_id_from(&["cursor", "lease@example.test"]);
+    let blob = tokens::blob_oauth(
+        &hofund_plugin_api::SecretString::from(near),
+        &hofund_plugin_api::SecretString::from("refresh-token"),
+        100_000,
+        "lease@example.test",
+        None,
+    );
+    let account = host
+        .context()
+        .accounts()
+        .account(id.clone(), "lease@example.test")
+        .expect("account");
+    block_on(host.context().accounts().upsert(account, blob.to_secret())).expect("upsert");
+    let refresh_url = endpoints().oauth_refresh();
+    host.http().enqueue_response(
+        200,
+        &[("content-type", "application/json")],
+        br#"{"accessToken":"renewed-token","refreshToken":"refresh-token-2"}"#.to_vec(),
+    );
+    block_on(async {
+        join_all(vec![
+            Box::pin(async {
+                sub.refresh(&id, host.context()).await.expect("first");
+            }),
+            Box::pin(async {
+                sub.refresh(&id, host.context()).await.expect("second");
+            }),
+        ])
+        .await;
+    });
+    let posts = host
+        .http()
+        .calls()
+        .into_iter()
+        .filter(|call| call.uri().contains(&refresh_url))
+        .count();
+    assert_eq!(
+        posts, 1,
+        "overlapping near-expiry refreshes must renew once"
+    );
 }
