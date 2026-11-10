@@ -493,10 +493,16 @@ async fn run_http1<'a>(
     .await;
     let mut response = match down {
         Ok(response) => response,
+        Err(error)
+            if matches!(
+                error.kind(),
+                PluginErrorKind::Connect | PluginErrorKind::Cancelled
+            ) =>
+        {
+            return Err(error);
+        }
         Err(error) => {
-            return Ok(one_event(RunEvent::Trailer(synthetic_end(
-                AppendFailure::from(error),
-            )?)));
+            return Err(PluginError::status_error(502, error.message()));
         }
     };
     let status = response.status().as_u16();
@@ -1716,6 +1722,29 @@ mod tests {
                 );
                 assert_eq!(fields[2].as_varint(), Some(sequence as u64));
             }
+        });
+    }
+
+    #[test]
+    fn run_sse_connect_failure_stays_connect_when_no_request_was_sent() {
+        let _guard = http2_memory::test_lock();
+        http2_memory::reset_for_tests();
+        block_on(async {
+            let h1 = Http1Server::start(Vec::new()).await;
+            let endpoints = endpoints(&h1, "http://127.0.0.1:9");
+            h1.shutdown().await;
+            let host = pooled_host();
+            http2_memory::remember(host.context());
+            let error = run(
+                host.context(),
+                &endpoints,
+                &AgentHost::default(),
+                &token(),
+                empty_run_args(),
+            )
+            .await
+            .expect_err("RunSSE could not connect");
+            assert_eq!(error.kind(), hofund_plugin_api::PluginErrorKind::Connect);
         });
     }
 
