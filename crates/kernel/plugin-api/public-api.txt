@@ -152,6 +152,7 @@ AuthResult
 AuthResult #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
 AuthResult::const fn accepted (self) -> bool
 AuthResult::const fn new (accepted : bool) -> Self
+BRIDGE_CALLBACK_PATH_PREFIX
 BalanceCard
 BalanceCard #[non_exhaustive] derives(Clone, Debug, Default, PartialEq)
 BalanceCard::const fn account_wide (& self) -> bool
@@ -244,6 +245,20 @@ BodyStream::fn from_bytes (bytes : impl Into < Bytes >) -> Self
 BodyStream::fn from_stream (stream : impl Stream < Item = Result < Bytes , PluginError > > + Send + 'static ,) -> Self
 BodyStream::fn resume (chunk : Bytes , rest : Self) -> Self
 BodyStream::fn unfold < T , F , Fut > (state : T , next : F) -> Self where T : Send + 'static , F : FnMut (T) -> Fut + Send + 'static , Fut : Future < Output = Option < (Result < Vec < u8 > , PluginError > , T) > > + Send + 'static ,
+BridgeCallbackGuard
+BridgeCallbackGuard #[non_exhaustive]
+BridgeCallbackGuard::fn callback_url (& self) -> & str
+BridgeCallbackHandle
+BridgeCallbackHandle #[non_exhaustive] derives(Clone)
+BridgeCallbackHandle::fn base_url (& self) -> Result < String , PluginError >
+BridgeCallbackHandle::fn register (& self , token : & str , handler : Arc < dyn BridgeCallbackHandler > ,) -> Result < BridgeCallbackGuard , PluginError >
+BridgeCallbackHandler
+BridgeCallbackHandler::fn handle (& self , body : Bytes) -> BoxFuture < '_ , BridgeCallbackReply >
+BridgeCallbackReply
+BridgeCallbackReply #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
+BridgeCallbackReply::const fn status (& self) -> u16
+BridgeCallbackReply::fn body (& self) -> & [u8]
+BridgeCallbackReply::fn new (status : u16 , body : impl Into < Bytes >) -> Self
 BuildContext
 BuildContext #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
 BuildContext::const fn new (protocol : ProtocolId) -> Self
@@ -443,6 +458,7 @@ HostContext #[non_exhaustive] derives(Clone)
 HostContext::const fn key (& self) -> & PluginKey
 HostContext::const fn plugin (& self) -> & PluginId
 HostContext::fn accounts (& self) -> & AccountsHandle
+HostContext::fn bridge_callback (& self) -> & BridgeCallbackHandle
 HostContext::fn clock (& self) -> & ClockHandle
 HostContext::fn dirs (& self) -> & DirHandle
 HostContext::fn from_backends (plugin : PluginId , http : Arc < dyn HttpBackend > , secrets : Arc < dyn SecretsBackend > , accounts : Arc < dyn AccountBackend > , clock : Arc < dyn ClockBackend > , scheduler : Arc < dyn SchedulerBackend > , process : Arc < dyn ProcessBackend > , dirs : Arc < dyn DirBackend > , observe : Arc < dyn ObserveBackend > ,) -> Self
@@ -453,6 +469,7 @@ HostContext::fn observe (& self) -> & ObserveHandle
 HostContext::fn scheduler (& self) -> & SchedulerHandle
 HostContext::fn secrets (& self) -> & SecretsHandle
 HostContext::fn spawn_process (& self) -> & ProcessHandle
+HostContext::fn with_bridge_callback (mut self , bridge : Arc < dyn BridgeCallbackBackend >) -> Self
 HostContext::fn with_loopback (mut self , loopback : Arc < dyn LoopbackBackend >) -> Self
 HostReadBudget
 HostReadBudget derives(Clone, Copy, Debug, PartialEq, Eq)
@@ -1122,6 +1139,7 @@ WriteCtx #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 WriteCtx::fn home (& self) -> & Path
 WriteCtx::fn new (home : impl Into < PathBuf >) -> Self
 const API
+const BRIDGE_CALLBACK_PATH_PREFIX
 const LOOPBACK_CANCEL_PATH
 const PROBE_CAP
 fn read_budget (request : & http :: Request < crate :: Body >) -> Option < Duration >
@@ -1138,6 +1156,10 @@ kernel::AccountLeaseBackend
 kernel::AccountLeaseBackend::async fn commit (self : Box < Self > , label : Option < String > , secret : SecretString ,) -> Result < () , PluginError >
 kernel::AccountLeaseBackend::fn account (& self) -> & Account
 kernel::AccountLeaseBackend::fn secret (& self) -> & SecretString
+kernel::BridgeCallbackBackend
+kernel::BridgeCallbackBackend::fn base_url (& self) -> Result < String , PluginError >
+kernel::BridgeCallbackBackend::fn register (& self , plugin : & PluginKey , token : & str , handler : std :: sync :: Arc < dyn crate :: BridgeCallbackHandler > ,) -> Result < String , PluginError >
+kernel::BridgeCallbackBackend::fn unregister (& self , plugin : & PluginKey , token : & str)
 kernel::ClockBackend
 kernel::ClockBackend::fn monotonic (& self) -> Duration
 kernel::ClockBackend::fn now (& self) -> SystemTime

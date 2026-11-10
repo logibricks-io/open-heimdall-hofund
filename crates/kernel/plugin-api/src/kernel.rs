@@ -380,6 +380,62 @@ impl LoopbackBackend for NoLoopback {
     fn release(&self, _plugin: &PluginKey, _session: &str) {}
 }
 
+/// Dedicated loopback listener for long-lived bridge callbacks.
+///
+/// This is not the browser sign-in [`LoopbackBackend`]. The kernel binds
+/// `127.0.0.1` only and dispatches POSTs by token.
+#[doc(hidden)]
+pub trait BridgeCallbackBackend: Send + Sync {
+    /// Origin of the listener, `http://127.0.0.1:<port>`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when this host has no listener or the
+    /// listener cannot be started.
+    fn base_url(&self) -> Result<String, PluginError>;
+
+    /// Registers `token` for `plugin`. Returns the full callback URL.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when this host has no listener, `token` is
+    /// already registered, or the listener cannot be started.
+    fn register(
+        &self,
+        plugin: &PluginKey,
+        token: &str,
+        handler: std::sync::Arc<dyn crate::BridgeCallbackHandler>,
+    ) -> Result<String, PluginError>;
+
+    /// Drops the registration for `token` if `plugin` created it. An unknown
+    /// token, or one registered by another plugin, is a no-op.
+    fn unregister(&self, plugin: &PluginKey, token: &str);
+}
+
+/// The backend a context gets when the kernel has no bridge callback listener.
+pub(crate) struct NoBridgeCallback;
+
+impl BridgeCallbackBackend for NoBridgeCallback {
+    fn base_url(&self) -> Result<String, PluginError> {
+        Err(PluginError::unsupported(
+            "this host has no bridge callback listener",
+        ))
+    }
+
+    fn register(
+        &self,
+        _plugin: &PluginKey,
+        _token: &str,
+        _handler: std::sync::Arc<dyn crate::BridgeCallbackHandler>,
+    ) -> Result<String, PluginError> {
+        Err(PluginError::unsupported(
+            "this host has no bridge callback listener",
+        ))
+    }
+
+    fn unregister(&self, _plugin: &PluginKey, _token: &str) {}
+}
+
 /// Per-plugin directories the kernel creates.
 #[doc(hidden)]
 pub trait DirBackend: Send + Sync {

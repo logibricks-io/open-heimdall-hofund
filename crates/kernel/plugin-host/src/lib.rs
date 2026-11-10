@@ -17,6 +17,7 @@
 mod account_secrets;
 mod accounts;
 mod agent_credentials;
+mod bridge_callback;
 mod duplex;
 mod loopback;
 mod piped;
@@ -34,8 +35,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 use async_trait::async_trait;
 use hofund_plugin_api::kernel::{
-    AccountBackend, ClockBackend, DirBackend, HttpRequest, HttpResponse, Job, LoopbackBackend,
-    PipedChildBackend, ProcessBackend, SchedulerBackend, SecretsBackend,
+    AccountBackend, BridgeCallbackBackend, ClockBackend, DirBackend, HttpRequest, HttpResponse,
+    Job, LoopbackBackend, PipedChildBackend, ProcessBackend, SchedulerBackend, SecretsBackend,
 };
 use hofund_plugin_api::{
     AuthResult, Body, BodyStream, HostContext, MemberId, PluginError, PluginId, PluginKey,
@@ -44,6 +45,7 @@ use hofund_plugin_api::{
 
 pub use accounts::{AccountStorageKind, AccountStore, StoreError};
 pub use agent_credentials::native_credential_store;
+pub use bridge_callback::BridgeCallbackRegistry;
 pub use hofund_plugin_api::kernel::{GatewayBackend, HttpBackend, ObserveBackend};
 pub use loopback::LoopbackRegistry;
 pub use pool::{
@@ -264,25 +266,30 @@ pub fn runtime_host_with_observe_for(
     let root = root.into();
     let accounts = AccountStore::open(root.join("accounts.json"))?;
     let plugin = PluginKey::new(kind, plugin);
-    Ok(host_context_for(
-        kind,
-        plugin.id().clone(),
-        Arc::new(PooledHttp::with_limits(HttpProfile::direct(), limits)),
-        Arc::new(KeySecrets {
-            plugin,
-            api_key: api_key.into(),
-        }),
-        Arc::new(accounts),
-        Arc::new(SystemClock),
-        Arc::new(RecordingScheduler::default()),
-        Arc::new(StdProcess::default()),
-        Arc::new(RootDirs {
-            root,
-            #[cfg(test)]
-            _guard: None,
-        }),
-        observe,
-    ))
+    Ok(
+        host_context_for(
+            kind,
+            plugin.id().clone(),
+            Arc::new(PooledHttp::with_limits(HttpProfile::direct(), limits)),
+            Arc::new(KeySecrets {
+                plugin,
+                api_key: api_key.into(),
+            }),
+            Arc::new(accounts),
+            Arc::new(SystemClock),
+            Arc::new(RecordingScheduler::default()),
+            Arc::new(StdProcess::default()),
+            Arc::new(RootDirs {
+                root,
+                #[cfg(test)]
+                _guard: None,
+            }),
+            observe,
+        )
+        .with_bridge_callback(
+            Arc::new(BridgeCallbackRegistry::new()) as Arc<dyn BridgeCallbackBackend>
+        ),
+    )
 }
 
 /// One `api_key` secret. [`Debug`] is not implemented.
@@ -333,6 +340,7 @@ pub struct TestHost {
     process: Arc<RecordingProcess>,
     observe: Arc<RecordingObserve>,
     loopback: Arc<LoopbackRegistry>,
+    bridge_callback: Arc<BridgeCallbackRegistry>,
 }
 
 impl TestHost {
@@ -374,6 +382,7 @@ impl TestHost {
         let process = Arc::new(RecordingProcess::default());
         let observe = Arc::new(RecordingObserve::default());
         let loopback = Arc::new(LoopbackRegistry::new());
+        let bridge_callback = Arc::new(BridgeCallbackRegistry::new());
         let accounts = AccountStore::open_with_backend(
             root.join("accounts.json"),
             Arc::new(account_secrets::MemoryAccountSecrets::default()),
@@ -395,7 +404,8 @@ impl TestHost {
             }),
             Arc::clone(&observe) as Arc<dyn ObserveBackend>,
         )
-        .with_loopback(Arc::clone(&loopback) as Arc<dyn LoopbackBackend>);
+        .with_loopback(Arc::clone(&loopback) as Arc<dyn LoopbackBackend>)
+        .with_bridge_callback(Arc::clone(&bridge_callback) as Arc<dyn BridgeCallbackBackend>);
         Self {
             context,
             http,
@@ -404,6 +414,7 @@ impl TestHost {
             process,
             observe,
             loopback,
+            bridge_callback,
         }
     }
 
@@ -426,6 +437,7 @@ impl TestHost {
         let process = Arc::new(RecordingProcess::default());
         let observe = Arc::new(RecordingObserve::default());
         let loopback = Arc::new(LoopbackRegistry::new());
+        let bridge_callback = Arc::new(BridgeCallbackRegistry::new());
         let accounts = AccountStore::open_with_backend(
             root.join("accounts.json"),
             Arc::new(account_secrets::MemoryAccountSecrets::default()),
@@ -447,7 +459,8 @@ impl TestHost {
             }),
             Arc::clone(&observe) as Arc<dyn ObserveBackend>,
         )
-        .with_loopback(Arc::clone(&loopback) as Arc<dyn LoopbackBackend>);
+        .with_loopback(Arc::clone(&loopback) as Arc<dyn LoopbackBackend>)
+        .with_bridge_callback(Arc::clone(&bridge_callback) as Arc<dyn BridgeCallbackBackend>);
         Self {
             context,
             http,
@@ -456,6 +469,7 @@ impl TestHost {
             process,
             observe,
             loopback,
+            bridge_callback,
         }
     }
 
@@ -500,6 +514,12 @@ impl TestHost {
     #[must_use]
     pub fn loopback(&self) -> &LoopbackRegistry {
         &self.loopback
+    }
+
+    /// The dedicated bridge callback listener the plugin registered on.
+    #[must_use]
+    pub fn bridge_callback(&self) -> &BridgeCallbackRegistry {
+        &self.bridge_callback
     }
 }
 
