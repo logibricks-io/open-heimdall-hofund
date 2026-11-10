@@ -167,8 +167,8 @@ pub(crate) fn decode_response(body: &[u8]) -> Result<ChatResponse, PluginError> 
                         response.text.push(text);
                     }
                 }
-                6 => response.saw_tool_call = true,
-                7 => response.saw_usage = true,
+                6 if field.as_bytes().is_some() => response.saw_tool_call = true,
+                7 if field.as_bytes().is_some() => response.saw_usage = true,
                 _ => {}
             }
         }
@@ -438,6 +438,18 @@ mod tests {
         assert!(decoded.saw_tool_call);
         assert!(!decoded.has_text_stream());
         assert!(!decoded.is_empty_reply());
+    }
+
+    #[test]
+    fn tool_and_usage_markers_require_length_delimited_fields() {
+        let message = hofund_plugin_sdk::protobuf::ProtoBuf::new()
+            .varint(6, 1)
+            .varint(7, 1)
+            .finish();
+        let decoded = decode_response(&frame(0, &message).expect("frame")).expect("decode");
+        assert!(!decoded.saw_tool_call);
+        assert!(!decoded.saw_usage);
+        assert!(decoded.is_empty_reply());
     }
 
     #[test]
