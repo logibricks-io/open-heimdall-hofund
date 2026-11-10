@@ -1070,6 +1070,7 @@ SurfaceId::as_str
 SurfaceId::from_static
 TextDelta
 TextPart
+ThinkingDelta
 TierId
 TierId #[non_exhaustive] derives(Clone, Debug)
 TierId::const fn from_static (value : & 'static str) -> Self
