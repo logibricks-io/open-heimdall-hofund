@@ -528,9 +528,11 @@ mod tests {
                     .map(|_| ())
                     .expect_err("an empty successful stream is not allowed");
                 assert_eq!(error.status(), Some(502));
-                assert!(error
-                    .message()
-                    .contains("an empty reply (the model answered nothing; try again)"));
+                assert!(
+                    error
+                        .message()
+                        .contains("an empty reply (the model answered nothing; try again)")
+                );
                 assert!(!error.message().contains("the upstream stopped sending"));
             }
         });
@@ -644,7 +646,11 @@ mod tests {
             let attempt = upstream.execute(text_request(), ProtocolId::OPENAI_CHAT);
             let control = async {
                 for _ in 0..100 {
-                    if h2.requests().first().is_some_and(|request| !request.data().is_empty()) {
+                    if h2
+                        .requests()
+                        .first()
+                        .is_some_and(|request| !request.data().is_empty())
+                    {
                         break;
                     }
                     yield_times(2).await;
@@ -660,7 +666,10 @@ mod tests {
             assert!(error.message().contains("idle"));
             assert!(!error.message().contains("an empty reply"));
             assert!(!error.message().contains("the upstream stopped sending"));
-            assert!(!http2_memory::blocked(host.context(), Duration::from_secs(600)));
+            assert!(!http2_memory::blocked(
+                host.context(),
+                Duration::from_secs(600)
+            ));
         });
     }
 
@@ -670,12 +679,14 @@ mod tests {
         http2_memory::reset_for_tests();
         block_on_paused(async {
             let heartbeat = interaction(13, Pb::new());
-            let h2 = Http2Server::start(vec![Http2Response::new(200)
-                .data(heartbeat.clone())
-                .data(heartbeat.clone())
-                .data(heartbeat)
-                .data_delay(Duration::from_secs(1))
-                .hold_open()])
+            let h2 = Http2Server::start(vec![
+                Http2Response::new(200)
+                    .data(heartbeat.clone())
+                    .data(heartbeat.clone())
+                    .data(heartbeat)
+                    .data_delay(Duration::from_secs(1))
+                    .hold_open(),
+            ])
             .await;
             let h1 = Http1Server::start(vec![config_reply(h2.base_url())]).await;
             let host = pooled_host();
@@ -690,7 +701,11 @@ mod tests {
             let attempt = upstream.execute(text_request(), ProtocolId::OPENAI_CHAT);
             let control = async {
                 for _ in 0..100 {
-                    if h2.requests().first().is_some_and(|request| !request.data().is_empty()) {
+                    if h2
+                        .requests()
+                        .first()
+                        .is_some_and(|request| !request.data().is_empty())
+                    {
                         break;
                     }
                     yield_times(2).await;
@@ -711,7 +726,10 @@ mod tests {
             assert!(error.message().contains("heartbeat"));
             assert!(!error.message().contains("an empty reply"));
             assert!(!error.message().contains("the upstream stopped sending"));
-            assert!(!http2_memory::blocked(host.context(), Duration::from_secs(600)));
+            assert!(!http2_memory::blocked(
+                host.context(),
+                Duration::from_secs(600)
+            ));
         });
     }
 
@@ -720,9 +738,11 @@ mod tests {
         let _guard = http2_memory::test_lock();
         http2_memory::reset_for_tests();
         block_on_paused(async {
-            let h2 = Http2Server::start(vec![Http2Response::new(200)
-                .data(text_frame("started"))
-                .hold_open()])
+            let h2 = Http2Server::start(vec![
+                Http2Response::new(200)
+                    .data(text_frame("started"))
+                    .hold_open(),
+            ])
             .await;
             let h1 = Http1Server::start(vec![config_reply(h2.base_url())]).await;
             let host = pooled_host();
@@ -752,11 +772,16 @@ mod tests {
             let Race::Left(event) = race(next, control).await else {
                 unreachable!("control remains pending")
             };
-            let error = event.expect("terminal event").expect_err("after-text stall");
+            let error = event
+                .expect("terminal event")
+                .expect_err("after-text stall");
             assert_eq!(error.status(), Some(502));
             assert!(error.message().contains("the upstream stopped sending"));
             assert!(!error.message().contains("an empty reply"));
-            assert!(!http2_memory::blocked(host.context(), Duration::from_secs(600)));
+            assert!(!http2_memory::blocked(
+                host.context(),
+                Duration::from_secs(600)
+            ));
         });
     }
 
@@ -767,7 +792,8 @@ mod tests {
         block_on(async {
             let old = Http2Server::start(Vec::new()).await;
             let regional = Http2Server::start(vec![
-                Http2Response::new(200).data([text_frame("regional text"), turn_end_frame()].concat()),
+                Http2Response::new(200)
+                    .data([text_frame("regional text"), turn_end_frame()].concat()),
             ])
             .await;
             let h1 = Http1Server::start(vec![
@@ -804,8 +830,14 @@ mod tests {
             assert_eq!(old.requests().len(), 0);
             assert_eq!(regional.requests().len(), 1);
             assert_eq!(h1.requests().len(), 3);
-            assert_eq!(h1.requests()[2].path(), "/aiserver.v1.ServerConfigService/GetServerConfig");
-            assert!(!http2_memory::blocked(host.context(), Duration::from_secs(600)));
+            assert_eq!(
+                h1.requests()[2].path(),
+                "/aiserver.v1.ServerConfigService/GetServerConfig"
+            );
+            assert!(!http2_memory::blocked(
+                host.context(),
+                Duration::from_secs(600)
+            ));
         });
     }
 
@@ -882,10 +914,8 @@ mod tests {
         http2_memory::reset_for_tests();
         block_on(async {
             let h2 = Http2Server::start(Vec::new()).await;
-            let h1 = Http1Server::start(vec![
-                Http1Response::new(400).body(b"bad run".to_vec()),
-            ])
-            .await;
+            let h1 =
+                Http1Server::start(vec![Http1Response::new(400).body(b"bad run".to_vec())]).await;
             let host = pooled_host();
             http2_memory::remember(host.context());
             let account = store_account(&host).await;

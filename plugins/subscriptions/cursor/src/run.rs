@@ -147,7 +147,10 @@ pub(crate) async fn run_stream<'a>(
         agent_url = agent_host
             .resolve(host, endpoints, token, false, args.team_id)
             .await;
-        let url = format!("{}/agent.v1.AgentService/Run", agent_url.trim_end_matches('/'));
+        let url = format!(
+            "{}/agent.v1.AgentService/Run",
+            agent_url.trim_end_matches('/')
+        );
         let request = run_duplex(
             url,
             endpoints,

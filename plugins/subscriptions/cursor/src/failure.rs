@@ -29,7 +29,9 @@ pub(crate) fn after_output(error: PluginError) -> PluginError {
 /// Maps a Connect trailer without requiring a socket or a transport error.
 pub(crate) fn trailer(payload: &[u8]) -> PluginError {
     let parsed = hofund_plugin_sdk::json::from_slice::<Value>(payload).ok();
-    let object = parsed.as_ref().map(|body| body.get("error").unwrap_or(body));
+    let object = parsed
+        .as_ref()
+        .map(|body| body.get("error").unwrap_or(body));
     let code = object
         .and_then(|body| body.get("code"))
         .and_then(Value::as_str)
@@ -45,8 +47,14 @@ pub(crate) fn trailer(payload: &[u8]) -> PluginError {
         .flatten()
         .filter_map(|detail| {
             let pair = detail.get("debug")?.get("details")?;
-            let title = pair.get("title").and_then(Value::as_str).unwrap_or_default();
-            let text = pair.get("detail").and_then(Value::as_str).unwrap_or_default();
+            let title = pair
+                .get("title")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let text = pair
+                .get("detail")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
             let joined = format!("{title}: {text}");
             (joined != ": ").then_some(joined)
         })
@@ -198,7 +206,11 @@ mod tests {
         let regional = classify(401, "unauthenticated", "account REGION is not served here");
         assert_eq!(regional.status(), Some(403));
         assert_eq!(regional.kind(), PluginErrorKind::Status);
-        assert!(regional.message().contains("account REGION is not served here"));
+        assert!(
+            regional
+                .message()
+                .contains("account REGION is not served here")
+        );
 
         let denied = classify(401, "permission_denied", "denied by policy");
         assert_eq!(denied.status(), Some(403));
@@ -244,9 +256,11 @@ mod tests {
         ] {
             let error = classify(400, "invalid_argument", message);
             assert_eq!(error.status(), Some(400));
-            assert!(error
-                .message()
-                .starts_with("input is too long for the model's context: "));
+            assert!(
+                error
+                    .message()
+                    .starts_with("input is too long for the model's context: ")
+            );
             assert!(error.message().contains(message));
         }
     }
