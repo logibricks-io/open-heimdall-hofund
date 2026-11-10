@@ -2,7 +2,9 @@
 
 pub mod decode;
 pub mod park;
+pub mod room;
 pub mod run;
+pub mod session;
 pub mod wsl;
 
 #[cfg(test)]

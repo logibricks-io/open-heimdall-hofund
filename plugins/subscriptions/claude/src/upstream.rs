@@ -16,8 +16,9 @@ use crate::account::account_dir;
 use crate::bridge::park::{self, Bridge};
 use crate::bridge::run::{
     SpawnPlan, StartSpec, env_deny, events_allowing_tools, events_from_stdout, has_tools,
-    reject_non_text, start_plan, stdin_from_said, workdir,
+    reject_non_text, start_plan, stdin_from_said, stdin_from_since, workdir,
 };
+use crate::bridge::session::{TurnStop, has_reply};
 use crate::{COMMAND, creds, setup_token};
 
 #[cfg(test)]
@@ -164,6 +165,15 @@ impl UpstreamProvider for ClaudeUpstream {
         if let Some(found) = self.try_match(&request) {
             return self.continue_parked(found, &request).await;
         }
+        if let Some(resume) = self.bridge.resume(&request, &self.account) {
+            return self.continue_resume(resume, &request).await;
+        }
+        let unshelved = self.bridge.unshelve(&request, &self.account);
+        self.bridge.retire(&self.account, &request);
+        let room = self
+            .bridge
+            .room
+            .take(|| self.bridge.evict_idle_for_room())?;
         let Some(secret) = self.host.accounts().secret(&self.account).await? else {
             return Err(
                 PluginError::auth("no Claude Code sign-in is stored for this account")
@@ -187,14 +197,19 @@ impl UpstreamProvider for ClaudeUpstream {
             proxy: Vec::new(),
             wsl_distro: None,
             mcp_config: None,
+            resume_session: unshelved.as_ref().map(|(saved, _)| saved.session.clone()),
         };
         let mut callback_guard = None;
         let mut run_id = None;
-        if has_tools(&request) {
-            let id = self.bridge.park_run(
-                self.account.clone(),
-                request.tools.iter().map(|tool| tool.name.clone()).collect(),
-            );
+        let tool_names: Vec<String> = request.tools.iter().map(|tool| tool.name.clone()).collect();
+        if has_tools(&request) || has_reply(&request.messages) || unshelved.is_some() {
+            let id = self
+                .bridge
+                .park_run(self.account.clone(), tool_names.clone());
+            self.bridge
+                .ensure_session_run(id, &self.account, tool_names);
+            self.bridge.heard(id, &request.messages);
+            self.bridge.set_room_guard(id, room);
             run_id = Some(id);
             let token = park::new_callback_token()?;
             let handler = self.bridge.callback_handler(id, request.clone());
@@ -219,10 +234,13 @@ impl UpstreamProvider for ClaudeUpstream {
                 Err(error) => return Err(error),
             }
         }
-        let plan = start_plan(&spec, &request)?;
+        let mut plan = start_plan(&spec, &request)?;
+        if let Some((_, since)) = unshelved {
+            plan.stdin = stdin_from_since(&since);
+        }
         let stdout = self.stdout_for(&plan, &spec).await?;
         let _ = callback_guard;
-        self.finish_stdout(stdout, run_id, has_tools(&request))
+        self.finish_stdout(stdout, run_id, has_tools(&request), &request)
     }
 }
 
@@ -237,7 +255,15 @@ impl ClaudeUpstream {
         if !has_results {
             return None;
         }
-        self.bridge.match_request(request, &self.account)
+        let found = self.bridge.match_request(request, &self.account)?;
+        if !self.bridge.claim_resume(found.run_id) {
+            return None;
+        }
+        if !self.bridge.follows(found.run_id, &request.messages) {
+            self.bridge.released(found.run_id);
+            return None;
+        }
+        Some(found)
     }
 
     async fn continue_parked(
@@ -252,7 +278,7 @@ impl ClaudeUpstream {
         };
         let _remapped = found.remapped;
         if let Some(stdout) = self.bridge.take_continuation(found.run_id) {
-            return self.finish_stdout(stdout, Some(found.run_id), true);
+            return self.finish_stdout(stdout, Some(found.run_id), true, request);
         }
         // Fake-runner tests (and any runner hook) serve the next script here.
         let config_dir = account_dir(&self.host, &self.account)?;
@@ -268,13 +294,40 @@ impl ClaudeUpstream {
             proxy: Vec::new(),
             wsl_distro: None,
             mcp_config: None,
+            resume_session: None,
         };
         let mut plan = start_plan(&spec, request)?;
         if !said.is_empty() {
             plan.stdin = stdin_from_said(&said);
         }
         let stdout = self.stdout_for(&plan, &spec).await?;
-        self.finish_stdout(stdout, Some(found.run_id), true)
+        self.finish_stdout(stdout, Some(found.run_id), true, request)
+    }
+
+    async fn continue_resume(
+        &self,
+        resume: crate::bridge::session::Resume,
+        request: &Request,
+    ) -> Result<Completion, PluginError> {
+        let config_dir = account_dir(&self.host, &self.account)?;
+        let spec = StartSpec {
+            program: self
+                .program()
+                .unwrap_or_else(|_| PathBuf::from("/opt/claude/bin/claude")),
+            cwd: config_dir.clone(),
+            model: request.model.clone(),
+            token: OsString::from(""),
+            config_dir,
+            sandbox: false,
+            proxy: Vec::new(),
+            wsl_distro: None,
+            mcp_config: None,
+            resume_session: None,
+        };
+        let mut plan = start_plan(&spec, request)?;
+        plan.stdin = stdin_from_since(&resume.since);
+        let stdout = self.stdout_for(&plan, &spec).await?;
+        self.finish_stdout(stdout, Some(resume.run_id), has_tools(request), request)
     }
 
     fn finish_stdout(
@@ -282,18 +335,40 @@ impl ClaudeUpstream {
         stdout: String,
         run_id: Option<u64>,
         allow_tools: bool,
+        request: &Request,
     ) -> Result<Completion, PluginError> {
-        if !allow_tools {
+        let result = if !allow_tools {
             let events = events_from_stdout(&stdout)?;
-            return Ok(Completion::Stream(Box::pin(stream::iter(
-                events.into_iter().map(Ok),
-            ))));
-        }
-        let (events, calls) = events_allowing_tools(&stdout)?;
-        if let Some(run_id) = run_id {
-            for (id, name) in calls {
-                self.bridge.register_call(run_id, id, name);
+            Ok((events, Vec::new(), session_id_from(&stdout)))
+        } else {
+            let (events, calls) = events_allowing_tools(&stdout)?;
+            Ok((events, calls, session_id_from(&stdout)))
+        };
+        let (events, calls, session) = match result {
+            Ok(decoded) => decoded,
+            Err(error) => {
+                if let Some(run_id) = run_id {
+                    self.bridge
+                        .ended(run_id, &self.account, request, "", TurnStop::Other, false);
+                }
+                return Err(error);
             }
+        };
+        if let Some(run_id) = run_id {
+            if let Some(session) = session {
+                self.bridge.set_session(run_id, session, Vec::new());
+            }
+            for (id, name) in &calls {
+                self.bridge.register_call(run_id, id.clone(), name.clone());
+            }
+            let said = assistant_text(&events);
+            let stop = if calls.is_empty() {
+                TurnStop::Stop
+            } else {
+                TurnStop::Tool
+            };
+            self.bridge
+                .ended(run_id, &self.account, request, &said, stop, true);
         } else if !calls.is_empty() {
             return Err(PluginError::unsupported(
                 "tool calls through Claude Code are not served yet",
@@ -303,6 +378,27 @@ impl ClaudeUpstream {
             events.into_iter().map(Ok),
         ))))
     }
+}
+
+fn assistant_text(events: &[hofund_plugin_api::StreamEvent]) -> String {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            hofund_plugin_api::StreamEvent::TextDelta(delta) => Some(delta.text.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn session_id_from(stdout: &str) -> Option<String> {
+    let mut decoder = crate::bridge::decode::Decoder::new();
+    let mut session = None;
+    for line in stdout.lines() {
+        if let Some(crate::bridge::decode::Step::Session(id)) = decoder.push_line(line) {
+            session = Some(id);
+        }
+    }
+    session
 }
 
 #[cfg(test)]
@@ -415,17 +511,20 @@ mod tests {
 
         let follow = serde_json::from_value::<Request>(json!({
             "model": "claude-sonnet-4-5",
-            "messages": [{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "thanks"},
-                    {
-                        "type": "tool_result",
-                        "id": "toolu_1",
-                        "content": [{"type": "text", "text": "ok"}]
-                    }
-                ]
-            }],
+            "messages": [
+                {"role": "user", "content": [{"type": "text", "text": "list files"}]},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "thanks"},
+                        {
+                            "type": "tool_result",
+                            "id": "toolu_1",
+                            "content": [{"type": "text", "text": "ok"}]
+                        }
+                    ]
+                }
+            ],
             "tools": [{"name": "Bash", "input_schema": {"type": "object"}}]
         }))
         .expect("follow");
@@ -496,5 +595,111 @@ mod tests {
             })
             .collect();
         assert_eq!(text, "Hello world");
+    }
+
+    #[test]
+    fn execute_resumes_an_idle_fake_runner_turn_without_a_fresh_token() {
+        use std::sync::Mutex;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let dir = tempfile::tempdir().expect("dir");
+        let host = TestHost::open_for(
+            PluginKind::Subscription,
+            PluginId::from_static("claude"),
+            dir.path(),
+        );
+        let id = AccountId::from_static("a-00000000000000aa");
+        seed_account(&host, &id);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let stdins = Arc::new(Mutex::new(Vec::new()));
+        let counter = Arc::clone(&calls);
+        let captured = Arc::clone(&stdins);
+        let bridge = crate::bridge::Bridge::new();
+        let provider = ClaudeUpstream::new(
+            id.clone(),
+            host.context().clone(),
+            Some(program()),
+            bridge.clone(),
+        )
+        .with_runner(Arc::new(move |plan| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            captured.lock().expect("stdin").push(plan.stdin.clone());
+            Ok(MESSAGE_DELTA.to_string())
+        }));
+
+        let first = serde_json::from_value::<Request>(json!({
+            "model": "claude-sonnet-4-5",
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "Hello"}]}],
+            "tools": [{"name": "Bash", "input_schema": {"type": "object"}}]
+        }))
+        .expect("request");
+        let completion =
+            block_on(provider.execute(first, ProtocolId::AnthropicMessages)).expect("first turn");
+        let events = collect_events(completion);
+        let text: String = events
+            .iter()
+            .filter_map(|event| match event {
+                StreamEvent::TextDelta(delta) => Some(delta.text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, "Hello world");
+        assert_eq!(bridge.idle_len(), 1);
+
+        // Dropping the stored secret must not block a resume hit.
+        block_on(host.context().accounts().remove(&id)).ok();
+
+        let second = serde_json::from_value::<Request>(json!({
+            "model": "claude-sonnet-4-5",
+            "messages": [
+                {"role": "user", "content": [{"type": "text", "text": "Hello"}]},
+                {"role": "assistant", "content": [{"type": "text", "text": "Hello world"}]},
+                {"role": "user", "content": [{"type": "text", "text": "Again"}]}
+            ],
+            "tools": [{"name": "Bash", "input_schema": {"type": "object"}}]
+        }))
+        .expect("second");
+        let completion = block_on(provider.execute(second, ProtocolId::AnthropicMessages))
+            .expect("resumed turn");
+        let events = collect_events(completion);
+        let text: String = events
+            .iter()
+            .filter_map(|event| match event {
+                StreamEvent::TextDelta(delta) => Some(delta.text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, "Hello world");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        let stdins = stdins.lock().expect("stdin");
+        assert!(
+            stdins[0].contains("Hello") && !stdins[0].contains("Again"),
+            "first stdin: {}",
+            stdins[0]
+        );
+        assert!(
+            stdins[1].contains("Again") && !stdins[1].contains("Hello world"),
+            "resume stdin: {}",
+            stdins[1]
+        );
+    }
+
+    #[test]
+    fn execute_does_not_idle_a_one_off_text_turn() {
+        let dir = tempfile::tempdir().expect("dir");
+        let host = TestHost::open_for(
+            PluginKind::Subscription,
+            PluginId::from_static("claude"),
+            dir.path(),
+        );
+        let id = AccountId::from_static("a-00000000000000aa");
+        seed_account(&host, &id);
+        let bridge = crate::bridge::Bridge::new();
+        let provider =
+            ClaudeUpstream::new(id, host.context().clone(), Some(program()), bridge.clone())
+                .with_runner(Arc::new(move |_plan| Ok(MESSAGE_DELTA.to_string())));
+        let completion = block_on(provider.execute(text_request(), ProtocolId::AnthropicMessages))
+            .expect("one-off");
+        let _ = collect_events(completion);
+        assert_eq!(bridge.idle_len(), 0);
     }
 }

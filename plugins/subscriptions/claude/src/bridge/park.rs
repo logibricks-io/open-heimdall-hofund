@@ -32,6 +32,8 @@ pub(crate) const MATCH_GAP: Duration = Duration::from_millis(25);
 #[derive(Clone, Debug, Default)]
 pub struct Bridge {
     inner: Arc<Inner>,
+    pub(crate) sessions: Arc<super::session::Sessions>,
+    pub(crate) room: super::room::Room,
 }
 
 #[derive(Default)]
@@ -103,6 +105,15 @@ impl Bridge {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// An empty table with a process cap.
+    #[must_use]
+    pub(crate) fn with_room(room: super::room::Room) -> Self {
+        Self {
+            room,
+            ..Self::default()
+        }
     }
 
     /// Allocates a parked run for `owner` offering `tool_names`.

@@ -87,6 +87,8 @@ pub struct ClaudeFactory;
 pub struct ClaudeConfig {
     /// An absolute path to `claude`, instead of looking it up on `PATH`.
     command: Option<PathBuf>,
+    /// Cap on concurrent Claude Code processes; `None` uses the memory heuristic.
+    runs_most: Option<usize>,
 }
 
 impl ValidConfig for ClaudeConfig {}
@@ -99,14 +101,23 @@ impl SubscriptionFactory for ClaudeFactory {
     }
 
     fn config_schema(&self) -> Schema {
-        Schema::object(vec![("command".to_owned(), Schema::string())], &[])
-            .expect("the command schema is valid")
+        Schema::object(
+            vec![
+                ("command".to_owned(), Schema::string()),
+                ("claude-runs-most".to_owned(), Schema::integer()),
+            ],
+            &[],
+        )
+        .expect("the command schema is valid")
     }
 
     fn validate(&self, raw: &RawTable) -> Result<Self::Config, ConfigError> {
         hofund_plugin_sdk::daily_warmup::read_times(raw)?;
         for key in raw.keys() {
-            if key != "command" && key != hofund_plugin_sdk::daily_warmup::TIMES_KEY {
+            if key != "command"
+                && key != "claude-runs-most"
+                && key != hofund_plugin_sdk::daily_warmup::TIMES_KEY
+            {
                 return Err(ConfigError::new("unknown key").with_path(key));
             }
         }
@@ -125,7 +136,22 @@ impl SubscriptionFactory for ClaudeFactory {
                 return Err(ConfigError::new("command must be a string").with_path("command"));
             }
         };
-        Ok(ClaudeConfig { command })
+        let runs_most = match raw.get("claude-runs-most") {
+            None => None,
+            Some(RawValue::Integer(value)) if *value > 0 => Some(*value as usize),
+            Some(RawValue::Integer(0)) => None,
+            Some(RawValue::Integer(_)) => {
+                return Err(
+                    ConfigError::new("claude-runs-most must be a non-negative integer")
+                        .with_path("claude-runs-most"),
+                );
+            }
+            Some(_) => {
+                return Err(ConfigError::new("claude-runs-most must be an integer")
+                    .with_path("claude-runs-most"));
+            }
+        };
+        Ok(ClaudeConfig { command, runs_most })
     }
 
     fn build(
@@ -137,7 +163,7 @@ impl SubscriptionFactory for ClaudeFactory {
             command: cfg.command.clone(),
             flow: SignInFlow::Bridge { command: COMMAND },
             pending: Mutex::new(HashMap::new()),
-            bridge: bridge::Bridge::new(),
+            bridge: bridge::Bridge::with_room(bridge::room::Room::from_config(cfg.runs_most)),
         }))
     }
 }

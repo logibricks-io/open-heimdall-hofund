@@ -53,6 +53,8 @@ pub(crate) struct StartSpec {
     pub wsl_distro: Option<String>,
     /// `--mcp-config` path when the turn offers tools.
     pub mcp_config: Option<PathBuf>,
+    /// Session id for `--resume` after unshelve. WSL keeps `--no-session-persistence`.
+    pub resume_session: Option<String>,
 }
 
 /// Arguments, environment, and stdin handed to Claude Code.
@@ -105,6 +107,13 @@ pub(crate) fn start_plan(spec: &StartSpec, request: &Request) -> Result<SpawnPla
         os("--dangerously-skip-permissions"),
         os("--no-session-persistence"),
     ]);
+    if let Some(session) = &spec.resume_session
+        && spec.wsl_distro.is_none()
+    {
+        args.retain(|arg| arg != os("--no-session-persistence").as_os_str());
+        args.push(os("--resume"));
+        args.push(OsString::from(session));
+    }
     let argv = if let Some(distro) = &spec.wsl_distro {
         wrap_argv(
             PathBuf::from(r"C:\Windows\System32\wsl.exe").as_path(),
@@ -243,6 +252,13 @@ pub(crate) fn stdin_from_request(request: &Request) -> String {
     out
 }
 
+/// Stream-json stdin for the messages since a resumed reply.
+pub(crate) fn stdin_from_since(since: &[hofund_plugin_api::Message]) -> String {
+    let mut request = Request::new("claude");
+    request.messages = since.to_vec();
+    stdin_from_request(&request)
+}
+
 /// Stream-json stdin for `saidWithResults` user text.
 pub(crate) fn stdin_from_said(said: &str) -> String {
     if said.is_empty() {
@@ -363,6 +379,7 @@ mod tests {
             )],
             wsl_distro: None,
             mcp_config: None,
+            resume_session: None,
         }
     }
 
@@ -488,5 +505,41 @@ mod tests {
     fn tool_use_in_a_text_only_script_fails_closed() {
         let error = events_from_stdout(TOOL_USE).expect_err("tool use");
         assert_eq!(error.kind(), PluginErrorKind::Unsupported);
+    }
+
+    #[test]
+    fn unshelved_start_plan_resumes_the_session_and_drops_no_session_persistence() {
+        let mut spec = spec();
+        spec.resume_session = Some("sess_text".into());
+        let plan = start_plan(&spec, &text_request("hi")).expect("plan");
+        let args: Vec<String> = plan
+            .argv
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.contains(&"--resume".into()), "{args:?}");
+        assert!(args.contains(&"sess_text".into()), "{args:?}");
+        assert!(
+            !args.iter().any(|a| a == "--no-session-persistence"),
+            "{args:?}"
+        );
+    }
+
+    #[test]
+    fn wsl_keeps_no_session_persistence_even_when_a_session_is_set() {
+        let mut spec = spec();
+        spec.resume_session = Some("sess_text".into());
+        spec.wsl_distro = Some("Ubuntu".into());
+        let plan = start_plan(&spec, &text_request("hi")).expect("plan");
+        let args: Vec<String> = plan
+            .argv
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            args.iter().any(|a| a == "--no-session-persistence"),
+            "{args:?}"
+        );
+        assert!(!args.contains(&"--resume".into()), "{args:?}");
     }
 }
