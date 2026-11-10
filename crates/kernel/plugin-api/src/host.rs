@@ -715,6 +715,7 @@ pub struct HostContext {
     dirs: DirHandle,
     observe: ObserveHandle,
     loopback: LoopbackHandle,
+    bridge_mcp_program: Option<PathBuf>,
 }
 
 impl HostContext {
@@ -795,6 +796,7 @@ impl HostContext {
                 plugin: key.clone(),
                 inner: Arc::new(NoLoopback),
             },
+            bridge_mcp_program: None,
             key,
         }
     }
@@ -878,6 +880,48 @@ impl HostContext {
     #[must_use]
     pub fn loopback(&self) -> &LoopbackHandle {
         &self.loopback
+    }
+
+    /// Kernel-only. Plugins do not call this.
+    ///
+    /// Overrides the helper program [`Self::bridge_mcp_helper`] would otherwise
+    /// take from the current process executable. Native runs use the current
+    /// executable; a later slice rewrites this path when the child runs under
+    /// a foreign OS compatibility layer.
+    #[cfg(feature = "kernel")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_bridge_mcp_program(mut self, program: PathBuf) -> Self {
+        self.bridge_mcp_program = Some(program);
+        self
+    }
+
+    /// The hidden stdio MCP helper: this process's executable (or an injected
+    /// path) and the argv prefix `bridge-mcp-stdio`. The plugin appends the
+    /// callback, tools, and listed-file paths when it writes the MCP config.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when the executable or the current directory
+    /// cannot be resolved, or when either path is not absolute.
+    pub fn bridge_mcp_helper(&self) -> Result<SpawnRequest, PluginError> {
+        let program = match &self.bridge_mcp_program {
+            Some(program) => program.clone(),
+            None => std::env::current_exe().map_err(|error| {
+                PluginError::internal(format!("cannot resolve the bridge MCP helper: {error}"))
+            })?,
+        };
+        let cwd = std::env::current_dir().map_err(|error| {
+            PluginError::internal(format!(
+                "cannot resolve the bridge MCP helper working directory: {error}"
+            ))
+        })?;
+        SpawnRequest::new(
+            program,
+            vec![OsString::from("bridge-mcp-stdio")],
+            Vec::new(),
+            cwd,
+        )
     }
 }
 

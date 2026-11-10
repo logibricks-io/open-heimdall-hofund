@@ -465,6 +465,13 @@ impl TestHost {
         &self.context
     }
 
+    /// Overrides the helper program [`HostContext::bridge_mcp_helper`] returns.
+    #[must_use]
+    pub fn with_bridge_mcp_program(mut self, program: PathBuf) -> Self {
+        self.context = self.context.with_bridge_mcp_program(program);
+        self
+    }
+
     /// Scripted HTTP responses and the calls the plugin made.
     #[must_use]
     pub fn http(&self) -> &RecordingHttp {
@@ -2065,5 +2072,40 @@ mod tests {
             .remove_account(&account, host.context())
             .await
             .expect("default remove");
+    }
+
+    #[test]
+    fn bridge_mcp_helper_uses_the_current_executable_and_subcommand_prefix() {
+        let root = root();
+        let host = super::TestHost::open(plugin(), root.to_path_buf());
+        let helper = host.context().bridge_mcp_helper().expect("helper");
+        assert_eq!(
+            helper.program(),
+            std::env::current_exe().expect("exe").as_path()
+        );
+        assert_eq!(
+            helper.args(),
+            [std::ffi::OsString::from("bridge-mcp-stdio")].as_slice()
+        );
+        assert!(helper.env().is_empty());
+        assert!(helper.cwd().is_absolute());
+    }
+
+    #[test]
+    fn bridge_mcp_helper_can_use_an_injected_program() {
+        let root = root();
+        let program = if cfg!(windows) {
+            std::path::PathBuf::from(r"C:\Program Files\hofund\hofund.exe")
+        } else {
+            std::path::PathBuf::from("/usr/bin/hofund")
+        };
+        let host = super::TestHost::open(plugin(), root.to_path_buf())
+            .with_bridge_mcp_program(program.clone());
+        let helper = host.context().bridge_mcp_helper().expect("helper");
+        assert_eq!(helper.program(), program.as_path());
+        assert_eq!(
+            helper.args(),
+            [std::ffi::OsString::from("bridge-mcp-stdio")].as_slice()
+        );
     }
 }

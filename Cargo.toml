@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "apps/bridge-mcp",
     "apps/cli",
     "apps/desktop/src-tauri",
     "apps/hofundd",
@@ -71,6 +72,7 @@ rust-version = "1.99.1"
 # a version is a wildcard, which `cargo deny` rejects.
 [workspace.dependencies]
 hofund-agent = { version = "0.1.0", path = "crates/kernel/agent" }
+hofund-bridge-mcp = { version = "0.1.0", path = "apps/bridge-mcp" }
 hofund-codec = { version = "0.1.0", path = "crates/kernel/codec" }
 hofund-config = { version = "0.1.0", path = "crates/kernel/config" }
 hofund-model-catalog = { version = "0.1.0", path = "crates/kernel/model-catalog" }
