@@ -13,6 +13,8 @@ use hofund_plugin_api::{
 use hofund_plugin_sdk::Contribution;
 
 mod agent_sign_in;
+#[allow(dead_code)]
+mod connect;
 mod creds;
 mod discover;
 mod models;
