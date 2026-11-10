@@ -19,26 +19,17 @@ pub(crate) struct MappedRequest {
 }
 
 impl MappedRequest {
-    /// Borrows the owned mapping in the shape the Run transport takes.
-    pub(crate) fn args(&self) -> RunArgs<'_> {
+    /// Moves every byte into a stream that can outlive `execute`.
+    pub(crate) fn into_args(self) -> RunArgs<'static> {
         RunArgs {
-            opening: self.opening.clone(),
+            opening: self.opening,
             team_id: None,
-            blobs: &self.blobs,
-            os: proto::goos_name_for(&self.os),
-            temp_dir: &self.temp_dir,
+            blobs: std::borrow::Cow::Owned(self.blobs),
+            os: std::borrow::Cow::Owned(proto::goos_name_for(&self.os).to_owned()),
+            temp_dir: std::borrow::Cow::Owned(self.temp_dir),
             limits: Limits::default(),
         }
     }
-}
-
-/// Deterministic mapping inputs used by unit tests.
-#[cfg(test)]
-struct MapOptions<'a> {
-    os: &'a str,
-    temp_dir: &'a str,
-    conversation_id: &'a str,
-    message_id: &'a str,
 }
 
 /// Maps a request with a fresh conversation, message, and per-execute temp path.
@@ -55,17 +46,6 @@ pub(crate) fn map(request: &Request) -> Result<MappedRequest, PluginError> {
         &message_id,
         std::env::consts::OS,
         &temp_dir,
-    )
-}
-
-#[cfg(test)]
-fn map_with(request: &Request, options: MapOptions<'_>) -> Result<MappedRequest, PluginError> {
-    build(
-        request,
-        options.conversation_id,
-        options.message_id,
-        options.os,
-        options.temp_dir,
     )
 }
 
@@ -226,6 +206,26 @@ fn insert_blob(blobs: &mut HashMap<Vec<u8>, Vec<u8>>, bytes: Vec<u8>) -> [u8; 32
     id
 }
 
+/// Deterministic mapping inputs used by unit tests.
+#[cfg(test)]
+struct MapOptions<'a> {
+    os: &'a str,
+    temp_dir: &'a str,
+    conversation_id: &'a str,
+    message_id: &'a str,
+}
+
+#[cfg(test)]
+fn map_with(request: &Request, options: MapOptions<'_>) -> Result<MappedRequest, PluginError> {
+    build(
+        request,
+        options.conversation_id,
+        options.message_id,
+        options.os,
+        options.temp_dir,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use hofund_plugin_api::{ContentPart, ImagePart, ImageSource, Message, Request, Role};
@@ -255,7 +255,7 @@ mod tests {
         message
     }
 
-    fn field<'a>(fields: &'a [Field], number: u32) -> &'a Field {
+    fn field(fields: &[Field], number: u32) -> &Field {
         fields
             .iter()
             .find(|field| field.number == number)
@@ -400,7 +400,7 @@ mod tests {
                 .is_empty()
         );
         assert!(request.iter().all(|field| field.number != 19));
-        assert_eq!(mapped.args().os, "darwin");
+        assert_eq!(mapped.into_args().os, "darwin");
     }
 
     #[test]

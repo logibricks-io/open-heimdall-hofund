@@ -1,6 +1,6 @@
 //! Small future helpers re-exported for plugins.
 
-pub use futures_util::stream::FuturesUnordered;
+pub use futures_util::stream::{FuturesUnordered, Stream, StreamExt, empty, unfold};
 
 /// Returns the next completed future in `futures`.
 ///

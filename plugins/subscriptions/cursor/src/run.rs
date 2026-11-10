@@ -1,15 +1,20 @@
 //! One Cursor Run over bidirectional HTTP/2 or the HTTP/1.1 fallback.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
+use std::pin::Pin;
 use std::time::Duration;
 
 use hofund_plugin_api::{
-    BodyStream, DuplexRequest, HostContext, HttpVersionPin, PluginError, PluginErrorKind,
-    SecretString,
+    BodyStream, DuplexReader, DuplexRequest, DuplexWriter, HostContext, HttpVersionPin,
+    PluginError, PluginErrorKind, SecretString,
 };
+#[cfg(test)]
+use hofund_plugin_sdk::futures::StreamExt;
+use hofund_plugin_sdk::futures::{self, Stream};
 use hofund_plugin_sdk::json::json;
 use hofund_plugin_sdk::oauth::secret_text;
-use hofund_plugin_sdk::{Call, FuturesUnordered, Race, next_ready, race, sleep};
+use hofund_plugin_sdk::{Call, FuturesUnordered, HttpResponse, Race, next_ready, race, sleep};
 
 use crate::agent_host::AgentHost;
 use crate::endpoints::Endpoints;
@@ -48,16 +53,17 @@ pub(crate) struct RunArgs<'a> {
     /// Optional team header forwarded to both transports.
     pub team_id: Option<&'a str>,
     /// Blob bytes indexed by their raw digest.
-    pub blobs: &'a HashMap<Vec<u8>, Vec<u8>>,
+    pub blobs: Cow<'a, HashMap<Vec<u8>, Vec<u8>>>,
     /// GOOS-compatible operating-system name.
-    pub os: &'a str,
+    pub os: Cow<'a, str>,
     /// Temporary directory returned to environment execs.
-    pub temp_dir: &'a str,
+    pub temp_dir: Cow<'a, str>,
     /// Transport limits.
     pub limits: Limits,
 }
 
 /// Events and terminal frames collected from one transport session.
+#[cfg(test)]
 #[derive(Debug, Default)]
 pub(crate) struct RunOutput {
     /// Decoded non-trailer server messages.
@@ -68,7 +74,24 @@ pub(crate) struct RunOutput {
     pub error_body: Option<Vec<u8>>,
 }
 
-/// Opens a Run, answers server questions, reads events, and sends heartbeats.
+/// One incremental transport item. Terminal items are data so the caller can
+/// distinguish a failed Run from a clean EOF before returning a stream.
+#[derive(Debug)]
+pub(crate) enum RunEvent {
+    /// A decoded server message.
+    Server(ServerEvent),
+    /// A Connect trailer, including a synthetic HTTP/1.1 failure.
+    Trailer(Frame),
+    /// A drained non-2xx HTTP/2 response body.
+    ErrorBody(Vec<u8>),
+}
+
+/// The live Run event stream. Dropping it cancels the transport.
+pub(crate) type RunStream<'a> =
+    Pin<Box<dyn Stream<Item = Result<RunEvent, PluginError>> + Send + 'a>>;
+
+/// Collects a Run for transport tests and callers that want the whole body.
+#[cfg(test)]
 pub(crate) async fn run(
     host: &HostContext,
     endpoints: &Endpoints,
@@ -76,6 +99,27 @@ pub(crate) async fn run(
     token: &SecretString,
     args: RunArgs<'_>,
 ) -> Result<RunOutput, PluginError> {
+    let mut stream = run_stream(host, endpoints, agent_host, token, args).await?;
+    let mut output = RunOutput::default();
+    while let Some(event) = stream.next().await {
+        match event? {
+            RunEvent::Server(event) => output.events.push(event),
+            RunEvent::Trailer(trailer) => output.trailers.push(trailer),
+            RunEvent::ErrorBody(body) => output.error_body = Some(body),
+        }
+    }
+    Ok(output)
+}
+
+/// Opens a Run and incrementally yields events while answering KV/exec and
+/// sending heartbeats. No separate transport loop exists for `run` to fork.
+pub(crate) async fn run_stream<'a>(
+    host: &HostContext,
+    endpoints: &Endpoints,
+    agent_host: &AgentHost,
+    token: &SecretString,
+    args: RunArgs<'a>,
+) -> Result<RunStream<'a>, PluginError> {
     let request_id = hofund_plugin_sdk::uuid::v4()
         .map_err(|error| PluginError::io(format!("cannot create a Run request id: {error}")))?;
     if !http2_memory::blocked(host, args.limits.http2_memory) {
@@ -93,7 +137,7 @@ pub(crate) async fn run(
         );
         match host.http().open_duplex(request).await {
             Ok(session) => {
-                return run_http2(session, &args).await;
+                return run_http2(session, args).await;
             }
             Err(error) => {
                 if http2_memory::should_remember(&error) {
@@ -102,7 +146,13 @@ pub(crate) async fn run(
             }
         }
     }
-    run_http1(host, endpoints, token, &request_id, &args).await
+    run_http1(host, endpoints, token, request_id, args).await
+}
+
+fn one_event(event: RunEvent) -> RunStream<'static> {
+    Box::pin(futures::unfold(Some(event), |event| async move {
+        event.map(|event| (Ok(event), None))
+    }))
 }
 
 fn run_duplex(
@@ -167,141 +217,239 @@ fn run_call(
     call
 }
 
-async fn run_http2(
+type Heartbeat<'a> = Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>;
+
+fn heartbeat(duration: Duration) -> Heartbeat<'static> {
+    Box::pin(sleep(duration))
+}
+
+struct Http2State<'a> {
+    reader: DuplexReader,
+    writer: Option<DuplexWriter>,
+    decoder: Option<FrameDecoder>,
+    heartbeat: Heartbeat<'a>,
+    args: RunArgs<'a>,
+    pending: VecDeque<RunEvent>,
+    finished: bool,
+}
+
+async fn run_http2<'a>(
     mut session: hofund_plugin_api::DuplexSession,
-    args: &RunArgs<'_>,
-) -> Result<RunOutput, PluginError> {
+    args: RunArgs<'a>,
+) -> Result<RunStream<'a>, PluginError> {
     if !(200..300).contains(&session.status().as_u16()) {
         let body = drain(session.reader(), args.limits.error_drain).await?;
-        return Ok(RunOutput {
-            error_body: Some(body),
-            ..RunOutput::default()
-        });
+        return Ok(one_event(RunEvent::ErrorBody(body)));
     }
-    let (mut reader, mut writer) = session.into_split();
+    let (reader, mut writer) = session.into_split();
     writer
         .write(frame::encode(0, &args.opening)?.into())
         .await?;
-    let mut output = RunOutput::default();
-    let mut decoder = FrameDecoder::new();
-    let mut heartbeat = std::pin::pin!(sleep(args.limits.heartbeat));
+    let heartbeat = heartbeat(args.limits.heartbeat);
+    let state = Http2State {
+        reader,
+        writer: Some(writer),
+        decoder: Some(FrameDecoder::new()),
+        heartbeat,
+        args,
+        pending: VecDeque::new(),
+        finished: false,
+    };
+    Ok(Box::pin(futures::unfold(state, |mut state| async move {
+        match next_http2(&mut state).await {
+            Ok(Some(event)) => Some((Ok(event), state)),
+            Ok(None) => None,
+            Err(error) => {
+                state.finished = true;
+                Some((Err(error), state))
+            }
+        }
+    })))
+}
+
+async fn next_http2(state: &mut Http2State<'_>) -> Result<Option<RunEvent>, PluginError> {
     loop {
-        match race(reader.reader().next_chunk(), &mut heartbeat).await {
+        if let Some(event) = state.pending.pop_front() {
+            return Ok(Some(event));
+        }
+        if state.finished {
+            return Ok(None);
+        }
+        match race(state.reader.reader().next_chunk(), &mut state.heartbeat).await {
             Race::Left(Some(Ok(chunk))) => {
-                for payload in decode_chunk(&mut decoder, &chunk, &mut output, args)? {
-                    writer.write(frame::encode(0, &payload)?.into()).await?;
+                let decoder = state.decoder.as_mut().expect("open decoder");
+                let (events, replies) = decode_chunk(decoder, &chunk, &state.args)?;
+                for payload in replies {
+                    state
+                        .writer
+                        .as_mut()
+                        .expect("open writer")
+                        .write(frame::encode(0, &payload)?.into())
+                        .await?;
                 }
+                state.pending.extend(events);
             }
             Race::Left(Some(Err(error))) => return Err(error),
             Race::Left(None) => {
-                for payload in finish_decoder(decoder, &mut output, args)? {
-                    writer.write(frame::encode(0, &payload)?.into()).await?;
+                let decoder = state.decoder.take().expect("open decoder");
+                let (events, replies) = finish_decoder(decoder, &state.args)?;
+                for payload in replies {
+                    state
+                        .writer
+                        .as_mut()
+                        .expect("open writer")
+                        .write(frame::encode(0, &payload)?.into())
+                        .await?;
                 }
-                writer.finish().await?;
-                return Ok(output);
+                state.writer.take().expect("open writer").finish().await?;
+                state.pending.extend(events);
+                state.finished = true;
             }
             Race::Right(()) => {
-                writer
+                state
+                    .writer
+                    .as_mut()
+                    .expect("open writer")
                     .write(frame::encode(0, &proto::heartbeat())?.into())
                     .await?;
-                heartbeat.as_mut().set(sleep(args.limits.heartbeat));
+                state.heartbeat = heartbeat(state.args.limits.heartbeat);
             }
         }
     }
 }
 
-async fn run_http1(
+struct Http1State<'a> {
+    response: HttpResponse,
+    context: AppendContext<'a>,
+    appends: AppendState<'a>,
+    decoder: Option<FrameDecoder>,
+    heartbeat: Heartbeat<'a>,
+    args: RunArgs<'a>,
+    pending: VecDeque<RunEvent>,
+    finished: bool,
+}
+
+async fn run_http1<'a>(
     host: &HostContext,
     endpoints: &Endpoints,
     token: &SecretString,
-    request_id: &str,
-    args: &RunArgs<'_>,
-) -> Result<RunOutput, PluginError> {
+    request_id: String,
+    args: RunArgs<'a>,
+) -> Result<RunStream<'a>, PluginError> {
+    let request_id: std::sync::Arc<str> = request_id.into();
     let down_url = format!(
         "{}/agent.v1.AgentService/RunSSE",
         endpoints.api.trim_end_matches('/')
     );
-    let down_payload = proto::Pb::new().string(1, request_id).finish();
+    let down_payload = proto::Pb::new().string(1, &request_id).finish();
     let down = run_call(
         down_url,
         "application/connect+proto",
         true,
         endpoints,
         token,
-        request_id,
+        &request_id,
         args.team_id,
     )
     .bytes(frame::encode(0, &down_payload)?)
     .open_raw(host.http(), 1)
     .await;
-    let mut output = RunOutput::default();
     let mut response = match down {
         Ok(response) => response,
         Err(error) => {
-            let failure = AppendFailure::from(error);
-            output.trailers.push(synthetic_end(failure)?);
-            return Ok(output);
+            return Ok(one_event(RunEvent::Trailer(synthetic_end(
+                AppendFailure::from(error),
+            )?)));
         }
     };
     let status = response.status().as_u16();
     if !(200..300).contains(&status) {
         let body = drain(response.body_mut(), args.limits.error_drain).await?;
         let message = error_message(status, &body);
-        output
-            .trailers
-            .push(synthetic_end(AppendFailure::status(status, message))?);
-        return Ok(output);
+        return Ok(one_event(RunEvent::Trailer(synthetic_end(
+            AppendFailure::status(status, message),
+        )?)));
     }
 
     let context = AppendContext {
-        host,
-        endpoints,
-        token,
+        host: host.clone(),
+        endpoints: endpoints.clone(),
+        token: token.clone(),
         request_id,
         team_id: args.team_id,
     };
-    if let Err(failure) = append(context, args.opening.clone(), 0).await {
-        output.trailers.push(synthetic_end(failure)?);
-        return Ok(output);
+    if let Err(failure) = append(context.clone(), args.opening.clone(), 0).await {
+        return Ok(one_event(RunEvent::Trailer(synthetic_end(failure)?)));
     }
 
-    let mut state = AppendState::new(1);
-    let mut decoder = FrameDecoder::new();
-    let mut heartbeat = std::pin::pin!(sleep(args.limits.heartbeat));
+    let heartbeat = heartbeat(args.limits.heartbeat);
+    let state = Http1State {
+        response,
+        context,
+        appends: AppendState::new(1),
+        decoder: Some(FrameDecoder::new()),
+        heartbeat,
+        args,
+        pending: VecDeque::new(),
+        finished: false,
+    };
+    Ok(Box::pin(futures::unfold(state, |mut state| async move {
+        match next_http1(&mut state).await {
+            Ok(Some(event)) => Some((Ok(event), state)),
+            Ok(None) => None,
+            Err(error) => {
+                state.finished = true;
+                Some((Err(error), state))
+            }
+        }
+    })))
+}
+
+async fn next_http1(state: &mut Http1State<'_>) -> Result<Option<RunEvent>, PluginError> {
     loop {
-        if let Err(failure) = state.send_ready(context).await {
-            output.trailers.push(synthetic_end(failure)?);
-            return Ok(output);
+        if let Some(event) = state.pending.pop_front() {
+            return Ok(Some(event));
+        }
+        if state.finished {
+            return Ok(None);
+        }
+        if let Err(failure) = state.appends.send_ready(state.context.clone()).await {
+            state.finished = true;
+            return Ok(Some(RunEvent::Trailer(synthetic_end(failure)?)));
         }
         match race(
-            race(response.body_mut().next_chunk(), &mut heartbeat),
-            next_ready(&mut state.in_flight),
+            race(state.response.body_mut().next_chunk(), &mut state.heartbeat),
+            next_ready(&mut state.appends.in_flight),
         )
         .await
         {
             Race::Left(Race::Left(Some(Ok(chunk)))) => {
-                state
-                    .pending
-                    .extend(decode_chunk(&mut decoder, &chunk, &mut output, args)?);
+                let decoder = state.decoder.as_mut().expect("open decoder");
+                let (events, replies) = decode_chunk(decoder, &chunk, &state.args)?;
+                state.appends.pending.extend(replies);
+                state.pending.extend(events);
             }
             Race::Left(Race::Left(Some(Err(error)))) => return Err(error),
             Race::Left(Race::Left(None)) => {
-                state
-                    .pending
-                    .extend(finish_decoder(decoder, &mut output, args)?);
-                if let Err(failure) = state.flush(context).await {
-                    output.trailers.push(synthetic_end(failure)?);
+                let decoder = state.decoder.take().expect("open decoder");
+                let (events, replies) = finish_decoder(decoder, &state.args)?;
+                state.appends.pending.extend(replies);
+                state.pending.extend(events);
+                if let Err(failure) = state.appends.flush(state.context.clone()).await {
+                    state
+                        .pending
+                        .push_back(RunEvent::Trailer(synthetic_end(failure)?));
                 }
-                return Ok(output);
+                state.finished = true;
             }
             Race::Left(Race::Right(())) => {
-                state.pending.push_back(proto::heartbeat());
-                heartbeat.as_mut().set(sleep(args.limits.heartbeat));
+                state.appends.pending.push_back(proto::heartbeat());
+                state.heartbeat = heartbeat(state.args.limits.heartbeat);
             }
             Race::Right(Ok(())) => {}
             Race::Right(Err(failure)) => {
-                output.trailers.push(synthetic_end(failure)?);
-                return Ok(output);
+                state.finished = true;
+                return Ok(Some(RunEvent::Trailer(synthetic_end(failure)?)));
             }
         }
     }
@@ -309,17 +457,17 @@ async fn run_http1(
 
 const MAX_IN_FLIGHT_KV: usize = 16;
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct AppendContext<'a> {
-    host: &'a HostContext,
-    endpoints: &'a Endpoints,
-    token: &'a SecretString,
-    request_id: &'a str,
+    host: HostContext,
+    endpoints: Endpoints,
+    token: SecretString,
+    request_id: std::sync::Arc<str>,
     team_id: Option<&'a str>,
 }
 
 type AppendFuture<'a> =
-    std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), AppendFailure>> + 'a>>;
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), AppendFailure>> + Send + 'a>>;
 
 struct AppendState<'a> {
     sequence: u64,
@@ -348,21 +496,21 @@ impl<'a> AppendState<'a> {
                 let payload = self.pending.pop_front().unwrap_or_default();
                 let sequence = self.take_sequence();
                 self.in_flight
-                    .push(Box::pin(append(context, payload, sequence)));
+                    .push(Box::pin(append(context.clone(), payload, sequence)));
             } else {
                 if !self.in_flight.is_empty() {
                     return Ok(());
                 }
                 let payload = self.pending.pop_front().unwrap_or_default();
                 let sequence = self.take_sequence();
-                append(context, payload, sequence).await?;
+                append(context.clone(), payload, sequence).await?;
             }
         }
     }
 
     async fn flush(&mut self, context: AppendContext<'a>) -> Result<(), AppendFailure> {
         loop {
-            self.send_ready(context).await?;
+            self.send_ready(context.clone()).await?;
             if self.pending.is_empty() && self.in_flight.is_empty() {
                 return Ok(());
             }
@@ -416,14 +564,14 @@ async fn append(
         "{}/aiserver.v1.BidiService/BidiAppend",
         context.endpoints.api.trim_end_matches('/')
     );
-    let body = proto::bidi_append(&payload, context.request_id, sequence);
+    let body = proto::bidi_append(&payload, &context.request_id, sequence);
     let reply = run_call(
         url,
         "application/proto",
         true,
-        context.endpoints,
-        context.token,
-        context.request_id,
+        &context.endpoints,
+        &context.token,
+        &context.request_id,
         context.team_id,
     )
     .read_timeout(append_deadline(body.len()))
@@ -497,41 +645,41 @@ async fn drain(reader: &mut BodyStream, cap: usize) -> Result<Vec<u8>, PluginErr
 fn decode_chunk(
     decoder: &mut FrameDecoder,
     chunk: &[u8],
-    output: &mut RunOutput,
     args: &RunArgs<'_>,
-) -> Result<Vec<Vec<u8>>, PluginError> {
+) -> Result<(Vec<RunEvent>, Vec<Vec<u8>>), PluginError> {
+    let mut events = Vec::new();
     let mut replies = Vec::new();
     for decoded in decoder.push(chunk)? {
-        push_frame(decoded, output, args, &mut replies);
+        push_frame(decoded, args, &mut events, &mut replies);
     }
-    Ok(replies)
+    Ok((events, replies))
 }
 
 fn finish_decoder(
     decoder: FrameDecoder,
-    output: &mut RunOutput,
     args: &RunArgs<'_>,
-) -> Result<Vec<Vec<u8>>, PluginError> {
+) -> Result<(Vec<RunEvent>, Vec<Vec<u8>>), PluginError> {
+    let mut events = Vec::new();
     let mut replies = Vec::new();
     for decoded in decoder.finish()? {
-        push_frame(decoded, output, args, &mut replies);
+        push_frame(decoded, args, &mut events, &mut replies);
     }
-    Ok(replies)
+    Ok((events, replies))
 }
 
 fn push_frame(
     decoded: Frame,
-    output: &mut RunOutput,
     args: &RunArgs<'_>,
+    events: &mut Vec<RunEvent>,
     replies: &mut Vec<Vec<u8>>,
 ) {
     if decoded.is_trailer() {
-        output.trailers.push(decoded);
+        events.push(RunEvent::Trailer(decoded));
         return;
     }
     for event in proto::decode_server(&decoded.payload).0 {
         reply_for(&event, args, replies);
-        output.events.push(event);
+        events.push(RunEvent::Server(event));
     }
 }
 
@@ -552,8 +700,8 @@ fn reply_for(event: &ServerEvent, args: &RunArgs<'_>, replies: &mut Vec<Vec<u8>>
                 replies.push(proto::exec_env_result(
                     request.id,
                     &request.exec_id,
-                    args.os,
-                    args.temp_dir,
+                    &args.os,
+                    &args.temp_dir,
                 ));
                 replies.push(proto::close_exec(request.id));
             }
@@ -616,9 +764,9 @@ mod tests {
         RunArgs {
             opening: proto::client_run(b"opening"),
             team_id: None,
-            blobs,
-            os: "linux",
-            temp_dir: "/tmp/r8f2",
+            blobs: std::borrow::Cow::Borrowed(blobs),
+            os: std::borrow::Cow::Borrowed("linux"),
+            temp_dir: std::borrow::Cow::Borrowed("/tmp/r8f2"),
             limits: Limits::default(),
         }
     }

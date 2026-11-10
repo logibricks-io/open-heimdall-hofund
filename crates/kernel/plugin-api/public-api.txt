@@ -231,6 +231,7 @@ BindBlocked
 BindBlocked #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
 BindBlocked::Busy
 BindBlocked::Reserved
+BlockStart
 Body
 Body #[non_exhaustive] derives(Clone, PartialEq, Eq)
 Body::fn bytes (& self) -> & Bytes
@@ -308,6 +309,8 @@ ConnectionStatus::const fn installed (& self) -> bool
 ConnectionStatus::const fn managed (& self) -> bool
 ConnectionStatus::fn new (id : & 'static str , display_name : & 'static str , installed : bool , connected : bool , managed : bool , paths : Vec < PathBuf > ,) -> Self
 ConnectionStatus::fn paths (& self) -> & [PathBuf]
+ContentBlockStart
+ContentBlockStop
 ContentPart
 CountOutcome
 CountOutcome #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
@@ -554,6 +557,9 @@ MemberKey #[non_exhaustive] derives(Clone, Debug)
 MemberKey::const fn from_static (value : & 'static str) -> Self
 MemberKey::fn as_str (& self) -> & str
 Message
+MessageDelta
+MessageStart
+MessageStop
 Method
 Method #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
 Method::Delete
@@ -1062,6 +1068,7 @@ SurfaceHost::fn protocols (& self) -> & [ProtocolId]
 SurfaceId
 SurfaceId::as_str
 SurfaceId::from_static
+TextDelta
 TextPart
 TierId
 TierId #[non_exhaustive] derives(Clone, Debug)
