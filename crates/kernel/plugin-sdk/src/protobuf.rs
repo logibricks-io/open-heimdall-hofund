@@ -431,7 +431,19 @@ mod tests {
     }
 
     #[test]
-    fn oversized_encode_and_wire_length_are_rejected() {
+    fn frame_cap_is_inclusive_and_one_byte_over_is_rejected() {
+        let at_cap = frame(0, &vec![0; MAX_FRAME_PAYLOAD]).expect("at cap");
+        assert_eq!(at_cap.len(), MAX_FRAME_PAYLOAD + 5);
+
+        let mut cap_header = vec![0];
+        let cap = u32::try_from(MAX_FRAME_PAYLOAD).expect("cap fits u32");
+        cap_header.extend_from_slice(&cap.to_be_bytes());
+        let error = frames(&cap_header)
+            .next()
+            .expect("error")
+            .expect_err("truncated at cap");
+        assert_eq!(error.message(), "unexpected EOF");
+
         let error = frame(0, &vec![0; MAX_FRAME_PAYLOAD + 1]).expect_err("oversized");
         assert!(error.message().contains("exceeds 67108864 bytes"));
         let len = u32::try_from(MAX_FRAME_PAYLOAD + 1).expect("u32");
@@ -473,9 +485,10 @@ mod tests {
             .string(3, "text")
             .fixed32(5, 0x1122_3344)
             .message(6, ProtoBuf::new().varint(1, 9))
+            .double(7, 1.5)
             .finish();
         let parsed = fields(&encoded);
-        assert_eq!(parsed.len(), 5);
+        assert_eq!(parsed.len(), 6);
         assert_eq!(parsed[0].as_varint(), Some(large));
         assert_eq!(parsed[1].value, WireValue::Fixed64(0x0102_0304_0506_0708));
         assert_eq!(parsed[2].as_string().as_deref(), Some("text"));
@@ -484,6 +497,7 @@ mod tests {
             parsed[4].as_message().expect("nested")[0].as_varint(),
             Some(9)
         );
+        assert_eq!(parsed[5].value, WireValue::Fixed64(1.5_f64.to_bits()));
         assert_eq!(parsed[0].as_bytes(), None);
     }
 
