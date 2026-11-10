@@ -502,6 +502,29 @@ mod tests {
     }
 
     #[test]
+    fn varint_tenth_byte_enforces_the_u64_limit() {
+        fn tenth_byte(last: u8) -> Vec<u8> {
+            let mut encoded = ProtoBuf::new().varint(1, 7).finish();
+            encoded.push(2 << 3);
+            encoded.extend_from_slice(&[0x80; 9]);
+            encoded.push(last);
+            encoded
+        }
+
+        let zero = fields(&tenth_byte(0));
+        assert_eq!(zero.len(), 2);
+        assert_eq!(zero[1].as_varint(), Some(0));
+        let high = fields(&tenth_byte(1));
+        assert_eq!(high[1].as_varint(), Some(1_u64 << 63));
+        let overflow = fields(&tenth_byte(2));
+        assert_eq!(overflow.len(), 1);
+        assert_eq!(overflow[0].as_varint(), Some(7));
+
+        let max = ProtoBuf::new().varint(1, u64::MAX).finish();
+        assert_eq!(fields(&max)[0].as_varint(), Some(u64::MAX));
+    }
+
+    #[test]
     fn malformed_protobuf_tail_keeps_the_valid_prefix() {
         let valid = ProtoBuf::new().varint(1, 7).string(2, "ok").finish();
         let tails: [&[u8]; 5] = [
