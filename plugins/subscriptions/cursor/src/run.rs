@@ -1990,12 +1990,15 @@ mod tests {
                 .iter()
                 .flat_map(|payload| server_frame(payload.clone()))
                 .collect();
+            // Park the 16 in-flight KV replies behind a gate rather than a
+            // 5s chunk_delay + advance_time. The delay left those sockets
+            // idle until the test clock jumped; on macOS CI the session
+            // could finish first with a synthetic append trailer
+            // (`trailers.is_empty()` failed on #769 and #774) after all
+            // 18 server events had already been read from the RunSSE body.
+            let (release, gate) = header_park();
             let mut responses = vec![Http1Response::chunked(vec![body]), Http1Response::new(200)];
-            responses.extend((0..16).map(|_| {
-                Http1Response::new(200)
-                    .body(b"delayed".to_vec())
-                    .chunk_delay(Duration::from_secs(5))
-            }));
+            responses.extend((0..16).map(|_| Http1Response::new(200).park(gate.clone())));
             let h1 = Http1Server::start(responses).await;
             let host = pooled_host();
             http2_memory::remember(host.context());
@@ -2025,7 +2028,7 @@ mod tests {
                 }
                 yield_times(20).await;
                 assert_eq!(h1.requests().len(), 18, "a 17th KV must wait");
-                advance_time(Duration::from_secs(5)).await;
+                release.release();
                 std::future::pending::<()>().await;
             };
             let output = match race(session, control).await {
@@ -2033,7 +2036,15 @@ mod tests {
                 Race::Right(()) => panic!("control finished before the session"),
             };
             assert_eq!(output.events.len(), 18);
-            assert!(output.trailers.is_empty());
+            assert!(
+                output.trailers.is_empty(),
+                "trailers: {:?}",
+                output
+                    .trailers
+                    .iter()
+                    .map(|trailer| String::from_utf8_lossy(&trailer.payload))
+                    .collect::<Vec<_>>()
+            );
 
             let expected = std::iter::once(proto::client_run(b"opening"))
                 .chain((0..17).map(|id| {
