@@ -539,47 +539,35 @@ mod tests {
     }
 
     #[test]
-    fn tools_and_images_fail_before_opening_a_run() {
+    fn images_fail_before_opening_a_tool_bearing_run() {
         let _guard = crate::http2_memory::test_lock();
         crate::http2_memory::reset_for_tests();
         block_on(async {
-            for (body, phrase) in [
-                (
-                    json!({
-                        "model": "auto",
-                        "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
-                        "tools": [{"name": "lookup", "input_schema": {"type": "object"}}]
-                    }),
-                    "tools are not served",
-                ),
-                (
-                    json!({
-                        "model": "auto",
-                        "messages": [{"role": "user", "content": [{
-                            "type": "image",
-                            "source": {"type": "url", "url": "https://image.test/a.png"}
-                        }]}]
-                    }),
-                    "images are not served",
-                ),
-            ] {
-                let h2 = Http2Server::start(Vec::new()).await;
-                let h1 = Http1Server::start(Vec::new()).await;
-                let host = pooled_host();
-                let account = store_account(&host).await;
-                let upstream = upstream(&host, &h1, h2.base_url(), account);
-                let request: Request = from_value(body).expect("request");
-                let error = upstream
-                    .execute(request, ProtocolId::OPENAI_CHAT)
-                    .await
-                    .map(|_| ())
-                    .expect_err("unsupported content");
-                assert_eq!(error.status(), Some(404));
-                assert!(error.message().contains(phrase));
-                assert!(!error.cools());
-                assert_eq!(h2.requests().len(), 0);
-                assert_eq!(h1.requests().len(), 0, "not even agent discovery");
-            }
+            let h2 = Http2Server::start(Vec::new()).await;
+            let h1 = Http1Server::start(Vec::new()).await;
+            let host = pooled_host();
+            let account = store_account(&host).await;
+            let upstream = upstream(&host, &h1, h2.base_url(), account);
+            let request: Request = from_value(json!({
+                "model": "auto",
+                "messages": [{"role": "user", "content": [
+                    {"type": "text", "text": "hi"},
+                    {"type": "image", "source": {"type": "url", "url": "https://image.test/a.png"}}
+                ]}],
+                "tools": [{"name": "lookup", "input_schema": {"type": "object"}}]
+            }))
+            .expect("request");
+            let error = upstream
+                .execute(request, ProtocolId::OPENAI_CHAT)
+                .await
+                .map(|_| ())
+                .expect_err("unsupported image");
+            assert_eq!(error.status(), Some(404));
+            assert!(error.message().contains("images are not served"));
+            assert!(!error.message().contains("tools are not served"));
+            assert!(!error.cools());
+            assert_eq!(h2.requests().len(), 0);
+            assert_eq!(h1.requests().len(), 0, "not even agent discovery");
         });
     }
 

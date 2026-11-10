@@ -66,6 +66,8 @@ pub(crate) struct RunArgs<'a> {
     pub os: Cow<'a, str>,
     /// Temporary directory returned to environment execs.
     pub temp_dir: Cow<'a, str>,
+    /// Caller tools selected for this request.
+    pub tools: Vec<proto::ToolDef>,
     /// Transport limits.
     pub limits: Limits,
 }
@@ -879,7 +881,11 @@ fn reply_for(event: &ServerEvent, args: &RunArgs<'_>, replies: &mut Vec<Vec<u8>>
                 replies.push(proto::close_exec(request.id));
             }
             proto::ExecKind::ListTools => {
-                replies.push(proto::exec_tools_result(request.id, &request.exec_id, &[]));
+                replies.push(proto::exec_tools_result(
+                    request.id,
+                    &request.exec_id,
+                    &args.tools,
+                ));
                 replies.push(proto::close_exec(request.id));
             }
             proto::ExecKind::McpArguments { .. } | proto::ExecKind::Other => {
@@ -940,6 +946,7 @@ mod tests {
             blobs: std::borrow::Cow::Borrowed(blobs),
             os: std::borrow::Cow::Borrowed("linux"),
             temp_dir: std::borrow::Cow::Borrowed("/tmp/r8f2"),
+            tools: Vec::new(),
             limits: Limits::default(),
         }
     }
