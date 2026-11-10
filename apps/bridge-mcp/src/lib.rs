@@ -377,11 +377,24 @@ fn read_tools(path: &Path) -> Result<Vec<Tool>, Error> {
 }
 
 fn write_listed(path: &Path) -> io::Result<()> {
-    fs::write(path, b"")?;
+    // Create the file at mode 0o600 so a reader cannot observe the default
+    // umask (0o644) between `write` and `set_permissions`.
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
+        use std::fs::OpenOptions;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        drop(file);
         fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    }
+    #[cfg(not(unix))]
+    {
+        fs::write(path, b"")?;
     }
     Ok(())
 }
