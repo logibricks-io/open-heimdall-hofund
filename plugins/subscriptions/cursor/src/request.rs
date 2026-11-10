@@ -243,7 +243,7 @@ fn system_blob(text: &str) -> Vec<u8> {
     .into_bytes()
 }
 
-fn join_split_calls<'a>(messages: Vec<&'a Message>) -> Vec<Vec<&'a Message>> {
+fn join_split_calls(messages: Vec<&Message>) -> Vec<Vec<&Message>> {
     let mut groups: Vec<Vec<&Message>> = Vec::new();
     for message in messages {
         let join = message.role == Role::Assistant
@@ -837,11 +837,7 @@ mod tests {
 
     #[test]
     fn outbound_mapping_contains_no_product_or_gateway_branding() {
-        let mapped = map_with(
-            &Request::new("auto").with_messages(vec![message(Role::User, &["hello"])]),
-            options(),
-        )
-        .expect("mapping");
+        let mapped = map_with(&request_with_tools(), options()).expect("mapping");
         let mut bytes = mapped.opening.clone();
         for blob in mapped.blobs.values() {
             bytes.extend_from_slice(blob);

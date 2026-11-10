@@ -590,12 +590,12 @@ pub(crate) enum ServerEvent {
     ThinkingDelta(String),
     /// Interaction field 5.
     ThinkingCompleted,
-    /// Interaction field 2.
-    ToolStarted,
-    /// Interaction field 3.
-    ToolCompleted,
-    /// Interaction field 7.
-    PartialTool,
+    /// Interaction field 2, with the call id from inner field 1.
+    ToolStarted(String),
+    /// Interaction field 3, with the call id from inner field 1.
+    ToolCompleted(String),
+    /// Interaction field 7, with the call id from inner field 1.
+    PartialTool(String),
     /// Interaction field 8.
     TokenDelta,
     /// Heartbeat: every top-level field is 1 and every inner field is 13.
@@ -606,8 +606,8 @@ pub(crate) enum ServerEvent {
     ToolCallCount(u64),
     /// Top-level field 2.
     Exec(ExecRequest),
-    /// Top-level field 3. R-8 ignores the body apart from stall timing.
-    Checkpoint,
+    /// Top-level field 3, with the number of pending calls in state field 4.
+    Checkpoint(usize),
     /// Top-level field 4.
     Kv(KvRequest),
     /// A top-level field the codec does not classify.
@@ -645,7 +645,7 @@ pub(crate) struct ExecRequest {
 pub(crate) enum ExecKind {
     /// Field 10: request context. Reply with the environment, then close.
     Environment,
-    /// Field 11: MCP arguments. R-8 refuses.
+    /// Field 11: MCP arguments. Selected caller tools close; all others refuse.
     McpArguments {
         /// Resolved tool name.
         name: String,
@@ -697,7 +697,14 @@ pub(crate) fn decode_server(buf: &[u8]) -> (Vec<ServerEvent>, usize) {
             2 => events.push(ServerEvent::Exec(decode_exec(
                 field.as_message().unwrap_or_default(),
             ))),
-            3 => events.push(ServerEvent::Checkpoint),
+            3 => events.push(ServerEvent::Checkpoint(
+                field
+                    .as_message()
+                    .unwrap_or_default()
+                    .iter()
+                    .filter(|inner| inner.number == 4)
+                    .count(),
+            )),
             4 => {
                 if let Some(kv) = decode_kv(field.as_message().unwrap_or_default()) {
                     events.push(ServerEvent::Kv(kv));
@@ -725,30 +732,12 @@ fn decode_interaction(inner: Vec<Field>) -> Vec<ServerEvent> {
     let mut events = Vec::new();
     for field in inner {
         match field.number {
-            1 => {
-                let text = field
-                    .as_message()
-                    .into_iter()
-                    .flatten()
-                    .find(|inner| inner.number == 1)
-                    .and_then(|inner| inner.as_string())
-                    .unwrap_or_default();
-                events.push(ServerEvent::TextDelta(text));
-            }
-            2 => events.push(ServerEvent::ToolStarted),
-            3 => events.push(ServerEvent::ToolCompleted),
-            4 => {
-                let text = field
-                    .as_message()
-                    .into_iter()
-                    .flatten()
-                    .find(|inner| inner.number == 1)
-                    .and_then(|inner| inner.as_string())
-                    .unwrap_or_default();
-                events.push(ServerEvent::ThinkingDelta(text));
-            }
+            1 => events.push(ServerEvent::TextDelta(interaction_text(&field))),
+            2 => events.push(ServerEvent::ToolStarted(interaction_text(&field))),
+            3 => events.push(ServerEvent::ToolCompleted(interaction_text(&field))),
+            4 => events.push(ServerEvent::ThinkingDelta(interaction_text(&field))),
             5 => events.push(ServerEvent::ThinkingCompleted),
-            7 => events.push(ServerEvent::PartialTool),
+            7 => events.push(ServerEvent::PartialTool(interaction_text(&field))),
             8 => events.push(ServerEvent::TokenDelta),
             13 => {
                 // A lone inner 13 without the heartbeat rule is still not a
@@ -771,6 +760,16 @@ fn decode_interaction(inner: Vec<Field>) -> Vec<ServerEvent> {
         }
     }
     events
+}
+
+fn interaction_text(field: &Field) -> String {
+    field
+        .as_message()
+        .into_iter()
+        .flatten()
+        .find(|inner| inner.number == 1)
+        .and_then(|inner| inner.as_string())
+        .unwrap_or_default()
 }
 
 fn decode_usage(inner: Vec<Field>) -> TurnUsage {
