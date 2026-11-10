@@ -27,6 +27,7 @@ mod models;
 mod proto;
 mod quota;
 mod refresh;
+mod request;
 /// Run transport. Request mapping and the upstream provider arrive in R-8f2/f3.
 #[allow(dead_code)]
 mod run;
