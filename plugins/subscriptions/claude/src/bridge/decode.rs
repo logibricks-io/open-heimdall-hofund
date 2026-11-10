@@ -4,20 +4,18 @@
 //! `LongLivedChild` stdout into the same decoder and may return an
 //! upstream provider once a text-only turn succeeds.
 
-use hofund_ir::{
-    BlockStart, ContentBlockStart, ContentBlockStop, MessageDelta, MessageStart, MessageStop, Stop,
-    StopReason, StreamEvent, TextDelta, ToolArgumentsDelta, Usage,
-};
+use hofund_plugin_api::{Stop, StopReason, StreamEvent};
 use serde::Deserialize;
+use serde_json::{Value, json};
 
 #[cfg(test)]
-const MESSAGE_DELTA: &str = include_str!("../../fixtures/stream/message_delta.jsonl");
+const MESSAGE_DELTA: &str = include_str!("fixtures/stream/message_delta.jsonl");
 #[cfg(test)]
-const TOOL_USE: &str = include_str!("../../fixtures/stream/tool_use.jsonl");
+const TOOL_USE: &str = include_str!("fixtures/stream/tool_use.jsonl");
 #[cfg(test)]
-const RATE_LIMIT: &str = include_str!("../../fixtures/stream/rate_limit_event.jsonl");
+const RATE_LIMIT: &str = include_str!("fixtures/stream/rate_limit_event.jsonl");
 #[cfg(test)]
-const RESULT_ERROR: &str = include_str!("../../fixtures/stream/result_error.jsonl");
+const RESULT_ERROR: &str = include_str!("fixtures/stream/result_error.jsonl");
 
 /// One decoded step from a stream-json line.
 #[derive(Clone, Debug, PartialEq)]
@@ -109,57 +107,50 @@ fn decode_stream_event(event: StreamEnvelope) -> Option<Vec<StreamEvent>> {
     let events = match event.typ.as_str() {
         "message_start" => {
             let message = event.message.unwrap_or_default();
-            vec![StreamEvent::MessageStart(MessageStart {
-                id: empty_to_none(message.id),
-                model: empty_to_none(message.model),
-                usage: message.usage.and_then(CliUsage::into_usage),
-                extensions: hofund_ir::Extensions::default(),
-            })]
+            vec![ir_event(json!({
+                "type": "message_start",
+                "id": empty_to_none(message.id),
+                "model": empty_to_none(message.model),
+                "usage": message.usage.and_then(CliUsage::into_usage),
+            }))]
         }
         "content_block_start" => {
             let block = event.content_block?;
             let mut events = Vec::new();
             match block.typ.as_str() {
                 "text" => {
-                    events.push(StreamEvent::ContentBlockStart(ContentBlockStart {
-                        index: event.index,
-                        block: BlockStart::Text,
-                        extensions: hofund_ir::Extensions::default(),
-                    }));
+                    events.push(ir_event(json!({
+                        "type": "content_block_start",
+                        "index": event.index,
+                        "block": { "type": "text" },
+                    })));
                     if !block.text.is_empty() {
-                        events.push(StreamEvent::TextDelta(TextDelta {
-                            index: event.index,
-                            text: block.text,
-                            extensions: hofund_ir::Extensions::default(),
-                        }));
+                        events.push(ir_event(json!({
+                            "type": "text_delta",
+                            "index": event.index,
+                            "text": block.text,
+                        })));
                     }
                 }
-                "tool_use" => events.push(StreamEvent::ContentBlockStart(ContentBlockStart {
-                    index: event.index,
-                    block: BlockStart::ToolCall {
-                        id: block.id.unwrap_or_default(),
-                        name: block.name.unwrap_or_default(),
+                "tool_use" => events.push(ir_event(json!({
+                    "type": "content_block_start",
+                    "index": event.index,
+                    "block": {
+                        "type": "tool_call",
+                        "id": block.id.unwrap_or_default(),
+                        "name": block.name.unwrap_or_default(),
                     },
-                    extensions: hofund_ir::Extensions::default(),
-                })),
-                "thinking" => events.push(StreamEvent::ContentBlockStart(ContentBlockStart {
-                    index: event.index,
-                    block: BlockStart::Thinking {
-                        redacted: false,
-                        data: None,
-                    },
-                    extensions: hofund_ir::Extensions::default(),
-                })),
-                "redacted_thinking" => {
-                    events.push(StreamEvent::ContentBlockStart(ContentBlockStart {
-                        index: event.index,
-                        block: BlockStart::Thinking {
-                            redacted: true,
-                            data: None,
-                        },
-                        extensions: hofund_ir::Extensions::default(),
-                    }))
-                }
+                }))),
+                "thinking" => events.push(ir_event(json!({
+                    "type": "content_block_start",
+                    "index": event.index,
+                    "block": { "type": "thinking" },
+                }))),
+                "redacted_thinking" => events.push(ir_event(json!({
+                    "type": "content_block_start",
+                    "index": event.index,
+                    "block": { "type": "thinking", "redacted": true },
+                }))),
                 _ => return None,
             }
             events
@@ -167,36 +158,36 @@ fn decode_stream_event(event: StreamEnvelope) -> Option<Vec<StreamEvent>> {
         "content_block_delta" => {
             let delta = event.delta?;
             let ev = match delta.typ.as_str() {
-                "text_delta" => StreamEvent::TextDelta(TextDelta {
-                    index: event.index,
-                    text: delta.text,
-                    extensions: hofund_ir::Extensions::default(),
-                }),
-                "input_json_delta" => StreamEvent::ToolArgumentsDelta(ToolArgumentsDelta {
-                    index: event.index,
-                    partial_json: delta.partial_json,
-                    extensions: hofund_ir::Extensions::default(),
-                }),
-                "thinking_delta" => StreamEvent::ThinkingDelta(hofund_ir::ThinkingDelta {
-                    index: event.index,
-                    text: delta.thinking,
-                    extensions: hofund_ir::Extensions::default(),
-                }),
-                "signature_delta" => StreamEvent::SignatureDelta(hofund_ir::SignatureDelta {
-                    index: event.index,
-                    signature: delta.signature,
-                    extensions: hofund_ir::Extensions::default(),
-                }),
+                "text_delta" => ir_event(json!({
+                    "type": "text_delta",
+                    "index": event.index,
+                    "text": delta.text,
+                })),
+                "input_json_delta" => ir_event(json!({
+                    "type": "tool_arguments_delta",
+                    "index": event.index,
+                    "partial_json": delta.partial_json,
+                })),
+                "thinking_delta" => ir_event(json!({
+                    "type": "thinking_delta",
+                    "index": event.index,
+                    "text": delta.thinking,
+                })),
+                "signature_delta" => ir_event(json!({
+                    "type": "signature_delta",
+                    "index": event.index,
+                    "signature": delta.signature,
+                })),
                 _ => return None,
             };
             vec![ev]
         }
-        "content_block_stop" => vec![StreamEvent::ContentBlockStop(ContentBlockStop {
-            index: event.index,
-            extensions: hofund_ir::Extensions::default(),
-        })],
+        "content_block_stop" => vec![ir_event(json!({
+            "type": "content_block_stop",
+            "index": event.index,
+        }))],
         "message_delta" => {
-            let stop_reason = event
+            let reason = event
                 .delta
                 .as_ref()
                 .and_then(|d| empty_to_none(d.stop_reason.clone()))
@@ -206,15 +197,14 @@ fn decode_stream_event(event: StreamEnvelope) -> Option<Vec<StreamEvent>> {
                 .as_ref()
                 .and_then(|d| d.stop_sequence.clone())
                 .and_then(empty_to_none);
-            vec![StreamEvent::MessageDelta(MessageDelta {
-                stop: stop_reason.map(|reason| Stop { reason, sequence }),
-                usage: event.usage.and_then(CliUsage::into_usage),
-                extensions: hofund_ir::Extensions::default(),
-            })]
+            let stop = reason.map(|reason| Stop { reason, sequence });
+            vec![ir_event(json!({
+                "type": "message_delta",
+                "stop": stop,
+                "usage": event.usage.and_then(CliUsage::into_usage),
+            }))]
         }
-        "message_stop" => vec![StreamEvent::MessageStop(MessageStop {
-            extensions: hofund_ir::Extensions::default(),
-        })],
+        "message_stop" => vec![ir_event(json!({"type": "message_stop"}))],
         _ => return None,
     };
     Some(events)
@@ -404,31 +394,73 @@ struct OutputDetails {
 }
 
 impl CliUsage {
-    fn into_usage(self) -> Option<Usage> {
-        let usage = Usage {
-            input_tokens: self.input_tokens,
-            output_tokens: self.output_tokens,
-            cache_read_tokens: self.cache_read_input_tokens,
-            cache_write_tokens: self.cache_creation_input_tokens,
-            reasoning_tokens: self.output_tokens_details.and_then(|d| d.thinking_tokens),
-            ..Usage::default()
-        };
-        let empty = usage.input_tokens.is_none()
-            && usage.output_tokens.is_none()
-            && usage.cache_read_tokens.is_none()
-            && usage.cache_write_tokens.is_none()
-            && usage.reasoning_tokens.is_none();
-        if empty { None } else { Some(usage) }
+    fn into_usage(self) -> Option<Value> {
+        let mut usage = serde_json::Map::new();
+        if let Some(v) = self.input_tokens {
+            usage.insert("input_tokens".into(), json!(v));
+        }
+        if let Some(v) = self.output_tokens {
+            usage.insert("output_tokens".into(), json!(v));
+        }
+        if let Some(v) = self.cache_read_input_tokens {
+            usage.insert("cache_read_tokens".into(), json!(v));
+        }
+        if let Some(v) = self.cache_creation_input_tokens {
+            usage.insert("cache_write_tokens".into(), json!(v));
+        }
+        if let Some(v) = self.output_tokens_details.and_then(|d| d.thinking_tokens) {
+            usage.insert("reasoning_tokens".into(), json!(v));
+        }
+        if usage.is_empty() {
+            None
+        } else {
+            Some(Value::Object(usage))
+        }
     }
+}
+
+/// Builds a [`StreamEvent`] from its IR JSON shape.
+fn ir_event(value: Value) -> StreamEvent {
+    serde_json::from_value(value).expect("stream-json maps onto a typed IR event")
+}
+
+/// `type` field of a `content_block_start` block, when `event` is one.
+#[cfg(test)]
+fn start_block_type(event: &StreamEvent) -> Option<String> {
+    let StreamEvent::ContentBlockStart(start) = event else {
+        return None;
+    };
+    serde_json::to_value(&start.block)
+        .ok()?
+        .get("type")?
+        .as_str()
+        .map(ToOwned::to_owned)
+}
+
+/// Tool-call id and name on a `content_block_start`, when `event` is one.
+#[cfg(test)]
+fn start_tool_call(event: &StreamEvent) -> Option<(u32, String, String)> {
+    let StreamEvent::ContentBlockStart(start) = event else {
+        return None;
+    };
+    let block = serde_json::to_value(&start.block).ok()?;
+    if block.get("type")?.as_str()? != "tool_call" {
+        return None;
+    }
+    Some((
+        start.index,
+        block.get("id")?.as_str()?.to_owned(),
+        block.get("name")?.as_str()?.to_owned(),
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         Decoder, MESSAGE_DELTA, RATE_LIMIT, RESULT_ERROR, Step, TOOL_USE, collected_events,
-        decode_script,
+        decode_script, start_block_type, start_tool_call,
     };
-    use hofund_ir::{BlockStart, StopReason, StreamEvent};
+    use hofund_plugin_api::{StopReason, StreamEvent};
 
     #[test]
     fn message_delta_fixture_becomes_text_events_and_captures_session() {
@@ -449,7 +481,8 @@ mod tests {
         assert!(
             events
                 .iter()
-                .any(|e| matches!(e, StreamEvent::ContentBlockStart(s) if s.index == 0 && s.block == BlockStart::Text))
+                .any(|e| start_block_type(e).as_deref() == Some("text")
+                    && matches!(e, StreamEvent::ContentBlockStart(s) if s.index == 0))
         );
         let text: String = events
             .iter()
@@ -474,12 +507,11 @@ mod tests {
         let (decoder, steps) = decode_script(TOOL_USE);
         assert_eq!(decoder.session_id(), Some("sess_tool"));
         let events = collected_events(&steps);
-        assert!(events.iter().any(|e| matches!(
-            e,
-            StreamEvent::ContentBlockStart(s)
-                if s.index == 0
-                    && matches!(&s.block, BlockStart::ToolCall { id, name } if id == "toolu_1" && name == "Bash")
-        )));
+        assert!(
+            events
+                .iter()
+                .any(|e| start_tool_call(e).as_ref() == Some(&(0, "toolu_1".into(), "Bash".into())))
+        );
         let args: String = events
             .iter()
             .filter_map(|e| match e {

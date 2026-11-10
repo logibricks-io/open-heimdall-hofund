@@ -174,9 +174,7 @@ fn expected_deps(package: &str) -> Option<&'static [&'static str]> {
         ],
         "hofund-plugin-relay" => &["hofund-plugin-api", "hofund-plugin-sdk"],
         "hofund-plugin-remote-gateway" => &["hofund-plugin-api", "hofund-plugin-sdk"],
-        "hofund-plugin-subscription-claude" => {
-            &["hofund-ir", "hofund-plugin-api", "hofund-plugin-sdk"]
-        }
+        "hofund-plugin-subscription-claude" => &["hofund-plugin-api", "hofund-plugin-sdk"],
         "hofund-plugin-subscription-cline" => &["hofund-plugin-api", "hofund-plugin-sdk"],
         "hofund-plugin-subscription-codex" => &["hofund-plugin-api", "hofund-plugin-sdk"],
         "hofund-plugin-subscription-copilot" => &["hofund-plugin-api", "hofund-plugin-sdk"],

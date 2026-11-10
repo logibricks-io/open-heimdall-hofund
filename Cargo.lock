@@ -2294,7 +2294,6 @@ dependencies = [
 name = "hofund-plugin-subscription-claude"
 version = "0.1.0"
 dependencies = [
- "hofund-ir",
  "hofund-kit-subscription",
  "hofund-plugin-api",
  "hofund-plugin-sdk",
