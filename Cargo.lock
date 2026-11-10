@@ -2298,6 +2298,8 @@ dependencies = [
  "hofund-plugin-api",
  "hofund-plugin-sdk",
  "regex",
+ "serde",
+ "serde_json",
  "tempfile",
 ]
 
