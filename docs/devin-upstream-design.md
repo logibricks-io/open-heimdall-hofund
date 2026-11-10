@@ -1,6 +1,6 @@
 # Devin subscription upstream (R-12, R-13)
 
-Status: design only. The subscription crate already imports CLI credentials, discovers agent sign-ins, writes agent TOML, and returns an upstream handle that refuses chat (`plugins/subscriptions/devin/src/upstream.rs:20-35`). This document is the contract for serving a model call on a Devin account through the same Windsurf/Codeium backend the Devin CLI uses.
+Status: R-12a ships the shared protobuf/Connect codec and Devin's text-only chat and raw model-config message tables with golden byte tests. HTTP execution and live model listing remain unwired; the subscription crate imports CLI credentials, discovers agent sign-ins, writes agent TOML, and returns an upstream handle that refuses chat (`plugins/subscriptions/devin/src/upstream.rs:20-35`). The remaining R-12/R-13 sections are the contract for serving a model call on a Devin account through the same Windsurf/Codeium backend the Devin CLI uses.
 
 The wire contract is the reference's JavaScript subscription plugin (`packages/devin/index.mjs`, tests listed in section 7). The Go provider files (`internal/provider/devin.go`, `devin_accounts.go`, `devin_images.go`) cover CLI install paths, catalog shaping, and migration readers; they do not open `GetChatMessage`. Where Go and JavaScript disagree, JavaScript is the wire contract.
 

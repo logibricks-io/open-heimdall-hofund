@@ -148,7 +148,7 @@ Every other gap below maps to an existing plan item.
 | n | error classification | Plugin `errors.test.mjs` | Not served | Missing | **R-13** |
 | o | keepalive | `keepalive.test.mjs` | None | Missing | **R-13** (new to the plan in this audit) |
 | p | agent sign-in | Core installs CLI (`devin.go:8-12`) | `agent_sign_in.rs` write TOML | Partial | CLI install helper like core (`DevinExecutable`) |
-| q | extras | gzip request, identity headers, CLI version pin (`devin/index.mjs:33-36`) | Not served | Missing | **R-12** |
+| q | extras | gzip request, identity headers, CLI version pin (`devin/index.mjs:33-36`) | `connect/` message tables + SDK `protobuf`; 8083/8333 gzip and golden byte tests; no HTTP | Partial | Wire transport and headers in **R-12** |
 
 ### Gaps (Devin)
 
