@@ -20,6 +20,7 @@ use hofund_plugin_agent_claude::ClaudeStore;
 use hofund_plugin_agent_codex::CodexStore;
 use hofund_plugin_agent_cursor::CursorStore;
 use hofund_plugin_agent_droid::DroidStore;
+use hofund_plugin_agent_grok::GrokStore;
 use hofund_plugin_agent_minimax_code::MiniMaxStore;
 use hofund_plugin_agent_raft::RaftStore;
 
@@ -117,10 +118,12 @@ pub(crate) fn run(config: &Path, command: &Command) -> Result<String, String> {
     let codex = CodexStore::new();
     let cursor = CursorStore::new();
     let droid = DroidStore::new();
+    let grok = GrokStore::new();
     let minimax = MiniMaxStore::new();
     let raft = RaftStore::new();
-    let stores: [&dyn SessionStore; 7] =
-        [&claude, &cindy, &codex, &cursor, &droid, &minimax, &raft];
+    let stores: [&dyn SessionStore; 8] = [
+        &claude, &cindy, &codex, &cursor, &droid, &grok, &minimax, &raft,
+    ];
     run_with(config, command, &stores, Local::now())
 }
 
@@ -741,6 +744,32 @@ mod tests {
         let listed = run_with(&config, &list, &stores, Local::now()).expect("list");
         assert!(listed.contains("Ship the cursor reader"), "{listed}");
         assert!(listed.contains("Editor transcript title"), "{listed}");
+    }
+
+    #[test]
+    fn grok_reader_is_consent_gated_through_index() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config = temp.path().join("hofund.toml");
+        let grok_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../plugins/agents/grok/tests/fixtures/root")
+            .canonicalize()
+            .expect("grok fixtures");
+        let grok = GrokStore::with_root(grok_root);
+        let stores: [&dyn SessionStore; 1] = [&grok];
+        let list = Command::List(Options {
+            days: None,
+            model: String::new(),
+            folder: String::new(),
+            limit: 20,
+            json: false,
+        });
+        let on = Command::Read(Some(ReadChange {
+            on: true,
+            targets: vec!["grok".to_owned()],
+        }));
+        run_with(&config, &on, &stores, Local::now()).expect("consent");
+        let listed = run_with(&config, &list, &stores, Local::now()).expect("list");
+        assert!(listed.contains("Parser port"), "{listed}");
     }
 
     #[test]

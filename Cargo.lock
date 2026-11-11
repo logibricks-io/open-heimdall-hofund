@@ -1817,6 +1817,7 @@ dependencies = [
  "hofund-plugin-agent-codex",
  "hofund-plugin-agent-cursor",
  "hofund-plugin-agent-droid",
+ "hofund-plugin-agent-grok",
  "hofund-plugin-agent-minimax-code",
  "hofund-plugin-agent-raft",
  "hofund-plugin-api",
@@ -2091,6 +2092,15 @@ dependencies = [
 
 [[package]]
 name = "hofund-plugin-agent-droid"
+version = "0.1.0"
+dependencies = [
+ "hofund-plugin-api",
+ "hofund-plugin-sdk",
+ "tempfile",
+]
+
+[[package]]
+name = "hofund-plugin-agent-grok"
 version = "0.1.0"
 dependencies = [
  "hofund-plugin-api",
