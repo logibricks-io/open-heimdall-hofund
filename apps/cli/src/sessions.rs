@@ -21,6 +21,7 @@ use hofund_plugin_agent_codex::CodexStore;
 use hofund_plugin_agent_cursor::CursorStore;
 use hofund_plugin_agent_droid::DroidStore;
 use hofund_plugin_agent_grok::GrokStore;
+use hofund_plugin_agent_kimi::KimiStore;
 use hofund_plugin_agent_minimax_code::MiniMaxStore;
 use hofund_plugin_agent_qoder::{QoderCnStore, QoderStore};
 use hofund_plugin_agent_raft::RaftStore;
@@ -120,10 +121,13 @@ pub(crate) fn run(config: &Path, command: &Command) -> Result<String, String> {
     let cursor = CursorStore::new();
     let droid = DroidStore::new();
     let grok = GrokStore::new();
+    let kimi = KimiStore::new();
     let minimax = MiniMaxStore::new();
+    let qoder = QoderStore::new();
+    let qoder_cn = QoderCnStore::new();
     let raft = RaftStore::new();
-    let stores: [&dyn SessionStore; 8] = [
-        &claude, &cindy, &codex, &cursor, &droid, &grok, &minimax, &raft,
+    let stores: [&dyn SessionStore; 11] = [
+        &claude, &cindy, &codex, &cursor, &droid, &grok, &kimi, &minimax, &qoder, &qoder_cn, &raft,
     ];
     run_with(config, command, &stores, Local::now())
 }
@@ -771,6 +775,32 @@ mod tests {
         run_with(&config, &on, &stores, Local::now()).expect("consent");
         let listed = run_with(&config, &list, &stores, Local::now()).expect("list");
         assert!(listed.contains("Explain the cache"), "{listed}");
+    }
+
+    #[test]
+    fn kimi_reader_is_consent_gated_through_index() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config = temp.path().join("hofund.toml");
+        let kimi_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../plugins/agents/kimi/tests/fixtures/root")
+            .canonicalize()
+            .expect("kimi fixtures");
+        let kimi = KimiStore::with_root(kimi_root);
+        let stores: [&dyn SessionStore; 1] = [&kimi];
+        let list = Command::List(Options {
+            days: None,
+            model: String::new(),
+            folder: String::new(),
+            limit: 20,
+            json: false,
+        });
+        let on = Command::Read(Some(ReadChange {
+            on: true,
+            targets: vec!["kimi".to_owned()],
+        }));
+        run_with(&config, &on, &stores, Local::now()).expect("consent");
+        let listed = run_with(&config, &list, &stores, Local::now()).expect("list");
+        assert!(listed.contains("Review the diff"), "{listed}");
     }
 
     #[test]

@@ -661,7 +661,7 @@ mod tests {
     fn droid_model_name_resolves_custom() {
         let root = fixture("root");
         assert_eq!(
-            droid_model_name("custom:magpie/anthropic/claude-sonnet-4-5", &root),
+            droid_model_name("custom:hofund/anthropic/claude-sonnet-4-5", &root),
             "anthropic/claude-sonnet-4-5"
         );
     }
