@@ -28,10 +28,7 @@ const PLUGIN_IDS: [&str; 4] = ["fake-pkce", "fake-device", "fake-token", "fake-b
 fn fake_agent_home() -> std::path::PathBuf {
     static HOME: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
     HOME.get_or_init(|| {
-        let path = std::path::PathBuf::from(
-            std::env::var_os("CARGO_TARGET_DIR").expect("CARGO_TARGET_DIR"),
-        )
-        .join("r7b-fake-agent-home");
+        let path = tempfile::tempdir().expect("agent home").keep();
         set_test_agent_home("R7B_FAKE_AGENT_HOME", path.clone());
         path
     })

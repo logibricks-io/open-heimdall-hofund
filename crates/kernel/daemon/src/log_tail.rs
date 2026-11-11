@@ -111,9 +111,20 @@ mod tests {
     #[test]
     fn a_non_not_found_open_error_is_a_read_failure() {
         let dir = tempfile::tempdir().expect("dir");
-        let file = dir.path().join("not-a-directory");
-        std::fs::write(&file, b"x").expect("file");
-        let path = file.join("daemon.log");
-        assert!(super::read_path(&path, LogTailQuery::default()).is_err());
+        // On Unix, File::open of a directory succeeds, so a parent-is-file path
+        // produces ENOTDIR. On Windows that same path is often NotFound (empty
+        // log), while opening a directory is PermissionDenied, not NotFound.
+        let path = if cfg!(windows) {
+            dir.path().to_path_buf()
+        } else {
+            let file = dir.path().join("not-a-directory");
+            std::fs::write(&file, b"x").expect("file");
+            file.join("daemon.log")
+        };
+        assert!(
+            super::read_path(&path, LogTailQuery::default()).is_err(),
+            "open of {} must not be treated as a missing log",
+            path.display()
+        );
     }
 }
