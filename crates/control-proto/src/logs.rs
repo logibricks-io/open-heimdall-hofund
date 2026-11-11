@@ -45,7 +45,6 @@ impl LogTailQuery {
                     parsed.max_bytes = value.parse().map_err(|_| bad_query())?;
                     seen_max = true;
                 }
-                "after" | "max_bytes" => return Err(bad_query()),
                 _ => return Err(bad_query()),
             }
         }
@@ -100,7 +99,7 @@ impl Default for LogTailResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::{LogTailQuery, MAX_LOG_TAIL_BYTES};
+    use super::{ControlErrorKind, LogTailQuery, MAX_LOG_TAIL_BYTES};
 
     #[test]
     fn log_query_defaults_bounds_and_round_trip() {
@@ -112,11 +111,13 @@ mod tests {
         for bad in [
             "after=nope",
             "after=1&after=2",
+            "max_bytes=1&max_bytes=2",
             "max_bytes=0",
             "max_bytes=65537",
             "follow=true",
         ] {
-            assert!(LogTailQuery::parse(Some(bad)).is_err(), "{bad}");
+            let error = LogTailQuery::parse(Some(bad)).expect_err("invalid query");
+            assert_eq!(error.kind, ControlErrorKind::BadRequest, "{bad}");
         }
     }
 }

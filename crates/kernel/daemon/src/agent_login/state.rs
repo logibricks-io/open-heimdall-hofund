@@ -36,6 +36,21 @@ impl Drop for TestHomeGuard {
     }
 }
 
+#[cfg(feature = "test-util")]
+static TEST_UTIL_AGENT_HOMES: std::sync::Mutex<BTreeMap<String, PathBuf>> =
+    std::sync::Mutex::new(BTreeMap::new());
+
+/// Overrides [`agent_home`] for integration tests. The last path for a given
+/// environment name wins.
+#[cfg(feature = "test-util")]
+#[doc(hidden)]
+pub fn set_test_agent_home(home_env: impl Into<String>, path: PathBuf) {
+    TEST_UTIL_AGENT_HOMES
+        .lock()
+        .expect("test agent homes")
+        .insert(home_env.into(), path);
+}
+
 /// One agent's remembered sign-in switching state.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -153,6 +168,15 @@ pub fn agent_home(decl: &hofund_plugin_api::AgentSignIn) -> Result<PathBuf, Daem
             .last()
             .and_then(|top| top.get(decl.home_env()).cloned())
     }) {
+        return Ok(path);
+    }
+    #[cfg(feature = "test-util")]
+    if let Some(path) = TEST_UTIL_AGENT_HOMES
+        .lock()
+        .expect("test agent homes")
+        .get(decl.home_env())
+        .cloned()
+    {
         return Ok(path);
     }
     if let Ok(value) = std::env::var(decl.home_env())

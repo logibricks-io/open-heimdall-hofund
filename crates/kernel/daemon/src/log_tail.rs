@@ -101,4 +101,19 @@ mod tests {
         assert_eq!(rest.offset, 65_536);
         assert_eq!(rest.next_offset, 70_000);
     }
+
+    #[test]
+    fn a_directory_is_a_read_failure_not_an_empty_log() {
+        let dir = tempfile::tempdir().expect("dir");
+        assert!(super::read_path(dir.path(), LogTailQuery::default()).is_err());
+    }
+
+    #[test]
+    fn a_non_not_found_open_error_is_a_read_failure() {
+        let dir = tempfile::tempdir().expect("dir");
+        let file = dir.path().join("not-a-directory");
+        std::fs::write(&file, b"x").expect("file");
+        let path = file.join("daemon.log");
+        assert!(super::read_path(&path, LogTailQuery::default()).is_err());
+    }
 }

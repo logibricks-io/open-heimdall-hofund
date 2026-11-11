@@ -116,3 +116,56 @@ impl Default for SettingsResponse {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::decode_request;
+
+    fn valid() -> SettingsPatchRequest {
+        let mut request = SettingsPatchRequest::new("r".repeat(64));
+        request.listen = Some("127.0.0.1:3425".to_owned());
+        request.currency = Some("usd".to_owned());
+        request.lan_allow = Some(vec!["192.168.1.0/24".to_owned(), String::new()]);
+        request
+    }
+
+    #[test]
+    fn settings_patch_validates_revision_currency_listen_and_lan_entries() {
+        let body = serde_json::to_vec(&valid()).expect("JSON");
+        decode_request::<SettingsPatchRequest>(API_VERSION, &body).expect("valid patch");
+        let mut cny = valid();
+        cny.currency = Some("cny".to_owned());
+        let body = serde_json::to_vec(&cny).expect("JSON");
+        decode_request::<SettingsPatchRequest>(API_VERSION, &body).expect("cny");
+        let mut boundary = valid();
+        boundary.expected_revision = "r".repeat(MAX_ID_BYTES);
+        boundary.lan_allow = Some(vec!["x".repeat(MAX_ID_BYTES)]);
+        let body = serde_json::to_vec(&boundary).expect("JSON");
+        decode_request::<SettingsPatchRequest>(API_VERSION, &body).expect("maximum lengths");
+
+        for (field, value) in [
+            ("revision", "x".repeat(MAX_ID_BYTES + 1)),
+            ("currency", "eur".to_owned()),
+            ("listen", "localhost:3425".to_owned()),
+            ("lan", "x".repeat(MAX_ID_BYTES + 1)),
+        ] {
+            let mut request = valid();
+            match field {
+                "revision" => request.expected_revision = value,
+                "currency" => request.currency = Some(value),
+                "listen" => request.listen = Some(value),
+                _ => request.lan_allow = Some(vec![value]),
+            }
+            let body = serde_json::to_vec(&request).expect("JSON");
+            let error = decode_request::<SettingsPatchRequest>(API_VERSION, &body)
+                .expect_err("invalid settings patch");
+            assert_eq!(
+                error.kind,
+                ControlErrorKind::Unprocessable,
+                "{field}: {}",
+                error.message
+            );
+        }
+    }
+}

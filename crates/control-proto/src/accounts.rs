@@ -130,6 +130,9 @@ pub enum SignInChallenge {
         /// Plugin-provided, secret-free instructions.
         text: String,
     },
+    /// A newer peer supplied an unknown challenge.
+    #[serde(other)]
+    Unknown,
 }
 
 impl Default for SignInChallenge {
@@ -612,4 +615,112 @@ fn validate_id(value: &str) -> Result<(), ControlError> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Request, decode_request};
+
+    fn invalid<T: Request + serde::Serialize + std::fmt::Debug>(request: &T) {
+        let body = serde_json::to_vec(request).expect("request JSON");
+        let error = decode_request::<T>(API_VERSION, &body).expect_err("invalid request");
+        assert_eq!(error.kind, ControlErrorKind::Unprocessable);
+    }
+
+    #[test]
+    fn sign_in_start_validates_every_option() {
+        let valid = SignInStartRequest {
+            version: API_VERSION,
+            host: Some("example.test".to_owned()),
+            label: Some("work".to_owned()),
+            site: Some("device".to_owned()),
+        };
+        let body = serde_json::to_vec(&valid).expect("JSON");
+        decode_request::<SignInStartRequest>(API_VERSION, &body).expect("valid options");
+        let boundary = SignInStartRequest {
+            host: Some("x".repeat(MAX_ID_BYTES)),
+            ..valid
+        };
+        let body = serde_json::to_vec(&boundary).expect("JSON");
+        decode_request::<SignInStartRequest>(API_VERSION, &body).expect("maximum id length");
+        for (host, label, site) in [
+            (Some(String::new()), None, None),
+            (None, Some(String::new()), None),
+            (None, None, Some(String::new())),
+            (Some("x".repeat(MAX_ID_BYTES + 1)), None, None),
+        ] {
+            invalid(&SignInStartRequest {
+                version: API_VERSION,
+                host,
+                label,
+                site,
+            });
+        }
+    }
+
+    #[test]
+    fn proof_constructors_and_validation_require_one_nonempty_secret_input() {
+        let url = SignInProofRequest::url("http://localhost/callback?code=fake&state=right");
+        assert!(url.url.is_some());
+        let body = serde_json::to_vec(&url).expect("JSON");
+        decode_request::<SignInProofRequest>(API_VERSION, &body).expect("URL proof");
+        let token = SignInProofRequest::token("fake-token");
+        assert!(token.token.is_some());
+        let body = serde_json::to_vec(&token).expect("JSON");
+        decode_request::<SignInProofRequest>(API_VERSION, &body).expect("token proof");
+
+        let mut neither = SignInProofRequest::url("http://localhost/callback");
+        neither.url = None;
+        invalid(&neither);
+        let mut both = SignInProofRequest::url("http://localhost/callback");
+        both.token = Some("fake-token".to_owned());
+        invalid(&both);
+        invalid(&SignInProofRequest::url("  "));
+        invalid(&SignInProofRequest::token("\n"));
+    }
+
+    #[test]
+    fn refresh_switch_import_and_discovery_validate_their_fields() {
+        invalid(&SubscriptionRefreshRequest::new(Some(String::new())));
+        invalid(&SubscriptionRefreshRequest::new(Some(
+            "x".repeat(MAX_ID_BYTES + 1),
+        )));
+        let body = serde_json::to_vec(&SubscriptionRefreshRequest::new(None)).expect("JSON");
+        decode_request::<SubscriptionRefreshRequest>(API_VERSION, &body).expect("all accounts");
+        let body = serde_json::to_vec(&SubscriptionRefreshRequest::new(Some(
+            "x".repeat(MAX_ID_BYTES),
+        )))
+        .expect("JSON");
+        decode_request::<SubscriptionRefreshRequest>(API_VERSION, &body)
+            .expect("maximum account id length");
+
+        invalid(&AccountSwitchRequest::new("", "next"));
+        invalid(&AccountSwitchRequest::new(
+            "agent",
+            "x".repeat(MAX_ID_BYTES + 1),
+        ));
+        let body = serde_json::to_vec(&AccountSwitchRequest::new("agent", "next")).expect("JSON");
+        decode_request::<AccountSwitchRequest>(API_VERSION, &body).expect("switch");
+
+        invalid(&AccountImportRequest::new("  "));
+        invalid(&AccountImportRequest::new(
+            "x".repeat(MAX_ID_BYTES * 16 + 1),
+        ));
+        let body = serde_json::to_vec(&AccountImportRequest::new("export.json")).expect("JSON");
+        decode_request::<AccountImportRequest>(API_VERSION, &body).expect("import");
+        let body = serde_json::to_vec(&AccountImportRequest::new("x".repeat(MAX_ID_BYTES * 16)))
+            .expect("JSON");
+        decode_request::<AccountImportRequest>(API_VERSION, &body)
+            .expect("maximum import path length");
+
+        let mut add = AccountDiscoverAddRequest::new();
+        add.add = false;
+        invalid(&add);
+        let body = serde_json::to_vec(&AccountDiscoverAddRequest::new()).expect("JSON");
+        decode_request::<AccountDiscoverAddRequest>(API_VERSION, &body).expect("confirmed add");
+
+        assert_eq!(SignInCancelRequest::new().version, API_VERSION);
+        assert_eq!(AccountRemoveRequest::new().version, API_VERSION);
+    }
 }

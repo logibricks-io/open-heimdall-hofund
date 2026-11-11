@@ -9,7 +9,9 @@ use std::time::{Duration, Instant};
 use hofund_control_proto::{
     API_VERSION, ControlErrorKind, SignInSessionState, SubscriptionFlow, decode_error_envelope,
 };
-use hofund_daemon::{ControlRuntime, DaemonRegistry, Running, StartOptions, start_linked};
+use hofund_daemon::{
+    ControlRuntime, DaemonRegistry, Running, StartOptions, set_test_agent_home, start_linked,
+};
 use hofund_plugin_api::{
     AccountId, AccountStatus, AgentDescription, AgentSignIn, BinaryName, BuildError, ConfigError,
     DeviceFlow, DiscoveredAgentAccount, DynUpstreamFactory, HostContext, LoopbackSpec, ModelList,
@@ -23,6 +25,19 @@ const SECRET: &str = "r7b-secret-sentinel-never-return";
 const CODE: &str = "r7b-callback-code-never-return";
 const PLUGIN_IDS: [&str; 4] = ["fake-pkce", "fake-device", "fake-token", "fake-bridge"];
 
+fn fake_agent_home() -> std::path::PathBuf {
+    static HOME: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    HOME.get_or_init(|| {
+        let path = std::path::PathBuf::from(
+            std::env::var_os("CARGO_TARGET_DIR").expect("CARGO_TARGET_DIR"),
+        )
+        .join("r7b-fake-agent-home");
+        set_test_agent_home("R7B_FAKE_AGENT_HOME", path.clone());
+        path
+    })
+    .clone()
+}
+
 static PKCE_SPEC: SubscriptionSpec = SubscriptionSpec::from_static(
     PluginId::from_static("fake-pkce"),
     "Fake PKCE",
@@ -30,8 +45,8 @@ static PKCE_SPEC: SubscriptionSpec = SubscriptionSpec::from_static(
 )
 .with_agent_sign_in(AgentSignIn::new(
     &["fake-agent"],
-    "R7B_UNUSED_HOME",
-    "/workspace/hofund-r7b-target-a/r7b-fake-agent-home",
+    "R7B_FAKE_AGENT_HOME",
+    "r7b-fake-agent-home",
 ));
 static DEVICE_SPEC: SubscriptionSpec = SubscriptionSpec::from_static(
     PluginId::from_static("fake-device"),
@@ -390,6 +405,7 @@ struct Rig {
 
 impl Rig {
     async fn new(mode: Mode, deadline: Option<Duration>) -> Self {
+        let _agent_home = fake_agent_home();
         let config = tempfile::tempdir().expect("config dir");
         let runtime = tempfile::tempdir().expect("runtime dir");
         std::fs::create_dir_all(runtime.path().join("home")).expect("runtime home");
@@ -535,12 +551,12 @@ async fn assert_port_released(port: u16) {
 #[tokio::test]
 async fn subscriptions_and_account_operations_persist_in_the_running_daemon() {
     let rig = Rig::new(Mode::Ready, None).await;
-    let export = std::env::temp_dir().join(format!("r7b-export-{}.json", std::process::id()));
-    std::fs::write(&export, "export:one").expect("export");
+    let export = tempfile::NamedTempFile::new().expect("export");
+    std::fs::write(export.path(), "export:one").expect("export");
     let (status, body) = rig
         .post(
             "/v1/hofund/accounts/import",
-            json!({"version": 1, "path": export.to_string_lossy()}),
+            json!({"version": 1, "path": export.path().to_string_lossy()}),
         )
         .await;
     assert_eq!(
@@ -623,9 +639,9 @@ async fn subscriptions_and_account_operations_persist_in_the_running_daemon() {
         String::from_utf8_lossy(&body)
     );
     assert_eq!(json(&body)["account"], "discovered");
+    let agent_home = fake_agent_home();
     assert_eq!(
-        std::fs::read_to_string("/workspace/hofund-r7b-target-a/r7b-fake-agent-home/account.txt")
-            .expect("agent write"),
+        std::fs::read_to_string(agent_home.join("account.txt")).expect("agent write"),
         "discovered"
     );
     let (status, body) = rig
@@ -659,18 +675,18 @@ async fn subscriptions_and_account_operations_persist_in_the_running_daemon() {
     let (_, body) = rig.get("/v1/hofund/subscriptions").await;
     assert!(!String::from_utf8_lossy(&body).contains("\"id\":\"one\""));
     assert!(String::from_utf8_lossy(&body).contains("\"id\":\"discovered\""));
-    std::fs::write(&export, "not an export").expect("invalid export");
+    std::fs::write(export.path(), "not an export").expect("invalid export");
     let (status, body) = rig
         .post(
             "/v1/hofund/accounts/import",
-            json!({"version": 1, "path": export.to_string_lossy()}),
+            json!({"version": 1, "path": export.path().to_string_lossy()}),
         )
         .await;
     assert_eq!(
         error_kind(status, &body, reqwest::StatusCode::UNPROCESSABLE_ENTITY),
         ControlErrorKind::Unprocessable
     );
-    let _ = std::fs::remove_file(export);
+    export.close().expect("close export");
     rig.shutdown().await;
 }
 
@@ -696,10 +712,9 @@ async fn sign_in_start_poll_proof_cancel_and_loopback_cleanup_work_without_block
         "start waited for the whole flow"
     );
     let session = json(&body)["session"].as_str().expect("session").to_owned();
-    assert_eq!(
-        state(&rig.status("fake-pkce", &session).await.1),
-        SignInSessionState::NeedsProof
-    );
+    let (_, status_body) = rig.status("fake-pkce", &session).await;
+    assert_eq!(state(&status_body), SignInSessionState::NeedsProof);
+    assert_eq!(json(&status_body)["challenge"]["type"], "open_url");
     let (status, body) = rig.start("fake-pkce").await;
     assert_eq!(
         error_kind(status, &body, reqwest::StatusCode::CONFLICT),
@@ -758,8 +773,11 @@ async fn sign_in_start_poll_proof_cancel_and_loopback_cleanup_work_without_block
         String::from_utf8_lossy(&body)
     );
     assert!(!String::from_utf8_lossy(&body).contains(CODE));
-    rig.wait_state("fake-pkce", &session, SignInSessionState::Ready)
+    assert!(json(&body)["challenge"].is_null());
+    let ready = rig
+        .wait_state("fake-pkce", &session, SignInSessionState::Ready)
         .await;
+    assert!(json(&ready)["challenge"].is_null());
     let (status, body) = rig
         .post(
             &format!("/v1/hofund/subscriptions/fake-pkce/sign-in/{session}/proof"),
@@ -798,8 +816,30 @@ async fn sign_in_start_poll_proof_cancel_and_loopback_cleanup_work_without_block
     let (status, body) = rig.start("fake-device").await;
     assert_eq!(status, reqwest::StatusCode::OK);
     let device_session = json(&body)["session"].as_str().expect("session").to_owned();
-    rig.wait_state("fake-device", &device_session, SignInSessionState::Ready)
+    let ready = rig
+        .wait_state("fake-device", &device_session, SignInSessionState::Ready)
         .await;
+    assert!(json(&ready)["challenge"].is_null());
+    rig.shutdown().await;
+}
+
+#[tokio::test]
+async fn pending_device_flow_keeps_its_challenge_until_cancelled() {
+    let rig = Rig::new(Mode::Hang, None).await;
+    let (status, body) = rig.start("fake-device").await;
+    assert_eq!(status, reqwest::StatusCode::OK);
+    let session = json(&body)["session"].as_str().expect("session").to_owned();
+    let (_, status_body) = rig.status("fake-device", &session).await;
+    assert_eq!(state(&status_body), SignInSessionState::Pending);
+    assert_eq!(json(&status_body)["challenge"]["type"], "device_code");
+    let (status, body) = rig
+        .post(
+            &format!("/v1/hofund/subscriptions/fake-device/sign-in/{session}/cancel"),
+            json!({"version": 1}),
+        )
+        .await;
+    assert_eq!(status, reqwest::StatusCode::OK);
+    assert!(json(&body)["challenge"].is_null());
     rig.shutdown().await;
 }
 

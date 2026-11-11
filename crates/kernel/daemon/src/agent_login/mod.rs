@@ -17,6 +17,9 @@ pub use state::{AgentState, agent_home, policy_from_config, read, write};
 #[cfg(test)]
 pub(crate) use state::{TestHomeGuard, push_test_agent_homes};
 
+#[cfg(feature = "test-util")]
+pub use state::set_test_agent_home;
+
 use std::path::Path;
 use std::time::Duration;
 

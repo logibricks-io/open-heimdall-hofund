@@ -47,10 +47,10 @@ pub fn edit_settings(text: &str, edit: &SettingsEdit) -> Result<String, ConfigEr
             .and_then(Item::as_array_of_tables_mut)
         {
             for subscription in subscriptions.iter_mut() {
-                if let Some(options) = subscription.get_mut("options") {
-                    if let Some(options) = options.as_table_like_mut() {
-                        options.remove("discover");
-                    }
+                if let Some(options) = subscription.get_mut("options")
+                    && let Some(options) = options.as_table_like_mut()
+                {
+                    options.remove("discover");
                 }
             }
         }

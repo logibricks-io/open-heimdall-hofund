@@ -82,6 +82,9 @@ mod watch;
 pub use account_discovery::{
     DiscoverReport, accounts_discover_in, format_report, import_if_configured,
 };
+#[cfg(feature = "test-util")]
+#[doc(hidden)]
+pub use agent_login::set_test_agent_home;
 pub use agent_login::{accounts_import_in, accounts_switch_in};
 pub use models::{
     Cached, ModelLimits, ModelsHost, Picks, ProbeOutcome, ProviderModels, RefreshTiming,

@@ -982,6 +982,7 @@ SignInChallenge #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize
 SignInChallenge::DeviceCode
 SignInChallenge::Instructions
 SignInChallenge::OpenUrl
+SignInChallenge::Unknown #[serde(other)]
 SignInProgressEvent #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
 SignInProgressEvent.provider
 SignInProgressEvent.session

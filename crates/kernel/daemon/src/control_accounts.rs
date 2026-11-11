@@ -15,7 +15,6 @@ use hofund_gateway::control::ControlFailure;
 use hofund_plugin_api::{SignInChallenge, SignInCtx, SignInFlowKind};
 use hofund_plugin_host::LoopbackRegistry;
 use tokio::sync::{Mutex as AsyncMutex, oneshot};
-use tokio::time::Instant;
 
 use crate::events::EventBus;
 use crate::runtime::Runtime;
@@ -36,7 +35,6 @@ pub(crate) struct AccountOps {
 struct ControlSession {
     subscription: String,
     ctx: SignInCtx,
-    started: Instant,
     state: Mutex<SignInSessionState>,
     challenge: Mutex<Option<WireChallenge>>,
     paste: tokio::sync::mpsc::UnboundedSender<String>,
@@ -164,7 +162,6 @@ impl AccountOps {
         let session = Arc::new(ControlSession {
             subscription: id,
             ctx: ctx.clone(),
-            started: Instant::now(),
             state: Mutex::new(SignInSessionState::Pending),
             challenge: Mutex::new(None),
             paste,
@@ -244,7 +241,9 @@ impl AccountOps {
             ));
         }
         *session.challenge.lock().expect("sign-in challenge") = Some(challenge.clone());
-        self.set_state(&session, state);
+        if session.state() == SignInSessionState::Pending {
+            self.set_state(&session, state);
+        }
         let mut response = SignInStartResponse::default();
         response.session = session_id;
         response.flow = flow;
@@ -254,7 +253,6 @@ impl AccountOps {
 
     pub(crate) async fn status(&self, id: &str) -> Result<SignInStatusResponse, ControlFailure> {
         let session = self.session(id).await?;
-        self.expire(&session);
         Ok(session.response())
     }
 
@@ -264,7 +262,6 @@ impl AccountOps {
         request: SignInProofRequest,
     ) -> Result<SignInStatusResponse, ControlFailure> {
         let session = self.session(id).await?;
-        self.expire(&session);
         if session.state() != SignInSessionState::NeedsProof {
             return Err(conflict("this sign-in is not accepting proof"));
         }
@@ -283,7 +280,9 @@ impl AccountOps {
             }
             _ => return Err(invalid("the proof does not match this sign-in challenge")),
         }
-        self.set_state(&session, SignInSessionState::Pending);
+        if session.state() == SignInSessionState::NeedsProof {
+            self.set_state(&session, SignInSessionState::Pending);
+        }
         Ok(session.response())
     }
 
@@ -408,13 +407,6 @@ impl AccountOps {
             .get(id)
             .cloned()
             .ok_or_else(|| not_found("sign-in session"))
-    }
-
-    fn expire(&self, session: &Arc<ControlSession>) {
-        if session.active() && session.started.elapsed() >= self.deadline {
-            session.signal_cancel();
-            self.set_state(session, SignInSessionState::Failed);
-        }
     }
 
     fn set_state(&self, session: &Arc<ControlSession>, state: SignInSessionState) {

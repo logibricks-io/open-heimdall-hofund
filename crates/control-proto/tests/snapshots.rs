@@ -748,6 +748,10 @@ fn unknown_response_enum_strings_use_fallbacks() {
         ResyncReason::Unknown
     );
     assert_eq!(
+        serde_json::from_str::<SignInChallenge>(r#"{"type":"future"}"#).expect("sign-in challenge"),
+        SignInChallenge::Unknown
+    );
+    assert_eq!(
         serde_json::from_str::<EventPayload>(
             r#"{"event":"future_event","data":{"anything":[1,2,3]}}"#
         )
@@ -983,6 +987,9 @@ fn debug_output_never_contains_token_or_config_text() {
         assert!(!output.contains(secret), "{output}");
         assert!(!output.contains(token), "{output}");
     }
+    let proof = format!("{:?}", SignInProofRequest::token(token));
+    assert!(proof.contains("<redacted>"), "{proof}");
+    assert!(proof.contains("version"), "{proof}");
 }
 
 #[test]

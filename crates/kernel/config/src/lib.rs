@@ -73,7 +73,8 @@ pub struct Config {
     /// Per-agent model visibility settings.
     pub agents: AgentModels,
     /// When true, the daemon may read agents' own sign-in files and import
-    /// accounts. Set with boolean `discover` under `[subscriptions.options]`.
+    /// accounts. Set with top-level `discover_agent_accounts`, or with legacy
+    /// boolean `discover` under `[subscriptions.options]`.
     pub discover_agent_accounts: bool,
     /// Deprecated keys that still loaded. The next release rejects them.
     pub warnings: Vec<String>,
