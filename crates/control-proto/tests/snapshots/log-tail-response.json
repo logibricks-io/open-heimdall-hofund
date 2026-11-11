@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "path": "/tmp/daemon-example.log",
+  "offset": 4,
+  "next_offset": 12,
+  "lines": [
+    "one",
+    "two"
+  ]
+}

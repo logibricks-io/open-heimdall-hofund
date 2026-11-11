@@ -30,22 +30,23 @@ use hofund_control_proto::{
     ConfigValidateRequest, ConfigValidationResponse, ControlError, ControlErrorKind, ErrorEnvelope,
     GatewayKeyRequest, GatewayKeyResponse, GatewayKeyRestoreRequest, GroupCreateRequest,
     GroupDeleteRequest, GroupDeleteResponse, GroupListResponse, GroupMemberCandidatesResponse,
-    GroupPatchRequest, GroupRestoreRequest, GroupWriteResponse, HealthResponse, MAX_ID_BYTES,
-    MAX_REQUEST_BODY_BYTES, ModelListResponse, PicksResponse, PicksSetRequest, PresetListResponse,
-    ProfileDeleteRequest, ProfileDetailResponse, ProfileListResponse, ProfileRenameRequest,
-    ProfileSaveRequest, ProfileSwitchRequest, ProfileSwitchResponse, ProviderCreateRequest,
-    ProviderDeleteRequest, ProviderDeleteResponse, ProviderKeyRequest, ProviderKeysResponse,
-    ProviderListResponse, ProviderPatchRequest, ProviderRenameRequest, ProviderRenameResponse,
-    ProviderTestRequest, ProviderTestResponse, ProviderWriteResponse, QuotaAlertsResponse,
-    QuotaAlertsSetRequest, QuotaAlertsSetResponse, QuotaCreditsModesResponse,
-    QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryQuery, QuotaHistoryResponse,
-    QuotaQuery, QuotaResponse, ReloadRequest, RouteListResponse, RouteModelListResponse,
-    RouteQuery, SessionRouteResponse, SettingsPatchRequest, SettingsResponse, ShutdownRequest,
-    ShutdownResponse, SignInCancelRequest, SignInCancelResponse, SignInProofRequest,
-    SignInStartRequest, SignInStartResponse, SignInStatusResponse, StatusResponse,
-    SubscriptionListResponse, SubscriptionRefreshRequest, SubscriptionRefreshResponse,
-    TokenRotateRequest, TokenRotateResponse, Topic, UnroutedListResponse, UsageQuery,
-    UsageResponse, WarmupListResponse, WarmupRunRequest, WarmupRunResponse, decode_request,
+    GroupPatchRequest, GroupRestoreRequest, GroupWriteResponse, HealthResponse, LogTailQuery,
+    LogTailResponse, MAX_ID_BYTES, MAX_REQUEST_BODY_BYTES, ModelListResponse, PicksResponse,
+    PicksSetRequest, PresetListResponse, ProfileDeleteRequest, ProfileDetailResponse,
+    ProfileListResponse, ProfileRenameRequest, ProfileSaveRequest, ProfileSwitchRequest,
+    ProfileSwitchResponse, ProviderCreateRequest, ProviderDeleteRequest, ProviderDeleteResponse,
+    ProviderKeyRequest, ProviderKeysResponse, ProviderListResponse, ProviderPatchRequest,
+    ProviderRenameRequest, ProviderRenameResponse, ProviderTestRequest, ProviderTestResponse,
+    ProviderWriteResponse, QuotaAlertsResponse, QuotaAlertsSetRequest, QuotaAlertsSetResponse,
+    QuotaCreditsModesResponse, QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryQuery,
+    QuotaHistoryResponse, QuotaQuery, QuotaResponse, ReloadRequest, RouteListResponse,
+    RouteModelListResponse, RouteQuery, SessionRouteResponse, SettingsPatchRequest,
+    SettingsResponse, ShutdownRequest, ShutdownResponse, SignInCancelRequest, SignInCancelResponse,
+    SignInProofRequest, SignInStartRequest, SignInStartResponse, SignInStatusResponse,
+    StatusResponse, SubscriptionListResponse, SubscriptionRefreshRequest,
+    SubscriptionRefreshResponse, TokenRotateRequest, TokenRotateResponse, Topic,
+    UnroutedListResponse, UsageQuery, UsageResponse, WarmupListResponse, WarmupRunRequest,
+    WarmupRunResponse, decode_request,
 };
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
@@ -177,6 +178,10 @@ pub trait ControlState: Send + Sync {
         _request: SettingsPatchRequest,
     ) -> ControlFuture<'_, SettingsResponse> {
         Box::pin(async { Err(unsupported_settings()) })
+    }
+    /// Reads one bounded chunk of the daemon log.
+    fn logs(&self, _query: LogTailQuery) -> ControlFuture<'_, LogTailResponse> {
+        Box::pin(async { Err(unsupported_logs()) })
     }
     /// Lists configured subscriptions and secret-free account rows.
     fn subscriptions(&self) -> ControlFuture<'_, SubscriptionListResponse> {
@@ -857,6 +862,15 @@ fn unsupported_settings() -> ControlFailure {
     .into()
 }
 
+fn unsupported_logs() -> ControlFailure {
+    ControlError::new(
+        ControlErrorKind::Internal,
+        "log tail is not implemented by this control state",
+        "control",
+    )
+    .into()
+}
+
 fn unsupported_accounts() -> ControlFailure {
     ControlError::new(
         ControlErrorKind::Internal,
@@ -954,6 +968,7 @@ impl Control {
                 "/v1/hofund/settings",
                 get(settings).patch(patch_settings).head(method_not_allowed),
             )
+            .route("/v1/hofund/logs", get(logs).head(method_not_allowed))
             .route(
                 "/v1/hofund/subscriptions",
                 get(subscriptions).head(method_not_allowed),
@@ -1459,6 +1474,14 @@ async fn patch_settings(State(state): State<HttpState>, body: Bytes) -> Response
         Err(failure) => return failure_response(failure),
     };
     operation_response!(state.control.state.patch_settings(request).await)
+}
+
+async fn logs(State(state): State<HttpState>, uri: Uri) -> Response {
+    let query = match LogTailQuery::parse(uri.query()) {
+        Ok(query) => query,
+        Err(error) => return failure_response(error.into()),
+    };
+    operation_response!(state.control.state.logs(query).await)
 }
 
 async fn subscriptions(State(state): State<HttpState>) -> Response {

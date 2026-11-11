@@ -38,6 +38,7 @@ const JSON_SNAPSHOTS: &[&str] = &[
     "error-envelope",
     "health-response",
     "listener-relisten-failed-event",
+    "log-tail-response",
     "member-cooled-event",
     "member-recovered-event",
     "model-list-response",
@@ -58,8 +59,13 @@ const JSON_SNAPSHOTS: &[&str] = &[
     "shutdown-response",
     "shutdown-started-event",
     "sign-in-progress-event",
+    "sign-in-proof-request",
+    "sign-in-start-response",
+    "sign-in-status-response",
+    "subscription-list-response",
     "snapshot-event",
     "snapshot-published-event",
+    "settings-response",
     "status-response",
     "token-rotate-request",
     "token-rotate-response",
@@ -82,6 +88,7 @@ const RESPONSE_SNAPSHOTS: &[&str] = &[
     "error-envelope",
     "health-response",
     "listener-relisten-failed-event",
+    "log-tail-response",
     "member-cooled-event",
     "member-recovered-event",
     "model-list-response",
@@ -97,8 +104,12 @@ const RESPONSE_SNAPSHOTS: &[&str] = &[
     "shutdown-response",
     "shutdown-started-event",
     "sign-in-progress-event",
+    "sign-in-start-response",
+    "sign-in-status-response",
+    "subscription-list-response",
     "snapshot-event",
     "snapshot-published-event",
+    "settings-response",
     "status-response",
     "token-rotate-response",
     "token-rotated-event",
@@ -174,6 +185,59 @@ fn json_snapshots_round_trip() {
     status.in_flight = 3;
     status.shutdown = ShutdownState::Draining;
     snapshot("status-response", &status);
+
+    let settings = dto!(SettingsResponse,
+        disk_revision: "disk-revision-2".to_owned(),
+        listen: "127.0.0.1:3425".to_owned(),
+        currency: "cny".to_owned(),
+        quota_left: true,
+        discover_accounts: true,
+        lan_allow: vec!["192.168.1.0/24".to_owned()],
+        pending_restart: true,
+    );
+    snapshot("settings-response", &settings);
+
+    let mut subscriptions = SubscriptionListResponse::default();
+    subscriptions.subscriptions.push(dto!(SubscriptionEntry,
+        id: "example".to_owned(),
+        name: "Example Subscription".to_owned(),
+        flow: SubscriptionFlow::Pkce,
+        accounts: vec![dto!(SubscriptionAccount,
+            id: "account-1".to_owned(),
+            label: "work@example.test".to_owned(),
+            ready: true,
+            needs_sign_in: None,
+        )],
+    ));
+    snapshot("subscription-list-response", &subscriptions);
+
+    let sign_in_start = dto!(SignInStartResponse,
+        session: "0123456789abcdef0123456789abcdef".to_owned(),
+        flow: SubscriptionFlow::Pkce,
+        challenge: SignInChallenge::OpenUrl {
+            url: "https://auth.example.test/authorize".to_owned(),
+        },
+    );
+    snapshot("sign-in-start-response", &sign_in_start);
+    let sign_in_status = dto!(SignInStatusResponse,
+        state: SignInSessionState::NeedsProof,
+        challenge: Some(SignInChallenge::Instructions {
+            text: "Paste the credential text.".to_owned(),
+        }),
+    );
+    snapshot("sign-in-status-response", &sign_in_status);
+    snapshot(
+        "sign-in-proof-request",
+        &SignInProofRequest::token("fake-token-text"),
+    );
+
+    let log_tail = dto!(LogTailResponse,
+        path: "/tmp/daemon-example.log".to_owned(),
+        offset: 4,
+        next_offset: 12,
+        lines: vec!["one".to_owned(), "two".to_owned()],
+    );
+    snapshot("log-tail-response", &log_tail);
 
     let mut config = ConfigResponse::default();
     config.disk_revision = "disk-revision-2".to_owned();
@@ -715,6 +779,19 @@ fn body_requests_reject_unknown_fields() {
     reject_unknown::<AgentModelRequest>(r#"{"version":1,"model":null,"future":true}"#);
     reject_unknown::<TokenRotateRequest>(r#"{"version":1,"future":true}"#);
     reject_unknown::<ShutdownRequest>(r#"{"version":1,"future":true}"#);
+    reject_unknown::<SettingsPatchRequest>(
+        r#"{"version":1,"expected_revision":"r","future":true}"#,
+    );
+    reject_unknown::<SignInStartRequest>(r#"{"version":1,"future":true}"#);
+    reject_unknown::<SignInProofRequest>(r#"{"version":1,"token":"x","future":true}"#);
+    reject_unknown::<SignInCancelRequest>(r#"{"version":1,"future":true}"#);
+    reject_unknown::<SubscriptionRefreshRequest>(r#"{"version":1,"future":true}"#);
+    reject_unknown::<AccountSwitchRequest>(
+        r#"{"version":1,"agent":"a","target":"b","future":true}"#,
+    );
+    reject_unknown::<AccountImportRequest>(r#"{"version":1,"path":"x","future":true}"#);
+    reject_unknown::<AccountDiscoverAddRequest>(r#"{"version":1,"add":true,"future":true}"#);
+    reject_unknown::<AccountRemoveRequest>(r#"{"version":1,"future":true}"#);
     let error = serde_json::from_str::<UsageQuery>(r#"{"period":"all","future":true}"#)
         .expect_err("query unknown field");
     assert!(error.to_string().contains("unknown field"));
@@ -896,6 +973,11 @@ fn debug_output_never_contains_token_or_config_text() {
             response.token = token.to_owned();
             response
         }),
+        format!(
+            "{:?}",
+            SignInProofRequest::url(format!("http://localhost/callback?code={token}"))
+        ),
+        format!("{:?}", SignInProofRequest::token(token)),
     ];
     for output in values {
         assert!(!output.contains(secret), "{output}");
@@ -1018,6 +1100,11 @@ fn decode_response_snapshot(name: &str, body: &[u8]) {
     match name {
         "health-response" => decode::<HealthResponse>(body),
         "status-response" => decode::<StatusResponse>(body),
+        "settings-response" => decode::<SettingsResponse>(body),
+        "subscription-list-response" => decode::<SubscriptionListResponse>(body),
+        "sign-in-start-response" => decode::<SignInStartResponse>(body),
+        "sign-in-status-response" => decode::<SignInStatusResponse>(body),
+        "log-tail-response" => decode::<LogTailResponse>(body),
         "config-response" => decode::<ConfigResponse>(body),
         "config-validation-response" => decode::<ConfigValidationResponse>(body),
         "provider-list-response" => decode::<ProviderListResponse>(body),

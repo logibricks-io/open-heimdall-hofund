@@ -659,6 +659,17 @@ async fn subscriptions_and_account_operations_persist_in_the_running_daemon() {
     let (_, body) = rig.get("/v1/hofund/subscriptions").await;
     assert!(!String::from_utf8_lossy(&body).contains("\"id\":\"one\""));
     assert!(String::from_utf8_lossy(&body).contains("\"id\":\"discovered\""));
+    std::fs::write(&export, "not an export").expect("invalid export");
+    let (status, body) = rig
+        .post(
+            "/v1/hofund/accounts/import",
+            json!({"version": 1, "path": export.to_string_lossy()}),
+        )
+        .await;
+    assert_eq!(
+        error_kind(status, &body, reqwest::StatusCode::UNPROCESSABLE_ENTITY),
+        ControlErrorKind::Unprocessable
+    );
     let _ = std::fs::remove_file(export);
     rig.shutdown().await;
 }

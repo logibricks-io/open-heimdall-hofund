@@ -315,6 +315,21 @@ impl Client {
         .await
     }
 
+    /// Reads one bounded daemon log chunk.
+    pub async fn logs(
+        &self,
+        after: u64,
+        max_bytes: Option<usize>,
+    ) -> Result<hofund_control_proto::LogTailResponse, ClientError> {
+        let mut query = hofund_control_proto::LogTailQuery::default();
+        query.after = after;
+        if let Some(max_bytes) = max_bytes {
+            query.max_bytes = max_bytes;
+        }
+        self.get(&format!("/v1/hofund/logs?{}", query.encode()))
+            .await
+    }
+
     /// Lists subscriptions and their secret-free account rows.
     pub async fn subscriptions(
         &self,

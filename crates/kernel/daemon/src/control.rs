@@ -488,6 +488,13 @@ impl ControlState for DaemonControl {
         Box::pin(super::control_settings::patch(&self.ops, request))
     }
 
+    fn logs(
+        &self,
+        query: hofund_control_proto::LogTailQuery,
+    ) -> ControlFuture<'_, hofund_control_proto::LogTailResponse> {
+        Box::pin(async move { super::log_tail::read(&self.config_path, query) })
+    }
+
     fn subscriptions(&self) -> ControlFuture<'_, hofund_control_proto::SubscriptionListResponse> {
         Box::pin(async move { self.account_ops()?.list().await })
     }

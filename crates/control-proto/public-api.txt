@@ -427,6 +427,17 @@ ListenerRelistenFailedEvent.generation
 ListenerRelistenFailedEvent.issue
 ListenerRelistenFailedEvent.running
 ListenerRelistenFailedEvent.runtime_revision
+LogTailQuery #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
+LogTailQuery.after
+LogTailQuery.max_bytes
+LogTailQuery::fn encode (self) -> String
+LogTailQuery::fn parse (query : Option < & str >) -> Result < Self , ControlError >
+LogTailResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+LogTailResponse.lines
+LogTailResponse.next_offset
+LogTailResponse.offset
+LogTailResponse.path
+LogTailResponse.version
 MemberCooledEvent #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
 MemberCooledEvent.cause
 MemberCooledEvent.error
@@ -1218,6 +1229,7 @@ const MAX_CONFIG_TEXT_BYTES
 const MAX_ERROR_MESSAGE_BYTES
 const MAX_IDS
 const MAX_ID_BYTES
+const MAX_LOG_TAIL_BYTES
 const MAX_REQUEST_BODY_BYTES
 const MAX_REQUEST_ID_LEN
 const MAX_RESPONSE_BODY_BYTES

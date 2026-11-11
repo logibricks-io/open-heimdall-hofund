@@ -52,6 +52,7 @@ mod control_provider_write;
 mod control_settings;
 mod credits_modes;
 mod events;
+mod log_tail;
 mod measurements;
 mod membership;
 mod models;
