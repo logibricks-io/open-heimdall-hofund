@@ -106,6 +106,19 @@ async fn state(
         None,
         fatal,
     );
+    let catalog = hofund_model_catalog::ModelCatalog::open(
+        &beside(path, ".hofund"),
+        super::effective_catalog_settings(config.catalog.clone()),
+        Arc::new(
+            hofund_model_catalog::ReqwestFetcher::new().map_err(|error| show(error.to_string()))?,
+        ),
+    )
+    .map_err(|error| show(error.to_string()))?;
+    let session_pricing = Arc::new(crate::pricing::effective_pricer(
+        config.usage.clone(),
+        catalog,
+        Arc::clone(&models_host),
+    ));
     let config = Arc::new(config);
     let ops = Arc::new(ConfigOps::new(
         path,
@@ -138,6 +151,7 @@ async fn state(
             cooldowns,
             usage,
             std::sync::Arc::new(hofund_secrets::KeyStore::beside_token(&token_path)),
+            session_pricing,
             token_path.clone(),
             shutdown,
         )

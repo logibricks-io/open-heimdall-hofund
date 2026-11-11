@@ -25,9 +25,11 @@ use hofund_control_proto::{
     QuotaAlertsResponse, QuotaAlertsSetRequest, QuotaAlertsSetResponse, QuotaCreditsModesResponse,
     QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryQuery, QuotaHistoryResponse,
     QuotaQuery, QuotaResponse, ReloadRequest, RouteListResponse, RouteModelListResponse,
-    RouteQuery, SessionRouteResponse, ShutdownRequest, ShutdownResponse, StatusResponse,
-    TokenRotateRequest, TokenRotateResponse, Topic, UnroutedListResponse, UsageQuery,
-    UsageResponse, WarmupListResponse, WarmupRunRequest, WarmupRunResponse, decode_error_envelope,
+    RouteQuery, SessionListQuery, SessionListResponse, SessionOverviewQuery,
+    SessionOverviewResponse, SessionProgressResponse, SessionRouteResponse, SessionStatsQuery,
+    SessionStatsResponse, ShutdownRequest, ShutdownResponse, StatusResponse, TokenRotateRequest,
+    TokenRotateResponse, Topic, UnroutedListResponse, UsageQuery, UsageResponse,
+    WarmupListResponse, WarmupRunRequest, WarmupRunResponse, decode_error_envelope,
     decode_response,
 };
 use http::header;
@@ -873,6 +875,73 @@ impl Client {
         .await
     }
 
+    /// Lists consent-filtered sessions.
+    pub async fn sessions(
+        &self,
+        query: SessionListQuery,
+    ) -> Result<SessionListResponse, ClientError> {
+        let mut fields = Vec::new();
+        if let Some(days) = query.days {
+            fields.push(("days", days.to_string()));
+        }
+        if !query.model.is_empty() {
+            fields.push(("model", query.model));
+        }
+        if !query.folder.is_empty() {
+            fields.push(("folder", query.folder));
+        }
+        if let Some(limit) = query.limit {
+            fields.push(("limit", limit.to_string()));
+        }
+        self.get(&with_query("/v1/hofund/sessions", fields)).await
+    }
+
+    /// Reports session usage by day, model, and folder.
+    pub async fn session_stats(
+        &self,
+        query: SessionStatsQuery,
+    ) -> Result<SessionStatsResponse, ClientError> {
+        let mut fields = Vec::new();
+        if let Some(days) = query.days {
+            fields.push(("days", days.to_string()));
+        }
+        if !query.model.is_empty() {
+            fields.push(("model", query.model));
+        }
+        if !query.folder.is_empty() {
+            fields.push(("folder", query.folder));
+        }
+        self.get(&with_query("/v1/hofund/sessions/stats", fields))
+            .await
+    }
+
+    /// Summarizes sessions in a filtered range.
+    pub async fn session_overview(
+        &self,
+        query: SessionOverviewQuery,
+    ) -> Result<SessionOverviewResponse, ClientError> {
+        let mut fields = Vec::new();
+        if let Some(days) = query.days {
+            fields.push(("days", days.to_string()));
+        }
+        for (key, value) in [
+            ("agent", query.agent),
+            ("model", query.model),
+            ("cwd", query.cwd),
+        ] {
+            if !value.is_empty() {
+                fields.push((key, value));
+            }
+        }
+        self.get(&with_query("/v1/hofund/sessions/overview", fields))
+            .await
+    }
+
+    /// Reports session index progress.
+    pub async fn session_progress(&self) -> Result<SessionProgressResponse, ClientError> {
+        self.get("/v1/hofund/sessions/progress").await
+    }
+
     /// Reports usage for a period.
     pub async fn usage(&self, query: UsageQuery) -> Result<UsageResponse, ClientError> {
         let url = format!("/v1/hofund/usage?{}", query.encode());
@@ -1299,6 +1368,19 @@ fn json_body<T: serde::Serialize>(request: &T) -> Result<Vec<u8>, ClientError> {
         .map_err(|_| ClientError::Transport("cannot encode control request".to_owned()))
 }
 
+fn with_query(path: &str, fields: Vec<(&str, String)>) -> String {
+    let query = fields
+        .into_iter()
+        .map(|(key, value)| format!("{key}={}", encode_segment(&value)))
+        .collect::<Vec<_>>()
+        .join("&");
+    if query.is_empty() {
+        path.to_owned()
+    } else {
+        format!("{path}?{query}")
+    }
+}
+
 fn encode_segment(id: &str) -> String {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let mut encoded = String::with_capacity(id.len());
@@ -1484,6 +1566,16 @@ mod route_tests {
             | "/v1/hofund/agents/agent-1/disconnect"
             | "/v1/hofund/agents/agent%2F1/model" => {
                 serde_json::to_vec(&proto::AgentChangeResponse::default())
+            }
+            "/v1/hofund/sessions" => serde_json::to_vec(&proto::SessionListResponse::default()),
+            "/v1/hofund/sessions/stats" => {
+                serde_json::to_vec(&proto::SessionStatsResponse::default())
+            }
+            "/v1/hofund/sessions/overview" => {
+                serde_json::to_vec(&proto::SessionOverviewResponse::default())
+            }
+            "/v1/hofund/sessions/progress" => {
+                serde_json::to_vec(&proto::SessionProgressResponse::default())
             }
             "/v1/hofund/usage" => serde_json::to_vec(&proto::UsageResponse::default()),
             "/v1/hofund/token/rotate" => serde_json::to_vec(&proto::TokenRotateResponse::default()),
@@ -1785,6 +1877,49 @@ mod route_tests {
             recorded
                 .iter()
                 .all(|request| request.last_event_id.is_none())
+        );
+    }
+
+    #[tokio::test]
+    async fn session_methods_encode_their_query_strings() {
+        use hofund_control_proto::{SessionListQuery, SessionOverviewQuery, SessionStatsQuery};
+
+        let (address, recorded, server) = recording_server().await;
+        let client = super::Client::tcp(address, "test-token");
+        let mut list = SessionListQuery::default();
+        list.days = Some(7);
+        list.model = "model/a".to_owned();
+        list.folder = "/work dir".to_owned();
+        list.limit = Some(2);
+        client.sessions(list).await.expect("session list");
+        client
+            .session_stats(SessionStatsQuery::default())
+            .await
+            .expect("session stats");
+        let mut overview = SessionOverviewQuery::default();
+        overview.agent = "fake".to_owned();
+        overview.cwd = "/work dir".to_owned();
+        client
+            .session_overview(overview)
+            .await
+            .expect("session overview");
+        client.session_progress().await.expect("session progress");
+        server.abort();
+
+        let paths: Vec<String> = recorded
+            .lock()
+            .expect("recorded")
+            .iter()
+            .map(|request| request.path_and_query.clone())
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                "/v1/hofund/sessions?days=7&model=model%2Fa&folder=%2Fwork%20dir&limit=2",
+                "/v1/hofund/sessions/stats",
+                "/v1/hofund/sessions/overview?agent=fake&cwd=%2Fwork%20dir",
+                "/v1/hofund/sessions/progress",
+            ]
         );
     }
 

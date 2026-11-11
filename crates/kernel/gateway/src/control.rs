@@ -37,9 +37,11 @@ use hofund_control_proto::{
     ProviderTestResponse, ProviderWriteResponse, QuotaAlertsResponse, QuotaAlertsSetRequest,
     QuotaAlertsSetResponse, QuotaCreditsModesResponse, QuotaCreditsSetRequest,
     QuotaCreditsSetResponse, QuotaHistoryQuery, QuotaHistoryResponse, QuotaQuery, QuotaResponse,
-    ReloadRequest, RouteListResponse, RouteModelListResponse, RouteQuery, SessionRouteResponse,
-    ShutdownRequest, ShutdownResponse, StatusResponse, TokenRotateRequest, TokenRotateResponse,
-    Topic, UnroutedListResponse, UsageQuery, UsageResponse, WarmupListResponse, WarmupRunRequest,
+    ReloadRequest, RouteListResponse, RouteModelListResponse, RouteQuery, SessionListQuery,
+    SessionListResponse, SessionOverviewQuery, SessionOverviewResponse, SessionProgressResponse,
+    SessionRouteResponse, SessionStatsQuery, SessionStatsResponse, ShutdownRequest,
+    ShutdownResponse, StatusResponse, TokenRotateRequest, TokenRotateResponse, Topic,
+    UnroutedListResponse, UsageQuery, UsageResponse, WarmupListResponse, WarmupRunRequest,
     WarmupRunResponse, decode_request,
 };
 use hyper_util::rt::TokioIo;
@@ -620,6 +622,28 @@ pub trait ControlState: Send + Sync {
             .into())
         })
     }
+    /// Lists consent-filtered sessions.
+    fn sessions(&self, query: SessionListQuery) -> ControlFuture<'_, SessionListResponse> {
+        let _ = query;
+        Box::pin(async { Err(unsupported_sessions()) })
+    }
+    /// Reports session usage by day, model, and folder.
+    fn session_stats(&self, query: SessionStatsQuery) -> ControlFuture<'_, SessionStatsResponse> {
+        let _ = query;
+        Box::pin(async { Err(unsupported_sessions()) })
+    }
+    /// Summarizes sessions in a filtered range.
+    fn session_overview(
+        &self,
+        query: SessionOverviewQuery,
+    ) -> ControlFuture<'_, SessionOverviewResponse> {
+        let _ = query;
+        Box::pin(async { Err(unsupported_sessions()) })
+    }
+    /// Reports session index progress.
+    fn session_progress(&self) -> ControlFuture<'_, SessionProgressResponse> {
+        Box::pin(async { Err(unsupported_sessions()) })
+    }
     /// Reports usage for a period.
     fn usage(&self, query: UsageQuery) -> ControlFuture<'_, UsageResponse>;
     /// Reports what is left of every subscription, with each account's
@@ -770,6 +794,15 @@ fn unsupported_gateway_keys() -> ControlFailure {
     ControlError::new(
         ControlErrorKind::Internal,
         "gateway-key management is not implemented by this control state",
+        "control",
+    )
+    .into()
+}
+
+fn unsupported_sessions() -> ControlFailure {
+    ControlError::new(
+        ControlErrorKind::BadRequest,
+        "session reads are not supported by this control state",
         "control",
     )
     .into()
@@ -955,6 +988,22 @@ impl Control {
             .route("/v1/hofund/profiles/save", post(save_profile))
             .route("/v1/hofund/profiles/switch", post(switch_profile))
             .route("/v1/hofund/profiles/rename", post(rename_profile))
+            .route(
+                "/v1/hofund/sessions",
+                get(sessions).head(method_not_allowed),
+            )
+            .route(
+                "/v1/hofund/sessions/stats",
+                get(session_stats).head(method_not_allowed),
+            )
+            .route(
+                "/v1/hofund/sessions/overview",
+                get(session_overview).head(method_not_allowed),
+            )
+            .route(
+                "/v1/hofund/sessions/progress",
+                get(session_progress).head(method_not_allowed),
+            )
             .route("/v1/hofund/usage", get(usage).head(method_not_allowed))
             .route(
                 "/v1/hofund/gateway-keys",
@@ -1808,6 +1857,34 @@ async fn delete_profile(
             .delete_profile(ProfileDeleteRequest::new(name))
             .await
     )
+}
+
+async fn sessions(State(state): State<HttpState>, uri: Uri) -> Response {
+    let query = match SessionListQuery::parse(uri.query()) {
+        Ok(query) => query,
+        Err(error) => return failure_response(error.into()),
+    };
+    operation_response!(state.control.state.sessions(query).await)
+}
+
+async fn session_stats(State(state): State<HttpState>, uri: Uri) -> Response {
+    let query = match SessionStatsQuery::parse(uri.query()) {
+        Ok(query) => query,
+        Err(error) => return failure_response(error.into()),
+    };
+    operation_response!(state.control.state.session_stats(query).await)
+}
+
+async fn session_overview(State(state): State<HttpState>, uri: Uri) -> Response {
+    let query = match SessionOverviewQuery::parse(uri.query()) {
+        Ok(query) => query,
+        Err(error) => return failure_response(error.into()),
+    };
+    operation_response!(state.control.state.session_overview(query).await)
+}
+
+async fn session_progress(State(state): State<HttpState>) -> Response {
+    operation_response!(state.control.state.session_progress().await)
 }
 
 async fn usage(State(state): State<HttpState>, uri: Uri) -> Response {

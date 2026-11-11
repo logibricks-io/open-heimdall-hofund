@@ -175,6 +175,22 @@ impl SessionIndex {
         consent: &Consent,
         stores: &[&dyn SessionStore],
     ) -> Result<(), IndexError> {
+        self.refresh_with_progress(consent, stores, |_, _| {})
+    }
+
+    /// Refreshes all consented stores and reports discovered and completed files.
+    ///
+    /// The callback runs before and after each file read as `(total, done)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IndexError`] on a file, parser, or cache write failure.
+    pub fn refresh_with_progress(
+        &mut self,
+        consent: &Consent,
+        stores: &[&dyn SessionStore],
+        mut progress: impl FnMut(u64, u64),
+    ) -> Result<(), IndexError> {
         let before_allowed: BTreeSet<String> = self
             .entries
             .values()
@@ -188,6 +204,9 @@ impl SessionIndex {
         }
 
         let mut seen = BTreeSet::new();
+        let mut total = 0_u64;
+        let mut done = 0_u64;
+        progress(total, done);
         for store in stores {
             let agent = store.agent();
             if !consent.allows(agent) {
@@ -196,7 +215,11 @@ impl SessionIndex {
             }
             for root in store.locator().roots() {
                 for file in store.files(&root)? {
+                    total = total.saturating_add(1);
+                    progress(total, done);
                     self.refresh_file(*store, &root, &file, &mut seen)?;
+                    done = done.saturating_add(1);
+                    progress(total, done);
                 }
             }
         }

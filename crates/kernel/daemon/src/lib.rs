@@ -48,6 +48,7 @@ mod control_presets;
 mod control_profiles;
 mod control_provider_summary;
 mod control_provider_write;
+mod control_sessions;
 mod credits_modes;
 mod events;
 mod measurements;
@@ -537,11 +538,12 @@ async fn start_inner(
     ));
     gateway = gateway.with_quotas(Arc::clone(&quotas) as Arc<dyn hofund_gateway::QuotaSource>);
     gateway = gateway.with_model_catalog(Arc::clone(&model_catalog));
-    gateway = gateway.with_effective_pricer(Arc::new(pricing::effective_pricer(
+    let session_pricing = Arc::new(pricing::effective_pricer(
         config.usage.clone(),
         Arc::clone(&model_catalog),
         Arc::clone(&models_host),
-    )));
+    ));
+    gateway = gateway.with_effective_pricer(Arc::clone(&session_pricing));
     if let Some(bus) = &control_bus {
         gateway = gateway.with_request_events(
             Arc::new(events::RequestBridge::new(Arc::clone(bus))),
@@ -619,6 +621,7 @@ async fn start_inner(
                 cooldowns,
                 Arc::clone(&usage),
                 Arc::clone(&key_store),
+                session_pricing,
                 token_path.clone(),
                 shutdown_request,
             )

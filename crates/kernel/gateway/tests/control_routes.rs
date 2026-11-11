@@ -19,9 +19,10 @@ use hofund_control_proto::{
     ProviderTestRequest, ProviderTestResponse, ProviderWriteResponse, QuotaAlertsResponse,
     QuotaAlertsSetRequest, QuotaAlertsSetResponse, QuotaCreditsModesResponse,
     QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryQuery, QuotaHistoryResponse,
-    QuotaQuery, QuotaResponse, RouteModelListResponse, ShutdownRequest, ShutdownResponse,
-    StatusResponse, TokenRotateRequest, TokenRotateResponse, UsageQuery, UsageResponse,
-    WarmupListResponse, WarmupRunRequest, WarmupRunResponse, decode_error_envelope,
+    QuotaQuery, QuotaResponse, RouteModelListResponse, SessionListQuery, SessionOverviewQuery,
+    SessionStatsQuery, ShutdownRequest, ShutdownResponse, StatusResponse, TokenRotateRequest,
+    TokenRotateResponse, UsageQuery, UsageResponse, WarmupListResponse, WarmupRunRequest,
+    WarmupRunResponse, decode_error_envelope,
 };
 use hofund_control_proto::{
     ConfigApplyRequest, ConfigResponse, ConfigValidateRequest, ConfigValidationResponse,
@@ -224,6 +225,31 @@ impl ControlState for FakeControlState {
             "run_checkin:{}:{}",
             request.subscription, request.account
         ))
+    }
+
+    fn sessions(
+        &self,
+        query: SessionListQuery,
+    ) -> ControlFuture<'_, hofund_control_proto::SessionListResponse> {
+        self.reply(format!("sessions:{:?}:{}", query.days, query.limit()))
+    }
+
+    fn session_stats(
+        &self,
+        query: SessionStatsQuery,
+    ) -> ControlFuture<'_, hofund_control_proto::SessionStatsResponse> {
+        self.reply(format!("session_stats:{:?}", query.days))
+    }
+
+    fn session_overview(
+        &self,
+        query: SessionOverviewQuery,
+    ) -> ControlFuture<'_, hofund_control_proto::SessionOverviewResponse> {
+        self.reply(format!("session_overview:{}", query.agent))
+    }
+
+    fn session_progress(&self) -> ControlFuture<'_, hofund_control_proto::SessionProgressResponse> {
+        self.reply("session_progress")
     }
 
     fn usage(&self, query: UsageQuery) -> ControlFuture<'_, UsageResponse> {
@@ -450,6 +476,18 @@ fn operation_routes() -> Vec<(Method, &'static str, Vec<u8>)> {
             "/v1/hofund/agents/agent/model",
             json!(&AgentModelRequest::new(Some("m".to_owned()))),
         ),
+        (
+            Method::GET,
+            "/v1/hofund/sessions?days=7&limit=2",
+            Vec::new(),
+        ),
+        (Method::GET, "/v1/hofund/sessions/stats?days=0", Vec::new()),
+        (
+            Method::GET,
+            "/v1/hofund/sessions/overview?agent=fake",
+            Vec::new(),
+        ),
+        (Method::GET, "/v1/hofund/sessions/progress", Vec::new()),
         (Method::GET, "/v1/hofund/usage?period=day", Vec::new()),
         (Method::GET, "/v1/hofund/quotas?kept=1", Vec::new()),
         (
@@ -606,6 +644,10 @@ async fn control_routes_success_and_error_envelopes_against_fake_state() {
             "connect_agent:agent",
             "disconnect_agent:agent",
             "set_agent_model:agent:Some(\"m\")",
+            "sessions:Some(7):2",
+            "session_stats:Some(0)",
+            "session_overview:fake",
+            "session_progress",
             "usage:Day",
             "quotas:kept=true",
             "quota_history:Some(\"7\"):Some(\"acct\"):Some(\"Me@x.io\")",
@@ -898,6 +940,25 @@ async fn query_and_body_rejections_use_control_envelopes() {
             ControlErrorKind::BadRequest | ControlErrorKind::UnsupportedVersion
         ));
     }
+}
+
+#[tokio::test]
+async fn session_queries_reject_bad_days_before_dispatch() {
+    let state = Arc::new(FakeControlState::default());
+    for path in [
+        "/v1/hofund/sessions?days=2",
+        "/v1/hofund/sessions/stats?days=all",
+        "/v1/hofund/sessions/overview?days=-1",
+        "/v1/hofund/sessions?limit=0",
+        "/v1/hofund/sessions?unknown=x",
+    ] {
+        let (status, headers, body) =
+            call(app(&state), Method::GET, path, Vec::new(), true, false).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+        assert_no_store(&headers);
+        assert_error(&body, ControlErrorKind::BadRequest);
+    }
+    assert!(state.calls.lock().expect("calls").is_empty());
 }
 
 #[tokio::test]
