@@ -22,7 +22,6 @@ use crate::stream;
 
 const CHAT_PATH: &str = "/exa.api_server_pb.ApiServerService/GetChatMessage";
 const ERROR_BODY_CAP: usize = 1024 * 1024;
-const STRUCTURED_MESSAGE: &str = "structured output is not served on Devin until R-13";
 const SIGNED_THINKING_MESSAGE: &str = "signed thinking history is not served on Devin until R-13";
 
 pub(crate) struct DevinUpstream {
@@ -283,6 +282,10 @@ fn prompts_for(request: &Request, tools: &[&Tool]) -> Result<Vec<OwnedPrompt>, P
         }
     }
     settle_results(&mut turns, &mut results);
+    let format = structured_text(request);
+    if !format.is_empty() {
+        instructions.push(format);
+    }
     let descriptions = tool_descriptions(tools);
     if !descriptions.is_empty() {
         instructions.push(descriptions);
@@ -575,30 +578,50 @@ fn refuse_unserved(request: &Request) -> Result<(), PluginError> {
     }) {
         return Err(refusal(SIGNED_THINKING_MESSAGE));
     }
-    if structured_format(request.extensions.get("response_format"))
-        || structured_format(
-            request
-                .extensions
-                .get("text")
-                .and_then(|value| value.get("format")),
-        )
-        || structured_format(
-            request
-                .extensions
-                .get("output_config")
-                .and_then(|value| value.get("format")),
-        )
-    {
-        return Err(refusal(STRUCTURED_MESSAGE));
-    }
     Ok(())
 }
 
-fn structured_format(format: Option<&hofund_plugin_sdk::json::Value>) -> bool {
-    format
-        .and_then(|value| value.get("type"))
-        .and_then(|value| value.as_str())
-        .is_some_and(|kind| matches!(kind, "json_object" | "json_schema"))
+fn structured_text(request: &Request) -> String {
+    request
+        .extensions
+        .get("response_format")
+        .or_else(|| {
+            request
+                .extensions
+                .get("text")
+                .and_then(|value| value.get("format"))
+        })
+        .or_else(|| {
+            request
+                .extensions
+                .get("output_config")
+                .and_then(|value| value.get("format"))
+        })
+        .map(format_text)
+        .unwrap_or_default()
+}
+
+fn format_text(format: &Value) -> String {
+    const OBJECT: &str = "Respond with a single JSON object and nothing else.";
+    match format.get("type").and_then(Value::as_str) {
+        Some("json_object") => OBJECT.to_owned(),
+        Some("json_schema") => {
+            let schema = format
+                .get("json_schema")
+                .and_then(|value| value.get("schema"))
+                .or_else(|| format.get("schema"));
+            if schema.is_none_or(Value::is_null) {
+                OBJECT.to_owned()
+            } else {
+                let schema = hofund_plugin_sdk::json::to_string(schema.expect("schema is present"))
+                    .expect("a JSON response schema always serializes");
+                format!(
+                    "Respond with a single JSON value and nothing else, matching this JSON schema:\n{schema}."
+                )
+            }
+        }
+        _ => String::new(),
+    }
 }
 
 fn refusal(message: &'static str) -> PluginError {

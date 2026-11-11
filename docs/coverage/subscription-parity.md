@@ -152,7 +152,9 @@ Every other gap below maps to an existing plan item.
 
 ### Gaps (Devin)
 
-- Reasoning signatures, structured output, and Messages cache marks — **L**, **R-13**
+- Reasoning signatures and Messages cache marks — **L**, **R-13**
+
+Structured-output prose for Chat, Responses, and Messages shipped in R-13b (`structured-output.test.mjs` behavior; `structured_text` in `upstream.rs`).
 - PKCE sign-in (not only import) — **M**, **R-12**
 - CLI install/bootstrap — **S**, **R-12** (new to the plan in this audit)
 - Keepalive (`keepalive.test.mjs`) — **S**, **R-13** (new to the plan in this audit)

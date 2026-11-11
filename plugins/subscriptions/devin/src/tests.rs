@@ -639,55 +639,6 @@ fn tool_only_reply_streams_calls_arguments_and_usage() {
 }
 
 #[test]
-fn structured_output_is_refused_without_http() {
-    let mut structured = request("swe-2");
-    structured.extensions.insert(
-        "response_format",
-        hofund_plugin_sdk::json::json!({"type": "json_object"}),
-    );
-    let mut responses_structured = request("swe-2");
-    responses_structured.extensions.insert(
-        "text",
-        hofund_plugin_sdk::json::json!({"format": {"type": "json_schema"}}),
-    );
-    let mut messages_structured = request("swe-2");
-    messages_structured.extensions.insert(
-        "output_config",
-        hofund_plugin_sdk::json::json!({"format": {"type": "json_object"}}),
-    );
-    for (label, request, phrase) in [
-        (
-            "structured-refusal@example.test",
-            structured,
-            "structured output",
-        ),
-        (
-            "responses-structured-refusal@example.test",
-            responses_structured,
-            "structured output",
-        ),
-        (
-            "messages-structured-refusal@example.test",
-            messages_structured,
-            "structured output",
-        ),
-    ] {
-        let dir = tempfile::tempdir().expect("dir");
-        let host = host(&dir);
-        let id = seed_account(&host, "devin-refusal-key", label);
-        let error = match execute(&host, &id, request, ProtocolId::OPENAI_CHAT) {
-            Err(error) => error,
-            Ok(_) => panic!("request should be refused"),
-        };
-        assert_eq!(error.kind(), PluginErrorKind::Status);
-        assert_eq!(error.status(), Some(404), "{label}: {}", error.message());
-        assert!(!error.cools());
-        assert!(error.message().contains(phrase), "{label}");
-        assert!(host.http().calls().is_empty(), "{label}");
-    }
-}
-
-#[test]
 fn live_model_list_uses_raw_protobuf_without_authorization() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
@@ -925,6 +876,67 @@ fn prompt_images(prompt: &[hofund_plugin_sdk::protobuf::Field]) -> Vec<(String, 
             )
         })
         .collect()
+}
+
+#[test]
+fn structured_formats_append_the_reference_prose_to_instructions() {
+    let object = "Respond with a single JSON object and nothing else.";
+    let told = "Respond with a single JSON value and nothing else, matching this JSON schema:\n{\"type\":\"object\",\"properties\":{\"answer\":{\"type\":\"string\"}},\"required\":[\"answer\"]}.";
+    let schema = hofund_plugin_sdk::json::json!({"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"]});
+    for (key, value, expected) in [
+        (
+            "response_format",
+            hofund_plugin_sdk::json::json!({"type":"json_schema","json_schema":{"name":"r","schema":schema.clone(),"strict":true}}),
+            told,
+        ),
+        (
+            "text",
+            hofund_plugin_sdk::json::json!({"format":{"type":"json_schema","schema":schema}}),
+            told,
+        ),
+        (
+            "output_config",
+            hofund_plugin_sdk::json::json!({"format":{"type":"json_object"}}),
+            object,
+        ),
+        (
+            "response_format",
+            hofund_plugin_sdk::json::json!({"type":"json_schema","json_schema":{"name":"r"}}),
+            object,
+        ),
+        (
+            "response_format",
+            hofund_plugin_sdk::json::json!({"type":"text"}),
+            "",
+        ),
+    ] {
+        let mut request: Request =
+            hofund_plugin_sdk::json::from_value(hofund_plugin_sdk::json::json!({
+                "model": "swe-2",
+                "stream": true,
+                "messages": [
+                    {"role": "system", "content": [{"type": "text", "text": "Be brief."}]},
+                    {"role": "user", "content": [{"type": "text", "text": "hi"}]}
+                ]
+            }))
+            .expect("structured request");
+        request.extensions.insert(key, value);
+        let body = encoded_tool_request(request);
+        let prompts = decoded_chat_prompts(&body);
+        let expected = if expected.is_empty() {
+            "Be brief.\n\nhi".to_owned()
+        } else {
+            format!("Be brief.\n\n{expected}\n\nhi")
+        };
+        assert_eq!(
+            prompts[0]
+                .iter()
+                .find(|field| field.number == 3)
+                .and_then(|field| field.as_string())
+                .as_deref(),
+            Some(expected.as_str())
+        );
+    }
 }
 
 #[test]
