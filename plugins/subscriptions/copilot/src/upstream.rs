@@ -7,9 +7,10 @@ use hofund_plugin_api::{
     AccountId, Completion, ContentPart, CredentialStyle, HostContext, PluginError, ProbeQuery,
     ProbeReport, ProtocolId, Request, Role, UpstreamProvider,
 };
-use hofund_plugin_sdk::oauth::{TokenCache, same_secret};
+use hofund_plugin_sdk::oauth::{TokenCache, same_secret, secret_text};
 use hofund_plugin_sdk::wire::{self, Target};
 
+use crate::auto::{self, AutoSession};
 use crate::models::{self, Book, Listed};
 use crate::session::{self, Session};
 
@@ -49,15 +50,31 @@ impl CopilotUpstream {
         self.book.get(&self.account).unwrap_or_default()
     }
 
-    /// Picks the protocol for `request` and accepts the model's terms when
-    /// they wait, as Copilot's editors do the first time a model is picked.
+    /// Resolves Auto and picks the protocol for `request`, accepting terms
+    /// when the concrete model needs it.
     async fn prepare(
         &self,
         session: &Session,
         request: &Request,
         inbound: ProtocolId,
-    ) -> ProtocolId {
+    ) -> Result<Prepared, PluginError> {
         let listed = self.listed(session).await;
+        let mut request = request.clone();
+        let auto = if request.model == auto::AUTO_ID {
+            let picked = auto::resolve(
+                &self.host,
+                session,
+                &self.account,
+                &self.book,
+                &listed,
+                &request,
+            )
+            .await?;
+            request.model = picked.model.clone();
+            Some(picked)
+        } else {
+            None
+        };
         if listed.waits(&request.model) {
             models::accept(
                 &self.host,
@@ -68,7 +85,15 @@ impl CopilotUpstream {
             )
             .await;
         }
-        listed.protocol(&request.model, inbound)
+        let protocol = auto.as_ref().map_or_else(
+            || listed.protocol(&request.model, inbound),
+            |picked| picked.protocol(inbound),
+        );
+        Ok(Prepared {
+            request,
+            protocol,
+            auto,
+        })
     }
 
     async fn send(
@@ -77,10 +102,18 @@ impl CopilotUpstream {
         protocol: ProtocolId,
         request: Request,
         inbound: ProtocolId,
+        auto: Option<&AutoSession>,
     ) -> Result<Completion, PluginError> {
+        let mut headers = session_request_headers(&request, session);
+        if let Some(token) = auto.and_then(|picked| picked.token.as_ref()) {
+            headers.push((
+                "Copilot-Session-Token".to_owned(),
+                secret_text(token).to_owned(),
+            ));
+        }
         let target = Target::new(protocol, session.base.clone())
             .credential(CredentialStyle::Bearer)
-            .headers(session_request_headers(&request, session));
+            .headers(headers);
         wire::execute(
             self.host.http(),
             &target,
@@ -90,6 +123,48 @@ impl CopilotUpstream {
         )
         .await
     }
+
+    async fn send_with_remint(
+        &self,
+        first: &Session,
+        prepared: Prepared,
+        inbound: ProtocolId,
+    ) -> Result<Completion, PluginError> {
+        match self
+            .send(
+                first,
+                prepared.protocol,
+                prepared.request.clone(),
+                inbound,
+                prepared.auto.as_ref(),
+            )
+            .await
+        {
+            Err(error) if error.status() == Some(401) => {
+                self.sessions
+                    .invalidate_if(&self.account, |cached| {
+                        same_secret(&cached.token, &first.token)
+                    })
+                    .await;
+                let renewed = session::session(&self.sessions, &self.host, &self.account).await?;
+                self.send(
+                    &renewed,
+                    prepared.protocol,
+                    prepared.request,
+                    inbound,
+                    prepared.auto.as_ref(),
+                )
+                .await
+            }
+            other => other,
+        }
+    }
+}
+
+struct Prepared {
+    request: Request,
+    protocol: ProtocolId,
+    auto: Option<AutoSession>,
 }
 
 #[hofund_plugin_sdk::async_trait]
@@ -100,21 +175,42 @@ impl UpstreamProvider for CopilotUpstream {
         inbound: ProtocolId,
     ) -> Result<Completion, PluginError> {
         let first = session::session(&self.sessions, &self.host, &self.account).await?;
-        let protocol = self.prepare(&first, &request, inbound).await;
-        match self.send(&first, protocol, request.clone(), inbound).await {
-            Err(error) if error.status() == Some(401) => {
-                // The session token was revoked before its expiry: trade
-                // again once, unless another caller already did.
-                self.sessions
-                    .invalidate_if(&self.account, |cached| {
-                        same_secret(&cached.token, &first.token)
-                    })
-                    .await;
-                let renewed = session::session(&self.sessions, &self.host, &self.account).await?;
-                self.send(&renewed, protocol, request, inbound).await
+        let mut request = request;
+        let mut last_error = None;
+        for _ in 0..4 {
+            let prepared = self.prepare(&first, &request, inbound).await?;
+            let automatic = prepared.auto.is_some();
+            let session_token = prepared
+                .auto
+                .as_ref()
+                .and_then(|picked| picked.token.clone());
+            let model = prepared.request.model.clone();
+            match self.send_with_remint(&first, prepared, inbound).await {
+                Err(error)
+                    if automatic && session_token.is_some() && auto::session_gone(&error) =>
+                {
+                    auto::forget_session(
+                        &self.book,
+                        &self.account,
+                        session_token.as_ref().expect("checked session token"),
+                    );
+                    request.model = auto::AUTO_ID.to_owned();
+                    last_error = Some(error);
+                }
+                Err(error) if auto::model_refusal(&error) => {
+                    auto::refuse(&self.book, &self.account, &model, self.host.clock().now());
+                    if !automatic {
+                        return Err(error);
+                    }
+                    request.model = auto::AUTO_ID.to_owned();
+                    last_error = Some(error);
+                }
+                other => return other,
             }
-            other => other,
         }
+        Err(last_error.unwrap_or_else(|| {
+            PluginError::status_error(400, "Copilot Auto could not pick a served model")
+        }))
     }
 
     async fn probe(&self, query: &ProbeQuery) -> Result<ProbeReport, PluginError> {

@@ -19,6 +19,7 @@ use hofund_plugin_sdk::Contribution;
 use hofund_plugin_sdk::oauth::device::DeviceStart;
 use hofund_plugin_sdk::oauth::{SecretObject, TokenCache};
 
+mod auto;
 mod discover;
 mod models;
 mod quota;
@@ -319,6 +320,8 @@ fn needs_sign_in(reason: &str) -> AccountStatus {
     }
 }
 
+#[cfg(test)]
+mod auto_tests;
 #[cfg(test)]
 mod conformance;
 #[cfg(test)]

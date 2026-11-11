@@ -24,6 +24,8 @@ pub(crate) struct Listed {
     apis: HashMap<String, Vec<ProtocolId>>,
     /// Models listed with terms the account has not accepted yet.
     waiting: HashSet<String>,
+    /// Enabled manual picks, likeliest served first.
+    picks: Vec<String>,
 }
 
 impl Listed {
@@ -31,13 +33,26 @@ impl Listed {
     /// `inbound`: the inbound one when the model is served on it, else the
     /// first API the list names, else Chat Completions.
     pub(crate) fn protocol(&self, model: &str, inbound: ProtocolId) -> ProtocolId {
-        let Some(apis) = self.apis.get(model) else {
-            return ProtocolId::OPENAI_CHAT;
-        };
+        let apis = self.apis(model);
         if apis.contains(&inbound) {
             return inbound;
         }
         apis.first().copied().unwrap_or(ProtocolId::OPENAI_CHAT)
+    }
+
+    pub(crate) fn apis(&self, model: &str) -> Vec<ProtocolId> {
+        self.apis
+            .get(model)
+            .cloned()
+            .unwrap_or_else(|| vec![ProtocolId::OPENAI_CHAT])
+    }
+
+    pub(crate) fn knows(&self, model: &str) -> bool {
+        self.apis.contains_key(model)
+    }
+
+    pub(crate) fn picks(&self) -> Vec<String> {
+        self.picks.clone()
     }
 
     /// Whether `model` waits for its terms to be accepted.
@@ -50,6 +65,8 @@ impl Listed {
 #[derive(Debug, Default)]
 pub(crate) struct Book {
     accounts: Mutex<HashMap<AccountId, Listed>>,
+    pub(crate) autos: Mutex<HashMap<AccountId, crate::auto::AutoSession>>,
+    pub(crate) refused: Mutex<HashMap<AccountId, HashMap<String, std::time::SystemTime>>>,
 }
 
 impl Book {
@@ -67,6 +84,15 @@ impl Book {
     /// Keeps `listed` as what `account`'s list says.
     pub(crate) fn put(&self, account: &AccountId, listed: Listed) {
         self.lock().insert(account.clone(), listed);
+    }
+
+    /// Remembers endpoints an Auto pick named even when `/models` did not.
+    pub(crate) fn see(&self, account: &AccountId, model: &str, apis: Vec<ProtocolId>) {
+        self.lock()
+            .entry(account.clone())
+            .or_default()
+            .apis
+            .insert(model.to_owned(), apis);
     }
 
     /// Records that `account` accepted the terms of `model`.
@@ -119,8 +145,25 @@ pub(crate) async fn list(
             ));
         }
     }
-    let (models, dropped, listed) = parse(reply.body())?;
+    let (mut models, mut dropped, listed) = parse(reply.body())?;
     book.put(account, listed);
+    let now = host.clock().now();
+    models.retain(|model| {
+        let served = !crate::auto::refused(book, account, model.id(), now);
+        if !served {
+            dropped.push(model.id().to_owned());
+        }
+        served
+    });
+    if !models
+        .iter()
+        .any(|model| model.id() == crate::auto::AUTO_ID)
+    {
+        models.push(ModelSpec::new(
+            crate::auto::AUTO_ID,
+            Some("Auto".to_owned()),
+        )?);
+    }
     Ok(ModelList::new(models, None)
         .with_dropped(dropped)
         .with_source_url(url))
@@ -157,6 +200,7 @@ pub(crate) fn parse(body: &[u8]) -> Result<(Vec<ModelSpec>, Vec<String>, Listed)
     let mut models = Vec::new();
     let mut dropped = Vec::new();
     let mut listed = Listed::default();
+    let mut ranked = Vec::new();
     for row in rows {
         let Some(id) = row
             .get("id")
@@ -196,6 +240,23 @@ pub(crate) fn parse(body: &[u8]) -> Result<(Vec<ModelSpec>, Vec<String>, Listed)
                 dropped.push(id.to_owned());
                 continue;
             }
+        } else {
+            let premium = row
+                .pointer("/billing/is_premium")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            let rank = if row.get("is_chat_fallback").and_then(Value::as_bool) == Some(true) {
+                0
+            } else if row.get("is_chat_default").and_then(Value::as_bool) == Some(true) {
+                1
+            } else if id == "gpt-4.1" {
+                2
+            } else if !premium {
+                3
+            } else {
+                4
+            };
+            ranked.push((rank, id.to_owned()));
         }
         let name = row
             .get("name")
@@ -213,6 +274,8 @@ pub(crate) fn parse(body: &[u8]) -> Result<(Vec<ModelSpec>, Vec<String>, Listed)
             ));
         models.push(spec);
     }
+    ranked.sort_by_key(|(rank, _)| *rank);
+    listed.picks = ranked.into_iter().map(|(_, id)| id).collect();
     Ok((models, dropped, listed))
 }
 
@@ -274,7 +337,7 @@ fn endpoint_name(api: ProtocolId) -> &'static str {
     }
 }
 
-fn strings(value: Option<&Value>) -> Vec<String> {
+pub(crate) fn strings(value: Option<&Value>) -> Vec<String> {
     value
         .and_then(Value::as_array)
         .map(|items| {

@@ -1244,7 +1244,8 @@ fn list_models_reads_the_account_list() {
             "gpt-5",
             "gpt-4.1",
             "o-terms",
-            "hidden-picked"
+            "hidden-picked",
+            "auto"
         ]
     );
     assert_eq!(
