@@ -188,7 +188,11 @@ fn parse_flags(reply: &Value) -> Flags {
 }
 
 fn platform() -> &'static str {
-    match (std::env::consts::OS, std::env::consts::ARCH) {
+    platform_for(std::env::consts::OS, std::env::consts::ARCH)
+}
+
+fn platform_for(os: &str, arch: &str) -> &'static str {
+    match (os, arch) {
         ("macos", "x86_64") => "DARWIN_AMD64",
         ("macos", "aarch64") => "DARWIN_ARM64",
         ("linux", "x86_64") => "LINUX_AMD64",
@@ -200,8 +204,12 @@ fn platform() -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{Flags, parse_flags};
+    use std::time::{Duration, SystemTime};
+
+    use hofund_plugin_api::AccountId;
     use hofund_plugin_sdk::json::json;
+
+    use super::{EXPERIMENTS_FOR, Experiments, Flags, Reading, parse_flags, platform_for};
 
     fn ids(flags: Flags, preview: bool) -> Vec<String> {
         flags
@@ -288,6 +296,10 @@ mod tests {
             "gemini-3.5-flash-lite"
         );
         assert_eq!(
+            latest.wire("gemini-3.5-flash-lite"),
+            "gemini-3.5-flash-lite"
+        );
+        assert_eq!(
             latest.shown("gemini-3.1-flash-lite"),
             "gemini-3.5-flash-lite"
         );
@@ -303,5 +315,44 @@ mod tests {
         assert_eq!(flags, Flags::default());
         assert_eq!(flags.shown("other"), "other");
         assert_eq!(flags.wire("models/other"), "models/other");
+    }
+
+    #[test]
+    fn r49_experiment_cache_forgets_only_the_signed_in_account() {
+        let cache = Experiments::default();
+        let first = AccountId::from_static("a-0000000000000001");
+        let second = AccountId::from_static("a-0000000000000002");
+        for account in [&first, &second] {
+            cache.readings.lock().expect("readings").insert(
+                (account.clone(), "project".to_owned()),
+                Reading {
+                    flags: Flags::default(),
+                    at: SystemTime::UNIX_EPOCH,
+                },
+            );
+        }
+        cache.forget(&first);
+        let readings = cache.readings.lock().expect("readings");
+        assert!(!readings.contains_key(&(first, "project".to_owned())));
+        assert!(readings.contains_key(&(second, "project".to_owned())));
+    }
+
+    #[test]
+    fn r49_experiment_cache_lasts_one_hour() {
+        assert_eq!(EXPERIMENTS_FOR, Duration::from_secs(60 * 60));
+    }
+
+    #[test]
+    fn r49_experiment_platform_names_match_gemini_cli() {
+        for (os, arch, expected) in [
+            ("macos", "x86_64", "DARWIN_AMD64"),
+            ("macos", "aarch64", "DARWIN_ARM64"),
+            ("linux", "x86_64", "LINUX_AMD64"),
+            ("linux", "aarch64", "LINUX_ARM64"),
+            ("windows", "x86_64", "WINDOWS_AMD64"),
+            ("other", "x86_64", "PLATFORM_UNSPECIFIED"),
+        ] {
+            assert_eq!(platform_for(os, arch), expected);
+        }
     }
 }
