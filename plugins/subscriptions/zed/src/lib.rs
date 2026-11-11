@@ -1,4 +1,4 @@
-//! Zed subscription plugin.
+//! Zed subscription plugin with native RSA loopback sign-in and credential import.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

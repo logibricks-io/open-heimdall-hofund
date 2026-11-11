@@ -169,8 +169,8 @@ Every other gap below maps to an existing plan item.
 
 | # | capability | reference v0.1.3005 behaviour | hofund 08035c9 | status | gap to close |
 |---|------------|------------------------------|----------------|--------|--------------|
-| a1 | sign-in: native app RSA loopback | Plugin opens `zed.dev/native_app_signin` (`zed/index.mjs:8-13`) | `start_sign_in` unsupported — import only (`lib.rs:113-120`) | Missing | Native sign-in flow (**R-56**, **R-16**) |
-| a2 | sign-in: import saved creds | Core `zedCreds` mover (`zed.go:14-34`) | `import.rs` + `TokenFile` flow | Partial | — |
+| a1 | sign-in: native app RSA loopback | Plugin opens `zed.dev/native_app_signin` (`zed/index.mjs:8-13`) | `sign_in.rs` + kernel query-token loopback; RSA-2048, OAEP-SHA256 + v1.5 fallback, 10-minute driver deadline; `r56_*` tests with loopback and mock `/client/users/me` | Done | Mocks only; no real-account smoke |
+| a2 | sign-in: import saved creds | Core `zedCreds` mover (`zed.go:14-34`) | `import.rs` remains alongside `Pkce` loopback flow | Partial | — |
 | a3 | API key / device | N/A | N/A | N/A | — |
 | b | import | Built-in side logins | `hofund subscription import` | Partial | — |
 | c | token storage | Plugin holds user id + access + system id | `creds.rs` stored secret | Partial | — |
@@ -191,7 +191,6 @@ Every other gap below maps to an existing plan item.
 
 ### Gaps (Zed)
 
-- Native app sign-in (RSA loopback) — **L**, **R-56**
 - Org picker UI for multi-account (stored org + automatic repick only)
 - Plan-only quota windows (no allowance meters; matches reference)
 - Gateway-facing Zed client API shapes beyond subscription upstream (parity doc only; not in R-16 scope)
