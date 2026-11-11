@@ -917,8 +917,15 @@ mod tests {
         let _idle = TcpStream::connect(("127.0.0.1", binding.port()))
             .await
             .expect("idle");
-        let (status, _) = get(binding.port(), "/missing-token?user_id=user-1").await;
-        assert_eq!(status, 404);
+        for target in [
+            "/missing-token?user_id=user-1",
+            "/empty-token?user_id=user-1&access_token=",
+            "/missing-user?access_token=encrypted-secret",
+            "/empty-user?user_id=&access_token=encrypted-secret",
+        ] {
+            let (status, _) = get(binding.port(), target).await;
+            assert_eq!(status, 404, "{target}");
+        }
         let (status, reply) = tokio::time::timeout(
             Duration::from_secs(3),
             get(
@@ -968,10 +975,20 @@ mod tests {
                 &LoopbackSpec::ephemeral().query_token("https://zed.test/succeeded"),
             )
             .expect("bind");
-        let paste = stream::iter(vec![format!(
-            "http://127.0.0.1:{}/elsewhere?user_id=user-pasted&access_token=token-pasted",
-            binding.port()
-        )]);
+        let port = binding.port();
+        let paste = stream::iter(vec![
+            format!("https://127.0.0.1:{port}/x?user_id=user&access_token=token"),
+            format!("http://evil.test:{port}/x?user_id=user&access_token=token"),
+            format!(
+                "http://127.0.0.1:{}/x?user_id=user&access_token=token",
+                port ^ 1
+            ),
+            format!("http://127.0.0.1:{port}/x?user_id=&access_token=token"),
+            format!("http://127.0.0.1:{port}/x?user_id=user&access_token="),
+            format!(
+                "http://127.0.0.1:{port}/elsewhere?user_id=user-pasted&access_token=token-pasted"
+            ),
+        ]);
         let proof = registry
             .await_callback(&session, Box::pin(paste), WAIT)
             .await
