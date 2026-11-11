@@ -123,7 +123,7 @@ impl Ledger {
                     row.outcome,
                     row.provider_key_id,
                     row.client_agent,
-                    super::sql_nullable_text(&row.session_id),
+                    row.session_id.as_str(),
                     super::sql_nullable_text(&row.native_session_id),
                     super::sql_nullable_text(&row.endpoint),
                     row.kind,
