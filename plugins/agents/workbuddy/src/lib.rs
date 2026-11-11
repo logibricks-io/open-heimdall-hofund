@@ -251,21 +251,21 @@ fn same_folder(a: &Path, b: &Path) -> bool {
     if !x.is_dir() || !y.is_dir() {
         return false;
     }
-    same_file(&x, &y)
-}
-
-#[cfg(unix)]
-fn same_file(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    left.dev() == right.dev() && left.ino() == right.ino()
-}
-
-#[cfg(windows)]
-fn same_file(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt;
-    left.file_index().is_some()
-        && left.file_index() == right.file_index()
-        && left.volume_serial_number() == right.volume_serial_number()
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        return x.dev() == y.dev() && x.ino() == y.ino();
+    }
+    // `MetadataExt::file_index` / `volume_serial_number` are still unstable
+    // (`windows_by_handle`). Canonical paths are the stable equivalent for
+    // same-folder dedup (kernel account stamps have the same constraint).
+    #[cfg(not(unix))]
+    {
+        let (Ok(left), Ok(right)) = (a.canonicalize(), b.canonicalize()) else {
+            return false;
+        };
+        left == right
+    }
 }
 
 fn list_buddy_files(_agent: &str, root: &Path) -> Result<Vec<SessionFile>, PluginError> {
@@ -720,6 +720,16 @@ mod tests {
         let record = parsed.record.expect("record");
         assert_eq!(record.cwd, "/work/wb-old");
         assert_eq!(record.title, "Quarterly report");
+    }
+
+    #[test]
+    fn same_folder_accepts_identical_and_dot_paths() {
+        let temp = tempfile::tempdir().expect("temp");
+        let root = temp.path().join("wb");
+        std::fs::create_dir_all(&root).expect("mkdir");
+        assert!(same_folder(&root, &root));
+        assert!(same_folder(&root, &root.join(".")));
+        assert!(!same_folder(&root, &temp.path().join("other")));
     }
 
     #[test]
