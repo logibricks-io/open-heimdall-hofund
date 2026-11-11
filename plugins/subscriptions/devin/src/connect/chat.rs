@@ -136,6 +136,7 @@ pub(crate) struct ChatResponse {
     pub(crate) error: Option<ConnectError>,
     pub(crate) saw_tool_call: bool,
     pub(crate) saw_usage: bool,
+    pub(crate) usage: ChatUsage,
     pub(crate) stop: Option<u64>,
 }
 
@@ -156,12 +157,20 @@ pub(crate) struct ConnectError {
     pub(crate) message: String,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ChatUsage {
+    pub(crate) input: u64,
+    pub(crate) output: u64,
+    pub(crate) cache_write: u64,
+    pub(crate) cache_read: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ChatEvent {
     Text(String),
     Reasoning(String),
     ToolCall,
-    Usage,
+    Usage(ChatUsage),
     Stop(u64),
     End(Option<ConnectError>),
 }
@@ -218,7 +227,9 @@ impl ChatDecoder {
                         .filter(|text| !text.is_empty())
                         .map(ChatEvent::Reasoning),
                     6 if field.as_bytes().is_some() => Some(ChatEvent::ToolCall),
-                    7 if field.as_bytes().is_some() => Some(ChatEvent::Usage),
+                    7 => field
+                        .as_bytes()
+                        .map(|bytes| ChatEvent::Usage(decode_usage(bytes))),
                     5 => field.as_varint().map(ChatEvent::Stop),
                     _ => None,
                 };
@@ -246,6 +257,23 @@ impl ChatDecoder {
     }
 }
 
+fn decode_usage(bytes: &[u8]) -> ChatUsage {
+    let mut usage = ChatUsage::default();
+    for field in fields(bytes) {
+        let Some(value) = field.as_varint().filter(|value| *value != 0) else {
+            continue;
+        };
+        match field.number {
+            2 => usage.input = value,
+            3 => usage.output = value,
+            4 => usage.cache_write = value,
+            5 => usage.cache_read = value,
+            _ => {}
+        }
+    }
+    usage
+}
+
 #[cfg(test)]
 pub(crate) fn decode_response(body: &[u8]) -> Result<ChatResponse, PluginError> {
     let mut decoder = ChatDecoder::default();
@@ -257,7 +285,10 @@ pub(crate) fn decode_response(body: &[u8]) -> Result<ChatResponse, PluginError> 
             ChatEvent::Text(text) => response.text.push(text),
             ChatEvent::Reasoning(text) => response.reasoning.push(text),
             ChatEvent::ToolCall => response.saw_tool_call = true,
-            ChatEvent::Usage => response.saw_usage = true,
+            ChatEvent::Usage(usage) => {
+                response.saw_usage = true;
+                response.usage = usage;
+            }
             ChatEvent::Stop(stop) => response.stop = Some(stop),
             ChatEvent::End(error) => {
                 response.error = error;
@@ -482,6 +513,25 @@ mod tests {
         assert!(!decoded.saw_tool_call);
         assert!(decoded.is_empty_reply());
         assert_eq!(decoded.error, None);
+    }
+
+    #[test]
+    fn usage_decodes_all_counters_as_u64() {
+        let usage = hofund_plugin_sdk::protobuf::ProtoBuf::new()
+            .varint(2, 27)
+            .varint(3, u64::MAX)
+            .varint(4, 560)
+            .varint(5, 7318)
+            .finish();
+        let message = hofund_plugin_sdk::protobuf::ProtoBuf::new()
+            .bytes(7, &usage)
+            .finish();
+        let decoded = decode_response(&frame(0, &message).expect("frame")).expect("decode");
+        assert!(decoded.saw_usage);
+        assert_eq!(decoded.usage.input, 27);
+        assert_eq!(decoded.usage.output, u64::MAX);
+        assert_eq!(decoded.usage.cache_write, 560);
+        assert_eq!(decoded.usage.cache_read, 7318);
     }
 
     #[test]

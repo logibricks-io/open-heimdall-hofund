@@ -206,6 +206,47 @@ fn a2b_6_upstream_executes_text_chat() {
 }
 
 #[test]
+fn stream_finish_reports_usage_and_estimates_only_missing_output() {
+    for (label, text, output, expected_output) in [
+        ("reported-usage@example.test", "Let me look.", 12, 12),
+        ("estimated-usage@example.test", "hello", 0, 2),
+    ] {
+        let dir = tempfile::tempdir().expect("dir");
+        let host = host(&dir);
+        let id = seed_account(&host, "devin-stream-usage-key", label);
+        enqueue_configs(&host);
+        let usage = ProtoBuf::new()
+            .varint(2, 27)
+            .varint(3, output)
+            .varint(4, 560)
+            .varint(5, 7318)
+            .finish();
+        let usage_message = ProtoBuf::new().bytes(7, &usage).finish();
+        let text_message = ProtoBuf::new().string(3, text).finish();
+        let body = [
+            frame(0, &usage_message).expect("usage"),
+            frame(0, &text_message).expect("text"),
+            frame(FLAG_END, b"{}").expect("end"),
+        ]
+        .concat();
+        host.http().enqueue(body);
+        let events = execute_events(&host, &id, request("swe-2"));
+        let usage = events
+            .iter()
+            .find_map(|event| match event {
+                StreamEvent::MessageDelta(delta) if delta.stop.is_some() => delta.usage.as_ref(),
+                _ => None,
+            })
+            .expect("finish usage");
+        assert_eq!(usage.input_tokens, Some(7905));
+        assert_eq!(usage.output_tokens, Some(expected_output));
+        assert_eq!(usage.total_tokens, Some(7905 + expected_output));
+        assert_eq!(usage.cache_read_tokens, Some(7318));
+        assert_eq!(usage.cache_write_tokens, Some(560));
+    }
+}
+
+#[test]
 fn a2b_7_secrets_not_in_debug_or_errors() {
     let key = "devin-secret-key-xyzzy";
     let credential = Credential {
