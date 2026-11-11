@@ -274,7 +274,12 @@ impl Subscription for Copilot {
             .fetch(host.http())
             .await?;
         match reply.status() {
-            200..=299 => quota::windows(reply.body()),
+            200..=299 => {
+                let (windows, entitlement) =
+                    quota::windows_with_entitlement(reply.body(), &stored.entitlement)?;
+                session::update_entitlement(host, account, &stored, &entitlement).await?;
+                Ok(windows)
+            }
             401 | 403 => Err(PluginError::auth(
                 "GitHub refused to show the Copilot quota",
             )),
@@ -316,6 +321,8 @@ fn needs_sign_in(reason: &str) -> AccountStatus {
 
 #[cfg(test)]
 mod conformance;
+#[cfg(test)]
+mod entitlement_tests;
 #[cfg(test)]
 mod side_login_tests;
 #[cfg(test)]

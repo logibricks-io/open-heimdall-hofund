@@ -759,7 +759,13 @@ fn request_headers_name_the_editor_and_initiator() {
 fn window<'a>(windows: &'a [QuotaWindow], name: &str) -> &'a QuotaWindow {
     windows
         .iter()
-        .find(|window| window.name() == name)
+        .find(|window| {
+            window.name() == name
+                || window
+                    .name()
+                    .strip_suffix(name)
+                    .is_some_and(|prefix| prefix.ends_with(" · "))
+        })
         .unwrap_or_else(|| panic!("{name} in {windows:?}"))
 }
 
@@ -780,7 +786,14 @@ fn quota_reads_snapshots() {
     });
     let windows = quota::windows(body.to_string().as_bytes()).expect("windows");
     let names: Vec<&str> = windows.iter().map(QuotaWindow::name).collect();
-    assert_eq!(names, ["Completions", "Premium requests", "Chat requests"]);
+    assert_eq!(
+        names,
+        [
+            "Pro · Completions",
+            "Pro · Premium requests",
+            "Pro · Chat requests"
+        ]
+    );
     let completions = window(&windows, "Completions");
     assert_eq!((completions.used(), completions.limit()), (500, Some(2000)));
     assert!(!completions.blocking());

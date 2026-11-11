@@ -10,6 +10,7 @@ use hofund_plugin_sdk::json::{self, Value};
 use hofund_plugin_sdk::oauth::{SecretObject, TokenCache, same_secret, secret_text};
 
 use crate::discover::{self, Source, SourceKind};
+use crate::quota::Entitlement;
 use crate::site::{GITHUB, Site};
 
 /// The blob flag set when GitHub refuses the stored token.
@@ -74,6 +75,14 @@ pub(crate) struct Stored {
     pub(crate) oauth: SecretString,
     pub(crate) site: Site,
     pub(crate) external: Option<Source>,
+    pub(crate) entitlement: Entitlement,
+}
+
+fn entitlement(blob: &SecretObject) -> Entitlement {
+    Entitlement {
+        plan: blob.text("plan").map(str::to_owned),
+        sku: blob.text("access_type_sku").map(str::to_owned),
+    }
 }
 
 /// The `Authorization` value for a GitHub OAuth token: the `token` scheme,
@@ -107,6 +116,7 @@ pub(crate) async fn stored(host: &HostContext, account: &AccountId) -> Result<St
             oauth: external.oauth,
             site: external.site,
             external: Some(external.source),
+            entitlement: entitlement(&blob),
         });
     }
     read_blob(&secret)
@@ -168,6 +178,7 @@ pub(crate) fn read_blob(secret: &SecretString) -> Result<Stored, PluginError> {
         oauth,
         site,
         external: None,
+        entitlement: entitlement(&blob),
     })
 }
 
@@ -215,6 +226,7 @@ async fn trade(
                     oauth: cli.oauth,
                     site: cli.site,
                     external: Some(cli.source),
+                    entitlement: stored.entitlement.clone(),
                 };
                 return direct(host, account, &stored).await;
             }
@@ -373,4 +385,37 @@ async fn unlapse(
     lease
         .commit(None, blob.with_flag(LAPSED, false).to_secret())
         .await
+}
+
+/// Keeps a successful entitlement reading only while the credential it was
+/// read with is still the stored one.
+pub(crate) async fn update_entitlement(
+    host: &HostContext,
+    account: &AccountId,
+    stored: &Stored,
+    refreshed: &Entitlement,
+) -> Result<(), PluginError> {
+    if refreshed.is_empty() {
+        return Ok(());
+    }
+    let lease = host.accounts().lease(account, LEASE_WAIT).await?;
+    let Ok(mut blob) = SecretObject::parse(lease.secret()) else {
+        return Ok(());
+    };
+    let same = match &stored.external {
+        Some(source) => discover::source_from_blob(&blob).as_ref() == Some(source),
+        None => blob
+            .secret("oauth_token")
+            .is_some_and(|token| same_secret(&token, &stored.oauth)),
+    };
+    if !same {
+        return Ok(());
+    }
+    if let Some(plan) = &refreshed.plan {
+        blob = blob.with_text("plan", plan);
+    }
+    if let Some(sku) = &refreshed.sku {
+        blob = blob.with_text("access_type_sku", sku);
+    }
+    lease.commit(None, blob.to_secret()).await
 }
