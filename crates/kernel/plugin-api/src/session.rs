@@ -136,7 +136,7 @@ pub struct SessionRecord {
     /// Agent plugin id.
     pub agent: String,
     /// Attribution agent for desktop variants, when different from `agent`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub app: String,
     /// Public session id, normally prefixed with the agent id.
     pub id: String,
@@ -187,10 +187,10 @@ pub struct SessionRecord {
     /// Whether input bounds or the agent format omitted some content.
     pub cut: bool,
     /// Whether this row is read-only in the session list.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub read_only: bool,
     /// Whether this row is projected from the gateway ledger.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub gateway: bool,
 }
 
