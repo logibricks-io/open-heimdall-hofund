@@ -61,13 +61,12 @@ AgentDescription::const fn model_key (& self) -> Option < & 'static str >
 AgentDescription::const fn model_prefix (& self) -> Option < & 'static str >
 AgentDescription::const fn model_table (& self) -> Option < & 'static str >
 AgentDescription::const fn nested_turn_headers (& self) -> & 'static [& 'static str]
-AgentDescription::const fn session_headers (& self) -> & 'static [& 'static str]
-AgentDescription::const fn with_session_headers (mut self , headers : & 'static [& 'static str]) -> Self
 AgentDescription::const fn remove (& self) -> & 'static [AgentRemove]
 AgentDescription::const fn request_agent_header (& self) -> Option < & 'static str >
 AgentDescription::const fn requires (& self) -> & 'static [crate :: id :: SurfaceId]
 AgentDescription::const fn restore_model_on_clear (& self) -> bool
 AgentDescription::const fn route (& self) -> AgentRoute
+AgentDescription::const fn session_headers (& self) -> & 'static [& 'static str]
 AgentDescription::const fn sets (& self) -> & 'static [AgentSet]
 AgentDescription::const fn status_checks (& self) -> & 'static [AgentStatusCheck]
 AgentDescription::const fn visible (& self) -> Visible
@@ -84,6 +83,7 @@ AgentDescription::const fn with_model_table (mut self , table : & 'static str) -
 AgentDescription::const fn with_nested_turn_headers (mut self , headers : & 'static [& 'static str]) -> Self
 AgentDescription::const fn with_remove (mut self , remove : & 'static [AgentRemove]) -> Self
 AgentDescription::const fn with_request_agent_header (mut self , header : & 'static str) -> Self
+AgentDescription::const fn with_session_headers (mut self , headers : & 'static [& 'static str]) -> Self
 AgentDescription::const fn with_status_checks (mut self , checks : & 'static [AgentStatusCheck]) -> Self
 AgentFactory
 AgentFactory::Config
@@ -981,8 +981,8 @@ SessionRecord.days
 SessionRecord.family_ids
 SessionRecord.family_leaf
 SessionRecord.family_root
-SessionRecord.gateway
 SessionRecord.forked_from
+SessionRecord.gateway
 SessionRecord.id
 SessionRecord.last_ms
 SessionRecord.main
@@ -1002,9 +1002,9 @@ SessionRecord::fn new (agent : impl Into < String > , id : impl Into < String > 
 SessionRecord::fn tokens (& self) -> SessionTokens
 SessionRecord::fn with_parent (mut self , parent_id : impl Into < String >) -> Self
 SessionStore
-SessionStore::fn gateway_dedup_pairs (& self , _record : & SessionRecord) -> Vec < (String , String) >
 SessionStore::fn agent (& self) -> & str
 SessionStore::fn files (& self , root : & Path) -> Result < Vec < SessionFile > , PluginError >
+SessionStore::fn gateway_dedup_pairs (& self , _record : & SessionRecord) -> Vec < (String , String) >
 SessionStore::fn locator (& self) -> & dyn SessionLocator
 SessionStore::fn parser (& self , file : & SessionFile , state : Option < & str > ,) -> Result < Box < dyn SessionParser > , PluginError >
 SessionTokens
