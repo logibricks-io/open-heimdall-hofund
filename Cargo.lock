@@ -2054,6 +2054,8 @@ dependencies = [
  "http",
  "quote",
  "secrecy",
+ "serde",
+ "serde_json",
  "static_assertions",
  "syn 3.0.9",
  "thiserror 2.0.21",
