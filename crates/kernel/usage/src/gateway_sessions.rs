@@ -289,4 +289,29 @@ mod tests {
         assert_eq!(s1.output_tokens, 6);
         assert!((s1.cost_usd - 0.02).abs() < f64::EPSILON);
     }
+
+    #[test]
+    fn r33_gateway_sessions_respects_since_cutoff() {
+        let dir = tempfile::tempdir().expect("dir");
+        let ledger = Ledger::open(&dir.path().join("usage.sqlite")).expect("ledger");
+        ledger
+            .record_with_details(
+                &row(5, "fixture-a", "old", "m1", 1, 0),
+                None,
+                Default::default(),
+                Some(priced()),
+            )
+            .expect("old");
+        ledger
+            .record_with_details(
+                &row(50, "fixture-a", "new", "m1", 2, 0),
+                None,
+                Default::default(),
+                Some(priced()),
+            )
+            .expect("new");
+        let filtered = gateway_sessions(&ledger, Some(40)).expect("sessions");
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].id, "new");
+    }
 }

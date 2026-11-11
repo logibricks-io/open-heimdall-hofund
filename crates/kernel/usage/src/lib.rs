@@ -929,7 +929,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn r33_ledger_adds_gateway_session_columns() {
         let dir = tempfile::tempdir().expect("temp dir");
         let path = dir.path().join("usage.sqlite");
@@ -967,6 +966,7 @@ mod tests {
         assert_eq!(rows[1].kind, "mcp");
     }
 
+    #[test]
     fn b4c_routing_rows_keep_ttft_and_migrate_an_old_ledger() {
         let dir = tempfile::tempdir().expect("temp dir");
         let path = dir.path().join("usage.sqlite");
