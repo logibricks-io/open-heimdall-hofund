@@ -807,3 +807,55 @@ fn r57_team_accounts_have_a_separate_label() {
     let rows = discover::list(&home).expect("discover");
     assert_eq!(rows[0].label(), "team@zcode.test (team)");
 }
+
+#[test]
+fn r57_3012_has_a_risk_control_hint_and_cooldown() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_plan_key(&host, "glm.plan.key.secret", "user@zcode.test");
+    host.http().enqueue_response(
+        405,
+        &[],
+        json!({
+            "type": "error",
+            "error": {
+                "type": "permission_error",
+                "code": "3012",
+                "message": "request has been blocked due to unusual activity"
+            }
+        })
+        .to_string(),
+    );
+    let upstream = subscription(&host)
+        .upstream(&id, host.context())
+        .expect("upstream");
+    let query = ProbeQuery::new(ProtocolId::ANTHROPIC_MESSAGES, "glm-5.3").expect("query");
+    let error = block_on(upstream.probe(&query)).expect_err("restricted");
+    assert_eq!(error.kind(), PluginErrorKind::Status);
+    assert_eq!(error.status(), Some(405));
+    assert_eq!(
+        error.retry_after(),
+        Some(std::time::Duration::from_secs(2 * 60 * 60))
+    );
+    assert!(error.message().contains("request has been blocked"));
+    assert!(
+        error
+            .message()
+            .contains("risk control blocked this account")
+    );
+    assert!(error.message().contains("Z Code support"));
+    let calls = host.http().calls();
+    assert_eq!(calls.len(), 1);
+    let body = String::from_utf8_lossy(calls[0].body());
+    assert!(!body.contains("hofund"));
+    assert!(!body.contains(&("mag".to_owned() + "pie")));
+}
+
+#[test]
+fn r57_other_405_errors_do_not_get_the_3012_hint() {
+    let error = crate::http_auth::classify_upstream_error(
+        hofund_plugin_api::PluginError::status_error(405, "method not allowed (30120)"),
+    );
+    assert_eq!(error.message(), "method not allowed (30120)");
+    assert_eq!(error.retry_after(), None);
+}
