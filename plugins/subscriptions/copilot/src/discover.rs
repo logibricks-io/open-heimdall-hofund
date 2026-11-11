@@ -529,3 +529,78 @@ fn strip_trailing_commas(input: &[u8]) -> Vec<u8> {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use hofund_kit_subscription::{PipedScript, TestHost, block_on};
+    use hofund_plugin_api::{PluginId, PluginKind};
+    use hofund_plugin_sdk::oauth::secret_text;
+
+    use super::*;
+
+    #[test]
+    fn jsonc_preserves_strings_and_drops_comments_and_trailing_commas() {
+        let input = br#"{
+          "text":"escaped quote: \" // /* stay",
+          "url":"https://github.com",
+          /* a block
+             comment */
+          "items":[1,2,],
+        }"#;
+        let value: Value = json::from_slice(&strip_jsonc(input)).expect("JSONC");
+        assert_eq!(value["text"], "escaped quote: \" // /* stay");
+        assert_eq!(value["url"], "https://github.com");
+        assert_eq!(value["items"], json::json!([1, 2]));
+        assert!(json::from_slice::<Value>(&strip_jsonc(b"{/* unterminated")).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn secret_tool_output_is_read_bounded_and_trimmed() {
+        let dir = tempfile::Builder::new()
+            .prefix("hofund-r48-copilot-secret-tool-")
+            .tempdir()
+            .expect("dir");
+        let host = TestHost::open_for(
+            PluginKind::Subscription,
+            PluginId::from_static("copilot"),
+            dir.path(),
+        );
+        host.process().script_piped(
+            PipedScript::new()
+                .line("  gho-keychain\n")
+                .exits(|_| Vec::new()),
+        );
+        let secret = block_on(run_secret_tool(
+            host.context(),
+            "/usr/bin/secret-tool",
+            vec!["lookup".to_owned()],
+            dir.path(),
+        ))
+        .expect("secret");
+        assert_eq!(secret_text(&secret), "gho-keychain");
+
+        host.process()
+            .script_piped(PipedScript::new().exits(|_| Vec::new()));
+        let empty = block_on(run_secret_tool(
+            host.context(),
+            "/usr/bin/secret-tool",
+            Vec::new(),
+            dir.path(),
+        ));
+        assert!(empty.is_none());
+
+        host.process().script_piped(
+            PipedScript::new()
+                .line("x".repeat(4097))
+                .exits(|_| Vec::new()),
+        );
+        let oversized = block_on(run_secret_tool(
+            host.context(),
+            "/usr/bin/secret-tool",
+            Vec::new(),
+            dir.path(),
+        ));
+        assert!(oversized.is_none());
+    }
+}

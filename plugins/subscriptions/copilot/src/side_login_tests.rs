@@ -171,6 +171,10 @@ fn cli_jsonc_import_uses_direct_token_and_cli_headers() {
     let before = std::fs::read(&path).expect("before");
     let id = import(&fixture, "octo");
     let sub = subscription(&fixture.host);
+    let discovered = block_on(sub.discover_agent_sign_in(&fixture.home)).expect("trait discovery");
+    assert_eq!(discovered.len(), 1);
+    assert_eq!(discovered[0].label(), "octo");
+    assert_eq!(discovered[0].id(), &id);
     fixture.host.http().enqueue(
         json!({"copilot_plan":"individual","endpoints":{"api":API}})
             .to_string()

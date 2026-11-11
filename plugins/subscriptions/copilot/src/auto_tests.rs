@@ -154,12 +154,18 @@ fn auto_v2_pick_is_reused_and_sent_with_its_session() {
     fixture.seed_session();
     fixture.host.http().enqueue(models_reply());
     fixture.host.http().enqueue(
-        json!({"session_token":"auto-1","selected_model":{"id":"gpt-5","supported_endpoints":["/responses"]},"expires_at":0})
+        json!({"session_token":"auto-1","selected_model":{"id":"gpt-auto-only","supported_endpoints":["/responses"]},"expires_at":0})
             .to_string()
             .into_bytes(),
     );
-    fixture.host.http().enqueue(responses_reply("gpt-5"));
-    fixture.host.http().enqueue(responses_reply("gpt-5"));
+    fixture
+        .host
+        .http()
+        .enqueue(responses_reply("gpt-auto-only"));
+    fixture
+        .host
+        .http()
+        .enqueue(responses_reply("gpt-auto-only"));
     for _ in 0..2 {
         block_on(upstream.execute(
             request("auto", ProtocolId::OPENAI_RESPONSES),
@@ -183,7 +189,12 @@ fn auto_v2_pick_is_reused_and_sent_with_its_session() {
     assert!(!negotiation["prompt"].as_str().expect("prompt").is_empty());
     assert_eq!(calls[2].header("X-GitHub-Api-Version"), Some("2026-08-01"));
     let sent: json::Value = json::from_slice(calls[3].body()).expect("request body");
-    assert_eq!(sent["model"], "gpt-5");
+    assert_eq!(sent["model"], "gpt-auto-only");
+    let listed = fixture.book.get(&fixture.id).expect("model book");
+    assert_eq!(
+        listed.protocol("gpt-auto-only", ProtocolId::OPENAI_CHAT),
+        ProtocolId::OPENAI_RESPONSES
+    );
     assert!(
         calls[3]
             .sensitive_headers()
@@ -434,4 +445,59 @@ fn no_auto_and_no_manual_model_is_an_auth_error() {
     .expect("unavailable");
     assert_eq!(error.kind(), PluginErrorKind::Auth);
     assert!(error.message().contains("does not offer Auto"));
+}
+
+#[test]
+fn refused_models_are_account_scoped_and_expire_after_six_hours() {
+    let book = Book::default();
+    let account = AccountId::from_static("a-0000000000001001");
+    let other = AccountId::from_static("a-0000000000001002");
+    let now = std::time::UNIX_EPOCH;
+    auto::refuse(&book, &account, "gpt-5", now);
+    assert!(auto::refused(&book, &account, "gpt-5", now));
+    assert!(!auto::refused(&book, &other, "gpt-5", now));
+    assert!(auto::refused(
+        &book,
+        &account,
+        "gpt-5",
+        now + std::time::Duration::from_secs(6 * 60 * 60 - 1)
+    ));
+    assert!(!auto::refused(
+        &book,
+        &account,
+        "gpt-5",
+        now + std::time::Duration::from_secs(6 * 60 * 60)
+    ));
+    let session_error = PluginError::status_error(500, "Requested model not available for session");
+    assert!(!auto::session_gone(&session_error));
+}
+
+#[test]
+fn auto_session_is_replaced_within_two_minutes_of_expiry() {
+    let fixture = fixture("near-expiry");
+    let upstream = fixture.upstream();
+    fixture.seed_session();
+    fixture.host.http().enqueue(models_reply());
+    for (token, expires_at) in [("auto-1", 120), ("auto-2", 7200)] {
+        fixture.host.http().enqueue(
+            json!({"session_token":token,"selected_model":{"id":"gpt-5","supported_endpoints":["/responses"]},"expires_at":expires_at})
+                .to_string()
+                .into_bytes(),
+        );
+        fixture.host.http().enqueue(responses_reply("gpt-5"));
+    }
+    for _ in 0..2 {
+        block_on(upstream.execute(
+            request("auto", ProtocolId::OPENAI_RESPONSES),
+            ProtocolId::OPENAI_RESPONSES,
+        ))
+        .expect("Auto call");
+    }
+    assert_eq!(
+        uris(&fixture.host)
+            .iter()
+            .filter(|uri| uri.ends_with("/auto"))
+            .count(),
+        2
+    );
 }
