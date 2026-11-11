@@ -1156,7 +1156,8 @@ pub fn linkers_of(workspace: &Path, package: &str) -> Result<BTreeSet<String>, S
     Ok(linkers)
 }
 
-/// The plugin's link closure must be the API and SDK closures, plus itself.
+/// The plugin's link closure must be the API and SDK closures, plus itself
+/// and the closures of any reviewed `PLUGIN_EXTRA_DEPS` for that package.
 ///
 /// # Errors
 ///
@@ -1174,12 +1175,30 @@ pub fn link_allowance(workspace: &Path, package: &str) -> Result<(), String> {
     let root = workspace_package_id(&meta, package, workspace)?;
     allowed.insert(root.clone());
     let linked = closure(&meta, &root);
+    // Reviewed extra deps (PLUGIN_EXTRA_DEPS) are already allowed in the
+    // manifest check. Their normal/build closures must be allowed here too,
+    // or a plugin that legitimately links rusqlite (etc.) fails on transitives
+    // that are not already in the API/SDK closure.
+    if let Some((_, extras)) = PLUGIN_EXTRA_DEPS.iter().find(|(pkg, _)| *pkg == package) {
+        for id in &linked {
+            if package_name_of(&meta, id).is_some_and(|name| extras.contains(&name)) {
+                allowed.extend(closure(&meta, id));
+            }
+        }
+    }
     let extra: Vec<&String> = linked.difference(&allowed).collect();
     if extra.is_empty() {
         Ok(())
     } else {
         Err(format!("{package} links {}", extra_list(&extra)))
     }
+}
+
+fn package_name_of<'a>(meta: &'a Metadata, id: &str) -> Option<&'a str> {
+    meta.ids_by_manifest
+        .iter()
+        .find(|(_, pkg_id, _)| pkg_id == id)
+        .map(|(name, _, _)| name.as_str())
 }
 
 fn extra_list(names: &[&String]) -> String {
@@ -2041,7 +2060,20 @@ cc = "1"
             .expect("workspace")
             .to_path_buf();
         super::link_allowance(&workspace, "hofund-plugin-fixture").expect("fixture closure");
+        super::link_allowance(&workspace, "hofund-plugin-agent-agy")
+            .expect("reviewed rusqlite closure is part of the allowance");
         let ids = super::link_ids(&workspace, "hofund-plugin-fixture").expect("ids");
+        let agy = super::link_ids(&workspace, "hofund-plugin-agent-agy").expect("agy ids");
+        assert!(
+            agy.iter()
+                .any(|id| id.contains("rusqlite@") || id.contains("#rusqlite@")),
+            "agy must actually link rusqlite, got {agy:?}"
+        );
+        assert!(
+            ids.iter()
+                .all(|id| !(id.contains("rusqlite@") || id.contains("#rusqlite@"))),
+            "the fixture must not inherit a sibling plugin's extra dep: {ids:?}"
+        );
         assert!(
             ids.iter()
                 .any(|id| id.contains("crates/kernel/plugin-api#")),
