@@ -21,7 +21,7 @@ Legend: **Done** = matches the reference at checklist granularity; **Partial** =
 | Cline / ClinePass (`cline`) | 2 | 12 | 1 | 3 | 1 |
 | ChatGPT / Codex (`codex` backend) and ChatGPT API (`chatgpt-api`) | 8 | 11 | 2 | 0 | 0 |
 | GitHub Copilot (github.com and GHE) | 10 | 5 | 2 | 5 | 0 |
-| Gemini CLI (Code Assist) | 8 | 6 | 2 | 2 | 0 |
+| Gemini CLI (Code Assist) | 10 | 4 | 2 | 2 | 0 |
 | Google Antigravity | 0 | 0 | 16 | 1 | 0 |
 | SuperGrok (`grok`) | 10 | 6 | 0 | 2 | 0 |
 | Qoder (international + Qoder CN) | 1 | 10 | 9 | 0 | 0 |
@@ -410,17 +410,16 @@ Every other gap below maps to an existing plan item.
 | h | tool calls | Gateway plain schema / function declarations (`codeassist.go`) | `plain_code_assist_tools` in upstream rewrite (`upstream.rs:48-49`) | Partial | Full tool parity vs gateway tests unverified |
 | i | images | Generative Language parts | via IR content parts | Partial | unverified |
 | j | reasoning / thinking | Thought signatures, skip validator (`codeassist.go:29-31`) | unverified in gemini plugin | Partial | Thought signature parity (R-49) |
-| k | quota / usage | `retrieveUserQuota` per model windows | `quota.rs` buckets from same RPC | Done | — |
-| l | model list | `fetchAvailableModels` + tier entitlements (`google.go:1073+`) | `quota.rs` models from `retrieveUserQuota` only (`lib.rs:358-364`) | Partial | `fetchAvailableModels` + tier handling (R-49) |
+| k | quota / usage | `retrieveUserQuota` per model windows | `quota.rs` buckets from same RPC; R-49 applies the experiment-driven quota-id mapping | Done | — |
+| l | model list | `retrieveUserQuota` preview signal + `listExperiments` flags choose Gemini CLI 0.61's catalog (`google.go:854-999`, `1180-1236`); `fetchAvailableModels` is Antigravity's path | `models.rs` ports the flag ids, catalog filtering, display names, and image flags; hourly per-instance cache; offline reference cases | Done | — |
 | m | multi-account | Multiple google logins | multiple accounts | Done | — |
 | n | error classification | RetryInfo → retry-after (`codeassist.go`) | `wire` retry_delay in feature-parity doc | Partial | Individual-account refusal persistence (`google.go:330+`) |
 | o | daily check-in / warmup | N/A | N/A | N/A | — |
 | p | agent sign-in | read gemini home only in reference docs | no `AgentSignIn` on gemini spec | Missing | Optional discover of `~/.gemini/oauth_creds.json` (R-49) |
-| q | extras | Code Assist Standard/Enterprise project onboarding; model-name mapping from the reference catalog | `project.rs` loadCodeAssist/onboardUser; model-name mapping not applied (`docs/feature-parity.md` row 3.4) | Partial | Model name mapping (R-49) |
+| q | extras | Code Assist Standard/Enterprise project onboarding; model-name mapping from the reference catalog | `project.rs` loadCodeAssist/onboardUser; `models.rs` maps listed, outgoing, and quota ids from the same experiments | Done | — |
 
 **Gaps**
 
-- `fetchAvailableModels` and entitlement-tier fallbacks — **L**, **R-49**.
 - Google account import formats — **M**, **R-49**.
 - Gateway-grade tool/thought-signature edge cases — **M**, **R-49**.
 

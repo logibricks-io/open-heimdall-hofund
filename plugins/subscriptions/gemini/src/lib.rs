@@ -20,6 +20,7 @@ use hofund_plugin_api::{
 use hofund_plugin_sdk::Contribution;
 use hofund_plugin_sdk::oauth::{Pkce, SecretObject, TokenCache, constant_time_eq, new_state};
 
+mod models;
 mod project;
 mod quota;
 mod sign_in;
@@ -154,6 +155,7 @@ impl SubscriptionFactory for GeminiFactory {
             flow: SignInFlow::Pkce,
             pending: Mutex::new(HashMap::new()),
             tokens: Arc::new(TokenCache::new(tokens::REFRESH_MARGIN)),
+            experiments: Arc::new(models::Experiments::default()),
         }))
     }
 }
@@ -174,6 +176,8 @@ struct Gemini {
     pending: Mutex<HashMap<String, Pending>>,
     /// Access tokens, in memory only, shared with the upstreams.
     tokens: Arc<TokenCache<SecretString>>,
+    /// Experiment readings shared by model lists, quota, and upstreams.
+    experiments: Arc<models::Experiments>,
 }
 
 impl Gemini {
@@ -192,12 +196,12 @@ impl Gemini {
         tokens::access(host, &self.endpoints, &self.tokens, account)
     }
 
-    /// The account's `retrieveUserQuota` reply.
-    async fn user_quota(
+    /// The account's quota reply and the experiments that map its model ids.
+    async fn model_info(
         &self,
         account: &AccountId,
         host: &HostContext,
-    ) -> Result<hofund_plugin_sdk::json::Value, PluginError> {
+    ) -> Result<(hofund_plugin_sdk::json::Value, models::Flags), PluginError> {
         let token = self.access(account, host).await?;
         let project = project::resolve(
             host,
@@ -208,7 +212,13 @@ impl Gemini {
         )
         .await?;
         let body = hofund_plugin_sdk::json::json!({ "project": project });
-        project::call(host, &self.endpoints, &token, "retrieveUserQuota", &body).await
+        let reply =
+            project::call(host, &self.endpoints, &token, "retrieveUserQuota", &body).await?;
+        let flags = self
+            .experiments
+            .read(host, &self.endpoints, account, &project, &token)
+            .await;
+        Ok((reply, flags))
     }
 }
 
@@ -294,8 +304,9 @@ impl Subscription for Gemini {
             .accounts()
             .account(signed_in.id.clone(), signed_in.label)?;
         host.accounts().upsert(account, signed_in.secret).await?;
-        // A token cached for an earlier sign-in of this account is dropped.
+        // Cached state from an earlier sign-in of this account is dropped.
         self.tokens.remove(&signed_in.id);
+        self.experiments.forget(&signed_in.id);
         Ok(signed_in.id)
     }
 
@@ -352,7 +363,8 @@ impl Subscription for Gemini {
         account: &AccountId,
         host: &HostContext,
     ) -> Result<Vec<QuotaWindow>, PluginError> {
-        quota::windows(&self.user_quota(account, host).await?)
+        let (reply, flags) = self.model_info(account, host).await?;
+        quota::windows(&reply, flags)
     }
 
     async fn list_models(
@@ -360,7 +372,8 @@ impl Subscription for Gemini {
         account: &AccountId,
         host: &HostContext,
     ) -> Result<ModelList, PluginError> {
-        let models = quota::models(&self.user_quota(account, host).await?)?;
+        let (reply, flags) = self.model_info(account, host).await?;
+        let models = flags.offered(quota::has_preview(&reply, flags))?;
         Ok(ModelList::new(models, None))
     }
 
@@ -374,6 +387,7 @@ impl Subscription for Gemini {
             host: host.clone(),
             endpoints: Arc::clone(&self.endpoints),
             tokens: Arc::clone(&self.tokens),
+            experiments: Arc::clone(&self.experiments),
             project: self.project.clone(),
         }))
     }
