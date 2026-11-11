@@ -38,3 +38,13 @@ fn r33_plugin_session_headers_merge_after_kernel_list() {
     assert!(names.iter().any(|name| name == "x-fixture-session"));
     assert_eq!(names[0], ECHO_SESSION_HEADER);
 }
+
+#[test]
+fn r33_plugin_extra_session_header_wins_in_session_of() {
+    let agent = fixture_description("fixture").with_session_headers(&["x-opencode-session-id"]);
+    let names = gateway_session_header_names(&[&agent]);
+    let headers = [("x-opencode-session-id", "opencode-only")];
+    let pairs = headers.to_vec();
+    let names_ref: Vec<&str> = names.iter().map(String::as_str).collect();
+    assert_eq!(session_of(&names_ref, &pairs), "opencode-only");
+}

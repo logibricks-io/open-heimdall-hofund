@@ -37,6 +37,9 @@ pub struct AgentToml {
     /// Headers that name this agent even when the user agent names another.
     #[serde(default)]
     pub nested_turn_headers: Vec<String>,
+    /// Extra gateway session header names, after the kernel list.
+    #[serde(default)]
+    pub session_headers: Vec<String>,
     #[serde(default, rename = "detect")]
     pub detect: Vec<DetectToml>,
     #[serde(default, rename = "remove")]
@@ -834,6 +837,7 @@ fn validate_request_hints(agent: &AgentToml, source: &str) -> Result<(), String>
     }
     valid_token_list(&agent.client_prefixes, source, "client_prefixes")?;
     valid_token_list(&agent.nested_turn_headers, source, "nested_turn_headers")?;
+    valid_token_list(&agent.session_headers, source, "session_headers")?;
     Ok(())
 }
 
@@ -1462,6 +1466,13 @@ pub fn render(agent: &AgentToml) -> (String, String) {
             agent.nested_turn_headers
         ));
     }
+    let session_name = format!("{static_name}_SESSION_HEADERS");
+    if !agent.session_headers.is_empty() {
+        output.push_str(&format!(
+            "static {session_name}: &[&str] = &{:?};\n",
+            agent.session_headers
+        ));
+    }
     let detect_name = format!("{static_name}_DETECT");
     if !agent.detect.is_empty() {
         output.push_str(&format!(
@@ -1561,6 +1572,9 @@ pub fn render(agent: &AgentToml) -> (String, String) {
     }
     if !agent.nested_turn_headers.is_empty() {
         output.push_str(&format!(".with_nested_turn_headers({nested_name})"));
+    }
+    if !agent.session_headers.is_empty() {
+        output.push_str(&format!(".with_session_headers({session_name})"));
     }
     if !agent.detect.is_empty() {
         output.push_str(&format!(".with_detect_paths({detect_name})"));
@@ -1822,7 +1836,7 @@ key = "effort"
     fn g2_16_request_hints_are_validated_and_rendered() {
         let text = base().replace(
             "route = \"gateway\"",
-            "route = \"gateway\"\nrequest_agent_header = \"x-fixture-agent-id\"\nclient_prefixes = [\"fixture\", \"fixture-extension\"]\nnested_turn_headers = [\"x-fixture-window-id\"]",
+            "route = \"gateway\"\nrequest_agent_header = \"x-fixture-agent-id\"\nclient_prefixes = [\"fixture\", \"fixture-extension\"]\nnested_turn_headers = [\"x-fixture-window-id\"]\nsession_headers = [\"x-fixture-session-id\"]",
         );
         let agent = validate(&text).expect("hints");
         let source = render(&agent).1;
@@ -1837,10 +1851,15 @@ key = "effort"
         assert!(
             source.contains(".with_nested_turn_headers(AGENT_FIXTURE_AGENT_NESTED_TURN_HEADERS)")
         );
+        assert!(source.contains(
+            "static AGENT_FIXTURE_AGENT_SESSION_HEADERS: &[&str] = &[\"x-fixture-session-id\"];"
+        ));
+        assert!(source.contains(".with_session_headers(AGENT_FIXTURE_AGENT_SESSION_HEADERS)"));
         let plain = render(&validate(&base()).expect("plain")).1;
         assert!(!plain.contains("with_request_agent_header"));
         assert!(!plain.contains("CLIENT_PREFIXES"));
         assert!(!plain.contains("NESTED_TURN_HEADERS"));
+        assert!(!plain.contains("SESSION_HEADERS"));
         let with = |extra: &str| {
             base().replace(
                 "route = \"gateway\"",
@@ -1856,6 +1875,7 @@ key = "effort"
             with("nested_turn_headers = [\"has space\"]"),
             "nested_turn_headers",
         );
+        reject(with("session_headers = [\"has space\"]"), "session_headers");
     }
 
     #[test]
