@@ -1819,6 +1819,7 @@ dependencies = [
  "hofund-plugin-agent-droid",
  "hofund-plugin-agent-grok",
  "hofund-plugin-agent-minimax-code",
+ "hofund-plugin-agent-qoder",
  "hofund-plugin-agent-raft",
  "hofund-plugin-api",
  "hofund-secrets",
@@ -2113,6 +2114,15 @@ name = "hofund-plugin-agent-minimax-code"
 version = "0.1.0"
 dependencies = [
  "base64 0.23.1",
+ "hofund-plugin-api",
+ "hofund-plugin-sdk",
+ "tempfile",
+]
+
+[[package]]
+name = "hofund-plugin-agent-qoder"
+version = "0.1.0"
+dependencies = [
  "hofund-plugin-api",
  "hofund-plugin-sdk",
  "tempfile",

@@ -22,6 +22,7 @@ use hofund_plugin_agent_cursor::CursorStore;
 use hofund_plugin_agent_droid::DroidStore;
 use hofund_plugin_agent_grok::GrokStore;
 use hofund_plugin_agent_minimax_code::MiniMaxStore;
+use hofund_plugin_agent_qoder::{QoderCnStore, QoderStore};
 use hofund_plugin_agent_raft::RaftStore;
 
 pub(crate) const HELP: &str = "\
@@ -744,6 +745,32 @@ mod tests {
         let listed = run_with(&config, &list, &stores, Local::now()).expect("list");
         assert!(listed.contains("Ship the cursor reader"), "{listed}");
         assert!(listed.contains("Editor transcript title"), "{listed}");
+    }
+
+    #[test]
+    fn qoder_reader_is_consent_gated_through_index() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config = temp.path().join("hofund.toml");
+        let qoder_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../plugins/agents/qoder/tests/fixtures/root")
+            .canonicalize()
+            .expect("qoder fixtures");
+        let qoder = QoderStore::with_root(qoder_root);
+        let stores: [&dyn SessionStore; 1] = [&qoder];
+        let list = Command::List(Options {
+            days: None,
+            model: String::new(),
+            folder: String::new(),
+            limit: 20,
+            json: false,
+        });
+        let on = Command::Read(Some(ReadChange {
+            on: true,
+            targets: vec!["qoder".to_owned()],
+        }));
+        run_with(&config, &on, &stores, Local::now()).expect("consent");
+        let listed = run_with(&config, &list, &stores, Local::now()).expect("list");
+        assert!(listed.contains("Explain the cache"), "{listed}");
     }
 
     #[test]
