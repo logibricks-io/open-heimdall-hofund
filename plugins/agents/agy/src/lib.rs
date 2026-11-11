@@ -227,12 +227,14 @@ fn read_summaries(path: &Path) -> Result<HashMap<String, AgySummary>, PluginErro
     if !path.is_file() {
         return Ok(HashMap::new());
     }
-    let uri = format!(
-        "file:{}?mode=ro",
-        path.to_string_lossy().replace('%', "%25")
-    );
-    let connection = Connection::open_with_flags(uri, OpenFlags::SQLITE_OPEN_READ_ONLY)
+    // Open by filesystem path, not a `file:` URI. A URI built from a raw
+    // Windows path (`D:\…` or a `\\?\` verbatim path from canonicalize)
+    // is not a valid SQLite URI, so titles would fall back to JSONL.
+    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|_| PluginError::io("cannot open agy summaries"))?;
+    connection
+        .execute_batch("PRAGMA query_only = ON")
+        .map_err(|_| PluginError::io("cannot bound agy summaries"))?;
     let mut statement = connection
         .prepare(
             "SELECT conversation_id, title, workspace_uris, last_modified_time FROM conversation_summaries",
@@ -632,5 +634,41 @@ mod tests {
             .expect("no row");
         let record = parse_transcript(&store, nr);
         assert_eq!(record.title, "what is in this folder");
+    }
+
+    #[test]
+    fn summaries_open_after_canonicalize_and_special_path_chars() {
+        let temp = tempfile::tempdir().expect("temp");
+        // `#` and `?` would truncate a naive `file:{path}?mode=ro` URI on every OS.
+        let dir = temp.path().join("conv#root?dir");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("conversation_summaries.db");
+        Connection::open(&path)
+            .expect("create")
+            .execute_batch(
+                "CREATE TABLE conversation_summaries (
+                    conversation_id TEXT,
+                    title TEXT,
+                    workspace_uris TEXT,
+                    last_modified_time INTEGER
+                );
+                INSERT INTO conversation_summaries
+                VALUES ('id-1', 'Hello from the fake.', NULL, 0);",
+            )
+            .expect("schema");
+        let opened = path.canonicalize().expect("canonicalize");
+        #[cfg(windows)]
+        {
+            let display = opened.to_string_lossy();
+            assert!(
+                display.starts_with("\\\\?\\") || display.starts_with("//?/"),
+                "windows canonicalize should be a verbatim path, got {opened:?}"
+            );
+        }
+        let rows = load_summaries(&opened);
+        assert_eq!(
+            rows.get("id-1").map(|summary| summary.title.as_str()),
+            Some("Hello from the fake.")
+        );
     }
 }
