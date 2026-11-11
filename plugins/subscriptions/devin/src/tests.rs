@@ -434,6 +434,21 @@ fn no_quota_windows_or_empty_status_skip_the_model_rpc() {
 }
 
 #[test]
+fn quota_status_body_is_capped_at_one_mib() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let id = seed_account(&host, "devin-quota-cap-key", "quota-cap@example.test");
+    let mut body = b"{}".to_vec();
+    body.resize(1024 * 1024, b' ');
+    body.push(b'x');
+    host.http().enqueue_response(200, &[], body);
+    let windows = block_on(sub.quota(&id, host.context())).expect("capped quota");
+    assert!(windows.is_empty());
+    assert_eq!(host.http().calls().len(), 1);
+}
+
+#[test]
 fn a2b_9_list_models_falls_back_to_snapshot() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);

@@ -205,7 +205,12 @@ mod tests {
     use hofund_plugin_api::{PluginError, PluginErrorKind};
     use hofund_plugin_sdk::json::json;
 
-    use super::{acu_window, quota_windows, reset_at, rpc_failure};
+    use super::{BODY_CAP, acu_window, quota_windows, reset_at, rpc_failure};
+
+    #[test]
+    fn status_body_cap_is_one_mib() {
+        assert_eq!(BODY_CAP, 1024 * 1024);
+    }
 
     #[test]
     fn omitted_zero_shares_are_exhausted_only_for_quota_billing() {

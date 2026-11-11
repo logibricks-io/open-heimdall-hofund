@@ -549,8 +549,8 @@ mod tests {
     use std::collections::{HashMap, HashSet};
 
     use super::{
-        Family, Price, Variant, effort_of, free_ids, listed, listed_with_billing, parse_models,
-        snapshot_families, snapshot_images, variant_for,
+        Family, Price, Variant, effort_of, free_ids, listed, listed_with_billing, own_ids,
+        parse_models, snapshot_families, snapshot_images, variant_for,
     };
 
     #[test]
@@ -611,6 +611,7 @@ mod tests {
             aliases: Vec::new(),
             models: vec![variant("fam-low"), variant("fam-high")],
         }];
+        assert_eq!(own_ids(&families[0], ""), ["fam-high", "fam-low"]);
         let low = Price {
             input: 1_000_000,
             output: 2_000_000,

@@ -252,9 +252,9 @@ pub(crate) fn model_uids(body: &[u8]) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use hofund_plugin_sdk::protobuf::{deframe, fields};
+    use hofund_plugin_sdk::protobuf::{ProtoBuf, deframe, fields};
 
-    use super::{encode_request, model_uids, parse, parse_free, parse_prices};
+    use super::{encode_request, model_uids, parse, parse_free, parse_prices, price_micros};
 
     const MODEL_CONFIGS: &[u8] = crate::connect::testdata::MODEL_CONFIGS;
     const MODEL_CONFIGS_1015: &[u8] = crate::connect::testdata::MODEL_CONFIGS_1015;
@@ -383,5 +383,43 @@ mod tests {
             })
         );
         assert!(!prices.contains_key("swe-2-high"));
+    }
+
+    #[test]
+    fn config_success_requires_a_family_and_output_only_prices_survive() {
+        let adaptive = ProtoBuf::new().string(22, "adaptive").varint(5, 1).finish();
+        let body = ProtoBuf::new().bytes(1, &adaptive).finish();
+        assert!(parse(&body).is_none());
+
+        let row = ProtoBuf::new()
+            .string(1, "Output")
+            .fixed32(2, 5.0_f32.to_bits())
+            .string(3, "1M tokens")
+            .finish();
+        let config = ProtoBuf::new()
+            .string(22, "output-only")
+            .bytes(32, &row)
+            .finish();
+        let body = ProtoBuf::new().bytes(1, &config).finish();
+        assert_eq!(
+            parse_prices(&body).get("output-only"),
+            Some(&super::Price {
+                input: 0,
+                output: 5_000_000,
+                cache_read: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn prices_reject_nonfinite_negative_and_unrepresentable_values() {
+        assert_eq!(price_micros(0.0), Some(0));
+        assert_eq!(price_micros(-1.0), None);
+        assert_eq!(price_micros(f32::NAN), None);
+        assert_eq!(
+            price_micros(18_446_744_073_709_551_616.0_f32),
+            None,
+            "2^64 dollars in micros does not fit u64"
+        );
     }
 }
