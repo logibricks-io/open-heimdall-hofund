@@ -1,0 +1,54 @@
+[
+  {
+    "id": "gemini:json-s",
+    "agent": "gemini",
+    "app": "",
+    "title": "question",
+    "cwd": "",
+    "start_ms": 1790942400000,
+    "last_ms": 1790942404000,
+    "tokens": {
+      "input": 13,
+      "output": 3,
+      "cache_read": 0,
+      "cache_write": 0,
+      "cache_write_1h": 0
+    },
+    "models": {
+      "gemini-model": {
+        "input": 13,
+        "output": 3,
+        "cache_read": 0,
+        "cache_write": 0,
+        "cache_write_1h": 0
+      }
+    },
+    "subagents": []
+  },
+  {
+    "id": "gemini:jsonl-s",
+    "agent": "gemini",
+    "app": "",
+    "title": "private",
+    "cwd": "",
+    "start_ms": 1790942400000,
+    "last_ms": 1790942405000,
+    "tokens": {
+      "input": 60,
+      "output": 15,
+      "cache_read": 40,
+      "cache_write": 0,
+      "cache_write_1h": 0
+    },
+    "models": {
+      "gemini-model": {
+        "input": 60,
+        "output": 15,
+        "cache_read": 40,
+        "cache_write": 0,
+        "cache_write_1h": 0
+      }
+    },
+    "subagents": []
+  }
+]

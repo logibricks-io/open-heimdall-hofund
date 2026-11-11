@@ -1,0 +1,6 @@
+{"sessionId":"jsonl-s"}
+{"type":"user","id":"u","timestamp":"2026-10-02T12:00:00Z","content":[{"text":"private"}]}
+{"type":"gemini","id":"a","timestamp":"2026-10-02T12:00:02Z","model":"gemini-model","content":"thinking","tokens":{"input":100,"output":10,"thoughts":5,"cached":40}}
+{"$patch":{"id":"a","toolCalls":[{"id":"tool","result":[{"functionResponse":{"id":"tool","response":{"result":"ok"}}}]}]}}
+{"type":"gemini","id":"final","timestamp":"2026-10-02T12:00:05Z","model":"gemini-model","content":"answer","tokens":{"input":120,"output":20,"cached":50}}
+{"$rewindTo":"a"}

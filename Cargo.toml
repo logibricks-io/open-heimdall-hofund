@@ -22,6 +22,7 @@ members = [
     "plugins/agents/opencode",
     "plugins/agents/pi",
     "plugins/agents/omp",
+    "plugins/agents/gemini-cli",
     "plugins/inbound/codex-catalog",
     "plugins/inbound/retrieval",
     "plugins/inbound/echo",
@@ -94,6 +95,7 @@ hofund-plugin-agent-codex = { version = "0.1.0", path = "plugins/agents/codex" }
 hofund-plugin-agent-opencode = { version = "0.1.0", path = "plugins/agents/opencode" }
 hofund-plugin-agent-pi = { version = "0.1.0", path = "plugins/agents/pi" }
 hofund-plugin-agent-omp = { version = "0.1.0", path = "plugins/agents/omp" }
+hofund-plugin-agent-gemini = { version = "0.1.0", path = "plugins/agents/gemini-cli" }
 hofund-plugin-azure = { version = "0.1.0", path = "plugins/providers/azure" }
 hofund-plugin-bedrock = { version = "0.1.0", path = "plugins/providers/bedrock" }
 hofund-plugin-bedrock-mantle = { version = "0.1.0", path = "plugins/providers/bedrock-mantle" }

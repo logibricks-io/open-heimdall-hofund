@@ -174,6 +174,9 @@ pub struct SessionRecord {
     /// Whether this record is a pure copy rather than a subagent.
     #[serde(default)]
     pub copy: bool,
+    /// Usage attribution when the session ran outside this agent's files.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub app: String,
     /// Parent checkpoint source for a fork, when one is named.
     #[serde(default)]
     pub forked_from: Option<String>,
@@ -209,6 +212,7 @@ impl SessionRecord {
             family_leaf: String::new(),
             family_ids: Vec::new(),
             copy: false,
+            app: String::new(),
             forked_from: None,
             usage: Vec::new(),
             cut: false,

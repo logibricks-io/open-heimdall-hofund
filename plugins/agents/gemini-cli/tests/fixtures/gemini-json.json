@@ -1,0 +1,44 @@
+{
+  "agent": "gemini",
+  "id": "gemini:json-s",
+  "path": "",
+  "cwd": "",
+  "title": "question",
+  "start_ms": 1790942400000,
+  "last_ms": 1790942404000,
+  "models": {
+    "gemini-model": {
+      "input": 13,
+      "output": 3,
+      "cache_read": 0,
+      "cache_write": 0,
+      "cache_write_1h": 0
+    }
+  },
+  "days": [
+    {
+      "date": "2026-10-02",
+      "model": "gemini-model",
+      "tokens": {
+        "input": 13,
+        "output": 3,
+        "cache_read": 0,
+        "cache_write": 0,
+        "cache_write_1h": 0
+      }
+    }
+  ],
+  "cost": 0.0,
+  "unpriced": 0,
+  "main": true,
+  "parent_id": null,
+  "subagents": [],
+  "copies": [],
+  "family_root": "",
+  "family_leaf": "",
+  "family_ids": [],
+  "copy": false,
+  "forked_from": null,
+  "usage": [],
+  "cut": false
+}

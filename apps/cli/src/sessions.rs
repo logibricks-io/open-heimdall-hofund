@@ -15,8 +15,9 @@ use hofund_sessions::pricing::{TokenPrice, price_records, token_cost};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use hofund_plugin_agent_claude::ClaudeStore;
+use hofund_plugin_agent_claude::{ClaudeDesktopStore, ClaudeStore};
 use hofund_plugin_agent_codex::CodexStore;
+use hofund_plugin_agent_gemini::GeminiStore;
 use hofund_plugin_agent_omp::OmpStore;
 use hofund_plugin_agent_opencode::OpenCodeStore;
 use hofund_plugin_agent_pi::PiStore;
@@ -115,7 +116,17 @@ pub(crate) fn run(config: &Path, command: &Command) -> Result<String, String> {
     let opencode = OpenCodeStore::new();
     let pi = PiStore::new();
     let omp = OmpStore::new();
-    let stores: [&dyn SessionStore; 5] = [&claude, &codex, &opencode, &pi, &omp];
+    let gemini = GeminiStore::new();
+    let claude_desktop = ClaudeDesktopStore::new();
+    let stores: [&dyn SessionStore; 7] = [
+        &claude,
+        &claude_desktop,
+        &codex,
+        &opencode,
+        &pi,
+        &omp,
+        &gemini,
+    ];
     run_with(config, command, &stores, Local::now())
 }
 

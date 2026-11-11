@@ -1,0 +1,2 @@
+{"type":"user","timestamp":"2026-11-10T12:00:00Z","message":{"role":"user","content":"Code tab question"},"cwd":"/work/app","sessionId":"desktop-tab","entrypoint":"claude-desktop-3p"}
+{"type":"assistant","timestamp":"2026-11-10T12:00:01Z","message":{"model":"claude-haiku-5-5","id":"m1","usage":{"input_tokens":4,"output_tokens":1}},"cwd":"/work/app","sessionId":"desktop-tab","entrypoint":"claude-desktop-3p"}
