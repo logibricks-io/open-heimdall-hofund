@@ -1,0 +1,19 @@
+[package]
+name = "hofund-plugin-agent-cursor"
+description = "Cursor CLI and editor session locator and parsers."
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+hofund-plugin-api = { workspace = true }
+hofund-plugin-sdk = { workspace = true }
+regex = { version = "1.13.1" }
+
+[lints]
+workspace = true

@@ -1815,6 +1815,7 @@ dependencies = [
  "hofund-plugin-agent-cindy",
  "hofund-plugin-agent-claude",
  "hofund-plugin-agent-codex",
+ "hofund-plugin-agent-cursor",
  "hofund-plugin-agent-minimax-code",
  "hofund-plugin-agent-raft",
  "hofund-plugin-api",
@@ -2076,6 +2077,15 @@ dependencies = [
  "hofund-plugin-api",
  "hofund-plugin-sdk",
  "tempfile",
+]
+
+[[package]]
+name = "hofund-plugin-agent-cursor"
+version = "0.1.0"
+dependencies = [
+ "hofund-plugin-api",
+ "hofund-plugin-sdk",
+ "regex",
 ]
 
 [[package]]
@@ -2563,6 +2573,7 @@ dependencies = [
  "hofund-plugin-api",
  "hofund-usage",
  "libc",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",
