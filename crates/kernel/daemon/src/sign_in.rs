@@ -1352,4 +1352,19 @@ mod tests {
         assert_eq!(value[0]["windows"][0]["limit"], 10);
         assert!(quota_in(&rig.opened(), Some("missing")).await.is_err());
     }
+
+    #[tokio::test]
+    async fn r49_default_project_setting_is_unsupported() {
+        let rig = new_rig(Mode::Device);
+        let mut opened = rig.opened();
+        opened[0].id = "gemini".to_owned();
+        let error =
+            crate::agent_login::accounts_project(&opened, "gemini", "u@example.test", "project-1")
+                .await
+                .expect_err("the fake has no project setting");
+        assert_eq!(
+            error.to_string(),
+            "this subscription has no per-account project setting"
+        );
+    }
 }

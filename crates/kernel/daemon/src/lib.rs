@@ -79,7 +79,7 @@ mod watch;
 pub use account_discovery::{
     DiscoverReport, accounts_discover_in, format_report, import_if_configured,
 };
-pub use agent_login::{accounts_import_in, accounts_switch_in};
+pub use agent_login::{accounts_import_in, accounts_project_in, accounts_switch_in};
 pub use models::{
     Cached, ModelLimits, ModelsHost, Picks, ProbeOutcome, ProviderModels, RefreshTiming,
 };

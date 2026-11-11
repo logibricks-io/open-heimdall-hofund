@@ -367,6 +367,17 @@ impl Subscription for Gemini {
         quota::windows(&reply, flags)
     }
 
+    async fn set_project(
+        &self,
+        email: &str,
+        project_id: &str,
+        host: &HostContext,
+    ) -> Result<(), PluginError> {
+        let account = project::set(host, email, project_id).await?;
+        self.experiments.forget(&account);
+        Ok(())
+    }
+
     async fn list_models(
         &self,
         account: &AccountId,

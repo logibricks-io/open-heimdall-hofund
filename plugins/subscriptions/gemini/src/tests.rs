@@ -97,7 +97,8 @@ fn seed(host: &TestHost, blob: &SecretObject) -> AccountId {
 fn signed_in_blob(project: Option<&str>) -> SecretObject {
     let blob = SecretObject::new()
         .with_number("v", 1)
-        .with_secret("refresh_token", &secret("refresh-1"));
+        .with_secret("refresh_token", &secret("refresh-1"))
+        .with_text("email", "u@example.test");
     match project {
         Some(project) => blob.with_text(project::PROJECT, project),
         None => blob,
@@ -285,7 +286,7 @@ fn exchange_needs_the_account_email() {
 }
 
 #[test]
-fn sign_in_stores_refresh_token_and_project_only() {
+fn sign_in_stores_refresh_token_project_and_email() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
     let sub = subscription(&host);
@@ -521,7 +522,10 @@ fn standard_tier_without_project_needs_sign_in() {
         reason.starts_with("Not eligible for the free tier: "),
         "{reason}"
     );
-    assert!(reason.contains("`project`"), "{reason}");
+    assert!(
+        reason.contains("hofund accounts project gemini u@example.test <project-id>"),
+        "{reason}"
+    );
 
     // Naming the project in the config makes it usable, and a refresh
     // onboards it there.
@@ -631,8 +635,87 @@ fn refresh_needing_a_project_says_so() {
         .enqueue(STANDARD_NEEDS_PROJECT.as_bytes().to_vec());
     let error = block_on(sub.refresh(&id, host.context())).expect_err("needs a project");
     assert_eq!(error.kind(), PluginErrorKind::Auth);
-    assert!(error.message().contains("`project`"), "{}", error.message());
+    assert!(
+        error
+            .message()
+            .contains("hofund accounts project gemini u@example.test <project-id>"),
+        "{}",
+        error.message()
+    );
     assert!(stored(&host, &id).flag(project::NEEDS_PROJECT));
+}
+
+#[test]
+fn r49_missing_project_reason_ignores_an_empty_vendor_reason() {
+    let blob = signed_in_blob(None)
+        .with_flag(project::NEEDS_PROJECT, true)
+        .with_text("needs_project_why", "");
+    let reason = project::missing_reason(&blob);
+    assert!(!reason.starts_with(':'), "{reason}");
+    assert!(
+        reason.contains("hofund accounts project gemini u@example.test <project-id>"),
+        "{reason}"
+    );
+}
+
+#[test]
+fn r49_set_project_trims_rejects_unknown_and_clears() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let id = seed(
+        &host,
+        &signed_in_blob(None).with_flag(project::NEEDS_PROJECT, true),
+    );
+    block_on(sub.set_project(" U@Example.Test ", "  proj-7  ", host.context()))
+        .expect("set project");
+    let blob = stored(&host, &id);
+    assert_eq!(blob.text(project::PROJECT), Some("proj-7"));
+    assert_eq!(blob.text("email"), Some("u@example.test"));
+    assert!(!blob.flag(project::NEEDS_PROJECT));
+
+    let before = blob.to_body();
+    let error = block_on(sub.set_project("nobody@example.test", "other", host.context()))
+        .expect_err("unknown email");
+    assert_eq!(error.kind(), PluginErrorKind::Config);
+    assert!(error.message().contains("no gemini account"));
+    assert_eq!(stored(&host, &id).to_body(), before);
+
+    block_on(sub.set_project("u@example.test", " \t ", host.context())).expect("clear project");
+    assert_eq!(stored(&host, &id).text(project::PROJECT), None);
+}
+
+#[test]
+fn r49_execute_and_quota_use_the_project_named_by_command() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let id = seed(&host, &signed_in_blob(None));
+    block_on(sub.set_project("u@example.test", " project-from-command ", host.context()))
+        .expect("set project");
+
+    host.http().enqueue(token_reply("acc-1", None, 3600));
+    host.http().enqueue(br#"{"flags":[]}"#.to_vec());
+    host.http().enqueue(UNARY_REPLY.as_bytes().to_vec());
+    let upstream = sub.upstream(&id, host.context()).expect("upstream");
+    block_on(upstream.execute(
+        gl_request("gemini-2.5-pro", false),
+        ProtocolId::GENERATIVE_LANGUAGE,
+    ))
+    .expect("execute");
+    let [execute] = posts_to(&host, &method_url("generateContent"))
+        .try_into()
+        .expect("one execute");
+    let execute: hofund_plugin_sdk::json::Value =
+        hofund_plugin_sdk::json::from_str(&execute).expect("json");
+    assert_eq!(execute["project"], "project-from-command");
+
+    host.http().enqueue(QUOTA_REPLY.as_bytes().to_vec());
+    block_on(sub.quota(&id, host.context())).expect("quota");
+    assert_eq!(
+        posts_to(&host, &method_url("retrieveUserQuota")),
+        vec![r#"{"project":"project-from-command"}"#.to_owned()]
+    );
 }
 
 #[test]

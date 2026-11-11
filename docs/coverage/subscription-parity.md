@@ -416,7 +416,7 @@ Every other gap below maps to an existing plan item.
 | n | error classification | RetryInfo → retry-after (`codeassist.go`) | `wire` retry_delay in feature-parity doc | Partial | Individual-account refusal persistence (`google.go:330+`) |
 | o | daily check-in / warmup | N/A | N/A | N/A | — |
 | p | agent sign-in | read gemini home only in reference docs | no `AgentSignIn` on gemini spec | Missing | Optional discover of `~/.gemini/oauth_creds.json` (R-49) |
-| q | extras | Code Assist Standard/Enterprise project onboarding; model-name mapping from the reference catalog | `project.rs` loadCodeAssist/onboardUser; `models.rs` maps listed, outgoing, and quota ids from the same experiments | Done | — |
+| q | extras | Code Assist Standard/Enterprise project onboarding; `SetGoogleProject` names or clears an account's stored Cloud project; model-name mapping from the reference catalog | `project.rs` loadCodeAssist/onboardUser and leased account updates; `hofund accounts project gemini <email> <gcp-project-id>` trims, stores, and clears the project used by execute and quota; `models.rs` maps listed, outgoing, and quota ids from the same experiments; offline tests only | Done | — |
 
 **Gaps**
 
