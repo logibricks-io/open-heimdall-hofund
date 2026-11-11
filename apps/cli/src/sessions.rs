@@ -17,6 +17,7 @@ use sha2::{Digest, Sha256};
 
 use hofund_plugin_agent_claude::ClaudeStore;
 use hofund_plugin_agent_codex::CodexStore;
+use hofund_plugin_agent_raft::RaftStore;
 
 pub(crate) const HELP: &str = "\
 usage: hofund sessions [--days N|today|all] [--model MODEL] [--folder FOLDER] [--limit N] [--json]
@@ -109,7 +110,8 @@ pub(crate) fn parse(words: &[&str], flags: Flags) -> Result<Command, String> {
 pub(crate) fn run(config: &Path, command: &Command) -> Result<String, String> {
     let claude = ClaudeStore::new();
     let codex = CodexStore::new();
-    let stores: [&dyn SessionStore; 2] = [&claude, &codex];
+    let raft = RaftStore::new();
+    let stores: [&dyn SessionStore; 3] = [&claude, &codex, &raft];
     run_with(config, command, &stores, Local::now())
 }
 
@@ -646,6 +648,35 @@ mod tests {
             std::fs::read_to_string(consent.path()).expect("consent"),
             "{\"asked\":false}\n"
         );
+    }
+
+    #[test]
+    fn raft_reader_is_consent_gated_through_index() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config = temp.path().join("hofund.toml");
+        let raft_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../plugins/agents/raft/tests/fixtures/root")
+            .canonicalize()
+            .expect("raft fixtures");
+        let raft = RaftStore::with_root(raft_root);
+        let stores: [&dyn SessionStore; 1] = [&raft];
+        let list = Command::List(Options {
+            days: None,
+            model: String::new(),
+            folder: String::new(),
+            limit: 20,
+            json: false,
+        });
+        let off = run_with(&config, &list, &stores, Local::now()).expect("off list");
+        assert!(off.contains("reads are off"));
+        let on = Command::Read(Some(ReadChange {
+            on: true,
+            targets: vec!["raft".to_owned()],
+        }));
+        run_with(&config, &on, &stores, Local::now()).expect("consent");
+        let listed = run_with(&config, &list, &stores, Local::now()).expect("list");
+        assert!(listed.contains("Ship the raft reader"), "{listed}");
+        assert!(listed.contains("Builtin agent run"), "{listed}");
     }
 
     #[test]

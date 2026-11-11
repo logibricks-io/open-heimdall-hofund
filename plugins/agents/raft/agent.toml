@@ -1,0 +1,6 @@
+id = "raft"
+display_name = "Raft"
+binary = "raft"
+
+# Session reader only (slock home). Connect file slots are not declared yet.
+# A file-less agent.toml is not compiled into the shipped connect catalog.
