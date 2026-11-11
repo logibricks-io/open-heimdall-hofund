@@ -17,6 +17,7 @@ use sha2::{Digest, Sha256};
 
 use hofund_plugin_agent_cindy::CindyStore;
 use hofund_plugin_agent_claude::ClaudeStore;
+use hofund_plugin_agent_cline::ClineStore;
 use hofund_plugin_agent_codex::CodexStore;
 use hofund_plugin_agent_cursor::CursorStore;
 use hofund_plugin_agent_droid::DroidStore;
@@ -117,6 +118,7 @@ pub(crate) fn parse(words: &[&str], flags: Flags) -> Result<Command, String> {
 pub(crate) fn run(config: &Path, command: &Command) -> Result<String, String> {
     let claude = ClaudeStore::new();
     let cindy = CindyStore::new();
+    let cline = ClineStore::new();
     let codex = CodexStore::new();
     let cursor = CursorStore::new();
     let droid = DroidStore::new();
@@ -126,8 +128,9 @@ pub(crate) fn run(config: &Path, command: &Command) -> Result<String, String> {
     let qoder = QoderStore::new();
     let qoder_cn = QoderCnStore::new();
     let raft = RaftStore::new();
-    let stores: [&dyn SessionStore; 11] = [
-        &claude, &cindy, &codex, &cursor, &droid, &grok, &kimi, &minimax, &qoder, &qoder_cn, &raft,
+    let stores: [&dyn SessionStore; 12] = [
+        &claude, &cindy, &cline, &codex, &cursor, &droid, &grok, &kimi, &minimax, &qoder,
+        &qoder_cn, &raft,
     ];
     run_with(config, command, &stores, Local::now())
 }
@@ -775,6 +778,32 @@ mod tests {
         run_with(&config, &on, &stores, Local::now()).expect("consent");
         let listed = run_with(&config, &list, &stores, Local::now()).expect("list");
         assert!(listed.contains("Explain the cache"), "{listed}");
+    }
+
+    #[test]
+    fn cline_reader_is_consent_gated_through_index() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config = temp.path().join("hofund.toml");
+        let cline_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../plugins/agents/cline/tests/fixtures/root/sessions")
+            .canonicalize()
+            .expect("cline fixtures");
+        let cline = ClineStore::with_sessions_dir(cline_root);
+        let stores: [&dyn SessionStore; 1] = [&cline];
+        let list = Command::List(Options {
+            days: None,
+            model: String::new(),
+            folder: String::new(),
+            limit: 20,
+            json: false,
+        });
+        let on = Command::Read(Some(ReadChange {
+            on: true,
+            targets: vec!["cline".to_owned()],
+        }));
+        run_with(&config, &on, &stores, Local::now()).expect("consent");
+        let listed = run_with(&config, &list, &stores, Local::now()).expect("list");
+        assert!(listed.contains("Importer speed-up"), "{listed}");
     }
 
     #[test]

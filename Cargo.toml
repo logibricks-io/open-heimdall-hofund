@@ -19,6 +19,7 @@ members = [
     "crates/kernel/plugin-sdk",
     "plugins/agents/claude-code",
     "plugins/agents/cindy",
+    "plugins/agents/cline",
     "plugins/agents/codex",
     "plugins/agents/minimax-code",
     "plugins/agents/cursor",
@@ -96,6 +97,7 @@ hofund-kit-upstream = { version = "0.1.0", path = "kits/upstream" }
 hofund-plugin-api = { version = "0.1.0", path = "crates/kernel/plugin-api" }
 hofund-plugin-agent-claude = { version = "0.1.0", path = "plugins/agents/claude-code" }
 hofund-plugin-agent-cindy = { version = "0.1.0", path = "plugins/agents/cindy" }
+hofund-plugin-agent-cline = { version = "0.1.0", path = "plugins/agents/cline" }
 hofund-plugin-agent-codex = { version = "0.1.0", path = "plugins/agents/codex" }
 hofund-plugin-agent-minimax-code = { version = "0.1.0", path = "plugins/agents/minimax-code" }
 hofund-plugin-agent-cursor = { version = "0.1.0", path = "plugins/agents/cursor" }

@@ -21,6 +21,7 @@ hofund-config = { workspace = true }
 hofund-control-client = { workspace = true }
 hofund-plugin-agent-claude = { workspace = true }
 hofund-plugin-agent-cindy = { workspace = true }
+hofund-plugin-agent-cline = { workspace = true }
 hofund-plugin-agent-codex = { workspace = true }
 hofund-plugin-agent-cursor = { workspace = true }
 hofund-plugin-agent-droid = { workspace = true }
