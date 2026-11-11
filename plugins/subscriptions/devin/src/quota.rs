@@ -2,7 +2,9 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use hofund_plugin_api::{AccountId, HostContext, PluginError, PluginErrorKind, QuotaWindow};
+use hofund_plugin_api::{
+    AccountId, BodyStream, HostContext, PluginError, PluginErrorKind, QuotaWindow,
+};
 use hofund_plugin_sdk::json::{Value, json};
 use hofund_plugin_sdk::oauth::secret_text;
 use hofund_plugin_sdk::{Call, time};
@@ -41,16 +43,7 @@ pub(crate) async fn read(
         .await
         .map_err(rpc_failure)?;
     let status = response.status().as_u16();
-    let mut stream = response.into_body();
-    let mut bytes = Vec::new();
-    while bytes.len() < BODY_CAP {
-        let Some(chunk) = stream.next_chunk().await else {
-            break;
-        };
-        let chunk = chunk.map_err(rpc_failure)?;
-        let remaining = BODY_CAP - bytes.len();
-        bytes.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
-    }
+    let bytes = read_body(response.into_body()).await?;
     if rejected(status, &bytes) {
         return Err(PluginError::auth(
             "Devin's sign-in has expired — sign in again",
@@ -79,6 +72,19 @@ pub(crate) async fn read(
         windows.push(acu);
     }
     Ok(windows)
+}
+
+async fn read_body(mut stream: BodyStream) -> Result<Vec<u8>, PluginError> {
+    let mut bytes = Vec::new();
+    while bytes.len() < BODY_CAP {
+        let Some(chunk) = stream.next_chunk().await else {
+            break;
+        };
+        let chunk = chunk.map_err(rpc_failure)?;
+        let remaining = BODY_CAP - bytes.len();
+        bytes.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+    }
+    Ok(bytes)
 }
 
 fn quota_windows(reply: &Value) -> Result<Vec<QuotaWindow>, PluginError> {
@@ -202,14 +208,27 @@ fn rpc_failure(error: PluginError) -> PluginError {
 mod tests {
     use std::time::{Duration, UNIX_EPOCH};
 
-    use hofund_plugin_api::{PluginError, PluginErrorKind};
+    use hofund_plugin_api::{BodyStream, PluginError, PluginErrorKind};
     use hofund_plugin_sdk::json::json;
 
-    use super::{BODY_CAP, acu_window, quota_windows, reset_at, rpc_failure};
+    use super::{BODY_CAP, acu_window, quota_windows, read_body, reset_at, rpc_failure};
 
     #[test]
     fn status_body_cap_is_one_mib() {
         assert_eq!(BODY_CAP, 1024 * 1024);
+    }
+
+    #[test]
+    fn body_cap_subtracts_bytes_from_an_earlier_chunk() {
+        let stream = BodyStream::unfold(0_u8, |step| async move {
+            match step {
+                0 => Some((Ok(vec![b'a'; 512]), 1)),
+                1 => Some((Ok(vec![b'b'; BODY_CAP]), 2)),
+                _ => None,
+            }
+        });
+        let bytes = hofund_kit_subscription::block_on(read_body(stream)).expect("body");
+        assert_eq!(bytes.len(), BODY_CAP);
     }
 
     #[test]
