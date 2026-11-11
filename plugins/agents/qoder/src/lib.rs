@@ -310,7 +310,7 @@ impl SessionParser for AgentRewriteParser {
                 .strip_prefix(&format!("{AGENT}:"))
                 .or_else(|| record.id.strip_prefix("qoder-cn:"))
                 .unwrap_or(&record.id);
-            record.agent = self.agent.to_owned();
+            self.agent.clone_into(&mut record.agent);
             record.id = format!("{}:{bare}", self.agent);
             if let Some(parent) = record.parent_id.as_mut()
                 && let Some(child) = parent.strip_prefix(&format!("{AGENT}:"))
