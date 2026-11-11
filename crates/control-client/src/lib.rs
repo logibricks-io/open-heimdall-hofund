@@ -25,12 +25,12 @@ use hofund_control_proto::{
     QuotaAlertsResponse, QuotaAlertsSetRequest, QuotaAlertsSetResponse, QuotaCreditsModesResponse,
     QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryQuery, QuotaHistoryResponse,
     QuotaQuery, QuotaResponse, ReloadRequest, RouteListResponse, RouteModelListResponse,
-    RouteQuery, SessionListQuery, SessionListResponse, SessionOverviewQuery,
+    RouteQuery, SessionDetailResponse, SessionListQuery, SessionListResponse, SessionOverviewQuery,
     SessionOverviewResponse, SessionProgressResponse, SessionRouteResponse, SessionStatsQuery,
-    SessionStatsResponse, ShutdownRequest, ShutdownResponse, StatusResponse, TokenRotateRequest,
-    TokenRotateResponse, Topic, UnroutedListResponse, UsageQuery, UsageResponse,
-    WarmupListResponse, WarmupRunRequest, WarmupRunResponse, decode_error_envelope,
-    decode_response,
+    SessionStatsResponse, SessionTranscriptResponse, ShutdownRequest, ShutdownResponse,
+    StatusResponse, TokenRotateRequest, TokenRotateResponse, Topic, UnroutedListResponse,
+    UsageQuery, UsageResponse, WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
+    decode_error_envelope, decode_response,
 };
 use http::header;
 use http_body_util::{BodyExt, Full, Limited};
@@ -942,6 +942,58 @@ impl Client {
         self.get("/v1/hofund/sessions/progress").await
     }
 
+    /// Returns one listed session.
+    pub async fn session(&self, id: &str) -> Result<SessionDetailResponse, ClientError> {
+        self.get(&format!("/v1/hofund/sessions/{}", encode_segment(id)))
+            .await
+    }
+
+    /// Reads one session or listed subagent transcript.
+    pub async fn session_transcript(
+        &self,
+        id: &str,
+        sub: Option<&str>,
+    ) -> Result<SessionTranscriptResponse, ClientError> {
+        let path = format!("/v1/hofund/sessions/{}/transcript", encode_segment(id));
+        let path = sub.map_or(path.clone(), |sub| {
+            with_query(&path, vec![("sub", sub.to_owned())])
+        });
+        self.get(&path).await
+    }
+
+    /// Reads one session as Markdown without creating a local file.
+    pub async fn session_markdown(&self, id: &str) -> Result<String, ClientError> {
+        let response = self
+            .open(
+                http::Method::GET,
+                &format!("/v1/hofund/sessions/{}/markdown", encode_segment(id)),
+                None,
+                None,
+            )
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(error_response(status, response.into_body()).await);
+        }
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        if !content_type.starts_with("text/markdown") {
+            return Err(ClientError::Transport(
+                "session Markdown response has the wrong content type".to_owned(),
+            ));
+        }
+        let body = Limited::new(response.into_body(), MAX_RESPONSE_BODY_BYTES)
+            .collect()
+            .await
+            .map_err(|error| transport("control response body failed", error))?
+            .to_bytes();
+        String::from_utf8(body.to_vec())
+            .map_err(|_| ClientError::Transport("session Markdown is not UTF-8".to_owned()))
+    }
+
     /// Reports usage for a period.
     pub async fn usage(&self, query: UsageQuery) -> Result<UsageResponse, ClientError> {
         let url = format!("/v1/hofund/usage?{}", query.encode());
@@ -1577,6 +1629,13 @@ mod route_tests {
             "/v1/hofund/sessions/progress" => {
                 serde_json::to_vec(&proto::SessionProgressResponse::default())
             }
+            "/v1/hofund/sessions/fake%3Aone" => {
+                serde_json::to_vec(&proto::SessionDetailResponse::default())
+            }
+            "/v1/hofund/sessions/fake%3Aone/transcript" => {
+                serde_json::to_vec(&proto::SessionTranscriptResponse::default())
+            }
+            "/v1/hofund/sessions/fake%3Aone/markdown" => Ok(b"# Fixture".to_vec()),
             "/v1/hofund/usage" => serde_json::to_vec(&proto::UsageResponse::default()),
             "/v1/hofund/token/rotate" => serde_json::to_vec(&proto::TokenRotateResponse::default()),
             "/v1/hofund/shutdown" => serde_json::to_vec(&proto::ShutdownResponse::default()),
@@ -1662,8 +1721,13 @@ mod route_tests {
                                     content_types,
                                     body,
                                 });
+                                let content_type = if path.ends_with("/markdown") {
+                                    "text/markdown; charset=utf-8"
+                                } else {
+                                    "application/json"
+                                };
                                 let response = http::Response::builder()
-                                    .header(http::header::CONTENT_TYPE, "application/json")
+                                    .header(http::header::CONTENT_TYPE, content_type)
                                     .body(Full::new(std::io::Cursor::new(reply_body(&path))))
                                     .expect("response");
                                 Ok::<_, Infallible>(response)
@@ -1904,6 +1968,16 @@ mod route_tests {
             .await
             .expect("session overview");
         client.session_progress().await.expect("session progress");
+        client.session("fake:one").await.expect("session detail");
+        client
+            .session_transcript("fake:one", Some("child/agent"))
+            .await
+            .expect("session transcript");
+        let markdown = client
+            .session_markdown("fake:one")
+            .await
+            .expect("session Markdown");
+        assert_eq!(markdown, "# Fixture");
         server.abort();
 
         let paths: Vec<String> = recorded
@@ -1919,6 +1993,9 @@ mod route_tests {
                 "/v1/hofund/sessions/stats",
                 "/v1/hofund/sessions/overview?agent=fake&cwd=%2Fwork%20dir",
                 "/v1/hofund/sessions/progress",
+                "/v1/hofund/sessions/fake%3Aone",
+                "/v1/hofund/sessions/fake%3Aone/transcript?sub=child%2Fagent",
+                "/v1/hofund/sessions/fake%3Aone/markdown",
             ]
         );
     }

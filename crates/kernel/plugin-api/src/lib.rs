@@ -105,7 +105,8 @@ pub use redaction::{redact_token, safe_url};
 pub use secrecy::SecretString;
 pub use session::{
     SessionCompression, SessionDay, SessionFile, SessionLocator, SessionParse, SessionParser,
-    SessionRecord, SessionStore, SessionTokens, SessionUsageEvent,
+    SessionPart, SessionRecord, SessionStore, SessionTokens, SessionTranscript,
+    SessionTranscriptParser, SessionUsageEvent,
 };
 pub use subscription::{DynSubscriptionFactory, Subscription, SubscriptionFactory};
 pub use upstream::{

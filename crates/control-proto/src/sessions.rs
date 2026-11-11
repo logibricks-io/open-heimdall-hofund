@@ -350,6 +350,93 @@ impl Default for SessionProgressResponse {
     }
 }
 
+/// One session and whether its transcript can be read.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct SessionDetailResponse {
+    /// Body wire version.
+    pub version: u32,
+    /// The same session object returned by the list route.
+    #[serde(flatten)]
+    pub session: SessionSummary,
+    /// Whether the plugin supports reading this session's own transcript.
+    pub transcript_available: bool,
+}
+
+impl Default for SessionDetailResponse {
+    fn default() -> Self {
+        Self {
+            version: API_VERSION,
+            session: SessionSummary::default(),
+            transcript_available: false,
+        }
+    }
+}
+
+/// One transcript content part on the control wire.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct SessionTranscriptPart {
+    /// Speaker: user, assistant, or tool.
+    pub role: String,
+    /// Content kind.
+    pub kind: String,
+    /// Tool name when present.
+    pub name: String,
+    /// Text content.
+    pub text: String,
+}
+
+/// Transcript response.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct SessionTranscriptResponse {
+    /// Body wire version.
+    pub version: u32,
+    /// Content parts in file order.
+    pub parts: Vec<SessionTranscriptPart>,
+    /// Whether input bounds omitted content.
+    pub cut: bool,
+    /// Optional source label.
+    pub source: String,
+}
+
+impl Default for SessionTranscriptResponse {
+    fn default() -> Self {
+        Self {
+            version: API_VERSION,
+            parts: Vec::new(),
+            cut: false,
+            source: String::new(),
+        }
+    }
+}
+
+/// Optional subagent selector for a transcript read.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SessionTranscriptQuery {
+    /// An id listed on the parent session's `subagents`.
+    pub sub: Option<String>,
+}
+
+impl SessionTranscriptQuery {
+    /// Parses and validates the transcript query string.
+    ///
+    /// # Errors
+    ///
+    /// Returns `BadRequest` for an unknown, duplicate, or malformed parameter.
+    pub fn parse(query: Option<&str>) -> Result<Self, ControlError> {
+        let mut out = Self::default();
+        for (key, value) in query_fields(query, &["sub"])? {
+            if key == "sub" && !value.is_empty() {
+                out.sub = Some(value);
+            }
+        }
+        Ok(out)
+    }
+}
+
 fn parse_days(value: &str) -> Result<u32, ControlError> {
     match value {
         "0" | "1" | "7" | "30" | "90" => value

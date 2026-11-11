@@ -5,14 +5,15 @@ use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Days, Local, NaiveDate, NaiveTime, TimeZone};
 use hofund_control_proto::{
-    ControlError, ControlErrorKind, SessionConsent, SessionDayStats, SessionListQuery,
-    SessionListResponse, SessionOverviewDay, SessionOverviewQuery, SessionOverviewResponse,
-    SessionOverviewTop, SessionProgressResponse, SessionStatShare, SessionStatsQuery,
-    SessionStatsResponse, SessionSummary, SessionTokenTotals,
+    ControlError, ControlErrorKind, SessionConsent, SessionDayStats, SessionDetailResponse,
+    SessionListQuery, SessionListResponse, SessionOverviewDay, SessionOverviewQuery,
+    SessionOverviewResponse, SessionOverviewTop, SessionProgressResponse, SessionStatShare,
+    SessionStatsQuery, SessionStatsResponse, SessionSummary, SessionTokenTotals,
+    SessionTranscriptPart, SessionTranscriptResponse,
 };
 use hofund_gateway::control::ControlFailure;
 use hofund_model_catalog::EffectivePricer;
-use hofund_plugin_api::{SessionDay, SessionRecord, SessionStore, SessionTokens};
+use hofund_plugin_api::{SessionDay, SessionFile, SessionRecord, SessionStore, SessionTokens};
 use hofund_sessions::consent::Consent;
 use hofund_sessions::index::SessionIndex;
 use hofund_sessions::pricing::{price_records, token_cost};
@@ -188,6 +189,119 @@ impl SessionControl {
             })
             .collect();
         Ok(response)
+    }
+
+    pub(crate) fn detail(&self, id: &str) -> Result<SessionDetailResponse, ControlFailure> {
+        let record = self.session_record(id)?;
+        let transcript_available = self
+            .stores
+            .iter()
+            .find(|store| store.agent() == record.agent)
+            .is_some_and(|store| store.transcript_available())
+            && !record.path.as_os_str().is_empty();
+        let mut response = SessionDetailResponse::default();
+        response.session = session_summary(&record);
+        response.transcript_available = transcript_available;
+        Ok(response)
+    }
+
+    pub(crate) fn transcript(
+        &self,
+        id: &str,
+        sub: Option<&str>,
+    ) -> Result<SessionTranscriptResponse, ControlFailure> {
+        let (_, transcript) = self.read_transcript(id, sub)?;
+        let mut response = SessionTranscriptResponse::default();
+        response.parts = transcript
+            .parts
+            .into_iter()
+            .map(|part| {
+                let mut out = SessionTranscriptPart::default();
+                out.role = part.role;
+                out.kind = part.kind;
+                out.name = part.name;
+                out.text = part.text;
+                out
+            })
+            .collect();
+        response.cut = transcript.cut;
+        response.source = transcript.source;
+        Ok(response)
+    }
+
+    pub(crate) fn markdown(&self, id: &str) -> Result<String, ControlFailure> {
+        let (record, transcript) = self.read_transcript(id, None)?;
+        Ok(hofund_sessions::read::markdown(&record, &transcript))
+    }
+
+    fn read_transcript(
+        &self,
+        id: &str,
+        sub: Option<&str>,
+    ) -> Result<(SessionRecord, hofund_plugin_api::SessionTranscript), ControlFailure> {
+        self.check_read_consent(id)?;
+        let record = self.session_record(id)?;
+        if sub.is_some_and(|sub| !record.subagents.iter().any(|listed| listed == sub)) {
+            return Err(session_not_found());
+        }
+        let store = self
+            .stores
+            .iter()
+            .find(|store| store.agent() == record.agent)
+            .ok_or_else(session_not_found)?;
+        let (root, file) = self.session_file(store.as_ref(), &record, sub)?;
+        let transcript = hofund_sessions::read::transcript(&root, store.as_ref(), &file)
+            .map_err(|_| session_internal())?;
+        Ok((record, transcript))
+    }
+
+    fn session_record(&self, id: &str) -> Result<SessionRecord, ControlFailure> {
+        self.records()?
+            .into_iter()
+            .find(|record| record.id == id)
+            .ok_or_else(session_not_found)
+    }
+
+    fn check_read_consent(&self, id: &str) -> Result<(), ControlFailure> {
+        let state = self.state.lock().map_err(|_| session_internal())?;
+        if let Some((agent, _)) = id.split_once(':')
+            && !state.consent.allows(agent)
+        {
+            return Err(ControlError::new(
+                ControlErrorKind::Forbidden,
+                "session reads are not consented for this agent",
+                "sessions",
+            )
+            .into());
+        }
+        Ok(())
+    }
+
+    fn session_file(
+        &self,
+        store: &dyn SessionStore,
+        record: &SessionRecord,
+        sub: Option<&str>,
+    ) -> Result<(PathBuf, SessionFile), ControlFailure> {
+        for root in store.locator().roots() {
+            if !hofund_sessions::open::within_root(&root, &record.path) {
+                continue;
+            }
+            let files = store.files(&root).map_err(|_| session_internal())?;
+            let found = files.into_iter().find(|file| {
+                if sub.is_none() {
+                    file.path == record.path
+                } else {
+                    sub.is_some_and(|sub| {
+                        file.id == sub || format!("{}:{}", record.agent, file.id) == sub
+                    })
+                }
+            });
+            if let Some(file) = found {
+                return Ok((root, file));
+            }
+        }
+        Err(session_not_found())
     }
 
     pub(crate) fn progress(&self) -> SessionProgressResponse {
@@ -394,6 +508,15 @@ fn stat_shares(shares: BTreeMap<String, StatShare>) -> Vec<SessionStatShare> {
             out
         })
         .collect()
+}
+
+fn session_not_found() -> ControlFailure {
+    ControlError::new(
+        ControlErrorKind::NotFound,
+        "no such session or subagent",
+        "sessions",
+    )
+    .into()
 }
 
 fn session_internal() -> ControlFailure {

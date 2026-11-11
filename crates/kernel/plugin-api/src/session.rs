@@ -262,6 +262,67 @@ impl SessionRecord {
     }
 }
 
+/// One transcript content part.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
+pub struct SessionPart {
+    /// Speaker: user, assistant, or tool.
+    pub role: String,
+    /// Content kind: text, thinking, `tool_use`, `tool_result`, context, or image.
+    pub kind: String,
+    /// Tool name when the part is a call or result.
+    pub name: String,
+    /// Text content.
+    pub text: String,
+}
+
+impl SessionPart {
+    /// Constructs one content part.
+    #[must_use]
+    pub fn new(
+        role: impl Into<String>,
+        kind: impl Into<String>,
+        name: impl Into<String>,
+        text: impl Into<String>,
+    ) -> Self {
+        Self {
+            role: role.into(),
+            kind: kind.into(),
+            name: name.into(),
+            text: text.into(),
+        }
+    }
+}
+
+/// A session transcript read from its own file.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
+pub struct SessionTranscript {
+    /// Content parts in file order.
+    pub parts: Vec<SessionPart>,
+    /// Whether input limits omitted later content.
+    pub cut: bool,
+    /// Optional source label; native agent files leave it empty.
+    pub source: String,
+}
+
+/// Incremental transcript parser supplied by a session plugin.
+pub trait SessionTranscriptParser: Send {
+    /// Consumes one depth-checked JSON value.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when the value cannot be interpreted.
+    fn push(&mut self, value: &serde_json::Value) -> Result<(), PluginError>;
+
+    /// Finishes the transcript.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when the transcript cannot be completed.
+    fn finish(self: Box<Self>) -> Result<SessionTranscript, PluginError>;
+}
+
 /// Compression the kernel removes before bounded JSONL parsing.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
@@ -376,4 +437,24 @@ pub trait SessionStore: Send + Sync {
         file: &SessionFile,
         state: Option<&str>,
     ) -> Result<Box<dyn SessionParser>, PluginError>;
+
+    /// Whether this store can read a transcript from a listed file.
+    fn transcript_available(&self) -> bool {
+        false
+    }
+
+    /// Starts a transcript parser for `file`. The kernel opens and bounds it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when this store does not support transcript reads.
+    fn transcript_parser(
+        &self,
+        file: &SessionFile,
+    ) -> Result<Box<dyn SessionTranscriptParser>, PluginError> {
+        let _ = file;
+        Err(PluginError::unsupported(
+            "session transcripts are not supported by this store",
+        ))
+    }
 }

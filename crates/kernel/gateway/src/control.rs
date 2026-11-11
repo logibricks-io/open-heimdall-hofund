@@ -37,12 +37,13 @@ use hofund_control_proto::{
     ProviderTestResponse, ProviderWriteResponse, QuotaAlertsResponse, QuotaAlertsSetRequest,
     QuotaAlertsSetResponse, QuotaCreditsModesResponse, QuotaCreditsSetRequest,
     QuotaCreditsSetResponse, QuotaHistoryQuery, QuotaHistoryResponse, QuotaQuery, QuotaResponse,
-    ReloadRequest, RouteListResponse, RouteModelListResponse, RouteQuery, SessionListQuery,
-    SessionListResponse, SessionOverviewQuery, SessionOverviewResponse, SessionProgressResponse,
-    SessionRouteResponse, SessionStatsQuery, SessionStatsResponse, ShutdownRequest,
-    ShutdownResponse, StatusResponse, TokenRotateRequest, TokenRotateResponse, Topic,
-    UnroutedListResponse, UsageQuery, UsageResponse, WarmupListResponse, WarmupRunRequest,
-    WarmupRunResponse, decode_request,
+    ReloadRequest, RouteListResponse, RouteModelListResponse, RouteQuery, SessionDetailResponse,
+    SessionListQuery, SessionListResponse, SessionOverviewQuery, SessionOverviewResponse,
+    SessionProgressResponse, SessionRouteResponse, SessionStatsQuery, SessionStatsResponse,
+    SessionTranscriptQuery, SessionTranscriptResponse, ShutdownRequest, ShutdownResponse,
+    StatusResponse, TokenRotateRequest, TokenRotateResponse, Topic, UnroutedListResponse,
+    UsageQuery, UsageResponse, WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
+    decode_request,
 };
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
@@ -644,6 +645,25 @@ pub trait ControlState: Send + Sync {
     fn session_progress(&self) -> ControlFuture<'_, SessionProgressResponse> {
         Box::pin(async { Err(unsupported_sessions()) })
     }
+    /// Returns one listed session.
+    fn session(&self, id: String) -> ControlFuture<'_, SessionDetailResponse> {
+        let _ = id;
+        Box::pin(async { Err(unsupported_sessions()) })
+    }
+    /// Reads one session or listed subagent transcript.
+    fn session_transcript(
+        &self,
+        id: String,
+        sub: Option<String>,
+    ) -> ControlFuture<'_, SessionTranscriptResponse> {
+        let _ = (id, sub);
+        Box::pin(async { Err(unsupported_sessions()) })
+    }
+    /// Renders one session transcript as a Markdown response body.
+    fn session_markdown(&self, id: String) -> ControlFuture<'_, String> {
+        let _ = id;
+        Box::pin(async { Err(unsupported_sessions()) })
+    }
     /// Reports usage for a period.
     fn usage(&self, query: UsageQuery) -> ControlFuture<'_, UsageResponse>;
     /// Reports what is left of every subscription, with each account's
@@ -1003,6 +1023,18 @@ impl Control {
             .route(
                 "/v1/hofund/sessions/progress",
                 get(session_progress).head(method_not_allowed),
+            )
+            .route(
+                "/v1/hofund/sessions/{id}/transcript",
+                get(session_transcript).head(method_not_allowed),
+            )
+            .route(
+                "/v1/hofund/sessions/{id}/markdown",
+                get(session_markdown).head(method_not_allowed),
+            )
+            .route(
+                "/v1/hofund/sessions/{id}",
+                get(session).head(method_not_allowed),
             )
             .route("/v1/hofund/usage", get(usage).head(method_not_allowed))
             .route(
@@ -1885,6 +1917,52 @@ async fn session_overview(State(state): State<HttpState>, uri: Uri) -> Response 
 
 async fn session_progress(State(state): State<HttpState>) -> Response {
     operation_response!(state.control.state.session_progress().await)
+}
+
+async fn session(
+    State(state): State<HttpState>,
+    id: Result<AxumPath<String>, PathRejection>,
+) -> Response {
+    let id = match path_id(id) {
+        Ok(id) => id,
+        Err(failure) => return failure_response(failure),
+    };
+    operation_response!(state.control.state.session(id).await)
+}
+
+async fn session_transcript(
+    State(state): State<HttpState>,
+    id: Result<AxumPath<String>, PathRejection>,
+    uri: Uri,
+) -> Response {
+    let id = match path_id(id) {
+        Ok(id) => id,
+        Err(failure) => return failure_response(failure),
+    };
+    let query = match SessionTranscriptQuery::parse(uri.query()) {
+        Ok(query) => query,
+        Err(error) => return failure_response(error.into()),
+    };
+    operation_response!(state.control.state.session_transcript(id, query.sub).await)
+}
+
+async fn session_markdown(
+    State(state): State<HttpState>,
+    id: Result<AxumPath<String>, PathRejection>,
+) -> Response {
+    let id = match path_id(id) {
+        Ok(id) => id,
+        Err(failure) => return failure_response(failure),
+    };
+    match state.control.state.session_markdown(id).await {
+        Ok(markdown) => Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "text/markdown; charset=utf-8")
+            .header(header::CACHE_CONTROL, "no-store")
+            .body(Body::from(markdown))
+            .unwrap_or_else(|_| Response::new(Body::empty())),
+        Err(failure) => failure_response(failure),
+    }
 }
 
 async fn usage(State(state): State<HttpState>, uri: Uri) -> Response {

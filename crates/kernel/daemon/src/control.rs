@@ -26,12 +26,12 @@ use hofund_control_proto::{
     QuotaAlertsSetResponse, QuotaCreditsModesResponse, QuotaCreditsSetRequest,
     QuotaCreditsSetResponse, QuotaHistoryQuery, QuotaHistoryResponse, QuotaQuery, QuotaResponse,
     RouteListResponse, RouteModel, RouteModelListResponse, RouteQuery, RouteReserve, ServeRole,
-    SessionListQuery, SessionListResponse, SessionOverviewQuery, SessionOverviewResponse,
-    SessionProgressResponse, SessionRouteResponse, SessionStatsQuery, SessionStatsResponse,
-    ShutdownRequest, ShutdownResponse, ShutdownState, StatusResponse, TokenRotateRequest,
-    TokenRotateResponse, UnroutedListResponse, UsageBreakdownBy, UsageBreakdownGroup, UsagePeriod,
-    UsageQuery, UsageResponse, UsageRow, UsageTotals, WarmupAccountRow, WarmupListResponse,
-    WarmupRunRequest, WarmupRunResponse,
+    SessionDetailResponse, SessionListQuery, SessionListResponse, SessionOverviewQuery,
+    SessionOverviewResponse, SessionProgressResponse, SessionRouteResponse, SessionStatsQuery,
+    SessionStatsResponse, SessionTranscriptResponse, ShutdownRequest, ShutdownResponse,
+    ShutdownState, StatusResponse, TokenRotateRequest, TokenRotateResponse, UnroutedListResponse,
+    UsageBreakdownBy, UsageBreakdownGroup, UsagePeriod, UsageQuery, UsageResponse, UsageRow,
+    UsageTotals, WarmupAccountRow, WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
 };
 use hofund_control_proto::{
     ConfigApplyRequest, ConfigResponse, ConfigValidateRequest, ConfigValidationResponse,
@@ -1311,6 +1311,29 @@ impl ControlState for DaemonControl {
     fn session_progress(&self) -> ControlFuture<'_, SessionProgressResponse> {
         let sessions = Arc::clone(&self.sessions);
         Box::pin(async move { Ok(sessions.progress()) })
+    }
+
+    fn session(&self, id: String) -> ControlFuture<'_, SessionDetailResponse> {
+        let sessions = Arc::clone(&self.sessions);
+        Box::pin(session_task(sessions, move |sessions| sessions.detail(&id)))
+    }
+
+    fn session_transcript(
+        &self,
+        id: String,
+        sub: Option<String>,
+    ) -> ControlFuture<'_, SessionTranscriptResponse> {
+        let sessions = Arc::clone(&self.sessions);
+        Box::pin(session_task(sessions, move |sessions| {
+            sessions.transcript(&id, sub.as_deref())
+        }))
+    }
+
+    fn session_markdown(&self, id: String) -> ControlFuture<'_, String> {
+        let sessions = Arc::clone(&self.sessions);
+        Box::pin(session_task(sessions, move |sessions| {
+            sessions.markdown(&id)
+        }))
     }
 
     fn usage(&self, query: UsageQuery) -> ControlFuture<'_, UsageResponse> {

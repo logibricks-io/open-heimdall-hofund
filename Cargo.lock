@@ -2532,6 +2532,7 @@ dependencies = [
 name = "hofund-sessions"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "hofund-plugin-api",
  "hofund-usage",
  "libc",

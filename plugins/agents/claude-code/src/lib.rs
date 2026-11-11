@@ -15,8 +15,8 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Local};
 use hofund_plugin_api::{
-    PluginError, SessionDay, SessionFile, SessionLocator, SessionParse, SessionParser,
-    SessionRecord, SessionStore, SessionTokens,
+    PluginError, SessionDay, SessionFile, SessionLocator, SessionParse, SessionParser, SessionPart,
+    SessionRecord, SessionStore, SessionTokens, SessionTranscript, SessionTranscriptParser,
 };
 use hofund_plugin_sdk::{chrono, json, serde};
 use json::Value;
@@ -137,6 +137,17 @@ impl SessionStore for ClaudeStore {
         Ok(Box::new(ClaudeParser {
             state: restored.unwrap_or_else(|| ClaudeState::new(file, parent)),
         }))
+    }
+
+    fn transcript_available(&self) -> bool {
+        true
+    }
+
+    fn transcript_parser(
+        &self,
+        _file: &SessionFile,
+    ) -> Result<Box<dyn SessionTranscriptParser>, PluginError> {
+        Ok(Box::new(ClaudeTranscriptParser::default()))
     }
 }
 
@@ -516,6 +527,112 @@ fn random_uuid(uuid: &str) -> bool {
         })
 }
 
+#[derive(Default)]
+struct ClaudeTranscriptParser {
+    transcript: SessionTranscript,
+}
+
+impl SessionTranscriptParser for ClaudeTranscriptParser {
+    fn push(&mut self, value: &Value) -> Result<(), PluginError> {
+        let kind = value.get("type").and_then(Value::as_str).unwrap_or("");
+        let is_meta = value
+            .get("isMeta")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let Some(content) = value
+            .get("message")
+            .and_then(|message| message.get("content"))
+        else {
+            return Ok(());
+        };
+        match kind {
+            "user" if !is_meta => self.transcript.parts.extend(claude_parts(content, "user")),
+            "assistant" => self
+                .transcript
+                .parts
+                .extend(claude_parts(content, "assistant")),
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn finish(self: Box<Self>) -> Result<SessionTranscript, PluginError> {
+        Ok(self.transcript)
+    }
+}
+
+fn claude_parts(content: &Value, role: &str) -> Vec<SessionPart> {
+    if let Some(text) = content.as_str() {
+        return vec![text_part(role, text)];
+    }
+    let Some(blocks) = content.as_array() else {
+        return Vec::new();
+    };
+    let mut parts = Vec::new();
+    for block in blocks {
+        let kind = block.get("type").and_then(Value::as_str).unwrap_or("");
+        let part = match kind {
+            "text" => block
+                .get("text")
+                .and_then(Value::as_str)
+                .map(|text| text_part(role, text)),
+            "thinking" => Some(SessionPart::new(
+                role,
+                "thinking",
+                "",
+                block.get("thinking").and_then(Value::as_str).unwrap_or(""),
+            )),
+            "tool_use" => Some(SessionPart::new(
+                role,
+                "tool_use",
+                block.get("name").and_then(Value::as_str).unwrap_or(""),
+                block
+                    .get("input")
+                    .map(|input| json::to_string_pretty(input).unwrap_or_default())
+                    .unwrap_or_default(),
+            )),
+            "tool_result" => Some(SessionPart::new(
+                "tool",
+                "tool_result",
+                "",
+                block.get("content").map(result_text).unwrap_or_default(),
+            )),
+            "image" => Some(SessionPart::new(role, "image", "", "[image]")),
+            _ => None,
+        };
+        parts.extend(part);
+    }
+    parts
+}
+
+fn text_part(role: &str, text: &str) -> SessionPart {
+    let trimmed = text.trim();
+    let kind = if trimmed.starts_with('<') || trimmed.starts_with("# AGENTS.md") {
+        "context"
+    } else {
+        "text"
+    };
+    SessionPart::new(role, kind, "", text)
+}
+
+fn result_text(content: &Value) -> String {
+    if let Some(text) = content.as_str() {
+        return text.to_owned();
+    }
+    if let Some(blocks) = content.as_array() {
+        return blocks
+            .iter()
+            .filter_map(|block| match block.get("type").and_then(Value::as_str) {
+                Some("text") => block.get("text").and_then(Value::as_str).map(str::to_owned),
+                Some("image") => Some("[image]".to_owned()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+    json::to_string(content).unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::{BufRead, BufReader};
@@ -575,6 +692,21 @@ mod tests {
         );
         assert_eq!(record.title, "Search the répo");
         assert_eq!(record.tokens().total(), 1100);
+    }
+
+    #[test]
+    fn claude_transcript_reads_fixture_content() {
+        let path = fixture("root/projects/-work-app/11111111-2222-3333-4444-555555555555.jsonl");
+        let file = SessionFile::new("fixture", &path);
+        let store = ClaudeStore::with_root(fixture("root"));
+        let mut parser = store.transcript_parser(&file).expect("parser");
+        for line in BufReader::new(std::fs::File::open(path).expect("fixture")).lines() {
+            let value = json::from_str(&line.expect("line")).expect("JSON");
+            parser.push(&value).expect("push");
+        }
+        let transcript = parser.finish().expect("transcript");
+        assert!(transcript.parts.iter().any(|part| part.role == "user"));
+        assert!(transcript.parts.iter().any(|part| part.role == "assistant"));
     }
 
     #[cfg(unix)]

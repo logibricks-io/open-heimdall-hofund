@@ -7,15 +7,17 @@ use std::sync::Arc;
 
 use chrono::Local;
 use hofund_control_proto::{
-    API_VERSION, ControlErrorKind, SessionListResponse, SessionOverviewResponse,
-    SessionProgressResponse, SessionStatsResponse, decode_error_envelope, decode_response,
+    API_VERSION, ControlErrorKind, SessionDetailResponse, SessionListResponse,
+    SessionOverviewResponse, SessionProgressResponse, SessionStatsResponse,
+    SessionTranscriptResponse, decode_error_envelope, decode_response,
 };
 use hofund_daemon::{
     CompiledPreset, ControlRuntime, DaemonRegistry, Running, StartOptions, start_linked,
 };
 use hofund_plugin_api::{
     AgentDescription, DynUpstreamFactory, InboundSurface, PluginError, ProtocolId, SessionFile,
-    SessionLocator, SessionParse, SessionParser, SessionRecord, SessionStore, SessionTokens,
+    SessionLocator, SessionParse, SessionParser, SessionPart, SessionRecord, SessionStore,
+    SessionTokens, SessionTranscript, SessionTranscriptParser,
 };
 use hofund_sessions::consent::Consent;
 
@@ -127,9 +129,43 @@ impl SessionStore for FakeStore {
             date: self.date.clone(),
         }))
     }
+
+    fn transcript_available(&self) -> bool {
+        true
+    }
+
+    fn transcript_parser(
+        &self,
+        _file: &SessionFile,
+    ) -> Result<Box<dyn SessionTranscriptParser>, PluginError> {
+        Ok(Box::new(FakeTranscriptParser::default()))
+    }
+}
+
+#[derive(Default)]
+struct FakeTranscriptParser {
+    transcript: SessionTranscript,
+}
+
+impl SessionTranscriptParser for FakeTranscriptParser {
+    fn push(&mut self, _value: &serde_json::Value) -> Result<(), PluginError> {
+        self.transcript.parts = vec![
+            SessionPart::new("user", "text", "", "Offline question"),
+            SessionPart::new("assistant", "text", "", "Offline answer"),
+        ];
+        Ok(())
+    }
+
+    fn finish(self: Box<Self>) -> Result<SessionTranscript, PluginError> {
+        Ok(self.transcript)
+    }
 }
 
 async fn start(dir: &Path) -> Running {
+    start_with_reads(dir, true).await
+}
+
+async fn start_with_reads(dir: &Path, reads: bool) -> Running {
     let now = Local::now();
     let agent = dir.join("agent");
     std::fs::create_dir(&agent).expect("agent root");
@@ -150,7 +186,7 @@ async fn start(dir: &Path) -> Running {
     .expect("config");
     let mut consent = Consent::new(dir);
     consent.settle();
-    consent.set_reads(Some(true), []).expect("consent");
+    consent.set_reads(Some(reads), []).expect("consent");
     start_linked(
         &config,
         registry,
@@ -244,4 +280,106 @@ async fn bad_days_return_a_control_error_without_reading_the_index() {
         .expect("error");
     assert_eq!(error.error.kind, ControlErrorKind::BadRequest);
     support::shutdown(running).await;
+}
+
+#[tokio::test]
+async fn detail_transcript_and_markdown_read_the_listed_file() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let running = start(dir.path()).await;
+
+    let response = get(&running, dir.path(), "/v1/hofund/sessions/fake:one").await;
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let detail: SessionDetailResponse =
+        decode_response(API_VERSION, &response.bytes().await.expect("detail body"))
+            .expect("detail");
+    assert_eq!(detail.session.id, "fake:one");
+    assert!(detail.transcript_available);
+    assert_eq!(detail.session.resume, None);
+
+    let response = get(
+        &running,
+        dir.path(),
+        "/v1/hofund/sessions/fake:one/transcript",
+    )
+    .await;
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let transcript: SessionTranscriptResponse = decode_response(
+        API_VERSION,
+        &response.bytes().await.expect("transcript body"),
+    )
+    .expect("transcript");
+    assert_eq!(transcript.parts.len(), 2);
+    assert_eq!(transcript.parts[0].text, "Offline question");
+    assert_eq!(transcript.parts[1].role, "assistant");
+
+    let response = get(
+        &running,
+        dir.path(),
+        "/v1/hofund/sessions/fake:one/transcript?sub=missing",
+    )
+    .await;
+    assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+
+    let response = get(
+        &running,
+        dir.path(),
+        "/v1/hofund/sessions/fake:one/markdown",
+    )
+    .await;
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .expect("content type"),
+        "text/markdown; charset=utf-8"
+    );
+    let markdown = response.text().await.expect("Markdown body");
+    assert!(markdown.contains("# Offline fixture"));
+    assert!(markdown.contains("Offline question"));
+    assert!(markdown.contains("Offline answer"));
+    assert!(markdown_files(dir.path()).is_empty());
+
+    for path in [
+        "/v1/hofund/sessions/fake:missing",
+        "/v1/hofund/sessions/fake:missing/transcript",
+        "/v1/hofund/sessions/fake:missing/markdown",
+    ] {
+        let response = get(&running, dir.path(), path).await;
+        assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND, "{path}");
+    }
+    support::shutdown(running).await;
+}
+
+#[tokio::test]
+async fn transcript_is_forbidden_when_agent_reads_are_off() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let running = start_with_reads(dir.path(), false).await;
+    let response = get(
+        &running,
+        dir.path(),
+        "/v1/hofund/sessions/fake:one/transcript",
+    )
+    .await;
+    assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
+    let error = decode_error_envelope(API_VERSION, &response.bytes().await.expect("error body"))
+        .expect("error");
+    assert_eq!(error.error.kind, ControlErrorKind::Forbidden);
+    support::shutdown(running).await;
+}
+
+fn markdown_files(root: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    let mut directories = vec![root.to_path_buf()];
+    while let Some(directory) = directories.pop() {
+        for entry in std::fs::read_dir(directory).expect("fixture directory") {
+            let path = entry.expect("directory entry").path();
+            if path.is_dir() {
+                directories.push(path);
+            } else if path.extension().is_some_and(|extension| extension == "md") {
+                files.push(path);
+            }
+        }
+    }
+    files
 }

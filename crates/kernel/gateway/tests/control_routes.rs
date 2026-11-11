@@ -252,6 +252,29 @@ impl ControlState for FakeControlState {
         self.reply("session_progress")
     }
 
+    fn session(
+        &self,
+        id: String,
+    ) -> ControlFuture<'_, hofund_control_proto::SessionDetailResponse> {
+        self.reply(format!("session:{id}"))
+    }
+
+    fn session_transcript(
+        &self,
+        id: String,
+        sub: Option<String>,
+    ) -> ControlFuture<'_, hofund_control_proto::SessionTranscriptResponse> {
+        self.reply(format!("session_transcript:{id}:{sub:?}"))
+    }
+
+    fn session_markdown(&self, id: String) -> ControlFuture<'_, String> {
+        self.calls
+            .lock()
+            .expect("calls")
+            .push(format!("session_markdown:{id}"));
+        Box::pin(async move { Ok(format!("# {id}")) })
+    }
+
     fn usage(&self, query: UsageQuery) -> ControlFuture<'_, UsageResponse> {
         self.reply(format!("usage:{:?}", query.period))
     }
@@ -488,6 +511,12 @@ fn operation_routes() -> Vec<(Method, &'static str, Vec<u8>)> {
             Vec::new(),
         ),
         (Method::GET, "/v1/hofund/sessions/progress", Vec::new()),
+        (Method::GET, "/v1/hofund/sessions/fake%3Aone", Vec::new()),
+        (
+            Method::GET,
+            "/v1/hofund/sessions/fake%3Aone/transcript?sub=child",
+            Vec::new(),
+        ),
         (Method::GET, "/v1/hofund/usage?period=day", Vec::new()),
         (Method::GET, "/v1/hofund/quotas?kept=1", Vec::new()),
         (
@@ -648,6 +677,8 @@ async fn control_routes_success_and_error_envelopes_against_fake_state() {
             "session_stats:Some(0)",
             "session_overview:fake",
             "session_progress",
+            "session:fake:one",
+            "session_transcript:fake:one:Some(\"child\")",
             "usage:Day",
             "quotas:kept=true",
             "quota_history:Some(\"7\"):Some(\"acct\"):Some(\"Me@x.io\")",
@@ -940,6 +971,31 @@ async fn query_and_body_rejections_use_control_envelopes() {
             ControlErrorKind::BadRequest | ControlErrorKind::UnsupportedVersion
         ));
     }
+}
+
+#[tokio::test]
+async fn session_markdown_is_a_body_only_markdown_response() {
+    let state = Arc::new(FakeControlState::default());
+    let (status, headers, body) = call(
+        app(&state),
+        Method::GET,
+        "/v1/hofund/sessions/fake%3Aone/markdown",
+        Vec::new(),
+        true,
+        false,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        headers.get(header::CONTENT_TYPE).expect("content type"),
+        "text/markdown; charset=utf-8"
+    );
+    assert_no_store(&headers);
+    assert_eq!(body, b"# fake:one");
+    assert_eq!(
+        state.calls.lock().expect("calls").as_slice(),
+        ["session_markdown:fake:one"]
+    );
 }
 
 #[tokio::test]
