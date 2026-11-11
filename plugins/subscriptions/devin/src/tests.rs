@@ -374,6 +374,22 @@ fn quota_failures_do_not_use_chat_or_raw_transport_classification() {
 }
 
 #[test]
+fn quota_unauthenticated_code_rejects_even_on_http_500() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let id = seed_account(&host, "devin-rejected-key", "rejected@example.test");
+    host.http().enqueue_response(
+        500,
+        &[],
+        br#"{"error":{"code":"unauthenticated","message":"expired"}}"#,
+    );
+    let error = block_on(sub.quota(&id, host.context())).expect_err("rejected");
+    assert_eq!(error.kind(), PluginErrorKind::Auth);
+    assert_eq!(error.status(), None);
+}
+
+#[test]
 fn unknown_free_models_leave_exhausted_windows_account_wide() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);

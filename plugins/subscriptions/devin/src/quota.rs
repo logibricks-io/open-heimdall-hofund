@@ -51,7 +51,7 @@ pub(crate) async fn read(
         let remaining = BODY_CAP - bytes.len();
         bytes.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
     }
-    if status == 401 {
+    if rejected(status, &bytes) {
         return Err(PluginError::auth(
             "Devin's sign-in has expired — sign in again",
         ));
@@ -169,6 +169,20 @@ fn reset_at(value: Option<&Value>) -> Option<SystemTime> {
         return None;
     }
     UNIX_EPOCH.checked_add(Duration::from_secs(seconds as u64))
+}
+
+fn rejected(status: u16, body: &[u8]) -> bool {
+    if status == 401 {
+        return true;
+    }
+    let Ok(value) = hofund_plugin_sdk::json::from_slice::<Value>(body) else {
+        return false;
+    };
+    let object = value
+        .get("error")
+        .filter(|error| error.is_object())
+        .unwrap_or(&value);
+    object.get("code").and_then(Value::as_str) == Some("unauthenticated")
 }
 
 fn rpc_failure(error: PluginError) -> PluginError {
