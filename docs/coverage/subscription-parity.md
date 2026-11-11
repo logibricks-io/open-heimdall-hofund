@@ -14,7 +14,7 @@ Legend: **Done** = matches the reference at checklist granularity; **Partial** =
 |---|---|---|---|---|---|
 | Claude Pro/Max (`claude`) | 1 | 11 | 9 | 2 | 0 |
 | Cursor (`cursor`) | 1 | 11 | 7 | 2 | 0 |
-| Devin (`devin`) | 7 | 7 | 4 | 1 | 0 |
+| Devin (`devin`) | 7 | 8 | 3 | 1 | 0 |
 | Zed (`zed`) | 0 | 6 | 1 | 3 | 0 |
 | Kiro (`kiro`) | 0 | 13 | 5 | 1 | 0 |
 | Factory / Droid (`factory`) | 1 | 15 | 0 | 3 | 0 |
@@ -142,8 +142,8 @@ Every other gap below maps to an existing plan item.
 | h | tool calls | Plugin `tool-ids.test.mjs`, split calls | Refused before RPC and on tool-only replies with fixed 404 | Missing | **R-13** |
 | i | images | Plugin `images.test.mjs`, `devin_images.go` in core catalog | Refused before RPC with fixed 404 | Missing | **R-13** |
 | j | reasoning / thinking | `thinking-signature.test.mjs`, effort variants | Field 9 becomes thinking deltas; Chat/Responses/Messages effort selection; signed history refused | Partial | Signature replay (**R-13**) |
-| k | quota / usage | Plugin `usage.test.mjs` | `quota()` empty vec (`lib.rs:179-185`); stream usage omitted | Missing | Usage RPC and stream counters (**R-13**) |
-| l | model list | CLI JSON + `GetCliModelConfigs` (`devin/index.mjs:44-134`) | Live raw-protobuf RPC, isolated CLI fallback, embedded snapshot, per-account freshness/retry cache | Done | Free-tier and price enrichment (**R-13**) |
+| k | quota / usage | Plugin `usage.test.mjs` | R-13a `quota.rs` reads daily/weekly and informational ACU windows; free ids survive as model exclusions; field 7 becomes finish usage with cache counters and output estimation | Partial | Plan/balance presentation and organization metadata are not represented by `Subscription::quota` |
+| l | model list | CLI JSON + `GetCliModelConfigs` (`devin/index.mjs:44-134`) | Live raw-protobuf RPC, isolated CLI fallback, embedded snapshot, per-account freshness/retry cache, tier-4 free flags, and matching-variant list prices | Done | — |
 | m | multi-account | EU host `eu.codeium.com` (plugin) | unverified in hofund | Partial | Region selection (**R-12**) |
 | n | error classification | Plugin `errors.test.mjs` | `errors.rs` section 6 HTTP/Connect mapping, exact empty-reply and broken-stream errors | Done | Tool/image-specific cases (**R-13**) |
 | o | keepalive | `keepalive.test.mjs` | None | Missing | **R-13** (new to the plan in this audit) |
@@ -152,7 +152,7 @@ Every other gap below maps to an existing plan item.
 
 ### Gaps (Devin)
 
-- Tools, images, reasoning signatures, usage — **L**, **R-13**
+- Tools, images, reasoning signatures, structured output, and Messages cache marks — **L**, **R-13**
 - PKCE sign-in (not only import) — **M**, **R-12**
 - CLI install/bootstrap — **S**, **R-12** (new to the plan in this audit)
 - Keepalive (`keepalive.test.mjs`) — **S**, **R-13** (new to the plan in this audit)

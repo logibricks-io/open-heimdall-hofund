@@ -1,6 +1,6 @@
 # Devin subscription upstream (R-12, R-13)
 
-Status: R-12a ships the shared protobuf/Connect codec and Devin's text-only chat and raw model-config message tables with golden byte tests. R-12b adds unary `GetChatMessage` execution with incremental text and reasoning streams, request gzip, section 6 error mapping, live `GetCliModelConfigs` with isolated CLI and snapshot fallbacks, variant selection, and stored-credential probes. PKCE, tools, images, usage, reasoning signatures, and keepalive remain deferred to their designated slices. The remaining R-12/R-13 sections are the contract for serving a model call on a Devin account through the same Windsurf/Codeium backend the Devin CLI uses.
+Status: R-12a ships the shared protobuf/Connect codec and Devin's text-only chat and raw model-config message tables with golden byte tests. R-12b adds unary `GetChatMessage` execution with incremental text and reasoning streams, request gzip, section 6 error mapping, live `GetCliModelConfigs` with isolated CLI and snapshot fallbacks, variant selection, and stored-credential probes. R-13a lands stream usage, `GetUserStatus` quota windows, free-tier model exclusions, and list prices. Tools, images, signed thinking, structured output, Messages cache marks, and keepalive remain for later R-13 slices; PKCE remains deferred to its designated slice. Keepalive stays off by default and is not exposed in product UI. The remaining R-12/R-13 sections are the contract for serving a model call on a Devin account through the same Windsurf/Codeium backend the Devin CLI uses.
 
 The wire contract is the reference's JavaScript subscription plugin (`packages/devin/index.mjs`, tests listed in section 7). The Go provider files (`internal/provider/devin.go`, `devin_accounts.go`, `devin_images.go`) cover CLI install paths, catalog shaping, and migration readers; they do not open `GetChatMessage`. Where Go and JavaScript disagree, JavaScript is the wire contract.
 
@@ -282,9 +282,9 @@ Structured output and other R-13-only wire fields: section 4.2 refusals (not a f
 **Successful execute** returns:
 
 1. `MessageStart` with generated id and the **requested** model id from the inbound request (`chat.model` in the reference stream, `index.mjs:1887`), not the resolved wire uid alone.
-2. `ContentBlockStart` text and/or thinking blocks: **`TextDelta` for field 3**; **R-12 forwards field-9 reasoning** (same `said` accounting as text, `index.mjs:1738-1740`) using the gateway’s reasoning stream shape for the inbound protocol. **For the whole stream**, do **not** emit IR events for fields **6, 10, 21, or 7** (section 1.7)—not only before `Ok(Completion::Stream)`.
+2. `ContentBlockStart` text and/or thinking blocks: **`TextDelta` for field 3**; **R-12 forwards field-9 reasoning** (same `said` accounting as text, `index.mjs:1738-1740`) using the gateway’s reasoning stream shape for the inbound protocol. **For the whole stream**, do **not** emit IR events for fields **6, 10, or 21** (section 1.7)—not only before `Ok(Completion::Stream)`.
 3. On clean end after text or reasoning was sent: map stop varint **3** to `StopReason::MaxTokens`; otherwise use **`StopReason::EndTurn`**. **Never** `StopReason::ToolUse` in R-12—even if the wire reports tool stop varint **10** or the reference would finish with `tool_calls` (`index.mjs:1781`). Tool-only replies (no field 3/9) stay section 1.7 **404** before `Ok`.
-4. Omit usage in R-12 even if field 7 arrives (R-13 billing path).
+4. R-12 omitted usage. R-13a consumes field 7 and attaches its counters to the finish event, estimating zero output from content bytes; field 7 alone still cannot open a success stream.
 
 Before `Ok(Completion::Stream)`, buffer until the first **`events`** output or a terminal error (`roundtrip`, `index.mjs:1851-1858`; section 1.7).
 
