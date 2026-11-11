@@ -20,6 +20,7 @@ members = [
     "plugins/agents/claude-code",
     "plugins/agents/cindy",
     "plugins/agents/codex",
+    "plugins/agents/minimax-code",
     "plugins/agents/raft",
     "plugins/inbound/codex-catalog",
     "plugins/inbound/retrieval",
@@ -91,6 +92,7 @@ hofund-plugin-api = { version = "0.1.0", path = "crates/kernel/plugin-api" }
 hofund-plugin-agent-claude = { version = "0.1.0", path = "plugins/agents/claude-code" }
 hofund-plugin-agent-cindy = { version = "0.1.0", path = "plugins/agents/cindy" }
 hofund-plugin-agent-codex = { version = "0.1.0", path = "plugins/agents/codex" }
+hofund-plugin-agent-minimax-code = { version = "0.1.0", path = "plugins/agents/minimax-code" }
 hofund-plugin-agent-raft = { version = "0.1.0", path = "plugins/agents/raft" }
 hofund-plugin-azure = { version = "0.1.0", path = "plugins/providers/azure" }
 hofund-plugin-bedrock = { version = "0.1.0", path = "plugins/providers/bedrock" }
@@ -128,6 +130,7 @@ hofund-secrets = { version = "0.1.0", path = "crates/kernel/secrets" }
 hofund-sessions = { version = "0.1.0", path = "crates/kernel/sessions" }
 hofund-tui = { version = "0.1.0", path = "apps/tui" }
 hofund-usage = { version = "0.1.0", path = "crates/kernel/usage" }
+base64 = "0.23.1"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 crossterm = "0.28.1"
 ratatui = "0.29.0"

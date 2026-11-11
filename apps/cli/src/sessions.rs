@@ -18,6 +18,7 @@ use sha2::{Digest, Sha256};
 use hofund_plugin_agent_cindy::CindyStore;
 use hofund_plugin_agent_claude::ClaudeStore;
 use hofund_plugin_agent_codex::CodexStore;
+use hofund_plugin_agent_minimax_code::MiniMaxStore;
 use hofund_plugin_agent_raft::RaftStore;
 
 pub(crate) const HELP: &str = "\
@@ -112,8 +113,9 @@ pub(crate) fn run(config: &Path, command: &Command) -> Result<String, String> {
     let claude = ClaudeStore::new();
     let cindy = CindyStore::new();
     let codex = CodexStore::new();
+    let minimax = MiniMaxStore::new();
     let raft = RaftStore::new();
-    let stores: [&dyn SessionStore; 4] = [&claude, &cindy, &codex, &raft];
+    let stores: [&dyn SessionStore; 5] = [&claude, &cindy, &codex, &minimax, &raft];
     run_with(config, command, &stores, Local::now())
 }
 
@@ -650,6 +652,32 @@ mod tests {
             std::fs::read_to_string(consent.path()).expect("consent"),
             "{\"asked\":false}\n"
         );
+    }
+
+    #[test]
+    fn minimax_reader_is_consent_gated_through_index() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config = temp.path().join("hofund.toml");
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../plugins/agents/minimax-code/tests/fixtures/root")
+            .canonicalize()
+            .expect("minimax fixtures");
+        let minimax = MiniMaxStore::with_root(root);
+        let stores: [&dyn SessionStore; 1] = [&minimax];
+        let list = Command::List(Options {
+            days: None,
+            model: String::new(),
+            folder: String::new(),
+            limit: 20,
+            json: false,
+        });
+        let on = Command::Read(Some(ReadChange {
+            on: true,
+            targets: vec!["minimax-code".to_owned()],
+        }));
+        run_with(&config, &on, &stores, Local::now()).expect("consent");
+        let listed = run_with(&config, &list, &stores, Local::now()).expect("list");
+        assert!(listed.contains("Hello minimax"), "{listed}");
     }
 
     #[test]
