@@ -2502,7 +2502,7 @@ fn unrouted_timeout_before_routing(
     )
 }
 
-fn request_header_pairs<'a>(headers: &'a HeaderMap) -> Vec<(&'a str, &'a str)> {
+fn request_header_pairs(headers: &HeaderMap) -> Vec<(&str, &str)> {
     headers
         .iter()
         .filter_map(|(name, value)| Some((name.as_str(), value.to_str().ok()?)))

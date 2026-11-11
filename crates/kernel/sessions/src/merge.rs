@@ -113,8 +113,8 @@ mod tests {
                 output_tokens: Some(1),
                 latency_ms: 1,
                 status: "200".to_owned(),
-              client_agent: "fixture".to_owned(),
-              session_id: "s1".to_owned(),
+                client_agent: "fixture".to_owned(),
+                session_id: "s1".to_owned(),
                 ..Row::default()
             })
             .expect("row");
@@ -126,5 +126,57 @@ mod tests {
         assert_eq!(added.len(), 1);
         assert!(added[0].gateway);
         assert!(added[0].read_only);
+    }
+
+    #[test]
+    fn r33_external_added_honors_copies_subagents_app_and_extras() {
+        let dir = tempfile::tempdir().expect("dir");
+        let ledger = Ledger::open(&dir.path().join("usage.sqlite")).expect("ledger");
+        for (agent, session) in [
+            ("fixture", "main"),
+            ("fixture", "copy-1"),
+            ("fixture", "sub-1"),
+            ("desktop", "main"),
+            ("other", "pi-dup"),
+        ] {
+            ledger
+                .record(&Row {
+                    created_unix: 10,
+                    model: "m".to_owned(),
+                    upstream: "up".to_owned(),
+                    latency_ms: 1,
+                    status: "200".to_owned(),
+                    client_agent: agent.to_owned(),
+                    session_id: session.to_owned(),
+                    ..Row::default()
+                })
+                .expect("row");
+        }
+        let mut native = SessionRecord::new("fixture", "main".to_owned(), "main.jsonl");
+        native.copies.push("copy-1".into());
+        native.subagents.push("sub-1".into());
+        native.app = "desktop".into();
+        let merged = merge_gateway_sessions(
+            dir.path(),
+            vec![native],
+            &ledger,
+            [("pi".into(), "pi-dup".into())],
+        )
+        .expect("merge");
+        assert_eq!(merged.len(), 2);
+        assert!(
+            merged
+                .iter()
+                .any(|record| record.id == "main" && !record.gateway)
+        );
+        assert!(
+            merged
+                .iter()
+                .any(|record| record.agent == "other" && record.id == "pi-dup" && record.gateway)
+        );
+        let gateway_only =
+            merge_gateway_sessions(dir.path(), Vec::new(), &ledger, []).expect("merge");
+        assert_eq!(gateway_only.len(), 5);
+        assert!(gateway_only.iter().all(|record| record.gateway));
     }
 }
