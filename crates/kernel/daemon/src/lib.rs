@@ -506,7 +506,7 @@ async fn start_inner(
     )));
     let agent_descriptions = registry.agents();
     let session_header_names =
-        hofund_gateway::session_headers::gateway_session_header_names(&agent_descriptions);
+        hofund_gateway::session_headers::gateway_session_header_names(agent_descriptions);
     let request_agent: hofund_gateway::RequestAgentHook = Arc::new({
         let descriptions = agent_descriptions;
         move |headers, identity| {
