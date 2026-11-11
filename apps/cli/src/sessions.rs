@@ -15,6 +15,7 @@ use hofund_sessions::pricing::{TokenPrice, price_records, token_cost};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+use hofund_plugin_agent_cindy::CindyStore;
 use hofund_plugin_agent_claude::ClaudeStore;
 use hofund_plugin_agent_codex::CodexStore;
 use hofund_plugin_agent_raft::RaftStore;
@@ -109,9 +110,10 @@ pub(crate) fn parse(words: &[&str], flags: Flags) -> Result<Command, String> {
 
 pub(crate) fn run(config: &Path, command: &Command) -> Result<String, String> {
     let claude = ClaudeStore::new();
+    let cindy = CindyStore::new();
     let codex = CodexStore::new();
     let raft = RaftStore::new();
-    let stores: [&dyn SessionStore; 3] = [&claude, &codex, &raft];
+    let stores: [&dyn SessionStore; 4] = [&claude, &cindy, &codex, &raft];
     run_with(config, command, &stores, Local::now())
 }
 
@@ -648,6 +650,35 @@ mod tests {
             std::fs::read_to_string(consent.path()).expect("consent"),
             "{\"asked\":false}\n"
         );
+    }
+
+    #[test]
+    fn cindy_reader_is_consent_gated_through_index() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config = temp.path().join("hofund.toml");
+        let config_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../plugins/agents/cindy/tests/fixtures/config")
+            .canonicalize()
+            .expect("cindy fixtures");
+        let cindy = CindyStore::with_config_root(config_root);
+        let stores: [&dyn SessionStore; 1] = [&cindy];
+        let list = Command::List(Options {
+            days: None,
+            model: String::new(),
+            folder: String::new(),
+            limit: 20,
+            json: false,
+        });
+        let off = run_with(&config, &list, &stores, Local::now()).expect("off list");
+        assert!(off.contains("reads are off"));
+        let on = Command::Read(Some(ReadChange {
+            on: true,
+            targets: vec!["cindy".to_owned()],
+        }));
+        run_with(&config, &on, &stores, Local::now()).expect("consent");
+        let listed = run_with(&config, &list, &stores, Local::now()).expect("list");
+        assert!(listed.contains("Ship the cindy reader"), "{listed}");
+        assert!(listed.contains("Global build session"), "{listed}");
     }
 
     #[test]

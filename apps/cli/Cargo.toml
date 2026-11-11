@@ -20,6 +20,7 @@ chrono = { version = "0.4.45", default-features = false, features = ["clock", "s
 hofund-config = { workspace = true }
 hofund-control-client = { workspace = true }
 hofund-plugin-agent-claude = { workspace = true }
+hofund-plugin-agent-cindy = { workspace = true }
 hofund-plugin-agent-codex = { workspace = true }
 hofund-plugin-agent-raft = { workspace = true }
 hofund-plugin-api = { workspace = true }

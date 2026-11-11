@@ -1812,6 +1812,7 @@ dependencies = [
  "hofund-control-client",
  "hofund-control-proto",
  "hofund-model-catalog",
+ "hofund-plugin-agent-cindy",
  "hofund-plugin-agent-claude",
  "hofund-plugin-agent-codex",
  "hofund-plugin-agent-raft",
@@ -2047,6 +2048,15 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tracing",
+]
+
+[[package]]
+name = "hofund-plugin-agent-cindy"
+version = "0.1.0"
+dependencies = [
+ "hofund-plugin-api",
+ "hofund-plugin-sdk",
+ "tempfile",
 ]
 
 [[package]]
