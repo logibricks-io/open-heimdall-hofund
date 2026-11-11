@@ -129,11 +129,12 @@ impl SessionStore for CursorStore {
         let Some(mut record) = record else {
             return Ok(Vec::new());
         };
-        if let Some(parent) = parent_id_from_db(database, &chat_id)? {
-            if parent != chat_id && safe_id(&parent) {
-                record.main = false;
-                record.parent_id = Some(format!("{AGENT}:{parent}"));
-            }
+        if let Some(parent) = parent_id_from_db(database, &chat_id)?
+            && parent != chat_id
+            && safe_id(&parent)
+        {
+            record.main = false;
+            record.parent_id = Some(format!("{AGENT}:{parent}"));
         }
         record.id = format!("{AGENT}:{chat_id}");
         Ok(vec![record])
@@ -195,15 +196,11 @@ fn cli_chat_files(root: &Path) -> Result<Vec<SessionFile>, PluginError> {
         return Ok(Vec::new());
     }
     let mut files = Vec::new();
-    walk_store_dbs(&chats, &chats, &mut files)?;
+    walk_store_dbs(&chats, &mut files)?;
     Ok(files)
 }
 
-fn walk_store_dbs(
-    root: &Path,
-    lexical: &Path,
-    out: &mut Vec<SessionFile>,
-) -> Result<(), PluginError> {
+fn walk_store_dbs(lexical: &Path, out: &mut Vec<SessionFile>) -> Result<(), PluginError> {
     let entries =
         std::fs::read_dir(lexical).map_err(|_| PluginError::io("cannot list cursor chats"))?;
     for entry in entries {
@@ -216,7 +213,7 @@ fn walk_store_dbs(
             continue;
         }
         if file_type.is_dir() {
-            walk_store_dbs(root, &path, out)?;
+            walk_store_dbs(&path, out)?;
             continue;
         }
         if path.file_name().and_then(|name| name.to_str()) != Some("store.db") {
@@ -231,7 +228,7 @@ fn walk_store_dbs(
         };
         if !safe_id(id) {
             continue;
-        };
+        }
         let meta = path
             .parent()
             .map(|chat_dir| chat_dir.join("meta.json"))
@@ -520,7 +517,7 @@ fn decode_meta_value(value: &SessionValue) -> Result<DbMeta, PluginError> {
         trimmed.to_owned()
     } else {
         let bytes = hex::decode(trimmed)
-            .map_err(|_| PluginError::decode("cursor meta row is not hex json"))?;
+            .map_err(|()| PluginError::decode("cursor meta row is not hex json"))?;
         String::from_utf8(bytes).map_err(|_| PluginError::decode("cursor meta row is not utf-8"))?
     };
     let value: Value = json::from_str(&json_text)
@@ -569,7 +566,7 @@ struct CursorMessage {
 struct CursorPart {
     kind: String,
     text: String,
-    tool_name: String,
+    _tool_name: String,
 }
 
 fn cursor_messages(
@@ -577,7 +574,7 @@ fn cursor_messages(
     root: &str,
 ) -> Result<Vec<CursorMessage>, PluginError> {
     let root_id =
-        hex::decode(root).map_err(|_| PluginError::decode("cursor root blob id invalid"))?;
+        hex::decode(root).map_err(|()| PluginError::decode("cursor root blob id invalid"))?;
     let state = blob_bytes(database, &root_id)?;
     let Some(state) = state else {
         return Ok(Vec::new());
@@ -651,7 +648,7 @@ fn pb_fields(bytes: &[u8], bytes_field: i32, var_field: i32) -> (Vec<Vec<u8>>, u
             break;
         };
         rest = &rest[consumed..];
-        let num = (key >> 3) as i32;
+        let num = i32::try_from(key >> 3).unwrap_or(i32::MAX);
         let typ = key & 7;
         match typ {
             0 => {
@@ -715,7 +712,7 @@ fn cursor_parts(content: &Value) -> Vec<CursorPart> {
         return vec![CursorPart {
             kind: "text".to_owned(),
             text: text.to_owned(),
-            tool_name: String::new(),
+            _tool_name: String::new(),
         }];
     }
     content
@@ -731,7 +728,7 @@ fn cursor_parts(content: &Value) -> Vec<CursorPart> {
                             .and_then(Value::as_str)
                             .unwrap_or_default()
                             .to_owned(),
-                        tool_name: part
+                        _tool_name: part
                             .get("toolName")
                             .and_then(Value::as_str)
                             .unwrap_or_default()
@@ -754,8 +751,12 @@ fn cursor_typed(parts: &[CursorPart]) -> (String, String) {
 
 fn cursor_typed_text(all: &str) -> (String, String) {
     static QUERY: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    static CONTEXT: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
     let query = QUERY.get_or_init(|| {
         Regex::new(r"(?s)<user_query>(.*?)</user_query>").expect("user_query regex")
+    });
+    let context = CONTEXT.get_or_init(|| {
+        Regex::new(r"(?s)(?:<user_info(?:\s[^>]*)?>.*?</user_info>|<project_layout(?:\s[^>]*)?>.*?</project_layout>|<rules(?:\s[^>]*)?>.*?</rules>|<always_applied_workspace_rules(?:\s[^>]*)?>.*?</always_applied_workspace_rules>|<agent_requestable_workspace_rules(?:\s[^>]*)?>.*?</agent_requestable_workspace_rules>|<user_rules(?:\s[^>]*)?>.*?</user_rules>|<agent_skills(?:\s[^>]*)?>.*?</agent_skills>|<available_skills(?:\s[^>]*)?>.*?</available_skills>|<open_and_recently_viewed_files(?:\s[^>]*)?>.*?</open_and_recently_viewed_files>|<system_reminder(?:\s[^>]*)?>.*?</system_reminder>|<system-reminder(?:\s[^>]*)?>.*?</system-reminder>|<instructions_update(?:\s[^>]*)?>.*?</instructions_update>|<mcp_instructions(?:\s[^>]*)?>.*?</mcp_instructions>|<mcp_file_system(?:\s[^>]*)?>.*?</mcp_file_system>|<mcp_file_system_servers(?:\s[^>]*)?>.*?</mcp_file_system_servers>|<git_status(?:\s[^>]*)?>.*?</git_status>|<agent_transcripts(?:\s[^>]*)?>.*?</agent_transcripts>|<cursor_rules_context(?:\s[^>]*)?>.*?</cursor_rules_context>|<attached_files(?:\s[^>]*)?>.*?</attached_files>|<system_notification(?:\s[^>]*)?>.*?</system_notification>|<task_notification(?:\s[^>]*)?>.*?</task_notification>|<agent_notification(?:\s[^>]*)?>.*?</agent_notification>)").expect("context regex")
     });
     let queries: Vec<String> = query
         .captures_iter(all)
@@ -764,13 +765,6 @@ fn cursor_typed_text(all: &str) -> (String, String) {
     if !queries.is_empty() {
         return (queries.join("\n"), String::new());
     }
-    static CONTEXT: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
-    let context = CONTEXT.get_or_init(|| {
-        Regex::new(
-            r"(?s)<(user_info|project_layout|rules|always_applied_workspace_rules|agent_requestable_workspace_rules|user_rules|agent_skills|available_skills|open_and_recently_viewed_files|system_reminder|system-reminder|instructions_update|mcp_instructions|mcp_file_system|mcp_file_system_servers|git_status|agent_transcripts|cursor_rules_context|attached_files|system_notification|task_notification|agent_notification)(?:\s[^>]*)?>.*?</\1>",
-        )
-        .expect("context regex")
-    });
     let rest = context.replace_all(all, "").trim().to_string();
     if rest.starts_with('<') {
         return (String::new(), rest);
@@ -940,7 +934,11 @@ mod hex {
     }
 
     pub(super) fn encode(bytes: &[u8]) -> String {
-        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+        let mut out = String::with_capacity(bytes.len() * 2);
+        for byte in bytes {
+            let _ = core::fmt::Write::write_fmt(&mut out, format_args!("{byte:02x}"));
+        }
+        out
     }
 
     fn from_hex(byte: u8) -> Result<u8, ()> {
@@ -971,7 +969,7 @@ mod tests {
         let text = "<user_info>x</user_info>\n<user_query>hello\nworld</user_query>";
         let (typed, other) = cursor_typed_text(text);
         assert_eq!(typed, "hello\nworld");
-        assert!(other.is_empty());
+        assert_eq!(other, "");
     }
 
     fn fixture_root() -> PathBuf {

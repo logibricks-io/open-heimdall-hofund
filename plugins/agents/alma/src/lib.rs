@@ -156,7 +156,7 @@ fn list_threads(database: &dyn SessionDatabase) -> Result<Vec<ThreadRow>, Plugin
           AND COALESCE(json_extract(CASE WHEN json_valid(t.metadata) THEN t.metadata END, '$.isCron'), 0) = 0 \
           AND instr(COALESCE(t.title, ''), '⏰ Cron:') <> 1";
     let rows = database
-        .query(&sql, &[])
+        .query(sql, &[])
         .map_err(|_| PluginError::decode("cannot list alma threads"))?;
     let mut out = Vec::new();
     for row in &rows.values {
@@ -173,11 +173,11 @@ fn list_threads(database: &dyn SessionDatabase) -> Result<Vec<ThreadRow>, Plugin
         }
         let rev = format!("{updated}|{}", message_count(database, &id)?);
         out.push(ThreadRow {
-            id: id.to_owned(),
-            title: title.to_owned(),
-            cwd: cwd.to_owned(),
-            created_at: created.to_owned(),
-            updated_at: updated.to_owned(),
+            id: id.clone(),
+            title: title.clone(),
+            cwd: cwd.clone(),
+            created_at: created.clone(),
+            updated_at: updated.clone(),
             rev,
         });
     }
@@ -346,8 +346,7 @@ fn message_count(database: &dyn SessionDatabase, thread_id: &str) -> Result<i64,
     Ok(rows
         .values
         .first()
-        .map(|row| i64::try_from(int_at(row, 0)).unwrap_or(0))
-        .unwrap_or(0))
+        .map_or(0, |row| i64::try_from(int_at(row, 0)).unwrap_or(0)))
 }
 
 fn usage_count(database: &dyn SessionDatabase, thread_id: &str) -> Result<i64, PluginError> {
@@ -360,8 +359,7 @@ fn usage_count(database: &dyn SessionDatabase, thread_id: &str) -> Result<i64, P
     Ok(rows
         .values
         .first()
-        .map(|row| i64::try_from(int_at(row, 0)).unwrap_or(0))
-        .unwrap_or(0))
+        .map_or(0, |row| i64::try_from(int_at(row, 0)).unwrap_or(0)))
 }
 
 fn alma_time_ms(raw: &str) -> i64 {
@@ -372,8 +370,7 @@ fn alma_time_ms(raw: &str) -> i64 {
         return parsed.timestamp_millis();
     }
     chrono::NaiveDateTime::parse_from_str(raw.trim(), "%Y-%m-%dT%H:%M:%S%.fZ")
-        .map(|dt| dt.and_utc().timestamp_millis())
-        .unwrap_or(0)
+        .map_or(0, |dt| dt.and_utc().timestamp_millis())
 }
 
 fn text_at(row: &[SessionValue], index: usize) -> String {
