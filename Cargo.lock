@@ -2044,6 +2044,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "hofund-plugin-agent-claude"
+version = "0.1.0"
+dependencies = [
+ "hofund-plugin-api",
+ "hofund-plugin-sdk",
+ "tempfile",
+]
+
+[[package]]
 name = "hofund-plugin-api"
 version = "0.1.0"
 dependencies = [

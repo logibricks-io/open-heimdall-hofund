@@ -29,6 +29,7 @@ checkin::run_minimax
 checkin::run_qoder
 checkin::run_trae
 checkin::run_workbuddy
+chrono
 classify::ModelTags #[non_exhaustive] derives(Clone, Copy, Debug, Default, PartialEq, Eq)
 classify::ModelTags::const fn decides (self) -> bool
 classify::ModelTags::const fn draws (self) -> bool
@@ -184,6 +185,7 @@ register::Contribution::fn surface (mut self , surface : impl InboundSurface) ->
 register::Contribution::fn surfaces (& self) -> & [Arc < dyn InboundSurface >]
 register::Contribution::fn upstream (mut self , factory : impl DynUpstreamFactory) -> Self
 register::Contribution::fn upstreams (& self) -> & [Arc < dyn DynUpstreamFactory >]
+serde
 sigv4::AwsSigner derives(Clone)
 sigv4::AwsSigner::fn fixed (mut self , unix_secs : u64 , host : impl Into < String >) -> Self
 sigv4::AwsSigner::fn new (region : impl Into < String > , access_key_id : impl Into < String > , secret_access_key : secrecy :: SecretString ,) -> Self

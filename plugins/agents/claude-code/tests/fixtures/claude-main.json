@@ -1,0 +1,52 @@
+{
+  "agent": "claude",
+  "id": "claude:11111111-2222-3333-4444-555555555555",
+  "path": "",
+  "cwd": "/work/app",
+  "title": "Login repair",
+  "start_ms": 1789898401000,
+  "last_ms": 1789898700000,
+  "models": {
+    "fixture-haiku-4-5": {
+      "input": 10,
+      "output": 20,
+      "cache_read": 200,
+      "cache_write": 0
+    },
+    "fixture-opus-5-5": {
+      "input": 100,
+      "output": 50,
+      "cache_read": 5000,
+      "cache_write": 1000
+    }
+  },
+  "days": [
+    {
+      "date": "2026-09-20",
+      "model": "fixture-opus-5-5",
+      "tokens": {
+        "input": 100,
+        "output": 50,
+        "cache_read": 5000,
+        "cache_write": 1000
+      }
+    },
+    {
+      "date": "2026-09-20",
+      "model": "fixture-haiku-4-5",
+      "tokens": {
+        "input": 10,
+        "output": 20,
+        "cache_read": 200,
+        "cache_write": 0
+      }
+    }
+  ],
+  "cost": 0.0,
+  "unpriced": 0,
+  "main": true,
+  "parent_id": null,
+  "subagents": [],
+  "copies": [],
+  "cut": false
+}

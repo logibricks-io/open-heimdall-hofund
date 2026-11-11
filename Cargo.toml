@@ -17,6 +17,7 @@ members = [
     "crates/kernel/plugin-api",
     "crates/kernel/plugin-host",
     "crates/kernel/plugin-sdk",
+    "plugins/agents/claude-code",
     "plugins/inbound/codex-catalog",
     "plugins/inbound/retrieval",
     "plugins/inbound/echo",
@@ -84,6 +85,7 @@ hofund-kit-agent = { version = "0.1.0", path = "kits/agent" }
 hofund-kit-subscription = { version = "0.1.0", path = "kits/subscription" }
 hofund-kit-upstream = { version = "0.1.0", path = "kits/upstream" }
 hofund-plugin-api = { version = "0.1.0", path = "crates/kernel/plugin-api" }
+hofund-plugin-agent-claude = { version = "0.1.0", path = "plugins/agents/claude-code" }
 hofund-plugin-azure = { version = "0.1.0", path = "plugins/providers/azure" }
 hofund-plugin-bedrock = { version = "0.1.0", path = "plugins/providers/bedrock" }
 hofund-plugin-bedrock-mantle = { version = "0.1.0", path = "plugins/providers/bedrock-mantle" }
