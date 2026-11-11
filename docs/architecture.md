@@ -257,6 +257,7 @@ This table covers normal and build dependencies, including their target-specific
 | `hofund-plugin-agent-raft` | `hofund-plugin-api`, `hofund-plugin-sdk` |
 | `hofund-plugin-agent-workbuddy` | `chrono`, `hofund-plugin-api`, `hofund-plugin-sdk`, `regex` |
 | `hofund-plugin-agent-agy` | `chrono`, `hofund-plugin-api`, `hofund-plugin-sdk`, `rusqlite` |
+| `hofund-plugin-agent-alma` | `chrono`, `hofund-plugin-api`, `hofund-plugin-sdk` |
 | `hofund-plugin-agent-dsh` | `chrono`, `hofund-plugin-api`, `hofund-plugin-sdk`, `regex`, `zstd` |
 | `hofund-plugin-agent-zcode` | `hofund-plugin-api`, `hofund-plugin-sdk` |
 | `hofund-plugin-sdk` | `chrono`, `chrono-tz`, `hofund-codec`, `hofund-ir`, `hofund-plugin-api`, `hofund-quirks`, `iana-time-zone` |
@@ -300,7 +301,7 @@ This table covers normal and build dependencies, including their target-specific
 | `hofund-agent` | `hofund-config`, `hofund-plugin-api` |
 | `hofund-daemon` | `hofund-codec`, `hofund-config`, `hofund-control-proto`, `hofund-gateway`, `hofund-model-catalog`, `hofund-plugin-api`, `hofund-plugin-host`, `hofund-plugin-registry` (tests also enable `test-fixtures`), `hofund-plugin-sdk`, `hofund-provider`, `hofund-quirks`, `hofund-router`, `hofund-secrets`, `hofund-usage`, `hofund-agent`, `hofund-control-client` (tests; dev `hofund-agent` enables `test-fixtures`) |
 | `hofund-daemon-bin` | `hofund-daemon`, `hofund-plugin-api`, `hofund-plugin-registry` |
-| `hofund-cli` | `hofund-config`, `hofund-control-client`, `hofund-model-catalog`, `hofund-plugin-agent-claude`, `hofund-plugin-agent-cindy`, `hofund-plugin-agent-cline`, `hofund-plugin-agent-codex`, `hofund-plugin-agent-cursor`, `hofund-plugin-agent-droid`, `hofund-plugin-agent-agy`, `hofund-plugin-agent-dsh`, `hofund-plugin-agent-grok`, `hofund-plugin-agent-hermes`, `hofund-plugin-agent-kimi`, `hofund-plugin-agent-qoder`, `hofund-plugin-agent-minimax-code`, `hofund-plugin-agent-raft`, `hofund-plugin-agent-workbuddy`, `hofund-plugin-agent-zcode`, `hofund-plugin-api`, `hofund-secrets`, `hofund-sessions`, `hofund-usage` |
+| `hofund-cli` | `hofund-config`, `hofund-control-client`, `hofund-model-catalog`, `hofund-plugin-agent-claude`, `hofund-plugin-agent-cindy`, `hofund-plugin-agent-cline`, `hofund-plugin-agent-codex`, `hofund-plugin-agent-cursor`, `hofund-plugin-agent-droid`, `hofund-plugin-agent-agy`, `hofund-plugin-agent-alma`, `hofund-plugin-agent-dsh`, `hofund-plugin-agent-grok`, `hofund-plugin-agent-hermes`, `hofund-plugin-agent-kimi`, `hofund-plugin-agent-qoder`, `hofund-plugin-agent-minimax-code`, `hofund-plugin-agent-raft`, `hofund-plugin-agent-workbuddy`, `hofund-plugin-agent-zcode`, `hofund-plugin-api`, `hofund-secrets`, `hofund-sessions`, `hofund-usage` |
 | `hofund-tui` | `hofund-config`, `hofund-control-client`, `hofund-secrets` |
 | `hofund-desktop` | `hofund-daemon`, `hofund-agent` |
 | `xtask` | — |

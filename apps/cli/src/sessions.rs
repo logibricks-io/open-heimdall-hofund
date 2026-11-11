@@ -16,6 +16,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use hofund_plugin_agent_agy::AgyStore;
+use hofund_plugin_agent_alma::AlmaStore;
 use hofund_plugin_agent_cindy::CindyStore;
 use hofund_plugin_agent_claude::ClaudeStore;
 use hofund_plugin_agent_cline::ClineStore;
@@ -138,9 +139,10 @@ pub(crate) fn run(config: &Path, command: &Command) -> Result<String, String> {
     let workbuddy_ai = WorkBuddyAiStore::new();
     let codebuddy = CodeBuddyStore::new();
     let agy = AgyStore::new();
+    let alma = AlmaStore::new();
     let dsh = DshStore::new();
     let zcode = ZCodeStore::new();
-    let stores: [&dyn SessionStore; 19] = [
+    let stores: [&dyn SessionStore; 20] = [
         &claude,
         &cindy,
         &cline,
@@ -158,6 +160,7 @@ pub(crate) fn run(config: &Path, command: &Command) -> Result<String, String> {
         &workbuddy_ai,
         &codebuddy,
         &agy,
+        &alma,
         &dsh,
         &zcode,
     ];
@@ -807,6 +810,32 @@ mod tests {
         run_with(&config, &on, &stores, Local::now()).expect("consent");
         let listed = run_with(&config, &list, &stores, Local::now()).expect("list");
         assert!(listed.contains("Explain the cache"), "{listed}");
+    }
+
+    #[test]
+    fn alma_reader_is_consent_gated_through_index() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config = temp.path().join("hofund.toml");
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../plugins/agents/alma/tests/fixtures/root")
+            .canonicalize()
+            .expect("alma fixtures");
+        let alma = AlmaStore::with_root(root);
+        let stores: [&dyn SessionStore; 1] = [&alma];
+        let list = Command::List(Options {
+            days: None,
+            model: String::new(),
+            folder: String::new(),
+            limit: 20,
+            json: false,
+        });
+        let on = Command::Read(Some(ReadChange {
+            on: true,
+            targets: vec!["alma".to_owned()],
+        }));
+        run_with(&config, &on, &stores, Local::now()).expect("consent");
+        let listed = run_with(&config, &list, &stores, Local::now()).expect("list");
+        assert!(listed.contains("Fix the build"), "{listed}");
     }
 
     #[test]

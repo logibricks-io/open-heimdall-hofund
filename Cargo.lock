@@ -1813,6 +1813,7 @@ dependencies = [
  "hofund-control-proto",
  "hofund-model-catalog",
  "hofund-plugin-agent-agy",
+ "hofund-plugin-agent-alma",
  "hofund-plugin-agent-cindy",
  "hofund-plugin-agent-claude",
  "hofund-plugin-agent-cline",
@@ -2070,6 +2071,16 @@ dependencies = [
  "hofund-plugin-api",
  "hofund-plugin-sdk",
  "rusqlite",
+ "tempfile",
+]
+
+[[package]]
+name = "hofund-plugin-agent-alma"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "hofund-plugin-api",
+ "hofund-plugin-sdk",
  "tempfile",
 ]
 

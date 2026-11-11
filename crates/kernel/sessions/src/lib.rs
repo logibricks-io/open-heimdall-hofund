@@ -17,3 +17,4 @@ pub mod open;
 pub mod pricing;
 mod sqlite;
 mod storage;
+pub mod wsl;

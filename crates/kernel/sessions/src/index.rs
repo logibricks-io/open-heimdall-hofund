@@ -229,6 +229,7 @@ impl SessionIndex {
         let before = self.entries.len();
         self.entries.retain(|key, _| seen.contains(key));
         self.dirty |= before != self.entries.len();
+        self.merge_wsl_cache(consent, &mut seen)?;
         self.save_if_dirty()
     }
 
@@ -322,6 +323,50 @@ impl SessionIndex {
         self.entries
             .retain(|_, entry| consent.allows(&entry.record.agent));
         self.dirty |= before != self.entries.len();
+    }
+
+    fn merge_wsl_cache(
+        &mut self,
+        consent: &Consent,
+        seen: &mut BTreeSet<EntryKey>,
+    ) -> Result<(), IndexError> {
+        let Some(config_dir) = self.path.parent().and_then(|state| state.parent()) else {
+            return Ok(());
+        };
+        let cache = crate::wsl::load_cache(&crate::wsl::wsl_cache_path(config_dir));
+        for (distro, listing) in &cache {
+            if crate::wsl::distro_running_for_merge(distro, listing.running) {
+                continue;
+            }
+            let root = PathBuf::from(&listing.home);
+            for entry in &listing.files {
+                let agent = crate::wsl::wsl_agent_id(&entry.agent, distro);
+                if !consent.allows(&entry.agent) && !consent.allows(&agent) {
+                    continue;
+                }
+                let mut record = SessionRecord::new(&agent, &entry.key, &entry.path);
+                record.agent.clone_from(&agent);
+                record.title.clone_from(&entry.key);
+                let key = (root.clone(), entry.path.clone(), record.id.clone());
+                seen.insert(key.clone());
+                self.entries.insert(
+                    key,
+                    CacheEntry {
+                        root: root.clone(),
+                        path: entry.path.clone(),
+                        file_id: record.id.clone(),
+                        size: entry.size,
+                        modified_ns: entry.modified_ns,
+                        offset: 0,
+                        state: String::new(),
+                        related: Vec::new(),
+                        record,
+                    },
+                );
+                self.dirty = true;
+            }
+        }
+        Ok(())
     }
 
     fn refresh_database(
