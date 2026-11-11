@@ -113,12 +113,12 @@ mod tests {
                 output_tokens: Some(1),
                 latency_ms: 1,
                 status: "200".to_owned(),
-                client_agent: "claude".to_owned(),
-                session_id: "s1".to_owned(),
+              client_agent: "fixture".to_owned(),
+              session_id: "s1".to_owned(),
                 ..Row::default()
             })
             .expect("row");
-        let native = vec![SessionRecord::new("claude", "s1", "path.jsonl")];
+        let native = vec![SessionRecord::new("fixture", "s1", "path.jsonl")];
         let merged = merge_gateway_sessions(dir.path(), native, &ledger, []).expect("merge");
         assert_eq!(merged.len(), 1);
         assert!(!merged[0].gateway);

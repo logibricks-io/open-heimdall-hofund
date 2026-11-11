@@ -246,7 +246,7 @@ mod tests {
         let ledger = Ledger::open(&dir.path().join("usage.sqlite")).expect("ledger");
         ledger
             .record_with_details(
-                &row(10, "claude", "s1", "m1", 1, 2),
+                &row(10, "fixture-a", "s1", "m1", 1, 2),
                 None,
                 Default::default(),
                 Some(priced()),
@@ -254,7 +254,7 @@ mod tests {
             .expect("first");
         ledger
             .record_with_details(
-                &row(20, "claude", "s1", "m2", 3, 4),
+                &row(20, "fixture-a", "s1", "m2", 3, 4),
                 None,
                 Default::default(),
                 Some(priced()),
@@ -262,7 +262,7 @@ mod tests {
             .expect("second");
         ledger
             .record_with_details(
-                &row(30, "codex", "s2", "m1", 5, 0),
+                &row(30, "fixture-b", "s2", "m1", 5, 0),
                 None,
                 Default::default(),
                 Some(priced()),
@@ -275,7 +275,7 @@ mod tests {
                 upstream: "up".to_owned(),
                 latency_ms: 1,
                 status: "200".to_owned(),
-                client_agent: "claude".to_owned(),
+                client_agent: "fixture-a".to_owned(),
                 ..Row::default()
             })
             .expect("no session");

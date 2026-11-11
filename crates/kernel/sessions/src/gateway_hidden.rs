@@ -56,9 +56,9 @@ mod tests {
 
     #[test]
     fn r33_gateway_hidden_hides_until_newer_row() {
-        let hidden = BTreeMap::from([("claude|s1".to_owned(), 100)]);
-        assert!(gateway_hidden(&hidden, "claude", "s1", 100));
-        assert!(gateway_hidden(&hidden, "claude", "s1", 50));
-        assert!(!gateway_hidden(&hidden, "claude", "s1", 101));
+        let hidden = BTreeMap::from([("fixture|s1".to_owned(), 100)]);
+        assert!(gateway_hidden(&hidden, "fixture", "s1", 100));
+        assert!(gateway_hidden(&hidden, "fixture", "s1", 50));
+        assert!(!gateway_hidden(&hidden, "fixture", "s1", 101));
     }
 }
