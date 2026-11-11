@@ -23,6 +23,7 @@ hofund-plugin-agent-claude = { workspace = true }
 hofund-plugin-agent-cindy = { workspace = true }
 hofund-plugin-agent-codex = { workspace = true }
 hofund-plugin-agent-cursor = { workspace = true }
+hofund-plugin-agent-droid = { workspace = true }
 hofund-plugin-agent-minimax-code = { workspace = true }
 hofund-plugin-agent-raft = { workspace = true }
 hofund-plugin-api = { workspace = true }

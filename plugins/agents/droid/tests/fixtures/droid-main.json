@@ -1,0 +1,44 @@
+{
+  "agent": "droid",
+  "id": "droid:d0000000-0000-4000-8000-00000000000a",
+  "path": "",
+  "cwd": "/work/droid",
+  "title": "Login bug",
+  "start_ms": 1790496000000,
+  "last_ms": 1790496120000,
+  "models": {
+    "anthropic/claude-sonnet-4-5": {
+      "input": 100,
+      "output": 50,
+      "cache_read": 1000,
+      "cache_write": 10,
+      "cache_write_1h": 0
+    }
+  },
+  "days": [
+    {
+      "date": "2026-09-27",
+      "model": "anthropic/claude-sonnet-4-5",
+      "tokens": {
+        "input": 100,
+        "output": 50,
+        "cache_read": 1000,
+        "cache_write": 10,
+        "cache_write_1h": 0
+      }
+    }
+  ],
+  "cost": 0.0,
+  "unpriced": 0,
+  "main": true,
+  "parent_id": null,
+  "subagents": [],
+  "copies": [],
+  "family_root": "",
+  "family_leaf": "",
+  "family_ids": [],
+  "copy": false,
+  "forked_from": null,
+  "usage": [],
+  "cut": false
+}

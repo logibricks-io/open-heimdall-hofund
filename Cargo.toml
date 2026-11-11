@@ -22,6 +22,7 @@ members = [
     "plugins/agents/codex",
     "plugins/agents/minimax-code",
     "plugins/agents/cursor",
+    "plugins/agents/droid",
     "plugins/agents/raft",
     "plugins/inbound/codex-catalog",
     "plugins/inbound/retrieval",
@@ -95,6 +96,7 @@ hofund-plugin-agent-cindy = { version = "0.1.0", path = "plugins/agents/cindy" }
 hofund-plugin-agent-codex = { version = "0.1.0", path = "plugins/agents/codex" }
 hofund-plugin-agent-minimax-code = { version = "0.1.0", path = "plugins/agents/minimax-code" }
 hofund-plugin-agent-cursor = { version = "0.1.0", path = "plugins/agents/cursor" }
+hofund-plugin-agent-droid = { version = "0.1.0", path = "plugins/agents/droid" }
 hofund-plugin-agent-raft = { version = "0.1.0", path = "plugins/agents/raft" }
 hofund-plugin-azure = { version = "0.1.0", path = "plugins/providers/azure" }
 hofund-plugin-bedrock = { version = "0.1.0", path = "plugins/providers/bedrock" }
