@@ -9,9 +9,9 @@ use std::collections::BTreeSet;
 use hofund_ir::{
     BlockStart, ContentBlockStart, ContentBlockStop, ContentPart, Effort, Extensions,
     GenerationParams, ImageDetail, ImagePart, ImageSource, Message, MessageDelta, MessageStart,
-    MessageStop, Ping, Request, Response, Role, Stop, StopReason, StreamEvent, TextDelta, TextPart,
-    ThinkingDelta, Tool, ToolArguments, ToolArgumentsDelta, ToolCallPart, ToolChoice,
-    ToolChoiceMode, ToolResultPart, UnknownEvent, UnknownPart, Usage,
+    MessageStop, Ping, Request, Response, Role, SignatureDelta, Stop, StopReason, StreamEvent,
+    TextDelta, TextPart, ThinkingDelta, Tool, ToolArguments, ToolArgumentsDelta, ToolCallPart,
+    ToolChoice, ToolChoiceMode, ToolResultPart, UnknownEvent, UnknownPart, Usage,
 };
 use serde_json::Value;
 
@@ -338,6 +338,25 @@ impl Decoder {
             events.push(StreamEvent::ThinkingDelta(ThinkingDelta {
                 index: THINKING_INDEX,
                 text: reasoning,
+                extensions: Extensions::new(),
+            }));
+        }
+        if let Some(signature) = take_string(&mut delta, "signature")?
+            && !signature.is_empty()
+        {
+            if !self.thinking_open {
+                events.push(block_start(
+                    THINKING_INDEX,
+                    BlockStart::Thinking {
+                        redacted: false,
+                        data: None,
+                    },
+                ));
+                self.thinking_open = true;
+            }
+            events.push(StreamEvent::SignatureDelta(SignatureDelta {
+                index: THINKING_INDEX,
+                signature,
                 extensions: Extensions::new(),
             }));
         }

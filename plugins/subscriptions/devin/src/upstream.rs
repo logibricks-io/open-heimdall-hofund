@@ -13,7 +13,7 @@ use hofund_plugin_sdk::{Call, uuid};
 
 use crate::catalog::{self, os_name};
 use crate::connect::chat::{
-    self, ChatRequest, Prompt, PromptCall, PromptImage, PromptRole, ToolDefinition,
+    self, ChatRequest, Prompt, PromptCall, PromptImage, PromptRole, PromptThinking, ToolDefinition,
 };
 use crate::creds::Stored;
 use crate::errors;
@@ -22,7 +22,6 @@ use crate::stream;
 
 const CHAT_PATH: &str = "/exa.api_server_pb.ApiServerService/GetChatMessage";
 const ERROR_BODY_CAP: usize = 1024 * 1024;
-const SIGNED_THINKING_MESSAGE: &str = "signed thinking history is not served on Devin until R-13";
 
 pub(crate) struct DevinUpstream {
     account: AccountId,
@@ -40,13 +39,12 @@ impl DevinUpstream {
         request: Request,
         inbound: ProtocolId,
     ) -> Result<Completion, PluginError> {
-        refuse_unserved(&request)?;
         let requested_model = request.model.clone();
         let effort = effort_for(&request, inbound);
         let catalog = catalog::families_for(&self.host, &self.account, &stored).await;
         let model_uid = variant_for(&catalog.families, &requested_model, &effort);
         let tools = offered_tools(&request);
-        let prompts = prompts_for(&request, &tools)?;
+        let prompts = prompts_for(&request, &tools, inbound, &model_uid)?;
         let borrowed: Vec<_> = prompts
             .iter()
             .map(|prompt| {
@@ -69,6 +67,11 @@ impl DevinUpstream {
                         media_type: &image.media_type,
                     })
                     .collect();
+                encoded.thinking = prompt.thinking.as_ref().map(|thinking| PromptThinking {
+                    text: &thinking.text,
+                    signature: thinking.signature.as_deref(),
+                    signature_type: thinking.signature_type.as_deref(),
+                });
                 encoded
             })
             .collect();
@@ -114,6 +117,7 @@ impl DevinUpstream {
             requested_model,
             inbound,
             request.stream,
+            inbound == ProtocolId::ANTHROPIC_MESSAGES && is_claude(&model_uid),
         )
         .await
     }
@@ -146,8 +150,10 @@ struct OwnedPrompt {
     calls: Vec<OwnedCall>,
     answer: Option<String>,
     images: Vec<OwnedImage>,
+    thinking: Option<OwnedThinking>,
 }
 
+#[derive(Clone)]
 struct OwnedCall {
     id: String,
     name: String,
@@ -159,12 +165,19 @@ struct OwnedImage {
     media_type: String,
 }
 
+struct OwnedThinking {
+    text: String,
+    signature: Option<String>,
+    signature_type: Option<String>,
+}
+
 struct JoinedMessage<'a> {
     role: Role,
     text: String,
     calls: Vec<OwnedCall>,
     results: Vec<&'a ToolResultPart>,
     content: &'a [ContentPart],
+    reasoning: String,
 }
 
 struct ResultTrack {
@@ -175,12 +188,18 @@ struct ResultTrack {
     without_note: String,
 }
 
-fn prompts_for(request: &Request, tools: &[&Tool]) -> Result<Vec<OwnedPrompt>, PluginError> {
+fn prompts_for(
+    request: &Request,
+    tools: &[&Tool],
+    inbound: ProtocolId,
+    model_uid: &str,
+) -> Result<Vec<OwnedPrompt>, PluginError> {
     let mut instructions = Vec::new();
     let mut turns = Vec::new();
     let mut pending = Vec::new();
     let mut results = Vec::new();
-    for message in join_split_calls(request) {
+    let claude = is_claude(model_uid);
+    for message in join_split_calls(request, inbound != ProtocolId::ANTHROPIC_MESSAGES) {
         match message.role {
             Role::System | Role::Developer => {
                 settle_results(&mut turns, &mut results);
@@ -190,19 +209,33 @@ fn prompts_for(request: &Request, tools: &[&Tool]) -> Result<Vec<OwnedPrompt>, P
             }
             Role::Assistant => {
                 settle_results(&mut turns, &mut results);
-                if message.text.is_empty() && message.calls.is_empty() {
+                let next_pending = message.calls.iter().map(|call| call.id.clone()).collect();
+                let own = if inbound == ProtocolId::ANTHROPIC_MESSAGES {
+                    messages_prompts(&message, claude)
+                } else if message.text.is_empty() && message.calls.is_empty() {
+                    Vec::new()
+                } else {
+                    let thinking = if !claude && !message.reasoning.is_empty() {
+                        Some(OwnedThinking {
+                            text: message.reasoning.clone(),
+                            signature: None,
+                            signature_type: None,
+                        })
+                    } else {
+                        None
+                    };
+                    vec![assistant_prompt(
+                        message.text.clone(),
+                        message.calls,
+                        thinking,
+                    )]
+                };
+                if own.is_empty() {
                     continue;
                 }
                 answer_pending(&mut turns, &mut pending);
-                pending = message.calls.iter().map(|call| call.id.clone()).collect();
-                turns.push(OwnedPrompt {
-                    id: String::new(),
-                    role: PromptRole::Assistant,
-                    text: message.text,
-                    calls: message.calls,
-                    answer: None,
-                    images: Vec::new(),
-                });
+                pending = next_pending;
+                turns.extend(own);
             }
             Role::Tool | Role::User => {
                 for result in message.results {
@@ -226,6 +259,7 @@ fn prompts_for(request: &Request, tools: &[&Tool]) -> Result<Vec<OwnedPrompt>, P
                             calls: Vec::new(),
                             answer: Some(pending.remove(index)),
                             images,
+                            thinking: None,
                         });
                         results.push(ResultTrack {
                             prompt,
@@ -274,6 +308,7 @@ fn prompts_for(request: &Request, tools: &[&Tool]) -> Result<Vec<OwnedPrompt>, P
                             calls: Vec::new(),
                             answer: None,
                             images,
+                            thinking: None,
                         });
                     }
                     settle_results(&mut turns, &mut results);
@@ -302,6 +337,7 @@ fn prompts_for(request: &Request, tools: &[&Tool]) -> Result<Vec<OwnedPrompt>, P
             calls: Vec::new(),
             answer: None,
             images: Vec::new(),
+            thinking: None,
         });
     }
     if !instructions.is_empty() {
@@ -324,6 +360,7 @@ fn prompts_for(request: &Request, tools: &[&Tool]) -> Result<Vec<OwnedPrompt>, P
                     calls: Vec::new(),
                     answer: None,
                     images: Vec::new(),
+                    thinking: None,
                 },
             );
         }
@@ -337,7 +374,7 @@ fn prompts_for(request: &Request, tools: &[&Tool]) -> Result<Vec<OwnedPrompt>, P
         .collect()
 }
 
-fn join_split_calls(request: &Request) -> Vec<JoinedMessage<'_>> {
+fn join_split_calls(request: &Request, join: bool) -> Vec<JoinedMessage<'_>> {
     let mut joined: Vec<JoinedMessage<'_>> = Vec::new();
     for message in &request.messages {
         let calls = message
@@ -365,8 +402,10 @@ fn join_split_calls(request: &Request) -> Vec<JoinedMessage<'_>> {
                 })
                 .collect(),
             content: &message.content,
+            reasoning: reasoning_of(&message.content),
         };
-        if next.role == Role::Assistant
+        if join
+            && next.role == Role::Assistant
             && let Some(previous) = joined.last_mut()
             && previous.role == Role::Assistant
             && !previous.calls.is_empty()
@@ -377,12 +416,110 @@ fn join_split_calls(request: &Request) -> Vec<JoinedMessage<'_>> {
                 }
                 previous.text.push_str(&next.text);
             }
+            if !next.reasoning.is_empty() {
+                if !previous.reasoning.is_empty() {
+                    previous.reasoning.push_str("\n\n");
+                }
+                previous.reasoning.push_str(&next.reasoning);
+            }
             previous.calls.extend(next.calls);
             continue;
         }
         joined.push(next);
     }
     joined
+}
+
+fn reasoning_of(parts: &[ContentPart]) -> String {
+    parts
+        .iter()
+        .filter_map(|part| match part {
+            ContentPart::Thinking(thinking) if !thinking.redacted && !thinking.text.is_empty() => {
+                Some(thinking.text.as_str())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn assistant_prompt(
+    text: String,
+    calls: Vec<OwnedCall>,
+    thinking: Option<OwnedThinking>,
+) -> OwnedPrompt {
+    OwnedPrompt {
+        id: String::new(),
+        role: PromptRole::Assistant,
+        text,
+        calls,
+        answer: None,
+        images: Vec::new(),
+        thinking,
+    }
+}
+
+fn messages_prompts(message: &JoinedMessage<'_>, claude: bool) -> Vec<OwnedPrompt> {
+    let mut own = Vec::new();
+    let mut thought = None;
+    for part in message.content {
+        match part {
+            ContentPart::Text(text) if !text.text.is_empty() => {
+                own.push(assistant_prompt(
+                    text.text.clone(),
+                    Vec::new(),
+                    thought.take(),
+                ));
+            }
+            ContentPart::Thinking(thinking) if !thinking.redacted => {
+                let next = if claude {
+                    thinking
+                        .signature
+                        .as_ref()
+                        .filter(|signature| !signature.is_empty())
+                        .map(|signature| OwnedThinking {
+                            text: thinking.text.clone(),
+                            signature: Some(signature.clone()),
+                            signature_type: Some(stream::sig_type_of(signature)),
+                        })
+                } else if !thinking.text.is_empty() {
+                    Some(OwnedThinking {
+                        text: thinking.text.clone(),
+                        signature: None,
+                        signature_type: None,
+                    })
+                } else {
+                    None
+                };
+                if let Some(next) = next {
+                    if thought.is_some() {
+                        own.push(assistant_prompt(String::new(), Vec::new(), thought.take()));
+                    }
+                    thought = Some(next);
+                }
+            }
+            _ => {}
+        }
+    }
+    if !message.calls.is_empty() {
+        if own.last().is_none_or(|prompt| prompt.thinking.is_some()) {
+            own.push(assistant_prompt(String::new(), Vec::new(), None));
+        }
+        let last = own.last_mut().expect("a calls prompt exists");
+        if last.thinking.is_none() {
+            last.thinking = thought.take();
+        }
+        last.calls = message.calls.clone();
+    } else if let Some(last) = own.last_mut()
+        && last.thinking.is_none()
+    {
+        last.thinking = thought;
+    }
+    own
+}
+
+fn is_claude(uid: &str) -> bool {
+    uid.to_ascii_lowercase().contains("claude")
 }
 
 fn answer_pending(turns: &mut Vec<OwnedPrompt>, pending: &mut Vec<String>) {
@@ -394,6 +531,7 @@ fn answer_pending(turns: &mut Vec<OwnedPrompt>, pending: &mut Vec<String>) {
             calls: Vec::new(),
             answer: Some(id),
             images: Vec::new(),
+            thinking: None,
         });
     }
 }
@@ -570,17 +708,6 @@ fn effort_for(request: &Request, inbound: ProtocolId) -> String {
     }
 }
 
-fn refuse_unserved(request: &Request) -> Result<(), PluginError> {
-    if request.messages.iter().any(|message| {
-        message.content.iter().any(|part| {
-            matches!(part, ContentPart::Thinking(thinking) if thinking.signature.is_some() || thinking.redacted || thinking.data.is_some())
-        })
-    }) {
-        return Err(refusal(SIGNED_THINKING_MESSAGE));
-    }
-    Ok(())
-}
-
 fn structured_text(request: &Request) -> String {
     request
         .extensions
@@ -622,10 +749,6 @@ fn format_text(format: &Value) -> String {
         }
         _ => String::new(),
     }
-}
-
-fn refusal(message: &'static str) -> PluginError {
-    PluginError::status_error(404, message).without_cooldown()
 }
 
 #[hofund_plugin_sdk::async_trait]

@@ -141,7 +141,7 @@ Every other gap below maps to an existing plan item.
 | g | streaming | Connect stream from GetChatMessage | Incremental text, reasoning, tool-start, and argument-delta IR events; content-or-tool-gated success | Done | — |
 | h | tool calls | Plugin `tool-ids.test.mjs`, split calls | R-13b encodes field-6 calls and field-7 results, joins split calls, fills interrupted results, sanitizes ids, offers history-only tools, and streams tool-only replies with usage | Done | — |
 | i | images | Plugin `images.test.mjs`, `devin_images.go` in core catalog | R-13b encodes inline field-10 images, omits URL-only images, and keeps direct or `FROM`/`NOTE`-associated tool-result images on their tool prompts | Done | — |
-| j | reasoning / thinking | `thinking-signature.test.mjs`, effort variants | Field 9 becomes thinking deltas; Chat/Responses/Messages effort selection; signed history refused | Partial | Signature replay (**R-13**) |
+| j | reasoning / thinking | `thinking-signature.test.mjs`, effort variants | R-13b replays unsigned reasoning on non-Claude uids, signed Claude thinking on fields 11/12/18, and fragmented Claude signatures from fields 10/21 with a 512-entry type map | Done | — |
 | k | quota / usage | Plugin `usage.test.mjs` | R-13a `quota.rs` reads daily/weekly and informational ACU windows; free ids survive as model exclusions; field 7 becomes finish usage with cache counters and output estimation | Partial | Plan/balance presentation and organization metadata are not represented by `Subscription::quota` |
 | l | model list | CLI JSON + `GetCliModelConfigs` (`devin/index.mjs:44-134`) | Live raw-protobuf RPC, isolated CLI fallback, embedded snapshot, per-account freshness/retry cache, tier-4 free flags, and matching-variant list prices | Done | — |
 | m | multi-account | EU host `eu.codeium.com` (plugin) | unverified in hofund | Partial | Region selection (**R-12**) |
@@ -152,12 +152,12 @@ Every other gap below maps to an existing plan item.
 
 ### Gaps (Devin)
 
-- Reasoning signatures and Messages cache marks — **L**, **R-13**
-
-Structured-output prose for Chat, Responses, and Messages shipped in R-13b (`structured-output.test.mjs` behavior; `structured_text` in `upstream.rs`).
+- Messages cache marks — **L**, **R-13**
 - PKCE sign-in (not only import) — **M**, **R-12**
 - CLI install/bootstrap — **S**, **R-12** (new to the plan in this audit)
 - Keepalive (`keepalive.test.mjs`) — **S**, **R-13** (new to the plan in this audit)
+
+Structured-output prose for Chat, Responses, and Messages shipped in R-13b (`structured-output.test.mjs` behavior; `structured_text` in `upstream.rs`).
 
 ---
 

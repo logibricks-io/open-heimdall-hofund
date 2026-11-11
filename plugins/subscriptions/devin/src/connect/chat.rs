@@ -33,6 +33,13 @@ pub(crate) struct PromptImage<'a> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PromptThinking<'a> {
+    pub(crate) text: &'a str,
+    pub(crate) signature: Option<&'a str>,
+    pub(crate) signature_type: Option<&'a str>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Prompt<'a> {
     pub(crate) id: &'a str,
     pub(crate) role: PromptRole,
@@ -40,6 +47,7 @@ pub(crate) struct Prompt<'a> {
     pub(crate) calls: Vec<PromptCall<'a>>,
     pub(crate) answer: Option<&'a str>,
     pub(crate) images: Vec<PromptImage<'a>>,
+    pub(crate) thinking: Option<PromptThinking<'a>>,
 }
 
 impl<'a> Prompt<'a> {
@@ -51,6 +59,7 @@ impl<'a> Prompt<'a> {
             calls: Vec::new(),
             answer: None,
             images: Vec::new(),
+            thinking: None,
         }
     }
 }
@@ -154,6 +163,17 @@ fn encode_prompt(prompt: &Prompt<'_>) -> Vec<u8> {
             .string(2, image.media_type)
             .finish();
         encoded = encoded.bytes(10, &image);
+    }
+    if let Some(thinking) = &prompt.thinking {
+        if !thinking.text.is_empty() {
+            encoded = encoded.string(11, thinking.text);
+        }
+        if let Some(signature) = thinking.signature.filter(|value| !value.is_empty()) {
+            encoded = encoded.string(12, signature);
+            if let Some(kind) = thinking.signature_type.filter(|value| !value.is_empty()) {
+                encoded = encoded.string(18, kind);
+            }
+        }
     }
     encoded.finish()
 }
@@ -269,6 +289,8 @@ pub(crate) struct ChatResponse {
     pub(crate) error: Option<ConnectError>,
     pub(crate) tool_calls: Vec<ChatToolCall>,
     pub(crate) tool_arguments: Vec<ChatToolArguments>,
+    pub(crate) signatures: Vec<String>,
+    pub(crate) signature_types: Vec<String>,
     pub(crate) saw_usage: bool,
     pub(crate) usage: ChatUsage,
     pub(crate) stop: Option<u64>,
@@ -318,6 +340,8 @@ pub(crate) enum ChatEvent {
     Reasoning(String),
     ToolCall(ChatToolCall),
     ToolArguments(ChatToolArguments),
+    Signature(String),
+    SignatureType(String),
     Usage(ChatUsage),
     Stop(u64),
     End(Option<ConnectError>),
@@ -381,6 +405,14 @@ impl ChatDecoder {
                         .as_string()
                         .filter(|text| !text.is_empty())
                         .map(ChatEvent::Reasoning),
+                    10 => field
+                        .as_string()
+                        .filter(|text| !text.is_empty())
+                        .map(ChatEvent::Signature),
+                    21 => field
+                        .as_string()
+                        .filter(|text| !text.is_empty())
+                        .map(ChatEvent::SignatureType),
                     7 => field
                         .as_bytes()
                         .map(|bytes| ChatEvent::Usage(decode_usage(bytes))),
@@ -494,6 +526,8 @@ pub(crate) fn decode_response(body: &[u8]) -> Result<ChatResponse, PluginError> 
             ChatEvent::Reasoning(text) => response.reasoning.push(text),
             ChatEvent::ToolCall(call) => response.tool_calls.push(call),
             ChatEvent::ToolArguments(arguments) => response.tool_arguments.push(arguments),
+            ChatEvent::Signature(signature) => response.signatures.push(signature),
+            ChatEvent::SignatureType(kind) => response.signature_types.push(kind),
             ChatEvent::Usage(usage) => {
                 response.saw_usage = true;
                 response.usage = usage;

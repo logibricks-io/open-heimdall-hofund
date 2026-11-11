@@ -516,6 +516,56 @@ fn reasoning_delta_opens_stream_and_becomes_thinking() {
 }
 
 #[test]
+fn messages_stream_forwards_claude_signatures_and_remembers_their_type() {
+    for (label, model, expected) in [
+        ("claude-signature@example.test", "claude-opus-5-5", 2),
+        ("other-signature@example.test", "swe-2", 0),
+    ] {
+        let dir = tempfile::tempdir().expect("dir");
+        let host = host(&dir);
+        let id = seed_account(&host, "devin-signature-stream-key", label);
+        enqueue_configs(&host);
+        let signature = format!("signature-{label}");
+        let split = signature.len() / 2;
+        let body = [
+            frame(0, &ProtoBuf::new().string(9, "thinking").finish()).expect("reasoning"),
+            frame(0, &ProtoBuf::new().string(10, &signature[..split]).finish())
+                .expect("first signature"),
+            frame(
+                0,
+                &ProtoBuf::new()
+                    .string(10, &signature[split..])
+                    .string(21, "anthropic-bedrock")
+                    .finish(),
+            )
+            .expect("second signature"),
+            frame(0, &ProtoBuf::new().string(3, "done").finish()).expect("text"),
+            frame(FLAG_END, b"{}").expect("end"),
+        ]
+        .concat();
+        host.http().enqueue(body);
+        let completion =
+            execute(&host, &id, request(model), ProtocolId::ANTHROPIC_MESSAGES).expect("execute");
+        let events = collect_events(completion).expect("events");
+        let signatures: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                StreamEvent::SignatureDelta(delta) => Some(delta.signature.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(signatures.len(), expected);
+        assert_eq!(
+            signatures.concat(),
+            if expected == 0 { "" } else { &signature }
+        );
+        if expected != 0 {
+            assert_eq!(crate::stream::sig_type_of(&signature), "anthropic-bedrock");
+        }
+    }
+}
+
+#[test]
 fn empty_and_metadata_only_replies_fail_before_stream() {
     let golden = scripted_chat_error(
         "empty-golden@example.test",
@@ -771,6 +821,7 @@ fn body_failures_after_success_are_broken_reply_502s() {
             "swe-2".to_owned(),
             ProtocolId::OPENAI_CHAT,
             true,
+            false,
         ));
         let error = if opened {
             collect_events(completion.expect("stream opens on text")).expect_err("body error")
@@ -841,6 +892,10 @@ fn tool_calls_in_history_encode_even_without_tool_definitions() {
 }
 
 fn encoded_tool_request(request: Request) -> Vec<u8> {
+    encoded_request_for(request, ProtocolId::OPENAI_CHAT)
+}
+
+fn encoded_request_for(request: Request, protocol: ProtocolId) -> Vec<u8> {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let unique = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let dir = tempfile::tempdir().expect("dir");
@@ -852,7 +907,8 @@ fn encoded_tool_request(request: Request) -> Vec<u8> {
     );
     enqueue_configs(&host);
     host.http().enqueue(chat_body(3, "ok"));
-    execute_events(&host, &id, request);
+    let completion = execute(&host, &id, request, protocol).expect("execute");
+    collect_events(completion).expect("events");
     host.http().calls()[1].body().to_vec()
 }
 
@@ -1050,6 +1106,145 @@ fn following_user_images_attach_to_their_noted_tool_result() {
             .and_then(|field| field.as_string())
             .as_deref(),
         Some("what are these?")
+    );
+}
+
+fn prompt_value(prompt: &[hofund_plugin_sdk::protobuf::Field], number: u32) -> Option<String> {
+    prompt
+        .iter()
+        .find(|field| field.number == number)
+        .and_then(|field| field.as_string())
+}
+
+fn prompt_role(prompt: &[hofund_plugin_sdk::protobuf::Field]) -> Option<u64> {
+    prompt
+        .iter()
+        .find(|field| field.number == 2)
+        .and_then(|field| field.as_varint())
+}
+
+#[test]
+fn non_claude_reasoning_replays_unsigned_and_joins_split_calls() {
+    let request: Request = hofund_plugin_sdk::json::from_value(hofund_plugin_sdk::json::json!({
+        "model": "swe-2",
+        "stream": true,
+        "messages": [
+            {"role": "assistant", "content": [
+                {"type": "thinking", "text": "First /a."},
+                {"type": "tool_call", "id": "call_a", "name": "read", "arguments": {"form": "raw", "text": "{}"}}
+            ]},
+            {"role": "assistant", "content": [
+                {"type": "thinking", "text": "And /b."},
+                {"type": "tool_call", "id": "call_b", "name": "read", "arguments": {"form": "raw", "text": "{}"}}
+            ]}
+        ]
+    }))
+    .expect("reasoning history");
+    let body = encoded_tool_request(request);
+    let prompts = decoded_chat_prompts(&body);
+    assert_eq!(
+        prompt_value(&prompts[0], 11).as_deref(),
+        Some("First /a.\n\nAnd /b.")
+    );
+    assert_eq!(prompt_value(&prompts[0], 12), None);
+    assert_eq!(prompt_value(&prompts[0], 18), None);
+    assert_eq!(
+        prompts[0].iter().filter(|field| field.number == 6).count(),
+        2
+    );
+}
+
+#[test]
+fn messages_replay_signed_thinking_only_on_claude_uids() {
+    for (model, text, signature, expected_text, expected_signature) in [
+        (
+            "claude-opus-5-5",
+            "Read it first.",
+            "sig-one",
+            Some("Read it first."),
+            Some("sig-one"),
+        ),
+        ("claude-opus-5-5", "Unsigned", "", None, None),
+        (
+            "claude-opus-5-5",
+            "",
+            "bare-signature",
+            None,
+            Some("bare-signature"),
+        ),
+        (
+            "swe-2",
+            "Read it first.",
+            "sig-one",
+            Some("Read it first."),
+            None,
+        ),
+    ] {
+        let request: Request = hofund_plugin_sdk::json::from_value(hofund_plugin_sdk::json::json!({
+            "model": model,
+            "stream": true,
+            "messages": [
+                {"role": "assistant", "content": [
+                    {"type": "thinking", "text": text, "signature": signature},
+                    {"type": "tool_call", "id": "toolu_01", "name": "read", "arguments": {"form": "json", "value": {}}}
+                ]},
+                {"role": "user", "content": [{"type": "tool_result", "id": "toolu_01", "content": [{"type": "text", "text": "A"}]}]}
+            ]
+        }))
+        .expect("thinking history");
+        let body = encoded_request_for(request, ProtocolId::ANTHROPIC_MESSAGES);
+        let prompts = decoded_chat_prompts(&body);
+        let assistant = prompts
+            .iter()
+            .find(|prompt| prompt_role(prompt) == Some(2))
+            .expect("assistant");
+        assert_eq!(prompt_value(assistant, 11).as_deref(), expected_text);
+        assert_eq!(prompt_value(assistant, 12).as_deref(), expected_signature);
+        assert_eq!(
+            prompt_value(assistant, 18).as_deref(),
+            expected_signature.map(|_| "anthropic")
+        );
+    }
+}
+
+#[test]
+fn thinking_after_text_gets_the_following_calls_prompt() {
+    let request: Request = hofund_plugin_sdk::json::from_value(hofund_plugin_sdk::json::json!({
+        "model": "claude-opus-5-5",
+        "stream": true,
+        "messages": [
+            {"role": "assistant", "content": [
+                {"type": "thinking", "text": "one", "signature": "sig-one"},
+                {"type": "text", "text": "Reading it."},
+                {"type": "thinking", "text": "two", "signature": "sig-two"},
+                {"type": "tool_call", "id": "toolu_01", "name": "read", "arguments": {"form": "json", "value": {}}}
+            ]},
+            {"role": "user", "content": [{"type": "tool_result", "id": "toolu_01", "content": [{"type": "text", "text": "A"}]}]}
+        ]
+    }))
+    .expect("ordered thinking");
+    let body = encoded_request_for(request, ProtocolId::ANTHROPIC_MESSAGES);
+    let prompts = decoded_chat_prompts(&body);
+    let assistants: Vec<_> = prompts
+        .iter()
+        .filter(|prompt| prompt_role(prompt) == Some(2))
+        .collect();
+    assert_eq!(assistants.len(), 2);
+    assert_eq!(
+        prompt_value(assistants[0], 3).as_deref(),
+        Some("Reading it.")
+    );
+    assert_eq!(prompt_value(assistants[0], 11).as_deref(), Some("one"));
+    assert_eq!(prompt_value(assistants[0], 12).as_deref(), Some("sig-one"));
+    assert_eq!(prompt_value(assistants[1], 3), None);
+    assert_eq!(prompt_value(assistants[1], 11).as_deref(), Some("two"));
+    assert_eq!(prompt_value(assistants[1], 12).as_deref(), Some("sig-two"));
+    assert_eq!(
+        assistants[1]
+            .iter()
+            .filter(|field| field.number == 6)
+            .count(),
+        1
     );
 }
 
