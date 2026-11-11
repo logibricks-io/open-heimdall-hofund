@@ -4,5 +4,5 @@ binary = "omp"
 
 # This crate currently ships the session reader only. Connect file
 # slots for ~/.omp/agent (YAML, same family as Pi) are not declared
-# yet. Do not add an empty description and expect it to stay
-# disconnected: the catalog treats a file-less agent as not connected.
+# yet. A file-less, credential-less agent.toml is not compiled into
+# the shipped connect catalog; the id is reserved until slots exist.
