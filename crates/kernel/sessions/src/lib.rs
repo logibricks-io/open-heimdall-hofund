@@ -14,4 +14,5 @@ pub mod consent;
 pub mod index;
 pub mod json;
 pub mod open;
+pub mod pricing;
 mod storage;

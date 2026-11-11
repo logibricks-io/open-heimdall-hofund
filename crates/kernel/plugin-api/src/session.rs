@@ -96,6 +96,38 @@ impl SessionDay {
     }
 }
 
+/// One usage observation with the running checkpoint that produced it.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
+pub struct SessionUsageEvent {
+    /// Running total reported by the agent, before normalization.
+    pub checkpoint: SessionTokens,
+    /// Tokens contributed by this observation.
+    pub tokens: SessionTokens,
+    /// Model id for this contribution.
+    pub model: String,
+    /// Local calendar date for this contribution.
+    pub date: String,
+}
+
+impl SessionUsageEvent {
+    /// A usage observation.
+    #[must_use]
+    pub fn new(
+        checkpoint: SessionTokens,
+        tokens: SessionTokens,
+        model: impl Into<String>,
+        date: impl Into<String>,
+    ) -> Self {
+        Self {
+            checkpoint,
+            tokens,
+            model: model.into(),
+            date: date.into(),
+        }
+    }
+}
+
 /// One parsed session file. Non-main records merge into their parent.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[non_exhaustive]
@@ -130,6 +162,24 @@ pub struct SessionRecord {
     pub subagents: Vec<String>,
     /// Pure-copy ids on a main record.
     pub copies: Vec<String>,
+    /// First and last shared message ids, when the format supports copies.
+    #[serde(default)]
+    pub family_root: String,
+    /// Last shared message id.
+    #[serde(default)]
+    pub family_leaf: String,
+    /// All shared message ids known in this file.
+    #[serde(default)]
+    pub family_ids: Vec<String>,
+    /// Whether this record is a pure copy rather than a subagent.
+    #[serde(default)]
+    pub copy: bool,
+    /// Parent checkpoint source for a fork, when one is named.
+    #[serde(default)]
+    pub forked_from: Option<String>,
+    /// Usage observations used for checkpoint dedup.
+    #[serde(default)]
+    pub usage: Vec<SessionUsageEvent>,
     /// Whether input bounds or the agent format omitted some content.
     pub cut: bool,
 }
@@ -155,6 +205,12 @@ impl SessionRecord {
             parent_id: None,
             subagents: Vec::new(),
             copies: Vec::new(),
+            family_root: String::new(),
+            family_leaf: String::new(),
+            family_ids: Vec::new(),
+            copy: false,
+            forked_from: None,
+            usage: Vec::new(),
             cut: false,
         }
     }

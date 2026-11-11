@@ -52,5 +52,48 @@
   "parent_id": null,
   "subagents": [],
   "copies": [],
+  "family_root": "",
+  "family_leaf": "",
+  "family_ids": [],
+  "copy": false,
+  "forked_from": null,
+  "usage": [
+    {
+      "checkpoint": {
+        "input": 10000,
+        "output": 300,
+        "cache_read": 4000,
+        "cache_write": 0,
+        "cache_write_1h": 0
+      },
+      "tokens": {
+        "input": 6000,
+        "output": 300,
+        "cache_read": 4000,
+        "cache_write": 0,
+        "cache_write_1h": 0
+      },
+      "model": "fixture-astra",
+      "date": "2026-09-20"
+    },
+    {
+      "checkpoint": {
+        "input": 22000,
+        "output": 500,
+        "cache_read": 14000,
+        "cache_write": 0,
+        "cache_write_1h": 0
+      },
+      "tokens": {
+        "input": 2000,
+        "output": 200,
+        "cache_read": 10000,
+        "cache_write": 0,
+        "cache_write_1h": 0
+      },
+      "model": "fixture-luna",
+      "date": "2026-09-20"
+    }
+  ],
   "cut": false
 }

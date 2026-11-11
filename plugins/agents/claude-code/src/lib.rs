@@ -10,7 +10,7 @@
     clippy::must_use_candidate
 )]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Local};
@@ -202,6 +202,8 @@ struct ClaudeState {
     root: String,
     leaf: String,
     compacts: Vec<String>,
+    #[serde(default)]
+    uuids: BTreeSet<String>,
 }
 
 impl ClaudeState {
@@ -221,6 +223,7 @@ impl ClaudeState {
             root: String::new(),
             leaf: String::new(),
             compacts: Vec::new(),
+            uuids: BTreeSet::new(),
         }
     }
 
@@ -240,6 +243,9 @@ impl ClaudeState {
         } else {
             fallback
         };
+        self.record.family_root.clone_from(&self.root);
+        self.record.family_leaf.clone_from(&self.leaf);
+        self.record.family_ids = self.uuids.iter().cloned().collect();
     }
 }
 
@@ -307,6 +313,7 @@ impl ClaudeParser {
                 uuid.clone_into(&mut self.state.root);
             }
             uuid.clone_into(&mut self.state.leaf);
+            self.state.uuids.insert(uuid.to_owned());
             if kind == "user"
                 && value
                     .get("isCompactSummary")

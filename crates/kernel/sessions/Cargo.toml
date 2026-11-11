@@ -12,6 +12,7 @@ rust-version.workspace = true
 
 [dependencies]
 hofund-plugin-api = { workspace = true }
+hofund-usage = { workspace = true }
 libc = "0.2.180"
 serde = { version = "1.0.228", default-features = false, features = ["derive"] }
 serde_json = "1.0.154"

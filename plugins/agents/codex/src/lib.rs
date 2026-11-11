@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Local};
 use hofund_plugin_api::{
     PluginError, SessionCompression, SessionDay, SessionFile, SessionLocator, SessionParse,
-    SessionParser, SessionRecord, SessionStore, SessionTokens,
+    SessionParser, SessionRecord, SessionStore, SessionTokens, SessionUsageEvent,
 };
 use hofund_plugin_sdk::{chrono, json, serde};
 use json::Value;
@@ -410,6 +410,11 @@ impl CodexParser {
         {
             self.state.record.id = format!("{AGENT}:{id}");
         }
+        self.state.record.forked_from = payload
+            .get("forked_from_id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .map(|id| format!("{AGENT}:{id}"));
         if self.state.record.cwd.is_empty()
             && let Some(cwd) = payload.get("cwd").and_then(Value::as_str)
         {
@@ -507,9 +512,17 @@ impl CodexParser {
         }
         let model = self.state.model.clone();
         let tokens = used.spent();
+        let date = at.map_or_else(String::new, |at| {
+            at.with_timezone(&Local).format("%Y-%m-%d").to_string()
+        });
+        self.state.record.usage.push(SessionUsageEvent::new(
+            SessionTokens::new(total.input, total.output, total.cached, total.cache_write),
+            tokens,
+            &model,
+            &date,
+        ));
         self.state.record.add_usage(&model, tokens);
-        if let Some(at) = at {
-            let date = at.with_timezone(&Local).format("%Y-%m-%d").to_string();
+        if !date.is_empty() {
             self.state
                 .record
                 .add_day(SessionDay::new(date, model, tokens));

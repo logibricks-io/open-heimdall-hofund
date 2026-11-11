@@ -5,7 +5,9 @@ use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-use hofund_plugin_api::{PluginError, SessionFile, SessionParse, SessionRecord, SessionStore};
+use hofund_plugin_api::{
+    PluginError, SessionDay, SessionFile, SessionParse, SessionRecord, SessionStore,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
@@ -214,12 +216,16 @@ impl SessionIndex {
             .filter(|entry| entry.record.main)
             .map(|entry| entry.record.clone())
             .collect();
-        let children: Vec<SessionRecord> = self
+        dedup_forks(&mut records);
+        sort_newest(&mut records);
+        let mut children: Vec<SessionRecord> = self
             .entries
             .values()
             .filter(|entry| !entry.record.main)
             .map(|entry| entry.record.clone())
             .collect();
+        children.extend(hide_pure_copies(&mut records));
+        records.retain(|record| record.main);
         for child in children {
             let Some(parent_id) = child.parent_id.as_deref() else {
                 continue;
@@ -228,13 +234,17 @@ impl SessionIndex {
                 .iter_mut()
                 .find(|parent| parent.agent == child.agent && parent.id == parent_id)
             {
-                for (model, tokens) in &child.models {
-                    parent.add_usage(model.clone(), *tokens);
+                if child.copy {
+                    parent.copies.push(child.id.clone());
+                } else {
+                    for (model, tokens) in &child.models {
+                        parent.add_usage(model.clone(), *tokens);
+                    }
+                    for day in child.days.clone() {
+                        parent.add_day(day);
+                    }
+                    parent.subagents.push(child.id.clone());
                 }
-                for day in child.days.clone() {
-                    parent.add_day(day);
-                }
-                parent.subagents.push(child.id.clone());
                 parent.start_ms = match (parent.start_ms, child.start_ms) {
                     (0, child) => child,
                     (parent, 0) => parent,
@@ -244,12 +254,7 @@ impl SessionIndex {
                 parent.cut |= child.cut;
             }
         }
-        records.sort_by(|left, right| {
-            right
-                .last_ms
-                .cmp(&left.last_ms)
-                .then_with(|| left.id.cmp(&right.id))
-        });
+        sort_newest(&mut records);
         records
     }
 
@@ -375,6 +380,98 @@ impl SessionIndex {
     }
 }
 
+fn sort_newest(records: &mut [SessionRecord]) {
+    records.sort_by(|left, right| {
+        right
+            .last_ms
+            .cmp(&left.last_ms)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+}
+
+fn dedup_forks(records: &mut [SessionRecord]) {
+    let parents = records.to_vec();
+    for record in records {
+        let Some(parent_id) = record.forked_from.as_deref() else {
+            continue;
+        };
+        let Some(parent) = parents
+            .iter()
+            .find(|parent| parent.agent == record.agent && parent.id == parent_id)
+        else {
+            continue;
+        };
+        let events = record.usage.clone();
+        record.models.clear();
+        record.days.clear();
+        for event in events {
+            if parent
+                .usage
+                .iter()
+                .any(|held| held.checkpoint == event.checkpoint)
+            {
+                continue;
+            }
+            record.add_usage(event.model.clone(), event.tokens);
+            if !event.date.is_empty() {
+                record.add_day(SessionDay::new(event.date, event.model, event.tokens));
+            }
+        }
+    }
+}
+
+fn hide_pure_copies(records: &mut [SessionRecord]) -> Vec<SessionRecord> {
+    let source = records.to_vec();
+    let mut links = BTreeMap::new();
+    for (index, child) in source.iter().enumerate() {
+        if child.family_root.is_empty() || child.family_leaf.is_empty() {
+            continue;
+        }
+        for (candidate, keeper) in source.iter().enumerate() {
+            if index == candidate || child.agent != keeper.agent || !holds_family(keeper, child) {
+                continue;
+            }
+            if holds_family(child, keeper) && !preferred_keeper(keeper, child) {
+                continue;
+            }
+            links.insert(index, candidate);
+            break;
+        }
+    }
+    let mut copies = Vec::new();
+    for index in links.keys() {
+        let mut keeper = links[index];
+        let mut seen = BTreeSet::new();
+        while let Some(next) = links.get(&keeper) {
+            if !seen.insert(keeper) {
+                break;
+            }
+            keeper = *next;
+        }
+        let mut copy = source[*index].clone();
+        copy.main = false;
+        copy.copy = true;
+        copy.parent_id = Some(source[keeper].id.clone());
+        records[*index].main = false;
+        records[*index].copy = true;
+        records[*index].parent_id.clone_from(&copy.parent_id);
+        copies.push(copy);
+    }
+    copies
+}
+
+fn holds_family(keeper: &SessionRecord, other: &SessionRecord) -> bool {
+    [&other.family_root, &other.family_leaf]
+        .into_iter()
+        .all(|id| {
+            keeper.family_ids.contains(id) || keeper.family_root == *id || keeper.family_leaf == *id
+        })
+}
+
+fn preferred_keeper(left: &SessionRecord, right: &SessionRecord) -> bool {
+    left.last_ms > right.last_ms || (left.last_ms == right.last_ms && left.id > right.id)
+}
+
 fn parse_file(
     store: &dyn SessionStore,
     root: &Path,
@@ -423,7 +520,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use hofund_plugin_api::{SessionLocator, SessionParser, SessionTokens};
+    use hofund_plugin_api::{SessionLocator, SessionParser, SessionTokens, SessionUsageEvent};
 
     use super::*;
 
@@ -644,5 +741,59 @@ mod tests {
             SessionIndex::load(&config, &consent).list(&consent),
             Vec::<SessionRecord>::new()
         );
+    }
+
+    #[test]
+    fn pure_copy_is_not_a_top_level_row() {
+        let mut keeper = SessionRecord::new("fake", "fake:keeper", "keeper");
+        keeper.last_ms = 20;
+        keeper.family_root = "root".to_owned();
+        keeper.family_leaf = "leaf".to_owned();
+        keeper.family_ids = vec!["root".to_owned(), "leaf".to_owned()];
+        let mut copy = SessionRecord::new("fake", "fake:copy", "copy");
+        copy.last_ms = 10;
+        copy.family_root = "root".to_owned();
+        copy.family_leaf = "leaf".to_owned();
+        copy.family_ids.clone_from(&keeper.family_ids);
+        let mut records = vec![copy, keeper];
+        let copies = hide_pure_copies(&mut records);
+        assert_eq!(copies.len(), 1);
+        assert_eq!(copies[0].parent_id.as_deref(), Some("fake:keeper"));
+        assert!(!records[0].main);
+        assert!(records[1].main);
+    }
+
+    #[test]
+    fn fork_counts_only_checkpoints_missing_from_parent() {
+        let copied = SessionUsageEvent::new(
+            SessionTokens::new(10, 1, 0, 0),
+            SessionTokens::new(10, 1, 0, 0),
+            "model",
+            "2026-11-10",
+        );
+        let later = SessionUsageEvent::new(
+            SessionTokens::new(20, 2, 0, 0),
+            SessionTokens::new(10, 1, 0, 0),
+            "model",
+            "2026-11-11",
+        );
+        let mut parent = SessionRecord::new("fake", "fake:parent", "parent");
+        parent.usage.push(copied.clone());
+        let mut child = SessionRecord::new("fake", "fake:child", "child");
+        child.forked_from = Some(parent.id.clone());
+        child.usage = vec![copied, later];
+        for event in &child.usage.clone() {
+            child.add_usage(event.model.clone(), event.tokens);
+            child.add_day(SessionDay::new(
+                event.date.clone(),
+                event.model.clone(),
+                event.tokens,
+            ));
+        }
+        let mut records = vec![parent, child];
+        dedup_forks(&mut records);
+        assert_eq!(records[1].tokens(), SessionTokens::new(10, 1, 0, 0));
+        assert_eq!(records[1].days.len(), 1);
+        assert_eq!(records[1].days[0].date, "2026-11-11");
     }
 }

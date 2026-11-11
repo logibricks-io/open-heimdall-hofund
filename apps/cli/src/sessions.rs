@@ -11,7 +11,7 @@ use hofund_model_catalog::{EffectivePricer, ListPriceLookup, ModelCatalog, Reqwe
 use hofund_plugin_api::{SessionRecord, SessionStore, SessionTokens};
 use hofund_sessions::consent::Consent;
 use hofund_sessions::index::SessionIndex;
-use hofund_usage::TokenPrice;
+use hofund_sessions::pricing::{TokenPrice, price_records, token_cost};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
@@ -533,17 +533,9 @@ fn pricing(config: &Path) -> Option<EffectivePricer> {
 }
 
 fn price_record(record: &mut SessionRecord, pricing: Option<&EffectivePricer>) {
-    record.cost = 0.0;
-    record.unpriced = 0;
-    for (model, tokens) in &record.models {
-        if let Some(price) =
-            pricing.and_then(|pricing| price_for_model(pricing, &record.agent, model))
-        {
-            record.cost += token_cost(price, *tokens);
-        } else {
-            record.unpriced += 1;
-        }
-    }
+    price_records(std::slice::from_mut(record), |agent, model| {
+        pricing.and_then(|pricing| price_for_model(pricing, agent, model))
+    });
 }
 
 fn price_for_model(pricing: &EffectivePricer, agent: &str, model: &str) -> Option<TokenPrice> {
@@ -557,19 +549,6 @@ fn price_for_model(pricing: &EffectivePricer, agent: &str, model: &str) -> Optio
             cache_write: price.cache_write,
             cache_write_1h: price.cache_write_1h,
         })
-}
-
-fn token_cost(price: TokenPrice, tokens: SessionTokens) -> f64 {
-    fn signed(value: u64) -> i64 {
-        i64::try_from(value).unwrap_or(i64::MAX)
-    }
-    price.cost_split(
-        signed(tokens.input),
-        signed(tokens.output),
-        signed(tokens.cache_read),
-        signed(tokens.cache_write),
-        signed(tokens.cache_write_1h),
-    )
 }
 
 #[cfg(test)]

@@ -287,6 +287,10 @@ helpers, and agent wiring in `internal/agent/qoder.go`.
 | Zed sign-in and cloud | Native app sign-in in the OS secret store; cloud `/models`, per-request LLM tokens, provider envelope on `/completions`, `zed_body` rewrites Responses payloads. | Adopt body shaping; redesign sign-in and upstream until verified | `hofund-plugin-subscription-zed` imports user-supplied credential JSON, lists models (including `display_name`), mints LLM tokens, POST `/completions` with catalog vendor and capability gates, incremental NDJSON-to-SSE relay, and applies `body.rs` (preserve non-array `input`, flatten namespace tools). Native RSA sign-in remains a gap. | Keychain sign-in is not reproduced from guesses; cloud relay is mock-verified (`a2c_12`–`a2c_52`). |
 | WorkBuddy desktop and check-in | Desktop auth under CodeBuddyExtension `Public/auth`, token re-read on use, `/v3/config` models, billing quota, CN daily check-in with vendor envelope codes on non-2xx. | Adopt paths and check-in parsing | `hofund-plugin-subscription-workbuddy` discovers desktop auth from CodeBuddyExtension data, re-reads desktop tokens each call, fetches `/v3/config`, refreshes OAuth on 401, and uses the SDK check-in that parses vendor `code` before HTTP status. Encrypted `$wbEncrypted` desktop files are refused. | Matches desktop layout; no static model list. |
 
-## Not in this version
+## Sessions
 
-Sessions are not compared here yet. Add a row when that subsystem is built.
+| Subsystem | magpie approach | Verdict | hofund approach | Rationale |
+| --- | --- | --- | --- | --- |
+| Local session reading | Agent-specific readers share process-global consent and cache state, with incremental file reads and subagent/copy attribution. | Adopt consent, bounds, and reader behavior; redesign ownership and plugin boundaries | `hofund-sessions` owns an explicit index, one-time fail-closed consent, canonical/no-follow opens, JSON/byte bounds, atomic state, and pricing. Agent plugins implement `SessionStore`; the kernel supplies consented roots and depth-checked JSON. R-29 ships Claude and Codex readers, local daily stats, and read-only CLI listing. | Fresh installs read nothing, failed writes cannot widen access, and revocation drops cached rows. Explicit state is testable with `FakeStore`; plugins cannot widen consent or open unbounded files. Control, recording, other readers, and session-file mutations remain separate reviewed rows. |
+
+## Not in this version

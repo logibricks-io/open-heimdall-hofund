@@ -160,6 +160,7 @@ flowchart BT
   gateway --> pluginApi
   gateway --> pluginHost
   sessions --> pluginApi
+  sessions --> usage
   daemon --> gateway
   daemon --> config
   daemon --> secrets
@@ -194,7 +195,9 @@ reaches the daemon through `control-client` and reads its config and token
 through `config` and `secrets`, and runs `hofundd` for `serve`,
 `subscription`, and one-shot operations. It has no `daemon` edge; an
 `xtask` test checks with `cargo metadata` that only `hofundd`, the daemon
-crate, and the desktop link `plugin-registry`.
+crate, and the desktop link `plugin-registry`. `cli` also links `sessions`
+and the two reader plugins for the local read-only `hofund sessions` command;
+it never writes into agent homes through that path.
 `plugin-api` depends on `ir`. `plugin-sdk` depends on `codec`, `ir`,
 `plugin-api`, and `quirks`. It uses `codec` for the Chat and Responses
 transport and `ir` to fold a stream into one response.
@@ -278,7 +281,7 @@ This table covers normal and build dependencies, including their target-specific
 | `hofund-control-client` | `hofund-control-proto` |
 | `hofund-control-proto` | — |
 | `hofund-secrets` | — |
-| `hofund-sessions` | `hofund-plugin-api` |
+| `hofund-sessions` | `hofund-plugin-api`, `hofund-usage` |
 | `hofund-usage` | — |
 | `hofund-agent` | `hofund-config`, `hofund-plugin-api` |
 | `hofund-daemon` | `hofund-codec`, `hofund-config`, `hofund-control-proto`, `hofund-gateway`, `hofund-model-catalog`, `hofund-plugin-api`, `hofund-plugin-host`, `hofund-plugin-registry` (tests also enable `test-fixtures`), `hofund-plugin-sdk`, `hofund-provider`, `hofund-quirks`, `hofund-router`, `hofund-secrets`, `hofund-usage`, `hofund-agent`, `hofund-control-client` (tests; dev `hofund-agent` enables `test-fixtures`) |

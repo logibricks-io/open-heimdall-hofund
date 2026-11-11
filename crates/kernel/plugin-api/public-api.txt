@@ -970,10 +970,15 @@ SessionRecord
 SessionRecord #[non_exhaustive] derives(Clone, Debug, Deserialize, PartialEq, Serialize)
 SessionRecord.agent
 SessionRecord.copies
+SessionRecord.copy
 SessionRecord.cost
 SessionRecord.cut
 SessionRecord.cwd
 SessionRecord.days
+SessionRecord.family_ids
+SessionRecord.family_leaf
+SessionRecord.family_root
+SessionRecord.forked_from
 SessionRecord.id
 SessionRecord.last_ms
 SessionRecord.main
@@ -984,6 +989,7 @@ SessionRecord.start_ms
 SessionRecord.subagents
 SessionRecord.title
 SessionRecord.unpriced
+SessionRecord.usage
 SessionRecord::fn add_day (& mut self , day : SessionDay)
 SessionRecord::fn add_usage (& mut self , model : impl Into < String > , tokens : SessionTokens)
 SessionRecord::fn model_ids (& self) -> Vec < String >
@@ -1007,6 +1013,13 @@ SessionTokens::fn add (& mut self , other : Self)
 SessionTokens::fn is_zero (self) -> bool
 SessionTokens::fn total (self) -> u64
 SessionTokens::fn with_cache_write_1h (mut self , tokens : u64) -> Self
+SessionUsageEvent
+SessionUsageEvent #[non_exhaustive] derives(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)
+SessionUsageEvent.checkpoint
+SessionUsageEvent.date
+SessionUsageEvent.model
+SessionUsageEvent.tokens
+SessionUsageEvent::fn new (checkpoint : SessionTokens , tokens : SessionTokens , model : impl Into < String > , date : impl Into < String > ,) -> Self
 SignInChallenge
 SignInChallenge #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 SignInChallenge::DeviceCode

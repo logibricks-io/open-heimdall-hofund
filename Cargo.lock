@@ -2530,6 +2530,7 @@ name = "hofund-sessions"
 version = "0.1.0"
 dependencies = [
  "hofund-plugin-api",
+ "hofund-usage",
  "libc",
  "serde",
  "serde_json",
