@@ -60,7 +60,7 @@ fn enqueue_configs(host: &TestHost) {
     host.http().enqueue_response(
         200,
         &[("content-type", "application/proto")],
-        include_bytes!("connect/testdata/model-configs.bin").as_slice(),
+        crate::connect::testdata::MODEL_CONFIGS,
     );
 }
 
@@ -321,7 +321,7 @@ fn empty_and_metadata_only_replies_fail_before_stream() {
     let golden = scripted_chat_error(
         "empty-golden@example.test",
         200,
-        include_bytes!("connect/testdata/empty-reply.bin"),
+        crate::connect::testdata::EMPTY_REPLY,
     );
     let metadata = scripted_chat_error(
         "empty-metadata@example.test",
