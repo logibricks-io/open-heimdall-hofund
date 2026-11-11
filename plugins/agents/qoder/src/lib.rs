@@ -302,7 +302,7 @@ impl SessionParser for AgentRewriteParser {
         self.inner.push(value)
     }
 
-    fn finish(mut self: Box<Self>) -> Result<SessionParse, PluginError> {
+    fn finish(self: Box<Self>) -> Result<SessionParse, PluginError> {
         let mut parsed = self.inner.finish()?;
         if let Some(record) = parsed.record.as_mut() {
             let bare = record
@@ -312,10 +312,10 @@ impl SessionParser for AgentRewriteParser {
                 .unwrap_or(&record.id);
             record.agent = self.agent.to_owned();
             record.id = format!("{}:{bare}", self.agent);
-            if let Some(parent) = record.parent_id.as_mut() {
-                if let Some(child) = parent.strip_prefix(&format!("{AGENT}:")) {
-                    *parent = format!("{}:{child}", self.agent);
-                }
+            if let Some(parent) = record.parent_id.as_mut()
+                && let Some(child) = parent.strip_prefix(&format!("{AGENT}:"))
+            {
+                *parent = format!("{}:{child}", self.agent);
             }
         }
         Ok(parsed)
