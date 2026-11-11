@@ -9,7 +9,7 @@ use hofund_plugin_sdk::Call;
 use hofund_plugin_sdk::json::{self, Value};
 use hofund_plugin_sdk::oauth::secret_text;
 
-use crate::session::{EDITOR_HEADERS, Session};
+use crate::session::Session;
 
 /// Id prefixes Copilot gives models nobody picks by hand.
 const INTERNAL_PREFIXES: [&str; 3] = ["copilot-search", "exec-agent", "trajectory"];
@@ -77,16 +77,21 @@ impl Book {
     }
 }
 
-/// A call to the Copilot API with the session token and editor headers.
+/// A call to the Copilot API with the session token and client headers.
 fn api_call(call: Call, session: &Session) -> Call {
-    EDITOR_HEADERS.iter().fold(
+    let call = session.headers().iter().fold(
         call.sensitive_header(
             "authorization",
             format!("Bearer {}", secret_text(&session.token)),
         )
         .header("accept", "application/json"),
         |call, (name, value)| call.header(*name, *value),
-    )
+    );
+    if session.direct {
+        call
+    } else {
+        call.header("X-GitHub-Api-Version", "2026-01-09")
+    }
 }
 
 /// Reads `/models` for `account` and keeps what it says in `book`.

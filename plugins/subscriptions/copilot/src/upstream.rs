@@ -11,7 +11,7 @@ use hofund_plugin_sdk::oauth::{TokenCache, same_secret};
 use hofund_plugin_sdk::wire::{self, Target};
 
 use crate::models::{self, Book, Listed};
-use crate::session::{self, EDITOR_HEADERS, Session};
+use crate::session::{self, Session};
 
 /// The GitHub API version Copilot chat calls name.
 const API_VERSION: &str = "2026-01-09";
@@ -80,7 +80,7 @@ impl CopilotUpstream {
     ) -> Result<Completion, PluginError> {
         let target = Target::new(protocol, session.base.clone())
             .credential(CredentialStyle::Bearer)
-            .headers(request_headers(&request));
+            .headers(session_request_headers(&request, session));
         wire::execute(
             self.host.http(),
             &target,
@@ -126,12 +126,27 @@ impl UpstreamProvider for CopilotUpstream {
 }
 
 /// The headers a Copilot chat call carries, besides the bearer token.
+#[cfg(test)]
 pub(crate) fn request_headers(request: &Request) -> Vec<(String, String)> {
-    let mut headers: Vec<(String, String)> = EDITOR_HEADERS
+    headers_with_client(request, &crate::session::EDITOR_HEADERS, true)
+}
+
+fn session_request_headers(request: &Request, session: &Session) -> Vec<(String, String)> {
+    headers_with_client(request, session.headers(), !session.direct)
+}
+
+fn headers_with_client(
+    request: &Request,
+    client: &[(&str, &str)],
+    editor_version: bool,
+) -> Vec<(String, String)> {
+    let mut headers: Vec<(String, String)> = client
         .iter()
         .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
         .collect();
-    headers.push(("X-GitHub-Api-Version".to_owned(), API_VERSION.to_owned()));
+    if editor_version {
+        headers.push(("X-GitHub-Api-Version".to_owned(), API_VERSION.to_owned()));
+    }
     headers.push(("Openai-Intent".to_owned(), "conversation-panel".to_owned()));
     headers.push(("X-Initiator".to_owned(), initiator(request).to_owned()));
     if has_image(request) {
