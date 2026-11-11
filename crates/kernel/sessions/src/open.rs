@@ -104,8 +104,22 @@ fn absolute(path: &Path) -> io::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use std::io::Read;
+    use std::time::Duration;
 
     use super::*;
+
+    #[test]
+    fn open_accepts_a_regular_file() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("session.jsonl");
+        std::fs::write(&path, b"hello\n").expect("write");
+        let mut text = String::new();
+        open_session_file(temp.path(), &path)
+            .expect("open regular file")
+            .read_to_string(&mut text)
+            .expect("read");
+        assert_eq!(text, "hello\n");
+    }
 
     #[test]
     fn open_rejects_dotdot() {
@@ -172,10 +186,17 @@ mod tests {
             .status()
             .expect("mkfifo");
         assert!(status.success());
-        assert!(matches!(
-            open_session_file(temp.path(), &fifo),
-            Err(OpenError::NotRegular)
-        ));
+        // Bound the open: if the `is_file` guard is inverted, `open` of a
+        // FIFO blocks. Fail in 2s instead of hanging the package suite.
+        let root = temp.path().to_path_buf();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(open_session_file(&root, &fifo));
+        });
+        let result = rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("fifo open should not block; the is_file guard must reject it first");
+        assert!(matches!(result, Err(OpenError::NotRegular)), "{result:?}");
     }
 
     #[test]
