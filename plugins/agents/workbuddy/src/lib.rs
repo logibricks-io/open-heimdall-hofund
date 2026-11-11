@@ -254,7 +254,7 @@ fn same_folder(a: &Path, b: &Path) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        return x.dev() == y.dev() && x.ino() == y.ino();
+        x.dev() == y.dev() && x.ino() == y.ino()
     }
     // `MetadataExt::file_index` / `volume_serial_number` are still unstable
     // (`windows_by_handle`). Canonical paths are the stable equivalent for
