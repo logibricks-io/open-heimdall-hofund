@@ -104,8 +104,12 @@ mod tests {
             let error = super::agent_home_from_credentials(path).expect_err(path);
             assert_eq!(error.kind(), PluginErrorKind::Auth);
         }
-        let home = super::agent_home_from_credentials("/tmp/agent/.zcode/v2/credentials.json")
-            .expect("absolute path");
-        assert_eq!(home, std::path::Path::new("/tmp/agent/.zcode"));
+        // A Unix-style `/tmp/...` path is not absolute on Windows (no drive
+        // prefix), so the fixture must be an OS-correct absolute path.
+        let home_dir = tempfile::tempdir().expect("agent home").keep();
+        let creds = home_dir.join("v2").join("credentials.json");
+        let path = creds.to_str().expect("utf-8 path");
+        let home = super::agent_home_from_credentials(path).expect("absolute path");
+        assert_eq!(home, home_dir);
     }
 }
