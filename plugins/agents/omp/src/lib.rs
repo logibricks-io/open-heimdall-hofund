@@ -35,11 +35,16 @@ impl OmpStore {
     #[must_use]
     pub fn new() -> Self {
         let root = home_dir().join(".omp").join("agent");
-        let mut roots = session_roots(&root);
+        let roots = session_roots(&root);
         #[cfg(not(windows))]
-        if let Some(data) = std::env::var_os("XDG_DATA_HOME").filter(|value| !value.is_empty()) {
-            roots.push(PathBuf::from(data).join("omp").join("sessions"));
-        }
+        let roots = {
+            let mut roots = roots;
+            if let Some(data) = std::env::var_os("XDG_DATA_HOME").filter(|value| !value.is_empty())
+            {
+                roots.push(PathBuf::from(data).join("omp").join("sessions"));
+            }
+            roots
+        };
         Self::with_session_roots(roots)
     }
 
