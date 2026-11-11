@@ -38,7 +38,7 @@ struct SessionState {
 struct IndexProgress {
     total: AtomicU64,
     done: AtomicU64,
-    running: AtomicBool,
+    running: AtomicU64,
 }
 
 impl SessionControl {
@@ -339,7 +339,23 @@ impl SessionControl {
                 row
             })
             .collect();
-        response.agent = query.agent;
+        response.agents.sort_by(|left, right| {
+            right
+                .count
+                .cmp(&left.count)
+                .then_with(|| left.agent.cmp(&right.agent))
+        });
+        response.agent = if !query.agent.is_empty()
+            && response.agents.iter().any(|row| row.agent == query.agent)
+        {
+            query.agent
+        } else {
+            response
+                .agents
+                .first()
+                .map(|row| row.agent.clone())
+                .unwrap_or_default()
+        };
         response.sessions = records
             .iter()
             .filter(|record| response.agent.is_empty() || record.agent == response.agent)
@@ -473,16 +489,16 @@ impl SessionControl {
         let mut response = SessionProgressResponse::default();
         response.files_total = self.progress.total.load(Ordering::SeqCst);
         response.files_done = self.progress.done.load(Ordering::SeqCst);
-        response.running = self.progress.running.load(Ordering::SeqCst);
+        response.running = self.progress.running.load(Ordering::SeqCst) > 0;
         response
     }
 
     fn records(&self) -> Result<Vec<SessionRecord>, ControlFailure> {
-        self.progress.running.store(true, Ordering::SeqCst);
+        self.progress.running.fetch_add(1, Ordering::SeqCst);
         self.progress.total.store(0, Ordering::SeqCst);
         self.progress.done.store(0, Ordering::SeqCst);
         let result = self.read_records();
-        self.progress.running.store(false, Ordering::SeqCst);
+        self.progress.running.fetch_sub(1, Ordering::SeqCst);
         result
     }
 

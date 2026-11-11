@@ -885,12 +885,159 @@ ServeRole::Desktop
 ServeRole::Serve
 ServeRole::Tui
 ServeRole::Unknown #[serde(other)]
+SessionConsent #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+SessionConsent.all
+SessionConsent.asked
+SessionConsent.enabled
+SessionDayStats #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Serialize, Deserialize)
+SessionDayStats.cost
+SessionDayStats.date
+SessionDayStats.tokens
+SessionDetailResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Serialize, Deserialize)
+SessionDetailResponse.session
+SessionDetailResponse.transcript_available
+SessionDetailResponse.version
+SessionListQuery #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq)
+SessionListQuery.days
+SessionListQuery.folder
+SessionListQuery.limit
+SessionListQuery.model
+SessionListQuery::fn limit (& self) -> usize
+SessionListQuery::fn parse (query : Option < & str >) -> Result < Self , ControlError >
+SessionListResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Serialize, Deserialize)
+SessionListResponse.consent
+SessionListResponse.revision
+SessionListResponse.sessions
+SessionListResponse.version
+SessionManageAgent #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+SessionManageAgent.agent
+SessionManageAgent.count
+SessionManageAgent.deletable
+SessionManageQuery #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq)
+SessionManageQuery.agent
+SessionManageQuery::fn parse (query : Option < & str >) -> Result < Self , ControlError >
+SessionManageResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Serialize, Deserialize)
+SessionManageResponse.agent
+SessionManageResponse.agents
+SessionManageResponse.recorded
+SessionManageResponse.recording
+SessionManageResponse.revision
+SessionManageResponse.sessions
+SessionManageResponse.trash
+SessionManageResponse.trash_dir
+SessionManageResponse.version
+SessionOverviewDay #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Serialize, Deserialize)
+SessionOverviewDay.cost
+SessionOverviewDay.count
+SessionOverviewDay.date
+SessionOverviewQuery #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq)
+SessionOverviewQuery.agent
+SessionOverviewQuery.cwd
+SessionOverviewQuery.days
+SessionOverviewQuery.model
+SessionOverviewQuery::fn parse (query : Option < & str >) -> Result < Self , ControlError >
+SessionOverviewResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Serialize, Deserialize)
+SessionOverviewResponse.by_day
+SessionOverviewResponse.count
+SessionOverviewResponse.median_cost
+SessionOverviewResponse.top
+SessionOverviewResponse.version
+SessionOverviewTop #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Serialize, Deserialize)
+SessionOverviewTop.cost
+SessionOverviewTop.id
+SessionOverviewTop.title
+SessionProgressResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+SessionProgressResponse.files_done
+SessionProgressResponse.files_total
+SessionProgressResponse.running
+SessionProgressResponse.version
+SessionReadAgent #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+SessionReadAgent.agent
+SessionReadAgent.on
+SessionReadsPatchRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
+SessionReadsPatchRequest.agents
+SessionReadsPatchRequest.all
+SessionReadsPatchRequest.expected_revision
+SessionReadsPatchRequest.version
+SessionReadsResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+SessionReadsResponse.all
+SessionReadsResponse.asked
+SessionReadsResponse.enabled
+SessionReadsResponse.found
+SessionReadsResponse.revision
+SessionReadsResponse.version
+SessionResume #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+SessionResume.argv
+SessionResume.cwd
 SessionRouteResponse #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
 SessionRouteResponse.decision
 SessionRouteResponse.seq
 SessionRouteResponse.session
 SessionRouteResponse.version
 SessionRouteResponse::fn empty (session : impl Into < String >) -> Self
+SessionSearchHit #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+SessionSearchHit.excerpt
+SessionSearchHit.id
+SessionSearchQuery #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq)
+SessionSearchQuery.agent
+SessionSearchQuery.q
+SessionSearchQuery::fn parse (query : Option < & str >) -> Result < Self , ControlError >
+SessionSearchResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+SessionSearchResponse.cut
+SessionSearchResponse.hits
+SessionSearchResponse.version
+SessionStatShare #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+SessionStatShare.name
+SessionStatShare.tokens
+SessionStatsQuery #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq)
+SessionStatsQuery.days
+SessionStatsQuery.folder
+SessionStatsQuery.model
+SessionStatsQuery::fn parse (query : Option < & str >) -> Result < Self , ControlError >
+SessionStatsResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Serialize, Deserialize)
+SessionStatsResponse.cost
+SessionStatsResponse.days
+SessionStatsResponse.folders
+SessionStatsResponse.models
+SessionStatsResponse.revision
+SessionStatsResponse.tokens
+SessionStatsResponse.unpriced
+SessionStatsResponse.version
+SessionSummary #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Serialize, Deserialize)
+SessionSummary.agent
+SessionSummary.cost
+SessionSummary.cwd
+SessionSummary.gateway
+SessionSummary.id
+SessionSummary.last_ms
+SessionSummary.models
+SessionSummary.read_only
+SessionSummary.resume
+SessionSummary.title
+SessionSummary.tokens
+SessionSummary.unpriced
+SessionTokenTotals #[non_exhaustive] derives(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+SessionTokenTotals.cache_read
+SessionTokenTotals.cache_write
+SessionTokenTotals.input
+SessionTokenTotals.output
+SessionTranscriptPart #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+SessionTranscriptPart.kind
+SessionTranscriptPart.name
+SessionTranscriptPart.role
+SessionTranscriptPart.text
+SessionTranscriptQuery #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq)
+SessionTranscriptQuery.sub
+SessionTranscriptQuery::fn parse (query : Option < & str >) -> Result < Self , ControlError >
+SessionTranscriptResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+SessionTranscriptResponse.cut
+SessionTranscriptResponse.parts
+SessionTranscriptResponse.source
+SessionTranscriptResponse.version
+SessionTrashRow #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+SessionTrashRow.agent
+SessionTrashRow.id
+SessionTrashRow.title
 ShutdownRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
 ShutdownRequest.version
 ShutdownRequest::fn new () -> Self
@@ -1090,6 +1237,7 @@ WarmupRunResponse.detail
 WarmupRunResponse.outcome
 WarmupRunResponse.version
 const API_VERSION
+const DEFAULT_SESSION_LIST_LIMIT
 const MAX_BOOT_ID_LEN
 const MAX_CONFIG_TEXT_BYTES
 const MAX_ERROR_MESSAGE_BYTES

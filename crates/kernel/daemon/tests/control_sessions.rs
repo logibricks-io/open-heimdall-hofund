@@ -463,6 +463,14 @@ async fn search_is_case_folded_and_manage_is_read_only() {
     assert!(!manage.recording && !manage.recorded);
     assert!(!std::path::Path::new(&manage.trash_dir).exists());
     assert_eq!(manage.revision.len(), 64);
+    let response = get(&running, dir.path(), "/v1/hofund/sessions/manage").await;
+    let default_view: SessionManageResponse = decode_response(
+        API_VERSION,
+        &response.bytes().await.expect("default manage body"),
+    )
+    .expect("default manage");
+    assert_eq!(default_view.agent, "fake");
+    assert_eq!(default_view.sessions.len(), 1);
     support::shutdown(running).await;
 }
 

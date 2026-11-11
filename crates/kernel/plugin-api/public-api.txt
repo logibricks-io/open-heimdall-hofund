@@ -966,6 +966,13 @@ SessionParse::fn new (record : SessionRecord , state : impl Into < String >) -> 
 SessionParser
 SessionParser::fn finish (self : Box < Self >) -> Result < SessionParse , PluginError >
 SessionParser::fn push (& mut self , value : & serde_json :: Value) -> Result < () , PluginError >
+SessionPart
+SessionPart #[non_exhaustive] derives(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)
+SessionPart.kind
+SessionPart.name
+SessionPart.role
+SessionPart.text
+SessionPart::fn new (role : impl Into < String > , kind : impl Into < String > , name : impl Into < String > , text : impl Into < String > ,) -> Self
 SessionRecord
 SessionRecord #[non_exhaustive] derives(Clone, Debug, Deserialize, PartialEq, Serialize)
 SessionRecord.agent
@@ -1001,6 +1008,8 @@ SessionStore::fn agent (& self) -> & str
 SessionStore::fn files (& self , root : & Path) -> Result < Vec < SessionFile > , PluginError >
 SessionStore::fn locator (& self) -> & dyn SessionLocator
 SessionStore::fn parser (& self , file : & SessionFile , state : Option < & str > ,) -> Result < Box < dyn SessionParser > , PluginError >
+SessionStore::fn transcript_available (& self) -> bool
+SessionStore::fn transcript_parser (& self , file : & SessionFile ,) -> Result < Box < dyn SessionTranscriptParser > , PluginError >
 SessionTokens
 SessionTokens #[non_exhaustive] derives(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)
 SessionTokens.cache_read
@@ -1013,6 +1022,14 @@ SessionTokens::fn add (& mut self , other : Self)
 SessionTokens::fn is_zero (self) -> bool
 SessionTokens::fn total (self) -> u64
 SessionTokens::fn with_cache_write_1h (mut self , tokens : u64) -> Self
+SessionTranscript
+SessionTranscript #[non_exhaustive] derives(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)
+SessionTranscript.cut
+SessionTranscript.parts
+SessionTranscript.source
+SessionTranscriptParser
+SessionTranscriptParser::fn finish (self : Box < Self >) -> Result < SessionTranscript , PluginError >
+SessionTranscriptParser::fn push (& mut self , value : & serde_json :: Value) -> Result < () , PluginError >
 SessionUsageEvent
 SessionUsageEvent #[non_exhaustive] derives(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)
 SessionUsageEvent.checkpoint

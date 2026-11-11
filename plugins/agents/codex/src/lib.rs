@@ -600,7 +600,7 @@ impl SessionTranscriptParser for CodexTranscriptParser {
             "message" if matches!(role, "user" | "assistant") => {
                 Some(text_part(role, &words("content", "\n")))
             }
-            "reasoning" | "magpie_reasoning" => Some(SessionPart::new(
+            "reasoning" => Some(SessionPart::new(
                 "assistant",
                 "thinking",
                 "",
