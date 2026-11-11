@@ -11,13 +11,15 @@
       "input": 6000,
       "output": 300,
       "cache_read": 4000,
-      "cache_write": 0
+      "cache_write": 0,
+      "cache_write_1h": 0
     },
     "fixture-luna": {
       "input": 2000,
       "output": 200,
       "cache_read": 10000,
-      "cache_write": 0
+      "cache_write": 0,
+      "cache_write_1h": 0
     }
   },
   "days": [
@@ -28,7 +30,8 @@
         "input": 6000,
         "output": 300,
         "cache_read": 4000,
-        "cache_write": 0
+        "cache_write": 0,
+      "cache_write_1h": 0
       }
     },
     {
@@ -38,7 +41,8 @@
         "input": 2000,
         "output": 200,
         "cache_read": 10000,
-        "cache_write": 0
+        "cache_write": 0,
+      "cache_write_1h": 0
       }
     }
   ],

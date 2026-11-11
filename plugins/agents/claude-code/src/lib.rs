@@ -95,6 +95,9 @@ impl SessionStore for ClaudeStore {
     fn files(&self, root: &Path) -> Result<Vec<SessionFile>, PluginError> {
         let projects = root.join("projects");
         let mut paths = Vec::new();
+        if !projects.exists() {
+            return Ok(Vec::new());
+        }
         walk_linked(&projects, &projects, &mut paths)
             .map_err(|_| PluginError::io("cannot list Claude Code sessions"))?;
         let mut files = Vec::new();
@@ -362,6 +365,12 @@ impl ClaudeParser {
             counter(usage, "output_tokens"),
             counter(usage, "cache_read_input_tokens"),
             counter(usage, "cache_creation_input_tokens").max(ephemeral),
+        )
+        .with_cache_write_1h(
+            creation
+                .and_then(|creation| creation.get("ephemeral_1h_input_tokens"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
         );
         if model.is_empty() || tokens.is_zero() {
             return;

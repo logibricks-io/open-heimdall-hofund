@@ -19,6 +19,7 @@ mod provider;
 mod provider_edit;
 mod quota;
 mod serve;
+mod sessions;
 mod subscription;
 mod tui;
 mod usage;
@@ -73,6 +74,7 @@ fn main() -> ExitCode {
         Command::Quota(command) => quota::run(&config, command),
         Command::Warmup(command) => warmup::run(&config, command),
         Command::Checkin(command) => checkin::run(&config, command),
+        Command::Sessions(command) => finish(sessions::run(&config, &command)),
         other => finish(run_control(&config, other)),
     }
 }
@@ -192,6 +194,7 @@ fn run_control(config: &Path, command: Command) -> Result<String, String> {
             | Command::Quota(_)
             | Command::Warmup(_)
             | Command::Checkin(_)
+            | Command::Sessions(_)
             | Command::Accounts(_) => Err("not a control command".to_owned()),
         }
     })
@@ -223,6 +226,7 @@ enum Command {
     Usage {
         options: usage::UsageReportOptions,
     },
+    Sessions(sessions::Command),
     Route,
     AgentList,
     AgentConnect {
@@ -378,6 +382,7 @@ enum HelpTopic {
     TokenRotate,
     GatewayKey,
     Usage,
+    Sessions,
     Agent,
     AgentList,
     AgentConnect,
@@ -408,10 +413,11 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
     let mut help = false;
     let mut own_secret = None;
     let mut flags = SubscriptionFlags::default();
+    let mut session_flags = sessions::Flags::default();
     let mut words = Vec::new();
     let mut operands_only = false;
     let mut key_protocol = None;
-    let mut iter = arguments.iter();
+    let mut iter = arguments.iter().peekable();
     while let Some(argument) = iter.next() {
         if operands_only {
             words.push(argument.as_str());
@@ -439,6 +445,38 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
                     .next()
                     .ok_or_else(|| "--protocol needs a protocol".to_owned())?;
                 key_protocol = Some(protocol.as_str());
+            }
+            "--days" | "-d" if words.first() == Some(&"sessions") => {
+                let value = if iter.peek().is_some_and(|value| !value.starts_with('-')) {
+                    iter.next().expect("peeked").as_str()
+                } else {
+                    "7"
+                };
+                session_flags.days = Some(value.to_owned());
+            }
+            other if words.first() == Some(&"sessions") && other.starts_with("--days=") => {
+                session_flags.days = Some(other[7..].to_owned());
+            }
+            "--model" | "-m" if words.first() == Some(&"sessions") => {
+                session_flags.model = Some(
+                    iter.next()
+                        .ok_or_else(|| "--model needs a value".to_owned())?
+                        .clone(),
+                );
+            }
+            "--folder" | "-f" if words.first() == Some(&"sessions") => {
+                session_flags.folder = Some(
+                    iter.next()
+                        .ok_or_else(|| "--folder needs a value".to_owned())?
+                        .clone(),
+                );
+            }
+            "--limit" | "-n" if words.first() == Some(&"sessions") => {
+                session_flags.limit = Some(
+                    iter.next()
+                        .ok_or_else(|| "--limit needs a value".to_owned())?
+                        .clone(),
+                );
             }
             "--dry-run" => dry_run = true,
             "--force" => force = true,
@@ -497,6 +535,7 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
     }
     let subscription_flags = flags.host.is_some() || flags.label.is_some() || flags.site.is_some();
     let json = flags.json;
+    session_flags.json = json;
     let command = match words.as_slice() {
         [] | ["version"] | ["--version"] | ["-V"] => Command::Version,
         ["serve"] => Command::Serve,
@@ -519,6 +558,7 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
             Ok(usage::UsageCommand::Report(options)) => Command::Usage { options },
             Err(message) => return Err(message),
         },
+        ["sessions", rest @ ..] => Command::Sessions(sessions::parse(rest, session_flags)?),
         ["route"] => Command::Route,
         ["agent", "list"] => Command::AgentList,
         ["agent", "connect", name] => Command::AgentConnect {
@@ -769,7 +809,10 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
     let json_elsewhere = json
         && !matches!(
             command,
-            Command::GatewayKey(gateway_key::Command::List { .. } | gateway_key::Command::Issue(_))
+            Command::Sessions(_)
+                | Command::GatewayKey(
+                    gateway_key::Command::List { .. } | gateway_key::Command::Issue(_)
+                )
         );
     if (subscription_flags || json_elsewhere) && !matches!(command, Command::Subscription(_)) {
         return Err(
@@ -849,6 +892,7 @@ fn help_topic(words: &[&str]) -> Result<HelpTopic, String> {
         ["token", ..] => HelpTopic::Token,
         ["gateway-key", ..] => HelpTopic::GatewayKey,
         ["usage", ..] => HelpTopic::Usage,
+        ["sessions", ..] => HelpTopic::Sessions,
         ["agent", "list", ..] => HelpTopic::AgentList,
         ["agent", "connect", ..] => HelpTopic::AgentConnect,
         ["agent", "disconnect", ..] => HelpTopic::AgentDisconnect,
@@ -894,6 +938,7 @@ fn help_text(topic: HelpTopic) -> String {
         HelpTopic::TokenRotate => TOKEN_ROTATE_HELP,
         HelpTopic::GatewayKey => gateway_key::HELP,
         HelpTopic::Usage => usage::USAGE_HELP,
+        HelpTopic::Sessions => sessions::HELP,
         HelpTopic::Agent => AGENT_HELP,
         HelpTopic::AgentList => AGENT_LIST_HELP,
         HelpTopic::AgentConnect => AGENT_CONNECT_HELP,
@@ -939,6 +984,8 @@ commands:
   token rotate                    replace the bearer token
   gateway-key                     manage named gateway keys and their scopes
   usage                           print the usage table
+  sessions                        list local sessions or daily totals
+  sessions read [on|off ...]      show or change session read consent
   agent list                      list coding-agent adapters
   agent connect <name> [--dry-run]
   agent disconnect <name> [--force]
@@ -1259,7 +1306,7 @@ fn finish<E: std::fmt::Display>(result: Result<String, E>) -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{Command, HelpTopic, SubscriptionCommand, help_text, help_topic, parse};
+    use super::{Command, HelpTopic, SubscriptionCommand, help_text, help_topic, parse, sessions};
     use std::path::PathBuf;
 
     fn words(values: &[&str]) -> Vec<String> {
@@ -1512,6 +1559,31 @@ mod tests {
         assert!(parse(&words(&["nope"])).is_err());
         assert!(parse(&words(&["agent", "status", "--dry-run"])).is_err());
         assert!(parse(&words(&["serve", "--force"])).is_err());
+    }
+
+    #[test]
+    fn sessions_commands_parse_without_touching_agent_actions() {
+        for arguments in [
+            &["sessions"][..],
+            &["sessions", "--days", "--json"][..],
+            &["sessions", "stats", "--model", "demo"][..],
+            &["sessions", "--folder", "work", "--limit", "5"][..],
+        ] {
+            assert!(matches!(
+                command(arguments),
+                Ok(Command::Sessions(sessions::Command::List(_)))
+            ));
+        }
+        assert_eq!(
+            command(&["sessions", "read"]),
+            Ok(Command::Sessions(sessions::Command::Read(None)))
+        );
+        assert!(matches!(
+            command(&["sessions", "read", "on", "codex"]),
+            Ok(Command::Sessions(sessions::Command::Read(Some(_))))
+        ));
+        assert!(command(&["sessions", "read", "on", "codex", "--json"]).is_err());
+        assert!(command(&["sessions", "resume", "one"]).is_err());
     }
 
     #[test]

@@ -331,7 +331,7 @@ impl SessionIndex {
         let append = old.as_ref().is_some_and(|old| {
             old.file_id == file.id
                 && file.compression == hofund_plugin_api::SessionCompression::None
-                && size >= old.size
+                && size > old.size
                 && modified_ns >= old.modified_ns
                 && old.offset <= size.min(MAX_FILE_BYTES)
         });
@@ -621,6 +621,20 @@ mod tests {
         assert_eq!(index.list(&consent)[0].title, "fake prompt");
         index.refresh(&consent, &stores).expect("second refresh");
         assert_eq!(parses.load(Ordering::SeqCst), 1);
+        std::fs::write(agent_root.join("one.jsonl"), b"{\"prompt\":\"howdy\"}\n")
+            .expect("same-size rewrite");
+        let changed = std::fs::OpenOptions::new()
+            .write(true)
+            .open(agent_root.join("one.jsonl"))
+            .expect("open rewrite");
+        changed
+            .set_times(
+                std::fs::FileTimes::new()
+                    .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(1)),
+            )
+            .expect("mtime");
+        index.refresh(&consent, &stores).expect("rewrite refresh");
+        assert_eq!(parses.load(Ordering::SeqCst), 2);
         consent
             .set_reads(None, [("fake".to_owned(), false)])
             .expect("disable");

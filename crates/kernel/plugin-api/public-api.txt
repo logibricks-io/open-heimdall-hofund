@@ -999,12 +999,14 @@ SessionTokens
 SessionTokens #[non_exhaustive] derives(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)
 SessionTokens.cache_read
 SessionTokens.cache_write
+SessionTokens.cache_write_1h
 SessionTokens.input
 SessionTokens.output
 SessionTokens::const fn new (input : u64 , output : u64 , cache_read : u64 , cache_write : u64) -> Self
 SessionTokens::fn add (& mut self , other : Self)
 SessionTokens::fn is_zero (self) -> bool
 SessionTokens::fn total (self) -> u64
+SessionTokens::fn with_cache_write_1h (mut self , tokens : u64) -> Self
 SignInChallenge
 SignInChallenge #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 SignInChallenge::DeviceCode

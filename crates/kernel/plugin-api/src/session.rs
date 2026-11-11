@@ -22,6 +22,9 @@ pub struct SessionTokens {
     pub cache_read: u64,
     /// Cached tokens written.
     pub cache_write: u64,
+    /// The one-hour subset of `cache_write`.
+    #[serde(default)]
+    pub cache_write_1h: u64,
 }
 
 impl SessionTokens {
@@ -33,7 +36,15 @@ impl SessionTokens {
             output,
             cache_read,
             cache_write,
+            cache_write_1h: 0,
         }
+    }
+
+    /// Marks the one-hour subset of cache writes.
+    #[must_use]
+    pub fn with_cache_write_1h(mut self, tokens: u64) -> Self {
+        self.cache_write_1h = tokens.min(self.cache_write);
+        self
     }
 
     /// Adds another counter set, saturating rather than wrapping hostile input.
@@ -42,6 +53,7 @@ impl SessionTokens {
         self.output = self.output.saturating_add(other.output);
         self.cache_read = self.cache_read.saturating_add(other.cache_read);
         self.cache_write = self.cache_write.saturating_add(other.cache_write);
+        self.cache_write_1h = self.cache_write_1h.saturating_add(other.cache_write_1h);
     }
 
     /// Whether every counter is zero.

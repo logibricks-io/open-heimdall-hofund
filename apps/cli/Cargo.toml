@@ -19,10 +19,16 @@ path = "src/main.rs"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 hofund-config = { workspace = true }
 hofund-control-client = { workspace = true }
+hofund-plugin-agent-claude = { workspace = true }
+hofund-plugin-agent-codex = { workspace = true }
+hofund-plugin-api = { workspace = true }
+hofund-sessions = { workspace = true }
 hofund-usage = { workspace = true }
 hofund-model-catalog = { workspace = true }
 hofund-secrets = { workspace = true }
+serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+sha2 = { workspace = true }
 tokio = { version = "1.54.1", features = ["macros", "rt", "signal", "time"] }
 toml_edit = "0.25.17"
 

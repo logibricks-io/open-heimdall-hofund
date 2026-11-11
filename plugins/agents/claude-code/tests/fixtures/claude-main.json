@@ -11,13 +11,15 @@
       "input": 10,
       "output": 20,
       "cache_read": 200,
-      "cache_write": 0
+      "cache_write": 0,
+      "cache_write_1h": 0
     },
     "fixture-opus-5-5": {
       "input": 100,
       "output": 50,
       "cache_read": 5000,
-      "cache_write": 1000
+      "cache_write": 1000,
+      "cache_write_1h": 0
     }
   },
   "days": [
@@ -28,7 +30,8 @@
         "input": 100,
         "output": 50,
         "cache_read": 5000,
-        "cache_write": 1000
+        "cache_write": 1000,
+      "cache_write_1h": 0
       }
     },
     {
@@ -38,7 +41,8 @@
         "input": 10,
         "output": 20,
         "cache_read": 200,
-        "cache_write": 0
+        "cache_write": 0,
+      "cache_write_1h": 0
       }
     }
   ],
