@@ -28,6 +28,7 @@ use hofund_plugin_agent_minimax_code::MiniMaxStore;
 use hofund_plugin_agent_qoder::{QoderCnStore, QoderStore};
 use hofund_plugin_agent_raft::RaftStore;
 use hofund_plugin_agent_workbuddy::{CodeBuddyStore, WorkBuddyAiStore, WorkBuddyStore};
+use hofund_plugin_agent_zcode::ZCodeStore;
 
 pub(crate) const HELP: &str = "\
 usage: hofund sessions [--days N|today|all] [--model MODEL] [--folder FOLDER] [--limit N] [--json]
@@ -134,7 +135,8 @@ pub(crate) fn run(config: &Path, command: &Command) -> Result<String, String> {
     let workbuddy = WorkBuddyStore::new();
     let workbuddy_ai = WorkBuddyAiStore::new();
     let codebuddy = CodeBuddyStore::new();
-    let stores: [&dyn SessionStore; 16] = [
+    let zcode = ZCodeStore::new();
+    let stores: [&dyn SessionStore; 17] = [
         &claude,
         &cindy,
         &cline,
@@ -151,6 +153,7 @@ pub(crate) fn run(config: &Path, command: &Command) -> Result<String, String> {
         &workbuddy,
         &workbuddy_ai,
         &codebuddy,
+        &zcode,
     ];
     run_with(config, command, &stores, Local::now())
 }
@@ -798,6 +801,32 @@ mod tests {
         run_with(&config, &on, &stores, Local::now()).expect("consent");
         let listed = run_with(&config, &list, &stores, Local::now()).expect("list");
         assert!(listed.contains("Explain the cache"), "{listed}");
+    }
+
+    #[test]
+    fn zcode_reader_is_consent_gated_through_index() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config = temp.path().join("hofund.toml");
+        let home = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../plugins/agents/zcode/tests/fixtures/root")
+            .canonicalize()
+            .expect("zcode fixtures");
+        let zcode = ZCodeStore::with_home(home);
+        let stores: [&dyn SessionStore; 1] = [&zcode];
+        let list = Command::List(Options {
+            days: None,
+            model: String::new(),
+            folder: String::new(),
+            limit: 20,
+            json: false,
+        });
+        let on = Command::Read(Some(ReadChange {
+            on: true,
+            targets: vec!["zcode".to_owned()],
+        }));
+        run_with(&config, &on, &stores, Local::now()).expect("consent");
+        let listed = run_with(&config, &list, &stores, Local::now()).expect("list");
+        assert!(listed.contains("Port the parser to Go"), "{listed}");
     }
 
     #[test]

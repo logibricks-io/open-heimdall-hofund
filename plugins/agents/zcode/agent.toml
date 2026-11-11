@@ -1,0 +1,5 @@
+id = "zcode"
+display_name = "ZCode"
+binary = "zcode"
+
+# Session reader only in R-32. Desktop app; database at ~/.zcode/cli/db/db.sqlite.

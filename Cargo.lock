@@ -1825,6 +1825,7 @@ dependencies = [
  "hofund-plugin-agent-qoder",
  "hofund-plugin-agent-raft",
  "hofund-plugin-agent-workbuddy",
+ "hofund-plugin-agent-zcode",
  "hofund-plugin-api",
  "hofund-secrets",
  "hofund-sessions",
@@ -2179,6 +2180,14 @@ dependencies = [
  "hofund-plugin-sdk",
  "regex",
  "tempfile",
+]
+
+[[package]]
+name = "hofund-plugin-agent-zcode"
+version = "0.1.0"
+dependencies = [
+ "hofund-plugin-api",
+ "hofund-plugin-sdk",
 ]
 
 [[package]]
