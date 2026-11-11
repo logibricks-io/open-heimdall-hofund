@@ -30,6 +30,7 @@ members = [
     "plugins/agents/qoder",
     "plugins/agents/raft",
     "plugins/agents/workbuddy",
+    "plugins/agents/agy",
     "plugins/agents/dsh",
     "plugins/agents/zcode",
     "plugins/inbound/codex-catalog",
@@ -112,6 +113,7 @@ hofund-plugin-agent-kimi = { version = "0.1.0", path = "plugins/agents/kimi" }
 hofund-plugin-agent-qoder = { version = "0.1.0", path = "plugins/agents/qoder" }
 hofund-plugin-agent-raft = { version = "0.1.0", path = "plugins/agents/raft" }
 hofund-plugin-agent-workbuddy = { version = "0.1.0", path = "plugins/agents/workbuddy" }
+hofund-plugin-agent-agy = { version = "0.1.0", path = "plugins/agents/agy" }
 hofund-plugin-agent-dsh = { version = "0.1.0", path = "plugins/agents/dsh" }
 hofund-plugin-agent-zcode = { version = "0.1.0", path = "plugins/agents/zcode" }
 hofund-plugin-azure = { version = "0.1.0", path = "plugins/providers/azure" }

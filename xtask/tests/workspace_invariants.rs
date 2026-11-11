@@ -44,6 +44,7 @@ const MEMBERS: &[&str] = &[
     "plugins/agents/qoder",
     "plugins/agents/raft",
     "plugins/agents/workbuddy",
+    "plugins/agents/agy",
     "plugins/agents/dsh",
     "plugins/agents/zcode",
     "plugins/inbound/codex-catalog",
@@ -108,6 +109,7 @@ fn expected_deps(package: &str) -> Option<&'static [&'static str]> {
             "hofund-plugin-agent-minimax-code",
             "hofund-plugin-agent-raft",
             "hofund-plugin-agent-workbuddy",
+            "hofund-plugin-agent-agy",
             "hofund-plugin-agent-dsh",
             "hofund-plugin-agent-zcode",
             "hofund-plugin-api",
@@ -178,6 +180,12 @@ fn expected_deps(package: &str) -> Option<&'static [&'static str]> {
         "hofund-plugin-agent-workbuddy" => {
             &["chrono", "hofund-plugin-api", "hofund-plugin-sdk", "regex"]
         }
+        "hofund-plugin-agent-agy" => &[
+            "chrono",
+            "hofund-plugin-api",
+            "hofund-plugin-sdk",
+            "rusqlite",
+        ],
         "hofund-plugin-agent-dsh" => &[
             "chrono",
             "hofund-plugin-api",
@@ -322,6 +330,7 @@ fn expected_dev_deps(package: &str) -> Option<&'static [&'static str]> {
         "hofund-plugin-agent-minimax-code" => &[],
         "hofund-plugin-agent-raft" => &[],
         "hofund-plugin-agent-workbuddy" => &[],
+        "hofund-plugin-agent-agy" => &[],
         "hofund-plugin-agent-dsh" => &[],
         "hofund-plugin-agent-zcode" => &[],
         "hofund-plugin-host" => &["hofund-plugin-sdk"],
@@ -569,6 +578,7 @@ fn dependency_graph_matches_architecture() {
         "hofund-plugin-agent-minimax-code",
         "hofund-plugin-agent-raft",
         "hofund-plugin-agent-workbuddy",
+        "hofund-plugin-agent-agy",
         "hofund-plugin-agent-dsh",
         "hofund-plugin-agent-zcode",
         "hofund-plugin-azure",

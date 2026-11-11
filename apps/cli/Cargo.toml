@@ -32,6 +32,7 @@ hofund-plugin-agent-qoder = { workspace = true }
 hofund-plugin-agent-minimax-code = { workspace = true }
 hofund-plugin-agent-raft = { workspace = true }
 hofund-plugin-agent-workbuddy = { workspace = true }
+hofund-plugin-agent-agy = { workspace = true }
 hofund-plugin-agent-dsh = { workspace = true }
 hofund-plugin-agent-zcode = { workspace = true }
 hofund-plugin-api = { workspace = true }

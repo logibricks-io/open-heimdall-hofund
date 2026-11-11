@@ -15,6 +15,7 @@ use hofund_sessions::pricing::{TokenPrice, price_records, token_cost};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+use hofund_plugin_agent_agy::AgyStore;
 use hofund_plugin_agent_cindy::CindyStore;
 use hofund_plugin_agent_claude::ClaudeStore;
 use hofund_plugin_agent_cline::ClineStore;
@@ -136,9 +137,10 @@ pub(crate) fn run(config: &Path, command: &Command) -> Result<String, String> {
     let workbuddy = WorkBuddyStore::new();
     let workbuddy_ai = WorkBuddyAiStore::new();
     let codebuddy = CodeBuddyStore::new();
+    let agy = AgyStore::new();
     let dsh = DshStore::new();
     let zcode = ZCodeStore::new();
-    let stores: [&dyn SessionStore; 18] = [
+    let stores: [&dyn SessionStore; 19] = [
         &claude,
         &cindy,
         &cline,
@@ -155,6 +157,7 @@ pub(crate) fn run(config: &Path, command: &Command) -> Result<String, String> {
         &workbuddy,
         &workbuddy_ai,
         &codebuddy,
+        &agy,
         &dsh,
         &zcode,
     ];
@@ -804,6 +807,32 @@ mod tests {
         run_with(&config, &on, &stores, Local::now()).expect("consent");
         let listed = run_with(&config, &list, &stores, Local::now()).expect("list");
         assert!(listed.contains("Explain the cache"), "{listed}");
+    }
+
+    #[test]
+    fn agy_reader_is_consent_gated_through_index() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config = temp.path().join("hofund.toml");
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../plugins/agents/agy/tests/fixtures/root")
+            .canonicalize()
+            .expect("agy fixtures");
+        let agy = AgyStore::with_root(root);
+        let stores: [&dyn SessionStore; 1] = [&agy];
+        let list = Command::List(Options {
+            days: None,
+            model: String::new(),
+            folder: String::new(),
+            limit: 20,
+            json: false,
+        });
+        let on = Command::Read(Some(ReadChange {
+            on: true,
+            targets: vec!["agy".to_owned()],
+        }));
+        run_with(&config, &on, &stores, Local::now()).expect("consent");
+        let listed = run_with(&config, &list, &stores, Local::now()).expect("list");
+        assert!(listed.contains("Hello from the fake."), "{listed}");
     }
 
     #[test]
