@@ -1819,6 +1819,7 @@ dependencies = [
  "hofund-plugin-agent-cursor",
  "hofund-plugin-agent-droid",
  "hofund-plugin-agent-grok",
+ "hofund-plugin-agent-hermes",
  "hofund-plugin-agent-kimi",
  "hofund-plugin-agent-minimax-code",
  "hofund-plugin-agent-qoder",
@@ -2119,6 +2120,16 @@ dependencies = [
  "hofund-plugin-api",
  "hofund-plugin-sdk",
  "tempfile",
+]
+
+[[package]]
+name = "hofund-plugin-agent-hermes"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "hofund-plugin-api",
+ "hofund-plugin-sdk",
+ "sha2",
 ]
 
 [[package]]

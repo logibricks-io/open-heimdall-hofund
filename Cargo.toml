@@ -25,6 +25,7 @@ members = [
     "plugins/agents/cursor",
     "plugins/agents/droid",
     "plugins/agents/grok",
+    "plugins/agents/hermes",
     "plugins/agents/kimi",
     "plugins/agents/qoder",
     "plugins/agents/raft",
@@ -103,6 +104,7 @@ hofund-plugin-agent-minimax-code = { version = "0.1.0", path = "plugins/agents/m
 hofund-plugin-agent-cursor = { version = "0.1.0", path = "plugins/agents/cursor" }
 hofund-plugin-agent-droid = { version = "0.1.0", path = "plugins/agents/droid" }
 hofund-plugin-agent-grok = { version = "0.1.0", path = "plugins/agents/grok" }
+hofund-plugin-agent-hermes = { version = "0.1.0", path = "plugins/agents/hermes" }
 hofund-plugin-agent-kimi = { version = "0.1.0", path = "plugins/agents/kimi" }
 hofund-plugin-agent-qoder = { version = "0.1.0", path = "plugins/agents/qoder" }
 hofund-plugin-agent-raft = { version = "0.1.0", path = "plugins/agents/raft" }

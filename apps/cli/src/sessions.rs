@@ -22,6 +22,7 @@ use hofund_plugin_agent_codex::CodexStore;
 use hofund_plugin_agent_cursor::CursorStore;
 use hofund_plugin_agent_droid::DroidStore;
 use hofund_plugin_agent_grok::GrokStore;
+use hofund_plugin_agent_hermes::HermesStore;
 use hofund_plugin_agent_kimi::KimiStore;
 use hofund_plugin_agent_minimax_code::MiniMaxStore;
 use hofund_plugin_agent_qoder::{QoderCnStore, QoderStore};
@@ -123,13 +124,14 @@ pub(crate) fn run(config: &Path, command: &Command) -> Result<String, String> {
     let cursor = CursorStore::new();
     let droid = DroidStore::new();
     let grok = GrokStore::new();
+    let hermes = HermesStore::new();
     let kimi = KimiStore::new();
     let minimax = MiniMaxStore::new();
     let qoder = QoderStore::new();
     let qoder_cn = QoderCnStore::new();
     let raft = RaftStore::new();
-    let stores: [&dyn SessionStore; 12] = [
-        &claude, &cindy, &cline, &codex, &cursor, &droid, &grok, &kimi, &minimax, &qoder,
+    let stores: [&dyn SessionStore; 13] = [
+        &claude, &cindy, &cline, &codex, &cursor, &droid, &grok, &hermes, &kimi, &minimax, &qoder,
         &qoder_cn, &raft,
     ];
     run_with(config, command, &stores, Local::now())
@@ -778,6 +780,32 @@ mod tests {
         run_with(&config, &on, &stores, Local::now()).expect("consent");
         let listed = run_with(&config, &list, &stores, Local::now()).expect("list");
         assert!(listed.contains("Explain the cache"), "{listed}");
+    }
+
+    #[test]
+    fn hermes_reader_is_consent_gated_through_index() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config = temp.path().join("hofund.toml");
+        let hermes_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../plugins/agents/hermes/tests/fixtures/root/.hermes")
+            .canonicalize()
+            .expect("hermes fixtures");
+        let hermes = HermesStore::with_home(hermes_root);
+        let stores: [&dyn SessionStore; 1] = [&hermes];
+        let list = Command::List(Options {
+            days: None,
+            model: String::new(),
+            folder: String::new(),
+            limit: 20,
+            json: false,
+        });
+        let on = Command::Read(Some(ReadChange {
+            on: true,
+            targets: vec!["hermes".to_owned()],
+        }));
+        run_with(&config, &on, &stores, Local::now()).expect("consent");
+        let listed = run_with(&config, &list, &stores, Local::now()).expect("list");
+        assert!(listed.contains("A Hermes task"), "{listed}");
     }
 
     #[test]

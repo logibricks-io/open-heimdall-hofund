@@ -26,6 +26,7 @@ hofund-plugin-agent-codex = { workspace = true }
 hofund-plugin-agent-cursor = { workspace = true }
 hofund-plugin-agent-droid = { workspace = true }
 hofund-plugin-agent-grok = { workspace = true }
+hofund-plugin-agent-hermes = { workspace = true }
 hofund-plugin-agent-kimi = { workspace = true }
 hofund-plugin-agent-qoder = { workspace = true }
 hofund-plugin-agent-minimax-code = { workspace = true }

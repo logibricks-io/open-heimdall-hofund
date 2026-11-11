@@ -38,6 +38,7 @@ const MEMBERS: &[&str] = &[
     "plugins/agents/cursor",
     "plugins/agents/droid",
     "plugins/agents/grok",
+    "plugins/agents/hermes",
     "plugins/agents/kimi",
     "plugins/agents/minimax-code",
     "plugins/agents/qoder",
@@ -98,6 +99,7 @@ fn expected_deps(package: &str) -> Option<&'static [&'static str]> {
             "hofund-plugin-agent-cursor",
             "hofund-plugin-agent-droid",
             "hofund-plugin-agent-grok",
+            "hofund-plugin-agent-hermes",
             "hofund-plugin-agent-kimi",
             "hofund-plugin-agent-qoder",
             "hofund-plugin-agent-minimax-code",
@@ -160,6 +162,9 @@ fn expected_deps(package: &str) -> Option<&'static [&'static str]> {
         "hofund-plugin-agent-cursor" => &["hofund-plugin-api", "hofund-plugin-sdk"],
         "hofund-plugin-agent-droid" => &["hofund-plugin-api", "hofund-plugin-sdk"],
         "hofund-plugin-agent-grok" => &["hofund-plugin-api", "hofund-plugin-sdk"],
+        "hofund-plugin-agent-hermes" => {
+            &["chrono", "hofund-plugin-api", "hofund-plugin-sdk", "sha2"]
+        }
         "hofund-plugin-agent-kimi" => &["hofund-plugin-api", "hofund-plugin-sdk"],
         "hofund-plugin-agent-qoder" => &["hofund-plugin-api", "hofund-plugin-sdk"],
         "hofund-plugin-agent-minimax-code" => &["hofund-plugin-api", "hofund-plugin-sdk"],
@@ -294,6 +299,7 @@ fn expected_dev_deps(package: &str) -> Option<&'static [&'static str]> {
         "hofund-plugin-agent-cursor" => &[],
         "hofund-plugin-agent-droid" => &[],
         "hofund-plugin-agent-grok" => &[],
+        "hofund-plugin-agent-hermes" => &[],
         "hofund-plugin-agent-kimi" => &[],
         "hofund-plugin-agent-qoder" => &[],
         "hofund-plugin-agent-minimax-code" => &[],
@@ -537,6 +543,7 @@ fn dependency_graph_matches_architecture() {
         "hofund-plugin-agent-cursor",
         "hofund-plugin-agent-droid",
         "hofund-plugin-agent-grok",
+        "hofund-plugin-agent-hermes",
         "hofund-plugin-agent-kimi",
         "hofund-plugin-agent-qoder",
         "hofund-plugin-agent-minimax-code",
