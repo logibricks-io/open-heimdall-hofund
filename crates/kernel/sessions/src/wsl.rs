@@ -12,19 +12,6 @@ use std::sync::{Mutex, OnceLock};
 use crate::index::IndexError;
 use crate::storage::atomic_write;
 
-/// Agents read inside a WSL distro home (`docs/sessions-library-design.md` §1.2).
-pub const WSL_AGENT_IDS: &[&str] = &["claude", "codex", "pi", "raft", "omp", "kimi"];
-
-/// Relative agent home segments under a distro user home.
-pub const WSL_AGENT_DIRS: &[(&str, &str)] = &[
-    ("claude", ".claude"),
-    ("codex", ".codex"),
-    ("pi", ".pi/agent"),
-    ("raft", ".slock"),
-    ("omp", ".omp/agent"),
-    ("kimi", ".kimi-code"),
-];
-
 type RunningHook = Box<dyn Fn(&str) -> bool + Send + Sync>;
 
 fn running_hook() -> &'static Mutex<Option<RunningHook>> {
@@ -33,6 +20,10 @@ fn running_hook() -> &'static Mutex<Option<RunningHook>> {
 }
 
 /// Test hook: whether a distro is running now.
+///
+/// # Panics
+///
+/// Panics if the hook mutex is poisoned.
 pub fn set_running_hook(hook: Option<RunningHook>) {
     *running_hook().lock().expect("wsl hook") = hook;
 }
@@ -61,7 +52,7 @@ fn distro_running(distro: &str, listing_running: bool) -> bool {
     }
 }
 
-/// Builds a WSL instance agent id (`claude@wsl:Ubuntu`).
+/// Builds a WSL instance agent id (`{base}@wsl:{distro}`).
 #[must_use]
 pub fn wsl_agent_id(base: &str, distro: &str) -> String {
     format!("{base}@wsl:{distro}")
@@ -96,7 +87,8 @@ pub(crate) struct WslListing {
 pub(crate) type WslCache = BTreeMap<String, WslListing>;
 
 /// Loads the on-disk WSL listing cache.
-pub fn load_cache(path: &Path) -> WslCache {
+#[must_use]
+pub(crate) fn load_cache(path: &Path) -> WslCache {
     let Ok(bytes) = std::fs::read(path) else {
         return BTreeMap::new();
     };
@@ -104,7 +96,13 @@ pub fn load_cache(path: &Path) -> WslCache {
 }
 
 /// Saves the WSL listing cache atomically.
-pub fn save_cache(path: &Path, cache: &WslCache) -> Result<(), IndexError> {
+///
+/// # Errors
+///
+/// Returns [`IndexError`] when the parent directory cannot be created,
+/// the cache cannot be serialized, or the atomic write fails.
+#[allow(dead_code)] // write path is tested; Windows listing will use it
+pub(crate) fn save_cache(path: &Path, cache: &WslCache) -> Result<(), IndexError> {
     let parent = path.parent().ok_or_else(|| {
         IndexError::Io(std::io::Error::new(
             std::io::ErrorKind::NotFound,
@@ -117,16 +115,15 @@ pub fn save_cache(path: &Path, cache: &WslCache) -> Result<(), IndexError> {
     Ok(())
 }
 
-/// Whether a path must not be opened because its distro is stopped.
-#[must_use]
-pub fn path_is_cold(_path: &Path, listing: &WslListing, distro: &str) -> bool {
-    !distro_running(distro, listing.running)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::ErrorKind;
+
+    fn path_is_cold(path: &Path, listing: &WslListing, distro: &str) -> bool {
+        let _ = path;
+        !distro_running(distro, listing.running)
+    }
 
     #[test]
     fn wsl_stopped_uses_cache_only() {
@@ -142,8 +139,8 @@ mod tests {
                 home: r"\\wsl.localhost\Ubuntu\home\me".to_owned(),
                 running: false,
                 files: vec![WslEntry {
-                    agent: "codex".to_owned(),
-                    key: "codex:abc".to_owned(),
+                    agent: "agent".to_owned(),
+                    key: "agent:abc".to_owned(),
                     path: missing.clone(),
                     main: true,
                     size: 10,
@@ -163,7 +160,7 @@ mod tests {
 
     #[test]
     fn wsl_agent_ids_match_grammar() {
-        let id = wsl_agent_id("claude", "Ubuntu-22.04");
+        let id = wsl_agent_id("agent", "Ubuntu-22.04");
         assert!(crate::consent::valid_agent_id(&id));
     }
 }

@@ -229,7 +229,7 @@ impl SessionIndex {
         let before = self.entries.len();
         self.entries.retain(|key, _| seen.contains(key));
         self.dirty |= before != self.entries.len();
-        self.merge_wsl_cache(consent, &mut seen)?;
+        self.merge_wsl_cache(consent, &mut seen);
         self.save_if_dirty()
     }
 
@@ -325,13 +325,9 @@ impl SessionIndex {
         self.dirty |= before != self.entries.len();
     }
 
-    fn merge_wsl_cache(
-        &mut self,
-        consent: &Consent,
-        seen: &mut BTreeSet<EntryKey>,
-    ) -> Result<(), IndexError> {
+    fn merge_wsl_cache(&mut self, consent: &Consent, seen: &mut BTreeSet<EntryKey>) {
         let Some(config_dir) = self.path.parent().and_then(|state| state.parent()) else {
-            return Ok(());
+            return;
         };
         let cache = crate::wsl::load_cache(&crate::wsl::wsl_cache_path(config_dir));
         for (distro, listing) in &cache {
@@ -366,7 +362,6 @@ impl SessionIndex {
                 self.dirty = true;
             }
         }
-        Ok(())
     }
 
     fn refresh_database(
