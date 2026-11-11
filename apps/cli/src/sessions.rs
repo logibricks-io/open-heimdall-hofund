@@ -11,7 +11,9 @@ use hofund_model_catalog::{EffectivePricer, ListPriceLookup, ModelCatalog, Reqwe
 use hofund_plugin_api::{SessionRecord, SessionStore, SessionTokens};
 use hofund_sessions::consent::Consent;
 use hofund_sessions::index::SessionIndex;
+use hofund_sessions::merge::merge_gateway_sessions;
 use hofund_sessions::pricing::{TokenPrice, price_records, token_cost};
+use hofund_usage::Ledger;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
@@ -133,6 +135,29 @@ fn run_with(
             let pricing = pricing(config);
             for record in &mut records {
                 price_record(record, pricing.as_ref());
+            }
+            let usage_path = load_path(config)
+                .map_err(|error| error.to_string())
+                .map(|settings| {
+                    config
+                        .parent()
+                        .unwrap_or_else(|| config)
+                        .join(settings.usage_file)
+                });
+            if let Ok(path) = usage_path {
+                if let Ok(ledger) = Ledger::open(&path) {
+                    let extra = stores
+                        .iter()
+                        .flat_map(|store| {
+                            records
+                                .iter()
+                                .filter(|record| record.agent == store.agent())
+                                .flat_map(|record| store.gateway_dedup_pairs(record))
+                        })
+                        .collect::<Vec<_>>();
+                    records = merge_gateway_sessions(&config_dir, records, &ledger, extra)
+                        .map_err(|error| error.to_string())?;
+                }
             }
             if let Some(days) = options.days {
                 stats(&records, options, days, now, pricing.as_ref())
@@ -276,8 +301,8 @@ fn session_json(record: &SessionRecord) -> Value {
         "cost": record.cost,
         "unpriced": record.unpriced,
         "resume": Value::Null,
-        "read_only": false,
-        "gateway": false,
+        "read_only": record.read_only,
+        "gateway": record.gateway,
     })
 }
 

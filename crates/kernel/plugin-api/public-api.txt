@@ -61,6 +61,8 @@ AgentDescription::const fn model_key (& self) -> Option < & 'static str >
 AgentDescription::const fn model_prefix (& self) -> Option < & 'static str >
 AgentDescription::const fn model_table (& self) -> Option < & 'static str >
 AgentDescription::const fn nested_turn_headers (& self) -> & 'static [& 'static str]
+AgentDescription::const fn session_headers (& self) -> & 'static [& 'static str]
+AgentDescription::const fn with_session_headers (mut self , headers : & 'static [& 'static str]) -> Self
 AgentDescription::const fn remove (& self) -> & 'static [AgentRemove]
 AgentDescription::const fn request_agent_header (& self) -> Option < & 'static str >
 AgentDescription::const fn requires (& self) -> & 'static [crate :: id :: SurfaceId]
@@ -969,6 +971,7 @@ SessionParser::fn push (& mut self , value : & serde_json :: Value) -> Result < 
 SessionRecord
 SessionRecord #[non_exhaustive] derives(Clone, Debug, Deserialize, PartialEq, Serialize)
 SessionRecord.agent
+SessionRecord.app
 SessionRecord.copies
 SessionRecord.copy
 SessionRecord.cost
@@ -978,6 +981,7 @@ SessionRecord.days
 SessionRecord.family_ids
 SessionRecord.family_leaf
 SessionRecord.family_root
+SessionRecord.gateway
 SessionRecord.forked_from
 SessionRecord.id
 SessionRecord.last_ms
@@ -985,6 +989,7 @@ SessionRecord.main
 SessionRecord.models
 SessionRecord.parent_id
 SessionRecord.path
+SessionRecord.read_only
 SessionRecord.start_ms
 SessionRecord.subagents
 SessionRecord.title
@@ -997,6 +1002,7 @@ SessionRecord::fn new (agent : impl Into < String > , id : impl Into < String > 
 SessionRecord::fn tokens (& self) -> SessionTokens
 SessionRecord::fn with_parent (mut self , parent_id : impl Into < String >) -> Self
 SessionStore
+SessionStore::fn gateway_dedup_pairs (& self , _record : & SessionRecord) -> Vec < (String , String) >
 SessionStore::fn agent (& self) -> & str
 SessionStore::fn files (& self , root : & Path) -> Result < Vec < SessionFile > , PluginError >
 SessionStore::fn locator (& self) -> & dyn SessionLocator

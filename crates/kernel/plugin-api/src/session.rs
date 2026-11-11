@@ -129,11 +129,15 @@ impl SessionUsageEvent {
 }
 
 /// One parsed session file. Non-main records merge into their parent.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct SessionRecord {
     /// Agent plugin id.
     pub agent: String,
+    /// Attribution agent for desktop variants, when different from `agent`.
+    #[serde(default)]
+    pub app: String,
     /// Public session id, normally prefixed with the agent id.
     pub id: String,
     /// Lexical path supplied by the plugin.
@@ -182,6 +186,12 @@ pub struct SessionRecord {
     pub usage: Vec<SessionUsageEvent>,
     /// Whether input bounds or the agent format omitted some content.
     pub cut: bool,
+    /// Whether this row is read-only in the session list.
+    #[serde(default)]
+    pub read_only: bool,
+    /// Whether this row is projected from the gateway ledger.
+    #[serde(default)]
+    pub gateway: bool,
 }
 
 impl SessionRecord {
@@ -212,6 +222,9 @@ impl SessionRecord {
             forked_from: None,
             usage: Vec::new(),
             cut: false,
+            app: String::new(),
+            read_only: false,
+            gateway: false,
         }
     }
 
@@ -376,4 +389,9 @@ pub trait SessionStore: Send + Sync {
         file: &SessionFile,
         state: Option<&str>,
     ) -> Result<Box<dyn SessionParser>, PluginError>;
+
+    /// Extra `(agent, session id)` pairs that suppress a matching gateway row.
+    fn gateway_dedup_pairs(&self, _record: &SessionRecord) -> Vec<(String, String)> {
+        Vec::new()
+    }
 }
