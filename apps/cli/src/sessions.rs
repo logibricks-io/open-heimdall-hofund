@@ -138,26 +138,21 @@ fn run_with(
             }
             let usage_path = load_path(config)
                 .map_err(|error| error.to_string())
-                .map(|settings| {
-                    config
-                        .parent()
-                        .unwrap_or_else(|| config)
-                        .join(settings.usage_file)
-                });
-            if let Ok(path) = usage_path {
-                if let Ok(ledger) = Ledger::open(&path) {
-                    let extra = stores
-                        .iter()
-                        .flat_map(|store| {
-                            records
-                                .iter()
-                                .filter(|record| record.agent == store.agent())
-                                .flat_map(|record| store.gateway_dedup_pairs(record))
-                        })
-                        .collect::<Vec<_>>();
-                    records = merge_gateway_sessions(&config_dir, records, &ledger, extra)
-                        .map_err(|error| error.to_string())?;
-                }
+                .map(|settings| config.parent().unwrap_or(config).join(settings.usage_file));
+            if let Ok(path) = usage_path
+                && let Ok(ledger) = Ledger::open(&path)
+            {
+                let extra = stores
+                    .iter()
+                    .flat_map(|store| {
+                        records
+                            .iter()
+                            .filter(|record| record.agent == store.agent())
+                            .flat_map(|record| store.gateway_dedup_pairs(record))
+                    })
+                    .collect::<Vec<_>>();
+                records = merge_gateway_sessions(&config_dir, records, &ledger, extra)
+                    .map_err(|error| error.to_string())?;
             }
             if let Some(days) = options.days {
                 stats(&records, options, days, now, pricing.as_ref())
