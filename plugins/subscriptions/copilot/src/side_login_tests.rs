@@ -3,7 +3,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use hofund_kit_subscription::{PipedScript, TestHost, block_on};
+#[cfg(target_os = "linux")]
+use hofund_kit_subscription::PipedScript;
+use hofund_kit_subscription::{TestHost, block_on};
 use hofund_plugin_api::{
     AccountId, AccountStatus, PluginErrorKind, PluginId, PluginKind, RawTable, SignInCtx,
     SignInProof, Subscription, SubscriptionFactory,

@@ -532,10 +532,6 @@ fn strip_trailing_commas(input: &[u8]) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use hofund_kit_subscription::{PipedScript, TestHost, block_on};
-    use hofund_plugin_api::{PluginId, PluginKind};
-    use hofund_plugin_sdk::oauth::secret_text;
-
     use super::*;
 
     #[test]
@@ -557,6 +553,10 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn secret_tool_output_is_read_bounded_and_trimmed() {
+        use hofund_kit_subscription::{PipedScript, TestHost, block_on};
+        use hofund_plugin_api::{PluginId, PluginKind};
+        use hofund_plugin_sdk::oauth::secret_text;
+
         let dir = tempfile::Builder::new()
             .prefix("hofund-r48-copilot-secret-tool-")
             .tempdir()
