@@ -226,24 +226,30 @@ fn cli_outside_the_isolated_home_is_not_an_identity() {
 
 #[test]
 fn cli_signed_out_rejects_and_two_unknown_sources_use_devin() {
-    for signed_out in [true, false] {
+    for mode in 0..3 {
         let dir = tempfile::tempdir().expect("dir");
         let host = host(&dir);
         let program = program(&dir);
         host.http().enqueue_response(503, &[], b"unavailable");
-        if signed_out {
-            host.process().script_piped(
+        match mode {
+            0 => host.process().script_piped(
                 PipedScript::new()
                     .line("Not logged in")
                     .exits(|_| Vec::new()),
-            );
+            ),
+            1 => host.process().script_piped(
+                PipedScript::new()
+                    .line("unrecognized status")
+                    .exits(|_| Vec::new()),
+            ),
+            _ => {}
         }
         let result = block_on(sign_in::success_with_program(
             host.context(),
             &credential("unknown-key"),
             Some(&program),
         ));
-        if signed_out {
+        if mode == 0 {
             assert!(result.is_err());
         } else {
             assert_eq!(result.expect("generic label").label, "Devin");
@@ -289,4 +295,53 @@ fn organization_labels_produce_distinct_account_ids() {
     let mut second = credential("key-2");
     second.label = "same@example.test · two".to_owned();
     assert_ne!(creds::account_id(&first), creds::account_id(&second));
+}
+
+#[test]
+fn legacy_cli_marker_without_a_path_uses_the_os_credentials_location() {
+    let blob = SecretObject::new()
+        .with_secret("api_key", &SecretString::from("legacy-key".to_owned()))
+        .with_text("cli", "true");
+    let stored = creds::parse_secret(&blob.to_secret()).expect("legacy CLI account");
+    let path = stored.cli_path.expect("default CLI path");
+    assert!(path.is_absolute());
+    assert_eq!(
+        path.file_name().and_then(|name| name.to_str()),
+        Some("credentials.toml")
+    );
+    assert_eq!(
+        path.parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str()),
+        Some("devin")
+    );
+}
+
+#[test]
+fn cli_path_with_parent_components_cannot_escape_the_temporary_home() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let program = program(&dir);
+    host.http().enqueue_response(503, &[], b"unavailable");
+    host.process()
+        .script_piped(PipedScript::new().exits(|spawn| {
+            let file = spawn
+                .cwd
+                .join("devin")
+                .join("..")
+                .join("..")
+                .join("outside")
+                .join("credentials.toml");
+            vec![format!(
+                "Logged in\n  File: {}\n  Email: outside@example.test",
+                file.display()
+            )]
+        }));
+    let signed_in = block_on(sign_in::success_with_program(
+        host.context(),
+        &credential("browser-key"),
+        Some(&program),
+    ))
+    .expect("unknown identity falls back");
+    assert_eq!(signed_in.label, "Devin");
 }

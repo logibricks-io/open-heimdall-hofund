@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use hofund_kit_subscription::{TestHost, block_on};
 use hofund_plugin_api::{
-    AccountId, Completion, PluginId, PluginKind, ProbeQuery, ProtocolId, RawTable, Request,
-    SecretString, SubscriptionFactory, UpstreamProvider,
+    AccountId, AccountStatus, Completion, PluginId, PluginKind, ProbeQuery, ProtocolId, RawTable,
+    Request, SecretString, SubscriptionFactory, UpstreamProvider,
 };
 use hofund_plugin_sdk::oauth::{SecretObject, secret_text};
 use hofund_plugin_sdk::protobuf::{FLAG_END, ProtoBuf, fields, frame};
@@ -215,6 +215,12 @@ fn chat_401_marks_needs_sign_in_without_deleting_the_secret() {
     let host = host(&dir);
     let original = credential("saved-key", "https://saved.test", "saved@example.test");
     let id = seed(&host, &original, None);
+    let cfg = DevinFactory.validate(&RawTable::new()).expect("config");
+    let subscription = DevinFactory.build(&cfg, host.context()).expect("build");
+    assert_eq!(
+        block_on(subscription.account_status(&id, host.context())).expect("ready"),
+        AccountStatus::Ready
+    );
     host.http().enqueue_response(
         200,
         &[("content-type", "application/proto")],
@@ -233,4 +239,8 @@ fn chat_401_marks_needs_sign_in_without_deleting_the_secret() {
     let stored = block_on(creds::Stored::load(host.context(), &id)).expect("stored");
     assert!(stored.needs_sign_in);
     assert_eq!(secret_text(&stored.credential.key), "saved-key");
+    assert!(matches!(
+        block_on(subscription.account_status(&id, host.context())).expect("status"),
+        AccountStatus::NeedsSignIn { .. }
+    ));
 }

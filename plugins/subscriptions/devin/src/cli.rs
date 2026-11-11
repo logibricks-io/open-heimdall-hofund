@@ -155,8 +155,9 @@ fn reads_home(output: &str, home: &Path) -> bool {
 }
 
 fn inside(file: &Path, directory: &Path) -> bool {
-    let file = std::fs::canonicalize(file).unwrap_or_else(|_| file.to_path_buf());
-    let directory = std::fs::canonicalize(directory).unwrap_or_else(|_| directory.to_path_buf());
+    let file = std::fs::canonicalize(file).unwrap_or_else(|_| normalized_absolute(file));
+    let directory =
+        std::fs::canonicalize(directory).unwrap_or_else(|_| normalized_absolute(directory));
     if cfg!(windows) {
         let file = PathBuf::from(file.to_string_lossy().to_lowercase());
         let directory = PathBuf::from(directory.to_string_lossy().to_lowercase());
@@ -164,6 +165,27 @@ fn inside(file: &Path, directory: &Path) -> bool {
     } else {
         file.starts_with(&directory) && file != directory
     }
+}
+
+fn normalized_absolute(path: &Path) -> PathBuf {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    };
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            _ => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
 }
 
 fn cli_path() -> Option<PathBuf> {
