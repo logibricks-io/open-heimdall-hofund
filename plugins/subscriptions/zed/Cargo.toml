@@ -16,6 +16,7 @@ hofund-plugin-sdk = { workspace = true }
 
 [dev-dependencies]
 hofund-kit-subscription = { workspace = true }
+hofund-plugin-sdk = { workspace = true, features = ["rsa-test"] }
 tempfile = { workspace = true }
 
 [lints]
