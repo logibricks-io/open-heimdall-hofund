@@ -1,0 +1,5 @@
+id = "workbuddy-ai"
+display_name = "WorkBuddy AI"
+binary = "workbuddy"
+
+# Session reader only in R-32. International desktop build.

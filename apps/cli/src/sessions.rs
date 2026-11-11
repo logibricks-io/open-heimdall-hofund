@@ -27,6 +27,7 @@ use hofund_plugin_agent_kimi::KimiStore;
 use hofund_plugin_agent_minimax_code::MiniMaxStore;
 use hofund_plugin_agent_qoder::{QoderCnStore, QoderStore};
 use hofund_plugin_agent_raft::RaftStore;
+use hofund_plugin_agent_workbuddy::{CodeBuddyStore, WorkBuddyAiStore, WorkBuddyStore};
 
 pub(crate) const HELP: &str = "\
 usage: hofund sessions [--days N|today|all] [--model MODEL] [--folder FOLDER] [--limit N] [--json]
@@ -130,9 +131,26 @@ pub(crate) fn run(config: &Path, command: &Command) -> Result<String, String> {
     let qoder = QoderStore::new();
     let qoder_cn = QoderCnStore::new();
     let raft = RaftStore::new();
-    let stores: [&dyn SessionStore; 13] = [
-        &claude, &cindy, &cline, &codex, &cursor, &droid, &grok, &hermes, &kimi, &minimax, &qoder,
-        &qoder_cn, &raft,
+    let workbuddy = WorkBuddyStore::new();
+    let workbuddy_ai = WorkBuddyAiStore::new();
+    let codebuddy = CodeBuddyStore::new();
+    let stores: [&dyn SessionStore; 16] = [
+        &claude,
+        &cindy,
+        &cline,
+        &codex,
+        &cursor,
+        &droid,
+        &grok,
+        &hermes,
+        &kimi,
+        &minimax,
+        &qoder,
+        &qoder_cn,
+        &raft,
+        &workbuddy,
+        &workbuddy_ai,
+        &codebuddy,
     ];
     run_with(config, command, &stores, Local::now())
 }
@@ -780,6 +798,32 @@ mod tests {
         run_with(&config, &on, &stores, Local::now()).expect("consent");
         let listed = run_with(&config, &list, &stores, Local::now()).expect("list");
         assert!(listed.contains("Explain the cache"), "{listed}");
+    }
+
+    #[test]
+    fn workbuddy_reader_is_consent_gated_through_index() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config = temp.path().join("hofund.toml");
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../plugins/agents/workbuddy/tests/fixtures/root")
+            .canonicalize()
+            .expect("workbuddy fixtures");
+        let workbuddy = WorkBuddyStore::with_root(root);
+        let stores: [&dyn SessionStore; 1] = [&workbuddy];
+        let list = Command::List(Options {
+            days: None,
+            model: String::new(),
+            folder: String::new(),
+            limit: 20,
+            json: false,
+        });
+        let on = Command::Read(Some(ReadChange {
+            on: true,
+            targets: vec!["workbuddy".to_owned()],
+        }));
+        run_with(&config, &on, &stores, Local::now()).expect("consent");
+        let listed = run_with(&config, &list, &stores, Local::now()).expect("list");
+        assert!(listed.contains("Launch notes draft"), "{listed}");
     }
 
     #[test]

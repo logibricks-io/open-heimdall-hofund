@@ -43,6 +43,7 @@ const MEMBERS: &[&str] = &[
     "plugins/agents/minimax-code",
     "plugins/agents/qoder",
     "plugins/agents/raft",
+    "plugins/agents/workbuddy",
     "plugins/inbound/codex-catalog",
     "plugins/inbound/retrieval",
     "plugins/inbound/echo",
@@ -104,6 +105,7 @@ fn expected_deps(package: &str) -> Option<&'static [&'static str]> {
             "hofund-plugin-agent-qoder",
             "hofund-plugin-agent-minimax-code",
             "hofund-plugin-agent-raft",
+            "hofund-plugin-agent-workbuddy",
             "hofund-plugin-api",
             "hofund-secrets",
             "hofund-sessions",
@@ -169,6 +171,9 @@ fn expected_deps(package: &str) -> Option<&'static [&'static str]> {
         "hofund-plugin-agent-qoder" => &["hofund-plugin-api", "hofund-plugin-sdk"],
         "hofund-plugin-agent-minimax-code" => &["hofund-plugin-api", "hofund-plugin-sdk"],
         "hofund-plugin-agent-raft" => &["hofund-plugin-api", "hofund-plugin-sdk"],
+        "hofund-plugin-agent-workbuddy" => {
+            &["chrono", "hofund-plugin-api", "hofund-plugin-sdk", "regex"]
+        }
         "hofund-plugin-host" => &["hofund-plugin-api"],
         "hofund-plugin-azure" => &["hofund-plugin-api", "hofund-plugin-sdk"],
         "hofund-plugin-bedrock" => &["hofund-plugin-api", "hofund-plugin-sdk"],
@@ -304,6 +309,7 @@ fn expected_dev_deps(package: &str) -> Option<&'static [&'static str]> {
         "hofund-plugin-agent-qoder" => &[],
         "hofund-plugin-agent-minimax-code" => &[],
         "hofund-plugin-agent-raft" => &[],
+        "hofund-plugin-agent-workbuddy" => &[],
         "hofund-plugin-host" => &["hofund-plugin-sdk"],
         "hofund-plugin-echo" => &[],
         "hofund-plugin-fixture" => &[],
@@ -548,6 +554,7 @@ fn dependency_graph_matches_architecture() {
         "hofund-plugin-agent-qoder",
         "hofund-plugin-agent-minimax-code",
         "hofund-plugin-agent-raft",
+        "hofund-plugin-agent-workbuddy",
         "hofund-plugin-azure",
         "hofund-plugin-bedrock",
         "hofund-plugin-bedrock-mantle",

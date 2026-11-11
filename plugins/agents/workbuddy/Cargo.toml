@@ -1,0 +1,23 @@
+[package]
+name = "hofund-plugin-agent-workbuddy"
+description = "WorkBuddy, WorkBuddy AI, and CodeBuddy session JSONL readers."
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+hofund-plugin-api = { workspace = true }
+hofund-plugin-sdk = { workspace = true }
+regex = { version = "1.13.1" }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

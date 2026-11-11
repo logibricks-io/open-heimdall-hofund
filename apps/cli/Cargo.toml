@@ -31,6 +31,7 @@ hofund-plugin-agent-kimi = { workspace = true }
 hofund-plugin-agent-qoder = { workspace = true }
 hofund-plugin-agent-minimax-code = { workspace = true }
 hofund-plugin-agent-raft = { workspace = true }
+hofund-plugin-agent-workbuddy = { workspace = true }
 hofund-plugin-api = { workspace = true }
 hofund-sessions = { workspace = true }
 hofund-usage = { workspace = true }
