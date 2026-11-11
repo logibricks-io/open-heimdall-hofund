@@ -20,6 +20,7 @@ mod creds;
 mod discover;
 mod errors;
 mod models;
+mod quota;
 mod snapshot_families;
 mod stream;
 mod upstream;
@@ -184,10 +185,10 @@ impl Subscription for Devin {
 
     async fn quota(
         &self,
-        _account: &AccountId,
-        _host: &HostContext,
+        account: &AccountId,
+        host: &HostContext,
     ) -> Result<Vec<QuotaWindow>, PluginError> {
-        Ok(Vec::new())
+        quota::read(host, account).await
     }
 
     async fn list_models(

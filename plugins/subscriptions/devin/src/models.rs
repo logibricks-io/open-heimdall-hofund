@@ -6,6 +6,7 @@ use std::sync::OnceLock;
 use hofund_plugin_api::{ModelList, ModelSpec, PluginError};
 use hofund_plugin_sdk::json::Value;
 
+use crate::connect::configs::Price;
 use crate::snapshot_families::{NO_IMAGES, SNAPSHOT_JSON};
 
 pub(crate) const LEVEL_RANK: &[&str] =
@@ -196,6 +197,15 @@ pub(crate) fn listed(
     families: &[Family],
     images: &HashMap<String, bool>,
 ) -> Result<Vec<ModelSpec>, PluginError> {
+    listed_with_billing(families, images, &HashSet::new(), &HashMap::new())
+}
+
+pub(crate) fn listed_with_billing(
+    families: &[Family],
+    images: &HashMap<String, bool>,
+    free: &HashSet<String>,
+    prices: &HashMap<String, Price>,
+) -> Result<Vec<ModelSpec>, PluginError> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
     for family in families {
@@ -219,6 +229,7 @@ pub(crate) fn listed(
             output,
             efforts(family, ""),
             image,
+            billing_for(&own_ids(family, ""), free, prices),
         )?;
         for (tier, label) in TIERS {
             if by_level(family, tier).is_empty() {
@@ -237,6 +248,7 @@ pub(crate) fn listed(
                 output,
                 efforts(family, tier),
                 image,
+                billing_for(&own_ids(family, tier), free, prices),
             )?;
         }
         if family.models.len() == 1 {
@@ -263,10 +275,61 @@ pub(crate) fn listed(
                 },
                 Vec::new(),
                 images.get(&model.id).copied(),
+                Billing {
+                    free: free.contains(&model.id),
+                    price: prices.get(&model.id).copied(),
+                },
             )?;
         }
     }
     Ok(out)
+}
+
+#[derive(Clone, Copy, Default)]
+struct Billing {
+    free: bool,
+    price: Option<Price>,
+}
+
+fn own_ids(family: &Family, tier: &str) -> Vec<String> {
+    let mut ids: Vec<_> = by_level(family, tier).into_values().collect();
+    if tier.is_empty()
+        && let Some(model) = default_model(family)
+        && !ids.contains(&model.id)
+    {
+        ids.push(model.id.clone());
+    }
+    ids
+}
+
+fn billing_for(ids: &[String], free: &HashSet<String>, prices: &HashMap<String, Price>) -> Billing {
+    if !ids.is_empty() && ids.iter().all(|id| free.contains(id)) {
+        return Billing {
+            free: true,
+            price: None,
+        };
+    }
+    let price = ids
+        .first()
+        .and_then(|id| prices.get(id))
+        .copied()
+        .filter(|first| ids.iter().all(|id| prices.get(id) == Some(first)));
+    Billing { free: false, price }
+}
+
+pub(crate) fn free_ids(
+    families: &[Family],
+    free: &HashSet<String>,
+) -> Result<Vec<String>, PluginError> {
+    let mut ids = free.clone();
+    for model in listed_with_billing(families, &HashMap::new(), free, &HashMap::new())? {
+        if model.free() == Some(true) {
+            ids.insert(model.id().to_owned());
+        }
+    }
+    let mut ids: Vec<_> = ids.into_iter().collect();
+    ids.sort();
+    Ok(ids)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -279,18 +342,23 @@ fn push_listed(
     output: u64,
     efforts: Vec<String>,
     image: Option<bool>,
+    billing: Billing,
 ) -> Result<(), PluginError> {
     if !seen.insert(id.to_owned()) {
         return Ok(());
     }
-    out.push(
-        ModelSpec::new(id, Some(name.to_owned()))?
-            .with_endpoints(vec!["/v1/chat/completions".to_owned()])
-            .with_context(context)
-            .with_max_output(output)
-            .with_efforts(efforts)
-            .with_image_input(image),
-    );
+    let mut model = ModelSpec::new(id, Some(name.to_owned()))?
+        .with_endpoints(vec!["/v1/chat/completions".to_owned()])
+        .with_context(context)
+        .with_max_output(output)
+        .with_efforts(efforts)
+        .with_image_input(image);
+    if billing.free {
+        model = model.with_free(true);
+    } else if let Some(price) = billing.price {
+        model = model.with_prices(price.input, price.output, price.cache_read);
+    }
+    out.push(model);
     Ok(())
 }
 
@@ -478,7 +546,12 @@ pub(crate) fn list_from_fixture(body: &[u8]) -> Result<ModelList, PluginError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{effort_of, listed, parse_models, snapshot_families, snapshot_images, variant_for};
+    use std::collections::{HashMap, HashSet};
+
+    use super::{
+        Family, Price, Variant, effort_of, free_ids, listed, listed_with_billing, parse_models,
+        snapshot_families, snapshot_images, variant_for,
+    };
 
     #[test]
     fn family_ids_resolve_to_snapshot_default_variants() {
@@ -522,5 +595,49 @@ mod tests {
         let snapshot = listed(snapshot_families(), snapshot_images()).expect("snapshot");
         assert!(snapshot.iter().any(|model| model.id() == "glm-5-2-1m"));
         assert!(!snapshot.iter().any(|model| model.id() == "adaptive"));
+    }
+
+    #[test]
+    fn family_billing_requires_matching_prices_and_free_ids_include_the_family() {
+        let variant = |id: &str| Variant {
+            id: id.to_owned(),
+            name: id.to_owned(),
+            context: 100,
+            output: 50,
+        };
+        let families = [Family {
+            uid: "fam".to_owned(),
+            label: "Fam".to_owned(),
+            aliases: Vec::new(),
+            models: vec![variant("fam-low"), variant("fam-high")],
+        }];
+        let low = Price {
+            input: 1_000_000,
+            output: 2_000_000,
+            cache_read: 0,
+        };
+        let high = Price {
+            input: 3_000_000,
+            output: 6_000_000,
+            cache_read: 0,
+        };
+        let prices = HashMap::from([("fam-low".to_owned(), low), ("fam-high".to_owned(), high)]);
+        let models = listed_with_billing(&families, &HashMap::new(), &HashSet::new(), &prices)
+            .expect("models");
+        assert_eq!(models[0].prices(), (None, None, None));
+
+        let prices = HashMap::from([("fam-low".to_owned(), low), ("fam-high".to_owned(), low)]);
+        let models = listed_with_billing(&families, &HashMap::new(), &HashSet::new(), &prices)
+            .expect("models");
+        assert_eq!(
+            models[0].prices(),
+            (Some(1_000_000), Some(2_000_000), Some(0))
+        );
+
+        let free = HashSet::from(["fam-low".to_owned(), "fam-high".to_owned()]);
+        assert_eq!(
+            free_ids(&families, &free).expect("free ids"),
+            ["fam", "fam-high", "fam-low"]
+        );
     }
 }

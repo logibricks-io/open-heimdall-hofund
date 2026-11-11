@@ -1,6 +1,6 @@
 //! Account model catalogs from the live RPC, CLI, and built-in snapshot.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -22,6 +22,8 @@ const BODY_CAP: usize = 64 * 1024 * 1024;
 pub(crate) struct Catalog {
     pub(crate) families: Arc<Vec<Family>>,
     pub(crate) images: Arc<HashMap<String, bool>>,
+    pub(crate) free: Arc<HashSet<String>>,
+    pub(crate) prices: Arc<HashMap<String, configs::Price>>,
 }
 
 #[derive(Default)]
@@ -71,7 +73,12 @@ pub(crate) async fn list_models(
 ) -> Result<ModelList, PluginError> {
     let catalog = families_for(host, account, stored).await;
     Ok(ModelList::new(
-        models::listed(&catalog.families, &catalog.images)?,
+        models::listed_with_billing(
+            &catalog.families,
+            &catalog.images,
+            &catalog.free,
+            &catalog.prices,
+        )?,
         None,
     ))
 }
@@ -128,11 +135,15 @@ pub(crate) async fn families_for(
         return Catalog {
             families: Arc::new(families),
             images: Arc::new(models::snapshot_images().clone()),
+            free: Arc::new(HashSet::new()),
+            prices: Arc::new(HashMap::new()),
         };
     }
     Catalog {
         families: Arc::new(snapshot_vec()),
         images: Arc::new(models::snapshot_images().clone()),
+        free: Arc::new(HashSet::new()),
+        prices: Arc::new(HashMap::new()),
     }
 }
 
@@ -171,6 +182,8 @@ async fn live_catalog(host: &HostContext, stored: &Stored) -> Result<Catalog, Pl
     Ok(Catalog {
         families: Arc::new(parsed.families),
         images: Arc::new(images),
+        free: Arc::new(parsed.free),
+        prices: Arc::new(parsed.prices),
     })
 }
 

@@ -1,16 +1,25 @@
 //! Raw, unframed GetCliModelConfigs protobuf messages.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use hofund_plugin_sdk::protobuf::{ProtoBuf, fields};
+use hofund_plugin_sdk::protobuf::{ProtoBuf, WireValue, fields};
 
 use super::metadata;
 use crate::models::{Family, Variant, snapshot_families};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Price {
+    pub(crate) input: u64,
+    pub(crate) output: u64,
+    pub(crate) cache_read: u64,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ModelConfigs {
     pub(crate) families: Vec<Family>,
     pub(crate) images: HashMap<String, bool>,
+    pub(crate) free: HashSet<String>,
+    pub(crate) prices: HashMap<String, Price>,
 }
 
 pub(crate) fn parse(body: &[u8]) -> Option<ModelConfigs> {
@@ -102,7 +111,120 @@ pub(crate) fn parse(body: &[u8]) -> Option<ModelConfigs> {
             id: uid,
         });
     }
-    (!images.is_empty() && !families.is_empty()).then_some(ModelConfigs { families, images })
+    (!images.is_empty() && !families.is_empty()).then_some(ModelConfigs {
+        families,
+        images,
+        free: parse_free(body),
+        prices: parse_prices(body),
+    })
+}
+
+pub(crate) fn parse_free(body: &[u8]) -> HashSet<String> {
+    let mut free = HashSet::new();
+    for config in fields(body)
+        .iter()
+        .filter(|field| field.number == 1)
+        .filter_map(|field| field.as_bytes())
+    {
+        let mut uid = String::new();
+        let mut tier = 0;
+        for field in fields(config) {
+            match field.number {
+                22 => uid = field.as_string().unwrap_or_default(),
+                24 => tier = field.as_varint().unwrap_or(0),
+                _ => {}
+            }
+        }
+        if !uid.is_empty() && tier == 4 {
+            free.insert(uid);
+        }
+    }
+    free
+}
+
+pub(crate) fn parse_prices(body: &[u8]) -> HashMap<String, Price> {
+    let mut prices = HashMap::new();
+    for config in fields(body)
+        .iter()
+        .filter(|field| field.number == 1)
+        .filter_map(|field| field.as_bytes())
+    {
+        let mut uid = String::new();
+        let mut input = None;
+        let mut output = None;
+        let mut cache_read = None;
+        for field in fields(config) {
+            match field.number {
+                22 => uid = field.as_string().unwrap_or_default(),
+                32 => {
+                    if let Some((name, value)) = field.as_bytes().and_then(price_row) {
+                        match name {
+                            "input" => input = Some(value),
+                            "output" => output = Some(value),
+                            "read" => cache_read = Some(value),
+                            _ => unreachable!("price rows have fixed labels"),
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if uid.is_empty() || input.unwrap_or(0) == 0 && output.unwrap_or(0) == 0 {
+            continue;
+        }
+        prices.insert(
+            uid,
+            Price {
+                input: input.unwrap_or(0),
+                output: output.unwrap_or(0),
+                cache_read: cache_read.unwrap_or(0),
+            },
+        );
+    }
+    prices
+}
+
+fn price_row(bytes: &[u8]) -> Option<(&'static str, u64)> {
+    let mut label = String::new();
+    let mut unit = String::new();
+    let mut value = None;
+    for field in fields(bytes) {
+        match field.number {
+            1 => label = field.as_string().unwrap_or_default(),
+            2 => {
+                if let WireValue::Fixed32(bits) = field.value {
+                    value = price_micros(f32::from_bits(bits));
+                }
+            }
+            3 => unit = field.as_string().unwrap_or_default(),
+            _ => {}
+        }
+    }
+    if unit != "1M tokens" {
+        return None;
+    }
+    let name = match label.as_str() {
+        "Input" => "input",
+        "Cached input" => "read",
+        "Output" => "output",
+        _ => return None,
+    };
+    Some((name, value?))
+}
+
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "the finite, nonnegative value is bounded before conversion"
+)]
+fn price_micros(value: f32) -> Option<u64> {
+    let value = f64::from(value);
+    if !value.is_finite() || value < 0.0 {
+        return None;
+    }
+    let rounded = format!("{value:.5e}").parse::<f64>().ok()?;
+    let micros = (rounded * 1_000_000.0).round();
+    (micros < 18_446_744_073_709_551_616.0).then_some(micros as u64)
 }
 
 pub(crate) fn encode_request(session_token: &str, os: &str) -> Vec<u8> {
@@ -132,7 +254,7 @@ pub(crate) fn model_uids(body: &[u8]) -> Vec<String> {
 mod tests {
     use hofund_plugin_sdk::protobuf::{deframe, fields};
 
-    use super::{encode_request, model_uids, parse};
+    use super::{encode_request, model_uids, parse, parse_free, parse_prices};
 
     const MODEL_CONFIGS: &[u8] = crate::connect::testdata::MODEL_CONFIGS;
     const MODEL_CONFIGS_1015: &[u8] = crate::connect::testdata::MODEL_CONFIGS_1015;
@@ -227,5 +349,39 @@ mod tests {
         assert_eq!(swe.models[0].output, 128_000);
         assert_eq!(configs.images.get("swe-2-high"), Some(&true));
         assert!(parse(b"").is_none());
+    }
+
+    #[test]
+    fn goldens_parse_free_variants_and_six_significant_digit_prices() {
+        let mut free: Vec<_> = parse_free(MODEL_CONFIGS).into_iter().collect();
+        free.sort();
+        assert_eq!(free, ["swe-2-high", "swe-2-max", "swe-2-medium"]);
+
+        let prices = parse_prices(MODEL_CONFIGS_1015);
+        assert_eq!(
+            prices.get("swe-1-7-lightning"),
+            Some(&super::Price {
+                input: 2_500_000,
+                output: 12_500_000,
+                cache_read: 1_000_000,
+            })
+        );
+        assert_eq!(
+            prices.get("swe-2-high-lightning"),
+            Some(&super::Price {
+                input: 1_000_000,
+                output: 5_000_000,
+                cache_read: 100_000,
+            })
+        );
+        assert_eq!(
+            prices.get("glm-5-2"),
+            Some(&super::Price {
+                input: 1_400_000,
+                output: 4_400_000,
+                cache_read: 260_000,
+            })
+        );
+        assert!(!prices.contains_key("swe-2-high"));
     }
 }

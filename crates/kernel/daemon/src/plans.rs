@@ -250,6 +250,7 @@ fn window_info(window: &hofund_plugin_api::PlanWindow) -> WindowInfo {
         },
         blocking: window.blocking(),
         scope_model: None,
+        excluded_models: Vec::new(),
         window_span: window.span(),
         reset_after: None,
     }

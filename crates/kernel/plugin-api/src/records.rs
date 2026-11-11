@@ -107,6 +107,7 @@ pub struct QuotaWindow {
     resets_at: Option<SystemTime>,
     blocking: bool,
     scope_model: Option<String>,
+    excluded_models: Vec<String>,
 }
 
 impl QuotaWindow {
@@ -138,6 +139,7 @@ impl QuotaWindow {
             resets_at,
             blocking: true,
             scope_model: None,
+            excluded_models: Vec::new(),
         })
     }
 
@@ -158,6 +160,13 @@ impl QuotaWindow {
         self
     }
 
+    /// Excludes models from an otherwise account-wide window.
+    #[must_use]
+    pub fn with_excluded_models(mut self, models: Vec<String>) -> Self {
+        self.excluded_models = models;
+        self
+    }
+
     /// Whether an exhausted window stops routing to the account.
     #[must_use]
     pub const fn blocking(&self) -> bool {
@@ -168,6 +177,12 @@ impl QuotaWindow {
     #[must_use]
     pub fn scope_model(&self) -> Option<&str> {
         self.scope_model.as_deref()
+    }
+
+    /// Models exempt from this account-wide window.
+    #[must_use]
+    pub fn excluded_models(&self) -> &[String] {
+        &self.excluded_models
     }
 
     /// Window name.
@@ -3273,9 +3288,14 @@ mod tests {
         let window = QuotaWindow::new("weekly", 1, Some(10), None).expect("window");
         assert!(window.blocking());
         assert_eq!(window.scope_model(), None);
-        let window = window.with_blocking(false).with_scope_model("model-a");
+        assert_eq!(window.excluded_models(), &[] as &[String]);
+        let window = window
+            .with_blocking(false)
+            .with_scope_model("model-a")
+            .with_excluded_models(vec!["model-b".to_owned()]);
         assert!(!window.blocking());
         assert_eq!(window.scope_model(), Some("model-a"));
+        assert_eq!(window.excluded_models(), ["model-b"]);
     }
 
     #[test]

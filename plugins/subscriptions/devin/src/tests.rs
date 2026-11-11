@@ -281,13 +281,140 @@ fn a2b_7_secrets_not_in_debug_or_errors() {
 }
 
 #[test]
-fn a2b_8_quota_is_empty() {
+fn a2b_8_quota_reads_windows_and_free_model_exclusions() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
     let sub = subscription(&host);
     let id = seed_account(&host, "devin-quota-key", "dev@example.test");
+    host.http().enqueue_response(
+        200,
+        &[("content-type", "application/json")],
+        br#"{"userStatus":{"planStatus":{"planInfo":{"billingStrategy":"BILLING_STRATEGY_QUOTA"},"dailyQuotaRemainingPercent":100,"dailyQuotaResetAtUnix":"1790841600","weeklyQuotaResetAtUnix":"1791100800"}}}"#,
+    );
+    enqueue_configs(&host);
     let windows = block_on(sub.quota(&id, host.context())).expect("quota");
-    assert!(windows.is_empty());
+    assert_eq!(windows.len(), 2);
+    assert_eq!(windows[0].name(), "1 day");
+    assert_eq!(windows[0].used(), 0);
+    assert_eq!(windows[0].limit(), Some(100));
+    assert_eq!(windows[1].name(), "7 days");
+    assert_eq!(windows[1].used(), 100);
+    for window in &windows {
+        assert_eq!(
+            window.excluded_models(),
+            ["swe-2", "swe-2-high", "swe-2-max", "swe-2-medium"]
+        );
+    }
+
+    let calls = host.http().calls();
+    assert_eq!(calls.len(), 2);
+    assert!(calls[0].uri().ends_with("/GetUserStatus"));
+    assert_eq!(calls[0].header("content-type"), Some("application/json"));
+    assert_eq!(calls[0].header("connect-protocol-version"), Some("1"));
+    assert!(calls[0].sensitive_headers().is_empty());
+    assert!(calls[0].header("authorization").is_none());
+    let request: hofund_plugin_sdk::json::Value =
+        hofund_plugin_sdk::json::from_slice(calls[0].body()).expect("request JSON");
+    assert_eq!(request["metadata"]["ideName"], "devin-cli");
+    assert_eq!(request["metadata"]["extensionName"], "devin-cli");
+    assert_eq!(request["metadata"]["ideVersion"], "3000.11.3");
+    assert_eq!(request["metadata"]["extensionVersion"], "3000.11.3");
+    assert_eq!(request["metadata"]["apiKey"], "devin-quota-key");
+    assert_eq!(request["metadata"]["locale"], "en");
+    assert!(request["metadata"]["os"].is_string());
+}
+
+#[test]
+fn quota_failures_do_not_use_chat_or_raw_transport_classification() {
+    enum Failure {
+        Status(u16),
+        Connect,
+        Timeout,
+    }
+    for (label, failure, expected) in [
+        (
+            "quota-auth@example.test",
+            Failure::Status(401),
+            PluginErrorKind::Auth,
+        ),
+        (
+            "quota-http@example.test",
+            Failure::Status(500),
+            PluginErrorKind::Status,
+        ),
+        (
+            "quota-connect@example.test",
+            Failure::Connect,
+            PluginErrorKind::Io,
+        ),
+        (
+            "quota-timeout@example.test",
+            Failure::Timeout,
+            PluginErrorKind::Io,
+        ),
+    ] {
+        let dir = tempfile::tempdir().expect("dir");
+        let host = host(&dir);
+        let sub = subscription(&host);
+        let id = seed_account(&host, "devin-quota-failure-key", label);
+        match failure {
+            Failure::Status(status) => host.http().enqueue_response(
+                status,
+                &[],
+                br#"{"code":"resource_exhausted","message":"quota exhausted"}"#,
+            ),
+            Failure::Connect => host.http().enqueue_connect("offline"),
+            Failure::Timeout => host.http().enqueue_timeout("slow"),
+        }
+        let error = block_on(sub.quota(&id, host.context())).expect_err("quota failure");
+        assert_eq!(error.kind(), expected, "{label}: {error}");
+        assert!(!error.to_string().contains("devin-quota-failure-key"));
+        assert_eq!(host.http().calls().len(), 1);
+    }
+}
+
+#[test]
+fn unknown_free_models_leave_exhausted_windows_account_wide() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let id = seed_account(&host, "devin-unknown-free-key", "unknown-free@example.test");
+    host.http().enqueue_response(
+        200,
+        &[],
+        br#"{"userStatus":{"planStatus":{"planInfo":{"billingStrategy":"BILLING_STRATEGY_QUOTA"},"dailyQuotaResetAtUnix":"1790841600","weeklyQuotaResetAtUnix":"1791100800"}}}"#,
+    );
+    host.http().enqueue_response(503, &[], b"unavailable");
+    let windows = block_on(sub.quota(&id, host.context())).expect("quota");
+    assert_eq!(windows.len(), 2);
+    assert!(windows.iter().all(|window| window.used() == 100));
+    assert!(
+        windows
+            .iter()
+            .all(|window| window.excluded_models() == &[] as &[String])
+    );
+    assert_eq!(host.http().calls().len(), 2);
+}
+
+#[test]
+fn no_quota_windows_or_empty_status_skip_the_model_rpc() {
+    for (label, body) in [
+        (
+            "quota-credits@example.test",
+            br#"{"userStatus":{"planStatus":{"planInfo":{"planName":"Free","billingStrategy":"BILLING_STRATEGY_CREDITS"}}}}"#
+                .as_slice(),
+        ),
+        ("quota-empty@example.test", b"".as_slice()),
+    ] {
+        let dir = tempfile::tempdir().expect("dir");
+        let host = host(&dir);
+        let sub = subscription(&host);
+        let id = seed_account(&host, "devin-no-quota-key", label);
+        host.http().enqueue_response(200, &[], body);
+        let windows = block_on(sub.quota(&id, host.context())).expect("quota");
+        assert!(windows.is_empty());
+        assert_eq!(host.http().calls().len(), 1);
+    }
 }
 
 #[test]
@@ -531,6 +658,45 @@ fn live_model_list_uses_raw_protobuf_without_authorization() {
     assert!(call.header("authorization").is_none());
     assert!(deframe(call.body()).is_err());
     assert_eq!(fields(call.body())[0].number, 1);
+}
+
+#[test]
+fn live_model_list_marks_free_tier_and_prices() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_account(&host, "devin-price-key", "prices@example.test");
+    host.http().enqueue_response(
+        200,
+        &[("content-type", "application/proto")],
+        crate::connect::testdata::MODEL_CONFIGS_1015,
+    );
+    let models = block_on(subscription(&host).list_models(&id, host.context())).expect("models");
+    let swe = models
+        .models()
+        .iter()
+        .find(|model| model.id() == "swe-2")
+        .expect("free family");
+    assert_eq!(swe.free(), Some(true));
+    assert!(swe.costs_nothing());
+    let lightning = models
+        .models()
+        .iter()
+        .find(|model| model.id() == "swe-2-high-lightning")
+        .expect("priced variant");
+    assert_eq!(lightning.free(), None);
+    assert_eq!(
+        lightning.prices(),
+        (Some(1_000_000), Some(5_000_000), Some(100_000))
+    );
+    let argon = models
+        .models()
+        .iter()
+        .find(|model| model.id() == "gemini-4-argon")
+        .expect("priced family");
+    assert_eq!(
+        argon.prices(),
+        (Some(1_000_000), Some(5_000_000), Some(50_000))
+    );
 }
 
 #[test]
