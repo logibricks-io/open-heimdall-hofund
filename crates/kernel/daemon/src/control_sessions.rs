@@ -2,14 +2,16 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Days, Local, NaiveDate, NaiveTime, TimeZone};
 use hofund_control_proto::{
     ControlError, ControlErrorKind, SessionConsent, SessionDayStats, SessionDetailResponse,
-    SessionListQuery, SessionListResponse, SessionOverviewDay, SessionOverviewQuery,
-    SessionOverviewResponse, SessionOverviewTop, SessionProgressResponse, SessionStatShare,
-    SessionStatsQuery, SessionStatsResponse, SessionSummary, SessionTokenTotals,
-    SessionTranscriptPart, SessionTranscriptResponse,
+    SessionListQuery, SessionListResponse, SessionManageAgent, SessionManageQuery,
+    SessionManageResponse, SessionOverviewDay, SessionOverviewQuery, SessionOverviewResponse,
+    SessionOverviewTop, SessionProgressResponse, SessionSearchHit, SessionSearchQuery,
+    SessionSearchResponse, SessionStatShare, SessionStatsQuery, SessionStatsResponse,
+    SessionSummary, SessionTokenTotals, SessionTranscriptPart, SessionTranscriptResponse,
 };
 use hofund_gateway::control::ControlFailure;
 use hofund_model_catalog::EffectivePricer;
@@ -20,6 +22,7 @@ use hofund_sessions::pricing::{price_records, token_cost};
 
 pub(crate) struct SessionControl {
     stores: Vec<Arc<dyn SessionStore>>,
+    config_dir: PathBuf,
     state: Mutex<SessionState>,
     pricing: Arc<EffectivePricer>,
     progress: IndexProgress,
@@ -49,6 +52,7 @@ impl SessionControl {
         let index = SessionIndex::load(&config_dir, &consent);
         Self {
             stores,
+            config_dir,
             state: Mutex::new(SessionState { consent, index }),
             pricing,
             progress: IndexProgress::default(),
@@ -188,6 +192,96 @@ impl SessionControl {
                 row
             })
             .collect();
+        Ok(response)
+    }
+
+    pub(crate) fn search(
+        &self,
+        query: SessionSearchQuery,
+        cancelled: &AtomicBool,
+    ) -> Result<SessionSearchResponse, ControlFailure> {
+        const HIT_CAP: usize = 200;
+        const TIME_BUDGET: Duration = Duration::from_secs(8);
+
+        let started = Instant::now();
+        let needle = query.q.to_lowercase();
+        let records = self.records()?;
+        let mut response = SessionSearchResponse::default();
+        for record in records
+            .iter()
+            .filter(|record| query.agent.is_empty() || record.agent == query.agent)
+        {
+            if cancelled.load(Ordering::SeqCst) || started.elapsed() >= TIME_BUDGET {
+                response.cut = true;
+                break;
+            }
+            let Some(store) = self
+                .stores
+                .iter()
+                .find(|store| store.agent() == record.agent && store.transcript_available())
+            else {
+                continue;
+            };
+            let Ok((root, file)) = self.session_file(store.as_ref(), record, None) else {
+                continue;
+            };
+            let Ok(transcript) = hofund_sessions::read::transcript(&root, store.as_ref(), &file)
+            else {
+                continue;
+            };
+            if let Some(excerpt) = transcript
+                .parts
+                .iter()
+                .find_map(|part| search_excerpt(&part.text, &needle))
+            {
+                let mut hit = SessionSearchHit::default();
+                hit.id.clone_from(&record.id);
+                hit.excerpt = excerpt;
+                response.hits.push(hit);
+                if response.hits.len() == HIT_CAP {
+                    response.cut = true;
+                    break;
+                }
+            }
+        }
+        Ok(response)
+    }
+
+    pub(crate) fn manage(
+        &self,
+        query: SessionManageQuery,
+    ) -> Result<SessionManageResponse, ControlFailure> {
+        let records = self.records()?;
+        let mut counts: BTreeMap<String, u64> = BTreeMap::new();
+        for record in &records {
+            let count = counts.entry(record.agent.clone()).or_default();
+            *count = count.saturating_add(1);
+        }
+        let mut response = SessionManageResponse::default();
+        response.agents = counts
+            .into_iter()
+            .map(|(agent, count)| {
+                let mut row = SessionManageAgent::default();
+                row.agent = agent;
+                row.count = count;
+                row.deletable = false;
+                row
+            })
+            .collect();
+        response.agent = query.agent;
+        response.sessions = records
+            .iter()
+            .filter(|record| response.agent.is_empty() || record.agent == response.agent)
+            .map(session_summary)
+            .collect();
+        response.trash_dir = self
+            .config_dir
+            .join("state")
+            .join("trash")
+            .join("sessions")
+            .to_string_lossy()
+            .into_owned();
+        seal(&mut response, |response| &mut response.revision);
         Ok(response)
     }
 
@@ -508,6 +602,36 @@ fn stat_shares(shares: BTreeMap<String, StatShare>) -> Vec<SessionStatShare> {
             out
         })
         .collect()
+}
+
+fn search_excerpt(text: &str, needle: &str) -> Option<String> {
+    let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut folded = String::new();
+    let mut original_offsets = Vec::new();
+    for (offset, character) in line.char_indices() {
+        let lowered = character.to_lowercase().to_string();
+        original_offsets.extend(std::iter::repeat_n(offset, lowered.len()));
+        folded.push_str(&lowered);
+    }
+    original_offsets.push(line.len());
+    let at = folded.find(needle)?;
+    let match_start = original_offsets[at];
+    let match_end = original_offsets[at + needle.len()];
+    let start = line[..match_start]
+        .char_indices()
+        .rev()
+        .nth(35)
+        .map_or(0, |(offset, _)| offset);
+    let end = line[match_end..]
+        .char_indices()
+        .nth(120)
+        .map_or(line.len(), |(offset, _)| match_end + offset);
+    Some(format!(
+        "{}{}{}",
+        if start > 0 { "…" } else { "" },
+        &line[start..end],
+        if end < line.len() { "…" } else { "" }
+    ))
 }
 
 fn session_not_found() -> ControlFailure {

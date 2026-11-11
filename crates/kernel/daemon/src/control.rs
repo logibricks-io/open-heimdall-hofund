@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::TimeZone;
@@ -26,8 +26,9 @@ use hofund_control_proto::{
     QuotaAlertsSetResponse, QuotaCreditsModesResponse, QuotaCreditsSetRequest,
     QuotaCreditsSetResponse, QuotaHistoryQuery, QuotaHistoryResponse, QuotaQuery, QuotaResponse,
     RouteListResponse, RouteModel, RouteModelListResponse, RouteQuery, RouteReserve, ServeRole,
-    SessionDetailResponse, SessionListQuery, SessionListResponse, SessionOverviewQuery,
-    SessionOverviewResponse, SessionProgressResponse, SessionRouteResponse, SessionStatsQuery,
+    SessionDetailResponse, SessionListQuery, SessionListResponse, SessionManageQuery,
+    SessionManageResponse, SessionOverviewQuery, SessionOverviewResponse, SessionProgressResponse,
+    SessionRouteResponse, SessionSearchQuery, SessionSearchResponse, SessionStatsQuery,
     SessionStatsResponse, SessionTranscriptResponse, ShutdownRequest, ShutdownResponse,
     ShutdownState, StatusResponse, TokenRotateRequest, TokenRotateResponse, UnroutedListResponse,
     UsageBreakdownBy, UsageBreakdownGroup, UsagePeriod, UsageQuery, UsageResponse, UsageRow,
@@ -1336,6 +1337,31 @@ impl ControlState for DaemonControl {
         }))
     }
 
+    fn session_search(
+        &self,
+        query: SessionSearchQuery,
+    ) -> ControlFuture<'_, SessionSearchResponse> {
+        let sessions = Arc::clone(&self.sessions);
+        Box::pin(async move {
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let _cancel_on_drop = CancelOnDrop(Arc::clone(&cancelled));
+            session_task(sessions, move |sessions| {
+                sessions.search(query, cancelled.as_ref())
+            })
+            .await
+        })
+    }
+
+    fn session_manage(
+        &self,
+        query: SessionManageQuery,
+    ) -> ControlFuture<'_, SessionManageResponse> {
+        let sessions = Arc::clone(&self.sessions);
+        Box::pin(session_task(sessions, move |sessions| {
+            sessions.manage(query)
+        }))
+    }
+
     fn usage(&self, query: UsageQuery) -> ControlFuture<'_, UsageResponse> {
         let ledger = Arc::clone(&self.usage);
         let config = self.ops.live().config.clone();
@@ -1987,6 +2013,14 @@ fn quotas_unavailable() -> ControlFailure {
         "quotas",
     )
     .into()
+}
+
+struct CancelOnDrop(Arc<AtomicBool>);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
 }
 
 async fn session_task<T: Send + 'static>(

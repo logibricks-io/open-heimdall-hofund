@@ -437,6 +437,158 @@ impl SessionTranscriptQuery {
     }
 }
 
+/// Session search filters.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SessionSearchQuery {
+    /// Exact agent id, or empty for every consented agent.
+    pub agent: String,
+    /// Case-folded substring to find.
+    pub q: String,
+}
+
+impl SessionSearchQuery {
+    /// Parses and validates the search query string.
+    ///
+    /// # Errors
+    ///
+    /// Returns `BadRequest` for an empty query, unknown key, duplicate key, or
+    /// malformed encoding.
+    pub fn parse(query: Option<&str>) -> Result<Self, ControlError> {
+        let mut out = Self::default();
+        for (key, value) in query_fields(query, &["agent", "q"])? {
+            if key == "agent" {
+                out.agent = value;
+            } else {
+                out.q = value;
+            }
+        }
+        if out.q.is_empty() {
+            return Err(bad_query("q must not be empty"));
+        }
+        Ok(out)
+    }
+}
+
+/// One search hit.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct SessionSearchHit {
+    /// Public session id.
+    pub id: String,
+    /// One-line excerpt around the first match.
+    pub excerpt: String,
+}
+
+/// Session search response.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct SessionSearchResponse {
+    /// Body wire version.
+    pub version: u32,
+    /// Matching sessions in newest-first order.
+    pub hits: Vec<SessionSearchHit>,
+    /// Whether the hit cap or time budget ended the search.
+    pub cut: bool,
+}
+
+impl Default for SessionSearchResponse {
+    fn default() -> Self {
+        Self {
+            version: API_VERSION,
+            hits: Vec::new(),
+            cut: false,
+        }
+    }
+}
+
+/// Manage query filters.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SessionManageQuery {
+    /// Exact agent id, or empty for every agent.
+    pub agent: String,
+}
+
+impl SessionManageQuery {
+    /// Parses and validates the manage query string.
+    ///
+    /// # Errors
+    ///
+    /// Returns `BadRequest` for an unknown, duplicate, or malformed parameter.
+    pub fn parse(query: Option<&str>) -> Result<Self, ControlError> {
+        let mut out = Self::default();
+        for (_key, value) in query_fields(query, &["agent"])? {
+            out.agent = value;
+        }
+        Ok(out)
+    }
+}
+
+/// One agent's session count and deletion capability.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct SessionManageAgent {
+    /// Agent plugin id.
+    pub agent: String,
+    /// Listed session count.
+    pub count: u64,
+    /// Whether session deletion is available. It is false in the read-only row.
+    pub deletable: bool,
+}
+
+/// One trash listing row.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct SessionTrashRow {
+    /// Trash entry id.
+    pub id: String,
+    /// Agent plugin id.
+    pub agent: String,
+    /// Display title.
+    pub title: String,
+}
+
+/// Read-only session management listing.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct SessionManageResponse {
+    /// Body wire version.
+    pub version: u32,
+    /// SHA-256 resource revision.
+    pub revision: String,
+    /// Per-agent listing counts.
+    pub agents: Vec<SessionManageAgent>,
+    /// Active agent filter.
+    pub agent: String,
+    /// Listed sessions.
+    pub sessions: Vec<SessionSummary>,
+    /// Trash rows; empty until session mutation ships.
+    pub trash: Vec<SessionTrashRow>,
+    /// Session trash directory.
+    pub trash_dir: String,
+    /// Whether gateway recording is enabled; false until that row ships.
+    pub recording: bool,
+    /// Whether gateway recordings exist; false until that row ships.
+    pub recorded: bool,
+}
+
+impl Default for SessionManageResponse {
+    fn default() -> Self {
+        Self {
+            version: API_VERSION,
+            revision: String::new(),
+            agents: Vec::new(),
+            agent: String::new(),
+            sessions: Vec::new(),
+            trash: Vec::new(),
+            trash_dir: String::new(),
+            recording: false,
+            recorded: false,
+        }
+    }
+}
+
 fn parse_days(value: &str) -> Result<u32, ControlError> {
     match value {
         "0" | "1" | "7" | "30" | "90" => value

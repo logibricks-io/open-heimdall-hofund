@@ -8,8 +8,8 @@ use std::sync::Arc;
 use chrono::Local;
 use hofund_control_proto::{
     API_VERSION, ControlErrorKind, SessionDetailResponse, SessionListResponse,
-    SessionOverviewResponse, SessionProgressResponse, SessionStatsResponse,
-    SessionTranscriptResponse, decode_error_envelope, decode_response,
+    SessionManageResponse, SessionOverviewResponse, SessionProgressResponse, SessionSearchResponse,
+    SessionStatsResponse, SessionTranscriptResponse, decode_error_envelope, decode_response,
 };
 use hofund_daemon::{
     CompiledPreset, ControlRuntime, DaemonRegistry, Running, StartOptions, start_linked,
@@ -77,6 +77,7 @@ struct FakeStore {
     locator: FakeLocator,
     last_ms: i64,
     date: String,
+    count: usize,
 }
 
 struct FakeParser {
@@ -115,7 +116,16 @@ impl SessionStore for FakeStore {
     }
 
     fn files(&self, root: &Path) -> Result<Vec<SessionFile>, PluginError> {
-        Ok(vec![SessionFile::new("one", root.join("one.jsonl"))])
+        Ok((0..self.count)
+            .map(|index| {
+                let id = if index == 0 {
+                    "one".to_owned()
+                } else {
+                    format!("session-{index}")
+                };
+                SessionFile::new(&id, root.join(format!("{id}.jsonl")))
+            })
+            .collect())
     }
 
     fn parser(
@@ -124,7 +134,7 @@ impl SessionStore for FakeStore {
         _state: Option<&str>,
     ) -> Result<Box<dyn SessionParser>, PluginError> {
         Ok(Box::new(FakeParser {
-            record: SessionRecord::new("fake", "fake:one", &file.path),
+            record: SessionRecord::new("fake", format!("fake:{}", file.id), &file.path),
             last_ms: self.last_ms,
             date: self.date.clone(),
         }))
@@ -166,14 +176,27 @@ async fn start(dir: &Path) -> Running {
 }
 
 async fn start_with_reads(dir: &Path, reads: bool) -> Running {
+    start_with_count(dir, reads, 1).await
+}
+
+async fn start_with_count(dir: &Path, reads: bool, count: usize) -> Running {
     let now = Local::now();
     let agent = dir.join("agent");
     std::fs::create_dir(&agent).expect("agent root");
-    std::fs::write(agent.join("one.jsonl"), b"{\"fixture\":true}\n").expect("session fixture");
+    for index in 0..count {
+        let id = if index == 0 {
+            "one".to_owned()
+        } else {
+            format!("session-{index}")
+        };
+        std::fs::write(agent.join(format!("{id}.jsonl")), b"{\"fixture\":true}\n")
+            .expect("session fixture");
+    }
     let store = FakeStore {
         locator: FakeLocator { root: agent },
         last_ms: now.timestamp_millis(),
         date: now.date_naive().to_string(),
+        count,
     };
     let registry = Arc::new(FakeRegistry {
         stores: vec![Arc::new(store)],
@@ -382,4 +405,73 @@ fn markdown_files(root: &Path) -> Vec<PathBuf> {
         }
     }
     files
+}
+
+#[tokio::test]
+async fn search_is_case_folded_and_manage_is_read_only() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let running = start(dir.path()).await;
+    let response = get(
+        &running,
+        dir.path(),
+        "/v1/hofund/sessions/search?agent=fake&q=QUESTION",
+    )
+    .await;
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let search: SessionSearchResponse =
+        decode_response(API_VERSION, &response.bytes().await.expect("search body"))
+            .expect("search");
+    assert_eq!(search.hits.len(), 1);
+    assert_eq!(search.hits[0].id, "fake:one");
+    assert!(search.hits[0].excerpt.contains("Offline question"));
+    assert!(!search.cut);
+
+    let response = get(
+        &running,
+        dir.path(),
+        "/v1/hofund/sessions/manage?agent=fake",
+    )
+    .await;
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let manage: SessionManageResponse =
+        decode_response(API_VERSION, &response.bytes().await.expect("manage body"))
+            .expect("manage");
+    assert_eq!(manage.agent, "fake");
+    assert_eq!(manage.sessions.len(), 1);
+    assert_eq!(manage.agents.len(), 1);
+    assert_eq!(manage.agents[0].count, 1);
+    assert!(!manage.agents[0].deletable);
+    assert!(manage.trash.is_empty());
+    assert!(!manage.recording && !manage.recorded);
+    assert!(!std::path::Path::new(&manage.trash_dir).exists());
+    assert_eq!(manage.revision.len(), 64);
+    support::shutdown(running).await;
+}
+
+#[tokio::test]
+async fn search_stops_at_two_hundred_hits() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let running = start_with_count(dir.path(), true, 201).await;
+    let response = get(
+        &running,
+        dir.path(),
+        "/v1/hofund/sessions/search?q=question",
+    )
+    .await;
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let search: SessionSearchResponse =
+        decode_response(API_VERSION, &response.bytes().await.expect("search body"))
+            .expect("search");
+    assert_eq!(search.hits.len(), 200);
+    assert!(search.cut);
+    assert_eq!(
+        search
+            .hits
+            .iter()
+            .map(|hit| hit.id.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        200
+    );
+    support::shutdown(running).await;
 }

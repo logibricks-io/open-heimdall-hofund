@@ -275,6 +275,20 @@ impl ControlState for FakeControlState {
         Box::pin(async move { Ok(format!("# {id}")) })
     }
 
+    fn session_search(
+        &self,
+        query: hofund_control_proto::SessionSearchQuery,
+    ) -> ControlFuture<'_, hofund_control_proto::SessionSearchResponse> {
+        self.reply(format!("session_search:{}:{}", query.agent, query.q))
+    }
+
+    fn session_manage(
+        &self,
+        query: hofund_control_proto::SessionManageQuery,
+    ) -> ControlFuture<'_, hofund_control_proto::SessionManageResponse> {
+        self.reply(format!("session_manage:{}", query.agent))
+    }
+
     fn usage(&self, query: UsageQuery) -> ControlFuture<'_, UsageResponse> {
         self.reply(format!("usage:{:?}", query.period))
     }
@@ -511,6 +525,16 @@ fn operation_routes() -> Vec<(Method, &'static str, Vec<u8>)> {
             Vec::new(),
         ),
         (Method::GET, "/v1/hofund/sessions/progress", Vec::new()),
+        (
+            Method::GET,
+            "/v1/hofund/sessions/search?agent=fake&q=Needle",
+            Vec::new(),
+        ),
+        (
+            Method::GET,
+            "/v1/hofund/sessions/manage?agent=fake",
+            Vec::new(),
+        ),
         (Method::GET, "/v1/hofund/sessions/fake%3Aone", Vec::new()),
         (
             Method::GET,
@@ -677,6 +701,8 @@ async fn control_routes_success_and_error_envelopes_against_fake_state() {
             "session_stats:Some(0)",
             "session_overview:fake",
             "session_progress",
+            "session_search:fake:Needle",
+            "session_manage:fake",
             "session:fake:one",
             "session_transcript:fake:one:Some(\"child\")",
             "usage:Day",
@@ -1007,6 +1033,8 @@ async fn session_queries_reject_bad_days_before_dispatch() {
         "/v1/hofund/sessions/overview?days=-1",
         "/v1/hofund/sessions?limit=0",
         "/v1/hofund/sessions?unknown=x",
+        "/v1/hofund/sessions/search?q=",
+        "/v1/hofund/sessions/search",
     ] {
         let (status, headers, body) =
             call(app(&state), Method::GET, path, Vec::new(), true, false).await;
@@ -1015,6 +1043,32 @@ async fn session_queries_reject_bad_days_before_dispatch() {
         assert_error(&body, ControlErrorKind::BadRequest);
     }
     assert!(state.calls.lock().expect("calls").is_empty());
+}
+
+#[tokio::test]
+async fn session_write_routes_remain_not_found() {
+    let state = Arc::new(FakeControlState::default());
+    for path in [
+        "/v1/hofund/sessions/fake%3Aone/export",
+        "/v1/hofund/sessions/delete",
+        "/v1/hofund/sessions/restore",
+        "/v1/hofund/sessions/purge",
+        "/v1/hofund/sessions/carry",
+        "/v1/hofund/sessions/relocate",
+        "/v1/hofund/sessions/recording",
+    ] {
+        let (status, _, body) = call(
+            app(&state),
+            Method::POST,
+            path,
+            br#"{"version":1}"#.to_vec(),
+            true,
+            true,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+        assert_error(&body, ControlErrorKind::NotFound);
+    }
 }
 
 #[tokio::test]

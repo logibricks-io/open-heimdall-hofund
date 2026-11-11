@@ -38,8 +38,9 @@ use hofund_control_proto::{
     QuotaAlertsSetResponse, QuotaCreditsModesResponse, QuotaCreditsSetRequest,
     QuotaCreditsSetResponse, QuotaHistoryQuery, QuotaHistoryResponse, QuotaQuery, QuotaResponse,
     ReloadRequest, RouteListResponse, RouteModelListResponse, RouteQuery, SessionDetailResponse,
-    SessionListQuery, SessionListResponse, SessionOverviewQuery, SessionOverviewResponse,
-    SessionProgressResponse, SessionRouteResponse, SessionStatsQuery, SessionStatsResponse,
+    SessionListQuery, SessionListResponse, SessionManageQuery, SessionManageResponse,
+    SessionOverviewQuery, SessionOverviewResponse, SessionProgressResponse, SessionRouteResponse,
+    SessionSearchQuery, SessionSearchResponse, SessionStatsQuery, SessionStatsResponse,
     SessionTranscriptQuery, SessionTranscriptResponse, ShutdownRequest, ShutdownResponse,
     StatusResponse, TokenRotateRequest, TokenRotateResponse, Topic, UnroutedListResponse,
     UsageQuery, UsageResponse, WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
@@ -664,6 +665,22 @@ pub trait ControlState: Send + Sync {
         let _ = id;
         Box::pin(async { Err(unsupported_sessions()) })
     }
+    /// Searches consent-filtered session transcripts.
+    fn session_search(
+        &self,
+        query: SessionSearchQuery,
+    ) -> ControlFuture<'_, SessionSearchResponse> {
+        let _ = query;
+        Box::pin(async { Err(unsupported_sessions()) })
+    }
+    /// Lists read-only session management state.
+    fn session_manage(
+        &self,
+        query: SessionManageQuery,
+    ) -> ControlFuture<'_, SessionManageResponse> {
+        let _ = query;
+        Box::pin(async { Err(unsupported_sessions()) })
+    }
     /// Reports usage for a period.
     fn usage(&self, query: UsageQuery) -> ControlFuture<'_, UsageResponse>;
     /// Reports what is left of every subscription, with each account's
@@ -1024,6 +1041,21 @@ impl Control {
                 "/v1/hofund/sessions/progress",
                 get(session_progress).head(method_not_allowed),
             )
+            .route(
+                "/v1/hofund/sessions/search",
+                get(session_search).head(method_not_allowed),
+            )
+            .route(
+                "/v1/hofund/sessions/manage",
+                get(session_manage).head(method_not_allowed),
+            )
+            .route("/v1/hofund/sessions/{id}/export", post(not_found))
+            .route("/v1/hofund/sessions/delete", post(not_found))
+            .route("/v1/hofund/sessions/restore", post(not_found))
+            .route("/v1/hofund/sessions/purge", post(not_found))
+            .route("/v1/hofund/sessions/carry", post(not_found))
+            .route("/v1/hofund/sessions/relocate", post(not_found))
+            .route("/v1/hofund/sessions/recording", post(not_found))
             .route(
                 "/v1/hofund/sessions/{id}/transcript",
                 get(session_transcript).head(method_not_allowed),
@@ -1917,6 +1949,22 @@ async fn session_overview(State(state): State<HttpState>, uri: Uri) -> Response 
 
 async fn session_progress(State(state): State<HttpState>) -> Response {
     operation_response!(state.control.state.session_progress().await)
+}
+
+async fn session_search(State(state): State<HttpState>, uri: Uri) -> Response {
+    let query = match SessionSearchQuery::parse(uri.query()) {
+        Ok(query) => query,
+        Err(error) => return failure_response(error.into()),
+    };
+    operation_response!(state.control.state.session_search(query).await)
+}
+
+async fn session_manage(State(state): State<HttpState>, uri: Uri) -> Response {
+    let query = match SessionManageQuery::parse(uri.query()) {
+        Ok(query) => query,
+        Err(error) => return failure_response(error.into()),
+    };
+    operation_response!(state.control.state.session_manage(query).await)
 }
 
 async fn session(

@@ -25,8 +25,9 @@ use hofund_control_proto::{
     QuotaAlertsResponse, QuotaAlertsSetRequest, QuotaAlertsSetResponse, QuotaCreditsModesResponse,
     QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryQuery, QuotaHistoryResponse,
     QuotaQuery, QuotaResponse, ReloadRequest, RouteListResponse, RouteModelListResponse,
-    RouteQuery, SessionDetailResponse, SessionListQuery, SessionListResponse, SessionOverviewQuery,
-    SessionOverviewResponse, SessionProgressResponse, SessionRouteResponse, SessionStatsQuery,
+    RouteQuery, SessionDetailResponse, SessionListQuery, SessionListResponse, SessionManageQuery,
+    SessionManageResponse, SessionOverviewQuery, SessionOverviewResponse, SessionProgressResponse,
+    SessionRouteResponse, SessionSearchQuery, SessionSearchResponse, SessionStatsQuery,
     SessionStatsResponse, SessionTranscriptResponse, ShutdownRequest, ShutdownResponse,
     StatusResponse, TokenRotateRequest, TokenRotateResponse, Topic, UnroutedListResponse,
     UsageQuery, UsageResponse, WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
@@ -994,6 +995,34 @@ impl Client {
             .map_err(|_| ClientError::Transport("session Markdown is not UTF-8".to_owned()))
     }
 
+    /// Searches consent-filtered session transcripts.
+    pub async fn session_search(
+        &self,
+        query: SessionSearchQuery,
+    ) -> Result<SessionSearchResponse, ClientError> {
+        let mut fields = Vec::new();
+        if !query.agent.is_empty() {
+            fields.push(("agent", query.agent));
+        }
+        fields.push(("q", query.q));
+        self.get(&with_query("/v1/hofund/sessions/search", fields))
+            .await
+    }
+
+    /// Lists read-only session management state.
+    pub async fn session_manage(
+        &self,
+        query: SessionManageQuery,
+    ) -> Result<SessionManageResponse, ClientError> {
+        let fields = if query.agent.is_empty() {
+            Vec::new()
+        } else {
+            vec![("agent", query.agent)]
+        };
+        self.get(&with_query("/v1/hofund/sessions/manage", fields))
+            .await
+    }
+
     /// Reports usage for a period.
     pub async fn usage(&self, query: UsageQuery) -> Result<UsageResponse, ClientError> {
         let url = format!("/v1/hofund/usage?{}", query.encode());
@@ -1636,6 +1665,12 @@ mod route_tests {
                 serde_json::to_vec(&proto::SessionTranscriptResponse::default())
             }
             "/v1/hofund/sessions/fake%3Aone/markdown" => Ok(b"# Fixture".to_vec()),
+            "/v1/hofund/sessions/search" => {
+                serde_json::to_vec(&proto::SessionSearchResponse::default())
+            }
+            "/v1/hofund/sessions/manage" => {
+                serde_json::to_vec(&proto::SessionManageResponse::default())
+            }
             "/v1/hofund/usage" => serde_json::to_vec(&proto::UsageResponse::default()),
             "/v1/hofund/token/rotate" => serde_json::to_vec(&proto::TokenRotateResponse::default()),
             "/v1/hofund/shutdown" => serde_json::to_vec(&proto::ShutdownResponse::default()),
@@ -1978,6 +2013,13 @@ mod route_tests {
             .await
             .expect("session Markdown");
         assert_eq!(markdown, "# Fixture");
+        let mut search = hofund_control_proto::SessionSearchQuery::default();
+        search.agent = "fake".to_owned();
+        search.q = "two words".to_owned();
+        client.session_search(search).await.expect("session search");
+        let mut manage = hofund_control_proto::SessionManageQuery::default();
+        manage.agent = "fake".to_owned();
+        client.session_manage(manage).await.expect("session manage");
         server.abort();
 
         let paths: Vec<String> = recorded
@@ -1996,6 +2038,8 @@ mod route_tests {
                 "/v1/hofund/sessions/fake%3Aone",
                 "/v1/hofund/sessions/fake%3Aone/transcript?sub=child%2Fagent",
                 "/v1/hofund/sessions/fake%3Aone/markdown",
+                "/v1/hofund/sessions/search?agent=fake&q=two%20words",
+                "/v1/hofund/sessions/manage?agent=fake",
             ]
         );
     }
