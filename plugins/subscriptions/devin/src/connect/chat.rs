@@ -19,12 +19,6 @@ pub(crate) enum PromptRole {
     Tool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PromptContent<'a> {
-    Text(&'a str),
-    Images,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PromptCall<'a> {
     pub(crate) id: &'a str,
@@ -33,12 +27,19 @@ pub(crate) struct PromptCall<'a> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PromptImage<'a> {
+    pub(crate) data: &'a str,
+    pub(crate) media_type: &'a str,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Prompt<'a> {
     pub(crate) id: &'a str,
     pub(crate) role: PromptRole,
-    pub(crate) content: PromptContent<'a>,
+    pub(crate) text: &'a str,
     pub(crate) calls: Vec<PromptCall<'a>>,
     pub(crate) answer: Option<&'a str>,
+    pub(crate) images: Vec<PromptImage<'a>>,
 }
 
 impl<'a> Prompt<'a> {
@@ -46,9 +47,10 @@ impl<'a> Prompt<'a> {
         Self {
             id,
             role,
-            content: PromptContent::Text(text),
+            text,
             calls: Vec::new(),
             answer: None,
+            images: Vec::new(),
         }
     }
 }
@@ -81,7 +83,7 @@ pub(crate) struct EncodedChatRequest {
 pub(crate) fn encode_request(request: &ChatRequest<'_>) -> Result<EncodedChatRequest, PluginError> {
     let mut message = ProtoBuf::new().bytes(1, &metadata(request.session_token, request.os));
     for prompt in request.prompts {
-        message = message.bytes(3, &encode_prompt(prompt)?);
+        message = message.bytes(3, &encode_prompt(prompt));
     }
     let sampling = sampling(request);
     message = message.varint(7, 5).bytes(8, &sampling);
@@ -125,23 +127,15 @@ fn encode_tool(name: &str, description: &str, schema: Option<&Value>) -> Vec<u8>
         .finish()
 }
 
-fn encode_prompt(prompt: &Prompt<'_>) -> Result<Vec<u8>, PluginError> {
-    if prompt.content == PromptContent::Images {
-        return Err(PluginError::config(
-            "Devin image prompts are not supported by the text-only chat codec",
-        ));
-    }
-    let PromptContent::Text(text) = prompt.content else {
-        unreachable!("image content returned above");
-    };
+fn encode_prompt(prompt: &Prompt<'_>) -> Vec<u8> {
     let role = match prompt.role {
         PromptRole::User => 1,
         PromptRole::Assistant => 2,
         PromptRole::Tool => 4,
     };
     let mut encoded = ProtoBuf::new().string(1, prompt.id).varint(2, role);
-    if !text.is_empty() {
-        encoded = encoded.string(3, text);
+    if !prompt.text.is_empty() {
+        encoded = encoded.string(3, prompt.text);
     }
     for call in &prompt.calls {
         let call = ProtoBuf::new()
@@ -154,7 +148,14 @@ fn encode_prompt(prompt: &Prompt<'_>) -> Result<Vec<u8>, PluginError> {
     if let Some(answer) = prompt.answer {
         encoded = encoded.string(7, answer);
     }
-    Ok(encoded.finish())
+    for image in &prompt.images {
+        let image = ProtoBuf::new()
+            .string(1, image.data)
+            .string(2, image.media_type)
+            .finish();
+        encoded = encoded.bytes(10, &image);
+    }
+    encoded.finish()
 }
 
 fn sampling(request: &ChatRequest<'_>) -> Vec<u8> {
@@ -537,8 +538,8 @@ mod tests {
     use hofund_plugin_sdk::protobuf::{FLAG_END, FLAG_GZIP, WireValue, deframe, fields, frame};
 
     use super::{
-        ChatRequest, ConnectError, GZIP_AT, Prompt, PromptContent, PromptRole, decode_response,
-        encode_request, frame_request,
+        ChatRequest, ConnectError, GZIP_AT, Prompt, PromptRole, decode_response, encode_request,
+        frame_request,
     };
 
     const EMPTY_REPLY: &[u8] = crate::connect::testdata::EMPTY_REPLY;
@@ -628,16 +629,26 @@ mod tests {
     }
 
     #[test]
-    fn image_prompts_are_refused_not_dropped() {
-        let prompts = [Prompt {
-            id: "id",
-            role: PromptRole::User,
-            content: PromptContent::Images,
-            calls: Vec::new(),
-            answer: None,
-        }];
-        let error = encode_request(&request(&prompts)).expect_err("unsupported content");
-        assert!(error.message().contains("not supported"));
+    fn image_prompts_encode_data_and_media_type() {
+        let mut prompt = Prompt::text("id", PromptRole::User, "look");
+        prompt.images.push(super::PromptImage {
+            data: "AAAA",
+            media_type: "image/png",
+        });
+        let encoded = encode_request(&request(&[prompt])).expect("encode");
+        let outer = fields(&deframe(&encoded.body).expect("frame").payload);
+        let prompt = outer
+            .iter()
+            .find(|field| field.number == 3)
+            .and_then(|field| field.as_bytes())
+            .expect("prompt");
+        let image = fields(prompt)
+            .into_iter()
+            .find(|field| field.number == 10)
+            .expect("image");
+        let image = fields(image.as_bytes().expect("image bytes"));
+        assert_eq!(image[0].as_string().as_deref(), Some("AAAA"));
+        assert_eq!(image[1].as_string().as_deref(), Some("image/png"));
     }
 
     #[test]
@@ -875,18 +886,5 @@ mod tests {
         assert_eq!(id.len(), 29);
         assert!(id.starts_with("call_"));
         assert!(id[5..].bytes().all(|byte| byte.is_ascii_hexdigit()));
-    }
-
-    #[test]
-    fn request_rejection_uses_plugin_errors() {
-        let prompts = [Prompt {
-            id: "id",
-            role: PromptRole::User,
-            content: PromptContent::Images,
-            calls: Vec::new(),
-            answer: None,
-        }];
-        let error = encode_request(&request(&prompts)).expect_err("images");
-        assert_eq!(error.kind(), hofund_plugin_api::PluginErrorKind::Config);
     }
 }

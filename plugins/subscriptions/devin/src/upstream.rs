@@ -3,16 +3,18 @@
 use std::time::Duration;
 
 use hofund_plugin_api::{
-    AccountId, Completion, ContentPart, HostContext, PluginError, ProbeQuery, ProbeReport,
-    ProtocolId, Request, Role, Tool, ToolArguments, ToolChoiceMode, ToolResultPart,
-    UpstreamProvider,
+    AccountId, Completion, ContentPart, HostContext, ImagePart, ImageSource, PluginError,
+    ProbeQuery, ProbeReport, ProtocolId, Request, Role, Tool, ToolArguments, ToolChoiceMode,
+    ToolResultPart, UpstreamProvider,
 };
 use hofund_plugin_sdk::json::Value;
 use hofund_plugin_sdk::oauth::secret_text;
 use hofund_plugin_sdk::{Call, uuid};
 
 use crate::catalog::{self, os_name};
-use crate::connect::chat::{self, ChatRequest, Prompt, PromptCall, PromptRole, ToolDefinition};
+use crate::connect::chat::{
+    self, ChatRequest, Prompt, PromptCall, PromptImage, PromptRole, ToolDefinition,
+};
 use crate::creds::Stored;
 use crate::errors;
 use crate::models::{effort_of, variant_for};
@@ -20,7 +22,6 @@ use crate::stream;
 
 const CHAT_PATH: &str = "/exa.api_server_pb.ApiServerService/GetChatMessage";
 const ERROR_BODY_CAP: usize = 1024 * 1024;
-const IMAGES_MESSAGE: &str = "image inputs are not served on Devin until R-13";
 const STRUCTURED_MESSAGE: &str = "structured output is not served on Devin until R-13";
 const SIGNED_THINKING_MESSAGE: &str = "signed thinking history is not served on Devin until R-13";
 
@@ -61,6 +62,14 @@ impl DevinUpstream {
                     })
                     .collect();
                 encoded.answer = prompt.answer.as_deref();
+                encoded.images = prompt
+                    .images
+                    .iter()
+                    .map(|image| PromptImage {
+                        data: &image.data,
+                        media_type: &image.media_type,
+                    })
+                    .collect();
                 encoded
             })
             .collect();
@@ -137,6 +146,7 @@ struct OwnedPrompt {
     text: String,
     calls: Vec<OwnedCall>,
     answer: Option<String>,
+    images: Vec<OwnedImage>,
 }
 
 struct OwnedCall {
@@ -145,25 +155,42 @@ struct OwnedCall {
     arguments: String,
 }
 
+struct OwnedImage {
+    data: String,
+    media_type: String,
+}
+
 struct JoinedMessage<'a> {
     role: Role,
     text: String,
     calls: Vec<OwnedCall>,
     results: Vec<&'a ToolResultPart>,
+    content: &'a [ContentPart],
+}
+
+struct ResultTrack {
+    prompt: usize,
+    id: String,
+    expected: usize,
+    seen: usize,
+    without_note: String,
 }
 
 fn prompts_for(request: &Request, tools: &[&Tool]) -> Result<Vec<OwnedPrompt>, PluginError> {
     let mut instructions = Vec::new();
     let mut turns = Vec::new();
     let mut pending = Vec::new();
+    let mut results = Vec::new();
     for message in join_split_calls(request) {
         match message.role {
             Role::System | Role::Developer => {
+                settle_results(&mut turns, &mut results);
                 if !message.text.is_empty() {
                     instructions.push(message.text);
                 }
             }
             Role::Assistant => {
+                settle_results(&mut turns, &mut results);
                 if message.text.is_empty() && message.calls.is_empty() {
                     continue;
                 }
@@ -175,6 +202,7 @@ fn prompts_for(request: &Request, tools: &[&Tool]) -> Result<Vec<OwnedPrompt>, P
                     text: message.text,
                     calls: message.calls,
                     answer: None,
+                    images: Vec::new(),
                 });
             }
             Role::Tool | Role::User => {
@@ -182,28 +210,79 @@ fn prompts_for(request: &Request, tools: &[&Tool]) -> Result<Vec<OwnedPrompt>, P
                     let result_id = chat::in_id(&result.id);
                     if let Some(index) = pending.iter().position(|id| id == &result_id) {
                         let text = tool_result_text(result);
+                        let (expected, without_note) = noted(&text);
+                        let prompt = turns.len();
+                        let images = result
+                            .content
+                            .iter()
+                            .filter_map(|part| match part {
+                                ContentPart::Image(image) => inline_image(image),
+                                _ => None,
+                            })
+                            .collect();
                         turns.push(OwnedPrompt {
                             id: String::new(),
                             role: PromptRole::Tool,
                             text,
                             calls: Vec::new(),
                             answer: Some(pending.remove(index)),
+                            images,
+                        });
+                        results.push(ResultTrack {
+                            prompt,
+                            id: result_id,
+                            expected,
+                            seen: 0,
+                            without_note,
                         });
                     }
                 }
-                if message.role == Role::User && !message.text.is_empty() {
-                    answer_pending(&mut turns, &mut pending);
-                    turns.push(OwnedPrompt {
-                        id: String::new(),
-                        role: PromptRole::User,
-                        text: message.text,
-                        calls: Vec::new(),
-                        answer: None,
-                    });
+                if message.role == Role::User {
+                    let mut texts = Vec::new();
+                    let mut images = Vec::new();
+                    let mut attach = None;
+                    for part in message.content {
+                        match part {
+                            ContentPart::Text(text) => {
+                                attach = result_for(&text.text, &results);
+                                if attach.is_none() && !text.text.is_empty() {
+                                    texts.push(text.text.as_str());
+                                }
+                            }
+                            ContentPart::Image(part) => {
+                                let image = inline_image(part);
+                                if let Some(index) = attach {
+                                    if let Some(image) = image {
+                                        turns[results[index].prompt].images.push(image);
+                                    }
+                                    results[index].seen += 1;
+                                    if results[index].seen == results[index].expected {
+                                        attach = None;
+                                    }
+                                } else if let Some(image) = image {
+                                    images.push(image);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    if !texts.is_empty() || !images.is_empty() {
+                        answer_pending(&mut turns, &mut pending);
+                        turns.push(OwnedPrompt {
+                            id: String::new(),
+                            role: PromptRole::User,
+                            text: texts.join("\n\n"),
+                            calls: Vec::new(),
+                            answer: None,
+                            images,
+                        });
+                    }
+                    settle_results(&mut turns, &mut results);
                 }
             }
         }
     }
+    settle_results(&mut turns, &mut results);
     let descriptions = tool_descriptions(tools);
     if !descriptions.is_empty() {
         instructions.push(descriptions);
@@ -219,6 +298,7 @@ fn prompts_for(request: &Request, tools: &[&Tool]) -> Result<Vec<OwnedPrompt>, P
             text: "Please proceed with the task.".to_owned(),
             calls: Vec::new(),
             answer: None,
+            images: Vec::new(),
         });
     }
     if !instructions.is_empty() {
@@ -240,6 +320,7 @@ fn prompts_for(request: &Request, tools: &[&Tool]) -> Result<Vec<OwnedPrompt>, P
                     text: joined,
                     calls: Vec::new(),
                     answer: None,
+                    images: Vec::new(),
                 },
             );
         }
@@ -280,6 +361,7 @@ fn join_split_calls(request: &Request) -> Vec<JoinedMessage<'_>> {
                     _ => None,
                 })
                 .collect(),
+            content: &message.content,
         };
         if next.role == Role::Assistant
             && let Some(previous) = joined.last_mut()
@@ -308,6 +390,7 @@ fn answer_pending(turns: &mut Vec<OwnedPrompt>, pending: &mut Vec<String>) {
             text: NO_RESULT.to_owned(),
             calls: Vec::new(),
             answer: Some(id),
+            images: Vec::new(),
         });
     }
 }
@@ -328,7 +411,7 @@ fn args_of(arguments: &ToolArguments) -> String {
 }
 
 fn tool_result_text(result: &ToolResultPart) -> String {
-    let text = result
+    result
         .content
         .iter()
         .filter_map(|part| match part {
@@ -336,11 +419,66 @@ fn tool_result_text(result: &ToolResultPart) -> String {
             _ => None,
         })
         .collect::<Vec<_>>()
-        .join("");
-    if text.is_empty() {
-        "(no output)".to_owned()
-    } else {
-        text
+        .join("")
+}
+
+fn noted(text: &str) -> (usize, String) {
+    const ONE: &str = "[The tool returned an image; it follows in the next message.]";
+    const MANY_END: &str = " images; they follow in the next message.]";
+    if let Some(before) = text.strip_suffix(ONE) {
+        return (1, without_note_separator(before).to_owned());
+    }
+    if let Some(end) = text.strip_suffix(MANY_END)
+        && let Some(start) = end.rfind("[The tool returned ")
+        && let Ok(count) = end[start + "[The tool returned ".len()..].parse::<usize>()
+    {
+        return (count, without_note_separator(&text[..start]).to_owned());
+    }
+    (0, text.to_owned())
+}
+
+fn without_note_separator(text: &str) -> &str {
+    text.strip_suffix("\n\n").unwrap_or(text)
+}
+
+fn result_for(text: &str, results: &[ResultTrack]) -> Option<usize> {
+    const FROM: &str = "[From the result of ";
+    if !text.starts_with(FROM) {
+        return None;
+    }
+    results.iter().position(|result| {
+        result.expected > result.seen
+            && (text == format!("{FROM}tool call {}:]", result.id)
+                || text.ends_with(&format!(" (tool call {}):]", result.id)))
+    })
+}
+
+fn inline_image(part: &ImagePart) -> Option<OwnedImage> {
+    let ImageSource::Base64 { media_type, data } = &part.source else {
+        return None;
+    };
+    if data.is_empty() {
+        return None;
+    }
+    Some(OwnedImage {
+        data: data.clone(),
+        media_type: if media_type.is_empty() {
+            "image/png".to_owned()
+        } else {
+            media_type.clone()
+        },
+    })
+}
+
+fn settle_results(turns: &mut [OwnedPrompt], results: &mut Vec<ResultTrack>) {
+    for result in results.drain(..) {
+        let prompt = &mut turns[result.prompt];
+        if result.expected != 0 && result.seen == result.expected {
+            prompt.text = result.without_note;
+        }
+        if prompt.text.is_empty() {
+            prompt.text = "(no output)".to_owned();
+        }
     }
 }
 
@@ -430,20 +568,6 @@ fn effort_for(request: &Request, inbound: ProtocolId) -> String {
 }
 
 fn refuse_unserved(request: &Request) -> Result<(), PluginError> {
-    if request.messages.iter().any(|message| {
-        message.content.iter().any(|part| match part {
-            ContentPart::Image(_) => true,
-            ContentPart::ToolResult(result) => result.content.iter().any(|part| match part {
-                ContentPart::Image(_) => true,
-                ContentPart::Unknown(part) => part.kind.to_ascii_lowercase().contains("image"),
-                _ => false,
-            }),
-            ContentPart::Unknown(part) => part.kind.to_ascii_lowercase().contains("image"),
-            _ => false,
-        })
-    }) {
-        return Err(refusal(IMAGES_MESSAGE));
-    }
     if request.messages.iter().any(|message| {
         message.content.iter().any(|part| {
             matches!(part, ContentPart::Thinking(thinking) if thinking.signature.is_some() || thinking.redacted || thinking.data.is_some())

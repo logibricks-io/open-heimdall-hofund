@@ -639,15 +639,7 @@ fn tool_only_reply_streams_calls_arguments_and_usage() {
 }
 
 #[test]
-fn images_and_structured_output_are_refused_without_http() {
-    let image: Request = hofund_plugin_sdk::json::from_value(hofund_plugin_sdk::json::json!({
-        "model": "swe-2",
-        "stream": true,
-        "messages": [{"role": "user", "content": [
-            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AA=="}}
-        ]}]
-    }))
-    .expect("image request");
+fn structured_output_is_refused_without_http() {
     let mut structured = request("swe-2");
     structured.extensions.insert(
         "response_format",
@@ -664,7 +656,6 @@ fn images_and_structured_output_are_refused_without_http() {
         hofund_plugin_sdk::json::json!({"format": {"type": "json_object"}}),
     );
     for (label, request, phrase) in [
-        ("images-refusal@example.test", image, "image inputs"),
         (
             "structured-refusal@example.test",
             structured,
@@ -912,6 +903,142 @@ fn encoded_tool_request(request: Request) -> Vec<u8> {
     host.http().enqueue(chat_body(3, "ok"));
     execute_events(&host, &id, request);
     host.http().calls()[1].body().to_vec()
+}
+
+fn decoded_chat_prompts(body: &[u8]) -> Vec<Vec<hofund_plugin_sdk::protobuf::Field>> {
+    fields(&deframe(body).expect("frame").payload)
+        .iter()
+        .filter(|field| field.number == 3)
+        .map(|field| fields(field.as_bytes().expect("prompt")))
+        .collect()
+}
+
+fn prompt_images(prompt: &[hofund_plugin_sdk::protobuf::Field]) -> Vec<(String, String)> {
+    prompt
+        .iter()
+        .filter(|field| field.number == 10)
+        .map(|field| {
+            let image = fields(field.as_bytes().expect("image"));
+            (
+                image[0].as_string().expect("data"),
+                image[1].as_string().expect("media type"),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn inline_images_encode_and_url_only_images_are_ignored() {
+    let request: Request = hofund_plugin_sdk::json::from_value(hofund_plugin_sdk::json::json!({
+        "model": "swe-2",
+        "stream": true,
+        "messages": [
+            {"role": "user", "content": [
+                {"type": "text", "text": "look"},
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}},
+                {"type": "image", "source": {"type": "url", "url": "https://example.test/a.png"}}
+            ]},
+            {"role": "user", "content": [
+                {"type": "image", "source": {"type": "url", "url": "https://example.test/b.png"}}
+            ]}
+        ]
+    }))
+    .expect("images");
+    let body = encoded_tool_request(request);
+    let prompts = decoded_chat_prompts(&body);
+    assert_eq!(prompts.len(), 1);
+    assert_eq!(
+        prompt_images(&prompts[0]),
+        [("AAAA".into(), "image/png".into())]
+    );
+}
+
+#[test]
+fn direct_tool_result_images_stay_on_the_tool_prompt() {
+    let request: Request = hofund_plugin_sdk::json::from_value(hofund_plugin_sdk::json::json!({
+        "model": "swe-2",
+        "stream": true,
+        "messages": [
+            {"role": "user", "content": [{"type": "text", "text": "look"}]},
+            {"role": "assistant", "content": [{"type": "tool_call", "id": "c1", "name": "shot", "arguments": {"form": "raw", "text": "{}"}}]},
+            {"role": "tool", "content": [{"type": "tool_result", "id": "c1", "content": [
+                {"type": "image", "source": {"type": "base64", "media_type": "image/webp", "data": "DDDD"}},
+                {"type": "image", "source": {"type": "url", "url": "https://example.test/a.png"}}
+            ]}]}
+        ]
+    }))
+    .expect("tool image");
+    let body = encoded_tool_request(request);
+    let prompts = decoded_chat_prompts(&body);
+    assert_eq!(prompts.len(), 3);
+    assert_eq!(
+        prompt_images(&prompts[2]),
+        [("DDDD".into(), "image/webp".into())]
+    );
+    assert_eq!(
+        prompts[2]
+            .iter()
+            .find(|field| field.number == 3)
+            .and_then(|field| field.as_string())
+            .as_deref(),
+        Some("(no output)")
+    );
+}
+
+#[test]
+fn following_user_images_attach_to_their_noted_tool_result() {
+    let request: Request = hofund_plugin_sdk::json::from_value(hofund_plugin_sdk::json::json!({
+        "model": "swe-2",
+        "stream": true,
+        "messages": [
+            {"role": "user", "content": [{"type": "text", "text": "shot"}]},
+            {"role": "assistant", "content": [
+                {"type": "tool_call", "id": "c1", "name": "read", "arguments": {"form": "raw", "text": "{}"}},
+                {"type": "tool_call", "id": "c2", "name": "read", "arguments": {"form": "raw", "text": "{}"}}
+            ]},
+            {"role": "tool", "content": [{"type": "tool_result", "id": "c1", "content": [{"type": "text", "text": "two pics\n\n[The tool returned 2 images; they follow in the next message.]"}]}]},
+            {"role": "tool", "content": [{"type": "tool_result", "id": "c2", "content": [{"type": "text", "text": "plain"}]}]},
+            {"role": "user", "content": [
+                {"type": "text", "text": "[From the result of read (tool call c1):]"},
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}},
+                {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": "BBBB"}},
+                {"type": "text", "text": "what are these?"},
+                {"type": "image", "source": {"type": "base64", "media_type": "image/gif", "data": "CCCC"}}
+            ]}
+        ]
+    }))
+    .expect("following images");
+    let body = encoded_tool_request(request);
+    let prompts = decoded_chat_prompts(&body);
+    assert_eq!(prompts.len(), 5);
+    assert_eq!(
+        prompts[2]
+            .iter()
+            .find(|field| field.number == 3)
+            .and_then(|field| field.as_string())
+            .as_deref(),
+        Some("two pics")
+    );
+    assert_eq!(
+        prompt_images(&prompts[2]),
+        [
+            ("AAAA".into(), "image/png".into()),
+            ("BBBB".into(), "image/jpeg".into())
+        ]
+    );
+    assert!(prompt_images(&prompts[3]).is_empty());
+    assert_eq!(
+        prompt_images(&prompts[4]),
+        [("CCCC".into(), "image/gif".into())]
+    );
+    assert_eq!(
+        prompts[4]
+            .iter()
+            .find(|field| field.number == 3)
+            .and_then(|field| field.as_string())
+            .as_deref(),
+        Some("what are these?")
+    );
 }
 
 #[test]
