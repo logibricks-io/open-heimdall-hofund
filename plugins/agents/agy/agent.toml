@@ -1,3 +1,5 @@
 id = "agy"
-name = "Antigravity CLI"
-vendor = "Google"
+display_name = "Antigravity CLI"
+binary = "agy"
+
+# Session reader only in R-32. Connect file slots are not declared in this tree.
