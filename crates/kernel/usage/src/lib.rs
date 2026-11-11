@@ -929,6 +929,7 @@ mod tests {
     }
 
     #[test]
+    #[test]
     fn r33_ledger_adds_gateway_session_columns() {
         let dir = tempfile::tempdir().expect("temp dir");
         let path = dir.path().join("usage.sqlite");
