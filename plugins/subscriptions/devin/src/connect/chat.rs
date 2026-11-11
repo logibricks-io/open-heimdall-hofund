@@ -211,7 +211,7 @@ mod tests {
         encode_request, frame_request,
     };
 
-    const EMPTY_REPLY: &[u8] = include_bytes!("testdata/empty-reply.bin");
+    const EMPTY_REPLY: &[u8] = crate::connect::testdata::EMPTY_REPLY;
 
     fn request<'a>(prompts: &'a [Prompt<'a>]) -> ChatRequest<'a> {
         ChatRequest {

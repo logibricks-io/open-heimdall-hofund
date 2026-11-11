@@ -32,8 +32,8 @@ mod tests {
 
     use super::{encode_request, model_uids};
 
-    const MODEL_CONFIGS: &[u8] = include_bytes!("testdata/model-configs.bin");
-    const MODEL_CONFIGS_1015: &[u8] = include_bytes!("testdata/model-configs-1015.bin");
+    const MODEL_CONFIGS: &[u8] = crate::connect::testdata::MODEL_CONFIGS;
+    const MODEL_CONFIGS_1015: &[u8] = crate::connect::testdata::MODEL_CONFIGS_1015;
 
     #[test]
     fn request_is_one_raw_metadata_field() {
