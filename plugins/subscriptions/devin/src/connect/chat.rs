@@ -1,9 +1,11 @@
 //! Text-only GetChatMessage protobuf and Connect response decoding.
 
+use std::collections::VecDeque;
+
 use hofund_plugin_api::PluginError;
 use hofund_plugin_sdk::inflate::compress;
 use hofund_plugin_sdk::json::Value;
-use hofund_plugin_sdk::protobuf::{FLAG_GZIP, ProtoBuf, fields, frame, frames};
+use hofund_plugin_sdk::protobuf::{FLAG_GZIP, MAX_FRAME_PAYLOAD, ProtoBuf, fields, frame, frames};
 
 use super::metadata;
 
@@ -129,18 +131,20 @@ fn frame_request(message: &[u8]) -> Result<EncodedChatRequest, PluginError> {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ChatResponse {
     pub(crate) text: Vec<String>,
+    pub(crate) reasoning: Vec<String>,
     pub(crate) error: Option<ConnectError>,
     pub(crate) saw_tool_call: bool,
     pub(crate) saw_usage: bool,
+    pub(crate) stop: Option<u64>,
 }
 
 impl ChatResponse {
     pub(crate) fn has_text_stream(&self) -> bool {
-        !self.text.is_empty()
+        !self.text.is_empty() || !self.reasoning.is_empty()
     }
 
     pub(crate) fn is_empty_reply(&self) -> bool {
-        self.error.is_none() && self.text.is_empty() && !self.saw_tool_call
+        self.error.is_none() && !self.has_text_stream() && !self.saw_tool_call
     }
 }
 
@@ -150,33 +154,118 @@ pub(crate) struct ConnectError {
     pub(crate) message: String,
 }
 
-pub(crate) fn decode_response(body: &[u8]) -> Result<ChatResponse, PluginError> {
-    let mut response = ChatResponse::default();
-    for next in frames(body) {
-        let frame = next?;
-        if frame.is_end() {
-            response.error = end_error(&frame.payload)?;
-            break;
-        }
-        for field in fields(&frame.payload) {
-            match field.number {
-                3 => {
-                    if let Some(text) = field.as_string()
-                        && !text.is_empty()
-                    {
-                        response.text.push(text);
-                    }
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ChatEvent {
+    Text(String),
+    Reasoning(String),
+    ToolCall,
+    Usage,
+    Stop(u64),
+    End(Option<ConnectError>),
+}
+
+#[derive(Default)]
+pub(crate) struct ChatDecoder {
+    buffered: Vec<u8>,
+    pending: VecDeque<ChatEvent>,
+    saw_frame: bool,
+}
+
+impl ChatDecoder {
+    pub(crate) fn push(&mut self, chunk: &[u8]) -> Result<(), PluginError> {
+        self.buffered.extend_from_slice(chunk);
+        loop {
+            if self.buffered.len() < 5 {
+                return Ok(());
+            }
+            let length = u32::from_be_bytes([
+                self.buffered[1],
+                self.buffered[2],
+                self.buffered[3],
+                self.buffered[4],
+            ]) as usize;
+            if length > MAX_FRAME_PAYLOAD {
+                return Err(PluginError::decode(format!(
+                    "frame payload exceeds {MAX_FRAME_PAYLOAD} bytes (got {length})"
+                )));
+            }
+            let end = 5_usize
+                .checked_add(length)
+                .ok_or_else(|| PluginError::decode("frame payload length overflow"))?;
+            if self.buffered.len() < end {
+                return Ok(());
+            }
+            let encoded: Vec<_> = self.buffered.drain(..end).collect();
+            let frame = frames(&encoded)
+                .next()
+                .expect("a complete frame yields one item")?;
+            self.saw_frame = true;
+            if frame.is_end() {
+                self.pending
+                    .push_back(ChatEvent::End(end_error(&frame.payload)?));
+                continue;
+            }
+            for field in fields(&frame.payload) {
+                let event = match field.number {
+                    3 => field
+                        .as_string()
+                        .filter(|text| !text.is_empty())
+                        .map(ChatEvent::Text),
+                    9 => field
+                        .as_string()
+                        .filter(|text| !text.is_empty())
+                        .map(ChatEvent::Reasoning),
+                    6 if field.as_bytes().is_some() => Some(ChatEvent::ToolCall),
+                    7 if field.as_bytes().is_some() => Some(ChatEvent::Usage),
+                    5 => field.as_varint().map(ChatEvent::Stop),
+                    _ => None,
+                };
+                if let Some(event) = event {
+                    self.pending.push_back(event);
                 }
-                6 if field.as_bytes().is_some() => response.saw_tool_call = true,
-                7 if field.as_bytes().is_some() => response.saw_usage = true,
-                _ => {}
+            }
+        }
+    }
+
+    pub(crate) fn next_event(&mut self) -> Option<ChatEvent> {
+        self.pending.pop_front()
+    }
+
+    pub(crate) fn finish(&self) -> Result<(), PluginError> {
+        if self.buffered.is_empty() {
+            Ok(())
+        } else {
+            Err(PluginError::decode("unexpected EOF"))
+        }
+    }
+
+    pub(crate) fn saw_frame(&self) -> bool {
+        self.saw_frame
+    }
+}
+
+pub(crate) fn decode_response(body: &[u8]) -> Result<ChatResponse, PluginError> {
+    let mut decoder = ChatDecoder::default();
+    decoder.push(body)?;
+    decoder.finish()?;
+    let mut response = ChatResponse::default();
+    while let Some(event) = decoder.next_event() {
+        match event {
+            ChatEvent::Text(text) => response.text.push(text),
+            ChatEvent::Reasoning(text) => response.reasoning.push(text),
+            ChatEvent::ToolCall => response.saw_tool_call = true,
+            ChatEvent::Usage => response.saw_usage = true,
+            ChatEvent::Stop(stop) => response.stop = Some(stop),
+            ChatEvent::End(error) => {
+                response.error = error;
+                break;
             }
         }
     }
     Ok(response)
 }
 
-fn end_error(payload: &[u8]) -> Result<Option<ConnectError>, PluginError> {
+pub(crate) fn end_error(payload: &[u8]) -> Result<Option<ConnectError>, PluginError> {
     let value: Value = hofund_plugin_sdk::json::from_slice(payload)
         .map_err(|error| PluginError::decode(format!("invalid Connect end JSON: {error}")))?;
     let object = if value.get("error").is_some_and(Value::is_object) {
@@ -351,9 +440,34 @@ mod tests {
         body.extend(frame(FLAG_END, b"{}").expect("end"));
         let decoded = decode_response(&body).expect("decode");
         assert_eq!(decoded.text, ["hello", " world"]);
+        assert_eq!(decoded.reasoning, ["not text in this slice"]);
         assert!(decoded.has_text_stream());
         assert!(!decoded.is_empty_reply());
         assert_eq!(decoded.error, None);
+    }
+
+    #[test]
+    fn incremental_decoder_waits_for_split_frames_and_surfaces_reasoning_and_stop() {
+        use super::{ChatDecoder, ChatEvent};
+
+        let message = hofund_plugin_sdk::protobuf::ProtoBuf::new()
+            .string(9, "thinking")
+            .varint(5, 3)
+            .finish();
+        let body = frame(0, &message).expect("frame");
+        let mut decoder = ChatDecoder::default();
+        decoder.push(&body[..2]).expect("partial header");
+        assert!(decoder.next_event().is_none());
+        decoder.push(&body[2..7]).expect("partial payload");
+        assert!(decoder.next_event().is_none());
+        decoder.push(&body[7..]).expect("rest");
+        assert_eq!(
+            decoder.next_event(),
+            Some(ChatEvent::Reasoning("thinking".to_owned()))
+        );
+        assert_eq!(decoder.next_event(), Some(ChatEvent::Stop(3)));
+        assert!(decoder.saw_frame());
+        decoder.finish().expect("complete");
     }
 
     #[test]

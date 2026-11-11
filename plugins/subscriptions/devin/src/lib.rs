@@ -18,6 +18,7 @@ mod connect;
 mod creds;
 mod discover;
 mod models;
+mod snapshot_families;
 mod upstream;
 
 pub(crate) const COMMAND: BinaryName = BinaryName::new("devin");
