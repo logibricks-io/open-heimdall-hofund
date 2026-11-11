@@ -18,23 +18,28 @@ const STATUS_PATH: &str = "/exa.seat_management_pb.SeatManagementService/GetUser
 const BODY_CAP: usize = 1024 * 1024;
 const PERCENT: u64 = 100;
 
-pub(crate) async fn read(
+pub(crate) struct StatusReply {
+    pub(crate) status: u16,
+    pub(crate) body: Vec<u8>,
+}
+
+pub(crate) async fn request(
     host: &HostContext,
-    account: &AccountId,
-) -> Result<Vec<QuotaWindow>, PluginError> {
-    let stored = Stored::load(host, account).await?;
+    key: &hofund_plugin_api::SecretString,
+    server: &str,
+) -> Result<StatusReply, PluginError> {
     let body = json!({
         "metadata": {
             "ideName": "devin-cli",
             "ideVersion": CLI_VERSION,
             "extensionName": "devin-cli",
             "extensionVersion": CLI_VERSION,
-            "apiKey": secret_text(&stored.credential.key),
+            "apiKey": secret_text(key),
             "locale": "en",
             "os": os_name(),
         }
     });
-    let response = Call::post(format!("{}{STATUS_PATH}", catalog::origin(&stored)))
+    let response = Call::post(format!("{}{STATUS_PATH}", server.trim_end_matches('/')))
         .header("Content-Type", "application/json")
         .header("Connect-Protocol-Version", "1")
         .read_timeout(Duration::from_secs(15))
@@ -43,7 +48,18 @@ pub(crate) async fn read(
         .await
         .map_err(rpc_failure)?;
     let status = response.status().as_u16();
-    let bytes = read_body(response.into_body()).await?;
+    let body = read_body(response.into_body()).await?;
+    Ok(StatusReply { status, body })
+}
+
+pub(crate) async fn read(
+    host: &HostContext,
+    account: &AccountId,
+) -> Result<Vec<QuotaWindow>, PluginError> {
+    let stored = Stored::load(host, account).await?;
+    let reply = request(host, &stored.credential.key, &catalog::origin(&stored)).await?;
+    let status = reply.status;
+    let bytes = reply.body;
     if rejected(status, &bytes) {
         return Err(PluginError::auth(
             "Devin's sign-in has expired — sign in again",

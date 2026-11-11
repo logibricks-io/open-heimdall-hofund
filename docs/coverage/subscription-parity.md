@@ -14,7 +14,7 @@ Legend: **Done** = matches the reference at checklist granularity; **Partial** =
 |---|---|---|---|---|---|
 | Claude Pro/Max (`claude`) | 1 | 11 | 9 | 2 | 0 |
 | Cursor (`cursor`) | 1 | 11 | 7 | 2 | 0 |
-| Devin (`devin`) | 7 | 8 | 3 | 1 | 0 |
+| Devin (`devin`) | 11 | 6 | 1 | 1 | 0 |
 | Zed (`zed`) | 0 | 6 | 1 | 3 | 0 |
 | Kiro (`kiro`) | 0 | 13 | 5 | 1 | 0 |
 | Factory / Droid (`factory`) | 1 | 15 | 0 | 3 | 0 |
@@ -130,10 +130,10 @@ Every other gap below maps to an existing plan item.
 
 | # | capability | reference v0.1.3005 behaviour | hofund 08035c9 | status | gap to close |
 |---|------------|------------------------------|----------------|--------|--------------|
-| a1 | sign-in: CLI PKCE | Plugin: loopback PKCE via `app.devin.ai` (`devin/index.mjs:28-31`, `SIGN_IN_TIMEOUT`) | Bridge flow imports existing CLI creds only (`lib.rs:105-127`) | Partial | Interactive PKCE sign-in in plugin — not in hofund |
-| a2 | sign-in: reuse CLI | Read `credentials.toml` (`devin.go:54-67`) | `creds.rs` + discover | Done | — |
+| a1 | sign-in: CLI PKCE | Plugin: loopback PKCE via `app.devin.ai` (`devin/index.mjs:28-31`, `SIGN_IN_TIMEOUT`) | `sign_in.rs` + loopback PKCE, fixed-server `ExchangeDevinCLIPKCECode`, and GetUserStatus identity; offline callback/exchange tests | Done | — |
+| a2 | sign-in: reuse CLI | Read `credentials.toml` (`devin.go:54-67`) | `creds.rs` + discover; CLI-sourced accounts re-read their imported TOML under a 30 s lease on execute; browser accounts do not | Done | — |
 | a3 | API key / device | N/A | N/A | N/A | — |
-| b | import | Side login mover + CLI path | XDG `credentials.toml` discover/import | Done | — |
+| b | import | Side login mover + CLI path | XDG/agent `credentials.toml` discover/import with identity labels and string `cli = "true"` source metadata | Done | — |
 | c | token storage | Plugin + TOML on disk | Daemon secret; atomic agent write on switch | Partial | — |
 | d | refresh | Plugin renews tokens (unverified); core reads CLI | `refresh` loads stored only (`lib.rs:174-176`) | Partial | OAuth refresh if CLI tokens expire (**R-12**) |
 | e | upstream wire | Protobuf Connect `GetChatMessage` on `server.codeium.com` (`devin/index.mjs:28-32`) | `upstream.rs` unary POST with literal Basic auth, 300 s read budget, origin override, and tool field 10 | Done | — |
@@ -153,7 +153,6 @@ Every other gap below maps to an existing plan item.
 ### Gaps (Devin)
 
 - Messages cache marks — **L**, **R-13**
-- PKCE sign-in (not only import) — **M**, **R-12**
 - CLI install/bootstrap — **S**, **R-12** (new to the plan in this audit)
 - Keepalive (`keepalive.test.mjs`) — **S**, **R-13** (new to the plan in this audit)
 

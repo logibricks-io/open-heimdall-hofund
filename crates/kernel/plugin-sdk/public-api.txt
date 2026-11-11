@@ -140,6 +140,7 @@ oauth::fn parse_iam_access_token (body : & [u8]) -> Result < IamAccessToken , To
 oauth::fn refresh_form (client_id : & str , client_secret : & str , refresh_token : & str) -> String
 oauth::fn refresh_secret_form (client_id : & str , client_secret : & str , refresh_token : & SecretString ,) -> String
 oauth::new_state
+oauth::new_state_with_random_bytes
 oauth::parse_token_set
 oauth::same_secret
 oauth::secret_text

@@ -1,4 +1,4 @@
-//! Isolated `devin models list` fallback.
+//! Isolated Devin CLI model and identity fallbacks.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -8,8 +8,9 @@ use hofund_plugin_api::{HostContext, PluginError, SpawnRequest};
 use hofund_plugin_sdk::oauth::secret_text;
 use hofund_plugin_sdk::{timeout, uuid};
 
-use crate::creds::Stored;
+use crate::creds::{Credential, Stored};
 use crate::models::{self, Family};
+use crate::sign_in::{Lookup, Who};
 
 pub(crate) async fn families(host: &HostContext, stored: &Stored) -> Option<Vec<Family>> {
     let program = cli_path()?;
@@ -21,17 +22,60 @@ pub(crate) async fn families_with_program(
     stored: &Stored,
     program: &Path,
 ) -> Option<Vec<Family>> {
+    let args = ["models", "list", "--format", "json"].map(OsString::from);
+    let output = run_with_program(host, &stored.credential, program, args.to_vec()).await?;
+    let families = models::parse_families(&output.bytes).ok()?;
+    (!families.is_empty()).then_some(families)
+}
+
+pub(crate) async fn identity(host: &HostContext, credential: &Credential) -> Lookup {
+    let Some(program) = cli_path() else {
+        return Lookup::Unknown;
+    };
+    identity_with_program(host, credential, &program).await
+}
+
+pub(crate) async fn identity_with_program(
+    host: &HostContext,
+    credential: &Credential,
+    program: &Path,
+) -> Lookup {
+    let args = vec![OsString::from("auth"), OsString::from("status")];
+    let Some(output) = run_with_program(host, credential, program, args).await else {
+        return Lookup::Unknown;
+    };
+    let text = String::from_utf8_lossy(&output.bytes);
+    if !reads_home(&text, &output.home) {
+        return Lookup::Unknown;
+    }
+    if let Some(who) = parse_status(&text)
+        && !who.user.is_empty()
+    {
+        return Lookup::Known(who);
+    }
+    if signed_out(&text) {
+        return Lookup::Rejected;
+    }
+    Lookup::Unknown
+}
+
+struct CliOutput {
+    bytes: Vec<u8>,
+    home: PathBuf,
+}
+
+async fn run_with_program(
+    host: &HostContext,
+    credential: &Credential,
+    program: &Path,
+    args: Vec<OsString>,
+) -> Option<CliOutput> {
     let temp = TempDir::new().ok()?;
-    temp.write_credentials(stored).ok()?;
+    temp.write_credentials(credential).ok()?;
     let data = temp.path().as_os_str().to_owned();
     let request = SpawnRequest::new(
         program,
-        vec![
-            OsString::from("models"),
-            OsString::from("list"),
-            OsString::from("--format"),
-            OsString::from("json"),
-        ],
+        args,
         vec![
             (OsString::from("XDG_DATA_HOME"), data.clone()),
             (OsString::from("APPDATA"), data),
@@ -40,7 +84,7 @@ pub(crate) async fn families_with_program(
     )
     .ok()?;
     let child = host.spawn_process().spawn_piped(&request).await.ok()?;
-    let output = timeout(Duration::from_secs(30), async move {
+    let bytes = timeout(Duration::from_secs(30), async move {
         let mut stdout = child.stdout().ok()?;
         let mut bytes = Vec::new();
         while let Some(chunk) = stdout.next_chunk().await {
@@ -50,8 +94,76 @@ pub(crate) async fn families_with_program(
     })
     .await
     .flatten()?;
-    let families = models::parse_families(&output).ok()?;
-    (!families.is_empty()).then_some(families)
+    Some(CliOutput {
+        bytes,
+        home: temp.path().to_path_buf(),
+    })
+}
+
+fn status_field(output: &str, key: &str) -> String {
+    for line in output.lines() {
+        let line = line.trim();
+        if let Some(value) = line.strip_prefix(&format!("{key}:")) {
+            return value.trim().to_owned();
+        }
+    }
+    String::new()
+}
+
+fn parse_status(output: &str) -> Option<Who> {
+    if !output.contains("Logged in") {
+        return None;
+    }
+    let team_id = status_field(output, "Team ID");
+    Some(Who {
+        user: {
+            let email = status_field(output, "Email");
+            if email.is_empty() {
+                status_field(output, "Name")
+            } else {
+                email
+            }
+        },
+        email: None,
+        plan: {
+            let tier = status_field(output, "Tier");
+            if tier.is_empty() {
+                status_field(output, "Plan")
+            } else {
+                tier
+            }
+        },
+        org_id: None,
+        team_id: (!team_id.is_empty()).then_some(team_id),
+    })
+}
+
+fn signed_out(output: &str) -> bool {
+    [
+        "Not logged in",
+        "Authentication required",
+        "Invalid token",
+        "try logging out and logging in again",
+    ]
+    .iter()
+    .any(|text| output.contains(text))
+}
+
+fn reads_home(output: &str, home: &Path) -> bool {
+    let file = status_field(output, "File");
+    file.is_empty() || inside(Path::new(&file), home)
+}
+
+fn inside(file: &Path, directory: &Path) -> bool {
+    let file = std::fs::canonicalize(file).unwrap_or_else(|_| file.to_path_buf());
+    let directory = std::fs::canonicalize(directory).unwrap_or_else(|_| directory.to_path_buf());
+    if cfg!(windows) {
+        let file = PathBuf::from(file.to_string_lossy().to_lowercase());
+        let directory = PathBuf::from(directory.to_string_lossy().to_lowercase());
+        file.starts_with(&directory) && file != directory
+    } else {
+        file.starts_with(&directory) && file != directory
+    }
 }
 
 fn cli_path() -> Option<PathBuf> {
@@ -104,14 +216,14 @@ impl TempDir {
         &self.path
     }
 
-    fn write_credentials(&self, stored: &Stored) -> Result<(), PluginError> {
+    fn write_credentials(&self, credential: &Credential) -> Result<(), PluginError> {
         let directory = self.path.join("devin");
         private_dir(&directory)?;
         let body = format!(
             "windsurf_api_key = {}\napi_server_url = {}\ndevin_webapp_host = \"app.devin.ai\"\ndevin_api_url = {}\n",
-            toml_string(secret_text(&stored.credential.key)),
-            toml_string(&stored.credential.api_server),
-            toml_string(&stored.credential.devin_api),
+            toml_string(secret_text(&credential.key)),
+            toml_string(&credential.api_server),
+            toml_string(&credential.devin_api),
         );
         let path = directory.join("credentials.toml");
         let mut options = std::fs::OpenOptions::new();

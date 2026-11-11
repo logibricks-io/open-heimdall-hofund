@@ -15,7 +15,7 @@ use crate::catalog::{self, os_name};
 use crate::connect::chat::{
     self, ChatRequest, Prompt, PromptCall, PromptImage, PromptRole, PromptThinking, ToolDefinition,
 };
-use crate::creds::Stored;
+use crate::creds::{self, Stored};
 use crate::errors;
 use crate::models::{effort_of, variant_for};
 use crate::stream;
@@ -758,8 +758,15 @@ impl UpstreamProvider for DevinUpstream {
         request: Request,
         inbound: ProtocolId,
     ) -> Result<Completion, PluginError> {
-        let stored = Stored::load(&self.host, &self.account).await?;
-        self.execute_inner(stored, request, inbound).await
+        let stored = Stored::live(&self.host, &self.account).await?;
+        let result = self.execute_inner(stored, request, inbound).await;
+        if result
+            .as_ref()
+            .is_err_and(|error| error.status() == Some(401))
+        {
+            creds::mark_needs_sign_in(&self.host, &self.account).await?;
+        }
+        result
     }
 
     async fn probe(&self, query: &ProbeQuery) -> Result<ProbeReport, PluginError> {

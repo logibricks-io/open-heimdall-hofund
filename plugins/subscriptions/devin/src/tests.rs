@@ -35,6 +35,9 @@ fn seed_account(host: &TestHost, key: &str, label: &str) -> AccountId {
         api_server: "https://server.test".to_owned(),
         devin_api: "https://api.devin.test".to_owned(),
         label: label.to_owned(),
+        plan: String::new(),
+        org_id: String::new(),
+        team_id: String::new(),
     };
     let id = creds::account_id(&credential);
     block_on(async {
@@ -254,6 +257,9 @@ fn a2b_7_secrets_not_in_debug_or_errors() {
         api_server: "https://server.test".to_owned(),
         devin_api: "https://api.devin.test".to_owned(),
         label: "dev@example.test".to_owned(),
+        plan: String::new(),
+        org_id: String::new(),
+        team_id: String::new(),
     };
     let debug = format!("{credential:?}");
     assert!(!debug.contains(key));
