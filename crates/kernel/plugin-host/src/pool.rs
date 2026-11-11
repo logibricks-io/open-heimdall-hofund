@@ -1058,13 +1058,17 @@ mod tests {
     async fn a_stream_survives_past_one_read_budget_and_a_stall_is_interrupted() {
         let _guard = exclusive().await;
         let limits = HttpLimits::new(Duration::from_secs(2), Duration::from_millis(400));
-        let (port, _) = drip(6, Duration::from_millis(80));
+        // Inter-chunk gap must sit clearly below the 400ms per-read idle
+        // budget, while the full drip must last clearly longer than one
+        // budget. Six 80ms gaps put the last byte at exactly 400ms, which
+        // failed on macOS CI as `error decoding response body: timed out`.
+        let (port, _) = drip(12, Duration::from_millis(50));
         let context = http(limits);
         let reply = Call::get(format!("http://127.0.0.1:{port}/stream"))
             .send(context.http())
             .await
             .expect("stream");
-        assert_eq!(reply.body(), b"abcdef");
+        assert_eq!(reply.body(), b"abcdefghijkl");
 
         let (port, _) = stall();
         let context = http(limits);
