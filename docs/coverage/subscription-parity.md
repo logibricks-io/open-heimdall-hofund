@@ -136,10 +136,10 @@ Every other gap below maps to an existing plan item.
 | b | import | Side login mover + CLI path | XDG `credentials.toml` discover/import | Done | — |
 | c | token storage | Plugin + TOML on disk | Daemon secret; atomic agent write on switch | Partial | — |
 | d | refresh | Plugin renews tokens (unverified); core reads CLI | `refresh` loads stored only (`lib.rs:174-176`) | Partial | OAuth refresh if CLI tokens expire (**R-12**) |
-| e | upstream wire | Protobuf Connect `GetChatMessage` on `server.codeium.com` (`devin/index.mjs:28-32`) | `upstream.rs` unary POST with literal Basic auth, 300 s read budget, and origin override | Done | Tools and images extend the wire in **R-13** |
+| e | upstream wire | Protobuf Connect `GetChatMessage` on `server.codeium.com` (`devin/index.mjs:28-32`) | `upstream.rs` unary POST with literal Basic auth, 300 s read budget, origin override, and tool field 10 | Done | Images extend the wire in **R-13** |
 | f | inbound shapes | Chat completions + Anthropic for Claude models (`devin/index.mjs:19-26`) | Chat, Responses, and Messages IR execute; catalog advertises Chat endpoint only | Partial | Per-model inbound routing (**R-13**) |
-| g | streaming | Connect stream from GetChatMessage | Incremental text and reasoning IR events; content-gated success | Done | — |
-| h | tool calls | Plugin `tool-ids.test.mjs`, split calls | Refused before RPC and on tool-only replies with fixed 404 | Missing | **R-13** |
+| g | streaming | Connect stream from GetChatMessage | Incremental text, reasoning, tool-start, and argument-delta IR events; content-or-tool-gated success | Done | — |
+| h | tool calls | Plugin `tool-ids.test.mjs`, split calls | R-13b encodes field-6 calls and field-7 results, joins split calls, fills interrupted results, sanitizes ids, offers history-only tools, and streams tool-only replies with usage | Done | — |
 | i | images | Plugin `images.test.mjs`, `devin_images.go` in core catalog | Refused before RPC with fixed 404 | Missing | **R-13** |
 | j | reasoning / thinking | `thinking-signature.test.mjs`, effort variants | Field 9 becomes thinking deltas; Chat/Responses/Messages effort selection; signed history refused | Partial | Signature replay (**R-13**) |
 | k | quota / usage | Plugin `usage.test.mjs` | R-13a `quota.rs` reads daily/weekly and informational ACU windows; free ids survive as model exclusions; field 7 becomes finish usage with cache counters and output estimation | Partial | Plan/balance presentation and organization metadata are not represented by `Subscription::quota` |
@@ -152,7 +152,7 @@ Every other gap below maps to an existing plan item.
 
 ### Gaps (Devin)
 
-- Tools, images, reasoning signatures, structured output, and Messages cache marks — **L**, **R-13**
+- Images, reasoning signatures, structured output, and Messages cache marks — **L**, **R-13**
 - PKCE sign-in (not only import) — **M**, **R-12**
 - CLI install/bootstrap — **S**, **R-12** (new to the plan in this audit)
 - Keepalive (`keepalive.test.mjs`) — **S**, **R-13** (new to the plan in this audit)

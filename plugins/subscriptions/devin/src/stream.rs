@@ -8,7 +8,6 @@ use hofund_plugin_sdk::{uuid, wire};
 use crate::connect::chat::{ChatDecoder, ChatEvent, ChatUsage};
 use crate::errors;
 
-pub(crate) const TOOLS_MESSAGE: &str = "tool calls and results are not served on Devin until R-13";
 pub(crate) const EMPTY_REPLY_MESSAGE: &str =
     "an empty reply (the model answered nothing; try again)";
 
@@ -29,12 +28,15 @@ pub(crate) async fn open(
                 said = said.saturating_add(content_len(&event));
                 break event;
             }
-            Some(ChatEvent::ToolCall) => saw_tool_call = true,
+            Some(event @ ChatEvent::ToolCall(_)) => {
+                saw_tool_call = true;
+                break event;
+            }
+            Some(ChatEvent::ToolArguments(_)) => {}
             Some(ChatEvent::Stop(reason)) => stop = Some(reason),
             Some(ChatEvent::Usage(next)) => merge_usage(&mut usage, next),
             Some(ChatEvent::End(Some(error))) => return Err(errors::connect(&error)),
-            Some(ChatEvent::End(None)) => return Err(empty_or_tools(saw_tool_call)),
-            None if saw_tool_call => return Err(tools_refusal()),
+            Some(ChatEvent::End(None)) => return Err(empty_reply()),
             None if reader.decoder.saw_frame() => return Err(empty_reply()),
             None => return Err(broken("EOF")),
         }
@@ -49,6 +51,7 @@ pub(crate) async fn open(
         stop,
         usage,
         said,
+        saw_tool_call,
         finished: false,
     };
     let rest = BodyStream::unfold(state, |mut state| async move {
@@ -64,9 +67,14 @@ pub(crate) async fn open(
                 }
             };
             match event {
-                Some(ChatEvent::Text(_) | ChatEvent::Reasoning(_)) => {
-                    let event = event.expect("content was just matched");
+                Some(
+                    event @ (ChatEvent::Text(_)
+                    | ChatEvent::Reasoning(_)
+                    | ChatEvent::ToolCall(_)
+                    | ChatEvent::ToolArguments(_)),
+                ) => {
                     state.said = state.said.saturating_add(content_len(&event));
+                    state.saw_tool_call |= matches!(event, ChatEvent::ToolCall(_));
                     let chunk = delta_chunk(&state.id, &state.model, &event);
                     return Some((Ok(chunk), state));
                 }
@@ -77,12 +85,17 @@ pub(crate) async fn open(
                     return Some((Err(errors::connect(&error)), state));
                 }
                 Some(ChatEvent::End(None)) | None => {
-                    let chunk =
-                        finish_chunk(&state.id, &state.model, state.stop, state.usage, state.said);
+                    let chunk = finish_chunk(
+                        &state.id,
+                        &state.model,
+                        state.stop,
+                        state.usage,
+                        state.said,
+                        state.saw_tool_call,
+                    );
                     state.finished = true;
                     return Some((Ok(chunk), state));
                 }
-                Some(ChatEvent::ToolCall) => {}
             }
         }
     });
@@ -143,19 +156,8 @@ struct StreamState {
     stop: Option<u64>,
     usage: ChatUsage,
     said: u64,
+    saw_tool_call: bool,
     finished: bool,
-}
-
-fn empty_or_tools(saw_tool_call: bool) -> PluginError {
-    if saw_tool_call {
-        tools_refusal()
-    } else {
-        empty_reply()
-    }
-}
-
-pub(crate) fn tools_refusal() -> PluginError {
-    PluginError::status_error(404, TOOLS_MESSAGE).without_cooldown()
 }
 
 fn empty_reply() -> PluginError {
@@ -206,7 +208,17 @@ fn delta_chunk(id: &str, model: &str, event: &ChatEvent) -> Vec<u8> {
     let delta = match event {
         ChatEvent::Text(text) => json!({"content": text}),
         ChatEvent::Reasoning(text) => json!({"reasoning_content": text}),
-        _ => unreachable!("only content deltas are encoded"),
+        ChatEvent::ToolCall(call) => json!({"tool_calls": [{
+            "index": call.index,
+            "id": call.id,
+            "type": "function",
+            "function": {"name": call.name, "arguments": ""},
+        }]}),
+        ChatEvent::ToolArguments(arguments) => json!({"tool_calls": [{
+            "index": arguments.index,
+            "function": {"arguments": arguments.arguments},
+        }]}),
+        _ => unreachable!("only content and tool deltas are encoded"),
     };
     sse(json!({
         "id": id,
@@ -227,8 +239,15 @@ fn finish_chunk(
     stop: Option<u64>,
     mut usage: ChatUsage,
     said: u64,
+    saw_tool_call: bool,
 ) -> Vec<u8> {
-    let reason = if stop == Some(3) { "length" } else { "stop" };
+    let reason = if saw_tool_call || stop == Some(10) {
+        "tool_calls"
+    } else if stop == Some(3) {
+        "length"
+    } else {
+        "stop"
+    };
     if usage.output == 0 && said != 0 {
         usage.output = said.saturating_add(3) / 4;
     }

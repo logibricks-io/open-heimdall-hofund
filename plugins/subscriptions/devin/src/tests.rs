@@ -586,30 +586,60 @@ fn connect_and_http_errors_follow_section_six_order() {
 }
 
 #[test]
-fn tool_only_reply_is_a_router_safe_refusal_before_stream() {
-    let message = ProtoBuf::new().bytes(6, b"call").finish();
+fn tool_only_reply_streams_calls_arguments_and_usage() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_account(&host, "devin-tool-stream-key", "tool-only@example.test");
+    enqueue_configs(&host);
+    let start = ProtoBuf::new()
+        .string(1, "call:1")
+        .string(2, "lookup")
+        .finish();
+    let first_args = ProtoBuf::new().string(3, "{\"query\":").finish();
+    let second_args = ProtoBuf::new().string(3, "\"hofund\"}").finish();
+    let usage = ProtoBuf::new().varint(2, 27).varint(3, 12).finish();
     let body = [
-        frame(0, &message).expect("tool"),
+        frame(0, &ProtoBuf::new().bytes(6, &start).finish()).expect("tool start"),
+        frame(0, &ProtoBuf::new().bytes(6, &first_args).finish()).expect("first args"),
+        frame(
+            0,
+            &ProtoBuf::new()
+                .bytes(6, &second_args)
+                .bytes(7, &usage)
+                .varint(5, 10)
+                .finish(),
+        )
+        .expect("second args"),
         frame(FLAG_END, b"{}").expect("end"),
     ]
     .concat();
-    let error = scripted_chat_error("tool-only@example.test", 200, &body);
-    assert_eq!(error.kind(), PluginErrorKind::Status);
-    assert_eq!(error.status(), Some(404));
-    assert!(!error.cools());
-    assert_eq!(error.message(), crate::stream::TOOLS_MESSAGE);
-    assert_ne!(error.message(), crate::stream::EMPTY_REPLY_MESSAGE);
+    host.http().enqueue(body);
+    let events = execute_events(&host, &id, request("swe-2"));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        StreamEvent::ContentBlockStart(start)
+            if start.index == 2 && matches!(&start.block, hofund_plugin_api::BlockStart::ToolCall { id, name } if id == "dv_Y2FsbDox" && name == "lookup")
+    )));
+    let arguments: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            StreamEvent::ToolArgumentsDelta(delta) if delta.index == 2 => {
+                Some(delta.partial_json.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(arguments, ["{\"query\":", "\"hofund\"}"]);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        StreamEvent::MessageDelta(delta)
+            if delta.stop.as_ref().is_some_and(|stop| stop.reason == hofund_plugin_api::StopReason::ToolUse)
+                && delta.usage.as_ref().is_some_and(|usage| usage.output_tokens == Some(12))
+    )));
 }
 
 #[test]
-fn tools_images_and_structured_output_are_refused_without_http() {
-    let tool: Request = hofund_plugin_sdk::json::from_value(hofund_plugin_sdk::json::json!({
-        "model": "swe-2",
-        "stream": true,
-        "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
-        "tools": [{"name": "lookup", "input_schema": {"type": "object"}}]
-    }))
-    .expect("tool request");
+fn images_and_structured_output_are_refused_without_http() {
     let image: Request = hofund_plugin_sdk::json::from_value(hofund_plugin_sdk::json::json!({
         "model": "swe-2",
         "stream": true,
@@ -634,11 +664,6 @@ fn tools_images_and_structured_output_are_refused_without_http() {
         hofund_plugin_sdk::json::json!({"format": {"type": "json_object"}}),
     );
     for (label, request, phrase) in [
-        (
-            "tools-refusal@example.test",
-            tool,
-            crate::stream::TOOLS_MESSAGE,
-        ),
         ("images-refusal@example.test", image, "image inputs"),
         (
             "structured-refusal@example.test",
@@ -821,10 +846,12 @@ fn body_failures_after_success_are_broken_reply_502s() {
 }
 
 #[test]
-fn tool_calls_in_history_are_refused_even_without_tool_definitions() {
+fn tool_calls_in_history_encode_even_without_tool_definitions() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
     let id = seed_account(&host, "devin-history-key", "tool-history@example.test");
+    enqueue_configs(&host);
+    host.http().enqueue(chat_body(3, "ok"));
     let request: Request = hofund_plugin_sdk::json::from_value(hofund_plugin_sdk::json::json!({
         "model": "swe-2",
         "stream": true,
@@ -833,13 +860,378 @@ fn tool_calls_in_history_are_refused_even_without_tool_definitions() {
         ]}]
     }))
     .expect("history");
-    let error = match execute(&host, &id, request, ProtocolId::OPENAI_CHAT) {
-        Err(error) => error,
-        Ok(_) => panic!("history must be refused"),
-    };
-    assert_eq!(error.status(), Some(404));
-    assert_eq!(error.message(), crate::stream::TOOLS_MESSAGE);
-    assert!(host.http().calls().is_empty());
+    execute_events(&host, &id, request);
+    let calls = host.http().calls();
+    let outer = fields(&deframe(calls[1].body()).expect("frame").payload);
+    let prompts: Vec<_> = outer
+        .iter()
+        .filter(|field| field.number == 3)
+        .map(|field| fields(field.as_bytes().expect("prompt")))
+        .collect();
+    assert_eq!(prompts.len(), 2);
+    let call = prompts[0]
+        .iter()
+        .find(|field| field.number == 6)
+        .and_then(|field| field.as_bytes())
+        .expect("call");
+    let call = fields(call);
+    assert_eq!(call[0].as_string().as_deref(), Some("call-1"));
+    assert_eq!(call[1].as_string().as_deref(), Some("lookup"));
+    assert_eq!(call[2].as_string().as_deref(), Some("{}"));
+    assert_eq!(prompts[1][1].as_varint(), Some(4));
+    assert_eq!(
+        prompts[1][2].as_string().as_deref(),
+        Some("Tool use was interrupted and did not produce a result.")
+    );
+    assert_eq!(prompts[1][3].as_string().as_deref(), Some("call-1"));
+    let tool = outer
+        .iter()
+        .find(|field| field.number == 10)
+        .and_then(|field| field.as_bytes())
+        .expect("history tool");
+    let tool = fields(tool);
+    assert_eq!(tool[0].as_string().as_deref(), Some("lookup"));
+    assert_eq!(tool[1].as_string().as_deref(), Some("Tool"));
+    assert_eq!(
+        tool[2].as_string().as_deref(),
+        Some("{\"type\":\"object\",\"properties\":{}}")
+    );
+}
+
+fn encoded_tool_request(request: Request) -> Vec<u8> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let unique = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_account(
+        &host,
+        &format!("devin-tool-request-key-{unique}"),
+        &format!("tools-{unique}@example.test"),
+    );
+    enqueue_configs(&host);
+    host.http().enqueue(chat_body(3, "ok"));
+    execute_events(&host, &id, request);
+    host.http().calls()[1].body().to_vec()
+}
+
+#[test]
+fn text_only_history_keeps_system_preamble_and_trailing_nudge() {
+    let request: Request = hofund_plugin_sdk::json::from_value(hofund_plugin_sdk::json::json!({
+        "model": "swe-2",
+        "stream": true,
+        "messages": [
+            {"role": "system", "content": [{"type": "text", "text": "Be brief"}]},
+            {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+            {"role": "user", "content": []},
+            {"role": "assistant", "content": [{"type": "text", "text": "done"}]}
+        ]
+    }))
+    .expect("text history");
+    let body = encoded_tool_request(request);
+    let outer = fields(&deframe(&body).expect("frame").payload);
+    let prompts: Vec<_> = outer
+        .iter()
+        .filter(|field| field.number == 3)
+        .map(|field| fields(field.as_bytes().expect("prompt")))
+        .collect();
+    assert_eq!(prompts.len(), 3);
+    assert_eq!(
+        prompts[0]
+            .iter()
+            .find(|field| field.number == 3)
+            .and_then(|field| field.as_string())
+            .as_deref(),
+        Some("Be brief\n\nhi")
+    );
+    assert_eq!(
+        prompts[2]
+            .iter()
+            .find(|field| field.number == 3)
+            .and_then(|field| field.as_string())
+            .as_deref(),
+        Some("Please proceed with the task.")
+    );
+}
+
+#[test]
+fn tool_definitions_use_instruction_descriptions_and_pointer_entries() {
+    let request: Request = hofund_plugin_sdk::json::from_value(hofund_plugin_sdk::json::json!({
+        "model": "swe-2",
+        "stream": true,
+        "messages": [
+            {"role": "system", "content": [{"type": "text", "text": "Follow directions"}]},
+            {"role": "user", "content": [{"type": "text", "text": "hi"}]}
+        ],
+        "tools": [
+            {"name": "lookup", "description": "  Look up values.  ", "input_schema": {"type": "object", "properties": {"query": {"type": "string"}}}},
+            {"name": "silent", "input_schema": null}
+        ]
+    }))
+    .expect("tool request");
+    let body = encoded_tool_request(request);
+    let outer = fields(&deframe(&body).expect("frame").payload);
+    let first = outer
+        .iter()
+        .find(|field| field.number == 3)
+        .and_then(|field| field.as_bytes())
+        .expect("first prompt");
+    assert_eq!(
+        fields(first)
+            .iter()
+            .find(|field| field.number == 3)
+            .and_then(|field| field.as_string())
+            .as_deref(),
+        Some(
+            "Follow directions\n\n<tool_descriptions>\n<tool name=\"lookup\">\nLook up values.\n</tool>\n</tool_descriptions>\n\nhi"
+        )
+    );
+    let tools: Vec<_> = outer
+        .iter()
+        .filter(|field| field.number == 10)
+        .map(|field| fields(field.as_bytes().expect("tool")))
+        .collect();
+    assert_eq!(tools.len(), 2);
+    assert_eq!(tools[0][0].as_string().as_deref(), Some("lookup"));
+    assert_eq!(
+        tools[0][1].as_string().as_deref(),
+        Some("Described under <tool name=\"lookup\"> in <tool_descriptions>, in the instructions.")
+    );
+    assert_eq!(
+        tools[0][2].as_string().as_deref(),
+        Some("{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}}}")
+    );
+    assert_eq!(tools[1][0].as_string().as_deref(), Some("silent"));
+    assert_eq!(tools[1][1].as_string().as_deref(), Some(""));
+    assert_eq!(
+        tools[1][2].as_string().as_deref(),
+        Some("{\"type\":\"object\",\"properties\":{}}")
+    );
+}
+
+#[test]
+fn split_assistant_calls_join_and_keep_their_real_results() {
+    let request: Request = hofund_plugin_sdk::json::from_value(hofund_plugin_sdk::json::json!({
+        "model": "swe-2",
+        "stream": true,
+        "messages": [
+            {"role": "user", "content": [{"type": "text", "text": "read a and b"}]},
+            {"role": "assistant", "content": [{"type": "tool_call", "id": "toolu_a", "name": "read", "arguments": {"form": "raw", "text": "{\"path\":\"a\"}"}}]},
+            {"role": "assistant", "content": [
+                {"type": "text", "text": "reading"},
+                {"type": "tool_call", "id": "toolu_b", "name": "read", "arguments": {"form": "raw", "text": "{\"path\":\"b\"}"}}
+            ]},
+            {"role": "tool", "content": [{"type": "tool_result", "id": "toolu_a", "content": [{"type": "text", "text": "A!"}]}]},
+            {"role": "tool", "content": [{"type": "tool_result", "id": "toolu_b", "content": [{"type": "text", "text": "B!"}]}]},
+            {"role": "user", "content": [{"type": "text", "text": "next"}]}
+        ]
+    }))
+    .expect("split history");
+    let body = encoded_tool_request(request);
+    let outer = fields(&deframe(&body).expect("frame").payload);
+    let prompts: Vec<_> = outer
+        .iter()
+        .filter(|field| field.number == 3)
+        .map(|field| fields(field.as_bytes().expect("prompt")))
+        .collect();
+    let roles: Vec<_> = prompts
+        .iter()
+        .map(|prompt| {
+            prompt
+                .iter()
+                .find(|field| field.number == 2)
+                .and_then(|field| field.as_varint())
+        })
+        .collect();
+    assert_eq!(roles, [Some(1), Some(2), Some(4), Some(4), Some(1)]);
+    assert_eq!(
+        prompts[1]
+            .iter()
+            .find(|field| field.number == 3)
+            .and_then(|field| field.as_string())
+            .as_deref(),
+        Some("reading")
+    );
+    let calls: Vec<_> = prompts[1]
+        .iter()
+        .filter(|field| field.number == 6)
+        .collect();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(
+        fields(calls[0].as_bytes().expect("first call"))[0]
+            .as_string()
+            .as_deref(),
+        Some("toolu_a")
+    );
+    assert_eq!(
+        fields(calls[1].as_bytes().expect("second call"))[0]
+            .as_string()
+            .as_deref(),
+        Some("toolu_b")
+    );
+    let answers: Vec<_> = prompts
+        .iter()
+        .filter_map(|prompt| prompt.iter().find(|field| field.number == 7))
+        .map(|field| field.as_string().expect("answer"))
+        .collect();
+    assert_eq!(answers, ["toolu_a", "toolu_b"]);
+    assert!(!String::from_utf8_lossy(&body).contains("Tool use was interrupted"));
+}
+
+#[test]
+fn unanswered_calls_get_no_result_before_a_later_user_turn() {
+    let request: Request = hofund_plugin_sdk::json::from_value(hofund_plugin_sdk::json::json!({
+        "model": "swe-2",
+        "stream": true,
+        "messages": [
+            {"role": "assistant", "content": [
+                {"type": "tool_call", "id": "call_a", "name": "read", "arguments": {"form": "raw", "text": "{}"}},
+                {"type": "tool_call", "id": "call_b", "name": "read", "arguments": {"form": "raw", "text": "{}"}}
+            ]},
+            {"role": "tool", "content": [{"type": "tool_result", "id": "call_a", "content": [{"type": "text", "text": "A"}]}]},
+            {"role": "user", "content": [{"type": "text", "text": "continue"}]}
+        ]
+    }))
+    .expect("unanswered history");
+    let body = encoded_tool_request(request);
+    let outer = fields(&deframe(&body).expect("frame").payload);
+    let prompts: Vec<_> = outer
+        .iter()
+        .filter(|field| field.number == 3)
+        .map(|field| fields(field.as_bytes().expect("prompt")))
+        .collect();
+    assert_eq!(prompts.len(), 4);
+    let results: Vec<_> = prompts
+        .iter()
+        .filter(|prompt| prompt.iter().any(|field| field.number == 7))
+        .map(|prompt| {
+            (
+                prompt
+                    .iter()
+                    .find(|field| field.number == 7)
+                    .and_then(|field| field.as_string())
+                    .expect("id"),
+                prompt
+                    .iter()
+                    .find(|field| field.number == 3)
+                    .and_then(|field| field.as_string())
+                    .expect("text"),
+            )
+        })
+        .collect();
+    assert_eq!(results[0].0, "call_a");
+    assert_eq!(results[0].1, "A");
+    assert_eq!(results[1].0, "call_b");
+    assert_eq!(
+        results[1].1,
+        "Tool use was interrupted and did not produce a result."
+    );
+    assert_eq!(
+        prompts[3]
+            .iter()
+            .find(|field| field.number == 3)
+            .and_then(|field| field.as_string())
+            .as_deref(),
+        Some("continue")
+    );
+}
+
+#[test]
+fn array_tool_arguments_keep_their_json_value() {
+    let request: Request = hofund_plugin_sdk::json::from_value(hofund_plugin_sdk::json::json!({
+        "model": "swe-2",
+        "stream": true,
+        "messages": [{"role": "assistant", "content": [{
+            "type": "tool_call", "id": "call_a", "name": "lookup",
+            "arguments": {"form": "json", "value": [1, 2]}
+        }]}]
+    }))
+    .expect("array arguments");
+    let body = encoded_tool_request(request);
+    let outer = fields(&deframe(&body).expect("frame").payload);
+    let prompt = outer
+        .iter()
+        .find(|field| field.number == 3)
+        .and_then(|field| field.as_bytes())
+        .expect("assistant");
+    let call = fields(prompt)
+        .into_iter()
+        .find(|field| field.number == 6)
+        .expect("call");
+    assert_eq!(
+        fields(call.as_bytes().expect("call bytes"))[2]
+            .as_string()
+            .as_deref(),
+        Some("[1,2]")
+    );
+}
+
+#[test]
+fn tool_choice_none_omits_current_definitions_but_keeps_history_tools() {
+    let request: Request = hofund_plugin_sdk::json::from_value(hofund_plugin_sdk::json::json!({
+        "model": "swe-2",
+        "stream": true,
+        "tool_choice": {"mode": {"mode": "none"}},
+        "tools": [{"name": "unused", "input_schema": {"type": "object"}}],
+        "messages": [{"role": "assistant", "content": [{
+            "type": "tool_call", "id": "call_a", "name": "used_before", "arguments": {"form": "raw", "text": "{}"}
+        }]}]
+    }))
+    .expect("disabled tools");
+    let body = encoded_tool_request(request);
+    let outer = fields(&deframe(&body).expect("frame").payload);
+    let tools: Vec<_> = outer
+        .iter()
+        .filter(|field| field.number == 10)
+        .map(|field| fields(field.as_bytes().expect("tool")))
+        .collect();
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0][0].as_string().as_deref(), Some("used_before"));
+    assert_eq!(tools[0][1].as_string().as_deref(), Some("Tool"));
+}
+
+#[test]
+fn encoded_tool_ids_decode_back_to_the_original_history_ids() {
+    for (raw, encoded) in [
+        ("call:1", "dv_Y2FsbDox"),
+        ("#foo", "dv_I2Zvbw"),
+        ("dv_abc", "dv_ZHZfYWJj"),
+    ] {
+        let request: Request = hofund_plugin_sdk::json::from_value(hofund_plugin_sdk::json::json!({
+            "model": "swe-2",
+            "stream": true,
+            "messages": [
+                {"role": "assistant", "content": [{"type": "tool_call", "id": encoded, "name": "lookup", "arguments": {"form": "raw", "text": "{}"}}]},
+                {"role": "tool", "content": [{"type": "tool_result", "id": encoded, "content": [{"type": "text", "text": "done"}]}]},
+                {"role": "user", "content": [{"type": "text", "text": "next"}]}
+            ]
+        }))
+        .expect("id history");
+        let body = encoded_tool_request(request);
+        let outer = fields(&deframe(&body).expect("frame").payload);
+        let prompts: Vec<_> = outer
+            .iter()
+            .filter(|field| field.number == 3)
+            .map(|field| fields(field.as_bytes().expect("prompt")))
+            .collect();
+        let call = prompts[0]
+            .iter()
+            .find(|field| field.number == 6)
+            .expect("call");
+        assert_eq!(
+            fields(call.as_bytes().expect("call bytes"))[0]
+                .as_string()
+                .as_deref(),
+            Some(raw)
+        );
+        assert_eq!(
+            prompts[1]
+                .iter()
+                .find(|field| field.number == 7)
+                .and_then(|field| field.as_string())
+                .as_deref(),
+            Some(raw)
+        );
+    }
 }
 
 #[test]

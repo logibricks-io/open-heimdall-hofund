@@ -1,10 +1,10 @@
-//! Text-only GetChatMessage protobuf and Connect response decoding.
+//! GetChatMessage protobuf and Connect response decoding.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 
 use hofund_plugin_api::PluginError;
 use hofund_plugin_sdk::inflate::compress;
-use hofund_plugin_sdk::json::Value;
+use hofund_plugin_sdk::json::{Value, json};
 use hofund_plugin_sdk::protobuf::{FLAG_GZIP, MAX_FRAME_PAYLOAD, ProtoBuf, fields, frame, frames};
 
 use super::metadata;
@@ -22,15 +22,23 @@ pub(crate) enum PromptRole {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PromptContent<'a> {
     Text(&'a str),
-    Tools,
     Images,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PromptCall<'a> {
+    pub(crate) id: &'a str,
+    pub(crate) name: &'a str,
+    pub(crate) arguments: &'a str,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Prompt<'a> {
     pub(crate) id: &'a str,
     pub(crate) role: PromptRole,
     pub(crate) content: PromptContent<'a>,
+    pub(crate) calls: Vec<PromptCall<'a>>,
+    pub(crate) answer: Option<&'a str>,
 }
 
 impl<'a> Prompt<'a> {
@@ -39,8 +47,17 @@ impl<'a> Prompt<'a> {
             id,
             role,
             content: PromptContent::Text(text),
+            calls: Vec::new(),
+            answer: None,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ToolDefinition<'a> {
+    pub(crate) name: &'a str,
+    pub(crate) description: Option<&'a str>,
+    pub(crate) schema: &'a Value,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -49,6 +66,7 @@ pub(crate) struct ChatRequest<'a> {
     pub(crate) os: &'a str,
     pub(crate) model_uid: &'a str,
     pub(crate) prompts: &'a [Prompt<'a>],
+    pub(crate) tools: &'a [ToolDefinition<'a>],
     pub(crate) max_tokens: Option<u64>,
     pub(crate) temperature: Option<f64>,
     pub(crate) top_p: Option<f64>,
@@ -66,36 +84,75 @@ pub(crate) fn encode_request(request: &ChatRequest<'_>) -> Result<EncodedChatReq
         message = message.bytes(3, &encode_prompt(prompt)?);
     }
     let sampling = sampling(request);
-    let message = message
-        .varint(7, 5)
-        .bytes(8, &sampling)
-        .string(21, request.model_uid)
-        .finish();
-    frame_request(&message)
+    message = message.varint(7, 5).bytes(8, &sampling);
+    let mut offered = HashSet::new();
+    for tool in request.tools {
+        let description = tool.description.filter(|text| !text.is_empty()).map(|_| {
+            format!(
+                "Described under <tool name=\"{}\"> in <tool_descriptions>, in the instructions.",
+                tool.name
+            )
+        });
+        message = message.bytes(
+            10,
+            &encode_tool(
+                tool.name,
+                description.as_deref().unwrap_or_default(),
+                Some(tool.schema),
+            ),
+        );
+        offered.insert(tool.name);
+    }
+    for call in request.prompts.iter().flat_map(|prompt| &prompt.calls) {
+        if offered.insert(call.name) {
+            message = message.bytes(10, &encode_tool(call.name, "Tool", None));
+        }
+    }
+    frame_request(&message.string(21, request.model_uid).finish())
+}
+
+fn encode_tool(name: &str, description: &str, schema: Option<&Value>) -> Vec<u8> {
+    let default = json!({"type": "object", "properties": {}});
+    let schema = schema
+        .filter(|value| value.is_object() || value.is_array())
+        .unwrap_or(&default);
+    let schema = hofund_plugin_sdk::json::to_string(schema)
+        .expect("a JSON tool schema always serializes to a string");
+    ProtoBuf::new()
+        .string(1, name)
+        .string(2, description)
+        .bytes(3, schema.as_bytes())
+        .finish()
 }
 
 fn encode_prompt(prompt: &Prompt<'_>) -> Result<Vec<u8>, PluginError> {
-    if prompt.role == PromptRole::Tool || prompt.content == PromptContent::Tools {
-        return Err(PluginError::config(
-            "Devin tool history is not supported by the text-only chat codec",
-        ));
-    }
     if prompt.content == PromptContent::Images {
         return Err(PluginError::config(
             "Devin image prompts are not supported by the text-only chat codec",
         ));
     }
     let PromptContent::Text(text) = prompt.content else {
-        unreachable!("tool and image content returned above");
+        unreachable!("image content returned above");
     };
     let role = match prompt.role {
         PromptRole::User => 1,
         PromptRole::Assistant => 2,
-        PromptRole::Tool => unreachable!("tool role returned above"),
+        PromptRole::Tool => 4,
     };
     let mut encoded = ProtoBuf::new().string(1, prompt.id).varint(2, role);
     if !text.is_empty() {
         encoded = encoded.string(3, text);
+    }
+    for call in &prompt.calls {
+        let call = ProtoBuf::new()
+            .string(1, call.id)
+            .string(2, call.name)
+            .bytes(3, call.arguments.as_bytes())
+            .finish();
+        encoded = encoded.bytes(6, &call);
+    }
+    if let Some(answer) = prompt.answer {
+        encoded = encoded.string(7, answer);
     }
     Ok(encoded.finish())
 }
@@ -128,13 +185,89 @@ fn frame_request(message: &[u8]) -> Result<EncodedChatRequest, PluginError> {
     })
 }
 
+pub(crate) fn out_id(id: &str) -> String {
+    if safe_id(id) && !id.starts_with("dv_") {
+        id.to_owned()
+    } else {
+        format!("dv_{}", base64url_encode(id.as_bytes()))
+    }
+}
+
+pub(crate) fn in_id(id: &str) -> String {
+    if !id.starts_with("dv_") || !safe_id(id) {
+        return id.to_owned();
+    }
+    let Some(raw) = base64url_decode(&id[3..]).and_then(|bytes| String::from_utf8(bytes).ok())
+    else {
+        return id.to_owned();
+    };
+    if !raw.is_empty() && out_id(&raw) == id {
+        raw
+    } else {
+        id.to_owned()
+    }
+}
+
+fn safe_id(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
+fn base64url_encode(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let triple = (u32::from(chunk[0]) << 16)
+            | (chunk.get(1).copied().map_or(0, u32::from) << 8)
+            | chunk.get(2).copied().map_or(0, u32::from);
+        for index in 0..chunk.len() + 1 {
+            out.push(char::from(
+                ALPHABET[((triple >> (18 - 6 * index)) & 0x3f) as usize],
+            ));
+        }
+    }
+    out
+}
+
+fn base64url_decode(text: &str) -> Option<Vec<u8>> {
+    if text.len() % 4 == 1 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(text.len() * 3 / 4);
+    for chunk in text.as_bytes().chunks(4) {
+        let mut triple = 0_u32;
+        for (index, byte) in chunk.iter().enumerate() {
+            let value = match byte {
+                b'A'..=b'Z' => byte - b'A',
+                b'a'..=b'z' => byte - b'a' + 26,
+                b'0'..=b'9' => byte - b'0' + 52,
+                b'-' => 62,
+                b'_' => 63,
+                _ => return None,
+            };
+            triple |= u32::from(value) << (18 - 6 * index);
+        }
+        out.push((triple >> 16) as u8);
+        if chunk.len() > 2 {
+            out.push((triple >> 8) as u8);
+        }
+        if chunk.len() > 3 {
+            out.push(triple as u8);
+        }
+    }
+    Some(out)
+}
+
 #[cfg(test)]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ChatResponse {
     pub(crate) text: Vec<String>,
     pub(crate) reasoning: Vec<String>,
     pub(crate) error: Option<ConnectError>,
-    pub(crate) saw_tool_call: bool,
+    pub(crate) tool_calls: Vec<ChatToolCall>,
+    pub(crate) tool_arguments: Vec<ChatToolArguments>,
     pub(crate) saw_usage: bool,
     pub(crate) usage: ChatUsage,
     pub(crate) stop: Option<u64>,
@@ -147,7 +280,7 @@ impl ChatResponse {
     }
 
     pub(crate) fn is_empty_reply(&self) -> bool {
-        self.error.is_none() && !self.has_text_stream() && !self.saw_tool_call
+        self.error.is_none() && !self.has_text_stream() && self.tool_calls.is_empty()
     }
 }
 
@@ -166,10 +299,24 @@ pub(crate) struct ChatUsage {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ChatToolCall {
+    pub(crate) index: u32,
+    pub(crate) id: String,
+    pub(crate) name: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ChatToolArguments {
+    pub(crate) index: u32,
+    pub(crate) arguments: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ChatEvent {
     Text(String),
     Reasoning(String),
-    ToolCall,
+    ToolCall(ChatToolCall),
+    ToolArguments(ChatToolArguments),
     Usage(ChatUsage),
     Stop(u64),
     End(Option<ConnectError>),
@@ -180,6 +327,7 @@ pub(crate) struct ChatDecoder {
     buffered: Vec<u8>,
     pending: VecDeque<ChatEvent>,
     saw_frame: bool,
+    active_tool: Option<u32>,
 }
 
 impl ChatDecoder {
@@ -217,6 +365,12 @@ impl ChatDecoder {
                 continue;
             }
             for field in fields(&frame.payload) {
+                if field.number == 6
+                    && let Some(bytes) = field.as_bytes()
+                {
+                    self.decode_tool_call(bytes)?;
+                    continue;
+                }
                 let event = match field.number {
                     3 => field
                         .as_string()
@@ -226,7 +380,6 @@ impl ChatDecoder {
                         .as_string()
                         .filter(|text| !text.is_empty())
                         .map(ChatEvent::Reasoning),
-                    6 if field.as_bytes().is_some() => Some(ChatEvent::ToolCall),
                     7 => field
                         .as_bytes()
                         .map(|bytes| ChatEvent::Usage(decode_usage(bytes))),
@@ -238,6 +391,48 @@ impl ChatDecoder {
                 }
             }
         }
+    }
+
+    fn decode_tool_call(&mut self, bytes: &[u8]) -> Result<(), PluginError> {
+        let mut id = String::new();
+        let mut name = String::new();
+        let mut arguments = String::new();
+        for field in fields(bytes) {
+            let text = field.as_string().unwrap_or_default();
+            match field.number {
+                1 => id = text,
+                2 => name = text,
+                3 => arguments.push_str(&text),
+                _ => {}
+            }
+        }
+        if !name.is_empty() {
+            let index = match self.active_tool {
+                Some(index) => index
+                    .checked_add(1)
+                    .ok_or_else(|| PluginError::decode("too many tool calls"))?,
+                None => 0,
+            };
+            self.active_tool = Some(index);
+            if id.is_empty() {
+                id = random_call_id()?;
+            }
+            self.pending.push_back(ChatEvent::ToolCall(ChatToolCall {
+                index,
+                id: out_id(&id),
+                name,
+            }));
+        }
+        if !arguments.is_empty()
+            && let Some(index) = self.active_tool
+        {
+            self.pending
+                .push_back(ChatEvent::ToolArguments(ChatToolArguments {
+                    index,
+                    arguments,
+                }));
+        }
+        Ok(())
     }
 
     pub(crate) fn next_event(&mut self) -> Option<ChatEvent> {
@@ -255,6 +450,18 @@ impl ChatDecoder {
     pub(crate) fn saw_frame(&self) -> bool {
         self.saw_frame
     }
+}
+
+fn random_call_id() -> Result<String, PluginError> {
+    let uuid = hofund_plugin_sdk::uuid::v4().map_err(|error| PluginError::io(error.to_string()))?;
+    let hex: String = uuid
+        .chars()
+        .filter(|ch| *ch != '-')
+        .enumerate()
+        .filter_map(|(index, ch)| (index != 12 && index != 16).then_some(ch))
+        .take(24)
+        .collect();
+    Ok(format!("call_{hex}"))
 }
 
 fn decode_usage(bytes: &[u8]) -> ChatUsage {
@@ -284,7 +491,8 @@ pub(crate) fn decode_response(body: &[u8]) -> Result<ChatResponse, PluginError> 
         match event {
             ChatEvent::Text(text) => response.text.push(text),
             ChatEvent::Reasoning(text) => response.reasoning.push(text),
-            ChatEvent::ToolCall => response.saw_tool_call = true,
+            ChatEvent::ToolCall(call) => response.tool_calls.push(call),
+            ChatEvent::ToolArguments(arguments) => response.tool_arguments.push(arguments),
             ChatEvent::Usage(usage) => {
                 response.saw_usage = true;
                 response.usage = usage;
@@ -325,7 +533,6 @@ pub(crate) fn end_error(payload: &[u8]) -> Result<Option<ConnectError>, PluginEr
 
 #[cfg(test)]
 mod tests {
-    use hofund_plugin_api::PluginError;
     use hofund_plugin_sdk::inflate::compress;
     use hofund_plugin_sdk::protobuf::{FLAG_END, FLAG_GZIP, WireValue, deframe, fields, frame};
 
@@ -342,6 +549,7 @@ mod tests {
             os: "linux",
             model_uid: "swe-2-high",
             prompts,
+            tools: &[],
             max_tokens: None,
             temperature: None,
             top_p: None,
@@ -420,19 +628,16 @@ mod tests {
     }
 
     #[test]
-    fn tool_and_image_prompts_are_refused_not_dropped() {
-        for content in [PromptContent::Tools, PromptContent::Images] {
-            let prompts = [Prompt {
-                id: "id",
-                role: PromptRole::User,
-                content,
-            }];
-            let error = encode_request(&request(&prompts)).expect_err("unsupported content");
-            assert!(error.message().contains("not supported"));
-        }
-        let prompts = [Prompt::text("id", PromptRole::Tool, "tool result")];
-        let error = encode_request(&request(&prompts)).expect_err("tool role");
-        assert!(error.message().contains("tool history"));
+    fn image_prompts_are_refused_not_dropped() {
+        let prompts = [Prompt {
+            id: "id",
+            role: PromptRole::User,
+            content: PromptContent::Images,
+            calls: Vec::new(),
+            answer: None,
+        }];
+        let error = encode_request(&request(&prompts)).expect_err("unsupported content");
+        assert!(error.message().contains("not supported"));
     }
 
     #[test]
@@ -510,7 +715,7 @@ mod tests {
         assert!(decoded.text.is_empty());
         assert!(!decoded.has_text_stream());
         assert!(decoded.saw_usage);
-        assert!(!decoded.saw_tool_call);
+        assert!(decoded.tool_calls.is_empty());
         assert!(decoded.is_empty_reply());
         assert_eq!(decoded.error, None);
     }
@@ -598,11 +803,20 @@ mod tests {
 
     #[test]
     fn tool_only_response_is_not_misclassified_as_empty() {
+        let call = hofund_plugin_sdk::protobuf::ProtoBuf::new()
+            .string(1, "call:1")
+            .string(2, "lookup")
+            .string(3, "{\"x\":")
+            .finish();
         let message = hofund_plugin_sdk::protobuf::ProtoBuf::new()
-            .bytes(6, b"later slice")
+            .bytes(6, &call)
             .finish();
         let decoded = decode_response(&frame(0, &message).expect("frame")).expect("decode");
-        assert!(decoded.saw_tool_call);
+        assert_eq!(decoded.tool_calls.len(), 1);
+        assert_eq!(decoded.tool_calls[0].index, 0);
+        assert_eq!(decoded.tool_calls[0].id, "dv_Y2FsbDox");
+        assert_eq!(decoded.tool_calls[0].name, "lookup");
+        assert_eq!(decoded.tool_arguments[0].arguments, "{\"x\":");
         assert!(!decoded.has_text_stream());
         assert!(!decoded.is_empty_reply());
     }
@@ -614,7 +828,7 @@ mod tests {
             .varint(7, 1)
             .finish();
         let decoded = decode_response(&frame(0, &message).expect("frame")).expect("decode");
-        assert!(!decoded.saw_tool_call);
+        assert!(decoded.tool_calls.is_empty());
         assert!(!decoded.saw_usage);
         assert!(decoded.is_empty_reply());
     }
@@ -627,13 +841,52 @@ mod tests {
     }
 
     #[test]
+    fn tool_ids_round_trip_only_through_the_own_encoding() {
+        for (raw, encoded) in [
+            ("call:1", "dv_Y2FsbDox"),
+            ("#foo", "dv_I2Zvbw"),
+            ("dv_", "dv_ZHZf"),
+            ("dv_abc", "dv_ZHZfYWJj"),
+            ("~~~", "dv_fn5-"),
+            ("~~?", "dv_fn4_"),
+        ] {
+            assert_eq!(super::out_id(raw), encoded);
+            assert_eq!(super::in_id(encoded), raw);
+        }
+        for safe in ["toolu_01AbC", "call_abc-123"] {
+            assert_eq!(super::out_id(safe), safe);
+            assert_eq!(super::in_id(safe), safe);
+        }
+        assert_eq!(super::in_id("dv_YQ"), "dv_YQ");
+        assert_eq!(super::in_id("dv_!"), "dv_!");
+        assert_eq!(super::base64url_decode("A"), None);
+    }
+
+    #[test]
+    fn an_empty_upstream_tool_id_is_synthesized_as_random_hex() {
+        let call = hofund_plugin_sdk::protobuf::ProtoBuf::new()
+            .string(2, "lookup")
+            .finish();
+        let message = hofund_plugin_sdk::protobuf::ProtoBuf::new()
+            .bytes(6, &call)
+            .finish();
+        let decoded = decode_response(&frame(0, &message).expect("frame")).expect("decode");
+        let id = &decoded.tool_calls[0].id;
+        assert_eq!(id.len(), 29);
+        assert!(id.starts_with("call_"));
+        assert!(id[5..].bytes().all(|byte| byte.is_ascii_hexdigit()));
+    }
+
+    #[test]
     fn request_rejection_uses_plugin_errors() {
         let prompts = [Prompt {
             id: "id",
             role: PromptRole::User,
-            content: PromptContent::Tools,
+            content: PromptContent::Images,
+            calls: Vec::new(),
+            answer: None,
         }];
-        let error: PluginError = encode_request(&request(&prompts)).expect_err("tools");
+        let error = encode_request(&request(&prompts)).expect_err("images");
         assert_eq!(error.kind(), hofund_plugin_api::PluginErrorKind::Config);
     }
 }
