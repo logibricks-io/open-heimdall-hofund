@@ -21,8 +21,9 @@ use crate::{
     QuotaAlertsResponse, QuotaAlertsSetRequest, QuotaAlertsSetResponse, QuotaCreditsModesResponse,
     QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryResponse, QuotaResponse,
     ReloadRequest, RouteListResponse, RouteModelListResponse, SessionRouteResponse,
-    ShutdownRequest, ShutdownResponse, StatusResponse, TokenRotateRequest, TokenRotateResponse,
-    UnroutedListResponse, UsageResponse, WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
+    SettingsPatchRequest, SettingsResponse, ShutdownRequest, ShutdownResponse, StatusResponse,
+    TokenRotateRequest, TokenRotateResponse, UnroutedListResponse, UsageResponse,
+    WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
 };
 
 mod sealed {
@@ -259,6 +260,7 @@ request!(GroupCreateRequest, validate);
 request!(GroupPatchRequest, validate);
 request!(GroupDeleteRequest, validate);
 request!(GroupRestoreRequest, validate);
+request!(SettingsPatchRequest, validate);
 
 impl sealed::Sealed for ConfigResponse {}
 impl Response for ConfigResponse {
@@ -307,6 +309,7 @@ impl Response for EventEnvelope {
 response!(
     HealthResponse,
     StatusResponse,
+    SettingsResponse,
     ConfigValidationResponse,
     ProviderListResponse,
     ProviderRenameResponse,

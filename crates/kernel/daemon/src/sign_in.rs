@@ -1313,6 +1313,7 @@ mod tests {
             catalog: CatalogSettings::default(),
             usage: hofund_config::UsageSettings::default(),
             discover_agent_accounts: false,
+            lan_allow: Vec::new(),
         }
     }
 

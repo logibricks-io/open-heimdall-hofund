@@ -297,6 +297,24 @@ impl Client {
         self.get("/v1/hofund/status").await
     }
 
+    /// Gets terminal UI settings.
+    pub async fn settings(&self) -> Result<hofund_control_proto::SettingsResponse, ClientError> {
+        self.get("/v1/hofund/settings").await
+    }
+
+    /// Patches terminal UI settings against a disk revision.
+    pub async fn patch_settings(
+        &self,
+        request: &hofund_control_proto::SettingsPatchRequest,
+    ) -> Result<hofund_control_proto::SettingsResponse, ClientError> {
+        self.request(
+            http::Method::PATCH,
+            "/v1/hofund/settings",
+            Some(json_body(request)?),
+        )
+        .await
+    }
+
     /// GETs a path and returns once the status line is known.
     ///
     /// On success the body is discarded. On failure the error envelope is decoded when present.

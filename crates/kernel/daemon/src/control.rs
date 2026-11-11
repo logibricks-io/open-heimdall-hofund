@@ -449,6 +449,17 @@ impl ControlState for DaemonControl {
         status
     }
 
+    fn settings(&self) -> ControlFuture<'_, hofund_control_proto::SettingsResponse> {
+        Box::pin(super::control_settings::get(&self.ops))
+    }
+
+    fn patch_settings(
+        &self,
+        request: hofund_control_proto::SettingsPatchRequest,
+    ) -> ControlFuture<'_, hofund_control_proto::SettingsResponse> {
+        Box::pin(super::control_settings::patch(&self.ops, request))
+    }
+
     fn draining(&self) -> bool {
         *self.shutdown.borrow()
     }

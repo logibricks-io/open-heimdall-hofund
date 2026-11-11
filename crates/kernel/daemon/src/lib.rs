@@ -48,6 +48,7 @@ mod control_presets;
 mod control_profiles;
 mod control_provider_summary;
 mod control_provider_write;
+mod control_settings;
 mod credits_modes;
 mod events;
 mod measurements;

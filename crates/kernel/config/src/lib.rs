@@ -19,6 +19,7 @@ pub mod pass_headers;
 mod provider_rename;
 mod provider_write;
 mod ruleparse;
+mod settings;
 mod visible;
 
 pub use groups_write::{
@@ -34,6 +35,7 @@ pub use provider_write::{
     validate_provider_base_url,
 };
 pub use ruleparse::{ParsedRule, parse_rule_line, rule_rename_group_ref, rule_without_line};
+pub use settings::{SettingsEdit, edit_settings};
 pub use visible::{
     AgentModels, CatalogEntry, VisibleCatalog, build_catalog_index, catalog_for_agent,
     edit_agent_hidden_models, edit_agent_picked_models, edit_agent_picked_only, edit_agent_visible,
@@ -77,8 +79,10 @@ pub struct Config {
     pub warnings: Vec<String>,
     /// models.dev catalog mirror, refresh, and per-model overrides.
     pub catalog: CatalogSettings,
-    /// Usage display currency and optional per-model list prices.
+    /// Usage display currency, quota bar direction, and optional per-model list prices.
     pub usage: UsageSettings,
+    /// LAN peers allowed in a later enforcement change. Stored but not enforced here.
+    pub lan_allow: Vec<String>,
 }
 
 /// Failover thresholds.
@@ -199,6 +203,8 @@ pub struct UsageSettings {
     pub currency: UsageCurrency,
     /// Fixed yuan per dollar; when set, live FX is not fetched.
     pub cny_per_usd: Option<f64>,
+    /// Whether terminal quota bars show remaining rather than used percentages.
+    pub quota_left: bool,
     /// Custom list prices keyed like the reference `ModelPrices` map.
     pub prices: BTreeMap<String, ModelPriceOverride>,
 }
@@ -1481,6 +1487,7 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
     let agents = visible::agent_models_of(raw.agents)?;
     let catalog = catalog_settings(raw.catalog)?;
     let usage = usage_settings(raw.usage)?;
+    discover_agent_accounts |= raw.discover_agent_accounts.unwrap_or(false);
     Ok(Config {
         listen,
         token_file: raw.token_file,
@@ -1498,6 +1505,7 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
         catalog,
         usage,
         discover_agent_accounts,
+        lan_allow: raw.lan_allow,
         warnings,
     })
 }
@@ -1977,6 +1985,8 @@ struct RawUsage {
     #[serde(default)]
     cny_per_usd: Option<f64>,
     #[serde(default)]
+    quota_left: bool,
+    #[serde(default)]
     prices: BTreeMap<String, RawModelPrice>,
 }
 
@@ -2056,6 +2066,7 @@ fn usage_settings(raw: RawUsage) -> Result<UsageSettings, ConfigError> {
     Ok(UsageSettings {
         currency,
         cny_per_usd: raw.cny_per_usd,
+        quota_left: raw.quota_left,
         prices,
     })
 }
@@ -2420,6 +2431,10 @@ struct RawFile {
     routes: Vec<RawRoute>,
     #[serde(default)]
     subscriptions: Vec<RawSubscription>,
+    #[serde(default)]
+    discover_agent_accounts: Option<bool>,
+    #[serde(default)]
+    lan_allow: Vec<String>,
     #[serde(default)]
     agents: visible::RawAgentModels,
     #[serde(default)]

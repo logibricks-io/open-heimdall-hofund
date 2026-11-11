@@ -38,9 +38,9 @@ use hofund_control_proto::{
     QuotaAlertsSetResponse, QuotaCreditsModesResponse, QuotaCreditsSetRequest,
     QuotaCreditsSetResponse, QuotaHistoryQuery, QuotaHistoryResponse, QuotaQuery, QuotaResponse,
     ReloadRequest, RouteListResponse, RouteModelListResponse, RouteQuery, SessionRouteResponse,
-    ShutdownRequest, ShutdownResponse, StatusResponse, TokenRotateRequest, TokenRotateResponse,
-    Topic, UnroutedListResponse, UsageQuery, UsageResponse, WarmupListResponse, WarmupRunRequest,
-    WarmupRunResponse, decode_request,
+    SettingsPatchRequest, SettingsResponse, ShutdownRequest, ShutdownResponse, StatusResponse,
+    TokenRotateRequest, TokenRotateResponse, Topic, UnroutedListResponse, UsageQuery,
+    UsageResponse, WarmupListResponse, WarmupRunRequest, WarmupRunResponse, decode_request,
 };
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
@@ -162,6 +162,17 @@ pub trait ControlState: Send + Sync {
     fn health(&self) -> HealthResponse;
     /// Returns the current daemon status.
     fn status(&self) -> StatusResponse;
+    /// Reads terminal UI settings.
+    fn settings(&self) -> ControlFuture<'_, SettingsResponse> {
+        Box::pin(async { Err(unsupported_settings()) })
+    }
+    /// Updates terminal UI settings against a disk revision.
+    fn patch_settings(
+        &self,
+        _request: SettingsPatchRequest,
+    ) -> ControlFuture<'_, SettingsResponse> {
+        Box::pin(async { Err(unsupported_settings()) })
+    }
     /// Reports whether mutations are draining.
     fn draining(&self) -> bool;
     /// Lists configured providers.
@@ -766,6 +777,15 @@ pub trait ControlState: Send + Sync {
     fn events(&self, query: EventsQuery) -> Result<EventSubscription, ControlFailure>;
 }
 
+fn unsupported_settings() -> ControlFailure {
+    ControlError::new(
+        ControlErrorKind::Internal,
+        "settings are not implemented by this control state",
+        "control",
+    )
+    .into()
+}
+
 fn unsupported_gateway_keys() -> ControlFailure {
     ControlError::new(
         ControlErrorKind::Internal,
@@ -850,6 +870,10 @@ impl Control {
         axum::Router::new()
             .route("/v1/hofund/health", get(health).head(method_not_allowed))
             .route("/v1/hofund/status", get(status).head(method_not_allowed))
+            .route(
+                "/v1/hofund/settings",
+                get(settings).patch(patch_settings).head(method_not_allowed),
+            )
             .route(
                 "/v1/hofund/providers",
                 get(providers)
@@ -1310,6 +1334,18 @@ async fn status(State(state): State<HttpState>) -> Response {
         StatusCode::OK,
         serde_json::to_vec(&state.control.state.status()).unwrap_or_default(),
     )
+}
+
+async fn settings(State(state): State<HttpState>) -> Response {
+    operation_response!(state.control.state.settings().await)
+}
+
+async fn patch_settings(State(state): State<HttpState>, body: Bytes) -> Response {
+    let request = match decode_body::<SettingsPatchRequest>(&body) {
+        Ok(request) => request,
+        Err(failure) => return failure_response(failure),
+    };
+    operation_response!(state.control.state.patch_settings(request).await)
 }
 
 async fn providers(State(state): State<HttpState>) -> Response {

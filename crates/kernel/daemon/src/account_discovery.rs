@@ -193,6 +193,7 @@ mod tests {
             warnings: Vec::new(),
             catalog: hofund_config::CatalogSettings::default(),
             usage: hofund_config::UsageSettings::default(),
+            lan_allow: Vec::new(),
         }
     }
 

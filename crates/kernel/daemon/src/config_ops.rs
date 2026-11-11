@@ -337,6 +337,35 @@ impl ConfigOps {
         self.apply_with_key_moves(expected, text, Vec::new()).await
     }
 
+    /// Applies terminal settings without moving the model listener. A changed
+    /// listen address becomes restart-pending instead of rebinding in the call.
+    pub(crate) async fn apply_settings(
+        self: &Arc<Self>,
+        expected: &str,
+        edit: hofund_config::SettingsEdit,
+    ) -> Result<ConfigResponse, ControlFailure> {
+        let _gate = self.gate.lock().await;
+        let ops = Arc::clone(self);
+        let expected = expected.to_owned();
+        let staged = run_blocking(move || {
+            let _lock = ops.lock()?;
+            let (disk_revision, text) = ops.read_disk()?;
+            if disk_revision != expected {
+                return Err(stale_revision());
+            }
+            let updated = hofund_config::edit_settings(&text, &edit).map_err(|error| {
+                ControlFailure::from(ControlError::new(
+                    ControlErrorKind::Unprocessable,
+                    error.to_string(),
+                    "settings",
+                ))
+            })?;
+            ops.apply_with_lock_held(&disk_revision, updated, Vec::new())
+        })
+        .await?;
+        Ok(self.finish_settings(staged).await)
+    }
+
     /// Adds one pattern to `[catalog].disabled` and publishes the config.
     pub(crate) async fn disable_catalog_model(
         self: &Arc<Self>,
@@ -580,10 +609,26 @@ impl ConfigOps {
 
     /// Moves the listener, then records and announces the publication.
     async fn finish(&self, staged: Staged) -> ConfigResponse {
-        let listen = self.routing.listener.follow(&staged.config).await;
+        self.finish_inner(staged, true).await
+    }
+
+    async fn finish_settings(&self, staged: Staged) -> ConfigResponse {
+        self.finish_inner(staged, false).await
+    }
+
+    async fn finish_inner(&self, staged: Staged, follow_listener: bool) -> ConfigResponse {
+        let listen = if follow_listener {
+            self.routing.listener.follow(&staged.config).await
+        } else {
+            None
+        };
+        let mut pending_restart = restart_diff(&self.started, &staged.config);
+        if !follow_listener && self.started.listen != staged.config.listen {
+            pending_restart.push("listen".to_owned());
+        }
         let mut live = self.live.write().expect("live config");
         let next = Arc::new(LiveConfig {
-            pending_restart: restart_diff(&self.started, &staged.config),
+            pending_restart,
             not_applied: listen.iter().map(|(issue, _)| issue.clone()).collect(),
             config: staged.config,
             runtime_revision: staged.runtime_revision,

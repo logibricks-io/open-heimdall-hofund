@@ -891,6 +891,24 @@ SessionRouteResponse.seq
 SessionRouteResponse.session
 SessionRouteResponse.version
 SessionRouteResponse::fn empty (session : impl Into < String >) -> Self
+SettingsPatchRequest #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
+SettingsPatchRequest.currency
+SettingsPatchRequest.discover_accounts
+SettingsPatchRequest.expected_revision
+SettingsPatchRequest.lan_allow
+SettingsPatchRequest.listen
+SettingsPatchRequest.quota_left
+SettingsPatchRequest.version
+SettingsPatchRequest::fn new (expected_revision : impl Into < String >) -> Self
+SettingsResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+SettingsResponse.currency
+SettingsResponse.discover_accounts
+SettingsResponse.disk_revision
+SettingsResponse.lan_allow
+SettingsResponse.listen
+SettingsResponse.pending_restart
+SettingsResponse.quota_left
+SettingsResponse.version
 ShutdownRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
 ShutdownRequest.version
 ShutdownRequest::fn new () -> Self
