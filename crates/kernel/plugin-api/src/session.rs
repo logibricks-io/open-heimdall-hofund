@@ -194,6 +194,17 @@ impl SessionRecord {
     }
 }
 
+/// Compression the kernel removes before bounded JSONL parsing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SessionCompression {
+    /// Plain UTF-8 JSONL.
+    #[default]
+    None,
+    /// A zstd-compressed JSONL stream, reparsed from its start when changed.
+    Zstd,
+}
+
 /// One file returned by a [`SessionStore`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -202,16 +213,26 @@ pub struct SessionFile {
     pub id: String,
     /// Absolute lexical path under the root passed to [`SessionStore::files`].
     pub path: PathBuf,
+    /// Compression applied to the file bytes.
+    pub compression: SessionCompression,
 }
 
 impl SessionFile {
-    /// A session file.
+    /// A plain session file.
     #[must_use]
     pub fn new(id: impl Into<String>, path: impl Into<PathBuf>) -> Self {
         Self {
             id: id.into(),
             path: path.into(),
+            compression: SessionCompression::None,
         }
+    }
+
+    /// Marks the file's compression.
+    #[must_use]
+    pub const fn with_compression(mut self, compression: SessionCompression) -> Self {
+        self.compression = compression;
+        self
     }
 }
 

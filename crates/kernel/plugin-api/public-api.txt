@@ -938,6 +938,10 @@ SecretString
 SecretsHandle
 SecretsHandle #[non_exhaustive] derives(Clone)
 SecretsHandle::async fn get (& self , id : & str) -> Result < Option < SecretString > , PluginError >
+SessionCompression
+SessionCompression #[non_exhaustive] derives(Clone, Copy, Debug, Default, PartialEq, Eq)
+SessionCompression::None
+SessionCompression::Zstd
 SessionDay
 SessionDay #[non_exhaustive] derives(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)
 SessionDay.date
@@ -946,8 +950,10 @@ SessionDay.tokens
 SessionDay::fn new (date : impl Into < String > , model : impl Into < String > , tokens : SessionTokens) -> Self
 SessionFile
 SessionFile #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
+SessionFile.compression
 SessionFile.id
 SessionFile.path
+SessionFile::const fn with_compression (mut self , compression : SessionCompression) -> Self
 SessionFile::fn new (id : impl Into < String > , path : impl Into < PathBuf >) -> Self
 SessionLocator
 SessionLocator::fn present (& self) -> bool

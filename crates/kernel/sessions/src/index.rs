@@ -1,7 +1,6 @@
 //! Incremental, consent-filtered session cache.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
@@ -40,13 +39,13 @@ pub struct ReadOutcome {
 ///
 /// # Errors
 ///
-/// Returns an I/O error when seeking or reading fails.
-pub fn read_incremental(
-    reader: &mut File,
+/// Returns an I/O error when reading fails. The caller positions seekable
+/// inputs at `offset` before calling; compressed inputs start at byte zero.
+pub fn read_incremental<R: Read>(
+    reader: &mut R,
     offset: u64,
     mut on_value: impl FnMut(&Value),
 ) -> io::Result<ReadOutcome> {
-    reader.seek(SeekFrom::Start(offset))?;
     let mut outcome = ReadOutcome {
         offset,
         ..ReadOutcome::default()
@@ -331,6 +330,7 @@ impl SessionIndex {
         }
         let append = old.as_ref().is_some_and(|old| {
             old.file_id == file.id
+                && file.compression == hofund_plugin_api::SessionCompression::None
                 && size >= old.size
                 && modified_ns >= old.modified_ns
                 && old.offset <= size.min(MAX_FILE_BYTES)
@@ -341,21 +341,8 @@ impl SessionIndex {
         } else {
             (0, None)
         };
-        let mut parser = store.parser(file, previous)?;
-        let mut opened = open_session_file(root, &file.path)
-            .map_err(|error| io::Error::other(error.to_string()))?;
-        let mut parser_error = None;
-        let outcome = read_incremental(&mut opened, offset, |value| {
-            if parser_error.is_none()
-                && let Err(error) = parser.push(value)
-            {
-                parser_error = Some(error);
-            }
-        })?;
-        if let Some(error) = parser_error {
-            return Err(error.into());
-        }
-        let SessionParse { record, state, .. } = parser.finish()?;
+        let (parsed, outcome) = parse_file(store, root, file, offset, previous)?;
+        let SessionParse { record, state, .. } = parsed;
         let Some(mut record) = record.or_else(|| {
             if append {
                 old.as_ref().map(|old| old.record.clone())
@@ -388,8 +375,50 @@ impl SessionIndex {
     }
 }
 
+fn parse_file(
+    store: &dyn SessionStore,
+    root: &Path,
+    file: &SessionFile,
+    offset: u64,
+    previous: Option<&str>,
+) -> Result<(SessionParse, ReadOutcome), IndexError> {
+    let mut parser = store.parser(file, previous)?;
+    let mut opened =
+        open_session_file(root, &file.path).map_err(|error| io::Error::other(error.to_string()))?;
+    let mut parser_error = None;
+    let mut on_value = |value: &Value| {
+        if parser_error.is_none()
+            && let Err(error) = parser.push(value)
+        {
+            parser_error = Some(error);
+        }
+    };
+    let outcome = match file.compression {
+        hofund_plugin_api::SessionCompression::None => {
+            opened.seek(SeekFrom::Start(offset))?;
+            read_incremental(&mut opened, offset, &mut on_value)?
+        }
+        hofund_plugin_api::SessionCompression::Zstd => {
+            let mut decoder = zstd::stream::read::Decoder::new(opened)?;
+            read_incremental(&mut decoder, 0, &mut on_value)?
+        }
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unsupported session compression",
+            )
+            .into());
+        }
+    };
+    if let Some(error) = parser_error {
+        return Err(error.into());
+    }
+    Ok((parser.finish()?, outcome))
+}
+
 #[cfg(test)]
 mod tests {
+    use std::fs::File;
     use std::io::Write;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -429,6 +458,21 @@ mod tests {
         assert_eq!(values.len(), 2);
         assert!(outcome.cut);
         assert_eq!(outcome.offset, std::fs::metadata(path).expect("size").len());
+    }
+
+    #[test]
+    fn zstd_stream_uses_the_same_json_bounds() {
+        let compressed =
+            zstd::bulk::compress(b"{}\n{\"packed\":true}\n".as_slice(), 3).expect("compress");
+        let mut decoder = zstd::stream::read::Decoder::new(compressed.as_slice()).expect("decoder");
+        let mut values = Vec::new();
+        let outcome =
+            read_incremental(&mut decoder, 0, |value| values.push(value.clone())).expect("read");
+        assert_eq!(values.len(), 2);
+        assert_eq!(
+            outcome.offset,
+            u64::try_from(b"{}\n{\"packed\":true}\n".len()).expect("fixture length")
+        );
     }
 
     #[test]
