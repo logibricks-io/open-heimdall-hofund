@@ -40,6 +40,7 @@ mod checkin;
 mod config_ops;
 mod config_write;
 mod control;
+mod control_accounts;
 mod control_agents;
 mod control_groups;
 mod control_local;
@@ -325,6 +326,9 @@ pub struct StartOptions {
     /// Overrides `HOFUND_OWNER_PID` on the status response, for tests.
     #[doc(hidden)]
     pub hofund_owner_pid: Option<u32>,
+    /// Overrides the ten-minute control sign-in deadline, for expiry tests.
+    #[doc(hidden)]
+    pub sign_in_deadline: Option<std::time::Duration>,
 }
 
 /// Binds the model address and serves until shutdown.
@@ -624,6 +628,11 @@ async fn start_inner(
                 shutdown_request,
             )
             .with_status_metadata(status_serves, options.hofund_owner_pid)
+            .with_sign_in_deadline(
+                options
+                    .sign_in_deadline
+                    .unwrap_or(sign_in::SIGN_IN_DEADLINE),
+            )
             .with_router(snapshot)
             .with_agent_hooks(options.agent_session, Some(token_generation))
             .with_quotas(Arc::clone(&quotas))

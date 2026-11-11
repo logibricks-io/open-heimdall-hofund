@@ -103,6 +103,11 @@ pub async fn accounts_switch(
             );
         }
         to
+    } else if let Some((id, _)) = known
+        .iter()
+        .find(|(id, _)| id.as_str().eq_ignore_ascii_case(reference))
+    {
+        id.to_string()
     } else {
         account_by_name(&rows, &aliases, reference).map_err(DaemonError::new)?
     };

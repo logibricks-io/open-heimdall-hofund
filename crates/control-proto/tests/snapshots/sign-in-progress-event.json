@@ -8,6 +8,7 @@
     "event": "sign_in_progress",
     "data": {
       "provider": "primary",
+      "session": "0123456789abcdef0123456789abcdef",
       "state": "waiting"
     }
   }

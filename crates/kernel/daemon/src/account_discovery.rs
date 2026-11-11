@@ -96,7 +96,7 @@ pub fn import_if_configured(path: &Path, config: &Config) -> Result<(), DaemonEr
     })
 }
 
-async fn discover_opened(
+pub(crate) async fn discover_opened(
     opened: &[Opened],
     registry: &dyn DaemonRegistry,
     _config: &Config,

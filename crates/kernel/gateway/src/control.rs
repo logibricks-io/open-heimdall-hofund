@@ -20,25 +20,30 @@ use axum::routing::{get, patch, post};
 use futures_util::future::BoxFuture;
 use futures_util::stream::{BoxStream, StreamExt};
 use hofund_control_proto::{
-    AgentChangeResponse, AgentConnectRequest, AgentDisconnectRequest, AgentHiddenSetRequest,
-    AgentListResponse, AgentModelRequest, AgentModelsResponse, AgentPickedOnlyRequest,
-    AgentPlanRequest, AgentPlanResponse, AgentStatusResponse, AgentVisibleSetRequest,
-    CatalogDisabledListResponse, CatalogModelRequest, CheckinListResponse, CheckinRunRequest,
-    CheckinRunResponse, ConfigApplyRequest, ConfigResponse, ConfigValidateRequest,
-    ConfigValidationResponse, ControlError, ControlErrorKind, ErrorEnvelope, GatewayKeyRequest,
-    GatewayKeyResponse, GatewayKeyRestoreRequest, GroupCreateRequest, GroupDeleteRequest,
-    GroupDeleteResponse, GroupListResponse, GroupMemberCandidatesResponse, GroupPatchRequest,
-    GroupRestoreRequest, GroupWriteResponse, HealthResponse, MAX_ID_BYTES, MAX_REQUEST_BODY_BYTES,
-    ModelListResponse, PicksResponse, PicksSetRequest, PresetListResponse, ProfileDeleteRequest,
-    ProfileDetailResponse, ProfileListResponse, ProfileRenameRequest, ProfileSaveRequest,
-    ProfileSwitchRequest, ProfileSwitchResponse, ProviderCreateRequest, ProviderDeleteRequest,
-    ProviderDeleteResponse, ProviderKeyRequest, ProviderKeysResponse, ProviderListResponse,
-    ProviderPatchRequest, ProviderRenameRequest, ProviderRenameResponse, ProviderTestRequest,
-    ProviderTestResponse, ProviderWriteResponse, QuotaAlertsResponse, QuotaAlertsSetRequest,
-    QuotaAlertsSetResponse, QuotaCreditsModesResponse, QuotaCreditsSetRequest,
-    QuotaCreditsSetResponse, QuotaHistoryQuery, QuotaHistoryResponse, QuotaQuery, QuotaResponse,
-    ReloadRequest, RouteListResponse, RouteModelListResponse, RouteQuery, SessionRouteResponse,
-    SettingsPatchRequest, SettingsResponse, ShutdownRequest, ShutdownResponse, StatusResponse,
+    AccountDiscoverAddRequest, AccountDiscoverImportResponse, AccountDiscoverResponse,
+    AccountImportRequest, AccountImportResponse, AccountRemoveRequest, AccountRemoveResponse,
+    AccountSwitchRequest, AccountSwitchResponse, AgentChangeResponse, AgentConnectRequest,
+    AgentDisconnectRequest, AgentHiddenSetRequest, AgentListResponse, AgentModelRequest,
+    AgentModelsResponse, AgentPickedOnlyRequest, AgentPlanRequest, AgentPlanResponse,
+    AgentStatusResponse, AgentVisibleSetRequest, CatalogDisabledListResponse, CatalogModelRequest,
+    CheckinListResponse, CheckinRunRequest, CheckinRunResponse, ConfigApplyRequest, ConfigResponse,
+    ConfigValidateRequest, ConfigValidationResponse, ControlError, ControlErrorKind, ErrorEnvelope,
+    GatewayKeyRequest, GatewayKeyResponse, GatewayKeyRestoreRequest, GroupCreateRequest,
+    GroupDeleteRequest, GroupDeleteResponse, GroupListResponse, GroupMemberCandidatesResponse,
+    GroupPatchRequest, GroupRestoreRequest, GroupWriteResponse, HealthResponse, MAX_ID_BYTES,
+    MAX_REQUEST_BODY_BYTES, ModelListResponse, PicksResponse, PicksSetRequest, PresetListResponse,
+    ProfileDeleteRequest, ProfileDetailResponse, ProfileListResponse, ProfileRenameRequest,
+    ProfileSaveRequest, ProfileSwitchRequest, ProfileSwitchResponse, ProviderCreateRequest,
+    ProviderDeleteRequest, ProviderDeleteResponse, ProviderKeyRequest, ProviderKeysResponse,
+    ProviderListResponse, ProviderPatchRequest, ProviderRenameRequest, ProviderRenameResponse,
+    ProviderTestRequest, ProviderTestResponse, ProviderWriteResponse, QuotaAlertsResponse,
+    QuotaAlertsSetRequest, QuotaAlertsSetResponse, QuotaCreditsModesResponse,
+    QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryQuery, QuotaHistoryResponse,
+    QuotaQuery, QuotaResponse, ReloadRequest, RouteListResponse, RouteModelListResponse,
+    RouteQuery, SessionRouteResponse, SettingsPatchRequest, SettingsResponse, ShutdownRequest,
+    ShutdownResponse, SignInCancelRequest, SignInCancelResponse, SignInProofRequest,
+    SignInStartRequest, SignInStartResponse, SignInStatusResponse, StatusResponse,
+    SubscriptionListResponse, SubscriptionRefreshRequest, SubscriptionRefreshResponse,
     TokenRotateRequest, TokenRotateResponse, Topic, UnroutedListResponse, UsageQuery,
     UsageResponse, WarmupListResponse, WarmupRunRequest, WarmupRunResponse, decode_request,
 };
@@ -172,6 +177,72 @@ pub trait ControlState: Send + Sync {
         _request: SettingsPatchRequest,
     ) -> ControlFuture<'_, SettingsResponse> {
         Box::pin(async { Err(unsupported_settings()) })
+    }
+    /// Lists configured subscriptions and secret-free account rows.
+    fn subscriptions(&self) -> ControlFuture<'_, SubscriptionListResponse> {
+        Box::pin(async { Err(unsupported_accounts()) })
+    }
+    /// Starts a background sign-in session.
+    fn start_sign_in(
+        &self,
+        _id: String,
+        _request: SignInStartRequest,
+    ) -> ControlFuture<'_, SignInStartResponse> {
+        Box::pin(async { Err(unsupported_accounts()) })
+    }
+    /// Polls a sign-in session.
+    fn sign_in_status(&self, _session: String) -> ControlFuture<'_, SignInStatusResponse> {
+        Box::pin(async { Err(unsupported_accounts()) })
+    }
+    /// Supplies a pasted callback or token to a sign-in session.
+    fn sign_in_proof(
+        &self,
+        _session: String,
+        _request: SignInProofRequest,
+    ) -> ControlFuture<'_, SignInStatusResponse> {
+        Box::pin(async { Err(unsupported_accounts()) })
+    }
+    /// Cancels a sign-in session.
+    fn sign_in_cancel(&self, _session: String) -> ControlFuture<'_, SignInCancelResponse> {
+        Box::pin(async { Err(unsupported_accounts()) })
+    }
+    /// Refreshes stored subscription accounts.
+    fn refresh_subscription(
+        &self,
+        _id: String,
+        _request: SubscriptionRefreshRequest,
+    ) -> ControlFuture<'_, SubscriptionRefreshResponse> {
+        Box::pin(async { Err(unsupported_accounts()) })
+    }
+    /// Switches an agent's remembered sign-in.
+    fn switch_account(
+        &self,
+        _request: AccountSwitchRequest,
+    ) -> ControlFuture<'_, AccountSwitchResponse> {
+        Box::pin(async { Err(unsupported_accounts()) })
+    }
+    /// Imports an account export on the daemon host.
+    fn import_account(
+        &self,
+        _request: AccountImportRequest,
+    ) -> ControlFuture<'_, AccountImportResponse> {
+        Box::pin(async { Err(unsupported_accounts()) })
+    }
+    /// Finds account sign-ins in agent files.
+    fn discover_accounts(&self) -> ControlFuture<'_, AccountDiscoverResponse> {
+        Box::pin(async { Err(unsupported_accounts()) })
+    }
+    /// Imports newly discovered account sign-ins.
+    fn import_discovered_accounts(&self) -> ControlFuture<'_, AccountDiscoverImportResponse> {
+        Box::pin(async { Err(unsupported_accounts()) })
+    }
+    /// Removes a stored account.
+    fn remove_account(
+        &self,
+        _id: String,
+        _account: String,
+    ) -> ControlFuture<'_, AccountRemoveResponse> {
+        Box::pin(async { Err(unsupported_accounts()) })
     }
     /// Reports whether mutations are draining.
     fn draining(&self) -> bool;
@@ -786,6 +857,15 @@ fn unsupported_settings() -> ControlFailure {
     .into()
 }
 
+fn unsupported_accounts() -> ControlFailure {
+    ControlError::new(
+        ControlErrorKind::Internal,
+        "account operations are not implemented by this control state",
+        "control",
+    )
+    .into()
+}
+
 fn unsupported_gateway_keys() -> ControlFailure {
     ControlError::new(
         ControlErrorKind::Internal,
@@ -873,6 +953,39 @@ impl Control {
             .route(
                 "/v1/hofund/settings",
                 get(settings).patch(patch_settings).head(method_not_allowed),
+            )
+            .route(
+                "/v1/hofund/subscriptions",
+                get(subscriptions).head(method_not_allowed),
+            )
+            .route("/v1/hofund/subscriptions/{id}/sign-in", post(start_sign_in))
+            .route(
+                "/v1/hofund/subscriptions/{id}/sign-in/{session}",
+                get(sign_in_status).head(method_not_allowed),
+            )
+            .route(
+                "/v1/hofund/subscriptions/{id}/sign-in/{session}/proof",
+                post(sign_in_proof),
+            )
+            .route(
+                "/v1/hofund/subscriptions/{id}/sign-in/{session}/cancel",
+                post(sign_in_cancel),
+            )
+            .route(
+                "/v1/hofund/subscriptions/{id}/refresh",
+                post(refresh_subscription),
+            )
+            .route(
+                "/v1/hofund/subscriptions/{id}/accounts/{account}/remove",
+                post(remove_account),
+            )
+            .route("/v1/hofund/accounts/switch", post(switch_account))
+            .route("/v1/hofund/accounts/import", post(import_account))
+            .route(
+                "/v1/hofund/accounts/discover",
+                get(discover_accounts)
+                    .post(import_discovered_accounts)
+                    .head(method_not_allowed),
             )
             .route(
                 "/v1/hofund/providers",
@@ -1346,6 +1459,180 @@ async fn patch_settings(State(state): State<HttpState>, body: Bytes) -> Response
         Err(failure) => return failure_response(failure),
     };
     operation_response!(state.control.state.patch_settings(request).await)
+}
+
+async fn subscriptions(State(state): State<HttpState>) -> Response {
+    operation_response!(state.control.state.subscriptions().await)
+}
+
+async fn start_sign_in(
+    State(state): State<HttpState>,
+    id: Result<AxumPath<String>, PathRejection>,
+    body: Bytes,
+) -> Response {
+    let id = match path_id(id) {
+        Ok(id) => id,
+        Err(failure) => return failure_response(failure),
+    };
+    let request = match decode_body::<SignInStartRequest>(&body) {
+        Ok(request) => request,
+        Err(failure) => return failure_response(failure),
+    };
+    operation_response!(state.control.state.start_sign_in(id, request).await)
+}
+
+async fn sign_in_status(
+    State(state): State<HttpState>,
+    ids: Result<AxumPath<(String, String)>, PathRejection>,
+) -> Response {
+    let AxumPath((id, session)) = match ids {
+        Ok(ids) => ids,
+        Err(_) => {
+            return failure_response(
+                ControlError::new(ControlErrorKind::BadRequest, "invalid id", "http").into(),
+            );
+        }
+    };
+    if id.is_empty()
+        || id.len() > MAX_ID_BYTES
+        || session.is_empty()
+        || session.len() > MAX_ID_BYTES
+    {
+        return failure_response(
+            ControlError::new(ControlErrorKind::BadRequest, "invalid id", "http").into(),
+        );
+    }
+    operation_response!(state.control.state.sign_in_status(session).await)
+}
+
+async fn sign_in_proof(
+    State(state): State<HttpState>,
+    ids: Result<AxumPath<(String, String)>, PathRejection>,
+    body: Bytes,
+) -> Response {
+    let AxumPath((id, session)) = match ids {
+        Ok(ids) => ids,
+        Err(_) => {
+            return failure_response(
+                ControlError::new(ControlErrorKind::BadRequest, "invalid id", "http").into(),
+            );
+        }
+    };
+    if id.is_empty()
+        || id.len() > MAX_ID_BYTES
+        || session.is_empty()
+        || session.len() > MAX_ID_BYTES
+    {
+        return failure_response(
+            ControlError::new(ControlErrorKind::BadRequest, "invalid id", "http").into(),
+        );
+    }
+    let request = match decode_body::<SignInProofRequest>(&body) {
+        Ok(request) => request,
+        Err(failure) => return failure_response(failure),
+    };
+    operation_response!(state.control.state.sign_in_proof(session, request).await)
+}
+
+async fn sign_in_cancel(
+    State(state): State<HttpState>,
+    ids: Result<AxumPath<(String, String)>, PathRejection>,
+    body: Bytes,
+) -> Response {
+    let AxumPath((id, session)) = match ids {
+        Ok(ids) => ids,
+        Err(_) => {
+            return failure_response(
+                ControlError::new(ControlErrorKind::BadRequest, "invalid id", "http").into(),
+            );
+        }
+    };
+    if id.is_empty()
+        || id.len() > MAX_ID_BYTES
+        || session.is_empty()
+        || session.len() > MAX_ID_BYTES
+    {
+        return failure_response(
+            ControlError::new(ControlErrorKind::BadRequest, "invalid id", "http").into(),
+        );
+    }
+    if let Err(failure) = decode_body::<SignInCancelRequest>(&body) {
+        return failure_response(failure);
+    }
+    operation_response!(state.control.state.sign_in_cancel(session).await)
+}
+
+async fn refresh_subscription(
+    State(state): State<HttpState>,
+    id: Result<AxumPath<String>, PathRejection>,
+    body: Bytes,
+) -> Response {
+    let id = match path_id(id) {
+        Ok(id) => id,
+        Err(failure) => return failure_response(failure),
+    };
+    let request = match decode_body::<SubscriptionRefreshRequest>(&body) {
+        Ok(request) => request,
+        Err(failure) => return failure_response(failure),
+    };
+    operation_response!(state.control.state.refresh_subscription(id, request).await)
+}
+
+async fn switch_account(State(state): State<HttpState>, body: Bytes) -> Response {
+    let request = match decode_body::<AccountSwitchRequest>(&body) {
+        Ok(request) => request,
+        Err(failure) => return failure_response(failure),
+    };
+    operation_response!(state.control.state.switch_account(request).await)
+}
+
+async fn import_account(State(state): State<HttpState>, body: Bytes) -> Response {
+    let request = match decode_body::<AccountImportRequest>(&body) {
+        Ok(request) => request,
+        Err(failure) => return failure_response(failure),
+    };
+    operation_response!(state.control.state.import_account(request).await)
+}
+
+async fn discover_accounts(State(state): State<HttpState>) -> Response {
+    operation_response!(state.control.state.discover_accounts().await)
+}
+
+async fn import_discovered_accounts(State(state): State<HttpState>, body: Bytes) -> Response {
+    let request = match decode_body::<AccountDiscoverAddRequest>(&body) {
+        Ok(request) => request,
+        Err(failure) => return failure_response(failure),
+    };
+    let _ = request;
+    operation_response!(state.control.state.import_discovered_accounts().await)
+}
+
+async fn remove_account(
+    State(state): State<HttpState>,
+    ids: Result<AxumPath<(String, String)>, PathRejection>,
+    body: Bytes,
+) -> Response {
+    let AxumPath((id, account)) = match ids {
+        Ok(ids) => ids,
+        Err(_) => {
+            return failure_response(
+                ControlError::new(ControlErrorKind::BadRequest, "invalid id", "http").into(),
+            );
+        }
+    };
+    if id.is_empty()
+        || id.len() > MAX_ID_BYTES
+        || account.is_empty()
+        || account.len() > MAX_ID_BYTES
+    {
+        return failure_response(
+            ControlError::new(ControlErrorKind::BadRequest, "invalid id", "http").into(),
+        );
+    }
+    if let Err(failure) = decode_body::<AccountRemoveRequest>(&body) {
+        return failure_response(failure);
+    }
+    operation_response!(state.control.state.remove_account(id, account).await)
 }
 
 async fn providers(State(state): State<HttpState>) -> Response {

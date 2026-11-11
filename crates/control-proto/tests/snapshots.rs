@@ -455,7 +455,8 @@ fn json_snapshots_round_trip() {
         "sign-in-progress-event",
         EventPayload::SignInProgress(dto!(SignInProgressEvent,
             provider: "primary".to_owned(),
-            state: "waiting".to_owned(),
+            session: Some("0123456789abcdef0123456789abcdef".to_owned()),
+            state: Some("waiting".to_owned()),
         )),
     );
     event_snapshot(
@@ -500,6 +501,20 @@ fn a10_member_cooled_event_carries_status_and_vendor_words() {
     let decoded: MemberCooledEvent = serde_json::from_slice(older).expect("older event");
     assert_eq!(decoded.status, None);
     assert!(decoded.error.is_empty());
+}
+
+#[test]
+fn sign_in_progress_session_and_state_are_optional_and_backward_compatible() {
+    let older = br#"{"provider":"primary","state":"waiting"}"#;
+    let decoded: SignInProgressEvent = serde_json::from_slice(older).expect("older event");
+    assert_eq!(decoded.session, None);
+    assert_eq!(decoded.state.as_deref(), Some("waiting"));
+    let encoded = serde_json::to_value(&decoded).expect("event json");
+    assert!(encoded.get("session").is_none());
+    assert_eq!(encoded["state"], "waiting");
+    let without_state = serde_json::to_value(SignInProgressEvent::default()).expect("default");
+    assert!(without_state.get("state").is_none());
+    assert!(without_state.get("session").is_none());
 }
 
 #[test]

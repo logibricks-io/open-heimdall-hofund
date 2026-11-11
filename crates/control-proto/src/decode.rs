@@ -2,11 +2,13 @@ use serde::de::DeserializeOwned;
 use serde_json::error::Category;
 
 use crate::{
-    API_VERSION, AgentChangeResponse, AgentConnectRequest, AgentDisconnectRequest,
-    AgentHiddenSetRequest, AgentListResponse, AgentModelRequest, AgentModelsResponse,
-    AgentPickedOnlyRequest, AgentPlanRequest, AgentPlanResponse, AgentStatusResponse,
-    AgentVisibleSetRequest, CatalogDisabledListResponse, CatalogModelRequest, CheckinListResponse,
-    CheckinRunRequest, CheckinRunResponse, ConfigApplyRequest, ConfigResponse,
+    API_VERSION, AccountDiscoverAddRequest, AccountDiscoverImportResponse, AccountDiscoverResponse,
+    AccountImportRequest, AccountImportResponse, AccountRemoveRequest, AccountRemoveResponse,
+    AccountSwitchRequest, AccountSwitchResponse, AgentChangeResponse, AgentConnectRequest,
+    AgentDisconnectRequest, AgentHiddenSetRequest, AgentListResponse, AgentModelRequest,
+    AgentModelsResponse, AgentPickedOnlyRequest, AgentPlanRequest, AgentPlanResponse,
+    AgentStatusResponse, AgentVisibleSetRequest, CatalogDisabledListResponse, CatalogModelRequest,
+    CheckinListResponse, CheckinRunRequest, CheckinRunResponse, ConfigApplyRequest, ConfigResponse,
     ConfigValidateRequest, ConfigValidationResponse, ControlError, ControlErrorKind, ErrorEnvelope,
     EventEnvelope, FieldIssue, GatewayKeyRequest, GatewayKeyResponse, GatewayKeyRestoreRequest,
     GroupCreateRequest, GroupDeleteRequest, GroupDeleteResponse, GroupListResponse,
@@ -21,9 +23,11 @@ use crate::{
     QuotaAlertsResponse, QuotaAlertsSetRequest, QuotaAlertsSetResponse, QuotaCreditsModesResponse,
     QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryResponse, QuotaResponse,
     ReloadRequest, RouteListResponse, RouteModelListResponse, SessionRouteResponse,
-    SettingsPatchRequest, SettingsResponse, ShutdownRequest, ShutdownResponse, StatusResponse,
-    TokenRotateRequest, TokenRotateResponse, UnroutedListResponse, UsageResponse,
-    WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
+    SettingsPatchRequest, SettingsResponse, ShutdownRequest, ShutdownResponse, SignInCancelRequest,
+    SignInCancelResponse, SignInProofRequest, SignInStartRequest, SignInStartResponse,
+    SignInStatusResponse, StatusResponse, SubscriptionListResponse, SubscriptionRefreshRequest,
+    SubscriptionRefreshResponse, TokenRotateRequest, TokenRotateResponse, UnroutedListResponse,
+    UsageResponse, WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
 };
 
 mod sealed {
@@ -261,6 +265,14 @@ request!(GroupPatchRequest, validate);
 request!(GroupDeleteRequest, validate);
 request!(GroupRestoreRequest, validate);
 request!(SettingsPatchRequest, validate);
+request!(SignInStartRequest, validate);
+request!(SignInProofRequest, validate);
+request!(SubscriptionRefreshRequest, validate);
+request!(AccountSwitchRequest, validate);
+request!(AccountImportRequest, validate);
+request!(AccountDiscoverAddRequest, validate);
+request!(SignInCancelRequest);
+request!(AccountRemoveRequest);
 
 impl sealed::Sealed for ConfigResponse {}
 impl Response for ConfigResponse {
@@ -351,6 +363,16 @@ response!(
     GroupWriteResponse,
     GroupDeleteResponse,
     GroupMemberCandidatesResponse,
+    SubscriptionListResponse,
+    SignInStartResponse,
+    SignInStatusResponse,
+    SignInCancelResponse,
+    SubscriptionRefreshResponse,
+    AccountSwitchResponse,
+    AccountImportResponse,
+    AccountDiscoverResponse,
+    AccountDiscoverImportResponse,
+    AccountRemoveResponse,
 );
 
 #[cfg(test)]

@@ -3,6 +3,7 @@
 //! Requests reject unknown fields. Responses and events accept additive fields
 //! and use unknown enum fallbacks so older clients can read newer peers.
 
+mod accounts;
 mod agents;
 mod checkins;
 mod common;
@@ -30,6 +31,7 @@ mod usage;
 mod version;
 mod warmups;
 
+pub use accounts::*;
 pub use agents::*;
 pub use checkins::*;
 pub use common::*;
