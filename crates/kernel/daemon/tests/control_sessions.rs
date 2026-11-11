@@ -8,8 +8,9 @@ use std::sync::Arc;
 use chrono::Local;
 use hofund_control_proto::{
     API_VERSION, ControlErrorKind, SessionDetailResponse, SessionListResponse,
-    SessionManageResponse, SessionOverviewResponse, SessionProgressResponse, SessionSearchResponse,
-    SessionStatsResponse, SessionTranscriptResponse, decode_error_envelope, decode_response,
+    SessionManageResponse, SessionOverviewResponse, SessionProgressResponse, SessionReadsResponse,
+    SessionSearchResponse, SessionStatsResponse, SessionTranscriptResponse, decode_error_envelope,
+    decode_response,
 };
 use hofund_daemon::{
     CompiledPreset, ControlRuntime, DaemonRegistry, Running, StartOptions, start_linked,
@@ -237,6 +238,23 @@ async fn get(running: &Running, dir: &Path, path: &str) -> reqwest::Response {
         .send()
         .await
         .expect("control response")
+}
+
+async fn patch_reads(running: &Running, dir: &Path, body: serde_json::Value) -> reqwest::Response {
+    let token = std::fs::read_to_string(dir.join("hofund.token"))
+        .expect("token")
+        .trim()
+        .to_owned();
+    support::client()
+        .patch(format!(
+            "http://{}/v1/hofund/sessions/reads",
+            running.control_local_addr().expect("control")
+        ))
+        .bearer_auth(token)
+        .json(&body)
+        .send()
+        .await
+        .expect("PATCH response")
 }
 
 #[tokio::test]
@@ -473,5 +491,69 @@ async fn search_stops_at_two_hundred_hits() {
             .len(),
         200
     );
+    support::shutdown(running).await;
+}
+
+#[tokio::test]
+async fn reads_patch_supports_optional_revision_and_rejects_stale_or_bad_ids() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let running = start(dir.path()).await;
+    let response = get(&running, dir.path(), "/v1/hofund/sessions/reads").await;
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let initial: SessionReadsResponse =
+        decode_response(API_VERSION, &response.bytes().await.expect("reads body")).expect("reads");
+    assert!(initial.asked && initial.all);
+    assert_eq!(initial.revision.len(), 64);
+    assert_eq!(initial.found.len(), 1);
+    assert_eq!(initial.found[0].agent, "fake");
+    assert!(initial.found[0].on);
+
+    let response = patch_reads(
+        &running,
+        dir.path(),
+        serde_json::json!({"version": 1, "agents": {"fake": false}}),
+    )
+    .await;
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let updated: SessionReadsResponse =
+        decode_response(API_VERSION, &response.bytes().await.expect("updated body"))
+            .expect("updated reads");
+    assert!(!updated.found[0].on);
+    assert!(updated.enabled.is_empty());
+    assert_ne!(updated.revision, initial.revision);
+
+    let response = patch_reads(
+        &running,
+        dir.path(),
+        serde_json::json!({
+            "version": 1,
+            "expected_revision": initial.revision,
+            "all": false
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), reqwest::StatusCode::CONFLICT);
+    let error = decode_error_envelope(API_VERSION, &response.bytes().await.expect("conflict body"))
+        .expect("conflict");
+    assert_eq!(error.error.kind, ControlErrorKind::Conflict);
+
+    let response = patch_reads(
+        &running,
+        dir.path(),
+        serde_json::json!({"version": 1, "agents": {"../bad": true}}),
+    )
+    .await;
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+    let error = decode_error_envelope(API_VERSION, &response.bytes().await.expect("bad id body"))
+        .expect("bad id");
+    assert_eq!(error.error.kind, ControlErrorKind::BadRequest);
+
+    let response = get(&running, dir.path(), "/v1/hofund/sessions/reads").await;
+    let current: SessionReadsResponse =
+        decode_response(API_VERSION, &response.bytes().await.expect("current body"))
+            .expect("current reads");
+    assert_eq!(current.revision, updated.revision);
+    assert!(current.all);
+    assert!(!current.found[0].on);
     support::shutdown(running).await;
 }

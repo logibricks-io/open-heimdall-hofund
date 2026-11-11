@@ -22,9 +22,10 @@ use crate::{
     QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryResponse, QuotaResponse,
     ReloadRequest, RouteListResponse, RouteModelListResponse, SessionDetailResponse,
     SessionListResponse, SessionManageResponse, SessionOverviewResponse, SessionProgressResponse,
-    SessionRouteResponse, SessionSearchResponse, SessionStatsResponse, SessionTranscriptResponse,
-    ShutdownRequest, ShutdownResponse, StatusResponse, TokenRotateRequest, TokenRotateResponse,
-    UnroutedListResponse, UsageResponse, WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
+    SessionReadsPatchRequest, SessionReadsResponse, SessionRouteResponse, SessionSearchResponse,
+    SessionStatsResponse, SessionTranscriptResponse, ShutdownRequest, ShutdownResponse,
+    StatusResponse, TokenRotateRequest, TokenRotateResponse, UnroutedListResponse, UsageResponse,
+    WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
 };
 
 mod sealed {
@@ -261,6 +262,7 @@ request!(GroupCreateRequest, validate);
 request!(GroupPatchRequest, validate);
 request!(GroupDeleteRequest, validate);
 request!(GroupRestoreRequest, validate);
+request!(SessionReadsPatchRequest, validate);
 
 impl sealed::Sealed for ConfigResponse {}
 impl Response for ConfigResponse {
@@ -324,6 +326,7 @@ response!(
     SessionManageResponse,
     SessionOverviewResponse,
     SessionProgressResponse,
+    SessionReadsResponse,
     SessionRouteResponse,
     SessionSearchResponse,
     SessionStatsResponse,

@@ -289,6 +289,20 @@ impl ControlState for FakeControlState {
         self.reply(format!("session_manage:{}", query.agent))
     }
 
+    fn session_reads(&self) -> ControlFuture<'_, hofund_control_proto::SessionReadsResponse> {
+        self.reply("session_reads")
+    }
+
+    fn patch_session_reads(
+        &self,
+        request: hofund_control_proto::SessionReadsPatchRequest,
+    ) -> ControlFuture<'_, hofund_control_proto::SessionReadsResponse> {
+        self.reply(format!(
+            "patch_session_reads:{:?}",
+            request.expected_revision
+        ))
+    }
+
     fn usage(&self, query: UsageQuery) -> ControlFuture<'_, UsageResponse> {
         self.reply(format!("usage:{:?}", query.period))
     }
@@ -535,6 +549,12 @@ fn operation_routes() -> Vec<(Method, &'static str, Vec<u8>)> {
             "/v1/hofund/sessions/manage?agent=fake",
             Vec::new(),
         ),
+        (Method::GET, "/v1/hofund/sessions/reads", Vec::new()),
+        (
+            Method::PATCH,
+            "/v1/hofund/sessions/reads",
+            br#"{"version":1,"agents":{"fake":true}}"#.to_vec(),
+        ),
         (Method::GET, "/v1/hofund/sessions/fake%3Aone", Vec::new()),
         (
             Method::GET,
@@ -703,6 +723,8 @@ async fn control_routes_success_and_error_envelopes_against_fake_state() {
             "session_progress",
             "session_search:fake:Needle",
             "session_manage:fake",
+            "session_reads",
+            "patch_session_reads:None",
             "session:fake:one",
             "session_transcript:fake:one:Some(\"child\")",
             "usage:Day",

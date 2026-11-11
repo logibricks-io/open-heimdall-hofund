@@ -39,12 +39,12 @@ use hofund_control_proto::{
     QuotaCreditsSetResponse, QuotaHistoryQuery, QuotaHistoryResponse, QuotaQuery, QuotaResponse,
     ReloadRequest, RouteListResponse, RouteModelListResponse, RouteQuery, SessionDetailResponse,
     SessionListQuery, SessionListResponse, SessionManageQuery, SessionManageResponse,
-    SessionOverviewQuery, SessionOverviewResponse, SessionProgressResponse, SessionRouteResponse,
-    SessionSearchQuery, SessionSearchResponse, SessionStatsQuery, SessionStatsResponse,
-    SessionTranscriptQuery, SessionTranscriptResponse, ShutdownRequest, ShutdownResponse,
-    StatusResponse, TokenRotateRequest, TokenRotateResponse, Topic, UnroutedListResponse,
-    UsageQuery, UsageResponse, WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
-    decode_request,
+    SessionOverviewQuery, SessionOverviewResponse, SessionProgressResponse,
+    SessionReadsPatchRequest, SessionReadsResponse, SessionRouteResponse, SessionSearchQuery,
+    SessionSearchResponse, SessionStatsQuery, SessionStatsResponse, SessionTranscriptQuery,
+    SessionTranscriptResponse, ShutdownRequest, ShutdownResponse, StatusResponse,
+    TokenRotateRequest, TokenRotateResponse, Topic, UnroutedListResponse, UsageQuery,
+    UsageResponse, WarmupListResponse, WarmupRunRequest, WarmupRunResponse, decode_request,
 };
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
@@ -681,6 +681,18 @@ pub trait ControlState: Send + Sync {
         let _ = query;
         Box::pin(async { Err(unsupported_sessions()) })
     }
+    /// Returns session read consent.
+    fn session_reads(&self) -> ControlFuture<'_, SessionReadsResponse> {
+        Box::pin(async { Err(unsupported_sessions()) })
+    }
+    /// Updates session read consent with optional optimistic concurrency.
+    fn patch_session_reads(
+        &self,
+        request: SessionReadsPatchRequest,
+    ) -> ControlFuture<'_, SessionReadsResponse> {
+        let _ = request;
+        Box::pin(async { Err(unsupported_sessions()) })
+    }
     /// Reports usage for a period.
     fn usage(&self, query: UsageQuery) -> ControlFuture<'_, UsageResponse>;
     /// Reports what is left of every subscription, with each account's
@@ -1048,6 +1060,12 @@ impl Control {
             .route(
                 "/v1/hofund/sessions/manage",
                 get(session_manage).head(method_not_allowed),
+            )
+            .route(
+                "/v1/hofund/sessions/reads",
+                get(session_reads)
+                    .patch(patch_session_reads)
+                    .head(method_not_allowed),
             )
             .route("/v1/hofund/sessions/{id}/export", post(not_found))
             .route("/v1/hofund/sessions/delete", post(not_found))
@@ -1965,6 +1983,18 @@ async fn session_manage(State(state): State<HttpState>, uri: Uri) -> Response {
         Err(error) => return failure_response(error.into()),
     };
     operation_response!(state.control.state.session_manage(query).await)
+}
+
+async fn session_reads(State(state): State<HttpState>) -> Response {
+    operation_response!(state.control.state.session_reads().await)
+}
+
+async fn patch_session_reads(State(state): State<HttpState>, body: Bytes) -> Response {
+    let request = match decode_body::<SessionReadsPatchRequest>(&body) {
+        Ok(request) => request,
+        Err(failure) => return failure_response(failure),
+    };
+    operation_response!(state.control.state.patch_session_reads(request).await)
 }
 
 async fn session(

@@ -28,11 +28,12 @@ use hofund_control_proto::{
     RouteListResponse, RouteModel, RouteModelListResponse, RouteQuery, RouteReserve, ServeRole,
     SessionDetailResponse, SessionListQuery, SessionListResponse, SessionManageQuery,
     SessionManageResponse, SessionOverviewQuery, SessionOverviewResponse, SessionProgressResponse,
-    SessionRouteResponse, SessionSearchQuery, SessionSearchResponse, SessionStatsQuery,
-    SessionStatsResponse, SessionTranscriptResponse, ShutdownRequest, ShutdownResponse,
-    ShutdownState, StatusResponse, TokenRotateRequest, TokenRotateResponse, UnroutedListResponse,
-    UsageBreakdownBy, UsageBreakdownGroup, UsagePeriod, UsageQuery, UsageResponse, UsageRow,
-    UsageTotals, WarmupAccountRow, WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
+    SessionReadsPatchRequest, SessionReadsResponse, SessionRouteResponse, SessionSearchQuery,
+    SessionSearchResponse, SessionStatsQuery, SessionStatsResponse, SessionTranscriptResponse,
+    ShutdownRequest, ShutdownResponse, ShutdownState, StatusResponse, TokenRotateRequest,
+    TokenRotateResponse, UnroutedListResponse, UsageBreakdownBy, UsageBreakdownGroup, UsagePeriod,
+    UsageQuery, UsageResponse, UsageRow, UsageTotals, WarmupAccountRow, WarmupListResponse,
+    WarmupRunRequest, WarmupRunResponse,
 };
 use hofund_control_proto::{
     ConfigApplyRequest, ConfigResponse, ConfigValidateRequest, ConfigValidationResponse,
@@ -1359,6 +1360,21 @@ impl ControlState for DaemonControl {
         let sessions = Arc::clone(&self.sessions);
         Box::pin(session_task(sessions, move |sessions| {
             sessions.manage(query)
+        }))
+    }
+
+    fn session_reads(&self) -> ControlFuture<'_, SessionReadsResponse> {
+        let sessions = Arc::clone(&self.sessions);
+        Box::pin(session_task(sessions, move |sessions| sessions.reads()))
+    }
+
+    fn patch_session_reads(
+        &self,
+        request: SessionReadsPatchRequest,
+    ) -> ControlFuture<'_, SessionReadsResponse> {
+        let sessions = Arc::clone(&self.sessions);
+        Box::pin(session_task(sessions, move |sessions| {
+            sessions.patch_reads(request)
         }))
     }
 

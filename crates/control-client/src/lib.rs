@@ -27,11 +27,11 @@ use hofund_control_proto::{
     QuotaQuery, QuotaResponse, ReloadRequest, RouteListResponse, RouteModelListResponse,
     RouteQuery, SessionDetailResponse, SessionListQuery, SessionListResponse, SessionManageQuery,
     SessionManageResponse, SessionOverviewQuery, SessionOverviewResponse, SessionProgressResponse,
-    SessionRouteResponse, SessionSearchQuery, SessionSearchResponse, SessionStatsQuery,
-    SessionStatsResponse, SessionTranscriptResponse, ShutdownRequest, ShutdownResponse,
-    StatusResponse, TokenRotateRequest, TokenRotateResponse, Topic, UnroutedListResponse,
-    UsageQuery, UsageResponse, WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
-    decode_error_envelope, decode_response,
+    SessionReadsPatchRequest, SessionReadsResponse, SessionRouteResponse, SessionSearchQuery,
+    SessionSearchResponse, SessionStatsQuery, SessionStatsResponse, SessionTranscriptResponse,
+    ShutdownRequest, ShutdownResponse, StatusResponse, TokenRotateRequest, TokenRotateResponse,
+    Topic, UnroutedListResponse, UsageQuery, UsageResponse, WarmupListResponse, WarmupRunRequest,
+    WarmupRunResponse, decode_error_envelope, decode_response,
 };
 use http::header;
 use http_body_util::{BodyExt, Full, Limited};
@@ -1023,6 +1023,24 @@ impl Client {
             .await
     }
 
+    /// Returns session read consent.
+    pub async fn session_reads(&self) -> Result<SessionReadsResponse, ClientError> {
+        self.get("/v1/hofund/sessions/reads").await
+    }
+
+    /// Updates session read consent with optional optimistic concurrency.
+    pub async fn patch_session_reads(
+        &self,
+        request: SessionReadsPatchRequest,
+    ) -> Result<SessionReadsResponse, ClientError> {
+        self.request(
+            http::Method::PATCH,
+            "/v1/hofund/sessions/reads",
+            Some(json_body(&request)?),
+        )
+        .await
+    }
+
     /// Reports usage for a period.
     pub async fn usage(&self, query: UsageQuery) -> Result<UsageResponse, ClientError> {
         let url = format!("/v1/hofund/usage?{}", query.encode());
@@ -1671,6 +1689,9 @@ mod route_tests {
             "/v1/hofund/sessions/manage" => {
                 serde_json::to_vec(&proto::SessionManageResponse::default())
             }
+            "/v1/hofund/sessions/reads" => {
+                serde_json::to_vec(&proto::SessionReadsResponse::default())
+            }
             "/v1/hofund/usage" => serde_json::to_vec(&proto::UsageResponse::default()),
             "/v1/hofund/token/rotate" => serde_json::to_vec(&proto::TokenRotateResponse::default()),
             "/v1/hofund/shutdown" => serde_json::to_vec(&proto::ShutdownResponse::default()),
@@ -2020,6 +2041,11 @@ mod route_tests {
         let mut manage = hofund_control_proto::SessionManageQuery::default();
         manage.agent = "fake".to_owned();
         client.session_manage(manage).await.expect("session manage");
+        client.session_reads().await.expect("session reads");
+        client
+            .patch_session_reads(hofund_control_proto::SessionReadsPatchRequest::default())
+            .await
+            .expect("PATCH reads");
         server.abort();
 
         let paths: Vec<String> = recorded
@@ -2040,8 +2066,14 @@ mod route_tests {
                 "/v1/hofund/sessions/fake%3Aone/markdown",
                 "/v1/hofund/sessions/search?agent=fake&q=two%20words",
                 "/v1/hofund/sessions/manage?agent=fake",
+                "/v1/hofund/sessions/reads",
+                "/v1/hofund/sessions/reads",
             ]
         );
+        let recorded = recorded.lock().expect("recorded");
+        let last = recorded.last().expect("PATCH request");
+        assert_eq!(last.method, http::Method::PATCH);
+        assert_eq!(last.body, br#"{"version":1}"#);
     }
 
     #[tokio::test]

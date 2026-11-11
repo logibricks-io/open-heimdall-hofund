@@ -1,8 +1,10 @@
 //! Read-only session listing and reporting contracts.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
-use crate::{API_VERSION, ControlError, ControlErrorKind};
+use crate::{API_VERSION, ControlError, ControlErrorKind, validate_revision};
 
 /// Default maximum number of rows returned by the session list.
 pub const DEFAULT_SESSION_LIST_LIMIT: usize = 5000;
@@ -586,6 +588,85 @@ impl Default for SessionManageResponse {
             recording: false,
             recorded: false,
         }
+    }
+}
+
+/// One found or explicitly configured agent's read state.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct SessionReadAgent {
+    /// Agent instance id.
+    pub agent: String,
+    /// Whether current consent permits this agent's files.
+    pub on: bool,
+}
+
+/// Session read-consent response.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct SessionReadsResponse {
+    /// Body wire version.
+    pub version: u32,
+    /// SHA-256 resource revision.
+    pub revision: String,
+    /// Whether the user has answered the consent prompt.
+    pub asked: bool,
+    /// Default for agents without an explicit answer.
+    pub all: bool,
+    /// Explicitly enabled agent ids.
+    pub enabled: Vec<String>,
+    /// Found and explicitly configured agents.
+    pub found: Vec<SessionReadAgent>,
+}
+
+impl Default for SessionReadsResponse {
+    fn default() -> Self {
+        Self {
+            version: API_VERSION,
+            revision: String::new(),
+            asked: false,
+            all: false,
+            enabled: Vec::new(),
+            found: Vec::new(),
+        }
+    }
+}
+
+/// Session read-consent update.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+#[serde(deny_unknown_fields)]
+pub struct SessionReadsPatchRequest {
+    /// Body wire version.
+    pub version: u32,
+    /// Expected resource revision, when tracked by the client.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_revision: Option<String>,
+    /// New default for agents without an explicit answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub all: Option<bool>,
+    /// Per-agent answers to merge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agents: Option<BTreeMap<String, bool>>,
+}
+
+impl Default for SessionReadsPatchRequest {
+    fn default() -> Self {
+        Self {
+            version: API_VERSION,
+            expected_revision: None,
+            all: None,
+            agents: None,
+        }
+    }
+}
+
+impl SessionReadsPatchRequest {
+    pub(crate) fn validate(&self) -> Result<(), ControlError> {
+        if let Some(revision) = &self.expected_revision {
+            validate_revision("expected_revision", revision)?;
+        }
+        Ok(())
     }
 }
 

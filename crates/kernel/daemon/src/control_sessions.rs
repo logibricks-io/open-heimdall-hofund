@@ -9,9 +9,10 @@ use hofund_control_proto::{
     ControlError, ControlErrorKind, SessionConsent, SessionDayStats, SessionDetailResponse,
     SessionListQuery, SessionListResponse, SessionManageAgent, SessionManageQuery,
     SessionManageResponse, SessionOverviewDay, SessionOverviewQuery, SessionOverviewResponse,
-    SessionOverviewTop, SessionProgressResponse, SessionSearchHit, SessionSearchQuery,
-    SessionSearchResponse, SessionStatShare, SessionStatsQuery, SessionStatsResponse,
-    SessionSummary, SessionTokenTotals, SessionTranscriptPart, SessionTranscriptResponse,
+    SessionOverviewTop, SessionProgressResponse, SessionReadAgent, SessionReadsPatchRequest,
+    SessionReadsResponse, SessionSearchHit, SessionSearchQuery, SessionSearchResponse,
+    SessionStatShare, SessionStatsQuery, SessionStatsResponse, SessionSummary, SessionTokenTotals,
+    SessionTranscriptPart, SessionTranscriptResponse,
 };
 use hofund_gateway::control::ControlFailure;
 use hofund_model_catalog::EffectivePricer;
@@ -193,6 +194,76 @@ impl SessionControl {
             })
             .collect();
         Ok(response)
+    }
+
+    pub(crate) fn reads(&self) -> Result<SessionReadsResponse, ControlFailure> {
+        let state = self.state.lock().map_err(|_| session_internal())?;
+        Ok(self.reads_from(&state))
+    }
+
+    pub(crate) fn patch_reads(
+        &self,
+        request: SessionReadsPatchRequest,
+    ) -> Result<SessionReadsResponse, ControlFailure> {
+        let mut state = self.state.lock().map_err(|_| session_internal())?;
+        if let Some(expected) = request.expected_revision.as_deref() {
+            let current = self.reads_from(&state);
+            if expected != current.revision {
+                return Err(ControlError::new(
+                    ControlErrorKind::Conflict,
+                    "session read consent changed since it was read",
+                    "sessions",
+                )
+                .into());
+            }
+        }
+        state
+            .consent
+            .set_reads(request.all, request.agents.unwrap_or_default())
+            .map_err(|error| {
+                let kind = match error {
+                    hofund_sessions::consent::ConsentError::InvalidAgent(_) => {
+                        ControlErrorKind::BadRequest
+                    }
+                    _ => ControlErrorKind::Internal,
+                };
+                ControlError::new(kind, "cannot update session read consent", "sessions")
+            })?;
+        let SessionState { consent, index } = &mut *state;
+        let _ = index.list(consent);
+        index.save_if_dirty().map_err(|_| session_internal())?;
+        Ok(self.reads_from(&state))
+    }
+
+    fn reads_from(&self, state: &SessionState) -> SessionReadsResponse {
+        let reads = state.consent.reads();
+        let mut response = SessionReadsResponse::default();
+        response.asked = reads.asked;
+        response.all = reads.all;
+        response.enabled = reads
+            .agents
+            .iter()
+            .filter(|(_, enabled)| **enabled)
+            .map(|(agent, _)| agent.clone())
+            .collect();
+        let mut agents: BTreeSet<String> = self
+            .stores
+            .iter()
+            .filter(|store| store.locator().present())
+            .map(|store| store.agent().to_owned())
+            .collect();
+        agents.extend(reads.agents.keys().cloned());
+        response.found = agents
+            .into_iter()
+            .map(|agent| {
+                let mut row = SessionReadAgent::default();
+                row.on = state.consent.allows(&agent);
+                row.agent = agent;
+                row
+            })
+            .collect();
+        seal(&mut response, |response| &mut response.revision);
+        response
     }
 
     pub(crate) fn search(
