@@ -17,6 +17,7 @@ use sha2::{Digest, Sha256};
 
 use hofund_plugin_agent_claude::ClaudeStore;
 use hofund_plugin_agent_codex::CodexStore;
+use hofund_plugin_agent_opencode::OpenCodeStore;
 
 pub(crate) const HELP: &str = "\
 usage: hofund sessions [--days N|today|all] [--model MODEL] [--folder FOLDER] [--limit N] [--json]
@@ -109,7 +110,8 @@ pub(crate) fn parse(words: &[&str], flags: Flags) -> Result<Command, String> {
 pub(crate) fn run(config: &Path, command: &Command) -> Result<String, String> {
     let claude = ClaudeStore::new();
     let codex = CodexStore::new();
-    let stores: [&dyn SessionStore; 2] = [&claude, &codex];
+    let opencode = OpenCodeStore::new();
+    let stores: [&dyn SessionStore; 3] = [&claude, &codex, &opencode];
     run_with(config, command, &stores, Local::now())
 }
 

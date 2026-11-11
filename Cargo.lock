@@ -1814,6 +1814,7 @@ dependencies = [
  "hofund-model-catalog",
  "hofund-plugin-agent-claude",
  "hofund-plugin-agent-codex",
+ "hofund-plugin-agent-opencode",
  "hofund-plugin-api",
  "hofund-secrets",
  "hofund-sessions",
@@ -2064,6 +2065,14 @@ dependencies = [
  "hofund-plugin-api",
  "hofund-plugin-sdk",
  "tempfile",
+]
+
+[[package]]
+name = "hofund-plugin-agent-opencode"
+version = "0.1.0"
+dependencies = [
+ "hofund-plugin-api",
+ "hofund-plugin-sdk",
 ]
 
 [[package]]
@@ -2529,9 +2538,11 @@ dependencies = [
 name = "hofund-sessions"
 version = "0.1.0"
 dependencies = [
+ "hofund-plugin-agent-opencode",
  "hofund-plugin-api",
  "hofund-usage",
  "libc",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",

@@ -21,6 +21,7 @@ hofund-config = { workspace = true }
 hofund-control-client = { workspace = true }
 hofund-plugin-agent-claude = { workspace = true }
 hofund-plugin-agent-codex = { workspace = true }
+hofund-plugin-agent-opencode = { workspace = true }
 hofund-plugin-api = { workspace = true }
 hofund-sessions = { workspace = true }
 hofund-usage = { workspace = true }

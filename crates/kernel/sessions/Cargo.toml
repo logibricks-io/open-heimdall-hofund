@@ -14,11 +14,15 @@ rust-version.workspace = true
 hofund-plugin-api = { workspace = true }
 hofund-usage = { workspace = true }
 libc = "0.2.180"
+rusqlite = { version = "0.41.0", default-features = false, features = ["bundled", "limits"] }
 serde = { version = "1.0.228", default-features = false, features = ["derive"] }
 serde_json = "1.0.154"
 tempfile = { workspace = true }
 thiserror = "2.0.21"
 zstd = { workspace = true }
+
+[dev-dependencies]
+hofund-plugin-agent-opencode = { workspace = true }
 
 [lints]
 workspace = true

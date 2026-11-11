@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use hofund_plugin_api::{
-    PluginError, SessionDay, SessionFile, SessionParse, SessionRecord, SessionStore,
+    PluginError, SessionDay, SessionFile, SessionFormat, SessionParse, SessionRecord, SessionStore,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -110,6 +110,15 @@ pub enum IndexError {
     Serialize,
 }
 
+type EntryKey = (PathBuf, PathBuf, String);
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+struct FileStamp {
+    path: PathBuf,
+    size: u64,
+    modified_ns: i64,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct CacheEntry {
     root: PathBuf,
@@ -119,6 +128,8 @@ struct CacheEntry {
     modified_ns: i64,
     offset: u64,
     state: String,
+    #[serde(default)]
+    related: Vec<FileStamp>,
     record: SessionRecord,
 }
 
@@ -132,7 +143,7 @@ struct DiskIndex {
 #[derive(Debug)]
 pub struct SessionIndex {
     path: PathBuf,
-    entries: BTreeMap<(PathBuf, PathBuf), CacheEntry>,
+    entries: BTreeMap<EntryKey, CacheEntry>,
     dirty: bool,
 }
 
@@ -152,8 +163,19 @@ impl SessionIndex {
             if consent.allows(&entry.record.agent)
                 && entry.path == entry.record.path
                 && within_root(&entry.root, &entry.path)
+                && entry
+                    .related
+                    .iter()
+                    .all(|related| within_root(&entry.root, &related.path))
             {
-                entries.insert((entry.root.clone(), entry.path.clone()), entry);
+                entries.insert(
+                    (
+                        entry.root.clone(),
+                        entry.path.clone(),
+                        entry.file_id.clone(),
+                    ),
+                    entry,
+                );
             } else {
                 dropped = true;
             }
@@ -196,7 +218,11 @@ impl SessionIndex {
             }
             for root in store.locator().roots() {
                 for file in store.files(&root)? {
-                    self.refresh_file(*store, &root, &file, &mut seen)?;
+                    if file.format == SessionFormat::Sqlite {
+                        self.refresh_database(*store, &root, &file, &mut seen)?;
+                    } else {
+                        self.refresh_file(*store, &root, &file, &mut seen)?;
+                    }
                 }
             }
         }
@@ -298,47 +324,107 @@ impl SessionIndex {
         self.dirty |= before != self.entries.len();
     }
 
+    fn refresh_database(
+        &mut self,
+        store: &dyn SessionStore,
+        root: &Path,
+        file: &SessionFile,
+        seen: &mut BTreeSet<EntryKey>,
+    ) -> Result<(), IndexError> {
+        if !within_root(root, &file.path) {
+            return Ok(());
+        }
+        let stamp = match file_stamp(root, &file.path) {
+            Ok(stamp) => stamp,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        let old: Vec<_> = self
+            .entries
+            .iter()
+            .filter(|(_, entry)| {
+                entry.root == root && entry.path == file.path && entry.record.agent == store.agent()
+            })
+            .map(|(key, entry)| (key.clone(), entry.clone()))
+            .collect();
+        if !old.is_empty()
+            && old.iter().all(|(_, entry)| {
+                entry.size == stamp.size && entry.modified_ns == stamp.modified_ns
+            })
+        {
+            seen.extend(old.into_iter().map(|(key, _)| key));
+            return Ok(());
+        }
+        self.entries.retain(|_, entry| {
+            entry.root != root || entry.path != file.path || entry.record.agent != store.agent()
+        });
+        let database = crate::sqlite::open_ro(root, &file.path)?;
+        let records = store.read_database(file, &database)?;
+        for mut record in records {
+            store.agent().clone_into(&mut record.agent);
+            record.path.clone_from(&file.path);
+            let key = (root.to_path_buf(), file.path.clone(), record.id.clone());
+            seen.insert(key.clone());
+            self.entries.insert(
+                key,
+                CacheEntry {
+                    root: root.to_path_buf(),
+                    path: file.path.clone(),
+                    file_id: record.id.clone(),
+                    size: stamp.size,
+                    modified_ns: stamp.modified_ns,
+                    offset: 0,
+                    state: String::new(),
+                    related: Vec::new(),
+                    record,
+                },
+            );
+        }
+        self.dirty = true;
+        Ok(())
+    }
+
     fn refresh_file(
         &mut self,
         store: &dyn SessionStore,
         root: &Path,
         file: &SessionFile,
-        seen: &mut BTreeSet<(PathBuf, PathBuf)>,
+        seen: &mut BTreeSet<EntryKey>,
     ) -> Result<(), IndexError> {
-        let key = (root.to_path_buf(), file.path.clone());
+        let key = (root.to_path_buf(), file.path.clone(), file.id.clone());
         if !within_root(root, &file.path) {
             self.entries.remove(&key);
             self.dirty = true;
             return Ok(());
         }
-        let metadata = match std::fs::metadata(&file.path) {
-            Ok(metadata) if metadata.is_file() => metadata,
-            Ok(_) => return Ok(()),
+        let stamp = match file_stamp(root, &file.path) {
+            Ok(stamp) => stamp,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
             Err(error) => return Err(error.into()),
         };
+        let related = file
+            .related
+            .iter()
+            .map(|path| file_stamp(root, path))
+            .collect::<Result<Vec<_>, _>>()?;
         seen.insert(key.clone());
-        let size = metadata.len();
-        let modified_ns = metadata
-            .modified()
-            .ok()
-            .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
-            .and_then(|duration| i64::try_from(duration.as_nanos()).ok())
-            .unwrap_or(0);
         let old = self.entries.get(&key).cloned();
         if let Some(old) = &old
-            && old.size == size
-            && old.modified_ns == modified_ns
+            && old.size == stamp.size
+            && old.modified_ns == stamp.modified_ns
             && old.file_id == file.id
+            && old.related == related
         {
             return Ok(());
         }
         let append = old.as_ref().is_some_and(|old| {
             old.file_id == file.id
+                && file.format == SessionFormat::JsonLines
+                && file.related.is_empty()
                 && file.compression == hofund_plugin_api::SessionCompression::None
-                && size > old.size
-                && modified_ns >= old.modified_ns
-                && old.offset <= size.min(MAX_FILE_BYTES)
+                && stamp.size > old.size
+                && stamp.modified_ns >= old.modified_ns
+                && old.offset <= stamp.size.min(MAX_FILE_BYTES)
         });
         let (offset, previous) = if append {
             let old = old.as_ref().expect("append has old state");
@@ -368,10 +454,11 @@ impl SessionIndex {
                 root: root.to_path_buf(),
                 path: file.path.clone(),
                 file_id: file.id.clone(),
-                size,
-                modified_ns,
+                size: stamp.size,
+                modified_ns: stamp.modified_ns,
                 offset: outcome.offset,
                 state,
+                related,
                 record,
             },
         );
@@ -472,6 +559,58 @@ fn preferred_keeper(left: &SessionRecord, right: &SessionRecord) -> bool {
     left.last_ms > right.last_ms || (left.last_ms == right.last_ms && left.id > right.id)
 }
 
+fn file_stamp(root: &Path, path: &Path) -> io::Result<FileStamp> {
+    if !within_root(root, path) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "session path escapes its root",
+        ));
+    }
+    let metadata = std::fs::metadata(path)?;
+    if !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "session path is not a regular file",
+        ));
+    }
+    let modified_ns = metadata
+        .modified()
+        .ok()
+        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .and_then(|duration| i64::try_from(duration.as_nanos()).ok())
+        .unwrap_or(0);
+    Ok(FileStamp {
+        path: path.to_path_buf(),
+        size: metadata.len(),
+        modified_ns,
+    })
+}
+
+fn read_document<R: Read>(
+    reader: &mut R,
+    mut on_value: impl FnMut(&Value),
+) -> io::Result<ReadOutcome> {
+    let mut bytes = Vec::new();
+    let mut limited = reader.take((MAX_LINE_BYTES + 1) as u64);
+    limited.read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_LINE_BYTES {
+        return Ok(ReadOutcome {
+            offset: MAX_LINE_BYTES as u64,
+            cut: true,
+            lines: 0,
+        });
+    }
+    let mut outcome = ReadOutcome {
+        offset: bytes.len() as u64,
+        ..ReadOutcome::default()
+    };
+    if let Ok(value) = parse_line(&bytes) {
+        outcome.lines = 1;
+        on_value(&value);
+    }
+    Ok(outcome)
+}
+
 fn parse_file(
     store: &dyn SessionStore,
     root: &Path,
@@ -480,8 +619,6 @@ fn parse_file(
     previous: Option<&str>,
 ) -> Result<(SessionParse, ReadOutcome), IndexError> {
     let mut parser = store.parser(file, previous)?;
-    let mut opened =
-        open_session_file(root, &file.path).map_err(|error| io::Error::other(error.to_string()))?;
     let mut parser_error = None;
     let mut on_value = |value: &Value| {
         if parser_error.is_none()
@@ -490,23 +627,52 @@ fn parse_file(
             parser_error = Some(error);
         }
     };
-    let outcome = match file.compression {
-        hofund_plugin_api::SessionCompression::None => {
-            opened.seek(SeekFrom::Start(offset))?;
-            read_incremental(&mut opened, offset, &mut on_value)?
+    let mut outcome = ReadOutcome::default();
+    match file.format {
+        SessionFormat::JsonLines => {
+            let mut opened = open_session_file(root, &file.path)
+                .map_err(|error| io::Error::other(error.to_string()))?;
+            outcome = match file.compression {
+                hofund_plugin_api::SessionCompression::None => {
+                    opened.seek(SeekFrom::Start(offset))?;
+                    read_incremental(&mut opened, offset, &mut on_value)?
+                }
+                hofund_plugin_api::SessionCompression::Zstd => {
+                    let mut decoder = zstd::stream::read::Decoder::new(opened)?;
+                    read_incremental(&mut decoder, 0, &mut on_value)?
+                }
+                _ => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "unsupported session compression",
+                    )
+                    .into());
+                }
+            };
         }
-        hofund_plugin_api::SessionCompression::Zstd => {
-            let mut decoder = zstd::stream::read::Decoder::new(opened)?;
-            read_incremental(&mut decoder, 0, &mut on_value)?
+        SessionFormat::Json => {
+            for path in std::iter::once(&file.path).chain(file.related.iter()) {
+                let mut opened = open_session_file(root, path)
+                    .map_err(|error| io::Error::other(error.to_string()))?;
+                let next = read_document(&mut opened, &mut on_value)?;
+                outcome.offset = next.offset;
+                outcome.lines += next.lines;
+                outcome.cut |= next.cut;
+            }
         }
-        _ => {
+        SessionFormat::Sqlite => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "unsupported session compression",
+                "SQLite source reached the JSON parser",
             )
             .into());
         }
-    };
+        _ => {
+            return Err(
+                io::Error::new(io::ErrorKind::InvalidData, "unsupported session format").into(),
+            );
+        }
+    }
     if let Some(error) = parser_error {
         return Err(error.into());
     }
@@ -599,6 +765,7 @@ mod tests {
             modified_ns: 1,
             offset: 3,
             state: String::new(),
+            related: Vec::new(),
             record,
         };
         let state = temp.path().join("state");
