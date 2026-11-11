@@ -66,6 +66,7 @@ const MEMBERS: &[&str] = &[
     "crates/kernel/quirks",
     "crates/kernel/router",
     "crates/kernel/secrets",
+    "crates/kernel/sessions",
     "crates/kernel/usage",
     "xtask",
 ];
@@ -209,6 +210,7 @@ fn expected_deps(package: &str) -> Option<&'static [&'static str]> {
             "hofund-plugin-api",
         ],
         "hofund-secrets" => &[],
+        "hofund-sessions" => &["hofund-plugin-api"],
         "hofund-usage" => &[],
         "xtask" => &[],
         _ => return None,
@@ -294,6 +296,7 @@ fn expected_dev_deps(package: &str) -> Option<&'static [&'static str]> {
             "hofund-plugin-api",
         ],
         "hofund-secrets" => &[],
+        "hofund-sessions" => &[],
         "hofund-usage" => &["hofund-config", "hofund-model-catalog"],
         "xtask" => &[],
         _ => return None,
@@ -515,6 +518,7 @@ fn dependency_graph_matches_architecture() {
         "hofund-quirks",
         "hofund-router",
         "hofund-secrets",
+        "hofund-sessions",
         "hofund-usage",
         "xtask",
     ] {

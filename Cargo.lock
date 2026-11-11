@@ -2501,6 +2501,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "hofund-sessions"
+version = "0.1.0"
+dependencies = [
+ "hofund-plugin-api",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "hofund-tui"
 version = "0.1.0"
 dependencies = [

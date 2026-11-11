@@ -52,6 +52,7 @@ members = [
     "crates/kernel/quirks",
     "crates/kernel/router",
     "crates/kernel/secrets",
+    "crates/kernel/sessions",
     "crates/kernel/usage",
     "xtask",
 ]
@@ -116,6 +117,7 @@ hofund-provider = { version = "0.1.0", path = "crates/kernel/provider" }
 hofund-quirks = { version = "0.1.0", path = "crates/kernel/quirks" }
 hofund-router = { version = "0.1.0", path = "crates/kernel/router" }
 hofund-secrets = { version = "0.1.0", path = "crates/kernel/secrets" }
+hofund-sessions = { version = "0.1.0", path = "crates/kernel/sessions" }
 hofund-tui = { version = "0.1.0", path = "apps/tui" }
 hofund-usage = { version = "0.1.0", path = "crates/kernel/usage" }
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
