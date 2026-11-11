@@ -490,6 +490,15 @@ mod tests {
         );
         assert_eq!(variant_for(&[], "swe-2", ""), "swe-2-high");
         assert_eq!(variant_for(&[], "swe-2", "none"), "swe-2-medium");
+        assert_eq!(
+            variant_for(snapshot_families(), "claude-opus-4.8", ""),
+            "claude-opus-4-8-medium"
+        );
+        assert!(
+            snapshot_families()
+                .iter()
+                .any(|family| family.uid == "gemini-3-7-flash")
+        );
     }
 
     #[test]

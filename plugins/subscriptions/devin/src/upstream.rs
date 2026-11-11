@@ -218,10 +218,11 @@ fn refuse_unserved(request: &Request) -> Result<(), PluginError> {
         return Err(stream::tools_refusal());
     }
     if request.messages.iter().any(|message| {
-        message
-            .content
-            .iter()
-            .any(|part| matches!(part, ContentPart::Image(_) | ContentPart::ToolResult(_)))
+        message.content.iter().any(|part| match part {
+            ContentPart::Image(_) | ContentPart::ToolResult(_) => true,
+            ContentPart::Unknown(part) => part.kind.to_ascii_lowercase().contains("image"),
+            _ => false,
+        })
     }) {
         return Err(refusal(IMAGES_MESSAGE));
     }

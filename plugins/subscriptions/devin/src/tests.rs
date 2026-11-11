@@ -424,6 +424,16 @@ fn tools_images_and_structured_output_are_refused_without_http() {
         "response_format",
         hofund_plugin_sdk::json::json!({"type": "json_object"}),
     );
+    let mut responses_structured = request("swe-2");
+    responses_structured.extensions.insert(
+        "text",
+        hofund_plugin_sdk::json::json!({"format": {"type": "json_schema"}}),
+    );
+    let mut messages_structured = request("swe-2");
+    messages_structured.extensions.insert(
+        "output_config",
+        hofund_plugin_sdk::json::json!({"format": {"type": "json_object"}}),
+    );
     for (label, request, phrase) in [
         (
             "tools-refusal@example.test",
@@ -434,6 +444,16 @@ fn tools_images_and_structured_output_are_refused_without_http() {
         (
             "structured-refusal@example.test",
             structured,
+            "structured output",
+        ),
+        (
+            "responses-structured-refusal@example.test",
+            responses_structured,
+            "structured output",
+        ),
+        (
+            "messages-structured-refusal@example.test",
+            messages_structured,
             "structured output",
         ),
     ] {

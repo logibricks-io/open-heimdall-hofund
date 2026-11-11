@@ -175,22 +175,13 @@ async fn live_catalog(host: &HostContext, stored: &Stored) -> Result<Catalog, Pl
 }
 
 #[cfg(test)]
-pub(crate) fn clear_cache() {
-    cache()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clear();
-}
-
-#[cfg(test)]
 mod tests {
     use std::time::Duration;
 
-    use super::{CacheEntry, FRESH, RETRY, clear_cache};
+    use super::{CacheEntry, FRESH, RETRY};
 
     #[test]
     fn cache_waits_for_fresh_expiry_and_failed_retry_delay() {
-        clear_cache();
         let entry = CacheEntry {
             at: Duration::from_secs(100),
             failed: Some(Duration::from_secs(200)),

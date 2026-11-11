@@ -14,7 +14,7 @@ Legend: **Done** = matches the reference at checklist granularity; **Partial** =
 |---|---|---|---|---|---|
 | Claude Pro/Max (`claude`) | 1 | 11 | 9 | 2 | 0 |
 | Cursor (`cursor`) | 1 | 11 | 7 | 2 | 0 |
-| Devin (`devin`) | 2 | 5 | 11 | 1 | 0 |
+| Devin (`devin`) | 7 | 7 | 4 | 1 | 0 |
 | Zed (`zed`) | 0 | 6 | 1 | 3 | 0 |
 | Kiro (`kiro`) | 0 | 13 | 5 | 1 | 0 |
 | Factory / Droid (`factory`) | 1 | 15 | 0 | 3 | 0 |
@@ -136,25 +136,23 @@ Every other gap below maps to an existing plan item.
 | b | import | Side login mover + CLI path | XDG `credentials.toml` discover/import | Done | — |
 | c | token storage | Plugin + TOML on disk | Daemon secret; atomic agent write on switch | Partial | — |
 | d | refresh | Plugin renews tokens (unverified); core reads CLI | `refresh` loads stored only (`lib.rs:174-176`) | Partial | OAuth refresh if CLI tokens expire (**R-12**) |
-| e | upstream wire | Protobuf Connect `GetChatMessage` on `server.codeium.com` (`devin/index.mjs:28-32`) | `upstream.rs` explicitly refuses (`devin/upstream.rs:20-35`) | Missing | Protobuf chat RPC (**R-12**, **R-13**) |
-| f | inbound shapes | Chat completions + Anthropic for Claude models (`devin/index.mjs:19-26`) | Not served | Missing | Dual npm routing (**R-12**) |
-| g | streaming | Connect stream from GetChatMessage | Not served | Missing | **R-12** |
-| h | tool calls | Plugin `tool-ids.test.mjs`, split calls | Not served | Missing | **R-13** |
-| i | images | Plugin `images.test.mjs`, `devin_images.go` in core catalog | Not served | Missing | **R-13** |
-| j | reasoning / thinking | `thinking-signature.test.mjs`, effort variants | Not served | Missing | **R-13** |
-| k | quota / usage | Plugin `usage.test.mjs` | `quota()` empty vec (`lib.rs:179-185`) | Missing | Usage RPC (**R-13**) |
-| l | model list | CLI JSON + `GetCliModelConfigs` (`devin/index.mjs:44-134`) | `list_models` refuses offline CLI (`lib.rs:187-195`) | Missing | Live model list (**R-12**) |
+| e | upstream wire | Protobuf Connect `GetChatMessage` on `server.codeium.com` (`devin/index.mjs:28-32`) | `upstream.rs` unary POST with literal Basic auth, 300 s read budget, and origin override | Done | Tools and images extend the wire in **R-13** |
+| f | inbound shapes | Chat completions + Anthropic for Claude models (`devin/index.mjs:19-26`) | Chat, Responses, and Messages IR execute; catalog advertises Chat endpoint only | Partial | Per-model inbound routing (**R-13**) |
+| g | streaming | Connect stream from GetChatMessage | Incremental text and reasoning IR events; content-gated success | Done | — |
+| h | tool calls | Plugin `tool-ids.test.mjs`, split calls | Refused before RPC and on tool-only replies with fixed 404 | Missing | **R-13** |
+| i | images | Plugin `images.test.mjs`, `devin_images.go` in core catalog | Refused before RPC with fixed 404 | Missing | **R-13** |
+| j | reasoning / thinking | `thinking-signature.test.mjs`, effort variants | Field 9 becomes thinking deltas; Chat/Responses/Messages effort selection; signed history refused | Partial | Signature replay (**R-13**) |
+| k | quota / usage | Plugin `usage.test.mjs` | `quota()` empty vec (`lib.rs:179-185`); stream usage omitted | Missing | Usage RPC and stream counters (**R-13**) |
+| l | model list | CLI JSON + `GetCliModelConfigs` (`devin/index.mjs:44-134`) | Live raw-protobuf RPC, isolated CLI fallback, embedded snapshot, per-account freshness/retry cache | Done | Free-tier and price enrichment (**R-13**) |
 | m | multi-account | EU host `eu.codeium.com` (plugin) | unverified in hofund | Partial | Region selection (**R-12**) |
-| n | error classification | Plugin `errors.test.mjs` | Not served | Missing | **R-13** |
+| n | error classification | Plugin `errors.test.mjs` | `errors.rs` section 6 HTTP/Connect mapping, exact empty-reply and broken-stream errors | Done | Tool/image-specific cases (**R-13**) |
 | o | keepalive | `keepalive.test.mjs` | None | Missing | **R-13** (new to the plan in this audit) |
 | p | agent sign-in | Core installs CLI (`devin.go:8-12`) | `agent_sign_in.rs` write TOML | Partial | CLI install helper like core (`DevinExecutable`) |
-| q | extras | gzip request, identity headers, CLI version pin (`devin/index.mjs:33-36`) | `connect/` message tables + SDK `protobuf`; 8083/8333 gzip and golden byte tests; no HTTP | Partial | Wire transport and headers in **R-12** |
+| q | extras | gzip request, identity headers, CLI version pin (`devin/index.mjs:33-36`) | `connect/` message tables + SDK `protobuf`; 8083/8333 gzip tests; HTTP encoding header, metadata, and sensitive Basic auth | Done | — |
 
 ### Gaps (Devin)
 
-- GetChatMessage upstream (protobuf, streaming) — **L**, **R-12**, **R-13**
-- Models list from CLI/API — **M**, **R-12**
-- Tools, images, reasoning, usage — **L**, **R-13**
+- Tools, images, reasoning signatures, usage — **L**, **R-13**
 - PKCE sign-in (not only import) — **M**, **R-12**
 - CLI install/bootstrap — **S**, **R-12** (new to the plan in this audit)
 - Keepalive (`keepalive.test.mjs`) — **S**, **R-13** (new to the plan in this audit)
