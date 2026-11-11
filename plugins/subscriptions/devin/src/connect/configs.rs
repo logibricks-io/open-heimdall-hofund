@@ -111,6 +111,7 @@ pub(crate) fn encode_request(session_token: &str, os: &str) -> Vec<u8> {
         .finish()
 }
 
+#[cfg(test)]
 pub(crate) fn model_uids(body: &[u8]) -> Vec<String> {
     fields(body)
         .iter()

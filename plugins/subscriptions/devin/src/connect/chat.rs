@@ -128,6 +128,7 @@ fn frame_request(message: &[u8]) -> Result<EncodedChatRequest, PluginError> {
     })
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ChatResponse {
     pub(crate) text: Vec<String>,
@@ -138,6 +139,7 @@ pub(crate) struct ChatResponse {
     pub(crate) stop: Option<u64>,
 }
 
+#[cfg(test)]
 impl ChatResponse {
     pub(crate) fn has_text_stream(&self) -> bool {
         !self.text.is_empty() || !self.reasoning.is_empty()
@@ -244,6 +246,7 @@ impl ChatDecoder {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn decode_response(body: &[u8]) -> Result<ChatResponse, PluginError> {
     let mut decoder = ChatDecoder::default();
     decoder.push(body)?;

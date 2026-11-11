@@ -13,12 +13,15 @@ use hofund_plugin_api::{
 use hofund_plugin_sdk::Contribution;
 
 mod agent_sign_in;
-#[allow(dead_code)]
+mod catalog;
+mod cli;
 mod connect;
 mod creds;
 mod discover;
+mod errors;
 mod models;
 mod snapshot_families;
+mod stream;
 mod upstream;
 
 pub(crate) const COMMAND: BinaryName = BinaryName::new("devin");
@@ -192,10 +195,8 @@ impl Subscription for Devin {
         account: &AccountId,
         host: &HostContext,
     ) -> Result<ModelList, PluginError> {
-        let _ = creds::Stored::load(host, account).await?;
-        Err(PluginError::config(
-            "Devin models come from `devin models list`; hofund does not run the CLI offline",
-        ))
+        let stored = creds::Stored::load(host, account).await?;
+        catalog::list_models(host, account, &stored).await
     }
 
     fn upstream(
