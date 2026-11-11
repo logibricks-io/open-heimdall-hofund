@@ -21,6 +21,7 @@ use hofund_plugin_agent_cline::ClineStore;
 use hofund_plugin_agent_codex::CodexStore;
 use hofund_plugin_agent_cursor::CursorStore;
 use hofund_plugin_agent_droid::DroidStore;
+use hofund_plugin_agent_dsh::DshStore;
 use hofund_plugin_agent_grok::GrokStore;
 use hofund_plugin_agent_hermes::HermesStore;
 use hofund_plugin_agent_kimi::KimiStore;
@@ -135,8 +136,9 @@ pub(crate) fn run(config: &Path, command: &Command) -> Result<String, String> {
     let workbuddy = WorkBuddyStore::new();
     let workbuddy_ai = WorkBuddyAiStore::new();
     let codebuddy = CodeBuddyStore::new();
+    let dsh = DshStore::new();
     let zcode = ZCodeStore::new();
-    let stores: [&dyn SessionStore; 17] = [
+    let stores: [&dyn SessionStore; 18] = [
         &claude,
         &cindy,
         &cline,
@@ -153,6 +155,7 @@ pub(crate) fn run(config: &Path, command: &Command) -> Result<String, String> {
         &workbuddy,
         &workbuddy_ai,
         &codebuddy,
+        &dsh,
         &zcode,
     ];
     run_with(config, command, &stores, Local::now())
@@ -801,6 +804,32 @@ mod tests {
         run_with(&config, &on, &stores, Local::now()).expect("consent");
         let listed = run_with(&config, &list, &stores, Local::now()).expect("list");
         assert!(listed.contains("Explain the cache"), "{listed}");
+    }
+
+    #[test]
+    fn dsh_reader_is_consent_gated_through_index() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config = temp.path().join("hofund.toml");
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../plugins/agents/dsh/tests/fixtures/root")
+            .canonicalize()
+            .expect("dsh fixtures");
+        let dsh = DshStore::with_root(root);
+        let stores: [&dyn SessionStore; 1] = [&dsh];
+        let list = Command::List(Options {
+            days: None,
+            model: String::new(),
+            folder: String::new(),
+            limit: 20,
+            json: false,
+        });
+        let on = Command::Read(Some(ReadChange {
+            on: true,
+            targets: vec!["dsh".to_owned()],
+        }));
+        run_with(&config, &on, &stores, Local::now()).expect("consent");
+        let listed = run_with(&config, &list, &stores, Local::now()).expect("list");
+        assert!(listed.contains("Build script tidy"), "{listed}");
     }
 
     #[test]
