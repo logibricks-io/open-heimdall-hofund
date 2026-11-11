@@ -181,6 +181,17 @@ impl SessionStore for OpenCodeStore {
     ) -> Result<Vec<SessionRecord>, PluginError> {
         read_database(file, database)
     }
+
+    fn resume_argv(&self, session_id: &str, _path: &Path) -> Option<Vec<String>> {
+        let id = session_id
+            .strip_prefix(&format!("{AGENT}:"))
+            .unwrap_or(session_id);
+        Some(vec![
+            "opencode".to_owned(),
+            "--session".to_owned(),
+            id.to_owned(),
+        ])
+    }
 }
 
 fn entries(path: &Path) -> Result<Vec<std::fs::DirEntry>, PluginError> {

@@ -649,6 +649,13 @@ fn parse_file(
                     .into());
                 }
             };
+            for path in &file.related {
+                let mut opened = open_session_file(root, path)
+                    .map_err(|error| io::Error::other(error.to_string()))?;
+                let next = read_incremental(&mut opened, 0, &mut on_value)?;
+                outcome.lines += next.lines;
+                outcome.cut |= next.cut;
+            }
         }
         SessionFormat::Json => {
             for path in std::iter::once(&file.path).chain(file.related.iter()) {

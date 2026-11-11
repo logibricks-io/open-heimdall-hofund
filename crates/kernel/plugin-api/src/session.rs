@@ -467,4 +467,9 @@ pub trait SessionStore: Send + Sync {
     ) -> Result<Vec<SessionRecord>, PluginError> {
         Err(PluginError::decode("session store does not support SQLite"))
     }
+
+    /// Returns resume argv for a later explicit resume action, without spawning it.
+    fn resume_argv(&self, _session_id: &str, _path: &Path) -> Option<Vec<String>> {
+        None
+    }
 }

@@ -1,0 +1,20 @@
+[
+  {
+    "id":"omp:omp-main","title":"omp main session","cwd":"/work/omp","start_ms":1767398400000,"last_ms":1767398405000,
+    "tokens":{"input":7,"output":3,"cache_read":1,"cache_write":0,"cache_write_1h":0},
+    "models":{
+      "model-artifact":{"input":2,"output":1,"cache_read":0,"cache_write":0,"cache_write_1h":0},
+      "model-omp":{"input":5,"output":2,"cache_read":1,"cache_write":0,"cache_write_1h":0}
+    },"subagents":["omp:omp-artifact"]
+  },
+  {
+    "id":"omp:omp-profile","title":"Profile session","cwd":"/work/profile","start_ms":1767484800000,"last_ms":1767484801000,
+    "tokens":{"input":4,"output":1,"cache_read":0,"cache_write":0,"cache_write_1h":0},
+    "models":{"model-profile":{"input":4,"output":1,"cache_read":0,"cache_write":0,"cache_write_1h":0}},"subagents":[]
+  },
+  {
+    "id":"omp:omp-xdg","title":"XDG session","cwd":"/work/xdg","start_ms":1767571200000,"last_ms":1767571201000,
+    "tokens":{"input":6,"output":2,"cache_read":0,"cache_write":0,"cache_write_1h":0},
+    "models":{"model-xdg":{"input":6,"output":2,"cache_read":0,"cache_write":0,"cache_write_1h":0}},"subagents":[]
+  }
+]

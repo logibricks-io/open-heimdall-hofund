@@ -1,0 +1,15 @@
+[
+  {
+    "id":"pi:pi-custom","title":"Custom session","cwd":"/work/custom","start_ms":1767312000000,"last_ms":1767312001000,
+    "tokens":{"input":2,"output":1,"cache_read":0,"cache_write":0,"cache_write_1h":0},
+    "models":{"model-custom":{"input":2,"output":1,"cache_read":0,"cache_write":0,"cache_write_1h":0}},"subagents":[]
+  },
+  {
+    "id":"pi:pi-main","title":"Pi named session","cwd":"/work/pi","start_ms":1767225600000,"last_ms":1767225604000,
+    "tokens":{"input":14,"output":6,"cache_read":2,"cache_write":1,"cache_write_1h":0},
+    "models":{
+      "model-pi":{"input":11,"output":5,"cache_read":2,"cache_write":1,"cache_write_1h":0},
+      "model-pi-extra":{"input":3,"output":1,"cache_read":0,"cache_write":0,"cache_write_1h":0}
+    },"subagents":[]
+  }
+]
