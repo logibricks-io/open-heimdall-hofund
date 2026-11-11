@@ -626,6 +626,12 @@ where
     P: Stream<Item = String> + Unpin,
     W: Write,
 {
+    if subscription.id().as_str() == "antigravity" {
+        say(
+            out,
+            "warning: Google may suspend an Antigravity account it sees used outside Antigravity. Use one you can afford to lose.",
+        )?;
+    }
     let failed = |error: hofund_plugin_api::PluginError| SignInError::failed(error.to_string());
     let challenge = subscription
         .start_sign_in(ctx, host)

@@ -22,7 +22,7 @@ Legend: **Done** = matches the reference at checklist granularity; **Partial** =
 | ChatGPT / Codex (`codex` backend) and ChatGPT API (`chatgpt-api`) | 8 | 11 | 2 | 0 | 0 |
 | GitHub Copilot (github.com and GHE) | 10 | 5 | 2 | 5 | 0 |
 | Gemini CLI (Code Assist) | 10 | 4 | 2 | 2 | 0 |
-| Google Antigravity | 0 | 0 | 16 | 1 | 0 |
+| Google Antigravity | 10 | 4 | 2 | 1 | 0 |
 | SuperGrok (`grok`) | 10 | 6 | 0 | 2 | 0 |
 | Qoder (international + Qoder CN) | 1 | 10 | 9 | 0 | 0 |
 | CodeBuddy / WorkBuddy (CN + international) | 7 | 6 | 3 | 0 | 3 |
@@ -431,33 +431,33 @@ Every other gap below maps to an existing plan item.
 
 **Community:** `packages/antigravity-cloak/` (middleware for turned-away prompts).
 
-**hofund path:** none (`docs/feature-parity.md:3.4` “Antigravity is not started”; agent adapter only under `plugins/agents/antigravity/`).
+**hofund path:** `plugins/subscriptions/antigravity/src/`; the existing desktop adapter remains separate under `plugins/agents/antigravity/`.
 
-| # | capability | reference v0.1.3005 | hofund 08035c9 | status | gap to close |
-|---|------------|----------------------|----------------|--------|--------------|
-| a1 | sign-in: loopback OAuth (Antigravity client) | `google.go:82-90` separate client, `/oauth-callback`, `localhost` | missing subscription plugin | Missing | New plugin with Antigravity OAuth client (R-49) |
-| b | import sources | `google_import.go` refresh token imports | none | Missing | Same import module as gemini family (R-49) |
-| c | token storage | logins.json + in-memory refresh | none | Missing | R-49 |
-| d | refresh | same as Google subscriptions | none | Missing | R-49 |
-| e | upstream wire | `daily-cloudcode-pa.googleapis.com` + prod load base (`google.go:98-100`) | none | Missing | R-49 |
-| f | inbound shapes | Same Code Assist envelope; effort variant IDs (`antigravity_models.go`) | none | Missing | R-49 |
-| g | streaming | SSE envelope | none | Missing | R-49 |
-| h | tools | tool declarations and thought signatures (`internal/gateway/codeassist.go`) | none | Missing | R-49 |
-| i | images | inline image parts on the Code Assist wire (`internal/gateway/codeassist.go`) | none | Missing | R-49 |
-| j | reasoning | thought signatures / thinking config, cloak and turned-away detection (`codeassist.go`, `packages/antigravity-cloak`) | none | Missing | R-49 |
-| k | quota / usage | `retrieveUserQuota` + per-account fetchAvailableModels union | none | Missing | R-49 |
-| l | model list | `antigravity_pool.go:15-49` union across accounts; effort folding (`antigravity_models.go`) | none | Missing | R-49 |
-| m | multi-account | Pool catalog union | none | Missing | R-49 |
-| n | error classification | 429 “turned away” prompts (`codeassist.go:51-66`) | none | Missing | R-49 |
+| # | capability | reference v0.1.3005 | hofund R-49c | status | gap to close |
+|---|------------|----------------------|--------------|--------|--------------|
+| a1 | sign-in: loopback OAuth (Antigravity client) | `google.go:82-90` embeds Antigravity's installed-app client, `/oauth-callback`, `localhost` | `sign_in.rs` and `lib.rs`: same scopes, PKCE, localhost path; client from plugin `client_id`/`client_secret` or `HOFUND_ANTIGRAVITY_CLIENT_*` env (hofund does not ship the 3005 literals). Offline tests use a fake client (`r49c_oauth_*`) | Done | Operator must supply the installed-app client; 3005 embeds it |
+| b | import sources | `google_import.go` refresh token imports | none | Missing | Antigravity Cockpit/Manager/CLIProxyAPI export import (R-49 follow-up) |
+| c | token storage | logins.json + in-memory refresh | Account store keeps the refresh token; `tokens.rs` keeps access tokens in memory | Done | — |
+| d | refresh | same as Google subscriptions | `tokens.rs`: oauth2.googleapis.com, two-minute margin, lapsed grants; offline refresh/refusal tests | Done | — |
+| e | upstream wire | `daily-cloudcode-pa.googleapis.com` + prod load base (`google.go:98-100`) | `Endpoints`, `project.rs`, and `upstream.rs` use those bases and the Antigravity Code Assist envelope | Done | — |
+| f | inbound shapes | Same Code Assist envelope; effort variant IDs (`antigravity_models.go`) | SDK codecs translate inbound wires; `models.rs` folds families and `upstream.rs` picks effort variants; offline unary test | Done | — |
+| g | streaming | SSE envelope | `upstream.rs` lifts each `response` frame on `streamGenerateContent?alt=sse`; offline stream test | Done | — |
+| h | tools | tool declarations and thought signatures (`internal/gateway/codeassist.go`) | Standard IR tools plus `plain_code_assist_tools`; no Antigravity-specific full gateway equivalence run | Partial | Thought-signature and tool-history edge cases remain unverified |
+| i | images | inline image parts on the Code Assist wire (`internal/gateway/codeassist.go`) | Standard IR image parts and model image flags | Partial | Offline image-request fixture remains |
+| j | reasoning | thought signatures / thinking config, cloak and turned-away detection (`codeassist.go`, `packages/antigravity-cloak`) | Effort ids/levels, reference prompt cloak, and non-cooling 400 mapping are tested offline; thought-signature edges are not | Partial | Thought-signature parity and live verification remain |
+| k | quota / usage | `fetchAvailableModels` model quota plus `retrieveUserQuotaSummary` shared windows | `quota.rs` reads both, including reset times and omitted-fraction exhaustion; offline test | Done | — |
+| l | model list | `antigravity_pool.go:15-49` union across accounts; effort folding (`antigravity_models.go`) | `models.rs` parses picker order, filters hidden/disabled ids, falls back through tiers, folds families, and merges account unions; offline tests | Done | — |
+| m | multi-account | Pool catalog union | One Google email has distinct Gemini and Antigravity account ids; all stored Antigravity accounts join the union in account order | Done | — |
+| n | error classification | 429 “turned away” prompts (`codeassist.go:51-66`) | `upstream.rs` distinguishes prompt refusal from real quota and returns a non-cooling 400 with the reference hint | Done | — |
 | o | check-in / warmup | N/A | N/A | N/A | — |
-| p | agent sign-in | Antigravity desktop agent separate | agent.toml only, no subscription | Missing | R-49 |
-| q | extras | Ban-risk warning in UI; version manifest URL (`google.go:68`) | unverified | Missing | R-49 |
+| p | agent sign-in | Antigravity desktop agent separate | Desktop `agent.toml` only; no subscription sign-in switch | Missing | Agent sign-in switching is not in R-49c |
+| q | extras | Ban-risk warning in UI; version manifest URL (`google.go:68`) | Full account-suspension warning prints before CLI sign-in and remains in docs; request version is the fixed reference fallback | Partial | Dynamic version-manifest refresh remains |
 
 **Gaps**
 
-- Entire Antigravity subscription plugin — **L**, **R-49**.
-- Multi-account model pool + effort variant catalog — **M**, **R-49**.
-- Prompt cloak / turned-away detection — **M**, **R-49**.
+- Refresh-token export import and agent sign-in switching — **M**, R-49 follow-up.
+- Full tool/image/thought-signature gateway fixtures and dynamic app-version refresh — **M**, R-49 follow-up.
+- Real-account verification is not performed in this slice.
 
 ---
 

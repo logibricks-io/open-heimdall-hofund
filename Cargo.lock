@@ -2205,6 +2205,7 @@ dependencies = [
  "hofund-plugin-remote-gateway",
  "hofund-plugin-retrieval",
  "hofund-plugin-sdk",
+ "hofund-plugin-subscription-antigravity",
  "hofund-plugin-subscription-claude",
  "hofund-plugin-subscription-cline",
  "hofund-plugin-subscription-codex",
@@ -2288,6 +2289,16 @@ dependencies = [
  "tracing",
  "url",
  "zstd",
+]
+
+[[package]]
+name = "hofund-plugin-subscription-antigravity"
+version = "0.1.0"
+dependencies = [
+ "hofund-kit-subscription",
+ "hofund-plugin-api",
+ "hofund-plugin-sdk",
+ "tempfile",
 ]
 
 [[package]]
