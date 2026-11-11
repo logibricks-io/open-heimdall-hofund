@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build chat_threads.db matching magpie alma_test.go almaFixture."""
+"""Build chat_threads.db for Alma session reader golden tests."""
 
 import sqlite3
 from pathlib import Path

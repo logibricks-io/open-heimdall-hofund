@@ -180,7 +180,10 @@ fn cline_sessions_dir() -> PathBuf {
     let cline_dir = std::env::var("CLINE_DIR")
         .ok()
         .filter(|value| !value.trim().is_empty())
-        .map_or_else(|| user_home().join(".cline"), |value| expand_home(value.trim()));
+        .map_or_else(
+            || user_home().join(".cline"),
+            |value| expand_home(value.trim()),
+        );
     cline_dir.join("data").join("sessions")
 }
 

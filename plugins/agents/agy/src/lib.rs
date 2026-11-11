@@ -610,7 +610,7 @@ mod tests {
     }
 
     #[test]
-    fn lists_agy_sessions_from_magpie_fixtures() {
+    fn lists_agy_sessions_from_golden_fixtures() {
         let root = fixture_root();
         let store = AgyStore::with_root(root.clone());
         let files = store.files(&root).expect("files");

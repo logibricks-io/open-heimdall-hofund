@@ -172,30 +172,15 @@ fn expected_deps(package: &str) -> Option<&'static [&'static str]> {
         "hofund-plugin-agent-cursor" => &["hofund-plugin-api", "hofund-plugin-sdk"],
         "hofund-plugin-agent-droid" => &["hofund-plugin-api", "hofund-plugin-sdk"],
         "hofund-plugin-agent-grok" => &["hofund-plugin-api", "hofund-plugin-sdk"],
-        "hofund-plugin-agent-hermes" => {
-            &["chrono", "hofund-plugin-api", "hofund-plugin-sdk", "sha2"]
-        }
+        "hofund-plugin-agent-hermes" => &["hofund-plugin-api", "hofund-plugin-sdk"],
         "hofund-plugin-agent-kimi" => &["hofund-plugin-api", "hofund-plugin-sdk"],
         "hofund-plugin-agent-qoder" => &["hofund-plugin-api", "hofund-plugin-sdk"],
         "hofund-plugin-agent-minimax-code" => &["hofund-plugin-api", "hofund-plugin-sdk"],
         "hofund-plugin-agent-raft" => &["hofund-plugin-api", "hofund-plugin-sdk"],
-        "hofund-plugin-agent-workbuddy" => {
-            &["chrono", "hofund-plugin-api", "hofund-plugin-sdk", "regex"]
-        }
-        "hofund-plugin-agent-agy" => &[
-            "chrono",
-            "hofund-plugin-api",
-            "hofund-plugin-sdk",
-            "rusqlite",
-        ],
-        "hofund-plugin-agent-alma" => &["chrono", "hofund-plugin-api", "hofund-plugin-sdk"],
-        "hofund-plugin-agent-dsh" => &[
-            "chrono",
-            "hofund-plugin-api",
-            "hofund-plugin-sdk",
-            "regex",
-            "zstd",
-        ],
+        "hofund-plugin-agent-workbuddy" => &["hofund-plugin-api", "hofund-plugin-sdk"],
+        "hofund-plugin-agent-agy" => &["hofund-plugin-api", "hofund-plugin-sdk"],
+        "hofund-plugin-agent-alma" => &["hofund-plugin-api", "hofund-plugin-sdk"],
+        "hofund-plugin-agent-dsh" => &["hofund-plugin-api", "hofund-plugin-sdk"],
         "hofund-plugin-agent-zcode" => &["hofund-plugin-api", "hofund-plugin-sdk"],
         "hofund-plugin-host" => &["hofund-plugin-api"],
         "hofund-plugin-azure" => &["hofund-plugin-api", "hofund-plugin-sdk"],
@@ -440,6 +425,8 @@ const VENDOR_SCAN_PENDING: &[&str] = &[
     "crates/kernel/provider",
     // Host, preset, protocol, and model selection for vendor request fixes.
     "crates/kernel/quirks",
+    // Session index: WSL agent ids follow the R-32 catalog until plugin injection.
+    "crates/kernel/sessions",
 ];
 
 /// Repo-relative paths that may mention the upstream project this work was

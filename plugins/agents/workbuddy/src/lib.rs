@@ -102,7 +102,9 @@ impl WorkBuddyAiStore {
     #[must_use]
     pub fn with_roots(ai_root: impl Into<PathBuf>, workbuddy_root: impl Into<PathBuf>) -> Self {
         Self {
-            locator: BuddyLocator { root: ai_root.into() },
+            locator: BuddyLocator {
+                root: ai_root.into(),
+            },
             workbuddy_root: workbuddy_root.into(),
         }
     }
@@ -163,7 +165,9 @@ impl CodeBuddyStore {
     #[must_use]
     pub fn with_roots(code_root: impl Into<PathBuf>, workbuddy_root: impl Into<PathBuf>) -> Self {
         Self {
-            locator: BuddyLocator { root: code_root.into() },
+            locator: BuddyLocator {
+                root: code_root.into(),
+            },
             workbuddy_root: workbuddy_root.into(),
         }
     }
@@ -666,7 +670,7 @@ mod tests {
     }
 
     #[test]
-    fn lists_three_workbuddy_sessions_from_magpie_fixtures() {
+    fn lists_three_workbuddy_sessions_from_golden_fixtures() {
         let store = WorkBuddyStore::with_root(fixture_root());
         let files = store.files(&fixture_root()).expect("files");
         assert_eq!(files.len(), 3);

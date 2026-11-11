@@ -11,7 +11,6 @@ homepage.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 hofund-plugin-api = { workspace = true }
 hofund-plugin-sdk = { workspace = true }
 

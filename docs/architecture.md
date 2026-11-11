@@ -247,18 +247,18 @@ This table covers normal and build dependencies, including their target-specific
 | `hofund-plugin-agent-codex` | `hofund-plugin-api`, `hofund-plugin-sdk` |
 | `hofund-plugin-agent-cindy` | `hofund-plugin-api`, `hofund-plugin-sdk` |
 | `hofund-plugin-agent-cline` | `hofund-plugin-api`, `hofund-plugin-sdk` |
-| `hofund-plugin-agent-cursor` | `hofund-plugin-api`, `hofund-plugin-sdk`, `regex` |
-| `hofund-plugin-agent-minimax-code` | `base64`, `hofund-plugin-api`, `hofund-plugin-sdk` |
+| `hofund-plugin-agent-cursor` | `hofund-plugin-api`, `hofund-plugin-sdk` |
+| `hofund-plugin-agent-minimax-code` | `hofund-plugin-api`, `hofund-plugin-sdk` |
 | `hofund-plugin-agent-droid` | `hofund-plugin-api`, `hofund-plugin-sdk` |
 | `hofund-plugin-agent-grok` | `hofund-plugin-api`, `hofund-plugin-sdk` |
-| `hofund-plugin-agent-hermes` | `chrono`, `hofund-plugin-api`, `hofund-plugin-sdk`, `sha2` |
+| `hofund-plugin-agent-hermes` | `hofund-plugin-api`, `hofund-plugin-sdk` |
 | `hofund-plugin-agent-kimi` | `hofund-plugin-api`, `hofund-plugin-sdk` |
 | `hofund-plugin-agent-qoder` | `hofund-plugin-api`, `hofund-plugin-sdk` |
 | `hofund-plugin-agent-raft` | `hofund-plugin-api`, `hofund-plugin-sdk` |
-| `hofund-plugin-agent-workbuddy` | `chrono`, `hofund-plugin-api`, `hofund-plugin-sdk`, `regex` |
-| `hofund-plugin-agent-agy` | `chrono`, `hofund-plugin-api`, `hofund-plugin-sdk`, `rusqlite` |
-| `hofund-plugin-agent-alma` | `chrono`, `hofund-plugin-api`, `hofund-plugin-sdk` |
-| `hofund-plugin-agent-dsh` | `chrono`, `hofund-plugin-api`, `hofund-plugin-sdk`, `regex`, `zstd` |
+| `hofund-plugin-agent-workbuddy` | `hofund-plugin-api`, `hofund-plugin-sdk` |
+| `hofund-plugin-agent-agy` | `hofund-plugin-api`, `hofund-plugin-sdk` |
+| `hofund-plugin-agent-alma` | `hofund-plugin-api`, `hofund-plugin-sdk` |
+| `hofund-plugin-agent-dsh` | `hofund-plugin-api`, `hofund-plugin-sdk` |
 | `hofund-plugin-agent-zcode` | `hofund-plugin-api`, `hofund-plugin-sdk` |
 | `hofund-plugin-sdk` | `chrono`, `chrono-tz`, `hofund-codec`, `hofund-ir`, `hofund-plugin-api`, `hofund-quirks`, `iana-time-zone` |
 | `hofund-plugin-fixture` | `hofund-plugin-api` |

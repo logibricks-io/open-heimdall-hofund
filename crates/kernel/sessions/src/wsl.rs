@@ -12,7 +12,7 @@ use std::sync::{Mutex, OnceLock};
 use crate::index::IndexError;
 use crate::storage::atomic_write;
 
-/// Agents read inside a WSL distro home (magpie `wslAgents`).
+/// Agents read inside a WSL distro home (`docs/sessions-library-design.md` §1.2).
 pub const WSL_AGENT_IDS: &[&str] = &["claude", "codex", "pi", "raft", "omp", "kimi"];
 
 /// Relative agent home segments under a distro user home.

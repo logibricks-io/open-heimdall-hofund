@@ -520,7 +520,7 @@ mod tests {
     }
 
     #[test]
-    fn lists_dsh_sessions_from_magpie_fixtures() {
+    fn lists_dsh_sessions_from_golden_fixtures() {
         let store = DshStore::with_root(fixture_root());
         let files = store.files(&fixture_root()).expect("files");
         assert_eq!(files.len(), 5);

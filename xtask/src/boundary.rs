@@ -20,8 +20,13 @@ const ALLOWED_DEPS: &[&str] = &["hofund-plugin-api", "hofund-plugin-sdk"];
 
 /// Extra runtime dependencies reviewed for one plugin package.
 const PLUGIN_EXTRA_DEPS: &[(&str, &[&str])] = &[
+    ("hofund-plugin-agent-agy", &["rusqlite"]),
+    ("hofund-plugin-agent-cline", &["regex"]),
     ("hofund-plugin-agent-cursor", &["regex"]),
+    ("hofund-plugin-agent-dsh", &["regex", "zstd"]),
+    ("hofund-plugin-agent-hermes", &["sha2"]),
     ("hofund-plugin-agent-minimax-code", &["base64"]),
+    ("hofund-plugin-agent-workbuddy", &["regex"]),
     ("hofund-plugin-subscription-claude", &["regex"]),
 ];
 
