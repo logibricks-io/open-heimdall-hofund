@@ -45,7 +45,7 @@ pub(crate) enum Command {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Options {
-    days: Option<usize>,
+    pub(crate) days: Option<usize>,
     model: String,
     folder: String,
     limit: usize,

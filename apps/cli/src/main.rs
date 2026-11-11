@@ -1306,7 +1306,9 @@ fn finish<E: std::fmt::Display>(result: Result<String, E>) -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{Command, HelpTopic, SubscriptionCommand, help_text, help_topic, parse, sessions};
+    use super::{
+        Command, HelpTopic, SubscriptionCommand, help_text, help_topic, parse, quota, sessions,
+    };
     use std::path::PathBuf;
 
     fn words(values: &[&str]) -> Vec<String> {
@@ -1584,6 +1586,27 @@ mod tests {
         ));
         assert!(command(&["sessions", "read", "on", "codex", "--json"]).is_err());
         assert!(command(&["sessions", "resume", "one"]).is_err());
+    }
+
+    #[test]
+    fn sessions_days_flags_are_scoped_to_sessions() {
+        // The `--days` / `-d` match guard must stay sessions-only so
+        // `quota history --days` is not consumed as a session flag.
+        assert_eq!(
+            command(&["quota", "history", "--days", "3"]),
+            Ok(Command::Quota(quota::QuotaCommand::History {
+                filters: Vec::new(),
+                days: Some("3".to_owned()),
+                json: false,
+            }))
+        );
+        // The `--days=` form must be accepted for sessions (a `false`
+        // match guard would drop it as an unknown flag).
+        let parsed = command(&["sessions", "--days=30"]).expect("parse");
+        let Command::Sessions(sessions::Command::List(options)) = parsed else {
+            panic!("{parsed:?}");
+        };
+        assert_eq!(options.days, Some(30));
     }
 
     #[test]
