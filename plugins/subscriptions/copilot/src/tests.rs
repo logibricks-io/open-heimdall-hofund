@@ -916,9 +916,9 @@ fn quota_reads_the_account_host() {
         vec!["https://api.acme.ghe.com/copilot_internal/user"]
     );
     for (status, kind) in [
-        (401, PluginErrorKind::Auth),
-        (403, PluginErrorKind::Auth),
         (502, PluginErrorKind::Status),
+        (403, PluginErrorKind::Auth),
+        (401, PluginErrorKind::Auth),
     ] {
         host.http().enqueue_response(status, &[], b"{}".to_vec());
         let error = block_on(sub.quota(&id, host.context())).expect_err("refused");

@@ -367,7 +367,7 @@ pub(crate) async fn lapse(
 }
 
 /// Clears a previous external refusal after the same reference works again.
-async fn unlapse(
+pub(crate) async fn unlapse(
     host: &HostContext,
     account: &AccountId,
     stored: &Stored,

@@ -201,3 +201,23 @@ fn quota_usage_reference_shapes_keep_their_values() {
     assert_eq!(windows[0].used(), 1);
     assert_eq!(windows[1].name(), "Free · Completions");
 }
+
+#[test]
+fn quota_401_lapses_but_403_and_transient_errors_do_not() {
+    for status in [401, 403, 503] {
+        let (_dir, host, id) = seeded();
+        let sub = subscription(&host);
+        host.http()
+            .enqueue_response(status, &[], b"refused".to_vec());
+        let error = block_on(sub.quota(&id, host.context())).expect_err("quota error");
+        assert_eq!(error.status(), (status >= 500).then_some(status));
+        assert_eq!(
+            stored(&host, &id).flag(session::LAPSED),
+            status == 401,
+            "status {status}"
+        );
+        if status == 401 {
+            assert_eq!(error.message(), session::LAPSED_REASON);
+        }
+    }
+}

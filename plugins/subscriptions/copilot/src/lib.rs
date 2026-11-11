@@ -278,10 +278,15 @@ impl Subscription for Copilot {
             200..=299 => {
                 let (windows, entitlement) =
                     quota::windows_with_entitlement(reply.body(), &stored.entitlement)?;
+                session::unlapse(host, account, &stored).await?;
                 session::update_entitlement(host, account, &stored, &entitlement).await?;
                 Ok(windows)
             }
-            401 | 403 => Err(PluginError::auth(
+            401 => {
+                session::lapse(host, account, &stored.oauth).await?;
+                Err(PluginError::auth(session::LAPSED_REASON))
+            }
+            403 => Err(PluginError::auth(
                 "GitHub refused to show the Copilot quota",
             )),
             status => Err(PluginError::status_error(

@@ -114,6 +114,36 @@ fn editor_and_ghe_discovery_import_is_read_only() {
         assert_eq!(blob.text("host"), Some(host));
         assert!(blob.secret("oauth_token").is_none());
     }
+    let sub = subscription(&fixture.host);
+    fixture.host.http().enqueue(
+        json!({"copilot_plan":"free","quota_snapshots":{"chat":{"entitlement":10,"quota_remaining":5}}})
+            .to_string()
+            .into_bytes(),
+    );
+    fixture.host.http().enqueue(
+        json!({"copilot_plan":"individual_max","quota_snapshots":{"chat":{"entitlement":20,"quota_remaining":5}}})
+            .to_string()
+            .into_bytes(),
+    );
+    let github_windows =
+        block_on(sub.quota(&github, fixture.host.context())).expect("github quota");
+    let enterprise_windows =
+        block_on(sub.quota(&enterprise, fixture.host.context())).expect("GHE quota");
+    assert_eq!(github_windows[0].name(), "Free · Chat requests");
+    assert_eq!(enterprise_windows[0].name(), "Max · Chat requests");
+    assert_eq!(
+        fixture
+            .host
+            .http()
+            .calls()
+            .iter()
+            .map(|call| call.uri())
+            .collect::<Vec<_>>(),
+        [
+            "https://api.github.com/copilot_internal/user",
+            "https://api.acme.ghe.com/copilot_internal/user"
+        ]
+    );
     let error = block_on(discover::import_at(
         &fixture.home,
         &fixture.config,
