@@ -1,13 +1,15 @@
 //! Unit tests against recording host backends; no network.
 
 use std::sync::Arc;
+use std::time::Duration;
 
-use hofund_kit_subscription::{TestHost, block_on};
+use hofund_kit_subscription::{TestHost, block_on, loopback_get};
 use hofund_plugin_api::{
     AccountId, Completion, ContentPart, PluginErrorKind, PluginId, PluginKind, ProbeQuery,
-    ProtocolId, RawTable, Request, SecretString, Subscription, SubscriptionFactory,
-    UpstreamProvider,
+    ProtocolId, RawTable, Request, SecretString, SignInChallenge, SignInCtx, SignInProof,
+    Subscription, SubscriptionFactory, UpstreamProvider,
 };
+use hofund_plugin_sdk::futures::FuturesUnordered;
 use hofund_plugin_sdk::json::{self, json};
 use hofund_plugin_sdk::oauth::{SecretObject, secret_text};
 
@@ -22,6 +24,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 const CLOUD: &str = "https://zed.test";
 const ACCESS: &str = "zed-access-test";
+const SESSION: &str = "0123456789abcdef0123456789abcdef";
 static SEED_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 fn endpoints() -> Endpoints {
@@ -42,6 +45,220 @@ fn subscription(host: &TestHost) -> Arc<dyn Subscription> {
     let factory = factory_with_endpoints(endpoints());
     let cfg = factory.validate(&RawTable::new()).expect("config");
     factory.build(&cfg, host.context()).expect("build")
+}
+
+fn ctx() -> SignInCtx {
+    SignInCtx::new(PluginId::from_static("zed"))
+        .with_session(SESSION)
+        .expect("session")
+}
+
+fn sign_in_params(challenge: SignInChallenge) -> (u16, String, String) {
+    let SignInChallenge::OpenUrl { url } = challenge else {
+        panic!("expected a browser address");
+    };
+    let parsed = hofund_plugin_sdk::url::Url::parse(&url).expect("sign-in URL");
+    assert_eq!(parsed.origin().ascii_serialization(), "https://zed.dev");
+    assert_eq!(parsed.path(), "/native_app_signin");
+    let params: std::collections::HashMap<String, String> = parsed
+        .query_pairs()
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    let port = params
+        .get("native_app_port")
+        .and_then(|port| port.parse::<u16>().ok())
+        .expect("loopback port");
+    assert_ne!(port, 0);
+    let public_key = params
+        .get("native_app_public_key")
+        .expect("public key")
+        .clone();
+    let system_id = params.get("system_id").expect("system id").clone();
+    assert_eq!(system_id.len(), 36);
+    assert_eq!(system_id.chars().filter(|ch| *ch == '-').count(), 4);
+    assert!(
+        public_key
+            .bytes()
+            .all(|byte| { byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'=') })
+    );
+    (port, public_key, system_id)
+}
+
+async fn started_sign_in(host: &TestHost, sub: &Arc<dyn Subscription>) -> (u16, String, String) {
+    sign_in_params(
+        sub.start_sign_in(&ctx(), host.context())
+            .await
+            .expect("start"),
+    )
+}
+
+fn account_ok() -> &'static [u8] {
+    br#"{"user":{"github_login":"native-user","name":"Native User"},"organizations":[{"id":"org-native","is_personal":true}],"default_organization_id":"org-native","plans_by_organization":{"org-native":"zed_pro"}}"#
+}
+
+async fn await_callback(host: &TestHost) -> SignInProof {
+    host.loopback()
+        .await_callback(
+            SESSION,
+            FuturesUnordered::<std::future::Ready<String>>::new(),
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("callback")
+}
+
+#[test]
+fn r56_start_binds_loopback_and_oaep_callback_stores_account() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    block_on(async {
+        let (port, public_key, system_id) = started_sign_in(&host, &sub).await;
+        let ciphertext =
+            hofund_plugin_sdk::rsa::encrypt_oaep_for_test(&public_key, "native-access-token")
+                .expect("encrypt");
+        host.http().enqueue_response(200, &[], account_ok());
+        let (status, reply) = loopback_get(
+            port,
+            &format!("/native/return?user_id=user-native&access_token={ciphertext}"),
+        )
+        .await
+        .expect("callback response");
+        assert_eq!(status, 302, "{reply}");
+        assert!(
+            reply.contains("Location: https://zed.dev/native_app_signin_succeeded\r\n"),
+            "{reply}"
+        );
+        assert!(!reply.contains(ciphertext.as_str()));
+        let proof = await_callback(&host).await;
+        let id = sub
+            .complete_sign_in(&ctx(), proof, host.context())
+            .await
+            .expect("complete");
+        let stored = creds::Stored::load(host.context(), &id)
+            .await
+            .expect("stored");
+        assert_eq!(stored.credential.user_id, "user-native");
+        assert_eq!(
+            secret_text(&stored.credential.access),
+            "native-access-token"
+        );
+        assert_eq!(stored.credential.system_id, system_id);
+        assert_eq!(stored.credential.org, "org-native");
+        assert_eq!(stored.credential.plan, "zed_pro");
+        assert_eq!(stored.credential.login, "native-user");
+        let calls = host.http().calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].method(), "GET");
+        assert_eq!(calls[0].uri(), "https://zed.test/client/users/me");
+        assert_eq!(calls[0].header("x-zed-system-id"), Some(system_id.as_str()));
+        assert!(
+            calls[0]
+                .header("user-agent")
+                .is_some_and(|agent| agent.starts_with("Zed/1.23.0 "))
+        );
+        assert!(
+            calls[0]
+                .sensitive_headers()
+                .contains(&"authorization".to_owned())
+        );
+        assert!(loopback_get(port, "/after-complete").await.is_err());
+    });
+}
+
+#[test]
+fn r56_pkcs1_v15_callback_decrypts_without_base64_padding() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    block_on(async {
+        let (_port, public_key, _) = started_sign_in(&host, &sub).await;
+        let ciphertext =
+            hofund_plugin_sdk::rsa::encrypt_pkcs1_for_test(&public_key, "pkcs1-access")
+                .expect("encrypt");
+        host.http().enqueue_response(200, &[], account_ok());
+        let proof = SignInProof::query_token("user-pkcs1", ciphertext.trim_end_matches('='));
+        let id = sub
+            .complete_sign_in(&ctx(), proof, host.context())
+            .await
+            .expect("complete");
+        let stored = creds::Stored::load(host.context(), &id)
+            .await
+            .expect("stored");
+        assert_eq!(secret_text(&stored.credential.access), "pkcs1-access");
+    });
+}
+
+#[test]
+fn r56_missing_callback_params_do_not_complete_and_cancel_releases_port() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    block_on(async {
+        let (port, _, _) = started_sign_in(&host, &sub).await;
+        let (status, _) = loopback_get(port, "/?user_id=user-incomplete")
+            .await
+            .expect("404");
+        assert_eq!(status, 404);
+        let error = host
+            .loopback()
+            .await_callback(
+                SESSION,
+                FuturesUnordered::<std::future::Ready<String>>::new(),
+                Duration::from_millis(20),
+            )
+            .await
+            .expect_err("missing params must not finish sign-in");
+        assert_eq!(error.kind(), PluginErrorKind::Timeout);
+        sub.cancel_sign_in(&ctx(), host.context())
+            .await
+            .expect("cancel");
+        assert!(loopback_get(port, "/after-cancel").await.is_err());
+        assert!(
+            host.context()
+                .accounts()
+                .list()
+                .await
+                .expect("accounts")
+                .is_empty()
+        );
+    });
+}
+
+#[test]
+fn r56_organization_with_hosted_models_off_stores_nothing() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    block_on(async {
+        let (_port, public_key, _) = started_sign_in(&host, &sub).await;
+        let ciphertext =
+            hofund_plugin_sdk::rsa::encrypt_oaep_for_test(&public_key, "unused-access")
+                .expect("encrypt");
+        host.http().enqueue_response(
+            200,
+            &[],
+            br#"{"organizations":[{"id":"org-off","is_personal":true}],"default_organization_id":"org-off","plans_by_organization":{"org-off":"zed_pro"},"configuration_by_organization":{"org-off":{"is_zed_model_provider_enabled":false}}}"#,
+        );
+        let error = sub
+            .complete_sign_in(
+                &ctx(),
+                SignInProof::query_token("user-off", ciphertext),
+                host.context(),
+            )
+            .await
+            .expect_err("hosted models disabled");
+        assert_eq!(error.kind(), PluginErrorKind::Auth);
+        assert!(error.to_string().contains("hosted models turned off"));
+        assert!(
+            host.context()
+                .accounts()
+                .list()
+                .await
+                .expect("accounts")
+                .is_empty()
+        );
+    });
 }
 
 fn seed(host: &TestHost) -> AccountId {

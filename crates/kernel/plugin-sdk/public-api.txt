@@ -107,6 +107,7 @@ mod probe
 mod process
 mod protobuf
 mod register
+mod rsa
 mod sigv4
 mod time
 mod time::zone
@@ -222,6 +223,12 @@ register::Contribution::fn surface (mut self , surface : impl InboundSurface) ->
 register::Contribution::fn surfaces (& self) -> & [Arc < dyn InboundSurface >]
 register::Contribution::fn upstream (mut self , factory : impl DynUpstreamFactory) -> Self
 register::Contribution::fn upstreams (& self) -> & [Arc < dyn DynUpstreamFactory >]
+rsa::PrivateKey
+rsa::PrivateKey::fn decrypt (& self , encoded : & str) -> Result < SecretString , PluginError >
+rsa::PrivateKey::fn generate () -> Result < Self , PluginError >
+rsa::PrivateKey::fn public_key_pkcs1_base64url (& self) -> Result < String , PluginError >
+rsa::fn encrypt_oaep_for_test (public_key : & str , plaintext : & str) -> Result < String , PluginError >
+rsa::fn encrypt_pkcs1_for_test (public_key : & str , plaintext : & str) -> Result < String , PluginError >
 sigv4::AwsSigner derives(Clone)
 sigv4::AwsSigner::fn fixed (mut self , unix_secs : u64 , host : impl Into < String >) -> Self
 sigv4::AwsSigner::fn new (region : impl Into < String > , access_key_id : impl Into < String > , secret_access_key : secrecy :: SecretString ,) -> Self
