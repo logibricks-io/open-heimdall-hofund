@@ -1,6 +1,7 @@
 //! Integration tests for [`super::tick_inner`] retry fairness and status listing.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -26,9 +27,20 @@ use crate::warmup::{
 use super::WarmupRunner;
 
 const PLUGIN: &str = "warm-test";
-const ACCOUNT_A: &str = "a-0000000000000001";
-const ACCOUNT_B: &str = "a-0000000000000002";
 const SECRET: &str = "sk-warm-test-secret";
+
+/// Account ids unique per fixture invocation. The fixture also holds
+/// [`hofund_plugin_host::memory_account_secrets`] so upserts stay in memory
+/// and do not write the login keychain (a3a_26 / a3a_27).
+fn unique_account_id() -> String {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("t-{nanos:x}-{n}")
+}
 
 static WARM_SPEC: SubscriptionSpec = SubscriptionSpec::from_static(
     PluginId::from_static("warm-test"),
@@ -290,14 +302,18 @@ fn chrono_offset_time(now: SystemTime, zone: chrono::FixedOffset) -> String {
 
 struct Fixture {
     _dir: tempfile::TempDir,
+    _secrets: hofund_plugin_host::MemoryAccountSecretsGuard,
     runtime: Arc<Runtime>,
     store: Arc<WarmupStore>,
     registry: Arc<WarmRegistry>,
     now: Arc<Mutex<SystemTime>>,
     member_a: String,
+    account_a: String,
+    account_b: String,
 }
 
 async fn fixture() -> Fixture {
+    let secrets = hofund_plugin_host::memory_account_secrets();
     let anchor = SystemTime::now();
     let times = due_times(anchor);
     let config = config_with_times(&times);
@@ -328,10 +344,12 @@ async fn fixture() -> Fixture {
         .get(PLUGIN)
         .expect("subscription")
         .clone();
-    for id in [ACCOUNT_A, ACCOUNT_B] {
+    let account_a = unique_account_id();
+    let account_b = unique_account_id();
+    for id in [&account_a, &account_b] {
         let accounts = state.host().accounts();
         let account = accounts
-            .account(AccountId::try_from(id).expect("id"), "label")
+            .account(AccountId::try_from(id.as_str()).expect("id"), "label")
             .expect("account row");
         accounts
             .upsert(account, SecretString::from(SECRET.to_owned()))
@@ -346,29 +364,33 @@ async fn fixture() -> Fixture {
         .members();
     let member_a = members
         .iter()
-        .find(|member| member.account.as_str() == ACCOUNT_A)
+        .find(|member| member.account.as_str() == account_a)
         .expect("member A")
         .id
         .to_string();
     let _member_b = members
         .iter()
-        .find(|member| member.account.as_str() == ACCOUNT_B)
+        .find(|member| member.account.as_str() == account_b)
         .expect("member B")
         .id
         .to_string();
     Fixture {
         _dir: dir,
+        _secrets: secrets,
         store: Arc::clone(runtime.warmup()),
         runtime,
         registry,
         now,
         member_a,
+        account_a,
+        account_b,
     }
 }
 
 struct RecordingRunner {
     seen: Arc<AsyncMutex<Vec<String>>>,
     fail_a: Arc<std::sync::atomic::AtomicBool>,
+    fail_id: String,
 }
 
 #[hofund_plugin_sdk::async_trait]
@@ -376,7 +398,7 @@ impl WarmupRunner for RecordingRunner {
     async fn run(&self, _state: &SubscriptionState, account: &AccountId) -> Result<(), String> {
         let id = account.as_str().to_owned();
         self.seen.lock().await.push(id.clone());
-        if id == ACCOUNT_A && self.fail_a.load(std::sync::atomic::Ordering::SeqCst) {
+        if id == self.fail_id && self.fail_a.load(std::sync::atomic::Ordering::SeqCst) {
             Err("injected warm-up failure".to_owned())
         } else {
             Ok(())
@@ -387,10 +409,12 @@ impl WarmupRunner for RecordingRunner {
 fn runner(
     seen: &Arc<AsyncMutex<Vec<String>>>,
     fail_a: &Arc<std::sync::atomic::AtomicBool>,
+    fail_id: &str,
 ) -> RecordingRunner {
     RecordingRunner {
         seen: Arc::clone(seen),
         fail_a: Arc::clone(fail_a),
+        fail_id: fail_id.to_owned(),
     }
 }
 
@@ -404,10 +428,10 @@ async fn a3a_26_tick_skips_cooling_account_and_clears_retry_after_success() {
         &fixture.runtime,
         &fixture.store,
         fixture.registry.as_ref(),
-        &runner(&seen, &fail_a),
+        &runner(&seen, &fail_a, &fixture.account_a),
     )
     .await;
-    assert_eq!(*seen.lock().await, vec![ACCOUNT_A.to_owned()]);
+    assert_eq!(*seen.lock().await, vec![fixture.account_a.clone()]);
     assert!(
         fixture
             .store
@@ -419,12 +443,12 @@ async fn a3a_26_tick_skips_cooling_account_and_clears_retry_after_success() {
         &fixture.runtime,
         &fixture.store,
         fixture.registry.as_ref(),
-        &runner(&seen, &fail_a),
+        &runner(&seen, &fail_a, &fixture.account_a),
     )
     .await;
     assert_eq!(
         *seen.lock().await,
-        vec![ACCOUNT_A.to_owned(), ACCOUNT_B.to_owned()]
+        vec![fixture.account_a.clone(), fixture.account_b.clone()]
     );
 
     {
@@ -437,12 +461,12 @@ async fn a3a_26_tick_skips_cooling_account_and_clears_retry_after_success() {
         &fixture.runtime,
         &fixture.store,
         fixture.registry.as_ref(),
-        &runner(&seen, &fail_a),
+        &runner(&seen, &fail_a, &fixture.account_a),
     )
     .await;
     assert_eq!(
         seen.lock().await.last().map(String::as_str),
-        Some(ACCOUNT_A)
+        Some(fixture.account_a.as_str())
     );
     assert!(
         fixture
@@ -462,7 +486,7 @@ async fn a3a_27_list_statuses_includes_never_run_configured_account() {
     );
     let row = rows
         .iter()
-        .find(|row| row.account().as_str() == ACCOUNT_B)
+        .find(|row| row.account().as_str() == fixture.account_b)
         .expect("configured account B");
     assert!(row.last().is_none());
 }

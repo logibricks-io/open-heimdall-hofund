@@ -42,6 +42,7 @@ use hofund_plugin_api::{
     PluginKind, ProtocolId, QuotaObservation, SecretString, SignInCtx, SpawnRequest, SurfaceHost,
 };
 
+pub use account_secrets::{MemoryAccountSecretsGuard, memory_account_secrets};
 pub use accounts::{AccountStorageKind, AccountStore, StoreError};
 pub use agent_credentials::native_credential_store;
 pub use hofund_plugin_api::kernel::{GatewayBackend, HttpBackend, ObserveBackend};
