@@ -639,8 +639,11 @@ mod tests {
     #[test]
     fn summaries_open_after_canonicalize_and_special_path_chars() {
         let temp = tempfile::tempdir().expect("temp");
-        // `#` and `?` would truncate a naive `file:{path}?mode=ro` URI on every OS.
-        let dir = temp.path().join("conv#root?dir");
+        // `#` starts a URI fragment and `%` is incomplete percent-encoding, so
+        // both would break a naive `file:{path}?mode=ro` URI on every OS.
+        // `?` is reserved in Windows filenames (ERROR_INVALID_NAME), so it is
+        // not used here; Unix would accept it, but `#` already covers truncation.
+        let dir = temp.path().join("conv#root%dir");
         std::fs::create_dir_all(&dir).expect("mkdir");
         let path = dir.join("conversation_summaries.db");
         Connection::open(&path)
