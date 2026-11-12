@@ -8,9 +8,10 @@ use crate::{
     AgentDisconnectRequest, AgentHiddenSetRequest, AgentListResponse, AgentModelRequest,
     AgentModelsResponse, AgentPickedOnlyRequest, AgentPlanRequest, AgentPlanResponse,
     AgentStatusResponse, AgentVisibleSetRequest, CatalogDisabledListResponse, CatalogModelRequest,
-    CheckinListResponse, CheckinRunRequest, CheckinRunResponse, ConfigApplyRequest, ConfigResponse,
-    ConfigValidateRequest, ConfigValidationResponse, ControlError, ControlErrorKind, ErrorEnvelope,
-    EventEnvelope, FieldIssue, GatewayKeyRequest, GatewayKeyResponse, GatewayKeyRestoreRequest,
+    CatalogSyncRequest, CatalogSyncResponse, CheckinListResponse, CheckinRunRequest,
+    CheckinRunResponse, ConfigApplyRequest, ConfigResponse, ConfigValidateRequest,
+    ConfigValidationResponse, ControlError, ControlErrorKind, ErrorEnvelope, EventEnvelope,
+    FieldIssue, GatewayKeyRequest, GatewayKeyResponse, GatewayKeyRestoreRequest,
     GroupCreateRequest, GroupDeleteRequest, GroupDeleteResponse, GroupListResponse,
     GroupMemberCandidatesResponse, GroupPatchRequest, GroupRestoreRequest, GroupWriteResponse,
     HealthResponse, LogTailResponse, MAX_REQUEST_BODY_BYTES, MAX_RESPONSE_BODY_BYTES,
@@ -240,6 +241,7 @@ request!(AgentConnectRequest, validate);
 request!(AgentDisconnectRequest, validate);
 request!(AgentModelRequest, validate);
 request!(CatalogModelRequest, validate);
+request!(CatalogSyncRequest);
 request!(AgentVisibleSetRequest);
 request!(AgentHiddenSetRequest);
 request!(AgentPickedOnlyRequest);
@@ -358,6 +360,7 @@ response!(
     ProfileDetailResponse,
     ProfileSwitchResponse,
     PresetListResponse,
+    CatalogSyncResponse,
     ProviderWriteResponse,
     ProviderDeleteResponse,
     GroupListResponse,
