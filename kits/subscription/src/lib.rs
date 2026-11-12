@@ -19,6 +19,27 @@ pub use servers::{
     HeaderPark, Http1Response, Http1Server, Http2Response, Http2Server, header_park,
 };
 
+/// Sends one HTTP/1.1 GET to a test sign-in listener and returns its reply.
+///
+/// # Errors
+///
+/// Returns an I/O error when the listener is closed or the exchange fails.
+pub async fn loopback_get(port: u16, target: &str) -> std::io::Result<(u16, String)> {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port)).await?;
+    stream
+        .write_all(format!("GET {target} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").as_bytes())
+        .await?;
+    let mut reply = String::new();
+    stream.read_to_string(&mut reply).await?;
+    let status = reply
+        .get(9..12)
+        .and_then(|status| status.parse().ok())
+        .unwrap_or(0);
+    Ok((status, reply))
+}
+
 /// Runs `future` on a paused Tokio clock so tests can [`advance_time`].
 ///
 /// # Panics

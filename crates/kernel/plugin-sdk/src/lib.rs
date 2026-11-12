@@ -61,6 +61,7 @@ pub mod page;
 pub mod probe;
 pub mod process;
 pub mod register;
+pub mod rsa;
 pub mod sigv4;
 pub mod time;
 pub mod transport;
