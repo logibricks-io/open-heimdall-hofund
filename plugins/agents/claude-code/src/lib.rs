@@ -22,6 +22,10 @@ use hofund_plugin_sdk::{chrono, json, serde};
 use json::Value;
 use serde::{Deserialize, Serialize};
 
+mod desktop;
+
+pub use desktop::{ClaudeDesktopLocator, ClaudeDesktopStore, DESKTOP_AGENT};
+
 /// The session agent id.
 pub const AGENT: &str = "claude";
 
@@ -93,35 +97,7 @@ impl SessionStore for ClaudeStore {
     }
 
     fn files(&self, root: &Path) -> Result<Vec<SessionFile>, PluginError> {
-        let projects = root.join("projects");
-        let mut paths = Vec::new();
-        if !projects.exists() {
-            return Ok(Vec::new());
-        }
-        walk_linked(&projects, &projects, &mut paths)
-            .map_err(|_| PluginError::io("cannot list Claude Code sessions"))?;
-        let mut files = Vec::new();
-        for path in paths {
-            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-                continue;
-            };
-            let id = name.strip_suffix(".jsonl").map(str::to_owned);
-            if path
-                .parent()
-                .and_then(Path::file_name)
-                .is_some_and(|dir| dir == "subagents")
-            {
-                if name.starts_with("agent-")
-                    && let Some(id) = id
-                {
-                    files.push(SessionFile::new(id, path));
-                }
-            } else if let Some(id) = id {
-                files.push(SessionFile::new(id, path));
-            }
-        }
-        files.sort_by(|left, right| left.path.cmp(&right.path));
-        Ok(files)
+        collect_cc_files(AGENT, &root.join("projects"))
     }
 
     fn parser(
@@ -129,14 +105,7 @@ impl SessionStore for ClaudeStore {
         file: &SessionFile,
         state: Option<&str>,
     ) -> Result<Box<dyn SessionParser>, PluginError> {
-        let parent = subagent_parent(file);
-        let restored = state
-            .map(json::from_str::<ClaudeState>)
-            .transpose()
-            .map_err(|_| PluginError::decode("invalid Claude Code parser state"))?;
-        Ok(Box::new(ClaudeParser {
-            state: restored.unwrap_or_else(|| ClaudeState::new(file, parent)),
-        }))
+        parser_for(AGENT, file, state)
     }
 
     fn transcript_available(&self) -> bool {
@@ -149,9 +118,131 @@ impl SessionStore for ClaudeStore {
     ) -> Result<Box<dyn SessionTranscriptParser>, PluginError> {
         Ok(Box::new(ClaudeTranscriptParser::default()))
     }
+
+    fn resume_argv(&self, session_id: &str, _path: &Path) -> Option<Vec<String>> {
+        let id = session_id
+            .strip_prefix(&format!("{AGENT}:"))
+            .unwrap_or(session_id);
+        if !safe_resume_id(id) {
+            return None;
+        }
+        Some(vec![
+            "claude".to_owned(),
+            "--resume".to_owned(),
+            id.to_owned(),
+        ])
+    }
 }
 
-fn subagent_parent(file: &SessionFile) -> Option<String> {
+fn safe_resume_id(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+}
+
+fn parser_for(
+    agent: &str,
+    file: &SessionFile,
+    state: Option<&str>,
+) -> Result<Box<dyn SessionParser>, PluginError> {
+    let parent = subagent_parent(agent, file);
+    let restored = state
+        .map(json::from_str::<ClaudeState>)
+        .transpose()
+        .map_err(|_| PluginError::decode("invalid Claude Code parser state"))?;
+    Ok(Box::new(ClaudeParser {
+        state: restored.unwrap_or_else(|| ClaudeState::new(agent, file, parent)),
+    }))
+}
+
+pub(crate) fn collect_cc_files(
+    _agent: &str,
+    projects: &Path,
+) -> Result<Vec<SessionFile>, PluginError> {
+    let mut paths = Vec::new();
+    if !projects.exists() {
+        return Ok(Vec::new());
+    }
+    walk_linked(projects, projects, &mut paths)
+        .map_err(|_| PluginError::io("cannot list Claude Code sessions"))?;
+    let mut files = Vec::new();
+    for path in paths {
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let id = name.strip_suffix(".jsonl").map(str::to_owned);
+        if path
+            .parent()
+            .and_then(Path::file_name)
+            .is_some_and(|dir| dir == "subagents")
+        {
+            if name.starts_with("agent-")
+                && let Some(id) = id
+            {
+                files.push(SessionFile::new(id, path));
+            }
+        } else if let Some(id) = id {
+            files.push(SessionFile::new(id, path));
+        }
+    }
+    files.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(files)
+}
+
+pub(crate) fn walk_desktop_homes(root: &Path) -> Result<Vec<PathBuf>, PluginError> {
+    let mode = root.join("local-agent-mode-sessions");
+    let mut homes = Vec::new();
+    if mode.is_dir() {
+        for account in entries(&mode)? {
+            if !account
+                .file_type()
+                .map_err(|_| PluginError::io("cannot list Claude Desktop sessions"))?
+                .is_dir()
+            {
+                continue;
+            }
+            for org in entries(&account.path())? {
+                if !org
+                    .file_type()
+                    .map_err(|_| PluginError::io("cannot list Claude Desktop sessions"))?
+                    .is_dir()
+                {
+                    continue;
+                }
+                for local in entries(&org.path())? {
+                    let name = local.file_name();
+                    let Some(name) = name.to_str() else {
+                        continue;
+                    };
+                    if !name.starts_with("local_") {
+                        continue;
+                    }
+                    let claude = local.path().join(".claude");
+                    if claude.is_dir() {
+                        homes.push(claude);
+                    }
+                }
+            }
+        }
+    }
+    homes.sort();
+    homes.dedup();
+    Ok(homes)
+}
+
+fn entries(path: &Path) -> Result<Vec<std::fs::DirEntry>, PluginError> {
+    let Ok(directory) = std::fs::read_dir(path) else {
+        return Ok(Vec::new());
+    };
+    let mut entries = directory
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| PluginError::io("cannot read session directory"))?;
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+    Ok(entries)
+}
+
+fn subagent_parent(agent: &str, file: &SessionFile) -> Option<String> {
     let is_sub = file
         .path
         .parent()
@@ -166,7 +257,14 @@ fn subagent_parent(file: &SessionFile) -> Option<String> {
         .and_then(Path::parent)
         .and_then(Path::file_name)
         .and_then(|name| name.to_str())?;
-    Some(format!("{AGENT}:{parent}"))
+    Some(format!("{agent}:{parent}"))
+}
+
+fn desktop_entrypoint(value: &Value) -> bool {
+    value
+        .get("entrypoint")
+        .and_then(Value::as_str)
+        .is_some_and(|entry| entry == "claude-desktop" || entry == "claude-desktop-3p")
 }
 
 fn walk_linked(root: &Path, lexical: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
@@ -205,6 +303,7 @@ struct SeenUsage {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(crate = "hofund_plugin_sdk::serde")]
 struct ClaudeState {
+    agent: String,
     record: SessionRecord,
     custom: String,
     named: String,
@@ -218,14 +317,15 @@ struct ClaudeState {
 }
 
 impl ClaudeState {
-    fn new(file: &SessionFile, parent: Option<String>) -> Self {
-        let id = format!("{AGENT}:{}", file.id);
-        let mut record = SessionRecord::new(AGENT, &id, &file.path);
+    fn new(agent: &str, file: &SessionFile, parent: Option<String>) -> Self {
+        let id = format!("{agent}:{}", file.id);
+        let mut record = SessionRecord::new(agent, &id, &file.path);
         record.title.clone_from(&file.id);
         if let Some(parent) = parent {
             record = record.with_parent(parent);
         }
         Self {
+            agent: agent.to_owned(),
             record,
             custom: String::new(),
             named: String::new(),
@@ -242,7 +342,7 @@ impl ClaudeState {
         let fallback = self
             .record
             .id
-            .strip_prefix(&format!("{AGENT}:"))
+            .strip_prefix(&format!("{}:", self.agent))
             .unwrap_or(&self.record.id)
             .to_owned();
         self.record.title = if !self.custom.is_empty() {
@@ -266,6 +366,12 @@ struct ClaudeParser {
 
 impl ClaudeParser {
     fn line(&mut self, value: &Value) {
+        if self.state.agent == AGENT
+            && self.state.record.app.is_empty()
+            && desktop_entrypoint(value)
+        {
+            DESKTOP_AGENT.clone_into(&mut self.state.record.app);
+        }
         let at = value
             .get("timestamp")
             .and_then(Value::as_str)
@@ -285,9 +391,10 @@ impl ClaudeParser {
         if self.state.record.main
             && let Some(session) = value.get("sessionId").and_then(Value::as_str)
             && !session.is_empty()
-            && self.state.record.id == format!("{AGENT}:{}", file_stem_id(&self.state.record))
+            && self.state.record.id
+                == format!("{}:{}", self.state.agent, file_stem_id(&self.state.record))
         {
-            self.state.record.id = format!("{AGENT}:{session}");
+            self.state.record.id = format!("{}:{session}", self.state.agent);
         }
 
         let kind = value.get("type").and_then(Value::as_str).unwrap_or("");
@@ -446,9 +553,8 @@ impl SessionParser for ClaudeParser {
 fn file_stem_id(record: &SessionRecord) -> String {
     record
         .id
-        .strip_prefix(&format!("{AGENT}:"))
-        .unwrap_or(&record.id)
-        .to_owned()
+        .split_once(':')
+        .map_or_else(|| record.id.clone(), |(_, id)| id.to_owned())
 }
 
 fn counter(value: &Value, key: &str) -> u64 {
@@ -707,6 +813,44 @@ mod tests {
         let transcript = parser.finish().expect("transcript");
         assert!(transcript.parts.iter().any(|part| part.role == "user"));
         assert!(transcript.parts.iter().any(|part| part.role == "assistant"));
+    }
+
+    #[test]
+    fn claude_resume_argv_uses_bare_id() {
+        let store = ClaudeStore::with_root(fixture("root"));
+        assert_eq!(
+            store.resume_argv(
+                "claude:11111111-2222-3333-4444-555555555555",
+                &fixture("root/projects/x.jsonl"),
+            ),
+            Some(vec![
+                "claude".to_owned(),
+                "--resume".to_owned(),
+                "11111111-2222-3333-4444-555555555555".to_owned(),
+            ])
+        );
+        assert_eq!(
+            store.resume_argv("claude:bad/id", &fixture("root/projects/x.jsonl")),
+            None
+        );
+    }
+
+    fn claude_entrypoint_tags_desktop_app_usage() {
+        let path = fixture("desktop/entrypoint.jsonl");
+        let file = SessionFile::new("desktop-tab", &path);
+        let store = ClaudeStore::with_root(fixture("root"));
+        let mut parser = store.parser(&file, None).expect("parser");
+        let input = std::fs::File::open(&path).expect("fixture");
+        for line in BufReader::new(input).lines() {
+            let line = line.expect("UTF-8");
+            let value = json::from_str(&line).expect("JSON");
+            parser.push(&value).expect("push");
+        }
+        let record = parser.finish().expect("finish").record.expect("record");
+        assert_eq!(record.agent, AGENT);
+        assert_eq!(record.app, DESKTOP_AGENT);
+        assert_eq!(record.tokens().input, 4);
+        assert_eq!(record.tokens().output, 1);
     }
 
     #[cfg(unix)]

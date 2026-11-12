@@ -37,14 +37,15 @@ use hofund_control_proto::{
     ProviderTestResponse, ProviderWriteResponse, QuotaAlertsResponse, QuotaAlertsSetRequest,
     QuotaAlertsSetResponse, QuotaCreditsModesResponse, QuotaCreditsSetRequest,
     QuotaCreditsSetResponse, QuotaHistoryQuery, QuotaHistoryResponse, QuotaQuery, QuotaResponse,
-    ReloadRequest, RouteListResponse, RouteModelListResponse, RouteQuery, SessionDetailResponse,
-    SessionListQuery, SessionListResponse, SessionManageQuery, SessionManageResponse,
-    SessionOverviewQuery, SessionOverviewResponse, SessionProgressResponse,
-    SessionReadsPatchRequest, SessionReadsResponse, SessionRouteResponse, SessionSearchQuery,
-    SessionSearchResponse, SessionStatsQuery, SessionStatsResponse, SessionTranscriptQuery,
-    SessionTranscriptResponse, ShutdownRequest, ShutdownResponse, StatusResponse,
-    TokenRotateRequest, TokenRotateResponse, Topic, UnroutedListResponse, UsageQuery,
-    UsageResponse, WarmupListResponse, WarmupRunRequest, WarmupRunResponse, decode_request,
+    ReloadRequest, RouteListResponse, RouteModelListResponse, RouteQuery, SessionCarryRequest,
+    SessionCarryResponse, SessionDetailResponse, SessionListQuery, SessionListResponse,
+    SessionManageQuery, SessionManageResponse, SessionOverviewQuery, SessionOverviewResponse,
+    SessionProgressResponse, SessionReadsPatchRequest, SessionReadsResponse, SessionRouteResponse,
+    SessionSearchQuery, SessionSearchResponse, SessionStatsQuery, SessionStatsResponse,
+    SessionTranscriptQuery, SessionTranscriptResponse, ShutdownRequest, ShutdownResponse,
+    StatusResponse, TokenRotateRequest, TokenRotateResponse, Topic, UnroutedListResponse,
+    UsageQuery, UsageResponse, WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
+    decode_request,
 };
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
@@ -693,6 +694,14 @@ pub trait ControlState: Send + Sync {
         let _ = request;
         Box::pin(async { Err(unsupported_sessions()) })
     }
+    /// Carries one session to another agent without converting its files.
+    fn session_carry(
+        &self,
+        request: SessionCarryRequest,
+    ) -> ControlFuture<'_, SessionCarryResponse> {
+        let _ = request;
+        Box::pin(async { Err(unsupported_sessions()) })
+    }
     /// Reports usage for a period.
     fn usage(&self, query: UsageQuery) -> ControlFuture<'_, UsageResponse>;
     /// Reports what is left of every subscription, with each account's
@@ -1071,7 +1080,8 @@ impl Control {
             .route("/v1/hofund/sessions/delete", post(not_found))
             .route("/v1/hofund/sessions/restore", post(not_found))
             .route("/v1/hofund/sessions/purge", post(not_found))
-            .route("/v1/hofund/sessions/carry", post(not_found))
+            .route("/v1/hofund/sessions/carry", post(session_carry))
+            .route("/api/sessions/carry", post(session_carry))
             .route("/v1/hofund/sessions/relocate", post(not_found))
             .route("/v1/hofund/sessions/recording", post(not_found))
             .route(
@@ -1995,6 +2005,14 @@ async fn patch_session_reads(State(state): State<HttpState>, body: Bytes) -> Res
         Err(failure) => return failure_response(failure),
     };
     operation_response!(state.control.state.patch_session_reads(request).await)
+}
+
+async fn session_carry(State(state): State<HttpState>, body: Bytes) -> Response {
+    let request = match decode_body::<SessionCarryRequest>(&body) {
+        Ok(request) => request,
+        Err(failure) => return failure_response(failure),
+    };
+    operation_response!(state.control.state.session_carry(request).await)
 }
 
 async fn session(

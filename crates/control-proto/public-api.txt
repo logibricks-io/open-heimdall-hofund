@@ -885,6 +885,15 @@ ServeRole::Desktop
 ServeRole::Serve
 ServeRole::Tui
 ServeRole::Unknown #[serde(other)]
+SessionCarryRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
+SessionCarryRequest.id
+SessionCarryRequest.to
+SessionCarryRequest.version
+SessionCarryResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+SessionCarryResponse.agent
+SessionCarryResponse.command
+SessionCarryResponse.id
+SessionCarryResponse.version
 SessionConsent #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
 SessionConsent.all
 SessionConsent.asked

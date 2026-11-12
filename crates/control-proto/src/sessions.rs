@@ -670,6 +670,72 @@ impl SessionReadsPatchRequest {
     }
 }
 
+/// Carry request for continuing a session in another agent.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+#[serde(deny_unknown_fields)]
+pub struct SessionCarryRequest {
+    /// Body wire version.
+    pub version: u32,
+    /// Public id of the session to carry.
+    pub id: String,
+    /// Destination agent id (`omp` for Pi carry).
+    pub to: String,
+}
+
+impl Default for SessionCarryRequest {
+    fn default() -> Self {
+        Self {
+            version: API_VERSION,
+            id: String::new(),
+            to: String::new(),
+        }
+    }
+}
+
+impl SessionCarryRequest {
+    pub(crate) fn validate(&self) -> Result<(), ControlError> {
+        if self.id.is_empty() {
+            return Err(bad_query("id is required"));
+        }
+        if self.id.len() > 256 {
+            return Err(bad_query("id is too long"));
+        }
+        if self.to.is_empty() {
+            return Err(bad_query("to is required"));
+        }
+        if self.to.len() > 64 {
+            return Err(bad_query("to is too long"));
+        }
+        Ok(())
+    }
+}
+
+/// Carry response with spawn argv instead of a shell line.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct SessionCarryResponse {
+    /// Body wire version.
+    pub version: u32,
+    /// Destination agent id.
+    pub agent: String,
+    /// Session id the carry applies to.
+    pub id: String,
+    /// Command to run in the session folder.
+    pub command: SessionResume,
+}
+
+impl Default for SessionCarryResponse {
+    fn default() -> Self {
+        Self {
+            version: API_VERSION,
+            agent: String::new(),
+            id: String::new(),
+            command: SessionResume::default(),
+        }
+    }
+}
+
 fn parse_days(value: &str) -> Result<u32, ControlError> {
     match value {
         "0" | "1" | "7" | "30" | "90" => value

@@ -10,10 +10,13 @@
     clippy::must_use_candidate
 )]
 
+pub mod carry;
 pub mod consent;
 pub mod index;
 pub mod json;
 pub mod open;
 pub mod pricing;
 pub mod read;
+pub mod resume;
+mod sqlite;
 mod storage;

@@ -942,6 +942,8 @@ SessionCompression
 SessionCompression #[non_exhaustive] derives(Clone, Copy, Debug, Default, PartialEq, Eq)
 SessionCompression::None
 SessionCompression::Zstd
+SessionDatabase
+SessionDatabase::fn query (& self , sql : & str , params : & [& str]) -> Result < SessionRows , PluginError >
 SessionDay
 SessionDay #[non_exhaustive] derives(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)
 SessionDay.date
@@ -951,10 +953,19 @@ SessionDay::fn new (date : impl Into < String > , model : impl Into < String > ,
 SessionFile
 SessionFile #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 SessionFile.compression
+SessionFile.format
 SessionFile.id
 SessionFile.path
+SessionFile.related
 SessionFile::const fn with_compression (mut self , compression : SessionCompression) -> Self
+SessionFile::const fn with_format (mut self , format : SessionFormat) -> Self
 SessionFile::fn new (id : impl Into < String > , path : impl Into < PathBuf >) -> Self
+SessionFile::fn with_related (mut self , related : Vec < PathBuf >) -> Self
+SessionFormat
+SessionFormat #[non_exhaustive] derives(Clone, Copy, Debug, Default, PartialEq, Eq)
+SessionFormat::Json
+SessionFormat::JsonLines
+SessionFormat::Sqlite
 SessionLocator
 SessionLocator::fn present (& self) -> bool
 SessionLocator::fn roots (& self) -> Vec < PathBuf >
@@ -976,6 +987,7 @@ SessionPart::fn new (role : impl Into < String > , kind : impl Into < String > ,
 SessionRecord
 SessionRecord #[non_exhaustive] derives(Clone, Debug, Deserialize, PartialEq, Serialize)
 SessionRecord.agent
+SessionRecord.app
 SessionRecord.copies
 SessionRecord.copy
 SessionRecord.cost
@@ -1003,11 +1015,18 @@ SessionRecord::fn model_ids (& self) -> Vec < String >
 SessionRecord::fn new (agent : impl Into < String > , id : impl Into < String > , path : impl Into < PathBuf >) -> Self
 SessionRecord::fn tokens (& self) -> SessionTokens
 SessionRecord::fn with_parent (mut self , parent_id : impl Into < String >) -> Self
+SessionRows
+SessionRows #[non_exhaustive] derives(Clone, Debug, Default, PartialEq)
+SessionRows.cut
+SessionRows.values
+SessionRows::const fn new (values : Vec < Vec < SessionValue > > , cut : bool) -> Self
 SessionStore
 SessionStore::fn agent (& self) -> & str
 SessionStore::fn files (& self , root : & Path) -> Result < Vec < SessionFile > , PluginError >
 SessionStore::fn locator (& self) -> & dyn SessionLocator
 SessionStore::fn parser (& self , file : & SessionFile , state : Option < & str > ,) -> Result < Box < dyn SessionParser > , PluginError >
+SessionStore::fn read_database (& self , _file : & SessionFile , _database : & dyn SessionDatabase ,) -> Result < Vec < SessionRecord > , PluginError >
+SessionStore::fn resume_argv (& self , _session_id : & str , _path : & Path) -> Option < Vec < String > >
 SessionStore::fn transcript_available (& self) -> bool
 SessionStore::fn transcript_parser (& self , file : & SessionFile ,) -> Result < Box < dyn SessionTranscriptParser > , PluginError >
 SessionTokens
@@ -1037,6 +1056,13 @@ SessionUsageEvent.date
 SessionUsageEvent.model
 SessionUsageEvent.tokens
 SessionUsageEvent::fn new (checkpoint : SessionTokens , tokens : SessionTokens , model : impl Into < String > , date : impl Into < String > ,) -> Self
+SessionValue
+SessionValue #[non_exhaustive] derives(Clone, Debug, PartialEq)
+SessionValue::Blob
+SessionValue::Integer
+SessionValue::Null
+SessionValue::Real
+SessionValue::Text
 SignInChallenge
 SignInChallenge #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 SignInChallenge::DeviceCode

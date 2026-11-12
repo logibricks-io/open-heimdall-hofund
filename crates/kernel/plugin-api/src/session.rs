@@ -174,6 +174,9 @@ pub struct SessionRecord {
     /// Whether this record is a pure copy rather than a subagent.
     #[serde(default)]
     pub copy: bool,
+    /// Usage attribution when the session ran outside this agent's files.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub app: String,
     /// Parent checkpoint source for a fork, when one is named.
     #[serde(default)]
     pub forked_from: Option<String>,
@@ -209,6 +212,7 @@ impl SessionRecord {
             family_leaf: String::new(),
             family_ids: Vec::new(),
             copy: false,
+            app: String::new(),
             forked_from: None,
             usage: Vec::new(),
             cut: false,
@@ -334,6 +338,19 @@ pub enum SessionCompression {
     Zstd,
 }
 
+/// How the kernel reads a session source.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SessionFormat {
+    /// Incremental JSON lines, optionally compressed.
+    #[default]
+    JsonLines,
+    /// One complete JSON value per listed file.
+    Json,
+    /// A read-only SQLite database that may contain many sessions.
+    Sqlite,
+}
+
 /// One file returned by a [`SessionStore`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -344,16 +361,22 @@ pub struct SessionFile {
     pub path: PathBuf,
     /// Compression applied to the file bytes.
     pub compression: SessionCompression,
+    /// Source format interpreted by the kernel and plugin.
+    pub format: SessionFormat,
+    /// Additional listed files that form the same session.
+    pub related: Vec<PathBuf>,
 }
 
 impl SessionFile {
-    /// A plain session file.
+    /// A plain JSONL session file.
     #[must_use]
     pub fn new(id: impl Into<String>, path: impl Into<PathBuf>) -> Self {
         Self {
             id: id.into(),
             path: path.into(),
             compression: SessionCompression::None,
+            format: SessionFormat::JsonLines,
+            related: Vec::new(),
         }
     }
 
@@ -363,6 +386,64 @@ impl SessionFile {
         self.compression = compression;
         self
     }
+
+    /// Marks the source format.
+    #[must_use]
+    pub const fn with_format(mut self, format: SessionFormat) -> Self {
+        self.format = format;
+        self
+    }
+
+    /// Adds related files opened under the same root and bounds.
+    #[must_use]
+    pub fn with_related(mut self, related: Vec<PathBuf>) -> Self {
+        self.related = related;
+        self
+    }
+}
+
+/// One SQLite value returned through the kernel's read-only connection.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub enum SessionValue {
+    /// SQL NULL.
+    Null,
+    /// A signed integer.
+    Integer(i64),
+    /// A floating-point number.
+    Real(f64),
+    /// UTF-8 text.
+    Text(String),
+    /// Binary data, used by schemas that store JSON as blobs.
+    Blob(Vec<u8>),
+}
+
+/// Rows returned by one bounded SQLite query.
+#[derive(Clone, Debug, Default, PartialEq)]
+#[non_exhaustive]
+pub struct SessionRows {
+    /// Row values in selected-column order.
+    pub values: Vec<Vec<SessionValue>>,
+    /// Whether the database-wide row cap stopped this query.
+    pub cut: bool,
+}
+
+impl SessionRows {
+    /// Rows returned by the bounded kernel connection.
+    #[must_use]
+    pub const fn new(values: Vec<Vec<SessionValue>>, cut: bool) -> Self {
+        Self { values, cut }
+    }
+}
+
+/// Kernel-owned read-only SQLite access. Plugins supply only fixed schema SQL.
+pub trait SessionDatabase {
+    /// Runs one fixed query with text parameters, subject to database limits.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when SQLite rejects or cannot read the query.
+    fn query(&self, sql: &str, params: &[&str]) -> Result<SessionRows, PluginError>;
 }
 
 /// A completed parse and the opaque state needed by the next incremental read.
@@ -456,5 +537,24 @@ pub trait SessionStore: Send + Sync {
         Err(PluginError::unsupported(
             "session transcripts are not supported by this store",
         ))
+    }
+
+    /// Reads every session in a kernel-opened SQLite database.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when the plugin does not support SQLite or the
+    /// database rows cannot be interpreted.
+    fn read_database(
+        &self,
+        _file: &SessionFile,
+        _database: &dyn SessionDatabase,
+    ) -> Result<Vec<SessionRecord>, PluginError> {
+        Err(PluginError::decode("session store does not support SQLite"))
+    }
+
+    /// Returns resume argv for a later explicit resume action, without spawning it.
+    fn resume_argv(&self, _session_id: &str, _path: &Path) -> Option<Vec<String>> {
+        None
     }
 }

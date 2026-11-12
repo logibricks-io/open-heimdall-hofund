@@ -6,12 +6,13 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Days, Local, NaiveDate, NaiveTime, TimeZone};
 use hofund_control_proto::{
-    ControlError, ControlErrorKind, SessionConsent, SessionDayStats, SessionDetailResponse,
-    SessionListQuery, SessionListResponse, SessionManageAgent, SessionManageQuery,
-    SessionManageResponse, SessionOverviewDay, SessionOverviewQuery, SessionOverviewResponse,
-    SessionOverviewTop, SessionProgressResponse, SessionReadAgent, SessionReadsPatchRequest,
-    SessionReadsResponse, SessionSearchHit, SessionSearchQuery, SessionSearchResponse,
-    SessionStatShare, SessionStatsQuery, SessionStatsResponse, SessionSummary, SessionTokenTotals,
+    ControlError, ControlErrorKind, SessionCarryRequest, SessionCarryResponse, SessionConsent,
+    SessionDayStats, SessionDetailResponse, SessionListQuery, SessionListResponse,
+    SessionManageAgent, SessionManageQuery, SessionManageResponse, SessionOverviewDay,
+    SessionOverviewQuery, SessionOverviewResponse, SessionOverviewTop, SessionProgressResponse,
+    SessionReadAgent, SessionReadsPatchRequest, SessionReadsResponse, SessionResume,
+    SessionSearchHit, SessionSearchQuery, SessionSearchResponse, SessionStatShare,
+    SessionStatsQuery, SessionStatsResponse, SessionSummary, SessionTokenTotals,
     SessionTranscriptPart, SessionTranscriptResponse,
 };
 use hofund_gateway::control::ControlFailure;
@@ -73,7 +74,7 @@ impl SessionControl {
             .filter(|record| in_list_window(record, since))
             .filter(|record| list_matches(record, &query.model, &query.folder))
             .take(query.limit())
-            .map(session_summary)
+            .map(|record| session_summary(record, &self.stores))
             .collect();
         response.consent = self.consent()?;
         seal(&mut response, |response| &mut response.revision);
@@ -359,7 +360,7 @@ impl SessionControl {
         response.sessions = records
             .iter()
             .filter(|record| response.agent.is_empty() || record.agent == response.agent)
-            .map(session_summary)
+            .map(|record| session_summary(record, &self.stores))
             .collect();
         response.trash_dir = self
             .config_dir
@@ -381,9 +382,44 @@ impl SessionControl {
             .is_some_and(|store| store.transcript_available())
             && !record.path.as_os_str().is_empty();
         let mut response = SessionDetailResponse::default();
-        response.session = session_summary(&record);
+        response.session = session_summary(&record, &self.stores);
         response.transcript_available = transcript_available;
         Ok(response)
+    }
+
+    pub(crate) fn carry(
+        &self,
+        request: SessionCarryRequest,
+    ) -> Result<SessionCarryResponse, ControlFailure> {
+        self.check_read_consent(&request.id)?;
+        let record = self.session_record(&request.id)?;
+        let (base, wsl) = hofund_sessions::resume::split_instance(&record.agent);
+        if wsl.is_some() {
+            return Err(session_not_found());
+        }
+        match (base, request.to.as_str()) {
+            ("pi", "omp") => {
+                let omp_present = self
+                    .stores
+                    .iter()
+                    .any(|store| store.agent() == "omp" && store.locator().present());
+                let command =
+                    hofund_sessions::carry::pi_to_omp_command(&record, omp_present, false)
+                        .ok_or_else(session_not_found)?;
+                let mut response = SessionCarryResponse::default();
+                response.agent = "omp".to_owned();
+                response.id.clone_from(&record.id);
+                let mut resume = SessionResume::default();
+                resume.argv = command.argv;
+                resume.cwd = command.cwd;
+                response.command = resume;
+                Ok(response)
+            }
+            ("claude" | "codex", "claude" | "codex") => {
+                Err(session_carry_unprocessable(base, &request.to))
+            }
+            _ => Err(session_not_found()),
+        }
     }
 
     pub(crate) fn transcript(
@@ -553,7 +589,7 @@ fn seal<T: serde::Serialize>(response: &mut T, mut revision: impl FnMut(&mut T) 
     *revision(response) = super::control::revision(&bytes);
 }
 
-fn session_summary(record: &SessionRecord) -> SessionSummary {
+fn session_summary(record: &SessionRecord, stores: &[Arc<dyn SessionStore>]) -> SessionSummary {
     let mut summary = SessionSummary::default();
     summary.id.clone_from(&record.id);
     summary.agent.clone_from(&record.agent);
@@ -564,10 +600,26 @@ fn session_summary(record: &SessionRecord) -> SessionSummary {
     summary.tokens = wire_tokens(record.tokens());
     summary.cost = record.cost;
     summary.unpriced = record.unpriced;
-    summary.resume = None;
     summary.read_only = false;
     summary.gateway = false;
+    let store = hofund_sessions::resume::store_for_agent(stores, &record.agent);
+    summary.resume =
+        hofund_sessions::resume::resume_command(record, store, summary.read_only).map(|command| {
+            let mut resume = SessionResume::default();
+            resume.argv = command.argv;
+            resume.cwd = command.cwd;
+            resume
+        });
     summary
+}
+
+fn session_carry_unprocessable(from: &str, to: &str) -> ControlFailure {
+    ControlError::new(
+        ControlErrorKind::Unprocessable,
+        format!("a {from} session can't be carried over to {to}"),
+        "sessions",
+    )
+    .into()
 }
 
 fn wire_tokens(tokens: SessionTokens) -> SessionTokenTotals {

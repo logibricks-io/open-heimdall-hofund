@@ -19,6 +19,10 @@ members = [
     "crates/kernel/plugin-sdk",
     "plugins/agents/claude-code",
     "plugins/agents/codex",
+    "plugins/agents/opencode",
+    "plugins/agents/pi",
+    "plugins/agents/omp",
+    "plugins/agents/gemini-cli",
     "plugins/inbound/codex-catalog",
     "plugins/inbound/retrieval",
     "plugins/inbound/echo",
@@ -88,6 +92,10 @@ hofund-kit-upstream = { version = "0.1.0", path = "kits/upstream" }
 hofund-plugin-api = { version = "0.1.0", path = "crates/kernel/plugin-api" }
 hofund-plugin-agent-claude = { version = "0.1.0", path = "plugins/agents/claude-code" }
 hofund-plugin-agent-codex = { version = "0.1.0", path = "plugins/agents/codex" }
+hofund-plugin-agent-opencode = { version = "0.1.0", path = "plugins/agents/opencode" }
+hofund-plugin-agent-pi = { version = "0.1.0", path = "plugins/agents/pi" }
+hofund-plugin-agent-omp = { version = "0.1.0", path = "plugins/agents/omp" }
+hofund-plugin-agent-gemini = { version = "0.1.0", path = "plugins/agents/gemini-cli" }
 hofund-plugin-azure = { version = "0.1.0", path = "plugins/providers/azure" }
 hofund-plugin-bedrock = { version = "0.1.0", path = "plugins/providers/bedrock" }
 hofund-plugin-bedrock-mantle = { version = "0.1.0", path = "plugins/providers/bedrock-mantle" }

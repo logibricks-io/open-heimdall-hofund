@@ -303,6 +303,13 @@ impl ControlState for FakeControlState {
         ))
     }
 
+    fn session_carry(
+        &self,
+        request: hofund_control_proto::SessionCarryRequest,
+    ) -> ControlFuture<'_, hofund_control_proto::SessionCarryResponse> {
+        self.reply(format!("session_carry:{}:{}", request.id, request.to))
+    }
+
     fn usage(&self, query: UsageQuery) -> ControlFuture<'_, UsageResponse> {
         self.reply(format!("usage:{:?}", query.period))
     }
@@ -1075,7 +1082,6 @@ async fn session_write_routes_remain_not_found() {
         "/v1/hofund/sessions/delete",
         "/v1/hofund/sessions/restore",
         "/v1/hofund/sessions/purge",
-        "/v1/hofund/sessions/carry",
         "/v1/hofund/sessions/relocate",
         "/v1/hofund/sessions/recording",
     ] {

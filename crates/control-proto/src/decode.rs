@@ -20,12 +20,12 @@ use crate::{
     ProviderSpendCapsResponse, ProviderTestRequest, ProviderTestResponse, ProviderWriteResponse,
     QuotaAlertsResponse, QuotaAlertsSetRequest, QuotaAlertsSetResponse, QuotaCreditsModesResponse,
     QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryResponse, QuotaResponse,
-    ReloadRequest, RouteListResponse, RouteModelListResponse, SessionDetailResponse,
-    SessionListResponse, SessionManageResponse, SessionOverviewResponse, SessionProgressResponse,
-    SessionReadsPatchRequest, SessionReadsResponse, SessionRouteResponse, SessionSearchResponse,
-    SessionStatsResponse, SessionTranscriptResponse, ShutdownRequest, ShutdownResponse,
-    StatusResponse, TokenRotateRequest, TokenRotateResponse, UnroutedListResponse, UsageResponse,
-    WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
+    ReloadRequest, RouteListResponse, RouteModelListResponse, SessionCarryRequest,
+    SessionDetailResponse, SessionListResponse, SessionManageResponse, SessionOverviewResponse,
+    SessionProgressResponse, SessionReadsPatchRequest, SessionReadsResponse, SessionRouteResponse,
+    SessionSearchResponse, SessionStatsResponse, SessionTranscriptResponse, ShutdownRequest,
+    ShutdownResponse, StatusResponse, TokenRotateRequest, TokenRotateResponse,
+    UnroutedListResponse, UsageResponse, WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
 };
 
 mod sealed {
@@ -263,6 +263,7 @@ request!(GroupPatchRequest, validate);
 request!(GroupDeleteRequest, validate);
 request!(GroupRestoreRequest, validate);
 request!(SessionReadsPatchRequest, validate);
+request!(SessionCarryRequest, validate);
 
 impl sealed::Sealed for ConfigResponse {}
 impl Response for ConfigResponse {

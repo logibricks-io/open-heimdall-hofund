@@ -1382,9 +1382,13 @@ impl Engine {
         session: &Session,
         target: &GatewayTarget,
     ) -> Result<ConnectionStatus, AgentError> {
-        let mut connected = true;
+        // An agent with no files (and no credential) is not connected. A
+        // vacuous "all slots match" would let token rotation refresh a stub
+        // description that was never applied.
+        let chosen = self.chosen()?;
+        let mut connected = !chosen.is_empty() || self.credential()?.is_some();
         let mut paths = Vec::new();
-        for chosen in self.chosen()? {
+        for chosen in chosen {
             paths.push(chosen.path.clone());
             let Chosen {
                 file,

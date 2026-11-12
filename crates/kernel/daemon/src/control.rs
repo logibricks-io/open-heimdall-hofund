@@ -26,14 +26,15 @@ use hofund_control_proto::{
     QuotaAlertsSetResponse, QuotaCreditsModesResponse, QuotaCreditsSetRequest,
     QuotaCreditsSetResponse, QuotaHistoryQuery, QuotaHistoryResponse, QuotaQuery, QuotaResponse,
     RouteListResponse, RouteModel, RouteModelListResponse, RouteQuery, RouteReserve, ServeRole,
-    SessionDetailResponse, SessionListQuery, SessionListResponse, SessionManageQuery,
-    SessionManageResponse, SessionOverviewQuery, SessionOverviewResponse, SessionProgressResponse,
-    SessionReadsPatchRequest, SessionReadsResponse, SessionRouteResponse, SessionSearchQuery,
-    SessionSearchResponse, SessionStatsQuery, SessionStatsResponse, SessionTranscriptResponse,
-    ShutdownRequest, ShutdownResponse, ShutdownState, StatusResponse, TokenRotateRequest,
-    TokenRotateResponse, UnroutedListResponse, UsageBreakdownBy, UsageBreakdownGroup, UsagePeriod,
-    UsageQuery, UsageResponse, UsageRow, UsageTotals, WarmupAccountRow, WarmupListResponse,
-    WarmupRunRequest, WarmupRunResponse,
+    SessionCarryRequest, SessionCarryResponse, SessionDetailResponse, SessionListQuery,
+    SessionListResponse, SessionManageQuery, SessionManageResponse, SessionOverviewQuery,
+    SessionOverviewResponse, SessionProgressResponse, SessionReadsPatchRequest,
+    SessionReadsResponse, SessionRouteResponse, SessionSearchQuery, SessionSearchResponse,
+    SessionStatsQuery, SessionStatsResponse, SessionTranscriptResponse, ShutdownRequest,
+    ShutdownResponse, ShutdownState, StatusResponse, TokenRotateRequest, TokenRotateResponse,
+    UnroutedListResponse, UsageBreakdownBy, UsageBreakdownGroup, UsagePeriod, UsageQuery,
+    UsageResponse, UsageRow, UsageTotals, WarmupAccountRow, WarmupListResponse, WarmupRunRequest,
+    WarmupRunResponse,
 };
 use hofund_control_proto::{
     ConfigApplyRequest, ConfigResponse, ConfigValidateRequest, ConfigValidationResponse,
@@ -1375,6 +1376,16 @@ impl ControlState for DaemonControl {
         let sessions = Arc::clone(&self.sessions);
         Box::pin(session_task(sessions, move |sessions| {
             sessions.patch_reads(request)
+        }))
+    }
+
+    fn session_carry(
+        &self,
+        request: SessionCarryRequest,
+    ) -> ControlFuture<'_, SessionCarryResponse> {
+        let sessions = Arc::clone(&self.sessions);
+        Box::pin(session_task(sessions, move |sessions| {
+            sessions.carry(request)
         }))
     }
 
