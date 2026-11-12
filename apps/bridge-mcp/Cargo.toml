@@ -1,0 +1,22 @@
+[package]
+name = "hofund-bridge-mcp"
+description = "Hidden stdio MCP helper used by a long-lived coding-agent subprocess."
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+getrandom = "0.2.17"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

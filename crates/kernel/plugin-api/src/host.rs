@@ -18,13 +18,13 @@ use crate::forward::{Forward, RawAnswer};
 #[cfg(feature = "kernel")]
 use crate::id::PluginKind;
 use crate::id::{AccountId, MemberId, PluginId, PluginKey, ProtocolId};
-#[cfg(feature = "kernel")]
-use crate::kernel::NoLoopback;
 use crate::kernel::{
-    AccountBackend, AccountLeaseBackend, ClockBackend, DirBackend, GatewayBackend, HttpBackend,
-    LoopbackBackend, ObserveBackend, PipedChildBackend, ProcessBackend, SchedulerBackend,
-    SecretsBackend,
+    AccountBackend, AccountLeaseBackend, BridgeCallbackBackend, ClockBackend, DirBackend,
+    GatewayBackend, HttpBackend, LongLivedChildBackend, LoopbackBackend, ObserveBackend,
+    PipedChildBackend, ProcessBackend, SchedulerBackend, SecretsBackend,
 };
+#[cfg(feature = "kernel")]
+use crate::kernel::{NoBridgeCallback, NoLoopback};
 use crate::records::{Account, QuotaObservation, SignInCtx};
 use bytes::Bytes;
 use futures_util::future::BoxFuture;
@@ -566,6 +566,115 @@ impl PipedChild {
     }
 }
 
+/// A long-lived child with piped standard input, output, and error.
+///
+/// Dropping it does not kill the child and does not close standard input.
+/// Call [`Self::kill`] to stop it, or [`Self::wait`] to reap a child that has
+/// already exited. [`Self::wait`] returns the same `i32` exit status as
+/// [`PipedChild::exit_code`].
+#[non_exhaustive]
+pub struct LongLivedChild {
+    inner: Box<dyn LongLivedChildBackend>,
+    on_kill: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+}
+
+impl std::fmt::Debug for LongLivedChild {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LongLivedChild")
+            .field("id", &self.inner.id())
+            .finish_non_exhaustive()
+    }
+}
+
+impl LongLivedChild {
+    /// The process id.
+    #[must_use]
+    pub fn id(&self) -> u32 {
+        self.inner.id()
+    }
+
+    /// Writes `bytes` to standard input and flushes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when standard input is closed or the write fails.
+    pub async fn write_stdin(&self, bytes: Bytes) -> Result<(), PluginError> {
+        self.inner.write_stdin(bytes).await
+    }
+
+    /// Closes standard input so the child reads end of file.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when closing fails. Closing twice is not an error.
+    pub async fn close_stdin(&self) -> Result<(), PluginError> {
+        self.inner.close_stdin().await
+    }
+
+    /// Standard output, one chunk per line with the newline kept.
+    ///
+    /// A line longer than 64 MiB ends the stream with an `Io` error.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when standard output was already taken.
+    pub fn stdout_stream(&self) -> Result<BodyStream, PluginError> {
+        self.inner
+            .take_stdout()
+            .ok_or_else(|| PluginError::config("standard output was already taken"))
+    }
+
+    /// Waits until the child exits and returns its exit code.
+    ///
+    /// Waiting does not kill the child. A second call returns the same code.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when the wait fails.
+    pub async fn wait(&self) -> Result<i32, PluginError> {
+        self.inner.wait().await
+    }
+
+    /// Signals the child to exit and runs the hook registered with
+    /// [`Self::on_kill`], if any. Does not wait for the child to reap.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when the signal cannot be sent. The hook still
+    /// runs once `kill` is called.
+    pub fn kill(&self) -> Result<(), PluginError> {
+        let result = self.inner.kill();
+        if let Some(hook) = self
+            .on_kill
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            hook();
+        }
+        result
+    }
+
+    /// Replaces the hook invoked from [`Self::kill`].
+    ///
+    /// The hook is not called when the child exits on its own or when this
+    /// handle is dropped. A plugin can use it for cleanup such as stopping a
+    /// process that lives behind a helper parent.
+    pub fn on_kill(&self, hook: Box<dyn FnOnce() + Send>) {
+        *self
+            .on_kill
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(hook);
+    }
+
+    /// The most recent 1 MiB of standard error.
+    #[must_use]
+    pub fn stderr_tail(&self) -> Bytes {
+        self.inner.stderr_tail()
+    }
+}
+
 /// Process spawn. The SDK resolves the binary. This handle does not invoke a shell.
 #[derive(Clone)]
 #[non_exhaustive]
@@ -614,6 +723,40 @@ impl ProcessHandle {
             )
             .await?;
         Ok(PipedChild { inner })
+    }
+
+    /// Spawns `request` as a long-lived piped child.
+    ///
+    /// The child inherits the host environment after names in `env_deny` are
+    /// removed, then the pairs in `request` are applied. This is not the
+    /// allowlist used by [`Self::spawn_piped`]. Standard output lines are
+    /// capped at 64 MiB. Standard error is retained up to 1 MiB (the tail).
+    /// Dropping the [`LongLivedChild`] does not kill the child and does not
+    /// close standard input.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when the process cannot be started, or with
+    /// kind `Unsupported` when the host has no long-lived spawn.
+    pub async fn spawn_long_lived(
+        &self,
+        request: &SpawnRequest,
+        env_deny: &[OsString],
+    ) -> Result<LongLivedChild, PluginError> {
+        let inner = self
+            .inner
+            .spawn_long_lived(
+                request.program.clone(),
+                request.args.clone(),
+                request.env.clone(),
+                request.cwd.clone(),
+                env_deny.to_vec(),
+            )
+            .await?;
+        Ok(LongLivedChild {
+            inner,
+            on_kill: Mutex::new(None),
+        })
     }
 
     /// Waits for `spawned` and reaps it.
@@ -715,6 +858,8 @@ pub struct HostContext {
     dirs: DirHandle,
     observe: ObserveHandle,
     loopback: LoopbackHandle,
+    bridge_callback: BridgeCallbackHandle,
+    bridge_mcp_program: Option<PathBuf>,
 }
 
 impl HostContext {
@@ -795,6 +940,11 @@ impl HostContext {
                 plugin: key.clone(),
                 inner: Arc::new(NoLoopback),
             },
+            bridge_callback: BridgeCallbackHandle {
+                plugin: key.clone(),
+                inner: Arc::new(NoBridgeCallback),
+            },
+            bridge_mcp_program: None,
             key,
         }
     }
@@ -878,6 +1028,71 @@ impl HostContext {
     #[must_use]
     pub fn loopback(&self) -> &LoopbackHandle {
         &self.loopback
+    }
+
+    /// Dedicated loopback listener for long-lived bridge callbacks.
+    #[must_use]
+    pub fn bridge_callback(&self) -> &BridgeCallbackHandle {
+        &self.bridge_callback
+    }
+
+    /// Kernel-only. Plugins do not call this.
+    ///
+    /// Gives this context a bridge callback listener. Without one,
+    /// [`BridgeCallbackHandle::register`] and
+    /// [`BridgeCallbackHandle::base_url`] return
+    /// [`crate::PluginErrorKind::Unsupported`].
+    #[cfg(feature = "kernel")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_bridge_callback(mut self, bridge: Arc<dyn BridgeCallbackBackend>) -> Self {
+        self.bridge_callback = BridgeCallbackHandle {
+            plugin: self.key.clone(),
+            inner: bridge,
+        };
+        self
+    }
+
+    /// Kernel-only. Plugins do not call this.
+    ///
+    /// Overrides the helper program [`Self::bridge_mcp_helper`] would otherwise
+    /// take from the current process executable. Native runs use the current
+    /// executable; a later slice rewrites this path when the child runs under
+    /// a foreign OS compatibility layer.
+    #[cfg(feature = "kernel")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_bridge_mcp_program(mut self, program: PathBuf) -> Self {
+        self.bridge_mcp_program = Some(program);
+        self
+    }
+
+    /// The hidden stdio MCP helper: this process's executable (or an injected
+    /// path) and the argv prefix `bridge-mcp-stdio`. The plugin appends the
+    /// callback, tools, and listed-file paths when it writes the MCP config.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when the executable or the current directory
+    /// cannot be resolved, or when either path is not absolute.
+    pub fn bridge_mcp_helper(&self) -> Result<SpawnRequest, PluginError> {
+        let program = match &self.bridge_mcp_program {
+            Some(program) => program.clone(),
+            None => std::env::current_exe().map_err(|error| {
+                PluginError::internal(format!("cannot resolve the bridge MCP helper: {error}"))
+            })?,
+        };
+        let cwd = std::env::current_dir().map_err(|error| {
+            PluginError::internal(format!(
+                "cannot resolve the bridge MCP helper working directory: {error}"
+            ))
+        })?;
+        SpawnRequest::new(
+            program,
+            vec![OsString::from("bridge-mcp-stdio")],
+            Vec::new(),
+            cwd,
+        )
     }
 }
 
@@ -1300,6 +1515,152 @@ impl std::fmt::Debug for LoopbackHandle {
     }
 }
 
+/// Path prefix of a bridge callback URL, including the trailing slash.
+///
+/// The token is the last path segment after this prefix:
+/// `http://127.0.0.1:<port>/callback/<token>`.
+pub const BRIDGE_CALLBACK_PATH_PREFIX: &str = "/callback/";
+
+/// Reply a registered bridge callback handler returns.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct BridgeCallbackReply {
+    status: u16,
+    body: Bytes,
+}
+
+impl BridgeCallbackReply {
+    /// HTTP status and response body bytes. The body is sent as JSON.
+    #[must_use]
+    pub fn new(status: u16, body: impl Into<Bytes>) -> Self {
+        Self {
+            status,
+            body: body.into(),
+        }
+    }
+
+    /// The HTTP status.
+    #[must_use]
+    pub const fn status(&self) -> u16 {
+        self.status
+    }
+
+    /// The response body.
+    #[must_use]
+    pub fn body(&self) -> &[u8] {
+        &self.body
+    }
+}
+
+/// Handles one POST on a live bridge callback token.
+pub trait BridgeCallbackHandler: Send + Sync {
+    /// Receives the raw POST body and returns the status and JSON body.
+    fn handle(&self, body: Bytes) -> BoxFuture<'_, BridgeCallbackReply>;
+}
+
+/// Guard that unregisters a bridge callback token when dropped.
+#[non_exhaustive]
+pub struct BridgeCallbackGuard {
+    plugin: PluginKey,
+    token: String,
+    url: String,
+    inner: Arc<dyn BridgeCallbackBackend>,
+}
+
+impl BridgeCallbackGuard {
+    /// The full callback URL written into the mode-`0600` callback file.
+    #[must_use]
+    pub fn callback_url(&self) -> &str {
+        &self.url
+    }
+}
+
+impl Drop for BridgeCallbackGuard {
+    fn drop(&mut self) {
+        self.inner.unregister(&self.plugin, &self.token);
+    }
+}
+
+impl std::fmt::Debug for BridgeCallbackGuard {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BridgeCallbackGuard")
+            .field("plugin", &self.plugin)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Dedicated loopback listener for long-lived bridge callbacks.
+///
+/// This sits beside [`LoopbackHandle`] (one-shot browser OAuth) and is not a
+/// replacement for it. The kernel owns a `127.0.0.1` listener; the plugin
+/// registers a token and receives the POST body.
+#[derive(Clone)]
+#[non_exhaustive]
+pub struct BridgeCallbackHandle {
+    plugin: PluginKey,
+    inner: Arc<dyn BridgeCallbackBackend>,
+}
+
+impl BridgeCallbackHandle {
+    /// Origin of the listener, `http://127.0.0.1:<port>`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when this host has no listener or the
+    /// listener cannot be started.
+    pub fn base_url(&self) -> Result<String, PluginError> {
+        self.inner.base_url()
+    }
+
+    /// Registers `token` until the returned guard is dropped.
+    ///
+    /// `token` must be a non-empty unreserved path segment (`ALPHA / DIGIT /
+    /// "-" / "." / "_" / "~"`), typically 24 random bytes as hex. The kernel
+    /// does not generate the token.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when `token` is empty or contains a character
+    /// that is not safe in a URL path, this host has no listener, or the
+    /// token is already registered.
+    pub fn register(
+        &self,
+        token: &str,
+        handler: Arc<dyn BridgeCallbackHandler>,
+    ) -> Result<BridgeCallbackGuard, PluginError> {
+        if !token_is_path_safe(token) {
+            return Err(PluginError::config(
+                "bridge callback token must be a non-empty unreserved path segment",
+            ));
+        }
+        let url = self.inner.register(&self.plugin, token, handler)?;
+        Ok(BridgeCallbackGuard {
+            plugin: self.plugin.clone(),
+            token: token.to_owned(),
+            url,
+            inner: Arc::clone(&self.inner),
+        })
+    }
+}
+
+impl std::fmt::Debug for BridgeCallbackHandle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BridgeCallbackHandle")
+            .field("plugin", &self.plugin)
+            .finish_non_exhaustive()
+    }
+}
+
+/// RFC 3986 unreserved characters only, and not empty.
+fn token_is_path_safe(token: &str) -> bool {
+    !token.is_empty()
+        && token
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~'))
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -1310,10 +1671,10 @@ mod tests {
     use async_trait::async_trait;
     use bytes::Bytes;
 
-    use super::{PipedChild, ProcessHandle, SpawnRequest};
+    use super::{LongLivedChild, PipedChild, ProcessHandle, SpawnRequest};
     use crate::body::BodyStream;
     use crate::error::{PluginError, PluginErrorKind};
-    use crate::kernel::{PipedChildBackend, ProcessBackend};
+    use crate::kernel::{LongLivedChildBackend, PipedChildBackend, ProcessBackend};
 
     struct NoPipes;
 
@@ -1387,6 +1748,11 @@ mod tests {
         let request = SpawnRequest::new(program, Vec::new(), Vec::new(), cwd).expect("request");
         let error = handle.spawn_piped(&request).await.expect_err("unsupported");
         assert_eq!(error.kind(), PluginErrorKind::Unsupported);
+        let error = handle
+            .spawn_long_lived(&request, &[])
+            .await
+            .expect_err("unsupported");
+        assert_eq!(error.kind(), PluginErrorKind::Unsupported);
     }
 
     #[tokio::test]
@@ -1414,6 +1780,90 @@ mod tests {
         assert_eq!(&chunk[..], b"line\n");
         let error = child.stdout().expect_err("second stdout");
         assert_eq!(error.kind(), PluginErrorKind::Config);
+    }
+
+    #[derive(Default)]
+    struct FakeLongLived {
+        written: Arc<Mutex<Vec<u8>>>,
+        closed: Arc<Mutex<bool>>,
+        killed: Arc<Mutex<bool>>,
+        stdout: Mutex<Option<BodyStream>>,
+        stderr: Bytes,
+    }
+
+    #[async_trait]
+    impl LongLivedChildBackend for FakeLongLived {
+        fn id(&self) -> u32 {
+            7
+        }
+
+        async fn write_stdin(&self, bytes: Bytes) -> Result<(), PluginError> {
+            self.written
+                .lock()
+                .expect("written")
+                .extend_from_slice(&bytes);
+            Ok(())
+        }
+
+        async fn close_stdin(&self) -> Result<(), PluginError> {
+            *self.closed.lock().expect("closed") = true;
+            Ok(())
+        }
+
+        fn take_stdout(&self) -> Option<BodyStream> {
+            self.stdout.lock().expect("stdout").take()
+        }
+
+        async fn wait(&self) -> Result<i32, PluginError> {
+            Ok(44)
+        }
+
+        fn kill(&self) -> Result<(), PluginError> {
+            *self.killed.lock().expect("killed") = true;
+            Ok(())
+        }
+
+        fn stderr_tail(&self) -> Bytes {
+            self.stderr.clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn long_lived_child_delegates_and_hands_out_stdout_once() {
+        let pipe = FakeLongLived {
+            stdout: Mutex::new(Some(BodyStream::from_bytes("line\n"))),
+            stderr: Bytes::from_static(b"err"),
+            ..FakeLongLived::default()
+        };
+        let written = Arc::clone(&pipe.written);
+        let closed = Arc::clone(&pipe.closed);
+        let killed = Arc::clone(&pipe.killed);
+        let child = LongLivedChild {
+            inner: Box::new(pipe),
+            on_kill: Mutex::new(None),
+        };
+        assert_eq!(child.id(), 7);
+        assert_eq!(format!("{child:?}"), "LongLivedChild { id: 7, .. }");
+        child
+            .write_stdin(Bytes::from_static(b"hello"))
+            .await
+            .expect("write");
+        assert_eq!(*written.lock().expect("written"), b"hello");
+        child.close_stdin().await.expect("close");
+        assert!(*closed.lock().expect("closed"));
+        assert_eq!(&child.stderr_tail()[..], b"err");
+        assert_eq!(child.wait().await.expect("wait"), 44);
+        let mut stdout = child.stdout_stream().expect("first stdout");
+        let chunk = stdout.next_chunk().await.expect("a chunk").expect("ok");
+        assert_eq!(&chunk[..], b"line\n");
+        let error = child.stdout_stream().expect_err("second stdout");
+        assert_eq!(error.kind(), PluginErrorKind::Config);
+        let ran = Arc::new(Mutex::new(false));
+        let flag = Arc::clone(&ran);
+        child.on_kill(Box::new(move || *flag.lock().expect("flag") = true));
+        child.kill().expect("kill");
+        assert!(*killed.lock().expect("killed"));
+        assert!(*ran.lock().expect("ran"));
     }
 
     #[test]
@@ -1601,6 +2051,63 @@ mod tests {
             assert_eq!(error.kind(), PluginErrorKind::Unsupported);
             handle.release(&ctx());
             assert!(format!("{handle:?}").contains("codex"));
+        }
+    }
+
+    mod bridge_callback {
+        use std::sync::Arc;
+
+        use bytes::Bytes;
+        use futures_util::future::BoxFuture;
+
+        use super::super::{BridgeCallbackHandle, BridgeCallbackHandler, BridgeCallbackReply};
+        use crate::error::PluginErrorKind;
+        use crate::id::{PluginId, PluginKey, PluginKind};
+        use crate::kernel::NoBridgeCallback;
+
+        struct Echo;
+
+        impl BridgeCallbackHandler for Echo {
+            fn handle(&self, body: Bytes) -> BoxFuture<'_, BridgeCallbackReply> {
+                Box::pin(async move { BridgeCallbackReply::new(200, body) })
+            }
+        }
+
+        fn handle() -> BridgeCallbackHandle {
+            BridgeCallbackHandle {
+                plugin: PluginKey::new(PluginKind::Subscription, PluginId::from_static("claude")),
+                inner: Arc::new(NoBridgeCallback),
+            }
+        }
+
+        #[test]
+        fn a_host_without_a_listener_is_unsupported() {
+            let handle = handle();
+            let error = handle.base_url().expect_err("unsupported");
+            assert_eq!(error.kind(), PluginErrorKind::Unsupported);
+            let error = handle
+                .register("abc", Arc::new(Echo))
+                .expect_err("unsupported");
+            assert_eq!(error.kind(), PluginErrorKind::Unsupported);
+            assert!(format!("{handle:?}").contains("claude"));
+        }
+
+        #[test]
+        fn register_rejects_an_empty_or_unsafe_token_before_the_backend() {
+            let handle = handle();
+            for token in ["", "ab/cd", "ab?x", "ab#x", "ab x", "ab%2f"] {
+                let error = handle
+                    .register(token, Arc::new(Echo))
+                    .expect_err("rejected");
+                assert_eq!(error.kind(), PluginErrorKind::Config, "{token:?}");
+            }
+        }
+
+        #[test]
+        fn reply_holds_the_status_and_body() {
+            let reply = BridgeCallbackReply::new(201, Bytes::from_static(b"{\"ok\":true}"));
+            assert_eq!(reply.status(), 201);
+            assert_eq!(reply.body(), br#"{"ok":true}"#);
         }
     }
 }
