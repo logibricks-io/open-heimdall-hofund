@@ -205,6 +205,7 @@ pub struct ConnectionStatus {
     connected: bool,
     managed: bool,
     paths: Vec<PathBuf>,
+    warnings: Vec<String>,
 }
 
 impl ConnectionStatus {
@@ -225,7 +226,15 @@ impl ConnectionStatus {
             connected,
             managed,
             paths,
+            warnings: Vec::new(),
         }
+    }
+
+    /// The same row with `warnings` attached.
+    #[must_use]
+    pub fn with_warnings(mut self, warnings: Vec<String>) -> Self {
+        self.warnings = warnings;
+        self
     }
 
     /// Stable id, such as `example-agent`.
@@ -262,6 +271,13 @@ impl ConnectionStatus {
     #[must_use]
     pub fn paths(&self) -> &[PathBuf] {
         &self.paths
+    }
+
+    /// Problems that kept the check from seeing everything, such as an OS
+    /// credential store that could not be read. Secrets never appear here.
+    #[must_use]
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
     }
 }
 
@@ -579,5 +595,21 @@ where
     ) -> Result<Arc<dyn AgentIntegration>, BuildError> {
         let cfg = self.validate(raw)?;
         self.build(&cfg, host)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_status_row_has_no_warnings_until_some_are_attached() {
+        let row = ConnectionStatus::new("zed", "Zed", true, false, true, Vec::new());
+        assert!(row.warnings().is_empty(), "{:?}", row.warnings());
+        let warned = row.with_warnings(vec!["store locked".to_owned()]);
+        assert_eq!(warned.warnings(), ["store locked".to_owned()]);
+        assert_eq!(warned.id(), "zed");
+        assert!(!warned.connected());
+        assert!(warned.managed());
     }
 }

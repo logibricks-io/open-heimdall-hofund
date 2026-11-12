@@ -70,6 +70,7 @@ AgentStatusEntry.id
 AgentStatusEntry.model
 AgentStatusEntry.paths
 AgentStatusEntry.state
+AgentStatusEntry.warnings
 AgentStatusResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
 AgentStatusResponse.agents
 AgentStatusResponse.version
@@ -418,10 +419,13 @@ ModelListResponse.provider
 ModelListResponse.removed
 ModelListResponse.version
 ModelListenerStatus #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+ModelListenerStatus.allow_ips
+ModelListenerStatus.allow_ips_invalid
 ModelListenerStatus.configured
 ModelListenerStatus.effective
 ModelListenerStatus.effective_source
 ModelListenerStatus.running
+ModelListenerStatus.trust_proxy
 ModelMove #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
 ModelMove.to
 ModelMove.why

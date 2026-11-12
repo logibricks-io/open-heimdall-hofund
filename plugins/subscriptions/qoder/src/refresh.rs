@@ -81,9 +81,11 @@ async fn refresh_stale(
     match reply.status() {
         200..=299 => {}
         401 | 403 => {
-            return Err(PluginError::auth(
-                "Qoder refused the stored sign-in; import credentials again",
-            ));
+            let blob = SecretObject::parse(lease.secret())?;
+            lease
+                .commit(None, blob.with_flag(creds::LAPSED, true).to_secret())
+                .await?;
+            return Err(PluginError::auth(creds::LAPSED_REASON));
         }
         status => {
             return Err(PluginError::status_error(
