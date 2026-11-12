@@ -1,5 +1,7 @@
 //! One Cursor Run over bidirectional HTTP/2 or the HTTP/1.1 fallback.
 
+use std::future::Future;
+use std::task::Poll;
 use std::time::Duration;
 
 use hofund_plugin_api::{
@@ -221,8 +223,9 @@ async fn run_http1(
         team_id,
     )
     .bytes(frame::encode(0, &down_payload)?)
-    .open_raw(host.http(), 1)
-    .await;
+    .open_raw(host.http(), 1);
+    let opening_append = append(host, endpoints, token, request_id, team_id, &opening, 0);
+    let (down, opening_append) = join(down, opening_append).await;
     let mut output = RunOutput::default();
     let mut response = match down {
         Ok(response) => response,
@@ -242,16 +245,11 @@ async fn run_http1(
         return Ok(output);
     }
 
-    let mut sequence = 0_u64;
-    if let Err(failure) = append(
-        host, endpoints, token, request_id, team_id, &opening, sequence,
-    )
-    .await
-    {
+    if let Err(failure) = opening_append {
         output.trailers.push(synthetic_end(failure)?);
         return Ok(output);
     }
-    sequence += 1;
+    let mut sequence = 1_u64;
 
     let mut cancelled = false;
     let mut decoder = FrameDecoder::new();
@@ -287,6 +285,38 @@ async fn run_http1(
             }
         }
     }
+}
+
+async fn join<A, B>(left: A, right: B) -> (A::Output, B::Output)
+where
+    A: Future,
+    B: Future,
+{
+    let mut left = std::pin::pin!(left);
+    let mut right = std::pin::pin!(right);
+    let mut left_output = None;
+    let mut right_output = None;
+    std::future::poll_fn(move |cx| {
+        if left_output.is_none()
+            && let Poll::Ready(output) = left.as_mut().poll(cx)
+        {
+            left_output = Some(output);
+        }
+        if right_output.is_none()
+            && let Poll::Ready(output) = right.as_mut().poll(cx)
+        {
+            right_output = Some(output);
+        }
+        if left_output.is_some() && right_output.is_some() {
+            Poll::Ready((
+                left_output.take().expect("left future completed"),
+                right_output.take().expect("right future completed"),
+            ))
+        } else {
+            Poll::Pending
+        }
+    })
+    .await
 }
 
 struct AppendFailure {
@@ -924,6 +954,63 @@ mod tests {
     }
 
     #[test]
+    fn http1_fallback_sends_opening_append_before_run_sse_headers() {
+        let _guard = http2_memory::test_lock();
+        http2_memory::reset_for_tests();
+        block_on_paused(async {
+            let (header_release, header_gate) = header_park();
+            let h1 = Http1Server::start(vec![
+                Http1Response::new(200).park_headers(header_gate),
+                Http1Response::new(200),
+            ])
+            .await;
+            let host = pooled_host();
+            http2_memory::remember(host.context());
+            let endpoints = endpoints(&h1, "http://127.0.0.1:9");
+            let resolver = AgentHost::default();
+            let token = token();
+            let mut session = std::pin::pin!(run(
+                host.context(),
+                &endpoints,
+                &resolver,
+                &token,
+                proto::client_run(b"opening"),
+                None,
+                Limits::default(),
+            ));
+            let control = async {
+                for _ in 0..100 {
+                    if h1
+                        .requests()
+                        .iter()
+                        .any(|request| request.path() == "/aiserver.v1.BidiService/BidiAppend")
+                    {
+                        break;
+                    }
+                    yield_times(2).await;
+                }
+                let requests = h1.requests();
+                let opening = requests
+                    .iter()
+                    .find(|request| request.path() == "/aiserver.v1.BidiService/BidiAppend")
+                    .expect("opening BidiAppend must arrive while RunSSE headers are parked");
+                let fields = proto::fields(opening.body());
+                assert_eq!(fields[2].as_varint(), Some(0));
+                assert_eq!(
+                    fields[0].as_string().as_deref(),
+                    Some(proto::to_hex(&proto::client_run(b"opening")).as_str())
+                );
+                header_release.release();
+            };
+            assert!(matches!(race(&mut session, control).await, Race::Right(())));
+            let output = session.await.expect("run after releasing headers");
+            assert!(output.events.is_empty());
+            assert!(output.trailers.is_empty());
+            assert_eq!(run_sse_count(&h1), 1);
+        });
+    }
+
+    #[test]
     fn dropping_a_session_does_not_set_http2_memory() {
         let _guard = http2_memory::test_lock();
         http2_memory::reset_for_tests();
@@ -1010,7 +1097,7 @@ mod tests {
                     .expect("trailer JSON");
             assert_eq!(body["error"]["code"], "invalid_argument");
             assert_eq!(body["error"]["message"], "bad opening");
-            assert_eq!(h1.requests().len(), 1);
+            assert_eq!(h1.requests().len(), 2);
         });
     }
 

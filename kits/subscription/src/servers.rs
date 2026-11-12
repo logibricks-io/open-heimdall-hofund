@@ -62,6 +62,7 @@ pub struct Http1Response {
     chunks: Vec<Vec<u8>>,
     chunked: bool,
     chunk_delay: Duration,
+    header_gate: Option<watch::Receiver<bool>>,
     hold_open: bool,
 }
 
@@ -75,6 +76,7 @@ impl Http1Response {
             chunks: Vec::new(),
             chunked: false,
             chunk_delay: Duration::ZERO,
+            header_gate: None,
             hold_open: false,
         }
     }
@@ -107,6 +109,13 @@ impl Http1Response {
     #[must_use]
     pub fn chunk_delay(mut self, delay: Duration) -> Self {
         self.chunk_delay = delay;
+        self
+    }
+
+    /// Parks the status and header block until `gate` becomes `true`.
+    #[must_use]
+    pub fn park_headers(mut self, gate: watch::Receiver<bool>) -> Self {
+        self.header_gate = Some(gate);
         self
     }
 
@@ -219,6 +228,21 @@ async fn serve_http1(
         .expect("response scripts")
         .pop_front()
         .unwrap_or_else(|| Http1Response::new(200));
+    if let Some(mut gate) = response.header_gate {
+        loop {
+            if *gate.borrow() {
+                break;
+            }
+            tokio::select! {
+                _ = stopped.changed() => return,
+                changed = gate.changed() => {
+                    if changed.is_err() {
+                        return;
+                    }
+                }
+            }
+        }
+    }
     let reason = http::StatusCode::from_u16(response.status)
         .ok()
         .and_then(|status| status.canonical_reason())
@@ -363,19 +387,19 @@ impl RecordedHttp2Request {
     }
 }
 
-/// Keeps parked HTTP/2 HEADERS unreleased until dropped or [`HeaderPark::release`].
+/// Keeps parked response headers unreleased until dropped or [`HeaderPark::release`].
 pub struct HeaderPark {
     tx: watch::Sender<bool>,
 }
 
 impl HeaderPark {
-    /// Lets the waiting stream send HEADERS.
+    /// Lets the waiting response send headers.
     pub fn release(self) {
         let _ = self.tx.send(true);
     }
 }
 
-/// A park handle and the gate consumed by [`Http2Response::park_headers`].
+/// A park handle and gate for HTTP/1 or HTTP/2 response headers.
 #[must_use]
 pub fn header_park() -> (HeaderPark, watch::Receiver<bool>) {
     let (tx, rx) = watch::channel(false);
