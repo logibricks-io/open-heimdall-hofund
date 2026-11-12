@@ -92,7 +92,10 @@ pub use sign_in::{
     SignInOptions, SubscriptionListing, quota_json, subscription_list, subscription_quota,
     subscription_refresh, subscription_sign_in, subscription_sign_out, subscriptions_json,
 };
-pub use terminate::{ConsoleEvent, Termination, TolerantWriter, finish, serve_until_signal};
+pub use terminate::{
+    ConsoleEvent, Signals, Termination, TolerantWriter, finish, serve_until_signal,
+    serve_until_signals,
+};
 pub use tray::{TrayStatus, tray_status};
 
 /// A configuration, credential, or startup failure.
@@ -714,7 +717,16 @@ async fn start_inner(
         Arc::clone(&registry),
     );
     let probes = runtime.spawn_probes();
-    let running = running.with_resource(AffinityFlush(runtime.affinity()));
+    let running = running
+        .with_resource(AffinityFlush(runtime.affinity()))
+        .with_after_drain({
+            let runtime = Arc::clone(&runtime);
+            move || async move {
+                runtime
+                    .shutdown_upstreams(runtime::PROVIDER_SHUTDOWN_DEADLINE)
+                    .await;
+            }
+        });
     Ok(running
         .with_task(refresh)
         .with_task(maintenance)
@@ -751,15 +763,18 @@ pub async fn serve(path: &Path) -> Result<(), DaemonError> {
 
 async fn serve_reason(path: &Path) -> Result<Termination, DaemonError> {
     let running = start(path).await?;
+    // Handlers first: a SIGTERM sent on reading the notice must drain.
+    let signals = Signals::register();
     terminate::notice(&format!("listening on http://{}", running.local_addr));
-    Ok(serve_until_signal(running).await)
+    Ok(serve_until_signals(running, signals).await)
 }
 
 /// Waits for Ctrl-C or a control `POST /v1/hofund/shutdown`, then drains.
 ///
 /// Linked control listeners stop first, the model listener then finishes its
-/// in-flight requests, and daemon resources such as the control lock and
-/// socket are released when the server is dropped.
+/// in-flight requests, constructed upstream providers are shut down, and
+/// daemon resources such as the control lock and socket are released when
+/// the server is dropped.
 ///
 /// # Errors
 ///

@@ -222,6 +222,10 @@ pub struct AgentStatusEntry {
     pub model: Option<String>,
     /// Managed paths inspected by the status operation.
     pub paths: Vec<String>,
+    /// Problems that kept the check from seeing everything, such as an OS
+    /// credential store that could not be read. Absent when there are none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 /// Agent status response.
@@ -390,5 +394,30 @@ impl AgentPickedOnlyRequest {
             version: API_VERSION,
             only,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #463: warnings are omitted when empty, so older readers see the same
+    /// body, and a body without them still decodes.
+    #[test]
+    fn status_entry_warnings_are_optional_on_the_wire() {
+        let mut entry = AgentStatusEntry {
+            id: "zed".to_owned(),
+            ..AgentStatusEntry::default()
+        };
+        let quiet = serde_json::to_value(&entry).expect("encode");
+        assert!(quiet.get("warnings").is_none(), "{quiet}");
+        let back: AgentStatusEntry = serde_json::from_value(quiet).expect("decode");
+        assert_eq!(back, entry);
+
+        entry.warnings = vec!["store locked".to_owned()];
+        let loud = serde_json::to_value(&entry).expect("encode");
+        assert_eq!(loud["warnings"], serde_json::json!(["store locked"]));
+        let back: AgentStatusEntry = serde_json::from_value(loud).expect("decode");
+        assert_eq!(back, entry);
     }
 }

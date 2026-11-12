@@ -155,16 +155,78 @@ pub fn agent_home(decl: &hofund_plugin_api::AgentSignIn) -> Result<PathBuf, Daem
     }) {
         return Ok(path);
     }
-    if let Ok(value) = std::env::var(decl.home_env())
-        && !value.is_empty()
-    {
+    home_from(decl, |key| std::env::var(key).ok())
+}
+
+/// [`agent_home`] over a variable lookup: the agent's own variable, then
+/// `HOME`, then `USERPROFILE` (Windows), each only when non-empty.
+fn home_from(
+    decl: &hofund_plugin_api::AgentSignIn,
+    var: impl Fn(&str) -> Option<String>,
+) -> Result<PathBuf, DaemonError> {
+    let set = |key: &str| var(key).filter(|value| !value.is_empty());
+    if let Some(value) = set(decl.home_env()) {
         return Ok(PathBuf::from(value));
     }
-    let home = std::env::var("HOME").map_err(|_| {
+    let home = set("HOME").or_else(|| set("USERPROFILE")).ok_or_else(|| {
         DaemonError::new(format!(
-            "HOME is not set; set {} to the agent directory",
+            "neither HOME nor USERPROFILE is set; set {} to the agent directory",
             decl.home_env()
         ))
     })?;
     Ok(PathBuf::from(home).join(decl.home_dir()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const DECL: hofund_plugin_api::AgentSignIn =
+        hofund_plugin_api::AgentSignIn::new(&["demo"], "DEMO_HOME", ".demo");
+
+    fn lookup<'a>(pairs: &'a [(&str, &str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |key| {
+            pairs
+                .iter()
+                .find(|(name, _)| *name == key)
+                .map(|(_, value)| (*value).to_owned())
+        }
+    }
+
+    #[test]
+    fn the_agent_variable_wins_when_set() {
+        let home = home_from(&DECL, lookup(&[("DEMO_HOME", "/agent"), ("HOME", "/h")]));
+        assert_eq!(home.expect("home"), PathBuf::from("/agent"));
+    }
+
+    #[test]
+    fn home_is_used_when_the_agent_variable_is_unset_or_empty() {
+        for pairs in [
+            &[("HOME", "/h"), ("USERPROFILE", "C:/u")][..],
+            &[("DEMO_HOME", ""), ("HOME", "/h"), ("USERPROFILE", "C:/u")][..],
+        ] {
+            let home = home_from(&DECL, lookup(pairs));
+            assert_eq!(home.expect("home"), PathBuf::from("/h").join(".demo"));
+        }
+    }
+
+    /// #612: Windows sets USERPROFILE, usually not HOME.
+    #[test]
+    fn userprofile_is_the_fallback_when_home_is_unset_or_empty() {
+        for pairs in [
+            &[("USERPROFILE", "C:/u")][..],
+            &[("HOME", ""), ("USERPROFILE", "C:/u")][..],
+        ] {
+            let home = home_from(&DECL, lookup(pairs));
+            assert_eq!(home.expect("home"), PathBuf::from("C:/u").join(".demo"));
+        }
+    }
+
+    #[test]
+    fn no_home_at_all_names_the_agent_variable() {
+        for pairs in [&[][..], &[("HOME", ""), ("USERPROFILE", "")][..]] {
+            let error = home_from(&DECL, lookup(pairs)).expect_err("no home");
+            assert!(error.to_string().contains("DEMO_HOME"), "{error}");
+        }
+    }
 }

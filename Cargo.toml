@@ -121,6 +121,7 @@ hofund-usage = { version = "0.1.0", path = "crates/kernel/usage" }
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 crossterm = "0.28.1"
 ratatui = "0.29.0"
+rusqlite = { version = "0.41.0", default-features = false, features = ["bundled"] }
 sha2 = "0.10.9"
 tempfile = "3.27.0"
 zstd = "0.13.3"

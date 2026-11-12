@@ -267,7 +267,7 @@ impl Subscription for Qoder {
         account: &AccountId,
         host: &HostContext,
     ) -> Result<hofund_plugin_api::CheckinResult, PluginError> {
-        checkin::run(account, host).await
+        checkin::run(account, host, Arc::clone(&self.endpoints)).await
     }
 
     async fn import_accounts(
