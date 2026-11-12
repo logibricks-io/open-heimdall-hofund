@@ -27,11 +27,22 @@ fn hofund() -> &'static Path {
     Path::new(env!("CARGO_BIN_EXE_hofund"))
 }
 
-/// Builds `hofundd` beside `hofund` once per test process.
+/// Path to `hofundd` beside `hofund`, building it once if needed.
+///
+/// `cargo test --workspace` compiles this binary before tests run, so the
+/// common path does not spawn cargo. A nested `cargo build` inherits the
+/// parent jobserver; on a 3-core macOS runner the default harness starts
+/// three offline cases at once and can hold every token, so that build
+/// waits until the tests themselves finish and is killed at the 120s
+/// child deadline with empty `--quiet` output.
 fn hofundd() -> &'static Path {
     static BUILT: OnceLock<PathBuf> = OnceLock::new();
     BUILT.get_or_init(|| {
         let bin_dir = hofund().parent().expect("bin dir");
+        let built = bin_dir.join("hofundd");
+        if built.is_file() {
+            return built;
+        }
         let target = bin_dir.parent().expect("target dir");
         let mut build = Command::new(env!("CARGO"));
         build
@@ -44,6 +55,9 @@ fn hofundd() -> &'static Path {
                 "hofundd",
             ])
             .env("CARGO_TARGET_DIR", target)
+            // Do not wait on the parent `cargo test` jobserver.
+            .env_remove("CARGO_MAKEFLAGS")
+            .env_remove("MAKEFLAGS")
             .current_dir(env!("CARGO_MANIFEST_DIR"))
             .stdin(Stdio::null());
         if bin_dir.file_name().is_some_and(|name| name == "release") {
@@ -51,7 +65,6 @@ fn hofundd() -> &'static Path {
         }
         let output = finish(spawn(&mut build), DEADLINE);
         assert!(output.status.success(), "building hofundd: {output:?}");
-        let built = bin_dir.join("hofundd");
         assert!(built.is_file(), "{} missing after build", built.display());
         built
     })
