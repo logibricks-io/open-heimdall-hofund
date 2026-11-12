@@ -5,6 +5,7 @@ use std::path::Path;
 use hofund_plugin_api::{AccountId, DiscoveredAgentAccount, HostContext, PluginError};
 
 use crate::creds::{self, Credential};
+use crate::sign_in;
 
 pub(crate) const REFERENCE: &str = "cli-credentials";
 
@@ -30,8 +31,18 @@ pub(crate) async fn import(
     }
     let path = credentials_path(home);
     let credential = creds::read_credentials(&path)?;
+    let credential = sign_in::success(host, &credential).await?;
     let id = creds::agent_account_id(home);
-    store(&credential, host, id).await
+    let account = host
+        .accounts()
+        .account(id.clone(), credential.label.clone())?;
+    host.accounts()
+        .upsert(
+            account,
+            creds::cli_secret_blob(&credential, &path).to_secret(),
+        )
+        .await?;
+    Ok(id)
 }
 
 fn credentials_path(home: &Path) -> std::path::PathBuf {
