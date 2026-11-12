@@ -322,7 +322,7 @@ Agent-by-agent status is in [docs/coverage/agents.md](coverage/agents.md).
 
 | # | magpie feature | magpie evidence | Stage | hofund status | hofund evidence | Plan to do better than magpie |
 | --- | --- | --- | --- | --- | --- | --- |
-| 15.1 | Menu bar tray | `internal/gui`; `magpie tray` | core | Partial | `apps/desktop/src-tauri/src/lib.rs` (start, stop, agent toggles, usage, open config, quit) | Add status, current route and quota in the menu. |
+| 15.1 | Menu bar tray | `internal/gui`; `magpie tray` | core | Partial | `apps/desktop/src-tauri/src/control.rs` (disabled route, Today, and quota rows; menu-order tests), `src/lib.rs` (60-second refresh), `crates/kernel/daemon/src/tray.rs` and `tests/tray_status.rs` (formatting and live empty-daemon tests). Desktop tests are CI-verified only because GLib is unavailable on the development box. | Remaining: per-card settings/picker, localized text, and icon glyphs. |
 | 15.2 | App window with pages: Agents, Providers, Routing, Usage, Sessions, Library, Masking, Plugins, Gateway, Settings | `internal/gui/assets/index.html` (`data-view`); `docs/subsystems/gui-shell.md` | auxiliary | Missing | `apps/desktop/ui` (tray only) | Tauri window over the local API (row 12.3). Pages ship in impact order: Providers, Routing, Usage, Agents. |
 | 15.3 | Terminal UI (`magpie tui`) | `internal/tui` | core | Partial | `apps/tui` (`hofund-tui`), `docs/tui-design.md` | R-11 shell: navigation, handoff, empty pages; Agents–Usage content in R-14+. |
 | 15.4 | Browser UI (`magpie web`, `--lan`) | `internal/cli/main.go:38`; `ref.md:2380` | auxiliary | Missing | none | Serve the same frontend as the desktop window, behind the gateway token. |
