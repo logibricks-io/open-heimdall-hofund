@@ -32,6 +32,7 @@ Usage: hofundd [--config <path>]
        hofundd accounts [--config <path>] switch <agent> <next|account>
        hofundd accounts [--config <path>] import <file>
        hofundd accounts [--config <path>] discover [--add]
+       hofundd accounts [--config <path>] project <gemini|antigravity> <email> <gcp-project-id>
 
 Serves the configuration until a termination signal, with local control
 enabled. Without --config, HOFUND_CONFIG or the per-user default is used.

@@ -86,7 +86,7 @@ pub use account_discovery::{
 #[cfg(feature = "test-util")]
 #[doc(hidden)]
 pub use agent_login::set_test_agent_home;
-pub use agent_login::{accounts_import_in, accounts_switch_in};
+pub use agent_login::{accounts_import_in, accounts_project_in, accounts_switch_in};
 pub use models::{
     Cached, ModelLimits, ModelsHost, Picks, ProbeOutcome, ProviderModels, RefreshTiming,
 };
