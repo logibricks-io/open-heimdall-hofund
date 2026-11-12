@@ -223,4 +223,30 @@ mod tests {
             .expect("trimmed");
         assert_eq!(rows.values[0][0], SessionValue::Integer(0));
     }
+
+    #[test]
+    fn sqlite_query_enforces_the_remaining_row_budget() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("sessions.db");
+        Connection::open(&path)
+            .expect("create")
+            .execute_batch(
+                "CREATE TABLE items (id INTEGER); INSERT INTO items (id) VALUES (1), (2), (3);",
+            )
+            .expect("schema");
+        let database = open_ro(temp.path(), &path).expect("read-only database");
+        database.remaining.set(2);
+        let first = database
+            .query("SELECT id FROM items ORDER BY id", &[])
+            .expect("first page");
+        assert_eq!(first.values.len(), 2);
+        assert!(first.cut);
+        assert_eq!(database.remaining.get(), 0);
+        let second = database
+            .query("SELECT id FROM items ORDER BY id", &[])
+            .expect("exhausted");
+        assert_eq!(second.values.len(), 0);
+        assert!(second.cut);
+        assert_eq!(database.remaining.get(), 0);
+    }
 }

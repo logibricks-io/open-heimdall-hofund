@@ -1118,11 +1118,18 @@ mod tests {
 
         fn read_database(
             &self,
-            _file: &SessionFile,
+            file: &SessionFile,
             _database: &dyn hofund_plugin_api::SessionDatabase,
         ) -> Result<Vec<SessionRecord>, PluginError> {
             self.db_reads.fetch_add(1, Ordering::SeqCst);
-            Ok(self.db_records.lock().expect("records").clone())
+            Ok(self
+                .db_records
+                .lock()
+                .expect("records")
+                .iter()
+                .filter(|record| record.path == file.path)
+                .cloned()
+                .collect())
         }
     }
 
@@ -1437,5 +1444,164 @@ mod tests {
         index.refresh(&consent, &stores).expect("refresh");
         assert_eq!(store.parses.load(Ordering::SeqCst), 0);
         assert_eq!(index.list(&consent), Vec::<SessionRecord>::new());
+    }
+
+    #[test]
+    fn read_incremental_keeps_the_starting_offset_without_a_newline() {
+        let body = br#"{"prompt":"hello"}"#;
+        let outcome = read_incremental(&mut body.as_slice(), 42, |_| panic!("no complete line"))
+            .expect("read");
+        assert_eq!(outcome.offset, 42);
+        assert_eq!(outcome.lines, 0);
+        assert!(!outcome.cut);
+    }
+
+    #[test]
+    fn parse_file_jsonl_counts_related_documents_and_cuts_oversize() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let main = temp.path().join("one.jsonl");
+        let related = temp.path().join("two.jsonl");
+        let oversize = temp.path().join("three.jsonl");
+        std::fs::write(&main, b"{\"prompt\":\"hello\"}\n").expect("main");
+        std::fs::write(&related, b"{\"prompt\":\"again\"}\n").expect("related");
+        let mut long = vec![b'x'; MAX_LINE_BYTES + 1];
+        long.push(b'\n');
+        std::fs::write(&oversize, long).expect("oversize");
+        let file = SessionFile::new("one", &main).with_related(vec![related, oversize]);
+        let store = ScriptedStore::new(temp.path(), vec![file.clone()]);
+        let (parsed, outcome) = parse_file(&store, temp.path(), &file, 0, None).expect("parse");
+        assert_eq!(outcome.lines, 2);
+        assert!(outcome.cut);
+        assert_eq!(parsed.record.expect("record").title, "fake prompt");
+    }
+
+    #[test]
+    fn refresh_file_marks_the_record_cut_when_the_read_is_truncated() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let agent_root = temp.path().join("agent");
+        std::fs::create_dir(&agent_root).expect("agent");
+        let path = agent_root.join("one.jsonl");
+        let mut body = br#"{"prompt":"hello"}"#.to_vec();
+        body.push(b'\n');
+        body.extend(vec![b'x'; MAX_LINE_BYTES + 1]);
+        body.push(b'\n');
+        std::fs::write(&path, body).expect("cut file");
+        let store = ScriptedStore::new(&agent_root, vec![SessionFile::new("one", &path)]);
+        let config = temp.path().join("config");
+        let consent = allow_all(&config);
+        let stores: [&dyn SessionStore; 1] = [&store];
+        let mut index = SessionIndex::load(&config, &consent);
+        index.refresh(&consent, &stores).expect("refresh");
+        let record = index.get(&consent, "fake:one").expect("record");
+        assert!(record.cut);
+    }
+
+    #[test]
+    fn refresh_database_returns_ok_for_a_missing_file_and_err_for_a_directory() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let agent_root = temp.path().join("agent");
+        std::fs::create_dir(&agent_root).expect("agent");
+        let missing = agent_root.join("missing.db");
+        let directory = agent_root.join("dir.db");
+        std::fs::create_dir(&directory).expect("directory");
+        let store = ScriptedStore::new(&agent_root, Vec::new());
+        let config = temp.path().join("config");
+        let mut index = SessionIndex::load(&config, &allow_all(&config));
+        let mut seen = BTreeSet::new();
+        let missing_file = SessionFile::new("missing", &missing).with_format(SessionFormat::Sqlite);
+        index
+            .refresh_database(&store, &agent_root, &missing_file, &mut seen)
+            .expect("missing is not an error");
+        let dir_file = SessionFile::new("dir", &directory).with_format(SessionFormat::Sqlite);
+        index
+            .refresh_database(&store, &agent_root, &dir_file, &mut seen)
+            .expect_err("a directory is not a missing file");
+    }
+
+    #[test]
+    fn refresh_file_returns_ok_for_a_missing_file_and_err_for_a_directory() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let agent_root = temp.path().join("agent");
+        std::fs::create_dir(&agent_root).expect("agent");
+        let missing = agent_root.join("missing.jsonl");
+        let directory = agent_root.join("dir.jsonl");
+        std::fs::create_dir(&directory).expect("directory");
+        let store = ScriptedStore::new(&agent_root, Vec::new());
+        let config = temp.path().join("config");
+        let mut index = SessionIndex::load(&config, &allow_all(&config));
+        let mut seen = BTreeSet::new();
+        let missing_file = SessionFile::new("missing", &missing);
+        index
+            .refresh_file(&store, &agent_root, &missing_file, &mut seen)
+            .expect("missing is not an error");
+        let dir_file = SessionFile::new("dir", &directory);
+        index
+            .refresh_file(&store, &agent_root, &dir_file, &mut seen)
+            .expect_err("a directory is not a missing file");
+    }
+
+    #[test]
+    fn refresh_database_does_not_reuse_a_sibling_or_drop_it_on_a_rewrite() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let agent_root = temp.path().join("agent");
+        std::fs::create_dir(&agent_root).expect("agent");
+        let path_a = agent_root.join("a.db");
+        let path_b = agent_root.join("b.db");
+        write_sqlite(&path_a);
+        write_sqlite(&path_b);
+        let shared = std::time::SystemTime::now() + std::time::Duration::from_secs(2);
+        for path in [&path_a, &path_b] {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(path)
+                .expect("open")
+                .set_times(std::fs::FileTimes::new().set_modified(shared))
+                .expect("mtime");
+        }
+        let file_a = SessionFile::new("a", &path_a).with_format(SessionFormat::Sqlite);
+        let file_b = SessionFile::new("b", &path_b).with_format(SessionFormat::Sqlite);
+        let mut store = ScriptedStore::new(&agent_root, vec![file_a.clone(), file_b.clone()])
+            .with_records(vec![
+                SessionRecord::new("fake", "fake:a", &path_a),
+                SessionRecord::new("fake", "fake:b", &path_b),
+            ]);
+        let config = temp.path().join("config");
+        let consent = allow_all(&config);
+        let mut index = SessionIndex::load(&config, &consent);
+        index.refresh(&consent, &[&store]).expect("first");
+        let mut ids: Vec<_> = index.list(&consent).into_iter().map(|row| row.id).collect();
+        ids.sort();
+        assert_eq!(ids, ["fake:a", "fake:b"]);
+
+        // Dropping B from the listing must drop B from the index. A reuse
+        // path that also treats B as "old" would keep it in `seen`.
+        store.files = vec![file_a.clone()];
+        *store.db_records.lock().expect("records") =
+            vec![SessionRecord::new("fake", "fake:a", &path_a)];
+        index.refresh(&consent, &[&store]).expect("without b");
+        let ids: Vec<_> = index.list(&consent).into_iter().map(|row| row.id).collect();
+        assert_eq!(ids, ["fake:a"]);
+
+        store.files = vec![file_a.clone(), file_b.clone()];
+        *store.db_records.lock().expect("records") = vec![
+            SessionRecord::new("fake", "fake:a", &path_a),
+            SessionRecord::new("fake", "fake:b", &path_b),
+        ];
+        index.refresh(&consent, &[&store]).expect("restore b");
+        bump_mtime(&path_a, true);
+        *store.db_records.lock().expect("records") =
+            vec![SessionRecord::new("fake", "fake:a2", &path_a)];
+        let mut seen = BTreeSet::new();
+        index
+            .refresh_database(&store, &agent_root, &file_a, &mut seen)
+            .expect("rewrite a");
+        let mut ids: Vec<_> = index
+            .entries
+            .values()
+            .map(|entry| entry.record.id.clone())
+            .collect();
+        ids.sort();
+        assert!(ids.contains(&"fake:a2".to_owned()), "{ids:?}");
+        assert!(ids.contains(&"fake:b".to_owned()), "{ids:?}");
     }
 }
