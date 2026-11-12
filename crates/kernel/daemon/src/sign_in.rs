@@ -626,6 +626,12 @@ where
     P: Stream<Item = String> + Unpin,
     W: Write,
 {
+    if subscription.id().as_str() == "antigravity" {
+        say(
+            out,
+            "warning: Google may suspend an Antigravity account it sees used outside Antigravity. Use one you can afford to lose.",
+        )?;
+    }
     let failed = |error: hofund_plugin_api::PluginError| SignInError::failed(error.to_string());
     let challenge = subscription
         .start_sign_in(ctx, host)
@@ -1353,5 +1359,20 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&quota_json(&listings)).expect("json");
         assert_eq!(value[0]["windows"][0]["limit"], 10);
         assert!(quota_in(&rig.opened(), Some("missing")).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn r49_default_project_setting_is_unsupported() {
+        let rig = new_rig(Mode::Device);
+        let mut opened = rig.opened();
+        opened[0].id = "gemini".to_owned();
+        let error =
+            crate::agent_login::accounts_project(&opened, "gemini", "u@example.test", "project-1")
+                .await
+                .expect_err("the fake has no project setting");
+        assert_eq!(
+            error.to_string(),
+            "this subscription has no per-account project setting"
+        );
     }
 }
