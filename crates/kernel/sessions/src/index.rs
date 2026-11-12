@@ -1601,7 +1601,6 @@ mod tests {
             .map(|entry| entry.record.id.clone())
             .collect();
         ids.sort();
-        assert!(ids.contains(&"fake:a2".to_owned()), "{ids:?}");
-        assert!(ids.contains(&"fake:b".to_owned()), "{ids:?}");
+        assert_eq!(ids, ["fake:a2", "fake:b"]);
     }
 }
