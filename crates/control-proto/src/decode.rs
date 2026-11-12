@@ -21,11 +21,12 @@ use crate::{
     QuotaAlertsResponse, QuotaAlertsSetRequest, QuotaAlertsSetResponse, QuotaCreditsModesResponse,
     QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryResponse, QuotaResponse,
     ReloadRequest, RouteListResponse, RouteModelListResponse, SessionCarryRequest,
-    SessionDetailResponse, SessionListResponse, SessionManageResponse, SessionOverviewResponse,
-    SessionProgressResponse, SessionReadsPatchRequest, SessionReadsResponse, SessionRouteResponse,
-    SessionSearchResponse, SessionStatsResponse, SessionTranscriptResponse, ShutdownRequest,
-    ShutdownResponse, StatusResponse, TokenRotateRequest, TokenRotateResponse,
-    UnroutedListResponse, UsageResponse, WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
+    SessionCarryResponse, SessionDetailResponse, SessionListResponse, SessionManageResponse,
+    SessionOverviewResponse, SessionProgressResponse, SessionReadsPatchRequest,
+    SessionReadsResponse, SessionRouteResponse, SessionSearchResponse, SessionStatsResponse,
+    SessionTranscriptResponse, ShutdownRequest, ShutdownResponse, StatusResponse,
+    TokenRotateRequest, TokenRotateResponse, UnroutedListResponse, UsageResponse,
+    WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
 };
 
 mod sealed {
@@ -322,6 +323,7 @@ response!(
     PicksResponse,
     RouteModelListResponse,
     RouteListResponse,
+    SessionCarryResponse,
     SessionDetailResponse,
     SessionListResponse,
     SessionManageResponse,

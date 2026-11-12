@@ -256,6 +256,8 @@ fn expected_dev_deps(package: &str) -> Option<&'static [&'static str]> {
             "hofund-agent",
             "hofund-control-client",
             "hofund-daemon",
+            "hofund-plugin-agent-omp",
+            "hofund-plugin-agent-pi",
             "hofund-plugin-registry",
             "hofund-secrets",
         ],

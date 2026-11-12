@@ -21,6 +21,7 @@ use hofund_plugin_api::{
     SessionTokens, SessionTranscript, SessionTranscriptParser,
 };
 use hofund_sessions::consent::Consent;
+use hofund_sessions::resume::safe_session_id;
 
 struct FakeRegistry {
     stores: Vec<Arc<dyn SessionStore>>,
@@ -151,6 +152,18 @@ impl SessionStore for FakeStore {
     ) -> Result<Box<dyn SessionTranscriptParser>, PluginError> {
         Ok(Box::new(FakeTranscriptParser::default()))
     }
+
+    fn resume_argv(&self, session_id: &str, _path: &Path) -> Option<Vec<String>> {
+        let bare = session_id.split_once(':')?.1;
+        if !safe_session_id(bare) {
+            return None;
+        }
+        Some(vec![
+            "fake".to_owned(),
+            "--resume".to_owned(),
+            bare.to_owned(),
+        ])
+    }
 }
 
 #[derive(Default)]
@@ -269,7 +282,12 @@ async fn list_stats_overview_and_progress_use_the_fake_store() {
     assert_eq!(list.sessions.len(), 1);
     assert_eq!(list.sessions[0].id, "fake:one");
     assert_eq!(list.sessions[0].title, "Offline fixture");
-    assert_eq!(list.sessions[0].resume, None);
+    let resume = list.sessions[0].resume.as_ref().expect("resume argv");
+    assert_eq!(
+        resume.argv,
+        vec!["fake".to_owned(), "--resume".to_owned(), "one".to_owned()]
+    );
+    assert_eq!(resume.cwd, "/work/project");
     assert!(list.consent.asked && list.consent.all);
     assert_eq!(list.revision.len(), 64);
 
@@ -335,7 +353,10 @@ async fn detail_transcript_and_markdown_read_the_listed_file() {
             .expect("detail");
     assert_eq!(detail.session.id, "fake:one");
     assert!(detail.transcript_available);
-    assert_eq!(detail.session.resume, None);
+    let resume = detail.session.resume.as_ref().expect("resume argv");
+    assert_eq!(resume.argv[0], "fake");
+    assert_eq!(resume.argv[2], "one");
+    assert_eq!(resume.cwd, "/work/project");
 
     let response = get(
         &running,

@@ -139,7 +139,7 @@ pub struct SessionTokenTotals {
     pub cache_write: u64,
 }
 
-/// Resume command. Session routes return null for this field until resume ships.
+/// Resume command as argv plus cwd for `std::process::Command`, never a shell line.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct SessionResume {
@@ -171,7 +171,7 @@ pub struct SessionSummary {
     pub cost: f64,
     /// Number of token-bearing models without a price.
     pub unpriced: u64,
-    /// Resume command, null until the resume row lands.
+    /// Resume command, or null when the session cannot be resumed.
     pub resume: Option<SessionResume>,
     /// Whether the source cannot be mutated.
     pub read_only: bool,
