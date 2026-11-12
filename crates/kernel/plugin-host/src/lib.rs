@@ -355,7 +355,25 @@ impl TestHost {
     /// Panics when the account file cannot be created.
     #[must_use]
     pub fn open_for(kind: PluginKind, plugin: PluginId, root: impl Into<PathBuf>) -> Self {
-        Self::open_for_with_monotonic(kind, plugin, root, Duration::ZERO)
+        Self::open_for_at(kind, plugin, root, SystemTime::UNIX_EPOCH)
+    }
+
+    /// Like [`Self::open_for`], with the wall clock fixed at `now`.
+    ///
+    /// Use this when a test must expire a credential. The default clock is
+    /// the Unix epoch, so a small `expires_at` is still in the future.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the account file cannot be created.
+    #[must_use]
+    pub fn open_for_at(
+        kind: PluginKind,
+        plugin: PluginId,
+        root: impl Into<PathBuf>,
+        now: SystemTime,
+    ) -> Self {
+        Self::open_with_clock(kind, plugin, root, Arc::new(FixedClock::new(now)))
     }
 
     /// Like [`Self::open_for`], with monotonic time driven by Tokio's clock.
@@ -369,44 +387,7 @@ impl TestHost {
         plugin: PluginId,
         root: impl Into<PathBuf>,
     ) -> Self {
-        let root = root.into();
-        let http = Arc::new(RecordingHttp::default());
-        let secrets = Arc::new(RecordingSecrets::default());
-        let scheduler = Arc::new(RecordingScheduler::default());
-        let process = Arc::new(RecordingProcess::default());
-        let observe = Arc::new(RecordingObserve::default());
-        let loopback = Arc::new(LoopbackRegistry::new());
-        let accounts = AccountStore::open_with_backend(
-            root.join("accounts.json"),
-            Arc::new(account_secrets::MemoryAccountSecrets::default()),
-        )
-        .expect("test host account file");
-        let context = host_context_for(
-            kind,
-            plugin,
-            Arc::clone(&http) as Arc<dyn HttpBackend>,
-            Arc::clone(&secrets) as Arc<dyn SecretsBackend>,
-            Arc::new(accounts),
-            Arc::new(TokioMonotonicClock::default()),
-            Arc::clone(&scheduler) as Arc<dyn SchedulerBackend>,
-            Arc::clone(&process) as Arc<dyn ProcessBackend>,
-            Arc::new(RootDirs {
-                root,
-                #[cfg(test)]
-                _guard: None,
-            }),
-            Arc::clone(&observe) as Arc<dyn ObserveBackend>,
-        )
-        .with_loopback(Arc::clone(&loopback) as Arc<dyn LoopbackBackend>);
-        Self {
-            context,
-            http,
-            secrets,
-            scheduler,
-            process,
-            observe,
-            loopback,
-        }
+        Self::open_with_clock(kind, plugin, root, Arc::new(TokioMonotonicClock::default()))
     }
 
     /// Like [`Self::open_for`], with a fixed monotonic clock reading.
@@ -421,6 +402,20 @@ impl TestHost {
         root: impl Into<PathBuf>,
         monotonic: Duration,
     ) -> Self {
+        Self::open_with_clock(
+            kind,
+            plugin,
+            root,
+            Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH).with_monotonic(monotonic)),
+        )
+    }
+
+    fn open_with_clock(
+        kind: PluginKind,
+        plugin: PluginId,
+        root: impl Into<PathBuf>,
+        clock: Arc<dyn ClockBackend>,
+    ) -> Self {
         let root = root.into();
         let http = Arc::new(RecordingHttp::default());
         let secrets = Arc::new(RecordingSecrets::default());
@@ -439,7 +434,7 @@ impl TestHost {
             Arc::clone(&http) as Arc<dyn HttpBackend>,
             Arc::clone(&secrets) as Arc<dyn SecretsBackend>,
             Arc::new(accounts),
-            Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH).with_monotonic(monotonic)),
+            clock,
             Arc::clone(&scheduler) as Arc<dyn SchedulerBackend>,
             Arc::clone(&process) as Arc<dyn ProcessBackend>,
             Arc::new(RootDirs {
@@ -1290,8 +1285,8 @@ mod tests {
     };
 
     use super::{
-        AccountStore, FixedClock, RecordingScheduler, StdProcess, SystemClock, host_context,
-        host_context_for, surface_host, test_host,
+        AccountStore, FixedClock, RecordingScheduler, StdProcess, SystemClock, TestHost,
+        host_context, host_context_for, surface_host, test_host,
     };
 
     fn plugin() -> PluginId {
@@ -1742,6 +1737,25 @@ mod tests {
             provider.dirs().state_dir().expect("state"),
             subscription.dirs().state_dir().expect("state")
         );
+    }
+
+    #[test]
+    fn test_host_can_fix_the_wall_clock_away_from_the_epoch() {
+        let root = root();
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let host = TestHost::open_for_at(
+            PluginKind::Subscription,
+            PluginId::from_static("clock-test"),
+            root.to_path_buf(),
+            now,
+        );
+        assert_eq!(host.context().clock().now(), now);
+        let epoch = TestHost::open_for(
+            PluginKind::Subscription,
+            PluginId::from_static("clock-test"),
+            root.to_path_buf(),
+        );
+        assert_eq!(epoch.context().clock().now(), SystemTime::UNIX_EPOCH);
     }
 
     #[tokio::test]
