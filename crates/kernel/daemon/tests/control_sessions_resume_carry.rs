@@ -14,7 +14,8 @@ use hofund_daemon::{
 use hofund_plugin_agent_omp::OmpStore;
 use hofund_plugin_agent_pi::PiStore;
 use hofund_plugin_api::{
-    AgentDescription, DynUpstreamFactory, InboundSurface, ProtocolId, SessionStore,
+    AgentDescription, DynUpstreamFactory, InboundSurface, PluginError, ProtocolId, SessionFile,
+    SessionLocator, SessionParse, SessionParser, SessionRecord, SessionStore,
 };
 use hofund_sessions::consent::Consent;
 
@@ -100,6 +101,144 @@ async fn start_pi_omp(dir: &Path) -> (Running, PathBuf) {
     .await
     .expect("daemon");
     (running, session_path)
+}
+
+/// Same as [`start_pi_omp`], but the omp store is registered with a missing
+/// sessions directory so `present()` is false while Pi is present.
+async fn start_pi_with_absent_omp(dir: &Path) -> (Running, PathBuf) {
+    let pi_home = dir.join("pi").join("agent");
+    std::fs::create_dir_all(&pi_home).expect("pi home");
+    let session_path = install_pi_session(&pi_home);
+    let omp_root = dir.join("omp").join("sessions");
+    let pi = Arc::new(PiStore::with_root(&pi_home)) as Arc<dyn SessionStore>;
+    let omp = Arc::new(OmpStore::with_session_roots([omp_root])) as Arc<dyn SessionStore>;
+    let registry = Arc::new(PiOmpRegistry {
+        stores: vec![pi, omp],
+    });
+    let config = dir.join("hofund.toml");
+    std::fs::write(&config, "listen = \"127.0.0.1:0\"\n").expect("config");
+    let mut consent = Consent::new(dir);
+    consent.settle();
+    consent
+        .set_reads(Some(true), [])
+        .expect("consent on for pi and omp");
+    let running = start_linked(
+        &config,
+        registry,
+        StartOptions {
+            control_listen: Some("127.0.0.1:0".parse().expect("control address")),
+            control_runtime: Some(ControlRuntime::new(None, dir.to_path_buf())),
+            ..StartOptions::default()
+        },
+    )
+    .await
+    .expect("daemon");
+    (running, session_path)
+}
+
+/// A store that publishes one pre-built record under `root` so carry can
+/// look the session up without depending on a vendor plugin.
+struct StaticStore {
+    agent: &'static str,
+    root: PathBuf,
+    record: SessionRecord,
+}
+
+impl SessionLocator for StaticStore {
+    fn roots(&self) -> Vec<PathBuf> {
+        vec![self.root.clone()]
+    }
+
+    fn present(&self) -> bool {
+        self.root.is_dir()
+    }
+}
+
+struct FinishParser {
+    record: SessionRecord,
+}
+
+impl SessionParser for FinishParser {
+    fn push(&mut self, _value: &serde_json::Value) -> Result<(), PluginError> {
+        Ok(())
+    }
+
+    fn finish(self: Box<Self>) -> Result<SessionParse, PluginError> {
+        Ok(SessionParse::new(self.record, "{}"))
+    }
+}
+
+impl SessionStore for StaticStore {
+    fn agent(&self) -> &str {
+        self.agent
+    }
+
+    fn locator(&self) -> &dyn SessionLocator {
+        self
+    }
+
+    fn files(&self, _root: &Path) -> Result<Vec<SessionFile>, PluginError> {
+        Ok(vec![SessionFile::new(
+            self.record
+                .id
+                .split_once(':')
+                .map_or(self.record.id.as_str(), |(_, id)| id),
+            &self.record.path,
+        )])
+    }
+
+    fn parser(
+        &self,
+        _file: &SessionFile,
+        _state: Option<&str>,
+    ) -> Result<Box<dyn SessionParser>, PluginError> {
+        Ok(Box::new(FinishParser {
+            record: self.record.clone(),
+        }))
+    }
+}
+
+fn write_session(root: &Path, agent: &'static str, bare: &str) -> SessionRecord {
+    std::fs::create_dir_all(root).expect("root");
+    let path = root.join(format!("{bare}.jsonl"));
+    std::fs::write(&path, b"{\"ok\":true}\n").expect("session");
+    SessionRecord::new(agent, format!("{agent}:{bare}"), path)
+}
+
+async fn start_claude_and_codex(dir: &Path) -> Running {
+    let claude_root = dir.join("claude");
+    let codex_root = dir.join("codex");
+    let claude = Arc::new(StaticStore {
+        agent: "claude",
+        root: claude_root.clone(),
+        record: write_session(&claude_root, "claude", "c1"),
+    }) as Arc<dyn SessionStore>;
+    let codex = Arc::new(StaticStore {
+        agent: "codex",
+        root: codex_root.clone(),
+        record: write_session(&codex_root, "codex", "x1"),
+    }) as Arc<dyn SessionStore>;
+    let registry = Arc::new(PiOmpRegistry {
+        stores: vec![claude, codex],
+    });
+    let config = dir.join("hofund.toml");
+    std::fs::write(&config, "listen = \"127.0.0.1:0\"\n").expect("config");
+    let mut consent = Consent::new(dir);
+    consent.settle();
+    consent
+        .set_reads(Some(true), [])
+        .expect("consent on for claude and codex");
+    start_linked(
+        &config,
+        registry,
+        StartOptions {
+            control_listen: Some("127.0.0.1:0".parse().expect("control address")),
+            control_runtime: Some(ControlRuntime::new(None, dir.to_path_buf())),
+            ..StartOptions::default()
+        },
+    )
+    .await
+    .expect("daemon")
 }
 
 /// Compare filesystem paths by components so Windows `\\` and `/` agree.
@@ -201,5 +340,41 @@ async fn carry_unknown_pairs_return_not_found() {
     )
     .await;
     assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+    support::shutdown(running).await;
+}
+
+#[tokio::test]
+async fn carry_pi_to_omp_is_not_found_when_omp_is_absent() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let (running, _session_path) = start_pi_with_absent_omp(dir.path()).await;
+    let response = post_json(
+        &running,
+        dir.path(),
+        "/v1/hofund/sessions/carry",
+        r#"{"version":1,"id":"pi:pi-main","to":"omp"}"#,
+    )
+    .await;
+    assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+    support::shutdown(running).await;
+}
+
+#[tokio::test]
+async fn carry_between_claude_and_codex_is_unprocessable() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let running = start_claude_and_codex(dir.path()).await;
+    for body in [
+        r#"{"version":1,"id":"claude:c1","to":"codex"}"#,
+        r#"{"version":1,"id":"codex:x1","to":"claude"}"#,
+        r#"{"version":1,"id":"claude:c1","to":"claude"}"#,
+    ] {
+        let response = post_json(&running, dir.path(), "/v1/hofund/sessions/carry", body).await;
+        assert_eq!(
+            response.status(),
+            reqwest::StatusCode::UNPROCESSABLE_ENTITY,
+            "{body}"
+        );
+        let text = response.text().await.expect("body");
+        assert!(text.contains("can't be carried over"), "{body}: {text}");
+    }
     support::shutdown(running).await;
 }
