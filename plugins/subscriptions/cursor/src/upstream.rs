@@ -1593,6 +1593,10 @@ mod tests {
             ])
             .await;
             let h1 = Http1Server::start(vec![config_reply(h2.base_url())]).await;
+            // Let the current-thread accept loops enter accept() before the
+            // client connects. A paused runtime can otherwise auto-advance a
+            // connect timeout and fail execute() with `error sending request`.
+            yield_times(2).await;
             let host = pooled_host();
             let account = store_account(&host).await;
             let mut upstream = upstream(&host, &h1, h2.base_url(), account);
@@ -1888,7 +1892,10 @@ mod tests {
 
     async fn advance_until_usage_polls(h1: &Http1Server, want: usize) {
         let path = "/aiserver.v1.DashboardService/GetFilteredUsageEvents";
-        for _ in 0..40 {
+        // Sleep on the paused clock instead of mixing yield_times() with
+        // advance_time(). yield_now() can look idle to Tokio and auto-advance
+        // to the next poller timer, overshooting past the second poll.
+        for _ in 0..200 {
             let seen = h1
                 .requests()
                 .iter()
@@ -1897,9 +1904,14 @@ mod tests {
             if seen >= want {
                 return;
             }
-            yield_times(2).await;
-            advance_time(Duration::from_millis(100)).await;
+            advance_time(Duration::from_millis(50)).await;
         }
+        let seen = h1
+            .requests()
+            .iter()
+            .filter(|request| request.path() == path)
+            .count();
+        panic!("timed out waiting for {want} usage polls, saw {seen}");
     }
 
     fn last_message_usage(events: &[StreamEvent]) -> Option<&Usage> {
