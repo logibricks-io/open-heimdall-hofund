@@ -797,8 +797,8 @@ mod tests {
             "revision": "",
             "consent": {"asked": true, "all": true, "enabled": []},
             "sessions": [{
-                "id": "claude:abc",
-                "agent": "claude",
+                "id": "agent:abc",
+                "agent": "agent",
                 "title": "t",
                 "cwd": "/work",
                 "last_ms": 1,
@@ -806,7 +806,7 @@ mod tests {
                 "tokens": {"input": 1, "output": 0, "cache_read": 0, "cache_write": 0},
                 "cost": 0.0,
                 "unpriced": 0,
-                "resume": "claude --resume abc",
+                "resume": "agent --resume abc",
                 "read_only": false,
                 "gateway": false
             }]
@@ -822,8 +822,8 @@ mod tests {
             "revision": "",
             "consent": {"asked": true, "all": true, "enabled": []},
             "sessions": [{
-                "id": "claude:abc",
-                "agent": "claude",
+                "id": "agent:abc",
+                "agent": "agent",
                 "title": "t",
                 "cwd": "/work",
                 "last_ms": 1,
@@ -831,14 +831,14 @@ mod tests {
                 "tokens": SessionTokenTotals::default(),
                 "cost": 0.0,
                 "unpriced": 0,
-                "resume": {"argv": ["claude", "--resume", "abc"], "cwd": "/work"},
+                "resume": {"argv": ["agent", "--resume", "abc"], "cwd": "/work"},
                 "read_only": false,
                 "gateway": false
             }]
         });
         let row: SessionSummary = serde_json::from_value(body["sessions"][0].clone()).expect("row");
         let resume = row.resume.expect("resume");
-        assert_eq!(resume.argv, ["claude", "--resume", "abc"]);
+        assert_eq!(resume.argv, ["agent", "--resume", "abc"]);
         assert_eq!(resume.cwd, "/work");
     }
 }
