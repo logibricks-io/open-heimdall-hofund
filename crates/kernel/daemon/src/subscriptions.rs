@@ -67,8 +67,7 @@ pub(crate) struct SubscriptionMember {
     pub(crate) account: AccountId,
     pub(crate) id: MemberId,
     pub(crate) built: BuiltProvider,
-    /// The plugin upstream, kept for tests that call it directly.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// The plugin upstream, shut down with the other constructed instances.
     pub(crate) upstream: Arc<dyn UpstreamProvider>,
 }
 

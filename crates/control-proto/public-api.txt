@@ -70,6 +70,7 @@ AgentStatusEntry.id
 AgentStatusEntry.model
 AgentStatusEntry.paths
 AgentStatusEntry.state
+AgentStatusEntry.warnings
 AgentStatusResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
 AgentStatusResponse.agents
 AgentStatusResponse.version
