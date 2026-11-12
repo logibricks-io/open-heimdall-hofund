@@ -685,6 +685,14 @@ impl Engine {
                 )?;
             }
         }
+        if self.id == "codex"
+            && let Some(config) = self
+                .locations
+                .iter()
+                .find(|location| location.file == "config")
+        {
+            let _ = crate::codex_threads::connect(&config.path).log();
+        }
         Ok(with_change(plan, stored))
     }
 
@@ -1566,6 +1574,15 @@ impl Engine {
                 self.id,
             )?);
             changed = true;
+        }
+        if changed
+            && self.id == "codex"
+            && let Some(config) = self
+                .locations
+                .iter()
+                .find(|location| location.file == "config")
+        {
+            warnings.extend(crate::codex_threads::disconnect(&config.path).log());
         }
         Ok(DisconnectOutcome::new(changed, warnings))
     }
