@@ -445,4 +445,98 @@ mod tests {
             "library must still be probed"
         );
     }
+
+    async fn serve_list_then_stats(list_status: u16, stats_status: u16) -> std::net::SocketAddr {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut buf = vec![0_u8; 4096];
+                let _ = stream.read(&mut buf).await;
+                let req = String::from_utf8_lossy(&buf);
+                let line = req.lines().next().unwrap_or("");
+                let stats = line.contains("/v1/hofund/sessions/stats");
+                let code = if stats { stats_status } else { list_status };
+                let body = if code == 200 && stats {
+                    r#"{"version":1,"revision":"","tokens":{"input":0,"output":0,"cache_read":0,"cache_write":0},"cost":0.0,"unpriced":0,"days":[],"models":[],"folders":[]}"#.to_owned()
+                } else if code == 200 {
+                    r#"{"version":1,"revision":"","consent":{"asked":false,"all":false,"enabled":[]},"sessions":[]}"#.to_owned()
+                } else {
+                    r#"{"version":1,"error":{"kind":"not_found","message":"missing","request_id":"test","retry_after_ms":null,"details":[]}}"#.to_owned()
+                };
+                let response = format!(
+                    "HTTP/1.1 {code} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            }
+        });
+        addr
+    }
+
+    #[tokio::test]
+    async fn schedule_sessions_fetch_maps_a_stats_404_after_a_successful_list() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let addr = serve_list_then_stats(200, 404).await;
+        let client = Client::tcp(addr, "t");
+        super::schedule_sessions_fetch(
+            Some(&client),
+            &tx,
+            Default::default(),
+            Default::default(),
+            7,
+        );
+        let super::WorkerMsg::SessionsLoad {
+            generation,
+            outcome,
+        } = recv_msg(&mut rx).await
+        else {
+            panic!("expected sessions load");
+        };
+        assert_eq!(generation, 7);
+        assert!(
+            matches!(*outcome, super::SessionsLoadOutcome::NotInBuild),
+            "stats 404 must be NotInBuild, not a generic error: {outcome:?}"
+        );
+
+        let addr = serve_list_then_stats(200, 500).await;
+        let client = Client::tcp(addr, "t");
+        super::schedule_sessions_fetch(
+            Some(&client),
+            &tx,
+            Default::default(),
+            Default::default(),
+            8,
+        );
+        let super::WorkerMsg::SessionsLoad { outcome, .. } = recv_msg(&mut rx).await else {
+            panic!("expected sessions load");
+        };
+        assert!(
+            matches!(*outcome, super::SessionsLoadOutcome::Err(_)),
+            "a non-404 stats error must stay an error: {outcome:?}"
+        );
+
+        let addr = serve_list_then_stats(200, 200).await;
+        let client = Client::tcp(addr, "t");
+        super::schedule_sessions_fetch(
+            Some(&client),
+            &tx,
+            Default::default(),
+            Default::default(),
+            9,
+        );
+        let super::WorkerMsg::SessionsLoad { outcome, .. } = recv_msg(&mut rx).await else {
+            panic!("expected sessions load");
+        };
+        assert!(
+            matches!(*outcome, super::SessionsLoadOutcome::Ok { .. }),
+            "list and stats 200 must succeed: {outcome:?}"
+        );
+    }
 }
