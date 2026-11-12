@@ -11,10 +11,13 @@
 //! the caller's own sign-in.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::future::{Future, poll_fn};
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::task::Poll;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use hofund_plugin_api::{Body, BodyStream, PluginError, too_long, words_of};
+use hofund_plugin_api::{Body, BodyStream, PluginError, StoppedWaiting, too_long, words_of};
 use hofund_plugin_sdk::json::{self, Value, json};
 use hofund_plugin_sdk::{
     HeaderMap, HttpRequest, HttpResponse, refused_passthrough, text_response, without_passthrough,
@@ -83,13 +86,49 @@ const DROPPED: [&str; 10] = [
     "accept-encoding",
 ];
 
-/// Passthrough members each upstream base has refused.
-#[derive(Clone, Debug, Default)]
+/// One whole compaction's summary budget. Codex hears nothing while the
+/// summary is made and abandons a silent stream at 300 seconds, so stop a
+/// minute earlier and answer with the local compaction while it still waits.
+pub(crate) const COMPACT_WITHIN: Duration = Duration::from_secs(240);
+
+const SUMMARY_TIMEOUT: &str = "no summary came in 4m0s, and Codex stops waiting at 5 minutes";
+
+type CompactDeadline = Pin<Box<dyn Future<Output = ()> + Send>>;
+type CompactClock = Arc<dyn Fn(Duration) -> CompactDeadline + Send + Sync>;
+
+/// Refused passthrough members and the compaction clock.
+#[derive(Clone)]
 pub(crate) struct State {
     refused: Arc<Mutex<BTreeMap<String, BTreeSet<String>>>>,
+    compact_clock: CompactClock,
+}
+
+impl Default for State {
+    fn default() -> Self {
+        Self {
+            refused: Arc::new(Mutex::new(BTreeMap::new())),
+            compact_clock: Arc::new(|within| Box::pin(hofund_plugin_sdk::sleep(within))),
+        }
+    }
+}
+
+impl std::fmt::Debug for State {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("State").finish_non_exhaustive()
+    }
 }
 
 impl State {
+    #[cfg(test)]
+    pub(crate) fn with_compact_clock(
+        clock: impl Fn(Duration) -> CompactDeadline + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            compact_clock: Arc::new(clock),
+            ..Self::default()
+        }
+    }
+
     fn strip(&self, base: &str, body: &[u8]) -> Option<Vec<u8>> {
         let refused = self.refused.lock().ok()?;
         let fields = refused.get(base)?;
@@ -119,7 +158,8 @@ impl State {
 /// Answers `request` under [`PREFIX`] without retaining refusals.
 #[cfg(test)]
 pub(crate) async fn serve(kernel: &dyn Kernel, bases: Bases, request: HttpRequest) -> HttpResponse {
-    serve_with_state(kernel, bases, request, &State::default()).await
+    let state = State::with_compact_clock(|_| Box::pin(std::future::pending()));
+    serve_with_state(kernel, bases, request, &state).await
 }
 
 /// Answers `request` under [`PREFIX`], retaining refused passthrough members.
@@ -159,7 +199,7 @@ pub(crate) async fn serve_with_state(
                 *request.body_mut() = Body::from(body);
             }
             if compaction {
-                return summarise(kernel, &request).await;
+                return summarise(kernel, &request, state).await;
             }
             return in_process(kernel, &request).await;
         }
@@ -243,10 +283,19 @@ async fn in_process(kernel: &dyn Kernel, request: &HttpRequest) -> HttpResponse 
 /// A hofund model's compaction: the conversation is summarised in
 /// process, and the summary is answered as the one compaction item of a
 /// Responses stream, which Codex keeps in place of what it summarised.
-async fn summarise(kernel: &dyn Kernel, request: &HttpRequest) -> HttpResponse {
-    match summary_attempt(kernel, request).await {
+async fn summarise(kernel: &dyn Kernel, request: &HttpRequest, state: &State) -> HttpResponse {
+    let marker = StoppedWaiting::new();
+    let mut deadline = (state.compact_clock)(COMPACT_WITHIN);
+    match summary_attempt_within(kernel, request, &marker, &mut deadline).await {
         SummaryAttempt::Done(response) => response,
+        SummaryAttempt::StoppedWaiting => local_compaction(request, SUMMARY_TIMEOUT),
         SummaryAttempt::SizeRefused => {
+            let expired =
+                poll_fn(|context| Poll::Ready(deadline.as_mut().poll(context).is_ready())).await;
+            if expired {
+                marker.stop();
+                return local_compaction(request, SUMMARY_TIMEOUT);
+            }
             let Some(body) = input::text_summary_body(request.body().bytes()) else {
                 return local_compaction(
                     request,
@@ -256,8 +305,9 @@ async fn summarise(kernel: &dyn Kernel, request: &HttpRequest) -> HttpResponse {
             let mut retry = local_call(request);
             *retry.body_mut() = Body::from(body);
             set(retry.headers_mut(), "accept", "application/json");
-            match summary_attempt(kernel, &retry).await {
+            match summary_attempt_within(kernel, &retry, &marker, &mut deadline).await {
                 SummaryAttempt::Done(response) => response,
+                SummaryAttempt::StoppedWaiting => local_compaction(request, SUMMARY_TIMEOUT),
                 SummaryAttempt::SizeRefused => {
                     local_compaction(request, "compaction: the text summary retry failed")
                 }
@@ -295,11 +345,37 @@ enum SummaryAttempt {
     SizeRefused,
     PassThrough(u16, String),
     Fail { status: Option<u16>, said: String },
+    StoppedWaiting,
 }
 
-async fn summary_attempt(kernel: &dyn Kernel, request: &HttpRequest) -> SummaryAttempt {
+async fn summary_attempt_within(
+    kernel: &dyn Kernel,
+    request: &HttpRequest,
+    marker: &StoppedWaiting,
+    deadline: &mut CompactDeadline,
+) -> SummaryAttempt {
+    let mut attempt = std::pin::pin!(summary_attempt(kernel, request, marker));
+    poll_fn(|context| {
+        if let Poll::Ready(attempt) = attempt.as_mut().poll(context) {
+            return Poll::Ready(attempt);
+        }
+        if deadline.as_mut().poll(context).is_ready() {
+            marker.stop();
+            return Poll::Ready(SummaryAttempt::StoppedWaiting);
+        }
+        Poll::Pending
+    })
+    .await
+}
+
+async fn summary_attempt(
+    kernel: &dyn Kernel,
+    request: &HttpRequest,
+    marker: &StoppedWaiting,
+) -> SummaryAttempt {
     let mut call = local_call(request);
     set(call.headers_mut(), "accept", "application/json");
+    call.extensions_mut().insert(marker.clone());
     let response = match kernel.call(call).await {
         Ok(response) => response,
         Err(failure) => {

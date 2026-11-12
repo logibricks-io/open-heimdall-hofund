@@ -9,15 +9,18 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use hofund_plugin_api::{
-    AccountId, AccountStatus, BuildError, ConfigError, DeviceFlow, HostContext, ModelList,
-    PluginError, PluginId, QuotaWindow, RawTable, RawValue, Schema, SignInChallenge, SignInCtx,
-    SignInFlow, SignInFlowKind, SignInProof, Subscription, SubscriptionFactory, SubscriptionSpec,
+    AccountId, AccountStatus, AgentSignIn, BuildError, ConfigError, DeviceFlow,
+    DiscoveredAgentAccount, HostContext, ModelList, PluginError, PluginErrorKind, PluginId,
+    QuotaWindow, RawTable, RawValue, Schema, SignInChallenge, SignInCtx, SignInFlow,
+    SignInFlowKind, SignInProof, Subscription, SubscriptionFactory, SubscriptionSpec,
     UpstreamProvider, ValidConfig,
 };
 use hofund_plugin_sdk::Contribution;
-use hofund_plugin_sdk::oauth::TokenCache;
 use hofund_plugin_sdk::oauth::device::DeviceStart;
+use hofund_plugin_sdk::oauth::{SecretObject, TokenCache};
 
+mod auto;
+mod discover;
 mod models;
 mod quota;
 mod session;
@@ -35,7 +38,8 @@ static SPEC: SubscriptionSpec = SubscriptionSpec::from_static(
     PluginId::from_static("copilot"),
     "GitHub Copilot",
     SignInFlowKind::Device,
-);
+)
+.with_agent_sign_in(AgentSignIn::new(&["copilot"], "COPILOT_HOME", ".copilot"));
 
 /// Registers the GitHub Copilot subscription.
 #[must_use]
@@ -171,7 +175,29 @@ impl Subscription for Copilot {
                 "Copilot sign-in completes once the code is entered on GitHub",
             ));
         };
-        let signed_in = sign_in::finish(host, &pending.site, &pending.start).await?;
+        let mut signed_in = sign_in::finish(host, &pending.site, &pending.start).await?;
+        for existing in host.accounts().list().await? {
+            if !existing.label().eq_ignore_ascii_case(&signed_in.label) {
+                continue;
+            }
+            let Some(secret) = host.accounts().secret(existing.id()).await? else {
+                continue;
+            };
+            let Ok(blob) = SecretObject::parse(&secret) else {
+                continue;
+            };
+            if discover::source_from_blob(&blob).is_none() {
+                continue;
+            }
+            match session::session(&self.sessions, host, existing.id()).await {
+                Ok(_) => return Ok(existing.id().clone()),
+                Err(error) if error.kind() == PluginErrorKind::Auth => {}
+                Err(error) => return Err(error),
+            }
+            signed_in.id = existing.id().clone();
+            signed_in.label = existing.label().to_owned();
+            break;
+        }
         let account = host
             .accounts()
             .account(signed_in.id.clone(), signed_in.label)?;
@@ -189,16 +215,43 @@ impl Subscription for Copilot {
         Ok(())
     }
 
+    async fn discover_agent_sign_in(
+        &self,
+        home: &std::path::Path,
+    ) -> Result<Vec<DiscoveredAgentAccount>, PluginError> {
+        discover::list(home)
+    }
+
+    async fn import_agent_sign_in(
+        &self,
+        home: &std::path::Path,
+        reference: &str,
+        host: &HostContext,
+    ) -> Result<AccountId, PluginError> {
+        discover::import(home, reference, host).await
+    }
+
     async fn account_status(
         &self,
         account: &AccountId,
         host: &HostContext,
     ) -> Result<AccountStatus, PluginError> {
+        session::migrate_legacy_name(host, account).await?;
         let Some(secret) = host.accounts().secret(account).await? else {
             return Ok(needs_sign_in(
                 "no Copilot sign-in is stored for this account",
             ));
         };
+        if session::external_source(&secret).is_some() {
+            let lapsed = SecretObject::parse(&secret)
+                .ok()
+                .is_some_and(|blob| blob.flag(session::LAPSED));
+            return Ok(if lapsed {
+                needs_sign_in(session::LAPSED_REASON)
+            } else {
+                AccountStatus::Ready
+            });
+        }
         match session::read_blob(&secret) {
             Ok(_) => Ok(AccountStatus::Ready),
             Err(error) => Ok(needs_sign_in(error.message())),
@@ -222,8 +275,18 @@ impl Subscription for Copilot {
             .fetch(host.http())
             .await?;
         match reply.status() {
-            200..=299 => quota::windows(reply.body()),
-            401 | 403 => Err(PluginError::auth(
+            200..=299 => {
+                let (windows, entitlement) =
+                    quota::windows_with_entitlement(reply.body(), &stored.entitlement)?;
+                session::unlapse(host, account, &stored).await?;
+                session::update_entitlement(host, account, &stored, &entitlement).await?;
+                Ok(windows)
+            }
+            401 => {
+                session::lapse(host, account, &stored.oauth).await?;
+                Err(PluginError::auth(session::LAPSED_REASON))
+            }
+            403 => Err(PluginError::auth(
                 "GitHub refused to show the Copilot quota",
             )),
             status => Err(PluginError::status_error(
@@ -263,6 +326,12 @@ fn needs_sign_in(reason: &str) -> AccountStatus {
 }
 
 #[cfg(test)]
+mod auto_tests;
+#[cfg(test)]
 mod conformance;
+#[cfg(test)]
+mod entitlement_tests;
+#[cfg(test)]
+mod side_login_tests;
 #[cfg(test)]
 mod tests;
