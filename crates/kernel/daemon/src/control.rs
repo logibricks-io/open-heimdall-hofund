@@ -472,6 +472,10 @@ impl ControlState for DaemonControl {
         status.model_listener.effective = listener.effective.to_string();
         status.model_listener.running = listener.running.map(|running| running.to_string());
         status.model_listener.effective_source = listener.source;
+        let network = self.ops.network_access();
+        status.model_listener.allow_ips = network.allow_ips;
+        status.model_listener.trust_proxy = network.trust_proxy;
+        status.model_listener.allow_ips_invalid = network.invalid_allow_ips;
         status.serves = self.status_serves.or_else(serve_role_from_env);
         status.owned_by_pid = self.status_owner_pid.unwrap_or_else(owned_by_pid_from_env);
         status
