@@ -3,8 +3,8 @@
 
 use hofund_kit_subscription::{TestHost, block_on};
 use hofund_plugin_api::{
-    AccountId, AccountStatus, PluginErrorKind, PluginId, PluginKind, RawTable, RawValue,
-    SignInFlowKind,
+    AccountId, AccountStatus, ContentPart, Message, PluginErrorKind, PluginId, PluginKind,
+    ProtocolId, RawTable, RawValue, Request, Role, SignInFlowKind,
 };
 
 fn host(dir: &tempfile::TempDir) -> TestHost {
@@ -73,12 +73,21 @@ fn unknown_account_needs_sign_in_and_runs_nothing() {
     let models = block_on(built.list_models(&account, host.context())).expect_err("models");
     assert_eq!(models.kind(), PluginErrorKind::Auth);
     assert!(block_on(built.refresh(&account, host.context())).is_err());
-    let upstream = built
+    let provider = built
         .upstream(&account, host.context())
-        .err()
-        .expect("not served yet");
-    assert_eq!(upstream.kind(), PluginErrorKind::Unsupported);
+        .expect("text-only serving starts in this slice");
+    let error = match block_on(provider.execute(text_request(), ProtocolId::AnthropicMessages)) {
+        Err(error) => error,
+        Ok(_) => panic!("unknown account cannot be served"),
+    };
+    assert_eq!(error.kind(), PluginErrorKind::Auth);
     assert!(block_on(built.health()).is_ok());
     assert!(host.process().piped_spawns().is_empty());
     assert!(host.http().calls().is_empty());
+}
+
+fn text_request() -> Request {
+    let mut message = Message::new(Role::User);
+    message.content = vec![ContentPart::text("hello")];
+    Request::new("claude-sonnet-4-5").with_messages(vec![message])
 }

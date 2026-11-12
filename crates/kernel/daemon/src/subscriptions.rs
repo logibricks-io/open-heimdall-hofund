@@ -67,8 +67,7 @@ pub(crate) struct SubscriptionMember {
     pub(crate) account: AccountId,
     pub(crate) id: MemberId,
     pub(crate) built: BuiltProvider,
-    /// The plugin upstream, kept for tests that call it directly.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// The plugin upstream, shut down with the other constructed instances.
     pub(crate) upstream: Arc<dyn UpstreamProvider>,
 }
 
@@ -383,7 +382,7 @@ fn credit_windowed(plugin: &PluginId) -> bool {
 }
 
 /// Turns polled windows into a cooldown. Only a blocking, model-wide window
-/// with a known limit that is spent cools the member. Returns whether one did.
+/// without exclusions and with a known spent limit cools the whole member.
 pub(crate) fn apply_windows(
     cooldowns: &Cooldowns,
     member: &MemberId,
@@ -394,7 +393,10 @@ pub(crate) fn apply_windows(
     cooldowns.observe_credit_window(member, windows);
     let mut cooled = false;
     for window in windows {
-        if !window.blocking() || window.scope_model().is_some() {
+        if !window.blocking()
+            || window.scope_model().is_some()
+            || !window.excluded_models().is_empty()
+        {
             continue;
         }
         let Some(limit) = window.limit() else {
@@ -959,6 +961,21 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    #[test]
+    fn exhausted_window_with_free_models_does_not_cool_the_whole_member() {
+        let cooldowns = cooldowns();
+        let id = member("one");
+        let window = full_window("day", Some(Duration::from_secs(3600)))
+            .with_excluded_models(vec!["free-model".to_owned()]);
+        assert!(!super::apply_windows(
+            &cooldowns,
+            &id,
+            &PluginId::from_static(PLUGIN),
+            &[window],
+        ));
+        assert!(cooldowns.cooling(&id).is_none());
     }
 
     #[tokio::test]

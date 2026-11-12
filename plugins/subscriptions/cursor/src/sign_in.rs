@@ -18,6 +18,13 @@ pub(crate) struct BrowserPending {
     pub uuid: String,
 }
 
+/// In-flight sign-in: browser PKCE, or an API key read at start.
+#[derive(Clone)]
+pub(crate) enum PendingSignIn {
+    Browser(BrowserPending),
+    ApiKey(SecretString),
+}
+
 /// Starts browser sign-in: returns the page URL and poll state.
 pub(crate) fn start(pkce: &Pkce, uuid: &str, endpoints: &Endpoints) -> (String, BrowserPending) {
     let url = endpoints.login_deep_control(&pkce.challenge, uuid);

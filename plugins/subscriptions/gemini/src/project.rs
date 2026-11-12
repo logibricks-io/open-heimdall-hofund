@@ -19,11 +19,6 @@ pub(crate) const NEEDS_PROJECT: &str = "needs_project";
 /// Google's reason the account needs a project, when it gave one.
 const NEEDS_PROJECT_WHY: &str = "needs_project_why";
 
-/// What a Code Assist Standard or Enterprise account without a project is told.
-pub(crate) const NEEDS_PROJECT_REASON: &str = "Google serves Gemini CLI's sign-in only to Gemini \
-     Code Assist Standard and Enterprise, which bill a Google Cloud project: name it as `project` \
-     in this subscription's config";
-
 /// What an account Code Assist has not set up yet is told.
 pub(crate) const PENDING_REASON: &str =
     "Code Assist has not set this account up yet; refresh the account to try again";
@@ -39,14 +34,25 @@ pub(crate) fn known(blob: &SecretObject, configured: Option<&str>) -> bool {
     blob.text(PROJECT).is_some() || configured.is_some()
 }
 
+/// What a Code Assist Standard or Enterprise account without a project is told.
+fn needs_project_reason(email: &str) -> String {
+    format!(
+        "Google serves Gemini CLI's sign-in only to Gemini Code Assist Standard and Enterprise, \
+         which bill a Google Cloud project: name it with `hofund accounts project gemini {email} \
+         <project-id>`. A personal Google account is served to Antigravity instead: add it under \
+         Antigravity in hofund"
+    )
+}
+
 /// Why an account has no project.
 pub(crate) fn missing_reason(blob: &SecretObject) -> String {
     if !blob.flag(NEEDS_PROJECT) {
         return PENDING_REASON.to_owned();
     }
+    let reason = needs_project_reason(blob.text("email").unwrap_or("<email>"));
     match blob.text(NEEDS_PROJECT_WHY) {
-        Some(why) if !why.is_empty() => format!("{why}: {NEEDS_PROJECT_REASON}"),
-        _ => NEEDS_PROJECT_REASON.to_owned(),
+        Some(why) if !why.is_empty() => format!("{why}: {reason}"),
+        _ => reason,
     }
 }
 
@@ -165,6 +171,37 @@ async fn stored(host: &HostContext, account: &AccountId) -> Result<Option<String
     Ok(SecretObject::parse(&secret)?
         .text(PROJECT)
         .map(str::to_owned))
+}
+
+/// Names the stored account's Cloud project, or clears it when `project` is blank.
+pub(crate) async fn set(
+    host: &HostContext,
+    email: &str,
+    project: &str,
+) -> Result<AccountId, PluginError> {
+    let email = email.trim();
+    let account = host
+        .accounts()
+        .list()
+        .await?
+        .into_iter()
+        .find(|account| account.label().eq_ignore_ascii_case(email))
+        .ok_or_else(|| PluginError::config(format!("no gemini account `{email}`")))?;
+    let id = account.id().clone();
+    let lease = host.accounts().lease(&id, LEASE_WAIT).await?;
+    let blob = SecretObject::parse(lease.secret())?
+        .without(PROJECT)
+        .without(NEEDS_PROJECT)
+        .without(NEEDS_PROJECT_WHY)
+        .with_text("email", lease.account().label());
+    let project = project.trim();
+    let next = if project.is_empty() {
+        blob
+    } else {
+        blob.with_text(PROJECT, project)
+    };
+    lease.commit(None, next.to_secret()).await?;
+    Ok(id)
 }
 
 /// What Code Assist is told about the client, as Gemini CLI sends it.
