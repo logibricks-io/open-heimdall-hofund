@@ -67,6 +67,7 @@ pub fn read_incremental<R: Read>(
         if read == 0 {
             break;
         }
+        let started = position;
         for &byte in &buffer[..read] {
             position += 1;
             if byte == b'\n' {
@@ -91,6 +92,10 @@ pub fn read_incremental<R: Read>(
                     line.clear();
                 }
             }
+        }
+        if position == started {
+            outcome.cut = true;
+            break;
         }
     }
     Ok(outcome)
@@ -773,7 +778,9 @@ mod tests {
             .expect("disable");
         assert_eq!(index.list(&consent), Vec::<SessionRecord>::new());
         index.save_if_dirty().expect("drop save");
-        consent.set_reads(Some(true), []).expect("re-enable");
+        consent
+            .set_reads(Some(true), [("fake".to_owned(), true)])
+            .expect("re-enable");
         assert_eq!(
             SessionIndex::load(&config, &consent).list(&consent),
             Vec::<SessionRecord>::new()
@@ -1069,6 +1076,7 @@ mod tests {
         );
         let consent = settled(temp.path());
         let (store, _) = FakeStore::new(&root);
+        let store = store.listing(vec![]);
         let stores: [&dyn SessionStore; 1] = [&store];
         let mut index = SessionIndex::load(temp.path(), &consent);
         assert_eq!(index.list(&consent).len(), 1);
@@ -1126,8 +1134,13 @@ mod tests {
         assert_eq!(index.list(&consent)[0].title, "fake prompt");
 
         store.pushes.lock().expect("pushes").clear();
-        let rewritten = b"{\"prompt\":\"hello\"}\n";
-        std::fs::write(&path, rewritten).expect("same-size rewrite");
+        let grown = std::fs::read(&path).expect("grown bytes");
+        let mut rewritten = grown;
+        // Same length, different payload, so this cannot be an append.
+        assert_eq!(rewritten.last(), Some(&b'\n'));
+        let last = rewritten.len() - 2;
+        rewritten[last] = b' ';
+        std::fs::write(&path, &rewritten).expect("same-size rewrite");
         let file = std::fs::OpenOptions::new()
             .write(true)
             .open(&path)
@@ -1144,6 +1157,39 @@ mod tests {
             [None, Some("{}".to_owned()), None]
         );
         assert_eq!(store.pushes.lock().expect("pushes").len(), 1);
+    }
+
+    #[test]
+    fn refresh_does_not_append_when_the_cached_offset_is_past_the_file() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let agent_root = temp.path().join("agent");
+        std::fs::create_dir(&agent_root).expect("agent");
+        let path = agent_root.join("one.jsonl");
+        std::fs::write(&path, b"{\"prompt\":\"hello\"}\n{\"more\":true}\n").expect("session");
+        let mut record = SessionRecord::new("fake", "fake:one", &path);
+        record.title = "stale".to_owned();
+        write_cache(
+            &temp.path().join("config"),
+            vec![CacheEntry {
+                root: agent_root.clone(),
+                path: path.clone(),
+                file_id: "one".to_owned(),
+                size: 10,
+                modified_ns: 1,
+                offset: 10_000,
+                state: "{}".to_owned(),
+                record,
+            }],
+        );
+        let config = temp.path().join("config");
+        let consent = settled(&config);
+        let (store, _) = FakeStore::new(&agent_root);
+        let stores: [&dyn SessionStore; 1] = [&store];
+        let mut index = SessionIndex::load(&config, &consent);
+        index.refresh(&consent, &stores).expect("refresh");
+        assert_eq!(store.previous.lock().expect("previous").as_slice(), [None]);
+        assert!(store.pushes.lock().expect("pushes").len() >= 2);
+        assert_eq!(index.list(&consent)[0].title, "fake prompt");
     }
 
     #[test]
