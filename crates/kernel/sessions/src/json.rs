@@ -55,4 +55,12 @@ mod tests {
         assert_eq!(parse_line(b"{"), Err(JsonError::Syntax));
         assert_eq!(parse_line(&[0xff]), Err(JsonError::Syntax));
     }
+
+    #[test]
+    fn json_object_depth_is_counted() {
+        let accepted = format!("{}0{}", r#"{"k":"#.repeat(32), "}".repeat(32));
+        assert!(parse_line(accepted.as_bytes()).is_ok());
+        let refused = format!("{}0{}", r#"{"k":"#.repeat(33), "}".repeat(33));
+        assert_eq!(parse_line(refused.as_bytes()), Err(JsonError::Depth));
+    }
 }

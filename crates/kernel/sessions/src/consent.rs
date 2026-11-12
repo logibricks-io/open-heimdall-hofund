@@ -317,4 +317,45 @@ mod tests {
         assert!(matches!(result, Err(ConsentError::InvalidAgent(_))));
         assert_eq!(std::fs::read(consent.path()).expect("after"), before);
     }
+
+    #[test]
+    fn valid_agent_ids_and_wsl_distro_dots() {
+        assert!(valid_agent_id("claude"));
+        assert!(valid_agent_id("a_b-1"));
+        assert!(!valid_agent_id(""));
+        assert!(!valid_agent_id("a.b"));
+        assert!(!valid_agent_id("bad name"));
+        assert!(valid_agent_id("claude@wsl:Ubuntu-22.04"));
+        assert!(!valid_agent_id("!!!@wsl:Ubuntu-22.04"));
+        assert!(!valid_agent_id("claude@wsl:bad name"));
+        assert!(!valid_agent_id(&"a".repeat(65)));
+    }
+
+    #[test]
+    fn false_all_is_omitted_from_stored_json() {
+        let on = Reads {
+            asked: true,
+            all: true,
+            agents: BTreeMap::new(),
+        };
+        let encoded = serde_json::to_value(&on).expect("encode");
+        assert_eq!(encoded["all"], true);
+        let off = Reads {
+            asked: true,
+            all: false,
+            agents: BTreeMap::new(),
+        };
+        let encoded = serde_json::to_value(&off).expect("encode");
+        assert!(encoded.get("all").is_none());
+    }
+
+    #[test]
+    fn read_stored_missing_is_none_and_other_io_errors_surface() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let missing = root.path().join("sessions-consent.json");
+        assert!(matches!(read_stored(&missing), Ok(None)));
+        std::fs::create_dir(&missing).expect("dir at consent path");
+        let error = read_stored(&missing).expect_err("not a file");
+        assert_ne!(error.kind(), std::io::ErrorKind::NotFound);
+    }
 }
