@@ -48,6 +48,11 @@ pub use model_health::{probe_address, probe_model_health};
 /// How long a failed one-shot `hofundd` may take to exit before it is killed.
 const ONE_SHOT_EXIT_WAIT: Duration = Duration::from_secs(5);
 
+/// How long a one-shot `hofundd` may take to complete the HTTP handshake
+/// and first response. A child that never speaks HTTP would otherwise
+/// block the client until an outer test or process deadline fires.
+const ONE_SHOT_HANDSHAKE_WAIT: Duration = Duration::from_secs(5);
+
 /// The most one-shot standard error kept while waiting for its response.
 const ONE_SHOT_STDERR_LIMIT: usize = 16 * 1024;
 
@@ -1110,11 +1115,13 @@ impl Client {
         let diagnostics = OneShotStderr::start(stderr);
         let io = tokio::io::join(stdout, stdin);
         let host = LOCAL_IPC_HOST.to_owned();
-        match self
-            .open_over(io, method, path, body, last_event_id, host)
-            .await
+        match tokio::time::timeout(
+            ONE_SHOT_HANDSHAKE_WAIT,
+            self.open_over(io, method, path, body, last_event_id, host),
+        )
+        .await
         {
-            Ok(response) => {
+            Ok(Ok(response)) => {
                 // Pass the child's diagnostics through from here on. It
                 // exits once the response is read and the connection
                 // drops; reap it in the background.
@@ -1124,15 +1131,8 @@ impl Client {
                 });
                 Ok(response)
             }
-            Err(error) => {
-                let status = match tokio::time::timeout(ONE_SHOT_EXIT_WAIT, child.wait()).await {
-                    Ok(Ok(status)) => status.to_string(),
-                    Ok(Err(wait)) => format!("unknown status: {wait}"),
-                    Err(_) => {
-                        let _ = child.kill().await;
-                        "still running; killed".to_owned()
-                    }
-                };
+            Ok(Err(error)) => {
+                let status = wait_or_kill_one_shot(&mut child).await;
                 // A child that exits before answering explains why on
                 // standard error; that beats the transport error.
                 let reason = diagnostics
@@ -1142,6 +1142,24 @@ impl Client {
                 Err(ClientError::Transport(format!(
                     "one-shot hofundd failed ({status}): {reason}"
                 )))
+            }
+            Err(_elapsed) => {
+                // The child is still running and will not exit on its own.
+                let _ = child.kill().await;
+                let status = wait_or_kill_one_shot(&mut child).await;
+                let reason = diagnostics.finish().await.unwrap_or_default();
+                let message = if reason.is_empty() {
+                    format!(
+                        "one-shot hofundd handshake timed out after {}s ({status})",
+                        ONE_SHOT_HANDSHAKE_WAIT.as_secs()
+                    )
+                } else {
+                    format!(
+                        "one-shot hofundd handshake timed out after {}s ({status}): {reason}",
+                        ONE_SHOT_HANDSHAKE_WAIT.as_secs()
+                    )
+                };
+                Err(ClientError::Transport(message))
             }
         }
     }
@@ -1182,6 +1200,18 @@ impl Client {
             .send_request(request)
             .await
             .map_err(|error| transport("control HTTP request failed", error))
+    }
+}
+
+/// Waits briefly for a one-shot child to exit, then kills it.
+async fn wait_or_kill_one_shot(child: &mut tokio::process::Child) -> String {
+    match tokio::time::timeout(ONE_SHOT_EXIT_WAIT, child.wait()).await {
+        Ok(Ok(status)) => status.to_string(),
+        Ok(Err(wait)) => format!("unknown status: {wait}"),
+        Err(_) => {
+            let _ = child.kill().await;
+            "still running; killed".to_owned()
+        }
     }
 }
 
