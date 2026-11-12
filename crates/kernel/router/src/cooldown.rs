@@ -366,7 +366,10 @@ impl Cooldowns {
         let mut reset = None;
         let mut unknown = false;
         for window in windows.iter().filter(|window| {
-            window.blocking() && window.scope_model().is_none() && window.limit().is_some()
+            window.blocking()
+                && window.scope_model().is_none()
+                && window.excluded_models().is_empty()
+                && window.limit().is_some()
         }) {
             let until = window
                 .resets_at()
