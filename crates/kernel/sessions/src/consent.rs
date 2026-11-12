@@ -320,14 +320,14 @@ mod tests {
 
     #[test]
     fn valid_agent_ids_and_wsl_distro_dots() {
-        assert!(valid_agent_id("claude"));
+        assert!(valid_agent_id("agent"));
         assert!(valid_agent_id("a_b-1"));
         assert!(!valid_agent_id(""));
         assert!(!valid_agent_id("a.b"));
         assert!(!valid_agent_id("bad name"));
-        assert!(valid_agent_id("claude@wsl:Ubuntu-22.04"));
+        assert!(valid_agent_id("agent@wsl:Distro-22.04"));
         assert!(!valid_agent_id("!!!@wsl:Ubuntu-22.04"));
-        assert!(!valid_agent_id("claude@wsl:bad name"));
+        assert!(!valid_agent_id("agent@wsl:bad name"));
         assert!(!valid_agent_id(&"a".repeat(65)));
     }
 
