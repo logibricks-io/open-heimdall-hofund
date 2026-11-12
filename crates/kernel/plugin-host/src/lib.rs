@@ -31,6 +31,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
+use tokio::sync::Notify;
 
 use async_trait::async_trait;
 use hofund_plugin_api::kernel::{
@@ -819,6 +820,7 @@ enum Scripted {
 pub struct RecordingHttp {
     calls: Mutex<Vec<RecordedRequest>>,
     scripted: Mutex<VecDeque<Scripted>>,
+    progress: Notify,
 }
 
 impl RecordingHttp {
@@ -867,6 +869,20 @@ impl RecordingHttp {
     pub fn calls(&self) -> Vec<RecordedRequest> {
         self.calls.lock().expect("http lock").clone()
     }
+
+    /// Completes when at least `count` calls have been recorded.
+    ///
+    /// Subscribe before reading the count so a call that arrives between the
+    /// check and the wait is not missed.
+    pub async fn wait_until_calls(&self, count: usize) {
+        loop {
+            let notified = self.progress.notified();
+            if self.calls.lock().expect("http lock").len() >= count {
+                return;
+            }
+            notified.await;
+        }
+    }
 }
 
 fn recorded(request: &HttpRequest<Body>) -> RecordedRequest {
@@ -900,6 +916,7 @@ impl HttpBackend for RecordingHttp {
             .lock()
             .expect("http lock")
             .push(recorded(&request));
+        self.progress.notify_waiters();
         match self.scripted.lock().expect("http lock").pop_front() {
             Some(Scripted::Connect(message)) => Err(PluginError::connect(message)),
             Some(Scripted::Timeout(message)) => Err(PluginError::timeout(message)),
