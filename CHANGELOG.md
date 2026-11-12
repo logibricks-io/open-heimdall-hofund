@@ -132,6 +132,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Z Code subscription (R-57): refresh re-imports hold the account lease and keep
+  a team seat lapsed when its refused business token is unchanged, while a
+  rotated token recovers it; malformed relative agent credential paths fail
+  closed, team accounts have separate labels, and code 3012 reports the
+  risk-control support hint with a two-hour cooldown.
 - Claude subscription (R-5 fix round 3): `/usage` reset times use
   `hofund-plugin-sdk::time::zone` (zones, yearless dates, time-only resets);
   the Claude plugin reads `catalog/models.dev.json` beside the data root
