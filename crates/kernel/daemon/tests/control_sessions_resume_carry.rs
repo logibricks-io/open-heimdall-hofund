@@ -63,7 +63,7 @@ fn pi_fixture(name: &str) -> PathBuf {
 }
 
 fn install_pi_session(root: &Path) -> PathBuf {
-    let sessions = root.join("sessions/work");
+    let sessions = root.join("sessions").join("work");
     std::fs::create_dir_all(&sessions).expect("pi sessions");
     let path = sessions.join("2026-01-01T00-00-00_pi-main.jsonl");
     std::fs::copy(pi_fixture("main.jsonl"), &path).expect("pi fixture");
@@ -71,10 +71,10 @@ fn install_pi_session(root: &Path) -> PathBuf {
 }
 
 async fn start_pi_omp(dir: &Path) -> (Running, PathBuf) {
-    let pi_home = dir.join("pi/agent");
+    let pi_home = dir.join("pi").join("agent");
     std::fs::create_dir_all(&pi_home).expect("pi home");
     let session_path = install_pi_session(&pi_home);
-    let omp_root = dir.join("omp/sessions");
+    let omp_root = dir.join("omp").join("sessions");
     std::fs::create_dir_all(&omp_root).expect("omp root");
     let pi = Arc::new(PiStore::with_root(&pi_home)) as Arc<dyn SessionStore>;
     let omp = Arc::new(OmpStore::with_session_roots([omp_root])) as Arc<dyn SessionStore>;
@@ -100,6 +100,16 @@ async fn start_pi_omp(dir: &Path) -> (Running, PathBuf) {
     .await
     .expect("daemon");
     (running, session_path)
+}
+
+/// Compare filesystem paths by components so Windows `\\` and `/` agree.
+fn assert_same_path(left: impl AsRef<Path>, right: impl AsRef<Path>) {
+    let left = left.as_ref();
+    let right = right.as_ref();
+    assert!(
+        left.components().eq(right.components()),
+        "paths differ: {left:?} vs {right:?}"
+    );
 }
 
 fn token(dir: &Path) -> String {
@@ -148,7 +158,7 @@ async fn pi_list_includes_resume_argv_and_carry_returns_omp_fork() {
     let resume = row.resume.as_ref().expect("pi resume");
     assert_eq!(resume.argv[0], "pi");
     assert_eq!(resume.argv[1], "--session");
-    assert_eq!(resume.argv[2], session_path.to_string_lossy().into_owned());
+    assert_same_path(&resume.argv[2], &session_path);
     assert_eq!(resume.cwd, "/work/pi");
 
     let response = post_json(
@@ -163,14 +173,9 @@ async fn pi_list_includes_resume_argv_and_carry_returns_omp_fork() {
         decode_response(API_VERSION, &response.bytes().await.expect("carry body")).expect("carry");
     assert_eq!(carry.agent, "omp");
     assert_eq!(carry.id, "pi:pi-main");
-    assert_eq!(
-        carry.command.argv,
-        vec![
-            "omp".to_owned(),
-            "--fork".to_owned(),
-            session_path.to_string_lossy().into_owned(),
-        ]
-    );
+    assert_eq!(carry.command.argv[0], "omp");
+    assert_eq!(carry.command.argv[1], "--fork");
+    assert_same_path(&carry.command.argv[2], &session_path);
     assert_eq!(carry.command.cwd, "/work/pi");
 
     support::shutdown(running).await;
