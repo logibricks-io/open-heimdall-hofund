@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   quota-shaped results, and process crashes map to `PluginError` without
   cooling the account where the reference does not. Real-account smoke stays
   on #304.
+- R-21: `hofund uninstall [--yes] [--purge]` restores every managed agent through
+  non-force disconnect, refuses to run beside a live daemon, and optionally
+  removes only hofund's resolved config, credential, usage, and state paths.
+  Release and README documentation cover deleting the two installed binaries.
+
 - R-16: Zed subscription upstream via POST `/completions` (provider envelope,
   NDJSON event unwrap, unary fold), model-token refresh with stale headers,
   live `/models` with snapshot fallback, plan quota from `/client/users/me`,

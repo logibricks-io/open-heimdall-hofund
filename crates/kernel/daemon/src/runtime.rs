@@ -29,6 +29,10 @@ const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(1);
 /// what is kept.
 pub(crate) const QUOTA_READ_TIMEOUT: Duration = Duration::from_secs(12);
 
+/// How long each constructed upstream may take to stop background work
+/// after the HTTP drain.
+pub(crate) const PROVIDER_SHUTDOWN_DEADLINE: Duration = Duration::from_secs(4);
+
 /// Providers and routes built from a candidate configuration, not yet live.
 pub(crate) struct Candidate {
     config: Arc<Config>,
@@ -708,6 +712,49 @@ impl Runtime {
 
     pub(crate) fn subscription_states(&self) -> Subscriptions {
         self.plan.lock().expect("plan").subscriptions.clone()
+    }
+
+    /// Calls `UpstreamProvider::shutdown` on every constructed instance.
+    ///
+    /// Provider instances and subscription members are included, and the same
+    /// `Arc` is only shut down once. A failed or overdue call is logged and
+    /// does not skip the remaining providers.
+    pub(crate) async fn shutdown_upstreams(&self, deadline: Duration) {
+        let calls = self
+            .constructed_upstreams()
+            .into_iter()
+            .map(|upstream| async move {
+                match tokio::time::timeout(deadline, upstream.shutdown(deadline)).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        tracing::warn!(%error, "upstream provider shutdown failed");
+                    }
+                    Err(_) => {
+                        tracing::warn!("upstream provider shutdown timed out");
+                    }
+                }
+            });
+        futures_util::future::join_all(calls).await;
+    }
+
+    fn constructed_upstreams(&self) -> Vec<Arc<dyn hofund_plugin_api::UpstreamProvider>> {
+        let mut seen = HashSet::new();
+        let mut upstreams = Vec::new();
+        let mut push = |upstream: Arc<dyn hofund_plugin_api::UpstreamProvider>| {
+            let identity = std::ptr::from_ref(upstream.as_ref()) as *const () as usize;
+            if seen.insert(identity) {
+                upstreams.push(upstream);
+            }
+        };
+        for instance in self.instances.lock().expect("provider instances").values() {
+            push(Arc::clone(&instance.upstream));
+        }
+        for state in self.subscription_states().values() {
+            for member in state.members() {
+                push(Arc::clone(&member.upstream));
+            }
+        }
+        upstreams
     }
 
     /// Returns sampled history from the shared store.

@@ -323,6 +323,8 @@ ConnectionStatus::const fn installed (& self) -> bool
 ConnectionStatus::const fn managed (& self) -> bool
 ConnectionStatus::fn new (id : & 'static str , display_name : & 'static str , installed : bool , connected : bool , managed : bool , paths : Vec < PathBuf > ,) -> Self
 ConnectionStatus::fn paths (& self) -> & [PathBuf]
+ConnectionStatus::fn warnings (& self) -> & [String]
+ConnectionStatus::fn with_warnings (mut self , warnings : Vec < String >) -> Self
 ContentPart
 CountOutcome
 CountOutcome #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
@@ -1042,6 +1044,11 @@ Spawned::const fn id (self) -> u32
 StillWorking
 Stop
 StopReason
+StoppedWaiting
+StoppedWaiting derives(Clone, Debug, Default)
+StoppedWaiting::fn is_stopped (& self) -> bool
+StoppedWaiting::fn new () -> Self
+StoppedWaiting::fn stop (& self)
 StreamEvent
 Subscription
 Subscription::async fn account_status (& self , account : & AccountId , host : & HostContext ,) -> Result < AccountStatus , PluginError >
