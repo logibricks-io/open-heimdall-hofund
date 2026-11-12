@@ -80,6 +80,7 @@ skip = [
     { crate = "cpufeatures@0.2.17", reason = "rsa 0.10 uses crypto-bigint 0.7 and cpufeatures 0.3 while the existing encryption stack uses cpufeatures 0.2" },
     { crate = "crypto-common@0.1.7", reason = "rsa 0.10 uses crypto-common 0.2 while the existing encryption stack uses crypto-common 0.1" },
     { crate = "digest@0.10.7", reason = "rsa 0.10 uses digest 0.11 while existing hashes and encryption use digest 0.10" },
+    { crate = "hmac@0.12.1", reason = "dbus-secret-service 4 and secret-service 4 pin hkdf 0.12 (hmac 0.12) while rsa 0.10, used by hofund-plugin-sdk for Zed sign-in, requires hmac 0.13" },
     { crate = "sha2@0.10.9", reason = "rsa 0.10 uses sha2 0.11 while existing workspace hashes use sha2 0.10" },
 ]
 
