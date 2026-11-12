@@ -270,6 +270,30 @@ pub trait ProcessBackend: Send + Sync {
             "this process backend has no piped spawn",
         ))
     }
+
+    /// Spawns `program` as a long-lived piped child.
+    ///
+    /// The child inherits the host environment after dropping names in
+    /// `env_deny`, then `env` is applied. Dropping the handle does not kill
+    /// the child. The default refuses.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when the process cannot be started, or with
+    /// kind `Unsupported` when this backend has no long-lived spawn.
+    async fn spawn_long_lived(
+        &self,
+        program: PathBuf,
+        args: Vec<std::ffi::OsString>,
+        env: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+        cwd: PathBuf,
+        env_deny: Vec<std::ffi::OsString>,
+    ) -> Result<Box<dyn LongLivedChildBackend>, PluginError> {
+        let _ = (program, args, env, cwd, env_deny);
+        Err(PluginError::unsupported(
+            "this process backend has no long-lived piped spawn",
+        ))
+    }
 }
 
 /// A child with piped standard input and output.
@@ -308,6 +332,57 @@ pub trait PipedChildBackend: Send + Sync {
             "this piped child backend has no exit status",
         ))
     }
+}
+
+/// A long-lived piped child.
+///
+/// Dropping it does not kill the child. The caller kills it with [`Self::kill`]
+/// or waits for it with [`Self::wait`].
+#[async_trait]
+#[doc(hidden)]
+pub trait LongLivedChildBackend: Send + Sync {
+    /// The process id.
+    fn id(&self) -> u32;
+
+    /// Writes `bytes` to standard input and flushes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when standard input is closed or the write fails.
+    async fn write_stdin(&self, bytes: Bytes) -> Result<(), PluginError>;
+
+    /// Closes standard input so the child reads end of file.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when closing fails. Closing twice is not an error.
+    async fn close_stdin(&self) -> Result<(), PluginError>;
+
+    /// Standard output as one chunk per line, newline included.
+    ///
+    /// Returns `None` after the first call.
+    fn take_stdout(&self) -> Option<BodyStream>;
+
+    /// Waits until the child exits and returns its exit code.
+    ///
+    /// This uses the same exit-status channel as [`PipedChildBackend::exit_code`].
+    /// A child terminated by a signal reports `128 + signal` on Unix, or `-1`
+    /// when no code is available.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when the wait fails.
+    async fn wait(&self) -> Result<i32, PluginError>;
+
+    /// Signals the child to exit. Does not wait for it to reap.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when the signal cannot be sent.
+    fn kill(&self) -> Result<(), PluginError>;
+
+    /// The most recent 1 MiB of standard error.
+    fn stderr_tail(&self) -> Bytes;
 }
 
 /// Host hook that aborts an open duplex call when a session half is dropped.
@@ -378,6 +453,62 @@ impl LoopbackBackend for NoLoopback {
     }
 
     fn release(&self, _plugin: &PluginKey, _session: &str) {}
+}
+
+/// Dedicated loopback listener for long-lived bridge callbacks.
+///
+/// This is not the browser sign-in [`LoopbackBackend`]. The kernel binds
+/// `127.0.0.1` only and dispatches POSTs by token.
+#[doc(hidden)]
+pub trait BridgeCallbackBackend: Send + Sync {
+    /// Origin of the listener, `http://127.0.0.1:<port>`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when this host has no listener or the
+    /// listener cannot be started.
+    fn base_url(&self) -> Result<String, PluginError>;
+
+    /// Registers `token` for `plugin`. Returns the full callback URL.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when this host has no listener, `token` is
+    /// already registered, or the listener cannot be started.
+    fn register(
+        &self,
+        plugin: &PluginKey,
+        token: &str,
+        handler: std::sync::Arc<dyn crate::BridgeCallbackHandler>,
+    ) -> Result<String, PluginError>;
+
+    /// Drops the registration for `token` if `plugin` created it. An unknown
+    /// token, or one registered by another plugin, is a no-op.
+    fn unregister(&self, plugin: &PluginKey, token: &str);
+}
+
+/// The backend a context gets when the kernel has no bridge callback listener.
+pub(crate) struct NoBridgeCallback;
+
+impl BridgeCallbackBackend for NoBridgeCallback {
+    fn base_url(&self) -> Result<String, PluginError> {
+        Err(PluginError::unsupported(
+            "this host has no bridge callback listener",
+        ))
+    }
+
+    fn register(
+        &self,
+        _plugin: &PluginKey,
+        _token: &str,
+        _handler: std::sync::Arc<dyn crate::BridgeCallbackHandler>,
+    ) -> Result<String, PluginError> {
+        Err(PluginError::unsupported(
+            "this host has no bridge callback listener",
+        ))
+    }
+
+    fn unregister(&self, _plugin: &PluginKey, _token: &str) {}
 }
 
 /// Per-plugin directories the kernel creates.

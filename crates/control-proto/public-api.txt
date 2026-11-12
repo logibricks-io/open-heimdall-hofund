@@ -89,6 +89,14 @@ CatalogModelRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Seria
 CatalogModelRequest.model
 CatalogModelRequest.version
 CatalogModelRequest::fn new (model : impl Into < String >) -> Self
+CatalogSyncRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
+CatalogSyncRequest.force
+CatalogSyncRequest.version
+CatalogSyncRequest::fn new (force : bool) -> Self
+CatalogSyncResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+CatalogSyncResponse.error
+CatalogSyncResponse.ok
+CatalogSyncResponse.version
 CheckinAccountRow #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize) # [serde (rename_all = "camelCase")]
 CheckinAccountRow.account
 CheckinAccountRow.at_ms
@@ -444,6 +452,7 @@ PicksForm::Edit
 PicksForm::Replace
 PicksForm::Reset
 PicksResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+PicksResponse.default_exposed
 PicksResponse.delisted
 PicksResponse.picked_from
 PicksResponse.picks
@@ -494,6 +503,7 @@ ProfileRenameRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Seri
 ProfileRenameRequest.from
 ProfileRenameRequest.to
 ProfileRenameRequest.version
+ProfileRenameRequest::fn new (from : impl Into < String > , to : impl Into < String >) -> Self
 ProfileRenameRequest::fn validate (& self) -> Result < () , ControlError >
 ProfileSaveRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
 ProfileSaveRequest.fields
@@ -526,10 +536,12 @@ ProviderCreateRequest.name
 ProviderCreateRequest.options
 ProviderCreateRequest.preset
 ProviderCreateRequest.version
+ProviderCreateRequest::fn new (expected_revision : impl Into < String > , preset : impl Into < String >) -> Self
 ProviderCreateRequest::fn validate (& self) -> Result < () , ControlError >
 ProviderDeleteRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
 ProviderDeleteRequest.expected_revision
 ProviderDeleteRequest.version
+ProviderDeleteRequest::fn new (expected_revision : impl Into < String >) -> Self
 ProviderDeleteRequest::fn validate (& self) -> Result < () , ControlError >
 ProviderDeleteResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
 ProviderDeleteResponse.disk_revision

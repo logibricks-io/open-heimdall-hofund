@@ -28,7 +28,10 @@ Sibling repositories:
 Kernel library crates live at `crates/kernel/<name>`. `crates/control-proto`
 and `crates/control-client` are shared by the kernel and the shells, so they
 stay beside it in `crates/`. The binaries are under `apps/`: `apps/cli`
-(`hofund`), `apps/hofundd` and `apps/desktop`.
+(`hofund`), `apps/hofundd` and `apps/desktop`. The hidden stdio MCP helper
+used by a long-lived coding-agent subprocess lives at `apps/bridge-mcp`
+(package `hofund-bridge-mcp`); `hofund` and `hofundd` both expose it as the
+hidden `bridge-mcp-stdio` subcommand.
 
 The menu-bar app lives at `apps/desktop` (Tauri v2, package `hofund-desktop`).
 Nothing in `crates/` depends on it. It depends on `hofund-daemon` and
@@ -245,6 +248,7 @@ This table covers normal and build dependencies, including their target-specific
 | Package | May depend on |
 | --- | --- |
 | `hofund-ir` | — |
+| `hofund-bridge-mcp` | — |
 | `hofund-codec` | `hofund-ir` |
 | `hofund-quirks` | `hofund-ir` |
 | `hofund-plugin-api` | `hofund-ir` |
@@ -267,7 +271,7 @@ This table covers normal and build dependencies, including their target-specific
 | `hofund-plugin-subscription-workbuddy` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
 | `hofund-plugin-subscription-zcode` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests), `hofund-plugin-sdk` (tests) |
 | `hofund-plugin-subscription-zed` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests), `hofund-plugin-sdk` (tests) |
-| `hofund-plugin-subscription-claude` | `hofund-plugin-api`, `hofund-plugin-sdk`, `regex`, `hofund-kit-subscription` (tests) |
+| `hofund-plugin-subscription-claude` | `hofund-plugin-api`, `hofund-plugin-sdk`, `bytes`, `futures-util`, `regex`, `ring`, `serde`, `serde_json`, `hofund-kit-subscription` (tests) |
 | `hofund-plugin-subscription-cline` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
 | `hofund-plugin-subscription-codex` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
 | `hofund-plugin-subscription-copilot` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
@@ -291,8 +295,8 @@ This table covers normal and build dependencies, including their target-specific
 | `hofund-usage` | — |
 | `hofund-agent` | `hofund-config`, `hofund-plugin-api` |
 | `hofund-daemon` | `hofund-codec`, `hofund-config`, `hofund-control-proto`, `hofund-gateway`, `hofund-model-catalog`, `hofund-plugin-api`, `hofund-plugin-host`, `hofund-plugin-registry` (tests also enable `test-fixtures`), `hofund-plugin-sdk`, `hofund-provider`, `hofund-quirks`, `hofund-router`, `hofund-secrets`, `hofund-usage`, `hofund-agent`, `hofund-control-client` (tests; dev `hofund-agent` enables `test-fixtures`) |
-| `hofund-daemon-bin` | `hofund-daemon`, `hofund-plugin-api`, `hofund-plugin-registry` |
-| `hofund-cli` | `hofund-config`, `hofund-control-client`, `hofund-model-catalog`, `hofund-plugin-agent-claude`, `hofund-plugin-agent-codex`, `hofund-plugin-api`, `hofund-secrets`, `hofund-sessions`, `hofund-usage` |
+| `hofund-daemon-bin` | `hofund-daemon`, `hofund-plugin-api`, `hofund-plugin-registry`, `hofund-bridge-mcp` |
+| `hofund-cli` | `hofund-config`, `hofund-control-client`, `hofund-model-catalog`, `hofund-plugin-agent-claude`, `hofund-plugin-agent-codex`, `hofund-plugin-api`, `hofund-secrets`, `hofund-sessions`, `hofund-usage`, `hofund-bridge-mcp` |
 | `hofund-tui` | `hofund-config`, `hofund-control-client`, `hofund-secrets` |
 | `hofund-desktop` | `hofund-daemon`, `hofund-agent` |
 | `xtask` | — |
@@ -384,6 +388,7 @@ The `control-client` and gateway `control-proto` edges landed in L3; the
 | `usage` | Request and token usage records. |
 | `daemon` | The daemon library. Wires config, secrets, the gateway, and the control plane around an injected `DaemonRegistry`. |
 | `hofundd` | The `hofundd` binary and process composition root. Links the plugin registry, owns the runtime, logging, signals, and drain. |
+| `bridge-mcp` | Hidden stdio MCP helper (`apps/bridge-mcp`). `hofund` and `hofundd` expose it as the `bridge-mcp-stdio` subcommand. It lists tools and POSTs `tools/call` to a loopback callback with the HTTP proxy disabled. |
 | `cli` | The `hofund` binary at `apps/cli`, a shell like the desktop. `hofund serve` runs `hofundd`. Runtime commands go to the running daemon over the control plane, or to one-shot `hofundd` when none runs. |
 | `desktop` | Menu-bar shell at `apps/desktop`. Renders status and calls the daemon and the agent adapters. |
 | `xtask` | Local workspace tasks and the architecture tests. |

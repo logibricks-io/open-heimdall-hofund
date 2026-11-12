@@ -5,27 +5,27 @@ use crate::{
     API_VERSION, AgentChangeResponse, AgentConnectRequest, AgentDisconnectRequest,
     AgentHiddenSetRequest, AgentListResponse, AgentModelRequest, AgentModelsResponse,
     AgentPickedOnlyRequest, AgentPlanRequest, AgentPlanResponse, AgentStatusResponse,
-    AgentVisibleSetRequest, CatalogDisabledListResponse, CatalogModelRequest, CheckinListResponse,
-    CheckinRunRequest, CheckinRunResponse, ConfigApplyRequest, ConfigResponse,
-    ConfigValidateRequest, ConfigValidationResponse, ControlError, ControlErrorKind, ErrorEnvelope,
-    EventEnvelope, FieldIssue, GatewayKeyRequest, GatewayKeyResponse, GatewayKeyRestoreRequest,
-    GroupCreateRequest, GroupDeleteRequest, GroupDeleteResponse, GroupListResponse,
-    GroupMemberCandidatesResponse, GroupPatchRequest, GroupRestoreRequest, GroupWriteResponse,
-    HealthResponse, MAX_REQUEST_BODY_BYTES, MAX_RESPONSE_BODY_BYTES, ModelListResponse,
-    PicksResponse, PicksSetRequest, PresetListResponse, ProfileDeleteRequest,
-    ProfileDetailResponse, ProfileListResponse, ProfileRenameRequest, ProfileSaveRequest,
-    ProfileSwitchRequest, ProfileSwitchResponse, ProviderCreateRequest, ProviderDeleteRequest,
-    ProviderDeleteResponse, ProviderKeyRequest, ProviderKeysResponse, ProviderListResponse,
-    ProviderPatchRequest, ProviderRenameRequest, ProviderRenameResponse, ProviderSpendCapRequest,
-    ProviderSpendCapsResponse, ProviderTestRequest, ProviderTestResponse, ProviderWriteResponse,
-    QuotaAlertsResponse, QuotaAlertsSetRequest, QuotaAlertsSetResponse, QuotaCreditsModesResponse,
-    QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryResponse, QuotaResponse,
-    ReloadRequest, RouteListResponse, RouteModelListResponse, SessionDetailResponse,
-    SessionListResponse, SessionManageResponse, SessionOverviewResponse, SessionProgressResponse,
-    SessionReadsPatchRequest, SessionReadsResponse, SessionRouteResponse, SessionSearchResponse,
-    SessionStatsResponse, SessionTranscriptResponse, ShutdownRequest, ShutdownResponse,
-    StatusResponse, TokenRotateRequest, TokenRotateResponse, UnroutedListResponse, UsageResponse,
-    WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
+    AgentVisibleSetRequest, CatalogDisabledListResponse, CatalogModelRequest, CatalogSyncRequest,
+    CatalogSyncResponse, CheckinListResponse, CheckinRunRequest, CheckinRunResponse,
+    ConfigApplyRequest, ConfigResponse, ConfigValidateRequest, ConfigValidationResponse,
+    ControlError, ControlErrorKind, ErrorEnvelope, EventEnvelope, FieldIssue, GatewayKeyRequest,
+    GatewayKeyResponse, GatewayKeyRestoreRequest, GroupCreateRequest, GroupDeleteRequest,
+    GroupDeleteResponse, GroupListResponse, GroupMemberCandidatesResponse, GroupPatchRequest,
+    GroupRestoreRequest, GroupWriteResponse, HealthResponse, MAX_REQUEST_BODY_BYTES,
+    MAX_RESPONSE_BODY_BYTES, ModelListResponse, PicksResponse, PicksSetRequest, PresetListResponse,
+    ProfileDeleteRequest, ProfileDetailResponse, ProfileListResponse, ProfileRenameRequest,
+    ProfileSaveRequest, ProfileSwitchRequest, ProfileSwitchResponse, ProviderCreateRequest,
+    ProviderDeleteRequest, ProviderDeleteResponse, ProviderKeyRequest, ProviderKeysResponse,
+    ProviderListResponse, ProviderPatchRequest, ProviderRenameRequest, ProviderRenameResponse,
+    ProviderSpendCapRequest, ProviderSpendCapsResponse, ProviderTestRequest, ProviderTestResponse,
+    ProviderWriteResponse, QuotaAlertsResponse, QuotaAlertsSetRequest, QuotaAlertsSetResponse,
+    QuotaCreditsModesResponse, QuotaCreditsSetRequest, QuotaCreditsSetResponse,
+    QuotaHistoryResponse, QuotaResponse, ReloadRequest, RouteListResponse, RouteModelListResponse,
+    SessionDetailResponse, SessionListResponse, SessionManageResponse, SessionOverviewResponse,
+    SessionProgressResponse, SessionReadsPatchRequest, SessionReadsResponse, SessionRouteResponse,
+    SessionSearchResponse, SessionStatsResponse, SessionTranscriptResponse, ShutdownRequest,
+    ShutdownResponse, StatusResponse, TokenRotateRequest, TokenRotateResponse,
+    UnroutedListResponse, UsageResponse, WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
 };
 
 mod sealed {
@@ -238,6 +238,7 @@ request!(AgentConnectRequest, validate);
 request!(AgentDisconnectRequest, validate);
 request!(AgentModelRequest, validate);
 request!(CatalogModelRequest, validate);
+request!(CatalogSyncRequest);
 request!(AgentVisibleSetRequest);
 request!(AgentHiddenSetRequest);
 request!(AgentPickedOnlyRequest);
@@ -355,6 +356,7 @@ response!(
     ProfileDetailResponse,
     ProfileSwitchResponse,
     PresetListResponse,
+    CatalogSyncResponse,
     ProviderWriteResponse,
     ProviderDeleteResponse,
     GroupListResponse,

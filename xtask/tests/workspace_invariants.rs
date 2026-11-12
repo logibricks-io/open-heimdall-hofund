@@ -15,6 +15,7 @@ mod plugin_rules;
 /// Workspace-relative paths of every Cargo package, in the same order as the
 /// root `[workspace] members` list is asserted below.
 const MEMBERS: &[&str] = &[
+    "apps/bridge-mcp",
     "apps/cli",
     "apps/desktop/src-tauri",
     "apps/hofundd",
@@ -79,7 +80,9 @@ const MEMBERS: &[&str] = &[
 fn expected_deps(package: &str) -> Option<&'static [&'static str]> {
     Some(match package {
         "hofund-agent" => &["hofund-config", "hofund-plugin-api"],
+        "hofund-bridge-mcp" => &[],
         "hofund-cli" => &[
+            "hofund-bridge-mcp",
             "hofund-config",
             "hofund-control-client",
             "hofund-model-catalog",
@@ -97,6 +100,7 @@ fn expected_deps(package: &str) -> Option<&'static [&'static str]> {
         "hofund-control-client" => &["hofund-control-proto"],
         "hofund-control-proto" => &[],
         "hofund-daemon-bin" => &[
+            "hofund-bridge-mcp",
             "hofund-daemon",
             "hofund-plugin-api",
             "hofund-plugin-registry",
@@ -235,6 +239,7 @@ fn expected_deps(package: &str) -> Option<&'static [&'static str]> {
 fn expected_dev_deps(package: &str) -> Option<&'static [&'static str]> {
     Some(match package {
         "hofund-agent" => &[],
+        "hofund-bridge-mcp" => &[],
         "hofund-cli" => &["hofund-control-proto"],
         "hofund-tui" => &["hofund-control-proto"],
         "hofund-codec" => &[],
@@ -486,6 +491,7 @@ fn dependency_graph_matches_architecture() {
 
     for package in [
         "hofund-agent",
+        "hofund-bridge-mcp",
         "hofund-cli",
         "hofund-tui",
         "hofund-codec",

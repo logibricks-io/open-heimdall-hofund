@@ -23,23 +23,23 @@ use hofund_control_proto::{
     AgentChangeResponse, AgentConnectRequest, AgentDisconnectRequest, AgentHiddenSetRequest,
     AgentListResponse, AgentModelRequest, AgentModelsResponse, AgentPickedOnlyRequest,
     AgentPlanRequest, AgentPlanResponse, AgentStatusResponse, AgentVisibleSetRequest,
-    CatalogDisabledListResponse, CatalogModelRequest, CheckinListResponse, CheckinRunRequest,
-    CheckinRunResponse, ConfigApplyRequest, ConfigResponse, ConfigValidateRequest,
-    ConfigValidationResponse, ControlError, ControlErrorKind, ErrorEnvelope, GatewayKeyRequest,
-    GatewayKeyResponse, GatewayKeyRestoreRequest, GroupCreateRequest, GroupDeleteRequest,
-    GroupDeleteResponse, GroupListResponse, GroupMemberCandidatesResponse, GroupPatchRequest,
-    GroupRestoreRequest, GroupWriteResponse, HealthResponse, MAX_ID_BYTES, MAX_REQUEST_BODY_BYTES,
-    ModelListResponse, PicksResponse, PicksSetRequest, PresetListResponse, ProfileDeleteRequest,
-    ProfileDetailResponse, ProfileListResponse, ProfileRenameRequest, ProfileSaveRequest,
-    ProfileSwitchRequest, ProfileSwitchResponse, ProviderCreateRequest, ProviderDeleteRequest,
-    ProviderDeleteResponse, ProviderKeyRequest, ProviderKeysResponse, ProviderListResponse,
-    ProviderPatchRequest, ProviderRenameRequest, ProviderRenameResponse, ProviderTestRequest,
-    ProviderTestResponse, ProviderWriteResponse, QuotaAlertsResponse, QuotaAlertsSetRequest,
-    QuotaAlertsSetResponse, QuotaCreditsModesResponse, QuotaCreditsSetRequest,
-    QuotaCreditsSetResponse, QuotaHistoryQuery, QuotaHistoryResponse, QuotaQuery, QuotaResponse,
-    ReloadRequest, RouteListResponse, RouteModelListResponse, RouteQuery, SessionDetailResponse,
-    SessionListQuery, SessionListResponse, SessionManageQuery, SessionManageResponse,
-    SessionOverviewQuery, SessionOverviewResponse, SessionProgressResponse,
+    CatalogDisabledListResponse, CatalogModelRequest, CatalogSyncRequest, CatalogSyncResponse,
+    CheckinListResponse, CheckinRunRequest, CheckinRunResponse, ConfigApplyRequest, ConfigResponse,
+    ConfigValidateRequest, ConfigValidationResponse, ControlError, ControlErrorKind, ErrorEnvelope,
+    GatewayKeyRequest, GatewayKeyResponse, GatewayKeyRestoreRequest, GroupCreateRequest,
+    GroupDeleteRequest, GroupDeleteResponse, GroupListResponse, GroupMemberCandidatesResponse,
+    GroupPatchRequest, GroupRestoreRequest, GroupWriteResponse, HealthResponse, MAX_ID_BYTES,
+    MAX_REQUEST_BODY_BYTES, ModelListResponse, PicksResponse, PicksSetRequest, PresetListResponse,
+    ProfileDeleteRequest, ProfileDetailResponse, ProfileListResponse, ProfileRenameRequest,
+    ProfileSaveRequest, ProfileSwitchRequest, ProfileSwitchResponse, ProviderCreateRequest,
+    ProviderDeleteRequest, ProviderDeleteResponse, ProviderKeyRequest, ProviderKeysResponse,
+    ProviderListResponse, ProviderPatchRequest, ProviderRenameRequest, ProviderRenameResponse,
+    ProviderTestRequest, ProviderTestResponse, ProviderWriteResponse, QuotaAlertsResponse,
+    QuotaAlertsSetRequest, QuotaAlertsSetResponse, QuotaCreditsModesResponse,
+    QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryQuery, QuotaHistoryResponse,
+    QuotaQuery, QuotaResponse, ReloadRequest, RouteListResponse, RouteModelListResponse,
+    RouteQuery, SessionDetailResponse, SessionListQuery, SessionListResponse, SessionManageQuery,
+    SessionManageResponse, SessionOverviewQuery, SessionOverviewResponse, SessionProgressResponse,
     SessionReadsPatchRequest, SessionReadsResponse, SessionRouteResponse, SessionSearchQuery,
     SessionSearchResponse, SessionStatsQuery, SessionStatsResponse, SessionTranscriptQuery,
     SessionTranscriptResponse, ShutdownRequest, ShutdownResponse, StatusResponse,
@@ -304,6 +304,17 @@ pub trait ControlState: Send + Sync {
             Err(ControlError::new(
                 ControlErrorKind::BadRequest,
                 "presets are not supported by this control state",
+                "control",
+            )
+            .into())
+        })
+    }
+    /// Syncs the public model catalog. Fetch failures stay on the response body.
+    fn sync_catalog(&self, _request: CatalogSyncRequest) -> ControlFuture<'_, CatalogSyncResponse> {
+        Box::pin(async {
+            Err(ControlError::new(
+                ControlErrorKind::BadRequest,
+                "catalog sync is not supported by this control state",
                 "control",
             )
             .into())
@@ -947,6 +958,10 @@ impl Control {
             .route(
                 "/v1/hofund/presets",
                 get(list_presets).head(method_not_allowed),
+            )
+            .route(
+                "/v1/hofund/catalog/sync",
+                post(sync_catalog).head(method_not_allowed),
             )
             .route(
                 "/v1/hofund/groups",
@@ -1638,6 +1653,14 @@ async fn delete_provider(
 
 async fn list_presets(State(state): State<HttpState>) -> Response {
     operation_response!(state.control.state.presets().await)
+}
+
+async fn sync_catalog(State(state): State<HttpState>, body: Bytes) -> Response {
+    let request = match decode_body::<CatalogSyncRequest>(&body) {
+        Ok(request) => request,
+        Err(failure) => return failure_response(failure),
+    };
+    operation_response!(state.control.state.sync_catalog(request).await)
 }
 
 async fn list_groups(State(state): State<HttpState>) -> Response {

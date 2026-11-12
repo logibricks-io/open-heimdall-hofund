@@ -22,11 +22,13 @@ struct Fake {
     member_id: MemberId,
     hits: Arc<AtomicUsize>,
     idle_drops: Arc<AtomicUsize>,
+    plugin_id: &'static str,
     kind: Kind,
 }
 
 enum Kind {
     Status(u16, &'static str),
+    FlaggedStatus(u16, &'static str),
     Connect(&'static str),
     Transport(&'static str),
     Auth,
@@ -62,6 +64,10 @@ impl Member for Fake {
         self.route_id
     }
 
+    fn plugin_id(&self) -> &str {
+        self.plugin_id
+    }
+
     fn scope_provider(&self) -> &str {
         self.scope_provider.unwrap_or(self.route_id)
     }
@@ -90,6 +96,9 @@ impl Member for Fake {
         self.hits.fetch_add(1, Ordering::SeqCst);
         match self.kind {
             Kind::Status(status, message) => Err(PluginError::status_error(status, message)),
+            Kind::FlaggedStatus(status, message) => Err(PluginError::status_error(status, message)
+                .without_cooldown()
+                .skip_failover_same_plugin()),
             Kind::RegionFailThenOk => {
                 let hit = self.hits.load(Ordering::SeqCst);
                 if hit == 1 {
@@ -236,6 +245,26 @@ fn fake(id: &'static str, hits: &Arc<AtomicUsize>, kind: Kind) -> Arc<dyn Member
     fake_on(id, id, hits, kind)
 }
 
+fn fake_plugin(
+    plugin_id: &'static str,
+    id: &'static str,
+    hits: &Arc<AtomicUsize>,
+    kind: Kind,
+) -> Arc<dyn Member> {
+    Arc::new(Fake {
+        route_id: id,
+        scope_provider: None,
+        member_id: MemberId::from_preset(
+            PresetId::try_from(id).expect("preset"),
+            MemberKey::from_static("row"),
+        ),
+        hits: Arc::clone(hits),
+        idle_drops: Arc::new(AtomicUsize::new(0)),
+        plugin_id,
+        kind,
+    })
+}
+
 fn fake_on(
     route_id: &'static str,
     id: &'static str,
@@ -251,6 +280,7 @@ fn fake_on(
         ),
         hits: Arc::clone(hits),
         idle_drops: Arc::new(AtomicUsize::new(0)),
+        plugin_id: "",
         kind,
     })
 }
@@ -271,6 +301,7 @@ fn fake_scoped(
         ),
         hits: Arc::clone(hits),
         idle_drops: Arc::new(AtomicUsize::new(0)),
+        plugin_id: "",
         kind,
     })
 }
@@ -947,6 +978,7 @@ async fn r4_71_region_refusal_drops_idle_before_reask() {
         ),
         hits: Arc::clone(&hits),
         idle_drops: Arc::clone(&idle),
+        plugin_id: "",
         kind: Kind::RegionFailThenOk,
     });
     let router = router(vec![member]);
@@ -1415,4 +1447,48 @@ async fn d37_12_bytes_read_before_a_severed_upstream_are_kept_ahead_of_its_error
         .expect_err("severed");
     assert!(error.to_string().contains("severed"), "{error}");
     assert!(body.next_chunk().await.is_none());
+}
+
+#[tokio::test]
+async fn skip_failover_same_plugin_skips_only_the_same_plugin_id() {
+    let first = Arc::new(AtomicUsize::new(0));
+    let same = Arc::new(AtomicUsize::new(0));
+    let other = Arc::new(AtomicUsize::new(0));
+    let routed = dispatch(
+        &router(vec![
+            fake_plugin(
+                "sub-a",
+                "one",
+                &first,
+                Kind::FlaggedStatus(503, "as many as may run at once"),
+            ),
+            fake_plugin("sub-a", "two", &same, Kind::Unary),
+            fake_plugin("sub-b", "three", &other, Kind::Unary),
+        ]),
+        "demo",
+    )
+    .await
+    .expect("other plugin");
+    assert_eq!(routed.upstream_id, "three");
+    assert_eq!(first.load(Ordering::SeqCst), 1);
+    assert_eq!(same.load(Ordering::SeqCst), 0);
+    assert_eq!(other.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn a_plain_503_still_fails_over_to_the_same_plugin_id() {
+    let first = Arc::new(AtomicUsize::new(0));
+    let same = Arc::new(AtomicUsize::new(0));
+    let routed = dispatch(
+        &router(vec![
+            fake_plugin("sub-a", "one", &first, Kind::Status(503, "busy")),
+            fake_plugin("sub-a", "two", &same, Kind::Unary),
+        ]),
+        "demo",
+    )
+    .await
+    .expect("same plugin");
+    assert_eq!(routed.upstream_id, "two");
+    assert_eq!(first.load(Ordering::SeqCst), 1);
+    assert_eq!(same.load(Ordering::SeqCst), 1);
 }
