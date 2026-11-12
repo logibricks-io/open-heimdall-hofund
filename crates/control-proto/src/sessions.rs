@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{validate_revision, ControlError, ControlErrorKind, API_VERSION};
+use crate::{API_VERSION, ControlError, ControlErrorKind, validate_revision};
 
 /// Default maximum number of rows returned by the session list.
 pub const DEFAULT_SESSION_LIST_LIMIT: usize = 5000;
@@ -739,8 +739,8 @@ fn bad_query(message: &str) -> ControlError {
 #[cfg(test)]
 mod tests {
     use super::{
-        SessionListQuery, SessionManageQuery, SessionOverviewQuery, SessionReadsPatchRequest,
-        SessionSearchQuery, SessionStatsQuery, SessionTranscriptQuery, DEFAULT_SESSION_LIST_LIMIT,
+        DEFAULT_SESSION_LIST_LIMIT, SessionListQuery, SessionManageQuery, SessionOverviewQuery,
+        SessionReadsPatchRequest, SessionSearchQuery, SessionStatsQuery, SessionTranscriptQuery,
     };
     use crate::{ControlErrorKind, MAX_ID_BYTES};
 
@@ -801,6 +801,8 @@ mod tests {
         assert_eq!(query.cwd, "/work");
         let a = SessionOverviewQuery::parse(Some("cwd=%61")).expect("lowercase a");
         assert_eq!(a.cwd, "a");
+        let zero = SessionOverviewQuery::parse(Some("cwd=%30")).expect("digit zero");
+        assert_eq!(zero.cwd, "0");
     }
 
     #[test]
@@ -815,8 +817,8 @@ mod tests {
         );
         assert_eq!(SessionTranscriptQuery::parse(None).expect("none").sub, None);
 
-        let search = SessionSearchQuery::parse(Some("agent=claude&q=hello")).expect("search");
-        assert_eq!(search.agent, "claude");
+        let search = SessionSearchQuery::parse(Some("agent=one&q=hello")).expect("search");
+        assert_eq!(search.agent, "one");
         assert_eq!(search.q, "hello");
         let empty = SessionSearchQuery::parse(Some("q=")).expect_err("empty q");
         assert_eq!(empty.kind, ControlErrorKind::BadRequest);

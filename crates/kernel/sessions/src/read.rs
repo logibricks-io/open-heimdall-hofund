@@ -92,8 +92,14 @@ fn bound(transcript: &mut SessionTranscript) {
         let room = MAX_TRANSCRIPT_BYTES - bytes;
         if part.text.len() > room {
             let mut end = room;
+            let mut steps = part.text.len() + 1;
             while !part.text.is_char_boundary(end) {
+                if end == 0 || steps == 0 {
+                    end = 0;
+                    break;
+                }
                 end -= 1;
+                steps -= 1;
             }
             part.text.truncate(end);
             cut = true;
@@ -256,7 +262,8 @@ mod tests {
         assert!(rendered.starts_with("# A title\n"));
         assert!(rendered.contains("## User"));
         assert!(rendered.contains("**Tool call: reader**"));
-        assert!(rendered.contains("````json"));
+        assert!(rendered.contains("````json\n{\"run\":```}\n````\n"));
+        assert!(!rendered.contains("`````"));
     }
 
     #[test]
@@ -300,6 +307,12 @@ mod tests {
         assert!(rendered.contains("<summary>Context</summary>"));
         assert!(rendered.contains("*[image]*"));
 
+        let mut only_assistant = SessionTranscript::default();
+        only_assistant.parts = vec![SessionPart::new("assistant", "text", "", "Answer")];
+        let assistant_md = markdown(&record, &only_assistant);
+        assert!(assistant_md.contains("## Assistant"));
+        assert!(!assistant_md.contains("## User"));
+
         let mut tool_only = SessionTranscript::default();
         tool_only.parts = vec![SessionPart::new("tool", "tool_result", "", "payload")];
         let tool_md = markdown(&record, &tool_only);
@@ -324,7 +337,12 @@ mod tests {
     #[test]
     fn bound_cuts_at_the_byte_cap_and_on_a_char_boundary() {
         let mut exact = SessionTranscript::default();
-        exact.parts = vec![SessionPart::new("user", "text", "", "x".repeat(MAX_PART_CHARS))];
+        exact.parts = vec![SessionPart::new(
+            "user",
+            "text",
+            "",
+            "x".repeat(MAX_PART_CHARS),
+        )];
         bound(&mut exact);
         assert!(!exact.cut);
         assert_eq!(exact.parts[0].text.chars().count(), MAX_PART_CHARS);
@@ -343,7 +361,10 @@ mod tests {
             .push(SessionPart::new("assistant", "text", "", "aaé"));
         bound(&mut mid_char);
         assert!(mid_char.cut);
-        assert_eq!(mid_char.parts.last().map(|part| part.text.as_str()), Some("aa"));
+        assert_eq!(
+            mid_char.parts.last().map(|part| part.text.as_str()),
+            Some("aa")
+        );
         let bytes: usize = mid_char.parts.iter().map(|part| part.text.len()).sum();
         assert_eq!(bytes, MAX_TRANSCRIPT_BYTES - 1);
     }
