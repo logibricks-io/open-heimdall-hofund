@@ -231,6 +231,7 @@ BindBlocked
 BindBlocked #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
 BindBlocked::Busy
 BindBlocked::Reserved
+BlockStart
 Body
 Body #[non_exhaustive] derives(Clone, PartialEq, Eq)
 Body::fn bytes (& self) -> & Bytes
@@ -879,9 +880,11 @@ QuotaWindow::const fn limit (& self) -> Option < u64 >
 QuotaWindow::const fn resets_at (& self) -> Option < SystemTime >
 QuotaWindow::const fn used (& self) -> u64
 QuotaWindow::const fn with_blocking (mut self , blocking : bool) -> Self
+QuotaWindow::fn excluded_models (& self) -> & [String]
 QuotaWindow::fn name (& self) -> & str
 QuotaWindow::fn new (name : impl Into < String > , used : u64 , limit : Option < u64 > , resets_at : Option < SystemTime > ,) -> Result < Self , PluginError >
 QuotaWindow::fn scope_model (& self) -> Option < & str >
+QuotaWindow::fn with_excluded_models (mut self , models : Vec < String >) -> Self
 QuotaWindow::fn with_scope_model (mut self , model : impl Into < String >) -> Self
 RawAnswer
 RawAnswer #[non_exhaustive] derives(Debug)
@@ -1079,6 +1082,10 @@ TierId
 TierId #[non_exhaustive] derives(Clone, Debug)
 TierId::const fn from_static (value : & 'static str) -> Self
 TierId::fn as_str (& self) -> & str
+Tool
+ToolArguments
+ToolChoiceMode
+ToolResultPart
 UpstreamFactory
 UpstreamFactory::Config
 UpstreamFactory::fn build (& self , cfg : & Self :: Config , host : & HostContext ,) -> Result < Arc < dyn UpstreamProvider > , BuildError >
