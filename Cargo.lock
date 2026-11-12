@@ -2870,7 +2870,12 @@ dependencies = [
  "hofund-control-client",
  "hofund-control-proto",
  "hofund-secrets",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "ratatui",
+ "serde_json",
  "tempfile",
  "tokio",
 ]

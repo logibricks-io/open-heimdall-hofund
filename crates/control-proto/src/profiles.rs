@@ -132,6 +132,16 @@ pub struct ProfileRenameRequest {
 }
 
 impl ProfileRenameRequest {
+    /// Constructs a version-current rename request.
+    #[must_use]
+    pub fn new(from: impl Into<String>, to: impl Into<String>) -> Self {
+        Self {
+            version: API_VERSION,
+            from: from.into(),
+            to: to.into(),
+        }
+    }
+
     /// Validates both profile names.
     pub fn validate(&self) -> Result<(), ControlError> {
         validate_profile_name(&self.from)?;

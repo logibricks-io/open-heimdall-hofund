@@ -323,6 +323,11 @@ pub struct PicksResponse {
     pub delisted: Vec<String>,
     /// SHA-256 host-state content revision.
     pub picks_revision: String,
+    /// Ids exposed when `picks` is empty: listed models that are not image,
+    /// video, or router models. Empty means the server has no list yet, and
+    /// the terminal UI must not invent an enabled set.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub default_exposed: Vec<String>,
 }
 
 impl Default for PicksResponse {
@@ -333,6 +338,7 @@ impl Default for PicksResponse {
             picked_from: Vec::new(),
             delisted: Vec::new(),
             picks_revision: String::new(),
+            default_exposed: Vec::new(),
         }
     }
 }
@@ -466,6 +472,22 @@ pub struct ProviderCreateRequest {
 }
 
 impl ProviderCreateRequest {
+    /// Constructs a version-current create request for `preset`.
+    #[must_use]
+    pub fn new(expected_revision: impl Into<String>, preset: impl Into<String>) -> Self {
+        Self {
+            version: API_VERSION,
+            expected_revision: expected_revision.into(),
+            preset: preset.into(),
+            id: None,
+            name: None,
+            base_url: None,
+            api_key: None,
+            family: None,
+            options: std::collections::BTreeMap::new(),
+        }
+    }
+
     /// Validates revision and ids.
     pub fn validate(&self) -> Result<(), ControlError> {
         validate_revision("expected_revision", &self.expected_revision)?;
@@ -548,6 +570,15 @@ pub struct ProviderDeleteRequest {
 }
 
 impl ProviderDeleteRequest {
+    /// Constructs a version-current delete request.
+    #[must_use]
+    pub fn new(expected_revision: impl Into<String>) -> Self {
+        Self {
+            version: API_VERSION,
+            expected_revision: expected_revision.into(),
+        }
+    }
+
     /// Validates the expected revision.
     pub fn validate(&self) -> Result<(), ControlError> {
         validate_revision("expected_revision", &self.expected_revision)
