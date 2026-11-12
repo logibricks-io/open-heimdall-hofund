@@ -1,24 +1,40 @@
-//! `hofundd accounts`: agent sign-in switching, import, and discovery.
+//! `hofundd accounts`: sign-in switching, import, discovery, and project settings.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use hofund_daemon::{accounts_discover_in, accounts_import_in, accounts_switch_in, format_report};
+use hofund_daemon::{
+    accounts_discover_in, accounts_import_in, accounts_project_in, accounts_switch_in,
+    format_report,
+};
 
 pub(crate) const USAGE: &str = "\
 Usage: hofundd accounts [--config <path>] switch <agent> <next|account>
        hofundd accounts [--config <path>] import <file>
        hofundd accounts [--config <path>] discover [--add]
+       hofundd accounts [--config <path>] project <gemini|antigravity> <email> <gcp-project-id>
 
 The hofund CLI runs these for `hofund accounts`.
 ";
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum AccountsCommand {
-    Switch { agent: String, target: String },
-    Import { file: PathBuf },
-    Discover { import: bool },
+    Switch {
+        agent: String,
+        target: String,
+    },
+    Import {
+        file: PathBuf,
+    },
+    Discover {
+        import: bool,
+    },
+    Project {
+        subscription: String,
+        email: String,
+        project: String,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -61,6 +77,13 @@ pub(crate) fn parse(args: &[OsString]) -> Result<Parsed, String> {
         [command, file] if command == "import" => AccountsCommand::Import {
             file: PathBuf::from(file),
         },
+        [command, subscription, email, project] if command == "project" => {
+            AccountsCommand::Project {
+                subscription: subscription.clone(),
+                email: email.clone(),
+                project: project.clone(),
+            }
+        }
         [command] if command == "discover" => AccountsCommand::Discover { import: false },
         [command, flag] if command == "discover" && flag == "--add" => {
             AccountsCommand::Discover { import: true }
@@ -104,6 +127,29 @@ pub(crate) fn run(config: &Path, command: AccountsCommand) -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        AccountsCommand::Project {
+            subscription,
+            email,
+            project,
+        } => match accounts_project_in(config, &subscription, &email, &project) {
+            Ok(()) => {
+                println!("{}", project_message(&email, &project));
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("{error}");
+                ExitCode::FAILURE
+            }
+        },
+    }
+}
+
+fn project_message(email: &str, project: &str) -> String {
+    let project = project.trim();
+    if project.is_empty() {
+        format!("{email} no longer names a Google Cloud project")
+    } else {
+        format!("{email} now uses Google Cloud project {project}")
     }
 }
 
@@ -139,5 +185,69 @@ mod tests {
             parsed,
             Parsed::Run(None, AccountsCommand::Discover { import: true })
         );
+    }
+
+    #[test]
+    fn r49_hofundd_accounts_project_parses() {
+        let parsed = parse(&[
+            OsString::from("--"),
+            OsString::from("project"),
+            OsString::from("antigravity"),
+            OsString::from("u@example.test"),
+            OsString::from("project-1"),
+        ])
+        .expect("parse");
+        assert_eq!(
+            parsed,
+            Parsed::Run(
+                None,
+                AccountsCommand::Project {
+                    subscription: "antigravity".to_owned(),
+                    email: "u@example.test".to_owned(),
+                    project: "project-1".to_owned(),
+                }
+            )
+        );
+        assert!(
+            parse(&[
+                OsString::from("other"),
+                OsString::from("gemini"),
+                OsString::from("u@example.test"),
+                OsString::from("project-1"),
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn r49_hofundd_accounts_project_reports_trimmed_success() {
+        assert_eq!(
+            project_message("u@example.test", "  project-1  "),
+            "u@example.test now uses Google Cloud project project-1"
+        );
+        assert_eq!(
+            project_message("u@example.test", " \t "),
+            "u@example.test no longer names a Google Cloud project"
+        );
+    }
+
+    #[test]
+    fn r49_hofundd_accounts_project_run_fails_without_the_plugin() {
+        let dir = tempfile::tempdir().expect("dir");
+        let config = dir.path().join("hofund.toml");
+        std::fs::write(
+            &config,
+            "[[subscriptions]]\nid = \"antigravity\"\naccounts = \"*\"\n",
+        )
+        .expect("config");
+        let code = run(
+            &config,
+            AccountsCommand::Project {
+                subscription: "antigravity".to_owned(),
+                email: "u@example.test".to_owned(),
+                project: "project-1".to_owned(),
+            },
+        );
+        assert_eq!(code, ExitCode::FAILURE);
     }
 }

@@ -208,6 +208,25 @@ pub trait Subscription: Send + Sync + 'static {
         ))
     }
 
+    /// Names the cloud project for the account identified by `email`.
+    /// Whitespace around the project is ignored; an empty project clears it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when the account is unknown or the write fails.
+    /// The default is [`PluginError::unsupported`].
+    async fn set_project(
+        &self,
+        email: &str,
+        project: &str,
+        host: &HostContext,
+    ) -> Result<(), PluginError> {
+        let _ = (email, project, host);
+        Err(PluginError::unsupported(
+            "this subscription has no per-account project setting",
+        ))
+    }
+
     /// Lists models for one account.
     ///
     /// # Errors
