@@ -1479,6 +1479,21 @@ fn b3b_credit_reset_named_in_headers_wins() {
 }
 
 #[test]
+fn credit_windows_ignore_scoped_nonblocking_and_free_excluded_readings() {
+    for window in [
+        window(10, Some(3 * HOUR)).with_blocking(false),
+        window(10, Some(3 * HOUR)).with_scope_model("paid-model"),
+        window(10, Some(3 * HOUR)).with_excluded_models(vec!["free-model".to_owned()]),
+    ] {
+        let (book, id, clock) = windowed();
+        book.observe_credit_window(&id, &[window]);
+        book.record_failure(&id, &credit_error())
+            .expect("default rest");
+        assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(5 * HOUR));
+    }
+}
+
+#[test]
 fn b3c_full_usage_window_reset_wins_over_retry_and_default() {
     let (book, id, clock) = windowed();
     book.observe_credit_window(&id, &[window(10, Some(3 * HOUR))]);

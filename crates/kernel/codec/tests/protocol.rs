@@ -273,6 +273,33 @@ fn openai_stream_round_trip_and_snapshot() {
 }
 
 #[test]
+fn openai_reasoning_signature_delta_uses_the_thinking_block() {
+    let events = OpenAiChat
+        .decode_stream(
+            br#"data: {"choices":[{"index":0,"delta":{"reasoning_content":"think","signature":"s"}}]}
+
+data: {"choices":[{"index":0,"delta":{"signature":"ig"}}]}
+
+data: [DONE]
+
+"#,
+        )
+        .expect("decode");
+    assert!(events.iter().any(|event| matches!(
+        event,
+        StreamEvent::SignatureDelta(delta) if delta.index == 1 && delta.signature == "s"
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        StreamEvent::ThinkingDelta(delta) if delta.index == 1 && delta.text == "think"
+    )));
+    let response = assemble(&events);
+    assert!(
+        matches!(&response.message.content[0], ContentPart::Thinking(thinking) if thinking.signature.as_deref() == Some("sig"))
+    );
+}
+
+#[test]
 fn cross_anthropic_request_through_chat() {
     let mut request = AnthropicMessages
         .decode_request(ANTHROPIC_REQUEST.as_bytes())
