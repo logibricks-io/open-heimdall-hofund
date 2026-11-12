@@ -2,13 +2,14 @@
 
 /// Default Cursor API and website bases.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[doc(hidden)]
 pub struct Endpoints {
     /// Browser sign-in site.
-    pub website: String,
+    pub(crate) website: String,
     /// Connect API base (`api2`).
-    pub api: String,
+    pub(crate) api: String,
     /// Client version sent on API calls.
-    pub client_version: String,
+    pub(crate) client_version: String,
 }
 
 impl Default for Endpoints {
@@ -38,6 +39,13 @@ impl Endpoints {
 
     pub(crate) fn oauth_refresh(&self) -> String {
         format!("{}/auth/refresh", self.api.trim_end_matches('/'))
+    }
+
+    pub(crate) fn exchange_user_api_key(&self) -> String {
+        format!(
+            "{}/auth/exchange_user_api_key",
+            self.api.trim_end_matches('/')
+        )
     }
 
     pub(crate) fn dashboard(&self, method: &str) -> String {

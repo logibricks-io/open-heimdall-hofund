@@ -1,11 +1,15 @@
 //! Running cursor-agent and reading macOS keychain tokens.
 
 use std::ffi::OsString;
+use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::pin::Pin;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::task::{Context, Poll, Waker};
+use std::time::Duration;
 
 use hofund_plugin_api::{BodyStream, HostContext, PluginError, SpawnRequest};
+use hofund_plugin_sdk::timeout;
 
 use crate::auth;
 
@@ -21,53 +25,217 @@ pub(crate) const MODELS_WAIT: Duration = Duration::from_secs(30);
 /// How long a keychain read is reused.
 const KEYCHAIN_TTL: Duration = Duration::from_secs(10);
 
+/// How long a non-44 keychain denial blocks another spawn.
+const KEYCHAIN_DENIED: Duration = Duration::from_secs(10 * 60);
+
+/// How long a keychain read may run.
+const KEYCHAIN_READ_WAIT: Duration = Duration::from_secs(10);
+
+/// `security(1)` exit status meaning the item is absent.
+const KEYCHAIN_ABSENT: i32 = 44;
+
 /// macOS `security(1)` used for keychain reads.
 const SECURITY: &str = "/usr/bin/security";
+
+/// Absolute `security` path on every OS, including Windows where a
+/// leading `/` is not absolute. Tests with `force_keychain` spawn this.
+fn security_program() -> PathBuf {
+    if cfg!(windows) {
+        PathBuf::from(r"C:\usr\bin\security")
+    } else {
+        PathBuf::from(SECURITY)
+    }
+}
 
 /// Cached macOS keychain token reads for one subscription instance.
 #[derive(Default)]
 pub(crate) struct KeychainCache {
     token: String,
-    read_at: Option<Instant>,
+    read_at: Option<Duration>,
+    denied_until: Option<Duration>,
+    flight: Option<Arc<Flight>>,
+}
+
+#[derive(Clone)]
+enum KeychainOutcome {
+    Token(String),
+    Empty,
+}
+
+struct Flight {
+    inner: Mutex<FlightInner>,
+}
+
+enum FlightInner {
+    Pending(Vec<Waker>),
+    Done(KeychainOutcome),
+}
+
+struct FlightWait {
+    flight: Arc<Flight>,
+}
+
+impl Flight {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            inner: Mutex::new(FlightInner::Pending(Vec::new())),
+        })
+    }
+
+    fn finish(&self, outcome: KeychainOutcome) {
+        let mut inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        let previous = std::mem::replace(&mut *inner, FlightInner::Done(outcome));
+        if let FlightInner::Pending(wakers) = previous {
+            for waker in wakers {
+                waker.wake();
+            }
+        }
+    }
+}
+
+impl Future for FlightWait {
+    type Output = KeychainOutcome;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut inner = self
+            .flight
+            .inner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        match &mut *inner {
+            FlightInner::Done(outcome) => Poll::Ready(outcome.clone()),
+            FlightInner::Pending(wakers) => {
+                if !wakers.iter().any(|waker| waker.will_wake(cx.waker())) {
+                    wakers.push(cx.waker().clone());
+                }
+                Poll::Pending
+            }
+        }
+    }
+}
+
+fn cache_lock(cache: &Mutex<KeychainCache>) -> std::sync::MutexGuard<'_, KeychainCache> {
+    cache.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 impl KeychainCache {
-    fn cached_token(&self) -> Option<String> {
+    fn cached_token(&self, now: Duration) -> Option<String> {
         let at = self.read_at?;
-        if at.elapsed() < KEYCHAIN_TTL {
-            Some(self.token.clone())
-        } else {
-            None
-        }
+        (now.saturating_sub(at) < KEYCHAIN_TTL).then(|| self.token.clone())
     }
 
-    fn store(&mut self, token: String) {
-        self.read_at = Some(Instant::now());
+    fn is_denied(&self, now: Duration) -> bool {
+        self.denied_until.is_some_and(|until| now < until)
+    }
+
+    fn store_success(&mut self, now: Duration, token: String) {
+        self.read_at = Some(now);
         self.token = token;
+        self.denied_until = None;
+        self.flight = None;
+    }
+
+    fn store_absent(&mut self) {
+        self.denied_until = None;
+        self.flight = None;
+    }
+
+    fn store_denial(&mut self, now: Duration) {
+        self.denied_until = Some(now + KEYCHAIN_DENIED);
+        self.flight = None;
+    }
+
+    fn store_timeout(&mut self, now: Duration) {
+        self.read_at = Some(now);
+        self.token.clear();
+        self.flight = None;
     }
 }
 
-/// Reads cursor-agent's token from the macOS keychain when allowed.
+/// Reads cursor-agent's token from the keychain when allowed.
 ///
-/// Spawn or read failures yield an empty string so callers can fall back to
-/// `auth.json`. This call must not fail the surrounding operation.
+/// Spawn, timeout, denial, or a missing item yield an empty string so callers
+/// can fall back to `auth.json`. This call must not fail the surrounding
+/// operation.
 pub(crate) async fn keychain_token(
     host: &HostContext,
     cache: &Mutex<KeychainCache>,
     fresh: bool,
-    skip: bool,
+    enabled: bool,
 ) -> String {
-    if !cfg!(target_os = "macos") || skip {
+    if !enabled {
         return String::new();
     }
-    if !fresh
-        && let Ok(guard) = cache.lock()
-        && let Some(token) = guard.cached_token()
-    {
-        return token;
+    let now = host.clock().monotonic();
+    enum Start {
+        Cached(String),
+        Empty,
+        Wait(Arc<Flight>),
+        Lead(Arc<Flight>),
     }
+    let start = {
+        let mut guard = cache_lock(cache);
+        if !fresh && let Some(token) = guard.cached_token(now) {
+            Start::Cached(token)
+        } else if !fresh && guard.is_denied(now) {
+            Start::Empty
+        } else if let Some(flight) = &guard.flight {
+            Start::Wait(Arc::clone(flight))
+        } else {
+            let flight = Flight::new();
+            guard.flight = Some(Arc::clone(&flight));
+            Start::Lead(flight)
+        }
+    };
+    let flight = match start {
+        Start::Cached(token) => return token,
+        Start::Empty => return String::new(),
+        Start::Wait(flight) => {
+            return match (FlightWait { flight }).await {
+                KeychainOutcome::Token(token) => token,
+                KeychainOutcome::Empty => String::new(),
+            };
+        }
+        Start::Lead(flight) => flight,
+    };
+    let outcome = read_keychain(host).await;
+    {
+        let now = host.clock().monotonic();
+        let mut guard = cache_lock(cache);
+        match &outcome {
+            ReadResult::Success(token) => guard.store_success(now, token.clone()),
+            ReadResult::Absent => guard.store_absent(),
+            ReadResult::Denied => guard.store_denial(now),
+            ReadResult::Timeout => guard.store_timeout(now),
+            ReadResult::Failed => {
+                guard.flight = None;
+            }
+        }
+    }
+    let shared = match &outcome {
+        ReadResult::Success(token) => KeychainOutcome::Token(token.clone()),
+        ReadResult::Absent | ReadResult::Denied | ReadResult::Timeout | ReadResult::Failed => {
+            KeychainOutcome::Empty
+        }
+    };
+    flight.finish(shared.clone());
+    match shared {
+        KeychainOutcome::Token(token) => token,
+        KeychainOutcome::Empty => String::new(),
+    }
+}
+
+enum ReadResult {
+    Success(String),
+    Absent,
+    Denied,
+    Timeout,
+    Failed,
+}
+
+async fn read_keychain(host: &HostContext) -> ReadResult {
     let Ok(request) = SpawnRequest::new(
-        PathBuf::from(SECURITY),
+        security_program(),
         [
             "find-generic-password",
             "-s",
@@ -82,35 +250,44 @@ pub(crate) async fn keychain_token(
         vec![],
         std::env::temp_dir(),
     ) else {
-        return String::new();
+        return ReadResult::Failed;
     };
     let Ok(child) = host.spawn_process().spawn_piped(&request).await else {
-        return String::new();
+        return ReadResult::Failed;
     };
     let Ok(mut stdout) = child.stdout() else {
-        return String::new();
+        return ReadResult::Failed;
     };
-    let token = collect(&mut stdout, 4096)
-        .await
-        .unwrap_or_default()
-        .trim()
-        .to_owned();
-    drop(child);
-    if let Ok(mut guard) = cache.lock() {
-        guard.store(token.clone());
+    match timeout(KEYCHAIN_READ_WAIT, async {
+        let token = collect(&mut stdout, 4096)
+            .await
+            .unwrap_or_default()
+            .trim()
+            .to_owned();
+        let code = child.exit_code().await.ok();
+        (token, code)
+    })
+    .await
+    {
+        None => {
+            drop(child);
+            ReadResult::Timeout
+        }
+        Some((_, Some(KEYCHAIN_ABSENT))) => ReadResult::Absent,
+        Some((_, Some(code))) if code != 0 => ReadResult::Denied,
+        Some((token, _)) => ReadResult::Success(token),
     }
-    token
 }
 
-/// Live access token: keychain on macOS, else auth.json.
+/// Live access token: keychain when enabled, else auth.json.
 pub(crate) async fn live_access(
     host: &HostContext,
     agent_home: &Path,
     fresh: bool,
     cache: &Mutex<KeychainCache>,
-    skip_keychain: bool,
+    keychain_enabled: bool,
 ) -> Result<Option<String>, PluginError> {
-    let keychain = keychain_token(host, cache, fresh, skip_keychain).await;
+    let keychain = keychain_token(host, cache, fresh, keychain_enabled).await;
     if !keychain.is_empty() {
         return Ok(Some(keychain));
     }
@@ -156,4 +333,24 @@ pub(crate) fn program(configured: Option<&PathBuf>) -> Result<PathBuf, PluginErr
                 "cursor-agent is not installed: it is not on PATH; install it or set `command`",
             )
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::security_program;
+
+    #[test]
+    fn security_program_is_absolute_and_named_security() {
+        let path = security_program();
+        assert!(
+            path.is_absolute(),
+            "keychain program must be absolute on this OS, got {}",
+            path.display()
+        );
+        assert!(
+            path.file_name().is_some_and(|name| name == "security"),
+            "keychain program must be named security, got {}",
+            path.display()
+        );
+    }
 }
