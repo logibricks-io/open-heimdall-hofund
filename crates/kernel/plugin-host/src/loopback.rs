@@ -215,7 +215,10 @@ impl LoopbackRegistry {
         let entry = self
             .session(session)
             .ok_or_else(|| PluginError::config("sign-in session has no loopback binding"))?;
-        let proof = parse_pasted_callback(raw, &entry.redirect_uri, &entry.state)?;
+        let proof = match &entry.mode {
+            Mode::OAuth { state } => parse_pasted_callback(raw, &entry.redirect_uri, state)?,
+            Mode::QueryToken { .. } => parse_pasted_query_token(raw, &entry.redirect_uri)?,
+        };
         if entry.shared.finish(Ok(proof)) {
             Ok(())
         } else {
