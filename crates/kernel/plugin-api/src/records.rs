@@ -288,6 +288,13 @@ impl QuotaObservation {
         self
     }
 
+    /// Sets the window name the vendor used for this observation.
+    #[must_use]
+    pub fn with_window(mut self, window: impl Into<String>) -> Self {
+        self.window = Some(window.into());
+        self
+    }
+
     /// The plugin that saw the headers.
     #[must_use]
     pub fn plugin(&self) -> &PluginId {

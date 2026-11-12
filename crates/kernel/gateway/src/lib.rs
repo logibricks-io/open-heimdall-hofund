@@ -6,6 +6,7 @@
 //! in `endpoints`.
 
 mod allow;
+mod bridge_effort;
 pub mod control;
 mod endpoints;
 mod issue_keys;
@@ -1975,6 +1976,7 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
             ),
         );
     }
+    bridge_effort::apply(codec.id(), &bytes, &mut model_request);
     let reservation = match reserve_for_codec(
         &app,
         codec.as_ref(),
