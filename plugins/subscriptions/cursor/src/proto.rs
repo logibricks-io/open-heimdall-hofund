@@ -91,11 +91,14 @@ pub(crate) fn fields(buf: &[u8]) -> Vec<Field> {
                 WireValue::Varint(value)
             }
             WIRE_FIXED64 => {
-                let Some(bytes) = buf.get(i..i + 8) else {
+                let Some(end) = i.checked_add(8) else {
+                    break;
+                };
+                let Some(bytes) = buf.get(i..end) else {
                     break;
                 };
                 let bits = u64::from_le_bytes(bytes.try_into().unwrap_or([0; 8]));
-                i += 8;
+                i = end;
                 WireValue::Fixed64(bits)
             }
             WIRE_BYTES => {
@@ -106,19 +109,25 @@ pub(crate) fn fields(buf: &[u8]) -> Vec<Field> {
                     break;
                 };
                 i = next;
-                let Some(bytes) = buf.get(i..i + len) else {
+                let Some(end) = i.checked_add(len) else {
+                    break;
+                };
+                let Some(bytes) = buf.get(i..end) else {
                     break;
                 };
                 let value = WireValue::Bytes(bytes.to_vec());
-                i += len;
+                i = end;
                 value
             }
             WIRE_FIXED32 => {
-                let Some(bytes) = buf.get(i..i + 4) else {
+                let Some(end) = i.checked_add(4) else {
+                    break;
+                };
+                let Some(bytes) = buf.get(i..end) else {
                     break;
                 };
                 let bits = u32::from_le_bytes(bytes.try_into().unwrap_or([0; 4]));
-                i += 4;
+                i = end;
                 WireValue::Fixed32(bits)
             }
             _ => break,
@@ -252,9 +261,18 @@ pub(crate) fn pb_value(value: &Value) -> Vec<u8> {
     }
 }
 
+const MAX_DECODE_DEPTH: u32 = 64;
+
 /// Decodes a `google.protobuf.Value`. Unknown or empty input becomes `Null`.
 #[must_use]
 pub(crate) fn pb_value_decode(buf: &[u8]) -> Value {
+    pb_value_decode_at_depth(buf, 0)
+}
+
+fn pb_value_decode_at_depth(buf: &[u8], depth: u32) -> Value {
+    if depth >= MAX_DECODE_DEPTH {
+        return Value::Null;
+    }
     let parsed = fields(buf);
     for field in parsed {
         match field.number {
@@ -278,7 +296,7 @@ pub(crate) fn pb_value_decode(buf: &[u8]) -> Value {
             }
             5 => {
                 if let Some(inner) = field.as_bytes() {
-                    return Value::Object(decode_struct(inner));
+                    return Value::Object(decode_struct(inner, depth));
                 }
             }
             6 => {
@@ -286,7 +304,11 @@ pub(crate) fn pb_value_decode(buf: &[u8]) -> Value {
                     let items = fields(inner)
                         .into_iter()
                         .filter(|entry| entry.number == 1)
-                        .filter_map(|entry| entry.as_bytes().map(pb_value_decode))
+                        .filter_map(|entry| {
+                            entry
+                                .as_bytes()
+                                .map(|inner| pb_value_decode_at_depth(inner, depth + 1))
+                        })
                         .collect();
                     return Value::Array(items);
                 }
@@ -297,7 +319,7 @@ pub(crate) fn pb_value_decode(buf: &[u8]) -> Value {
     Value::Null
 }
 
-fn decode_struct(buf: &[u8]) -> Map<String, Value> {
+fn decode_struct(buf: &[u8], depth: u32) -> Map<String, Value> {
     let mut map = Map::new();
     for entry in fields(buf).into_iter().filter(|field| field.number == 1) {
         let Some(inner) = entry.as_message() else {
@@ -308,7 +330,11 @@ fn decode_struct(buf: &[u8]) -> Map<String, Value> {
         for field in inner {
             match field.number {
                 1 => key = field.as_string(),
-                2 => value = field.as_bytes().map(pb_value_decode),
+                2 => {
+                    value = field
+                        .as_bytes()
+                        .map(|inner| pb_value_decode_at_depth(inner, depth + 1));
+                }
                 _ => {}
             }
         }
@@ -808,15 +834,10 @@ fn decode_mcp_arguments(inner: Vec<Field>) -> ExecKind {
         match field.number {
             1 => field1 = field.as_string().unwrap_or_default(),
             2 => {
-                if let Some(entries) = field.as_message() {
-                    for entry in entries {
-                        if entry.number != 0 {
-                            // Each argument is a message: field 1 key, field 2 Value.
-                        }
-                    }
+                if let Some(entries) = field.as_bytes() {
                     // Field 2 may itself be repeated entries. If this field is a
                     // single entry, parse it; if it wraps entries, walk them.
-                    decode_argument_entries(field.as_bytes().unwrap_or(&[]), &mut arguments);
+                    decode_argument_entries(entries, &mut arguments, 0);
                 }
             }
             3 => call_id = field.as_string().unwrap_or_default(),
@@ -831,7 +852,10 @@ fn decode_mcp_arguments(inner: Vec<Field>) -> ExecKind {
     }
 }
 
-fn decode_argument_entries(buf: &[u8], arguments: &mut Map<String, Value>) {
+fn decode_argument_entries(buf: &[u8], arguments: &mut Map<String, Value>, depth: u32) {
+    if depth >= MAX_DECODE_DEPTH {
+        return;
+    }
     let parsed = fields(buf);
     // Two shapes: this buffer is one entry (fields 1 and 2), or a list of
     // length-delimited entries (unknown field numbers). The reference writes
@@ -846,7 +870,11 @@ fn decode_argument_entries(buf: &[u8], arguments: &mut Map<String, Value>) {
         for field in parsed {
             match field.number {
                 1 => key = field.as_string(),
-                2 => value = field.as_bytes().map(pb_value_decode),
+                2 => {
+                    value = field
+                        .as_bytes()
+                        .map(|inner| pb_value_decode_at_depth(inner, depth + 1));
+                }
                 _ => {}
             }
         }
@@ -857,7 +885,7 @@ fn decode_argument_entries(buf: &[u8], arguments: &mut Map<String, Value>) {
     }
     for field in parsed {
         if let Some(bytes) = field.as_bytes() {
-            decode_argument_entries(bytes, arguments);
+            decode_argument_entries(bytes, arguments, depth + 1);
         }
     }
 }
@@ -922,11 +950,11 @@ fn read_varint(buf: &[u8], mut i: usize) -> Option<(u64, usize)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentRunParams, ExecKind, Field, KvKind, Pb, ServerEvent, ToolDef, TurnUsage, WireValue,
-        bidi_append, client_run, close_exec, decode_server, encode_agent_run_request, environment,
-        exec_env_result, exec_tools_result, fields, goos_name_for, heartbeat, kv_get_found,
-        kv_get_missing, kv_store_ack, mcp_tool_name, pb_value, pb_value_decode, refuse_exec,
-        to_hex, unknown_count,
+        AgentRunParams, ExecKind, Field, KvKind, MAX_DECODE_DEPTH, Pb, ServerEvent, ToolDef,
+        TurnUsage, WireValue, bidi_append, client_run, close_exec, decode_server,
+        encode_agent_run_request, environment, exec_env_result, exec_tools_result, fields,
+        goos_name_for, heartbeat, kv_get_found, kv_get_missing, kv_store_ack, mcp_tool_name,
+        pb_value, pb_value_decode, refuse_exec, to_hex, unknown_count,
     };
     use hofund_plugin_sdk::json::{Value, json};
 
@@ -959,13 +987,51 @@ mod tests {
         let parsed = fields(&truncated);
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].number, 4);
+    }
 
-        // Truncated fixed64.
-        let mut fixed = Pb::new().varint(1, 1).finish();
-        fixed.push((2 << 3) | 1);
-        fixed.extend_from_slice(&[1, 2, 3]);
-        let parsed = fields(&fixed);
+    #[test]
+    fn fields_length_overflow_keeps_the_prefix() {
+        let mut buf = Pb::new().varint(1, 7).finish();
+        buf.push((2 << 3) | 2);
+        buf.extend_from_slice(&[0xff; 9]);
+        buf.push(0x01);
+        let parsed = fields(&buf);
         assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].as_varint(), Some(7));
+    }
+
+    #[test]
+    fn fields_bad_varints_keep_the_prefix() {
+        let mut unterminated = Pb::new().varint(1, 7).finish();
+        unterminated.extend_from_slice(&[(2 << 3), 0x80]);
+        let parsed = fields(&unterminated);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].as_varint(), Some(7));
+
+        let mut overflow = Pb::new().varint(1, 7).finish();
+        overflow.push(2 << 3);
+        overflow.extend_from_slice(&[0x80; 9]);
+        overflow.push(0x02);
+        let parsed = fields(&overflow);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].as_varint(), Some(7));
+    }
+
+    #[test]
+    fn fields_truncated_fixed_values_keep_the_prefix() {
+        let mut fixed64 = Pb::new().varint(1, 7).finish();
+        fixed64.push((2 << 3) | 1);
+        fixed64.extend_from_slice(&[1, 2, 3]);
+        let parsed = fields(&fixed64);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].as_varint(), Some(7));
+
+        let mut fixed32 = Pb::new().varint(1, 7).finish();
+        fixed32.push((2 << 3) | 5);
+        fixed32.extend_from_slice(&[1, 2, 3]);
+        let parsed = fields(&fixed32);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].as_varint(), Some(7));
     }
 
     #[test]
@@ -1012,6 +1078,29 @@ mod tests {
             })
             .collect();
         assert_eq!(keys, ["alpha", "mu", "zeta"]);
+    }
+
+    #[test]
+    fn pb_value_decode_bounds_nesting_and_round_trips_shallow_values() {
+        let mut shallow = json!("leaf");
+        for _ in 0..8 {
+            shallow = json!({"nested": shallow});
+        }
+        assert_eq!(pb_value_decode(&pb_value(&shallow)), shallow);
+
+        let mut deep = json!("leaf");
+        for _ in 0..MAX_DECODE_DEPTH + 8 {
+            deep = json!({"nested": deep});
+        }
+        let decoded = pb_value_decode(&pb_value(&deep));
+        let mut innermost = &decoded;
+        for _ in 0..MAX_DECODE_DEPTH - 1 {
+            let Value::Object(map) = innermost else {
+                panic!("expected object before decode depth limit");
+            };
+            innermost = &map["nested"];
+        }
+        assert_eq!(innermost, &json!({"nested": null}));
     }
 
     #[test]
@@ -1246,6 +1335,32 @@ mod tests {
             close_inner[0].as_message().expect("id")[0].as_varint(),
             Some(4)
         );
+    }
+
+    #[test]
+    fn exec_mcp_argument_entry_nesting_is_bounded() {
+        let mut entries = Pb::new()
+            .string(1, "query")
+            .bytes(2, &pb_value(&json!("weather")))
+            .finish();
+        for _ in 0..MAX_DECODE_DEPTH + 8 {
+            entries = Pb::new().bytes(9, &entries).finish();
+        }
+        let args = Pb::new()
+            .string(1, "tools-web_search")
+            .bytes(2, &entries)
+            .finish();
+        let exec = Pb::new().message(2, Pb::new().bytes(11, &args)).finish();
+        let (events, _) = decode_server(&exec);
+        match &events[..] {
+            [ServerEvent::Exec(req)] => match &req.kind {
+                ExecKind::McpArguments { arguments, .. } => {
+                    assert_eq!(arguments, &json!({}));
+                }
+                other => panic!("expected mcp arguments, got {other:?}"),
+            },
+            other => panic!("expected one exec, got {other:?}"),
+        }
     }
 
     #[test]

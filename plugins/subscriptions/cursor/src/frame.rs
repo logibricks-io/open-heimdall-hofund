@@ -78,8 +78,34 @@ impl FrameDecoder {
     /// Returns a decode error when a frame length exceeds [`MAX_FRAME_PAYLOAD`],
     /// or when a gzip payload cannot be inflated inside the cap.
     pub(crate) fn push(&mut self, data: &[u8]) -> Result<Vec<Frame>, PluginError> {
-        self.buf.extend_from_slice(data);
-        self.take_complete()
+        let mut frames = Vec::new();
+        let mut input = data;
+        while !input.is_empty() {
+            if self.buf.len() < 5 {
+                let take = (5 - self.buf.len()).min(input.len());
+                self.buf.extend_from_slice(&input[..take]);
+                input = &input[take..];
+                if self.buf.len() < 5 {
+                    break;
+                }
+            }
+            let len =
+                u32::from_be_bytes([self.buf[1], self.buf[2], self.buf[3], self.buf[4]]) as usize;
+            if len > MAX_FRAME_PAYLOAD {
+                return Err(payload_too_large(len));
+            }
+            let total = 5 + len;
+            if self.buf.len() < total {
+                let take = (total - self.buf.len()).min(input.len());
+                self.buf.extend_from_slice(&input[..take]);
+                input = &input[take..];
+                if self.buf.len() < total {
+                    break;
+                }
+            }
+            frames.extend(self.take_complete()?);
+        }
+        Ok(frames)
     }
 
     /// Ends the stream. Any leftover byte is `unexpected EOF`.
@@ -175,6 +201,18 @@ mod tests {
     }
 
     #[test]
+    fn one_push_returns_two_complete_frames() {
+        let mut body = encode(0, b"one").expect("first");
+        body.extend(encode(0, b"two").expect("second"));
+        let mut decoder = FrameDecoder::new();
+        let frames = decoder.push(&body).expect("decode");
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].payload, b"one");
+        assert_eq!(frames[1].payload, b"two");
+        assert!(decoder.finish().expect("end").is_empty());
+    }
+
+    #[test]
     fn leftover_byte_after_the_body_ends_is_unexpected_eof() {
         let mut body = encode(0, b"ok").expect("frame");
         body.push(0x00);
@@ -200,16 +238,16 @@ mod tests {
     #[test]
     fn payload_one_byte_over_64_mib_is_rejected_without_buffering_the_body() {
         let len = u32::try_from(MAX_FRAME_PAYLOAD + 1).expect("fits u32");
-        let mut head = vec![0_u8];
-        head.extend_from_slice(&len.to_be_bytes());
-        let err = FrameDecoder::new().push(&head).expect_err("too large");
+        let mut input = vec![0_u8; 5 + 128];
+        input[1..5].copy_from_slice(&len.to_be_bytes());
+        let mut decoder = FrameDecoder::new();
+        let err = decoder.push(&input).expect_err("too large");
         assert!(
             err.message().contains("64") && err.message().contains("exceeds"),
             "message was {}",
             err.message()
         );
-        // The decoder must not have tried to wait for (or allocate) the body.
-        assert_eq!(head.len(), 5);
+        assert_eq!(decoder.buf.len(), 5);
     }
 
     #[test]
