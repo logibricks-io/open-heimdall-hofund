@@ -1292,6 +1292,8 @@ mod tests {
         use hofund_config::{Accounts, CatalogSettings, Failover, Stays, Subscription};
         hofund_config::Config {
             listen: "127.0.0.1:3425".parse().expect("addr"),
+            allow_ips: Vec::new(),
+            trust_proxy: false,
             token_file: String::new(),
             usage_file: String::new(),
             failover: Failover::default(),
