@@ -3,7 +3,10 @@
 //! This crate is unpublished and is only a dev-dependency of a subscription
 //! plugin. [`test_host`] builds a `hofund_plugin_host::HostContext` with fake
 //! backends. [`block_on`], [`join_all`], [`drive_until`], and [`poll_once`] drive async plugin
-//! calls without a plugin depending on tokio. Conformance tests land in PR D.
+//! calls without a plugin depending on tokio. [`FakeClaude`] is an in-process stand-in for the Claude Code binary: it records argv, env, and stdin, checks optional assertions, and returns a scripted stdout fixture. Conformance tests land in PR D.
+
+mod fake_claude;
+pub use fake_claude::{FakeClaude, FakeClaudeError, RunRecord};
 
 use std::future::Future;
 use std::pin::Pin;

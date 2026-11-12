@@ -116,6 +116,15 @@ fn say(mut sink: impl Write, line: &str) {
 
 fn main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    if args.first().and_then(|word| word.to_str()) == Some(hofund_bridge_mcp::SUBCOMMAND) {
+        return match hofund_bridge_mcp::run_stdio(&args[1..]) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                say(stderr(), &format!("hofundd: {error}"));
+                ExitCode::FAILURE
+            }
+        };
+    }
     match parse(&args) {
         Ok(Command::Help) => {
             say(TolerantWriter(io::stdout()), USAGE.trim_end());
@@ -272,6 +281,14 @@ mod tests {
         assert_eq!(
             parse(&args(&["subscription", "--help"])),
             Ok(Command::SubscriptionHelp)
+        );
+    }
+
+    #[test]
+    fn hidden_bridge_mcp_subcommand_is_not_in_usage() {
+        assert!(
+            !USAGE.contains("bridge-mcp-stdio"),
+            "the helper subcommand must stay hidden from usage"
         );
     }
 
