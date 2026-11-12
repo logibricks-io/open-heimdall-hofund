@@ -20,13 +20,13 @@ Legend: **Done** = matches the reference at checklist granularity; **Partial** =
 | Factory / Droid (`factory`) | 1 | 15 | 0 | 3 | 0 |
 | Cline / ClinePass (`cline`) | 2 | 12 | 1 | 3 | 1 |
 | ChatGPT / Codex (`codex` backend) and ChatGPT API (`chatgpt-api`) | 8 | 11 | 2 | 0 | 0 |
-| GitHub Copilot (github.com and GHE) | 10 | 5 | 2 | 5 | 0 |
-| Gemini CLI (Code Assist) | 10 | 4 | 2 | 2 | 0 |
+| GitHub Copilot (github.com and GHE) | 15 | 2 | 0 | 5 | 0 |
+| Gemini CLI (Code Assist) | 8 | 6 | 2 | 2 | 0 |
 | Google Antigravity | 10 | 4 | 2 | 1 | 0 |
 | SuperGrok (`grok`) | 10 | 6 | 0 | 2 | 0 |
 | Qoder (international + Qoder CN) | 1 | 10 | 9 | 0 | 0 |
 | CodeBuddy / WorkBuddy (CN + international) | 7 | 6 | 3 | 0 | 3 |
-| Z Code (`zcode`) | 6 | 9 | 2 | 0 | 2 |
+| Z Code (`zcode`) | 7 | 8 | 2 | 0 | 2 |
 
 Gaps that had no plan item before this audit (the supervisor's v0.2.0 plan and backlog now carry them under the item named):
 
@@ -358,15 +358,15 @@ Every other gap below maps to an existing plan item.
 
 **hofund path:** `plugins/subscriptions/copilot/`.
 
-| # | capability | reference v0.1.3005 | hofund 08035c9 | status | gap to close |
-|---|------------|----------------------|----------------|--------|--------------|
+| # | capability | reference v0.1.3005 | hofund R-48 | status | gap to close |
+|---|------------|----------------------|-------------|--------|--------------|
 | a1 | sign-in: device flow | `copilot_signin.go:31-38`, `59-86` GitHub device OAuth app (client id in `copilot_signin.go`) | `sign_in.rs`, `lib.rs:138-150` device flow | Done | — |
 | a2 | sign-in: browser OAuth | N/A (device only for reference-added accounts) | N/A | N/A | — |
 | a3 | sign-in: API key | N/A | N/A | N/A | — |
 | a4 | sign-in: paste | N/A | N/A | N/A | — |
-| a5 | sign-in: editor / CLI login reuse | `copilot_accounts.go:3-8`, `copilot_cli.go:81+` read editors’/CLI OAuth, never write | no editor config read in copilot plugin | Missing | Read Copilot CLI/editor side login (R-48) |
+| a5 | sign-in: editor / CLI login reuse | `copilot_accounts.go:3-8`, `copilot_cli.go:81+` read editors’/CLI OAuth, never write | `discover.rs`, `session.rs`; editor `apps.json`/`hosts.json`, CLI JSONC and keychain reads; direct CLI sessions; read-only stale/recovery fixtures | Done | — |
 | a6 | sign-in: GHE host option | `copilot_ghe.go`, `CopilotHost` in sign-in | `site.rs:9-40`, `lib.rs:72-81` `host` config → `.ghe.com` URLs | Done | — |
-| b | import sources | Side login from editor token metadata (`copilot_accounts.go`) | none | Missing | Side-login import (R-48) |
+| b | import sources | Side login from editor token metadata (`copilot_accounts.go`) | `discover_agent_sign_in` / `import_agent_sign_in`; hofund stores only source path, host, and login, never the external token | Done | — |
 | c | token storage | GitHub token in `logins.json`; Copilot session token minted per request | encrypted account secret + `TokenCache<Session>` (`session.rs`) | Done | — |
 | d | refresh | GitHub token long-lived; Copilot `copilot_internal/v2/token` remint (`copilot_accounts.go` session) | `session.rs` cache with margin, 401 remint (`upstream.rs:105-114`) | Done | — |
 | e | upstream wire | Session `endpoints.api` (githubcopilot.com or GHE host) JSON | `upstream.rs:81-90` bearer to session base | Done | — |
@@ -375,19 +375,17 @@ Every other gap below maps to an existing plan item.
 | h | tool calls | Copilot tool schemas | standard IR tools on wire | Partial | unverified against GHE tenant |
 | i | images | Vision header when images present | `upstream.rs:137-139` `Copilot-Vision-Request` | Done | — |
 | j | reasoning | model-dependent | unverified | Partial | — |
-| k | quota / usage | `copilot_internal/user` plan, premium requests | `quota.rs` GitHub Copilot user API | Partial | Plan label / SKU display (`copilot_entitlement.go`) (R-48) |
+| k | quota / usage | `copilot_internal/user` plan, premium requests | `quota.rs` plan/SKU labels on cards; guarded entitlement persistence and missing-field retention in `session.rs` and `lib.rs` | Done | — |
 | l | model list | From session + internal APIs | `models.rs` list + terms acceptance | Done | — |
-| m | multi-account | Editor account + reference device accounts (`copilot_accounts.go`) | multiple reference-signed accounts only | Partial | Editor “side” account pool (R-48) |
-| n | error classification | `copilot_lapsed.go`, `copilot_refused.go` | 401 session remint; seat check at sign-in (`sign_in.rs`) | Partial | Entitlement/lapsed mapping parity (R-48) |
+| m | multi-account | Editor account + reference device accounts (`copilot_accounts.go`) | device/editor/CLI coexistence; host-qualified ids and labels; legacy bare GHE label migration; two-host offline quota fixtures | Done | — |
+| n | error classification | `copilot_lapsed.go`, `copilot_refused.go` | session and quota 401 lapse, replacement-token guard, stale external `NeedsSignIn`, Auto/model refusal and session-loss mapping | Done | — |
 | o | daily check-in / warmup | N/A | N/A | N/A | — |
 | p | agent sign-in switch | Editor account is read-only reference | no agent sign-in on copilot spec | N/A | — |
-| q | extras | Editor version headers, initiator, API version | `session.rs:26+`, `upstream.rs:128-140` | Done | GHE live tenant verification (R-48) |
+| q | extras | Editor version headers, initiator, API version | editor/CLI/session/model/chat versions plus Auto `2026-08-01` and `2025-10-01`; offline GHE host, naming, and base-URL fixtures | Done | Live GHE tenant verification remains unverified |
 
 **Gaps**
 
-- Read VS Code / Copilot CLI side login without overwriting — **M**, **R-48**.
-- Plan/SKU labels and entitlement refresh on quota cards — **S**, **R-48**.
-- GHE data-residency integration test — **S**, **R-48**.
+- Live GHE data-residency tenant verification — not done; R-48 covers host URLs, host-qualified account names, plan/usage, and API base selection with offline fixtures only.
 
 ---
 
@@ -578,39 +576,44 @@ Every other gap below maps to an existing plan item.
 
 ## Z Code (`zcode`)
 
-**Reference files read:** `zcode.go`, `zcode_device.go`, `zcode_team.go`, `migrate_zcode.go`; plugin `packages/zcode/index.mjs`, `README.md` (check-in gifts).
+**Reference files read:** `zcode.go`, `zcode_device.go`, `zcode_team.go`, `migrate_zcode.go`, `plugin_checkin.go`, `workbuddy.go`, `internal/agent/zcode.go`, and `internal/appdir/zcode.go`. The earlier audit cited plugin `packages/zcode/index.mjs` and `README.md`, but that package is absent from the frozen tag; plugin-only wire details not also visible in Go remain unverified.
 
 **hofund path:** `plugins/subscriptions/zcode/`.
 
-| # | capability | reference v0.1.3005 | hofund 08035c9 | status | gap to close |
-|---|------------|----------------------|----------------|--------|--------------|
-| a1 | sign-in: device / portal OAuth | plugin sign-in flows in `index.mjs` | `lib.rs:166-176` import/discover only | Partial | Full portal sign-in in plugin (R-57) |
+| # | capability | reference v0.1.3005 | hofund 08035c9 + R-57 | status | gap to close |
+|---|------------|----------------------|-----------------------|--------|--------------|
+| a1 | sign-in: device / portal OAuth | plugin sign-in flows in `index.mjs` | `lib.rs` import/discover only | Partial | Full portal sign-in; the flow is not fully visible in the frozen Go sources (**R-57b**) |
 | a2 | API key import | plugin supports key plans | credential import via agent store | Partial | — |
-| a3 | paste / browser | plugin OAuth | unsupported in start_sign_in | Missing | R-57 |
+| a3 | paste / browser | plugin OAuth | unsupported in `start_sign_in` | Missing | **R-57b**; no guessed OAuth or paste wire |
 | b | import sources | encrypted `~/.zcode/v2/credentials.json` (`zcode.go:14-18`) | `creds.rs` decrypt + `discover.rs` | Done | — |
-| c | token storage | logins.json for reference-added; encrypted agent store read | SecretObject + device mid (`creds.rs:459+`) | Done | — |
-| d | refresh | JWT refresh near expiry in plugin | `refresh.rs` business API refresh | Partial | unverified vs plugin JWT rules |
-| e | upstream wire | Anthropic plan API bases (`zcode.go:47-48`); Start Plan accounts go to `START_BASE` (`zcode/index.mjs:33`, used at `:2371`) | `upstream.rs:66-74` Messages on plan base; JWT-only Start Plan import refused (`tests.rs:424`) | Partial | Start Plan routing (R-57) |
-| f | inbound shapes | Messages only upstream | `upstream.rs:60-63` rejects non-Messages | Done | — |
+| c | token storage | logins.json for reference-added; encrypted agent store read | SecretObject + device mid (`creds.rs`) | Done | — |
+| d | refresh | JWT refresh near expiry in plugin | `refresh.rs` re-imports through the account lease, preserves `lapsed` for the same team token, clears it for a rotated token, and rejects non-absolute credential paths (`r57_*` tests) | Partial | Plugin JWT renewal rules remain unverified (**R-57b**) |
+| e | upstream wire | Anthropic plan API bases (`zcode.go:47-48`); Start Plan accounts go to `START_BASE` (`zcode/index.mjs:33`, used at `:2371`) | `upstream.rs` Messages on plan base; JWT-only Start Plan import refused | Partial | Start Plan routing and its required request transformations; the base is visible but the full plugin wire is not (**R-57b**) |
+| f | inbound shapes | Messages only upstream | `upstream.rs` rejects non-Messages | Done | — |
 | g | streaming | Anthropic SSE | wire streaming | Done | — |
 | h | tool calls | Anthropic tools | standard Messages wire | Partial | unverified |
-| i | images | per-model `supportsImage` (`packages/zcode/index.mjs:1690`) | unverified | unverified | Confirm in **R-57** |
-| j | reasoning | per-model reasoning levels mapped to thinking budgets (`packages/zcode/index.mjs:1691`, `1753-1765`) | unverified | unverified | Confirm in **R-57** |
+| i | images | per-model `supportsImage` (`packages/zcode/index.mjs:1690`) | no verified per-model mapping | unverified | Plugin catalog shape is absent from the frozen tag (**R-57b**) |
+| j | reasoning | per-model reasoning levels mapped to thinking budgets (`packages/zcode/index.mjs:1691`, `1753-1765`) | no verified per-model mapping | unverified | Plugin levels and budgets are absent from the frozen tag (**R-57b**) |
 | k | quota / usage | monitor `/api/monitor/usage/quota/limit` personal/team | `quota.rs` monitor endpoints | Done | — |
-| l | model list | portal + plan APIs in plugin | `models.rs` | Partial | Gift/check-in tied models unverified |
-| m | multi-account | team seats from `setting.json` (`zcode_team.go`) | `team.rs` project keys | Done | — |
-| n | error classification | ZCodeRestricted hint code 3012 (`workbuddy.go:254-260` shared pattern) | unverified in zcode plugin | Partial | R-57 |
-| o | daily check-in | plugin `auth.checkin` gift plans (`index.mjs:2740+`) | no check-in in zcode plugin | Missing | Daily gift check-in, with the 30-minute recheck the reference applies to `zcode` (`plugin_checkin.go:274`) (R-57) |
-| p | agent sign-in switch | agent switching into Z Code config (reference gap in subscriptions.md) | `agent_sign_in.rs` write | Partial | Agent connect for zcode (R-57) |
-| q | extras | `X-Device-Mid`, `X-Device-Mid` (`api.rs:80` on the hofund side); plugin pins `APP_VERSION` 3.17.2 for User-Agent and `X-ZCode-App-Version`, and the vendor gates on it (`zcode/index.mjs:34-38`); core `zcode.go:55` still says 3.14.3 | `device.rs`; `APP_VERSION` 3.14.3 in `lib.rs:45` | Partial | Send 3.17.2 in User-Agent and `X-ZCode-App-Version` (R-57) |
+| l | model list | portal + plan APIs in plugin | `models.rs` | Partial | Gift/check-in tied models unverified (**R-57b**) |
+| m | multi-account | team seats from `setting.json` (`zcode_team.go`); plugin 0.1.20 labels a team account `<email> (team)` (`migrate_zcode.go`) | `team.rs` project keys and separate `(team)` labels (`r57_team_accounts_have_a_separate_label`) | Done | — |
+| n | error classification | ZCodeRestricted hint code 3012 (`workbuddy.go`); the account rests for two hours (`zcode_blocked_test.go`) | `http_auth.rs` keeps HTTP 405, adds the risk-control/support hint and two-hour retry hint (`r57_3012_has_a_risk_control_hint_and_cooldown`) | Done | — |
+| o | daily check-in | plugin `auth.checkin` gift plans (`index.mjs:2740+`); 30-minute recheck (`plugin_checkin.go`) | no check-in in zcode plugin | Missing | Claim endpoints, payloads, and result mapping are not fully visible in the frozen Go sources, so neither claims nor recheck scheduling are guessed (**R-57b**) |
+| p | agent sign-in switch | agent switching into Z Code config; team keys are created when absent (`zcode_team.go` comments) | `agent_sign_in.rs` refuses credential switching; separate team labels implemented | Partial | Agent config switching and missing-key creation request body remain unverified (**R-57b**) |
+| q | extras | `X-Device-Mid`; plugin pins `APP_VERSION` 3.17.2 for User-Agent and `X-ZCode-App-Version`; core `zcode.go` still says 3.14.3 | `device.rs`; `APP_VERSION` 3.14.3 in `lib.rs` | Partial | Send 3.17.2 in User-Agent and `X-ZCode-App-Version` (**R-57b**) |
 
-**Gaps**
+**R-57 completed**
 
-- Daily marketing/check-in gift flow — **M**, **R-57**.
-- Native portal sign-in (not import-only) — **M**, **R-57**.
-- Risk-control / restricted account handling (3012) — **S**, **R-57**.
-- Agent switching parity — **S**, **R-57**.
-- Start Plan routing to the plan base (`START_BASE`) — **S**, **R-57**.
-- Send app version 3.17.2 in User-Agent and `X-ZCode-App-Version` — **S**, **R-57**.
+- Kept `lapsed` across same-secret team refresh re-imports, serialized re-import through the account lease, failed closed on relative credential paths, and added separate team labels (#613 follow-ups).
+- Mapped code 3012 to the reference's user-facing risk-control hint and two-hour cooldown.
+
+**Gaps (R-57b)**
+
+- Daily marketing/check-in gift flow and its 30-minute recheck — **M**.
+- Native portal sign-in (not import-only) — **M**.
+- Agent switching and creating a missing team key — **M**.
+- Start Plan routing and request shaping — **M**.
+- Per-model image and reasoning mappings — **M**.
+- Send app version 3.17.2 in User-Agent and `X-ZCode-App-Version` — **S**.
 
 ---

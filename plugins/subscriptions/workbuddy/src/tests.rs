@@ -1,6 +1,7 @@
 //! Unit tests against recording host backends; no network.
 
 use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 use hofund_kit_subscription::{TestHost, block_on};
 use hofund_plugin_api::{
@@ -52,11 +53,20 @@ fn endpoints() -> Endpoints {
 }
 
 fn host(dir: &tempfile::TempDir) -> TestHost {
-    TestHost::open_for(
+    host_at(dir, SystemTime::UNIX_EPOCH)
+}
+
+fn host_at(dir: &tempfile::TempDir, now: SystemTime) -> TestHost {
+    TestHost::open_for_at(
         PluginKind::Subscription,
         PluginId::from_static("workbuddy"),
         dir.path(),
+        now,
     )
+}
+
+fn after_expiry() -> SystemTime {
+    SystemTime::UNIX_EPOCH + Duration::from_secs(10_000)
 }
 
 fn subscription(
@@ -301,6 +311,34 @@ fn a2c_27_daily_checkin_cn_only() {
     let result =
         block_on(subscription(&host, None).daily_checkin(&id, host.context())).expect("run");
     assert_eq!(result.outcome(), hofund_plugin_api::CheckinOutcome::Claimed);
+}
+
+#[test]
+fn a2c_39_checkin_refreshes_expired_token() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host_at(&dir, after_expiry());
+    let id = seed(&host, 1);
+    host.http().enqueue(
+        json::json!({
+            "accessToken": "wb-access-for-checkin",
+            "refreshToken": "wb-refresh-for-checkin",
+            "expiresAt": 4_000_000_000_000_i64
+        })
+        .to_string()
+        .into_bytes(),
+    );
+    host.http().enqueue(
+        br#"{"code":0,"msg":"ok","data":{"active":true,"today_checked_in":false,"streak_days":"1","today_credit":"0"}}"#,
+    );
+    host.http().enqueue(
+        br#"{"code":0,"msg":"ok","data":{"credit":"5","streak_days":"2","message":"ok"}}"#,
+    );
+    let result =
+        block_on(subscription(&host, None).daily_checkin(&id, host.context())).expect("run");
+    assert_eq!(result.outcome(), hofund_plugin_api::CheckinOutcome::Claimed);
+    let calls = host.http().calls();
+    assert_eq!(calls.len(), 3);
+    assert!(calls[0].uri().contains("/token/refresh"));
 }
 
 #[test]
