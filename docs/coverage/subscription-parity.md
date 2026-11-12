@@ -20,7 +20,7 @@ Legend: **Done** = matches the reference at checklist granularity; **Partial** =
 | Factory / Droid (`factory`) | 1 | 15 | 0 | 3 | 0 |
 | Cline / ClinePass (`cline`) | 2 | 12 | 1 | 3 | 1 |
 | ChatGPT / Codex (`codex` backend) and ChatGPT API (`chatgpt-api`) | 8 | 11 | 2 | 0 | 0 |
-| GitHub Copilot (github.com and GHE) | 10 | 5 | 2 | 5 | 0 |
+| GitHub Copilot (github.com and GHE) | 15 | 2 | 0 | 5 | 0 |
 | Gemini CLI (Code Assist) | 8 | 6 | 2 | 2 | 0 |
 | Google Antigravity | 0 | 0 | 16 | 1 | 0 |
 | SuperGrok (`grok`) | 10 | 6 | 0 | 2 | 0 |
@@ -358,15 +358,15 @@ Every other gap below maps to an existing plan item.
 
 **hofund path:** `plugins/subscriptions/copilot/`.
 
-| # | capability | reference v0.1.3005 | hofund 08035c9 | status | gap to close |
-|---|------------|----------------------|----------------|--------|--------------|
+| # | capability | reference v0.1.3005 | hofund R-48 | status | gap to close |
+|---|------------|----------------------|-------------|--------|--------------|
 | a1 | sign-in: device flow | `copilot_signin.go:31-38`, `59-86` GitHub device OAuth app (client id in `copilot_signin.go`) | `sign_in.rs`, `lib.rs:138-150` device flow | Done | — |
 | a2 | sign-in: browser OAuth | N/A (device only for reference-added accounts) | N/A | N/A | — |
 | a3 | sign-in: API key | N/A | N/A | N/A | — |
 | a4 | sign-in: paste | N/A | N/A | N/A | — |
-| a5 | sign-in: editor / CLI login reuse | `copilot_accounts.go:3-8`, `copilot_cli.go:81+` read editors’/CLI OAuth, never write | no editor config read in copilot plugin | Missing | Read Copilot CLI/editor side login (R-48) |
+| a5 | sign-in: editor / CLI login reuse | `copilot_accounts.go:3-8`, `copilot_cli.go:81+` read editors’/CLI OAuth, never write | `discover.rs`, `session.rs`; editor `apps.json`/`hosts.json`, CLI JSONC and keychain reads; direct CLI sessions; read-only stale/recovery fixtures | Done | — |
 | a6 | sign-in: GHE host option | `copilot_ghe.go`, `CopilotHost` in sign-in | `site.rs:9-40`, `lib.rs:72-81` `host` config → `.ghe.com` URLs | Done | — |
-| b | import sources | Side login from editor token metadata (`copilot_accounts.go`) | none | Missing | Side-login import (R-48) |
+| b | import sources | Side login from editor token metadata (`copilot_accounts.go`) | `discover_agent_sign_in` / `import_agent_sign_in`; hofund stores only source path, host, and login, never the external token | Done | — |
 | c | token storage | GitHub token in `logins.json`; Copilot session token minted per request | encrypted account secret + `TokenCache<Session>` (`session.rs`) | Done | — |
 | d | refresh | GitHub token long-lived; Copilot `copilot_internal/v2/token` remint (`copilot_accounts.go` session) | `session.rs` cache with margin, 401 remint (`upstream.rs:105-114`) | Done | — |
 | e | upstream wire | Session `endpoints.api` (githubcopilot.com or GHE host) JSON | `upstream.rs:81-90` bearer to session base | Done | — |
@@ -375,19 +375,17 @@ Every other gap below maps to an existing plan item.
 | h | tool calls | Copilot tool schemas | standard IR tools on wire | Partial | unverified against GHE tenant |
 | i | images | Vision header when images present | `upstream.rs:137-139` `Copilot-Vision-Request` | Done | — |
 | j | reasoning | model-dependent | unverified | Partial | — |
-| k | quota / usage | `copilot_internal/user` plan, premium requests | `quota.rs` GitHub Copilot user API | Partial | Plan label / SKU display (`copilot_entitlement.go`) (R-48) |
+| k | quota / usage | `copilot_internal/user` plan, premium requests | `quota.rs` plan/SKU labels on cards; guarded entitlement persistence and missing-field retention in `session.rs` and `lib.rs` | Done | — |
 | l | model list | From session + internal APIs | `models.rs` list + terms acceptance | Done | — |
-| m | multi-account | Editor account + reference device accounts (`copilot_accounts.go`) | multiple reference-signed accounts only | Partial | Editor “side” account pool (R-48) |
-| n | error classification | `copilot_lapsed.go`, `copilot_refused.go` | 401 session remint; seat check at sign-in (`sign_in.rs`) | Partial | Entitlement/lapsed mapping parity (R-48) |
+| m | multi-account | Editor account + reference device accounts (`copilot_accounts.go`) | device/editor/CLI coexistence; host-qualified ids and labels; legacy bare GHE label migration; two-host offline quota fixtures | Done | — |
+| n | error classification | `copilot_lapsed.go`, `copilot_refused.go` | session and quota 401 lapse, replacement-token guard, stale external `NeedsSignIn`, Auto/model refusal and session-loss mapping | Done | — |
 | o | daily check-in / warmup | N/A | N/A | N/A | — |
 | p | agent sign-in switch | Editor account is read-only reference | no agent sign-in on copilot spec | N/A | — |
-| q | extras | Editor version headers, initiator, API version | `session.rs:26+`, `upstream.rs:128-140` | Done | GHE live tenant verification (R-48) |
+| q | extras | Editor version headers, initiator, API version | editor/CLI/session/model/chat versions plus Auto `2026-08-01` and `2025-10-01`; offline GHE host, naming, and base-URL fixtures | Done | Live GHE tenant verification remains unverified |
 
 **Gaps**
 
-- Read VS Code / Copilot CLI side login without overwriting — **M**, **R-48**.
-- Plan/SKU labels and entitlement refresh on quota cards — **S**, **R-48**.
-- GHE data-residency integration test — **S**, **R-48**.
+- Live GHE data-residency tenant verification — not done; R-48 covers host URLs, host-qualified account names, plan/usage, and API base selection with offline fixtures only.
 
 ---
 
