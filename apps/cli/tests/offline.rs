@@ -422,13 +422,15 @@ fn offline_status_local_report() {
         "{report}"
     );
     assert_eq!(lines[4], "model address: 0.0.0.0:4100 (config)");
-    assert_eq!(lines.len(), 5, "{report}");
+    assert_eq!(lines[5], "allow list: unrestricted");
+    assert_eq!(lines[6], "trust proxy: false");
+    assert_eq!(lines.len(), 7, "{report}");
 
     let scratch = scratch.with_env("HOFUND_ADDR", "127.0.0.1:4200");
     let out = scratch.hofund(&["status"]);
     assert!(
         out.ok()
-            .ends_with("model address: 127.0.0.1:4200 (environment)"),
+            .contains("model address: 127.0.0.1:4200 (environment)"),
         "{out:#?}"
     );
     scratch.assert_no_daemon_state();
