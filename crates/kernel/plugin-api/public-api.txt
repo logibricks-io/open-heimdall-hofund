@@ -308,6 +308,8 @@ ConnectionStatus::const fn installed (& self) -> bool
 ConnectionStatus::const fn managed (& self) -> bool
 ConnectionStatus::fn new (id : & 'static str , display_name : & 'static str , installed : bool , connected : bool , managed : bool , paths : Vec < PathBuf > ,) -> Self
 ConnectionStatus::fn paths (& self) -> & [PathBuf]
+ConnectionStatus::fn warnings (& self) -> & [String]
+ConnectionStatus::fn with_warnings (mut self , warnings : Vec < String >) -> Self
 ContentPart
 CountOutcome
 CountOutcome #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
@@ -533,6 +535,8 @@ LoopbackSpec::const fn ephemeral () -> Self
 LoopbackSpec::const fn fixed (port : u16) -> Self
 LoopbackSpec::const fn host (& self) -> RedirectHost
 LoopbackSpec::const fn path (mut self , path : & 'static str) -> Self
+LoopbackSpec::const fn query_token (mut self , success_url : & 'static str) -> Self
+LoopbackSpec::const fn query_token_success_url (& self) -> Option < & 'static str >
 LoopbackSpec::const fn redirect_host (mut self , host : RedirectHost) -> Self
 LoopbackSpec::const fn requested_port (& self) -> Option < u16 >
 LoopbackSpec::fn expect_state (mut self , state : impl Into < String >) -> Self
@@ -1054,9 +1058,11 @@ SignInProof #[non_exhaustive] derives(Clone)
 SignInProof::Await
 SignInProof::Callback
 SignInProof::Device
+SignInProof::QueryToken
 SignInProof::Token
 SignInProof::fn callback (code : impl Into < SecretString > , state : impl Into < String >) -> Self
 SignInProof::fn device (user_code : impl Into < SecretString >) -> Self
+SignInProof::fn query_token (user_id : impl Into < String > , access_token : impl Into < SecretString >) -> Self
 SignInProof::fn token (token : impl Into < SecretString >) -> Self
 Slot
 Slot #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
@@ -1089,6 +1095,11 @@ Spawned #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
 Spawned::const fn id (self) -> u32
 Stop
 StopReason
+StoppedWaiting
+StoppedWaiting derives(Clone, Debug, Default)
+StoppedWaiting::fn is_stopped (& self) -> bool
+StoppedWaiting::fn new () -> Self
+StoppedWaiting::fn stop (& self)
 StreamEvent
 Subscription
 Subscription::async fn account_status (& self , account : & AccountId , host : & HostContext ,) -> Result < AccountStatus , PluginError >
