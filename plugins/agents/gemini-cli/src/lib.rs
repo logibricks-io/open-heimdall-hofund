@@ -658,6 +658,15 @@ mod tests {
     }
 
     #[test]
+    fn line_keeps_the_file_id_when_the_session_field_is_empty() {
+        let mut state = fresh_state();
+        assert_eq!(state.record.id, "gemini:s0");
+        state.session.clear();
+        state.line(&json::json!({"type": "noop"}));
+        assert_eq!(state.record.id, "gemini:s0");
+    }
+
+    #[test]
     fn line_ignores_empty_session_id_and_tracks_time_bounds() {
         let mut state = fresh_state();
         state.line(&json::json!({"sessionId": ""}));
