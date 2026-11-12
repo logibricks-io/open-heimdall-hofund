@@ -8,6 +8,7 @@ use crate::app::App;
 use crate::events::apply_control_event;
 use crate::gateway::HandoffOutcome;
 use crate::pages::{ProbeOutcome, read_path};
+use crate::session::{SessionOutcome, run_intent};
 use crate::state::PageId;
 
 /// Work sent back to the UI task from background jobs.
@@ -30,6 +31,8 @@ pub enum WorkerMsg {
         generation: u64,
         outcome: ProbeOutcome,
     },
+    /// One control intent finished.
+    Session(Box<SessionOutcome>),
 }
 
 /// Handoff fields needed on quit (updated each tick).
@@ -66,6 +69,25 @@ pub fn apply_worker_msg(app: &mut App, msg: WorkerMsg) {
                 app.pages.apply_probe(page, outcome);
             });
         }
+        WorkerMsg::Session(outcome) => app.apply_session(*outcome),
+    }
+}
+
+/// Spawns queued control calls. Intents stay queued when no client is attached.
+pub fn schedule_intents(app: &mut App, client: Option<&Client>, work_tx: &mpsc::Sender<WorkerMsg>) {
+    if client.is_none() {
+        return;
+    }
+    let Some(client) = client.cloned() else {
+        return;
+    };
+    for intent in app.take_intents() {
+        let client = client.clone();
+        let work_tx = work_tx.clone();
+        tokio::spawn(async move {
+            let outcome = run_intent(&client, intent).await;
+            let _ = work_tx.send(WorkerMsg::Session(Box::new(outcome))).await;
+        });
     }
 }
 

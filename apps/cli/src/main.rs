@@ -51,6 +51,20 @@ use subscription::{SubscriptionCommand, SubscriptionFlags};
 
 fn main() -> ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
+    if arguments.first().map(String::as_str) == Some(hofund_bridge_mcp::SUBCOMMAND) {
+        return match hofund_bridge_mcp::run_stdio(
+            &arguments[1..]
+                .iter()
+                .map(std::ffi::OsString::from)
+                .collect::<Vec<_>>(),
+        ) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("{error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     let (config, command) = match parse(&arguments) {
         Ok(parsed) => parsed,
         Err(message) => {
@@ -1355,6 +1369,15 @@ mod tests {
 
     fn words(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    #[test]
+    fn hidden_bridge_mcp_subcommand_is_not_in_help() {
+        let help = help_text(HelpTopic::Overview);
+        assert!(
+            !help.contains("bridge-mcp-stdio"),
+            "the helper subcommand must stay hidden from help:\n{help}"
+        );
     }
 
     #[test]

@@ -10,26 +10,26 @@ use hofund_control_proto::{
     AgentChangeResponse, AgentConnectRequest, AgentDisconnectRequest, AgentHiddenSetRequest,
     AgentListResponse, AgentModelRequest, AgentModelsResponse, AgentPickedOnlyRequest,
     AgentPlanRequest, AgentPlanResponse, AgentStatusResponse, AgentVisibleSetRequest,
-    CatalogDisabledListResponse, CatalogModelRequest, CheckinAccountRow, CheckinListResponse,
-    CheckinRunRequest, CheckinRunResponse, ControlError, ControlErrorKind, FieldIssue, GatewayKey,
-    GatewayKeyAction, GatewayKeyLimit, GatewayKeyRequest, GatewayKeyResponse,
-    GatewayKeyRestoreRequest, GroupCreateRequest, GroupDeleteRequest, GroupDeleteResponse,
-    GroupListResponse, GroupMemberCandidatesResponse, GroupPatchRequest, GroupRestoreRequest,
-    GroupWriteResponse, HealthResponse, ModelEntry, ModelListResponse, PicksResponse,
-    PicksSetRequest, PresetListResponse, ProfileDeleteRequest, ProfileDetailResponse,
-    ProfileListResponse, ProfileRenameRequest, ProfileSaveRequest, ProfileSwitchRequest,
-    ProfileSwitchResponse, ProviderCreateRequest, ProviderDeleteRequest, ProviderDeleteResponse,
-    ProviderKeyRequest, ProviderKeysResponse, ProviderListResponse, ProviderPatchRequest,
-    ProviderRenameRequest, ProviderRenameResponse, ProviderSpendCap, ProviderSpendCapPeriod,
-    ProviderSpendCapRequest, ProviderSpendCapsResponse, ProviderTestRequest, ProviderTestResponse,
-    ProviderTestResult, ProviderWriteResponse, QuotaAlertsResponse, QuotaAlertsSetRequest,
-    QuotaAlertsSetResponse, QuotaCreditsModesResponse, QuotaCreditsSetRequest,
-    QuotaCreditsSetResponse, QuotaHistoryQuery, QuotaHistoryResponse, QuotaQuery, QuotaResponse,
-    RouteListResponse, RouteModel, RouteModelListResponse, RouteQuery, RouteReserve, ServeRole,
-    SessionRouteResponse, ShutdownRequest, ShutdownResponse, ShutdownState, StatusResponse,
-    TokenRotateRequest, TokenRotateResponse, UnroutedListResponse, UsageBreakdownBy,
-    UsageBreakdownGroup, UsagePeriod, UsageQuery, UsageResponse, UsageRow, UsageTotals,
-    WarmupAccountRow, WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
+    CatalogDisabledListResponse, CatalogModelRequest, CatalogSyncRequest, CatalogSyncResponse,
+    CheckinAccountRow, CheckinListResponse, CheckinRunRequest, CheckinRunResponse, ControlError,
+    ControlErrorKind, FieldIssue, GatewayKey, GatewayKeyAction, GatewayKeyLimit, GatewayKeyRequest,
+    GatewayKeyResponse, GatewayKeyRestoreRequest, GroupCreateRequest, GroupDeleteRequest,
+    GroupDeleteResponse, GroupListResponse, GroupMemberCandidatesResponse, GroupPatchRequest,
+    GroupRestoreRequest, GroupWriteResponse, HealthResponse, ModelEntry, ModelListResponse,
+    PicksResponse, PicksSetRequest, PresetListResponse, ProfileDeleteRequest,
+    ProfileDetailResponse, ProfileListResponse, ProfileRenameRequest, ProfileSaveRequest,
+    ProfileSwitchRequest, ProfileSwitchResponse, ProviderCreateRequest, ProviderDeleteRequest,
+    ProviderDeleteResponse, ProviderKeyRequest, ProviderKeysResponse, ProviderListResponse,
+    ProviderPatchRequest, ProviderRenameRequest, ProviderRenameResponse, ProviderSpendCap,
+    ProviderSpendCapPeriod, ProviderSpendCapRequest, ProviderSpendCapsResponse,
+    ProviderTestRequest, ProviderTestResponse, ProviderTestResult, ProviderWriteResponse,
+    QuotaAlertsResponse, QuotaAlertsSetRequest, QuotaAlertsSetResponse, QuotaCreditsModesResponse,
+    QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryQuery, QuotaHistoryResponse,
+    QuotaQuery, QuotaResponse, RouteListResponse, RouteModel, RouteModelListResponse, RouteQuery,
+    RouteReserve, ServeRole, SessionRouteResponse, ShutdownRequest, ShutdownResponse,
+    ShutdownState, StatusResponse, TokenRotateRequest, TokenRotateResponse, UnroutedListResponse,
+    UsageBreakdownBy, UsageBreakdownGroup, UsagePeriod, UsageQuery, UsageResponse, UsageRow,
+    UsageTotals, WarmupAccountRow, WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
 };
 use hofund_control_proto::{
     ConfigApplyRequest, ConfigResponse, ConfigValidateRequest, ConfigValidationResponse,
@@ -697,7 +697,8 @@ impl ControlState for DaemonControl {
     fn picks(&self, id: String) -> ControlFuture<'_, PicksResponse> {
         let result = self.provider_exists(&id).map(|()| {
             let (picks, revision) = self.models.picks_with_revision(&id);
-            picks_response(&picks, revision)
+            let exposed = self.models.default_exposed_ids(&id);
+            picks_response(&picks, revision, exposed)
         });
         Box::pin(async move { result.map_err(Into::into) })
     }
@@ -712,7 +713,10 @@ impl ControlState for DaemonControl {
                     .edit_picks(&id, Some(&request.expected_picks_revision), form)
                     .map_err(|error| picks_failure(&id, error))
             })
-            .map(|(picks, revision)| picks_response(&picks, revision));
+            .map(|(picks, revision)| {
+                let exposed = self.models.default_exposed_ids(&id);
+                picks_response(&picks, revision, exposed)
+            });
         Box::pin(async move { result })
     }
 
@@ -937,6 +941,11 @@ impl ControlState for DaemonControl {
     fn presets(&self) -> ControlFuture<'_, PresetListResponse> {
         let registry = Arc::clone(&self.registry);
         Box::pin(async move { Ok(super::control_presets::list_presets(registry.as_ref())) })
+    }
+
+    fn sync_catalog(&self, request: CatalogSyncRequest) -> ControlFuture<'_, CatalogSyncResponse> {
+        let catalog = self.ops.model_catalog();
+        Box::pin(async move { sync_model_catalog(catalog, request.force).await })
     }
 
     fn create_provider(
@@ -1562,12 +1571,71 @@ fn model_entries(models: &[ModelSpec]) -> Vec<ModelEntry> {
         .collect()
 }
 
-fn picks_response(picks: &Picks, revision: String) -> PicksResponse {
+async fn sync_model_catalog(
+    catalog: Option<Arc<hofund_model_catalog::ModelCatalog>>,
+    force: bool,
+) -> Result<CatalogSyncResponse, ControlFailure> {
+    let Some(catalog) = catalog else {
+        let mut response = CatalogSyncResponse::default();
+        response.ok = false;
+        response.error = Some("model catalog is not open".to_owned());
+        return Ok(response);
+    };
+    if !force && catalog.has_index() {
+        let mut response = CatalogSyncResponse::default();
+        response.ok = true;
+        return Ok(response);
+    }
+    let receive = catalog.refresh_detached();
+    let mut response = CatalogSyncResponse::default();
+    match tokio::time::timeout(std::time::Duration::from_secs(30), receive).await {
+        Ok(Ok(Ok(result))) => {
+            response.ok = !matches!(result, hofund_model_catalog::FetchResult::Failed);
+            if !response.ok {
+                response.error = Some("catalog fetch failed".to_owned());
+            }
+        }
+        Ok(Ok(Err(error))) => {
+            response.ok = false;
+            response.error = Some(sanitize_catalog_error(&error.to_string()));
+        }
+        Ok(Err(_)) => {
+            response.ok = false;
+            response.error = Some("catalog sync stopped before it finished".to_owned());
+        }
+        Err(_) => {
+            response.ok = false;
+            response.error = Some("catalog sync timed out".to_owned());
+        }
+    }
+    Ok(response)
+}
+
+fn sanitize_catalog_error(message: &str) -> String {
+    let mut out = String::new();
+    for word in message.split_whitespace() {
+        if word.contains("://") || word.len() > 120 {
+            out.push_str("[redacted] ");
+        } else {
+            out.push_str(word);
+            out.push(' ');
+        }
+    }
+    let trimmed = out.trim();
+    if trimmed.is_empty() {
+        "catalog sync failed".to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+fn picks_response(picks: &Picks, revision: String, default_exposed: Vec<String>) -> PicksResponse {
     let mut response = PicksResponse::default();
     response.picks = picks.picks().to_vec();
     response.picked_from = picks.picked_from().to_vec();
     response.delisted = picks.delisted().to_vec();
     response.picks_revision = revision;
+    response.default_exposed = default_exposed;
     response
 }
 

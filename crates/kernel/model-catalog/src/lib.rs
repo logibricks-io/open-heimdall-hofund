@@ -138,6 +138,14 @@ impl ModelCatalog {
         &self.cache.path
     }
 
+    /// Whether a catalog index is loaded from disk.
+    #[must_use]
+    pub fn has_index(&self) -> bool {
+        self.index
+            .read()
+            .is_ok_and(|guard| guard.as_ref().is_some())
+    }
+
     /// Whether the on-disk cache is older than the configured refresh interval.
     #[must_use]
     pub fn stale(&self) -> bool {

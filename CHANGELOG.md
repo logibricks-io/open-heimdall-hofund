@@ -15,6 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   allowed, a malformed environment list fails closed to loopback only, and
   apply/reload replace the settings without a restart. `hofund status` shows
   the effective list.
+- R-6g: Claude Code bridge error mapping and a vendor-neutral
+  `skip_failover_same_plugin` flag so a room-full 503 skips later members of
+  the same plugin only. Sign-in lapses, extra-usage 400s, too-long prompts,
+  quota-shaped results, and process crashes map to `PluginError` without
+  cooling the account where the reference does not. Real-account smoke stays
+  on #304.
 - R-21: `hofund uninstall [--yes] [--purge]` restores every managed agent through
   non-force disconnect, refuses to run beside a live daemon, and optionally
   removes only hofund's resolved config, credential, usage, and state paths.
