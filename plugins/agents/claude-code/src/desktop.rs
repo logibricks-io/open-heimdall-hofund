@@ -201,4 +201,25 @@ mod tests {
             None
         );
     }
+
+    #[test]
+    fn present_is_true_when_either_session_dir_exists() {
+        let root = fixture("desktop/data");
+        let locator = ClaudeDesktopLocator { roots: vec![root] };
+        assert!(locator.present());
+        let missing = ClaudeDesktopLocator {
+            roots: vec![fixture("desktop/missing-data")],
+        };
+        assert!(!missing.present());
+        let empty = ClaudeDesktopLocator { roots: vec![] };
+        assert!(!empty.present());
+    }
+
+    #[test]
+    fn data_dirs_and_home_are_not_empty() {
+        let dirs = desktop_data_dirs();
+        assert_ne!(dirs.len(), 0);
+        assert!(dirs.iter().all(|path| !path.as_os_str().is_empty()));
+        assert!(!home_dir().as_os_str().is_empty());
+    }
 }

@@ -699,4 +699,37 @@ mod tests {
                 .all(|file| file.path.starts_with(temp.path().join("linked")))
         );
     }
+
+    #[test]
+    fn subagent_parent_reads_the_parent_session_dir() {
+        let child = SessionFile::new("child", "sessions/parent/subagents/child.jsonl");
+        assert_eq!(
+            subagent_parent("claude", &child).as_deref(),
+            Some("claude:parent")
+        );
+        let main = SessionFile::new("main", "sessions/parent/main.jsonl");
+        assert_eq!(subagent_parent("claude", &main), None);
+    }
+
+    #[test]
+    fn desktop_entrypoint_matches_desktop_ids_only() {
+        assert!(desktop_entrypoint(
+            &json::json!({"entrypoint": "claude-desktop"})
+        ));
+        assert!(desktop_entrypoint(
+            &json::json!({"entrypoint": "claude-desktop-3p"})
+        ));
+        assert!(!desktop_entrypoint(
+            &json::json!({"entrypoint": "claude-code"})
+        ));
+        assert!(!desktop_entrypoint(&json::json!({})));
+    }
+
+    #[test]
+    fn file_stem_id_strips_the_agent_prefix() {
+        let record = SessionRecord::new("claude", "claude:abc", "p");
+        assert_eq!(file_stem_id(&record), "abc");
+        let record = SessionRecord::new("claude", "nocolon", "p");
+        assert_eq!(file_stem_id(&record), "nocolon");
+    }
 }
