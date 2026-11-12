@@ -448,4 +448,92 @@ mod tests {
         assert_eq!(s1.output_tokens, 5);
         assert_eq!(sessions.len(), 1);
     }
+
+    #[test]
+    fn local_date_formats_yyyy_mm_dd() {
+        let text = local_date(1_600_000_000);
+        assert_eq!(text.len(), 10, "{text}");
+        assert_ne!(text, "xyzzy");
+        let bytes = text.as_bytes();
+        assert_eq!(bytes[4], b'-');
+        assert_eq!(bytes[7], b'-');
+        assert!(bytes[..4].iter().all(u8::is_ascii_digit), "{text}");
+        assert!(bytes[5..7].iter().all(u8::is_ascii_digit), "{text}");
+        assert!(bytes[8..].iter().all(u8::is_ascii_digit), "{text}");
+    }
+
+    #[test]
+    fn r33_gateway_sessions_sorts_models_by_token_sum() {
+        let dir = tempfile::tempdir().expect("dir");
+        let ledger = Ledger::open(&dir.path().join("usage.sqlite")).expect("ledger");
+        // m-high: 3+0=3; m-low: 1+1=2. Replacing + with * would sort m-low first.
+        ledger
+            .record_with_details(
+                &row(10, "fixture-a", "s1", "m-high", 3, 0),
+                None,
+                Default::default(),
+                Some(priced()),
+            )
+            .expect("high");
+        ledger
+            .record_with_details(
+                &row(11, "fixture-a", "s1", "m-low", 1, 1),
+                None,
+                Default::default(),
+                Some(priced()),
+            )
+            .expect("low");
+        let session = &gateway_sessions(&ledger, None).expect("sessions")[0];
+        let models: Vec<_> = session
+            .models
+            .iter()
+            .map(|model| model.model.as_str())
+            .collect();
+        assert_eq!(models, ["m-high", "m-low"]);
+    }
+
+    #[test]
+    fn r33_gateway_sessions_tracks_unpriced_rows_and_model_cost() {
+        let dir = tempfile::tempdir().expect("dir");
+        let ledger = Ledger::open(&dir.path().join("usage.sqlite")).expect("ledger");
+        ledger
+            .record_with_details(
+                &row(10, "fixture-a", "s1", "priced", 2, 0),
+                None,
+                Default::default(),
+                Some(priced()),
+            )
+            .expect("priced");
+        ledger
+            .record(&row(11, "fixture-a", "s1", "tokens", 0, 5))
+            .expect("unpriced tokens");
+        ledger
+            .record(&row(12, "fixture-a", "s1", "tokens", 0, 5))
+            .expect("second unpriced");
+        ledger
+            .record(&row(13, "fixture-a", "s1", "zero", 0, 0))
+            .expect("unpriced zeros");
+        let session = &gateway_sessions(&ledger, None).expect("sessions")[0];
+        assert_eq!(session.unpriced, 2);
+        assert!((session.cost_usd - 0.01).abs() < f64::EPSILON);
+        let priced_model = session
+            .models
+            .iter()
+            .find(|model| model.model == "priced")
+            .expect("priced model");
+        assert!(priced_model.priced);
+        assert!((priced_model.cost_usd - 0.01).abs() < f64::EPSILON);
+        let tokens = session
+            .models
+            .iter()
+            .find(|model| model.model == "tokens")
+            .expect("unpriced model");
+        assert!(!tokens.priced);
+        let zero = session
+            .models
+            .iter()
+            .find(|model| model.model == "zero")
+            .expect("zero model");
+        assert!(zero.priced);
+    }
 }
