@@ -1,11 +1,12 @@
 //! Unit tests against recording host backends; no network.
 
 use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 use hofund_kit_subscription::{TestHost, block_on};
 use hofund_plugin_api::{
-    AccountId, PluginErrorKind, PluginId, PluginKind, ProbeQuery, ProtocolId, RawTable,
-    SecretString, Subscription, SubscriptionFactory,
+    AccountId, AccountStatus, PluginErrorKind, PluginId, PluginKind, ProbeQuery, ProtocolId,
+    RawTable, SecretString, Subscription, SubscriptionFactory,
 };
 use hofund_plugin_sdk::json;
 use hofund_plugin_sdk::oauth::{SecretObject, secret_text};
@@ -30,11 +31,21 @@ fn endpoints() -> Endpoints {
 }
 
 fn host(dir: &tempfile::TempDir) -> TestHost {
-    TestHost::open_for(
+    host_at(dir, SystemTime::UNIX_EPOCH)
+}
+
+fn host_at(dir: &tempfile::TempDir, now: SystemTime) -> TestHost {
+    TestHost::open_for_at(
         PluginKind::Subscription,
         PluginId::from_static("qoder"),
         dir.path(),
+        now,
     )
+}
+
+/// A wall clock far enough past a 1 ms expiry that `ready_at` is false.
+fn after_expiry() -> SystemTime {
+    SystemTime::UNIX_EPOCH + Duration::from_secs(10_000)
 }
 
 fn subscription(host: &TestHost) -> Arc<dyn Subscription> {
@@ -228,7 +239,7 @@ fn a2c_8_secrets_not_in_error_strings() {
 fn a2c_9_daily_checkin_uses_bearer() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
-    let id = seed(&host);
+    let id = seed_with_expiry(&host, 4_000_000_000_000);
     host.http().enqueue(
         br#"{"campaigns":[{"campaignId":"daily","actionType":"CLAIM_BENEFIT","claimStatus":"CLAIMABLE","startAt":0,"endAt":4102444800,"benefit":{"amount":100}}]}"#,
     );
@@ -241,10 +252,70 @@ fn a2c_9_daily_checkin_uses_bearer() {
 #[test]
 fn a2c_10_account_status_ready_with_refresh_when_access_expired() {
     let dir = tempfile::tempdir().expect("dir");
-    let host = host(&dir);
+    // The default TestHost clock is the Unix epoch, so expires_at=1 is still
+    // in the future and this assertion would not cover the refresh-token arm.
+    let host = host_at(&dir, after_expiry());
     let id = seed_with_expiry(&host, 1);
     let status = block_on(subscription(&host).account_status(&id, host.context())).expect("status");
-    assert!(matches!(status, hofund_plugin_api::AccountStatus::Ready));
+    assert!(matches!(status, AccountStatus::Ready));
+}
+
+#[test]
+fn a2c_12_refresh_refused_reports_needs_sign_in() {
+    for status in [401_u16, 403] {
+        let dir = tempfile::tempdir().expect("dir");
+        let host = host_at(&dir, after_expiry());
+        let id = seed_with_expiry(&host, 1);
+        host.http().enqueue_response(status, &[], Vec::new());
+        let err = block_on(subscription(&host).refresh(&id, host.context())).expect_err("refused");
+        assert_eq!(err.kind(), PluginErrorKind::Auth);
+        assert_eq!(err.message(), creds::LAPSED_REASON);
+        assert!(!err.to_string().contains(REFRESH));
+        assert!(!err.to_string().contains(TOKEN));
+        let secret = block_on(host.context().accounts().secret(&id))
+            .expect("read")
+            .expect("stored");
+        assert!(
+            SecretObject::parse(&secret)
+                .expect("blob")
+                .flag(creds::LAPSED)
+        );
+        let reported =
+            block_on(subscription(&host).account_status(&id, host.context())).expect("status");
+        assert_eq!(
+            reported,
+            AccountStatus::NeedsSignIn {
+                reason: creds::LAPSED_REASON.to_owned()
+            }
+        );
+        assert_eq!(host.http().calls().len(), 1);
+    }
+}
+
+#[test]
+fn a2c_13_checkin_refreshes_expired_token() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host_at(&dir, after_expiry());
+    let id = seed_with_expiry(&host, 1);
+    host.http().enqueue(
+        json::json!({
+            "token": "qoder-access-for-checkin",
+            "refresh_token": "qoder-refresh-for-checkin",
+            "expires_at": 4_000_000_000_000_i64
+        })
+        .to_string()
+        .into_bytes(),
+    );
+    host.http().enqueue(
+        br#"{"campaigns":[{"campaignId":"daily","actionType":"CLAIM_BENEFIT","claimStatus":"CLAIMABLE","startAt":0,"endAt":4102444800,"benefit":{"amount":100}}]}"#,
+    );
+    host.http()
+        .enqueue(br#"{"status":"CLAIMED","benefit":{"amount":100}}"#);
+    let result = block_on(subscription(&host).daily_checkin(&id, host.context())).expect("checkin");
+    assert_eq!(result.outcome(), hofund_plugin_api::CheckinOutcome::Claimed);
+    let calls = host.http().calls();
+    assert_eq!(calls.len(), 3);
+    assert!(calls[0].uri().contains("/jobToken/refresh"));
 }
 
 #[test]
