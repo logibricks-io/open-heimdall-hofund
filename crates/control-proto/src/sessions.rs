@@ -804,7 +804,15 @@ fn bad_query(message: &str) -> ControlError {
 
 #[cfg(test)]
 mod tests {
-    use super::{SessionListQuery, SessionOverviewQuery, SessionStatsQuery};
+    use super::{SessionCarryRequest, SessionListQuery, SessionOverviewQuery, SessionStatsQuery};
+
+    fn carry(id: impl Into<String>, to: impl Into<String>) -> SessionCarryRequest {
+        SessionCarryRequest {
+            version: crate::API_VERSION,
+            id: id.into(),
+            to: to.into(),
+        }
+    }
 
     #[test]
     fn list_query_accepts_only_the_contract_days() {
@@ -832,5 +840,28 @@ mod tests {
             .expect("overview");
         assert_eq!(overview.cwd, "/work/repo");
         assert!(SessionOverviewQuery::parse(Some("folder=repo")).is_err());
+    }
+
+    #[test]
+    fn carry_request_validate_rejects_empty_and_overlong_fields() {
+        assert!(carry("", "omp").validate().is_err(), "empty id");
+        assert!(carry("s", "").validate().is_err(), "empty to");
+        assert!(carry("s", "omp").validate().is_ok());
+        assert!(
+            carry("a".repeat(256), "omp").validate().is_ok(),
+            "id of 256 is accepted"
+        );
+        assert!(
+            carry("a".repeat(257), "omp").validate().is_err(),
+            "id of 257 is rejected"
+        );
+        assert!(
+            carry("s", "b".repeat(64)).validate().is_ok(),
+            "to of 64 is accepted"
+        );
+        assert!(
+            carry("s", "b".repeat(65)).validate().is_err(),
+            "to of 65 is rejected"
+        );
     }
 }
