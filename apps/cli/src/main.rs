@@ -1649,6 +1649,9 @@ mod tests {
             panic!("{parsed:?}");
         };
         assert_eq!(options.days, Some(30));
+    }
+
+    #[test]
     fn uninstall_command_parses_yes_and_purge() {
         assert_eq!(
             command(&["uninstall"]),
