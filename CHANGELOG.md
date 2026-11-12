@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- R-22: LAN allow list and trusted proxy. Top-level `allow_ips` (IPs and CIDRs)
+  and `trust_proxy`, overridable by `HOFUND_ALLOW_IPS` / `HOFUND_TRUST_PROXY`;
+  non-listed peers get a JSON 403 before authentication, loopback is always
+  allowed, a malformed environment list fails closed to loopback only, and
+  apply/reload replace the settings without a restart. `hofund status` shows
+  the effective list.
 - R-6g: Claude Code bridge error mapping and a vendor-neutral
   `skip_failover_same_plugin` flag so a room-full 503 skips later members of
   the same plugin only. Sign-in lapses, extra-usage 400s, too-long prompts,

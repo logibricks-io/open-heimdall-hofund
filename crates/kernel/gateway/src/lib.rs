@@ -5,6 +5,7 @@
 //! names do not belong in this crate. Generative Language paths are matched
 //! in `endpoints`.
 
+mod allow;
 mod bridge_effort;
 pub mod control;
 mod endpoints;
@@ -24,6 +25,7 @@ mod responses_ws;
 mod stream_timing;
 mod usage_handoff;
 
+pub use allow::NetworkAccess;
 pub use endpoints::{GENERATIVE_LIST, GENERATIVE_STREAM, GENERATIVE_UNARY};
 #[doc(hidden)]
 pub use quotas::{
@@ -91,6 +93,7 @@ pub struct Gateway {
 
 struct Inner {
     snapshot: Snapshot,
+    network_access: allow::NetworkAccess,
     tokens: TokenState,
     keys: Option<Arc<KeyStore>>,
     oidc_rules: Option<RuleStore>,
@@ -539,6 +542,7 @@ impl Gateway {
         Self {
             inner: Arc::new(Inner {
                 snapshot,
+                network_access: allow::NetworkAccess::default(),
                 tokens: TokenState::new(token, token_file),
                 keys: None,
                 oidc_rules: None,
@@ -560,6 +564,15 @@ impl Gateway {
                 pricer: None,
             }),
         }
+    }
+
+    /// Shares network-access settings that the daemon replaces on config reload.
+    #[must_use]
+    pub fn with_network_access(mut self, access: allow::NetworkAccess) -> Self {
+        Arc::get_mut(&mut self.inner)
+            .expect("gateway is not shared yet")
+            .network_access = access;
+        self
     }
 
     /// Shares the visibility catalog the daemon updates on config reload.
@@ -1044,6 +1057,10 @@ fn request_router(app: &Arc<Inner>) -> axum::Router {
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(app),
             issue_keys::refused_guard,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(app),
+            allow::guard,
         ))
 }
 
