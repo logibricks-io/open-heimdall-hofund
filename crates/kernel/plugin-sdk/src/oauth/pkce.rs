@@ -25,7 +25,16 @@ impl Pkce {
     ///
     /// Returns [`PluginError`] when the system random source fails.
     pub fn generate() -> Result<Self, PluginError> {
-        Ok(Self::from_verifier(&random_token()?))
+        Self::generate_with_random_bytes(RANDOM_BYTES)
+    }
+
+    /// A fresh verifier from `random_bytes` bytes of the system random source.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when the system random source fails.
+    pub fn generate_with_random_bytes(random_bytes: usize) -> Result<Self, PluginError> {
+        Ok(Self::from_verifier(&random_token(random_bytes)?))
     }
 
     /// The challenge for a known verifier.
@@ -54,7 +63,16 @@ impl std::fmt::Debug for Pkce {
 ///
 /// Returns [`PluginError`] when the system random source fails.
 pub fn new_state() -> Result<String, PluginError> {
-    random_token()
+    new_state_with_random_bytes(RANDOM_BYTES)
+}
+
+/// A fresh URL-safe `state` value from `random_bytes` random bytes.
+///
+/// # Errors
+///
+/// Returns [`PluginError`] when the system random source fails.
+pub fn new_state_with_random_bytes(random_bytes: usize) -> Result<String, PluginError> {
+    random_token(random_bytes)
 }
 
 /// `base` with `pairs` appended as a form-encoded query.
@@ -131,8 +149,8 @@ pub fn client_code_exchange_form(
     ])
 }
 
-fn random_token() -> Result<String, PluginError> {
-    let mut bytes = [0_u8; RANDOM_BYTES];
+fn random_token(random_bytes: usize) -> Result<String, PluginError> {
+    let mut bytes = vec![0_u8; random_bytes];
     SystemRandom::new()
         .fill(&mut bytes)
         .map_err(|_| PluginError::internal("the system random source failed"))?;
@@ -249,6 +267,13 @@ mod tests {
                 .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
         );
         assert_ne!(state, new_state().expect("state"));
+        let custom = Pkce::generate_with_random_bytes(48).expect("custom PKCE");
+        assert_eq!(custom.verifier.expose_secret().len(), 64);
+        assert_eq!(custom.challenge.len(), 43);
+        assert_eq!(
+            super::new_state_with_random_bytes(24).expect("state").len(),
+            32
+        );
     }
 
     #[test]
