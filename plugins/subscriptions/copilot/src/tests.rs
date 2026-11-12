@@ -759,7 +759,13 @@ fn request_headers_name_the_editor_and_initiator() {
 fn window<'a>(windows: &'a [QuotaWindow], name: &str) -> &'a QuotaWindow {
     windows
         .iter()
-        .find(|window| window.name() == name)
+        .find(|window| {
+            window.name() == name
+                || window
+                    .name()
+                    .strip_suffix(name)
+                    .is_some_and(|prefix| prefix.ends_with(" · "))
+        })
         .unwrap_or_else(|| panic!("{name} in {windows:?}"))
 }
 
@@ -780,7 +786,14 @@ fn quota_reads_snapshots() {
     });
     let windows = quota::windows(body.to_string().as_bytes()).expect("windows");
     let names: Vec<&str> = windows.iter().map(QuotaWindow::name).collect();
-    assert_eq!(names, ["Completions", "Premium requests", "Chat requests"]);
+    assert_eq!(
+        names,
+        [
+            "Pro · Completions",
+            "Pro · Premium requests",
+            "Pro · Chat requests"
+        ]
+    );
     let completions = window(&windows, "Completions");
     assert_eq!((completions.used(), completions.limit()), (500, Some(2000)));
     assert!(!completions.blocking());
@@ -903,9 +916,9 @@ fn quota_reads_the_account_host() {
         vec!["https://api.acme.ghe.com/copilot_internal/user"]
     );
     for (status, kind) in [
-        (401, PluginErrorKind::Auth),
-        (403, PluginErrorKind::Auth),
         (502, PluginErrorKind::Status),
+        (403, PluginErrorKind::Auth),
+        (401, PluginErrorKind::Auth),
     ] {
         host.http().enqueue_response(status, &[], b"{}".to_vec());
         let error = block_on(sub.quota(&id, host.context())).expect_err("refused");
@@ -1231,7 +1244,8 @@ fn list_models_reads_the_account_list() {
             "gpt-5",
             "gpt-4.1",
             "o-terms",
-            "hidden-picked"
+            "hidden-picked",
+            "auto"
         ]
     );
     assert_eq!(

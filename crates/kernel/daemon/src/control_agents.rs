@@ -247,6 +247,11 @@ impl AgentOps {
                     .iter()
                     .map(|path| path.display().to_string())
                     .collect();
+                entry.warnings = status
+                    .warnings()
+                    .iter()
+                    .map(|warning| scrub(warning, &[&token]))
+                    .collect();
                 response.agents.push(entry);
             }
             Ok(response)
