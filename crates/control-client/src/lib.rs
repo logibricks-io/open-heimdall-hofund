@@ -10,17 +10,17 @@ use hofund_control_proto::{
     AgentChangeResponse, AgentConnectRequest, AgentDisconnectRequest, AgentHiddenSetRequest,
     AgentListResponse, AgentModelRequest, AgentModelsResponse, AgentPickedOnlyRequest,
     AgentPlanRequest, AgentPlanResponse, AgentStatusResponse, AgentVisibleSetRequest,
-    CatalogDisabledListResponse, CatalogModelRequest, CheckinListResponse, CheckinRunRequest,
-    CheckinRunResponse, ConfigApplyRequest, ConfigResponse, ConfigValidateRequest,
-    ConfigValidationResponse, ControlError, ErrorEnvelope, EventEnvelope, GatewayKeyRequest,
-    GatewayKeyResponse, GatewayKeyRestoreRequest, GroupCreateRequest, GroupDeleteRequest,
-    GroupDeleteResponse, GroupListResponse, GroupMemberCandidatesResponse, GroupPatchRequest,
-    GroupRestoreRequest, GroupWriteResponse, HealthResponse, MAX_RESPONSE_BODY_BYTES,
-    ModelListResponse, PicksResponse, PicksSetRequest, PresetListResponse, ProfileDetailResponse,
-    ProfileListResponse, ProfileRenameRequest, ProfileSaveRequest, ProfileSwitchRequest,
-    ProfileSwitchResponse, ProviderCreateRequest, ProviderDeleteRequest, ProviderDeleteResponse,
-    ProviderKeyRequest, ProviderKeysResponse, ProviderListResponse, ProviderPatchRequest,
-    ProviderRenameRequest, ProviderRenameResponse, ProviderSpendCapRequest,
+    CatalogDisabledListResponse, CatalogModelRequest, CatalogSyncRequest, CatalogSyncResponse,
+    CheckinListResponse, CheckinRunRequest, CheckinRunResponse, ConfigApplyRequest, ConfigResponse,
+    ConfigValidateRequest, ConfigValidationResponse, ControlError, ErrorEnvelope, EventEnvelope,
+    GatewayKeyRequest, GatewayKeyResponse, GatewayKeyRestoreRequest, GroupCreateRequest,
+    GroupDeleteRequest, GroupDeleteResponse, GroupListResponse, GroupMemberCandidatesResponse,
+    GroupPatchRequest, GroupRestoreRequest, GroupWriteResponse, HealthResponse,
+    MAX_RESPONSE_BODY_BYTES, ModelListResponse, PicksResponse, PicksSetRequest, PresetListResponse,
+    ProfileDetailResponse, ProfileListResponse, ProfileRenameRequest, ProfileSaveRequest,
+    ProfileSwitchRequest, ProfileSwitchResponse, ProviderCreateRequest, ProviderDeleteRequest,
+    ProviderDeleteResponse, ProviderKeyRequest, ProviderKeysResponse, ProviderListResponse,
+    ProviderPatchRequest, ProviderRenameRequest, ProviderRenameResponse, ProviderSpendCapRequest,
     ProviderSpendCapsResponse, ProviderTestRequest, ProviderTestResponse, ProviderWriteResponse,
     QuotaAlertsResponse, QuotaAlertsSetRequest, QuotaAlertsSetResponse, QuotaCreditsModesResponse,
     QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryQuery, QuotaHistoryResponse,
@@ -449,6 +449,22 @@ impl Client {
     /// Lists preset catalog rows.
     pub async fn presets(&self) -> Result<PresetListResponse, ClientError> {
         self.get("/v1/hofund/presets").await
+    }
+
+    /// Syncs the public model catalog.
+    ///
+    /// `force` fetches even when an index is already loaded. Agents `S` uses
+    /// that. Startup uses `force: false`, which is a no-op once a cache exists.
+    pub async fn sync_catalog(
+        &self,
+        request: &CatalogSyncRequest,
+    ) -> Result<CatalogSyncResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            "/v1/hofund/catalog/sync",
+            Some(json_body(request)?),
+        )
+        .await
     }
 
     /// Creates a configured provider.
