@@ -76,6 +76,7 @@ mod spend_cap_live;
 mod spend_caps;
 mod subscriptions;
 mod terminate;
+mod tray;
 mod warmup;
 mod watch;
 
@@ -101,6 +102,7 @@ pub use terminate::{
     ConsoleEvent, Signals, Termination, TolerantWriter, finish, serve_until_signal,
     serve_until_signals,
 };
+pub use tray::{TrayStatus, tray_status};
 
 /// A configuration, credential, or startup failure.
 #[derive(Debug)]
@@ -577,6 +579,7 @@ async fn start_inner(
         .await
         .map_err(|error| DaemonError::new(error.to_string()))?;
     running = running.with_resource(Arc::clone(&route_trace));
+    running = running.with_resource(Arc::clone(&quotas) as Arc<dyn hofund_gateway::QuotaSource>);
     if let Some(hook) = options.relisten_hook {
         running = running.with_bind_hook(hook);
     }
