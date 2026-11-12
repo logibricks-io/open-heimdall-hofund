@@ -33,6 +33,7 @@ mod request;
 mod run;
 mod session;
 mod sign_in;
+mod team;
 mod tokens;
 mod upstream;
 
