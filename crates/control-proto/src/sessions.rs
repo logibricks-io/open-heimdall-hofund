@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{API_VERSION, ControlError, ControlErrorKind, validate_revision};
+use crate::{validate_revision, ControlError, ControlErrorKind, API_VERSION};
 
 /// Default maximum number of rows returned by the session list.
 pub const DEFAULT_SESSION_LIST_LIMIT: usize = 5000;
@@ -738,7 +738,11 @@ fn bad_query(message: &str) -> ControlError {
 
 #[cfg(test)]
 mod tests {
-    use super::{SessionListQuery, SessionOverviewQuery, SessionStatsQuery};
+    use super::{
+        SessionListQuery, SessionManageQuery, SessionOverviewQuery, SessionReadsPatchRequest,
+        SessionSearchQuery, SessionStatsQuery, SessionTranscriptQuery, DEFAULT_SESSION_LIST_LIMIT,
+    };
+    use crate::{ControlErrorKind, MAX_ID_BYTES};
 
     #[test]
     fn list_query_accepts_only_the_contract_days() {
@@ -766,5 +770,74 @@ mod tests {
             .expect("overview");
         assert_eq!(overview.cwd, "/work/repo");
         assert!(SessionOverviewQuery::parse(Some("folder=repo")).is_err());
+    }
+
+    #[test]
+    fn list_query_keeps_model_folder_and_positive_limit() {
+        let query =
+            SessionListQuery::parse(Some("model=gpt-4&folder=%2Ftmp&limit=10")).expect("list");
+        assert_eq!(query.model, "gpt-4");
+        assert_eq!(query.folder, "/tmp");
+        assert_eq!(query.limit(), 10);
+        assert_eq!(
+            SessionListQuery::default().limit(),
+            DEFAULT_SESSION_LIST_LIMIT
+        );
+        assert_eq!(
+            SessionListQuery::parse(Some("limit=1"))
+                .expect("one")
+                .limit(),
+            1
+        );
+        let error = SessionListQuery::parse(Some("limit=0")).expect_err("zero");
+        assert_eq!(error.kind, ControlErrorKind::BadRequest);
+        assert!(error.message.contains("positive integer"));
+    }
+
+    #[test]
+    fn overview_days_and_lowercase_percent_decoding() {
+        let query = SessionOverviewQuery::parse(Some("days=7&cwd=%2fwork")).expect("overview");
+        assert_eq!(query.days, Some(7));
+        assert_eq!(query.cwd, "/work");
+        let a = SessionOverviewQuery::parse(Some("cwd=%61")).expect("lowercase a");
+        assert_eq!(a.cwd, "a");
+    }
+
+    #[test]
+    fn transcript_search_and_manage_queries_keep_fields() {
+        let transcript = SessionTranscriptQuery::parse(Some("sub=child-1")).expect("sub");
+        assert_eq!(transcript.sub.as_deref(), Some("child-1"));
+        assert_eq!(
+            SessionTranscriptQuery::parse(Some("sub="))
+                .expect("empty sub")
+                .sub,
+            None
+        );
+        assert_eq!(SessionTranscriptQuery::parse(None).expect("none").sub, None);
+
+        let search = SessionSearchQuery::parse(Some("agent=claude&q=hello")).expect("search");
+        assert_eq!(search.agent, "claude");
+        assert_eq!(search.q, "hello");
+        let empty = SessionSearchQuery::parse(Some("q=")).expect_err("empty q");
+        assert_eq!(empty.kind, ControlErrorKind::BadRequest);
+        assert!(empty.message.contains("q must not be empty"));
+
+        let manage = SessionManageQuery::parse(Some("agent=pi")).expect("manage");
+        assert_eq!(manage.agent, "pi");
+    }
+
+    #[test]
+    fn reads_patch_rejects_an_overlong_revision_and_unknown_params_are_bad_requests() {
+        let ok = SessionReadsPatchRequest::default();
+        ok.validate().expect("default");
+        let bad = SessionReadsPatchRequest {
+            expected_revision: Some("x".repeat(MAX_ID_BYTES + 1)),
+            ..SessionReadsPatchRequest::default()
+        };
+        let error = bad.validate().expect_err("too long");
+        assert_eq!(error.kind, ControlErrorKind::Unprocessable);
+        let unknown = SessionListQuery::parse(Some("nope=1")).expect_err("unknown");
+        assert_eq!(unknown.kind, ControlErrorKind::BadRequest);
+        assert!(unknown.message.contains("unknown sessions query parameter"));
     }
 }
