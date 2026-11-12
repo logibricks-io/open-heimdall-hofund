@@ -91,7 +91,10 @@ pub use sign_in::{
     SignInOptions, SubscriptionListing, quota_json, subscription_list, subscription_quota,
     subscription_refresh, subscription_sign_in, subscription_sign_out, subscriptions_json,
 };
-pub use terminate::{ConsoleEvent, Termination, TolerantWriter, finish, serve_until_signal};
+pub use terminate::{
+    ConsoleEvent, Signals, Termination, TolerantWriter, finish, serve_until_signal,
+    serve_until_signals,
+};
 
 /// A configuration, credential, or startup failure.
 #[derive(Debug)]
@@ -748,8 +751,10 @@ pub async fn serve(path: &Path) -> Result<(), DaemonError> {
 
 async fn serve_reason(path: &Path) -> Result<Termination, DaemonError> {
     let running = start(path).await?;
+    // Handlers first: a SIGTERM sent on reading the notice must drain.
+    let signals = Signals::register();
     terminate::notice(&format!("listening on http://{}", running.local_addr));
-    Ok(serve_until_signal(running).await)
+    Ok(serve_until_signals(running, signals).await)
 }
 
 /// Waits for Ctrl-C or a control `POST /v1/hofund/shutdown`, then drains.

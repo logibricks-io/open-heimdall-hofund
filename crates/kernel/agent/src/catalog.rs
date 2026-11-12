@@ -1462,8 +1462,11 @@ impl Engine {
                 connected = false;
             }
         }
+        let mut warnings = Vec::new();
         if connected && let Some(credential) = self.credential()? {
-            connected = credential.connected(target)?;
+            let (held, warning) = credential.connected(target);
+            connected = held;
+            warnings.extend(warning);
         }
         if connected && self.status_blocked(session, target) {
             connected = false;
@@ -1479,7 +1482,8 @@ impl Engine {
             connected,
             managed,
             paths,
-        ))
+        )
+        .with_warnings(warnings))
     }
 
     fn status_blocked(&self, session: &Session, target: &GatewayTarget) -> bool {
