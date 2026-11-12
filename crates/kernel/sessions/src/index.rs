@@ -1010,4 +1010,45 @@ mod tests {
         assert_eq!(records[1].days.len(), 1);
         assert_eq!(records[1].days[0].date, "2026-11-11");
     }
+
+    #[test]
+    fn refresh_merges_a_stopped_wsl_cache_when_either_agent_id_is_allowed() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config = temp.path().join("config");
+        std::fs::create_dir_all(config.join("state")).expect("state");
+        let mut cache = crate::wsl::WslCache::new();
+        cache.insert(
+            "Ubuntu".to_owned(),
+            crate::wsl::WslListing {
+                home: r"\\wsl.localhost\Ubuntu\home\me".to_owned(),
+                running: false,
+                files: vec![crate::wsl::WslEntry {
+                    agent: "agent".to_owned(),
+                    key: "agent:abc".to_owned(),
+                    path: PathBuf::from(r"\\wsl.localhost\Ubuntu\home\me\.agent\abc.jsonl"),
+                    main: true,
+                    size: 10,
+                    modified_ns: 1,
+                }],
+            },
+        );
+        crate::wsl::save_cache(&crate::wsl::wsl_cache_path(&config), &cache).expect("cache");
+
+        let mut consent = Consent::new(&config);
+        consent.settle();
+        // Allow only the remapped id. The cache row's raw agent is `agent`.
+        consent
+            .set_reads(
+                Some(false),
+                [(crate::wsl::wsl_agent_id("agent", "Ubuntu"), true)],
+            )
+            .expect("consent");
+
+        let mut index = SessionIndex::load(&config, &consent);
+        index.refresh(&consent, &[]).expect("refresh");
+        let records = index.list(&consent);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].id, "agent:abc");
+        assert_eq!(records[0].agent, "agent@wsl:Ubuntu");
+    }
 }
