@@ -29,10 +29,12 @@ impl Clock {
             clock.asked.lock().expect("asked").push(within);
             let clock = clock.clone();
             Box::pin(poll_fn(move |context| {
+                // fire_after can fire between a check and registration; block_on would park forever.
+                let mut waker = clock.waker.lock().expect("waker");
                 if clock.fired.load(Ordering::SeqCst) {
                     Poll::Ready(())
                 } else {
-                    *clock.waker.lock().expect("waker") = Some(context.waker().clone());
+                    *waker = Some(context.waker().clone());
                     Poll::Pending
                 }
             }))
@@ -44,8 +46,12 @@ impl Clock {
     }
 
     fn fire(&self) {
-        self.fired.store(true, Ordering::SeqCst);
-        if let Some(waker) = self.waker.lock().expect("waker").take() {
+        let waker = {
+            let mut waker = self.waker.lock().expect("waker");
+            self.fired.store(true, Ordering::SeqCst);
+            waker.take()
+        };
+        if let Some(waker) = waker {
             waker.wake();
         }
     }
