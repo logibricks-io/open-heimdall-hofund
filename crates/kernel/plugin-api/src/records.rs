@@ -1338,6 +1338,13 @@ pub enum SignInProof {
         /// The `state` value the helper checked.
         state: String,
     },
+    /// A native-app callback carrying an encrypted access token.
+    QueryToken {
+        /// The provider's user id.
+        user_id: String,
+        /// The encrypted access token.
+        access_token: SecretString,
+    },
     /// A device-flow code.
     Device {
         /// The user code.
@@ -1357,6 +1364,15 @@ impl SignInProof {
         Self::Callback {
             code: code.into(),
             state: state.into(),
+        }
+    }
+
+    /// A native-app query-token proof.
+    #[must_use]
+    pub fn query_token(user_id: impl Into<String>, access_token: impl Into<SecretString>) -> Self {
+        Self::QueryToken {
+            user_id: user_id.into(),
+            access_token: access_token.into(),
         }
     }
 
@@ -1382,6 +1398,11 @@ impl std::fmt::Debug for SignInProof {
                 .debug_struct("Callback")
                 .field("code", &"<redacted>")
                 .field("state", state)
+                .finish(),
+            Self::QueryToken { user_id, .. } => formatter
+                .debug_struct("QueryToken")
+                .field("user_id", user_id)
+                .field("access_token", &"<redacted>")
                 .finish(),
             Self::Device { .. } => formatter.write_str("Device { user_code: <redacted> }"),
             Self::Token(_) => formatter.write_str("Token(<redacted>)"),
@@ -3327,5 +3348,9 @@ mod tests {
         assert_eq!(ctx.option("label"), None);
         assert!(SignInCtx::new(plugin).with_option("", "x").is_err());
         assert_eq!(format!("{:?}", SignInProof::Await), "Await");
+        let proof = SignInProof::query_token("user-1", "ciphertext-secret");
+        let shown = format!("{proof:?}");
+        assert!(shown.contains("user-1"));
+        assert!(!shown.contains("ciphertext-secret"));
     }
 }
