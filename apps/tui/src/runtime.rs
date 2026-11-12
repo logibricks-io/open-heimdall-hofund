@@ -245,6 +245,7 @@ mod tests {
     use crate::gateway::{HandoffDeps, HandoffState, record_attach};
     use crate::state::PageId;
     use hofund_control_client::Client;
+    use tokio::sync::mpsc;
 
     struct AliveDeps;
 
@@ -327,5 +328,121 @@ mod tests {
         );
         assert!(state.spawned);
         assert_eq!(state.child_pid, Some(42));
+    }
+
+    async fn serve_status(status: u16, path_prefix: &str) -> std::net::SocketAddr {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let prefix = path_prefix.to_owned();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut buf = vec![0_u8; 4096];
+                let _ = stream.read(&mut buf).await;
+                let req = String::from_utf8_lossy(&buf);
+                let hit = req
+                    .lines()
+                    .next()
+                    .is_some_and(|line| line.contains(&prefix));
+                let code = if hit { status } else { 404 };
+                let body = if code == 200 {
+                    "{}".to_owned()
+                } else {
+                    r#"{"version":1,"error":{"kind":"not_found","message":"missing","request_id":"test","retry_after_ms":null,"details":[]}}"#.to_owned()
+                };
+                let response = format!(
+                    "HTTP/1.1 {code} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            }
+        });
+        addr
+    }
+
+    async fn recv_msg(rx: &mut mpsc::Receiver<super::WorkerMsg>) -> super::WorkerMsg {
+        tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("worker timed out")
+            .expect("channel closed")
+    }
+
+    #[tokio::test]
+    async fn schedule_sessions_fetch_maps_404_and_other_errors() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let addr = serve_status(404, "/v1/hofund/sessions").await;
+        let client = Client::tcp(addr, "t");
+        super::schedule_sessions_fetch(
+            Some(&client),
+            &tx,
+            Default::default(),
+            Default::default(),
+            3,
+        );
+        let super::WorkerMsg::SessionsLoad {
+            generation,
+            outcome,
+        } = recv_msg(&mut rx).await
+        else {
+            panic!("expected sessions load");
+        };
+        assert_eq!(generation, 3);
+        assert!(
+            matches!(*outcome, super::SessionsLoadOutcome::NotInBuild),
+            "{outcome:?}"
+        );
+
+        let addr = serve_status(500, "/v1/hofund/sessions").await;
+        let client = Client::tcp(addr, "t");
+        super::schedule_sessions_fetch(
+            Some(&client),
+            &tx,
+            Default::default(),
+            Default::default(),
+            4,
+        );
+        let super::WorkerMsg::SessionsLoad { outcome, .. } = recv_msg(&mut rx).await else {
+            panic!("expected sessions load");
+        };
+        assert!(matches!(*outcome, super::SessionsLoadOutcome::Err(_)));
+    }
+
+    #[tokio::test]
+    async fn schedule_open_page_load_uses_sessions_fetch_for_sessions() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let addr = serve_status(404, "/v1/hofund/sessions").await;
+        let client = Client::tcp(addr, "t");
+        let app = App::for_test(PageId::Sessions);
+        super::schedule_open_page_load(&app, Some(&client), &tx);
+        let msg = recv_msg(&mut rx).await;
+        assert!(
+            matches!(msg, super::WorkerMsg::SessionsLoad { .. }),
+            "sessions page must use the list/stats fetch, not the probe path"
+        );
+    }
+
+    #[tokio::test]
+    async fn schedule_open_page_load_probes_library() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let addr = serve_status(200, "/v1/hofund/library").await;
+        let client = Client::tcp(addr, "t");
+        let app = App::for_test(PageId::Library);
+        super::schedule_open_page_load(&app, Some(&client), &tx);
+        let msg = recv_msg(&mut rx).await;
+        assert!(
+            matches!(
+                msg,
+                super::WorkerMsg::PageProbe {
+                    page: PageId::Library,
+                    ..
+                }
+            ),
+            "library must still be probed"
+        );
     }
 }

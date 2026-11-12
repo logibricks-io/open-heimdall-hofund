@@ -88,6 +88,12 @@ impl SessionsPage {
         self.not_in_build
     }
 
+    /// Last fetch error, if the most recent load failed.
+    #[must_use]
+    pub fn load_error(&self) -> Option<&str> {
+        self.load_error.as_deref()
+    }
+
     /// `days` query for the active range tab.
     #[must_use]
     pub fn days(&self) -> u32 {

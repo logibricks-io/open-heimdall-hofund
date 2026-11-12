@@ -69,4 +69,18 @@ mod tests {
         resume.cwd = dir.to_string_lossy().into_owned();
         assert!(run_foreground(&resume).is_ok());
     }
+
+    #[test]
+    fn missing_or_absent_cwd_is_rejected() {
+        let mut empty = SessionResume::default();
+        empty.argv = vec!["/bin/true".to_owned()];
+        let err = run_foreground(&empty).expect_err("empty cwd");
+        assert!(err.contains("missing cwd"), "{err}");
+
+        let mut missing = SessionResume::default();
+        missing.argv = vec!["/bin/true".to_owned()];
+        missing.cwd = "/no/such/hofund-r44-resume-cwd".to_owned();
+        let err = run_foreground(&missing).expect_err("absent cwd");
+        assert!(err.contains("isn't there any more"), "{err}");
+    }
 }

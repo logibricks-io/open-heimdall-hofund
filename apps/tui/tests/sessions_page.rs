@@ -13,7 +13,7 @@ fn sample_session(id: &str) -> SessionSummary {
     tokens.input = 42;
     let mut row = SessionSummary::default();
     row.id = id.to_owned();
-    row.agent = "claude".to_owned();
+    row.agent = "agent".to_owned();
     row.title = "fixture".to_owned();
     row.cwd = "/workspace/hofund".to_owned();
     row.last_ms = 1_700_000_000_000;
@@ -120,4 +120,107 @@ fn enter_with_argv_requests_resume() {
         crossterm::event::KeyModifiers::empty(),
     ));
     assert!(matches!(action, AppAction::Resume(_)));
+}
+
+#[test]
+fn reload_key_bumps_generation() {
+    let mut app = App::for_test(PageId::Sessions);
+    let before = app.pages.page_dyn(PageId::Sessions).fetch_gen();
+    let action = app.handle_key(crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Char('r'),
+        crossterm::event::KeyModifiers::empty(),
+    ));
+    assert!(matches!(action, AppAction::Reload));
+    assert!(app.pages.page_dyn(PageId::Sessions).fetch_gen() > before);
+}
+
+#[test]
+fn range_key_reloads_once_and_stats_key_does_not() {
+    let mut app = App::for_test(PageId::Sessions);
+    let start = app.pages.page_dyn(PageId::Sessions).fetch_gen();
+    let action = app.handle_key(crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Right,
+        crossterm::event::KeyModifiers::empty(),
+    ));
+    assert!(matches!(action, AppAction::Reload));
+    let after_range = app.pages.page_dyn(PageId::Sessions).fetch_gen();
+    assert!(after_range > start);
+    let action = app.handle_key(crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Char('s'),
+        crossterm::event::KeyModifiers::empty(),
+    ));
+    assert!(matches!(action, AppAction::None));
+    assert_eq!(
+        app.pages.page_dyn(PageId::Sessions).fetch_gen(),
+        after_range
+    );
+}
+
+#[test]
+fn pages_sessions_returns_the_live_page() {
+    let mut app = App::for_test(PageId::Sessions);
+    let mut consent = SessionConsent::default();
+    consent.asked = true;
+    let mut list = SessionListResponse::default();
+    list.consent = consent;
+    list.sessions = vec![sample_session("live")];
+    app.pages
+        .sessions_mut()
+        .set_fixture_list(list, SessionStatsResponse::default());
+    assert_eq!(app.pages.sessions().sessions()[0].id, "live");
+}
+
+#[test]
+fn apply_worker_msg_loads_list_and_maps_404_to_not_in_build() {
+    let mut app = App::for_test(PageId::Sessions);
+    let generation = 1;
+    let mut consent = SessionConsent::default();
+    consent.asked = true;
+    let mut list = SessionListResponse::default();
+    list.consent = consent;
+    list.sessions = vec![sample_session("w")];
+    hofund_tui::runtime::apply_worker_msg(
+        &mut app,
+        hofund_tui::runtime::WorkerMsg::SessionsLoad {
+            generation,
+            outcome: Box::new(hofund_tui::runtime::SessionsLoadOutcome::Ok {
+                list,
+                stats: Box::new(SessionStatsResponse::default()),
+            }),
+        },
+    );
+    assert_eq!(app.pages.sessions().sessions()[0].id, "w");
+    assert!(!app.pages.sessions().not_in_build());
+
+    hofund_tui::runtime::apply_worker_msg(
+        &mut app,
+        hofund_tui::runtime::WorkerMsg::SessionsLoad {
+            generation,
+            outcome: Box::new(hofund_tui::runtime::SessionsLoadOutcome::NotInBuild),
+        },
+    );
+    assert!(app.pages.sessions().not_in_build());
+
+    hofund_tui::runtime::apply_worker_msg(
+        &mut app,
+        hofund_tui::runtime::WorkerMsg::SessionsLoad {
+            generation,
+            outcome: Box::new(hofund_tui::runtime::SessionsLoadOutcome::Err(
+                "dashboard down".to_owned(),
+            )),
+        },
+    );
+    assert_eq!(app.pages.sessions().load_error(), Some("dashboard down"));
+}
+
+#[test]
+fn page_shell_reload_updates_fetch_gen() {
+    let mut shell = hofund_tui::pages::PageShell::new(PageId::Agents, "not in this build");
+    assert_eq!(shell.fetch_gen(), 0);
+    shell.reload(7);
+    assert_eq!(shell.fetch_gen(), 7);
+    let mut app = App::for_test(PageId::Agents);
+    let before = app.pages.page_dyn(PageId::Agents).fetch_gen();
+    let _ = app.reload_open_page();
+    assert!(app.pages.page_dyn(PageId::Agents).fetch_gen() > before);
 }
