@@ -93,6 +93,9 @@ pub fn window_start<Tz: TimeZone>(window: Window, now: DateTime<Tz>) -> Option<i
 /// Outcome marker for a try handed to another member after billing tokens.
 pub const OUTCOME_HANDED_ON: &str = "handed_on";
 
+/// Outcome marker for a request abandoned on the gateway's own waiter's deadline.
+pub const OUTCOME_STOPPED_WAITING: &str = "stopped_waiting";
+
 /// Whether a row counts toward request totals.
 #[must_use]
 pub fn counts_as_request(outcome: &str) -> bool {
@@ -161,7 +164,8 @@ pub struct Row {
     pub cost_usd: Option<f64>,
     /// List price per million tokens stored on the row.
     pub price: Option<TokenPrice>,
-    /// Row kind for handed-off, refusal, or turned-away tries; empty for ordinary rows.
+    /// Row kind for a handoff, refusal, stopped wait, or other special outcome;
+    /// empty for ordinary rows.
     pub outcome: String,
     /// Five-byte API-key fingerprint of the provider key that served the request.
     /// Empty when the member has no API key.
@@ -1021,5 +1025,19 @@ mod tests {
             )
             .expect("plan");
         assert!(plan.contains("requests_created_unix"), "{plan}");
+    }
+
+    #[test]
+    fn d84_stopped_waiting_is_a_request_outcome() {
+        assert!(super::counts_as_request(super::OUTCOME_STOPPED_WAITING));
+        let dir = tempfile::tempdir().expect("temp dir");
+        let ledger = Ledger::open(&dir.path().join("usage.sqlite")).expect("ledger");
+        let mut stopped = row(20, None, None);
+        stopped.status = "504".to_owned();
+        stopped.outcome = super::OUTCOME_STOPPED_WAITING.to_owned();
+        ledger.record(&stopped).expect("record");
+        let (rows, totals) = ledger.summary(None, 10).expect("summary");
+        assert_eq!(rows[0].outcome, "stopped_waiting");
+        assert_eq!(totals.requests, 1);
     }
 }

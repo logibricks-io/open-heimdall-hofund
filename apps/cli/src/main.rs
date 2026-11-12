@@ -22,6 +22,7 @@ mod serve;
 mod sessions;
 mod subscription;
 mod tui;
+mod uninstall;
 mod usage;
 mod visible;
 mod warmup;
@@ -75,6 +76,7 @@ fn main() -> ExitCode {
         Command::Warmup(command) => warmup::run(&config, command),
         Command::Checkin(command) => checkin::run(&config, command),
         Command::Sessions(command) => finish(sessions::run(&config, &command)),
+        Command::Uninstall { yes, purge } => uninstall::run(&config, yes, purge),
         other => finish(run_control(&config, other)),
     }
 }
@@ -195,6 +197,7 @@ fn run_control(config: &Path, command: Command) -> Result<String, String> {
             | Command::Warmup(_)
             | Command::Checkin(_)
             | Command::Sessions(_)
+            | Command::Uninstall { .. }
             | Command::Accounts(_) => Err("not a control command".to_owned()),
         }
     })
@@ -215,6 +218,10 @@ enum Command {
     ConfigReload,
     Status,
     Shutdown,
+    Uninstall {
+        yes: bool,
+        purge: bool,
+    },
     Healthcheck,
     /// `events tail`; `requests` adds the requests topic.
     EventsTail {
@@ -375,6 +382,7 @@ enum HelpTopic {
     ConfigReload,
     Status,
     Shutdown,
+    Uninstall,
     Healthcheck,
     EventsTail,
     Token,
@@ -407,6 +415,8 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
     let mut config = None;
     let mut dry_run = false;
     let mut force = false;
+    let mut yes = false;
+    let mut purge = false;
     let mut requests = false;
     let mut no_color = false;
     let mut read_only = false;
@@ -480,6 +490,8 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
             }
             "--dry-run" => dry_run = true,
             "--force" => force = true,
+            "--yes" => yes = true,
+            "--purge" => purge = true,
             "--requests" => requests = true,
             "--no-color" => no_color = true,
             "--read-only" => read_only = true,
@@ -547,6 +559,7 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
         ["config", "reload"] => Command::ConfigReload,
         ["status"] => Command::Status,
         ["shutdown"] => Command::Shutdown,
+        ["uninstall"] => Command::Uninstall { yes, purge },
         ["healthcheck"] => Command::Healthcheck,
         ["events", "tail"] => Command::EventsTail { requests },
         ["token", "show"] => Command::TokenShow,
@@ -837,6 +850,12 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
     if force && !matches!(command, Command::AgentDisconnect { .. }) {
         return Err("--force is only valid with agent disconnect".to_owned());
     }
+    if yes && !matches!(command, Command::Uninstall { .. }) {
+        return Err("--yes is only valid with uninstall".to_owned());
+    }
+    if purge && !matches!(command, Command::Uninstall { .. }) {
+        return Err("--purge is only valid with uninstall".to_owned());
+    }
     if requests && !matches!(command, Command::EventsTail { .. }) {
         return Err("--requests is only valid with events tail".to_owned());
     }
@@ -885,6 +904,7 @@ fn help_topic(words: &[&str]) -> Result<HelpTopic, String> {
         ["config", ..] => HelpTopic::ConfigCheck,
         ["status", ..] => HelpTopic::Status,
         ["shutdown", ..] => HelpTopic::Shutdown,
+        ["uninstall", ..] => HelpTopic::Uninstall,
         ["healthcheck", ..] => HelpTopic::Healthcheck,
         ["events", ..] => HelpTopic::EventsTail,
         ["token", "show", ..] => HelpTopic::TokenShow,
@@ -931,6 +951,7 @@ fn help_text(topic: HelpTopic) -> String {
         HelpTopic::ConfigReload => RELOAD_HELP,
         HelpTopic::Status => STATUS_HELP,
         HelpTopic::Shutdown => SHUTDOWN_HELP,
+        HelpTopic::Uninstall => UNINSTALL_HELP,
         HelpTopic::Healthcheck => HEALTHCHECK_HELP,
         HelpTopic::EventsTail => EVENTS_TAIL_HELP,
         HelpTopic::Token => TOKEN_HELP,
@@ -975,6 +996,7 @@ commands:
   serve                           bind the listen address and serve
   status                          print the daemon status, or a local report
   shutdown                        stop a running daemon
+  uninstall [--yes] [--purge]     restore every managed agent and optionally purge state
   healthcheck                     probe the model gateway's /health
   events tail [--requests]        print daemon events, starting a daemon if none runs
   config check                    validate the config and build its providers
@@ -1096,6 +1118,26 @@ usage: hofund shutdown [--config PATH]
 
 Ask the running daemon to finish in-flight requests and exit. With no daemon
 running this prints `no daemon running; nothing to shut down` and exits 0.
+";
+
+const UNINSTALL_HELP: &str = "\
+usage: hofund uninstall [--yes] [--purge] [--config PATH]
+
+Disconnect every agent with hofund backups, using non-force disconnect so edits
+made after connect stay. One failed agent does not stop the others; its error
+and the `hofund agent disconnect <id> --force` recovery command are printed.
+
+The command refuses to change anything while a hofund gateway/daemon runs;
+stop it first, for example with `hofund shutdown`. Without --yes it prints the
+plan and asks [y/N] on a terminal. Non-terminal stdin requires --yes.
+
+--purge also deletes the resolved config, token, usage database, gateway-key
+and OIDC stores, and .hofund state directory. Without it those paths stay for
+a reinstall. Symlinks are removed as links, never followed. Account entries in
+the OS keychain are listed as left behind because no bulk-removal API exists.
+
+The hofund binary stays where it is; the final output names it so you can
+delete it. Any failed agent or file removal makes the command exit non-zero.
 ";
 
 const EVENTS_TAIL_HELP: &str = "\
@@ -1607,6 +1649,25 @@ mod tests {
             panic!("{parsed:?}");
         };
         assert_eq!(options.days, Some(30));
+    fn uninstall_command_parses_yes_and_purge() {
+        assert_eq!(
+            command(&["uninstall"]),
+            Ok(Command::Uninstall {
+                yes: false,
+                purge: false,
+            })
+        );
+        assert_eq!(
+            command(&["uninstall", "--yes", "--purge"]),
+            Ok(Command::Uninstall {
+                yes: true,
+                purge: true
+            })
+        );
+        assert!(command(&["uninstall", "--unknown"]).is_err());
+        assert!(command(&["status", "--yes"]).is_err());
+        assert!(help_text(HelpTopic::Overview).contains("uninstall [--yes] [--purge]"));
+        assert!(help_text(help_topic(&["uninstall"]).expect("topic")).contains("[y/N]"));
     }
 
     #[test]

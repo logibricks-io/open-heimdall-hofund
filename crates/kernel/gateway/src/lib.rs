@@ -34,6 +34,7 @@ pub use relisten::{Relisten, RelistenError};
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
+use std::future::Future;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -60,13 +61,13 @@ use hofund_codec::{
 use hofund_config::VisibleCatalog;
 use hofund_ir::{BlockStart, Request as ModelRequest, StreamEvent, too_long, words_of};
 use hofund_plugin_api::{
-    BodyStream, InboundSurface, Method, PluginError, PluginErrorKind, ProtocolId,
+    BodyStream, InboundSurface, Method, PluginError, PluginErrorKind, ProtocolId, StoppedWaiting,
 };
 use hofund_plugin_host::HttpBackend;
 use hofund_router::{AttemptHook, Completion, RouteScope, Routed, RouterError, Snapshot, WaitHook};
 use hofund_secrets::oidc::RuleStore;
 use hofund_secrets::{Identity, KeyStore};
-use hofund_usage::{Ledger, Row, UNKNOWN_CLIENT_AGENT};
+use hofund_usage::{Ledger, OUTCOME_STOPPED_WAITING, Row, UNKNOWN_CLIENT_AGENT};
 use thiserror::Error;
 use tokio::net::TcpListener;
 use tokio::sync::{oneshot, watch};
@@ -76,9 +77,10 @@ const BODY_LIMIT: usize = 8 * 1024 * 1024;
 /// The largest body a surface takes: room for a speech-to-text upload, which
 /// the common speech-to-text APIs cap at 25 MB.
 const SURFACE_BODY_LIMIT: usize = 32 * 1024 * 1024;
-/// How long a surface call may take: a forwarded transcription of a long
-/// recording takes minutes.
-const SURFACE_TIMEOUT: Duration = Duration::from_secs(180);
+/// How long a surface call may take. This outlasts the 240-second inbound
+/// compaction budget with room to build its local summary, while staying below
+/// the client's 300-second silent-stream limit.
+const SURFACE_TIMEOUT: Duration = Duration::from_secs(285);
 
 /// Resolves the agent id on an authenticated request, when known.
 pub type RequestAgentHook = Arc<dyn Fn(&HeaderMap, &Identity) -> Option<String> + Send + Sync>;
@@ -262,6 +264,7 @@ struct RequestTrack {
     finished: bool,
     drop_status: u16,
     cancel_usage: Option<(Arc<Ledger>, UsageMeta)>,
+    stopped_waiting: Option<StoppedWaiting>,
     reservation: Option<limits::Reservation>,
 }
 
@@ -284,6 +287,7 @@ impl RequestTrack {
             finished: false,
             drop_status: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
             cancel_usage: None,
+            stopped_waiting: None,
             reservation: None,
         }
     }
@@ -309,6 +313,27 @@ impl RequestTrack {
             self.in_flight.fetch_sub(1, Ordering::SeqCst);
             self.active = false;
         }
+    }
+
+    fn stop_waiting(
+        &mut self,
+        marker: StoppedWaiting,
+        usage: Arc<Ledger>,
+        request: &ModelRequest,
+        identity: &Identity,
+    ) {
+        self.stopped_waiting = Some(marker);
+        self.cancel_usage = Some((
+            usage,
+            UsageMeta::new(
+                request,
+                "",
+                &request.model,
+                self.started,
+                identity,
+                UNKNOWN_CLIENT_AGENT,
+            ),
+        ));
     }
 
     fn client_waiting(&mut self, usage: Arc<Ledger>, request: &ModelRequest, identity: &Identity) {
@@ -359,6 +384,7 @@ impl RequestTrack {
             finished: self.finished,
             drop_status: self.drop_status,
             cancel_usage: self.cancel_usage.take(),
+            stopped_waiting: self.stopped_waiting.clone(),
             reservation: self.reservation.take(),
         };
         self.active = false;
@@ -372,11 +398,26 @@ impl Drop for RequestTrack {
         if !self.finished {
             // Panic, cancellation, or a path that forgot finish: still emit and
             // return the counter to zero.
-            let status = self.drop_status;
-            if status == 499
-                && let Some((usage, meta)) = self.cancel_usage.take()
-            {
-                write_usage_simple(&usage, &meta, None, StatusCode::from_u16(499).expect("499"));
+            let stopped = self
+                .stopped_waiting
+                .as_ref()
+                .is_some_and(StoppedWaiting::is_stopped);
+            let status = if stopped {
+                StatusCode::GATEWAY_TIMEOUT.as_u16()
+            } else {
+                self.drop_status
+            };
+            if let Some((usage, meta)) = self.cancel_usage.take() {
+                if stopped {
+                    write_usage_stopped_waiting(&usage, &meta);
+                } else if status == 499 {
+                    write_usage_simple(
+                        &usage,
+                        &meta,
+                        None,
+                        StatusCode::from_u16(499).expect("499"),
+                    );
+                }
             }
             self.end_with(None, status, None, None);
         } else {
@@ -402,6 +443,9 @@ fn unix_ms_now() -> u64 {
 #[doc(hidden)]
 pub const CONTROL_DRAIN: std::time::Duration = std::time::Duration::from_secs(4);
 
+/// Hook run after the HTTP drain, before [`Running`] is dropped.
+type AfterDrainHook = Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send>;
+
 /// A bound server.
 pub struct Running {
     /// The address the listener accepted at start. After a relisten,
@@ -419,6 +463,7 @@ pub struct Running {
     sockets: Option<Arc<responses_ws::SocketRegistry>>,
     relisten: Option<Relisten>,
     fatal: Option<watch::Receiver<Option<String>>>,
+    after_drain: Option<AfterDrainHook>,
 }
 
 /// The listener could not be bound.
@@ -588,7 +633,7 @@ impl Gateway {
     }
 
     /// Mounts inbound surfaces. A request that matches one is authenticated,
-    /// then handled inside the inbound span with a 60 second deadline.
+    /// then handled inside the inbound span with a 285 second deadline.
     ///
     /// Codec routes stay on their own paths. A surface is reached from the
     /// fallback, so a codec path wins when both could match.
@@ -757,6 +802,7 @@ impl Running {
             sockets: None,
             relisten: None,
             fatal: None,
+            after_drain: None,
         }
     }
 
@@ -876,6 +922,21 @@ impl Running {
         self
     }
 
+    /// Runs `hook` after the HTTP drain, before this server is dropped.
+    ///
+    /// The daemon uses this to shut constructed upstream providers down so
+    /// parked children are not orphaned.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_after_drain<F, Fut>(mut self, hook: F) -> Self
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        self.after_drain = Some(Box::new(move || Box::pin(hook())));
+        self
+    }
+
     /// Returns the routing trace book stored with [`Self::with_resource`].
     #[must_use]
     pub fn route_trace_book(&self) -> Option<Arc<hofund_router::RouteTraceBook>> {
@@ -928,6 +989,8 @@ impl Running {
     /// Asks the server to stop, aborts attached tasks, and waits for the server.
     /// Control listeners close connections that outlast their drain deadline.
     /// Responses sockets close after their turns; dropping a bounded drain cuts them.
+    /// After the HTTP drain, any [`Self::with_after_drain`] hook runs so
+    /// constructed upstream providers can shut down before they are dropped.
     pub async fn shutdown(mut self) {
         self.request_shutdown();
         for task in self.attached.drain(..) {
@@ -957,6 +1020,9 @@ impl Running {
                     let _ = task.await;
                 }
             }
+        }
+        if let Some(hook) = self.after_drain.take() {
+            hook().await;
         }
     }
 }
@@ -1745,6 +1811,7 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
     let uri = request.uri().clone();
     let headers = request.headers().clone();
     let inherited = request.extensions().get::<Identity>().cloned();
+    let stopped_waiting = request.extensions().get::<StoppedWaiting>().cloned();
     if path == "/v1/messages/count_tokens" {
         return count_tokens(app, headers, uri, request, inherited, "/v1/messages", None).await;
     }
@@ -1945,6 +2012,9 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
         },
     )
     .with_reservation(reservation);
+    if let Some(marker) = stopped_waiting {
+        track.stop_waiting(marker, Arc::clone(&app.usage), &model_request, &identity);
+    }
     let turn = turn_in(&model_request);
     let conversation = hofund_router::affinity::Conversation::new(
         conversation_key(&model_request.model, &identity_headers, &bytes),
@@ -3567,6 +3637,7 @@ fn finish_record(row: &mut RecordOnEnd, status: StatusCode) {
         status,
         row.pricer.as_deref(),
         row.provider_free,
+        "",
     );
     if let Some(track) = row.track.as_mut() {
         track.end_with(
@@ -3584,7 +3655,19 @@ fn write_usage_simple(
     tokens: Option<(Option<i64>, Option<i64>)>,
     status: StatusCode,
 ) {
-    write_usage(usage, meta, tokens, status, None, false);
+    write_usage(usage, meta, tokens, status, None, false, "");
+}
+
+fn write_usage_stopped_waiting(usage: &Ledger, meta: &UsageMeta) {
+    write_usage(
+        usage,
+        meta,
+        None,
+        StatusCode::GATEWAY_TIMEOUT,
+        None,
+        false,
+        OUTCOME_STOPPED_WAITING,
+    );
 }
 
 fn write_usage_app(
@@ -3600,6 +3683,7 @@ fn write_usage_app(
         status,
         app.pricer.as_deref(),
         false,
+        "",
     );
 }
 
@@ -3610,6 +3694,7 @@ fn write_usage(
     status: StatusCode,
     pricer: Option<&hofund_model_catalog::EffectivePricer>,
     provider_free: bool,
+    outcome: &str,
 ) {
     let (input_tokens, output_tokens) = tokens.unwrap_or((None, None));
     let mut details = meta.details;
@@ -3659,6 +3744,7 @@ fn write_usage(
         first_text_ms: details.first_text_ms,
         first_reasoning_ms: details.first_reasoning_ms,
         flow_ms: details.flow_ms,
+        outcome: outcome.to_owned(),
         ..Default::default()
     };
     if details.uncached_input_tokens.is_none() {
@@ -3775,6 +3861,21 @@ fn text_response(status: StatusCode, message: &str) -> Response {
 }
 
 #[cfg(test)]
+mod surface_timeout_tests {
+    use std::time::Duration;
+
+    use super::SURFACE_TIMEOUT;
+
+    #[test]
+    fn d84_surface_timeout_outlives_the_inbound_compaction_budget() {
+        // The inbound plugin's whole compaction budget is 240 seconds; the
+        // local summary still needs time before the client leaves at 300.
+        assert!(SURFACE_TIMEOUT > Duration::from_secs(240));
+        assert!(SURFACE_TIMEOUT < Duration::from_secs(300));
+    }
+}
+
+#[cfg(test)]
 mod request_event_tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
@@ -3814,6 +3915,7 @@ mod request_event_tests {
             finished: false,
             drop_status: 500,
             cancel_usage: None,
+            stopped_waiting: None,
             reservation: None,
         };
         // Mirror begin's increment (begin also calls started).
@@ -3856,6 +3958,7 @@ mod request_event_tests {
                 finished: false,
                 drop_status: 500,
                 cancel_usage: None,
+                stopped_waiting: None,
                 reservation: None,
             };
             counter.fetch_add(1, Ordering::SeqCst);

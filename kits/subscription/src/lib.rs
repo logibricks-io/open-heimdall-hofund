@@ -2,7 +2,7 @@
 //!
 //! This crate is unpublished and is only a dev-dependency of a subscription
 //! plugin. [`test_host`] builds a `hofund_plugin_host::HostContext` with fake
-//! backends. [`block_on`], [`join_all`], and [`poll_once`] drive async plugin
+//! backends. [`block_on`], [`join_all`], [`drive_until`], and [`poll_once`] drive async plugin
 //! calls without a plugin depending on tokio. Conformance tests land in PR D.
 
 use std::future::Future;
@@ -50,6 +50,29 @@ pub fn block_on<T>(future: impl Future<Output = T>) -> T {
 /// Runs every future concurrently and returns their outputs in order.
 pub async fn join_all<T>(futures: Vec<Pin<Box<dyn Future<Output = T> + '_>>>) -> Vec<T> {
     futures_util::future::join_all(futures).await
+}
+
+/// Polls `future` with a real runtime waker until `until` completes.
+///
+/// Use this when a call must make progress (for example recording HTTP)
+/// before the test acts, instead of a fixed `yield_times` budget.
+///
+/// # Panics
+///
+/// Panics if `future` completes first.
+pub async fn drive_until<F, U, T>(future: Pin<&mut F>, until: U)
+where
+    F: Future<Output = T> + ?Sized,
+    U: Future<Output = ()>,
+    T: std::fmt::Debug,
+{
+    let until = std::pin::pin!(until);
+    match futures_util::future::select(future, until).await {
+        futures_util::future::Either::Left((result, _)) => {
+            panic!("future finished early: {result:?}")
+        }
+        futures_util::future::Either::Right(((), _)) => {}
+    }
 }
 
 /// Polls `future` once with a no-op waker.
