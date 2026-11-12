@@ -26,6 +26,7 @@ mod quota;
 mod refresh;
 mod session;
 mod sign_in;
+mod team;
 mod tokens;
 
 pub(crate) use endpoints::Endpoints;

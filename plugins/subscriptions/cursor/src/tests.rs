@@ -1165,3 +1165,118 @@ fn r8c_upstream_stays_unsupported() {
     };
     assert_eq!(error.kind(), PluginErrorKind::Unsupported);
 }
+
+fn jwt_with_sub(email: &str, sub: &str, exp: i64) -> String {
+    let claims = format!(r#"{{"email":"{email}","sub":"{sub}","exp":{exp}}}"#);
+    format!("e30.{}.sig", b64url(claims.as_bytes()))
+}
+
+fn write_cli_config(dir: &Path, body: &str) {
+    std::fs::create_dir_all(dir).expect("team dir");
+    std::fs::write(dir.join("cli-config.json"), body).expect("cli-config");
+}
+
+fn upsert_oauth(host: &TestHost, email: &str, token: &str) -> hofund_plugin_api::AccountId {
+    let id = account_id_from(&["cursor", email]);
+    let blob = tokens::blob_oauth(
+        &hofund_plugin_api::SecretString::from(token.to_owned()),
+        &hofund_plugin_api::SecretString::from("none"),
+        4_000_000_000_000,
+        email,
+        None,
+    );
+    let account = host
+        .context()
+        .accounts()
+        .account(id.clone(), email)
+        .expect("account");
+    block_on(host.context().accounts().upsert(account, blob.to_secret())).expect("upsert");
+    id
+}
+
+fn run_quota_with_cli_config(
+    config_dir: &Path,
+    cli_body: &str,
+    email: &str,
+    sub: &str,
+) -> (Vec<u8>, Option<String>) {
+    write_cli_config(config_dir, cli_body);
+    let _guard = crate::team::begin_test(Some(config_dir.to_path_buf()));
+    crate::team::set_test_now_ms(Some(1_000));
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub_plugin = subscription(&host);
+    let token = jwt_with_sub(email, sub, 4_000_000_000);
+    let id = upsert_oauth(&host, email, &token);
+    host.http().enqueue_response(
+        200,
+        &[("content-type", "application/json")],
+        br#"{"billingCycleEnd":"1792833042000","planUsage":{"autoPercentUsed":1,"apiPercentUsed":2,"totalPercentUsed":3}}"#,
+    );
+    block_on(sub_plugin.quota(&id, host.context())).expect("quota");
+    let period_url = endpoints().dashboard("GetCurrentPeriodUsage");
+    let call = host
+        .http()
+        .calls()
+        .into_iter()
+        .find(|call| call.uri().contains(&period_url))
+        .expect("period usage call");
+    (
+        call.body().to_vec(),
+        call.header("x-cursor-team-id").map(str::to_owned),
+    )
+}
+
+#[test]
+fn r8d_quota_sends_decimal_team_header_when_auth_id_matches_sub() {
+    let config = tempfile::tempdir().expect("config");
+    let (body, team) = run_quota_with_cli_config(
+        config.path(),
+        r#"{"authInfo":{"authId":"auth0|user","activeTeamId":42}}"#,
+        "team@example.test",
+        "auth0|user",
+    );
+    assert_eq!(body, b"{}");
+    assert_eq!(team.as_deref(), Some("42"));
+}
+
+#[test]
+fn r8d_quota_omits_team_header_when_auth_id_does_not_match_jwt_sub() {
+    let config = tempfile::tempdir().expect("config");
+    let (body, team) = run_quota_with_cli_config(
+        config.path(),
+        r#"{"authInfo":{"authId":"auth0|other","activeTeamId":42}}"#,
+        "team-mismatch@example.test",
+        "auth0|user",
+    );
+    assert_eq!(body, b"{}");
+    assert_eq!(team, None);
+}
+
+#[test]
+fn r8d_quota_omits_team_header_when_active_team_id_is_zero() {
+    let config = tempfile::tempdir().expect("config");
+    let (_, team) = run_quota_with_cli_config(
+        config.path(),
+        r#"{"authInfo":{"authId":"auth0|user","activeTeamId":0}}"#,
+        "team-zero@example.test",
+        "auth0|user",
+    );
+    assert_eq!(team, None);
+}
+
+#[test]
+fn r8d_quota_period_body_stays_empty_object_when_team_header_is_sent() {
+    let config = tempfile::tempdir().expect("config");
+    let (body, team) = run_quota_with_cli_config(
+        config.path(),
+        r#"{"authInfo":{"authId":"auth0|user","activeTeamId":7}}"#,
+        "team-body@example.test",
+        "auth0|user",
+    );
+    assert_eq!(
+        body, b"{}",
+        "GetCurrentPeriodUsage body stays {{}} when the team id is sent"
+    );
+    assert_eq!(team.as_deref(), Some("7"));
+}

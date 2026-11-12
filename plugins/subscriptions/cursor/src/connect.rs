@@ -14,7 +14,7 @@ pub(crate) async fn unary(
     body: &str,
 ) -> Result<Value, PluginError> {
     let url = endpoints.dashboard(path);
-    let reply = Call::post(url)
+    let mut request = Call::post(url)
         .header("content-type", "application/json")
         .header("connect-protocol-version", "1")
         .sensitive_header(
@@ -23,10 +23,11 @@ pub(crate) async fn unary(
         )
         .header("x-cursor-client-version", &endpoints.client_version)
         .header("x-cursor-client-type", "cli")
-        .header("x-ghost-mode", "true")
-        .bytes(body.as_bytes())
-        .fetch(host.http())
-        .await?;
+        .header("x-ghost-mode", "true");
+    if let Some(team_id) = crate::team::header_value(token) {
+        request = request.header("x-cursor-team-id", team_id);
+    }
+    let reply = request.bytes(body.as_bytes()).fetch(host.http()).await?;
     if !(200..300).contains(&reply.status()) {
         return Err(PluginError::status_error(
             reply.status(),
