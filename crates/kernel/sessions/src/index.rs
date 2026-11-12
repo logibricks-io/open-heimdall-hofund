@@ -731,9 +731,12 @@ mod tests {
     use std::fs::File;
     use std::io::Write;
     use std::sync::Arc;
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use hofund_plugin_api::{SessionLocator, SessionParser, SessionTokens, SessionUsageEvent};
+    use hofund_plugin_api::{
+        SessionCompression, SessionLocator, SessionParser, SessionTokens, SessionUsageEvent,
+    };
 
     use super::*;
 
@@ -1050,5 +1053,389 @@ mod tests {
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].id, "agent:abc");
         assert_eq!(records[0].agent, "agent@wsl:Ubuntu");
+    }
+
+    struct ScriptedStore {
+        locator: FakeLocator,
+        files: Vec<SessionFile>,
+        parses: Arc<AtomicUsize>,
+        parse_states: Arc<Mutex<Vec<Option<String>>>>,
+        db_reads: Arc<AtomicUsize>,
+        db_records: Mutex<Vec<SessionRecord>>,
+    }
+
+    impl ScriptedStore {
+        fn new(root: &Path, files: Vec<SessionFile>) -> Self {
+            Self {
+                locator: FakeLocator {
+                    root: root.to_path_buf(),
+                },
+                files,
+                parses: Arc::new(AtomicUsize::new(0)),
+                parse_states: Arc::new(Mutex::new(Vec::new())),
+                db_reads: Arc::new(AtomicUsize::new(0)),
+                db_records: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn with_records(self, records: Vec<SessionRecord>) -> Self {
+            *self.db_records.lock().expect("records") = records;
+            self
+        }
+
+        fn states(&self) -> Vec<Option<String>> {
+            self.parse_states.lock().expect("states").clone()
+        }
+    }
+
+    impl SessionStore for ScriptedStore {
+        fn agent(&self) -> &'static str {
+            "fake"
+        }
+
+        fn locator(&self) -> &dyn SessionLocator {
+            &self.locator
+        }
+
+        fn files(&self, _root: &Path) -> Result<Vec<SessionFile>, PluginError> {
+            Ok(self.files.clone())
+        }
+
+        fn parser(
+            &self,
+            file: &SessionFile,
+            state: Option<&str>,
+        ) -> Result<Box<dyn SessionParser>, PluginError> {
+            self.parses.fetch_add(1, Ordering::SeqCst);
+            self.parse_states
+                .lock()
+                .expect("states")
+                .push(state.map(str::to_owned));
+            Ok(Box::new(FakeParser {
+                record: SessionRecord::new("fake", format!("fake:{}", file.id), &file.path),
+            }))
+        }
+
+        fn read_database(
+            &self,
+            _file: &SessionFile,
+            _database: &dyn hofund_plugin_api::SessionDatabase,
+        ) -> Result<Vec<SessionRecord>, PluginError> {
+            self.db_reads.fetch_add(1, Ordering::SeqCst);
+            Ok(self.db_records.lock().expect("records").clone())
+        }
+    }
+
+    fn write_sqlite(path: &Path) {
+        rusqlite::Connection::open(path)
+            .expect("create")
+            .execute_batch("CREATE TABLE items (id TEXT); INSERT INTO items (id) VALUES ('x');")
+            .expect("schema");
+    }
+
+    fn allow_all(config: &Path) -> Consent {
+        let mut consent = Consent::new(config);
+        consent.settle();
+        consent.set_reads(Some(true), []).expect("consent");
+        consent
+    }
+
+    fn bump_mtime(path: &Path, later: bool) {
+        let time = if later {
+            std::time::SystemTime::now() + std::time::Duration::from_secs(2)
+        } else {
+            std::time::UNIX_EPOCH + std::time::Duration::from_secs(1)
+        };
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("open")
+            .set_times(std::fs::FileTimes::new().set_modified(time))
+            .expect("mtime");
+    }
+
+    #[test]
+    fn read_document_accepts_a_bounded_json_object() {
+        let body = br#"{"prompt":"hello"}"#;
+        let mut seen = 0;
+        let outcome = read_document(&mut body.as_slice(), |value| {
+            assert_eq!(value["prompt"], "hello");
+            seen += 1;
+        })
+        .expect("read");
+        assert_eq!(seen, 1);
+        assert_eq!(outcome.offset, body.len() as u64);
+        assert_eq!(outcome.lines, 1);
+        assert!(!outcome.cut);
+    }
+
+    #[test]
+    fn read_document_cuts_when_the_document_exceeds_the_line_cap() {
+        let bytes = vec![b'x'; MAX_LINE_BYTES + 1];
+        let mut seen = 0;
+        let outcome = read_document(&mut bytes.as_slice(), |_| seen += 1).expect("read");
+        assert_eq!(seen, 0);
+        assert_eq!(outcome.lines, 0);
+        assert!(outcome.cut);
+        assert_eq!(outcome.offset, MAX_LINE_BYTES as u64);
+    }
+
+    #[test]
+    fn read_document_keeps_a_document_at_the_line_cap() {
+        let bytes = vec![b' '; MAX_LINE_BYTES];
+        let outcome = read_document(&mut bytes.as_slice(), |_| panic!("no value")).expect("read");
+        assert!(!outcome.cut);
+        assert_eq!(outcome.lines, 0);
+        assert_eq!(outcome.offset, MAX_LINE_BYTES as u64);
+    }
+
+    #[test]
+    fn parse_file_rejects_a_sqlite_source() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("one.db");
+        write_sqlite(&path);
+        let file = SessionFile::new("one", &path).with_format(SessionFormat::Sqlite);
+        let store = ScriptedStore::new(temp.path(), vec![file.clone()]);
+        let error = parse_file(&store, temp.path(), &file, 0, None).expect_err("sqlite");
+        assert!(
+            error
+                .to_string()
+                .contains("SQLite source reached the JSON parser"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn parse_file_reads_zstd_jsonl_from_the_start() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("one.jsonl.zst");
+        let compressed = zstd::bulk::compress(
+            br#"{"prompt":"hello"}
+"#
+            .as_slice(),
+            3,
+        )
+        .expect("compress");
+        std::fs::write(&path, compressed).expect("write");
+        let file = SessionFile::new("one", &path).with_compression(SessionCompression::Zstd);
+        let store = ScriptedStore::new(temp.path(), vec![file.clone()]);
+        let (parsed, outcome) = parse_file(&store, temp.path(), &file, 0, None).expect("parse");
+        assert_eq!(outcome.lines, 1);
+        assert!(!outcome.cut);
+        assert_eq!(parsed.record.expect("record").title, "fake prompt");
+    }
+
+    #[test]
+    fn parse_file_json_counts_related_documents_and_cuts_oversize() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let main = temp.path().join("one.json");
+        let related = temp.path().join("two.json");
+        let oversize = temp.path().join("three.json");
+        std::fs::write(&main, br#"{"prompt":"hello"}"#).expect("main");
+        std::fs::write(&related, br#"{"prompt":"again"}"#).expect("related");
+        std::fs::write(&oversize, vec![b'x'; MAX_LINE_BYTES + 1]).expect("oversize");
+        let file = SessionFile::new("one", &main)
+            .with_format(SessionFormat::Json)
+            .with_related(vec![related, oversize]);
+        let store = ScriptedStore::new(temp.path(), vec![file.clone()]);
+        let (parsed, outcome) = parse_file(&store, temp.path(), &file, 0, None).expect("parse");
+        assert_eq!(outcome.lines, 2);
+        assert!(outcome.cut);
+        assert_eq!(outcome.offset, MAX_LINE_BYTES as u64);
+        assert_eq!(parsed.record.expect("record").title, "fake prompt");
+    }
+
+    #[test]
+    fn refresh_appends_only_grown_uncompressed_jsonl() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let agent_root = temp.path().join("agent");
+        std::fs::create_dir(&agent_root).expect("agent");
+        let path = agent_root.join("one.jsonl");
+        std::fs::write(&path, b"{\"prompt\":\"hello\"}\n").expect("session");
+        let config = temp.path().join("config");
+        let consent = allow_all(&config);
+        let store = ScriptedStore::new(&agent_root, vec![SessionFile::new("one", &path)]);
+        let stores: [&dyn SessionStore; 1] = [&store];
+        let mut index = SessionIndex::load(&config, &consent);
+        index.refresh(&consent, &stores).expect("first");
+        assert_eq!(store.parses.load(Ordering::SeqCst), 1);
+        assert_eq!(store.states(), [None]);
+
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("append");
+        file.write_all(b"{\"prompt\":\"later\"}\n").expect("write");
+        drop(file);
+        bump_mtime(&path, true);
+        index.refresh(&consent, &stores).expect("append");
+        assert_eq!(store.parses.load(Ordering::SeqCst), 2);
+        assert_eq!(store.states()[1].as_deref(), Some("{}"));
+    }
+
+    #[test]
+    fn refresh_does_not_append_a_same_size_rewrite() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let agent_root = temp.path().join("agent");
+        std::fs::create_dir(&agent_root).expect("agent");
+        let path = agent_root.join("one.jsonl");
+        std::fs::write(&path, b"{\"prompt\":\"hello\"}\n").expect("session");
+        let config = temp.path().join("config");
+        let consent = allow_all(&config);
+        let store = ScriptedStore::new(&agent_root, vec![SessionFile::new("one", &path)]);
+        let stores: [&dyn SessionStore; 1] = [&store];
+        let mut index = SessionIndex::load(&config, &consent);
+        index.refresh(&consent, &stores).expect("first");
+        std::fs::write(&path, b"{\"prompt\":\"howdy\"}\n").expect("rewrite");
+        bump_mtime(&path, true);
+        index.refresh(&consent, &stores).expect("rewrite");
+        assert_eq!(store.parses.load(Ordering::SeqCst), 2);
+        assert_eq!(store.states(), [None, None]);
+    }
+
+    #[test]
+    fn refresh_does_not_append_when_mtime_moves_backwards() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let agent_root = temp.path().join("agent");
+        std::fs::create_dir(&agent_root).expect("agent");
+        let path = agent_root.join("one.jsonl");
+        std::fs::write(&path, b"{\"prompt\":\"hello\"}\n").expect("session");
+        let config = temp.path().join("config");
+        let consent = allow_all(&config);
+        let store = ScriptedStore::new(&agent_root, vec![SessionFile::new("one", &path)]);
+        let stores: [&dyn SessionStore; 1] = [&store];
+        let mut index = SessionIndex::load(&config, &consent);
+        index.refresh(&consent, &stores).expect("first");
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("append");
+        file.write_all(b"{\"prompt\":\"later\"}\n").expect("write");
+        drop(file);
+        bump_mtime(&path, false);
+        index.refresh(&consent, &stores).expect("older mtime");
+        assert_eq!(store.parses.load(Ordering::SeqCst), 2);
+        assert_eq!(store.states(), [None, None]);
+    }
+
+    #[test]
+    fn refresh_does_not_append_related_or_compressed_files() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let agent_root = temp.path().join("agent");
+        std::fs::create_dir(&agent_root).expect("agent");
+        let path = agent_root.join("one.jsonl.zst");
+        let related = agent_root.join("two.jsonl");
+        let compressed = zstd::bulk::compress(
+            br#"{"prompt":"hello"}
+"#
+            .as_slice(),
+            3,
+        )
+        .expect("compress");
+        std::fs::write(&path, compressed).expect("zstd");
+        std::fs::write(&related, b"{\"prompt\":\"side\"}\n").expect("related");
+        let config = temp.path().join("config");
+        let consent = allow_all(&config);
+        let file = SessionFile::new("one", &path)
+            .with_compression(SessionCompression::Zstd)
+            .with_related(vec![related]);
+        let store = ScriptedStore::new(&agent_root, vec![file]);
+        let stores: [&dyn SessionStore; 1] = [&store];
+        let mut index = SessionIndex::load(&config, &consent);
+        index.refresh(&consent, &stores).expect("first");
+        let more = zstd::bulk::compress(
+            br#"{"prompt":"hello"}
+{"prompt":"later"}
+"#
+            .as_slice(),
+            3,
+        )
+        .expect("compress more");
+        std::fs::write(&path, more).expect("grow");
+        bump_mtime(&path, true);
+        index.refresh(&consent, &stores).expect("grown zstd");
+        assert_eq!(store.parses.load(Ordering::SeqCst), 2);
+        assert_eq!(store.states(), [None, None]);
+    }
+
+    #[test]
+    fn refresh_database_reuses_an_unchanged_stamp_and_drops_stale_rows() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let agent_root = temp.path().join("agent");
+        std::fs::create_dir(&agent_root).expect("agent");
+        let path = agent_root.join("sessions.db");
+        write_sqlite(&path);
+        let first = vec![
+            SessionRecord::new("fake", "fake:a", &path),
+            SessionRecord::new("fake", "fake:b", &path),
+        ];
+        let store = ScriptedStore::new(
+            &agent_root,
+            vec![SessionFile::new("db", &path).with_format(SessionFormat::Sqlite)],
+        )
+        .with_records(first);
+        let config = temp.path().join("config");
+        let consent = allow_all(&config);
+        let stores: [&dyn SessionStore; 1] = [&store];
+        let mut index = SessionIndex::load(&config, &consent);
+        index.refresh(&consent, &stores).expect("first");
+        assert_eq!(store.db_reads.load(Ordering::SeqCst), 1);
+        let mut ids: Vec<_> = index.list(&consent).into_iter().map(|row| row.id).collect();
+        ids.sort();
+        assert_eq!(ids, ["fake:a", "fake:b"]);
+
+        index.refresh(&consent, &stores).expect("reuse");
+        assert_eq!(store.db_reads.load(Ordering::SeqCst), 1);
+
+        *store.db_records.lock().expect("records") =
+            vec![SessionRecord::new("fake", "fake:c", &path)];
+        // Keep the same bytes but move mtime so the stamp changes.
+        bump_mtime(&path, true);
+        index.refresh(&consent, &stores).expect("rewritten");
+        assert_eq!(store.db_reads.load(Ordering::SeqCst), 2);
+        let ids: Vec<_> = index.list(&consent).into_iter().map(|row| row.id).collect();
+        assert_eq!(ids, ["fake:c"]);
+    }
+
+    #[test]
+    fn refresh_database_skips_missing_and_escaped_paths() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let agent_root = temp.path().join("agent");
+        std::fs::create_dir(&agent_root).expect("agent");
+        let missing = agent_root.join("missing.db");
+        let outside = temp.path().join("outside.db");
+        write_sqlite(&outside);
+        let store = ScriptedStore::new(
+            &agent_root,
+            vec![
+                SessionFile::new("missing", &missing).with_format(SessionFormat::Sqlite),
+                SessionFile::new("outside", &outside).with_format(SessionFormat::Sqlite),
+            ],
+        )
+        .with_records(vec![SessionRecord::new("fake", "fake:outside", &outside)]);
+        let config = temp.path().join("config");
+        let consent = allow_all(&config);
+        let stores: [&dyn SessionStore; 1] = [&store];
+        let mut index = SessionIndex::load(&config, &consent);
+        index.refresh(&consent, &stores).expect("refresh");
+        assert_eq!(store.db_reads.load(Ordering::SeqCst), 0);
+        assert_eq!(index.list(&consent), Vec::<SessionRecord>::new());
+    }
+
+    #[test]
+    fn refresh_file_skips_an_escaped_path() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let agent_root = temp.path().join("agent");
+        std::fs::create_dir(&agent_root).expect("agent");
+        let outside = temp.path().join("outside.jsonl");
+        std::fs::write(&outside, b"{\"prompt\":\"hello\"}\n").expect("outside");
+        let store = ScriptedStore::new(&agent_root, vec![SessionFile::new("one", &outside)]);
+        let config = temp.path().join("config");
+        let consent = allow_all(&config);
+        let stores: [&dyn SessionStore; 1] = [&store];
+        let mut index = SessionIndex::load(&config, &consent);
+        index.refresh(&consent, &stores).expect("refresh");
+        assert_eq!(store.parses.load(Ordering::SeqCst), 0);
+        assert_eq!(index.list(&consent), Vec::<SessionRecord>::new());
     }
 }
