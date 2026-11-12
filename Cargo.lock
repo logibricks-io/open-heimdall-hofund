@@ -2134,10 +2134,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "hofund-bridge-mcp"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.2.17",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "hofund-cli"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "hofund-bridge-mcp",
  "hofund-config",
  "hofund-control-client",
  "hofund-control-proto",
@@ -2252,6 +2263,7 @@ dependencies = [
 name = "hofund-daemon-bin"
 version = "0.1.0"
 dependencies = [
+ "hofund-bridge-mcp",
  "hofund-daemon",
  "hofund-plugin-api",
  "hofund-plugin-registry",
@@ -2637,10 +2649,15 @@ dependencies = [
 name = "hofund-plugin-subscription-claude"
 version = "0.1.0"
 dependencies = [
+ "bytes",
+ "futures-util",
  "hofund-kit-subscription",
  "hofund-plugin-api",
  "hofund-plugin-sdk",
  "regex",
+ "ring",
+ "serde",
+ "serde_json",
  "tempfile",
 ]
 
