@@ -410,4 +410,111 @@ mod tests {
         );
         assert_eq!(session_id_from_dir("plain-folder"), "plain-folder");
     }
+
+    #[test]
+    fn present_is_false_without_the_sessions_directory() {
+        let dir = tempfile::tempdir().expect("temp");
+        let locator = MiniMaxLocator {
+            root: dir.path().to_path_buf(),
+        };
+        assert!(!locator.present());
+        std::fs::create_dir_all(dir.path().join("v2").join("sessions")).expect("sessions dir");
+        assert!(locator.present());
+    }
+
+    #[test]
+    fn home_root_is_not_empty() {
+        let root = home_root();
+        assert!(!root.as_os_str().is_empty());
+        let home = if cfg!(windows) {
+            std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))
+        } else {
+            std::env::var_os("HOME")
+        };
+        match home.filter(|value| !value.is_empty()) {
+            Some(home) => assert_eq!(root, PathBuf::from(home).join(".minimax")),
+            None => assert_eq!(root, PathBuf::from(".minimax")),
+        }
+    }
+
+    #[test]
+    fn files_skips_jsonl_that_is_not_a_messages_file() {
+        let dir = tempfile::tempdir().expect("temp");
+        let sessions = dir.path().join("v2").join("sessions").join("sess");
+        std::fs::create_dir_all(&sessions).expect("sessions");
+        std::fs::write(sessions.join("other.jsonl"), b"{}\n").expect("other");
+        std::fs::write(sessions.join("messages.jsonl"), b"{}\n").expect("messages");
+        let store = MiniMaxStore::with_root(dir.path());
+        let files = store.files(dir.path()).expect("files");
+        assert_eq!(files.len(), 1);
+        assert!(
+            files[0]
+                .path
+                .file_name()
+                .is_some_and(|name| name == "messages.jsonl")
+        );
+    }
+
+    fn assistant_usage(model: &str, input: u64, output: u64, at: i64) -> Value {
+        json::json!({
+            "message": {
+                "role": "assistant",
+                "model": model,
+                "timestamp": at,
+                "usage": {"input": input, "output": output, "cacheRead": 0, "cacheWrite": 0}
+            }
+        })
+    }
+
+    #[test]
+    fn usage_helpers_keep_non_zero_token_counts() {
+        let usage = MiniMaxUsage {
+            input: 3,
+            output: 4,
+            cache_read: 1,
+            cache_write: 2,
+        };
+        assert_eq!(usage.tokens(), SessionTokens::new(3, 4, 1, 2));
+        let value = json::json!({"input": 3, "output": 4, "cacheRead": 1, "cacheWrite": 2});
+        let parsed = MiniMaxUsage::of(&value).expect("usage");
+        assert_eq!(parsed.tokens(), SessionTokens::new(3, 4, 1, 2));
+        assert!(MiniMaxUsage::of(&json::json!("nope")).is_none());
+    }
+
+    #[test]
+    fn parser_records_assistant_usage_and_time_bounds() {
+        let file = SessionFile::new("s1", "messages.jsonl");
+        let mut parser = MiniMaxParser {
+            state: MiniMaxState::new(&file),
+        };
+        parser.push_line(&assistant_usage("m1", 5, 6, 2_000));
+        parser.push_line(&assistant_usage("m1", 1, 1, 1_000));
+        parser.push_line(&assistant_usage("", 2, 0, 3_000));
+        assert_eq!(parser.state.record.start_ms, 1_000);
+        assert_eq!(parser.state.record.last_ms, 3_000);
+        let tokens = parser.state.record.tokens();
+        assert_eq!(tokens.input, 8);
+        assert_eq!(tokens.output, 7);
+        assert!(parser.state.record.models.contains_key("m1"));
+        assert!(parser.state.record.models.contains_key("unknown"));
+    }
+
+    #[test]
+    fn ms_to_datetime_keeps_the_millisecond_offset() {
+        let got = ms_to_datetime(1_500).expect("datetime");
+        let expected = Local
+            .timestamp_millis_opt(1_500)
+            .single()
+            .expect("local")
+            .fixed_offset();
+        assert_eq!(got, expected);
+        assert!(ms_to_datetime(0).is_some());
+    }
+
+    #[test]
+    fn user_prompt_rejects_empty_and_tag_prefixed_text() {
+        assert_eq!(user_prompt("hello world").as_deref(), Some("hello world"));
+        assert_eq!(user_prompt("   "), None);
+        assert_eq!(user_prompt("<tool>ignore</tool>"), None);
+    }
 }

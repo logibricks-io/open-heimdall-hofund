@@ -394,6 +394,7 @@ fn int_at(row: &[SessionValue], index: usize) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hofund_plugin_api::SessionRows;
 
     #[test]
     fn exposes_sqlite_database_file() {
@@ -406,5 +407,252 @@ mod tests {
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].format, SessionFormat::Sqlite);
         assert!(store.locator().present());
+    }
+
+    #[test]
+    fn present_is_false_without_the_threads_database() {
+        let dir = tempfile::tempdir().expect("temp");
+        let locator = AlmaLocator {
+            root: dir.path().to_path_buf(),
+        };
+        assert!(!locator.present());
+        std::fs::write(dir.path().join("chat_threads.db"), b"").expect("db file");
+        assert!(locator.present());
+    }
+
+    #[test]
+    fn config_and_home_paths_are_not_empty() {
+        assert!(!alma_config_dir().as_os_str().is_empty());
+        assert!(!alma_default_config_dir().as_os_str().is_empty());
+        assert!(!user_home().as_os_str().is_empty());
+        if let Some(home) = std::env::var_os("ALMA_HOME").filter(|value| !value.is_empty()) {
+            assert_eq!(alma_config_dir(), PathBuf::from(home));
+        }
+    }
+
+    struct FakeDb {
+        threads: Vec<Vec<SessionValue>>,
+        message_counts: std::collections::BTreeMap<String, i64>,
+        usage_counts: std::collections::BTreeMap<String, i64>,
+        messages: std::collections::BTreeMap<String, Vec<String>>,
+        usage: std::collections::BTreeMap<String, Vec<Vec<SessionValue>>>,
+        aux: std::collections::BTreeMap<String, Vec<Vec<SessionValue>>>,
+    }
+
+    impl FakeDb {
+        fn empty() -> Self {
+            Self {
+                threads: Vec::new(),
+                message_counts: std::collections::BTreeMap::new(),
+                usage_counts: std::collections::BTreeMap::new(),
+                messages: std::collections::BTreeMap::new(),
+                usage: std::collections::BTreeMap::new(),
+                aux: std::collections::BTreeMap::new(),
+            }
+        }
+    }
+
+    impl SessionDatabase for FakeDb {
+        fn query(&self, sql: &str, params: &[&str]) -> Result<SessionRows, PluginError> {
+            if sql.contains("FROM chat_threads") {
+                return Ok(SessionRows::new(self.threads.clone(), false));
+            }
+            let id = params.first().copied().unwrap_or("");
+            if sql.contains("COUNT(*) FROM chat_messages") {
+                let count = self.message_counts.get(id).copied().unwrap_or(0);
+                return Ok(SessionRows::new(
+                    vec![vec![SessionValue::Integer(count)]],
+                    false,
+                ));
+            }
+            if sql.contains("COUNT(*) FROM usage_records") {
+                let count = self.usage_counts.get(id).copied().unwrap_or(0);
+                return Ok(SessionRows::new(
+                    vec![vec![SessionValue::Integer(count)]],
+                    false,
+                ));
+            }
+            if sql.contains("FROM chat_messages") {
+                let rows = self
+                    .messages
+                    .get(id)
+                    .map(|messages| {
+                        messages
+                            .iter()
+                            .map(|message| vec![SessionValue::Text(message.clone())])
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                return Ok(SessionRows::new(rows, false));
+            }
+            if sql.contains("FROM aux_usage_records") {
+                return Ok(SessionRows::new(
+                    self.aux.get(id).cloned().unwrap_or_default(),
+                    false,
+                ));
+            }
+            if sql.contains("FROM usage_records") {
+                return Ok(SessionRows::new(
+                    self.usage.get(id).cloned().unwrap_or_default(),
+                    false,
+                ));
+            }
+            Err(PluginError::decode("unexpected alma test query"))
+        }
+    }
+
+    fn thread_row(id: &str, title: &str) -> Vec<SessionValue> {
+        vec![
+            SessionValue::Text(id.into()),
+            SessionValue::Text(title.into()),
+            SessionValue::Text(String::new()),
+            SessionValue::Text(String::new()),
+            SessionValue::Text(String::new()),
+        ]
+    }
+
+    fn user_message(text: &str) -> String {
+        format!(r#"{{"role":"user","parts":[{{"type":"text","text":"{text}"}}]}}"#)
+    }
+
+    #[test]
+    fn list_threads_keeps_rows_with_only_messages_or_only_usage() {
+        let mut db = FakeDb::empty();
+        db.threads = vec![
+            thread_row("keep-msg", "m"),
+            thread_row("keep-usage", "u"),
+            thread_row("skip-empty", "s"),
+            thread_row("", "no-id"),
+        ];
+        db.message_counts.extend([
+            ("keep-msg".into(), 2),
+            ("keep-usage".into(), 0),
+            ("skip-empty".into(), 0),
+            (String::new(), 4),
+        ]);
+        db.usage_counts.extend([
+            ("keep-msg".into(), 0),
+            ("keep-usage".into(), 3),
+            ("skip-empty".into(), 0),
+            (String::new(), 3),
+        ]);
+        let threads = list_threads(&db).expect("threads");
+        let ids: Vec<_> = threads.iter().map(|thread| thread.id.as_str()).collect();
+        assert_eq!(ids, ["keep-msg", "keep-usage"]);
+    }
+
+    #[test]
+    fn title_from_falls_back_when_stored_is_placeholder() {
+        let mut db = FakeDb::empty();
+        db.messages
+            .insert("t1".into(), vec![user_message("hello from db")]);
+        assert_eq!(
+            title_from("New Chat", &db, "t1").expect("title"),
+            "hello from db"
+        );
+        assert_eq!(
+            title_from("   ", &db, "t1").expect("title"),
+            "hello from db"
+        );
+        assert_eq!(title_from("Saved", &db, "t1").expect("title"), "Saved");
+    }
+
+    #[test]
+    fn apply_first_prompt_fills_an_empty_title() {
+        let mut db = FakeDb::empty();
+        db.messages
+            .insert("t1".into(), vec![user_message("prompt title")]);
+        let mut record = SessionRecord::new("alma", "alma:t1", "x");
+        record.title.clear();
+        apply_first_prompt(&db, "t1", &mut record).expect("prompt");
+        assert_eq!(record.title, "prompt title");
+    }
+
+    #[test]
+    fn apply_usage_subtracts_cached_input_tokens() {
+        let mut db = FakeDb::empty();
+        db.usage.insert(
+            "t1".into(),
+            vec![vec![
+                SessionValue::Text("gpt".into()),
+                SessionValue::Text(String::new()),
+                SessionValue::Integer(10),
+                SessionValue::Integer(2),
+                SessionValue::Integer(3),
+                SessionValue::Integer(1),
+            ]],
+        );
+        let mut record = SessionRecord::new("alma", "alma:t1", "x");
+        apply_usage(&db, "t1", &mut record).expect("usage");
+        let tokens = record.tokens();
+        assert_eq!(tokens.input, 7);
+        assert_eq!(tokens.output, 2);
+        assert_eq!(tokens.cache_read, 3);
+        assert_eq!(tokens.cache_write, 1);
+        assert_eq!(record.models.get("gpt").map(|t| t.input), Some(7));
+    }
+
+    #[test]
+    fn alma_model_strips_provider_and_plugin_suffix() {
+        assert_eq!(alma_model("", "openai"), "");
+        assert_eq!(alma_model("gpt-4", "openai"), "gpt-4");
+        assert_eq!(alma_model("openai:gpt-4", "openai"), "gpt-4");
+        assert_eq!(alma_model("plugin:pack:slot:real", "plugin"), "real");
+        assert_eq!(alma_model("plugin:pack:slot:", "plugin"), "pack:slot:");
+        assert_eq!(alma_model("plugin:only", "plugin"), "only");
+    }
+
+    #[test]
+    fn first_user_text_reads_non_empty_user_text_parts() {
+        let user = json::from_str::<Value>(&user_message("hello")).expect("json");
+        assert_eq!(first_user_text(&user).as_deref(), Some("hello"));
+        let assistant = json::from_str::<Value>(
+            r#"{"role":"assistant","parts":[{"type":"text","text":"nope"}]}"#,
+        )
+        .expect("json");
+        assert_eq!(first_user_text(&assistant), None);
+        let blank = json::from_str::<Value>(&user_message("   ")).expect("json");
+        assert_eq!(first_user_text(&blank), None);
+        let other =
+            json::from_str::<Value>(r#"{"role":"user","parts":[{"type":"image","text":"hello"}]}"#)
+                .expect("json");
+        assert_eq!(first_user_text(&other), None);
+    }
+
+    #[test]
+    fn counts_and_time_helpers_parse_values() {
+        let mut db = FakeDb::empty();
+        db.message_counts.insert("t1".into(), 5);
+        db.usage_counts.insert("t1".into(), 4);
+        assert_eq!(message_count(&db, "t1").expect("messages"), 5);
+        assert_eq!(usage_count(&db, "t1").expect("usage"), 4);
+        assert_eq!(alma_time_ms(""), 0);
+        let raw = "2020-01-02T03:04:05.000Z";
+        let ms = alma_time_ms(raw);
+        let expected = chrono::DateTime::parse_from_rfc3339(raw)
+            .expect("rfc3339")
+            .timestamp_millis();
+        assert_eq!(ms, expected);
+        assert!(ms > 1);
+    }
+
+    #[test]
+    fn text_at_and_int_at_cover_value_shapes() {
+        let row = vec![
+            SessionValue::Text("7".into()),
+            SessionValue::Integer(8),
+            SessionValue::Real(9.0),
+            SessionValue::Blob(b"blob".to_vec()),
+            SessionValue::Null,
+        ];
+        assert_eq!(text_at(&row, 0), "7");
+        assert_eq!(text_at(&row, 1), "8");
+        assert_eq!(text_at(&row, 2), "9");
+        assert_eq!(text_at(&row, 3), "blob");
+        assert_eq!(text_at(&row, 4), "");
+        assert_eq!(int_at(&row, 0), 7);
+        assert_eq!(int_at(&row, 1), 8);
+        assert_eq!(int_at(&[], 0), 0);
+        assert_eq!(int_at(&[SessionValue::Null], 0), 0);
     }
 }
