@@ -9,9 +9,9 @@ use std::collections::BTreeSet;
 use hofund_ir::{
     BlockStart, ContentBlockStart, ContentBlockStop, ContentPart, Effort, Extensions,
     GenerationParams, ImageDetail, ImagePart, ImageSource, Message, MessageDelta, MessageStart,
-    MessageStop, Ping, Request, Response, Role, Stop, StopReason, StreamEvent, TextDelta, TextPart,
-    ThinkingDelta, Tool, ToolArguments, ToolArgumentsDelta, ToolCallPart, ToolChoice,
-    ToolChoiceMode, ToolResultPart, UnknownEvent, UnknownPart, Usage,
+    MessageStop, Ping, Request, Response, Role, SignatureDelta, Stop, StopReason, StreamEvent,
+    TextDelta, TextPart, ThinkingDelta, Tool, ToolArguments, ToolArgumentsDelta, ToolCallPart,
+    ToolChoice, ToolChoiceMode, ToolResultPart, UnknownEvent, UnknownPart, Usage,
 };
 use serde_json::Value;
 
@@ -338,6 +338,25 @@ impl Decoder {
             events.push(StreamEvent::ThinkingDelta(ThinkingDelta {
                 index: THINKING_INDEX,
                 text: reasoning,
+                extensions: Extensions::new(),
+            }));
+        }
+        if let Some(signature) = take_string(&mut delta, "signature")?
+            && !signature.is_empty()
+        {
+            if !self.thinking_open {
+                events.push(block_start(
+                    THINKING_INDEX,
+                    BlockStart::Thinking {
+                        redacted: false,
+                        data: None,
+                    },
+                ));
+                self.thinking_open = true;
+            }
+            events.push(StreamEvent::SignatureDelta(SignatureDelta {
+                index: THINKING_INDEX,
+                signature,
                 extensions: Extensions::new(),
             }));
         }
@@ -1303,11 +1322,11 @@ fn decode_usage(mut object: Object) -> Result<Usage, CodecError> {
     let total_tokens = take_u64(&mut object, "total_tokens")?;
     let mut details = Object::new();
     if let Some(mut prompt) = take_object(&mut object, "prompt_tokens_details")? {
-        let cached = take_u64(&mut prompt, "cached_tokens")?;
+        let cache_read_tokens = take_u64(&mut prompt, "cached_tokens")?;
+        let cache_write_tokens = take_u64(&mut prompt, "cache_write_tokens")?;
         for (key, value) in prompt {
             details.entry(key).or_insert(value);
         }
-        let cache_read_tokens = cached;
         if let Some(mut completion) = take_object(&mut object, "completion_tokens_details")? {
             let reasoning = take_u64(&mut completion, "reasoning_tokens")?;
             for (key, value) in completion {
@@ -1317,7 +1336,7 @@ fn decode_usage(mut object: Object) -> Result<Usage, CodecError> {
                 input_tokens,
                 output_tokens,
                 total_tokens,
-                cache_read_tokens,
+                (cache_read_tokens, cache_write_tokens),
                 reasoning,
                 object,
                 details,
@@ -1327,7 +1346,7 @@ fn decode_usage(mut object: Object) -> Result<Usage, CodecError> {
             input_tokens,
             output_tokens,
             total_tokens,
-            cache_read_tokens,
+            (cache_read_tokens, cache_write_tokens),
             None,
             object,
             details,
@@ -1342,7 +1361,7 @@ fn decode_usage(mut object: Object) -> Result<Usage, CodecError> {
             input_tokens,
             output_tokens,
             total_tokens,
-            None,
+            (None, None),
             reasoning,
             object,
             details,
@@ -1352,7 +1371,7 @@ fn decode_usage(mut object: Object) -> Result<Usage, CodecError> {
         input_tokens,
         output_tokens,
         total_tokens,
-        None,
+        (None, None),
         None,
         object,
         details,
@@ -1363,17 +1382,18 @@ fn usage_from(
     input_tokens: Option<u64>,
     output_tokens: Option<u64>,
     total_tokens: Option<u64>,
-    cache_read_tokens: Option<u64>,
+    cache_tokens: (Option<u64>, Option<u64>),
     reasoning_tokens: Option<u64>,
     object: Object,
     details: Object,
 ) -> Result<Usage, CodecError> {
+    let (cache_read_tokens, cache_write_tokens) = cache_tokens;
     Ok(Usage {
         input_tokens,
         output_tokens,
         total_tokens,
         cache_read_tokens,
-        cache_write_tokens: None,
+        cache_write_tokens,
         cache_write_5m_tokens: None,
         cache_write_1h_tokens: None,
         reasoning_tokens,

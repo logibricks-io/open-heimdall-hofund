@@ -89,7 +89,10 @@ pub fn assemble(events: &[StreamEvent]) -> Response {
                 block.extensions.absorb(&delta.extensions);
             }
             StreamEvent::SignatureDelta(delta) => {
-                blocks.entry(delta.index).or_default().signature = Some(delta.signature.clone());
+                let signature = &mut blocks.entry(delta.index).or_default().signature;
+                signature
+                    .get_or_insert_with(String::new)
+                    .push_str(&delta.signature);
             }
             StreamEvent::ToolArgumentsDelta(delta) => {
                 blocks
