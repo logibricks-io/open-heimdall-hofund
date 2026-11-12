@@ -86,8 +86,8 @@ pub fn merge_extra_session_header_names(mut names: Vec<String>, extra: &[String]
 #[cfg(test)]
 mod tests {
     use super::{
-        ECHO_SESSION_HEADER, SESSION_HEADERS, merge_extra_session_header_names, native_session_of,
-        session_of, trim_session_value,
+        ECHO_SESSION_HEADER, SESSION_HEADERS, kernel_session_header_names,
+        merge_extra_session_header_names, native_session_of, session_of, trim_session_value,
     };
 
     #[test]
@@ -96,6 +96,28 @@ mod tests {
         let trimmed = trim_session_value(&wide);
         assert!(trimmed.len() <= 128);
         assert!(std::str::from_utf8(trimmed.as_bytes()).is_ok());
+
+        // "x" shifts the 128-byte cut into the middle of an `é`, so the
+        // boundary walk actually runs (a pure "é" repeat lands on a boundary).
+        let shifted = format!("x{}", "é".repeat(200));
+        let trimmed = trim_session_value(&shifted);
+        assert_eq!(trimmed.len(), 127);
+        assert!(trimmed.starts_with('x'));
+        assert!(std::str::from_utf8(trimmed.as_bytes()).is_ok());
+        assert!(!shifted.is_char_boundary(128));
+    }
+
+    #[test]
+    fn r33_kernel_session_header_names_are_echo_then_session_headers() {
+        let names = kernel_session_header_names();
+        assert_eq!(names.first().map(String::as_str), Some(ECHO_SESSION_HEADER));
+        assert_eq!(names.len(), 1 + SESSION_HEADERS.len());
+        for header in SESSION_HEADERS {
+            assert!(
+                names.iter().any(|name| name == header),
+                "missing {header} in {names:?}"
+            );
+        }
     }
 
     #[test]

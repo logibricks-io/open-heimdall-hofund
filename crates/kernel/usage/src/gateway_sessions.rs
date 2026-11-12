@@ -313,5 +313,45 @@ mod tests {
         let filtered = gateway_sessions(&ledger, Some(40)).expect("sessions");
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].id, "new");
+
+        // A row at exactly `since` is kept (`created < since`, not `<=`).
+        ledger
+            .record_with_details(
+                &row(40, "fixture-a", "edge", "m1", 3, 0),
+                None,
+                Default::default(),
+                Some(priced()),
+            )
+            .expect("edge");
+        let filtered = gateway_sessions(&ledger, Some(40)).expect("sessions");
+        assert!(filtered.iter().any(|session| session.id == "edge"));
+        assert!(filtered.iter().any(|session| session.id == "new"));
+        assert!(filtered.iter().all(|session| session.id != "old"));
+    }
+
+    #[test]
+    fn r33_gateway_sessions_start_last_and_zero_tokens() {
+        let dir = tempfile::tempdir().expect("dir");
+        let ledger = Ledger::open(&dir.path().join("usage.sqlite")).expect("ledger");
+        let mut early = row(30, "fixture-a", "s1", "m1", 4, 0);
+        early.latency_ms = 2500;
+        ledger
+            .record_with_details(&early, None, Default::default(), Some(priced()))
+            .expect("early");
+        let mut later = row(10, "fixture-a", "s1", "m1", -1, 0);
+        later.latency_ms = 100;
+        later.input_tokens = Some(-1);
+        later.output_tokens = Some(0);
+        ledger
+            .record_with_details(&later, None, Default::default(), Some(priced()))
+            .expect("later earlier timestamp");
+        let sessions = gateway_sessions(&ledger, None).expect("sessions");
+        assert_eq!(sessions.len(), 1);
+        let session = &sessions[0];
+        assert_eq!(session.start_unix, 10);
+        // 30 + 2500ms/1000 = 32
+        assert_eq!(session.last_unix, 32);
+        assert_eq!(session.input_tokens, 4);
+        assert_eq!(session.output_tokens, 0);
     }
 }

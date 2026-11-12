@@ -61,4 +61,20 @@ mod tests {
         assert!(gateway_hidden(&hidden, "fixture", "s1", 50));
         assert!(!gateway_hidden(&hidden, "fixture", "s1", 101));
     }
+
+    #[test]
+    fn r33_load_gateway_hidden_reads_stamps_from_the_state_file() {
+        let dir = tempfile::tempdir().expect("dir");
+        assert!(load_gateway_hidden(dir.path()).is_empty());
+        std::fs::create_dir_all(dir.path().join("state")).expect("state");
+        std::fs::write(
+            hidden_path(dir.path()),
+            br#"[{"agent":"fixture","id":"s1","last_unix":100}]"#,
+        )
+        .expect("write");
+        let hidden = load_gateway_hidden(dir.path());
+        assert_eq!(hidden.get("fixture|s1").copied(), Some(100));
+        assert!(gateway_hidden(&hidden, "fixture", "s1", 100));
+        assert!(!gateway_hidden(&hidden, "fixture", "s1", 101));
+    }
 }
