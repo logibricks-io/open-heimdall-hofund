@@ -222,4 +222,14 @@ mod tests {
         assert!(dirs.iter().all(|path| !path.as_os_str().is_empty()));
         assert!(!home_dir().as_os_str().is_empty());
     }
+
+    #[test]
+    fn desktop_roots_return_the_configured_paths() {
+        let roots = vec![
+            PathBuf::from("/tmp/desktop-a"),
+            PathBuf::from("/tmp/desktop-b"),
+        ];
+        let store = ClaudeDesktopStore::with_roots(roots.clone());
+        assert_eq!(store.locator().roots(), roots);
+    }
 }
