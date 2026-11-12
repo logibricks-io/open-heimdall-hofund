@@ -18,8 +18,17 @@ pub fn trim_session_value(value: &str) -> String {
         return trimmed.to_owned();
     }
     let mut end = SESSION_VALUE_MAX_BYTES;
-    while !trimmed.is_char_boundary(end) {
+    // A UTF-8 code point is at most 4 bytes. Bound the walk so a mutated
+    // decrement cannot spin (the previous `while` + `end -= 1` hung when
+    // `-=` became `/=`).
+    for _ in 0..SESSION_VALUE_MAX_BYTES {
+        if trimmed.is_char_boundary(end) {
+            break;
+        }
         end -= 1;
+    }
+    if !trimmed.is_char_boundary(end) {
+        end = 0;
     }
     trimmed[..end].to_owned()
 }

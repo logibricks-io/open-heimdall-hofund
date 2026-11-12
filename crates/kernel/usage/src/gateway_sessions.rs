@@ -354,4 +354,98 @@ mod tests {
         assert_eq!(session.input_tokens, 4);
         assert_eq!(session.output_tokens, 0);
     }
+
+    #[test]
+    fn r33_gateway_sessions_projects_cache_and_reasoning_tokens() {
+        // Cache and reasoning are written through UsageDetails, not by
+        // setting the same fields on Row and passing Default details.
+        let dir = tempfile::tempdir().expect("dir");
+        let ledger = Ledger::open(&dir.path().join("usage.sqlite")).expect("ledger");
+        let details = crate::UsageDetails {
+            cache_read_tokens: Some(2),
+            cache_write_5m_tokens: Some(3),
+            cache_write_1h_tokens: Some(4),
+            reasoning_tokens: Some(5),
+            ..crate::UsageDetails::default()
+        };
+        ledger
+            .record_with_details(
+                &row(10, "fixture-a", "s1", "m1", 7, 8),
+                None,
+                details,
+                Some(priced()),
+            )
+            .expect("row");
+        let zeroed = crate::UsageDetails {
+            cache_read_tokens: Some(0),
+            reasoning_tokens: Some(-1),
+            ..crate::UsageDetails::default()
+        };
+        ledger
+            .record_with_details(
+                &row(11, "fixture-a", "s1", "m1", 1, 1),
+                None,
+                zeroed,
+                Some(priced()),
+            )
+            .expect("zeroed");
+        let stored = ledger
+            .rows()
+            .expect("rows")
+            .into_iter()
+            .find(|row| row.cache_read_tokens == Some(2))
+            .expect("details row persisted");
+        assert_eq!(stored.cache_write_5m_tokens, Some(3));
+        assert_eq!(stored.cache_write_1h_tokens, Some(4));
+        assert_eq!(stored.reasoning_tokens, Some(5));
+        let session = &gateway_sessions(&ledger, None).expect("sessions")[0];
+        assert_eq!(session.cache_read_tokens, 2);
+        assert_eq!(session.cache_write_5m_tokens, 3);
+        assert_eq!(session.cache_write_1h_tokens, 4);
+        assert_eq!(session.reasoning_tokens, 5);
+        assert_eq!(session.input_tokens, 8);
+        assert_eq!(session.output_tokens, 9);
+        let model = session
+            .models
+            .iter()
+            .find(|model| model.model == "m1")
+            .expect("m1");
+        assert_eq!(model.cache_read_tokens, 2);
+        assert_eq!(model.reasoning_tokens, 5);
+    }
+
+    #[test]
+    fn r33_gateway_sessions_drops_non_request_outcomes() {
+        let dir = tempfile::tempdir().expect("dir");
+        let ledger = Ledger::open(&dir.path().join("usage.sqlite")).expect("ledger");
+        let mut refused = row(20, "fixture-a", "only-refusal", "m1", 99, 99);
+        refused.outcome = "refusal".to_owned();
+        ledger
+            .record_with_details(&refused, None, Default::default(), Some(priced()))
+            .expect("refusal");
+
+        ledger
+            .record_with_details(
+                &row(10, "fixture-a", "s1", "m1", 4, 5),
+                None,
+                Default::default(),
+                Some(priced()),
+            )
+            .expect("ok");
+        let mut handed = row(15, "fixture-a", "s1", "m1", 80, 80);
+        handed.outcome = crate::OUTCOME_HANDED_ON.to_owned();
+        ledger
+            .record_with_details(&handed, None, Default::default(), Some(priced()))
+            .expect("handed_on");
+
+        let sessions = gateway_sessions(&ledger, None).expect("sessions");
+        assert!(sessions.iter().all(|session| session.id != "only-refusal"));
+        let s1 = sessions
+            .iter()
+            .find(|session| session.id == "s1")
+            .expect("s1");
+        assert_eq!(s1.input_tokens, 4);
+        assert_eq!(s1.output_tokens, 5);
+        assert_eq!(sessions.len(), 1);
+    }
 }
