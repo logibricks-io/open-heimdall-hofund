@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- R-22: LAN allow list and trusted proxy. Top-level `allow_ips` (IPs and CIDRs)
+  and `trust_proxy`, overridable by `HOFUND_ALLOW_IPS` / `HOFUND_TRUST_PROXY`;
+  non-listed peers get a JSON 403 before authentication, loopback is always
+  allowed, a malformed environment list fails closed to loopback only, and
+  apply/reload replace the settings without a restart. `hofund status` shows
+  the effective list.
 - R-21: `hofund uninstall [--yes] [--purge]` restores every managed agent through
   non-force disconnect, refuses to run beside a live daemon, and optionally
   removes only hofund's resolved config, credential, usage, and state paths.

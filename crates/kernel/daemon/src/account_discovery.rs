@@ -180,6 +180,8 @@ mod tests {
     fn minimal_config(discover: bool) -> Config {
         Config {
             listen: "127.0.0.1:9".parse().expect("listen"),
+            allow_ips: Vec::new(),
+            trust_proxy: false,
             token_file: "token".to_owned(),
             usage_file: "usage.db".to_owned(),
             failover: hofund_config::Failover::default(),
