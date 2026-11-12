@@ -1,7 +1,6 @@
-//! Zed subscription plugin with native RSA loopback sign-in and credential import.
+//! Zed subscription plugin.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use hofund_plugin_api::{
     AccountId, AccountStatus, BuildError, ConfigError, HostContext, ModelList, PluginError,
@@ -20,14 +19,16 @@ mod models;
 mod org;
 mod quota;
 mod refresh;
-mod sign_in;
 mod stream;
 mod thread;
 mod tokens;
 mod upstream;
 
-static SPEC: SubscriptionSpec =
-    SubscriptionSpec::from_static(PluginId::from_static("zed"), "Zed", SignInFlowKind::Pkce);
+static SPEC: SubscriptionSpec = SubscriptionSpec::from_static(
+    PluginId::from_static("zed"),
+    "Zed",
+    SignInFlowKind::TokenFile,
+);
 
 /// Registers the Zed subscription.
 #[must_use]
@@ -96,8 +97,7 @@ impl SubscriptionFactory for ZedFactory {
     ) -> Result<Arc<dyn Subscription>, BuildError> {
         Ok(Arc::new(Zed {
             endpoints: Arc::clone(&self.endpoints),
-            flow: SignInFlow::Pkce,
-            pending: Mutex::new(HashMap::new()),
+            flow: SignInFlow::TokenFile,
         }))
     }
 }
@@ -105,7 +105,6 @@ impl SubscriptionFactory for ZedFactory {
 struct Zed {
     endpoints: Arc<Endpoints>,
     flow: SignInFlow,
-    pending: Mutex<HashMap<String, sign_in::Pending>>,
 }
 
 #[hofund_plugin_sdk::async_trait]
@@ -120,39 +119,30 @@ impl Subscription for Zed {
 
     async fn start_sign_in(
         &self,
-        ctx: &SignInCtx,
-        host: &HostContext,
+        _ctx: &SignInCtx,
+        _host: &HostContext,
     ) -> Result<SignInChallenge, PluginError> {
-        let (pending, challenge) = sign_in::start(ctx, host)?;
-        self.pending
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(ctx.session().to_owned(), pending);
-        Ok(challenge)
+        Err(PluginError::unsupported(
+            "import a Zed credential export with `hofund subscription import`",
+        ))
     }
 
     async fn complete_sign_in(
         &self,
-        ctx: &SignInCtx,
-        proof: SignInProof,
-        host: &HostContext,
+        _ctx: &SignInCtx,
+        _proof: SignInProof,
+        _host: &HostContext,
     ) -> Result<AccountId, PluginError> {
-        let pending = self
-            .pending
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(ctx.session())
-            .ok_or_else(|| PluginError::config("no Zed sign-in is in progress for this session"))?;
-        host.loopback().release(ctx);
-        sign_in::complete(host, Arc::clone(&self.endpoints), pending, proof).await
+        Err(PluginError::unsupported(
+            "import a Zed credential export with `hofund subscription import`",
+        ))
     }
 
-    async fn cancel_sign_in(&self, ctx: &SignInCtx, host: &HostContext) -> Result<(), PluginError> {
-        self.pending
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(ctx.session());
-        host.loopback().release(ctx);
+    async fn cancel_sign_in(
+        &self,
+        _ctx: &SignInCtx,
+        _host: &HostContext,
+    ) -> Result<(), PluginError> {
         Ok(())
     }
 

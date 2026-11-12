@@ -44,8 +44,16 @@ runs:
     - name: Install Linux host libraries
       if: runner.os == 'Linux'
       shell: bash
-      # Bound and retry apt so a DNS stall cannot eat the whole step.
-      run: bash .github/scripts/install-linux-host-libraries.sh
+      run: |
+        sudo DEBIAN_FRONTEND=noninteractive apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=30
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+          -o Acquire::Retries=3 -o Acquire::http::Timeout=30 \
+          -o Dpkg::Options::="--force-confold" \
+          libwebkit2gtk-4.1-dev \
+          libayatana-appindicator3-dev \
+          librsvg2-dev \
+          patchelf \
+          libxdo-dev
     - name: Install the Tauri CLI
       shell: bash
       run: npm install --global @tauri-apps/cli@2.12.4

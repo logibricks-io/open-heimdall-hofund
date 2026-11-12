@@ -20,13 +20,8 @@ windows = "~/.codex/config.toml"
 env_override = "CODEX_HOME"
 env_replaces = "~/.codex"
 
-# model_provider selects the hofund table. The engine also moves the previous
-# provider's threads to hofund and moves hofund's threads back at disconnect so
-# Codex 0.166+ can resume them. A selected profile with its own model_provider
-# leaves threads alone. Original rollout bytes are kept under
-# CODEX_HOME/.hofund/trash/codex-provider before any rollout is rewritten.
-# base_url includes /v1 because wire_api = "responses" posts to
-# {base_url}/responses.
+# model_provider selects the hofund table. base_url includes /v1 because
+# wire_api = "responses" posts to {base_url}/responses.
 [[set]]
 file = "config"
 key = "model_provider"

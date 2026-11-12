@@ -56,7 +56,6 @@ pub use hofund_plugin_api::{
 mod active_provider;
 mod catalog;
 mod checkpoint;
-mod codex_threads;
 mod credential;
 mod edit;
 mod go_binary;

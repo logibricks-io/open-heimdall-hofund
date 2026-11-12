@@ -413,9 +413,6 @@ mod d34_tests;
 mod backend_tests;
 
 #[cfg(test)]
-mod backend_deadline_tests;
-
-#[cfg(test)]
 mod input_tests;
 
 #[cfg(test)]

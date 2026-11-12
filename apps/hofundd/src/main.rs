@@ -19,7 +19,7 @@ use std::sync::Arc;
 use tracing::level_filters::LevelFilter;
 
 use hofund_daemon::{
-    DaemonError, Signals, StartOptions, Termination, TolerantWriter, finish, serve_until_signals,
+    DaemonError, StartOptions, Termination, TolerantWriter, finish, serve_until_signal,
     start_linked, user_config_path,
 };
 
@@ -214,13 +214,11 @@ fn serve(path: &Path) -> ExitCode {
             ..StartOptions::default()
         };
         let running = start_linked(path, Arc::new(registry::LinkedRegistry), options).await?;
-        // Handlers first: a SIGTERM sent on reading the notice must drain.
-        let signals = Signals::register();
         say(
             stderr(),
             &format!("listening on http://{}", running.local_addr),
         );
-        Ok::<Termination, DaemonError>(serve_until_signals(running, signals).await)
+        Ok::<Termination, DaemonError>(serve_until_signal(running).await)
     });
     // Background tasks end here, before a signal is re-raised.
     drop(runtime);

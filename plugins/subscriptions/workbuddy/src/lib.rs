@@ -314,7 +314,7 @@ impl Subscription for WorkBuddy {
         account: &AccountId,
         host: &HostContext,
     ) -> Result<hofund_plugin_api::CheckinResult, PluginError> {
-        checkin::run(account, host, Arc::clone(&self.endpoints)).await
+        checkin::run(account, host).await
     }
 
     async fn discover_agent_sign_in(

@@ -9,12 +9,6 @@ use hofund_plugin_sdk::oauth::{SecretObject, account_id_from};
 pub(crate) const REFRESH_MARGIN: Duration = Duration::from_secs(5 * 60);
 pub(crate) const CN_SITE: &str = "qoder-cn";
 
-/// The flag a refused refresh sets on the stored secret.
-pub(crate) const LAPSED: &str = "lapsed";
-
-/// What a lapsed sign-in is told.
-pub(crate) const LAPSED_REASON: &str = "Qoder refused the stored sign-in; import credentials again";
-
 /// Which Qoder deployment an account uses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Site {
@@ -98,9 +92,6 @@ impl Stored {
 
 pub(crate) fn parse_secret(secret: &SecretString) -> Result<Stored, PluginError> {
     let blob = SecretObject::parse(secret)?;
-    if blob.flag(LAPSED) {
-        return Err(PluginError::auth(LAPSED_REASON));
-    }
     let uid = blob
         .text("uid")
         .filter(|value| !value.is_empty())

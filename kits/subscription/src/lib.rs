@@ -2,7 +2,7 @@
 //!
 //! This crate is unpublished and is only a dev-dependency of a subscription
 //! plugin. [`test_host`] builds a `hofund_plugin_host::HostContext` with fake
-//! backends. [`block_on`], [`join_all`], [`drive_until`], and [`poll_once`] drive async plugin
+//! backends. [`block_on`], [`join_all`], and [`poll_once`] drive async plugin
 //! calls without a plugin depending on tokio. Conformance tests land in PR D.
 
 use std::future::Future;
@@ -13,27 +13,6 @@ pub use hofund_plugin_host::{
     PipedScript, PipedSpawn, RecordingHttp, RecordingObserve, RecordingProcess, RecordingScheduler,
     RecordingSecrets, TestHost, test_host,
 };
-
-/// Sends one HTTP/1.1 GET to a test sign-in listener and returns its reply.
-///
-/// # Errors
-///
-/// Returns an I/O error when the listener is closed or the exchange fails.
-pub async fn loopback_get(port: u16, target: &str) -> std::io::Result<(u16, String)> {
-    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-
-    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port)).await?;
-    stream
-        .write_all(format!("GET {target} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").as_bytes())
-        .await?;
-    let mut reply = String::new();
-    stream.read_to_string(&mut reply).await?;
-    let status = reply
-        .get(9..12)
-        .and_then(|status| status.parse().ok())
-        .unwrap_or(0);
-    Ok((status, reply))
-}
 
 /// Runs `future` on a paused Tokio clock so tests can [`advance_time`].
 ///
@@ -71,29 +50,6 @@ pub fn block_on<T>(future: impl Future<Output = T>) -> T {
 /// Runs every future concurrently and returns their outputs in order.
 pub async fn join_all<T>(futures: Vec<Pin<Box<dyn Future<Output = T> + '_>>>) -> Vec<T> {
     futures_util::future::join_all(futures).await
-}
-
-/// Polls `future` with a real runtime waker until `until` completes.
-///
-/// Use this when a call must make progress (for example recording HTTP)
-/// before the test acts, instead of a fixed `yield_times` budget.
-///
-/// # Panics
-///
-/// Panics if `future` completes first.
-pub async fn drive_until<F, U, T>(future: Pin<&mut F>, until: U)
-where
-    F: Future<Output = T> + ?Sized,
-    U: Future<Output = ()>,
-    T: std::fmt::Debug,
-{
-    let until = std::pin::pin!(until);
-    match futures_util::future::select(future, until).await {
-        futures_util::future::Either::Left((result, _)) => {
-            panic!("future finished early: {result:?}")
-        }
-        futures_util::future::Either::Right(((), _)) => {}
-    }
 }
 
 /// Polls `future` once with a no-op waker.

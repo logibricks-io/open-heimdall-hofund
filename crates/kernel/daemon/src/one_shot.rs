@@ -116,11 +116,6 @@ async fn state(
         runtime_revision,
         ConfigOpsRouting {
             listener,
-            network_access: hofund_gateway::NetworkAccess::new(hofund_config::effective_network(
-                &config,
-                hofund_config::allow_ips_env().as_deref(),
-                hofund_config::trust_proxy_env().as_deref(),
-            )),
             visible_catalog: Arc::new(RwLock::new(VisibleCatalog::build(
                 Arc::clone(&config),
                 &snapshot.load().models(),

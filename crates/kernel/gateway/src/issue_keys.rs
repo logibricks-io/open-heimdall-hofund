@@ -33,6 +33,14 @@ pub(super) const KEYS_PATH: &str = "/v1/hofund/keys";
 const KEYS_ID_PATH: &str = "/v1/hofund/keys/{id}";
 const BODY_LIMIT: usize = 1 << 20;
 const PRUNE_INTERVAL: Duration = Duration::from_secs(10 * 60);
+const FORWARD_HEADERS: &[&str] = &[
+    "forwarded",
+    "x-forwarded-for",
+    "x-real-ip",
+    "cf-connecting-ip",
+    "true-client-ip",
+    "tailscale-user-login",
+];
 
 pub(super) fn routes(router: readonly::RouteSet) -> readonly::RouteSet {
     router
@@ -235,7 +243,7 @@ fn issuer_for(app: &Inner, request: &Request) -> Result<String, Box<Response>> {
             if has_credential(request.headers(), request.uri()) {
                 return Err(unauthorized);
             }
-            if let Some(message) = local_profile_refused(app, request) {
+            if let Some(message) = local_profile_refused(request) {
                 return Err(Box::new(error(StatusCode::FORBIDDEN, &message)));
             }
             Ok(String::new())
@@ -250,14 +258,17 @@ fn has_credential(headers: &HeaderMap, uri: &Uri) -> bool {
         || uri.query().and_then(query_key).is_some()
 }
 
-fn local_profile_refused(app: &Inner, request: &Request) -> Option<String> {
+fn local_profile_refused(request: &Request) -> Option<String> {
     let peer = request.extensions().get::<PeerAddr>().map(|peer| peer.0);
     if !peer.is_some_and(|peer| peer.ip().is_loopback()) {
         return Some(
             "short-lived keys without a gateway key may be issued only from loopback".to_owned(),
         );
     }
-    if !app.network_access.is_local(request) {
+    if FORWARD_HEADERS
+        .iter()
+        .any(|name| request.headers().contains_key(*name))
+    {
         return Some(
             "a forwarded request cannot issue short-lived keys without a gateway key".to_owned(),
         );
@@ -733,58 +744,5 @@ mod tests {
         let limit: Value = serde_json::from_slice(&body).expect("limit");
         assert_eq!(limit["expires"], child.expires);
         assert_eq!(limit["issuerLimits"][0]["tokenLimit"], 100);
-    }
-
-    #[tokio::test]
-    async fn r22_forwarded_loopback_is_remote_for_keyless_issue_unless_trusted() {
-        let fixture = fixture();
-        let access = crate::allow::NetworkAccess::new(hofund_config::NetworkSettings::default());
-        let app = fixture
-            .gateway
-            .with_network_access(access.clone())
-            .into_router();
-        let (status, _, _) = request(
-            &app,
-            "POST",
-            KEYS_PATH,
-            "127.0.0.1",
-            None,
-            r#"{"ttl":"1h"}"#,
-            &[("user-agent", "sandbox-agent")],
-        )
-        .await;
-        assert_eq!(status, StatusCode::CREATED);
-
-        for header in crate::allow::FORWARD_HEADERS {
-            let (status, _, _) = request(
-                &app,
-                "POST",
-                KEYS_PATH,
-                "127.0.0.1",
-                None,
-                r#"{"ttl":"1h"}"#,
-                &[("user-agent", "sandbox-agent"), (header, "forwarded")],
-            )
-            .await;
-            assert_eq!(status, StatusCode::FORBIDDEN, "{header}");
-        }
-
-        access.replace(hofund_config::NetworkSettings {
-            trust_proxy: true,
-            ..hofund_config::NetworkSettings::default()
-        });
-        for header in crate::allow::FORWARD_HEADERS {
-            let (status, _, body) = request(
-                &app,
-                "POST",
-                KEYS_PATH,
-                "127.0.0.1",
-                None,
-                r#"{"ttl":"1h"}"#,
-                &[("user-agent", "sandbox-agent"), (header, "forwarded")],
-            )
-            .await;
-            assert_eq!(status, StatusCode::CREATED, "{header}: {body:?}");
-        }
     }
 }

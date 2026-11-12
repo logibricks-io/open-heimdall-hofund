@@ -6,12 +6,7 @@
     "configured": "127.0.0.1:3425",
     "effective": "127.0.0.1:4425",
     "running": "127.0.0.1:3425",
-    "effective_source": "environment",
-    "allow_ips": [
-      "192.168.1.0/24"
-    ],
-    "trust_proxy": true,
-    "allow_ips_invalid": true
+    "effective_source": "environment"
   },
   "generation": 4,
   "disk_revision": "disk-revision-2",

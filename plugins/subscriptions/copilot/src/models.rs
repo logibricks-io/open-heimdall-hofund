@@ -9,7 +9,7 @@ use hofund_plugin_sdk::Call;
 use hofund_plugin_sdk::json::{self, Value};
 use hofund_plugin_sdk::oauth::secret_text;
 
-use crate::session::Session;
+use crate::session::{EDITOR_HEADERS, Session};
 
 /// Id prefixes Copilot gives models nobody picks by hand.
 const INTERNAL_PREFIXES: [&str; 3] = ["copilot-search", "exec-agent", "trajectory"];
@@ -24,8 +24,6 @@ pub(crate) struct Listed {
     apis: HashMap<String, Vec<ProtocolId>>,
     /// Models listed with terms the account has not accepted yet.
     waiting: HashSet<String>,
-    /// Enabled manual picks, likeliest served first.
-    picks: Vec<String>,
 }
 
 impl Listed {
@@ -33,26 +31,13 @@ impl Listed {
     /// `inbound`: the inbound one when the model is served on it, else the
     /// first API the list names, else Chat Completions.
     pub(crate) fn protocol(&self, model: &str, inbound: ProtocolId) -> ProtocolId {
-        let apis = self.apis(model);
+        let Some(apis) = self.apis.get(model) else {
+            return ProtocolId::OPENAI_CHAT;
+        };
         if apis.contains(&inbound) {
             return inbound;
         }
         apis.first().copied().unwrap_or(ProtocolId::OPENAI_CHAT)
-    }
-
-    pub(crate) fn apis(&self, model: &str) -> Vec<ProtocolId> {
-        self.apis
-            .get(model)
-            .cloned()
-            .unwrap_or_else(|| vec![ProtocolId::OPENAI_CHAT])
-    }
-
-    pub(crate) fn knows(&self, model: &str) -> bool {
-        self.apis.contains_key(model)
-    }
-
-    pub(crate) fn picks(&self) -> Vec<String> {
-        self.picks.clone()
     }
 
     /// Whether `model` waits for its terms to be accepted.
@@ -65,8 +50,6 @@ impl Listed {
 #[derive(Debug, Default)]
 pub(crate) struct Book {
     accounts: Mutex<HashMap<AccountId, Listed>>,
-    pub(crate) autos: Mutex<HashMap<AccountId, crate::auto::AutoSession>>,
-    pub(crate) refused: Mutex<HashMap<AccountId, HashMap<String, std::time::SystemTime>>>,
 }
 
 impl Book {
@@ -86,15 +69,6 @@ impl Book {
         self.lock().insert(account.clone(), listed);
     }
 
-    /// Remembers endpoints an Auto pick named even when `/models` did not.
-    pub(crate) fn see(&self, account: &AccountId, model: &str, apis: Vec<ProtocolId>) {
-        self.lock()
-            .entry(account.clone())
-            .or_default()
-            .apis
-            .insert(model.to_owned(), apis);
-    }
-
     /// Records that `account` accepted the terms of `model`.
     pub(crate) fn accepted(&self, account: &AccountId, model: &str) {
         if let Some(listed) = self.lock().get_mut(account) {
@@ -103,21 +77,16 @@ impl Book {
     }
 }
 
-/// A call to the Copilot API with the session token and client headers.
+/// A call to the Copilot API with the session token and editor headers.
 fn api_call(call: Call, session: &Session) -> Call {
-    let call = session.headers().iter().fold(
+    EDITOR_HEADERS.iter().fold(
         call.sensitive_header(
             "authorization",
             format!("Bearer {}", secret_text(&session.token)),
         )
         .header("accept", "application/json"),
         |call, (name, value)| call.header(*name, *value),
-    );
-    if session.direct {
-        call
-    } else {
-        call.header("X-GitHub-Api-Version", "2026-01-09")
-    }
+    )
 }
 
 /// Reads `/models` for `account` and keeps what it says in `book`.
@@ -145,25 +114,8 @@ pub(crate) async fn list(
             ));
         }
     }
-    let (mut models, mut dropped, listed) = parse(reply.body())?;
+    let (models, dropped, listed) = parse(reply.body())?;
     book.put(account, listed);
-    let now = host.clock().now();
-    models.retain(|model| {
-        let served = !crate::auto::refused(book, account, model.id(), now);
-        if !served {
-            dropped.push(model.id().to_owned());
-        }
-        served
-    });
-    if !models
-        .iter()
-        .any(|model| model.id() == crate::auto::AUTO_ID)
-    {
-        models.push(ModelSpec::new(
-            crate::auto::AUTO_ID,
-            Some("Auto".to_owned()),
-        )?);
-    }
     Ok(ModelList::new(models, None)
         .with_dropped(dropped)
         .with_source_url(url))
@@ -200,7 +152,6 @@ pub(crate) fn parse(body: &[u8]) -> Result<(Vec<ModelSpec>, Vec<String>, Listed)
     let mut models = Vec::new();
     let mut dropped = Vec::new();
     let mut listed = Listed::default();
-    let mut ranked = Vec::new();
     for row in rows {
         let Some(id) = row
             .get("id")
@@ -240,23 +191,6 @@ pub(crate) fn parse(body: &[u8]) -> Result<(Vec<ModelSpec>, Vec<String>, Listed)
                 dropped.push(id.to_owned());
                 continue;
             }
-        } else {
-            let premium = row
-                .pointer("/billing/is_premium")
-                .and_then(Value::as_bool)
-                .unwrap_or(true);
-            let rank = if row.get("is_chat_fallback").and_then(Value::as_bool) == Some(true) {
-                0
-            } else if row.get("is_chat_default").and_then(Value::as_bool) == Some(true) {
-                1
-            } else if id == "gpt-4.1" {
-                2
-            } else if !premium {
-                3
-            } else {
-                4
-            };
-            ranked.push((rank, id.to_owned()));
         }
         let name = row
             .get("name")
@@ -274,8 +208,6 @@ pub(crate) fn parse(body: &[u8]) -> Result<(Vec<ModelSpec>, Vec<String>, Listed)
             ));
         models.push(spec);
     }
-    ranked.sort_by_key(|(rank, _)| *rank);
-    listed.picks = ranked.into_iter().map(|(_, id)| id).collect();
     Ok((models, dropped, listed))
 }
 
@@ -337,7 +269,7 @@ fn endpoint_name(api: ProtocolId) -> &'static str {
     }
 }
 
-pub(crate) fn strings(value: Option<&Value>) -> Vec<String> {
+fn strings(value: Option<&Value>) -> Vec<String> {
     value
         .and_then(Value::as_array)
         .map(|items| {

@@ -251,9 +251,7 @@ impl AccountStore {
     /// Returns [`StoreError`] when a file or the selected secret backend fails.
     pub fn open(path: impl Into<PathBuf>) -> Result<Self, StoreError> {
         let path = path.into();
-        let backend = crate::account_secrets::scoped_memory_backend(&path)
-            .unwrap_or_else(|| default_backend(&path));
-        Self::open_with_backend(&path, backend)
+        Self::open_with_backend(&path, default_backend(&path))
     }
 
     pub(crate) fn open_with_backend(

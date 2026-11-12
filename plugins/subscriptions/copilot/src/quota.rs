@@ -15,81 +15,6 @@ const WINDOWS: [(&str, &str); 3] = [
 const PREMIUM: &str = "premium_interactions";
 const COMPLETIONS: &str = "completions";
 
-/// The plan and access SKU reported by Copilot. They are distinct: an
-/// educational SKU can sit on an individual plan.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct Entitlement {
-    pub(crate) plan: Option<String>,
-    pub(crate) sku: Option<String>,
-}
-
-impl Entitlement {
-    fn read(object: &Map<String, Value>) -> Self {
-        Self {
-            plan: object
-                .get("copilot_plan")
-                .and_then(Value::as_str)
-                .filter(|plan| !plan.is_empty())
-                .map(str::to_owned),
-            sku: object
-                .get("access_type_sku")
-                .and_then(Value::as_str)
-                .filter(|sku| !sku.is_empty())
-                .map(str::to_owned),
-        }
-    }
-
-    /// Missing fields do not erase the last successful reading.
-    fn or_previous(mut self, previous: &Self) -> Self {
-        self.plan = self.plan.or_else(|| previous.plan.clone());
-        self.sku = self.sku.or_else(|| previous.sku.clone());
-        self
-    }
-
-    pub(crate) fn is_empty(&self) -> bool {
-        self.plan.is_none() && self.sku.is_none()
-    }
-
-    /// The name GitHub's own clients show for this entitlement.
-    pub(crate) fn label(&self) -> String {
-        match self.sku.as_deref() {
-            Some("free_educational_quota") => return "Education".to_owned(),
-            Some("free_limited_copilot") => return "Free".to_owned(),
-            _ => {}
-        }
-        let Some(plan) = self.plan.as_deref().filter(|plan| !plan.is_empty()) else {
-            return String::new();
-        };
-        let known = match plan.to_ascii_lowercase().as_str() {
-            "free" => "Free",
-            "individual" => "Pro",
-            "individual_pro" => "Pro+",
-            "individual_max" => "Max",
-            "individual_edu" => "Education",
-            "business" => "Business",
-            "enterprise" => "Enterprise",
-            _ => "",
-        };
-        if !known.is_empty() {
-            return known.to_owned();
-        }
-        let mut chars = plan.chars();
-        let Some(first) = chars.next() else {
-            return String::new();
-        };
-        first.to_uppercase().collect::<String>() + chars.as_str()
-    }
-
-    fn window_name(&self, name: &str) -> String {
-        let label = self.label();
-        if label.is_empty() {
-            name.to_owned()
-        } else {
-            format!("{label} · {name}")
-        }
-    }
-}
-
 /// Reads the quota windows from a `copilot_internal/user` reply.
 ///
 /// Usage is entitlement minus remaining, or 100 minus the percent left. A
@@ -97,21 +22,12 @@ impl Entitlement {
 /// windows come last, with no limit. Completions never block. Premium
 /// requests do not block when overage is permitted on a seat the user pays
 /// for: a business or enterprise seat is managed and still blocks.
-#[cfg(test)]
 pub(crate) fn windows(body: &[u8]) -> Result<Vec<QuotaWindow>, PluginError> {
-    windows_with_entitlement(body, &Entitlement::default()).map(|(windows, _)| windows)
-}
-
-pub(crate) fn windows_with_entitlement(
-    body: &[u8],
-    previous: &Entitlement,
-) -> Result<(Vec<QuotaWindow>, Entitlement), PluginError> {
     let Ok(Value::Object(object)) = json::from_slice::<Value>(body) else {
         return Err(PluginError::decode(
             "the Copilot quota reply is not a JSON object",
         ));
     };
-    let entitlement = Entitlement::read(&object).or_previous(previous);
     let managed = object
         .get("copilot_plan")
         .and_then(Value::as_str)
@@ -132,7 +48,6 @@ pub(crate) fn windows_with_entitlement(
     let mut limited = Vec::new();
     let mut unlimited = Vec::new();
     for (id, name) in WINDOWS {
-        let name = entitlement.window_name(name);
         let Some(snapshot) = snapshots
             .and_then(|all| all.get(id))
             .and_then(Value::as_object)
@@ -174,7 +89,7 @@ pub(crate) fn windows_with_entitlement(
         limited.push(QuotaWindow::new(name, used, Some(limit), resets_at)?.with_blocking(blocking));
     }
     limited.extend(unlimited);
-    Ok((limited, entitlement))
+    Ok(limited)
 }
 
 /// Used and limit of one snapshot, or `None` to skip it.

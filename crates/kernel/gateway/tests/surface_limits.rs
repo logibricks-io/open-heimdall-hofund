@@ -105,13 +105,13 @@ async fn a_surface_takes_a_body_up_to_32_mib() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_surface_deadline_leaves_room_for_compaction() {
+async fn a_surface_has_three_minutes() {
     assert_eq!(
-        post("/sleep", b"284".to_vec()).await,
+        post("/sleep", b"179".to_vec()).await,
         (StatusCode::OK, "awake".to_owned())
     );
     assert_eq!(
-        post("/sleep", b"286".to_vec()).await,
+        post("/sleep", b"181".to_vec()).await,
         (
             StatusCode::GATEWAY_TIMEOUT,
             "kernel deadline exceeded".to_owned()

@@ -120,10 +120,8 @@ A non-issued, non-expiring, full-access key may be allowed to issue keys with
 Issued, expiring, read-only, disabled, and unauthorized keys cannot issue.
 Without a key, only a direct loopback client can use the key-management route:
 its peer and `Host` must be loopback, and it must carry no forwarding header,
-`Origin`, `Sec-Fetch-*` mark, or `Mozilla/` user agent. Setting `trust_proxy = true`
-or `HOFUND_TRUST_PROXY=true` deliberately lets a trusted local proxy keep this
-privilege. The model listener's `allow_ips` check still uses the socket peer and
-runs before this profile. This exception does not make any other route keyless.
+`Origin`, `Sec-Fetch-*` mark, or `Mozilla/` user agent. This exception does not
+make any other route keyless.
 
 `POST /v1/hofund/keys` accepts `ttl` as a duration string such as `"1h"` or as
 seconds, plus `name`, `models`, `accounts`, `tokens`, `cost`, and `readOnly`.

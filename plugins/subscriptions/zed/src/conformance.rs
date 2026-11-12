@@ -7,13 +7,13 @@ use hofund_plugin_api::{
 };
 
 #[test]
-fn a2c_12_contributes_loopback_subscription_with_import() {
+fn a2c_12_contributes_token_file_subscription() {
     let contribution = crate::contribute();
     let [factory] = contribution.subscriptions() else {
         panic!("one subscription factory");
     };
     assert_eq!(factory.spec().plugin().as_str(), "zed");
-    assert_eq!(factory.spec().flow(), SignInFlowKind::Pkce);
+    assert_eq!(factory.spec().flow(), SignInFlowKind::TokenFile);
     assert!(!factory.spec().daily_checkin());
 
     let dir = tempfile::tempdir().expect("dir");
@@ -26,7 +26,6 @@ fn a2c_12_contributes_loopback_subscription_with_import() {
         .validate_and_build(&RawTable::new(), host.context())
         .expect("build");
     assert_eq!(built.id().as_str(), "zed");
-    assert_eq!(built.flow().kind(), SignInFlowKind::Pkce);
 }
 
 #[test]

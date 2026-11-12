@@ -138,39 +138,3 @@ async fn get_http_status_returns_404_and_200() {
 
     server.abort();
 }
-
-/// Matches [`OPEN_WAIT`] in the client library.
-const OPEN_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
-
-#[tokio::test]
-async fn tcp_handshake_times_out_when_the_peer_never_answers() {
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind server");
-    let addr = listener.local_addr().expect("server address");
-    let server = tokio::spawn(async move {
-        let (_stream, _) = listener.accept().await.expect("accept");
-        // Hold the connection open and never speak HTTP.
-        std::future::pending::<()>().await;
-    });
-
-    let started = std::time::Instant::now();
-    let error = tokio::time::timeout(
-        OPEN_WAIT + std::time::Duration::from_secs(3),
-        Client::tcp(addr, TOKEN).health(),
-    )
-    .await
-    .expect("handshake timeout must return before the outer bound")
-    .expect_err("silent peer");
-    let elapsed = started.elapsed();
-    assert!(elapsed >= OPEN_WAIT, "timed out too early: {elapsed:?}");
-    assert!(
-        elapsed < OPEN_WAIT + std::time::Duration::from_secs(3),
-        "timed out too late: {elapsed:?}"
-    );
-    let message = error.to_string();
-    assert!(
-        message.contains("control TCP handshake timed out after 5s"),
-        "{message}"
-    );
-    assert!(error.is_unavailable(), "{message}");
-    server.abort();
-}

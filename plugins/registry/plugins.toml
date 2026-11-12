@@ -1,11 +1,4 @@
 [[plugin]]
-id = "antigravity"
-kind = "subscription"
-path = "plugins/subscriptions/antigravity"
-package = "hofund-plugin-subscription-antigravity"
-feature = "antigravity"
-
-[[plugin]]
 id = "azure"
 kind = "provider"
 path = "plugins/providers/azure"

@@ -232,9 +232,6 @@ fn parse_store(
     }
     auth.uid = info_id.trim().to_owned();
     auth.label = who_label(&info_email, &info_name, &info_id);
-    if auth.team() {
-        auth.label = format!("{} (team)", auth.label);
-    }
     Ok(auth)
 }
 

@@ -1,9 +1,8 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
 use chacha20poly1305::aead::{Aead, Payload};
 use chacha20poly1305::{KeyInit, XChaCha20Poly1305, XNonce};
@@ -24,61 +23,6 @@ pub(crate) const KEYCHAIN_REFERENCE: &str = "os-keychain:v2";
 pub(crate) const FILE_REFERENCE_V1: &str = "encrypted-file:v1";
 pub(crate) const FILE_REFERENCE: &str = "encrypted-file:v2";
 const KEYCHAIN_SERVICE: &str = "io.logibricks.hofund.accounts";
-
-/// Number of live [`MemoryAccountSecretsGuard`]s. When non-zero,
-/// [`crate::AccountStore::open`] uses an in-memory secret backend.
-static MEMORY_SCOPES: AtomicUsize = AtomicUsize::new(0);
-static MEMORY_BACKENDS: OnceLock<Mutex<HashMap<PathBuf, Arc<MemoryAccountSecrets>>>> =
-    OnceLock::new();
-
-fn memory_backends() -> &'static Mutex<HashMap<PathBuf, Arc<MemoryAccountSecrets>>> {
-    MEMORY_BACKENDS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-/// Keeps [`crate::AccountStore::open`] on the in-memory secret backend.
-///
-/// Overlapping guards stay active until the last one drops. One backend is
-/// reused per metadata path so two hosts in the same test share secrets.
-/// Drop clears the path map when no guard remains.
-///
-/// Tests that upsert throwaway accounts should hold this for the fixture
-/// lifetime so they do not write the process login keychain.
-#[must_use]
-pub struct MemoryAccountSecretsGuard {
-    _private: (),
-}
-
-impl Drop for MemoryAccountSecretsGuard {
-    fn drop(&mut self) {
-        let previous = MEMORY_SCOPES.fetch_sub(1, Ordering::SeqCst);
-        if previous == 1 {
-            memory_backends()
-                .lock()
-                .expect("memory account secrets")
-                .clear();
-        }
-    }
-}
-
-/// Starts an in-memory account-secret scope for the calling test.
-///
-/// See [`MemoryAccountSecretsGuard`].
-pub fn memory_account_secrets() -> MemoryAccountSecretsGuard {
-    MEMORY_SCOPES.fetch_add(1, Ordering::SeqCst);
-    MemoryAccountSecretsGuard { _private: () }
-}
-
-pub(crate) fn scoped_memory_backend(metadata_path: &Path) -> Option<Arc<dyn AccountSecretBackend>> {
-    if MEMORY_SCOPES.load(Ordering::SeqCst) == 0 {
-        return None;
-    }
-    let mut map = memory_backends().lock().expect("memory account secrets");
-    let backend = map
-        .entry(metadata_path.to_path_buf())
-        .or_insert_with(|| Arc::new(MemoryAccountSecrets::default()));
-    Some(Arc::clone(backend) as Arc<dyn AccountSecretBackend>)
-}
-
 const MAGIC: &[u8; 8] = b"HOFACCT\0";
 const FORMAT_VERSION: u8 = 2;
 const NONCE_LEN: usize = 24;

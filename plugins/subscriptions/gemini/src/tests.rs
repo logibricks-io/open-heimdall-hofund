@@ -605,10 +605,13 @@ fn setup_keeps_a_project_stored_while_it_asked() {
             .expect("lease");
         let mut refresh = sub.refresh(&id, host.context());
         // The setup asks Code Assist, then waits for the lease held here.
-        // Drive refresh with a real waker until both HTTP calls are recorded.
-        // A fixed yield/poll budget can run out under load (#394, #445, #594).
-        hofund_kit_subscription::drive_until(refresh.as_mut(), host.http().wait_until_calls(2))
-            .await;
+        for _ in 0..1000 {
+            assert!(hofund_kit_subscription::poll_once(refresh.as_mut()).is_pending());
+            if host.http().calls().len() == 2 {
+                break;
+            }
+            hofund_kit_subscription::yield_times(1).await;
+        }
         assert_eq!(host.http().calls().len(), 2, "the setup asked Code Assist");
         held.commit(None, signed_in_blob(Some("proj-other")).to_secret())
             .await

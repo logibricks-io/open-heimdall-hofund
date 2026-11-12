@@ -158,7 +158,6 @@ pub(crate) enum ReloadOrigin {
 /// Listener and model-list state shared with config edits.
 pub(crate) struct ConfigOpsRouting {
     pub(crate) listener: ModelListener,
-    pub(crate) network_access: hofund_gateway::NetworkAccess,
     pub(crate) visible_catalog: Arc<RwLock<VisibleCatalog>>,
     pub(crate) snapshot: Snapshot,
 }
@@ -289,11 +288,6 @@ impl ConfigOps {
     /// The listener addresses for the published configuration.
     pub(crate) fn listener(&self) -> ListenerView {
         self.routing.listener.view(&self.live().config)
-    }
-
-    /// The effective network-access settings shared with the model listener.
-    pub(crate) fn network_access(&self) -> hofund_config::NetworkSettings {
-        self.routing.network_access.settings()
     }
 
     /// The published configuration.
@@ -586,13 +580,6 @@ impl ConfigOps {
 
     /// Moves the listener, then records and announces the publication.
     async fn finish(&self, staged: Staged) -> ConfigResponse {
-        self.routing
-            .network_access
-            .replace(hofund_config::effective_network(
-                &staged.config,
-                hofund_config::allow_ips_env().as_deref(),
-                hofund_config::trust_proxy_env().as_deref(),
-            ));
         let listen = self.routing.listener.follow(&staged.config).await;
         let mut live = self.live.write().expect("live config");
         let next = Arc::new(LiveConfig {
@@ -707,9 +694,6 @@ fn config_issue(error: &ConfigError, text: &str) -> FieldIssue {
                 .filter(|line| !line.starts_with('|') && !line.contains('|'))
                 .unwrap_or("invalid TOML");
             FieldIssue::new("config", "syntax", format!("{position}: {description}"))
-        }
-        ConfigError::Invalid(message) if message.starts_with("allow_ips entry ") => {
-            FieldIssue::new("config", "invalid", message.clone())
         }
         ConfigError::Invalid(message) => FieldIssue::new("config", "invalid", scrub(message, text)),
         ConfigError::Read(message) => FieldIssue::new("config", "read", scrub(message, text)),
@@ -847,9 +831,6 @@ mod tests {
             revision(text.as_bytes()),
             ConfigOpsRouting {
                 listener: ModelListener::new(None, None, tokio::sync::watch::channel(None).0),
-                network_access: hofund_gateway::NetworkAccess::new(
-                    hofund_config::effective_network(&config, None, None),
-                ),
                 visible_catalog: Arc::new(RwLock::new(VisibleCatalog::build(
                     Arc::clone(&config),
                     &snapshot.load().models(),

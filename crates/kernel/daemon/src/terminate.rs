@@ -77,48 +77,10 @@ const CONSOLE_DRAIN: Duration = hofund_gateway::CONTROL_DRAIN;
 /// reports why it stopped.
 ///
 /// The drain matches [`crate::serve_until_shutdown`]: control listeners stop
-/// first, the model listener finishes its in-flight requests, and
-/// constructed upstream providers are shut down. Pass the result to
-/// [`finish`] once the runtime is done.
+/// first and the model listener finishes its in-flight requests. Pass the
+/// result to [`finish`] once the runtime is done.
 pub async fn serve_until_signal(running: Running) -> Termination {
-    serve_until_signals(running, Signals::register()).await
-}
-
-/// Like [`serve_until_signal`], with handlers registered beforehand.
-///
-/// Register with [`Signals::register`] before announcing that the daemon is
-/// listening: a supervisor may send `SIGTERM` as soon as it reads that line,
-/// and a signal that arrives before the handlers exist takes its default
-/// disposition and skips the drain.
-pub async fn serve_until_signals(running: Running, signals: Signals) -> Termination {
-    serve_until(running, signals.next()).await
-}
-
-/// Termination signal or console handlers, registered when built.
-///
-/// A signal that arrives after [`Signals::register`] is kept until the drain
-/// waits for it.
-#[derive(Debug)]
-pub struct Signals(platform::Watch);
-
-impl Signals {
-    /// Registers the handlers now.
-    ///
-    /// A failure to register is reported on standard error and the result
-    /// then never resolves, so only a control shutdown stops the daemon.
-    ///
-    /// # Panics
-    ///
-    /// Panics when called outside a Tokio runtime.
-    #[must_use]
-    pub fn register() -> Self {
-        Self(platform::Watch::register())
-    }
-
-    /// Resolves with the first termination signal and its drain bound.
-    async fn next(self) -> (Termination, Option<Duration>) {
-        self.0.next().await
-    }
+    serve_until(running, termination_signal()).await
 }
 
 /// Serves until `signal` resolves or a control shutdown, then drains.
@@ -238,6 +200,11 @@ impl<W: Write> Write for TolerantWriter<W> {
     }
 }
 
+/// Resolves with the first termination signal and its drain bound.
+async fn termination_signal() -> (Termination, Option<Duration>) {
+    platform::next().await
+}
+
 #[cfg(unix)]
 mod platform {
     use std::time::Duration;
@@ -247,32 +214,18 @@ mod platform {
 
     use super::{Termination, notice};
 
-    /// The registered handlers, or `None` after a failed registration.
-    #[derive(Debug)]
-    pub(super) struct Watch(Option<Handlers>);
-
-    impl Watch {
-        pub(super) fn register() -> Self {
-            // The ignored check must run before the handler replaces SIG_IGN.
-            let hangup = !super::hangup_ignored_at_start();
-            match Handlers::register(hangup) {
-                Ok(handlers) => Self(Some(handlers)),
-                Err(error) => {
-                    notice(&format!("cannot register signal handlers: {error}"));
-                    Self(None)
-                }
-            }
-        }
-
-        pub(super) async fn next(self) -> (Termination, Option<Duration>) {
-            match self.0 {
-                Some(mut handlers) => (Termination::Signal(handlers.recv().await), None),
-                None => std::future::pending().await,
+    pub(super) async fn next() -> (Termination, Option<Duration>) {
+        // The ignored check must run before the handler replaces SIG_IGN.
+        let hangup = !super::hangup_ignored_at_start();
+        match Handlers::register(hangup) {
+            Ok(mut handlers) => (Termination::Signal(handlers.recv().await), None),
+            Err(error) => {
+                notice(&format!("cannot register signal handlers: {error}"));
+                std::future::pending().await
             }
         }
     }
 
-    #[derive(Debug)]
     struct Handlers {
         interrupt: Signal,
         terminate: Signal,
@@ -316,61 +269,29 @@ mod platform {
 
     use super::{ConsoleEvent, Termination, notice};
 
-    /// The registered handlers, or `None` after a failed registration.
-    #[derive(Debug)]
-    pub(super) struct Watch(Option<Handlers>);
-
-    #[derive(Debug)]
-    struct Handlers {
-        ctrl_c: windows::CtrlC,
-        ctrl_break: windows::CtrlBreak,
-        close: windows::CtrlClose,
-        logoff: windows::CtrlLogoff,
-        shutdown: windows::CtrlShutdown,
-    }
-
-    impl Watch {
-        pub(super) fn register() -> Self {
-            match Handlers::register() {
-                Ok(handlers) => Self(Some(handlers)),
-                Err(error) => {
-                    notice(&format!("cannot register console handlers: {error}"));
-                    Self(None)
-                }
-            }
-        }
-
-        pub(super) async fn next(self) -> (Termination, Option<Duration>) {
-            match self.0 {
-                Some(mut handlers) => {
-                    let event = handlers.recv().await;
-                    (Termination::Console(event), event.drain_bound())
-                }
-                None => std::future::pending().await,
+    pub(super) async fn next() -> (Termination, Option<Duration>) {
+        match event().await {
+            Ok(event) => (Termination::Console(event), event.drain_bound()),
+            Err(error) => {
+                notice(&format!("cannot register console handlers: {error}"));
+                std::future::pending().await
             }
         }
     }
 
-    impl Handlers {
-        fn register() -> std::io::Result<Self> {
-            Ok(Self {
-                ctrl_c: windows::ctrl_c()?,
-                ctrl_break: windows::ctrl_break()?,
-                close: windows::ctrl_close()?,
-                logoff: windows::ctrl_logoff()?,
-                shutdown: windows::ctrl_shutdown()?,
-            })
-        }
-
-        async fn recv(&mut self) -> ConsoleEvent {
-            tokio::select! {
-                _ = self.ctrl_c.recv() => ConsoleEvent::CtrlC,
-                _ = self.ctrl_break.recv() => ConsoleEvent::CtrlBreak,
-                _ = self.close.recv() => ConsoleEvent::Close,
-                _ = self.logoff.recv() => ConsoleEvent::Logoff,
-                _ = self.shutdown.recv() => ConsoleEvent::Shutdown,
-            }
-        }
+    async fn event() -> std::io::Result<ConsoleEvent> {
+        let mut ctrl_c = windows::ctrl_c()?;
+        let mut ctrl_break = windows::ctrl_break()?;
+        let mut close = windows::ctrl_close()?;
+        let mut logoff = windows::ctrl_logoff()?;
+        let mut shutdown = windows::ctrl_shutdown()?;
+        Ok(tokio::select! {
+            _ = ctrl_c.recv() => ConsoleEvent::CtrlC,
+            _ = ctrl_break.recv() => ConsoleEvent::CtrlBreak,
+            _ = close.recv() => ConsoleEvent::Close,
+            _ = logoff.recv() => ConsoleEvent::Logoff,
+            _ = shutdown.recv() => ConsoleEvent::Shutdown,
+        })
     }
 }
 
@@ -380,18 +301,8 @@ mod platform {
 
     use super::Termination;
 
-    /// No handlers exist on this platform.
-    #[derive(Debug)]
-    pub(super) struct Watch;
-
-    impl Watch {
-        pub(super) fn register() -> Self {
-            Self
-        }
-
-        pub(super) async fn next(self) -> (Termination, Option<Duration>) {
-            std::future::pending().await
-        }
+    pub(super) async fn next() -> (Termination, Option<Duration>) {
+        std::future::pending().await
     }
 }
 
@@ -490,21 +401,6 @@ mod tests {
         writeln!(writer, "hello").expect("writeln");
         assert_eq!(writer.write(b"ab").expect("write"), 2);
         assert_eq!(writer.0, b"hello\nab");
-    }
-
-    /// #563: a signal that lands after the handlers are registered but
-    /// before the drain first waits on them is still seen, instead of taking
-    /// the default disposition and killing the process.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn a_signal_between_register_and_wait_is_kept() {
-        let signals = Signals::register();
-        signal_hook::low_level::raise(signal_hook::consts::SIGTERM).expect("raise");
-        let (reason, bound) = tokio::time::timeout(Duration::from_secs(10), signals.next())
-            .await
-            .expect("the queued signal is delivered");
-        assert_eq!(reason, Termination::Signal(signal_hook::consts::SIGTERM));
-        assert_eq!(bound, None);
     }
 
     #[test]

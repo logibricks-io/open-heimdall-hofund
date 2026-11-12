@@ -22,7 +22,6 @@
 
 mod agent;
 mod body;
-mod cancellation;
 mod completion;
 mod config;
 mod duplex;
@@ -69,7 +68,6 @@ pub use balance::{
 };
 pub use billed::BilledUsage;
 pub use body::{Body, BodyStream};
-pub use cancellation::StoppedWaiting;
 pub use checkin::{CheckinAccountStatus, CheckinOutcome, CheckinRecord, CheckinResult};
 pub use completion::{Completion, CountOutcome, PROBE_CAP, ProbeReport};
 pub use config::{BuildError, ConfigError, RawTable, RawValue, Schema, ValidConfig};

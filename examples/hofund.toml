@@ -11,19 +11,6 @@
 
 listen = "127.0.0.1:3425"
 
-# Optional socket-peer allow list for a listener shared beyond this machine.
-# Entries are bare IPv4/IPv6 addresses or CIDR networks. Loopback always passes;
-# an empty list imposes no restriction. HOFUND_ALLOW_IPS replaces this list when
-# set, splitting entries at commas or whitespace. A malformed environment entry
-# fails closed: only loopback passes. Changes apply on config apply/reload.
-# allow_ips = ["192.168.1.0/24", "10.0.0.5", "2001:db8::/32"]
-#
-# A loopback request carrying a forwarding header is not local for local-only
-# privileges unless trust_proxy = true. HOFUND_TRUST_PROXY overrides this flag;
-# an invalid boolean is false. Forwarding headers never select the peer address
-# checked by allow_ips.
-# trust_proxy = false
-
 # Optional models.dev catalog settings. The cache lives under `.hofund/catalog/`
 # beside this file. Overrides win over the fetched catalog.
 # [catalog]

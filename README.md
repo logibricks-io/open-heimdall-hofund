@@ -92,26 +92,6 @@ Otherwise they use `hofund/hofund.toml` under the platform config directory:
 macOS, and `%APPDATA%` on Windows. `--config` selects another file. The app
 creates a starter file on Start or Open config.
 
-## Uninstall
-
-Stop the gateway with `hofund shutdown`, then run:
-
-```sh
-hofund uninstall
-```
-
-This disconnects every agent with hofund backups. Non-force disconnect preserves
-edits made after connect. The command prints each result and leaves your hofund
-settings in place for a reinstall. Use `hofund uninstall --purge` to delete the
-resolved config, token, usage database, gateway-key stores, and `.hofund` state
-as well. On a non-terminal stdin, add `--yes` to either form.
-
-Finally, delete the `hofund` and `hofundd` binaries from their install directory.
-The command prints the current `hofund` path. hofund does not install a service,
-login item, or shortcut, so uninstall has none to remove. Account credentials in
-the OS keychain may remain after `--purge`; the existing API cannot enumerate
-and bulk-remove them.
-
 ## Configuration
 
 [`examples/hofund.toml`](examples/hofund.toml) is a complete file: two

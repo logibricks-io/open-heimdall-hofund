@@ -1,15 +1,11 @@
 //! Daily check-in for WorkBuddy China accounts.
 
-use std::sync::Arc;
-
 use hofund_plugin_api::{AccountId, CheckinResult, HostContext, PluginError};
 use hofund_plugin_sdk::checkin::{CheckinTransport, WorkBuddySite, run_workbuddy};
 use hofund_plugin_sdk::oauth::secret_text;
 use hofund_plugin_sdk::transport::{Call, Reply};
 
-use crate::Endpoints;
-use crate::creds;
-use crate::refresh;
+use crate::creds::{self, Stored};
 use crate::site::Site;
 
 struct Transport<'a> {
@@ -33,9 +29,8 @@ impl CheckinTransport for Transport<'_> {
 pub(crate) async fn run(
     account: &AccountId,
     host: &HostContext,
-    endpoints: Arc<Endpoints>,
 ) -> Result<CheckinResult, PluginError> {
-    let stored = refresh::ensure_fresh(host, endpoints, account).await?;
+    let stored = Stored::load(host, account).await?;
     if stored.credential.site != Site::China {
         return Ok(CheckinResult::new(
             hofund_plugin_api::CheckinOutcome::Inactive,

@@ -9,7 +9,7 @@ use hofund_plugin_sdk::oauth::{SecretObject, TokenCache, same_secret};
 use crate::creds::{self, LAPSED, LAPSED_REASON, PlanAuth};
 use crate::team;
 
-pub(crate) const LEASE_WAIT: Duration = Duration::from_secs(30);
+const LEASE_WAIT: Duration = Duration::from_secs(30);
 
 pub(crate) struct Stored {
     pub auth: PlanAuth,

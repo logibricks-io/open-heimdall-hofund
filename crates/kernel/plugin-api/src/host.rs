@@ -1087,7 +1087,6 @@ pub struct LoopbackSpec {
     path: &'static str,
     redirect_host: RedirectHost,
     state: Option<String>,
-    query_token_success_url: Option<&'static str>,
 }
 
 impl LoopbackSpec {
@@ -1099,7 +1098,6 @@ impl LoopbackSpec {
             path: "/callback",
             redirect_host: RedirectHost::Localhost,
             state: None,
-            query_token_success_url: None,
         }
     }
 
@@ -1111,12 +1109,10 @@ impl LoopbackSpec {
             path: "/callback",
             redirect_host: RedirectHost::Localhost,
             state: None,
-            query_token_success_url: None,
         }
     }
 
     /// The callback path, such as `/auth/callback`. The default is `/callback`.
-    /// Query-token listeners accept every path.
     #[must_use]
     pub const fn path(mut self, path: &'static str) -> Self {
         self.path = path;
@@ -1130,18 +1126,10 @@ impl LoopbackSpec {
         self
     }
 
-    /// The `state` value the callback must carry. Required for OAuth.
+    /// The `state` value the callback must carry. Required.
     #[must_use]
     pub fn expect_state(mut self, state: impl Into<String>) -> Self {
         self.state = Some(state.into());
-        self
-    }
-
-    /// Accepts `user_id` and an encrypted `access_token` on any path, then
-    /// redirects to `success_url`. This mode does not use OAuth state.
-    #[must_use]
-    pub const fn query_token(mut self, success_url: &'static str) -> Self {
-        self.query_token_success_url = Some(success_url);
         self
     }
 
@@ -1169,13 +1157,7 @@ impl LoopbackSpec {
         self.state.as_deref()
     }
 
-    /// The success redirect for a query-token callback.
-    #[must_use]
-    pub const fn query_token_success_url(&self) -> Option<&'static str> {
-        self.query_token_success_url
-    }
-
-    /// Checks the path and callback mode before a backend sees the spec.
+    /// Checks the path and state before a backend sees the spec.
     fn validate(&self) -> Result<(), PluginError> {
         let path = self.path;
         if !path.starts_with('/')
@@ -1188,18 +1170,9 @@ impl LoopbackSpec {
                 "loopback callback path must be a plain absolute path other than /cancel",
             ));
         }
-        match (self.query_token_success_url, self.state.as_deref()) {
-            (Some(url), None)
-                if url.starts_with("https://")
-                    && url.bytes().all(|byte| byte.is_ascii_graphic()) =>
-            {
-                Ok(())
-            }
-            (Some(_), _) => Err(PluginError::config(
-                "query-token sign-in needs an HTTPS success URL and no expected state",
-            )),
-            (None, Some(state)) if !state.is_empty() => Ok(()),
-            (None, _) => Err(PluginError::config(
+        match self.state.as_deref() {
+            Some(state) if !state.is_empty() => Ok(()),
+            _ => Err(PluginError::config(
                 "loopback sign-in needs an expected state",
             )),
         }
@@ -1532,32 +1505,6 @@ mod tests {
             assert_eq!(ephemeral.requested_port(), None);
             assert_eq!(ephemeral.callback_path(), "/callback");
             assert_eq!(ephemeral.host(), RedirectHost::Localhost);
-        }
-
-        #[test]
-        fn query_token_mode_needs_no_state_and_has_an_https_success_url() {
-            let fake = Arc::new(Fake::default());
-            let handle = handle(Arc::clone(&fake) as Arc<dyn LoopbackBackend>);
-            let spec = LoopbackSpec::ephemeral()
-                .path("/")
-                .query_token("https://example.test/succeeded");
-            assert_eq!(spec.state(), None);
-            assert_eq!(
-                spec.query_token_success_url(),
-                Some("https://example.test/succeeded")
-            );
-            handle.bind(&ctx(), &spec).expect("query-token bind");
-            for bad in [
-                LoopbackSpec::ephemeral().query_token("http://example.test/succeeded"),
-                LoopbackSpec::ephemeral().query_token("https://example.test/a b"),
-                LoopbackSpec::ephemeral()
-                    .query_token("https://example.test/succeeded")
-                    .expect_state("not-empty"),
-            ] {
-                let error = handle.bind(&ctx(), &bad).expect_err("invalid query token");
-                assert_eq!(error.kind(), PluginErrorKind::Config);
-            }
-            assert_eq!(fake.calls.lock().expect("calls").len(), 1);
         }
 
         #[test]

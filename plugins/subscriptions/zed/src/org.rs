@@ -23,7 +23,7 @@ pub(crate) fn plan_name(id: &str) -> String {
     }
 }
 
-pub(crate) fn models_off(me: &Value, org: &str) -> bool {
+fn models_off(me: &Value, org: &str) -> bool {
     me.get("configuration_by_organization")
         .and_then(Value::as_object)
         .and_then(|map| map.get(org))

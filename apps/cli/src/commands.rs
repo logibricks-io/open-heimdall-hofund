@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use hofund_control_client::hofund_control_proto::{
     AgentAction, AgentConnectRequest, AgentDisconnectRequest, AgentModelRequest, AgentPlanRequest,
-    AgentState, AgentStatusEntry, ConfigApplyRequest, ConfigValidateRequest, FieldIssue,
-    ReloadRequest, RouteQuery, ShutdownRequest, TokenRotateRequest, UsageResponse,
+    AgentState, ConfigApplyRequest, ConfigValidateRequest, FieldIssue, ReloadRequest, RouteQuery,
+    ShutdownRequest, TokenRotateRequest, UsageResponse,
 };
 use hofund_control_client::{Client, ClientError, probe_model_health, resolve_config_id};
 
@@ -156,12 +156,6 @@ pub(crate) async fn status(config: &Path) -> Result<String, String> {
         listener.running.as_deref().unwrap_or(&listener.effective),
         listen_source(listener.effective_source),
     );
-    push_network_status(
-        &mut out,
-        &listener.allow_ips,
-        listener.trust_proxy,
-        listener.allow_ips_invalid,
-    );
     out.push_str(&format!(
         "\ngeneration: {}\ndisk revision: {}\nruntime revision: {}\nin flight: {}",
         status.generation, status.disk_revision, status.runtime_revision, status.in_flight
@@ -184,18 +178,6 @@ fn listen_source(
     }
 }
 
-fn push_network_status(out: &mut String, allow_ips: &[String], trust_proxy: bool, invalid: bool) {
-    let list = if allow_ips.is_empty() {
-        "unrestricted".to_owned()
-    } else {
-        allow_ips.join(", ")
-    };
-    out.push_str(&format!("\nallow list: {list}\ntrust proxy: {trust_proxy}"));
-    if invalid {
-        out.push_str("\nallow list is invalid; only loopback peers are allowed");
-    }
-}
-
 /// The offline status report: config path and id, disk revision, and the
 /// effective model address with its source.
 async fn offline_status(config: &Path) -> Result<String, String> {
@@ -206,19 +188,11 @@ async fn offline_status(config: &Path) -> Result<String, String> {
         Ok(client) => client.config().await.map_err(failure)?.disk_revision,
         Err(_) => "unknown (hofundd is unavailable)".to_owned(),
     };
-    let network = local::network_settings(config)?;
-    let mut out = format!(
+    Ok(format!(
         "daemon not running\nconfig: {}\nconfig id: {id}\ndisk revision: {revision}\nmodel address: {listen} ({})",
         config.display(),
         local::source_label(source),
-    );
-    push_network_status(
-        &mut out,
-        &network.allow_ips,
-        network.trust_proxy,
-        network.invalid_allow_ips,
-    );
-    Ok(out)
+    ))
 }
 
 /// `hofund healthcheck`: GET the model listener's `/health` directly.
@@ -529,17 +503,8 @@ pub(crate) async fn agent_status(config: &Path, only: Option<&str>) -> Result<St
     {
         return Err(format!("unknown agent `{id}`"));
     }
-    Ok(agent_status_table(&rows))
-}
-
-/// The `hofund agent status` table, then one `warning:` line per warning.
-fn agent_status_table(rows: &[&AgentStatusEntry]) -> String {
     let mut out = String::from("id\tstate\tmodel");
-    let mut warnings = String::new();
     for entry in rows {
-        for warning in &entry.warnings {
-            warnings.push_str(&format!("\nwarning: {}: {warning}", entry.id));
-        }
         let state = match entry.state {
             AgentState::Connected => "connected",
             AgentState::Disconnected => "disconnected",
@@ -552,8 +517,7 @@ fn agent_status_table(rows: &[&AgentStatusEntry]) -> String {
             entry.model.as_deref().unwrap_or("-")
         ));
     }
-    out.push_str(&warnings);
-    out
+    Ok(out)
 }
 
 /// `hofund agent connect <name> [--dry-run]`: plan, then connect against
@@ -693,34 +657,10 @@ pub(crate) async fn token_rotate(config: &Path) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        agent_status_table, opencode_models_note, tokens, usage_breakdown_table, usage_table,
-    };
+    use super::{opencode_models_note, tokens, usage_breakdown_table, usage_table};
     use hofund_control_client::hofund_control_proto::{
-        AgentState, AgentStatusEntry, UsageBreakdownBy, UsageBreakdownGroup, UsageResponse,
-        UsageRow,
+        UsageBreakdownBy, UsageBreakdownGroup, UsageResponse, UsageRow,
     };
-
-    /// #463: store warnings print under the table, one line each.
-    #[test]
-    fn agent_status_prints_warnings_under_the_table() {
-        let mut zed = AgentStatusEntry::default();
-        zed.id = "zed".to_owned();
-        zed.state = AgentState::Disconnected;
-        zed.warnings = vec!["store locked".to_owned(), "second".to_owned()];
-        let mut codex = AgentStatusEntry::default();
-        codex.id = "codex".to_owned();
-        codex.state = AgentState::Connected;
-        codex.model = Some("gpt".to_owned());
-        assert_eq!(
-            agent_status_table(&[&zed, &codex]),
-            "id\tstate\tmodel\nzed\tdisconnected\t-\ncodex\tconnected\tgpt\nwarning: zed: store locked\nwarning: zed: second"
-        );
-        assert_eq!(
-            agent_status_table(&[&codex]),
-            "id\tstate\tmodel\ncodex\tconnected\tgpt"
-        );
-    }
 
     #[test]
     fn u1b_13_cli_usage_totals_show_cost_currency_and_unpriced() {

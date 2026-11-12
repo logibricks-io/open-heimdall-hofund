@@ -36,12 +36,6 @@ pub(crate) struct Snapshot {
     pub running: bool,
     /// Bound address while running, otherwise the address in the config file.
     pub listen: String,
-    /// Newest routing decision while running, otherwise empty.
-    pub route: String,
-    /// Request and token totals since local midnight while running, otherwise empty.
-    pub today: String,
-    /// Retained quota card lines while running, otherwise empty.
-    pub quotas: Vec<String>,
     /// The latest action error, or empty.
     pub message: String,
     /// Every catalog adapter, in catalog order.
@@ -82,27 +76,6 @@ pub(crate) fn menu_entries(snapshot: &Snapshot) -> Vec<MenuEntry> {
             checked: None,
         },
     ];
-    for (id, label) in [("route", &snapshot.route), ("today", &snapshot.today)] {
-        if !label.is_empty() {
-            entries.push(MenuEntry {
-                id: id.to_owned(),
-                label: label.clone(),
-                enabled: false,
-                checked: None,
-            });
-        }
-    }
-    if !snapshot.quotas.is_empty() {
-        entries.push(separator("separator-quotas"));
-        for (index, quota) in snapshot.quotas.iter().enumerate() {
-            entries.push(MenuEntry {
-                id: format!("quota:{index}"),
-                label: quota.clone(),
-                enabled: false,
-                checked: None,
-            });
-        }
-    }
     if !snapshot.message.is_empty() {
         entries.push(MenuEntry {
             id: "notice".to_owned(),
@@ -173,7 +146,6 @@ pub(crate) struct Control {
     server: Option<Running>,
     bound: Option<String>,
     message: String,
-    tray: hofund_daemon::TrayStatus,
 }
 
 impl Control {
@@ -184,7 +156,6 @@ impl Control {
             server: None,
             bound: None,
             message: String::new(),
-            tray: hofund_daemon::TrayStatus::default(),
         }
     }
 
@@ -192,7 +163,6 @@ impl Control {
     pub(crate) async fn start(&mut self) -> Result<(), String> {
         if self.server.is_some() {
             self.message.clear();
-            self.refresh_tray().await;
             return Ok(());
         }
         if let Err(error) = ensure_config_file(&self.config_path) {
@@ -203,7 +173,6 @@ impl Control {
                 self.bound = Some(running.local_addr.to_string());
                 self.server = Some(running);
                 self.message.clear();
-                self.refresh_tray().await;
                 Ok(())
             }
             Err(error) => self.fail(error.to_string()),
@@ -217,22 +186,7 @@ impl Control {
         }
         self.bound = None;
         self.message.clear();
-        self.refresh_tray().await;
         Ok(())
-    }
-
-    /// Refreshes the retained route, daily usage, and quota text.
-    pub(crate) async fn refresh_tray(&mut self) {
-        // Build the future before awaiting so no `&Running` (not `Sync`)
-        // is held across the await; Tauri commands need `Send` futures.
-        let pending = self
-            .server
-            .as_ref()
-            .map(|server| hofund_daemon::tray_status(server, &self.config_path));
-        self.tray = match pending {
-            Some(pending) => pending.await,
-            None => hofund_daemon::TrayStatus::default(),
-        };
     }
 
     /// Connects or disconnects the catalog agent `id`.
@@ -321,25 +275,9 @@ impl Control {
                 }
             }
         }
-        let running = self.server.is_some();
         Snapshot {
-            running,
+            running: self.server.is_some(),
             listen: self.listen_label(),
-            route: if running {
-                self.tray.route.clone()
-            } else {
-                String::new()
-            },
-            today: if running {
-                self.tray.today.clone()
-            } else {
-                String::new()
-            },
-            quotas: if running {
-                self.tray.quotas.clone()
-            } else {
-                Vec::new()
-            },
             message: self.message.clone(),
             agents,
         }
@@ -378,7 +316,7 @@ mod tests {
     use hofund_agent::{Session, catalog};
     use hofund_daemon::agent_descriptions;
 
-    use super::{Control, Snapshot, menu_entries};
+    use super::{Control, menu_entries};
 
     fn agent_catalog() -> hofund_agent::Catalog {
         catalog(agent_descriptions()).expect("agent catalog")
@@ -396,23 +334,16 @@ mod tests {
         let mut control = Control::open(&path);
         let session = Session::new(dir.path());
         control.start().await.expect("start");
-        control.refresh_tray().await;
         let snapshot = control.snapshot(&session);
         assert!(snapshot.running);
         assert!(snapshot.listen.starts_with("127.0.0.1:"));
         assert_ne!(snapshot.listen, "127.0.0.1:0");
-        assert_eq!(snapshot.route, "Route: no requests yet");
-        assert_eq!(snapshot.today, "Today: no requests yet");
-        assert!(snapshot.quotas.is_empty());
         let table = control.usage_summary().expect("usage");
         assert!(table.contains("MODEL"));
         control.stop().await.expect("stop");
         let snapshot = control.snapshot(&session);
         assert!(!snapshot.running);
         assert_eq!(snapshot.listen, "127.0.0.1:0");
-        assert!(snapshot.route.is_empty());
-        assert!(snapshot.today.is_empty());
-        assert!(snapshot.quotas.is_empty());
     }
 
     #[test]
@@ -436,10 +367,6 @@ mod tests {
         assert!(entries.iter().any(|entry| entry.id == "usage"));
         assert!(entries.iter().any(|entry| entry.id == "open-config"));
         assert!(entries.iter().any(|entry| entry.id == "quit"));
-        assert!(entries.iter().all(|entry| {
-            !matches!(entry.id.as_str(), "route" | "today" | "separator-quotas")
-                && !entry.id.starts_with("quota:")
-        }));
         let toggles: Vec<_> = entries
             .iter()
             .filter(|entry| entry.id.starts_with("agent:"))
@@ -452,69 +379,6 @@ mod tests {
             assert_eq!(entry.label, adapter.display_name());
             assert_eq!(entry.checked, Some(false));
         }
-    }
-
-    #[test]
-    fn the_menu_places_route_today_and_quotas_after_listen() {
-        let snapshot = Snapshot {
-            running: true,
-            listen: "127.0.0.1:3425".to_owned(),
-            route: "Route: demo → provider/member".to_owned(),
-            today: "Today: 1 request, 12.3k tokens".to_owned(),
-            quotas: vec!["Work: 42% · 18%".to_owned(), "Plan: 12 credits".to_owned()],
-            message: String::new(),
-            agents: Vec::new(),
-        };
-        let entries = menu_entries(&snapshot);
-        let ids: Vec<_> = entries.iter().map(|entry| entry.id.as_str()).collect();
-        assert_eq!(
-            ids,
-            [
-                "status",
-                "listen",
-                "route",
-                "today",
-                "separator-quotas",
-                "quota:0",
-                "quota:1",
-                "gateway-start",
-                "gateway-stop",
-                "separator-agents",
-                "separator-actions",
-                "usage",
-                "open-config",
-                "quit",
-            ]
-        );
-        for (id, label) in [
-            ("route", snapshot.route.as_str()),
-            ("today", snapshot.today.as_str()),
-            ("quota:0", snapshot.quotas[0].as_str()),
-            ("quota:1", snapshot.quotas[1].as_str()),
-        ] {
-            let entry = entries.iter().find(|entry| entry.id == id).expect(id);
-            assert_eq!(entry.label, label);
-            assert!(!entry.enabled);
-            assert_eq!(entry.checked, None);
-        }
-        let separator = entries
-            .iter()
-            .find(|entry| entry.id == "separator-quotas")
-            .expect("quota separator");
-        assert!(separator.label.is_empty());
-        assert!(!separator.enabled);
-
-        let empty = Snapshot {
-            route: String::new(),
-            today: String::new(),
-            quotas: Vec::new(),
-            ..snapshot
-        };
-        let entries = menu_entries(&empty);
-        assert!(entries.iter().all(|entry| {
-            !matches!(entry.id.as_str(), "route" | "today" | "separator-quotas")
-                && !entry.id.starts_with("quota:")
-        }));
     }
 
     #[test]

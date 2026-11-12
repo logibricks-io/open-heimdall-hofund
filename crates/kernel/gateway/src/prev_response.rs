@@ -490,20 +490,19 @@ pub(crate) fn caller_scope(
     key_id: Option<&str>,
     via: Option<IpAddr>,
     peer: Option<IpAddr>,
-    proxied: bool,
 ) -> String {
     let mut scope = format!("key:{}", key_id.unwrap_or_default());
     if let Some(via) = via {
         scope.push_str(&format!("\0via:{via}"));
     }
-    if key_id.is_none() && peer.is_some_and(|ip| proxied || !ip.is_loopback()) {
+    if key_id.is_none() && peer.is_some_and(|ip| !ip.is_loopback()) {
         scope.push_str(&format!("\0ip:{}", peer.expect("peer")));
     }
     scope
 }
 
 pub(crate) fn request_scope() -> String {
-    caller_scope(Some("default"), None, None, false)
+    caller_scope(Some("default"), None, None)
 }
 
 pub(crate) fn not_found_body(id: &str) -> Vec<u8> {

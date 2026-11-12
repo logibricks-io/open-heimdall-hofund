@@ -51,15 +51,6 @@ pub struct ModelListenerStatus {
     pub running: Option<String>,
     /// Source of the effective address.
     pub effective_source: ListenSource,
-    /// Effective socket-peer allow list after environment precedence.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub allow_ips: Vec<String>,
-    /// Whether forwarding headers on loopback retain local-only privileges.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub trust_proxy: bool,
-    /// Whether a malformed environment allow list currently refuses every remote peer.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub allow_ips_invalid: bool,
 }
 
 /// Daemon shutdown state.
@@ -125,10 +116,6 @@ pub struct StatusResponse {
     /// Parent process id that spawned this daemon, or zero when unknown.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub owned_by_pid: u32,
-}
-
-fn is_false(value: &bool) -> bool {
-    !*value
 }
 
 fn is_zero(value: &u32) -> bool {

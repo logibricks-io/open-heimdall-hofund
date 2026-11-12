@@ -48,17 +48,6 @@ pub use model_health::{probe_address, probe_model_health};
 /// How long a failed one-shot `hofundd` may take to exit before it is killed.
 const ONE_SHOT_EXIT_WAIT: Duration = Duration::from_secs(5);
 
-/// How long a control TCP or Unix connect, plus the HTTP handshake and
-/// first response, may take. A peer that never accepts, or that accepts
-/// but never speaks HTTP, would otherwise block until an outer deadline
-/// fires.
-const OPEN_WAIT: Duration = Duration::from_secs(5);
-
-/// How long a one-shot `hofundd` may take to complete the HTTP handshake
-/// and first response. A child that never speaks HTTP would otherwise
-/// block the client until an outer test or process deadline fires.
-const ONE_SHOT_HANDSHAKE_WAIT: Duration = OPEN_WAIT;
-
 /// The most one-shot standard error kept while waiting for its response.
 const ONE_SHOT_STDERR_LIMIT: usize = 16 * 1024;
 
@@ -1064,57 +1053,27 @@ impl Client {
     ) -> Result<http::Response<Incoming>, ClientError> {
         match &self.endpoint {
             Endpoint::Tcp(addr) => {
-                let deadline = tokio::time::Instant::now() + OPEN_WAIT;
-                let stream = match tokio::time::timeout_at(deadline, TcpStream::connect(addr)).await
-                {
-                    Ok(Ok(stream)) => stream,
-                    Ok(Err(error)) => {
-                        return Err(connect_error("control TCP connection failed", error));
-                    }
-                    Err(_) => return Err(open_timeout("control TCP connection")),
-                };
-                match tokio::time::timeout_at(
-                    deadline,
-                    self.open_over(stream, method, path, body, last_event_id, addr.to_string()),
-                )
-                .await
-                {
-                    Ok(result) => result,
-                    Err(_) => Err(open_timeout("control TCP handshake")),
-                }
+                let stream = TcpStream::connect(addr)
+                    .await
+                    .map_err(|error| connect_error("control TCP connection failed", error))?;
+                self.open_over(stream, method, path, body, last_event_id, addr.to_string())
+                    .await
             }
             #[cfg(unix)]
             Endpoint::Unix(socket) => {
                 verify_unix_socket(socket)?;
-                let deadline = tokio::time::Instant::now() + OPEN_WAIT;
-                let stream = match tokio::time::timeout_at(
-                    deadline,
-                    tokio::net::UnixStream::connect(socket),
+                let stream = tokio::net::UnixStream::connect(socket)
+                    .await
+                    .map_err(|error| connect_error("control Unix connection failed", error))?;
+                self.open_over(
+                    stream,
+                    method,
+                    path,
+                    body,
+                    last_event_id,
+                    LOCAL_IPC_HOST.to_owned(),
                 )
                 .await
-                {
-                    Ok(Ok(stream)) => stream,
-                    Ok(Err(error)) => {
-                        return Err(connect_error("control Unix connection failed", error));
-                    }
-                    Err(_) => return Err(open_timeout("control Unix connection")),
-                };
-                match tokio::time::timeout_at(
-                    deadline,
-                    self.open_over(
-                        stream,
-                        method,
-                        path,
-                        body,
-                        last_event_id,
-                        LOCAL_IPC_HOST.to_owned(),
-                    ),
-                )
-                .await
-                {
-                    Ok(result) => result,
-                    Err(_) => Err(open_timeout("control Unix handshake")),
-                }
             }
             Endpoint::OneShot { exe, config } => {
                 self.open_one_shot(exe, config, method, path, body, last_event_id)
@@ -1151,13 +1110,11 @@ impl Client {
         let diagnostics = OneShotStderr::start(stderr);
         let io = tokio::io::join(stdout, stdin);
         let host = LOCAL_IPC_HOST.to_owned();
-        match tokio::time::timeout(
-            ONE_SHOT_HANDSHAKE_WAIT,
-            self.open_over(io, method, path, body, last_event_id, host),
-        )
-        .await
+        match self
+            .open_over(io, method, path, body, last_event_id, host)
+            .await
         {
-            Ok(Ok(response)) => {
+            Ok(response) => {
                 // Pass the child's diagnostics through from here on. It
                 // exits once the response is read and the connection
                 // drops; reap it in the background.
@@ -1167,8 +1124,15 @@ impl Client {
                 });
                 Ok(response)
             }
-            Ok(Err(error)) => {
-                let status = wait_or_kill_one_shot(&mut child).await;
+            Err(error) => {
+                let status = match tokio::time::timeout(ONE_SHOT_EXIT_WAIT, child.wait()).await {
+                    Ok(Ok(status)) => status.to_string(),
+                    Ok(Err(wait)) => format!("unknown status: {wait}"),
+                    Err(_) => {
+                        let _ = child.kill().await;
+                        "still running; killed".to_owned()
+                    }
+                };
                 // A child that exits before answering explains why on
                 // standard error; that beats the transport error.
                 let reason = diagnostics
@@ -1178,24 +1142,6 @@ impl Client {
                 Err(ClientError::Transport(format!(
                     "one-shot hofundd failed ({status}): {reason}"
                 )))
-            }
-            Err(_elapsed) => {
-                // The child is still running and will not exit on its own.
-                let _ = child.kill().await;
-                let status = wait_or_kill_one_shot(&mut child).await;
-                let reason = diagnostics.finish().await.unwrap_or_default();
-                let message = if reason.is_empty() {
-                    format!(
-                        "one-shot hofundd handshake timed out after {}s ({status})",
-                        ONE_SHOT_HANDSHAKE_WAIT.as_secs()
-                    )
-                } else {
-                    format!(
-                        "one-shot hofundd handshake timed out after {}s ({status}): {reason}",
-                        ONE_SHOT_HANDSHAKE_WAIT.as_secs()
-                    )
-                };
-                Err(ClientError::Transport(message))
             }
         }
     }
@@ -1236,18 +1182,6 @@ impl Client {
             .send_request(request)
             .await
             .map_err(|error| transport("control HTTP request failed", error))
-    }
-}
-
-/// Waits briefly for a one-shot child to exit, then kills it.
-async fn wait_or_kill_one_shot(child: &mut tokio::process::Child) -> String {
-    match tokio::time::timeout(ONE_SHOT_EXIT_WAIT, child.wait()).await {
-        Ok(Ok(status)) => status.to_string(),
-        Ok(Err(wait)) => format!("unknown status: {wait}"),
-        Err(_) => {
-            let _ = child.kill().await;
-            "still running; killed".to_owned()
-        }
     }
 }
 
@@ -1411,17 +1345,11 @@ fn verify_unix_socket_for(path: &std::path::Path, expected_uid: u32) -> Result<(
     Ok(())
 }
 
-fn open_timeout(what: &str) -> ClientError {
-    ClientError::ConnectionUnavailable(format!("{what} timed out after {}s", OPEN_WAIT.as_secs()))
-}
-
 fn connect_error(context: &str, error: std::io::Error) -> ClientError {
     let message = format!("{context}: {error}");
     if matches!(
         error.kind(),
-        std::io::ErrorKind::ConnectionRefused
-            | std::io::ErrorKind::NotFound
-            | std::io::ErrorKind::TimedOut
+        std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
     ) {
         ClientError::ConnectionUnavailable(message)
     } else {

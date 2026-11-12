@@ -13,7 +13,6 @@ use std::time::Duration;
 use serde::Deserialize;
 use thiserror::Error;
 
-mod allow;
 mod groups_write;
 mod migrate;
 pub mod pass_headers;
@@ -22,10 +21,6 @@ mod provider_write;
 mod ruleparse;
 mod visible;
 
-pub use allow::{
-    ALLOW_IPS_ENV, IpNetwork, NetworkSettings, TRUST_PROXY_ENV, allow_ips_env, effective_network,
-    trust_proxy_env,
-};
 pub use groups_write::{
     edit_group_create, edit_group_delete, edit_group_patch, edit_group_restore, group_id_from_name,
     validate_group_rules,
@@ -55,12 +50,6 @@ pub use visible::{
 pub struct Config {
     /// Address the gateway binds.
     pub listen: SocketAddr,
-    /// Canonical IP addresses and CIDR networks allowed to use the model listener.
-    /// Empty imposes no network restriction. Loopback is always allowed.
-    pub allow_ips: Vec<String>,
-    /// Whether a local proxy's forwarding headers retain loopback-only privileges.
-    /// Forwarding headers never select the address checked by `allow_ips`.
-    pub trust_proxy: bool,
     /// Path of the bearer-token file, as written in the TOML.
     pub token_file: String,
     /// Path of the usage database, as written in the TOML.
@@ -1031,8 +1020,6 @@ impl fmt::Debug for Config {
         formatter
             .debug_struct("Config")
             .field("listen", &self.listen)
-            .field("allow_ips", &self.allow_ips)
-            .field("trust_proxy", &self.trust_proxy)
             .field("token_file", &self.token_file)
             .field("usage_file", &self.usage_file)
             .field("failover", &self.failover)
@@ -1261,7 +1248,6 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
     let listen = raw.listen.parse::<SocketAddr>().map_err(|_| {
         ConfigError::Invalid(format!("listen `{}` is not an ip:port address", raw.listen))
     })?;
-    let allow_ips = allow::clean_allow_ips(&raw.allow_ips)?;
     if raw.token_file.is_empty() {
         return Err(ConfigError::Invalid("token_file is empty".to_owned()));
     }
@@ -1497,8 +1483,6 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
     let usage = usage_settings(raw.usage)?;
     Ok(Config {
         listen,
-        allow_ips,
-        trust_proxy: raw.trust_proxy,
         token_file: raw.token_file,
         usage_file: raw.usage_file,
         failover: Failover {
@@ -2420,10 +2404,6 @@ fn patience_of(kind: &str, id: &str, value: Option<&Value>) -> Result<Patience, 
 struct RawFile {
     #[serde(default = "default_listen")]
     listen: String,
-    #[serde(default)]
-    allow_ips: Vec<String>,
-    #[serde(default)]
-    trust_proxy: bool,
     #[serde(default = "default_token_file")]
     token_file: String,
     #[serde(default = "default_usage_file")]

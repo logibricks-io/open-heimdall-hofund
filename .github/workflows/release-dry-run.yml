@@ -89,9 +89,18 @@ jobs:
         run: ${{ matrix.install_dist.run }}
       - name: Install Linux host libraries
         if: runner.os == 'Linux'
-        # Bound and retry apt so a DNS stall cannot eat the whole step.
-        timeout-minutes: 15
-        run: bash .github/scripts/install-linux-host-libraries.sh
+        # The apt mirror sometimes stalls; fail fast so the job can be rerun.
+        timeout-minutes: 10
+        run: |
+          sudo DEBIAN_FRONTEND=noninteractive apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=30
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            -o Acquire::Retries=3 -o Acquire::http::Timeout=30 \
+            -o Dpkg::Options::="--force-confold" \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libxdo-dev
       - name: Build artifacts
         id: build
         shell: bash
