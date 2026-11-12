@@ -1,9 +1,11 @@
-//! Importing Cursor auth.json text into an account.
+//! Importing Cursor auth.json text or a Cursor API key into an account.
 
 use crate::auth;
+use crate::endpoints::Endpoints;
+use crate::exchange;
 use crate::tokens;
 use hofund_plugin_api::{AccountId, HostContext, PluginError, SecretString};
-use hofund_plugin_sdk::oauth::SecretObject;
+use hofund_plugin_sdk::oauth::{SecretObject, secret_text};
 
 /// Stores an account from raw auth.json (`accessToken` field).
 pub(crate) async fn store(host: &HostContext, text: &str) -> Result<Vec<AccountId>, PluginError> {
@@ -35,14 +37,50 @@ pub(crate) async fn store(host: &HostContext, text: &str) -> Result<Vec<AccountI
     Ok(vec![id])
 }
 
-/// Returns unsupported for non-auth.json imports.
+/// Exchanges `key`, stores only the key (not the access token), and returns
+/// the account id derived from the exchanged token.
+pub(crate) async fn store_api_key(
+    host: &HostContext,
+    endpoints: &Endpoints,
+    key: SecretString,
+) -> Result<AccountId, PluginError> {
+    let trimmed = secret_text(&key).trim();
+    if trimmed.is_empty() {
+        return Err(PluginError::auth("Cursor API key is empty"));
+    }
+    let key = SecretString::from(trimmed.to_owned());
+    let access = exchange::exchange_key(host, endpoints, &key).await?;
+    let (label, id) = tokens::jwt_identity(secret_text(&access))
+        .ok_or_else(|| PluginError::auth("Cursor signed in but did not name the account"))?;
+    let blob = tokens::blob_api_key(&key, &label, None);
+    let account = host.accounts().account(id.clone(), label)?;
+    host.accounts().upsert(account, blob.to_secret()).await?;
+    Ok(id)
+}
+
+/// Returns unsupported for inputs this subscription does not read.
+///
+/// `CURSOR_API_KEY` is read here when `text` is empty, then stored. Later
+/// calls do not read the process environment.
 pub(crate) async fn import_accounts(
     host: &HostContext,
+    endpoints: &Endpoints,
     text: &str,
 ) -> Result<Vec<AccountId>, PluginError> {
     let trimmed = text.trim();
     if trimmed.starts_with('{') && trimmed.contains("accessToken") {
         return store(host, trimmed).await;
+    }
+    if !trimmed.is_empty() && !trimmed.starts_with('{') {
+        let id = store_api_key(host, endpoints, SecretString::from(trimmed.to_owned())).await?;
+        return Ok(vec![id]);
+    }
+    if trimmed.is_empty() {
+        if let Some(key) = exchange::read_env_api_key() {
+            let id = store_api_key(host, endpoints, key).await?;
+            return Ok(vec![id]);
+        }
+        return Err(PluginError::config("nothing to import"));
     }
     Err(PluginError::unsupported(
         "not an account file this subscription reads",
