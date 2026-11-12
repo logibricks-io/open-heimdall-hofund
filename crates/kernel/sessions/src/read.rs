@@ -92,8 +92,14 @@ fn bound(transcript: &mut SessionTranscript) {
         let room = MAX_TRANSCRIPT_BYTES - bytes;
         if part.text.len() > room {
             let mut end = room;
+            let mut steps = part.text.len() + 1;
             while !part.text.is_char_boundary(end) {
+                if end == 0 || steps == 0 {
+                    end = 0;
+                    break;
+                }
                 end -= 1;
+                steps -= 1;
             }
             part.text.truncate(end);
             cut = true;
@@ -252,11 +258,12 @@ mod tests {
             SessionPart::new("user", "text", "", "Question"),
             SessionPart::new("assistant", "tool_use", "reader", "{\"run\":```}"),
         ];
-        let markdown = markdown(&record, &transcript);
-        assert!(markdown.starts_with("# A title\n"));
-        assert!(markdown.contains("## User"));
-        assert!(markdown.contains("**Tool call: reader**"));
-        assert!(markdown.contains("````json"));
+        let rendered = markdown(&record, &transcript);
+        assert!(rendered.starts_with("# A title\n"));
+        assert!(rendered.contains("## User"));
+        assert!(rendered.contains("**Tool call: reader**"));
+        assert!(rendered.contains("````json\n{\"run\":```}\n````\n"));
+        assert!(!rendered.contains("`````"));
     }
 
     #[test]
@@ -271,5 +278,94 @@ mod tests {
         bound(&mut transcript);
         assert!(transcript.cut);
         assert_eq!(transcript.parts[0].text.chars().count(), MAX_PART_CHARS);
+    }
+
+    #[test]
+    fn markdown_renders_every_part_kind_and_skips_empty_fields() {
+        let mut record = SessionRecord::new("fake", "fake:one", "/sessions/one.jsonl");
+        record.title = "A title".to_owned();
+        record.start_ms = 1_700_000_000_000;
+        record.last_ms = 0;
+        let mut transcript = SessionTranscript::default();
+        transcript.parts = vec![
+            SessionPart::new("user", "text", "", "Question"),
+            SessionPart::new("assistant", "thinking", "", "deliberation"),
+            SessionPart::new("assistant", "text", "", "Answer"),
+            SessionPart::new("tool", "tool_result", "reader", "ok"),
+            SessionPart::new("assistant", "context", "", "prior"),
+            SessionPart::new("assistant", "image", "", "ignored"),
+        ];
+        let rendered = markdown(&record, &transcript);
+        assert!(rendered.contains("- **Agent:** fake"));
+        assert!(!rendered.contains("Folder"));
+        assert!(rendered.contains("- **Started:**"));
+        assert!(!rendered.contains("Last active"));
+        assert!(rendered.contains("## Assistant"));
+        assert!(rendered.contains("<summary>Thinking</summary>"));
+        assert!(rendered.contains("deliberation"));
+        assert!(rendered.contains("<summary>Tool result: reader</summary>"));
+        assert!(rendered.contains("<summary>Context</summary>"));
+        assert!(rendered.contains("*[image]*"));
+
+        let mut only_assistant = SessionTranscript::default();
+        only_assistant.parts = vec![SessionPart::new("assistant", "text", "", "Answer")];
+        let assistant_md = markdown(&record, &only_assistant);
+        assert!(assistant_md.contains("## Assistant"));
+        assert!(!assistant_md.contains("## User"));
+
+        let mut tool_only = SessionTranscript::default();
+        tool_only.parts = vec![SessionPart::new("tool", "tool_result", "", "payload")];
+        let tool_md = markdown(&record, &tool_only);
+        assert!(!tool_md.contains("## User"));
+        assert!(!tool_md.contains("## Assistant"));
+
+        let empty = markdown(&record, &SessionTranscript::default());
+        assert!(empty.contains("*Nothing was said in this session.*"));
+    }
+
+    fn ascii_parts_totaling(bytes: usize) -> Vec<SessionPart> {
+        let mut parts = Vec::new();
+        let mut left = bytes;
+        while left > 0 {
+            let n = left.min(MAX_PART_CHARS);
+            parts.push(SessionPart::new("user", "text", "", "a".repeat(n)));
+            left -= n;
+        }
+        parts
+    }
+
+    #[test]
+    fn bound_cuts_at_the_byte_cap_and_on_a_char_boundary() {
+        let mut exact = SessionTranscript::default();
+        exact.parts = vec![SessionPart::new(
+            "user",
+            "text",
+            "",
+            "x".repeat(MAX_PART_CHARS),
+        )];
+        bound(&mut exact);
+        assert!(!exact.cut);
+        assert_eq!(exact.parts[0].text.chars().count(), MAX_PART_CHARS);
+
+        let mut at_cap = SessionTranscript::default();
+        at_cap.parts = ascii_parts_totaling(MAX_TRANSCRIPT_BYTES);
+        bound(&mut at_cap);
+        assert!(!at_cap.cut);
+        let bytes: usize = at_cap.parts.iter().map(|part| part.text.len()).sum();
+        assert_eq!(bytes, MAX_TRANSCRIPT_BYTES);
+
+        let mut mid_char = SessionTranscript::default();
+        mid_char.parts = ascii_parts_totaling(MAX_TRANSCRIPT_BYTES - 3);
+        mid_char
+            .parts
+            .push(SessionPart::new("assistant", "text", "", "aaé"));
+        bound(&mut mid_char);
+        assert!(mid_char.cut);
+        assert_eq!(
+            mid_char.parts.last().map(|part| part.text.as_str()),
+            Some("aa")
+        );
+        let bytes: usize = mid_char.parts.iter().map(|part| part.text.len()).sum();
+        assert_eq!(bytes, MAX_TRANSCRIPT_BYTES - 1);
     }
 }
