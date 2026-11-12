@@ -8,7 +8,7 @@ mod state;
 
 mod cli;
 
-pub use cli::{accounts_import_in, accounts_switch_in};
+pub use cli::{accounts_import_in, accounts_project_in, accounts_switch_in};
 pub use logic::{
     LoginPolicy, LoginQuota, LoginRow, account_by_name, next_in_order, next_login, next_on_forget,
 };
@@ -240,7 +240,7 @@ async fn quota_peeks(entry: &Opened, known: &[(AccountId, String)]) -> Vec<(Stri
             Ok(windows) => {
                 let mut used = 0.0_f64;
                 for window in &windows {
-                    if window.scope_model().is_some() {
+                    if window.scope_model().is_some() || !window.excluded_models().is_empty() {
                         continue;
                     }
                     if window.blocking() {
@@ -367,7 +367,10 @@ async fn quota_peeks_instance(
             Ok(windows) => {
                 let mut used = 0.0_f64;
                 for window in &windows {
-                    if window.scope_model().is_some() || !window.blocking() {
+                    if window.scope_model().is_some()
+                        || !window.excluded_models().is_empty()
+                        || !window.blocking()
+                    {
                         continue;
                     }
                     let share = match window.limit() {
@@ -393,6 +396,21 @@ async fn quota_peeks_instance(
         out.push((label.to_lowercase(), peek));
     }
     out
+}
+
+/// Names the cloud project for one stored subscription account.
+pub async fn accounts_project(
+    opened: &[Opened],
+    subscription: &str,
+    email: &str,
+    project: &str,
+) -> Result<(), DaemonError> {
+    let entry = find(opened, subscription)?;
+    entry
+        .instance
+        .set_project(email, project, &entry.host)
+        .await
+        .map_err(show)
 }
 
 /// Imports accounts from `text` through the first subscription that reads it.
@@ -634,6 +652,14 @@ mod tests {
         .expect("tick");
         assert_eq!(moved.as_deref(), Some("spare"));
         assert_eq!(wrote.0.lock().expect("wrote").as_slice(), ["spare"]);
+    }
+
+    #[tokio::test]
+    async fn r49_accounts_project_requires_a_configured_subscription() {
+        let error = accounts_project(&[], "other", "u@example.test", "project-1")
+            .await
+            .expect_err("unknown subscription");
+        assert_eq!(error.to_string(), "no subscription `other` in the config");
     }
 
     #[test]

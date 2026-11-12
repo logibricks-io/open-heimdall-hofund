@@ -1,8 +1,10 @@
 //! Code Assist usage limits and models from `retrieveUserQuota`.
 
-use hofund_plugin_api::{ModelSpec, PluginError, QuotaWindow};
+use hofund_plugin_api::{PluginError, QuotaWindow};
 use hofund_plugin_sdk::json::Value;
 use hofund_plugin_sdk::time::parse_rfc3339;
+
+use crate::models::Flags;
 
 /// The scale a remaining fraction is reported on.
 const SCALE: u64 = 10_000;
@@ -10,15 +12,15 @@ const SCALE: u64 = 10_000;
 /// One quota bucket Code Assist reported.
 #[derive(Debug, PartialEq)]
 struct Bucket<'a> {
-    model: &'a str,
+    model: String,
     remaining: Option<f64>,
     resets: Option<&'a str>,
 }
 
-/// The buckets Gemini CLI shows: skips ones with no model, a `_vertex`
-/// model, or a model already seen.
-fn buckets(reply: &Value) -> Vec<Bucket<'_>> {
-    let mut seen: Vec<&str> = Vec::new();
+/// The buckets Gemini CLI shows: maps Code Assist's ids to the CLI's ids,
+/// then skips empty, `_vertex`, and repeated models.
+fn buckets(reply: &Value, flags: Flags) -> Vec<Bucket<'_>> {
+    let mut seen: Vec<String> = Vec::new();
     let mut out = Vec::new();
     for bucket in reply
         .get("buckets")
@@ -29,10 +31,11 @@ fn buckets(reply: &Value) -> Vec<Bucket<'_>> {
         let Some(model) = bucket.get("modelId").and_then(Value::as_str) else {
             continue;
         };
+        let model = flags.shown(model);
         if model.is_empty() || model.ends_with("_vertex") || seen.contains(&model) {
             continue;
         }
-        seen.push(model);
+        seen.push(model.clone());
         out.push(Bucket {
             model,
             remaining: bucket.get("remainingFraction").and_then(Value::as_f64),
@@ -48,13 +51,13 @@ fn buckets(reply: &Value) -> Vec<Bucket<'_>> {
 /// # Errors
 ///
 /// Never in practice: names are non-empty and used is at most the limit.
-pub(crate) fn windows(reply: &Value) -> Result<Vec<QuotaWindow>, PluginError> {
-    buckets(reply)
+pub(crate) fn windows(reply: &Value, flags: Flags) -> Result<Vec<QuotaWindow>, PluginError> {
+    buckets(reply, flags)
         .into_iter()
         .filter_map(|bucket| Some((bucket.model, bucket.remaining?, bucket.resets)))
         .map(|(model, remaining, resets)| {
             QuotaWindow::new(
-                model,
+                model.clone(),
                 spent(remaining),
                 Some(SCALE),
                 resets.and_then(parse_rfc3339),
@@ -64,16 +67,11 @@ pub(crate) fn windows(reply: &Value) -> Result<Vec<QuotaWindow>, PluginError> {
         .collect()
 }
 
-/// The models the buckets name.
-///
-/// # Errors
-///
-/// Returns an error when a model id is not a valid model name.
-pub(crate) fn models(reply: &Value) -> Result<Vec<ModelSpec>, PluginError> {
-    buckets(reply)
-        .into_iter()
-        .map(|bucket| ModelSpec::new(bucket.model, None))
-        .collect()
+/// Whether any bucket gives the account quota for a preview model.
+pub(crate) fn has_preview(reply: &Value, flags: Flags) -> bool {
+    buckets(reply, flags)
+        .iter()
+        .any(|bucket| bucket.model.contains("-preview"))
 }
 
 #[expect(
@@ -96,6 +94,7 @@ mod tests {
     use hofund_plugin_sdk::json::json;
 
     use super::{buckets, spent};
+    use crate::models::Flags;
 
     #[test]
     fn spent_is_the_rounded_complement() {
@@ -118,12 +117,12 @@ mod tests {
             {"modelId": "gemini-2.5-pro", "remainingFraction": 0.9},
             {"modelId": "gemini-2.5-flash"},
         ]});
-        let found = buckets(&reply);
-        let models: Vec<&str> = found.iter().map(|bucket| bucket.model).collect();
+        let found = buckets(&reply, Flags::default());
+        let models: Vec<&str> = found.iter().map(|bucket| bucket.model.as_str()).collect();
         assert_eq!(models, vec!["gemini-2.5-pro", "gemini-2.5-flash"]);
         assert_eq!(found[0].remaining, Some(0.5));
         assert_eq!(found[0].resets, Some("2026-11-01T00:00:00Z"));
         assert_eq!(found[1].remaining, None);
-        assert!(buckets(&json!({})).is_empty());
+        assert!(buckets(&json!({}), Flags::default()).is_empty());
     }
 }
