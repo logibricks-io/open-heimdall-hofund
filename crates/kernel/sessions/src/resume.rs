@@ -153,4 +153,39 @@ mod tests {
         let store = PiStore::with_session_roots("agent", None);
         assert!(resume_command(&record, Some(&store), true).is_none());
     }
+
+    #[test]
+    fn safe_session_id_allows_alnum_underscore_and_hyphen() {
+        assert!(safe_session_id("abc-def_1"));
+        assert!(safe_session_id("a"));
+        assert!(safe_session_id("_"));
+        assert!(safe_session_id("-"));
+        assert!(safe_session_id(&"x".repeat(256)));
+        assert!(!safe_session_id(""));
+        assert!(!safe_session_id(&"x".repeat(257)));
+        assert!(!safe_session_id("bad/id"));
+    }
+
+    #[test]
+    fn store_for_agent_matches_the_base_agent_id() {
+        let store = PiStore::with_session_roots("agent", None);
+        let stores: [std::sync::Arc<dyn hofund_plugin_api::SessionStore>; 1] =
+            [std::sync::Arc::new(store)];
+        assert!(store_for_agent(&stores, "pi").is_some());
+        assert!(store_for_agent(&stores, "pi@wsl:Ubuntu").is_some());
+        assert!(store_for_agent(&stores, "cursor").is_none());
+    }
+
+    #[test]
+    fn resume_command_allows_empty_cwd_except_for_cursor() {
+        let path = Path::new("/work/pi.jsonl");
+        let store = PiStore::with_session_roots("agent", None);
+        let empty = record("pi", "pi:ok", path, "");
+        let cmd = resume_command(&empty, Some(&store), false).expect("empty cwd");
+        assert_eq!(cmd.cwd, "");
+        let cursor = record("cursor", "cursor:ok", path, "/work");
+        assert!(resume_command(&cursor, Some(&store), false).is_some());
+        let cursor_empty = record("cursor", "cursor:ok", path, "");
+        assert!(resume_command(&cursor_empty, Some(&store), false).is_none());
+    }
 }
