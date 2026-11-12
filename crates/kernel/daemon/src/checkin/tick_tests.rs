@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -21,9 +21,18 @@ use crate::registry::{DaemonRegistry, RegistryAdapter};
 use crate::runtime::Runtime;
 
 const PLUGIN: &str = "check-test";
-const ACCOUNT: &str = "a-0000000000000001";
-const ACCOUNT2: &str = "a-0000000000000002";
 const SECRET: &str = "sk-check-test-secret";
+
+/// See warmup::tick_tests: shared account ids collide in the macOS keychain.
+fn unique_account_id() -> String {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("t-{nanos:x}-{n}")
+}
 
 static CHECK_SPEC: SubscriptionSpec = SubscriptionSpec::from_static(
     PluginId::from_static("check-test"),
@@ -304,6 +313,7 @@ struct Fixture {
     runtime: Arc<Runtime>,
     store: Arc<crate::checkin::CheckinStore>,
     registry: Arc<CheckRegistry>,
+    account: String,
 }
 
 fn persisted_member_day(root: &Path, member_id: &str) -> Option<String> {
@@ -342,7 +352,7 @@ async fn fixture_with(
     enabled: bool,
     spec: &'static SubscriptionSpec,
     settings: Arc<CheckFakeSettings>,
-    extra_accounts: &[&str],
+    extra_accounts: usize,
 ) -> Fixture {
     let anchor = UNIX_EPOCH + Duration::from_secs(1_762_195_200);
     let config = config(enabled);
@@ -377,16 +387,11 @@ async fn fixture_with(
         .expect("subscription")
         .clone();
     let accounts = state.host().accounts();
-    let account = accounts
-        .account(AccountId::try_from(ACCOUNT).expect("id"), "label")
-        .expect("account row");
-    accounts
-        .upsert(account, SecretString::from(SECRET.to_owned()))
-        .await
-        .expect("upsert");
-    for extra in extra_accounts {
+    let account_id = unique_account_id();
+    let extras: Vec<String> = (0..extra_accounts).map(|_| unique_account_id()).collect();
+    for id in std::iter::once(&account_id).chain(extras.iter()) {
         let account = accounts
-            .account(AccountId::try_from(*extra).expect("id"), "label")
+            .account(AccountId::try_from(id.as_str()).expect("id"), "label")
             .expect("account row");
         accounts
             .upsert(account, SecretString::from(SECRET.to_owned()))
@@ -401,6 +406,7 @@ async fn fixture_with(
         store: Arc::clone(runtime.checkin()),
         runtime,
         registry,
+        account: account_id,
     }
 }
 
@@ -409,7 +415,7 @@ async fn fixture(enabled: bool) -> Fixture {
         enabled,
         &CHECK_SPEC,
         Arc::new(CheckFakeSettings::default()),
-        &[],
+        0,
     )
     .await
 }
@@ -467,7 +473,7 @@ async fn a3b_6_manual_run_now_checks_one_account() {
         &fixture.store,
         fixture.registry.as_ref(),
         PLUGIN,
-        ACCOUNT,
+        &fixture.account,
     )
     .await
     .expect("manual check-in");
@@ -491,7 +497,7 @@ impl CheckinRunner for SlowRunner {
 #[tokio::test]
 async fn a3b_13_vendor_error_records_status_marks_day_without_routing() {
     let fixture = fixture(true).await;
-    let account_id = AccountId::try_from(ACCOUNT).expect("id");
+    let account_id = AccountId::try_from(fixture.account.as_str()).expect("id");
     let state = fixture
         .runtime
         .subscription_states()
@@ -515,7 +521,7 @@ async fn a3b_13_vendor_error_records_status_marks_day_without_routing() {
     );
     let row = rows
         .iter()
-        .find(|row| row.account().as_str() == ACCOUNT)
+        .find(|row| row.account().as_str() == fixture.account)
         .expect("status row");
     let record = row.last().expect("last check-in");
     assert_eq!(record.outcome(), CheckinOutcome::Failed);
@@ -547,7 +553,7 @@ async fn a3b_13_vendor_error_records_status_marks_day_without_routing() {
 #[tokio::test]
 async fn a3b_14_subscription_without_checkin_spec_skips_runner_on_tick() {
     let settings = Arc::new(CheckFakeSettings::default());
-    let fixture = fixture_with(true, &NO_DAILY_CHECK_SPEC, Arc::clone(&settings), &[]).await;
+    let fixture = fixture_with(true, &NO_DAILY_CHECK_SPEC, Arc::clone(&settings), 0).await;
     let runner = RecordingRunner {
         outcomes: Arc::new(Mutex::new(vec![Ok(CheckinResult::new(
             CheckinOutcome::Claimed,
@@ -567,7 +573,7 @@ async fn a3b_14_subscription_without_checkin_spec_skips_runner_on_tick() {
 #[tokio::test]
 async fn a3b_15_not_ready_account_skips_tick_without_marking_day() {
     let settings = Arc::new(CheckFakeSettings::default());
-    let fixture = fixture_with(true, &CHECK_SPEC, Arc::clone(&settings), &[]).await;
+    let fixture = fixture_with(true, &CHECK_SPEC, Arc::clone(&settings), 0).await;
     let states = fixture.runtime.subscription_states();
     let state = states.get(PLUGIN).expect("subscription");
     let member_id = state.members()[0].id.to_string();
@@ -641,13 +647,7 @@ async fn a3b_16_runner_error_marks_day_no_intraday_retry() {
 
 #[tokio::test]
 async fn a3b_17_one_checkin_per_tick_with_two_due_accounts() {
-    let fixture = fixture_with(
-        true,
-        &CHECK_SPEC,
-        Arc::new(CheckFakeSettings::default()),
-        &[ACCOUNT2],
-    )
-    .await;
+    let fixture = fixture_with(true, &CHECK_SPEC, Arc::new(CheckFakeSettings::default()), 1).await;
     let runner = RecordingRunner {
         outcomes: Arc::new(Mutex::new(vec![
             Ok(CheckinResult::new(CheckinOutcome::Claimed, "")),
@@ -684,7 +684,7 @@ async fn a3b_18_run_now_rejects_when_daily_checkin_option_off() {
         &fixture.store,
         fixture.registry.as_ref(),
         PLUGIN,
-        ACCOUNT,
+        &fixture.account,
     )
     .await
     .expect_err("run-now must refuse when opt-in is off");
@@ -718,7 +718,7 @@ async fn a3b_19_run_now_rejects_unknown_account_before_vendor() {
 #[tokio::test]
 async fn a3b_20_run_now_rejects_unsigned_account() {
     let settings = Arc::new(CheckFakeSettings::default());
-    let fixture = fixture_with(true, &CHECK_SPEC, Arc::clone(&settings), &[]).await;
+    let fixture = fixture_with(true, &CHECK_SPEC, Arc::clone(&settings), 0).await;
     *settings.account_status.lock().expect("account status") = AccountStatus::NeedsSignIn {
         reason: "fixture offline".to_owned(),
     };
@@ -727,7 +727,7 @@ async fn a3b_20_run_now_rejects_unsigned_account() {
         &fixture.store,
         fixture.registry.as_ref(),
         PLUGIN,
-        ACCOUNT,
+        &fixture.account,
     )
     .await
     .expect_err("run-now must refuse when account is not ready");
@@ -738,7 +738,7 @@ async fn a3b_20_run_now_rejects_unsigned_account() {
 #[tokio::test(start_paused = true)]
 async fn a3b_13_tick_timeout_records_status_marks_day_without_routing() {
     let fixture = fixture(true).await;
-    let account_id = AccountId::try_from(ACCOUNT).expect("id");
+    let account_id = AccountId::try_from(fixture.account.as_str()).expect("id");
     let state = fixture
         .runtime
         .subscription_states()
@@ -762,7 +762,7 @@ async fn a3b_13_tick_timeout_records_status_marks_day_without_routing() {
     );
     let row = rows
         .iter()
-        .find(|row| row.account().as_str() == ACCOUNT)
+        .find(|row| row.account().as_str() == fixture.account)
         .expect("status row");
     let record = row.last().expect("last check-in");
     assert_eq!(record.outcome(), CheckinOutcome::Failed);
