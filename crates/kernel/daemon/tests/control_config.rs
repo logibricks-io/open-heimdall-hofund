@@ -831,16 +831,32 @@ async fn reload_listen_with_hofund_addr_reports_not_applied_env_override() {
 
     let scratch = Scratch::new("relisten-env");
     let original = config("");
-    let env = free_addr();
     let binds = Arc::new(AtomicUsize::new(0));
-    let counter = Arc::clone(&binds);
-    let mut options = options(&scratch);
-    options.hofund_addr = Some(format!(" {env} "));
-    options.relisten_hook = Some(hofund_daemon::BindHook::new(move |_| {
-        counter.fetch_add(1, Ordering::SeqCst);
-        Ok(())
-    }));
-    let running = start_with(&scratch.path(), &original, options).await;
+    // `free_addr` drops the probe socket before the daemon binds, so another
+    // test can take the port. Retry with a fresh address on EADDRINUSE.
+    let (running, env) = {
+        let mut started = None;
+        for _ in 0..8 {
+            let env = free_addr();
+            let counter = Arc::clone(&binds);
+            let mut options = options(&scratch);
+            options.hofund_addr = Some(format!(" {env} "));
+            options.relisten_hook = Some(hofund_daemon::BindHook::new(move |_| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }));
+            std::fs::write(scratch.path(), &original).expect("config");
+            match start_with_options(&scratch.path(), options).await {
+                Ok(running) => {
+                    started = Some((running, env));
+                    break;
+                }
+                Err(err) if err.to_string().contains("Address already in use") => continue,
+                Err(err) => panic!("daemon: {err:?}"),
+            }
+        }
+        started.expect("could not bind a free HOFUND_ADDR after retries")
+    };
     let client = Client::new(&running, &scratch);
     assert_eq!(running.listen_addr(), env);
 
