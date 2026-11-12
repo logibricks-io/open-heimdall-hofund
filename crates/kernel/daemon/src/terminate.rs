@@ -77,8 +77,9 @@ const CONSOLE_DRAIN: Duration = hofund_gateway::CONTROL_DRAIN;
 /// reports why it stopped.
 ///
 /// The drain matches [`crate::serve_until_shutdown`]: control listeners stop
-/// first and the model listener finishes its in-flight requests. Pass the
-/// result to [`finish`] once the runtime is done.
+/// first, the model listener finishes its in-flight requests, and
+/// constructed upstream providers are shut down. Pass the result to
+/// [`finish`] once the runtime is done.
 pub async fn serve_until_signal(running: Running) -> Termination {
     serve_until_signals(running, Signals::register()).await
 }

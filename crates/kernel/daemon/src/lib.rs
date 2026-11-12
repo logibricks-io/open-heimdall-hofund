@@ -714,7 +714,16 @@ async fn start_inner(
         Arc::clone(&registry),
     );
     let probes = runtime.spawn_probes();
-    let running = running.with_resource(AffinityFlush(runtime.affinity()));
+    let running = running
+        .with_resource(AffinityFlush(runtime.affinity()))
+        .with_after_drain({
+            let runtime = Arc::clone(&runtime);
+            move || async move {
+                runtime
+                    .shutdown_upstreams(runtime::PROVIDER_SHUTDOWN_DEADLINE)
+                    .await;
+            }
+        });
     Ok(running
         .with_task(refresh)
         .with_task(maintenance)
@@ -760,8 +769,9 @@ async fn serve_reason(path: &Path) -> Result<Termination, DaemonError> {
 /// Waits for Ctrl-C or a control `POST /v1/hofund/shutdown`, then drains.
 ///
 /// Linked control listeners stop first, the model listener then finishes its
-/// in-flight requests, and daemon resources such as the control lock and
-/// socket are released when the server is dropped.
+/// in-flight requests, constructed upstream providers are shut down, and
+/// daemon resources such as the control lock and socket are released when
+/// the server is dropped.
 ///
 /// # Errors
 ///
