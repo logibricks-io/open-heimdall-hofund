@@ -10,7 +10,6 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 
 use crate::app::App;
-use crate::pages::Page;
 use crate::state::Mode;
 use crate::theme::Theme;
 
@@ -30,7 +29,9 @@ pub fn draw(app: &App, area: Rect, buf: &mut Buffer, theme: &Theme) {
     if app.mode == Mode::Help {
         draw_help(chunks[1], buf, theme);
     } else {
-        app.pages.page(app.page).draw_body(chunks[1], buf, theme);
+        app.pages
+            .page_dyn(app.page)
+            .draw_body(chunks[1], buf, theme);
     }
     draw_status(app, chunks[2], buf, theme);
     draw_footer(app, chunks[3], buf, theme);
@@ -113,7 +114,7 @@ fn draw_footer(app: &App, area: Rect, buf: &mut Buffer, theme: &Theme) {
             crate::state::PageId::Routing => "↑↓  group  1–6  pages  r  reload  ?  help  q  quit",
             crate::state::PageId::Usage => "←→  period  1–6  pages  r  reload  ?  help  q  quit",
             crate::state::PageId::Sessions => {
-                "↑↓  session  1–6  pages  r  reload  ?  help  q  quit"
+                "↑↓  session  ←→  range  s  stats  ↵  resume  M/f  filter  1–6  r  reload  q  quit"
             }
             crate::state::PageId::Library => "↑↓  item  1–6  pages  r  reload  ?  help  q  quit",
         }

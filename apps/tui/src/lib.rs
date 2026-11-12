@@ -5,6 +5,7 @@
 #![allow(missing_docs)]
 
 pub mod app;
+pub use app::AppAction;
 pub mod events;
 pub mod gateway;
 pub mod pages;

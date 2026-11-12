@@ -1,6 +1,7 @@
 //! Terminal entry, async loop, and live gateway dependencies.
 
 pub(crate) mod deps;
+pub(crate) mod resume;
 pub(crate) mod spawn;
 
 use std::io;
@@ -21,11 +22,10 @@ use tokio::sync::mpsc;
 
 use crate::app::{App, AppAction};
 use crate::gateway::{HandoffDeps, HandoffState, WATCH_INTERVAL, run_handoff_tick};
-use crate::pages::read_path;
 use crate::quit::{QuitAction, perform_quit};
 use crate::runtime::{
     HandoffSnapshot, WorkerMsg, apply_control_followup, apply_worker_msg, open_event_stream,
-    schedule_page_probe,
+    schedule_open_page_load,
 };
 use crate::state::{GatewayPresence, PageId};
 use crate::theme::Theme;
@@ -121,7 +121,7 @@ async fn async_main(config: &Path, no_color: bool) -> Result<QuitAction, String>
                         } else if followup.resync_stream {
                             try_reopen_control_stream(&live, &mut app, &mut control, None).await;
                         }
-                        schedule_probe_for_open_page(&app, live.client().as_ref(), &work_tx);
+                        schedule_open_page_load(&app, live.client().as_ref(), &work_tx);
                         draw(&mut terminal, &app, &theme)?;
                     }
                     Some(Err(error)) => {
@@ -135,10 +135,30 @@ async fn async_main(config: &Path, no_color: bool) -> Result<QuitAction, String>
                 let Some(event) = maybe else { break };
                 match event {
                     Ok(Event::Key(key)) if key.kind == KeyEventKind::Press => {
-                        if app.handle_key(key) == AppAction::Quit {
-                            break;
+                        match app.handle_key(key) {
+                            AppAction::Quit => break,
+                            AppAction::Reload => {
+                                schedule_open_page_load(&app, live.client().as_ref(), &work_tx);
+                            }
+                            AppAction::Resume(resume) => match run_resume(
+                                &mut terminal,
+                                &app,
+                                &theme,
+                                &resume,
+                            ) {
+                                Ok(()) => app.set_flash(crate::state::Flash::new(
+                                    "back from the session",
+                                    true,
+                                )),
+                                Err(message) => {
+                                    app.set_flash(crate::state::Flash::new(message, false))
+                                }
+                            },
+                            AppAction::Flash { text, ok } => {
+                                app.set_flash(crate::state::Flash::new(text, ok));
+                            }
+                            AppAction::None => {}
                         }
-                        schedule_probe_for_open_page(&app, live.client().as_ref(), &work_tx);
                         draw(&mut terminal, &app, &theme)?;
                     }
                     Ok(Event::Resize(_, _)) => {
@@ -268,7 +288,7 @@ async fn open_control_if_needed(
         return;
     }
     try_reopen_control_stream(live, app, control, None).await;
-    schedule_probe_for_open_page(app, live.client().as_ref(), work_tx);
+    schedule_open_page_load(app, live.client().as_ref(), work_tx);
 }
 
 /// Records a failed control stream open without exiting the UI loop.
@@ -311,16 +331,19 @@ async fn reconnect_after_token(
     }
 }
 
-fn schedule_probe_for_open_page(
+fn run_resume(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &App,
-    client: Option<&hofund_control_client::Client>,
-    work_tx: &mpsc::Sender<WorkerMsg>,
-) {
-    let page = app.page;
-    if read_path(page).is_some() {
-        let generation = app.pages.page(page).fetch_gen();
-        schedule_page_probe(client, work_tx, page, generation);
-    }
+    theme: &Theme,
+    resume: &hofund_control_proto::SessionResume,
+) -> Result<(), String> {
+    let _ = disable_raw_mode();
+    let _ = execute!(io::stdout(), LeaveAlternateScreen, crossterm::cursor::Show);
+    let result = resume::run_foreground(resume);
+    let _ = enable_raw_mode();
+    let _ = execute!(io::stdout(), EnterAlternateScreen, crossterm::cursor::Hide);
+    draw(terminal, app, theme)?;
+    result
 }
 
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>, String> {

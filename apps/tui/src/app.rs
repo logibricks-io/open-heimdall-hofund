@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::pages::{Page, Pages};
+use crate::pages::{Page, PageKeyOutcome, Pages};
 use crate::state::{FLASH_TTL, Flash, GatewayPresence, Generation, Mode, PageId, PendingOp};
 
 /// Main TUI model (testable without the terminal loop).
@@ -126,7 +126,10 @@ impl App {
     pub fn reload_open_page(&mut self) -> Generation {
         self.bump_generation();
         let read_gen = self.generation;
-        self.pages.mut_page(self.page).reload(read_gen);
+        match self.page {
+            PageId::Sessions => self.pages.sessions_mut().reload(read_gen),
+            page => self.pages.mut_page(page).reload(read_gen),
+        }
         #[cfg(test)]
         {
             self.reloads += 1;
@@ -194,7 +197,7 @@ impl App {
             }
             KeyCode::Char('r') => {
                 let _ = self.reload_open_page();
-                return AppAction::Reload;
+                return AppAction::reload();
             }
             KeyCode::Char(c @ '1'..='6') => {
                 let index = c as usize - '1' as usize;
@@ -215,8 +218,71 @@ impl App {
             }
             _ => {}
         }
-        let _ = self.pages.mut_page(self.page).on_key(key);
-        AppAction::None
+        self.page_key_outcome(key)
+    }
+
+    fn page_key_outcome(&mut self, key: crossterm::event::KeyEvent) -> AppAction {
+        let page = self.page;
+        let outcome = match page {
+            PageId::Sessions => {
+                let sessions = self.pages.sessions_mut();
+                let outcome = sessions.on_key(key);
+                Self::apply_sessions_outcome(sessions, outcome)
+            }
+            _ => {
+                let shell = self.pages.mut_page(page);
+                match shell.on_key(key) {
+                    PageKeyOutcome::CursorUp
+                    | PageKeyOutcome::CursorDown
+                    | PageKeyOutcome::None => AppAction::None,
+                    other => Self::apply_sessions_outcome_stub(other),
+                }
+            }
+        };
+        if matches!(outcome, AppAction::Reload) && !matches!(key.code, KeyCode::Char('r')) {
+            let _ = self.reload_open_page();
+        }
+        outcome
+    }
+
+    fn apply_sessions_outcome(
+        sessions: &mut crate::pages::SessionsPage,
+        outcome: PageKeyOutcome,
+    ) -> AppAction {
+        match outcome {
+            PageKeyOutcome::None | PageKeyOutcome::CursorUp | PageKeyOutcome::CursorDown => {
+                AppAction::None
+            }
+            PageKeyOutcome::Reload => AppAction::reload(),
+            PageKeyOutcome::Resume(resume) => AppAction::Resume(resume),
+            PageKeyOutcome::FlashResumeUnavailable => AppAction::Flash {
+                text: "this session can't be resumed from here".to_owned(),
+                ok: false,
+            },
+            PageKeyOutcome::ClosePicker => {
+                sessions.close_picker();
+                AppAction::None
+            }
+            PageKeyOutcome::PickFilter(value) => {
+                sessions.apply_filter_pick(value);
+                AppAction::reload()
+            }
+        }
+    }
+
+    fn apply_sessions_outcome_stub(outcome: PageKeyOutcome) -> AppAction {
+        match outcome {
+            PageKeyOutcome::Reload => AppAction::reload(),
+            PageKeyOutcome::Resume(resume) => AppAction::Resume(resume),
+            PageKeyOutcome::FlashResumeUnavailable => AppAction::Flash {
+                text: "this session can't be resumed from here".to_owned(),
+                ok: false,
+            },
+            PageKeyOutcome::PickFilter(_) | PageKeyOutcome::ClosePicker => AppAction::None,
+            PageKeyOutcome::None | PageKeyOutcome::CursorUp | PageKeyOutcome::CursorDown => {
+                AppAction::None
+            }
+        }
     }
 
     /// Starts a pending mutation if none is active.
@@ -257,7 +323,7 @@ fn next_page(current: PageId, delta: i32) -> PageId {
 }
 
 /// Outcome of [`App::handle_key`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AppAction {
     /// Redraw only.
     None,
@@ -265,6 +331,21 @@ pub enum AppAction {
     Reload,
     /// User requested quit.
     Quit,
+    /// Resume an agent in the foreground.
+    Resume(hofund_control_proto::SessionResume),
+    /// Set a flash without leaving the loop.
+    Flash {
+        /// Message.
+        text: String,
+        /// Success bit.
+        ok: bool,
+    },
+}
+
+impl AppAction {
+    fn reload() -> Self {
+        Self::Reload
+    }
 }
 
 #[cfg(test)]
@@ -330,6 +411,6 @@ mod tests {
     fn reload_increments_page_generation() {
         let mut app = App::for_test(PageId::Sessions);
         let _ = app.reload_open_page();
-        assert_eq!(app.pages.page(PageId::Sessions).fetch_gen(), 2);
+        assert_eq!(app.pages.page_dyn(PageId::Sessions).fetch_gen(), 2);
     }
 }

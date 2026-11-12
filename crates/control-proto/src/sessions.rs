@@ -2,7 +2,8 @@
 
 use std::collections::BTreeMap;
 
-use serde::{Deserialize, Serialize};
+use serde::de::Error as _;
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::{API_VERSION, ControlError, ControlErrorKind, validate_revision};
 
@@ -172,6 +173,7 @@ pub struct SessionSummary {
     /// Number of token-bearing models without a price.
     pub unpriced: u64,
     /// Resume command, null until the resume row lands.
+    #[serde(default, deserialize_with = "deserialize_opt_resume")]
     pub resume: Option<SessionResume>,
     /// Whether the source cannot be mutated.
     pub read_only: bool,
@@ -736,9 +738,29 @@ fn bad_query(message: &str) -> ControlError {
     ControlError::new(ControlErrorKind::BadRequest, message, "validate")
 }
 
+fn deserialize_opt_resume<'de, D>(deserializer: D) -> Result<Option<SessionResume>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    match value {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(_))
+        | Some(serde_json::Value::Array(_))
+        | Some(serde_json::Value::Bool(_))
+        | Some(serde_json::Value::Number(_)) => Ok(None),
+        Some(object @ serde_json::Value::Object(_)) => serde_json::from_value(object)
+            .map(Some)
+            .map_err(D::Error::custom),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{SessionListQuery, SessionOverviewQuery, SessionStatsQuery};
+    use super::{
+        SessionListQuery, SessionListResponse, SessionOverviewQuery, SessionStatsQuery,
+        SessionSummary, SessionTokenTotals,
+    };
 
     #[test]
     fn list_query_accepts_only_the_contract_days() {
@@ -766,5 +788,57 @@ mod tests {
             .expect("overview");
         assert_eq!(overview.cwd, "/work/repo");
         assert!(SessionOverviewQuery::parse(Some("folder=repo")).is_err());
+    }
+
+    #[test]
+    fn resume_string_on_list_row_is_ignored() {
+        let body = serde_json::json!({
+            "version": 1,
+            "revision": "",
+            "consent": {"asked": true, "all": true, "enabled": []},
+            "sessions": [{
+                "id": "claude:abc",
+                "agent": "claude",
+                "title": "t",
+                "cwd": "/work",
+                "last_ms": 1,
+                "models": ["m"],
+                "tokens": {"input": 1, "output": 0, "cache_read": 0, "cache_write": 0},
+                "cost": 0.0,
+                "unpriced": 0,
+                "resume": "claude --resume abc",
+                "read_only": false,
+                "gateway": false
+            }]
+        });
+        let list: SessionListResponse = serde_json::from_value(body).expect("list");
+        assert_eq!(list.sessions[0].resume, None);
+    }
+
+    #[test]
+    fn resume_argv_object_is_accepted() {
+        let body = serde_json::json!({
+            "version": 1,
+            "revision": "",
+            "consent": {"asked": true, "all": true, "enabled": []},
+            "sessions": [{
+                "id": "claude:abc",
+                "agent": "claude",
+                "title": "t",
+                "cwd": "/work",
+                "last_ms": 1,
+                "models": ["m"],
+                "tokens": SessionTokenTotals::default(),
+                "cost": 0.0,
+                "unpriced": 0,
+                "resume": {"argv": ["claude", "--resume", "abc"], "cwd": "/work"},
+                "read_only": false,
+                "gateway": false
+            }]
+        });
+        let row: SessionSummary = serde_json::from_value(body["sessions"][0].clone()).expect("row");
+        let resume = row.resume.expect("resume");
+        assert_eq!(resume.argv, ["claude", "--resume", "abc"]);
+        assert_eq!(resume.cwd, "/work");
     }
 }
