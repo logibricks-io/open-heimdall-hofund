@@ -267,6 +267,7 @@ const MAX_DECODE_DEPTH: u32 = 64;
 
 /// Decodes a `google.protobuf.Value`. Unknown or empty input becomes `Null`.
 #[must_use]
+#[allow(dead_code)]
 pub(crate) fn pb_value_decode(buf: &[u8]) -> Value {
     pb_value_decode_at_depth(buf, 0)
 }
