@@ -166,6 +166,9 @@ fn json_snapshots_round_trip() {
     status.model_listener.effective = "127.0.0.1:4425".to_owned();
     status.model_listener.running = Some("127.0.0.1:3425".to_owned());
     status.model_listener.effective_source = ListenSource::Environment;
+    status.model_listener.allow_ips = vec!["192.168.1.0/24".to_owned()];
+    status.model_listener.trust_proxy = true;
+    status.model_listener.allow_ips_invalid = true;
     status.generation = 4;
     status.disk_revision = "disk-revision-2".to_owned();
     status.runtime_revision = "runtime-revision-1".to_owned();

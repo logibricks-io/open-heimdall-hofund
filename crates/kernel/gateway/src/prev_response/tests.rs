@@ -359,12 +359,16 @@ fn a5_scopes_separate_callers_and_keyless_remote_peers() {
     let remote: IpAddr = "192.0.2.10".parse().expect("IP");
     let loopback: IpAddr = "127.0.0.1".parse().expect("IP");
     assert_ne!(
-        caller_scope(None, None, Some(remote)),
-        caller_scope(None, None, Some(loopback))
+        caller_scope(None, None, Some(remote), false),
+        caller_scope(None, None, Some(loopback), false)
     );
     assert_ne!(
-        caller_scope(Some("one"), None, None),
-        caller_scope(Some("two"), None, None)
+        caller_scope(None, None, Some(loopback), true),
+        caller_scope(None, None, Some(loopback), false)
+    );
+    assert_ne!(
+        caller_scope(Some("one"), None, None, false),
+        caller_scope(Some("two"), None, None, false)
     );
 }
 
