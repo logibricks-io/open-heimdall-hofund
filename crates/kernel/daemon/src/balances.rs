@@ -415,6 +415,7 @@ fn window_info(window: &PlanWindow) -> WindowInfo {
         },
         blocking: window.blocking(),
         scope_model: None,
+        excluded_models: Vec::new(),
         window_span: window.span(),
         reset_after: None,
     }
@@ -445,6 +446,7 @@ fn wallet_info(wallet: &BalanceWallet) -> WindowInfo {
         span,
         blocking: true,
         scope_model: None,
+        excluded_models: Vec::new(),
         window_span: None,
         reset_after: None,
     }
