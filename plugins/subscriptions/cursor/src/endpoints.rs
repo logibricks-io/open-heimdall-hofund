@@ -2,15 +2,16 @@
 
 /// Default Cursor API and website bases.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[doc(hidden)]
 pub struct Endpoints {
     /// Browser sign-in site.
-    pub website: String,
+    pub(crate) website: String,
     /// Connect API base (`api2`).
     pub api: String,
     /// Default agent API origin when server config has no usable override.
     pub agent: String,
     /// Client version sent on API calls.
-    pub client_version: String,
+    pub(crate) client_version: String,
 }
 
 impl Default for Endpoints {
@@ -46,6 +47,13 @@ impl Endpoints {
     pub(crate) fn server_config(&self) -> String {
         format!(
             "{}/aiserver.v1.ServerConfigService/GetServerConfig",
+            self.api.trim_end_matches('/')
+        )
+    }
+
+    pub(crate) fn exchange_user_api_key(&self) -> String {
+        format!(
+            "{}/auth/exchange_user_api_key",
             self.api.trim_end_matches('/')
         )
     }
