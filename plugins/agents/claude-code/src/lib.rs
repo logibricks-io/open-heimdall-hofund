@@ -835,6 +835,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn claude_entrypoint_tags_desktop_app_usage() {
         let path = fixture("desktop/entrypoint.jsonl");
         let file = SessionFile::new("desktop-tab", &path);
