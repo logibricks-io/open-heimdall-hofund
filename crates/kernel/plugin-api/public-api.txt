@@ -1038,6 +1038,7 @@ Subscription::async fn quota (& self , account : & AccountId , host : & HostCont
 Subscription::async fn quota_reset_credits (& self , account : & AccountId , host : & HostContext ,) -> Result < Option < QuotaResetCredits > , PluginError >
 Subscription::async fn refresh (& self , account : & AccountId , host : & HostContext) -> Result < () , PluginError >
 Subscription::async fn remove_account (& self , account : & AccountId , host : & HostContext ,) -> Result < () , PluginError >
+Subscription::async fn set_project (& self , email : & str , project : & str , host : & HostContext ,) -> Result < () , PluginError >
 Subscription::async fn shutdown (& self , deadline : Duration) -> Result < () , PluginError >
 Subscription::async fn start_sign_in (& self , ctx : & SignInCtx , host : & HostContext ,) -> Result < SignInChallenge , PluginError >
 Subscription::async fn write_agent_sign_in (& self , account : & AccountId , home : & std :: path :: Path , host : & HostContext ,) -> Result < () , PluginError >
