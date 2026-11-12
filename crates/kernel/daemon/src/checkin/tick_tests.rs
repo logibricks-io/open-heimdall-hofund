@@ -23,7 +23,7 @@ use crate::runtime::Runtime;
 const PLUGIN: &str = "check-test";
 const SECRET: &str = "sk-check-test-secret";
 
-/// See warmup::tick_tests: shared account ids collide in the macOS keychain.
+/// See warmup::tick_tests: fixtures hold an in-memory account-secret scope.
 fn unique_account_id() -> String {
     static NEXT: AtomicU64 = AtomicU64::new(1);
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
@@ -308,6 +308,7 @@ accounts = "*"
 
 struct Fixture {
     dir: tempfile::TempDir,
+    _secrets: hofund_plugin_host::MemoryAccountSecretsGuard,
     now: Arc<Mutex<SystemTime>>,
     settings: Arc<CheckFakeSettings>,
     runtime: Arc<Runtime>,
@@ -354,6 +355,7 @@ async fn fixture_with(
     settings: Arc<CheckFakeSettings>,
     extra_accounts: usize,
 ) -> Fixture {
+    let secrets = hofund_plugin_host::memory_account_secrets();
     let anchor = UNIX_EPOCH + Duration::from_secs(1_762_195_200);
     let config = config(enabled);
     let dir = tempfile::tempdir().expect("temp");
@@ -401,6 +403,7 @@ async fn fixture_with(
     runtime.refresh_subscriptions().await;
     Fixture {
         dir,
+        _secrets: secrets,
         now,
         settings,
         store: Arc::clone(runtime.checkin()),

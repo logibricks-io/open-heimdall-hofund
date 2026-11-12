@@ -29,9 +29,9 @@ use super::WarmupRunner;
 const PLUGIN: &str = "warm-test";
 const SECRET: &str = "sk-warm-test-secret";
 
-/// Keychain item names are `{kind}/{plugin}/{account}` under a process-wide
-/// service. Concurrent fixtures must not share account ids, or macOS
-/// `set_secret` fails with "item already exists" (a3a_26 / a3a_27).
+/// Account ids unique per fixture invocation. The fixture also holds
+/// [`hofund_plugin_host::memory_account_secrets`] so upserts stay in memory
+/// and do not write the login keychain (a3a_26 / a3a_27).
 fn unique_account_id() -> String {
     static NEXT: AtomicU64 = AtomicU64::new(1);
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
@@ -302,6 +302,7 @@ fn chrono_offset_time(now: SystemTime, zone: chrono::FixedOffset) -> String {
 
 struct Fixture {
     _dir: tempfile::TempDir,
+    _secrets: hofund_plugin_host::MemoryAccountSecretsGuard,
     runtime: Arc<Runtime>,
     store: Arc<WarmupStore>,
     registry: Arc<WarmRegistry>,
@@ -312,6 +313,7 @@ struct Fixture {
 }
 
 async fn fixture() -> Fixture {
+    let secrets = hofund_plugin_host::memory_account_secrets();
     let anchor = SystemTime::now();
     let times = due_times(anchor);
     let config = config_with_times(&times);
@@ -374,6 +376,7 @@ async fn fixture() -> Fixture {
         .to_string();
     Fixture {
         _dir: dir,
+        _secrets: secrets,
         store: Arc::clone(runtime.warmup()),
         runtime,
         registry,
