@@ -12,7 +12,7 @@ Legend: **Done** = matches the reference at checklist granularity; **Partial** =
 
 | Vendor section | Done | Partial | Missing | N/A | Unverified |
 |---|---|---|---|---|---|
-| Claude Pro/Max (`claude`) | 1 | 11 | 9 | 2 | 0 |
+| Claude Pro/Max (`claude`) | 1 | 17 | 3 | 2 | 0 |
 | Cursor (`cursor`) | 1 | 11 | 7 | 2 | 0 |
 | Devin (`devin`) | 11 | 6 | 1 | 1 | 0 |
 | Zed (`zed`) | 0 | 6 | 1 | 3 | 0 |
@@ -44,7 +44,7 @@ Every other gap below maps to an existing plan item.
 
 **Reference files read:** `internal/provider/claude_signin.go`, `claude_auth.go`, `claude_dirs.go`, `claude_setup_token.go`, `claude_limits.go`, `claude_usage_cli.go`, `claude_warmup.go`, `claude_warmup.go`, `claude_probe.go`; `internal/gateway/claude_subscription.go`; `internal/claudebridge/mcp.go`.
 
-**Hofund path:** `plugins/subscriptions/claude/src/` (`lib.rs`, `cli.rs`, `creds.rs`, `account.rs`, `agent_sign_in.rs`, `discover.rs`, `import.rs`, `lock.rs`).
+**Hofund path:** `plugins/subscriptions/claude/src/` (`lib.rs`, `cli.rs`, `creds.rs`, `account.rs`, `agent_sign_in.rs`, `discover.rs`, `import.rs`, `lock.rs`, `upstream.rs`, `bridge/`).
 
 | # | capability | reference v0.1.3005 behaviour | hofund 08035c9 | status | gap to close |
 |---|------------|------------------------------|----------------|--------|--------------|
@@ -58,23 +58,23 @@ Every other gap below maps to an existing plan item.
 | b2 | import: keychain / other tools | Keychain item `claudeDirService` (`claude_dirs.go:42-58`) | File-only `.credentials.json` in agent home | Partial | Keychain import path |
 | c | token storage and encryption | Per-account config dir + optional macOS Keychain; the reference `logins.json` holds metadata (`claude_dirs.go`) | Encrypted account lease via daemon secret store; copies creds to account dir on use (`account.rs`, `creds.rs`) | Partial | Keychain parity; encryption model differs (hofund central store) — acceptable if behaviour matches |
 | d | refresh | Claude Code refreshes; `invalid_grant` → Refused, not rested (`claude_auth.go:1-12`, `25-41`) | `account::refresh` via `claude auth status --json` (`lib.rs:403-404`, `account.rs`) | Partial | Map refusal strings to `NeedsSignIn` / Refused like `ClaudeSignInRequired` (`claude_auth.go:25-41`) |
-| e | upstream request wire | No direct Anthropic HTTP; subprocess + MCP bridge (`claude_subscription.go:3-29`, `claudebridge/mcp.go:54-59`) | `upstream()` returns unsupported (`lib.rs:427-434`) | Missing | MCP bridge + long-lived runs (`claude_subscription.go:74-79`) |
-| f | inbound API shapes | Gateway `serveClaudeSubscription` for Anthropic Messages and translated Chat/Responses paths (`gateway.go:4995`, `claude_subscription.go:6041+`) | Not served | Missing | Chat Completions, Responses, Messages → bridge (`R-6`) |
-| g | streaming | Bridge streams Claude Code stdout/SSE to caller (`claude_subscription.go` run loop) | Not served | Missing | Stream bridge events to IR |
-| h | tool calls | MCP `tools/call` blocks; results on next HTTP request (`claude_subscription.go:9-13`, `mcp.go:36-48`) | Not served | Missing | Tool parking protocol (`R-6`) |
-| i | images | Gateway image tests pass through bridge (`claude_images_test.go` cited in tree) | Not served | Missing | Image blocks via bridge |
-| j | reasoning / thinking | Effort / think-off **staged** in gateway (`6158-6161`, `6072-6076`, `anthropic.go:281-291`) | Not served | Missing | Effort and extended thinking via CLI; hofund uses **`X-Hofund-Cache-Marks`** (neutral header) instead of reference vendor-prefixed cache opt-in header (`claude_cache.go:36-38`) |
+| e | upstream request wire | No direct Anthropic HTTP; subprocess + MCP bridge (`claude_subscription.go:3-29`, `claudebridge/mcp.go:54-59`) | `upstream()` serves text, tools, images, and resume through Claude Code (`upstream.rs`, `bridge/`; PRs #753–#761 and R-6g). Tests use a fake runner. | Partial | Real Claude Code process and account (#304); WSL/proxy paths still unverified |
+| f | inbound API shapes | Gateway `serveClaudeSubscription` for Anthropic Messages and translated Chat/Responses paths (`gateway.go:4995`, `claude_subscription.go:6041+`) | Gateway codecs already translate Chat/Responses/Messages to IR; the plugin serves those turns through the bridge | Partial | Real-account protocol smoke (#304) |
+| g | streaming | Bridge streams Claude Code stdout/SSE to caller (`claude_subscription.go` run loop) | stream-json decoded to IR events, including `StillWorking` keepalive (`bridge/decode.rs`, `bridge/keepalive.rs`) | Partial | Live LongLivedChild keepalive wrapper and real-binary stream (#304) |
+| h | tool calls | MCP `tools/call` blocks; results on next HTTP request (`claude_subscription.go:9-13`, `mcp.go:36-48`) | Tool parking plus MCP callback via `bridge-mcp-stdio` (`bridge/park.rs`, PRs #753, #756, #759) | Partial | Live helper + callback against a real Claude Code process (#304) |
+| i | images | Gateway image tests pass through bridge (`claude_images_test.go` cited in tree) | Image blocks on the `-p` stream-json prompt (`bridge/images.rs`, PR #761). URL sources are not fetched; 2000 px / 5 MiB refit is not applied | Partial | Pixel fitting (#698); TUI URL fetch |
+| j | reasoning / thinking | Effort / think-off **staged** in gateway (`6158-6161`, `6072-6076`, `anthropic.go:281-291`) | Gateway A–B extensions plus plugin CLI flags and `setEffort` (`bridge/flags.rs`, PR #761). Neutral **`X-Hofund-Cache-Marks`** instead of the reference vendor-prefixed cache opt-in header (`claude_cache.go:36-38`) | Partial | Real-account effort/`setEffort` (#304) |
 | k | quota / usage | `claude -p /usage` parse (`claude_usage_cli.go:50-57`); plus `NoteClaudeLimits` from stream headers (`claude_limits.go:69-71`) | `quota()` unsupported (`lib.rs:407-414`) | Missing | `/usage` CLI + header-derived windows (`R-5`) |
 | l | model list | From Claude Code / catalog in gateway context (unverified detail); usage scopes per model in limits | `list_models()` unsupported (`lib.rs:417-424`) | Missing | Model list + scoped week windows (`R-5`) |
 | m | multi-account | Multiple saved logins, routing, agent switch (`claude_routed_signin_test.go` etc.) | Daemon multi-account + agent switch with locks | Partial | Quota-aware routing needs row k |
-| n | error classification | `ClaudeSignInRequired`, refusal vs retry (`claude_auth.go`); subscription refusals move account (`gateway/refusal_accounts_test.go`) | Refresh/auth errors only; no upstream | Partial | Rest/cooldown from bridge refusals when upstream exists |
+| n | error classification | `ClaudeSignInRequired`, refusal vs retry (`claude_auth.go`); subscription refusals move account (`gateway/refusal_accounts_test.go`) | `bridge/failure.rs` maps sign-in, extra-usage, too-long, quota, 429, and crash text; room-full 503 sets vendor-neutral `skip_failover_same_plugin` (R-6g). Sign-in lapses are pinned to the login version captured at run start | Partial | Real-account classification (#304); image/timeout live wrapping still thin |
 | o | daily warmup | `KeepClaudeWindowsWarm` / `claude_warmup.go:77-79` | `daily_warmup` on spec + `account::warmup` (`lib.rs:54-63`, `454-459`) | Partial | Gateway-coordinated warm request path (probe) vs CLI-only warm-up |
 | p | agent sign-in switching | Switch with locks, CAS on refresh token (`logins.go` patterns; docs in subscriptions.md) | `write_agent_sign_in`, discover/import (`lib.rs:437-475`) | Partial | Full lock parity documented in subscriptions.md gaps (overage quota) |
 | q | vendor extras | WSL Claude, per-login proxy (`claude_signin.go:139-145`), setup-token inference-only | Proxy/WSL/setup-token absent | Partial | Proxy env for sign-in and runs; setup-token (`R-5`, `R-6`) |
 
 ### Gaps (Claude)
 
-- MCP subscription bridge and multi-protocol gateway translation — **L**, **R-6**
+- MCP subscription bridge and multi-protocol gateway translation — implemented on the R-6 stack (PRs #753–#761 and R-6g), not merged; real-account smoke remains **#304**
 - Quota from `/usage` + stream header limits — **L**, **R-5**
 - Model list and scoped quota windows — **M**, **R-5**
 - macOS Keychain credential path — **M**, **R-5**
