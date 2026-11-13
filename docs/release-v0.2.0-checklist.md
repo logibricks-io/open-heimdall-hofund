@@ -6,13 +6,14 @@ a pull request, or run live-account or live-network smoke.
 
 The general tag, dry-run, desktop, and signing process is
 [docs/release.md](release.md). Follow that file when the cut actually
-happens. This page is the v0.2.0-specific preflight: what is still
-unmerged, what a dry-run must prove, and which smoke stays with Palmer.
+happens. This page is the v0.2.0-specific preflight: what still remains
+to cut the tag, what a dry-run must prove, and which smoke stays with Palmer.
 
 The reference freeze for this release is the inspiration project's `v0.1.3005` (`6abacd46`).
-hofund `main` at the time of writing is `318912ff` (R-6: Claude Code bridge
-design, #736). Workspace version strings still say `0.1.0`. **v0.2.0 is not
-tagged, and no GitHub Release has been published from this tree.**
+hofund `main` at the time of writing is `74dbebbc` (R-34: session resume argv
+and Pi-to-omp carry, #798, 2026-11-13). Workspace version strings still say
+`0.1.0`. **v0.2.0 is not tagged, and no GitHub Release has been published
+from this tree.**
 
 ## What this pull request does not do
 
@@ -26,87 +27,76 @@ tagged, and no GitHub Release has been published from this tree.**
   (#58, #304, #310). Those stay Palmer's. This document does not close
   those issues.
 
-## Honest preflight (2026-11-11)
+## Honest preflight (2026-11-13)
 
-Scores and user-facing honesty for what is on `main` versus open work are
-the subject of Must #11,
+Scores and user-facing honesty for what is on `main` are the subject of
+Must #11,
 [PR #776](https://github.com/logibricks-io/open-heimdall-hofund/pull/776)
-(`feat/must11-docs-honesty`, head `5a93c335`). That pull request is
-**open and unmerged**. The tagged tree should include it, or equivalent
-wording. Until it lands, `docs/feature-parity.md` on `main` still has a
-stale Summary and an older snapshot header.
+(`feat/must11-docs-honesty`). Land that pull request (or equivalent wording)
+before the tag so the tagged docs match the landed surface.
 
 Most subscription and routing work is verified with mocks only.
 
 ### Already on `main` (do not redo)
 
-| Must item | State on `318912ff` |
+| Must item | State on `74dbebbc` (2026-11-13) |
 | --- | --- |
 | Usage reports 9.4 / 9.9 | Merged (#665) |
 | D-71, D-73, D-74, D-75 | Merged (R-4) |
 | Phase-3 A-2c | Merged (#611) |
 | Phase-3 A-2d lapsed-team refresh | On `main` (`a2d_24`) |
 | Claude account-dir cleanup (#303) | Closed, on `main` |
-| Zed POST `/completions` (R-16) | On `main`. This is not login-and-quota-only. |
-| Claude Code request serving | **Not** on `main`. `upstream()` returns unsupported. Design only (#736). |
-| Cursor agent-API request serving | **Not** on `main`. `upstream()` returns unsupported. |
-| Devin chat | **Not** implemented. The frozen must-list puts this in Next (§2.2), not Must. |
+| Zed POST `/completions` (R-16) and RSA sign-in (R-56) | On `main`. This is not login-and-quota-only. |
+| Claude Code request serving (H8) | Merged (#762 tip, including R-6g). Mocks only; real-binary smoke is still #304. |
+| Cursor agent-API request serving (R-8/R-9) | Merged (#775 tip). Mocks only; documented deviations stay in `docs/feature-parity.md`. |
+| Devin chat (R-12/R-13) | Merged (#786 tip). Mocks only. |
 | Kiro | Unary text-only on `main` (no stream, tools, or images). That is the Must scope. |
-| Antigravity (row 3.4) | No plugin. Not a Must item. |
+| Antigravity (row 3.4) | Plugin is on `main` (R-49). Mocks only. |
+| P1-8 uninstall / purge | Merged (#748) |
+| 10.5 LAN allow-IPs / trusted proxy | Merged (#749) |
+| 15.1 tray status, route, quota | Merged (#750) |
+| D-80 Codex thread relabel | Merged (#747) |
+| D-84 Codex compaction fallback | Merged (#746) |
+| R-25 stability follow-ups | Merged (#751, #752) |
+| 15.3 TUI Providers / Agents | Merged (#740) |
+| Sessions R-29–R-34 and TUI Sessions (R-44) | Merged (#792, #794–#799). Library writes and true 4.2–4.4 recording/MCP execution are not on `main`. |
 
-### Open must-list work (Palmer merges; this runbook does not)
+### Still open or unstarted at the cut (re-check before tagging)
 
-These are open at the time of writing. Heads will move if CI fixes are
-merged forward. Re-check `gh pr view` before the cut. None of this is
-shipped until it is on `main`.
+| Item | State |
+| --- | --- |
+| #776 Must #11 documentation honesty + #274 | Open docs PR; should land before the tag. |
+| #777 (this PR) Must #12 checklist only | Open docs PR; does not bump or tag. |
+| Library writes (row 6 / R-35+) | No open implementation PR. Palmer included Library in the v0.2.0 scope; it is unstarted. |
+| True 4.2–4.4 session recording / capture, library mutate, MCP execution | Held. |
+| R-47b Codex store | Held (`838a5338` / `a3183edc`). Awaiting Palmer's written spec approval. |
+| Dependabot #741–#745 | Held out of the v0.2.0 land order unless Palmer includes them. |
+| Version bump, tag, GitHub Release | Not started. Follow § B and § E only at the cut. |
+| Real-account smoke #58, #304, #310 | Palmer only. Not on the agent critical path. |
 
-| PR | Topic | Branch / last known head |
-| --- | --- | --- |
-| #746 | D-84 Codex compaction fallback | `feat/r20-codex-compaction-fallback` |
-| #747 | D-80 Codex 0.166+ thread relabel | `feat/r19-codex-thread-relabel` |
-| #748 | P1-8 uninstall / purge | `feat/r21-uninstall` |
-| #749 | 10.5 LAN allow-IPs and trusted proxy | `feat/r22-lan-allow-ips` |
-| #750 | 15.1 tray status, route, quota | `feat/r23-tray-status` |
-| #751–#752 | R-25 stability (#563, #463, #612, #465, #607 follow-ups) | `feat/r25a-stability-b`, `feat/r25b-stability-b` |
-| #753–#762 | Claude H8b request serving | stack on `feat/r6a-bridge-callback` … `feat/r6g-errors-docs` |
-| #763–#775 | Cursor R-8/R-9 agent-API request serving | stack up to `feat/r9e-images` @ `0423cbec` |
-| #776 | Must #11 documentation honesty + #274 | `feat/must11-docs-honesty` @ `5a93c335` |
-| (this PR) | Must #12 checklist only | `feat/must12-release-checklist` |
+Mid-stack PRs whose tips already landed (#753–#761, #763–#774, #779–#780, #784–#785, #788–#789, and similar) should not be merged again onto `main`.
 
-Related issues that stay open after this PR: #609, #607, #612, #465, #463,
-#563 (implementation is in the stacks above; do not treat the issues as
-done until the matching PRs merge).
+### Not in this cut unless Palmer expands the freeze further
 
-### Not in this cut unless Palmer expands the freeze
-
-- Devin GetChatMessage / chat upstream (design in
-  [docs/devin-upstream-design.md](devin-upstream-design.md); §2.2 Next).
-- Other §2.2 Next items (auxiliary rows, D-46 cluster, and so on).
+- Other §2.2 Next items (D-46 cluster, remaining auxiliary rows, and so on).
 - D-50 stays skipped.
-- R-47b stays held (`838a5338` / `a3183edc`).
-- 15.3 TUI is [PR #740](https://github.com/logibricks-io/open-heimdall-hofund/pull/740).
-  Palmer chooses whether it is in v0.2.0 or deferred. This runbook does not
-  merge it.
-
-Dependabot PRs (#741–#745 and later) are not must-list items. Include them
-only if Palmer wants the bumps on the tagged commit.
+- True 4.2–4.4 implementation and R-47b stay held.
 
 ## A. Merge preflight (Palmer)
 
-1. Decide, in writing, which of the open must-list PRs above land in
-   v0.2.0 and whether #740 is in or deferred.
-2. Merge those pull requests to `main` yourself. Agents must not merge to
-   `main`.
-3. Confirm `origin/main` contains Must #11 (#776) or equivalent honesty
-   text, so the tagged docs do not claim unmerged request serving as
-   released.
-4. Confirm CI is green on the commit that will be tagged. For the Cursor
-   stack, a known-flake rerun is allowed only for macOS `a3a_26` /
-   `a3a_27`, Windows `control_picks`, plugin-host `r4_72` variants, and
-   “Install desktop host libraries” timeouts. `delayed_http2` and the
+1. Decide, in writing, whether any remaining open or unstarted items
+   above (especially Library R-35+ and held work) land in v0.2.0 or are
+   deferred.
+2. Confirm `origin/main` is the commit you intend to tag, and that Must
+   #11 (#776) or equivalent honesty text is on that commit so the tagged
+   docs match the landed surface.
+3. Confirm CI is green on the commit that will be tagged. A known-flake
+   rerun is allowed only for confirmed flakes on main-identical tests
+   (for example the historical `free_port()` / `HOFUND_ADDR` race, which
+   now has a deterministic fix in #808). `delayed_http2` and the
    heartbeats tool-count wait are **not** known infra flakes; they need a
    real fix before the cut.
-5. Do not bump versions until this preflight is done.
+4. Do not bump versions until this preflight is done.
 
 ## B. Version and changelog (do not perform until the cut)
 
@@ -117,10 +107,11 @@ the to-be-tagged commit, with **0.2.0**:
    version on every `hofund-*` entry in `[workspace.dependencies]`.
 2. Set the same version in `xtask/tests/workspace_invariants.rs`.
 3. Move notes from `[Unreleased]` in `CHANGELOG.md` to
-   `[0.2.0] - YYYY-MM-DD`. Be honest: do not list Cursor or Claude Code
-   request serving, or Devin chat, as released unless the matching PRs are
-   already on that commit. Keep Kiro as unary text-only unless a later
-   change landed.
+   `[0.2.0] - YYYY-MM-DD`. Be honest about what is on that commit: Cursor
+   R-8/R-9, Claude H8, and Devin R-12/R-13 request serving are already on
+   `74dbebbc` (mocks only). Keep Kiro as unary text-only unless a later
+   change landed. Do not list Library writes or true 4.2–4.4 recording/MCP
+   execution as released.
 4. Commit those files. The tag is created from that commit, not from a
    dirty tree.
 
@@ -170,7 +161,7 @@ exists.
 
 | Issue | What to run | Notes |
 | --- | --- | --- |
-| #304 | Real `claude` binary: `claude auth login --claudeai` non-TTY output and `claude auth status --json` shape, plus sign-in and refresh of the hofund Claude subscription | Scripted-child tests are not a substitute. H8b request serving, if merged, still needs this smoke before it is claimed as verified against a real binary. |
+| #304 | Real `claude` binary: `claude auth login --claudeai` non-TTY output and `claude auth status --json` shape, plus sign-in and refresh of the hofund Claude subscription | Scripted-child tests are not a substitute. H8 request serving is on `main` but still needs this smoke before it is claimed as verified against a real binary. |
 | #310 | Live GitHub Copilot: device sign-in, token exchange, refresh, and a chat call, and the same against a GitHub Enterprise host | H6 is mocks only on `main`. |
 | #58 | Live Vertex ADC and impersonation, and Bedrock Converse with a session token | Unit tests and wiremock are not a substitute. Opt-in / environment-gated is acceptable; it must actually have been run. |
 
