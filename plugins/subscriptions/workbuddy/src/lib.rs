@@ -1,6 +1,6 @@
 //! WorkBuddy subscription plugin.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -22,6 +22,7 @@ mod quota;
 mod refresh;
 mod sign_in;
 mod site;
+mod tools;
 mod upstream;
 
 static SPEC: SubscriptionSpec = SubscriptionSpec::from_static(
@@ -126,6 +127,7 @@ impl SubscriptionFactory for WorkBuddyFactory {
             endpoints: Arc::clone(&self.endpoints),
             flow: SignInFlow::TokenFile,
             pending: Mutex::new(HashMap::new()),
+            after_tools: Arc::new(Mutex::new(HashSet::new())),
         }))
     }
 }
@@ -134,6 +136,7 @@ struct WorkBuddy {
     endpoints: Arc<Endpoints>,
     flow: SignInFlow,
     pending: Mutex<HashMap<String, sign_in::Pending>>,
+    after_tools: Arc<Mutex<HashSet<String>>>,
 }
 
 #[hofund_plugin_sdk::async_trait]
@@ -319,6 +322,7 @@ impl Subscription for WorkBuddy {
             account.clone(),
             host.clone(),
             Arc::clone(&self.endpoints),
+            Arc::clone(&self.after_tools),
         )))
     }
 

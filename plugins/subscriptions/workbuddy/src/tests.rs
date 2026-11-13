@@ -754,3 +754,94 @@ fn r55_unknown_sign_in_site_is_rejected_without_network() {
     assert_eq!(error.kind(), PluginErrorKind::Config);
     assert!(host.http().calls().is_empty());
 }
+
+fn chat_body(bytes: &[u8]) -> json::Value {
+    let body = hofund_plugin_sdk::inflate::gzip(bytes).expect("gzip chat body");
+    json::from_slice(&body).expect("chat JSON")
+}
+
+fn after_tools_request(model: &str, prefill: bool) -> hofund_plugin_api::Request {
+    use hofund_plugin_api::{ContentPart, Extensions, Message, Request, Role, ToolResultPart};
+
+    let result = Message {
+        role: Role::Tool,
+        content: vec![ContentPart::ToolResult(ToolResultPart {
+            id: "call_1".to_owned(),
+            is_error: false,
+            content: Vec::new(),
+            extensions: Extensions::new(),
+        })],
+        extensions: Extensions::new(),
+    };
+    Request::new(model).with_messages(vec![
+        Message::new(Role::User),
+        result,
+        Message::new(if prefill { Role::Assistant } else { Role::User }),
+    ])
+}
+
+#[test]
+fn r55c_after_tools_refusal_retries_once_and_learns_per_model() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, 4_000_000_000_000);
+    host.http().enqueue_response(
+        400,
+        &[],
+        br#"{"code":11153,"msg":"the conversation must end with a user message"}"#.to_vec(),
+    );
+    for _ in 0..3 {
+        host.http().enqueue(
+            br#"{"id":"chatcmpl-1","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"ok"}}]}"#,
+        );
+    }
+    let upstream = subscription(&host, None)
+        .upstream(&id, host.context())
+        .expect("upstream");
+    for model in [
+        "gemini-after-tools",
+        "gemini-after-tools",
+        "deepseek-after-tools",
+    ] {
+        block_on(upstream.execute(after_tools_request(model, false), ProtocolId::OPENAI_CHAT))
+            .expect("served");
+    }
+    let calls = host.http().calls();
+    assert_eq!(calls.len(), 4);
+    let roles = |at: usize| {
+        chat_body(calls[at].body())["messages"]
+            .as_array()
+            .expect("messages")
+            .iter()
+            .map(|message| message["role"].as_str().expect("role").to_owned())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(roles(0), ["user", "tool", "user"]);
+    assert_eq!(roles(1), ["user", "tool", "assistant", "user"]);
+    assert_eq!(chat_body(calls[1].body())["messages"][2]["content"], "");
+    assert_eq!(roles(2), ["user", "tool", "assistant", "user"]);
+    assert_eq!(roles(3), ["user", "tool", "user"]);
+}
+
+#[test]
+fn r55c_after_tools_prefill_is_not_retried() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, 4_000_000_000_000);
+    host.http().enqueue_response(
+        400,
+        &[],
+        br#"{"code":11153,"msg":"the conversation must end with a user message"}"#.to_vec(),
+    );
+    let upstream = subscription(&host, None)
+        .upstream(&id, host.context())
+        .expect("upstream");
+    let error = block_on(upstream.execute(
+        after_tools_request("gemini-after-tools", true),
+        ProtocolId::OPENAI_CHAT,
+    ))
+    .err()
+    .expect("prefill refused");
+    assert_eq!(error.status(), Some(400));
+    assert_eq!(host.http().calls().len(), 1);
+}
