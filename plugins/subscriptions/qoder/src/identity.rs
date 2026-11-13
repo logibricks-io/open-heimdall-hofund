@@ -93,6 +93,46 @@ struct RefreshWait {
     refresh: Arc<Refresh>,
 }
 
+struct RefreshLeader<'a> {
+    identities: &'a Mutex<HashMap<IdentityKey, IdentityEntry>>,
+    key: IdentityKey,
+    refresh: Arc<Refresh>,
+    armed: bool,
+}
+
+impl RefreshLeader<'_> {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for RefreshLeader<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        {
+            let mut cache = self
+                .identities
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if let Some(entry) = cache.get_mut(&self.key)
+                && entry
+                    .refresh
+                    .as_ref()
+                    .is_some_and(|current| Arc::ptr_eq(current, &self.refresh))
+            {
+                entry.refresh = None;
+            }
+        }
+        self.refresh.finish(Err(NativeError {
+            kind: PluginErrorKind::Cancelled,
+            message: "Qoder device identity refresh was cancelled".to_owned(),
+            status: None,
+        }));
+    }
+}
+
 impl Refresh {
     fn new() -> Arc<Self> {
         Arc::new(Self {
@@ -239,6 +279,12 @@ impl Devices {
             }
             Start::Lead(refresh) => refresh,
         };
+        let mut leader = RefreshLeader {
+            identities: &self.identities,
+            key: key.clone(),
+            refresh: Arc::clone(&refresh),
+            armed: true,
+        };
         let result = match read_native(host, &self.env, credential).await {
             Ok(identity) => Ok(Some(identity)),
             Err(_) if credential.site == Site::China => Ok(None),
@@ -259,6 +305,7 @@ impl Devices {
             entry.refresh = None;
         }
         refresh.finish(result.clone());
+        leader.disarm();
         result.map_err(NativeError::into_error)
     }
 

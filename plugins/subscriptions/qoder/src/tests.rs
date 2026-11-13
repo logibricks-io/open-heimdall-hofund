@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-use hofund_kit_subscription::{PipedScript, TestHost, block_on, join_all, poll_once};
+use hofund_kit_subscription::{PipedScript, TestHost, block_on, poll_once};
 use hofund_plugin_api::{
     AccountId, AccountStatus, PluginErrorKind, PluginId, PluginKind, ProbeQuery, ProtocolId,
     RawTable, SecretString, SignInFlow, Subscription, SubscriptionFactory,
@@ -512,22 +512,63 @@ fn r54_chat_keeps_cached_identity_during_checkin_refresh() {
 }
 
 #[test]
+fn r54_cancelled_checkin_refresh_can_be_retried() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_with_expiry(&host, 4_000_000_000_000);
+    let devices = test_devices(&dir);
+    let stored = block_on(Stored::load(host.context(), &id)).expect("stored");
+    host.process().script_piped(PipedScript::new());
+
+    let mut abandoned = Box::pin(devices.checkin_identity(host.context(), &stored.credential));
+    block_on(async {
+        assert!(poll_once(abandoned.as_mut()).is_pending());
+    });
+    assert_eq!(host.process().piped_spawns().len(), 1);
+    drop(abandoned);
+
+    host.process().script_piped(native_script("3"));
+    block_on(devices.checkin_identity(host.context(), &stored.credential))
+        .expect("retried identity")
+        .expect("native identity");
+    assert_eq!(host.process().piped_spawns().len(), 2);
+    let headers = block_on(devices.chat_headers(host.context(), &stored.credential));
+    assert_eq!(
+        paired(&headers, "Cosy-MachineToken"),
+        Some("fixture-native-token")
+    );
+}
+
+#[test]
 fn r54_checkin_refreshes_share_one_native_helper() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
     let id = seed_with_expiry(&host, 4_000_000_000_000);
     let devices = test_devices(&dir);
     let stored = block_on(Stored::load(host.context(), &id)).expect("stored");
-    host.process().script_piped(native_script("3"));
+    host.process().script_piped(
+        PipedScript::new().line(r#"{"machineToken":"fixture-native-token","machineType":"7"}"#),
+    );
 
-    let results = block_on(join_all(vec![
-        Box::pin(devices.checkin_identity(host.context(), &stored.credential)),
-        Box::pin(devices.checkin_identity(host.context(), &stored.credential)),
-    ]));
-    for result in results {
-        result.expect("shared identity").expect("native identity");
-    }
+    let mut first = Box::pin(devices.checkin_identity(host.context(), &stored.credential));
+    let mut second = Box::pin(devices.checkin_identity(host.context(), &stored.credential));
+    block_on(async {
+        assert!(poll_once(first.as_mut()).is_pending());
+        assert!(poll_once(second.as_mut()).is_pending());
+    });
     assert_eq!(host.process().piped_spawns().len(), 1);
+
+    drop(first);
+    let result = block_on(async {
+        match poll_once(second.as_mut()) {
+            std::task::Poll::Ready(result) => result,
+            std::task::Poll::Pending => {
+                panic!("waiter was not completed after leader cancellation")
+            }
+        }
+    });
+    let error = result.err().expect("cancelled refresh");
+    assert_eq!(error.kind(), PluginErrorKind::Cancelled);
 }
 
 #[test]
