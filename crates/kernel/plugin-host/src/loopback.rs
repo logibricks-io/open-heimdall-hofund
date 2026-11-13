@@ -1207,6 +1207,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn submitted_query_token_is_validated_and_delivered() {
+        let registry = LoopbackRegistry::new();
+        let session = session();
+        let binding = registry
+            .bind(
+                &key(),
+                &session,
+                &LoopbackSpec::ephemeral().query_token("https://zed.test/succeeded"),
+            )
+            .expect("bind");
+        let wrong = format!(
+            "http://evil.test:{}/callback?user_id=user&access_token=pasted-secret",
+            binding.port()
+        );
+        let error = registry
+            .submit_pasted_callback(&session, &wrong)
+            .expect_err("wrong host");
+        assert!(!error.to_string().contains("pasted-secret"));
+
+        let pasted = format!(
+            "http://127.0.0.1:{}/callback?user_id=pasted-user&access_token=pasted-secret",
+            binding.port()
+        );
+        registry
+            .submit_pasted_callback(&session, &pasted)
+            .expect("accepted");
+        let proof = registry
+            .await_callback(&session, no_paste(), WAIT)
+            .await
+            .expect("proof");
+        let SignInProof::QueryToken {
+            user_id,
+            access_token,
+        } = proof
+        else {
+            panic!("not a query-token proof");
+        };
+        assert_eq!(user_id, "pasted-user");
+        assert_eq!(access_token.expose_secret(), "pasted-secret");
+    }
+
+    #[tokio::test]
     async fn binding_released_on_cancel_sign_in() {
         let port = free_port();
         let registry = std::sync::Arc::new(LoopbackRegistry::new());

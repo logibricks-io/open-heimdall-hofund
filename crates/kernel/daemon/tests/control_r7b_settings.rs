@@ -8,6 +8,7 @@ use hofund_control_proto::{
 };
 use hofund_daemon::{ControlRuntime, Running, StartOptions, start_with_options};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 
 struct Scratch {
     config: std::path::PathBuf,
@@ -94,6 +95,18 @@ impl Client {
         self.get("/v1/hofund/settings").await
     }
 
+    async fn raw_get(&self, path: &str) -> (reqwest::StatusCode, Vec<u8>) {
+        let response = self
+            .http
+            .get(format!("{}{path}", self.base))
+            .bearer_auth(&self.token)
+            .send()
+            .await
+            .expect("GET");
+        let status = response.status();
+        (status, response.bytes().await.expect("body").to_vec())
+    }
+
     async fn patch(&self, request: &SettingsPatchRequest) -> (reqwest::StatusCode, Vec<u8>) {
         let response = self
             .http
@@ -108,8 +121,53 @@ impl Client {
     }
 }
 
+const SECRET: &str = "SENTINEL-SETTINGS-SECRET-99";
+
+fn revision(text: &str) -> String {
+    let digest = Sha256::digest(text.as_bytes());
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 fn patch(revision: &str) -> SettingsPatchRequest {
     SettingsPatchRequest::new(revision)
+}
+
+fn assert_sanitized_error(
+    status: reqwest::StatusCode,
+    body: &[u8],
+    expected_kind: ControlErrorKind,
+) {
+    assert!(!status.is_success());
+    assert!(!String::from_utf8_lossy(body).contains(SECRET));
+    let error = decode_error_envelope(API_VERSION, body)
+        .expect("error")
+        .error;
+    assert_eq!(error.kind, expected_kind);
+    assert_eq!(error.request_id, "settings");
+    assert!(!error.message.contains(SECRET));
+    assert!(error.details.iter().all(|issue| {
+        !issue.field.contains(SECRET)
+            && !issue.reason.contains(SECRET)
+            && !issue.message.contains(SECRET)
+    }));
+}
+
+#[tokio::test]
+async fn malformed_settings_do_not_echo_secrets() {
+    let scratch = Scratch::new("malformed");
+    let running = start(&scratch).await;
+    let client = Client::new(&running, &scratch);
+    let malformed = format!("listen = \"127.0.0.1:0\"\napi_key = \"{SECRET}\n");
+    std::fs::write(&scratch.config, &malformed).expect("malformed config");
+
+    let (status, body) = client.raw_get("/v1/hofund/settings").await;
+    assert_sanitized_error(status, &body, ControlErrorKind::InvalidConfig);
+
+    let mut update = patch(&revision(&malformed));
+    update.currency = Some("cny".to_owned());
+    let (status, body) = client.patch(&update).await;
+    assert_sanitized_error(status, &body, ControlErrorKind::Unprocessable);
+    support::shutdown(running).await;
 }
 
 #[tokio::test]

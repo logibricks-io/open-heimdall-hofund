@@ -360,11 +360,14 @@ impl ConfigOps {
                 return Err(stale_revision());
             }
             let updated = hofund_config::edit_settings(&text, &edit).map_err(|error| {
-                ControlFailure::from(ControlError::new(
+                let issue = config_issue(&error, &text);
+                let mut failure = ControlError::new(
                     ControlErrorKind::Unprocessable,
-                    error.to_string(),
+                    issue.message.clone(),
                     "settings",
-                ))
+                );
+                failure.details = vec![issue];
+                ControlFailure::from(failure)
             })?;
             ops.apply_with_lock_held(&disk_revision, updated, Vec::new())
         })
@@ -739,7 +742,7 @@ async fn run_blocking<T: Send + 'static>(
 /// One sanitized issue for a load failure. TOML syntax errors quote the
 /// offending source line, which may hold a secret, so only the position line
 /// and the final description are kept.
-fn config_issue(error: &ConfigError, text: &str) -> FieldIssue {
+pub(crate) fn config_issue(error: &ConfigError, text: &str) -> FieldIssue {
     match error {
         ConfigError::Syntax(message) => {
             let mut lines = message

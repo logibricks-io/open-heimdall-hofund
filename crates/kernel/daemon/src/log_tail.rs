@@ -1,3 +1,4 @@
+use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
@@ -28,15 +29,16 @@ fn log_path(config_path: &Path) -> Result<PathBuf, ControlFailure> {
 fn read_path(path: &Path, query: LogTailQuery) -> Result<LogTailResponse, ControlFailure> {
     let mut response = LogTailResponse::default();
     response.path = path.display().to_string();
-    let mut file = match std::fs::File::open(path) {
+    let mut file = match open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(response),
         Err(error) => return Err(read_failure(path, error)),
     };
-    let file_len = file
-        .metadata()
-        .map_err(|error| read_failure(path, error))?
-        .len();
+    let metadata = file.metadata().map_err(|error| read_failure(path, error))?;
+    if !metadata.is_file() {
+        return Err(read_failure(path, not_regular_file()));
+    }
+    let file_len = metadata.len();
     let offset = query.after.min(file_len);
     file.seek(SeekFrom::Start(offset))
         .map_err(|error| read_failure(path, error))?;
@@ -50,6 +52,32 @@ fn read_path(path: &Path, query: LogTailQuery) -> Result<LogTailResponse, Contro
     response.next_offset = next_offset;
     response.lines = text.lines().map(str::to_owned).collect();
     Ok(response)
+}
+
+#[cfg(unix)]
+fn open(path: &Path) -> std::io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn open(path: &Path) -> std::io::Result<File> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(not_regular_file());
+    }
+    File::open(path)
+}
+
+fn not_regular_file() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        "daemon log is not a regular file",
+    )
 }
 
 fn read_failure(path: &Path, error: std::io::Error) -> ControlFailure {
@@ -106,6 +134,33 @@ mod tests {
     fn a_directory_is_a_read_failure_not_an_empty_log() {
         let dir = tempfile::tempdir().expect("dir");
         assert!(super::read_path(dir.path(), LogTailQuery::default()).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_is_a_read_failure_without_exposing_its_target() {
+        let dir = tempfile::tempdir().expect("dir");
+        let target = dir.path().join("target.log");
+        let contents = "distinctive-target-contents-never-return";
+        std::fs::write(&target, contents).expect("target");
+        let path = dir.path().join("daemon.log");
+        std::os::unix::fs::symlink(&target, &path).expect("symlink");
+
+        let failure = super::read_path(&path, LogTailQuery::default()).expect_err("symlink");
+        assert!(!failure.error.message.contains(contents));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_is_a_read_failure() {
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("daemon.log");
+        nix::unistd::mkfifo(
+            &path,
+            nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+        )
+        .expect("fifo");
+        assert!(super::read_path(&path, LogTailQuery::default()).is_err());
     }
 
     #[test]

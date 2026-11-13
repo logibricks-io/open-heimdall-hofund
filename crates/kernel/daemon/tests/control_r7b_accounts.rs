@@ -821,6 +821,54 @@ async fn sign_in_start_poll_proof_cancel_and_loopback_cleanup_work_without_block
 }
 
 #[tokio::test]
+async fn sign_in_sessions_reject_a_different_subscription() {
+    let rig = Rig::new(Mode::Hang, None).await;
+    let (status, body) = rig.start("fake-pkce").await;
+    assert_eq!(status, reqwest::StatusCode::OK);
+    let session = json(&body)["session"].as_str().expect("session").to_owned();
+
+    for subscription in ["fake-token", "missing"] {
+        let (status, body) = rig.status(subscription, &session).await;
+        assert_eq!(
+            error_kind(status, &body, reqwest::StatusCode::NOT_FOUND),
+            ControlErrorKind::NotFound
+        );
+        let (status, body) = rig
+            .post(
+                &format!("/v1/hofund/subscriptions/{subscription}/sign-in/{session}/proof"),
+                json!({"version": 1, "url": "https://example.test/callback"}),
+            )
+            .await;
+        assert_eq!(
+            error_kind(status, &body, reqwest::StatusCode::NOT_FOUND),
+            ControlErrorKind::NotFound
+        );
+        let (status, body) = rig
+            .post(
+                &format!("/v1/hofund/subscriptions/{subscription}/sign-in/{session}/cancel"),
+                json!({"version": 1}),
+            )
+            .await;
+        assert_eq!(
+            error_kind(status, &body, reqwest::StatusCode::NOT_FOUND),
+            ControlErrorKind::NotFound
+        );
+    }
+
+    let (status, body) = rig.status("fake-pkce", &session).await;
+    assert_eq!(status, reqwest::StatusCode::OK);
+    assert_eq!(state(&body), SignInSessionState::NeedsProof);
+    let (status, _) = rig
+        .post(
+            &format!("/v1/hofund/subscriptions/fake-pkce/sign-in/{session}/cancel"),
+            json!({"version": 1}),
+        )
+        .await;
+    assert_eq!(status, reqwest::StatusCode::OK);
+    rig.shutdown().await;
+}
+
+#[tokio::test]
 async fn pending_device_flow_keeps_its_challenge_until_cancelled() {
     let rig = Rig::new(Mode::Hang, None).await;
     let (status, body) = rig.start("fake-device").await;

@@ -251,17 +251,22 @@ impl AccountOps {
         Ok(response)
     }
 
-    pub(crate) async fn status(&self, id: &str) -> Result<SignInStatusResponse, ControlFailure> {
-        let session = self.session(id).await?;
+    pub(crate) async fn status(
+        &self,
+        subscription: &str,
+        id: &str,
+    ) -> Result<SignInStatusResponse, ControlFailure> {
+        let session = self.session(subscription, id).await?;
         Ok(session.response())
     }
 
     pub(crate) async fn proof(
         &self,
+        subscription: &str,
         id: &str,
         request: SignInProofRequest,
     ) -> Result<SignInStatusResponse, ControlFailure> {
-        let session = self.session(id).await?;
+        let session = self.session(subscription, id).await?;
         if session.state() != SignInSessionState::NeedsProof {
             return Err(conflict("this sign-in is not accepting proof"));
         }
@@ -286,8 +291,12 @@ impl AccountOps {
         Ok(session.response())
     }
 
-    pub(crate) async fn cancel(&self, id: &str) -> Result<SignInCancelResponse, ControlFailure> {
-        let session = self.session(id).await?;
+    pub(crate) async fn cancel(
+        &self,
+        subscription: &str,
+        id: &str,
+    ) -> Result<SignInCancelResponse, ControlFailure> {
+        let session = self.session(subscription, id).await?;
         session.signal_cancel();
         self.set_state(&session, SignInSessionState::Cancelled);
         Ok(SignInCancelResponse::default())
@@ -400,12 +409,17 @@ impl AccountOps {
         Ok(response)
     }
 
-    async fn session(&self, id: &str) -> Result<Arc<ControlSession>, ControlFailure> {
+    async fn session(
+        &self,
+        subscription: &str,
+        id: &str,
+    ) -> Result<Arc<ControlSession>, ControlFailure> {
         self.sessions
             .lock()
             .await
             .get(id)
             .cloned()
+            .filter(|session| session.subscription == subscription)
             .ok_or_else(|| not_found("sign-in session"))
     }
 

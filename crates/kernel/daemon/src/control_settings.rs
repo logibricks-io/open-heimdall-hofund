@@ -6,16 +6,19 @@ use hofund_control_proto::{
 };
 use hofund_gateway::control::ControlFailure;
 
-use crate::config_ops::{ConfigOps, LiveConfig};
+use crate::config_ops::{ConfigOps, LiveConfig, config_issue};
 
 pub(crate) async fn get(ops: &ConfigOps) -> Result<SettingsResponse, ControlFailure> {
     let current = ops.get().await?;
     let config = hofund_config::load(&current.text).map_err(|error| {
-        ControlFailure::from(ControlError::new(
+        let issue = config_issue(&error, &current.text);
+        let mut failure = ControlError::new(
             ControlErrorKind::InvalidConfig,
-            error.to_string(),
+            issue.message.clone(),
             "settings",
-        ))
+        );
+        failure.details = vec![issue];
+        ControlFailure::from(failure)
     })?;
     Ok(response(&config, &ops.live(), current.disk_revision))
 }

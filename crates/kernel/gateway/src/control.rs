@@ -196,19 +196,28 @@ pub trait ControlState: Send + Sync {
         Box::pin(async { Err(unsupported_accounts()) })
     }
     /// Polls a sign-in session.
-    fn sign_in_status(&self, _session: String) -> ControlFuture<'_, SignInStatusResponse> {
+    fn sign_in_status(
+        &self,
+        _id: String,
+        _session: String,
+    ) -> ControlFuture<'_, SignInStatusResponse> {
         Box::pin(async { Err(unsupported_accounts()) })
     }
     /// Supplies a pasted callback or token to a sign-in session.
     fn sign_in_proof(
         &self,
+        _id: String,
         _session: String,
         _request: SignInProofRequest,
     ) -> ControlFuture<'_, SignInStatusResponse> {
         Box::pin(async { Err(unsupported_accounts()) })
     }
     /// Cancels a sign-in session.
-    fn sign_in_cancel(&self, _session: String) -> ControlFuture<'_, SignInCancelResponse> {
+    fn sign_in_cancel(
+        &self,
+        _id: String,
+        _session: String,
+    ) -> ControlFuture<'_, SignInCancelResponse> {
         Box::pin(async { Err(unsupported_accounts()) })
     }
     /// Refreshes stored subscription accounts.
@@ -1540,7 +1549,7 @@ async fn sign_in_status(
             ControlError::new(ControlErrorKind::BadRequest, "invalid id", "http").into(),
         );
     }
-    operation_response!(state.control.state.sign_in_status(session).await)
+    operation_response!(state.control.state.sign_in_status(id, session).await)
 }
 
 async fn sign_in_proof(
@@ -1569,7 +1578,13 @@ async fn sign_in_proof(
         Ok(request) => request,
         Err(failure) => return failure_response(failure),
     };
-    operation_response!(state.control.state.sign_in_proof(session, request).await)
+    operation_response!(
+        state
+            .control
+            .state
+            .sign_in_proof(id, session, request)
+            .await
+    )
 }
 
 async fn sign_in_cancel(
@@ -1597,7 +1612,7 @@ async fn sign_in_cancel(
     if let Err(failure) = decode_body::<SignInCancelRequest>(&body) {
         return failure_response(failure);
     }
-    operation_response!(state.control.state.sign_in_cancel(session).await)
+    operation_response!(state.control.state.sign_in_cancel(id, session).await)
 }
 
 async fn refresh_subscription(

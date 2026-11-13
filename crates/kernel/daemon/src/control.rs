@@ -513,24 +513,27 @@ impl ControlState for DaemonControl {
 
     fn sign_in_status(
         &self,
+        id: String,
         session: String,
     ) -> ControlFuture<'_, hofund_control_proto::SignInStatusResponse> {
-        Box::pin(async move { self.account_ops()?.status(&session).await })
+        Box::pin(async move { self.account_ops()?.status(&id, &session).await })
     }
 
     fn sign_in_proof(
         &self,
+        id: String,
         session: String,
         request: hofund_control_proto::SignInProofRequest,
     ) -> ControlFuture<'_, hofund_control_proto::SignInStatusResponse> {
-        Box::pin(async move { self.account_ops()?.proof(&session, request).await })
+        Box::pin(async move { self.account_ops()?.proof(&id, &session, request).await })
     }
 
     fn sign_in_cancel(
         &self,
+        id: String,
         session: String,
     ) -> ControlFuture<'_, hofund_control_proto::SignInCancelResponse> {
-        Box::pin(async move { self.account_ops()?.cancel(&session).await })
+        Box::pin(async move { self.account_ops()?.cancel(&id, &session).await })
     }
 
     fn refresh_subscription(
