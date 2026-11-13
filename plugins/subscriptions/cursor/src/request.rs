@@ -64,76 +64,14 @@ pub(crate) fn map_with_mode(
         &temp_dir,
         max_mode,
     )?;
-    #[cfg(test)]
-    record_mapped_max_mode(max_mode);
     Ok(mapped)
 }
 
 /// Maps a request with a fresh conversation, message, and per-execute temp path.
 #[cfg(test)]
 pub(crate) fn map(request: &Request) -> Result<MappedRequest, PluginError> {
-    let _lock = map_lock();
     map_with_mode(request, None, false)
 }
-
-/// Enables the Max Mode mapping log for the current test and excludes other
-/// test-only [`map`] callers until the guard is dropped.
-#[cfg(test)]
-pub(crate) fn start_mapped_max_mode() -> MappedMaxMode {
-    let lock = map_lock();
-    *mapped_max_mode() = Some(Vec::new());
-    MappedMaxMode { _lock: lock }
-}
-
-/// Max Mode flags recorded while a [`start_mapped_max_mode`] guard is held.
-#[cfg(test)]
-pub(crate) struct MappedMaxMode {
-    _lock: std::sync::MutexGuard<'static, ()>,
-}
-
-#[cfg(test)]
-impl MappedMaxMode {
-    pub(crate) fn take(&self) -> Vec<bool> {
-        mapped_max_mode()
-            .as_mut()
-            .map(std::mem::take)
-            .unwrap_or_default()
-    }
-}
-
-#[cfg(test)]
-impl Drop for MappedMaxMode {
-    fn drop(&mut self) {
-        *mapped_max_mode() = None;
-    }
-}
-
-#[cfg(test)]
-fn map_lock() -> std::sync::MutexGuard<'static, ()> {
-    MAP_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
-#[cfg(test)]
-static MAP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-#[cfg(test)]
-fn record_mapped_max_mode(max_mode: bool) {
-    if let Some(flags) = mapped_max_mode().as_mut() {
-        flags.push(max_mode);
-    }
-}
-
-#[cfg(test)]
-fn mapped_max_mode() -> std::sync::MutexGuard<'static, Option<Vec<bool>>> {
-    MAPPED_MAX_MODE
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
-#[cfg(test)]
-static MAPPED_MAX_MODE: std::sync::Mutex<Option<Vec<bool>>> = std::sync::Mutex::new(None);
 
 fn new_uuid() -> Result<String, PluginError> {
     hofund_plugin_sdk::uuid::v4()

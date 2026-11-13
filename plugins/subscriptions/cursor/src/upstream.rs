@@ -33,6 +33,8 @@ pub(crate) struct CursorUpstream {
     limits: Limits,
     #[cfg(test)]
     test_conversation_id: Option<String>,
+    #[cfg(test)]
+    mapped_max_mode: Mutex<Vec<bool>>,
 }
 
 impl CursorUpstream {
@@ -57,6 +59,8 @@ impl CursorUpstream {
             limits: Limits::default(),
             #[cfg(test)]
             test_conversation_id: None,
+            #[cfg(test)]
+            mapped_max_mode: Mutex::new(Vec::new()),
         }
     }
 
@@ -76,7 +80,24 @@ impl CursorUpstream {
                 conversation_id
             }
         };
-        request::map_with_mode(request, conversation_id, max_mode)
+        let mapped = request::map_with_mode(request, conversation_id, max_mode)?;
+        #[cfg(test)]
+        self.mapped_max_mode
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(max_mode);
+        Ok(mapped)
+    }
+
+    /// Max Mode flags used by each [`Self::mapped_request`] call on this instance.
+    #[cfg(test)]
+    fn take_mapped_max_mode(&self) -> Vec<bool> {
+        std::mem::take(
+            &mut *self
+                .mapped_max_mode
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
     }
 }
 
@@ -2068,10 +2089,19 @@ mod tests {
 
     async fn advance_until_usage_polls(h1: &Http1Server, want: usize) {
         let path = "/aiserver.v1.DashboardService/GetFilteredUsageEvents";
-        // Sleep on the paused clock instead of mixing yield_times() with
-        // advance_time(). yield_now() can look idle to Tokio and auto-advance
-        // to the next poller timer, overshooting past the second poll.
+        // Yield so execute can run, then step the paused clock for first-wait
+        // and retry sleeps. Check after each yield so a first poll with a zero
+        // first-wait is visible before further clock jumps.
         for _ in 0..200 {
+            let seen = h1
+                .requests()
+                .iter()
+                .filter(|request| request.path() == path)
+                .count();
+            if seen >= want {
+                return;
+            }
+            yield_times(2).await;
             let seen = h1
                 .requests()
                 .iter()
@@ -2407,7 +2437,6 @@ mod tests {
         http2_memory::reset_for_tests();
         let _max = crate::max_only::test_lock();
         crate::max_only::clear();
-        let mapped = crate::request::start_mapped_max_mode();
         block_on(async {
             let success = [text_frame("hi"), turn_end_frame()].concat();
             let h2 = Http2Server::start(vec![
@@ -2442,7 +2471,7 @@ mod tests {
                 "{events:?}"
             );
             assert_eq!(
-                mapped.take(),
+                upstream.take_mapped_max_mode(),
                 [false, true],
                 "first attempt is off; the retry is Max Mode"
             );
@@ -2461,7 +2490,7 @@ mod tests {
             };
             drop(collect(Completion::Stream(stream)).await.expect("second"));
             assert_eq!(
-                mapped.take(),
+                upstream.take_mapped_max_mode(),
                 [true],
                 "later execute is a single Max Mode Run"
             );
@@ -2481,7 +2510,6 @@ mod tests {
         let _max = crate::max_only::test_lock();
         crate::max_only::clear();
         crate::max_only::remember("gpt-5.6-luna-high");
-        let mapped = crate::request::start_mapped_max_mode();
         block_on(async {
             let h2 = Http2Server::start(vec![
                 Http2Response::new(200)
@@ -2504,7 +2532,7 @@ mod tests {
                 "{}",
                 error.message()
             );
-            assert_eq!(mapped.take(), [true]);
+            assert_eq!(upstream.take_mapped_max_mode(), [true]);
             assert_eq!(h2.requests().len(), 1);
         });
         crate::max_only::clear();
@@ -2516,7 +2544,6 @@ mod tests {
         http2_memory::reset_for_tests();
         let _max = crate::max_only::test_lock();
         crate::max_only::clear();
-        let mapped = crate::request::start_mapped_max_mode();
         block_on(async {
             let trailer = frame::encode(
                 frame::FLAG_TRAILER,
@@ -2536,7 +2563,7 @@ mod tests {
                 .expect_err("unrelated failure");
             assert_eq!(error.status(), Some(502));
             assert!(error.message().contains("upstream exploded"));
-            assert_eq!(mapped.take(), [false]);
+            assert_eq!(upstream.take_mapped_max_mode(), [false]);
             assert_eq!(h2.requests().len(), 1);
             assert!(!crate::max_only::contains("gpt-5.6-luna-high"));
         });
