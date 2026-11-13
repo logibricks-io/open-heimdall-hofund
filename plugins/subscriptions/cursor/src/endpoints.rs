@@ -2,16 +2,15 @@
 
 /// Default Cursor API and website bases.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[doc(hidden)]
 pub struct Endpoints {
     /// Browser sign-in site.
-    pub(crate) website: String,
+    pub website: String,
     /// Connect API base (`api2`).
     pub api: String,
     /// Default agent API origin when server config has no usable override.
     pub agent: String,
     /// Client version sent on API calls.
-    pub(crate) client_version: String,
+    pub client_version: String,
 }
 
 impl Default for Endpoints {

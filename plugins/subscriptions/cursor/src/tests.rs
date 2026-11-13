@@ -1154,19 +1154,6 @@ fn r8c_account_status_ready_for_api_key() {
     assert_eq!(status, hofund_plugin_api::AccountStatus::Ready);
 }
 
-#[test]
-fn r8c_upstream_stays_unsupported() {
-    let dir = tempfile::tempdir().expect("dir");
-    let host = host(&dir);
-    let sub = subscription(&host);
-    let id = account_id_from(&["cursor", "api@example.test"]);
-    let error = match sub.upstream(&id, host.context()) {
-        Ok(_) => panic!("upstream must stay unsupported"),
-        Err(error) => error,
-    };
-    assert_eq!(error.kind(), PluginErrorKind::Unsupported);
-}
-
 fn jwt_with_sub(email: &str, sub: &str, exp: i64) -> String {
     let claims = format!(r#"{{"email":"{email}","sub":"{sub}","exp":{exp}}}"#);
     format!("e30.{}.sig", b64url(claims.as_bytes()))

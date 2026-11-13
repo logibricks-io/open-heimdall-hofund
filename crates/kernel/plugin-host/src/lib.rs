@@ -421,6 +421,7 @@ impl TestHost {
         let process = Arc::new(RecordingProcess::default());
         let observe = Arc::new(RecordingObserve::default());
         let loopback = Arc::new(LoopbackRegistry::new());
+        let bridge_callback = Arc::new(BridgeCallbackRegistry::new());
         let accounts = AccountStore::open_with_backend(
             root.join("accounts.json"),
             Arc::new(account_secrets::MemoryAccountSecrets::default()),
@@ -442,7 +443,8 @@ impl TestHost {
             }),
             Arc::clone(&observe) as Arc<dyn ObserveBackend>,
         )
-        .with_loopback(Arc::clone(&loopback) as Arc<dyn LoopbackBackend>);
+        .with_loopback(Arc::clone(&loopback) as Arc<dyn LoopbackBackend>)
+        .with_bridge_callback(Arc::clone(&bridge_callback) as Arc<dyn BridgeCallbackBackend>);
         Self {
             context,
             http,
@@ -451,6 +453,7 @@ impl TestHost {
             process,
             observe,
             loopback,
+            bridge_callback,
         }
     }
 

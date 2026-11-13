@@ -25,7 +25,7 @@ use crate::pages::read_path;
 use crate::quit::{QuitAction, perform_quit};
 use crate::runtime::{
     HandoffSnapshot, WorkerMsg, apply_control_followup, apply_worker_msg, open_event_stream,
-    schedule_page_probe,
+    schedule_intents, schedule_page_probe,
 };
 use crate::state::{GatewayPresence, PageId};
 use crate::theme::Theme;
@@ -104,6 +104,7 @@ async fn async_main(config: &Path, no_color: bool) -> Result<QuitAction, String>
                 }
                 apply_worker_msg(&mut app, msg);
                 open_control_if_needed(&live, &mut app, &mut control, &work_tx).await;
+                schedule_intents(&mut app, live.client().as_ref(), &work_tx);
                 draw(&mut terminal, &app, &theme)?;
             }
             event = async {
@@ -122,6 +123,7 @@ async fn async_main(config: &Path, no_color: bool) -> Result<QuitAction, String>
                             try_reopen_control_stream(&live, &mut app, &mut control, None).await;
                         }
                         schedule_probe_for_open_page(&app, live.client().as_ref(), &work_tx);
+                        schedule_intents(&mut app, live.client().as_ref(), &work_tx);
                         draw(&mut terminal, &app, &theme)?;
                     }
                     Some(Err(error)) => {
@@ -139,6 +141,7 @@ async fn async_main(config: &Path, no_color: bool) -> Result<QuitAction, String>
                             break;
                         }
                         schedule_probe_for_open_page(&app, live.client().as_ref(), &work_tx);
+                        schedule_intents(&mut app, live.client().as_ref(), &work_tx);
                         draw(&mut terminal, &app, &theme)?;
                     }
                     Ok(Event::Resize(_, _)) => {
@@ -292,7 +295,10 @@ async fn try_reopen_control_stream(
         return;
     };
     match open_event_stream(&client, last_event_id).await {
-        Ok(stream) => *control = Some(stream),
+        Ok(stream) => {
+            *control = Some(stream);
+            app.on_control_attached();
+        }
         Err(message) => apply_event_stream_open_failure(app, control, message),
     }
 }

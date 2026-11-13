@@ -204,6 +204,28 @@ impl LoopbackRegistry {
         }
     }
 
+    /// Validates a pasted callback against this session and delivers it to the
+    /// waiting sign-in. The pasted value is never logged or included in errors.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized [`PluginError`] when the session is unknown, the
+    /// callback does not match, or the session already finished.
+    pub fn submit_pasted_callback(&self, session: &str, raw: &str) -> Result<(), PluginError> {
+        let entry = self
+            .session(session)
+            .ok_or_else(|| PluginError::config("sign-in session has no loopback binding"))?;
+        let proof = match &entry.mode {
+            Mode::OAuth { state } => parse_pasted_callback(raw, &entry.redirect_uri, state)?,
+            Mode::QueryToken { .. } => parse_pasted_query_token(raw, &entry.redirect_uri)?,
+        };
+        if entry.shared.finish(Ok(proof)) {
+            Ok(())
+        } else {
+            Err(PluginError::config("the sign-in has already finished"))
+        }
+    }
+
     /// Closes the listener for `session` and cancels a pending wait.
     pub fn release(&self, session: &str) {
         let entry = self
@@ -1155,6 +1177,75 @@ mod tests {
         )
         .expect_err("refused");
         assert_eq!(refused.kind(), PluginErrorKind::Auth);
+    }
+
+    #[tokio::test]
+    async fn submitted_paste_is_validated_and_delivered() {
+        let registry = LoopbackRegistry::new();
+        let session = session();
+        let binding = registry.bind(&key(), &session, &spec()).expect("bind");
+        let wrong = format!(
+            "http://localhost:{}/callback?code=secret&state=wrong",
+            binding.port()
+        );
+        let error = registry
+            .submit_pasted_callback(&session, &wrong)
+            .expect_err("wrong state");
+        assert!(!error.to_string().contains("secret"));
+        let pasted = format!(
+            "http://localhost:{}/callback?code=pasted-code&state={STATE}",
+            binding.port()
+        );
+        registry
+            .submit_pasted_callback(&session, &pasted)
+            .expect("accepted");
+        let proof = registry
+            .await_callback(&session, no_paste(), WAIT)
+            .await
+            .expect("proof");
+        assert_eq!(code(&proof), "pasted-code");
+    }
+
+    #[tokio::test]
+    async fn submitted_query_token_is_validated_and_delivered() {
+        let registry = LoopbackRegistry::new();
+        let session = session();
+        let binding = registry
+            .bind(
+                &key(),
+                &session,
+                &LoopbackSpec::ephemeral().query_token("https://zed.test/succeeded"),
+            )
+            .expect("bind");
+        let wrong = format!(
+            "http://evil.test:{}/callback?user_id=user&access_token=pasted-secret",
+            binding.port()
+        );
+        let error = registry
+            .submit_pasted_callback(&session, &wrong)
+            .expect_err("wrong host");
+        assert!(!error.to_string().contains("pasted-secret"));
+
+        let pasted = format!(
+            "http://127.0.0.1:{}/callback?user_id=pasted-user&access_token=pasted-secret",
+            binding.port()
+        );
+        registry
+            .submit_pasted_callback(&session, &pasted)
+            .expect("accepted");
+        let proof = registry
+            .await_callback(&session, no_paste(), WAIT)
+            .await
+            .expect("proof");
+        let SignInProof::QueryToken {
+            user_id,
+            access_token,
+        } = proof
+        else {
+            panic!("not a query-token proof");
+        };
+        assert_eq!(user_id, "pasted-user");
+        assert_eq!(access_token.expose_secret(), "pasted-secret");
     }
 
     #[tokio::test]
