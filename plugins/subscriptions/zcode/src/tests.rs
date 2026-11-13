@@ -1105,6 +1105,90 @@ fn r57b_bigmodel_browser_sign_in_resolves_the_coding_plan() {
 }
 
 #[test]
+fn r57b_zai_browser_sign_in_exchanges_business_token_and_uses_start_plan() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    host.http().enqueue(
+        json!({"code": 0, "data": {
+            "flow_id": "flow-zai",
+            "authorize_url": "https://z.ai/login",
+            "poll_interval_sec": 0
+        }})
+        .to_string()
+        .into_bytes(),
+    );
+    host.http().enqueue(
+        json!({"code": 0, "data": {
+            "status": "ready",
+            "zai": {"access_token": "zai-site-token"},
+            "token": "session.jwt.value",
+            "user": {"user_id": "u-zai", "email": "zai@zcode.test"}
+        }})
+        .to_string()
+        .into_bytes(),
+    );
+    host.http().enqueue(
+        json!({"code": 200, "data": {"access_token": "business-token"}})
+            .to_string()
+            .into_bytes(),
+    );
+    host.http().enqueue(
+        json!({"code": 200, "data": {"organizations": [{
+            "organizationId": "own-org",
+            "projects": [{"projectId": "own-project", "projectType": 1}]
+        }]}})
+        .to_string()
+        .into_bytes(),
+    );
+    host.http().enqueue(
+        json!({"code": 200, "data": [{"name": "zcode-api-key", "apiKey": "own"}]})
+            .to_string()
+            .into_bytes(),
+    );
+    host.http().enqueue(
+        json!({"code": 200, "data": {"secretKey": "own-secret"}})
+            .to_string()
+            .into_bytes(),
+    );
+    host.http()
+        .enqueue(json!({"code": 200, "data": []}).to_string().into_bytes());
+    host.http().enqueue(
+        json!({"code": 0, "data": {
+            "server_time": 4_102_444_800_i64,
+            "plans": [{"plan_id": "start", "name": "Start Plan", "status": "active", "ends_at": 4_102_500_000_i64}],
+            "balances": []
+        }})
+        .to_string()
+        .into_bytes(),
+    );
+    let sub = subscription(&host);
+    let challenge =
+        block_on(sub.start_sign_in(&sign_in_ctx("zai"), host.context())).expect("start");
+    let SignInChallenge::OpenUrl { url } = challenge else {
+        panic!("open URL challenge");
+    };
+    assert!(url.contains("redirect_uri="));
+    let id =
+        block_on(sub.complete_sign_in(&sign_in_ctx("zai"), SignInProof::Await, host.context()))
+            .expect("complete");
+    let secret = block_on(host.context().accounts().secret(&id))
+        .expect("read")
+        .expect("stored");
+    let blob = SecretObject::parse(&secret).expect("blob");
+    assert_eq!(blob.text("plan"), Some("Start Plan"));
+    assert_eq!(
+        blob.secret("api_key").as_ref().map(secret_text),
+        Some("own.own-secret")
+    );
+    assert!(blob.secret("jwt").is_some());
+    let calls = host.http().calls();
+    assert_eq!(calls.len(), 8);
+    assert_eq!(calls[2].uri(), "https://api.z.ai/api/auth/z/login");
+    assert!(calls[6].uri().contains("/api/biz/subscription/list"));
+    assert!(calls[7].uri().contains("app_version=3.17.2"));
+}
+
+#[test]
 fn r57b_browser_sign_in_rejects_an_insecure_authorize_url() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
