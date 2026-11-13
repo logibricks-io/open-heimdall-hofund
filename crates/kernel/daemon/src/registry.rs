@@ -46,6 +46,11 @@ pub trait DaemonRegistry: Send + Sync {
     /// Returns every contributed inbound surface.
     fn surfaces(&self) -> Vec<Arc<dyn InboundSurface>>;
 
+    /// Returns the linked session readers. The default links none.
+    fn session_stores(&self) -> Vec<Arc<dyn hofund_plugin_api::SessionStore>> {
+        Vec::new()
+    }
+
     /// Returns the subscription factory for `id`. The default links none.
     fn subscription(&self, id: &str) -> Option<Arc<dyn DynSubscriptionFactory>> {
         let _ = id;
@@ -137,6 +142,10 @@ impl DaemonRegistry for RegistryAdapter {
 
     fn surfaces(&self) -> Vec<Arc<dyn InboundSurface>> {
         hofund_plugin_registry::surfaces()
+    }
+
+    fn session_stores(&self) -> Vec<Arc<dyn hofund_plugin_api::SessionStore>> {
+        hofund_plugin_registry::session_stores()
     }
 
     fn subscription(&self, id: &str) -> Option<Arc<dyn DynSubscriptionFactory>> {

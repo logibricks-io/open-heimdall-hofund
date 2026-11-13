@@ -97,7 +97,8 @@ fn seed(host: &TestHost, blob: &SecretObject) -> AccountId {
 fn signed_in_blob(project: Option<&str>) -> SecretObject {
     let blob = SecretObject::new()
         .with_number("v", 1)
-        .with_secret("refresh_token", &secret("refresh-1"));
+        .with_secret("refresh_token", &secret("refresh-1"))
+        .with_text("email", "u@example.test");
     match project {
         Some(project) => blob.with_text(project::PROJECT, project),
         None => blob,
@@ -285,7 +286,7 @@ fn exchange_needs_the_account_email() {
 }
 
 #[test]
-fn sign_in_stores_refresh_token_and_project_only() {
+fn sign_in_stores_refresh_token_project_and_email() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
     let sub = subscription(&host);
@@ -521,7 +522,10 @@ fn standard_tier_without_project_needs_sign_in() {
         reason.starts_with("Not eligible for the free tier: "),
         "{reason}"
     );
-    assert!(reason.contains("`project`"), "{reason}");
+    assert!(
+        reason.contains("hofund accounts project gemini u@example.test <project-id>"),
+        "{reason}"
+    );
 
     // Naming the project in the config makes it usable, and a refresh
     // onboards it there.
@@ -601,13 +605,10 @@ fn setup_keeps_a_project_stored_while_it_asked() {
             .expect("lease");
         let mut refresh = sub.refresh(&id, host.context());
         // The setup asks Code Assist, then waits for the lease held here.
-        for _ in 0..1000 {
-            assert!(hofund_kit_subscription::poll_once(refresh.as_mut()).is_pending());
-            if host.http().calls().len() == 2 {
-                break;
-            }
-            hofund_kit_subscription::yield_times(1).await;
-        }
+        // Drive refresh with a real waker until both HTTP calls are recorded.
+        // A fixed yield/poll budget can run out under load (#394, #445, #594).
+        hofund_kit_subscription::drive_until(refresh.as_mut(), host.http().wait_until_calls(2))
+            .await;
         assert_eq!(host.http().calls().len(), 2, "the setup asked Code Assist");
         held.commit(None, signed_in_blob(Some("proj-other")).to_secret())
             .await
@@ -631,8 +632,87 @@ fn refresh_needing_a_project_says_so() {
         .enqueue(STANDARD_NEEDS_PROJECT.as_bytes().to_vec());
     let error = block_on(sub.refresh(&id, host.context())).expect_err("needs a project");
     assert_eq!(error.kind(), PluginErrorKind::Auth);
-    assert!(error.message().contains("`project`"), "{}", error.message());
+    assert!(
+        error
+            .message()
+            .contains("hofund accounts project gemini u@example.test <project-id>"),
+        "{}",
+        error.message()
+    );
     assert!(stored(&host, &id).flag(project::NEEDS_PROJECT));
+}
+
+#[test]
+fn r49_missing_project_reason_ignores_an_empty_vendor_reason() {
+    let blob = signed_in_blob(None)
+        .with_flag(project::NEEDS_PROJECT, true)
+        .with_text("needs_project_why", "");
+    let reason = project::missing_reason(&blob);
+    assert!(!reason.starts_with(':'), "{reason}");
+    assert!(
+        reason.contains("hofund accounts project gemini u@example.test <project-id>"),
+        "{reason}"
+    );
+}
+
+#[test]
+fn r49_set_project_trims_rejects_unknown_and_clears() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let id = seed(
+        &host,
+        &signed_in_blob(None).with_flag(project::NEEDS_PROJECT, true),
+    );
+    block_on(sub.set_project(" U@Example.Test ", "  proj-7  ", host.context()))
+        .expect("set project");
+    let blob = stored(&host, &id);
+    assert_eq!(blob.text(project::PROJECT), Some("proj-7"));
+    assert_eq!(blob.text("email"), Some("u@example.test"));
+    assert!(!blob.flag(project::NEEDS_PROJECT));
+
+    let before = blob.to_body();
+    let error = block_on(sub.set_project("nobody@example.test", "other", host.context()))
+        .expect_err("unknown email");
+    assert_eq!(error.kind(), PluginErrorKind::Config);
+    assert!(error.message().contains("no gemini account"));
+    assert_eq!(stored(&host, &id).to_body(), before);
+
+    block_on(sub.set_project("u@example.test", " \t ", host.context())).expect("clear project");
+    assert_eq!(stored(&host, &id).text(project::PROJECT), None);
+}
+
+#[test]
+fn r49_execute_and_quota_use_the_project_named_by_command() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let id = seed(&host, &signed_in_blob(None));
+    block_on(sub.set_project("u@example.test", " project-from-command ", host.context()))
+        .expect("set project");
+
+    host.http().enqueue(token_reply("acc-1", None, 3600));
+    host.http().enqueue(br#"{"flags":[]}"#.to_vec());
+    host.http().enqueue(UNARY_REPLY.as_bytes().to_vec());
+    let upstream = sub.upstream(&id, host.context()).expect("upstream");
+    block_on(upstream.execute(
+        gl_request("gemini-2.5-pro", false),
+        ProtocolId::GENERATIVE_LANGUAGE,
+    ))
+    .expect("execute");
+    let [execute] = posts_to(&host, &method_url("generateContent"))
+        .try_into()
+        .expect("one execute");
+    let execute: hofund_plugin_sdk::json::Value =
+        hofund_plugin_sdk::json::from_str(&execute).expect("json");
+    assert_eq!(execute["project"], "project-from-command");
+
+    host.http().enqueue(QUOTA_REPLY.as_bytes().to_vec());
+    block_on(sub.quota(&id, host.context())).expect("quota");
+    assert_eq!(
+        posts_to(&host, &method_url("retrieveUserQuota")),
+        vec![r#"{"project":"project-from-command"}"#.to_owned()]
+    );
 }
 
 #[test]
@@ -970,6 +1050,7 @@ fn raw_text(completion: Completion) -> String {
 fn ready(host: &TestHost, project: Option<&str>) -> (Arc<dyn Subscription>, AccountId) {
     let id = seed(host, &signed_in_blob(project));
     host.http().enqueue(token_reply("acc-1", None, 3600));
+    host.http().enqueue(br#"{"flags":[]}"#.to_vec());
     (subscription(host), id)
 }
 
@@ -987,7 +1068,7 @@ fn envelope_adds_project_and_prompt_id() {
         ProtocolId::GENERATIVE_LANGUAGE,
     ))
     .expect("execute");
-    let call = &host.http().calls()[1];
+    let call = &host.http().calls()[2];
     assert_eq!(call.uri(), method_url("generateContent"));
     let sent: hofund_plugin_sdk::json::Value =
         hofund_plugin_sdk::json::from_slice(call.body()).expect("json body");
@@ -1040,7 +1121,7 @@ fn v1_code_assist_flattens_function_declaration_schemas() {
         }))
         .expect("request");
     block_on(upstream.execute(request, ProtocolId::GENERATIVE_LANGUAGE)).expect("execute");
-    let call = &host.http().calls()[1];
+    let call = &host.http().calls()[2];
     let sent: hofund_plugin_sdk::json::Value =
         hofund_plugin_sdk::json::from_slice(call.body()).expect("json body");
     let parameters = &sent["request"]["tools"][0]["functionDeclarations"][0]["parameters"];
@@ -1061,6 +1142,7 @@ fn the_configured_project_is_used_when_none_is_stored() {
     let host = host(&dir);
     let id = seed(&host, &signed_in_blob(None));
     host.http().enqueue(token_reply("acc-1", None, 3600));
+    host.http().enqueue(br#"{"flags":[]}"#.to_vec());
     host.http().enqueue(UNARY_REPLY.as_bytes().to_vec());
     let sub = subscription_with(&host, Some("from-config"));
     let upstream = sub.upstream(&id, host.context()).expect("upstream");
@@ -1084,6 +1166,7 @@ fn a_stored_project_wins_over_the_configured_one() {
     let host = host(&dir);
     let id = seed(&host, &signed_in_blob(Some("from-store")));
     host.http().enqueue(token_reply("acc-1", None, 3600));
+    host.http().enqueue(br#"{"flags":[]}"#.to_vec());
     host.http().enqueue(UNARY_REPLY.as_bytes().to_vec());
     let sub = subscription_with(&host, Some("from-config"));
     let upstream = sub.upstream(&id, host.context()).expect("upstream");
@@ -1120,7 +1203,7 @@ fn sse_response_unwrapped() {
         "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"a\"}]}}]}\r\n\r\n"
     );
     assert_eq!(
-        host.http().calls()[1].uri(),
+        host.http().calls()[2].uri(),
         format!("{CODE_ASSIST}/v1internal:streamGenerateContent?alt=sse")
     );
 }
@@ -1159,7 +1242,11 @@ fn a_401_refreshes_once_and_resends() {
     let calls = host.http().calls();
     let uris: Vec<&str> = calls.iter().map(|call| call.uri()).collect();
     let generate = method_url("generateContent");
-    assert_eq!(uris, vec![TOKEN_URL, &generate, TOKEN_URL, &generate]);
+    let experiments = method_url("listExperiments");
+    assert_eq!(
+        uris,
+        vec![TOKEN_URL, &experiments, &generate, TOKEN_URL, &generate]
+    );
 }
 
 #[test]
@@ -1180,7 +1267,11 @@ fn resource_exhausted_429_maps_retry_after() {
     .err()
     .expect("429");
     assert_eq!(error.retry_after(), Some(Duration::from_secs(12)));
-    assert_eq!(host.http().calls().len(), 2, "a 429 is not retried here");
+    assert_eq!(
+        posts_to(&host, &method_url("generateContent")).len(),
+        1,
+        "a 429 is not retried here"
+    );
 }
 
 const QUOTA_REPLY: &str = r#"{"buckets":[
@@ -1193,8 +1284,11 @@ const QUOTA_REPLY: &str = r#"{"buckets":[
 fn quota_windows_are_model_scoped() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
-    let (sub, id) = ready(&host, Some("proj-9"));
+    let id = seed(&host, &signed_in_blob(Some("proj-9")));
+    host.http().enqueue(token_reply("acc-1", None, 3600));
     host.http().enqueue(QUOTA_REPLY.as_bytes().to_vec());
+    host.http().enqueue(br#"{"flags":[]}"#.to_vec());
+    let sub = subscription(&host);
     let windows = block_on(sub.quota(&id, host.context())).expect("quota");
     assert_eq!(
         posts_to(&host, &method_url("retrieveUserQuota")),
@@ -1215,14 +1309,108 @@ fn quota_windows_are_model_scoped() {
 }
 
 #[test]
-fn models_come_from_the_quota_buckets() {
+fn models_follow_experiments_and_preview_quota() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
-    let (sub, id) = ready(&host, Some("proj-9"));
+    let id = seed(&host, &signed_in_blob(Some("proj-9")));
+    host.http().enqueue(token_reply("acc-1", None, 3600));
     host.http().enqueue(QUOTA_REPLY.as_bytes().to_vec());
+    host.http().enqueue(br#"{"flags":[]}"#.to_vec());
+    let sub = subscription(&host);
     let list = block_on(sub.list_models(&id, host.context())).expect("models");
     let ids: Vec<&str> = list.models().iter().map(|model| model.id()).collect();
-    assert_eq!(ids, vec!["gemini-2.5-pro", "gemini-2.5-flash"]);
+    assert_eq!(
+        ids,
+        vec![
+            "gemini-3.5-flash",
+            "gemini-3.1-flash-lite",
+            "gemini-2.5-pro",
+            "gemini-2.5-flash",
+            "gemini-2.5-flash-lite",
+        ]
+    );
+    assert!(
+        list.models()
+            .iter()
+            .all(|model| model.display_name().is_some() && model.image_input() == Some(true))
+    );
+    let [ask] = posts_to(&host, &method_url("listExperiments"))
+        .try_into()
+        .expect("one experiment reading");
+    let ask: hofund_plugin_sdk::json::Value =
+        hofund_plugin_sdk::json::from_str(&ask).expect("json");
+    assert_eq!(ask["project"], "proj-9");
+    assert_eq!(ask["metadata"]["duetProject"], "proj-9");
+    assert_eq!(ask["metadata"]["ideVersion"], "0.61.0");
+    assert_eq!(ask["metadata"]["updateChannel"], "stable");
+}
+
+#[test]
+fn r49_latest_experiment_maps_execute_and_quota_and_is_cached() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, &signed_in_blob(Some("proj-9")));
+    host.http().enqueue(token_reply("acc-1", None, 3600));
+    host.http().enqueue(
+        br#"{"flags":[{"flagId":45842815,"boolValue":true},{"flagId":45827489,"boolValue":true}]}"#
+            .to_vec(),
+    );
+    host.http().enqueue(UNARY_REPLY.as_bytes().to_vec());
+    host.http().enqueue(UNARY_REPLY.as_bytes().to_vec());
+    let sub = subscription(&host);
+    let upstream = sub.upstream(&id, host.context()).expect("upstream");
+    for model in ["gemini-3.5-flash", "models/gemini-3.1-flash-lite"] {
+        block_on(upstream.execute(gl_request(model, false), ProtocolId::GENERATIVE_LANGUAGE))
+            .expect("execute");
+    }
+    let sent = posts_to(&host, &method_url("generateContent"));
+    assert_eq!(sent.len(), 2);
+    let first: hofund_plugin_sdk::json::Value =
+        hofund_plugin_sdk::json::from_str(&sent[0]).expect("first body");
+    let second: hofund_plugin_sdk::json::Value =
+        hofund_plugin_sdk::json::from_str(&sent[1]).expect("second body");
+    assert_eq!(first["model"], "gemini-3.8-flash");
+    assert_eq!(second["model"], "gemini-3.5-flash-lite");
+    assert_eq!(posts_to(&host, TOKEN_URL).len(), 1);
+    assert_eq!(posts_to(&host, &method_url("listExperiments")).len(), 1);
+
+    host.http()
+        .enqueue(br#"{"buckets":[{"modelId":"gemini-3-flash","remainingFraction":0.5}]}"#.to_vec());
+    let windows = block_on(sub.quota(&id, host.context())).expect("quota");
+    assert_eq!(windows.len(), 1);
+    assert_eq!(windows[0].name(), "gemini-3.8-flash");
+    assert_eq!(windows[0].scope_model(), Some("gemini-3.8-flash"));
+    assert_eq!(windows[0].used(), 5_000);
+    assert_eq!(posts_to(&host, &method_url("listExperiments")).len(), 1);
+}
+
+#[test]
+fn r49_latest_experiment_controls_the_listed_models() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, &signed_in_blob(Some("proj-9")));
+    host.http().enqueue(token_reply("acc-1", None, 3600));
+    host.http().enqueue(
+        br#"{"buckets":[{"modelId":"gemini-3-pro-preview","remainingFraction":1}]}"#.to_vec(),
+    );
+    host.http().enqueue(
+        br#"{"flags":[{"flagId":45842815,"boolValue":true},{"flagId":45827489,"boolValue":true},{"flagId":45760185,"boolValue":true}]}"#
+            .to_vec(),
+    );
+    let sub = subscription(&host);
+    let list = block_on(sub.list_models(&id, host.context())).expect("models");
+    let ids: Vec<&str> = list.models().iter().map(|model| model.id()).collect();
+    assert_eq!(
+        ids,
+        [
+            "gemini-3.1-pro-preview",
+            "gemini-3-flash-preview",
+            "gemini-3.8-flash",
+            "gemini-3.5-flash-lite",
+            "gemini-2.5-pro",
+            "gemini-2.5-flash-lite",
+        ]
+    );
 }
 
 #[test]

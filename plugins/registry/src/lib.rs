@@ -251,6 +251,15 @@ pub fn find_fixture_preset(id: &str) -> Option<(&'static CompiledPreset, Option<
         .map(|preset| (preset, alias.region))
 }
 
+/// The linked read-only session stores.
+#[must_use]
+pub fn session_stores() -> Vec<Arc<dyn hofund_plugin_api::SessionStore>> {
+    vec![
+        Arc::new(hofund_plugin_agent_claude::ClaudeStore::new()),
+        Arc::new(hofund_plugin_agent_codex::CodexStore::new()),
+    ]
+}
+
 /// Every inbound surface the linked plugins contribute.
 ///
 /// Surfaces on contributions of any other [`PluginKind`] are ignored.

@@ -26,6 +26,8 @@ httpdate = "1.0.3"
 iana-time-zone = "0.1.65"
 regex = "1.13.1"
 ring = "0.17.14"
+rsa = { version = "0.10.0", features = ["pkcs1v15"] }
+getrandom = "0.4.3"
 secrecy = "0.10.3"
 md-5 = "0.10.6"
 serde = { version = "1.0.228", features = ["derive"] }
@@ -38,6 +40,7 @@ zstd = { workspace = true }
 
 [features]
 enc-v1-test = []
+rsa-test = []
 test-host-local = []
 
 [dev-dependencies]

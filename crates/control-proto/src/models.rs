@@ -172,6 +172,58 @@ impl Default for CatalogDisabledListResponse {
     }
 }
 
+/// Forces or fills the public model catalog cache.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+#[serde(deny_unknown_fields)]
+pub struct CatalogSyncRequest {
+    /// Body wire version.
+    pub version: u32,
+    /// When true, fetch even if a catalog index is already loaded.
+    #[serde(default)]
+    pub force: bool,
+}
+
+impl CatalogSyncRequest {
+    /// Constructs a version-current catalog sync request.
+    #[must_use]
+    pub fn new(force: bool) -> Self {
+        Self {
+            version: API_VERSION,
+            force,
+        }
+    }
+}
+
+impl Default for CatalogSyncRequest {
+    fn default() -> Self {
+        Self::new(false)
+    }
+}
+
+/// Result of a catalog sync. A fetch failure stays on this body.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct CatalogSyncResponse {
+    /// Body wire version.
+    pub version: u32,
+    /// Whether a usable catalog is present after the call.
+    pub ok: bool,
+    /// Sanitized failure text when `ok` is false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl Default for CatalogSyncResponse {
+    fn default() -> Self {
+        Self {
+            version: API_VERSION,
+            ok: false,
+            error: None,
+        }
+    }
+}
+
 impl CatalogDisabledListResponse {
     pub(crate) fn validate(&self) -> Result<(), ControlError> {
         if self.disabled.len() > MAX_IDS {

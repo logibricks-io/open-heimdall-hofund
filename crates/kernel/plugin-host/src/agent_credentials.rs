@@ -215,8 +215,12 @@ mod native {
 
     const STORE: &str = "Secret Service";
 
+    /// An encrypted session, so the secret is not sent in the clear on the
+    /// session bus. Needs the `crypto-rust` feature on `dbus-secret-service`.
+    pub(super) const SESSION_ENCRYPTION: EncryptionType = EncryptionType::Dh;
+
     fn connect() -> Result<SecretService, CredentialError> {
-        SecretService::connect_with_max_prompt_timeout(EncryptionType::Plain, PROMPT_SECONDS)
+        SecretService::connect_with_max_prompt_timeout(SESSION_ENCRYPTION, PROMPT_SECONDS)
             .map_err(|error| failure(STORE, &error))
     }
 
@@ -457,5 +461,18 @@ mod tests {
             NativeCredentialStore::default().deadline,
             Duration::from_secs(90)
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn secret_service_opens_an_encrypted_session() {
+        assert!(matches!(
+            native::SESSION_ENCRYPTION,
+            dbus_secret_service::EncryptionType::Dh
+        ));
+        assert!(!matches!(
+            native::SESSION_ENCRYPTION,
+            dbus_secret_service::EncryptionType::Plain
+        ));
     }
 }

@@ -46,7 +46,16 @@ pub struct ReadOutcome {
 pub fn read_incremental<R: Read>(
     reader: &mut R,
     offset: u64,
+    on_value: impl FnMut(&Value),
+) -> io::Result<ReadOutcome> {
+    read_incremental_cancellable(reader, offset, on_value, || false)
+}
+
+pub(crate) fn read_incremental_cancellable<R: Read>(
+    reader: &mut R,
+    offset: u64,
     mut on_value: impl FnMut(&Value),
+    mut cancelled: impl FnMut() -> bool,
 ) -> io::Result<ReadOutcome> {
     let mut outcome = ReadOutcome {
         offset,
@@ -57,6 +66,12 @@ pub fn read_incremental<R: Read>(
     let mut long = false;
     let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
     loop {
+        if cancelled() {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "session read cancelled",
+            ));
+        }
         if position >= MAX_FILE_BYTES {
             outcome.cut = true;
             break;
@@ -64,9 +79,16 @@ pub fn read_incremental<R: Read>(
         let remaining = usize::try_from(MAX_FILE_BYTES - position).unwrap_or(usize::MAX);
         let capacity = buffer.len().min(remaining);
         let read = reader.read(&mut buffer[..capacity])?;
+        if cancelled() {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "session read cancelled",
+            ));
+        }
         if read == 0 {
             break;
         }
+        let started = position;
         for &byte in &buffer[..read] {
             position += 1;
             if byte == b'\n' {
@@ -91,6 +113,10 @@ pub fn read_incremental<R: Read>(
                     line.clear();
                 }
             }
+        }
+        if position == started {
+            outcome.cut = true;
+            break;
         }
     }
     Ok(outcome)
@@ -197,6 +223,22 @@ impl SessionIndex {
         consent: &Consent,
         stores: &[&dyn SessionStore],
     ) -> Result<(), IndexError> {
+        self.refresh_with_progress(consent, stores, |_, _| {})
+    }
+
+    /// Refreshes all consented stores and reports discovered and completed files.
+    ///
+    /// The callback runs before and after each file read as `(total, done)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IndexError`] on a file, parser, or cache write failure.
+    pub fn refresh_with_progress(
+        &mut self,
+        consent: &Consent,
+        stores: &[&dyn SessionStore],
+        mut progress: impl FnMut(u64, u64),
+    ) -> Result<(), IndexError> {
         let before_allowed: BTreeSet<String> = self
             .entries
             .values()
@@ -210,6 +252,9 @@ impl SessionIndex {
         }
 
         let mut seen = BTreeSet::new();
+        let mut total = 0_u64;
+        let mut done = 0_u64;
+        progress(total, done);
         for store in stores {
             let agent = store.agent();
             if !consent.allows(agent) {
@@ -218,11 +263,15 @@ impl SessionIndex {
             }
             for root in store.locator().roots() {
                 for file in store.files(&root)? {
+                    total = total.saturating_add(1);
+                    progress(total, done);
                     if file.format == SessionFormat::Sqlite {
                         self.refresh_database(*store, &root, &file, &mut seen)?;
                     } else {
                         self.refresh_file(*store, &root, &file, &mut seen)?;
                     }
+                    done = done.saturating_add(1);
+                    progress(total, done);
                 }
             }
         }
@@ -337,6 +386,12 @@ impl SessionIndex {
         let stamp = match file_stamp(root, &file.path) {
             Ok(stamp) => stamp,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+                match std::fs::metadata(&file.path) {
+                    Ok(metadata) if !metadata.is_file() => return Ok(()),
+                    _ => return Err(error.into()),
+                }
+            }
             Err(error) => return Err(error.into()),
         };
         let old: Vec<_> = self
@@ -400,6 +455,12 @@ impl SessionIndex {
         let stamp = match file_stamp(root, &file.path) {
             Ok(stamp) => stamp,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+                match std::fs::metadata(&file.path) {
+                    Ok(metadata) if !metadata.is_file() => return Ok(()),
+                    _ => return Err(error.into()),
+                }
+            }
             Err(error) => return Err(error.into()),
         };
         let related = file
@@ -689,13 +750,28 @@ fn parse_file(
 #[cfg(test)]
 mod tests {
     use std::fs::File;
-    use std::io::Write;
-    use std::sync::Arc;
+    use std::io::{self, Read, Write};
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
     use hofund_plugin_api::{SessionLocator, SessionParser, SessionTokens, SessionUsageEvent};
 
     use super::*;
+
+    struct BoundReads<R> {
+        inner: R,
+        left: usize,
+    }
+
+    impl<R: Read> Read for BoundReads<R> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.left == 0 {
+                return Err(io::Error::other("incremental reader spun past EOF"));
+            }
+            self.left -= 1;
+            self.inner.read(buf)
+        }
+    }
 
     #[test]
     fn index_stops_at_byte_cap() {
@@ -812,6 +888,9 @@ mod tests {
     struct FakeStore {
         locator: FakeLocator,
         parses: Arc<AtomicUsize>,
+        listed: Option<Vec<SessionFile>>,
+        pushes: Arc<Mutex<Vec<Value>>>,
+        previous: Arc<Mutex<Vec<Option<String>>>>,
     }
 
     impl FakeStore {
@@ -823,18 +902,28 @@ mod tests {
                         root: root.to_path_buf(),
                     },
                     parses: Arc::clone(&parses),
+                    listed: None,
+                    pushes: Arc::new(Mutex::new(Vec::new())),
+                    previous: Arc::new(Mutex::new(Vec::new())),
                 },
                 parses,
             )
+        }
+
+        fn listing(mut self, files: Vec<SessionFile>) -> Self {
+            self.listed = Some(files);
+            self
         }
     }
 
     struct FakeParser {
         record: SessionRecord,
+        pushes: Arc<Mutex<Vec<Value>>>,
     }
 
     impl SessionParser for FakeParser {
         fn push(&mut self, value: &Value) -> Result<(), PluginError> {
+            self.pushes.lock().expect("pushes").push(value.clone());
             if value.get("prompt").and_then(Value::as_str).is_some() {
                 self.record.title = "fake prompt".to_owned();
                 self.record.last_ms = 10;
@@ -859,17 +948,25 @@ mod tests {
         }
 
         fn files(&self, root: &Path) -> Result<Vec<SessionFile>, PluginError> {
-            Ok(vec![SessionFile::new("one", root.join("one.jsonl"))])
+            Ok(self
+                .listed
+                .clone()
+                .unwrap_or_else(|| vec![SessionFile::new("one", root.join("one.jsonl"))]))
         }
 
         fn parser(
             &self,
             file: &SessionFile,
-            _state: Option<&str>,
+            state: Option<&str>,
         ) -> Result<Box<dyn SessionParser>, PluginError> {
             self.parses.fetch_add(1, Ordering::SeqCst);
+            self.previous
+                .lock()
+                .expect("previous")
+                .push(state.map(str::to_owned));
             Ok(Box::new(FakeParser {
                 record: SessionRecord::new("fake", "fake:one", &file.path),
+                pushes: Arc::clone(&self.pushes),
             }))
         }
     }
@@ -911,6 +1008,9 @@ mod tests {
             .expect("disable");
         assert_eq!(index.list(&consent), Vec::<SessionRecord>::new());
         index.save_if_dirty().expect("drop save");
+        consent
+            .set_reads(Some(true), [("fake".to_owned(), true)])
+            .expect("re-enable");
         assert_eq!(
             SessionIndex::load(&config, &consent).list(&consent),
             Vec::<SessionRecord>::new()
@@ -969,5 +1069,621 @@ mod tests {
         assert_eq!(records[1].tokens(), SessionTokens::new(10, 1, 0, 0));
         assert_eq!(records[1].days.len(), 1);
         assert_eq!(records[1].days[0].date, "2026-11-11");
+    }
+
+    #[test]
+    fn file_and_line_caps_are_the_contract_products() {
+        assert_eq!(MAX_FILE_BYTES, 512 * 1024 * 1024);
+        assert_eq!(MAX_LINE_BYTES, 1024 * 1024);
+    }
+
+    #[test]
+    fn incremental_read_keeps_a_nonzero_start_offset_and_counts_lines() {
+        let empty = read_incremental(&mut std::io::Cursor::new(b""), 42, |_| {}).expect("empty");
+        assert_eq!(empty.offset, 42);
+        assert_eq!(empty.lines, 0);
+        assert!(!empty.cut);
+
+        let mut lines = 0;
+        let one = read_incremental(&mut std::io::Cursor::new(b"{\"a\":1}\n"), 0, |_| {
+            lines += 1;
+        })
+        .expect("one line");
+        assert_eq!(lines, 1);
+        assert_eq!(one.lines, 1);
+        assert_eq!(one.offset, 8);
+        assert!(!one.cut);
+    }
+
+    #[test]
+    fn cancellable_incremental_read_stops_between_chunks() {
+        let input = format!("{{}}\n{}{{}}\n", " ".repeat(70_000));
+        let stop = Arc::new(AtomicUsize::new(0));
+        let parsed = Arc::clone(&stop);
+        let cancelled = Arc::clone(&stop);
+        let error = read_incremental_cancellable(
+            &mut std::io::Cursor::new(input),
+            0,
+            move |_| {
+                parsed.fetch_add(1, Ordering::SeqCst);
+            },
+            move || cancelled.load(Ordering::SeqCst) > 0,
+        )
+        .expect_err("cancelled read");
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+        assert_eq!(stop.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn sort_newest_orders_by_last_ms_then_id() {
+        let mut later = SessionRecord::new("fake", "fake:a", "a");
+        later.last_ms = 20;
+        let mut earlier = SessionRecord::new("fake", "fake:b", "b");
+        earlier.last_ms = 10;
+        let mut records = vec![earlier, later];
+        sort_newest(&mut records);
+        assert_eq!(
+            records
+                .iter()
+                .map(|row| row.id.as_str())
+                .collect::<Vec<_>>(),
+            ["fake:a", "fake:b"]
+        );
+
+        let mut mid = SessionRecord::new("fake", "fake:c", "c");
+        mid.last_ms = 20;
+        let mut last = SessionRecord::new("fake", "fake:d", "d");
+        last.last_ms = 20;
+        let mut ties = vec![last, mid];
+        sort_newest(&mut ties);
+        assert_eq!(
+            ties.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+            ["fake:c", "fake:d"]
+        );
+    }
+
+    #[test]
+    fn preferred_keeper_prefers_the_newer_row_or_the_greater_id() {
+        let mut left = SessionRecord::new("fake", "fake:a", "a");
+        left.last_ms = 10;
+        let mut right = SessionRecord::new("fake", "fake:b", "b");
+        right.last_ms = 5;
+        assert!(preferred_keeper(&left, &right));
+        assert!(!preferred_keeper(&right, &left));
+        right.last_ms = 10;
+        assert!(!preferred_keeper(&left, &right));
+        assert!(preferred_keeper(&right, &left));
+        let mut same_left = SessionRecord::new("fake", "fake:same", "l");
+        same_left.last_ms = 10;
+        let mut same_right = SessionRecord::new("fake", "fake:same", "r");
+        same_right.last_ms = 10;
+        assert!(!preferred_keeper(&same_left, &same_right));
+        assert!(!preferred_keeper(&same_right, &same_left));
+    }
+
+    #[test]
+    fn holds_family_accepts_ids_on_the_keeper() {
+        let mut keeper = SessionRecord::new("fake", "fake:k", "k");
+        keeper.family_root = "root".to_owned();
+        keeper.family_leaf = "leaf".to_owned();
+        keeper.family_ids = vec!["root".to_owned(), "mid".to_owned(), "leaf".to_owned()];
+        let mut other = SessionRecord::new("fake", "fake:o", "o");
+        other.family_root = "root".to_owned();
+        other.family_leaf = "leaf".to_owned();
+        assert!(holds_family(&keeper, &other));
+        other.family_leaf = "missing".to_owned();
+        assert!(!holds_family(&keeper, &other));
+        other.family_root = "mid".to_owned();
+        other.family_leaf = "root".to_owned();
+        assert!(holds_family(&keeper, &other));
+        keeper.family_ids = vec!["mid".to_owned()];
+        other.family_root = "mid".to_owned();
+        other.family_leaf = "leaf".to_owned();
+        assert!(holds_family(&keeper, &other));
+    }
+
+    #[test]
+    fn get_returns_a_listed_main_row_by_id() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let agent_root = temp.path().join("agent");
+        std::fs::create_dir(&agent_root).expect("agent");
+        std::fs::write(agent_root.join("one.jsonl"), b"{\"prompt\":\"hello\"}\n").expect("session");
+        let config = temp.path().join("config");
+        let mut consent = Consent::new(&config);
+        consent.settle();
+        consent.set_reads(Some(true), []).expect("consent");
+        let (store, _) = FakeStore::new(&agent_root);
+        let stores: [&dyn SessionStore; 1] = [&store];
+        let mut index = SessionIndex::load(&config, &consent);
+        index.refresh(&consent, &stores).expect("refresh");
+        let found = index.get(&consent, "fake:one").expect("listed");
+        assert_eq!(found.id, "fake:one");
+        assert!(index.get(&consent, "missing").is_none());
+    }
+
+    #[test]
+    fn load_drops_a_row_when_the_cache_path_does_not_match_the_record() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let root = temp.path().join("root");
+        std::fs::create_dir(&root).expect("root");
+        let on_disk = root.join("one.jsonl");
+        let recorded = root.join("other.jsonl");
+        std::fs::write(&on_disk, b"{}\n").expect("file");
+        let record = SessionRecord::new("fake", "fake:one", &recorded);
+        let entry = CacheEntry {
+            root: root.clone(),
+            path: on_disk,
+            file_id: "one".to_owned(),
+            size: 3,
+            modified_ns: 1,
+            offset: 3,
+            state: String::new(),
+            related: Vec::new(),
+            record,
+        };
+        let state = temp.path().join("state");
+        std::fs::create_dir(&state).expect("state");
+        std::fs::write(
+            state.join("sessions-index.json"),
+            serde_json::to_vec(&DiskIndex {
+                entries: vec![entry],
+            })
+            .expect("encode"),
+        )
+        .expect("cache");
+        let mut consent = Consent::new(temp.path());
+        consent.settle();
+        consent.set_reads(Some(true), []).expect("consent");
+        let mut index = SessionIndex::load(temp.path(), &consent);
+        assert_eq!(index.list(&consent), Vec::<SessionRecord>::new());
+    }
+
+    fn write_cache(config: &Path, entries: Vec<CacheEntry>) {
+        let state = config.join("state");
+        std::fs::create_dir_all(&state).expect("state");
+        std::fs::write(
+            state.join("sessions-index.json"),
+            serde_json::to_vec(&DiskIndex { entries }).expect("encode"),
+        )
+        .expect("cache");
+    }
+
+    fn settled(config: &Path) -> Consent {
+        let mut consent = Consent::new(config);
+        consent.settle();
+        consent.set_reads(Some(true), []).expect("consent");
+        consent
+    }
+
+    #[test]
+    fn incremental_read_stops_at_eof_without_spinning() {
+        let mut reader = BoundReads {
+            inner: std::io::Cursor::new(b""),
+            left: 3,
+        };
+        let empty = read_incremental(&mut reader, 42, |_| {}).expect("empty eof");
+        assert_eq!(empty.offset, 42);
+        assert_eq!(empty.lines, 0);
+        assert!(!empty.cut);
+
+        let mut reader = BoundReads {
+            inner: std::io::Cursor::new(b"{\"a\":1}\n"),
+            left: 4,
+        };
+        let mut lines = 0;
+        let one = read_incremental(&mut reader, 0, |_| {
+            lines += 1;
+        })
+        .expect("one line eof");
+        assert_eq!(lines, 1);
+        assert_eq!(one.lines, 1);
+        assert_eq!(one.offset, 8);
+        assert!(!one.cut);
+    }
+
+    #[test]
+    fn refresh_skips_a_listed_directory_and_a_listed_missing_path() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let agent_root = temp.path().join("agent");
+        std::fs::create_dir(&agent_root).expect("agent");
+        let directory = agent_root.join("dir.jsonl");
+        std::fs::create_dir(&directory).expect("listed directory");
+        let missing = agent_root.join("missing.jsonl");
+        let config = temp.path().join("config");
+        let consent = settled(&config);
+        let (store, parses) = FakeStore::new(&agent_root);
+        let store = store.listing(vec![
+            SessionFile::new("dir", directory),
+            SessionFile::new("missing", missing),
+        ]);
+        let stores: [&dyn SessionStore; 1] = [&store];
+        let mut index = SessionIndex::load(&config, &consent);
+        index.refresh(&consent, &stores).expect("skip non-files");
+        assert_eq!(parses.load(Ordering::SeqCst), 0);
+        assert_eq!(index.list(&consent), Vec::<SessionRecord>::new());
+    }
+
+    #[test]
+    fn refresh_drops_an_unlisted_cached_row_and_persists() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let root = temp.path().join("root");
+        std::fs::create_dir(&root).expect("root");
+        let cached = root.join("two.jsonl");
+        std::fs::write(&cached, b"{\"prompt\":\"old\"}\n").expect("cached file");
+        let record = SessionRecord::new("fake", "fake:two", &cached);
+        write_cache(
+            temp.path(),
+            vec![CacheEntry {
+                root: root.clone(),
+                path: cached,
+                file_id: "two".to_owned(),
+                size: 16,
+                modified_ns: 1,
+                offset: 16,
+                state: String::new(),
+                related: Vec::new(),
+                record,
+            }],
+        );
+        let consent = settled(temp.path());
+        let (store, _) = FakeStore::new(&root);
+        let store = store.listing(vec![]);
+        let stores: [&dyn SessionStore; 1] = [&store];
+        let mut index = SessionIndex::load(temp.path(), &consent);
+        assert_eq!(index.list(&consent).len(), 1);
+        index.refresh(&consent, &stores).expect("drop unlisted");
+        assert_eq!(
+            SessionIndex::load(temp.path(), &consent).list(&consent),
+            Vec::<SessionRecord>::new()
+        );
+    }
+
+    #[test]
+    fn refresh_appends_when_the_plain_file_grows() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let agent_root = temp.path().join("agent");
+        std::fs::create_dir(&agent_root).expect("agent");
+        let path = agent_root.join("one.jsonl");
+        std::fs::write(&path, b"{\"prompt\":\"hello\"}\n").expect("session");
+        let config = temp.path().join("config");
+        let consent = settled(&config);
+        let (store, parses) = FakeStore::new(&agent_root);
+        let stores: [&dyn SessionStore; 1] = [&store];
+        let mut index = SessionIndex::load(&config, &consent);
+        index.refresh(&consent, &stores).expect("first refresh");
+        assert_eq!(parses.load(Ordering::SeqCst), 1);
+        assert_eq!(store.previous.lock().expect("previous").as_slice(), [None]);
+        assert_eq!(store.pushes.lock().expect("pushes").len(), 1);
+        store.pushes.lock().expect("pushes").clear();
+
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("append");
+        file.write_all(b"{\"prompt\":\"hello\",\"more\":true}\n")
+            .expect("append line");
+        drop(file);
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("touch");
+        file.set_times(
+            std::fs::FileTimes::new()
+                .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(1)),
+        )
+        .expect("mtime");
+
+        index.refresh(&consent, &stores).expect("append refresh");
+        assert_eq!(parses.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            store.previous.lock().expect("previous").as_slice(),
+            [None, Some("{}".to_owned())]
+        );
+        let pushed = store.pushes.lock().expect("pushes").clone();
+        assert_eq!(pushed.len(), 1);
+        assert_eq!(pushed[0].get("more").and_then(Value::as_bool), Some(true));
+        assert_eq!(index.list(&consent)[0].title, "fake prompt");
+
+        store.pushes.lock().expect("pushes").clear();
+        let grown = std::fs::read(&path).expect("grown bytes");
+        let mut rewritten = grown;
+        // Same length, different payload, so this cannot be an append.
+        assert_eq!(rewritten.last(), Some(&b'\n'));
+        let last = rewritten.len() - 2;
+        rewritten[last] = b' ';
+        std::fs::write(&path, &rewritten).expect("same-size rewrite");
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("touch rewrite");
+        file.set_times(
+            std::fs::FileTimes::new()
+                .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(2)),
+        )
+        .expect("mtime rewrite");
+        index.refresh(&consent, &stores).expect("rewrite refresh");
+        assert_eq!(parses.load(Ordering::SeqCst), 3);
+        assert_eq!(
+            store.previous.lock().expect("previous").as_slice(),
+            [None, Some("{}".to_owned()), None]
+        );
+        assert_eq!(store.pushes.lock().expect("pushes").len(), 1);
+    }
+
+    #[test]
+    fn refresh_does_not_append_when_the_cached_offset_is_past_the_file() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let agent_root = temp.path().join("agent");
+        std::fs::create_dir(&agent_root).expect("agent");
+        let path = agent_root.join("one.jsonl");
+        std::fs::write(&path, b"{\"prompt\":\"hello\"}\n{\"more\":true}\n").expect("session");
+        let mut record = SessionRecord::new("fake", "fake:one", &path);
+        record.title = "stale".to_owned();
+        write_cache(
+            &temp.path().join("config"),
+            vec![CacheEntry {
+                root: agent_root.clone(),
+                path: path.clone(),
+                file_id: "one".to_owned(),
+                size: 10,
+                modified_ns: 1,
+                offset: 10_000,
+                state: "{}".to_owned(),
+                related: Vec::new(),
+                record,
+            }],
+        );
+        let config = temp.path().join("config");
+        let consent = settled(&config);
+        let (store, _) = FakeStore::new(&agent_root);
+        let stores: [&dyn SessionStore; 1] = [&store];
+        let mut index = SessionIndex::load(&config, &consent);
+        index.refresh(&consent, &stores).expect("refresh");
+        assert_eq!(store.previous.lock().expect("previous").as_slice(), [None]);
+        assert!(store.pushes.lock().expect("pushes").len() >= 2);
+        assert_eq!(index.list(&consent)[0].title, "fake prompt");
+    }
+
+    #[test]
+    fn refresh_marks_cut_when_a_line_exceeds_the_cap() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let agent_root = temp.path().join("agent");
+        std::fs::create_dir(&agent_root).expect("agent");
+        let mut bytes = b"{\"prompt\":\"hello\"}\n".to_vec();
+        bytes.extend(std::iter::repeat_n(b' ', MAX_LINE_BYTES + 1));
+        bytes.extend(b"\n");
+        std::fs::write(agent_root.join("one.jsonl"), bytes).expect("long line");
+        let config = temp.path().join("config");
+        let consent = settled(&config);
+        let (store, _) = FakeStore::new(&agent_root);
+        let stores: [&dyn SessionStore; 1] = [&store];
+        let mut index = SessionIndex::load(&config, &consent);
+        index.refresh(&consent, &stores).expect("refresh");
+        assert!(index.list(&consent)[0].cut);
+    }
+
+    #[test]
+    fn list_attaches_a_subagent_and_merges_cut_tokens() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = temp.path().join("state");
+        std::fs::create_dir(&state).expect("state");
+        let root = temp.path().join("root");
+        std::fs::create_dir(&root).expect("root");
+        let parent_path = root.join("parent.jsonl");
+        let child_path = root.join("child.jsonl");
+        std::fs::write(&parent_path, b"{}\n").expect("parent file");
+        std::fs::write(&child_path, b"{}\n").expect("child file");
+        let mut parent = SessionRecord::new("fake", "fake:parent", &parent_path);
+        parent.last_ms = 10;
+        parent.add_usage("m", SessionTokens::new(1, 0, 0, 0));
+        let mut child =
+            SessionRecord::new("fake", "fake:child", &child_path).with_parent("fake:parent");
+        child.last_ms = 20;
+        child.cut = true;
+        child.add_usage("m", SessionTokens::new(0, 2, 0, 0));
+        let entries = vec![
+            CacheEntry {
+                root: root.clone(),
+                path: parent_path.clone(),
+                file_id: "parent".to_owned(),
+                size: 3,
+                modified_ns: 1,
+                offset: 3,
+                state: String::new(),
+                related: Vec::new(),
+                record: parent,
+            },
+            CacheEntry {
+                root,
+                path: child_path,
+                file_id: "child".to_owned(),
+                size: 3,
+                modified_ns: 1,
+                offset: 3,
+                state: String::new(),
+                related: Vec::new(),
+                record: child,
+            },
+        ];
+        std::fs::write(
+            state.join("sessions-index.json"),
+            serde_json::to_vec(&DiskIndex { entries }).expect("encode"),
+        )
+        .expect("cache");
+        let mut consent = Consent::new(temp.path());
+        consent.settle();
+        consent.set_reads(Some(true), []).expect("consent");
+        let mut index = SessionIndex::load(temp.path(), &consent);
+        let rows = index.list(&consent);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "fake:parent");
+        assert_eq!(rows[0].subagents, vec!["fake:child".to_owned()]);
+        assert_eq!(rows[0].tokens(), SessionTokens::new(1, 2, 0, 0));
+        assert!(rows[0].cut);
+        assert_eq!(rows[0].last_ms, 20);
+        assert_eq!(
+            index.get(&consent, "fake:parent").expect("parent").id,
+            "fake:parent"
+        );
+        assert!(index.get(&consent, "fake:child").is_none());
+    }
+
+    #[test]
+    fn list_does_not_attach_a_child_to_a_different_agent_or_id() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = temp.path().join("state");
+        std::fs::create_dir(&state).expect("state");
+        let root = temp.path().join("root");
+        std::fs::create_dir(&root).expect("root");
+        let other_path = root.join("other.jsonl");
+        let wrong_path = root.join("wrong.jsonl");
+        let child_path = root.join("child.jsonl");
+        std::fs::write(&other_path, b"{}\n").expect("other file");
+        std::fs::write(&wrong_path, b"{}\n").expect("wrong file");
+        std::fs::write(&child_path, b"{}\n").expect("child file");
+        let mut other = SessionRecord::new("other", "fake:parent", &other_path);
+        other.last_ms = 10;
+        other.add_usage("m", SessionTokens::new(9, 0, 0, 0));
+        let mut wrong = SessionRecord::new("fake", "fake:wrong", &wrong_path);
+        wrong.last_ms = 10;
+        wrong.add_usage("m", SessionTokens::new(8, 0, 0, 0));
+        let mut child =
+            SessionRecord::new("fake", "fake:child", &child_path).with_parent("fake:parent");
+        child.last_ms = 20;
+        child.cut = true;
+        child.add_usage("m", SessionTokens::new(0, 2, 0, 0));
+        write_cache(
+            temp.path(),
+            vec![
+                CacheEntry {
+                    root: root.clone(),
+                    path: other_path,
+                    file_id: "other".to_owned(),
+                    size: 3,
+                    modified_ns: 1,
+                    offset: 3,
+                    state: String::new(),
+                    related: Vec::new(),
+                    record: other,
+                },
+                CacheEntry {
+                    root: root.clone(),
+                    path: wrong_path,
+                    file_id: "wrong".to_owned(),
+                    size: 3,
+                    modified_ns: 1,
+                    offset: 3,
+                    state: String::new(),
+                    related: Vec::new(),
+                    record: wrong,
+                },
+                CacheEntry {
+                    root,
+                    path: child_path,
+                    file_id: "child".to_owned(),
+                    size: 3,
+                    modified_ns: 1,
+                    offset: 3,
+                    state: String::new(),
+                    related: Vec::new(),
+                    record: child,
+                },
+            ],
+        );
+        let consent = settled(temp.path());
+        let mut index = SessionIndex::load(temp.path(), &consent);
+        let rows = index.list(&consent);
+        assert_eq!(rows.len(), 2);
+        for row in &rows {
+            assert_eq!(row.subagents.len(), 0);
+            assert!(!row.cut);
+            assert_eq!(row.last_ms, 10);
+        }
+        assert_eq!(rows[0].tokens(), SessionTokens::new(9, 0, 0, 0));
+        assert_eq!(rows[1].tokens(), SessionTokens::new(8, 0, 0, 0));
+    }
+
+    #[test]
+    fn dedup_forks_requires_the_same_agent_and_id() {
+        let copied = SessionUsageEvent::new(
+            SessionTokens::new(10, 1, 0, 0),
+            SessionTokens::new(10, 1, 0, 0),
+            "model",
+            "2026-11-10",
+        );
+        let later = SessionUsageEvent::new(
+            SessionTokens::new(20, 2, 0, 0),
+            SessionTokens::new(10, 1, 0, 0),
+            "model",
+            "2026-11-11",
+        );
+        let mut parent = SessionRecord::new("fake", "fake:parent", "parent");
+        parent.usage.push(copied.clone());
+        let mut distractor = SessionRecord::new("other", "fake:parent", "distractor");
+        distractor.usage = vec![copied.clone(), later.clone()];
+        let mut child = SessionRecord::new("fake", "fake:child", "child");
+        child.forked_from = Some(parent.id.clone());
+        child.usage = vec![copied, later];
+        for event in &child.usage.clone() {
+            child.add_usage(event.model.clone(), event.tokens);
+            child.add_day(SessionDay::new(
+                event.date.clone(),
+                event.model.clone(),
+                event.tokens,
+            ));
+        }
+        let mut records = vec![distractor, parent, child];
+        dedup_forks(&mut records);
+        assert_eq!(records[2].tokens(), SessionTokens::new(10, 1, 0, 0));
+        assert_eq!(records[2].days.len(), 1);
+        assert_eq!(records[2].days[0].date, "2026-11-11");
+    }
+
+    #[test]
+    fn hide_pure_copies_walks_to_the_preferred_keeper() {
+        let mut newest = SessionRecord::new("fake", "fake:c", "c");
+        newest.last_ms = 30;
+        newest.family_root = "root".to_owned();
+        newest.family_leaf = "leaf".to_owned();
+        newest.family_ids = vec!["root".to_owned(), "leaf".to_owned()];
+        let mut mid = newest.clone();
+        mid.id = "fake:b".to_owned();
+        mid.path = PathBuf::from("b");
+        mid.last_ms = 20;
+        let mut old = mid.clone();
+        old.id = "fake:a".to_owned();
+        old.path = PathBuf::from("a");
+        old.last_ms = 10;
+        let mut records = vec![old, mid, newest];
+        let copies = hide_pure_copies(&mut records);
+        assert_eq!(copies.len(), 2);
+        assert!(
+            copies
+                .iter()
+                .all(|copy| copy.parent_id.as_deref() == Some("fake:c"))
+        );
+        assert!(!records[0].main);
+        assert!(!records[1].main);
+        assert!(records[2].main);
+    }
+
+    #[test]
+    fn hide_pure_copies_leaves_unrelated_and_solo_rows_alone() {
+        let mut solo = SessionRecord::new("fake", "fake:solo", "solo");
+        solo.family_root = "root".to_owned();
+        solo.family_leaf = "leaf".to_owned();
+        solo.family_ids = vec!["root".to_owned(), "leaf".to_owned()];
+        let mut only_solo = vec![solo.clone()];
+        assert_eq!(hide_pure_copies(&mut only_solo).len(), 0);
+        assert!(only_solo[0].main);
+
+        let mut other = SessionRecord::new("fake", "fake:other", "other");
+        other.family_root = "other-root".to_owned();
+        other.family_leaf = "other-leaf".to_owned();
+        other.family_ids = vec!["other-root".to_owned(), "other-leaf".to_owned()];
+        let mut records = vec![solo, other];
+        assert_eq!(hide_pure_copies(&mut records).len(), 0);
+        assert!(records[0].main);
+        assert!(records[1].main);
     }
 }

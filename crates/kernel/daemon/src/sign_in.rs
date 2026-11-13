@@ -192,6 +192,32 @@ fn open(
     Ok(opened)
 }
 
+/// Uses the running runtime's plugin instances and account stores.
+pub(crate) fn open_built(
+    built: subscriptions::Subscriptions,
+    registry: &Arc<dyn DaemonRegistry>,
+    loopback: &Arc<LoopbackRegistry>,
+) -> Vec<Opened> {
+    let mut opened = Vec::with_capacity(built.len());
+    for (id, state) in built {
+        let name = registry.subscription(&id).map_or_else(
+            || id.clone(),
+            |factory| factory.spec().display_name().to_owned(),
+        );
+        let host = state
+            .host()
+            .clone()
+            .with_loopback(Arc::clone(loopback) as _);
+        opened.push(Opened {
+            id,
+            name,
+            instance: Arc::clone(state.instance()),
+            host,
+        });
+    }
+    opened
+}
+
 pub(crate) fn find<'a>(opened: &'a [Opened], id: &str) -> Result<&'a Opened, DaemonError> {
     opened
         .iter()
@@ -226,7 +252,7 @@ pub fn subscription_list(path: &Path) -> Result<Vec<SubscriptionListing>, Daemon
     with_opened(path, async |opened| list_in(opened).await)
 }
 
-async fn list_in(opened: &[Opened]) -> Result<Vec<SubscriptionListing>, DaemonError> {
+pub(crate) async fn list_in(opened: &[Opened]) -> Result<Vec<SubscriptionListing>, DaemonError> {
     let mut listings = Vec::with_capacity(opened.len());
     for entry in opened {
         let mut accounts = Vec::new();
@@ -319,7 +345,7 @@ pub fn subscription_sign_out(path: &Path, id: &str, account: &str) -> Result<(),
     })
 }
 
-async fn sign_out_in(
+pub(crate) async fn sign_out_in(
     opened: &[Opened],
     config: &hofund_config::Config,
     id: &str,
@@ -367,7 +393,7 @@ pub fn subscription_refresh(
     with_opened(path, async |opened| refresh_in(opened, id, account).await)
 }
 
-async fn refresh_in(
+pub(crate) async fn refresh_in(
     opened: &[Opened],
     id: &str,
     account: Option<&str>,
@@ -530,7 +556,10 @@ pub fn subscription_sign_in(
     })
 }
 
-fn sign_in_ctx(plugin: &PluginId, options: &SignInOptions) -> Result<SignInCtx, SignInError> {
+pub(crate) fn sign_in_ctx(
+    plugin: &PluginId,
+    options: &SignInOptions,
+) -> Result<SignInCtx, SignInError> {
     let failed = |error: hofund_plugin_api::PluginError| SignInError::failed(error.to_string());
     let mut ctx = hofund_plugin_host::sign_in_ctx(plugin.clone()).map_err(failed)?;
     if let Some(host) = &options.host {
@@ -576,10 +605,79 @@ async fn drive_sign_in<P, I, W>(
     host: &HostContext,
     loopback: &LoopbackRegistry,
     ctx: SignInCtx,
+    paste: P,
+    interrupt: I,
+    deadline: Duration,
+    out: &mut W,
+) -> Result<AccountId, SignInError>
+where
+    P: Stream<Item = String> + Unpin,
+    I: Future<Output = ()>,
+    W: Write,
+{
+    drive_sign_in_inner(
+        subscription,
+        host,
+        loopback,
+        ctx,
+        paste,
+        interrupt,
+        deadline,
+        out,
+        None,
+    )
+    .await
+}
+
+/// Runs the shared driver and reports its first challenge to a control session.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the driver's inputs are the seams tests replace"
+)]
+pub(crate) async fn drive_sign_in_with_challenge<P, I, W>(
+    subscription: &dyn Subscription,
+    host: &HostContext,
+    loopback: &LoopbackRegistry,
+    ctx: SignInCtx,
+    paste: P,
+    interrupt: I,
+    deadline: Duration,
+    out: &mut W,
+    challenge: &tokio::sync::mpsc::UnboundedSender<SignInChallenge>,
+) -> Result<AccountId, SignInError>
+where
+    P: Stream<Item = String> + Unpin,
+    I: Future<Output = ()>,
+    W: Write,
+{
+    drive_sign_in_inner(
+        subscription,
+        host,
+        loopback,
+        ctx,
+        paste,
+        interrupt,
+        deadline,
+        out,
+        Some(challenge),
+    )
+    .await
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the driver's inputs are the seams tests replace"
+)]
+async fn drive_sign_in_inner<P, I, W>(
+    subscription: &dyn Subscription,
+    host: &HostContext,
+    loopback: &LoopbackRegistry,
+    ctx: SignInCtx,
     mut paste: P,
     interrupt: I,
     deadline: Duration,
     out: &mut W,
+    challenge_out: Option<&tokio::sync::mpsc::UnboundedSender<SignInChallenge>>,
 ) -> Result<AccountId, SignInError>
 where
     P: Stream<Item = String> + Unpin,
@@ -595,6 +693,7 @@ where
             &mut paste,
             deadline,
             out,
+            challenge_out,
         );
         tokio::select! {
             biased;
@@ -604,15 +703,19 @@ where
             }
         }
     };
-    if let Ok(Err(error)) =
+    if let Ok(Err(_error)) =
         tokio::time::timeout(CANCEL_TIMEOUT, subscription.cancel_sign_in(&ctx, host)).await
     {
-        tracing::debug!(%error, "cancel_sign_in failed");
+        tracing::debug!("cancel_sign_in failed");
     }
     loopback.release(ctx.session());
     outcome
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the driver's inputs are the seams tests replace"
+)]
 async fn run_flow<P, W>(
     subscription: &dyn Subscription,
     host: &HostContext,
@@ -621,16 +724,26 @@ async fn run_flow<P, W>(
     paste: &mut P,
     deadline: Duration,
     out: &mut W,
+    challenge_out: Option<&tokio::sync::mpsc::UnboundedSender<SignInChallenge>>,
 ) -> Result<AccountId, SignInError>
 where
     P: Stream<Item = String> + Unpin,
     W: Write,
 {
+    if subscription.id().as_str() == "antigravity" {
+        say(
+            out,
+            "warning: Google may suspend an Antigravity account it sees used outside Antigravity. Use one you can afford to lose.",
+        )?;
+    }
     let failed = |error: hofund_plugin_api::PluginError| SignInError::failed(error.to_string());
     let challenge = subscription
         .start_sign_in(ctx, host)
         .await
         .map_err(failed)?;
+    if let Some(sender) = challenge_out {
+        let _ = sender.send(challenge.clone());
+    }
     let proof = match challenge {
         SignInChallenge::OpenUrl { url } => {
             say(
@@ -1292,6 +1405,8 @@ mod tests {
         use hofund_config::{Accounts, CatalogSettings, Failover, Stays, Subscription};
         hofund_config::Config {
             listen: "127.0.0.1:3425".parse().expect("addr"),
+            allow_ips: Vec::new(),
+            trust_proxy: false,
             token_file: String::new(),
             usage_file: String::new(),
             failover: Failover::default(),
@@ -1313,6 +1428,7 @@ mod tests {
             catalog: CatalogSettings::default(),
             usage: hofund_config::UsageSettings::default(),
             discover_agent_accounts: false,
+            lan_allow: Vec::new(),
         }
     }
 
@@ -1351,5 +1467,20 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&quota_json(&listings)).expect("json");
         assert_eq!(value[0]["windows"][0]["limit"], 10);
         assert!(quota_in(&rig.opened(), Some("missing")).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn r49_default_project_setting_is_unsupported() {
+        let rig = new_rig(Mode::Device);
+        let mut opened = rig.opened();
+        opened[0].id = "gemini".to_owned();
+        let error =
+            crate::agent_login::accounts_project(&opened, "gemini", "u@example.test", "project-1")
+                .await
+                .expect_err("the fake has no project setting");
+        assert_eq!(
+            error.to_string(),
+            "this subscription has no per-account project setting"
+        );
     }
 }
