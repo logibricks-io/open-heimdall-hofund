@@ -22,11 +22,13 @@ mod api;
 mod creds;
 mod device;
 mod discover;
+mod gift;
 mod http_auth;
 mod models;
 mod quota;
 mod refresh;
 mod session;
+mod start;
 mod team;
 mod upstream;
 
@@ -36,6 +38,8 @@ pub(crate) const ZAI_ANTHROPIC_BASE: &str = "https://api.z.ai/api/anthropic";
 pub(crate) const BIGMODEL_ANTHROPIC_BASE: &str = "https://open.bigmodel.cn/api/anthropic";
 /// Z Code portal root (device mid header scope on portal URLs).
 pub(crate) const ZCODE_PORTAL: &str = "https://zcode.z.ai";
+/// Anthropic-compatible API for Z Code Start Plan and other gift balances.
+pub(crate) const START_BASE: &str = "https://zcode.z.ai/api/v1/zcode-plan/anthropic";
 /// Z.ai business API origin.
 pub(crate) const ZAI_BIZ: &str = "https://api.z.ai";
 /// BigModel business API origin.
@@ -82,6 +86,17 @@ impl Endpoints {
             BIGMODEL_BIZ
         } else {
             ZAI_BIZ
+        }
+    }
+
+    pub(crate) fn start_base(&self) -> String {
+        if self.portal == ZCODE_PORTAL {
+            START_BASE.to_owned()
+        } else {
+            format!(
+                "{}/api/v1/zcode-plan/anthropic",
+                self.portal.trim_end_matches('/')
+            )
         }
     }
 }
@@ -229,7 +244,15 @@ impl Subscription for Zcode {
             &self.team_keys,
         )
         .await?;
-        quota::read(host, account, &stored, &self.device_file, &self.team_keys).await
+        quota::read(
+            host,
+            &self.endpoints,
+            account,
+            &stored,
+            &self.device_file,
+            &self.team_keys,
+        )
+        .await
     }
 
     async fn list_models(
@@ -245,7 +268,15 @@ impl Subscription for Zcode {
             &self.team_keys,
         )
         .await?;
-        models::list(host, account, &stored, &self.team_keys).await
+        models::list(
+            host,
+            &self.endpoints,
+            account,
+            &stored,
+            &self.device_file,
+            &self.team_keys,
+        )
+        .await
     }
 
     fn upstream(

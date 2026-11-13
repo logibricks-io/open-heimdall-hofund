@@ -14,6 +14,8 @@ pub(crate) const LEASE_WAIT: Duration = Duration::from_secs(30);
 pub(crate) struct Stored {
     pub auth: PlanAuth,
     pub api_key: SecretString,
+    pub device: String,
+    pub plan: String,
 }
 
 /// Offline readiness for the daemon account tick (no vendor HTTP).
@@ -32,11 +34,11 @@ pub(crate) fn offline_status(secret: &SecretString) -> Result<(), PluginError> {
             "the stored Z Code team seat has no business sign-in token",
         ));
     }
-    if auth.api_key.is_some() {
+    if auth.api_key.is_some() || auth.jwt.is_some() {
         return Ok(());
     }
     Err(PluginError::auth(
-        "the stored Z Code sign-in has no GLM Coding Plan key",
+        "the stored Z Code sign-in has no plan key or Z Code session",
     ))
 }
 
@@ -63,16 +65,24 @@ pub(crate) async fn parse_loaded(
     device_file: &Path,
     team_keys: &TokenCache<SecretString>,
 ) -> Result<Stored, PluginError> {
-    let _ = SecretObject::parse(secret)?;
+    let blob = SecretObject::parse(secret)?;
     let auth = creds::parse_secret(secret)?;
     let api_key = if auth.team() && auth.api_key.is_none() {
         resolve_team_project_key(host, endpoints, account, &auth, device_file, team_keys).await?
     } else {
-        auth.api_key.clone().ok_or_else(|| {
-            PluginError::auth("the stored Z Code sign-in has no GLM Coding Plan key")
-        })?
+        auth.api_key
+            .clone()
+            .or_else(|| auth.jwt.clone())
+            .ok_or_else(|| {
+                PluginError::auth("the stored Z Code sign-in has no plan key or Z Code session")
+            })?
     };
-    Ok(Stored { auth, api_key })
+    Ok(Stored {
+        auth,
+        api_key,
+        device: blob.text("device").unwrap_or("").to_owned(),
+        plan: blob.text("plan").unwrap_or("").to_owned(),
+    })
 }
 
 async fn resolve_team_project_key(

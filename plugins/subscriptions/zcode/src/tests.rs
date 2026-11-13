@@ -317,7 +317,7 @@ fn a2d_4c_refresh_accepts_unexpired_jwt() {
         .expect("stored");
     assert_eq!(secret_text(&before), secret_text(&after));
     let status = block_on(sub.account_status(&id, host.context())).expect("status");
-    assert!(matches!(status, AccountStatus::NeedsSignIn { .. }));
+    assert!(matches!(status, AccountStatus::Ready));
 }
 
 #[test]
@@ -421,15 +421,65 @@ fn a2d_23_team_status_is_offline_and_project_key_is_cached() {
 }
 
 #[test]
-fn a2d_19_start_plan_jwt_only_is_unsupported_on_import() {
+fn r57b_start_plan_jwt_only_imports_and_serves_dressed_messages() {
     let dir = tempfile::tempdir().expect("dir");
     let home = dir.path().join(".zcode");
     write_jwt_only_credentials(&home, "u-jwt-only");
-    assert!(discover::list(&home).expect("list").is_empty());
+    assert_eq!(discover::list(&home).expect("list").len(), 1);
     let host = host(&dir);
-    let error = block_on(discover::import(&home, discover::REFERENCE, host.context()))
-        .expect_err("jwt only");
-    assert_eq!(error.kind(), PluginErrorKind::Unsupported);
+    let id =
+        block_on(discover::import(&home, discover::REFERENCE, host.context())).expect("jwt only");
+    host.http().enqueue(
+        br#"{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"model":"GLM-5.3-Flash","stop_reason":"end_turn"}"#
+            .to_vec(),
+    );
+    let upstream = subscription(&host)
+        .upstream(&id, host.context())
+        .expect("upstream");
+    let query = ProbeQuery::new(ProtocolId::ANTHROPIC_MESSAGES, "GLM-5.3-Flash").expect("query");
+    block_on(upstream.probe(&query)).expect("probe");
+    let calls = host.http().calls();
+    assert_eq!(calls.len(), 1);
+    assert!(
+        calls[0]
+            .uri()
+            .starts_with("https://zcode.test/api/v1/zcode-plan/anthropic/v1/messages")
+    );
+    let headers = calls[0].sensitive_headers();
+    for name in [
+        "authorization",
+        "x-zcode-app-version",
+        "x-title",
+        "x-session-id",
+    ] {
+        assert!(headers.contains(&name.to_owned()), "{name}: {headers:?}");
+    }
+    let body: hofund_plugin_sdk::json::Value =
+        hofund_plugin_sdk::json::from_slice(calls[0].body()).expect("request body");
+    assert_eq!(body["system"].as_array().map(Vec::len), Some(3));
+    assert_eq!(
+        body["system"][0]["text"],
+        "You are ZCode, an interactive agent"
+    );
+    assert!(
+        body["system"][2]["text"]
+            .as_str()
+            .expect("dynamic prompt")
+            .contains("You are powered by the model named zai-api/GLM-5.3-Flash.")
+    );
+    assert_eq!(body["messages"][0]["role"], "user");
+    assert!(
+        body["messages"][0]["content"][0]["text"]
+            .as_str()
+            .expect("date reminder")
+            .contains("Today's date is")
+    );
+    assert_eq!(
+        body["metadata"]["user_id"]
+            .as_str()
+            .map(|id| id.contains("session_id")),
+        Some(true)
+    );
 }
 
 #[test]
@@ -909,5 +959,47 @@ fn r57b_team_key_is_created_with_the_reference_body_and_version() {
             "{}",
             call.uri()
         );
+    }
+}
+
+#[test]
+fn r57b_start_balance_drives_quota_and_gift_models() {
+    let dir = tempfile::tempdir().expect("dir");
+    let home = dir.path().join(".zcode");
+    write_jwt_only_credentials(&home, "u-jwt-balance");
+    let host = host(&dir);
+    let id =
+        block_on(discover::import(&home, discover::REFERENCE, host.context())).expect("import");
+    let balance = json!({
+        "code": 0,
+        "data": {
+            "server_time": 4_102_444_800_i64,
+            "plans": [{"plan_id": "start", "name": "Start Plan", "status": "active", "starts_at": 1, "ends_at": 4_102_500_000_i64}],
+            "balances": [{
+                "plan_id": "start",
+                "show_name": "GLM-5.3-Flash",
+                "capabilities": ["model:glm-5.3-flash"],
+                "total_units": 1000,
+                "used_units": 250,
+                "remaining_units": 750,
+                "expires_at": 4_102_448_400_i64
+            }]
+        }
+    });
+    host.http().enqueue(balance.to_string().into_bytes());
+    let sub = subscription(&host);
+    let windows = block_on(sub.quota(&id, host.context())).expect("quota");
+    assert!(windows.iter().any(|window| window.used() == 25));
+    host.http().enqueue(balance.to_string().into_bytes());
+    let models = block_on(sub.list_models(&id, host.context())).expect("models");
+    let ids: Vec<&str> = models.models().iter().map(|model| model.id()).collect();
+    assert!(ids.contains(&"GLM-5.3-Flash"));
+    assert!(ids.contains(&"GLM-5.3-Flash-Trial"));
+    let calls = host.http().calls();
+    assert_eq!(calls.len(), 2);
+    for call in calls {
+        assert!(call.uri().contains("app_version=3.17.2"));
+        assert_eq!(call.header("user-agent"), Some("ZCode/3.17.2"));
+        assert!(call.header("x-device-mid").is_some());
     }
 }
