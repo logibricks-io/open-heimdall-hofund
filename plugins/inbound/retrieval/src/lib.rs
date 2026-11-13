@@ -1,7 +1,8 @@
-//! Embeddings, reranking, and speech on the gateway's own address.
+//! Embeddings, reranking, speech, and images on the gateway's own address.
 //!
-//! `POST /v1/embeddings`, `POST /v1/rerank`, and `POST /v1/audio/speech`
-//! take a JSON object that names a `model`. `POST /v1/audio/transcriptions`
+//! `POST /v1/embeddings`, `POST /v1/rerank`, `POST /v1/audio/speech`, and
+//! `POST /v1/images/{generations,edits}` take a JSON object that names a
+//! `model`. `POST /v1/audio/transcriptions`
 //! and `POST /v1/audio/translations` take a `multipart/form-data` form with a
 //! file and a `model` field. The kernel routes the model like a chat and
 //! forwards the body to each provider of the model in turn, with the model
@@ -35,17 +36,21 @@ const TRANSCRIPTIONS: &str = "/v1/audio/transcriptions";
 const TRANSLATIONS: &str = "/v1/audio/translations";
 const SPEECH: &str = "/v1/audio/speech";
 const BARE_SPEECH: &str = "/audio/speech";
+const IMAGES: &str = "/v1/images/generations";
+const IMAGE_EDITS: &str = "/v1/images/edits";
 const JSON: &str = "application/json";
 const MPEG: &str = "audio/mpeg";
 
 static ID: SurfaceId = SurfaceId::from_static("retrieval");
-static ROUTES: [RouteSpec; 6] = [
+static ROUTES: [RouteSpec; 8] = [
     RouteSpec::from_static(Method::Post, EMBEDDINGS),
     RouteSpec::from_static(Method::Post, RERANK),
     RouteSpec::from_static(Method::Post, TRANSCRIPTIONS),
     RouteSpec::from_static(Method::Post, TRANSLATIONS),
     RouteSpec::from_static(Method::Post, SPEECH),
     RouteSpec::from_static(Method::Post, BARE_SPEECH),
+    RouteSpec::from_static(Method::Post, IMAGES),
+    RouteSpec::from_static(Method::Post, IMAGE_EDITS),
 ];
 
 /// The retrieval surface.
@@ -95,6 +100,8 @@ async fn serve(kernel: &dyn Kernel, request: &HttpRequest) -> HttpResponse {
         TRANSCRIPTIONS => audio_call("/audio/transcriptions", request),
         TRANSLATIONS => audio_call("/audio/translations", request),
         SPEECH | BARE_SPEECH => call("/audio/speech", body),
+        IMAGES => call("/images/generations", body),
+        IMAGE_EDITS => call("/images/edits", body),
         _ => return text_response(404, "404 page not found"),
     };
     let call = match call {

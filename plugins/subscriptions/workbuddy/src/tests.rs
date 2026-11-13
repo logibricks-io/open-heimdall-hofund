@@ -80,8 +80,12 @@ fn subscription(
 }
 
 fn seed(host: &TestHost, expires: i64) -> AccountId {
+    seed_site(host, expires, Site::China)
+}
+
+fn seed_site(host: &TestHost, expires: i64, site: Site) -> AccountId {
     let credential = Credential {
-        uid: "uid-cn".to_owned(),
+        uid: format!("uid-{}", site.plugin_id()),
         access: SecretString::from(TOKEN.to_owned()),
         refresh: SecretString::from("wb-refresh-test".to_owned()),
         expires_at: expires,
@@ -89,7 +93,7 @@ fn seed(host: &TestHost, expires: i64) -> AccountId {
         domain: "www.codebuddy.cn".to_owned(),
         token_type: "Bearer".to_owned(),
         label: "wb-user".to_owned(),
-        site: Site::China,
+        site,
         desktop: false,
         api_key: false,
         enterprise_id: String::new(),
@@ -219,10 +223,55 @@ fn a2c_36_desktop_rereads_rotated_token_on_upstream() {
 
 #[test]
 fn a2c_28_models_from_config_json() {
-    let list =
-        crate::models::parse_config(br#"{"models":[{"id":"deepseek-v3","name":"DeepSeek V3"}]}"#)
-            .expect("parse");
+    let list = crate::models::parse_config(
+        br#"{"models":[{"id":"deepseek-v3","name":"DeepSeek V3"}]}"#,
+        Site::China,
+    )
+    .expect("parse");
     assert_eq!(list.models()[0].id(), "deepseek-v3");
+}
+
+#[test]
+fn r55c_model_images_follow_site_and_edit_tags() {
+    let body = br#"{"data":{"models":[
+        {"id":"kimi-k3","supportsImages":true,"maxInputTokens":1000,"maxOutputTokens":100},
+        {"id":"glm-5.3","supportsImages":true},
+        {"id":"hunyuan-image-alpha","tags":["text-to-image"]},
+        {"id":"hunyuan-image-alpha-edit","tags":["image-to-image"]}
+    ]}}"#;
+    let international = crate::models::parse_config(body, Site::International).expect("parse");
+    let kimi = &international.models()[0];
+    assert_eq!(kimi.image_input(), Some(true));
+    assert_eq!(kimi.input_modalities(), ["text", "image"]);
+    assert_eq!(kimi.context(), 1000);
+    assert_eq!(kimi.max_output(), 100);
+    assert_eq!(international.models()[1].image_input(), Some(false));
+    let drawer = &international.models()[2];
+    assert!(drawer.draws());
+    assert_eq!(drawer.image_input(), Some(true));
+    let china = crate::models::parse_config(body, Site::China).expect("parse");
+    assert_eq!(china.models()[1].image_input(), Some(true));
+
+    for site in [Site::China, Site::International] {
+        let declared = crate::models::declared(site);
+        for model in declared.models() {
+            let expected = !(site == Site::International && model.id().starts_with("glm-"));
+            assert_eq!(
+                model.image_input(),
+                Some(expected),
+                "{}:{}",
+                site.plugin_id(),
+                model.id()
+            );
+        }
+    }
+    let declared = crate::models::declared(Site::International);
+    let kimi = declared
+        .models()
+        .iter()
+        .find(|model| model.id() == "kimi-k3")
+        .expect("kimi");
+    assert_eq!(kimi.input_modalities(), ["text", "image"]);
 }
 
 #[test]
@@ -843,5 +892,99 @@ fn r55c_after_tools_prefill_is_not_retried() {
     .err()
     .expect("prefill refused");
     assert_eq!(error.status(), Some(400));
+    assert_eq!(host.http().calls().len(), 1);
+}
+
+#[test]
+fn r55c_image_generation_and_edit_are_plain_json_for_both_sites() {
+    use hofund_plugin_api::RawBody;
+
+    for site in [Site::China, Site::International] {
+        let dir = tempfile::tempdir().expect("dir");
+        let host = host(&dir);
+        let id = seed_site(&host, 4_000_000_000_000, site);
+        let upstream = subscription(&host, None)
+            .upstream(&id, host.context())
+            .expect("upstream");
+        host.http()
+            .enqueue(br#"{"code":0,"msg":"ok","data":{"created":1,"data":[{"b64_json":"aGk="}]}}"#);
+        let answer = block_on(upstream.forward(
+            "/images/generations",
+            RawBody::new(
+                "application/json",
+                br#"{"model":"gpt-image-2.5-sunburst","prompt":"a bird","n":1,"size":"1024x1024","response_format":"url","unknown":true}"#.to_vec(),
+            ),
+        ))
+        .expect("generation");
+        let generated: json::Value = json::from_slice(answer.body()).expect("answer");
+        assert_eq!(generated["data"][0]["b64_json"], "aGk=");
+        let calls = host.http().calls();
+        assert_eq!(calls.len(), 1);
+        let base = endpoints();
+        let base = base.base_for(site);
+        assert_eq!(calls[0].uri(), format!("{base}/v2/images/generations"));
+        assert_eq!(calls[0].header("content-encoding"), None);
+        assert_eq!(calls[0].body()[0], b'{');
+        let sent: json::Value = json::from_slice(calls[0].body()).expect("request");
+        assert_eq!(sent["response_format"], "b64_json");
+        assert!(sent.get("unknown").is_none());
+
+        host.http().enqueue(
+            br#"{"code":0,"data":{"models":[{"id":"hunyuan-image-alpha","tags":["text-to-image"]},{"id":"hunyuan-image-alpha-edit","tags":["image-to-image"]}]}}"#,
+        );
+        host.http().enqueue(
+            br#"{"code":0,"msg":"ok","data":{"created":1,"data":[{"url":"https://image.test/a.png"}]}}"#,
+        );
+        block_on(upstream.forward(
+            "/images/edits",
+            RawBody::new(
+                "application/json",
+                br#"{"model":"hunyuan-image-alpha","prompt":"make it red","n":1,"size":"auto","response_format":"b64_json","image":["data:image/png;base64,aGk="]}"#.to_vec(),
+            ),
+        ))
+        .expect("edit");
+        let calls = host.http().calls();
+        assert_eq!(calls.len(), 3);
+        assert!(calls[1].uri().ends_with("/v3/config"));
+        assert_eq!(calls[2].uri(), format!("{base}/v2/images/edits"));
+        assert_eq!(calls[2].header("content-encoding"), None);
+        let sent: json::Value = json::from_slice(calls[2].body()).expect("request");
+        assert_eq!(sent["model"], "hunyuan-image-alpha-edit");
+        assert_eq!(sent["image"][0], "data:image/png;base64,aGk=");
+        assert!(sent.get("size").is_none());
+        assert!(sent.get("response_format").is_none());
+    }
+}
+
+#[test]
+fn r55c_image_envelope_refusal_and_unsupported_path_are_safe() {
+    use hofund_plugin_api::RawBody;
+
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, 4_000_000_000_000);
+    let upstream = subscription(&host, None)
+        .upstream(&id, host.context())
+        .expect("upstream");
+    host.http()
+        .enqueue(br#"{"code":11101,"msg":"invalid image"}"#);
+    let error = block_on(upstream.forward(
+        "/images/generations",
+        RawBody::new(
+            "application/json",
+            br#"{"model":"gpt-image-2.5-sunburst","prompt":"a bird","n":1}"#.to_vec(),
+        ),
+    ))
+    .expect_err("refused");
+    assert_eq!(error.status(), Some(502));
+    assert!(error.message().contains("invalid image (11101)"));
+    assert!(!error.message().contains(TOKEN));
+
+    let error = block_on(upstream.forward(
+        "/embeddings",
+        RawBody::new("application/json", b"{}".to_vec()),
+    ))
+    .expect_err("unsupported");
+    assert_eq!(error.kind(), PluginErrorKind::Unsupported);
     assert_eq!(host.http().calls().len(), 1);
 }

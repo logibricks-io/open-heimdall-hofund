@@ -71,11 +71,24 @@ pub(crate) fn after_tools_refusal(message: &str) -> bool {
     if lower.contains("must end with a user message") {
         return true;
     }
-    lower.match_indices("11153").any(|(at, _)| {
-        let before = lower[..at].chars().next_back();
-        let after = lower[at + 5..].chars().next();
-        before.is_none_or(|c| !c.is_ascii_digit())
-            && after.is_none_or(|c| !matches!(c, '.' | '0'..='9'))
+    ["\"code\"", "'code'"].into_iter().any(|key| {
+        lower.match_indices(key).any(|(at, _)| {
+            let rest = lower[at + key.len()..].trim_start();
+            let Some(rest) = rest.strip_prefix(':') else {
+                return false;
+            };
+            let rest = rest.trim_start();
+            let rest = rest
+                .strip_prefix('"')
+                .or_else(|| rest.strip_prefix('\''))
+                .unwrap_or(rest);
+            let Some(rest) = rest.strip_prefix("11153") else {
+                return false;
+            };
+            rest.chars()
+                .next()
+                .is_none_or(|c| !matches!(c, '.' | '0'..='9'))
+        })
     })
 }
 
@@ -311,7 +324,6 @@ fn fit_shape(schema: &mut Value, depth: usize) {
     }
     match object.get_mut("required") {
         Some(Value::Array(required)) => required.retain(|item| item.is_string()),
-        Some(Value::Null) => {}
         Some(_) => {
             object.remove("required");
         }
@@ -946,5 +958,6 @@ mod tests {
         ));
         assert!(!after_tools_refusal(r#"{"code":111530}"#));
         assert!(!after_tools_refusal(r#"{"code":11153.0}"#));
+        assert!(!after_tools_refusal(r#"{"requestId":"11153"}"#));
     }
 }

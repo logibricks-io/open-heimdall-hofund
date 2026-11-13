@@ -141,7 +141,7 @@ fn parsed(body: &str) -> Value {
 fn p1_4_01_routes() {
     let routes = Retrieval.routes();
     assert_eq!(Retrieval.id().as_str(), "retrieval");
-    assert_eq!(routes.len(), 6);
+    assert_eq!(routes.len(), 8);
     let pairs: Vec<_> = routes
         .iter()
         .map(|route: &RouteSpec| (route.method(), route.prefix()))
@@ -155,8 +155,36 @@ fn p1_4_01_routes() {
             (Method::Post, "/v1/audio/translations"),
             (Method::Post, "/v1/audio/speech"),
             (Method::Post, "/audio/speech"),
+            (Method::Post, "/v1/images/generations"),
+            (Method::Post, "/v1/images/edits"),
         ]
     );
+}
+
+#[test]
+fn r55c_image_calls_forward_with_the_member_model() {
+    for (public, upstream) in [
+        ("/v1/images/generations", "/images/generations"),
+        ("/v1/images/edits", "/images/edits"),
+    ] {
+        let gateway = Gateway::answering(200, r#"{"data":[{"b64_json":"aGk="}]}"#);
+        let (status, _, body) = ask(
+            &gateway,
+            public,
+            r#"{"model":"route-image","prompt":"a bird","n":1}"#,
+        );
+        assert_eq!(status, 200);
+        assert_eq!(body, r#"{"data":[{"b64_json":"aGk="}]}"#);
+        let seen = gateway.seen();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].0, "route-image");
+        assert_eq!(seen[0].1, upstream);
+        assert_eq!(seen[0].2.content_type(), "application/json");
+        assert_eq!(
+            parsed(std::str::from_utf8(seen[0].2.bytes()).expect("body"))["model"],
+            "vendor-embed"
+        );
+    }
 }
 
 #[test]

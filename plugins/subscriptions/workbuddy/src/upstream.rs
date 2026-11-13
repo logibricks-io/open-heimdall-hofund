@@ -5,8 +5,9 @@ use std::sync::{Arc, Mutex};
 
 use hofund_plugin_api::{
     AccountId, Completion, CredentialStyle, HostContext, PluginError, ProbeQuery, ProbeReport,
-    ProtocolId, Request, Role, UpstreamProvider,
+    ProtocolId, RawAnswer, RawBody, Request, Role, UpstreamProvider,
 };
+use hofund_plugin_sdk::json::{Map, Value};
 use hofund_plugin_sdk::wire::{self, Target};
 
 use crate::Endpoints;
@@ -117,6 +118,68 @@ impl WorkBuddyUpstream {
         .await
         .map_err(crate::errors::classify)
     }
+
+    async fn send_forward(
+        &self,
+        stored: &creds::Stored,
+        path: &str,
+        body: RawBody,
+    ) -> Result<RawAnswer, PluginError> {
+        let body = self.image_body(stored, path, body).await?;
+        let base = self.endpoints.base_for(stored.credential.site);
+        let mut header_rows: Vec<(String, String)> =
+            creds::signed_headers(&stored.credential, base)
+                .into_iter()
+                .filter(|(name, _)| name != "Authorization")
+                .collect();
+        header_rows.extend(creds::chat_headers());
+        let target = Target::new(ProtocolId::OPENAI_CHAT, format!("{base}/v2"))
+            .credential(CredentialStyle::Bearer)
+            .headers(header_rows);
+        let answer = wire::forward(
+            self.host.http(),
+            &target,
+            Some(&stored.credential.access),
+            path,
+            body,
+        )
+        .await
+        .map_err(crate::errors::classify)?;
+        image_answer(answer)
+    }
+
+    async fn image_body(
+        &self,
+        stored: &creds::Stored,
+        path: &str,
+        body: RawBody,
+    ) -> Result<RawBody, PluginError> {
+        let mut object = match hofund_plugin_sdk::json::from_slice::<Value>(body.bytes()) {
+            Ok(Value::Object(object)) => object,
+            _ => {
+                return Err(PluginError::status_error(
+                    400,
+                    "the image body must be a JSON object",
+                ));
+            }
+        };
+        if path == "/images/edits" {
+            let model = object
+                .get("model")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let editor =
+                crate::models::editor(&self.host, Arc::clone(&self.endpoints), stored, &model)
+                    .await?;
+            object.insert("model".to_owned(), Value::String(editor));
+        }
+        shape_image(&mut object, path == "/images/edits");
+        Ok(RawBody::new(
+            "application/json",
+            Value::Object(object).to_string(),
+        ))
+    }
 }
 
 #[hofund_plugin_sdk::async_trait]
@@ -145,6 +208,22 @@ impl UpstreamProvider for WorkBuddyUpstream {
         }
     }
 
+    async fn forward(&self, path: &str, body: RawBody) -> Result<RawAnswer, PluginError> {
+        if !matches!(path, "/images/generations" | "/images/edits") {
+            return Err(PluginError::unsupported(format!(
+                "this upstream does not serve {path}"
+            )));
+        }
+        let stored = self.stored(false).await?;
+        match self.send_forward(&stored, path, body.clone()).await {
+            Err(error) if error.status() == Some(401) => {
+                let renewed = self.stored(true).await?;
+                self.send_forward(&renewed, path, body).await
+            }
+            other => other,
+        }
+    }
+
     async fn probe(&self, query: &ProbeQuery) -> Result<ProbeReport, PluginError> {
         let completion = self
             .execute(query.minimal_request(), query.protocol())
@@ -164,4 +243,76 @@ fn needs_reply_after_tools(request: &Request) -> bool {
         return users && message.role == Role::Tool;
     }
     false
+}
+
+fn shape_image(object: &mut Map<String, Value>, edit: bool) {
+    let model = object
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let gpt = model.to_ascii_lowercase().contains("gpt-image");
+    let mut shaped = Map::new();
+    for key in ["model", "prompt", "n"] {
+        if let Some(value) = object.get(key) {
+            shaped.insert(key.to_owned(), value.clone());
+        }
+    }
+    if let Some(size) = object.get("size").and_then(Value::as_str)
+        && (gpt || size != "auto")
+    {
+        shaped.insert("size".to_owned(), Value::String(size.to_owned()));
+    }
+    if gpt {
+        for key in ["quality", "background", "output_format"] {
+            if let Some(value) = object.get(key).and_then(Value::as_str)
+                && !value.is_empty()
+            {
+                shaped.insert(key.to_owned(), Value::String(value.to_owned()));
+            }
+        }
+        shaped.insert(
+            "response_format".to_owned(),
+            Value::String("b64_json".to_owned()),
+        );
+    }
+    if edit {
+        if let Some(images) = object.get("image") {
+            shaped.insert("image".to_owned(), images.clone());
+        }
+        if gpt && let Some(mask) = object.get("mask") {
+            shaped.insert("mask".to_owned(), mask.clone());
+        }
+    }
+    *object = shaped;
+}
+
+fn image_answer(answer: RawAnswer) -> Result<RawAnswer, PluginError> {
+    let Ok(Value::Object(object)) = hofund_plugin_sdk::json::from_slice::<Value>(answer.body())
+    else {
+        return Ok(answer);
+    };
+    let Some(code) = object.get("code") else {
+        return Ok(answer);
+    };
+    let code_text = match code {
+        Value::Number(number) => number.to_string(),
+        Value::String(text) => text.clone(),
+        _ => return Ok(answer),
+    };
+    if code_text != "0" {
+        let message = object.get("msg").and_then(Value::as_str).unwrap_or("error");
+        return Err(PluginError::status_error(
+            502,
+            format!("{message} ({code_text})"),
+        ));
+    }
+    let Some(data) = object.get("data").filter(|data| data.is_object()) else {
+        return Ok(answer);
+    };
+    Ok(RawAnswer::new(
+        answer.status(),
+        answer.content_type().map(str::to_owned),
+        data.to_string(),
+    ))
 }
