@@ -19,13 +19,13 @@ path = "src/main.rs"
 crossterm = { workspace = true, features = ["event-stream"] }
 hofund-config = { workspace = true }
 hofund-control-client = { workspace = true }
+hofund-control-proto = { workspace = true }
 hofund-secrets = { workspace = true }
 ratatui = { workspace = true }
 futures-util = "0.3.31"
 tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread", "sync", "time", "process", "io-util"] }
 
 [dev-dependencies]
-hofund-control-proto = { workspace = true }
 http = "1.5.0"
 http-body-util = "0.1.5"
 hyper = { version = "1.12.0", features = ["server", "http1"] }

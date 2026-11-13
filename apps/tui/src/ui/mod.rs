@@ -45,6 +45,10 @@ fn draw_body(app: &App, area: Rect, buf: &mut Buffer, theme: &Theme) {
         app.agents.draw(area, buf, theme);
         return;
     }
+    if app.page == crate::state::PageId::Sessions {
+        app.pages.sessions().draw_body(area, buf, theme);
+        return;
+    }
     app.pages.page(app.page).draw_body(area, buf, theme);
 }
 
@@ -149,7 +153,7 @@ fn draw_footer(app: &App, area: Rect, buf: &mut Buffer, theme: &Theme) {
             crate::state::PageId::Routing => "↑↓  group  1–6  pages  r  reload  ?  help  q  quit",
             crate::state::PageId::Usage => "←→  period  1–6  pages  r  reload  ?  help  q  quit",
             crate::state::PageId::Sessions => {
-                "↑↓  session  1–6  pages  r  reload  ?  help  q  quit"
+                "↑↓  session  ←→  range  s  stats  ↵  resume  M/f  filter  1–6  r  reload  q  quit"
             }
             crate::state::PageId::Library => "↑↓  item  1–6  pages  r  reload  ?  help  q  quit",
         }
