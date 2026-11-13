@@ -86,8 +86,10 @@ fn quota_open_gap_retry_cap_and_fresh_reload() {
         unreachable!()
     };
 
-    let mut deferred = QuotaResponse::default();
-    deferred.data = vec![quota(true)];
+    let deferred = QuotaResponse {
+        data: vec![quota(true)],
+        ..QuotaResponse::default()
+    };
     app.apply_session(SessionOutcome::Quotas {
         token,
         result: Ok(deferred.clone()),
@@ -287,17 +289,18 @@ fn quota_intent(intents: Vec<ControlIntent>) -> ControlIntent {
 }
 
 fn quota(deferred: bool) -> Quota {
-    let mut quota = Quota::default();
-    quota.provider = "one".to_owned();
-    quota.name = "Account".to_owned();
-    quota.read_deferred = deferred;
-    quota.windows = vec![QuotaSpan {
-        name: "weekly".to_owned(),
-        used: 40.0,
-        remaining: 60.0,
-        ..QuotaSpan::default()
-    }];
-    quota
+    Quota {
+        provider: "one".to_owned(),
+        name: "Account".to_owned(),
+        read_deferred: deferred,
+        windows: vec![QuotaSpan {
+            name: "weekly".to_owned(),
+            used: 40.0,
+            remaining: 60.0,
+            ..QuotaSpan::default()
+        }],
+        ..Quota::default()
+    }
 }
 
 fn usage_response() -> UsageResponse {
@@ -437,20 +440,26 @@ fn response_for(method: &http::Method, path: &str, body: &Value) -> Value {
             serde_json::to_value(settings).expect("settings")
         }
         ("GET", "/v1/hofund/quotas") => {
-            let mut quotas = QuotaResponse::default();
-            quotas.data = vec![quota(!path.contains("kept=1"))];
+            let quotas = QuotaResponse {
+                data: vec![quota(!path.contains("kept=1"))],
+                ..QuotaResponse::default()
+            };
             serde_json::to_value(quotas).expect("quotas")
         }
         ("GET", "/v1/hofund/quotas/alerts") => {
-            let mut alerts = QuotaAlertsResponse::default();
-            alerts.usage_alert = 80;
-            alerts.balance_alert = 5.0;
+            let alerts = QuotaAlertsResponse {
+                usage_alert: 80,
+                balance_alert: 5.0,
+                ..QuotaAlertsResponse::default()
+            };
             serde_json::to_value(alerts).expect("alerts")
         }
         ("POST", "/v1/hofund/quotas/alerts/settings") => {
-            let mut alerts = QuotaAlertsSetResponse::default();
-            alerts.usage_alert = body["usageAlert"].as_u64().unwrap_or(80) as u8;
-            alerts.balance_alert = body["balanceAlert"].as_f64().unwrap_or(5.0);
+            let alerts = QuotaAlertsSetResponse {
+                usage_alert: body["usageAlert"].as_u64().unwrap_or(80) as u8,
+                balance_alert: body["balanceAlert"].as_f64().unwrap_or(5.0),
+                ..QuotaAlertsSetResponse::default()
+            };
             serde_json::to_value(alerts).expect("alerts")
         }
         ("GET", "/v1/hofund/checkins") => {

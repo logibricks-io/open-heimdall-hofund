@@ -542,9 +542,12 @@ impl App {
                 self.finish_pending();
                 match result {
                     Ok(response) => {
-                        let mut alerts = hofund_control_client::hofund_control_proto::QuotaAlertsResponse::default();
-                        alerts.usage_alert = response.usage_alert;
-                        alerts.balance_alert = response.balance_alert;
+                        let alerts =
+                            hofund_control_client::hofund_control_proto::QuotaAlertsResponse {
+                                version: response.version,
+                                usage_alert: response.usage_alert,
+                                balance_alert: response.balance_alert,
+                            };
                         self.pages.usage_mut().apply_alerts(alerts);
                         self.set_flash_ttl("saved quota alerts", true);
                     }
