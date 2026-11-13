@@ -3,10 +3,12 @@
 use hofund_control_client::hofund_control_proto::{
     API_VERSION, AgentAction, AgentConnectRequest, AgentDisconnectRequest, AgentHiddenSetRequest,
     AgentModelRequest, AgentModelsResponse, AgentPickedOnlyRequest, AgentPlanRequest,
-    AgentStatusEntry, AgentSummary, CatalogSyncRequest, ModelEntry, PicksResponse, PicksSetRequest,
-    PresetEntry, ProfileRenameRequest, ProfileSummary, ProviderCreateRequest,
-    ProviderDeleteRequest, ProviderKey, ProviderKeyAction, ProviderKeyRequest,
-    ProviderPatchRequest, ProviderSummary, ProviderTestRequest, QuotaKind, QuotaQuery,
+    AgentStatusEntry, AgentSummary, CatalogSyncRequest, GroupDeleteRequest, GroupDeleteResponse,
+    GroupListResponse, GroupMemberCandidatesResponse, GroupRestoreRequest, GroupWriteResponse,
+    ModelEntry, PicksResponse, PicksSetRequest, PresetEntry, ProfileRenameRequest, ProfileSummary,
+    ProviderCreateRequest, ProviderDeleteRequest, ProviderKey, ProviderKeyAction,
+    ProviderKeyRequest, ProviderPatchRequest, ProviderSummary, ProviderTestRequest, QuotaKind,
+    QuotaQuery, RouteListResponse, RouteQuery, SessionRouteResponse, UnroutedListResponse,
 };
 use hofund_control_client::{Client, ClientError};
 
@@ -51,6 +53,17 @@ pub struct PlanView {
     pub revision: String,
     /// Redacted change lines.
     pub lines: Vec<String>,
+}
+
+/// All reads shown by the Routing route panel.
+#[derive(Clone, Debug)]
+pub struct RouteSnapshot {
+    /// Recent routing decisions.
+    pub routes: RouteListResponse,
+    /// Latest decision for the first listed session, when one exists.
+    pub session: Option<SessionRouteResponse>,
+    /// Requests waiting before routing.
+    pub unrouted: UnroutedListResponse,
 }
 
 /// Fields a finished mutation may update.
@@ -159,6 +172,43 @@ pub enum SessionOutcome {
         /// Plan, or a redacted error.
         result: Result<PlanView, String>,
     },
+    /// Routing group list.
+    Groups {
+        /// Read generation.
+        generation: u64,
+        /// Group list and disk revision, or a redacted error.
+        result: Result<GroupListResponse, String>,
+    },
+    /// Member or classifier candidates.
+    GroupCandidates {
+        /// Picker read token.
+        token: u64,
+        /// Candidate lists, or a redacted error.
+        result: Result<GroupMemberCandidatesResponse, String>,
+    },
+    /// Route panel reads.
+    RouteView {
+        /// Read generation.
+        generation: u64,
+        /// Route panel data, or a redacted error.
+        result: Result<RouteSnapshot, String>,
+    },
+    /// A group create, patch, or restore finished.
+    GroupWrite {
+        /// Group id before an optional rename; empty for create.
+        id: String,
+        /// Success toast.
+        success: String,
+        /// Write response, or a redacted error.
+        result: Result<GroupWriteResponse, String>,
+    },
+    /// A group delete finished.
+    GroupDelete {
+        /// Group id.
+        id: String,
+        /// Delete response, or a redacted error.
+        result: Result<GroupDeleteResponse, String>,
+    },
     /// A mutation finished.
     Finished(Finished),
     /// Catalog sync finished.
@@ -229,6 +279,29 @@ impl ControlIntent {
             Self::PlanAgent { agent, action } => SessionOutcome::Plan {
                 agent: agent.clone(),
                 action: *action,
+                result: Err(message),
+            },
+            Self::LoadGroups { generation } => SessionOutcome::Groups {
+                generation: *generation,
+                result: Err(message),
+            },
+            Self::LoadGroupCandidates { token } => SessionOutcome::GroupCandidates {
+                token: *token,
+                result: Err(message),
+            },
+            Self::LoadRouteView { generation } => SessionOutcome::RouteView {
+                generation: *generation,
+                result: Err(message),
+            },
+            Self::CreateGroup { .. } | Self::PatchGroup { .. } | Self::RestoreGroup { .. } => {
+                SessionOutcome::GroupWrite {
+                    id: String::new(),
+                    success: String::new(),
+                    result: Err(message),
+                }
+            }
+            Self::DeleteGroup { id, .. } => SessionOutcome::GroupDelete {
+                id: id.clone(),
                 result: Err(message),
             },
             Self::CatalogSync { .. } => SessionOutcome::Catalog(Err(message)),
@@ -483,6 +556,64 @@ pub async fn execute(client: &Client, intent: ControlIntent) -> SessionOutcome {
                 Err(error) => finished(explain(error, None), false, false, false, None),
             }
         }
+        ControlIntent::LoadGroups { generation } => SessionOutcome::Groups {
+            generation,
+            result: client.groups().await.map_err(|error| explain(error, None)),
+        },
+        ControlIntent::LoadGroupCandidates { token } => SessionOutcome::GroupCandidates {
+            token,
+            result: client
+                .group_member_candidates()
+                .await
+                .map_err(|error| explain(error, None)),
+        },
+        ControlIntent::LoadRouteView { generation } => SessionOutcome::RouteView {
+            generation,
+            result: load_route_view(client).await,
+        },
+        ControlIntent::CreateGroup { request } => {
+            let success = format!("created group {}", request.name);
+            let result = client
+                .create_group(&request)
+                .await
+                .map_err(|error| explain(error, None));
+            SessionOutcome::GroupWrite {
+                id: String::new(),
+                success,
+                result,
+            }
+        }
+        ControlIntent::PatchGroup { id, request } => {
+            let result = client
+                .patch_group(&id, &request)
+                .await
+                .map_err(|error| explain(error, None));
+            SessionOutcome::GroupWrite {
+                success: format!("saved {id}"),
+                id,
+                result,
+            }
+        }
+        ControlIntent::RestoreGroup { id, revision } => {
+            let request = GroupRestoreRequest::new(revision);
+            let result = client
+                .restore_group(&id, &request)
+                .await
+                .map_err(|error| explain(error, None));
+            SessionOutcome::GroupWrite {
+                success: format!("restored {id}"),
+                id,
+                result,
+            }
+        }
+        ControlIntent::DeleteGroup { id, revision } => {
+            let request = GroupDeleteRequest::new(revision);
+            let result = client
+                .delete_group(&id, &request)
+                .await
+                .map_err(|error| explain(error, None));
+            SessionOutcome::GroupDelete { id, result }
+        }
         ControlIntent::CatalogSync { force } => {
             match client.sync_catalog(&CatalogSyncRequest::new(force)).await {
                 Ok(response) if response.ok => SessionOutcome::Catalog(Ok(())),
@@ -539,6 +670,35 @@ async fn load_agents(client: &Client) -> Result<AgentSnapshot, String> {
     Ok(AgentSnapshot {
         agents: agents.agents,
         status: status.agents,
+    })
+}
+
+async fn load_route_view(client: &Client) -> Result<RouteSnapshot, String> {
+    let routes = client
+        .route_decisions(RouteQuery::default())
+        .await
+        .map_err(|error| explain(error, None))?;
+    let unrouted = client
+        .route_unrouted()
+        .await
+        .map_err(|error| explain(error, None))?;
+    let session = match routes
+        .decisions
+        .iter()
+        .find(|decision| !decision.session.is_empty())
+    {
+        Some(decision) => Some(
+            client
+                .route_session(&decision.session, RouteQuery::default())
+                .await
+                .map_err(|error| explain(error, None))?,
+        ),
+        None => None,
+    };
+    Ok(RouteSnapshot {
+        routes,
+        session,
+        unrouted,
     })
 }
 

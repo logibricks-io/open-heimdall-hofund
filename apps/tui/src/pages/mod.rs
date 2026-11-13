@@ -4,6 +4,7 @@ mod agents;
 mod frame;
 mod probe;
 mod providers;
+pub mod routing;
 pub mod sessions;
 mod status;
 
@@ -11,6 +12,7 @@ pub use agents::AgentPage;
 pub use frame::PageShell;
 pub use probe::{ProbeOutcome, apply_probe_to_shell, read_path};
 pub use providers::ProviderPage;
+pub use routing::RoutingPage;
 pub use sessions::SessionsPage;
 
 use hofund_control_proto::SessionResume;
@@ -64,7 +66,7 @@ pub enum PageKeyOutcome {
 pub struct Pages {
     agents: PageShell,
     providers: PageShell,
-    routing: PageShell,
+    routing: RoutingPage,
     usage: PageShell,
     sessions: SessionsPage,
     library: PageShell,
@@ -75,7 +77,7 @@ impl Default for Pages {
         Self {
             agents: PageShell::new(PageId::Agents, "No agents loaded yet."),
             providers: PageShell::new(PageId::Providers, "No providers loaded yet."),
-            routing: PageShell::new(PageId::Routing, "No routing groups loaded yet."),
+            routing: RoutingPage::new(),
             usage: PageShell::new(PageId::Usage, "No usage loaded yet."),
             sessions: SessionsPage::new(),
             library: PageShell::new(PageId::Library, "Loading library…"),
@@ -89,10 +91,9 @@ impl Pages {
         match id {
             PageId::Agents => Some(&mut self.agents),
             PageId::Providers => Some(&mut self.providers),
-            PageId::Routing => Some(&mut self.routing),
             PageId::Usage => Some(&mut self.usage),
             PageId::Library => Some(&mut self.library),
-            PageId::Sessions => None,
+            PageId::Routing | PageId::Sessions => None,
         }
     }
 
@@ -107,10 +108,21 @@ impl Pages {
         &self.sessions
     }
 
+    /// Mutable Routing page.
+    pub fn routing_mut(&mut self) -> &mut RoutingPage {
+        &mut self.routing
+    }
+
+    /// Immutable Routing page.
+    #[must_use]
+    pub fn routing(&self) -> &RoutingPage {
+        &self.routing
+    }
+
     /// Mutable page by id (shell pages only).
     pub fn mut_page(&mut self, id: PageId) -> &mut PageShell {
         self.mut_shell(id)
-            .expect("sessions page is not a PageShell; use sessions_mut")
+            .expect("dedicated page is not a PageShell; use its accessor")
     }
 
     /// Draws a page as a trait object.
@@ -132,11 +144,10 @@ impl Pages {
         match id {
             PageId::Agents => &self.agents,
             PageId::Providers => &self.providers,
-            PageId::Routing => &self.routing,
             PageId::Usage => &self.usage,
             PageId::Library => &self.library,
-            PageId::Sessions => {
-                panic!("sessions page is SessionsPage; use page_dyn or sessions")
+            PageId::Routing | PageId::Sessions => {
+                panic!("dedicated page is not a PageShell; use its accessor")
             }
         }
     }
