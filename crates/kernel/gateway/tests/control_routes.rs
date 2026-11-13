@@ -227,6 +227,10 @@ impl ControlState for FakeControlState {
         ))
     }
 
+    fn library(&self) -> ControlFuture<'_, hofund_control_proto::LibraryResponse> {
+        self.reply("library")
+    }
+
     fn sessions(
         &self,
         query: SessionListQuery,
@@ -634,6 +638,7 @@ fn operation_routes() -> Vec<(Method, &'static str, Vec<u8>)> {
             "/v1/hofund/config/reload",
             json!(&ReloadRequest::new("0".repeat(64))),
         ),
+        (Method::GET, "/v1/hofund/library", Vec::new()),
     ]
 }
 
@@ -762,6 +767,7 @@ async fn control_routes_success_and_error_envelopes_against_fake_state() {
             "config_validate",
             "config_apply",
             "config_reload",
+            "library",
         ],
         "each control route must dispatch to its own handler"
     );

@@ -178,6 +178,7 @@ impl App {
         let read_gen = self.generation;
         match self.page {
             PageId::Sessions => self.pages.sessions_mut().reload(read_gen),
+            PageId::Library => self.pages.library_mut().reload(read_gen),
             PageId::Accounts => self.pages.accounts_mut().reload(read_gen),
             PageId::Routing => self.pages.routing_mut().reload(read_gen),
             PageId::Usage => self.pages.usage_mut().reload(read_gen),
@@ -356,6 +357,10 @@ impl App {
         if self.page == PageId::Sessions {
             let outcome = self.pages.sessions_mut().on_key(key);
             return self.apply_sessions_outcome(outcome);
+        }
+        if self.page == PageId::Library {
+            let _ = self.pages.library_mut().on_key(key);
+            return AppAction::None;
         }
         if self.page == PageId::Accounts {
             let action = self.pages.accounts_mut().on_accounts_key(key);

@@ -38,7 +38,6 @@ impl PageShell {
     pub fn set_not_in_build(&mut self, _value: bool) {
         self.message = match self.id {
             PageId::Sessions => "Sessions are not in this build yet.".to_owned(),
-            PageId::Library => "Library is not in this build yet.".to_owned(),
             _ => self.message.clone(),
         };
     }
@@ -117,12 +116,7 @@ impl Page for PageShell {
     }
 
     fn draw_body(&self, area: Rect, buf: &mut Buffer, theme: &Theme) {
-        let min_rows = match self.id {
-            PageId::Library => 4,
-            PageId::Agents => 3,
-            _ => 3,
-        };
-        let window = list_window(area.height, min_rows, self.rows.len(), self.cursor);
+        let window = list_window(area.height, 3, self.rows.len(), self.cursor);
         let mut lines: Vec<Line<'static>> = Vec::new();
         if self.rows.is_empty() {
             lines.push(Line::from(Span::styled(
