@@ -10,14 +10,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Documentation honesty for the v0.2.0 freeze (Must #11, #274):
-  `docs/feature-parity.md` snapshot and Summary counts now match the Matrix
+  `docs/feature-parity.md` snapshot and Summary counts match the Matrix
   (an xtask invariant refuses drift); README, CLI help, and subscription crate
-  docs describe what `main` actually serves versus unmerged open work. Cursor
-  and Claude Code request serving, and Devin chat, are not claimed as shipped.
-  Kiro is documented as unary text-only. Zed's POST `/completions` path on
-  `main` is documented. A truncated A-2c Unreleased bullet is closed so it no
-  longer contradicts R-16. Later Unreleased `### Added` blocks stay in
-  historical order so existing bullets do not move.
+  docs describe what `main` actually serves. Cursor R-8/R-9, Claude Code bridge
+  H8, and Devin R-12/R-13 request serving are on `main` (mocks only; real-account
+  smoke is still outstanding). Sessions R-29–R-34 and the R-44 TUI Sessions page,
+  and the R-14 TUI Providers/Agents pages, are on `main`. Library writes and true
+  4.2–4.4 recording/MCP execution remain unlanded. v0.2.0 is not tagged.
+- R-22: LAN allow list and trusted proxy. Top-level `allow_ips` (IPs and CIDRs)
+  and `trust_proxy`, overridable by `HOFUND_ALLOW_IPS` / `HOFUND_TRUST_PROXY`;
+  non-listed peers get a JSON 403 before authentication, loopback is always
+  allowed, a malformed environment list fails closed to loopback only, and
+  apply/reload replace the settings without a restart. `hofund status` shows
+  the effective list.
+- R-6g: Claude Code bridge error mapping and a vendor-neutral
+  `skip_failover_same_plugin` flag so a room-full 503 skips later members of
+  the same plugin only. Sign-in lapses, extra-usage 400s, too-long prompts,
+  quota-shaped results, and process crashes map to `PluginError` without
+  cooling the account where the reference does not. Real-account smoke stays
+  on #304.
+- R-21: `hofund uninstall [--yes] [--purge]` restores every managed agent through
+  non-force disconnect, refuses to run beside a live daemon, and optionally
+  removes only hofund's resolved config, credential, usage, and state paths.
+  Release and README documentation cover deleting the two installed binaries.
 
 - R-16: Zed subscription upstream via POST `/completions` (provider envelope,
   NDJSON event unwrap, unary fold), model-token refresh with stale headers,
@@ -138,6 +153,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Z Code subscription (R-57): refresh re-imports hold the account lease and keep
+  a team seat lapsed when its refused business token is unchanged, while a
+  rotated token recovers it; malformed relative agent credential paths fail
+  closed, team accounts have separate labels, and code 3012 reports the
+  risk-control support hint with a two-hour cooldown.
 - Claude subscription (R-5 fix round 3): `/usage` reset times use
   `hofund-plugin-sdk::time::zone` (zones, yearless dates, time-only resets);
   the Claude plugin reads `catalog/models.dev.json` beside the data root

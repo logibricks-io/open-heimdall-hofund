@@ -33,6 +33,11 @@ pub enum StreamEvent {
     MessageStop(MessageStop),
     /// A keep-alive with no content.
     Ping(Ping),
+    /// The provider is still working, with no new content yet.
+    ///
+    /// Unlike [`Ping`], this event commits a held stream so a client hears
+    /// that the provider is alive during a long think phase.
+    StillWorking(StillWorking),
     /// An event name this version does not model.
     Unknown(UnknownEvent),
 }
@@ -201,6 +206,18 @@ pub struct Ping {
     pub extensions: Extensions,
 }
 
+/// Neutral signal that the provider is still working.
+///
+/// Analogous to the reference `KAlive`. Encoders map this to a protocol
+/// keepalive (a throttled Messages `ping`, a Chat Completions SSE comment,
+/// or a repeated Responses `response.in_progress`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct StillWorking {
+    /// Fields this version does not model.
+    #[serde(default, skip_serializing_if = "Extensions::is_empty")]
+    pub extensions: Extensions,
+}
+
 /// An event this version does not model.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct UnknownEvent {
@@ -229,6 +246,7 @@ impl StreamEvent {
             Self::MessageDelta(event) => Some(&event.extensions),
             Self::MessageStop(event) => Some(&event.extensions),
             Self::Ping(event) => Some(&event.extensions),
+            Self::StillWorking(event) => Some(&event.extensions),
             Self::Unknown(_) => None,
         }
     }
@@ -256,6 +274,7 @@ impl StreamEvent {
             }
             Self::MessageStop(event) => event.extensions.clear(),
             Self::Ping(event) => event.extensions.clear(),
+            Self::StillWorking(event) => event.extensions.clear(),
             Self::Unknown(event) => {
                 event.payload = serde_json::Value::Null;
             }

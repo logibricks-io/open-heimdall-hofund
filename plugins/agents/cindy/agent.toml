@@ -1,0 +1,6 @@
+id = "cindy"
+display_name = "Cindy"
+binary = "cindy"
+
+# Session reader only. Connect file slots are not declared yet.
+# A file-less agent.toml is not compiled into the shipped connect catalog.

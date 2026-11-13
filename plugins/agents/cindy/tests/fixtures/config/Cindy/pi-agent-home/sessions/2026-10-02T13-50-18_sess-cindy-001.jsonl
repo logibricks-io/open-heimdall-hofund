@@ -1,0 +1,3 @@
+{"type":"session","version":3,"id":"sess-cindy-001","timestamp":"2026-10-02T13:50:18.588Z","cwd":"/workspace/demo"}
+{"type":"message","timestamp":"2026-10-02T13:50:38.712Z","message":{"role":"user","content":[{"type":"text","text":"Ship the cindy reader"}]}}
+{"type":"message","timestamp":"2026-10-02T13:50:40.407Z","message":{"role":"assistant","model":"demo-model","usage":{"input":100,"output":50,"cacheRead":10,"cacheWrite":5}}}

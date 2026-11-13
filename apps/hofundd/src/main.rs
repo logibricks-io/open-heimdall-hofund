@@ -19,7 +19,7 @@ use std::sync::Arc;
 use tracing::level_filters::LevelFilter;
 
 use hofund_daemon::{
-    DaemonError, StartOptions, Termination, TolerantWriter, finish, serve_until_signal,
+    DaemonError, Signals, StartOptions, Termination, TolerantWriter, finish, serve_until_signals,
     start_linked, user_config_path,
 };
 
@@ -32,6 +32,7 @@ Usage: hofundd [--config <path>]
        hofundd accounts [--config <path>] switch <agent> <next|account>
        hofundd accounts [--config <path>] import <file>
        hofundd accounts [--config <path>] discover [--add]
+       hofundd accounts [--config <path>] project <gemini|antigravity> <email> <gcp-project-id>
 
 Serves the configuration until a termination signal, with local control
 enabled. Without --config, HOFUND_CONFIG or the per-user default is used.
@@ -115,6 +116,15 @@ fn say(mut sink: impl Write, line: &str) {
 
 fn main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    if args.first().and_then(|word| word.to_str()) == Some(hofund_bridge_mcp::SUBCOMMAND) {
+        return match hofund_bridge_mcp::run_stdio(&args[1..]) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                say(stderr(), &format!("hofundd: {error}"));
+                ExitCode::FAILURE
+            }
+        };
+    }
     match parse(&args) {
         Ok(Command::Help) => {
             say(TolerantWriter(io::stdout()), USAGE.trim_end());
@@ -213,11 +223,13 @@ fn serve(path: &Path) -> ExitCode {
             ..StartOptions::default()
         };
         let running = start_linked(path, Arc::new(registry::LinkedRegistry), options).await?;
+        // Handlers first: a SIGTERM sent on reading the notice must drain.
+        let signals = Signals::register();
         say(
             stderr(),
             &format!("listening on http://{}", running.local_addr),
         );
-        Ok::<Termination, DaemonError>(serve_until_signal(running).await)
+        Ok::<Termination, DaemonError>(serve_until_signals(running, signals).await)
     });
     // Background tasks end here, before a signal is re-raised.
     drop(runtime);
@@ -269,6 +281,14 @@ mod tests {
         assert_eq!(
             parse(&args(&["subscription", "--help"])),
             Ok(Command::SubscriptionHelp)
+        );
+    }
+
+    #[test]
+    fn hidden_bridge_mcp_subcommand_is_not_in_usage() {
+        assert!(
+            !USAGE.contains("bridge-mcp-stdio"),
+            "the helper subcommand must stay hidden from usage"
         );
     }
 

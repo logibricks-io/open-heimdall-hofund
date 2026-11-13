@@ -2,29 +2,36 @@
 //! Subscription chat is not implemented.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use hofund_plugin_api::{
-    AccountId, AccountStatus, AgentSignIn, BinaryName, BuildError, ConfigError, HostContext,
-    ModelList, PluginError, PluginId, QuotaWindow, RawTable, Schema, SignInChallenge, SignInCtx,
-    SignInFlow, SignInFlowKind, SignInProof, Subscription, SubscriptionFactory, SubscriptionSpec,
-    UpstreamProvider, ValidConfig,
+    AccountId, AccountStatus, AgentSignIn, BuildError, ConfigError, HostContext, LoopbackSpec,
+    ModelList, PluginError, PluginId, QuotaWindow, RawTable, RedirectHost, Schema, SignInChallenge,
+    SignInCtx, SignInFlow, SignInFlowKind, SignInProof, Subscription, SubscriptionFactory,
+    SubscriptionSpec, UpstreamProvider, ValidConfig,
 };
 use hofund_plugin_sdk::Contribution;
+use hofund_plugin_sdk::oauth::{constant_time_eq, secret_text};
 
 mod agent_sign_in;
+mod catalog;
+mod cli;
+mod connect;
 mod creds;
 mod discover;
+mod errors;
 mod models;
+mod quota;
+mod sign_in;
+mod snapshot_families;
+mod stream;
 mod upstream;
-
-pub(crate) const COMMAND: BinaryName = BinaryName::new("devin");
 
 static SPEC: SubscriptionSpec = SubscriptionSpec::from_static(
     PluginId::from_static("devin"),
     "Devin",
-    SignInFlowKind::Bridge,
+    SignInFlowKind::Pkce,
 )
 .with_agent_sign_in(AgentSignIn::new(
     &["devin"],
@@ -73,7 +80,7 @@ impl SubscriptionFactory for DevinFactory {
         _host: &HostContext,
     ) -> Result<Arc<dyn Subscription>, BuildError> {
         Ok(Arc::new(Devin {
-            flow: SignInFlow::Bridge { command: COMMAND },
+            flow: SignInFlow::Pkce,
             pending: Mutex::new(HashMap::new()),
         }))
     }
@@ -81,11 +88,11 @@ impl SubscriptionFactory for DevinFactory {
 
 struct Devin {
     flow: SignInFlow,
-    pending: Mutex<HashMap<String, PathBuf>>,
+    pending: Mutex<HashMap<String, sign_in::Pending>>,
 }
 
 impl Devin {
-    fn take_pending(&self, session: &str) -> Option<PathBuf> {
+    fn take_pending(&self, session: &str) -> Option<sign_in::Pending> {
         self.pending
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -106,25 +113,36 @@ impl Subscription for Devin {
     async fn start_sign_in(
         &self,
         ctx: &SignInCtx,
-        _host: &HostContext,
+        host: &HostContext,
     ) -> Result<SignInChallenge, PluginError> {
         drop(self.take_pending(ctx.session()));
-        let path = creds::default_credentials_path()?;
-        let credential = creds::read_credentials(&path).map_err(|error| {
-            PluginError::auth(format!(
-                "Devin is not signed in at {}; {}",
-                path.display(),
-                error.message()
-            ))
-        })?;
+        host.loopback().release(ctx);
+        let (pkce, state) = sign_in::generate()?;
+        let spec = LoopbackSpec::ephemeral()
+            .path("/callback")
+            .redirect_host(RedirectHost::Ipv4)
+            .expect_state(state.clone());
+        let binding = host.loopback().bind(ctx, &spec)?;
+        let redirect_uri = binding.redirect_uri().to_owned();
+        let url = match sign_in::authorize(&redirect_uri, &pkce, &state) {
+            Ok(url) => url,
+            Err(error) => {
+                host.loopback().release(ctx);
+                return Err(error);
+            }
+        };
         self.pending
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(ctx.session().to_owned(), path);
-        let _ = credential;
-        SignInChallenge::instructions(
-            "Devin is signed in in the CLI; confirm to import its credentials.",
-        )
+            .insert(
+                ctx.session().to_owned(),
+                sign_in::Pending {
+                    verifier: pkce.verifier,
+                    state,
+                    redirect_uri,
+                },
+            );
+        SignInChallenge::open_url(url)
     }
 
     async fn complete_sign_in(
@@ -133,26 +151,43 @@ impl Subscription for Devin {
         proof: SignInProof,
         host: &HostContext,
     ) -> Result<AccountId, PluginError> {
-        let SignInProof::Await = proof else {
-            return Err(PluginError::config(
-                "Devin sign-in completes once the CLI credentials are imported",
-            ));
-        };
-        let Some(path) = self.take_pending(ctx.session()) else {
+        let pending = self.take_pending(ctx.session());
+        host.loopback().release(ctx);
+        let Some(pending) = pending else {
             return Err(PluginError::config(
                 "no Devin sign-in is in progress for this session",
             ));
         };
-        let credential = creds::read_credentials(&path)?;
+        let SignInProof::Callback { code, state } = proof else {
+            return Err(PluginError::config(
+                "Devin sign-in completes from the browser callback",
+            ));
+        };
+        if secret_text(&code).is_empty() {
+            return Err(PluginError::config("the sign-in callback has no code"));
+        }
+        if !constant_time_eq(state.as_bytes(), pending.state.as_bytes()) {
+            return Err(PluginError::auth(
+                "the sign-in callback does not belong to this sign-in",
+            ));
+        }
+        let key = sign_in::exchange(host, &code, &pending).await?;
+        let credential = creds::Credential {
+            key,
+            api_server: sign_in::SERVER.to_owned(),
+            devin_api: "https://api.devin.ai".to_owned(),
+            label: "Devin".to_owned(),
+            plan: String::new(),
+            org_id: String::new(),
+            team_id: String::new(),
+        };
+        let credential = sign_in::success(host, &credential).await?;
         discover::store(&credential, host, creds::account_id(&credential)).await
     }
 
-    async fn cancel_sign_in(
-        &self,
-        ctx: &SignInCtx,
-        _host: &HostContext,
-    ) -> Result<(), PluginError> {
+    async fn cancel_sign_in(&self, ctx: &SignInCtx, host: &HostContext) -> Result<(), PluginError> {
         let _ = self.take_pending(ctx.session());
+        host.loopback().release(ctx);
         Ok(())
     }
 
@@ -162,6 +197,9 @@ impl Subscription for Devin {
         host: &HostContext,
     ) -> Result<AccountStatus, PluginError> {
         match creds::Stored::load(host, account).await {
+            Ok(stored) if stored.needs_sign_in => Ok(AccountStatus::NeedsSignIn {
+                reason: "Devin refused the stored sign-in; sign in again".to_owned(),
+            }),
             Ok(_) => Ok(AccountStatus::Ready),
             Err(error) if error.kind() == hofund_plugin_api::PluginErrorKind::Auth => {
                 Ok(AccountStatus::NeedsSignIn {
@@ -179,10 +217,10 @@ impl Subscription for Devin {
 
     async fn quota(
         &self,
-        _account: &AccountId,
-        _host: &HostContext,
+        account: &AccountId,
+        host: &HostContext,
     ) -> Result<Vec<QuotaWindow>, PluginError> {
-        Ok(Vec::new())
+        quota::read(host, account).await
     }
 
     async fn list_models(
@@ -190,10 +228,8 @@ impl Subscription for Devin {
         account: &AccountId,
         host: &HostContext,
     ) -> Result<ModelList, PluginError> {
-        let _ = creds::Stored::load(host, account).await?;
-        Err(PluginError::config(
-            "Devin models come from `devin models list`; hofund does not run the CLI offline",
-        ))
+        let stored = creds::Stored::load(host, account).await?;
+        catalog::list_models(host, account, &stored).await
     }
 
     fn upstream(
@@ -235,5 +271,11 @@ impl Subscription for Devin {
 
 #[cfg(test)]
 mod conformance;
+#[cfg(test)]
+mod identity_tests;
+#[cfg(test)]
+mod live_tests;
+#[cfg(test)]
+mod pkce_tests;
 #[cfg(test)]
 mod tests;

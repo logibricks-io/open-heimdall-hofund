@@ -29,6 +29,7 @@ hofund-provider = { workspace = true }
 hofund-quirks = { workspace = true }
 hofund-router = { workspace = true }
 hofund-secrets = { workspace = true }
+hofund-sessions = { workspace = true }
 hofund-usage = { workspace = true }
 async-trait = "0.1.89"
 bytes = "1.12.0"
@@ -46,7 +47,11 @@ url = "2.5.7"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 
 [target.'cfg(unix)'.dependencies]
+libc = "0.2.191"
 signal-hook = { version = "0.4.5", default-features = false }
+
+[target.'cfg(unix)'.dev-dependencies]
+nix = { version = "0.29.0", features = ["fs"] }
 
 [lints]
 workspace = true
@@ -60,6 +65,8 @@ required-features = ["test-util"]
 hofund-agent = { workspace = true, features = ["test-fixtures"] }
 hofund-control-client = { workspace = true }
 hofund-daemon = { path = ".", features = ["test-util"] }
+hofund-plugin-agent-omp = { workspace = true }
+hofund-plugin-agent-pi = { workspace = true }
 hofund-plugin-registry = { workspace = true, features = ["test-fixtures"] }
 hofund-secrets = { workspace = true, features = ["test-fixtures"] }
 reqwest = { version = "0.12.28", default-features = false, features = ["json", "rustls-tls-native-roots"] }

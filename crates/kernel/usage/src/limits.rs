@@ -89,8 +89,9 @@ impl Ledger {
                     cache_write_5m_tokens, cache_write_1h_tokens, reasoning_tokens, reasoning_hidden,
                     priced, cost_usd, price_input, price_output, price_cache_read, price_cache_write,
                     price_cache_write_1h, outcome, provider_key_id, client_agent, session_id,
-                    first_text_ms, first_reasoning_ms, flow_ms, served_model
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33)",
+                    native_session_id, endpoint, kind, first_text_ms, first_reasoning_ms, flow_ms,
+                    served_model
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36)",
                 params![
                     row.created_unix,
                     row.model,
@@ -122,7 +123,10 @@ impl Ledger {
                     row.outcome,
                     row.provider_key_id,
                     row.client_agent,
-                    row.session_id,
+                    row.session_id.as_str(),
+                    super::sql_nullable_text(&row.native_session_id),
+                    super::sql_nullable_text(&row.endpoint),
+                    row.kind,
                     details.first_text_ms,
                     details.first_reasoning_ms,
                     details.flow_ms,

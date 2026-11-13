@@ -1,0 +1,5 @@
+id = "codebuddy"
+display_name = "CodeBuddy"
+binary = "codebuddy"
+
+# Session reader only in R-32. CodeBuddy Code desktop sibling of WorkBuddy.

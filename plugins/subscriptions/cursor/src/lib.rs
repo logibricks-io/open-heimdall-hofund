@@ -14,21 +14,33 @@ use hofund_plugin_api::{
 use hofund_plugin_sdk::Contribution;
 use hofund_plugin_sdk::oauth::{Pkce, SecretObject, secret_text};
 
+mod agent_host;
 mod agent_sign_in;
 mod auth;
 mod cli;
 mod connect;
 mod discover;
 mod endpoints;
+mod exchange;
+mod failure;
+mod frame;
+mod http2_memory;
 mod import;
+mod max_only;
 mod models;
+mod proto;
 mod quota;
 mod refresh;
+mod request;
+mod run;
 mod session;
 mod sign_in;
+mod team;
 mod tokens;
+mod upstream;
+mod usage;
 
-pub use endpoints::Endpoints;
+pub(crate) use endpoints::Endpoints;
 
 static SPEC: SubscriptionSpec = SubscriptionSpec::from_static(
     PluginId::from_static("cursor"),
@@ -48,12 +60,14 @@ pub fn contribute() -> Contribution {
 }
 
 /// Builds the factory against `endpoints`.
+#[doc(hidden)]
 #[must_use]
-pub fn factory_with_endpoints(endpoints: Endpoints) -> CursorFactory {
+pub(crate) fn factory_with_endpoints(endpoints: Endpoints) -> CursorFactory {
     CursorFactory {
         endpoints: Arc::new(endpoints),
         test_agent_home: None,
         skip_keychain: false,
+        force_keychain: false,
     }
 }
 
@@ -63,10 +77,13 @@ pub struct CursorFactory {
     endpoints: Arc<Endpoints>,
     /// When set, agent refresh and token reads use this directory instead of the OS default.
     #[doc(hidden)]
-    pub test_agent_home: Option<PathBuf>,
-    /// When true, macOS keychain reads are skipped (tests).
+    pub(crate) test_agent_home: Option<PathBuf>,
+    /// When true, keychain reads are skipped (tests).
     #[doc(hidden)]
-    pub skip_keychain: bool,
+    pub(crate) skip_keychain: bool,
+    /// When true, keychain reads run on every OS so tests can script the child.
+    #[doc(hidden)]
+    pub(crate) force_keychain: bool,
 }
 
 /// Validated plugin config.
@@ -123,13 +140,22 @@ impl SubscriptionFactory for CursorFactory {
             command: cfg.command.clone(),
             flow: SignInFlow::Pkce,
             pending: Mutex::new(HashMap::new()),
-            keychain: Mutex::new(cli::KeychainCache::default()),
+            keychain: Arc::new(Mutex::new(cli::KeychainCache::default())),
             agent_home: self
                 .test_agent_home
                 .clone()
                 .unwrap_or_else(auth::default_agent_home),
-            skip_keychain: self.skip_keychain,
+            keychain_enabled: self.keychain_enabled(),
         }))
+    }
+}
+
+impl CursorFactory {
+    fn keychain_enabled(&self) -> bool {
+        if self.skip_keychain {
+            return false;
+        }
+        self.force_keychain || cfg!(target_os = "macos")
     }
 }
 
@@ -137,10 +163,10 @@ struct Cursor {
     endpoints: Arc<Endpoints>,
     command: Option<PathBuf>,
     flow: SignInFlow,
-    pending: Mutex<HashMap<String, sign_in::BrowserPending>>,
-    keychain: Mutex<cli::KeychainCache>,
+    pending: Mutex<HashMap<String, sign_in::PendingSignIn>>,
+    keychain: Arc<Mutex<cli::KeychainCache>>,
     agent_home: PathBuf,
-    skip_keychain: bool,
+    keychain_enabled: bool,
 }
 
 impl Cursor {
@@ -168,13 +194,29 @@ impl Subscription for Cursor {
         ctx: &SignInCtx,
         _host: &HostContext,
     ) -> Result<SignInChallenge, PluginError> {
+        if let Some(key) = crate::exchange::read_env_api_key() {
+            self.pending
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(
+                    ctx.session().to_owned(),
+                    sign_in::PendingSignIn::ApiKey(key),
+                );
+            return SignInChallenge::instructions(format!(
+                "Using the Cursor API key from the {} environment variable.",
+                crate::exchange::CURSOR_API_KEY_ENV
+            ));
+        }
         let pkce = Pkce::generate()?;
         let uuid = hofund_plugin_sdk::oauth::new_state()?;
         let (url, pending) = sign_in::start(&pkce, &uuid, &self.endpoints);
         self.pending
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(ctx.session().to_owned(), pending);
+            .insert(
+                ctx.session().to_owned(),
+                sign_in::PendingSignIn::Browser(pending),
+            );
         SignInChallenge::open_url(url)
     }
 
@@ -184,53 +226,78 @@ impl Subscription for Cursor {
         proof: SignInProof,
         host: &HostContext,
     ) -> Result<AccountId, PluginError> {
-        let SignInProof::Await = proof else {
-            return Err(PluginError::config(
-                "Cursor sign-in finishes once the browser has signed in",
-            ));
-        };
-        let session = ctx.session().to_string();
-        let pending = {
-            let guard = self
-                .pending
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let Some(pending) = guard.get(&session) else {
-                return Err(PluginError::config(
-                    "no Cursor sign-in is in progress for this session",
-                ));
-            };
-            pending.clone()
-        };
-        let blob = match sign_in::finish(host, &self.endpoints, &pending, || {
-            self.pending
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .contains_key(&session)
-        })
-        .await
-        {
-            Ok(blob) => blob,
-            Err(error) => {
-                self.pending
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .remove(&session);
-                return Err(error);
+        match proof {
+            SignInProof::Token(key) => {
+                let key = if secret_text(&key).trim().is_empty() {
+                    crate::exchange::read_env_api_key()
+                        .ok_or_else(|| PluginError::auth("Cursor API key is empty"))?
+                } else {
+                    key
+                };
+                import::store_api_key(host, &self.endpoints, key).await
             }
-        };
-        self.pending
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&session);
-        let access = blob
-            .secret(tokens::ACCESS)
-            .ok_or_else(|| PluginError::auth("Cursor sent back no access token"))?;
-        let (id_label, id) = tokens::jwt_identity(secret_text(&access))
-            .ok_or_else(|| PluginError::auth("Cursor signed in but did not name the account"))?;
-        let account = host.accounts().account(id.clone(), id_label)?;
-        host.accounts().upsert(account, blob.to_secret()).await?;
-        Ok(id)
+            SignInProof::Await => {
+                let session = ctx.session().to_string();
+                let pending = {
+                    let guard = self
+                        .pending
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let Some(pending) = guard.get(&session) else {
+                        return Err(PluginError::config(
+                            "no Cursor sign-in is in progress for this session",
+                        ));
+                    };
+                    pending.clone()
+                };
+                match pending {
+                    sign_in::PendingSignIn::ApiKey(key) => {
+                        let result = import::store_api_key(host, &self.endpoints, key).await;
+                        self.pending
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .remove(&session);
+                        result
+                    }
+                    sign_in::PendingSignIn::Browser(pending) => {
+                        let blob = match sign_in::finish(host, &self.endpoints, &pending, || {
+                            self.pending
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .contains_key(&session)
+                        })
+                        .await
+                        {
+                            Ok(blob) => blob,
+                            Err(error) => {
+                                self.pending
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                    .remove(&session);
+                                return Err(error);
+                            }
+                        };
+                        self.pending
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .remove(&session);
+                        let access = blob
+                            .secret(tokens::ACCESS)
+                            .ok_or_else(|| PluginError::auth("Cursor sent back no access token"))?;
+                        let (id_label, id) = tokens::jwt_identity(secret_text(&access))
+                            .ok_or_else(|| {
+                                PluginError::auth("Cursor signed in but did not name the account")
+                            })?;
+                        let account = host.accounts().account(id.clone(), id_label)?;
+                        host.accounts().upsert(account, blob.to_secret()).await?;
+                        Ok(id)
+                    }
+                }
+            }
+            _ => Err(PluginError::config(
+                "Cursor sign-in finishes once the browser has signed in or with an API key",
+            )),
+        }
     }
 
     async fn cancel_sign_in(
@@ -263,6 +330,9 @@ impl Subscription for Cursor {
         if tokens::is_agent(&blob) {
             return Ok(AccountStatus::Ready);
         }
+        if tokens::is_api_key(&blob) {
+            return Ok(AccountStatus::Ready);
+        }
         if blob.secret(tokens::ACCESS).is_none() {
             return Ok(AccountStatus::NeedsSignIn {
                 reason: "the stored Cursor sign-in has no access token".to_owned(),
@@ -289,16 +359,20 @@ impl Subscription for Cursor {
         };
         let blob = SecretObject::parse(&secret)?;
         if tokens::is_agent(&blob) {
-            let home = self.agent_home().to_path_buf();
-            let token = cli::live_access(host, &home, false, &self.keychain, self.skip_keychain)
-                .await?
-                .unwrap_or_default();
-            let now = host.clock().now();
-            if !token.is_empty() && !tokens::near_expiry(now, tokens::jwt_expiry_ms(&token)) {
-                return Ok(());
-            }
-            let program = self.program()?;
-            refresh::agent_status(host, &program, &home).await
+            refresh::renew_agent(
+                host,
+                account,
+                self.program().ok().as_deref(),
+                self.agent_home(),
+                &self.keychain,
+                self.keychain_enabled,
+            )
+            .await
+            .map(|_| ())
+        } else if tokens::is_api_key(&blob) {
+            crate::exchange::access_token(host, &self.endpoints, account)
+                .await
+                .map(|_| ())
         } else {
             refresh::oauth_check(host, &self.endpoints, account).await
         }
@@ -316,11 +390,20 @@ impl Subscription for Cursor {
             self.agent_home(),
             self.program().ok(),
             &self.keychain,
-            self.skip_keychain,
+            self.keychain_enabled,
         )
         .await?;
-        let body =
-            connect::unary(host, &self.endpoints, "GetCurrentPeriodUsage", &token, "{}").await?;
+        let team_id = team::header_value(&token);
+        let body = connect::unary_opts(
+            host,
+            &self.endpoints,
+            "GetCurrentPeriodUsage",
+            &token,
+            "{}",
+            team_id.as_deref(),
+            None,
+        )
+        .await?;
         quota::period_windows(&body)
     }
 
@@ -336,17 +419,16 @@ impl Subscription for Cursor {
             self.agent_home(),
             self.program().ok(),
             &self.keychain,
-            self.skip_keychain,
+            self.keychain_enabled,
         )
         .await?;
         let program = self.program()?;
-        let models_dir = host
-            .dirs()
-            .state_dir()?
-            .join("cursor-models")
-            .join(account_label(account));
-        auth::write_auth_file(&models_dir, hofund_plugin_sdk::oauth::secret_text(&token))?;
-        let request = cli::request(&program, &["models"], &models_dir)?;
+        let models_dir = models_temp_dir(account)?;
+        auth::write_auth_file(
+            &models_dir.path,
+            hofund_plugin_sdk::oauth::secret_text(&token),
+        )?;
+        let request = cli::request(&program, &["models"], &models_dir.path)?;
         let child = host.spawn_process().spawn_piped(&request).await?;
         let mut stdout = child.stdout()?;
         let text =
@@ -365,12 +447,18 @@ impl Subscription for Cursor {
 
     fn upstream(
         &self,
-        _account: &AccountId,
-        _host: &HostContext,
+        account: &AccountId,
+        host: &HostContext,
     ) -> Result<Arc<dyn UpstreamProvider>, PluginError> {
-        Err(PluginError::unsupported(
-            "requests through Cursor's agent API are not served yet",
-        ))
+        Ok(Arc::new(upstream::CursorUpstream::new(
+            account.clone(),
+            host.clone(),
+            Arc::clone(&self.endpoints),
+            self.agent_home.clone(),
+            self.program().ok(),
+            Arc::clone(&self.keychain),
+            self.keychain_enabled,
+        )))
     }
 
     async fn import_accounts(
@@ -378,7 +466,7 @@ impl Subscription for Cursor {
         text: &str,
         host: &HostContext,
     ) -> Result<Vec<AccountId>, PluginError> {
-        import::import_accounts(host, text).await
+        import::import_accounts(host, &self.endpoints, text).await
     }
 
     async fn discover_agent_sign_in(
@@ -398,12 +486,28 @@ impl Subscription for Cursor {
     }
 }
 
-fn account_label(account: &AccountId) -> String {
-    account
-        .to_string()
-        .chars()
-        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
-        .collect()
+/// Isolated `cursor-agent models` config dir. Removed on drop, including errors.
+struct ModelsTempDir {
+    path: PathBuf,
+}
+
+impl Drop for ModelsTempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+fn models_temp_dir(account: &AccountId) -> Result<ModelsTempDir, PluginError> {
+    let digest = hofund_plugin_sdk::digest::sha256(account.to_string().as_bytes());
+    let mut name = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        write!(name, "{byte:02x}").expect("write to a string");
+    }
+    let path = std::env::temp_dir().join(name);
+    std::fs::create_dir_all(&path)
+        .map_err(|_| PluginError::io("cannot create the Cursor models directory"))?;
+    Ok(ModelsTempDir { path })
 }
 
 #[cfg(test)]

@@ -2229,3 +2229,28 @@ fn g3_4_agent_model_refs_rewritten_on_provider_rename() {
     );
     assert_eq!(read_json(&path)["model"].as_str(), Some("hofund/team/m"));
 }
+
+#[test]
+fn fileless_description_is_not_connected() {
+    static BARE: AgentDescription = AgentDescription::from_static(
+        PluginId::from_static("bare-agent"),
+        "Bare",
+        "bare",
+        &[],
+        &[],
+        None,
+        None,
+        Visible::All,
+        AgentRoute::Gateway,
+        &[],
+    );
+    let home = scratch();
+    let session = Session::new(&*home);
+    let agent = Compiled::new(&BARE);
+    assert!(
+        !agent
+            .status(&session, &target_with(&["m"]))
+            .expect("status")
+            .connected()
+    );
+}

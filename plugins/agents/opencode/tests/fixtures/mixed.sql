@@ -1,0 +1,15 @@
+CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT, title TEXT, time_created INTEGER, time_updated INTEGER);
+CREATE TABLE message (id TEXT, session_id TEXT, data TEXT);
+CREATE TABLE part (id TEXT, message_id TEXT, data TEXT);
+CREATE TABLE session_v2 (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT, title TEXT, time_created INTEGER, time_updated INTEGER);
+CREATE TABLE session_message (id TEXT, session_id TEXT, type TEXT, seq INTEGER, data TEXT);
+CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT);
+INSERT INTO kv VALUES ('migration.v1-v2', '{"phase":"copying"}');
+INSERT INTO session VALUES ('ses_shared', NULL, '/work/old-copy', 'Stale copy', 1767225600000, 1767225600000);
+INSERT INTO session VALUES ('ses_old', NULL, '/work/old', 'Uncopied session', 1767225700000, 1767225701000);
+INSERT INTO session_v2 VALUES ('ses_shared', NULL, '/work/new', 'Migrated session', 1767225600000, 1767225601000);
+INSERT INTO message VALUES ('m_stale', 'ses_shared', '{"id":"m_stale","role":"assistant","modelID":"stale-model","time":{"created":1767225600000},"tokens":{"input":999,"output":0,"reasoning":0,"cache":{"read":0,"write":0}}}');
+INSERT INTO message VALUES ('m_old_user', 'ses_old', '{"id":"m_old_user","role":"user","time":{"created":1767225700000}}');
+INSERT INTO message VALUES ('m_old', 'ses_old', '{"id":"m_old","role":"assistant","modelID":"model-old","time":{"created":1767225701000},"tokens":{"input":7,"output":2,"reasoning":0,"cache":{"read":0,"write":0}}}');
+INSERT INTO part VALUES ('p_old', 'm_old_user', '{"type":"text","messageID":"m_old_user","text":"Old prompt"}');
+INSERT INTO session_message VALUES ('m_new', 'ses_shared', 'assistant', 1, '{"model":{"id":"model-new"},"time":{"created":1767225601000},"tokens":{"input":5,"output":1,"reasoning":0,"cache":{"read":0,"write":0}}}');

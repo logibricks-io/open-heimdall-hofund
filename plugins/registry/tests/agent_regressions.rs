@@ -2245,3 +2245,9 @@ fn g2_15_shipped_agents_declare_request_hints() {
         assert!(agent.nested_turn_headers().is_empty(), "{id} nested");
     }
 }
+
+#[test]
+fn r33_opencode_declares_extra_session_header() {
+    let opencode = hofund_plugin_registry::agent("opencode").expect("opencode");
+    assert_eq!(opencode.session_headers(), ["x-opencode-session-id"]);
+}

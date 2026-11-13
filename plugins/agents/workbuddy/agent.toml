@@ -1,0 +1,5 @@
+id = "workbuddy"
+display_name = "WorkBuddy"
+binary = "workbuddy"
+
+# Session reader only in R-32. Desktop app; no gateway connect adapter in this tree.

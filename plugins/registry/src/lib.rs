@@ -251,6 +251,20 @@ pub fn find_fixture_preset(id: &str) -> Option<(&'static CompiledPreset, Option<
         .map(|preset| (preset, alias.region))
 }
 
+/// The linked read-only session stores.
+#[must_use]
+pub fn session_stores() -> Vec<Arc<dyn hofund_plugin_api::SessionStore>> {
+    vec![
+        Arc::new(hofund_plugin_agent_claude::ClaudeStore::new()),
+        Arc::new(hofund_plugin_agent_claude::ClaudeDesktopStore::new()),
+        Arc::new(hofund_plugin_agent_codex::CodexStore::new()),
+        Arc::new(hofund_plugin_agent_opencode::OpenCodeStore::new()),
+        Arc::new(hofund_plugin_agent_pi::PiStore::new()),
+        Arc::new(hofund_plugin_agent_omp::OmpStore::new()),
+        Arc::new(hofund_plugin_agent_gemini::GeminiStore::new()),
+    ]
+}
+
 /// Every inbound surface the linked plugins contribute.
 ///
 /// Surfaces on contributions of any other [`PluginKind`] are ignored.
@@ -607,5 +621,24 @@ mod tests {
                 .protocols()
                 .contains(&ProtocolId::BEDROCK_CONVERSE)
         );
+    }
+    #[test]
+    fn session_stores_include_the_r31_readers() {
+        let stores = super::session_stores();
+        let agents: Vec<_> = stores.iter().map(|store| store.agent()).collect();
+        for expected in [
+            "claude",
+            "claude-desktop",
+            "codex",
+            "opencode",
+            "pi",
+            "omp",
+            "gemini",
+        ] {
+            assert!(
+                agents.contains(&expected),
+                "{expected} missing from session_stores: {agents:?}"
+            );
+        }
     }
 }

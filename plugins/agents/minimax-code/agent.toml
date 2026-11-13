@@ -1,0 +1,5 @@
+id = "minimax-code"
+display_name = "MiniMax Code"
+binary = "minimax-code"
+
+# Session reader only. Connect file slots are not declared yet.

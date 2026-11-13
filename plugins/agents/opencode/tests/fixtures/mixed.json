@@ -1,0 +1,22 @@
+[
+  {
+    "id": "opencode:ses_old",
+    "title": "Uncopied session",
+    "cwd": "/work/old",
+    "start_ms": 1767225700000,
+    "last_ms": 1767225701000,
+    "tokens": {"input":7,"output":2,"cache_read":0,"cache_write":0,"cache_write_1h":0},
+    "models": {"model-old":{"input":7,"output":2,"cache_read":0,"cache_write":0,"cache_write_1h":0}},
+    "subagents": []
+  },
+  {
+    "id": "opencode:ses_shared",
+    "title": "Migrated session",
+    "cwd": "/work/new",
+    "start_ms": 1767225600000,
+    "last_ms": 1767225601000,
+    "tokens": {"input":5,"output":1,"cache_read":0,"cache_write":0,"cache_write_1h":0},
+    "models": {"model-new":{"input":5,"output":1,"cache_read":0,"cache_write":0,"cache_write_1h":0}},
+    "subagents": []
+  }
+]

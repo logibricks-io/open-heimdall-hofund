@@ -487,6 +487,11 @@ impl ModelsHost {
         self.picks_with_revision(provider_id).0
     }
 
+    /// Ids served when the provider has no explicit picks.
+    pub(crate) fn default_exposed_ids(&self, provider_id: &str) -> Vec<String> {
+        default_exposed(&self.cached(provider_id).models)
+    }
+
     /// Reads a provider's picks and the revision of its saved state under
     /// one lock.
     pub(crate) fn picks_with_revision(&self, provider_id: &str) -> (Picks, String) {

@@ -1,0 +1,2 @@
+{"message_id":"msg-user-1","turn_id":"turn-1","message":{"role":"user","content":[{"type":"text","text":"Hello minimax"}],"timestamp":1790949018000}}
+{"message_id":"msg-asst-1","turn_id":"turn-1","message":{"role":"assistant","content":[{"type":"text","text":"Hi there"}],"provider":"custom_provider:relay","model":"m2","usage":{"input":100,"output":50,"cacheRead":10,"cacheWrite":5},"timestamp":1790949040000}}
