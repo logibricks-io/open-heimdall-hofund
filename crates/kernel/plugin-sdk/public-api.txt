@@ -74,8 +74,12 @@ futures::FuturesUnordered
 futures::Race derives(Clone, Copy, Debug, PartialEq, Eq)
 futures::Race::Left
 futures::Race::Right
+futures::Stream
+futures::StreamExt
 futures::async fn next_ready < F > (futures : & mut FuturesUnordered < F >) -> F :: Output where F : std :: future :: Future ,
 futures::async fn race < A , B > (left : A , right : B) -> Race < A :: Output , B :: Output > where A : std :: future :: Future , B : std :: future :: Future ,
+futures::empty
+futures::unfold
 gemini_models
 gemini_models_with_dropped
 gzip
