@@ -20,7 +20,6 @@ const ALLOWED_DEPS: &[&str] = &["hofund-plugin-api", "hofund-plugin-sdk"];
 
 /// Extra runtime dependencies reviewed for one plugin package.
 const PLUGIN_EXTRA_DEPS: &[(&str, &[&str])] = &[
-    ("hofund-plugin-agent-agy", &["rusqlite"]),
     ("hofund-plugin-agent-cline", &["regex"]),
     ("hofund-plugin-agent-cursor", &["regex"]),
     ("hofund-plugin-agent-dsh", &["regex", "zstd"]),
@@ -2081,17 +2080,28 @@ cc = "1"
             .to_path_buf();
         super::link_allowance(&workspace, "hofund-plugin-fixture").expect("fixture closure");
         super::link_allowance(&workspace, "hofund-plugin-agent-agy")
-            .expect("reviewed rusqlite closure is part of the allowance");
+            .expect("agy stays inside the default api/sdk allowance");
+        super::link_allowance(&workspace, "hofund-plugin-agent-hermes")
+            .expect("reviewed sha2 closure is part of the allowance");
         let ids = super::link_ids(&workspace, "hofund-plugin-fixture").expect("ids");
         let agy = super::link_ids(&workspace, "hofund-plugin-agent-agy").expect("agy ids");
+        let hermes = super::link_ids(&workspace, "hofund-plugin-agent-hermes").expect("hermes ids");
         assert!(
             agy.iter()
-                .any(|id| id.contains("rusqlite@") || id.contains("#rusqlite@")),
-            "agy must actually link rusqlite, got {agy:?}"
+                .all(|id| !(id.contains("rusqlite@") || id.contains("#rusqlite@"))),
+            "agy no longer links rusqlite, got {agy:?}"
         );
         assert!(
-            ids.iter()
-                .all(|id| !(id.contains("rusqlite@") || id.contains("#rusqlite@"))),
+            hermes
+                .iter()
+                .any(|id| id.contains("sha2@") || id.contains("#sha2@")),
+            "hermes must actually link sha2, got {hermes:?}"
+        );
+        assert!(
+            ids.iter().all(|id| !(id.contains("rusqlite@")
+                || id.contains("#rusqlite@")
+                || id.contains("sha2@")
+                || id.contains("#sha2@"))),
             "the fixture must not inherit a sibling plugin's extra dep: {ids:?}"
         );
         assert!(
