@@ -1043,6 +1043,7 @@ SessionRecord.days
 SessionRecord.family_ids
 SessionRecord.family_leaf
 SessionRecord.family_root
+SessionRecord.fork_usage_filtered
 SessionRecord.forked_from
 SessionRecord.id
 SessionRecord.last_ms

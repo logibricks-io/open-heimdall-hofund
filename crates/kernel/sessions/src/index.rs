@@ -549,6 +549,9 @@ fn sort_newest(records: &mut [SessionRecord]) {
 fn dedup_forks(records: &mut [SessionRecord]) {
     let parents = records.to_vec();
     for record in records {
+        if record.fork_usage_filtered {
+            continue;
+        }
         let Some(parent_id) = record.forked_from.as_deref() else {
             continue;
         };
@@ -1116,6 +1119,42 @@ mod tests {
         assert_eq!(records[1].tokens(), SessionTokens::new(10, 1, 0, 0));
         assert_eq!(records[1].days.len(), 1);
         assert_eq!(records[1].days[0].date, "2026-11-11");
+    }
+
+    #[test]
+    fn dedup_forks_preserves_already_filtered_usage() {
+        let event = SessionUsageEvent::new(
+            SessionTokens::new(20, 8, 4, 2),
+            SessionTokens::new(10, 4, 2, 1),
+            "model",
+            "2026-11-11",
+        );
+        let mut parent = SessionRecord::new("fake", "fake:parent", "parent");
+        parent.usage.push(event.clone());
+        let mut filtered = SessionRecord::new("fake", "fake:filtered", "filtered");
+        let mut unfiltered = SessionRecord::new("fake", "fake:unfiltered", "unfiltered");
+        for child in [&mut filtered, &mut unfiltered] {
+            child.forked_from = Some(parent.id.clone());
+            child.usage.push(event.clone());
+            child.add_usage(event.model.clone(), event.tokens);
+            child.add_day(SessionDay::new(
+                event.date.clone(),
+                event.model.clone(),
+                event.tokens,
+            ));
+        }
+        filtered.fork_usage_filtered = true;
+        let filtered_usage = filtered.usage.clone();
+        let filtered_days = filtered.days.clone();
+        let unfiltered_usage = unfiltered.usage.clone();
+        let mut records = vec![parent, filtered, unfiltered];
+        dedup_forks(&mut records);
+        assert_eq!(records[1].tokens(), event.tokens);
+        assert_eq!(records[1].days, filtered_days);
+        assert_eq!(records[1].usage, filtered_usage);
+        assert_eq!(records[2].tokens(), SessionTokens::default());
+        assert_eq!(records[2].days.len(), 0);
+        assert_eq!(records[2].usage, unfiltered_usage);
     }
 
     #[test]

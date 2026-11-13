@@ -410,6 +410,7 @@ impl PiParser {
         {
             self.state.since = ms;
             self.state.record.forked_from = Some(format!("{AGENT}:{parent}"));
+            self.state.record.fork_usage_filtered = true;
         }
         if let Some(title) = value.get("title").and_then(Value::as_str) {
             self.state.named = title_line(title);

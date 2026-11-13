@@ -131,6 +131,7 @@ impl SessionUsageEvent {
 /// One parsed session file. Non-main records merge into their parent.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[non_exhaustive]
+#[allow(clippy::struct_excessive_bools)] // independent session flags, not a state machine
 pub struct SessionRecord {
     /// Agent plugin id.
     pub agent: String,
@@ -180,6 +181,11 @@ pub struct SessionRecord {
     /// Parent checkpoint source for a fork, when one is named.
     #[serde(default)]
     pub forked_from: Option<String>,
+    /// Whether `models` and `days` already exclude copied pre-fork usage.
+    ///
+    /// When true, the kernel must not rebuild them from checkpoint comparison.
+    #[serde(default)]
+    pub fork_usage_filtered: bool,
     /// Usage observations used for checkpoint dedup.
     #[serde(default)]
     pub usage: Vec<SessionUsageEvent>,
@@ -214,6 +220,7 @@ impl SessionRecord {
             copy: false,
             app: String::new(),
             forked_from: None,
+            fork_usage_filtered: false,
             usage: Vec::new(),
             cut: false,
         }

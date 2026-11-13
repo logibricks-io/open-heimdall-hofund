@@ -131,7 +131,7 @@ fn write_jsonl(path: &Path, lines: &[Value]) {
 }
 
 fn assert_fork_usage(store: &dyn SessionStore, sessions: &Path, config: &Path) {
-    let parent_lines = vec![
+    let mut parent_lines = vec![
         json!({"type":"session","id":"parent","timestamp":"2026-02-01T12:00:00Z"}),
         json!({"type":"message","message":{"role":"user","content":"Parent prompt"},"timestamp":"2026-02-01T12:00:01Z"}),
         json!({"type":"message","message":{"role":"assistant","model":"model-parent","content":[],"usage":{"input":10,"output":4,"cacheRead":2,"cacheWrite":1}},"timestamp":"2026-02-01T12:00:02Z"}),
@@ -144,6 +144,9 @@ fn assert_fork_usage(store: &dyn SessionStore, sessions: &Path, config: &Path) {
         json!({"type":"message","message":{"role":"user","content":"Child prompt"},"timestamp":"2026-02-01T13:00:01Z"}),
         json!({"type":"message","message":{"role":"assistant","model":"model-child","content":[],"usage":{"input":10,"output":4,"cacheRead":2,"cacheWrite":1}},"timestamp":"2026-02-01T13:00:02Z"}),
     ]);
+    parent_lines.push(
+        json!({"type":"message","message":{"role":"assistant","model":"model-parent","content":[],"usage":{"input":10,"output":4,"cacheRead":2,"cacheWrite":1}},"timestamp":"2026-02-01T13:00:03Z"}),
+    );
     write_jsonl(
         &sessions.join("2026-02-01T12-00-00_parent-file.jsonl"),
         &parent_lines,
@@ -165,9 +168,10 @@ fn assert_fork_usage(store: &dyn SessionStore, sessions: &Path, config: &Path) {
         .iter()
         .find(|record| record.id == child_id)
         .expect("child record");
-    let parent_tokens = SessionTokens::new(10, 4, 2, 1);
+    let parent_tokens = SessionTokens::new(20, 8, 4, 2);
     let post_fork = SessionTokens::new(10, 4, 2, 1);
     assert_eq!(child.forked_from.as_deref(), Some(parent_id.as_str()));
+    assert!(child.fork_usage_filtered);
     assert_eq!(child.tokens(), post_fork);
     assert_eq!(child.days.len(), 1);
     assert_eq!(child.days[0].model, "model-child");
