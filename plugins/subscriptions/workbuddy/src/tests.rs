@@ -80,8 +80,12 @@ fn subscription(
 }
 
 fn seed(host: &TestHost, expires: i64) -> AccountId {
+    seed_site(host, expires, Site::China)
+}
+
+fn seed_site(host: &TestHost, expires: i64, site: Site) -> AccountId {
     let credential = Credential {
-        uid: "uid-cn".to_owned(),
+        uid: format!("uid-{}", site.plugin_id()),
         access: SecretString::from(TOKEN.to_owned()),
         refresh: SecretString::from("wb-refresh-test".to_owned()),
         expires_at: expires,
@@ -89,7 +93,7 @@ fn seed(host: &TestHost, expires: i64) -> AccountId {
         domain: "www.codebuddy.cn".to_owned(),
         token_type: "Bearer".to_owned(),
         label: "wb-user".to_owned(),
-        site: Site::China,
+        site,
         desktop: false,
         api_key: false,
         enterprise_id: String::new(),
@@ -201,16 +205,15 @@ fn a2c_36_desktop_rereads_rotated_token_on_upstream() {
         secret_text(&stored.credential.access),
         "wb-access-rotated-on-disk"
     );
-    host.http().enqueue(
-        br#"{"id":"chatcmpl-1","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"ok"}}]}"#,
-    );
+    enqueue_empty_config(&host);
+    enqueue_chat_ok(&host);
     let upstream = subscription(&host, None)
         .upstream(&id, host.context())
         .expect("upstream");
     let query = ProbeQuery::new(ProtocolId::OPENAI_CHAT, "deepseek-v3").expect("query");
     block_on(upstream.probe(&query)).expect("probe");
     assert!(
-        host.http().calls()[0]
+        host.http().calls()[1]
             .sensitive_headers()
             .iter()
             .any(|name| name.eq_ignore_ascii_case("authorization"))
@@ -219,10 +222,102 @@ fn a2c_36_desktop_rereads_rotated_token_on_upstream() {
 
 #[test]
 fn a2c_28_models_from_config_json() {
-    let list =
-        crate::models::parse_config(br#"{"models":[{"id":"deepseek-v3","name":"DeepSeek V3"}]}"#)
-            .expect("parse");
+    let list = crate::models::parse_config(
+        br#"{"models":[{"id":"deepseek-v3","name":"DeepSeek V3"}]}"#,
+        Site::China,
+    )
+    .expect("parse");
     assert_eq!(list.models()[0].id(), "deepseek-v3");
+}
+
+#[test]
+fn r55c_model_images_follow_site_and_edit_tags() {
+    let body = br#"{"data":{"models":[
+        {"id":"kimi-k3","supportsImages":true,"maxInputTokens":1000,"maxOutputTokens":100},
+        {"id":"glm-5.3","supportsImages":true},
+        {"id":"hunyuan-image-alpha","tags":["text-to-image"]},
+        {"id":"hunyuan-image-alpha-edit","tags":["image-to-image"]}
+    ]}}"#;
+    let international = crate::models::parse_config(body, Site::International).expect("parse");
+    let kimi = &international.models()[0];
+    assert_eq!(kimi.image_input(), Some(true));
+    assert_eq!(kimi.input_modalities(), ["text", "image"]);
+    assert_eq!(kimi.context(), 1000);
+    assert_eq!(kimi.max_output(), 100);
+    assert_eq!(international.models()[1].image_input(), Some(false));
+    let drawer = &international.models()[2];
+    assert!(drawer.draws());
+    assert_eq!(drawer.image_input(), Some(true));
+    let china = crate::models::parse_config(body, Site::China).expect("parse");
+    assert_eq!(china.models()[1].image_input(), Some(true));
+
+    for site in [Site::China, Site::International] {
+        let declared = crate::models::declared(site);
+        for model in declared.models() {
+            let expected = !(site == Site::International && model.id().starts_with("glm-"));
+            assert_eq!(
+                model.image_input(),
+                Some(expected),
+                "{}:{}",
+                site.plugin_id(),
+                model.id()
+            );
+        }
+    }
+    let declared = crate::models::declared(Site::International);
+    let kimi = declared
+        .models()
+        .iter()
+        .find(|model| model.id() == "kimi-k3")
+        .expect("kimi");
+    assert_eq!(kimi.input_modalities(), ["text", "image"]);
+}
+
+#[test]
+fn r55c_effort_lists_match_the_frozen_config() {
+    let list = crate::models::parse_config(
+        include_bytes!("fixtures/config-efforts.json"),
+        Site::International,
+    )
+    .expect("parse");
+    let efforts = |id: &str| {
+        list.models()
+            .iter()
+            .find(|model| model.id() == id)
+            .unwrap_or_else(|| panic!("model {id}"))
+            .efforts()
+            .to_vec()
+    };
+    for id in ["fast-model", "kimi-k3", "gemini-3.5-flash"] {
+        assert_eq!(efforts(id), ["low", "medium", "high", "max"]);
+    }
+    assert_eq!(efforts("primary-model"), ["low", "high", "max"]);
+    assert_eq!(
+        efforts("deepseek-v4.1-flash-sg"),
+        ["none", "low", "high", "max"]
+    );
+    assert_eq!(efforts("hy3"), ["low", "high"]);
+    assert_eq!(
+        efforts("gpt-5.6-sol"),
+        ["none", "low", "medium", "high", "xhigh", "max"]
+    );
+    assert_eq!(efforts("glm-5.2"), ["none", "high", "xhigh"]);
+    assert!(efforts("default-model").is_empty());
+
+    let china = crate::models::declared(Site::China);
+    let deepseek = china
+        .models()
+        .iter()
+        .find(|model| model.id() == "deepseek-v4.1-flash")
+        .expect("deepseek");
+    assert_eq!(deepseek.efforts(), ["none", "low", "high", "max"]);
+    let international = crate::models::declared(Site::International);
+    let glm = international
+        .models()
+        .iter()
+        .find(|model| model.id() == "glm-5.2")
+        .expect("glm");
+    assert_eq!(glm.efforts(), ["high", "xhigh"]);
 }
 
 #[test]
@@ -286,15 +381,14 @@ fn a2c_24_upstream_sends_workbuddy_user_agent() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
     let id = seed(&host, 4_000_000_000_000);
-    host.http().enqueue(
-        br#"{"id":"chatcmpl-1","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"ok"}}]}"#,
-    );
+    enqueue_empty_config(&host);
+    enqueue_chat_ok(&host);
     let upstream = subscription(&host, None)
         .upstream(&id, host.context())
         .expect("upstream");
     let query = ProbeQuery::new(ProtocolId::OPENAI_CHAT, "deepseek-v3").expect("query");
     block_on(upstream.probe(&query)).expect("probe");
-    let call = &host.http().calls()[0];
+    let call = &host.http().calls()[1];
     assert_eq!(call.uri(), format!("{CN}/v2/chat/completions"));
     assert_eq!(call.header("content-encoding"), Some("gzip"));
     let body = hofund_plugin_sdk::inflate::gzip(call.body()).expect("gzip chat body");
@@ -408,6 +502,7 @@ fn r55_upstream_restriction_rests_account_with_reference_hint() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
     let id = seed(&host, 4_000_000_000_000);
+    enqueue_empty_config(&host);
     host.http().enqueue_response(
         403,
         &[],
@@ -686,28 +781,27 @@ fn r55_api_key_sign_in_works_for_both_sites_without_exposing_key() {
                 .is_empty()
         );
         assert!(host.http().calls().is_empty());
-        host.http().enqueue(
-            br#"{"id":"chatcmpl-1","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"ok"}}]}"#,
-        );
+        enqueue_empty_config(&host);
+        enqueue_chat_ok(&host);
         let upstream = sub.upstream(&id, host.context()).expect("upstream");
         let query = ProbeQuery::new(ProtocolId::OPENAI_CHAT, "deepseek-v3").expect("query");
         block_on(upstream.probe(&query)).expect("key chat");
         let calls = host.http().calls();
-        assert_eq!(calls.len(), 1);
+        assert_eq!(calls.len(), 2);
         assert!(
-            calls[0]
+            calls[1]
                 .sensitive_headers()
                 .iter()
                 .any(|name| name == "x-api-key")
         );
         assert!(
-            calls[0]
+            calls[1]
                 .sensitive_headers()
                 .iter()
                 .any(|name| name == "authorization")
         );
         assert!(
-            !calls[0]
+            !calls[1]
                 .sensitive_headers()
                 .iter()
                 .any(|name| name == "x-domain")
@@ -753,4 +847,426 @@ fn r55_unknown_sign_in_site_is_rejected_without_network() {
         .expect_err("unknown site");
     assert_eq!(error.kind(), PluginErrorKind::Config);
     assert!(host.http().calls().is_empty());
+}
+
+fn chat_body(bytes: &[u8]) -> json::Value {
+    let body = hofund_plugin_sdk::inflate::gzip(bytes).expect("gzip chat body");
+    json::from_slice(&body).expect("chat JSON")
+}
+
+const CHAT_OK: &[u8] = br#"{"id":"chatcmpl-1","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"ok"}}]}"#;
+
+fn enqueue_chat_ok(host: &TestHost) {
+    host.http().enqueue(CHAT_OK);
+}
+
+fn enqueue_empty_config(host: &TestHost) {
+    host.http().enqueue(br#"{"code":0,"data":{"models":[]}}"#);
+}
+
+fn chat_request(model: &str) -> hofund_plugin_api::Request {
+    hofund_plugin_api::Request::new(model)
+}
+
+fn run_chat(
+    upstream: &Arc<dyn hofund_plugin_api::UpstreamProvider>,
+    request: hofund_plugin_api::Request,
+) {
+    block_on(upstream.execute(request, ProtocolId::OPENAI_CHAT)).expect("chat");
+}
+
+fn budget_request(model: &str, limit: u64, max_tokens_field: bool) -> hofund_plugin_api::Request {
+    let mut request = chat_request(model);
+    request.params.max_tokens = Some(limit);
+    if max_tokens_field {
+        request.params.extensions.insert(
+            "originalChatTokenField",
+            json::Value::String("max_tokens".to_owned()),
+        );
+    }
+    request
+}
+
+#[test]
+fn r55c_default_effort_uses_each_models_valid_config_default() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, 4_000_000_000_000);
+    let upstream = subscription(&host, None)
+        .upstream(&id, host.context())
+        .expect("upstream");
+    host.http()
+        .enqueue(include_bytes!("fixtures/config-default-efforts.json").to_vec());
+    for model in ["deepseek-v4.1-flash", "glm-5.2", "fallback-default"] {
+        enqueue_chat_ok(&host);
+        run_chat(&upstream, chat_request(model));
+    }
+    let calls = host.http().calls();
+    assert_eq!(calls.len(), 4);
+    assert!(calls[0].uri().ends_with("/v3/config"));
+    for (call, effort) in calls[1..].iter().zip(["high", "xhigh", "medium"]) {
+        assert!(call.uri().ends_with("/v2/chat/completions"));
+        assert_eq!(call.header("content-encoding"), Some("gzip"));
+        assert_eq!(chat_body(call.body())["reasoning_effort"], effort);
+    }
+}
+
+#[test]
+fn r55c_explicit_effort_is_preserved_without_reading_config() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, 4_000_000_000_000);
+    let upstream = subscription(&host, None)
+        .upstream(&id, host.context())
+        .expect("upstream");
+    for effort in ["none", "low", "max"] {
+        enqueue_chat_ok(&host);
+        let mut request = chat_request("deepseek-v4.1-flash");
+        request
+            .extensions
+            .insert("reasoning_effort", json::json!(effort));
+        run_chat(&upstream, request);
+    }
+    enqueue_chat_ok(&host);
+    let mut nested = chat_request("deepseek-v4.1-flash");
+    nested
+        .extensions
+        .insert("reasoning", json::json!({"effort": "low"}));
+    run_chat(&upstream, nested);
+
+    let calls = host.http().calls();
+    assert_eq!(calls.len(), 4);
+    for (call, effort) in calls[..3].iter().zip(["none", "low", "max"]) {
+        assert_eq!(chat_body(call.body())["reasoning_effort"], effort);
+    }
+    let nested = chat_body(calls[3].body());
+    assert!(nested.get("reasoning_effort").is_none());
+    assert_eq!(nested["reasoning"], json::json!({"effort": "low"}));
+}
+
+#[test]
+fn r55c_models_without_a_valid_default_stay_unchanged() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, 4_000_000_000_000);
+    let upstream = subscription(&host, None)
+        .upstream(&id, host.context())
+        .expect("upstream");
+    host.http()
+        .enqueue(include_bytes!("fixtures/config-default-efforts.json").to_vec());
+    for model in ["auto", "odd-default", "not-listed"] {
+        enqueue_chat_ok(&host);
+        run_chat(&upstream, chat_request(model));
+    }
+    let calls = host.http().calls();
+    assert_eq!(calls.len(), 4);
+    for call in &calls[1..] {
+        assert!(chat_body(call.body()).get("reasoning_effort").is_none());
+    }
+}
+
+#[test]
+fn r55c_failed_default_config_leaves_chats_unchanged_and_is_cached() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, 4_000_000_000_000);
+    let upstream = subscription(&host, None)
+        .upstream(&id, host.context())
+        .expect("upstream");
+    host.http().enqueue_response(502, &[], b"down");
+    for _ in 0..2 {
+        enqueue_chat_ok(&host);
+        run_chat(&upstream, chat_request("deepseek-v4.1-flash"));
+    }
+    let calls = host.http().calls();
+    assert_eq!(calls.len(), 3);
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| call.uri().ends_with("/v3/config"))
+            .count(),
+        1
+    );
+    for call in &calls[1..] {
+        assert!(chat_body(call.body()).get("reasoning_effort").is_none());
+    }
+}
+
+#[test]
+fn r55c_small_budgets_suppress_only_the_default_effort() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, 4_000_000_000_000);
+    let upstream = subscription(&host, None)
+        .upstream(&id, host.context())
+        .expect("upstream");
+    host.http()
+        .enqueue(include_bytes!("fixtures/config-default-efforts.json").to_vec());
+    for limit in [64, 100, 256, 1000, 1024] {
+        enqueue_chat_ok(&host);
+        run_chat(
+            &upstream,
+            budget_request("deepseek-v4.1-flash", limit, true),
+        );
+    }
+    enqueue_chat_ok(&host);
+    run_chat(&upstream, budget_request("deepseek-v4.1-flash", 64, false));
+    enqueue_chat_ok(&host);
+    let mut explicit = budget_request("deepseek-v4.1-flash", 64, true);
+    explicit
+        .extensions
+        .insert("reasoning_effort", json::json!("low"));
+    run_chat(&upstream, explicit);
+    for (limit, max_tokens_field) in [(1025, true), (32000, false), (0, true)] {
+        enqueue_chat_ok(&host);
+        run_chat(
+            &upstream,
+            budget_request("deepseek-v4.1-flash", limit, max_tokens_field),
+        );
+    }
+
+    let calls = host.http().calls();
+    assert_eq!(calls.len(), 11);
+    let bodies = calls[1..]
+        .iter()
+        .map(|call| chat_body(call.body()))
+        .collect::<Vec<_>>();
+    for body in &bodies[..6] {
+        assert!(body.get("reasoning_effort").is_none());
+    }
+    assert_eq!(bodies[6]["reasoning_effort"], "low");
+    for body in &bodies[7..] {
+        assert_eq!(body["reasoning_effort"], "high");
+    }
+
+    let dir = tempfile::tempdir().expect("dir");
+    let ai_host = host_at(&dir, SystemTime::UNIX_EPOCH);
+    let id = seed_site(&ai_host, 4_000_000_000_000, Site::International);
+    let upstream = subscription(&ai_host, None)
+        .upstream(&id, ai_host.context())
+        .expect("upstream");
+    ai_host
+        .http()
+        .enqueue(include_bytes!("fixtures/config-default-efforts.json").to_vec());
+    enqueue_chat_ok(&ai_host);
+    run_chat(&upstream, budget_request("deepseek-v4.1-flash", 64, true));
+    let calls = ai_host.http().calls();
+    assert_eq!(calls.len(), 2);
+    assert!(chat_body(calls[1].body()).get("reasoning_effort").is_none());
+}
+
+fn after_tools_request(model: &str, prefill: bool) -> hofund_plugin_api::Request {
+    use hofund_plugin_api::{ContentPart, Extensions, Message, Request, Role, ToolResultPart};
+
+    let result = Message {
+        role: Role::Tool,
+        content: vec![ContentPart::ToolResult(ToolResultPart {
+            id: "call_1".to_owned(),
+            is_error: false,
+            content: Vec::new(),
+            extensions: Extensions::new(),
+        })],
+        extensions: Extensions::new(),
+    };
+    Request::new(model).with_messages(vec![
+        Message::new(Role::User),
+        result,
+        Message::new(if prefill { Role::Assistant } else { Role::User }),
+    ])
+}
+
+#[test]
+fn r55c_after_tools_refusal_retries_once_and_learns_per_model() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, 4_000_000_000_000);
+    enqueue_empty_config(&host);
+    host.http().enqueue_response(
+        400,
+        &[],
+        br#"{"code":11153,"msg":"the conversation must end with a user message"}"#.to_vec(),
+    );
+    for _ in 0..3 {
+        enqueue_chat_ok(&host);
+    }
+    let upstream = subscription(&host, None)
+        .upstream(&id, host.context())
+        .expect("upstream");
+    for model in [
+        "gemini-after-tools",
+        "gemini-after-tools",
+        "deepseek-after-tools",
+    ] {
+        block_on(upstream.execute(after_tools_request(model, false), ProtocolId::OPENAI_CHAT))
+            .expect("served");
+    }
+    let calls = host.http().calls();
+    assert_eq!(calls.len(), 5);
+    let roles = |at: usize| {
+        chat_body(calls[at].body())["messages"]
+            .as_array()
+            .expect("messages")
+            .iter()
+            .map(|message| message["role"].as_str().expect("role").to_owned())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(roles(1), ["user", "tool", "user"]);
+    assert_eq!(roles(2), ["user", "tool", "assistant", "user"]);
+    assert_eq!(chat_body(calls[2].body())["messages"][2]["content"], "");
+    assert_eq!(roles(3), ["user", "tool", "assistant", "user"]);
+    assert_eq!(roles(4), ["user", "tool", "user"]);
+}
+
+#[test]
+fn r55c_after_tools_prefill_is_not_retried() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, 4_000_000_000_000);
+    enqueue_empty_config(&host);
+    host.http().enqueue_response(
+        400,
+        &[],
+        br#"{"code":11153,"msg":"the conversation must end with a user message"}"#.to_vec(),
+    );
+    let upstream = subscription(&host, None)
+        .upstream(&id, host.context())
+        .expect("upstream");
+    let error = block_on(upstream.execute(
+        after_tools_request("gemini-after-tools", true),
+        ProtocolId::OPENAI_CHAT,
+    ))
+    .err()
+    .expect("prefill refused");
+    assert_eq!(error.status(), Some(400));
+    assert_eq!(host.http().calls().len(), 2);
+}
+
+#[test]
+fn r55c_image_generation_and_edit_are_plain_json_for_both_sites() {
+    use hofund_plugin_api::RawBody;
+
+    for site in [Site::China, Site::International] {
+        let dir = tempfile::tempdir().expect("dir");
+        let host = host(&dir);
+        let id = seed_site(&host, 4_000_000_000_000, site);
+        let upstream = subscription(&host, None)
+            .upstream(&id, host.context())
+            .expect("upstream");
+        host.http()
+            .enqueue(br#"{"code":0,"msg":"ok","data":{"created":1,"data":[{"b64_json":"aGk="}]}}"#);
+        let answer = block_on(upstream.forward(
+            "/images/generations",
+            RawBody::new(
+                "application/json",
+                br#"{"model":"gpt-image-2.5-sunburst","prompt":"a bird","n":1,"size":"1024x1024","response_format":"url","unknown":true}"#.to_vec(),
+            ),
+        ))
+        .expect("generation");
+        let generated: json::Value = json::from_slice(answer.body()).expect("answer");
+        assert_eq!(generated["data"][0]["b64_json"], "aGk=");
+        let calls = host.http().calls();
+        assert_eq!(calls.len(), 1);
+        let base = endpoints();
+        let base = base.base_for(site);
+        assert_eq!(calls[0].uri(), format!("{base}/v2/images/generations"));
+        assert_eq!(calls[0].header("content-encoding"), None);
+        assert_eq!(calls[0].body()[0], b'{');
+        let sent: json::Value = json::from_slice(calls[0].body()).expect("request");
+        assert_eq!(sent["response_format"], "b64_json");
+        assert!(sent.get("unknown").is_none());
+
+        host.http().enqueue(
+            br#"{"code":0,"data":{"models":[{"id":"hunyuan-image-alpha","tags":["text-to-image"]},{"id":"hunyuan-image-alpha-edit","tags":["image-to-image"]}]}}"#,
+        );
+        host.http().enqueue(
+            br#"{"code":0,"msg":"ok","data":{"created":1,"data":[{"url":"https://image.test/a.png"}]}}"#,
+        );
+        block_on(upstream.forward(
+            "/images/edits",
+            RawBody::new(
+                "application/json",
+                br#"{"model":"hunyuan-image-alpha","prompt":"make it red","n":1,"size":"auto","response_format":"b64_json","image":"data:image/png;base64,aGk="}"#.to_vec(),
+            ),
+        ))
+        .expect("edit");
+        let calls = host.http().calls();
+        assert_eq!(calls.len(), 3);
+        assert!(calls[1].uri().ends_with("/v3/config"));
+        assert_eq!(calls[2].uri(), format!("{base}/v2/images/edits"));
+        assert_eq!(calls[2].header("content-encoding"), None);
+        let sent: json::Value = json::from_slice(calls[2].body()).expect("request");
+        assert_eq!(sent["model"], "hunyuan-image-alpha-edit");
+        assert_eq!(sent["image"], json::json!(["data:image/png;base64,aGk="]));
+        assert!(sent.get("size").is_none());
+        assert!(sent.get("response_format").is_none());
+    }
+}
+
+#[test]
+fn r55c_image_envelope_refusal_and_unsupported_path_are_safe() {
+    use hofund_plugin_api::RawBody;
+
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, 4_000_000_000_000);
+    let upstream = subscription(&host, None)
+        .upstream(&id, host.context())
+        .expect("upstream");
+    host.http()
+        .enqueue(br#"{"code":11101,"msg":"invalid image"}"#);
+    let error = block_on(upstream.forward(
+        "/images/generations",
+        RawBody::new(
+            "application/json",
+            br#"{"model":"gpt-image-2.5-sunburst","prompt":"a bird","n":1}"#.to_vec(),
+        ),
+    ))
+    .expect_err("refused");
+    assert_eq!(error.status(), Some(502));
+    assert!(error.message().contains("invalid image (11101)"));
+    assert!(!error.message().contains(TOKEN));
+
+    let error = block_on(upstream.forward(
+        "/embeddings",
+        RawBody::new("application/json", b"{}".to_vec()),
+    ))
+    .expect_err("unsupported");
+    assert_eq!(error.kind(), PluginErrorKind::Unsupported);
+    assert_eq!(host.http().calls().len(), 1);
+}
+
+#[test]
+fn r55c_reasoning_history_is_sent_as_reasoning() {
+    use hofund_plugin_api::{ContentPart, Extensions, Message, Role};
+
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, 4_000_000_000_000);
+    enqueue_empty_config(&host);
+    enqueue_chat_ok(&host);
+    let upstream = subscription(&host, None)
+        .upstream(&id, host.context())
+        .expect("upstream");
+    let mut request = after_tools_request("kimi-k2.6", false);
+    request.messages.insert(
+        1,
+        Message {
+            role: Role::Assistant,
+            content: vec![ContentPart::thinking(
+                "The user wants the files. Codeword ZEBRA-42.",
+            )],
+            extensions: Extensions::new(),
+        },
+    );
+    block_on(upstream.execute(request, ProtocolId::OPENAI_CHAT)).expect("served");
+    let body = chat_body(host.http().calls()[1].body());
+    let assistant = &body["messages"][1];
+    assert_eq!(
+        assistant["reasoning"],
+        "The user wants the files. Codeword ZEBRA-42."
+    );
+    assert!(assistant.get("reasoning_content").is_none());
+    assert!(assistant.get("reasoning_details").is_none());
+    assert_eq!(body["messages"][2]["role"], "tool");
+    assert_eq!(body["messages"][3]["role"], "user");
 }

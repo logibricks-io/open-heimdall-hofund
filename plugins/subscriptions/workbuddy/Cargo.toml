@@ -1,6 +1,6 @@
 [package]
 name = "hofund-plugin-subscription-workbuddy"
-description = "WorkBuddy subscription: desktop auth import, token refresh, billing quota, and OpenAI chat upstream."
+description = "WorkBuddy subscription: desktop auth import, token refresh, billing quota, and OpenAI chat or image upstream."
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
