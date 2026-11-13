@@ -8,7 +8,7 @@ mod tick_tests;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use hofund_config::Value;
 use hofund_plugin_api::{
@@ -39,6 +39,8 @@ const RUN_TIMEOUT: Duration = Duration::from_secs(2 * 60);
 struct Persisted {
     #[serde(default)]
     daily: BTreeMap<String, String>,
+    #[serde(default)]
+    recheck: BTreeMap<String, u64>,
 }
 
 /// In-memory check-in state plus on-disk keys so restarts do not repeat the same day.
@@ -71,10 +73,36 @@ impl CheckinStore {
             .unwrap_or_default()
     }
 
+    fn due(&self, member: &str, day: &str, now: SystemTime) -> bool {
+        if self.last_day(member) != day {
+            return true;
+        }
+        let now = now.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+        self.persisted
+            .lock()
+            .expect("checkin persisted")
+            .recheck
+            .get(member)
+            .is_some_and(|at| *at <= now)
+    }
+
     fn set_day(&self, member: &str, day: &str) {
+        self.set_outcome(member, day, None);
+    }
+
+    fn set_outcome(&self, member: &str, day: &str, recheck_at: Option<SystemTime>) {
         let snapshot = {
             let mut persisted = self.persisted.lock().expect("checkin persisted");
             persisted.daily.insert(member.to_owned(), day.to_owned());
+            if let Some(at) = recheck_at
+                && let Ok(seconds) = at.duration_since(UNIX_EPOCH)
+            {
+                persisted
+                    .recheck
+                    .insert(member.to_owned(), seconds.as_secs());
+            } else {
+                persisted.recheck.remove(member);
+            }
             persisted.clone()
         };
         if let Err(error) = write_persisted(&self.path, &snapshot) {
@@ -222,7 +250,7 @@ pub(crate) async fn tick_with_runner(
 
     for candidate in candidates {
         let member_id = candidate.member.id.to_string();
-        if store.last_day(&member_id) == day {
+        if !store.due(&member_id, &day, now) {
             continue;
         }
         if !account_ready(&candidate.state, &candidate.member.account).await {
@@ -245,10 +273,10 @@ pub(crate) async fn tick_with_runner(
                         subscription = %candidate.subscription,
                         account = %candidate.member.account,
                         detail = %record.detail(),
-                        "daily check-in failed; will retry on the next local day"
+                        "daily check-in failed"
                     );
                 }
-                store.set_day(&member_id, &day);
+                store.set_outcome(&member_id, &day, outcome.recheck_at());
                 let mut row = CheckinAccountStatus::new(
                     candidate.subscription,
                     candidate.member.account.clone(),
@@ -380,7 +408,7 @@ pub(crate) async fn run_now(
     match run_checkin(state, &account_id).await {
         Ok(result) => {
             let record = CheckinRecord::from_result(now, &result);
-            store.set_day(&member_id, &day);
+            store.set_outcome(&member_id, &day, result.recheck_at());
             let mut row = CheckinAccountStatus::new(subscription.to_owned(), account_id);
             row.set_last(record.clone());
             store.record(row);
@@ -485,5 +513,23 @@ mod tests {
         assert_eq!(store2.last_day("member/a-0000000000000001"), "2026-11-04");
         let on_disk = std::fs::read_to_string(&path).expect("state file");
         assert!(on_disk.contains("2026-11-04"));
+    }
+
+    #[test]
+    fn r57b_recheck_runs_at_the_persisted_half_hour_boundary() {
+        let dir = tempfile::tempdir().expect("temp");
+        let store = CheckinStore::new(dir.path());
+        let member = "zcode/a-0000000000000001";
+        let day = "2026-11-14";
+        let now = UNIX_EPOCH + Duration::from_secs(1_763_000_000);
+        store.set_outcome(member, day, Some(now + Duration::from_secs(30 * 60)));
+        assert!(!store.due(member, day, now));
+        assert!(!store.due(member, day, now + Duration::from_secs(30 * 60 - 1)));
+        assert!(store.due(member, day, now + Duration::from_secs(30 * 60)));
+        let reopened = CheckinStore::new(dir.path());
+        assert!(reopened.due(member, day, now + Duration::from_secs(30 * 60)));
+        assert!(reopened.due(member, "2026-11-15", now));
+        store.set_day(member, day);
+        assert!(!store.due(member, day, now + Duration::from_secs(30 * 60)));
     }
 }

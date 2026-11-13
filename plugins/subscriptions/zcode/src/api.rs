@@ -76,7 +76,11 @@ pub(crate) async fn call(req: &EnvelopeRequest<'_>) -> Result<Value, PluginError
         .header("content-type", "application/json")
         .header("accept", "application/json")
         .header("user-agent", format!("ZCode/{APP_VERSION}"));
-    if url.starts_with(&format!("{}/", endpoints.portal.trim_end_matches('/'))) {
+    if url.starts_with(&format!("{}/", endpoints.portal.trim_end_matches('/')))
+        && !extra_headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("x-device-mid"))
+    {
         call = call.header("x-device-mid", device_mid(device_file)?);
     }
     if let Some(token) = auth {

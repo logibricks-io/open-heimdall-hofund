@@ -38,6 +38,7 @@ const PLUGIN_EXTRA_DEPS: &[(&str, &[&str])] = &[
         ],
     ),
     ("hofund-plugin-subscription-kiro", &["rusqlite", "tokio"]),
+    ("hofund-plugin-subscription-zcode", &["regex"]),
 ];
 
 fn plugin_allows_dep(package: &str, name: &str) -> bool {

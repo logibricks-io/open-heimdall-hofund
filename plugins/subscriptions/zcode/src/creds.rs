@@ -185,14 +185,9 @@ fn parse_store(
         auth.site = team.site;
         auth.api_key = None;
     }
-    if auth.api_key.is_none() && !auth.team() && auth.jwt.is_some() {
-        return Err(PluginError::unsupported(
-            "Z Code Start Plan sign-in is not supported; use a GLM Coding Plan or team seat",
-        ));
-    }
-    if auth.api_key.is_none() && !auth.team() {
+    if auth.api_key.is_none() && !auth.team() && auth.jwt.is_none() {
         return Err(PluginError::auth(
-            "Z Code has no readable GLM Coding Plan or team seat in that directory",
+            "Z Code has no readable plan key, team seat, or Z Code session in that directory",
         ));
     }
     let mut info_email = String::new();
