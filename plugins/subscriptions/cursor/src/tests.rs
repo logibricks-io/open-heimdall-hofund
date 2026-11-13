@@ -30,6 +30,7 @@ fn endpoints() -> Endpoints {
     Endpoints {
         website: "https://cursor.test".to_owned(),
         api: "https://api2.cursor.test".to_owned(),
+        agent: "https://agent.cursor.test".to_owned(),
         client_version: "cli-test".to_owned(),
     }
 }

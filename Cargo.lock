@@ -2162,7 +2162,7 @@ dependencies = [
  "http",
  "serde",
  "serde_json",
- "sha2",
+ "sha2 0.10.9",
  "tempfile",
  "tokio",
  "toml_edit 0.25.17+spec-1.1.0",
@@ -2249,6 +2249,8 @@ dependencies = [
  "hofund-secrets",
  "hofund-sessions",
  "hofund-usage",
+ "libc",
+ "nix",
  "notify",
  "regex",
  "reqwest 0.12.28",
@@ -2356,8 +2358,11 @@ dependencies = [
 name = "hofund-kit-subscription"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "futures-util",
+ "h2",
  "hofund-plugin-host",
+ "http",
  "tokio",
 ]
 

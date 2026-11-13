@@ -72,6 +72,7 @@ pub(crate) struct DaemonControl {
     sessions: Arc<SessionControl>,
     agents: AgentOps,
     profiles: ProfileOps,
+    accounts: Option<Arc<super::control_accounts::AccountOps>>,
     shutdown: watch::Sender<bool>,
     events: Arc<EventBus>,
     in_flight: Arc<AtomicU64>,
@@ -80,6 +81,7 @@ pub(crate) struct DaemonControl {
     route_trace: Option<Arc<hofund_router::RouteTraceBook>>,
     status_serves: Option<ServeRole>,
     status_owner_pid: Option<u32>,
+    sign_in_deadline: std::time::Duration,
 }
 
 impl DaemonControl {
@@ -127,6 +129,7 @@ impl DaemonControl {
                 token_path,
             ),
             profiles: ProfileOps::new(config_path, registry_agents),
+            accounts: None,
             usage,
             keys,
             sessions,
@@ -140,6 +143,7 @@ impl DaemonControl {
             route_trace: None,
             status_serves: None,
             status_owner_pid: None,
+            sign_in_deadline: super::sign_in::SIGN_IN_DEADLINE,
         }
     }
 
@@ -150,6 +154,11 @@ impl DaemonControl {
     ) -> Self {
         self.status_serves = serves;
         self.status_owner_pid = owner_pid;
+        self
+    }
+
+    pub(crate) fn with_sign_in_deadline(mut self, deadline: std::time::Duration) -> Self {
+        self.sign_in_deadline = deadline;
         self
     }
 
@@ -182,6 +191,14 @@ impl DaemonControl {
     /// Serves `/v1/hofund/events` from `bus`.
     pub(crate) fn with_events(mut self, bus: Arc<EventBus>) -> Self {
         self.agents = self.agents.with_events(Arc::clone(&bus));
+        if let Some(runtime) = &self.runtime {
+            self.accounts = Some(Arc::new(super::control_accounts::AccountOps::new(
+                Arc::clone(runtime),
+                Arc::clone(&self.registry),
+                Arc::clone(&bus),
+                self.sign_in_deadline,
+            )));
+        }
         self.events = bus;
         self
     }
@@ -413,6 +430,17 @@ impl DaemonControl {
         Ok(known)
     }
 
+    fn account_ops(&self) -> Result<&Arc<super::control_accounts::AccountOps>, ControlFailure> {
+        self.accounts.as_ref().ok_or_else(|| {
+            ControlError::new(
+                ControlErrorKind::Internal,
+                "account operations are not available",
+                "accounts",
+            )
+            .into()
+        })
+    }
+
     fn provider_exists(&self, id: &str) -> Result<(), ControlError> {
         if self
             .config()
@@ -465,6 +493,107 @@ impl ControlState for DaemonControl {
         status.serves = self.status_serves.or_else(serve_role_from_env);
         status.owned_by_pid = self.status_owner_pid.unwrap_or_else(owned_by_pid_from_env);
         status
+    }
+
+    fn settings(&self) -> ControlFuture<'_, hofund_control_proto::SettingsResponse> {
+        Box::pin(super::control_settings::get(&self.ops))
+    }
+
+    fn patch_settings(
+        &self,
+        request: hofund_control_proto::SettingsPatchRequest,
+    ) -> ControlFuture<'_, hofund_control_proto::SettingsResponse> {
+        Box::pin(super::control_settings::patch(&self.ops, request))
+    }
+
+    fn logs(
+        &self,
+        query: hofund_control_proto::LogTailQuery,
+    ) -> ControlFuture<'_, hofund_control_proto::LogTailResponse> {
+        Box::pin(async move { super::log_tail::read(&self.config_path, query) })
+    }
+
+    fn subscriptions(&self) -> ControlFuture<'_, hofund_control_proto::SubscriptionListResponse> {
+        Box::pin(async move { self.account_ops()?.list().await })
+    }
+
+    fn start_sign_in(
+        &self,
+        id: String,
+        request: hofund_control_proto::SignInStartRequest,
+    ) -> ControlFuture<'_, hofund_control_proto::SignInStartResponse> {
+        Box::pin(async move { self.account_ops()?.start(id, request).await })
+    }
+
+    fn sign_in_status(
+        &self,
+        id: String,
+        session: String,
+    ) -> ControlFuture<'_, hofund_control_proto::SignInStatusResponse> {
+        Box::pin(async move { self.account_ops()?.status(&id, &session).await })
+    }
+
+    fn sign_in_proof(
+        &self,
+        id: String,
+        session: String,
+        request: hofund_control_proto::SignInProofRequest,
+    ) -> ControlFuture<'_, hofund_control_proto::SignInStatusResponse> {
+        Box::pin(async move { self.account_ops()?.proof(&id, &session, request).await })
+    }
+
+    fn sign_in_cancel(
+        &self,
+        id: String,
+        session: String,
+    ) -> ControlFuture<'_, hofund_control_proto::SignInCancelResponse> {
+        Box::pin(async move { self.account_ops()?.cancel(&id, &session).await })
+    }
+
+    fn refresh_subscription(
+        &self,
+        id: String,
+        request: hofund_control_proto::SubscriptionRefreshRequest,
+    ) -> ControlFuture<'_, hofund_control_proto::SubscriptionRefreshResponse> {
+        Box::pin(async move { self.account_ops()?.refresh(id, request.account).await })
+    }
+
+    fn switch_account(
+        &self,
+        request: hofund_control_proto::AccountSwitchRequest,
+    ) -> ControlFuture<'_, hofund_control_proto::AccountSwitchResponse> {
+        Box::pin(async move {
+            self.account_ops()?
+                .switch(request.agent, request.target)
+                .await
+        })
+    }
+
+    fn import_account(
+        &self,
+        request: hofund_control_proto::AccountImportRequest,
+    ) -> ControlFuture<'_, hofund_control_proto::AccountImportResponse> {
+        Box::pin(async move { self.account_ops()?.import(request.path).await })
+    }
+
+    fn discover_accounts(
+        &self,
+    ) -> ControlFuture<'_, hofund_control_proto::AccountDiscoverResponse> {
+        Box::pin(async move { self.account_ops()?.discover(false).await.map(Into::into) })
+    }
+
+    fn import_discovered_accounts(
+        &self,
+    ) -> ControlFuture<'_, hofund_control_proto::AccountDiscoverImportResponse> {
+        Box::pin(async move { self.account_ops()?.discover(true).await.map(Into::into) })
+    }
+
+    fn remove_account(
+        &self,
+        id: String,
+        account: String,
+    ) -> ControlFuture<'_, hofund_control_proto::AccountRemoveResponse> {
+        Box::pin(async move { self.account_ops()?.remove(id, account).await })
     }
 
     fn draining(&self) -> bool {

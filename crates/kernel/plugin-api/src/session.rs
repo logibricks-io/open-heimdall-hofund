@@ -458,3 +458,58 @@ pub trait SessionStore: Send + Sync {
         ))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{SessionDay, SessionRecord, SessionTokens};
+
+    #[test]
+    fn token_counters_add_and_report_totals() {
+        let tokens = SessionTokens::new(2, 3, 4, 10).with_cache_write_1h(6);
+        assert_eq!(tokens.cache_write_1h, 6);
+        assert!(!tokens.is_zero());
+        assert_eq!(tokens.total(), 19);
+        assert!(SessionTokens::default().is_zero());
+        assert_eq!(SessionTokens::default().total(), 0);
+
+        let mut sum = SessionTokens::new(1, 0, 0, 0);
+        sum.add(SessionTokens::new(0, 2, 0, 0));
+        assert_eq!(sum, SessionTokens::new(1, 2, 0, 0));
+    }
+
+    #[test]
+    fn session_record_usage_and_days_ignore_zeros_and_merge() {
+        let mut record = SessionRecord::new("fake", "fake:one", "/sessions/one.jsonl");
+        record.add_usage("m", SessionTokens::default());
+        assert_eq!(record.models.len(), 0);
+        record.add_usage("m", SessionTokens::new(2, 0, 0, 0));
+        record.add_usage("m", SessionTokens::new(0, 3, 0, 0));
+        assert_eq!(record.model_ids(), vec!["m".to_owned()]);
+        assert_eq!(record.tokens(), SessionTokens::new(2, 3, 0, 0));
+
+        record.add_day(SessionDay::new("2026-01-01", "m", SessionTokens::default()));
+        assert_eq!(record.days.len(), 0);
+        record.add_day(SessionDay::new(
+            "2026-01-01",
+            "m",
+            SessionTokens::new(1, 0, 0, 0),
+        ));
+        record.add_day(SessionDay::new(
+            "2026-01-01",
+            "m",
+            SessionTokens::new(0, 4, 0, 0),
+        ));
+        record.add_day(SessionDay::new(
+            "2026-01-02",
+            "m",
+            SessionTokens::new(1, 0, 0, 0),
+        ));
+        record.add_day(SessionDay::new(
+            "2026-01-01",
+            "other",
+            SessionTokens::new(1, 0, 0, 0),
+        ));
+        assert_eq!(record.days.len(), 3);
+        assert_eq!(record.days[0].tokens, SessionTokens::new(1, 4, 0, 0));
+    }
+}

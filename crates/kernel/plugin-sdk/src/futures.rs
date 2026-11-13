@@ -2,6 +2,25 @@
 
 pub use futures_util::stream::FuturesUnordered;
 
+/// Returns the next completed future in `futures`.
+///
+/// Unlike `StreamExt::next`, this stays pending forever while the set is empty,
+/// so an empty append window cannot starve another branch of a race.
+pub async fn next_ready<F>(futures: &mut FuturesUnordered<F>) -> F::Output
+where
+    F: std::future::Future,
+{
+    use futures_util::StreamExt;
+
+    if futures.is_empty() {
+        return std::future::pending().await;
+    }
+    match futures.next().await {
+        Some(output) => output,
+        None => std::future::pending().await,
+    }
+}
+
 /// Returns whichever future completes first.
 pub async fn race<A, B>(left: A, right: B) -> Race<A::Output, B::Output>
 where
@@ -29,7 +48,18 @@ pub enum Race<L, R> {
 mod tests {
     use std::time::Duration;
 
-    use super::{Race, race};
+    use super::{FuturesUnordered, Race, next_ready, race};
+
+    #[tokio::test]
+    async fn next_ready_pends_while_empty_then_returns_a_result() {
+        let mut futures = FuturesUnordered::<std::future::Ready<u8>>::new();
+        assert_eq!(
+            race(next_ready(&mut futures), async { 7_u8 }).await,
+            Race::Right(7)
+        );
+        futures.push(std::future::ready(9));
+        assert_eq!(next_ready(&mut futures).await, 9);
+    }
 
     #[tokio::test(start_paused = true)]
     async fn race_returns_the_branch_that_finishes_first() {
