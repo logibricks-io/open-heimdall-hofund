@@ -1268,3 +1268,55 @@ fn r8d_quota_period_body_stays_empty_object_when_team_header_is_sent() {
     );
     assert_eq!(team.as_deref(), Some("7"));
 }
+
+#[test]
+fn r8f3_upstream_execute_honors_keychain_enablement() {
+    {
+        let dir = tempfile::tempdir().expect("dir");
+        let agent_home = dir.path().join("agent");
+        let host = host(&dir);
+        let sub = subscription_factory(&host, Some(agent_home.clone()), false, true);
+        let id = upsert_agent(
+            &host,
+            "upstream-kc@example.test",
+            &agent_home,
+            4_000_000_000,
+        );
+        host.process()
+            .script_piped(PipedScript::new().exits(|_| vec![]).status(44));
+        let provider = sub.upstream(&id, host.context()).expect("provider");
+        let _ = block_on(provider.execute(
+            hofund_plugin_api::Request::new("auto"),
+            hofund_plugin_api::ProtocolId::OPENAI_CHAT,
+        ));
+        assert_eq!(
+            host.process().piped_spawns().len(),
+            1,
+            "enabled keychain must be consulted on upstream execute"
+        );
+    }
+
+    {
+        let dir = tempfile::tempdir().expect("dir");
+        let agent_home = dir.path().join("agent");
+        let host = host(&dir);
+        let sub = subscription_factory(&host, Some(agent_home.clone()), true, false);
+        let id = upsert_agent(
+            &host,
+            "upstream-skip@example.test",
+            &agent_home,
+            4_000_000_000,
+        );
+        host.process()
+            .script_piped(PipedScript::new().exits(|_| vec![]).status(44));
+        let provider = sub.upstream(&id, host.context()).expect("provider");
+        let _ = block_on(provider.execute(
+            hofund_plugin_api::Request::new("auto"),
+            hofund_plugin_api::ProtocolId::OPENAI_CHAT,
+        ));
+        assert!(
+            host.process().piped_spawns().is_empty(),
+            "skip_keychain must not spawn a keychain read on upstream execute"
+        );
+    }
+}

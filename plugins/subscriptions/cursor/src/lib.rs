@@ -445,7 +445,7 @@ impl Subscription for Cursor {
             self.agent_home.clone(),
             self.program().ok(),
             Arc::clone(&self.keychain),
-            !self.keychain_enabled,
+            self.keychain_enabled,
         )))
     }
 
