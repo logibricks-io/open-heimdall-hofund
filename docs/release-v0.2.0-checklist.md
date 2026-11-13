@@ -49,7 +49,7 @@ Most subscription and routing work is verified with mocks only.
 | Claude Code request serving (H8) | Merged (#762 tip, including R-6g). Mocks only; real-binary smoke is still #304. |
 | Cursor agent-API request serving (R-8/R-9) | Merged (#775 tip). Mocks only; documented deviations stay in `docs/feature-parity.md`. |
 | Devin chat (R-12/R-13) | Merged (#786 tip). Mocks only. |
-| Kiro | Unary text-only on `main` (no stream, tools, or images). That is the Must scope. |
+| Kiro | Unary or streaming Messages with tools and inline images (R-51, mocks/loopback only). Images over the 5 MiB Base64 limit are refused. Portal sign-in and kiro-cli SQLite remain later R-51 slices. |
 | Antigravity (row 3.4) | Plugin is on `main` (R-49). Mocks only. |
 | P1-8 uninstall / purge | Merged (#748) |
 | 10.5 LAN allow-IPs / trusted proxy | Merged (#749) |
@@ -108,8 +108,9 @@ the to-be-tagged commit, with **0.2.0**:
 3. Move notes from `[Unreleased]` in `CHANGELOG.md` to
    `[0.2.0] - YYYY-MM-DD`. Be honest about what is on that commit: Cursor
    R-8/R-9, Claude H8, and Devin R-12/R-13 request serving are already on
-   `f320d119` (mocks only). Keep Kiro as unary text-only unless a later
-   change landed. Do not list Library writes or true 4.2–4.4 recording/MCP
+   `f320d119` (mocks only). If R-51 has landed, describe unary or streaming
+   Messages with tools and images, and the 5 MiB Base64 refusal; do not claim
+   portal sign-in or kiro-cli SQLite. Do not list Library writes or true 4.2–4.4 recording/MCP
    execution as released.
 4. Commit those files. The tag is created from that commit, not from a
    dirty tree.

@@ -42,7 +42,7 @@ under `plugins/subscriptions`. Request serving is not uniform:
 - **Claude Pro/Max:** sign-in, refresh, models, quota, and request serving
   through the Claude Code MCP bridge (H8).
 - **Devin:** sign-in, import, models, quota, and subscription chat (R-12/R-13).
-- **Kiro:** unary text-only requests (no stream, tools, or images).
+- **Kiro:** unary or streaming Messages (`generateAssistantResponse`) with tools and inline images (R-51). Images over the 5 MiB Base64 limit are refused.
 - **Zed:** native RSA loopback sign-in (R-56) and POST `/completions` upstream
   (R-16; mocks only).
 

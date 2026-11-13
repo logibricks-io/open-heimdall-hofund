@@ -169,7 +169,7 @@ picks up a sign-in or sign-out on its next account check.
 Request serving differs by subscription. On this tree: Cursor serves Agent
 Run requests (R-8/R-9, with documented deviations). Claude Code requests
 are served through the MCP bridge (H8). Devin chat is implemented (R-12/R-13).
-Kiro accepts unary text-only requests (no stream, tools, or images). Zed
+Kiro accepts unary or streaming Messages requests with tools and inline images (R-51). Images over the 5 MiB Base64 limit are refused. Zed
 serves POST /completions (R-16) and has native RSA loopback sign-in (R-56).
 See docs/feature-parity.md.
 ";

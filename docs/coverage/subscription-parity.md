@@ -16,7 +16,7 @@ Legend: **Done** = matches the reference at checklist granularity; **Partial** =
 | Cursor (`cursor`) | 1 | 15 | 3 | 2 | 0 |
 | Devin (`devin`) | 11 | 6 | 1 | 1 | 0 |
 | Zed (`zed`) | 0 | 6 | 1 | 3 | 0 |
-| Kiro (`kiro`) | 0 | 17 | 1 | 2 | 0 |
+| Kiro (`kiro`) | 0 | 16 | 1 | 2 | 0 |
 | Factory / Droid (`factory`) | 1 | 15 | 0 | 3 | 0 |
 | Cline / ClinePass (`cline`) | 2 | 12 | 1 | 3 | 1 |
 | ChatGPT / Codex (`codex` backend) and ChatGPT API (`chatgpt-api`) | 8 | 11 | 2 | 0 | 0 |

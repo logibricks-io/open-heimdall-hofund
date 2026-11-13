@@ -28,7 +28,7 @@ Heimdall 是那扇门。Hofund 是守门的剑。
 - **Cursor：** 支持登录、导入、查模型和配额，以及 Agent Run 请求转发（R-8/R-9；偏差见 `docs/feature-parity.md`）。
 - **Claude Pro/Max：** 支持登录、刷新、查模型和配额，以及通过 Claude Code MCP 桥接转发请求（H8）。
 - **Devin：** 支持登录、导入、查模型和配额，以及订阅 chat（R-12/R-13）。
-- **Kiro：** 仅支持纯文本、非流式、无工具/图片的单次请求。
+- **Kiro：** 支持单次或流式 Messages（`generateAssistantResponse`），含工具和内联图片（R-51）。超过 5 MiB Base64 限制的图片会被拒绝。
 - **Zed：** 支持原生 RSA 回环登录（R-56）和 POST `/completions` 上游（R-16；仅 mock 验证）。
 
 计分表与未合并工作见 [docs/feature-parity.md](docs/feature-parity.md)（英文）。
