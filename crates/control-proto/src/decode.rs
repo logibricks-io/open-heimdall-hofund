@@ -23,15 +23,16 @@ use crate::{
     ProviderSpendCapsResponse, ProviderTestRequest, ProviderTestResponse, ProviderWriteResponse,
     QuotaAlertsResponse, QuotaAlertsSetRequest, QuotaAlertsSetResponse, QuotaCreditsModesResponse,
     QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryResponse, QuotaResponse,
-    ReloadRequest, RouteListResponse, RouteModelListResponse, SessionDetailResponse,
-    SessionListResponse, SessionManageResponse, SessionOverviewResponse, SessionProgressResponse,
-    SessionReadsPatchRequest, SessionReadsResponse, SessionRouteResponse, SessionSearchResponse,
-    SessionStatsResponse, SessionTranscriptResponse, SettingsPatchRequest, SettingsResponse,
-    ShutdownRequest, ShutdownResponse, SignInCancelRequest, SignInCancelResponse,
-    SignInProofRequest, SignInStartRequest, SignInStartResponse, SignInStatusResponse,
-    StatusResponse, SubscriptionListResponse, SubscriptionRefreshRequest,
-    SubscriptionRefreshResponse, TokenRotateRequest, TokenRotateResponse, UnroutedListResponse,
-    UsageResponse, WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
+    ReloadRequest, RouteListResponse, RouteModelListResponse, SessionCarryRequest,
+    SessionCarryResponse, SessionDetailResponse, SessionListResponse, SessionManageResponse,
+    SessionOverviewResponse, SessionProgressResponse, SessionReadsPatchRequest,
+    SessionReadsResponse, SessionRouteResponse, SessionSearchResponse, SessionStatsResponse,
+    SessionTranscriptResponse, SettingsPatchRequest, SettingsResponse, ShutdownRequest,
+    ShutdownResponse, SignInCancelRequest, SignInCancelResponse, SignInProofRequest,
+    SignInStartRequest, SignInStartResponse, SignInStatusResponse, StatusResponse,
+    SubscriptionListResponse, SubscriptionRefreshRequest, SubscriptionRefreshResponse,
+    TokenRotateRequest, TokenRotateResponse, UnroutedListResponse, UsageResponse,
+    WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
 };
 
 mod sealed {
@@ -279,6 +280,7 @@ request!(AccountImportRequest, validate);
 request!(AccountDiscoverAddRequest, validate);
 request!(SignInCancelRequest);
 request!(AccountRemoveRequest);
+request!(SessionCarryRequest, validate);
 
 impl sealed::Sealed for ConfigResponse {}
 impl Response for ConfigResponse {
@@ -337,6 +339,7 @@ response!(
     PicksResponse,
     RouteModelListResponse,
     RouteListResponse,
+    SessionCarryResponse,
     SessionDetailResponse,
     SessionListResponse,
     SessionManageResponse,

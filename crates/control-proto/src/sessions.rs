@@ -142,7 +142,7 @@ pub struct SessionTokenTotals {
     pub cache_write: u64,
 }
 
-/// Resume command. Session routes return null for this field until resume ships.
+/// Resume command as argv plus cwd for `std::process::Command`, never a shell line.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct SessionResume {
@@ -176,7 +176,7 @@ pub struct SessionSummary {
     pub cost: f64,
     /// Number of token-bearing models without a price.
     pub unpriced: u64,
-    /// Resume command, null until the resume row lands.
+    /// Resume command, or null when the session cannot be resumed.
     #[serde(default, deserialize_with = "deserialize_opt_resume")]
     pub resume: Option<SessionResume>,
     /// Whether the source cannot be mutated.
@@ -676,6 +676,72 @@ impl SessionReadsPatchRequest {
     }
 }
 
+/// Carry request for continuing a session in another agent.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+#[serde(deny_unknown_fields)]
+pub struct SessionCarryRequest {
+    /// Body wire version.
+    pub version: u32,
+    /// Public id of the session to carry.
+    pub id: String,
+    /// Destination agent id (`omp` for Pi carry).
+    pub to: String,
+}
+
+impl Default for SessionCarryRequest {
+    fn default() -> Self {
+        Self {
+            version: API_VERSION,
+            id: String::new(),
+            to: String::new(),
+        }
+    }
+}
+
+impl SessionCarryRequest {
+    pub(crate) fn validate(&self) -> Result<(), ControlError> {
+        if self.id.is_empty() {
+            return Err(bad_query("id is required"));
+        }
+        if self.id.len() > 256 {
+            return Err(bad_query("id is too long"));
+        }
+        if self.to.is_empty() {
+            return Err(bad_query("to is required"));
+        }
+        if self.to.len() > 64 {
+            return Err(bad_query("to is too long"));
+        }
+        Ok(())
+    }
+}
+
+/// Carry response with spawn argv instead of a shell line.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct SessionCarryResponse {
+    /// Body wire version.
+    pub version: u32,
+    /// Destination agent id.
+    pub agent: String,
+    /// Session id the carry applies to.
+    pub id: String,
+    /// Command to run in the session folder.
+    pub command: SessionResume,
+}
+
+impl Default for SessionCarryResponse {
+    fn default() -> Self {
+        Self {
+            version: API_VERSION,
+            agent: String::new(),
+            id: String::new(),
+            command: SessionResume::default(),
+        }
+    }
+}
+
 fn parse_days(value: &str) -> Result<u32, ControlError> {
     match value {
         "0" | "1" | "7" | "30" | "90" => value
@@ -762,11 +828,19 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_SESSION_LIST_LIMIT, SessionListQuery, SessionListResponse, SessionManageQuery,
-        SessionOverviewQuery, SessionReadsPatchRequest, SessionSearchQuery, SessionStatsQuery,
-        SessionSummary, SessionTokenTotals, SessionTranscriptQuery,
+        DEFAULT_SESSION_LIST_LIMIT, SessionCarryRequest, SessionListQuery, SessionListResponse,
+        SessionManageQuery, SessionOverviewQuery, SessionReadsPatchRequest, SessionSearchQuery,
+        SessionStatsQuery, SessionSummary, SessionTokenTotals, SessionTranscriptQuery,
     };
     use crate::{ControlErrorKind, MAX_ID_BYTES};
+
+    fn carry(id: impl Into<String>, to: impl Into<String>) -> SessionCarryRequest {
+        SessionCarryRequest {
+            version: crate::API_VERSION,
+            id: id.into(),
+            to: to.into(),
+        }
+    }
 
     #[test]
     fn list_query_accepts_only_the_contract_days() {
@@ -794,6 +868,29 @@ mod tests {
             .expect("overview");
         assert_eq!(overview.cwd, "/work/repo");
         assert!(SessionOverviewQuery::parse(Some("folder=repo")).is_err());
+    }
+
+    #[test]
+    fn carry_request_validate_rejects_empty_and_overlong_fields() {
+        assert!(carry("", "omp").validate().is_err(), "empty id");
+        assert!(carry("s", "").validate().is_err(), "empty to");
+        assert!(carry("s", "omp").validate().is_ok());
+        assert!(
+            carry("a".repeat(256), "omp").validate().is_ok(),
+            "id of 256 is accepted"
+        );
+        assert!(
+            carry("a".repeat(257), "omp").validate().is_err(),
+            "id of 257 is rejected"
+        );
+        assert!(
+            carry("s", "b".repeat(64)).validate().is_ok(),
+            "to of 64 is accepted"
+        );
+        assert!(
+            carry("s", "b".repeat(65)).validate().is_err(),
+            "to of 65 is rejected"
+        );
     }
 
     #[test]

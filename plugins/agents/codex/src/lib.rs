@@ -154,6 +154,23 @@ impl SessionStore for CodexStore {
     ) -> Result<Box<dyn SessionTranscriptParser>, PluginError> {
         Ok(Box::new(CodexTranscriptParser::default()))
     }
+
+    fn resume_argv(&self, session_id: &str, _path: &Path) -> Option<Vec<String>> {
+        let id = session_id
+            .strip_prefix(&format!("{AGENT}:"))
+            .unwrap_or(session_id);
+        if !safe_resume_id(id) {
+            return None;
+        }
+        Some(vec!["codex".to_owned(), "resume".to_owned(), id.to_owned()])
+    }
+}
+
+fn safe_resume_id(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
 }
 
 fn discover_homes() -> Vec<PathBuf> {
@@ -739,6 +756,19 @@ mod tests {
             files
                 .iter()
                 .any(|file| file.compression == SessionCompression::Zstd)
+        );
+    }
+
+    #[test]
+    fn codex_resume_argv_uses_bare_id() {
+        let store = CodexStore::with_root(fixture("home"));
+        assert_eq!(
+            store.resume_argv("codex:thread-one", &fixture("home/sessions/x.jsonl")),
+            Some(vec![
+                "codex".to_owned(),
+                "resume".to_owned(),
+                "thread-one".to_owned(),
+            ])
         );
     }
 

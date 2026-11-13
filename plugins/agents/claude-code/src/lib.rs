@@ -118,6 +118,27 @@ impl SessionStore for ClaudeStore {
     ) -> Result<Box<dyn SessionTranscriptParser>, PluginError> {
         Ok(Box::new(ClaudeTranscriptParser::default()))
     }
+
+    fn resume_argv(&self, session_id: &str, _path: &Path) -> Option<Vec<String>> {
+        let id = session_id
+            .strip_prefix(&format!("{AGENT}:"))
+            .unwrap_or(session_id);
+        if !safe_resume_id(id) {
+            return None;
+        }
+        Some(vec![
+            "claude".to_owned(),
+            "--resume".to_owned(),
+            id.to_owned(),
+        ])
+    }
+}
+
+fn safe_resume_id(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
 }
 
 fn parser_for(
@@ -783,6 +804,41 @@ mod tests {
     }
 
     #[test]
+    fn claude_transcript_reads_fixture_content() {
+        let path = fixture("root/projects/-work-app/11111111-2222-3333-4444-555555555555.jsonl");
+        let file = SessionFile::new("fixture", &path);
+        let store = ClaudeStore::with_root(fixture("root"));
+        let mut parser = store.transcript_parser(&file).expect("parser");
+        for line in BufReader::new(std::fs::File::open(path).expect("fixture")).lines() {
+            let value = json::from_str(&line.expect("line")).expect("JSON");
+            parser.push(&value).expect("push");
+        }
+        let transcript = parser.finish().expect("transcript");
+        assert!(transcript.parts.iter().any(|part| part.role == "user"));
+        assert!(transcript.parts.iter().any(|part| part.role == "assistant"));
+    }
+
+    #[test]
+    fn claude_resume_argv_uses_bare_id() {
+        let store = ClaudeStore::with_root(fixture("root"));
+        assert_eq!(
+            store.resume_argv(
+                "claude:11111111-2222-3333-4444-555555555555",
+                &fixture("root/projects/x.jsonl"),
+            ),
+            Some(vec![
+                "claude".to_owned(),
+                "--resume".to_owned(),
+                "11111111-2222-3333-4444-555555555555".to_owned(),
+            ])
+        );
+        assert_eq!(
+            store.resume_argv("claude:bad/id", &fixture("root/projects/x.jsonl")),
+            None
+        );
+    }
+
+    #[test]
     fn claude_entrypoint_tags_desktop_app_usage() {
         let path = fixture("desktop/entrypoint.jsonl");
         let file = SessionFile::new("desktop-tab", &path);
@@ -799,21 +855,6 @@ mod tests {
         assert_eq!(record.app, DESKTOP_AGENT);
         assert_eq!(record.tokens().input, 4);
         assert_eq!(record.tokens().output, 1);
-    }
-
-    #[test]
-    fn claude_transcript_reads_fixture_content() {
-        let path = fixture("root/projects/-work-app/11111111-2222-3333-4444-555555555555.jsonl");
-        let file = SessionFile::new("fixture", &path);
-        let store = ClaudeStore::with_root(fixture("root"));
-        let mut parser = store.transcript_parser(&file).expect("parser");
-        for line in BufReader::new(std::fs::File::open(path).expect("fixture")).lines() {
-            let value = json::from_str(&line.expect("line")).expect("JSON");
-            parser.push(&value).expect("push");
-        }
-        let transcript = parser.finish().expect("transcript");
-        assert!(transcript.parts.iter().any(|part| part.role == "user"));
-        assert!(transcript.parts.iter().any(|part| part.role == "assistant"));
     }
 
     #[cfg(unix)]

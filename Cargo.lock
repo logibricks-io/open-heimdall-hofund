@@ -2258,6 +2258,8 @@ dependencies = [
  "hofund-daemon",
  "hofund-gateway",
  "hofund-model-catalog",
+ "hofund-plugin-agent-omp",
+ "hofund-plugin-agent-pi",
  "hofund-plugin-api",
  "hofund-plugin-host",
  "hofund-plugin-registry",
