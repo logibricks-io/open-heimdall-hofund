@@ -19,7 +19,7 @@ pub fn read_path(page: PageId) -> Option<&'static str> {
 pub enum ProbeOutcome {
     /// HTTP 404: route not shipped in this build.
     NotInBuild,
-    /// HTTP 2xx: empty shell until a later row fills rows.
+    /// HTTP 2xx: the read route answered.
     Ready,
     /// Any other failure.
     Error(String),

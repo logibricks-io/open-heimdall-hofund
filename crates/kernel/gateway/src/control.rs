@@ -31,27 +31,27 @@ use hofund_control_proto::{
     ConfigValidationResponse, ControlError, ControlErrorKind, ErrorEnvelope, GatewayKeyRequest,
     GatewayKeyResponse, GatewayKeyRestoreRequest, GroupCreateRequest, GroupDeleteRequest,
     GroupDeleteResponse, GroupListResponse, GroupMemberCandidatesResponse, GroupPatchRequest,
-    GroupRestoreRequest, GroupWriteResponse, HealthResponse, LogTailQuery, LogTailResponse,
-    MAX_ID_BYTES, MAX_REQUEST_BODY_BYTES, ModelListResponse, PicksResponse, PicksSetRequest,
-    PresetListResponse, ProfileDeleteRequest, ProfileDetailResponse, ProfileListResponse,
-    ProfileRenameRequest, ProfileSaveRequest, ProfileSwitchRequest, ProfileSwitchResponse,
-    ProviderCreateRequest, ProviderDeleteRequest, ProviderDeleteResponse, ProviderKeyRequest,
-    ProviderKeysResponse, ProviderListResponse, ProviderPatchRequest, ProviderRenameRequest,
-    ProviderRenameResponse, ProviderTestRequest, ProviderTestResponse, ProviderWriteResponse,
-    QuotaAlertsResponse, QuotaAlertsSetRequest, QuotaAlertsSetResponse, QuotaCreditsModesResponse,
-    QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryQuery, QuotaHistoryResponse,
-    QuotaQuery, QuotaResponse, ReloadRequest, RouteListResponse, RouteModelListResponse,
-    RouteQuery, SessionCarryRequest, SessionCarryResponse, SessionDetailResponse, SessionListQuery,
-    SessionListResponse, SessionManageQuery, SessionManageResponse, SessionOverviewQuery,
-    SessionOverviewResponse, SessionProgressResponse, SessionReadsPatchRequest,
-    SessionReadsResponse, SessionRouteResponse, SessionSearchQuery, SessionSearchResponse,
-    SessionStatsQuery, SessionStatsResponse, SessionTranscriptQuery, SessionTranscriptResponse,
-    SettingsPatchRequest, SettingsResponse, ShutdownRequest, ShutdownResponse, SignInCancelRequest,
-    SignInCancelResponse, SignInProofRequest, SignInStartRequest, SignInStartResponse,
-    SignInStatusResponse, StatusResponse, SubscriptionListResponse, SubscriptionRefreshRequest,
-    SubscriptionRefreshResponse, TokenRotateRequest, TokenRotateResponse, Topic,
-    UnroutedListResponse, UsageQuery, UsageResponse, WarmupListResponse, WarmupRunRequest,
-    WarmupRunResponse, decode_request,
+    GroupRestoreRequest, GroupWriteResponse, HealthResponse, LibraryResponse, LogTailQuery,
+    LogTailResponse, MAX_ID_BYTES, MAX_REQUEST_BODY_BYTES, ModelListResponse, PicksResponse,
+    PicksSetRequest, PresetListResponse, ProfileDeleteRequest, ProfileDetailResponse,
+    ProfileListResponse, ProfileRenameRequest, ProfileSaveRequest, ProfileSwitchRequest,
+    ProfileSwitchResponse, ProviderCreateRequest, ProviderDeleteRequest, ProviderDeleteResponse,
+    ProviderKeyRequest, ProviderKeysResponse, ProviderListResponse, ProviderPatchRequest,
+    ProviderRenameRequest, ProviderRenameResponse, ProviderTestRequest, ProviderTestResponse,
+    ProviderWriteResponse, QuotaAlertsResponse, QuotaAlertsSetRequest, QuotaAlertsSetResponse,
+    QuotaCreditsModesResponse, QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryQuery,
+    QuotaHistoryResponse, QuotaQuery, QuotaResponse, ReloadRequest, RouteListResponse,
+    RouteModelListResponse, RouteQuery, SessionCarryRequest, SessionCarryResponse,
+    SessionDetailResponse, SessionListQuery, SessionListResponse, SessionManageQuery,
+    SessionManageResponse, SessionOverviewQuery, SessionOverviewResponse, SessionProgressResponse,
+    SessionReadsPatchRequest, SessionReadsResponse, SessionRouteResponse, SessionSearchQuery,
+    SessionSearchResponse, SessionStatsQuery, SessionStatsResponse, SessionTranscriptQuery,
+    SessionTranscriptResponse, SettingsPatchRequest, SettingsResponse, ShutdownRequest,
+    ShutdownResponse, SignInCancelRequest, SignInCancelResponse, SignInProofRequest,
+    SignInStartRequest, SignInStartResponse, SignInStatusResponse, StatusResponse,
+    SubscriptionListResponse, SubscriptionRefreshRequest, SubscriptionRefreshResponse,
+    TokenRotateRequest, TokenRotateResponse, Topic, UnroutedListResponse, UsageQuery,
+    UsageResponse, WarmupListResponse, WarmupRunRequest, WarmupRunResponse, decode_request,
 };
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
@@ -733,6 +733,10 @@ pub trait ControlState: Send + Sync {
             .into())
         })
     }
+    /// Lists the library without changing it.
+    fn library(&self) -> ControlFuture<'_, LibraryResponse> {
+        Box::pin(async { Err(unsupported_library()) })
+    }
     /// Lists consent-filtered sessions.
     fn sessions(&self, query: SessionListQuery) -> ControlFuture<'_, SessionListResponse> {
         let _ = query;
@@ -960,6 +964,15 @@ fn unsupported_gateway_keys() -> ControlFailure {
     ControlError::new(
         ControlErrorKind::Internal,
         "gateway-key management is not implemented by this control state",
+        "control",
+    )
+    .into()
+}
+
+fn unsupported_library() -> ControlFailure {
+    ControlError::new(
+        ControlErrorKind::BadRequest,
+        "library reads are not supported by this control state",
         "control",
     )
     .into()
@@ -1220,6 +1233,7 @@ impl Control {
             .route("/v1/hofund/profiles/save", post(save_profile))
             .route("/v1/hofund/profiles/switch", post(switch_profile))
             .route("/v1/hofund/profiles/rename", post(rename_profile))
+            .route("/v1/hofund/library", get(library).head(method_not_allowed))
             .route(
                 "/v1/hofund/sessions",
                 get(sessions).head(method_not_allowed),
@@ -2331,6 +2345,10 @@ async fn delete_profile(
             .delete_profile(ProfileDeleteRequest::new(name))
             .await
     )
+}
+
+async fn library(State(state): State<HttpState>) -> Response {
+    operation_response!(state.control.state.library().await)
 }
 
 async fn sessions(State(state): State<HttpState>, uri: Uri) -> Response {

@@ -621,7 +621,7 @@ Path `{id}` is the list row's `id` field, percent-encoded when it contains `:`. 
 
 Mutating library bodies accept `{version, …}` from the TUI draft; `expected_revision` is optional until the client tracks `revision` (same rule as section 5 sessions reads).
 
-`GET /v1/hofund/library` returns `{version, revision, dir, error?, rows:[{kind, name, on:[agent], about, bad, own}], agents:[{id, name, instructions, mcp, skills}]}`. Optional additive `error` matches the TUI draft when the library file cannot be loaded. `kind` is `instructions`, `mcp`, `skill`, `found-mcp`, `found-skill`, `rtk`, and later `hook`, `subagent`, `project`. Unknown kind is a dim row in the TUI.
+`GET /v1/hofund/library` returns `{version, revision?, dir, error?, rows:[{kind, name, on:[agent], about, bad, own}], agents:[{id, name, instructions, mcp, skills}]}`. R-45 implements this read-only route. Until a library store exists, the daemon returns empty `rows` and `agents` with the real `dir`. Optional additive `error` matches the TUI draft when the library file cannot be loaded. `kind` is `instructions`, `mcp`, `skill`, `found-mcp`, `found-skill`, `rtk`, and later `hook`, `subagent`, `project`. Unknown kind is a dim row in the TUI.
 
 | Route | Body | Result | Row |
 |---|---|---|---|

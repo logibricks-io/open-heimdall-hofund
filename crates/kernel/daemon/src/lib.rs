@@ -43,6 +43,7 @@ mod control;
 mod control_accounts;
 mod control_agents;
 mod control_groups;
+mod control_library;
 mod control_local;
 pub(crate) mod control_map;
 mod control_presets;

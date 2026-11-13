@@ -25,7 +25,7 @@ Legend: **Done** = matches the reference at checklist granularity; **Partial** =
 | Google Antigravity | 10 | 4 | 2 | 1 | 0 |
 | SuperGrok (`grok`) | 10 | 6 | 0 | 2 | 0 |
 | Qoder (international + Qoder CN) | 1 | 11 | 7 | 1 | 0 |
-| CodeBuddy / WorkBuddy (CN + international) | 13 | 3 | 0 | 0 | 3 |
+| CodeBuddy / WorkBuddy (CN + international) | 15 | 1 | 0 | 0 | 3 |
 | Z Code (`zcode`) | 7 | 8 | 2 | 0 | 2 |
 
 Gaps that had no plan item before this audit (the supervisor's v0.2.0 plan and backlog now carry them under the item named):
@@ -536,21 +536,21 @@ Structured-output prose for Chat, Responses, and Messages shipped in R-13b (`str
 
 **hofund path:** `plugins/subscriptions/workbuddy/`.
 
-| # | capability | reference v0.1.3005 | hofund R-55 | status | gap to close |
-|---|------------|----------------------|-------------|--------|--------------|
+| # | capability | reference v0.1.3005 | hofund R-55b | status | gap to close |
+|---|------------|----------------------|--------------|--------|--------------|
 | a1 | sign-in: browser (Tencent page poll) | plugin `index.mjs:5-7`, state/token/account polling | `sign_in.rs` starts the returned HTTPS page, then polls token and account state for either `--site` (`r55_browser_sign_in_works_for_both_sites`, mocks only) | Done | — |
 | a2 | sign-in: API key | API-key accounts (`packages/workbuddy/index.mjs:404-418` `keyAccount`, `apikey.test.mjs`) | `sign_in.rs::import_api_key` stores a key account with the anonymous suffix; chat sends bearer plus `X-API-Key`, never `X-Domain`; key quota and check-in make no calls (`r55_api_key_sign_in_works_for_both_sites_without_exposing_key`) | Done | — |
 | a3 | desktop login reuse | read `workbuddy-desktop.info` / AI variant | `discover.rs:14-31`, `auth_store.rs` | Done | — |
 | b | import sources | desktop JSON under CodeBuddyExtension data | same paths in discover | Done | — |
 | c | token storage | plain JSON on disk (plugin) | encrypted hofund secret + desktop path in blob | Done | — |
 | d | refresh | desktop token re-read + OAuth refresh in plugin | `refresh.rs` ensure_fresh / desktop re-read; encrypted access or refresh objects fail closed with a secret-free browser-sign-in error (`r55_desktop_rejects_encrypted_tokens_without_exposing_envelopes`) | Done | No decryptor exists in the frozen reference; none is invented |
-| e | upstream wire | `{endpoint}/v2` streamed chat, gzipped body with `Content-Encoding: gzip` (`index.mjs:7-9`, `1502-1519`) | plain JSON to `{base}/v1/chat/completions` (`upstream.rs:50-51`), no gzip | Partial | `/v2` path + gzip bodies remain |
+| e | upstream wire | `{endpoint}/v2` streamed chat, gzipped body with `Content-Encoding: gzip` (`index.mjs:7-9`, `1502-1519`) | `upstream.rs` targets `{endpoint}/v2/chat/completions` and enables the SDK's opt-in request gzip, using `inflate::compress`; `a2c_24_upstream_sends_workbuddy_user_agent` inflates the recorded body and checks the exact URL and encoding | Done | — |
 | f | inbound shapes | OpenAI chat + WorkBuddy headers | OpenAI chat + `creds::signed_headers` and `chat_headers` | Done | — |
 | g | streaming | stream only in plugin | wire streaming | Done | — |
 | h | tools | `fitTools`, `tools.test.mjs`, `aftertools.test.mjs` | unverified | unverified | Confirm in a follow-up |
 | i | images | `/v2/images/*`, `images.test.mjs`, `declared-images.test.mjs` | unverified | unverified | Confirm in a follow-up |
 | j | reasoning | effort lists, `reasoning.test.mjs`, `efforts.test.mjs` | unverified | unverified | Confirm in a follow-up |
-| k | quota / usage | profile usage page + billing API | `quota.rs` billing without guessed totals; key accounts return no windows without calling billing | Partial | Profile-page usage remains |
+| k | quota / usage | `usageOf`, `kindsOf`, `listedExtra`, `packagesOf`, and `enterpriseUsageOf` read the summary, paid/free package, and enterprise meters for the profile usage page | `quota.rs` splits plan and extra windows from groups or reference codes, retains truthful prepaid remainders without totals, adds unlisted extras, applies UTC+8 plan/enterprise resets, and tolerates detail-meter refusals; key accounts return no windows without calling billing (`r55b_*`, recorded HTTP only) | Done | Fields that `QuotaWindow` cannot represent are documented below |
 | l | model list | `/v3/config` in plugin | `models.rs` config fetch with the signed client headers | Done | — |
 | m | multi-account | `workbuddy` vs `workbuddy-ai` provider ids | single plugin, `site::Site` CN vs International (`lib.rs:31-35`) | Partial | Separate subscription ids if needed for routing labels |
 | n | error classification | `WBRestricted` code 11140 (`workbuddy.go:267-299`) | `errors.rs` accepts top-level, `data`, or `error` numeric/string codes and appends the exact hint; the router applies a generic 403 account rest (`r55_restriction_*`, upstream test) | Done | — |
@@ -558,18 +558,21 @@ Structured-output prose for Chat, Responses, and Messages shipped in R-13b (`str
 | p | agent sign-in | desktop auth paths | `AgentSignIn` workbuddy + workbuddy-ai (`lib.rs:31-35`) | Done | — |
 | q | extras | User-Agent must be WorkBuddy/version (`index.mjs:8-9`) | `creds.rs` sends the reference's 5.9.3 app/2.165.0 CLI identity, attribution and chat SDK headers per site (`r55_signed_headers_match_each_site`, `r55_chat_headers_match_the_desktop_cli`) | Done | — |
 
+`QuotaWindow` carries rounded integer percentages, optional reset times, and blocking state. The reference's credit amounts and display strings, plan labels, units, cycle spans, and `runsOutAt` / `runsOut` package-expiry fields have no faithful representation and are omitted. A prepaid remainder appears in a balance-style window name without a guessed total.
+
 **R-55 completed**
 
 - Browser and API-key sign-in work for both sites through the existing subscription proof flow, with deterministic recorded-HTTP tests only.
+- Chat completions use `/v2` with gzip request bodies; billing and other non-completion calls stay uncompressed.
+- Profile usage reads plan/extra/prepaid summary windows, paid/free package details, plan cycle resets, and the enterprise fallback.
 - Chat, models, quota, check-in, and refresh use the reference's client identity and applicable signing headers; key material is sensitive and never included in errors.
 - Code 11140 produces the reference hint; the router applies a generic 403 account rest.
 - Encrypted desktop tokens remain unreadable by design and direct the user to browser sign-in without rendering the encrypted envelope.
 
 **Remaining gaps**
 
-- `/v2` chat path and gzip request bodies.
 - Tool, image, and reasoning parity is still unverified.
-- Profile-page usage and separate subscription ids remain as listed above.
+- Separate subscription ids remain as listed above.
 
 ---
 
