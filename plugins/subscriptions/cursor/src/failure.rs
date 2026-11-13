@@ -20,28 +20,61 @@ pub(crate) fn stall(kind: &str, last_frame: &str) -> PluginError {
 
 /// Rewords only a transport stall after the caller has received text.
 pub(crate) fn after_output(error: PluginError) -> PluginError {
+    if error.kind() == hofund_plugin_api::PluginErrorKind::Timeout {
+        return PluginError::status_error(
+            502,
+            format!("{STALL_AFTER_TEXT}: idle stall; last server frame: response body"),
+        );
+    }
     let Some(diagnostic) = error.message().strip_prefix(STALL_PREFIX) else {
         return error;
     };
     PluginError::status_error(502, format!("{STALL_AFTER_TEXT}: {diagnostic}"))
 }
 
+/// Maps a transport timeout that fires before any text to the idle stall wording.
+pub(crate) fn timeout_before_text(error: PluginError) -> PluginError {
+    if error.kind() == hofund_plugin_api::PluginErrorKind::Timeout {
+        stall("idle", "response body")
+    } else {
+        error
+    }
+}
+
 /// Maps a Connect trailer without requiring a socket or a transport error.
 pub(crate) fn trailer(payload: &[u8]) -> PluginError {
-    let parsed = hofund_plugin_sdk::json::from_slice::<Value>(payload).ok();
-    let object = parsed
-        .as_ref()
-        .map(|body| body.get("error").unwrap_or(body));
-    let code = object
-        .and_then(|body| body.get("code"))
-        .and_then(Value::as_str)
-        .unwrap_or_default();
+    match connect_fields(payload) {
+        Some((code, message)) => classify(0, &code, &message),
+        None => classify(0, "", String::from_utf8_lossy(payload).trim()),
+    }
+}
+
+/// Maps an HTTP error body, preserving its status when it has no Connect code.
+pub(crate) fn body(status: u16, bytes: &[u8]) -> PluginError {
+    if let Some((code, message)) = connect_fields(bytes) {
+        return classify(status, &code, &message);
+    }
+    let text = String::from_utf8_lossy(bytes);
+    let text = text.trim();
+    let message = if text.is_empty() {
+        status_text(status).to_owned()
+    } else {
+        text.to_owned()
+    };
+    classify(status, "", &message)
+}
+
+/// Reads Connect `code` and the best available message, including debug details.
+fn connect_fields(bytes: &[u8]) -> Option<(String, String)> {
+    let parsed = hofund_plugin_sdk::json::from_slice::<Value>(bytes).ok()?;
+    let object = parsed.get("error").unwrap_or(&parsed);
+    let code = object.get("code").and_then(Value::as_str);
     let base = object
-        .and_then(|body| body.get("message"))
+        .get("message")
         .and_then(Value::as_str)
         .unwrap_or_default();
     let detail = object
-        .and_then(|body| body.get("details"))
+        .get("details")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
@@ -60,42 +93,15 @@ pub(crate) fn trailer(payload: &[u8]) -> PluginError {
         })
         .collect::<Vec<_>>()
         .join("; ");
-    let message = if detail.is_empty() {
-        if base.is_empty() {
-            String::from_utf8_lossy(payload).trim().to_owned()
-        } else {
-            base.to_owned()
-        }
-    } else {
-        detail
-    };
-    classify(0, code, &message)
-}
-
-/// Maps an HTTP error body, preserving its status when it has no Connect code.
-pub(crate) fn body(status: u16, bytes: &[u8]) -> PluginError {
-    if let Ok(parsed) = hofund_plugin_sdk::json::from_slice::<Value>(bytes) {
-        let object = parsed.get("error").unwrap_or(&parsed);
-        if object.get("code").and_then(Value::as_str).is_some() {
-            let code = object
-                .get("code")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let message = object
-                .get("message")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            return classify(status, code, message);
-        }
+    if code.is_none() && detail.is_empty() {
+        return None;
     }
-    let text = String::from_utf8_lossy(bytes);
-    let text = text.trim();
-    let message = if text.is_empty() {
-        status_text(status).to_owned()
+    let message = if !detail.is_empty() {
+        detail
     } else {
-        text.to_owned()
+        base.to_owned()
     };
-    classify(status, "", &message)
+    Some((code.unwrap_or_default().to_owned(), message))
 }
 
 /// Whether the server explicitly assigned the account to another region.
@@ -293,6 +299,17 @@ mod tests {
         );
         assert_eq!(error.status(), Some(400));
         assert!(error.message().contains("Prompt title: more detail"));
+    }
+
+    #[test]
+    fn http_body_reads_debug_details_for_classification() {
+        let error = body(
+            401,
+            br#"{"error":{"code":"unknown","message":"request failed","details":[{"debug":{"details":{"title":"Routing","detail":"account is in another region"}}}]}}"#,
+        );
+        assert_eq!(error.status(), Some(403));
+        assert!(error.message().contains("region"));
+        assert!(!super::regional("request failed"));
     }
 
     #[test]

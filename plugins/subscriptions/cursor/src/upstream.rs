@@ -103,7 +103,7 @@ impl UpstreamProvider for CursorUpstream {
                     Ok(RunEvent::Server(_)) => continue,
                     Ok(RunEvent::Trailer(frame)) => failure::trailer(&frame.payload),
                     Ok(RunEvent::ErrorBody { status, body }) => failure::body(status, &body),
-                    Err(error) => error,
+                    Err(error) => failure::timeout_before_text(error),
                 };
                 if !retried && failure::regional(error.message()) {
                     crate::http2_memory::clear();

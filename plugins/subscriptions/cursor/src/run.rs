@@ -512,7 +512,9 @@ async fn run_http1<'a>(
             return Err(error);
         }
         Err(error) => {
-            return Err(PluginError::status_error(502, error.message()));
+            return Ok(one_event(RunEvent::Trailer(synthetic_end(
+                AppendFailure::from(error),
+            )?)));
         }
     };
     let status = response.status().as_u16();
