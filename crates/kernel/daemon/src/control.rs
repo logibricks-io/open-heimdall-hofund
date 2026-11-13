@@ -10,26 +10,26 @@ use hofund_control_proto::{
     AgentChangeResponse, AgentConnectRequest, AgentDisconnectRequest, AgentHiddenSetRequest,
     AgentListResponse, AgentModelRequest, AgentModelsResponse, AgentPickedOnlyRequest,
     AgentPlanRequest, AgentPlanResponse, AgentStatusResponse, AgentVisibleSetRequest,
-    CatalogDisabledListResponse, CatalogModelRequest, CheckinAccountRow, CheckinListResponse,
-    CheckinRunRequest, CheckinRunResponse, ControlError, ControlErrorKind, FieldIssue, GatewayKey,
-    GatewayKeyAction, GatewayKeyLimit, GatewayKeyRequest, GatewayKeyResponse,
-    GatewayKeyRestoreRequest, GroupCreateRequest, GroupDeleteRequest, GroupDeleteResponse,
-    GroupListResponse, GroupMemberCandidatesResponse, GroupPatchRequest, GroupRestoreRequest,
-    GroupWriteResponse, HealthResponse, ModelEntry, ModelListResponse, PicksResponse,
-    PicksSetRequest, PresetListResponse, ProfileDeleteRequest, ProfileDetailResponse,
-    ProfileListResponse, ProfileRenameRequest, ProfileSaveRequest, ProfileSwitchRequest,
-    ProfileSwitchResponse, ProviderCreateRequest, ProviderDeleteRequest, ProviderDeleteResponse,
-    ProviderKeyRequest, ProviderKeysResponse, ProviderListResponse, ProviderPatchRequest,
-    ProviderRenameRequest, ProviderRenameResponse, ProviderSpendCap, ProviderSpendCapPeriod,
-    ProviderSpendCapRequest, ProviderSpendCapsResponse, ProviderTestRequest, ProviderTestResponse,
-    ProviderTestResult, ProviderWriteResponse, QuotaAlertsResponse, QuotaAlertsSetRequest,
-    QuotaAlertsSetResponse, QuotaCreditsModesResponse, QuotaCreditsSetRequest,
-    QuotaCreditsSetResponse, QuotaHistoryQuery, QuotaHistoryResponse, QuotaQuery, QuotaResponse,
-    RouteListResponse, RouteModel, RouteModelListResponse, RouteQuery, RouteReserve, ServeRole,
-    SessionRouteResponse, ShutdownRequest, ShutdownResponse, ShutdownState, StatusResponse,
-    TokenRotateRequest, TokenRotateResponse, UnroutedListResponse, UsageBreakdownBy,
-    UsageBreakdownGroup, UsagePeriod, UsageQuery, UsageResponse, UsageRow, UsageTotals,
-    WarmupAccountRow, WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
+    CatalogDisabledListResponse, CatalogModelRequest, CatalogSyncRequest, CatalogSyncResponse,
+    CheckinAccountRow, CheckinListResponse, CheckinRunRequest, CheckinRunResponse, ControlError,
+    ControlErrorKind, FieldIssue, GatewayKey, GatewayKeyAction, GatewayKeyLimit, GatewayKeyRequest,
+    GatewayKeyResponse, GatewayKeyRestoreRequest, GroupCreateRequest, GroupDeleteRequest,
+    GroupDeleteResponse, GroupListResponse, GroupMemberCandidatesResponse, GroupPatchRequest,
+    GroupRestoreRequest, GroupWriteResponse, HealthResponse, ModelEntry, ModelListResponse,
+    PicksResponse, PicksSetRequest, PresetListResponse, ProfileDeleteRequest,
+    ProfileDetailResponse, ProfileListResponse, ProfileRenameRequest, ProfileSaveRequest,
+    ProfileSwitchRequest, ProfileSwitchResponse, ProviderCreateRequest, ProviderDeleteRequest,
+    ProviderDeleteResponse, ProviderKeyRequest, ProviderKeysResponse, ProviderListResponse,
+    ProviderPatchRequest, ProviderRenameRequest, ProviderRenameResponse, ProviderSpendCap,
+    ProviderSpendCapPeriod, ProviderSpendCapRequest, ProviderSpendCapsResponse,
+    ProviderTestRequest, ProviderTestResponse, ProviderTestResult, ProviderWriteResponse,
+    QuotaAlertsResponse, QuotaAlertsSetRequest, QuotaAlertsSetResponse, QuotaCreditsModesResponse,
+    QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryQuery, QuotaHistoryResponse,
+    QuotaQuery, QuotaResponse, RouteListResponse, RouteModel, RouteModelListResponse, RouteQuery,
+    RouteReserve, ServeRole, SessionRouteResponse, ShutdownRequest, ShutdownResponse,
+    ShutdownState, StatusResponse, TokenRotateRequest, TokenRotateResponse, UnroutedListResponse,
+    UsageBreakdownBy, UsageBreakdownGroup, UsagePeriod, UsageQuery, UsageResponse, UsageRow,
+    UsageTotals, WarmupAccountRow, WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
 };
 use hofund_control_proto::{
     ConfigApplyRequest, ConfigResponse, ConfigValidateRequest, ConfigValidationResponse,
@@ -66,6 +66,7 @@ pub(crate) struct DaemonControl {
     keys: Arc<KeyStore>,
     agents: AgentOps,
     profiles: ProfileOps,
+    accounts: Option<Arc<super::control_accounts::AccountOps>>,
     shutdown: watch::Sender<bool>,
     events: Arc<EventBus>,
     in_flight: Arc<AtomicU64>,
@@ -74,6 +75,7 @@ pub(crate) struct DaemonControl {
     route_trace: Option<Arc<hofund_router::RouteTraceBook>>,
     status_serves: Option<ServeRole>,
     status_owner_pid: Option<u32>,
+    sign_in_deadline: std::time::Duration,
 }
 
 impl DaemonControl {
@@ -114,6 +116,7 @@ impl DaemonControl {
                 token_path,
             ),
             profiles: ProfileOps::new(config_path, registry_agents),
+            accounts: None,
             usage,
             keys,
             ops,
@@ -126,6 +129,7 @@ impl DaemonControl {
             route_trace: None,
             status_serves: None,
             status_owner_pid: None,
+            sign_in_deadline: super::sign_in::SIGN_IN_DEADLINE,
         }
     }
 
@@ -136,6 +140,11 @@ impl DaemonControl {
     ) -> Self {
         self.status_serves = serves;
         self.status_owner_pid = owner_pid;
+        self
+    }
+
+    pub(crate) fn with_sign_in_deadline(mut self, deadline: std::time::Duration) -> Self {
+        self.sign_in_deadline = deadline;
         self
     }
 
@@ -168,6 +177,14 @@ impl DaemonControl {
     /// Serves `/v1/hofund/events` from `bus`.
     pub(crate) fn with_events(mut self, bus: Arc<EventBus>) -> Self {
         self.agents = self.agents.with_events(Arc::clone(&bus));
+        if let Some(runtime) = &self.runtime {
+            self.accounts = Some(Arc::new(super::control_accounts::AccountOps::new(
+                Arc::clone(runtime),
+                Arc::clone(&self.registry),
+                Arc::clone(&bus),
+                self.sign_in_deadline,
+            )));
+        }
         self.events = bus;
         self
     }
@@ -399,6 +416,17 @@ impl DaemonControl {
         Ok(known)
     }
 
+    fn account_ops(&self) -> Result<&Arc<super::control_accounts::AccountOps>, ControlFailure> {
+        self.accounts.as_ref().ok_or_else(|| {
+            ControlError::new(
+                ControlErrorKind::Internal,
+                "account operations are not available",
+                "accounts",
+            )
+            .into()
+        })
+    }
+
     fn provider_exists(&self, id: &str) -> Result<(), ControlError> {
         if self
             .config()
@@ -444,9 +472,114 @@ impl ControlState for DaemonControl {
         status.model_listener.effective = listener.effective.to_string();
         status.model_listener.running = listener.running.map(|running| running.to_string());
         status.model_listener.effective_source = listener.source;
+        let network = self.ops.network_access();
+        status.model_listener.allow_ips = network.allow_ips;
+        status.model_listener.trust_proxy = network.trust_proxy;
+        status.model_listener.allow_ips_invalid = network.invalid_allow_ips;
         status.serves = self.status_serves.or_else(serve_role_from_env);
         status.owned_by_pid = self.status_owner_pid.unwrap_or_else(owned_by_pid_from_env);
         status
+    }
+
+    fn settings(&self) -> ControlFuture<'_, hofund_control_proto::SettingsResponse> {
+        Box::pin(super::control_settings::get(&self.ops))
+    }
+
+    fn patch_settings(
+        &self,
+        request: hofund_control_proto::SettingsPatchRequest,
+    ) -> ControlFuture<'_, hofund_control_proto::SettingsResponse> {
+        Box::pin(super::control_settings::patch(&self.ops, request))
+    }
+
+    fn logs(
+        &self,
+        query: hofund_control_proto::LogTailQuery,
+    ) -> ControlFuture<'_, hofund_control_proto::LogTailResponse> {
+        Box::pin(async move { super::log_tail::read(&self.config_path, query) })
+    }
+
+    fn subscriptions(&self) -> ControlFuture<'_, hofund_control_proto::SubscriptionListResponse> {
+        Box::pin(async move { self.account_ops()?.list().await })
+    }
+
+    fn start_sign_in(
+        &self,
+        id: String,
+        request: hofund_control_proto::SignInStartRequest,
+    ) -> ControlFuture<'_, hofund_control_proto::SignInStartResponse> {
+        Box::pin(async move { self.account_ops()?.start(id, request).await })
+    }
+
+    fn sign_in_status(
+        &self,
+        id: String,
+        session: String,
+    ) -> ControlFuture<'_, hofund_control_proto::SignInStatusResponse> {
+        Box::pin(async move { self.account_ops()?.status(&id, &session).await })
+    }
+
+    fn sign_in_proof(
+        &self,
+        id: String,
+        session: String,
+        request: hofund_control_proto::SignInProofRequest,
+    ) -> ControlFuture<'_, hofund_control_proto::SignInStatusResponse> {
+        Box::pin(async move { self.account_ops()?.proof(&id, &session, request).await })
+    }
+
+    fn sign_in_cancel(
+        &self,
+        id: String,
+        session: String,
+    ) -> ControlFuture<'_, hofund_control_proto::SignInCancelResponse> {
+        Box::pin(async move { self.account_ops()?.cancel(&id, &session).await })
+    }
+
+    fn refresh_subscription(
+        &self,
+        id: String,
+        request: hofund_control_proto::SubscriptionRefreshRequest,
+    ) -> ControlFuture<'_, hofund_control_proto::SubscriptionRefreshResponse> {
+        Box::pin(async move { self.account_ops()?.refresh(id, request.account).await })
+    }
+
+    fn switch_account(
+        &self,
+        request: hofund_control_proto::AccountSwitchRequest,
+    ) -> ControlFuture<'_, hofund_control_proto::AccountSwitchResponse> {
+        Box::pin(async move {
+            self.account_ops()?
+                .switch(request.agent, request.target)
+                .await
+        })
+    }
+
+    fn import_account(
+        &self,
+        request: hofund_control_proto::AccountImportRequest,
+    ) -> ControlFuture<'_, hofund_control_proto::AccountImportResponse> {
+        Box::pin(async move { self.account_ops()?.import(request.path).await })
+    }
+
+    fn discover_accounts(
+        &self,
+    ) -> ControlFuture<'_, hofund_control_proto::AccountDiscoverResponse> {
+        Box::pin(async move { self.account_ops()?.discover(false).await.map(Into::into) })
+    }
+
+    fn import_discovered_accounts(
+        &self,
+    ) -> ControlFuture<'_, hofund_control_proto::AccountDiscoverImportResponse> {
+        Box::pin(async move { self.account_ops()?.discover(true).await.map(Into::into) })
+    }
+
+    fn remove_account(
+        &self,
+        id: String,
+        account: String,
+    ) -> ControlFuture<'_, hofund_control_proto::AccountRemoveResponse> {
+        Box::pin(async move { self.account_ops()?.remove(id, account).await })
     }
 
     fn draining(&self) -> bool {
@@ -693,7 +826,8 @@ impl ControlState for DaemonControl {
     fn picks(&self, id: String) -> ControlFuture<'_, PicksResponse> {
         let result = self.provider_exists(&id).map(|()| {
             let (picks, revision) = self.models.picks_with_revision(&id);
-            picks_response(&picks, revision)
+            let exposed = self.models.default_exposed_ids(&id);
+            picks_response(&picks, revision, exposed)
         });
         Box::pin(async move { result.map_err(Into::into) })
     }
@@ -708,7 +842,10 @@ impl ControlState for DaemonControl {
                     .edit_picks(&id, Some(&request.expected_picks_revision), form)
                     .map_err(|error| picks_failure(&id, error))
             })
-            .map(|(picks, revision)| picks_response(&picks, revision));
+            .map(|(picks, revision)| {
+                let exposed = self.models.default_exposed_ids(&id);
+                picks_response(&picks, revision, exposed)
+            });
         Box::pin(async move { result })
     }
 
@@ -933,6 +1070,11 @@ impl ControlState for DaemonControl {
     fn presets(&self) -> ControlFuture<'_, PresetListResponse> {
         let registry = Arc::clone(&self.registry);
         Box::pin(async move { Ok(super::control_presets::list_presets(registry.as_ref())) })
+    }
+
+    fn sync_catalog(&self, request: CatalogSyncRequest) -> ControlFuture<'_, CatalogSyncResponse> {
+        let catalog = self.ops.model_catalog();
+        Box::pin(async move { sync_model_catalog(catalog, request.force).await })
     }
 
     fn create_provider(
@@ -1558,12 +1700,71 @@ fn model_entries(models: &[ModelSpec]) -> Vec<ModelEntry> {
         .collect()
 }
 
-fn picks_response(picks: &Picks, revision: String) -> PicksResponse {
+async fn sync_model_catalog(
+    catalog: Option<Arc<hofund_model_catalog::ModelCatalog>>,
+    force: bool,
+) -> Result<CatalogSyncResponse, ControlFailure> {
+    let Some(catalog) = catalog else {
+        let mut response = CatalogSyncResponse::default();
+        response.ok = false;
+        response.error = Some("model catalog is not open".to_owned());
+        return Ok(response);
+    };
+    if !force && catalog.has_index() {
+        let mut response = CatalogSyncResponse::default();
+        response.ok = true;
+        return Ok(response);
+    }
+    let receive = catalog.refresh_detached();
+    let mut response = CatalogSyncResponse::default();
+    match tokio::time::timeout(std::time::Duration::from_secs(30), receive).await {
+        Ok(Ok(Ok(result))) => {
+            response.ok = !matches!(result, hofund_model_catalog::FetchResult::Failed);
+            if !response.ok {
+                response.error = Some("catalog fetch failed".to_owned());
+            }
+        }
+        Ok(Ok(Err(error))) => {
+            response.ok = false;
+            response.error = Some(sanitize_catalog_error(&error.to_string()));
+        }
+        Ok(Err(_)) => {
+            response.ok = false;
+            response.error = Some("catalog sync stopped before it finished".to_owned());
+        }
+        Err(_) => {
+            response.ok = false;
+            response.error = Some("catalog sync timed out".to_owned());
+        }
+    }
+    Ok(response)
+}
+
+fn sanitize_catalog_error(message: &str) -> String {
+    let mut out = String::new();
+    for word in message.split_whitespace() {
+        if word.contains("://") || word.len() > 120 {
+            out.push_str("[redacted] ");
+        } else {
+            out.push_str(word);
+            out.push(' ');
+        }
+    }
+    let trimmed = out.trim();
+    if trimmed.is_empty() {
+        "catalog sync failed".to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+fn picks_response(picks: &Picks, revision: String, default_exposed: Vec<String>) -> PicksResponse {
     let mut response = PicksResponse::default();
     response.picks = picks.picks().to_vec();
     response.picked_from = picks.picked_from().to_vec();
     response.delisted = picks.delisted().to_vec();
     response.picks_revision = revision;
+    response.default_exposed = default_exposed;
     response
 }
 

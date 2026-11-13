@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- R-22: LAN allow list and trusted proxy. Top-level `allow_ips` (IPs and CIDRs)
+  and `trust_proxy`, overridable by `HOFUND_ALLOW_IPS` / `HOFUND_TRUST_PROXY`;
+  non-listed peers get a JSON 403 before authentication, loopback is always
+  allowed, a malformed environment list fails closed to loopback only, and
+  apply/reload replace the settings without a restart. `hofund status` shows
+  the effective list.
+- R-6g: Claude Code bridge error mapping and a vendor-neutral
+  `skip_failover_same_plugin` flag so a room-full 503 skips later members of
+  the same plugin only. Sign-in lapses, extra-usage 400s, too-long prompts,
+  quota-shaped results, and process crashes map to `PluginError` without
+  cooling the account where the reference does not. Real-account smoke stays
+  on #304.
+- R-21: `hofund uninstall [--yes] [--purge]` restores every managed agent through
+  non-force disconnect, refuses to run beside a live daemon, and optionally
+  removes only hofund's resolved config, credential, usage, and state paths.
+  Release and README documentation cover deleting the two installed binaries.
+
 - R-16: Zed subscription upstream via POST `/completions` (provider envelope,
   NDJSON event unwrap, unary fold), model-token refresh with stale headers,
   live `/models` with snapshot fallback, plan quota from `/client/users/me`,
@@ -127,6 +144,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Z Code subscription (R-57): refresh re-imports hold the account lease and keep
+  a team seat lapsed when its refused business token is unchanged, while a
+  rotated token recovers it; malformed relative agent credential paths fail
+  closed, team accounts have separate labels, and code 3012 reports the
+  risk-control support hint with a two-hour cooldown.
 - Claude subscription (R-5 fix round 3): `/usage` reset times use
   `hofund-plugin-sdk::time::zone` (zones, yearless dates, time-only resets);
   the Claude plugin reads `catalog/models.dev.json` beside the data root

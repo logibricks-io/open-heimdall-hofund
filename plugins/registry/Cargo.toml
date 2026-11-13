@@ -11,7 +11,8 @@ homepage.workspace = true
 rust-version.workspace = true
 
 [features]
-default = ["azure", "bedrock", "bedrock-mantle", "claude", "cline", "codex", "copilot", "cursor", "devin", "echo", "factory", "gemini", "grok", "google-vertex", "kiro", "zcode", "codex-catalog", "muse", "ollama", "plan-quota", "qoder", "relay", "remote-gateway", "retrieval", "workbuddy", "zed"]
+default = ["antigravity", "azure", "bedrock", "bedrock-mantle", "claude", "cline", "codex", "copilot", "cursor", "devin", "echo", "factory", "gemini", "grok", "google-vertex", "kiro", "zcode", "codex-catalog", "muse", "ollama", "plan-quota", "qoder", "relay", "remote-gateway", "retrieval", "workbuddy", "zed"]
+antigravity = ["dep:hofund-plugin-subscription-antigravity"]
 azure = ["dep:hofund-plugin-azure"]
 bedrock = ["dep:hofund-plugin-bedrock"]
 bedrock-mantle = ["dep:hofund-plugin-bedrock-mantle"]
@@ -56,6 +57,7 @@ hofund-plugin-ollama = { workspace = true, optional = true }
 hofund-plugin-plan-quota = { workspace = true, optional = true }
 hofund-plugin-relay = { workspace = true, optional = true }
 hofund-plugin-remote-gateway = { workspace = true, optional = true }
+hofund-plugin-subscription-antigravity = { workspace = true, optional = true }
 hofund-plugin-subscription-claude = { workspace = true, optional = true }
 hofund-plugin-subscription-cline = { workspace = true, optional = true }
 hofund-plugin-subscription-codex = { workspace = true, optional = true }

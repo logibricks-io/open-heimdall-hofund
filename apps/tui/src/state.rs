@@ -115,6 +115,11 @@ pub struct PendingOp {
     pub label: String,
     /// When the operation started.
     pub started: Instant,
+    /// Read generation of the mutation that took this slot.
+    ///
+    /// A completion may release the slot only when it carries this generation.
+    /// A later mutation keeps the keyboard if an older completion arrives.
+    pub generation: u64,
 }
 
 /// How this UI relates to a running daemon.

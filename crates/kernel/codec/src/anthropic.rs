@@ -1200,6 +1200,9 @@ struct Encoder {
     started: BTreeSet<u32>,
     open: BTreeSet<u32>,
     saw_message: bool,
+    /// A `message_start` has already gone on the wire (placeholder or real).
+    start_written: bool,
+    last_ping: Option<std::time::Instant>,
     stop: Option<Stop>,
     usage: Option<Usage>,
     have_usage: bool,
@@ -1226,6 +1229,17 @@ impl Encoder {
         match event {
             StreamEvent::MessageStart(start) => {
                 self.saw_message = true;
+                if self.start_written {
+                    if let Some(usage) = &start.usage {
+                        match &mut self.usage {
+                            Some(existing) => existing.merge_from(usage),
+                            None => self.usage = Some(usage.clone()),
+                        }
+                        self.have_usage = true;
+                    }
+                    return Ok(());
+                }
+                self.start_written = true;
                 write_json(&mut self.out, "message_start", &encode_message_start(start))
             }
             StreamEvent::ContentBlockStart(start) => {
@@ -1311,12 +1325,30 @@ impl Encoder {
             }
             StreamEvent::MessageStop(stop) => self.flush_terminal(&stop.extensions),
             StreamEvent::Ping(ping) => write_json(&mut self.out, "ping", &ping_json(ping)),
+            StreamEvent::StillWorking(_) => self.write_still_working(),
             StreamEvent::Unknown(event) => {
                 let data = serde_json::to_string(&event.payload)?;
                 sse::write_event(&mut self.out, Some(&event.name), &data);
                 Ok(())
             }
         }
+    }
+
+    /// Anthropic: at most one `ping` per minute after `message_start`;
+    /// earlier ticks and ticks before a start are SSE comments.
+    fn write_still_working(&mut self) -> Result<(), CodecError> {
+        const PING_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
+        let now = std::time::Instant::now();
+        if self.start_written
+            && self
+                .last_ping
+                .is_none_or(|last| now.duration_since(last) >= PING_EVERY)
+        {
+            self.last_ping = Some(now);
+            return write_json(&mut self.out, "ping", &ping_json(&Ping::default()));
+        }
+        crate::sse::write_comment(&mut self.out, "keepalive");
+        Ok(())
     }
 
     fn ensure_start(&mut self, index: u32, block: &BlockStart) -> Result<(), CodecError> {

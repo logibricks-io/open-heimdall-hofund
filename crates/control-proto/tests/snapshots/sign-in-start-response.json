@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "session": "0123456789abcdef0123456789abcdef",
+  "flow": "pkce",
+  "challenge": {
+    "type": "open_url",
+    "url": "https://auth.example.test/authorize"
+  }
+}
