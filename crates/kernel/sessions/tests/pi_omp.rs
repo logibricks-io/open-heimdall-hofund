@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use hofund_plugin_agent_omp::OmpStore;
 use hofund_plugin_agent_pi::PiStore;
-use hofund_plugin_api::{SessionRecord, SessionStore};
+use hofund_plugin_api::{SessionRecord, SessionStore, SessionTokens};
 use hofund_sessions::consent::Consent;
 use hofund_sessions::index::SessionIndex;
 use serde_json::{Value, json};
@@ -117,6 +117,82 @@ fn omp_default_profile_xdg_and_artifacts_match_golden() {
     );
     let store = OmpStore::with_session_roots([default, profile, xdg]);
     assert_golden("omp", "omp", &records(&store, &temp.path().join("config")));
+}
+
+fn write_jsonl(path: &Path, lines: &[Value]) {
+    std::fs::create_dir_all(path.parent().expect("parent")).expect("directory");
+    let mut contents = lines
+        .iter()
+        .map(|line| serde_json::to_string(line).expect("JSONL line"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    contents.push('\n');
+    std::fs::write(path, contents).expect("JSONL file");
+}
+
+fn assert_fork_usage(store: &dyn SessionStore, sessions: &Path, config: &Path) {
+    let parent_lines = vec![
+        json!({"type":"session","id":"parent","timestamp":"2026-02-01T12:00:00Z"}),
+        json!({"type":"message","message":{"role":"user","content":"Parent prompt"},"timestamp":"2026-02-01T12:00:01Z"}),
+        json!({"type":"message","message":{"role":"assistant","model":"model-parent","content":[],"usage":{"input":10,"output":4,"cacheRead":2,"cacheWrite":1}},"timestamp":"2026-02-01T12:00:02Z"}),
+    ];
+    let mut fork_lines = vec![
+        json!({"type":"session","id":"child","parentSession":"parent","timestamp":"2026-02-01T13:00:00Z"}),
+    ];
+    fork_lines.extend(parent_lines.iter().skip(1).cloned());
+    fork_lines.extend([
+        json!({"type":"message","message":{"role":"user","content":"Child prompt"},"timestamp":"2026-02-01T13:00:01Z"}),
+        json!({"type":"message","message":{"role":"assistant","model":"model-child","content":[],"usage":{"input":7,"output":3,"cacheRead":1,"cacheWrite":0}},"timestamp":"2026-02-01T13:00:02Z"}),
+    ]);
+    write_jsonl(
+        &sessions.join("2026-02-01T12-00-00_parent-file.jsonl"),
+        &parent_lines,
+    );
+    write_jsonl(
+        &sessions.join("2026-02-01T13-00-00_child-file.jsonl"),
+        &fork_lines,
+    );
+
+    let records = records(store, config);
+    assert_eq!(records.len(), 2);
+    let parent_id = format!("{}:parent", store.agent());
+    let child_id = format!("{}:child", store.agent());
+    let parent = records
+        .iter()
+        .find(|record| record.id == parent_id)
+        .expect("parent record");
+    let child = records
+        .iter()
+        .find(|record| record.id == child_id)
+        .expect("child record");
+    let parent_tokens = SessionTokens::new(10, 4, 2, 1);
+    let post_fork = SessionTokens::new(7, 3, 1, 0);
+    assert_eq!(child.forked_from.as_deref(), Some(parent_id.as_str()));
+    assert_eq!(child.tokens(), post_fork);
+    assert_eq!(child.days.len(), 1);
+    assert_eq!(child.days[0].model, "model-child");
+    assert_eq!(child.days[0].tokens, post_fork);
+    assert_eq!(parent.tokens(), parent_tokens);
+}
+
+#[test]
+fn pi_fork_keeps_post_fork_usage_when_parent_is_present() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let root = temp.path().join("agent");
+    let store = PiStore::with_session_roots(&root, None);
+    assert_fork_usage(
+        &store,
+        &root.join("sessions/work"),
+        &temp.path().join("config"),
+    );
+}
+
+#[test]
+fn omp_fork_keeps_post_fork_usage_when_parent_is_present() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let root = temp.path().join("sessions");
+    let store = OmpStore::with_session_roots([root.clone()]);
+    assert_fork_usage(&store, &root.join("work"), &temp.path().join("config"));
 }
 
 #[test]

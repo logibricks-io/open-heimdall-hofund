@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Local};
 use hofund_plugin_api::{
     PluginError, SessionDay, SessionFile, SessionLocator, SessionParse, SessionParser,
-    SessionRecord, SessionStore, SessionTokens,
+    SessionRecord, SessionStore, SessionTokens, SessionUsageEvent,
 };
 use hofund_plugin_sdk::{chrono, json, serde};
 use json::Value;
@@ -213,6 +213,8 @@ struct OmpState {
     since: i64,
     #[serde(default)]
     header_seen: bool,
+    #[serde(default)]
+    checkpoint: SessionTokens,
 }
 
 impl OmpState {
@@ -232,6 +234,7 @@ impl OmpState {
             model: String::new(),
             since: 0,
             header_seen: false,
+            checkpoint: SessionTokens::default(),
         }
     }
 
@@ -388,9 +391,18 @@ impl OmpParser {
         if tokens.is_zero() {
             return;
         }
+        let date = at.map_or_else(String::new, |at| {
+            at.with_timezone(&Local).format("%Y-%m-%d").to_string()
+        });
+        self.state.checkpoint.add(tokens);
+        self.state.record.usage.push(SessionUsageEvent::new(
+            self.state.checkpoint,
+            tokens,
+            model,
+            &date,
+        ));
         self.state.record.add_usage(model, tokens);
-        if let Some(at) = at {
-            let date = at.with_timezone(&Local).format("%Y-%m-%d").to_string();
+        if !date.is_empty() {
             self.state
                 .record
                 .add_day(SessionDay::new(date, model, tokens));
