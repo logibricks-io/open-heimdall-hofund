@@ -26,7 +26,7 @@ Legend: **Done** = matches the reference at checklist granularity; **Partial** =
 | SuperGrok (`grok`) | 10 | 6 | 0 | 2 | 0 |
 | Qoder (international + Qoder CN) | 1 | 11 | 7 | 1 | 0 |
 | CodeBuddy / WorkBuddy (CN + international) | 13 | 3 | 0 | 0 | 3 |
-| Z Code (`zcode`) | 13 | 4 | 0 | 0 | 0 |
+| Z Code (`zcode`) | 15 | 4 | 0 | 0 | 0 |
 
 Gaps that had no plan item before this audit (the supervisor's v0.2.0 plan and backlog now carry them under the item named):
 
@@ -584,23 +584,23 @@ Structured-output prose for Chat, Responses, and Messages shipped in R-13b (`str
 
 | # | capability | reference v0.1.3005 | hofund 08035c9 + R-57 + R-57b | status | gap to close |
 |---|------------|----------------------|--------------------------------|--------|--------------|
-| a1 | sign-in: device / portal OAuth | `authorize()` posts `/api/v1/oauth/cli/init`, validates an HTTPS page, sets the site-specific redirect, and polls `/api/v1/oauth/cli/poll/{flow_id}` | `sign_in.rs` pending sessions implement both sites, business-token exchange, own/team plan resolution, and Start Plan fallback | Done | Recorded mocks only; no live account |
+| a1 | sign-in: device / portal OAuth | `authorize()` posts `/api/v1/oauth/cli/init`, validates an HTTPS page, sets the site-specific redirect, and polls `/api/v1/oauth/cli/poll/{flow_id}` | `sign_in.rs` pending sessions implement both sites, business-token exchange, own/team plan resolution, and Start Plan fallback only for a live or pending plan | Done | Recorded mocks only; no live account |
 | a2 | API key import | Plugin supports Z.ai and BigModel key plans | Agent-store import plus `SignInProof::Token` API-key accounts | Done | — |
 | a3 | paste / browser | Automatic browser completion; the reference names no additional paste URL | `start_sign_in` returns an HTTPS `OpenUrl`; `complete_sign_in(Await)` polls and stores the account | Done | No paste flow is invented |
 | b | import sources | encrypted `~/.zcode/v2/credentials.json` (`zcode.go:14-18`) | `creds.rs` decrypt + `discover.rs`, including JWT-only Start Plan stores | Done | — |
 | c | token storage | logins.json for reference-added; encrypted agent store read | SecretObject + per-account device id (`creds.rs`) | Done | — |
 | d | refresh | The frozen plugin says the JWT cannot be refreshed; app-backed accounts reread the app's renewed session | `refresh.rs` re-imports through the account lease and fails closed on an expired browser-only JWT; no renewal endpoint is invented | Partial | Recorded mocks only; browser-only JWTs require sign-in again |
-| e | upstream wire | Plan bases and `START_BASE`; 3.17.2 headers and prompt texts, body dressing, device/session metadata, gift aliases | `upstream.rs` + `start.rs` + `gift.rs` implement JWT-only and trial routing, exact prompt hashes, reasoning budgets, balance checks, and Start quota | Partial | Dual-account automatic free-first, ToolSearch rewriting, busy retries, and edge-firewall holds are not ported |
+| e | upstream wire | Plan bases and `START_BASE`; 3.17.2 headers and prompt texts, body dressing, device/session metadata, gift aliases | `upstream.rs` + `start.rs` + `gift.rs` implement JWT-only and trial routing, exact prompt hashes, disabled/enabled reasoning, live-bucket balance checks, and Start quota. Team keys skip personal-plan detection, and expired JWTs leave key-backed plan requests usable | Partial | Dual-account automatic free-first, ToolSearch rewriting, busy retries, and edge-firewall holds are not ported |
 | f | inbound shapes | Messages only upstream | `upstream.rs` rejects non-Messages | Done | — |
 | g | streaming | Anthropic SSE | wire streaming | Done | — |
 | h | tool calls | Anthropic tools | standard Messages wire | Partial | unverified |
 | i | images | Per-model `supportsImage` in provider rules (`index.mjs:1690`) | `provider_config.rs` maps the flag to `ModelSpec::image_input` and input modalities | Done | Recorded config fixture only |
-| j | reasoning | Per-model levels and thinking budgets (`index.mjs:1691`, `1753-1765`) | Provider levels map to `ModelSpec::efforts`; `start.rs` maps effort to the reference thinking budgets | Done | Recorded config fixture only |
-| k | quota / usage | Monitor quota plus Start Plan balance buckets | `quota.rs` monitor endpoints and `gift.rs` live/pending balance windows | Done | — |
+| j | reasoning | Per-model levels and thinking budgets (`index.mjs:1691`, `1753-1765`) | Provider levels map to `ModelSpec::efforts`; `start.rs` maps `none` to disabled thinking and other levels to the reference budgets | Done | Recorded config and wire fixtures only |
+| k | quota / usage | Monitor quota plus Start Plan balance buckets; a live sibling supersedes a spent bucket for the same model | `quota.rs` monitor endpoints and `gift.rs` live/pending windows; spent siblings are non-blocking and recorded quota and trial-routing fixtures cover live-plan selection | Done | — |
 | l | model list | Latest remote/local provider config, static fallback, and gift-tied model entries | `provider_config.rs` chooses by revision; `models.rs` adds Start and `-Trial` entries from every live grant | Done | No 10-minute config cache; mocks only |
 | m | multi-account | team seats from `setting.json`; separate `(team)` labels | `team.rs` project keys and separate labels; native sign-in supports team selection | Done | — |
 | n | error classification | ZCodeRestricted hint code 3012 and two-hour rest | `http_auth.rs` keeps HTTP 405, adds the support hint and cooldown | Done | — |
-| o | daily check-in | `claimDaily` reads marketing/touch and posts `/billing/claim`; codes 0/1003/1004, captcha fail-closed, 30-minute recheck | `checkin.rs` maps all outcomes without a captcha solver; `CheckinResult::recheck_at` and daemon-persisted deadlines rerun inactive/ineligible accounts | Done | Recorded mocks only |
+| o | daily check-in | `claimDaily` reads marketing/touch and posts `/billing/claim`; codes 0/1003/1004, captcha fail-closed, 30-minute recheck | `checkin.rs` maps all outcomes without a captcha solver; `CheckinResult::recheck_at` and daemon-persisted deadlines rerun inactive, ineligible, and failed claims after 30 minutes | Done | Recorded mocks only |
 | p | agent sign-in switch | Go writes gateway provider config; team keys are created when absent; the encrypted account store is read-only in the reference | `team.rs` creates `zcode-team-api-key` with `keyType: 2`; `agent_sign_in.rs` still refuses credential switching | Partial | No safe encrypted-store account-switch writer is specified, so switching stays fail-closed |
 | q | extras | `X-Device-Mid`; plugin pins `APP_VERSION` 3.17.2 and the marketing/Start version headers | `lib.rs` pins 3.17.2; `api.rs`, `checkin.rs`, and `start.rs` send the reference UA and `X-ZCode-App-Version` where used | Done | — |
 
@@ -612,7 +612,7 @@ Structured-output prose for Chat, Responses, and Messages shipped in R-13b (`str
 **R-57b completed**
 
 - Used the present frozen plugin package to add 3.17.2 identity and exact 3.17.2 Start Plan prompts, native Z.ai/BigModel sign-in, Start Plan and gift-balance routing, provider-config image/reasoning metadata, missing team-key creation, and daily marketing claims.
-- Added a plugin API recheck deadline and daemon persistence so inactive and ineligible Z Code results rerun after 30 minutes without sleeps or wall-clock test dependencies.
+- Added a plugin API recheck deadline and daemon persistence so inactive, ineligible, and failed Z Code results rerun after 30 minutes without sleeps or wall-clock test dependencies.
 
 **Remaining gaps after R-57b**
 
