@@ -269,3 +269,118 @@ async fn a_host_without_a_gateway_says_so() {
     assert_eq!(host.gateway(), host.clone().gateway());
     assert!(format!("{:?}", host.gateway()).contains("available: false"));
 }
+
+struct Pending {
+    member_id: MemberId,
+    hits: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl Member for Pending {
+    fn id(&self) -> &MemberId {
+        &self.member_id
+    }
+
+    fn route_id(&self) -> &str {
+        "pending"
+    }
+
+    fn protocol(&self) -> &str {
+        "plain"
+    }
+
+    async fn execute(
+        &self,
+        _request: ModelRequest,
+        _inbound_protocol: &str,
+    ) -> Result<Completion, PluginError> {
+        self.hits.fetch_add(1, Ordering::SeqCst);
+        std::future::pending().await
+    }
+}
+
+static STOP_ID: SurfaceId = SurfaceId::from_static("stop");
+static STOP_ROUTES: [RouteSpec; 1] = [RouteSpec::from_static(Method::Post, "/stop")];
+
+struct Stop {
+    marker: hofund_plugin_api::StoppedWaiting,
+}
+
+#[async_trait]
+impl InboundSurface for Stop {
+    fn id(&self) -> &SurfaceId {
+        &STOP_ID
+    }
+
+    fn routes(&self) -> &'static [RouteSpec] {
+        &STOP_ROUTES
+    }
+
+    async fn handle(
+        &self,
+        _route: &RouteSpec,
+        _request: axum::http::Request<hofund_plugin_api::Body>,
+        host: &SurfaceHost,
+    ) -> Result<axum::http::Response<BodyStream>, PluginError> {
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("content-type", "application/json")
+            .extension(self.marker.clone())
+            .body(hofund_plugin_api::Body::from_bytes(CHAT))
+            .expect("in-process request");
+        host.gateway().call(request).await
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn d84_dropping_a_marked_in_process_call_records_stopped_waiting() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let usage = Arc::new(Ledger::open(&dir.path().join("usage.sqlite")).expect("usage"));
+    let hits = Arc::new(AtomicUsize::new(0));
+    let member: Arc<dyn Member> = Arc::new(Pending {
+        member_id: MemberId::from_preset(
+            PresetId::try_from("pending").expect("preset"),
+            MemberKey::from_static("row"),
+        ),
+        hits: Arc::clone(&hits),
+    });
+    let routes = BTreeMap::from([("demo".to_owned(), vec![member])]);
+    let codecs = HashMap::from([(
+        "/v1/chat/completions".to_owned(),
+        Arc::new(OpenAiChat) as Arc<dyn Codec>,
+    )]);
+    let marker = hofund_plugin_api::StoppedWaiting::new();
+    let app = Gateway::new(
+        Snapshot::new(Router::new(routes, FailoverPolicy::default())),
+        "secret".to_owned(),
+        codecs,
+        Arc::clone(&usage),
+    )
+    .with_surfaces(vec![Arc::new(Stop {
+        marker: marker.clone(),
+    }) as Arc<dyn InboundSurface>])
+    .into_router();
+    let request = Request::builder()
+        .method("POST")
+        .uri("/stop")
+        .header("authorization", "Bearer secret")
+        .body(Body::empty())
+        .expect("request");
+    let mut call = Box::pin(app.oneshot(request));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(1), &mut call)
+            .await
+            .is_err()
+    );
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    assert!(!marker.is_stopped());
+    marker.stop();
+    drop(call);
+
+    let rows = usage.rows().expect("usage rows");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].model, "demo");
+    assert_eq!(rows[0].status, "504");
+    assert_eq!(rows[0].outcome, hofund_usage::OUTCOME_STOPPED_WAITING);
+}

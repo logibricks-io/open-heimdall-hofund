@@ -27,7 +27,17 @@ const PLUGIN_EXTRA_DEPS: &[(&str, &[&str])] = &[
     ("hofund-plugin-agent-hermes", &["sha2"]),
     ("hofund-plugin-agent-minimax-code", &["base64"]),
     ("hofund-plugin-agent-workbuddy", &["regex"]),
-    ("hofund-plugin-subscription-claude", &["regex"]),
+    (
+        "hofund-plugin-subscription-claude",
+        &[
+            "bytes",
+            "futures-util",
+            "regex",
+            "ring",
+            "serde",
+            "serde_json",
+        ],
+    ),
 ];
 
 fn plugin_allows_dep(package: &str, name: &str) -> bool {
@@ -1871,6 +1881,16 @@ cc = "1"
         assert_eq!(
             dependency_error(
                 "regex",
+                &[],
+                false,
+                None,
+                Some("hofund-plugin-subscription-claude")
+            ),
+            None
+        );
+        assert_eq!(
+            dependency_error(
+                "futures-util",
                 &[],
                 false,
                 None,

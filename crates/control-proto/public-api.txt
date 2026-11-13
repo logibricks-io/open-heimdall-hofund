@@ -1,4 +1,40 @@
 *
+AccountDiscoverAddRequest #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
+AccountDiscoverAddRequest.add
+AccountDiscoverAddRequest.version
+AccountDiscoverAddRequest::fn new () -> Self
+AccountDiscoverImportResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+AccountDiscoverImportResponse.imported
+AccountDiscoverImportResponse.version
+AccountDiscoverResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+AccountDiscoverResponse.found
+AccountDiscoverResponse.version
+AccountImportRequest #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
+AccountImportRequest.path
+AccountImportRequest.version
+AccountImportRequest::fn new (path : impl Into < String >) -> Self
+AccountImportResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+AccountImportResponse.imported
+AccountImportResponse.skipped
+AccountImportResponse.version
+AccountImportSkip #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+AccountImportSkip.path
+AccountImportSkip.reason
+AccountRemoveRequest #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
+AccountRemoveRequest.version
+AccountRemoveRequest::fn new () -> Self
+AccountRemoveResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+AccountRemoveResponse.removed
+AccountRemoveResponse.version
+AccountSwitchRequest #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
+AccountSwitchRequest.agent
+AccountSwitchRequest.target
+AccountSwitchRequest.version
+AccountSwitchRequest::fn new (agent : impl Into < String > , target : impl Into < String >) -> Self
+AccountSwitchResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+AccountSwitchResponse.account
+AccountSwitchResponse.agent
+AccountSwitchResponse.version
 AgentAction #[non_exhaustive] derives(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize) # [serde (rename_all = "snake_case")]
 AgentAction::Connect
 AgentAction::Disconnect
@@ -70,6 +106,7 @@ AgentStatusEntry.id
 AgentStatusEntry.model
 AgentStatusEntry.paths
 AgentStatusEntry.state
+AgentStatusEntry.warnings
 AgentStatusResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
 AgentStatusResponse.agents
 AgentStatusResponse.version
@@ -88,6 +125,14 @@ CatalogModelRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Seria
 CatalogModelRequest.model
 CatalogModelRequest.version
 CatalogModelRequest::fn new (model : impl Into < String >) -> Self
+CatalogSyncRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
+CatalogSyncRequest.force
+CatalogSyncRequest.version
+CatalogSyncRequest::fn new (force : bool) -> Self
+CatalogSyncResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+CatalogSyncResponse.error
+CatalogSyncResponse.ok
+CatalogSyncResponse.version
 CheckinAccountRow #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize) # [serde (rename_all = "camelCase")]
 CheckinAccountRow.account
 CheckinAccountRow.at_ms
@@ -172,6 +217,10 @@ CooldownReason::Quota
 CooldownReason::RateLimit
 CooldownReason::Unknown #[serde(other)]
 CooldownReason::const fn as_str (self) -> & 'static str
+DiscoveredAccount #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+DiscoveredAccount.already_stored
+DiscoveredAccount.label
+DiscoveredAccount.subscription
 EmptyRequest #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
 EmptyRequest::const fn new () -> Self
 ErrorEnvelope #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
@@ -387,6 +436,17 @@ ListenerRelistenFailedEvent.generation
 ListenerRelistenFailedEvent.issue
 ListenerRelistenFailedEvent.running
 ListenerRelistenFailedEvent.runtime_revision
+LogTailQuery #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
+LogTailQuery.after
+LogTailQuery.max_bytes
+LogTailQuery::fn encode (self) -> String
+LogTailQuery::fn parse (query : Option < & str >) -> Result < Self , ControlError >
+LogTailResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+LogTailResponse.lines
+LogTailResponse.next_offset
+LogTailResponse.offset
+LogTailResponse.path
+LogTailResponse.version
 MemberCooledEvent #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
 MemberCooledEvent.cause
 MemberCooledEvent.error
@@ -418,10 +478,13 @@ ModelListResponse.provider
 ModelListResponse.removed
 ModelListResponse.version
 ModelListenerStatus #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+ModelListenerStatus.allow_ips
+ModelListenerStatus.allow_ips_invalid
 ModelListenerStatus.configured
 ModelListenerStatus.effective
 ModelListenerStatus.effective_source
 ModelListenerStatus.running
+ModelListenerStatus.trust_proxy
 ModelMove #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
 ModelMove.to
 ModelMove.why
@@ -440,6 +503,7 @@ PicksForm::Edit
 PicksForm::Replace
 PicksForm::Reset
 PicksResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+PicksResponse.default_exposed
 PicksResponse.delisted
 PicksResponse.picked_from
 PicksResponse.picks
@@ -490,6 +554,7 @@ ProfileRenameRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Seri
 ProfileRenameRequest.from
 ProfileRenameRequest.to
 ProfileRenameRequest.version
+ProfileRenameRequest::fn new (from : impl Into < String > , to : impl Into < String >) -> Self
 ProfileRenameRequest::fn validate (& self) -> Result < () , ControlError >
 ProfileSaveRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
 ProfileSaveRequest.fields
@@ -522,10 +587,12 @@ ProviderCreateRequest.name
 ProviderCreateRequest.options
 ProviderCreateRequest.preset
 ProviderCreateRequest.version
+ProviderCreateRequest::fn new (expected_revision : impl Into < String > , preset : impl Into < String >) -> Self
 ProviderCreateRequest::fn validate (& self) -> Result < () , ControlError >
 ProviderDeleteRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
 ProviderDeleteRequest.expected_revision
 ProviderDeleteRequest.version
+ProviderDeleteRequest::fn new (expected_revision : impl Into < String >) -> Self
 ProviderDeleteRequest::fn validate (& self) -> Result < () , ControlError >
 ProviderDeleteResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
 ProviderDeleteResponse.disk_revision
@@ -885,12 +952,178 @@ ServeRole::Desktop
 ServeRole::Serve
 ServeRole::Tui
 ServeRole::Unknown #[serde(other)]
+SessionConsent #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+SessionConsent.all
+SessionConsent.asked
+SessionConsent.enabled
+SessionDayStats #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Serialize, Deserialize)
+SessionDayStats.cost
+SessionDayStats.date
+SessionDayStats.tokens
+SessionDetailResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Serialize, Deserialize)
+SessionDetailResponse.session
+SessionDetailResponse.transcript_available
+SessionDetailResponse.version
+SessionListQuery #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq)
+SessionListQuery.days
+SessionListQuery.folder
+SessionListQuery.limit
+SessionListQuery.model
+SessionListQuery::fn limit (& self) -> usize
+SessionListQuery::fn parse (query : Option < & str >) -> Result < Self , ControlError >
+SessionListResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Serialize, Deserialize)
+SessionListResponse.consent
+SessionListResponse.revision
+SessionListResponse.sessions
+SessionListResponse.version
+SessionManageAgent #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+SessionManageAgent.agent
+SessionManageAgent.count
+SessionManageAgent.deletable
+SessionManageQuery #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq)
+SessionManageQuery.agent
+SessionManageQuery::fn parse (query : Option < & str >) -> Result < Self , ControlError >
+SessionManageResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Serialize, Deserialize)
+SessionManageResponse.agent
+SessionManageResponse.agents
+SessionManageResponse.recorded
+SessionManageResponse.recording
+SessionManageResponse.revision
+SessionManageResponse.sessions
+SessionManageResponse.trash
+SessionManageResponse.trash_dir
+SessionManageResponse.version
+SessionOverviewDay #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Serialize, Deserialize)
+SessionOverviewDay.cost
+SessionOverviewDay.count
+SessionOverviewDay.date
+SessionOverviewQuery #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq)
+SessionOverviewQuery.agent
+SessionOverviewQuery.cwd
+SessionOverviewQuery.days
+SessionOverviewQuery.model
+SessionOverviewQuery::fn parse (query : Option < & str >) -> Result < Self , ControlError >
+SessionOverviewResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Serialize, Deserialize)
+SessionOverviewResponse.by_day
+SessionOverviewResponse.count
+SessionOverviewResponse.median_cost
+SessionOverviewResponse.top
+SessionOverviewResponse.version
+SessionOverviewTop #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Serialize, Deserialize)
+SessionOverviewTop.cost
+SessionOverviewTop.id
+SessionOverviewTop.title
+SessionProgressResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+SessionProgressResponse.files_done
+SessionProgressResponse.files_total
+SessionProgressResponse.running
+SessionProgressResponse.version
+SessionReadAgent #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+SessionReadAgent.agent
+SessionReadAgent.on
+SessionReadsPatchRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
+SessionReadsPatchRequest.agents
+SessionReadsPatchRequest.all
+SessionReadsPatchRequest.expected_revision
+SessionReadsPatchRequest.version
+SessionReadsResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+SessionReadsResponse.all
+SessionReadsResponse.asked
+SessionReadsResponse.enabled
+SessionReadsResponse.found
+SessionReadsResponse.revision
+SessionReadsResponse.version
+SessionResume #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+SessionResume.argv
+SessionResume.cwd
 SessionRouteResponse #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
 SessionRouteResponse.decision
 SessionRouteResponse.seq
 SessionRouteResponse.session
 SessionRouteResponse.version
 SessionRouteResponse::fn empty (session : impl Into < String >) -> Self
+SessionSearchHit #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+SessionSearchHit.excerpt
+SessionSearchHit.id
+SessionSearchQuery #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq)
+SessionSearchQuery.agent
+SessionSearchQuery.q
+SessionSearchQuery::fn parse (query : Option < & str >) -> Result < Self , ControlError >
+SessionSearchResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+SessionSearchResponse.cut
+SessionSearchResponse.hits
+SessionSearchResponse.version
+SessionStatShare #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+SessionStatShare.name
+SessionStatShare.tokens
+SessionStatsQuery #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq)
+SessionStatsQuery.days
+SessionStatsQuery.folder
+SessionStatsQuery.model
+SessionStatsQuery::fn parse (query : Option < & str >) -> Result < Self , ControlError >
+SessionStatsResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Serialize, Deserialize)
+SessionStatsResponse.cost
+SessionStatsResponse.days
+SessionStatsResponse.folders
+SessionStatsResponse.models
+SessionStatsResponse.revision
+SessionStatsResponse.tokens
+SessionStatsResponse.unpriced
+SessionStatsResponse.version
+SessionSummary #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Serialize, Deserialize)
+SessionSummary.agent
+SessionSummary.cost
+SessionSummary.cwd
+SessionSummary.gateway
+SessionSummary.id
+SessionSummary.last_ms
+SessionSummary.models
+SessionSummary.read_only
+SessionSummary.resume
+SessionSummary.subagents
+SessionSummary.title
+SessionSummary.tokens
+SessionSummary.unpriced
+SessionTokenTotals #[non_exhaustive] derives(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+SessionTokenTotals.cache_read
+SessionTokenTotals.cache_write
+SessionTokenTotals.input
+SessionTokenTotals.output
+SessionTranscriptPart #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+SessionTranscriptPart.kind
+SessionTranscriptPart.name
+SessionTranscriptPart.role
+SessionTranscriptPart.text
+SessionTranscriptQuery #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq)
+SessionTranscriptQuery.sub
+SessionTranscriptQuery::fn parse (query : Option < & str >) -> Result < Self , ControlError >
+SessionTranscriptResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+SessionTranscriptResponse.cut
+SessionTranscriptResponse.parts
+SessionTranscriptResponse.source
+SessionTranscriptResponse.version
+SessionTrashRow #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+SessionTrashRow.agent
+SessionTrashRow.id
+SessionTrashRow.title
+SettingsPatchRequest #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
+SettingsPatchRequest.currency
+SettingsPatchRequest.discover_accounts
+SettingsPatchRequest.expected_revision
+SettingsPatchRequest.lan_allow
+SettingsPatchRequest.listen
+SettingsPatchRequest.quota_left
+SettingsPatchRequest.version
+SettingsPatchRequest::fn new (expected_revision : impl Into < String >) -> Self
+SettingsResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+SettingsResponse.currency
+SettingsResponse.discover_accounts
+SettingsResponse.disk_revision
+SettingsResponse.lan_allow
+SettingsResponse.listen
+SettingsResponse.pending_restart
+SettingsResponse.quota_left
+SettingsResponse.version
 ShutdownRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
 ShutdownRequest.version
 ShutdownRequest::fn new () -> Self
@@ -903,9 +1136,49 @@ ShutdownState #[non_exhaustive] derives(Clone, Copy, Debug, Default, PartialEq, 
 ShutdownState::Draining
 ShutdownState::Running
 ShutdownState::Unknown #[serde(other)]
+SignInCancelRequest #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
+SignInCancelRequest.version
+SignInCancelRequest::fn new () -> Self
+SignInCancelResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+SignInCancelResponse.state
+SignInCancelResponse.version
+SignInChallenge #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (tag = "type" , rename_all = "snake_case")]
+SignInChallenge::DeviceCode
+SignInChallenge::Instructions
+SignInChallenge::OpenUrl
+SignInChallenge::Unknown #[serde(other)]
 SignInProgressEvent #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
 SignInProgressEvent.provider
+SignInProgressEvent.session
 SignInProgressEvent.state
+SignInProofRequest #[non_exhaustive] derives(Clone, Default, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
+SignInProofRequest.token
+SignInProofRequest.url
+SignInProofRequest.version
+SignInProofRequest::fn token (token : impl Into < String >) -> Self
+SignInProofRequest::fn url (url : impl Into < String >) -> Self
+SignInSessionState #[non_exhaustive] derives(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize) # [serde (rename_all = "snake_case")]
+SignInSessionState::Cancelled
+SignInSessionState::Failed
+SignInSessionState::NeedsProof
+SignInSessionState::Pending
+SignInSessionState::Ready
+SignInSessionState::Unknown #[serde(other)]
+SignInStartRequest #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
+SignInStartRequest.host
+SignInStartRequest.label
+SignInStartRequest.site
+SignInStartRequest.version
+SignInStartRequest::fn new () -> Self
+SignInStartResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+SignInStartResponse.challenge
+SignInStartResponse.flow
+SignInStartResponse.session
+SignInStartResponse.version
+SignInStatusResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+SignInStatusResponse.challenge
+SignInStatusResponse.state
+SignInStatusResponse.version
 SkipReason #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (tag = "kind" , rename_all = "snake_case")]
 SkipReason::Context
 SkipReason::Cooldown
@@ -953,6 +1226,32 @@ StatusResponse.serves
 StatusResponse.shutdown
 StatusResponse.started_at_ms
 StatusResponse.version
+SubscriptionAccount #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+SubscriptionAccount.id
+SubscriptionAccount.label
+SubscriptionAccount.needs_sign_in
+SubscriptionAccount.ready
+SubscriptionEntry #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+SubscriptionEntry.accounts
+SubscriptionEntry.flow
+SubscriptionEntry.id
+SubscriptionEntry.name
+SubscriptionFlow #[non_exhaustive] derives(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize) # [serde (rename_all = "snake_case")]
+SubscriptionFlow::Bridge
+SubscriptionFlow::Device
+SubscriptionFlow::Pkce
+SubscriptionFlow::TokenFile
+SubscriptionFlow::Unknown #[serde(other)]
+SubscriptionListResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+SubscriptionListResponse.subscriptions
+SubscriptionListResponse.version
+SubscriptionRefreshRequest #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
+SubscriptionRefreshRequest.account
+SubscriptionRefreshRequest.version
+SubscriptionRefreshRequest::fn new (account : Option < String >) -> Self
+SubscriptionRefreshResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+SubscriptionRefreshResponse.refreshed
+SubscriptionRefreshResponse.version
 TokenRotateRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
 TokenRotateRequest.version
 TokenRotateRequest::fn new () -> Self
@@ -1090,11 +1389,13 @@ WarmupRunResponse.detail
 WarmupRunResponse.outcome
 WarmupRunResponse.version
 const API_VERSION
+const DEFAULT_SESSION_LIST_LIMIT
 const MAX_BOOT_ID_LEN
 const MAX_CONFIG_TEXT_BYTES
 const MAX_ERROR_MESSAGE_BYTES
 const MAX_IDS
 const MAX_ID_BYTES
+const MAX_LOG_TAIL_BYTES
 const MAX_REQUEST_BODY_BYTES
 const MAX_REQUEST_ID_LEN
 const MAX_RESPONSE_BODY_BYTES

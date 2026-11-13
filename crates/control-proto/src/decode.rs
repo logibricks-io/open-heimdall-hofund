@@ -2,17 +2,20 @@ use serde::de::DeserializeOwned;
 use serde_json::error::Category;
 
 use crate::{
-    API_VERSION, AgentChangeResponse, AgentConnectRequest, AgentDisconnectRequest,
-    AgentHiddenSetRequest, AgentListResponse, AgentModelRequest, AgentModelsResponse,
-    AgentPickedOnlyRequest, AgentPlanRequest, AgentPlanResponse, AgentStatusResponse,
-    AgentVisibleSetRequest, CatalogDisabledListResponse, CatalogModelRequest, CheckinListResponse,
-    CheckinRunRequest, CheckinRunResponse, ConfigApplyRequest, ConfigResponse,
-    ConfigValidateRequest, ConfigValidationResponse, ControlError, ControlErrorKind, ErrorEnvelope,
-    EventEnvelope, FieldIssue, GatewayKeyRequest, GatewayKeyResponse, GatewayKeyRestoreRequest,
+    API_VERSION, AccountDiscoverAddRequest, AccountDiscoverImportResponse, AccountDiscoverResponse,
+    AccountImportRequest, AccountImportResponse, AccountRemoveRequest, AccountRemoveResponse,
+    AccountSwitchRequest, AccountSwitchResponse, AgentChangeResponse, AgentConnectRequest,
+    AgentDisconnectRequest, AgentHiddenSetRequest, AgentListResponse, AgentModelRequest,
+    AgentModelsResponse, AgentPickedOnlyRequest, AgentPlanRequest, AgentPlanResponse,
+    AgentStatusResponse, AgentVisibleSetRequest, CatalogDisabledListResponse, CatalogModelRequest,
+    CatalogSyncRequest, CatalogSyncResponse, CheckinListResponse, CheckinRunRequest,
+    CheckinRunResponse, ConfigApplyRequest, ConfigResponse, ConfigValidateRequest,
+    ConfigValidationResponse, ControlError, ControlErrorKind, ErrorEnvelope, EventEnvelope,
+    FieldIssue, GatewayKeyRequest, GatewayKeyResponse, GatewayKeyRestoreRequest,
     GroupCreateRequest, GroupDeleteRequest, GroupDeleteResponse, GroupListResponse,
     GroupMemberCandidatesResponse, GroupPatchRequest, GroupRestoreRequest, GroupWriteResponse,
-    HealthResponse, MAX_REQUEST_BODY_BYTES, MAX_RESPONSE_BODY_BYTES, ModelListResponse,
-    PicksResponse, PicksSetRequest, PresetListResponse, ProfileDeleteRequest,
+    HealthResponse, LogTailResponse, MAX_REQUEST_BODY_BYTES, MAX_RESPONSE_BODY_BYTES,
+    ModelListResponse, PicksResponse, PicksSetRequest, PresetListResponse, ProfileDeleteRequest,
     ProfileDetailResponse, ProfileListResponse, ProfileRenameRequest, ProfileSaveRequest,
     ProfileSwitchRequest, ProfileSwitchResponse, ProviderCreateRequest, ProviderDeleteRequest,
     ProviderDeleteResponse, ProviderKeyRequest, ProviderKeysResponse, ProviderListResponse,
@@ -20,9 +23,15 @@ use crate::{
     ProviderSpendCapsResponse, ProviderTestRequest, ProviderTestResponse, ProviderWriteResponse,
     QuotaAlertsResponse, QuotaAlertsSetRequest, QuotaAlertsSetResponse, QuotaCreditsModesResponse,
     QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryResponse, QuotaResponse,
-    ReloadRequest, RouteListResponse, RouteModelListResponse, SessionRouteResponse,
-    ShutdownRequest, ShutdownResponse, StatusResponse, TokenRotateRequest, TokenRotateResponse,
-    UnroutedListResponse, UsageResponse, WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
+    ReloadRequest, RouteListResponse, RouteModelListResponse, SessionDetailResponse,
+    SessionListResponse, SessionManageResponse, SessionOverviewResponse, SessionProgressResponse,
+    SessionReadsPatchRequest, SessionReadsResponse, SessionRouteResponse, SessionSearchResponse,
+    SessionStatsResponse, SessionTranscriptResponse, SettingsPatchRequest, SettingsResponse,
+    ShutdownRequest, ShutdownResponse, SignInCancelRequest, SignInCancelResponse,
+    SignInProofRequest, SignInStartRequest, SignInStartResponse, SignInStatusResponse,
+    StatusResponse, SubscriptionListResponse, SubscriptionRefreshRequest,
+    SubscriptionRefreshResponse, TokenRotateRequest, TokenRotateResponse, UnroutedListResponse,
+    UsageResponse, WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
 };
 
 mod sealed {
@@ -235,6 +244,7 @@ request!(AgentConnectRequest, validate);
 request!(AgentDisconnectRequest, validate);
 request!(AgentModelRequest, validate);
 request!(CatalogModelRequest, validate);
+request!(CatalogSyncRequest);
 request!(AgentVisibleSetRequest);
 request!(AgentHiddenSetRequest);
 request!(AgentPickedOnlyRequest);
@@ -259,6 +269,16 @@ request!(GroupCreateRequest, validate);
 request!(GroupPatchRequest, validate);
 request!(GroupDeleteRequest, validate);
 request!(GroupRestoreRequest, validate);
+request!(SessionReadsPatchRequest, validate);
+request!(SettingsPatchRequest, validate);
+request!(SignInStartRequest, validate);
+request!(SignInProofRequest, validate);
+request!(SubscriptionRefreshRequest, validate);
+request!(AccountSwitchRequest, validate);
+request!(AccountImportRequest, validate);
+request!(AccountDiscoverAddRequest, validate);
+request!(SignInCancelRequest);
+request!(AccountRemoveRequest);
 
 impl sealed::Sealed for ConfigResponse {}
 impl Response for ConfigResponse {
@@ -317,7 +337,28 @@ response!(
     PicksResponse,
     RouteModelListResponse,
     RouteListResponse,
+    SessionDetailResponse,
+    SessionListResponse,
+    SessionManageResponse,
+    SessionOverviewResponse,
+    SessionProgressResponse,
+    SessionReadsResponse,
     SessionRouteResponse,
+    SessionSearchResponse,
+    SessionStatsResponse,
+    SessionTranscriptResponse,
+    SettingsResponse,
+    LogTailResponse,
+    SignInStartResponse,
+    SignInStatusResponse,
+    SignInCancelResponse,
+    AccountSwitchResponse,
+    AccountImportResponse,
+    AccountDiscoverResponse,
+    AccountDiscoverImportResponse,
+    AccountRemoveResponse,
+    SubscriptionListResponse,
+    SubscriptionRefreshResponse,
     UnroutedListResponse,
     AgentListResponse,
     AgentStatusResponse,
@@ -342,6 +383,7 @@ response!(
     ProfileDetailResponse,
     ProfileSwitchResponse,
     PresetListResponse,
+    CatalogSyncResponse,
     ProviderWriteResponse,
     ProviderDeleteResponse,
     GroupListResponse,
