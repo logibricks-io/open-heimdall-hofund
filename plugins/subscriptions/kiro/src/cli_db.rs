@@ -6,7 +6,7 @@ use std::time::UNIX_EPOCH;
 use hofund_plugin_api::{PluginError, SecretString};
 use hofund_plugin_sdk::json::{self, Value};
 use hofund_plugin_sdk::oauth::{same_secret, secret_text};
-use rusqlite::{Connection, OpenFlags, OptionalExtension as _};
+use rusqlite::{Connection, OpenFlags, OptionalExtension as _, TransactionBehavior};
 
 use crate::creds::Credential;
 
@@ -159,12 +159,15 @@ pub(crate) fn write_refresh(
     credential: &Credential,
     refresh_used: &SecretString,
 ) -> Result<(), PluginError> {
-    let connection = Connection::open(path)
+    let mut connection = Connection::open(path)
         .map_err(|_| PluginError::io("cannot open the kiro-cli sign-in database for writing"))?;
     connection
         .busy_timeout(std::time::Duration::from_secs(3))
         .map_err(|_| PluginError::io("cannot configure the kiro-cli sign-in database"))?;
-    let Some(current) = get(&connection, key) else {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|_| PluginError::io("cannot write the kiro-cli sign-in database"))?;
+    let Some(current) = get(&transaction, key) else {
         return Ok(());
     };
     let current_refresh =
@@ -197,13 +200,24 @@ pub(crate) fn write_refresh(
     }
     let encoded = json::to_string(&Value::Object(object))
         .map_err(|_| PluginError::io("cannot encode the kiro-cli sign-in"))?;
+    update_if_refresh_matches(&transaction, key, &encoded, refresh_used)?;
+    transaction
+        .commit()
+        .map_err(|_| PluginError::io("cannot write the kiro-cli sign-in database"))
+}
+
+fn update_if_refresh_matches(
+    connection: &Connection,
+    key: &str,
+    encoded: &str,
+    refresh_used: &SecretString,
+) -> Result<usize, PluginError> {
     connection
         .execute(
-            "UPDATE auth_kv SET value = ?1 WHERE key = ?2",
-            (&encoded, key),
+            "UPDATE auth_kv SET value = ?1 WHERE key = ?2 AND json_extract(value, '$.refresh_token') = ?3",
+            (encoded, key, secret_text(refresh_used)),
         )
-        .map_err(|_| PluginError::io("cannot write the kiro-cli sign-in database"))?;
-    Ok(())
+        .map_err(|_| PluginError::io("cannot write the kiro-cli sign-in database"))
 }
 
 #[cfg(test)]
@@ -342,5 +356,44 @@ mod tests {
         .expect("stale write is a no-op");
         let unchanged = get(&connection, key).expect("unchanged row");
         assert_eq!(text(&unchanged, "access_token"), Some("new-a"));
+    }
+
+    #[test]
+    fn r51b_cli_conditional_write_rejects_rotated_refresh_token() {
+        let dir = tempfile::tempdir().expect("fixture directory");
+        let path = fixture(&dir);
+        let key = "kirocli:social:token";
+        insert(
+            &path,
+            key,
+            json::json!({"access_token":"old-a","refresh_token":"old-r"}),
+        );
+        let connection = Connection::open(&path).expect("fixture database");
+        connection
+            .execute(
+                "UPDATE auth_kv SET value = ?1 WHERE key = ?2",
+                (
+                    json::to_string(
+                        &json::json!({"access_token":"rotated-a","refresh_token":"rotated-r"}),
+                    )
+                    .expect("JSON"),
+                    key,
+                ),
+            )
+            .expect("rotate fixture");
+        let encoded =
+            json::to_string(&json::json!({"access_token":"stale-a","refresh_token":"stale-r"}))
+                .expect("JSON");
+        let updated = update_if_refresh_matches(
+            &connection,
+            key,
+            &encoded,
+            &SecretString::from("old-r".to_owned()),
+        )
+        .expect("conditional write");
+        assert_eq!(updated, 0);
+        let current = get(&connection, key).expect("current row");
+        assert_eq!(text(&current, "access_token"), Some("rotated-a"));
+        assert_eq!(text(&current, "refresh_token"), Some("rotated-r"));
     }
 }

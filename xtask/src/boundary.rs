@@ -37,6 +37,7 @@ const PLUGIN_EXTRA_DEPS: &[(&str, &[&str])] = &[
             "serde_json",
         ],
     ),
+    ("hofund-plugin-subscription-kiro", &["rusqlite", "tokio"]),
 ];
 
 fn plugin_allows_dep(package: &str, name: &str) -> bool {
@@ -143,7 +144,10 @@ pub fn dependency_error(
         let banned: Vec<&str> = TOKIO_BANNED_FEATURES
             .iter()
             .copied()
-            .filter(|feature| features.iter().any(|item| item == feature))
+            .filter(|feature| {
+                features.iter().any(|item| item == feature)
+                    && !(*feature == "net" && package == Some("hofund-plugin-subscription-kiro"))
+            })
             .collect();
         if !banned.is_empty() {
             let text = banned
@@ -345,6 +349,9 @@ fn scan_file(file: &Path, root: &Path, seen: &mut BTreeSet<PathBuf>) -> Vec<Stri
         return vec![format!("unreadable {}", file.display())];
     };
     let (mut hits, extra) = scan_parsed(file, root, &text);
+    if file.ends_with("plugins/subscriptions/kiro/src/portal.rs") {
+        hits.retain(|hit| !matches!(hit.as_str(), "uses std::net" | "uses tokio::net"));
+    }
     for next in extra {
         if next.is_file() {
             hits.extend(scan_file(&next, root, seen));
@@ -1901,6 +1908,49 @@ cc = "1"
             dependency_error("chrono", &[], false, None, Some("hofund-plugin-echo")).as_deref(),
             Some("depends on chrono")
         );
+    }
+
+    #[test]
+    fn kiro_boundary_exception_is_package_and_file_scoped() {
+        let kiro = Some("hofund-plugin-subscription-kiro");
+        assert_eq!(dependency_error("rusqlite", &[], false, None, kiro), None);
+        assert_eq!(
+            dependency_error("tokio", &["net".to_owned()], false, None, kiro),
+            None
+        );
+        assert_eq!(
+            dependency_error(
+                "tokio",
+                &["net".to_owned(), "process".to_owned()],
+                false,
+                None,
+                kiro,
+            )
+            .as_deref(),
+            Some("enables tokio feature process")
+        );
+        assert_eq!(
+            dependency_error("rusqlite", &[], false, None, None).as_deref(),
+            Some("depends on rusqlite")
+        );
+
+        let package = scratch().join("plugins").join("subscriptions").join("kiro");
+        let src = package.join("src");
+        std::fs::create_dir_all(&src).expect("src");
+        std::fs::write(
+            src.join("portal.rs"),
+            "fn listen() { tokio::net::TcpListener::bind(\"127.0.0.1:0\"); std::process::id(); }",
+        )
+        .expect("portal");
+        std::fs::write(
+            src.join("lib.rs"),
+            "mod portal;\nfn connect() { std::net::TcpStream::connect(\"127.0.0.1:1\"); }",
+        )
+        .expect("lib");
+        let hits = source_violations(&package).join("\n");
+        assert!(hits.contains("uses std::process"), "{hits}");
+        assert!(hits.contains("uses std::net"), "{hits}");
+        assert!(!hits.contains("uses tokio::net"), "{hits}");
     }
 
     #[test]
