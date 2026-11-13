@@ -1,6 +1,4 @@
-//! Terminal UI shell for hofund (R-11).
-//!
-//! Page content lands in R-14 and follow-on rows; this crate is the shell only.
+//! Terminal UI for hofund, backed by the control client.
 
 #![allow(missing_docs)]
 
