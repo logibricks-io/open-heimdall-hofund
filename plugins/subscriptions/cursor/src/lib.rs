@@ -28,13 +28,13 @@ mod models;
 mod proto;
 mod quota;
 mod refresh;
-/// Run transport. Request mapping and the upstream provider arrive in R-8f2/f3.
-#[allow(dead_code)]
+mod request;
 mod run;
 mod session;
 mod sign_in;
 mod team;
 mod tokens;
+mod upstream;
 
 pub(crate) use endpoints::Endpoints;
 
@@ -136,7 +136,7 @@ impl SubscriptionFactory for CursorFactory {
             command: cfg.command.clone(),
             flow: SignInFlow::Pkce,
             pending: Mutex::new(HashMap::new()),
-            keychain: Mutex::new(cli::KeychainCache::default()),
+            keychain: Arc::new(Mutex::new(cli::KeychainCache::default())),
             agent_home: self
                 .test_agent_home
                 .clone()
@@ -160,7 +160,7 @@ struct Cursor {
     command: Option<PathBuf>,
     flow: SignInFlow,
     pending: Mutex<HashMap<String, sign_in::PendingSignIn>>,
-    keychain: Mutex<cli::KeychainCache>,
+    keychain: Arc<Mutex<cli::KeychainCache>>,
     agent_home: PathBuf,
     keychain_enabled: bool,
 }
@@ -434,12 +434,18 @@ impl Subscription for Cursor {
 
     fn upstream(
         &self,
-        _account: &AccountId,
-        _host: &HostContext,
+        account: &AccountId,
+        host: &HostContext,
     ) -> Result<Arc<dyn UpstreamProvider>, PluginError> {
-        Err(PluginError::unsupported(
-            "requests through Cursor's agent API are not served yet",
-        ))
+        Ok(Arc::new(upstream::CursorUpstream::new(
+            account.clone(),
+            host.clone(),
+            Arc::clone(&self.endpoints),
+            self.agent_home.clone(),
+            self.program().ok(),
+            Arc::clone(&self.keychain),
+            self.keychain_enabled,
+        )))
     }
 
     async fn import_accounts(
