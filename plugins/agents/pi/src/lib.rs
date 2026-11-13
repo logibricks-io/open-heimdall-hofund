@@ -368,14 +368,18 @@ impl PiParser {
                 }
             }
             "model_change" => self.model_change(value),
-            "usage" | "model_usage" if !copied => {
+            "usage" | "model_usage" => {
                 if let Some(model) = value.get("model").and_then(Value::as_str) {
-                    self.count(model, value.get("usage"), at.as_ref());
+                    self.count(model, value.get("usage"), at.as_ref(), copied);
+                } else if copied {
+                    self.count("", value.get("usage"), at.as_ref(), copied);
                 }
             }
-            "compaction" | "branch_summary" if !copied && !self.state.model.is_empty() => {
-                let model = self.state.model.clone();
-                self.count(&model, value.get("usage"), at.as_ref());
+            "compaction" | "branch_summary" => {
+                if copied || !self.state.model.is_empty() {
+                    let model = self.state.model.clone();
+                    self.count(&model, value.get("usage"), at.as_ref(), copied);
+                }
             }
             "message" => self.message(value, copied, at.as_ref()),
             _ => {}
@@ -442,18 +446,15 @@ impl PiParser {
             "assistant" => {
                 if let Some(model) = message.get("model").and_then(Value::as_str) {
                     model.clone_into(&mut self.state.model);
-                }
-                if copied {
-                    return;
-                }
-                if let Some(model) = message.get("model").and_then(Value::as_str) {
-                    self.count(model, message.get("usage"), at);
+                    self.count(model, message.get("usage"), at, copied);
+                } else if copied {
+                    self.count("", message.get("usage"), at, copied);
                 }
             }
             _ => {
-                if !copied && !self.state.model.is_empty() {
+                if copied || !self.state.model.is_empty() {
                     let model = self.state.model.clone();
-                    self.count(&model, message.get("usage"), at);
+                    self.count(&model, message.get("usage"), at, copied);
                 }
             }
         }
@@ -464,6 +465,7 @@ impl PiParser {
         model: &str,
         usage: Option<&Value>,
         at: Option<&DateTime<chrono::FixedOffset>>,
+        copied: bool,
     ) {
         let Some(usage) = usage else {
             return;
@@ -477,10 +479,13 @@ impl PiParser {
         if tokens.is_zero() {
             return;
         }
+        self.state.checkpoint.add(tokens);
+        if copied {
+            return;
+        }
         let date = at.map_or_else(String::new, |at| {
             at.with_timezone(&Local).format("%Y-%m-%d").to_string()
         });
-        self.state.checkpoint.add(tokens);
         self.state.record.usage.push(SessionUsageEvent::new(
             self.state.checkpoint,
             tokens,

@@ -142,7 +142,7 @@ fn assert_fork_usage(store: &dyn SessionStore, sessions: &Path, config: &Path) {
     fork_lines.extend(parent_lines.iter().skip(1).cloned());
     fork_lines.extend([
         json!({"type":"message","message":{"role":"user","content":"Child prompt"},"timestamp":"2026-02-01T13:00:01Z"}),
-        json!({"type":"message","message":{"role":"assistant","model":"model-child","content":[],"usage":{"input":7,"output":3,"cacheRead":1,"cacheWrite":0}},"timestamp":"2026-02-01T13:00:02Z"}),
+        json!({"type":"message","message":{"role":"assistant","model":"model-child","content":[],"usage":{"input":10,"output":4,"cacheRead":2,"cacheWrite":1}},"timestamp":"2026-02-01T13:00:02Z"}),
     ]);
     write_jsonl(
         &sessions.join("2026-02-01T12-00-00_parent-file.jsonl"),
@@ -166,7 +166,7 @@ fn assert_fork_usage(store: &dyn SessionStore, sessions: &Path, config: &Path) {
         .find(|record| record.id == child_id)
         .expect("child record");
     let parent_tokens = SessionTokens::new(10, 4, 2, 1);
-    let post_fork = SessionTokens::new(7, 3, 1, 0);
+    let post_fork = SessionTokens::new(10, 4, 2, 1);
     assert_eq!(child.forked_from.as_deref(), Some(parent_id.as_str()));
     assert_eq!(child.tokens(), post_fork);
     assert_eq!(child.days.len(), 1);
