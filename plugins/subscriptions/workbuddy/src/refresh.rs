@@ -105,20 +105,40 @@ async fn refresh_stale(
     }
     let root: Value = hofund_plugin_sdk::json::from_slice(reply.body())
         .map_err(|_| PluginError::decode("WorkBuddy refresh returned invalid JSON"))?;
-    let access = root
+    let code = root.get("code").and_then(json_i64).unwrap_or(0);
+    if code != 0 {
+        return Err(PluginError::auth(format!(
+            "WorkBuddy refused the stored sign-in (code {code}); sign in again"
+        )));
+    }
+    let data = root.get("data").unwrap_or(&root);
+    let access = data
         .get("accessToken")
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| PluginError::auth("WorkBuddy refresh sent back no access token"))?;
     let mut credential = stored.credential.clone();
     credential.access = SecretString::from(access.to_owned());
-    if let Some(refresh) = root.get("refreshToken").and_then(Value::as_str)
+    if let Some(refresh) = data.get("refreshToken").and_then(Value::as_str)
         && !refresh.is_empty()
     {
         credential.refresh = SecretString::from(refresh.to_owned());
     }
-    if let Some(expires) = root.get("expiresAt").and_then(|v| v.as_i64()) {
-        credential.expires_at = expires;
+    let now_ms = host
+        .clock()
+        .now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or(0);
+    credential.expires_at =
+        expiry(data, "expiresAt", "expiresIn", now_ms).unwrap_or(credential.expires_at);
+    credential.refresh_expires_at = expiry(data, "refreshExpiresAt", "refreshExpiresIn", now_ms)
+        .unwrap_or(credential.refresh_expires_at);
+    if let Some(domain) = data.get("domain").and_then(Value::as_str) {
+        credential.domain = domain.to_owned();
+    }
+    if let Some(token_type) = data.get("tokenType").and_then(Value::as_str) {
+        credential.token_type = token_type.to_owned();
     }
     lease
         .commit(
@@ -127,4 +147,23 @@ async fn refresh_stale(
         )
         .await?;
     Ok(())
+}
+
+fn expiry(data: &Value, absolute: &str, relative: &str, now_ms: i64) -> Option<i64> {
+    data.get(absolute)
+        .and_then(json_i64)
+        .filter(|value| *value > 0)
+        .or_else(|| {
+            data.get(relative)
+                .and_then(json_i64)
+                .filter(|value| *value > 0)
+                .map(|value| now_ms + value.saturating_mul(1_000))
+        })
+}
+
+fn json_i64(value: &Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_u64().map(|number| number as i64))
+        .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
 }

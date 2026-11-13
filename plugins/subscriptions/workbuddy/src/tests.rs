@@ -250,6 +250,38 @@ fn a2c_23_refresh_on_expiry() {
 }
 
 #[test]
+fn r55_refresh_accepts_enveloped_tokens_and_relative_expiry() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, 1);
+    host.http().enqueue(
+        json::json!({
+            "code": 0,
+            "data": {
+                "accessToken": "wb-access-enveloped",
+                "refreshToken": "wb-refresh-enveloped",
+                "expiresIn": 3600,
+                "refreshExpiresIn": 7200
+            }
+        })
+        .to_string()
+        .into_bytes(),
+    );
+    block_on(subscription(&host, None).refresh(&id, host.context())).expect("refresh");
+    let stored = block_on(creds::Stored::load(host.context(), &id)).expect("stored");
+    assert_eq!(
+        secret_text(&stored.credential.access),
+        "wb-access-enveloped"
+    );
+    assert_eq!(
+        secret_text(&stored.credential.refresh),
+        "wb-refresh-enveloped"
+    );
+    assert_eq!(stored.credential.expires_at, 3_600_000);
+    assert_eq!(stored.credential.refresh_expires_at, 7_200_000);
+}
+
+#[test]
 fn a2c_24_upstream_sends_workbuddy_user_agent() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);

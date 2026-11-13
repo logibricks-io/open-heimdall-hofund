@@ -156,11 +156,6 @@ pub(crate) fn parse_desktop_info(
         .map_err(|_| PluginError::auth("WorkBuddy auth file is invalid JSON"))?;
     let account = root.get("account").and_then(Value::as_object);
     let auth = root.get("auth").and_then(Value::as_object);
-    let uid = account
-        .and_then(|map| map.get("uid"))
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| PluginError::auth("WorkBuddy auth file has no account uid"))?;
     if auth.is_some_and(|map| {
         ["accessToken", "refreshToken"]
             .into_iter()
@@ -171,6 +166,11 @@ pub(crate) fn parse_desktop_info(
             "WorkBuddy desktop keeps its sign-in encrypted (WorkBuddy 5.6 and later), which hofund can't read; use browser sign-in instead",
         ));
     }
+    let uid = account
+        .and_then(|map| map.get("uid"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| PluginError::auth("WorkBuddy auth file has no account uid"))?;
     let access = auth
         .and_then(|map| map.get("accessToken"))
         .and_then(string_value)
@@ -265,7 +265,13 @@ pub(crate) fn domain(credential: &Credential, base: &str) -> String {
     }
     hofund_plugin_sdk::url::Url::parse(base)
         .ok()
-        .and_then(|url| url.host_str().map(str::to_owned))
+        .and_then(|url| {
+            let host = url.host_str()?;
+            Some(match url.port() {
+                Some(port) => format!("{host}:{port}"),
+                None => host.to_owned(),
+            })
+        })
         .unwrap_or_default()
 }
 
@@ -293,7 +299,7 @@ pub(crate) fn signed_headers(credential: &Credential, base: &str) -> Vec<(String
     } else {
         headers.push(("X-Domain".to_owned(), domain(credential, base)));
     }
-    if !credential.enterprise_id.is_empty() {
+    if !credential.api_key && !credential.enterprise_id.is_empty() {
         headers.push((
             "X-Enterprise-Id".to_owned(),
             credential.enterprise_id.clone(),
@@ -315,8 +321,8 @@ pub(crate) fn chat_headers() -> Vec<(String, String)> {
             "X-Stainless-Package-Version".to_owned(),
             "6.25.0".to_owned(),
         ),
-        ("X-Stainless-OS".to_owned(), sdk_os().to_owned()),
-        ("X-Stainless-Arch".to_owned(), sdk_arch().to_owned()),
+        ("X-Stainless-OS".to_owned(), sdk_os()),
+        ("X-Stainless-Arch".to_owned(), sdk_arch()),
         ("X-Stainless-Runtime".to_owned(), "node".to_owned()),
         (
             "X-Stainless-Runtime-Version".to_owned(),
@@ -325,31 +331,27 @@ pub(crate) fn chat_headers() -> Vec<(String, String)> {
     ]
 }
 
-fn sdk_os() -> &'static str {
+fn sdk_os() -> String {
     match std::env::consts::OS {
-        "macos" => "MacOS",
-        "windows" => "Windows",
-        "linux" => "Linux",
-        "freebsd" => "FreeBSD",
-        "openbsd" => "OpenBSD",
-        "android" => "Android",
-        other => match other {
-            "" => "Unknown",
-            _ => "Other",
-        },
+        "macos" => "MacOS".to_owned(),
+        "windows" => "Windows".to_owned(),
+        "linux" => "Linux".to_owned(),
+        "freebsd" => "FreeBSD".to_owned(),
+        "openbsd" => "OpenBSD".to_owned(),
+        "android" => "Android".to_owned(),
+        "" => "Unknown".to_owned(),
+        other => format!("Other:{other}"),
     }
 }
 
-fn sdk_arch() -> &'static str {
+fn sdk_arch() -> String {
     match std::env::consts::ARCH {
-        "x86_64" => "x64",
-        "aarch64" => "arm64",
-        "arm" => "arm",
-        "x86" => "x32",
-        other => match other {
-            "" => "unknown",
-            _ => "other",
-        },
+        "x86_64" => "x64".to_owned(),
+        "aarch64" => "arm64".to_owned(),
+        "arm" => "arm".to_owned(),
+        "x86" => "x32".to_owned(),
+        "" => "unknown".to_owned(),
+        other => format!("other:{other}"),
     }
 }
 
@@ -498,6 +500,8 @@ mod tests {
         let headers = signed_headers(&credential, "https://workbuddy-ai.test");
         assert_eq!(header(&headers, "X-API-Key"), Some("fixture-access"));
         assert!(header(&headers, "X-Domain").is_none());
+        assert!(header(&headers, "X-Enterprise-Id").is_none());
+        assert!(header(&headers, "X-Tenant-Id").is_none());
         credential.enterprise_id.clear();
         let headers = signed_headers(&credential, "https://workbuddy-ai.test");
         assert!(header(&headers, "X-Enterprise-Id").is_none());
@@ -522,5 +526,9 @@ mod tests {
         }
         assert!(header(&headers, "X-Stainless-OS").is_some());
         assert!(header(&headers, "X-Stainless-Arch").is_some());
+        assert_eq!(
+            super::domain(&credential(Site::China), "http://127.0.0.1:18443"),
+            "127.0.0.1:18443"
+        );
     }
 }

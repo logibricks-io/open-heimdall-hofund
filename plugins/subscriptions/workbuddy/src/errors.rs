@@ -44,14 +44,17 @@ fn restricted(status: u16, body: &[u8]) -> bool {
     let text = String::from_utf8_lossy(body);
     text.to_ascii_lowercase()
         .contains("account has been restricted due to unusual activity")
-        || text
-            .split(|character: char| !character.is_ascii_digit())
-            .any(|digits| digits == "11140")
+        || text.contains("(11140)")
 }
 
 fn restriction_code(value: &Value) -> Option<i64> {
     match value {
-        Value::Number(number) => number.as_i64().filter(|code| *code == RESTRICTED_CODE),
+        Value::Number(number)
+            if number.as_i64() == Some(RESTRICTED_CODE)
+                || number.as_f64() == Some(RESTRICTED_CODE as f64) =>
+        {
+            Some(RESTRICTED_CODE)
+        }
         Value::String(text) if text == "11140" => Some(RESTRICTED_CODE),
         _ => None,
     }
@@ -89,5 +92,7 @@ mod tests {
         assert!(!restricted(200, br#"{"code":11140}"#));
         assert!(!restricted(403, br#"{"code":111400}"#));
         assert!(!restricted(403, br#"{"error":{"code":"011140"}}"#));
+        assert!(!restricted(403, br#"{"requestId":"11140"}"#));
+        assert!(restricted(403, br#"{"code":11140.0}"#));
     }
 }
