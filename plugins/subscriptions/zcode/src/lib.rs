@@ -273,7 +273,9 @@ impl Subscription for Zcode {
         match session::offline_status(&secret) {
             Ok(()) => {
                 let auth = creds::parse_secret(&secret)?;
-                if let Some(jwt) = auth.jwt
+                if auth.api_key.is_none()
+                    && !auth.team()
+                    && let Some(jwt) = auth.jwt
                     && let Err(error) = gift::ensure_live_jwt(host, &jwt)
                 {
                     return Ok(needs_sign_in(error.message()));

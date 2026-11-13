@@ -252,6 +252,7 @@ async fn signed_in(
     ))
     .await?;
     let mut first_error = None;
+    let mut start_attempted = false;
     if !on_team {
         match own_plan(host, endpoints, site, &business, &info, &device_file).await {
             Ok((key, plan)) if !plan.is_empty() => {
@@ -271,6 +272,7 @@ async fn signed_in(
                         plan: team.plan,
                     });
                 }
+                start_attempted = true;
                 if let Some(signed) =
                     start_plan(host, endpoints, site, Some(key), jwt, device, &device_file).await?
                 {
@@ -295,7 +297,9 @@ async fn signed_in(
             plan: team.plan,
         });
     }
-    if let Some(signed) = start_plan(host, endpoints, site, None, jwt, device, &device_file).await?
+    if !start_attempted
+        && let Some(signed) =
+            start_plan(host, endpoints, site, None, jwt, device, &device_file).await?
     {
         return Ok(signed);
     }
@@ -332,10 +336,11 @@ async fn start_plan(
         device: device.to_owned(),
     };
     match gift::read(host, endpoints, &stored, device_file).await {
-        Ok(balance) => Ok(Some(Signed {
+        Ok(balance) if balance.has_plan => Ok(Some(Signed {
             auth: stored.auth,
             plan: balance.plan,
         })),
+        Ok(_) => Ok(None),
         Err(error) if error.kind() == hofund_plugin_api::PluginErrorKind::Decode => Ok(None),
         Err(error) => Err(error),
     }

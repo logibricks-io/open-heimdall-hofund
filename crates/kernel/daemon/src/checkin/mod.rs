@@ -273,7 +273,7 @@ pub(crate) async fn tick_with_runner(
                         subscription = %candidate.subscription,
                         account = %candidate.member.account,
                         detail = %record.detail(),
-                        "daily check-in failed; will retry on the next local day"
+                        "daily check-in failed"
                     );
                 }
                 store.set_outcome(&member_id, &day, outcome.recheck_at());

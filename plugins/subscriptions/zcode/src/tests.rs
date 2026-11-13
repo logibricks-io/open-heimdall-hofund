@@ -109,35 +109,41 @@ fn write_jwt_only_credentials(home: &std::path::Path, user_id: &str) {
     std::fs::write(home.join("v2").join("credentials.json"), store.to_string()).expect("write");
 }
 
-fn seed_plan_key(host: &TestHost, key: &str, label: &str) -> AccountId {
-    let auth = PlanAuth {
-        api_key: Some(SecretString::from(key.to_owned())),
-        jwt: None,
-        team_token: None,
-        org: String::new(),
-        project: String::new(),
-        base: ZAI_ANTHROPIC_BASE.to_owned(),
-        site: Site::Zai,
-        uid: "u-plan".to_owned(),
-        label: label.to_owned(),
-        follow_agent: false,
-        agent_credentials: None,
-    };
-    let id = creds::account_id_for(&auth);
+fn seed_auth(host: &TestHost, auth: &PlanAuth) -> AccountId {
+    let id = creds::account_id_for(auth);
     block_on(async {
         let accounts = host.context().accounts();
         let account = accounts
-            .account(id.clone(), label.to_owned())
+            .account(id.clone(), auth.label.clone())
             .expect("account");
         accounts
             .upsert(
                 account,
-                creds::secret_blob(&auth, "00000000-0000-4000-8000-000000000001").to_secret(),
+                creds::secret_blob(auth, "00000000-0000-4000-8000-000000000001").to_secret(),
             )
             .await
             .expect("upsert");
     });
     id
+}
+
+fn seed_plan_key(host: &TestHost, key: &str, label: &str) -> AccountId {
+    seed_auth(
+        host,
+        &PlanAuth {
+            api_key: Some(SecretString::from(key.to_owned())),
+            jwt: None,
+            team_token: None,
+            org: String::new(),
+            project: String::new(),
+            base: ZAI_ANTHROPIC_BASE.to_owned(),
+            site: Site::Zai,
+            uid: "u-plan".to_owned(),
+            label: label.to_owned(),
+            follow_agent: false,
+            agent_credentials: None,
+        },
+    )
 }
 
 fn seed_team(
@@ -148,34 +154,22 @@ fn seed_team(
     org: &str,
     project: &str,
 ) -> AccountId {
-    let auth = PlanAuth {
-        api_key: None,
-        jwt: None,
-        team_token: Some(SecretString::from(token.to_owned())),
-        org: org.to_owned(),
-        project: project.to_owned(),
-        base: base.to_owned(),
-        site,
-        uid: "u-team".to_owned(),
-        label: "team@zcode.test".to_owned(),
-        follow_agent: false,
-        agent_credentials: None,
-    };
-    let id = creds::account_id_for(&auth);
-    block_on(async {
-        let accounts = host.context().accounts();
-        let account = accounts
-            .account(id.clone(), auth.label.clone())
-            .expect("account");
-        accounts
-            .upsert(
-                account,
-                creds::secret_blob(&auth, "00000000-0000-4000-8000-000000000001").to_secret(),
-            )
-            .await
-            .expect("upsert");
-    });
-    id
+    seed_auth(
+        host,
+        &PlanAuth {
+            api_key: None,
+            jwt: None,
+            team_token: Some(SecretString::from(token.to_owned())),
+            org: org.to_owned(),
+            project: project.to_owned(),
+            base: base.to_owned(),
+            site,
+            uid: "u-team".to_owned(),
+            label: "team@zcode.test".to_owned(),
+            follow_agent: false,
+            agent_credentials: None,
+        },
+    )
 }
 
 fn jwt_with_exp(exp_secs: u64) -> SecretString {
@@ -1270,7 +1264,10 @@ fn r57b_checkin_maps_done_ineligible_captcha_and_unknown() {
     assert_eq!(captcha.recheck_at(), None);
     let (unknown, _) = claim_fixture(500, "not json");
     assert_eq!(unknown.outcome(), hofund_plugin_api::CheckinOutcome::Failed);
-    assert_eq!(unknown.recheck_at(), None);
+    assert_eq!(
+        unknown.recheck_at(),
+        Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(30 * 60))
+    );
 }
 
 #[test]
@@ -1367,4 +1364,288 @@ fn r57b_provider_config_sets_images_reasoning_and_limits() {
     assert_eq!(calls.len(), 2);
     assert!(calls[0].uri().contains("app_version=3.17.2"));
     assert_eq!(calls[1].header("user-agent"), Some("ZCode/3.17.2"));
+}
+
+fn message_ok() -> Vec<u8> {
+    br#"{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"model":"GLM-5.3","stop_reason":"end_turn"}"#
+        .to_vec()
+}
+
+fn seed_team_key_and_jwt(host: &TestHost, jwt: SecretString) -> AccountId {
+    seed_auth(
+        host,
+        &PlanAuth {
+            api_key: Some(SecretString::from("team.project.key".to_owned())),
+            jwt: Some(jwt),
+            team_token: Some(SecretString::from("team.business.token".to_owned())),
+            org: "team-org".to_owned(),
+            project: "team-project".to_owned(),
+            base: ZAI_ANTHROPIC_BASE.to_owned(),
+            site: Site::Zai,
+            uid: "u-team-key-jwt".to_owned(),
+            label: "team@zcode.test (team)".to_owned(),
+            follow_agent: false,
+            agent_credentials: None,
+        },
+    )
+}
+
+#[test]
+fn r57b_team_key_and_jwt_ignore_an_empty_personal_plan_list() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_team_key_and_jwt(&host, jwt_with_exp(4_102_444_800));
+    let upstream = subscription(&host)
+        .upstream(&id, host.context())
+        .expect("upstream");
+
+    host.http().enqueue(message_ok());
+    let ordinary = ProbeQuery::new(ProtocolId::ANTHROPIC_MESSAGES, "GLM-5.3").expect("query");
+    block_on(upstream.probe(&ordinary)).expect("team request");
+
+    let balance = json!({
+        "code": 0,
+        "data": {
+            "server_time": 4_102_444_800_i64,
+            "plans": [{"plan_id": "gift", "name": "Dev Day", "status": "active", "ends_at": 4_102_500_000_i64}],
+            "balances": [{
+                "plan_id": "gift",
+                "capabilities": ["model:GLM-5.3"],
+                "total_units": 100,
+                "used_units": 25,
+                "remaining_units": 75
+            }]
+        }
+    });
+    host.http().enqueue(balance.to_string().into_bytes());
+    host.http().enqueue(message_ok());
+    let trial = ProbeQuery::new(ProtocolId::ANTHROPIC_MESSAGES, "GLM-5.3-Trial").expect("query");
+    block_on(upstream.probe(&trial)).expect("gift request");
+
+    let calls = host.http().calls();
+    assert_eq!(calls.len(), 3);
+    assert!(calls[0].uri().starts_with(ZAI_ANTHROPIC_BASE));
+    assert!(calls[1].uri().contains("/billing/balance"));
+    assert!(
+        calls[2]
+            .uri()
+            .starts_with("https://zcode.test/api/v1/zcode-plan/anthropic")
+    );
+    assert!(
+        calls
+            .iter()
+            .all(|call| !call.uri().contains("/api/biz/subscription/list"))
+    );
+}
+
+#[test]
+fn r57b_expired_jwt_does_not_disable_a_coding_plan_key() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = TestHost::open_for_at(
+        PluginKind::Subscription,
+        PluginId::from_static("zcode"),
+        dir.path(),
+        std::time::UNIX_EPOCH + std::time::Duration::from_secs(2),
+    );
+    let id = seed_auth(
+        &host,
+        &PlanAuth {
+            api_key: Some(SecretString::from("personal.plan.key".to_owned())),
+            jwt: Some(jwt_with_exp(1)),
+            team_token: None,
+            org: String::new(),
+            project: String::new(),
+            base: ZAI_ANTHROPIC_BASE.to_owned(),
+            site: Site::Zai,
+            uid: "u-expired-personal".to_owned(),
+            label: "personal@zcode.test".to_owned(),
+            follow_agent: false,
+            agent_credentials: None,
+        },
+    );
+    let sub = subscription(&host);
+    let status = block_on(sub.account_status(&id, host.context())).expect("status");
+    assert!(matches!(status, AccountStatus::Ready));
+
+    host.http().enqueue(
+        json!({"code": 200, "data": [{"status": "VALID", "productName": "GLM Coding Pro"}]})
+            .to_string()
+            .into_bytes(),
+    );
+    host.http().enqueue(message_ok());
+    let upstream = sub.upstream(&id, host.context()).expect("upstream");
+    let query = ProbeQuery::new(ProtocolId::ANTHROPIC_MESSAGES, "GLM-5.3").expect("query");
+    block_on(upstream.probe(&query)).expect("plan request");
+    let calls = host.http().calls();
+    assert_eq!(calls.len(), 2);
+    assert!(calls[0].uri().contains("/api/biz/subscription/list"));
+    assert!(calls[1].uri().starts_with(ZAI_ANTHROPIC_BASE));
+}
+
+#[test]
+fn r57b_expired_jwt_does_not_disable_a_team_credential() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = TestHost::open_for_at(
+        PluginKind::Subscription,
+        PluginId::from_static("zcode"),
+        dir.path(),
+        std::time::UNIX_EPOCH + std::time::Duration::from_secs(2),
+    );
+    let id = seed_team_key_and_jwt(&host, jwt_with_exp(1));
+    let sub = subscription(&host);
+    let status = block_on(sub.account_status(&id, host.context())).expect("status");
+    assert!(matches!(status, AccountStatus::Ready));
+
+    host.http().enqueue(message_ok());
+    let upstream = sub.upstream(&id, host.context()).expect("upstream");
+    let query = ProbeQuery::new(ProtocolId::ANTHROPIC_MESSAGES, "GLM-5.3").expect("query");
+    block_on(upstream.probe(&query)).expect("team request");
+    let calls = host.http().calls();
+    assert_eq!(calls.len(), 1);
+    assert!(calls[0].uri().starts_with(ZAI_ANTHROPIC_BASE));
+}
+
+#[test]
+fn r57b_expired_jwt_only_account_still_needs_sign_in() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = TestHost::open_for_at(
+        PluginKind::Subscription,
+        PluginId::from_static("zcode"),
+        dir.path(),
+        std::time::UNIX_EPOCH + std::time::Duration::from_secs(2),
+    );
+    let id = seed_auth(
+        &host,
+        &PlanAuth {
+            api_key: None,
+            jwt: Some(jwt_with_exp(1)),
+            team_token: None,
+            org: String::new(),
+            project: String::new(),
+            base: ZAI_ANTHROPIC_BASE.to_owned(),
+            site: Site::Zai,
+            uid: "u-expired-jwt-only".to_owned(),
+            label: "jwt@zcode.test".to_owned(),
+            follow_agent: false,
+            agent_credentials: None,
+        },
+    );
+    let status = block_on(subscription(&host).account_status(&id, host.context())).expect("status");
+    assert!(matches!(status, AccountStatus::NeedsSignIn { .. }));
+    assert!(host.http().calls().is_empty());
+}
+
+#[test]
+fn r57b_browser_sign_in_rejects_an_empty_gift_balance() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    host.http().enqueue(
+        json!({"code": 0, "data": {
+            "flow_id": "flow-empty",
+            "authorize_url": "https://open.bigmodel.cn/login",
+            "poll_interval_sec": 0
+        }})
+        .to_string()
+        .into_bytes(),
+    );
+    host.http().enqueue(
+        json!({"code": 0, "data": {
+            "status": "ready",
+            "bigmodel": {"access_token": "site-token"},
+            "token": "session.jwt.value",
+            "user": {"user_id": "u-empty", "email": "empty@zcode.test"}
+        }})
+        .to_string()
+        .into_bytes(),
+    );
+    host.http().enqueue(
+        json!({"code": 200, "data": {"organizations": [{
+            "organizationId": "own-org",
+            "projects": [{"projectId": "own-project", "projectType": 1}]
+        }]}})
+        .to_string()
+        .into_bytes(),
+    );
+    host.http().enqueue(
+        json!({"code": 200, "data": [{"name": "zcode-api-key", "apiKey": "own"}]})
+            .to_string()
+            .into_bytes(),
+    );
+    host.http().enqueue(
+        json!({"code": 200, "data": {"secretKey": "own-secret"}})
+            .to_string()
+            .into_bytes(),
+    );
+    host.http()
+        .enqueue(json!({"code": 200, "data": []}).to_string().into_bytes());
+    host.http().enqueue(
+        json!({"code": 0, "data": {"plans": [], "balances": []}})
+            .to_string()
+            .into_bytes(),
+    );
+
+    let sub = subscription(&host);
+    block_on(sub.start_sign_in(&sign_in_ctx("bigmodel"), host.context())).expect("start");
+    let error = block_on(sub.complete_sign_in(
+        &sign_in_ctx("bigmodel"),
+        SignInProof::Await,
+        host.context(),
+    ))
+    .expect_err("empty balance is not a plan");
+    assert_eq!(error.kind(), PluginErrorKind::Auth);
+    assert!(error.message().contains("no GLM Coding Plan"));
+    assert_eq!(host.http().calls().len(), 7);
+}
+
+#[test]
+fn r57b_live_sibling_bucket_controls_quota_and_trial_routing() {
+    let dir = tempfile::tempdir().expect("dir");
+    let home = dir.path().join(".zcode");
+    write_jwt_only_credentials(&home, "u-live-sibling");
+    let host = host(&dir);
+    let id =
+        block_on(discover::import(&home, discover::REFERENCE, host.context())).expect("import");
+    let balance = json!({
+        "code": 0,
+        "data": {
+            "server_time": 4_102_444_800_i64,
+            "plans": [
+                {"plan_id": "start", "user_plan_id": "s1", "name": "Start Plan", "status": "active", "ends_at": 4_102_500_000_i64},
+                {"plan_id": "trust", "user_plan_id": "t1", "name": "Trust Build", "status": "active", "ends_at": 4_102_500_000_i64}
+            ],
+            "balances": [
+                {"plan_id": "start", "user_plan_id": "s1", "show_name": "Spent Start", "capabilities": ["model:GLM-5.3-Flash"], "total_units": 100, "used_units": 100, "remaining_units": 0},
+                {"plan_id": "trust", "user_plan_id": "t1", "show_name": "Live Trust", "capabilities": ["model:GLM-5.3-Flash"], "total_units": 100, "used_units": 15, "remaining_units": 85}
+            ]
+        }
+    });
+    host.http().enqueue(balance.to_string().into_bytes());
+    let sub = subscription(&host);
+    let windows = block_on(sub.quota(&id, host.context())).expect("quota");
+    assert_eq!(windows.len(), 4);
+    for scope in ["GLM-5.3-Flash", "GLM-5.3-Flash-Trial"] {
+        let scoped: Vec<_> = windows
+            .iter()
+            .filter(|window| window.scope_model() == Some(scope))
+            .collect();
+        assert_eq!(scoped.len(), 2);
+        assert!(scoped[0].blocking());
+        assert_eq!(scoped[0].used(), 15);
+        assert!(!scoped[1].blocking());
+        assert_eq!(scoped[1].used(), 100);
+    }
+
+    host.http().enqueue(balance.to_string().into_bytes());
+    host.http().enqueue(message_ok());
+    let upstream = sub.upstream(&id, host.context()).expect("upstream");
+    let query =
+        ProbeQuery::new(ProtocolId::ANTHROPIC_MESSAGES, "GLM-5.3-Flash-Trial").expect("query");
+    block_on(upstream.probe(&query)).expect("live gift request");
+    let calls = host.http().calls();
+    assert_eq!(calls.len(), 3);
+    assert!(
+        calls[2]
+            .uri()
+            .starts_with("https://zcode.test/api/v1/zcode-plan/anthropic")
+    );
 }

@@ -57,7 +57,7 @@ impl ZcodeUpstream {
         let trial = gift::model_for_trial(&request.model);
         let start_only = stored.auth.api_key.is_none() && !stored.auth.team();
         let mut use_start = start_only || trial.is_some();
-        if !use_start && stored.auth.jwt.is_some() {
+        if !use_start && stored.auth.jwt.is_some() && !stored.auth.team() {
             use_start = !self.has_coding_plan(stored).await;
         }
         let session = start::session_id(&stored.device);

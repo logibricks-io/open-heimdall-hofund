@@ -12,6 +12,7 @@ use crate::{APP_VERSION, Endpoints, api};
 
 pub(crate) struct Balance {
     pub plan: String,
+    pub has_plan: bool,
     pub all_models: Vec<String>,
     pub usable_models: Vec<String>,
     pub windows: Vec<QuotaWindow>,
@@ -94,8 +95,8 @@ fn parse(data: &Value, start_only: bool, host_now: f64) -> Result<Balance, Plugi
         .iter()
         .filter(|plan| not_started(plan, now) && !ended(plan, now))
         .collect();
-    let live = !live_plans.is_empty();
-    if !live && pending.is_empty() && start_only {
+    let has_plan = !live_plans.is_empty() || !pending.is_empty();
+    if !has_plan && start_only {
         return Err(PluginError::decode(
             "this account has no GLM Coding Plan, and the Z Code Start Plan has ended or was never started",
         ));
@@ -107,8 +108,20 @@ fn parse(data: &Value, start_only: bool, host_now: f64) -> Result<Balance, Plugi
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| "Start Plan".to_owned());
     let several = live_plans.len() > 1;
-    let mut all_models = Vec::new();
     let mut usable_models = Vec::new();
+    for bucket in balances {
+        if !live_plans.iter().any(|plan| same_plan(bucket, plan))
+            || number(bucket.get("expires_at"))
+                .is_some_and(|seconds| seconds > 0.0 && seconds <= now)
+            || bucket_spent(bucket)
+        {
+            continue;
+        }
+        for model in bucket_models(bucket) {
+            push_unique(&mut usable_models, &model);
+        }
+    }
+    let mut all_models = Vec::new();
     let mut windows = Vec::new();
     for bucket in balances {
         let Some(owner) = live_plans.iter().find(|plan| same_plan(bucket, plan)) else {
@@ -122,9 +135,6 @@ fn parse(data: &Value, start_only: bool, host_now: f64) -> Result<Balance, Plugi
         let spent = bucket_spent(bucket);
         for model in &models {
             push_unique(&mut all_models, model);
-            if !spent {
-                push_unique(&mut usable_models, model);
-            }
         }
         let total = number(bucket.get("total_units"));
         let remaining = number(bucket.get("remaining_units"));
@@ -168,27 +178,27 @@ fn parse(data: &Value, start_only: bool, host_now: f64) -> Result<Balance, Plugi
         let resets_at = expiry
             .filter(|seconds| *seconds > 0.0)
             .map(|seconds| UNIX_EPOCH + Duration::from_secs_f64(seconds));
-        let scope: Vec<String> = models
-            .iter()
-            .flat_map(|model| {
-                if start_only {
-                    vec![model.clone(), gift_id(model)]
-                } else {
-                    vec![gift_id(model)]
-                }
-            })
-            .collect();
-        if scope.is_empty() {
-            windows.push(QuotaWindow::new(
-                window_name,
-                used_pct,
-                Some(100),
-                resets_at,
-            )?);
-        } else {
+        if models.is_empty() {
+            windows.push(
+                QuotaWindow::new(window_name, used_pct, Some(100), resets_at)?
+                    .with_blocking(!spent),
+            );
+            continue;
+        }
+        for model in models {
+            let live_sibling = usable_models
+                .iter()
+                .any(|usable| usable.eq_ignore_ascii_case(&model));
+            let blocking = !spent || !live_sibling;
+            let scope = if start_only {
+                vec![model.clone(), gift_id(&model)]
+            } else {
+                vec![gift_id(&model)]
+            };
             for model in scope {
                 windows.push(
                     QuotaWindow::new(window_name.clone(), used_pct, Some(100), resets_at)?
+                        .with_blocking(blocking)
                         .with_scope_model(model),
                 );
             }
@@ -200,8 +210,10 @@ fn parse(data: &Value, start_only: bool, host_now: f64) -> Result<Balance, Plugi
                 .with_blocking(false),
         );
     }
+    windows.sort_by_key(|window| !window.blocking());
     Ok(Balance {
         plan,
+        has_plan,
         all_models,
         usable_models,
         windows,
@@ -305,4 +317,30 @@ fn number(value: Option<&Value>) -> Option<f64> {
         Value::String(text) => text.trim().parse().ok(),
         _ => None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hofund_plugin_sdk::json::json;
+
+    #[test]
+    fn r57b_only_a_live_or_pending_plan_counts_for_sign_in() {
+        let empty = parse(&json!({"plans": [], "balances": []}), false, 100.0).expect("empty");
+        assert!(!empty.has_plan);
+
+        let pending = parse(
+            &json!({
+                "server_time": 100,
+                "plans": [{"name": "Start Plan", "status": "active", "starts_at": 200}],
+                "balances": []
+            }),
+            false,
+            100.0,
+        )
+        .expect("pending");
+        assert!(pending.has_plan);
+        assert_eq!(pending.plan, "Start Plan");
+        assert!(pending.usable_models.is_empty());
+    }
 }

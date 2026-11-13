@@ -34,12 +34,12 @@ pub(crate) async fn run(
         ));
     };
     if let Err(error) = gift::ensure_live_jwt(host, jwt) {
-        return Ok(CheckinResult::new(CheckinOutcome::Failed, error.message()));
+        return Ok(failed(host, error.message()));
     }
     let plans = match marketing_plans(host, &endpoints, &stored, device_file, touch_seq).await {
         Ok(plans) => plans,
         Err(error) => {
-            return Ok(CheckinResult::new(CheckinOutcome::Failed, error.message()));
+            return Ok(failed(host, error.message()));
         }
     };
     if plans.is_empty() {
@@ -249,6 +249,11 @@ async fn claim_one(
     )
 }
 
+fn failed(host: &HostContext, message: impl Into<String>) -> CheckinResult {
+    CheckinResult::new(CheckinOutcome::Failed, message)
+        .with_recheck_at(host.clock().now() + RECHECK)
+}
+
 fn summarize(host: &HostContext, results: Vec<(String, (ClaimOutcome, String))>) -> CheckinResult {
     let names = |outcome| {
         results
@@ -278,7 +283,7 @@ fn summarize(host: &HostContext, results: Vec<(String, (ClaimOutcome, String))>)
         .iter()
         .any(|(_, (outcome, _))| *outcome == ClaimOutcome::Failed)
     {
-        return CheckinResult::new(CheckinOutcome::Failed, message);
+        return failed(host, message);
     }
     if results
         .iter()

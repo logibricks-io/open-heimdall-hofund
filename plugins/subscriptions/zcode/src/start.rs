@@ -164,6 +164,10 @@ pub(crate) fn reasoning(root: &mut Map<String, Value>) {
         return;
     }
     root.remove("output_config");
+    if effort == "none" {
+        root.insert("thinking".to_owned(), json::json!({"type": "disabled"}));
+        return;
+    }
     let budget = match effort.as_str() {
         "minimal" => 1_024,
         "low" => 4_096,
@@ -354,6 +358,20 @@ mod tests {
         assert_eq!(hex(DYNAMIC_BEHAVIOR), "7d843753f3adae93");
         assert_eq!(hex(SESSION_GUIDANCE), "6596a0131800c779");
         assert_eq!(hex(CONTEXT_MANAGEMENT), "406a0480d88086cd");
+    }
+
+    #[test]
+    fn r57b_reasoning_wire_fixtures_disable_none_and_enable_high() {
+        let mut disabled = json::json!({"output_config": {"effort": "none"}});
+        reasoning(disabled.as_object_mut().expect("root"));
+        assert_eq!(disabled, json::json!({"thinking": {"type": "disabled"}}));
+
+        let mut enabled = json::json!({"output_config": {"effort": "high"}});
+        reasoning(enabled.as_object_mut().expect("root"));
+        assert_eq!(
+            enabled,
+            json::json!({"thinking": {"type": "enabled", "budget_tokens": 16_000}})
+        );
     }
 
     fn hex(text: &str) -> String {
