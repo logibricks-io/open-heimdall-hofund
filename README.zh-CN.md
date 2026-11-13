@@ -23,7 +23,7 @@ Heimdall 是那扇门。Hofund 是守门的剑。
 
 **v0.2.0 尚未打标签。** 本仓库按冻结的参考实现（magpie `v0.1.3005`）计分，尚未发布 GitHub Release。发布步骤见 [docs/release.md](docs/release.md)（英文）。以下以当前 `main`（`74dbebbc`，2026-11-13）为准，未合并的 pull request 不记为已发布。多数订阅与路由工作仅有 mock 验证，尚未做真实账号冒烟。
 
-规范中间表示（IR），Anthropic Messages、OpenAI Chat Completions、OpenAI Responses 与 Generative Language API 的编解码（含流式），quirk 配置，上游适配器，按顺序的故障转移，本地 HTTP 服务，Claude Code、Codex CLI、Gemini CLI、OpenCode 的配置适配器，以及菜单栏应用已经实现。字段对照见 [docs/codecs.md](docs/codecs.md)（英文）。`plugins/subscriptions` 下有十四个订阅插件，但请求转发并不整齐：
+规范中间表示（IR），Anthropic Messages、OpenAI Chat Completions、OpenAI Responses 与 Generative Language API 的编解码（含流式），quirk 配置，上游适配器，按顺序的故障转移，本地 HTTP 服务，Claude Code、Codex CLI、Gemini CLI、OpenCode 的配置适配器，以及菜单栏应用已经实现。字段对照见 [docs/codecs.md](docs/codecs.md)（英文）。`plugins/subscriptions` 下有十五个订阅插件，但请求转发并不整齐：
 
 - **Cursor：** 支持登录、导入、查模型和配额，以及 Agent Run 请求转发（R-8/R-9；偏差见 `docs/feature-parity.md`）。
 - **Claude Pro/Max：** 支持登录、刷新、查模型和配额，以及通过 Claude Code MCP 桥接转发请求（H8）。

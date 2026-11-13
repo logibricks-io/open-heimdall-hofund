@@ -34,7 +34,7 @@ The canonical IR, the Anthropic Messages, OpenAI Chat Completions, OpenAI
 Responses, and Generative Language codecs, quirk profiles, upstream adapters,
 ordered failover, the local HTTP server, config adapters for Claude Code,
 Codex CLI, Gemini CLI, and OpenCode, and the menu-bar app are implemented.
-See [docs/codecs.md](docs/codecs.md). Fourteen subscription plugins ship
+See [docs/codecs.md](docs/codecs.md). Fifteen subscription plugins ship
 under `plugins/subscriptions`. Request serving is not uniform:
 
 - **Cursor:** sign-in, import, models, usage, and Agent Run request serving
