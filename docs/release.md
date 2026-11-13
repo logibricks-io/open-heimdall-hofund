@@ -1,5 +1,10 @@
 # Releasing hofund
 
+**v0.2.0 is not tagged, and no GitHub Release has been published from this
+tree.** The steps below are the release process (Must #12). Do not treat
+this document as evidence that a release already shipped. Workspace version
+strings may still say 0.1.0 until that cut.
+
 Version 0.1.0 is prepared in the tree: the workspace version, this process,
 and the changelog. Pushing a tag publishes a GitHub release. Do not push a
 tag until the changelog and the version agree.
