@@ -10,6 +10,7 @@
     clippy::must_use_candidate
 )]
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Local};
@@ -34,9 +35,7 @@ impl PiStore {
     /// Uses Pi's environment overrides, agent home, and `settings.json`.
     #[must_use]
     pub fn new() -> Self {
-        let root = std::env::var_os("PI_CODING_AGENT_DIR")
-            .filter(|value| !value.is_empty())
-            .map_or_else(|| home_dir().join(".pi").join("agent"), PathBuf::from);
+        let root = agent_root_from_override(std::env::var_os("PI_CODING_AGENT_DIR"));
         let session = std::env::var_os("PI_CODING_AGENT_SESSION_DIR")
             .filter(|value| !value.is_empty())
             .map(PathBuf::from)
@@ -90,15 +89,105 @@ fn expand_home(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
+fn agent_root_from_override(override_dir: Option<OsString>) -> PathBuf {
+    override_dir
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .map_or_else(
+            || home_dir().join(".pi").join("agent"),
+            |path| expand_home(&path),
+        )
+}
+
 fn configured_session_dir(root: &Path) -> Option<PathBuf> {
     let bytes = std::fs::read(root.join("settings.json")).ok()?;
-    let settings: Value = json::from_slice(&bytes).ok()?;
+    let settings: Value = json::from_slice(&strip_jsonc(&bytes)).ok()?;
     settings
         .get("sessionDir")
         .and_then(Value::as_str)
         .filter(|path| !path.is_empty())
         .map(PathBuf::from)
         .map(|path| expand_home(&path))
+}
+
+fn strip_jsonc(input: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(input.len());
+    let mut index = 0;
+    let mut string = false;
+    let mut escaped = false;
+    while index < input.len() {
+        let byte = input[index];
+        if string {
+            out.push(byte);
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                string = false;
+            }
+            index += 1;
+            continue;
+        }
+        if byte == b'"' {
+            string = true;
+            out.push(byte);
+            index += 1;
+        } else if byte == b'/' && input.get(index + 1) == Some(&b'/') {
+            index += 2;
+            while index < input.len() && input[index] != b'\n' {
+                index += 1;
+            }
+        } else if byte == b'/' && input.get(index + 1) == Some(&b'*') {
+            index += 2;
+            while index + 1 < input.len() && &input[index..index + 2] != b"*/" {
+                if input[index] == b'\n' {
+                    out.push(b'\n');
+                }
+                index += 1;
+            }
+            index = (index + 2).min(input.len());
+        } else {
+            out.push(byte);
+            index += 1;
+        }
+    }
+    strip_trailing_commas(&out)
+}
+
+fn strip_trailing_commas(input: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(input.len());
+    let mut string = false;
+    let mut escaped = false;
+    for (index, byte) in input.iter().copied().enumerate() {
+        if string {
+            out.push(byte);
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                string = false;
+            }
+            continue;
+        }
+        if byte == b'"' {
+            string = true;
+            out.push(byte);
+            continue;
+        }
+        if byte == b',' {
+            let mut next = index + 1;
+            while input.get(next).is_some_and(u8::is_ascii_whitespace) {
+                next += 1;
+            }
+            if matches!(input.get(next), Some(b'}' | b']')) {
+                continue;
+            }
+        }
+        out.push(byte);
+    }
+    out
 }
 
 /// Directory-only Pi locator.
@@ -445,5 +534,43 @@ fn title_line(text: &str) -> String {
         format!("{}…", kept.trim_end())
     } else {
         kept
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn jsonc_settings_configure_the_session_root() {
+        let root = tempfile::tempdir().expect("temp dir");
+        std::fs::write(
+            root.path().join("settings.json"),
+            br#"{
+              // Pi accepts line comments.
+              /* And block comments. */
+              "sessionDir": "~/custom-sessions",
+            }"#,
+        )
+        .expect("settings");
+        let store = PiStore::with_root(root.path());
+        assert!(
+            store
+                .locator()
+                .roots()
+                .contains(&home_dir().join("custom-sessions"))
+        );
+    }
+
+    #[test]
+    fn agent_root_override_expands_home() {
+        assert_eq!(
+            agent_root_from_override(Some(OsString::from("~/pi"))),
+            home_dir().join("pi")
+        );
+        assert_eq!(
+            agent_root_from_override(Some(OsString::from("~"))),
+            home_dir()
+        );
     }
 }

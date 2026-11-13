@@ -346,7 +346,8 @@ impl OpenCodeParser {
         if role != "assistant" {
             return;
         }
-        if let Some(completed) = value.pointer("/time/completed").and_then(Value::as_i64) {
+        let completed = value.pointer("/time/completed").and_then(Value::as_i64);
+        if let Some(completed) = completed {
             self.saw(completed);
         }
         if self.state.record.cwd.is_empty()
@@ -378,7 +379,7 @@ impl OpenCodeParser {
             return;
         }
         self.state.record.add_usage(model, tokens);
-        if let Some(date) = local_date(created) {
+        if let Some(date) = local_date(completed.unwrap_or(created)) {
             self.state
                 .record
                 .add_day(SessionDay::new(date, model, tokens));
@@ -714,6 +715,10 @@ mod tests {
         PluginError, SessionDatabase, SessionFile, SessionFormat, SessionRows, SessionStore,
         SessionValue,
     };
+    use hofund_plugin_sdk::{
+        chrono::{Local, TimeZone},
+        json,
+    };
 
     struct CutDatabase {
         infos: SessionRows,
@@ -740,6 +745,114 @@ mod tests {
 
         fn revision(&self) -> Result<i64, PluginError> {
             Ok(1)
+        }
+    }
+
+    struct DailyUsageDatabase {
+        v2: bool,
+        created: i64,
+        completed: i64,
+    }
+
+    impl DailyUsageDatabase {
+        fn infos(&self) -> SessionRows {
+            SessionRows::new(
+                vec![vec![
+                    SessionValue::Text("ses_one".to_owned()),
+                    SessionValue::Text(String::new()),
+                    SessionValue::Text("/work".to_owned()),
+                    SessionValue::Text("one".to_owned()),
+                    SessionValue::Integer(self.created),
+                    SessionValue::Integer(self.completed),
+                ]],
+                false,
+            )
+        }
+
+        fn message(&self) -> String {
+            let time = json::json!({"created": self.created, "completed": self.completed});
+            let tokens = json::json!({"input": 5, "output": 1});
+            let data = if self.v2 {
+                json::json!({"time": time, "model": {"id": "m"}, "tokens": tokens})
+            } else {
+                json::json!({
+                    "role": "assistant",
+                    "modelID": "m",
+                    "time": time,
+                    "tokens": tokens
+                })
+            };
+            json::to_string(&data).expect("message JSON")
+        }
+    }
+
+    impl SessionDatabase for DailyUsageDatabase {
+        fn query(&self, sql: &str, params: &[&str]) -> Result<SessionRows, PluginError> {
+            let normalized = sql.to_ascii_lowercase();
+            if normalized.contains("sqlite_master") {
+                let table = params.first().copied().unwrap_or("");
+                let found = if self.v2 {
+                    table == "session_v2"
+                } else {
+                    matches!(table, "session" | "message")
+                };
+                return Ok(SessionRows::new(
+                    vec![vec![SessionValue::Integer(i64::from(found))]],
+                    false,
+                ));
+            }
+            if normalized.contains("from session_message") && self.v2 {
+                return Ok(SessionRows::new(
+                    vec![vec![
+                        SessionValue::Text("msg_one".to_owned()),
+                        SessionValue::Text("assistant".to_owned()),
+                        SessionValue::Text(self.message()),
+                    ]],
+                    false,
+                ));
+            }
+            if normalized.contains("from session_v2") || normalized.contains("from session") {
+                return Ok(self.infos());
+            }
+            if normalized.contains("from message") && !self.v2 {
+                return Ok(SessionRows::new(
+                    vec![vec![SessionValue::Text(self.message())]],
+                    false,
+                ));
+            }
+            Ok(SessionRows::new(Vec::new(), false))
+        }
+
+        fn revision(&self) -> Result<i64, PluginError> {
+            Ok(1)
+        }
+    }
+
+    #[test]
+    fn database_usage_uses_completion_day_for_v1_and_v2() {
+        let created = Local
+            .with_ymd_and_hms(2026, 1, 1, 23, 59, 59)
+            .single()
+            .expect("created local time")
+            .timestamp_millis();
+        let completed = Local
+            .with_ymd_and_hms(2026, 1, 2, 0, 0, 1)
+            .single()
+            .expect("completed local time")
+            .timestamp_millis();
+        let file = SessionFile::new("database", "opencode.db").with_format(SessionFormat::Sqlite);
+        for v2 in [false, true] {
+            let database = DailyUsageDatabase {
+                v2,
+                created,
+                completed,
+            };
+            let records = read_database(&file, &database).expect("records");
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].days.len(), 1);
+            assert_eq!(records[0].days[0].date, "2026-01-02");
+            assert_eq!(records[0].days[0].tokens.input, 5);
+            assert_eq!(records[0].days[0].tokens.output, 1);
         }
     }
 

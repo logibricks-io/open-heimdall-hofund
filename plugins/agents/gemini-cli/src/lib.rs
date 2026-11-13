@@ -346,7 +346,9 @@ impl GeminiState {
             self.messages.remove(&id);
         }
         let order_ids = patch_ids(patch, "OrderIDs");
-        if !order_ids.is_empty() {
+        if order_ids.is_empty() {
+            self.order.retain(|id| self.messages.contains_key(id));
+        } else {
             let mut keep = Vec::new();
             for id in &self.order {
                 if self.messages.contains_key(id) && !order_ids.iter().any(|item| item == id) {
@@ -748,6 +750,29 @@ mod tests {
         state.patch(&json::json!({"RemoveIDs": ["a"]}));
         assert!(!state.messages.contains_key("a"));
         assert!(state.messages.contains_key("b"));
+        assert_eq!(state.order, ["b"]);
+    }
+
+    #[test]
+    fn remove_then_re_add_does_not_double_count_usage() {
+        let message = json::json!({
+            "id": "a",
+            "type": "gemini",
+            "model": "m",
+            "timestamp": "2020-01-02T00:00:00Z",
+            "tokens": {"input": 5, "output": 1}
+        });
+        let mut state = fresh_state();
+        state.put(&message);
+        state.patch(&json::json!({"RemoveIDs": ["a"]}));
+        assert!(!state.messages.contains_key("a"));
+        assert!(!state.order.iter().any(|id| id == "a"));
+        state.put(&message);
+        state.rebuild_usage();
+        assert_eq!(state.order, ["a"]);
+        let tokens = state.record.tokens();
+        assert_eq!(tokens.input, 5);
+        assert_eq!(tokens.output, 1);
     }
 
     #[test]
@@ -781,10 +806,11 @@ mod tests {
         }));
         assert_eq!(state.session, "s1");
         assert_eq!(state.record.id, "gemini:s1");
-        // $set must run first so RemoveIDs can see message "a". Patch does not
-        // rewrite `order`, so "a" may remain there after the map removal.
+        // $set must run first so RemoveIDs can see message "a" and remove it
+        // from both the message map and the order.
         assert!(!state.messages.contains_key("a"));
         assert!(state.messages.contains_key("b"));
+        assert_eq!(state.order, ["b"]);
     }
 
     #[test]
