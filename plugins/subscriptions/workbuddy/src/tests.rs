@@ -277,10 +277,7 @@ fn r55c_model_images_follow_site_and_edit_tags() {
 #[test]
 fn r55c_effort_lists_match_the_frozen_config() {
     let list = crate::models::parse_config(
-        include_bytes!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/fixtures/config-efforts.json"
-        )),
+        include_bytes!("fixtures/config-efforts.json"),
         Site::International,
     )
     .expect("parse");
