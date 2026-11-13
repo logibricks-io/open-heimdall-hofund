@@ -685,6 +685,14 @@ impl Engine {
                 )?;
             }
         }
+        if self.id == "codex"
+            && let Some(config) = self
+                .locations
+                .iter()
+                .find(|location| location.file == "config")
+        {
+            let _ = crate::codex_threads::connect(&config.path).log();
+        }
         Ok(with_change(plan, stored))
     }
 
@@ -1462,8 +1470,11 @@ impl Engine {
                 connected = false;
             }
         }
+        let mut warnings = Vec::new();
         if connected && let Some(credential) = self.credential()? {
-            connected = credential.connected(target)?;
+            let (held, warning) = credential.connected(target);
+            connected = held;
+            warnings.extend(warning);
         }
         if connected && self.status_blocked(session, target) {
             connected = false;
@@ -1479,7 +1490,8 @@ impl Engine {
             connected,
             managed,
             paths,
-        ))
+        )
+        .with_warnings(warnings))
     }
 
     fn status_blocked(&self, session: &Session, target: &GatewayTarget) -> bool {
@@ -1562,6 +1574,15 @@ impl Engine {
                 self.id,
             )?);
             changed = true;
+        }
+        if changed
+            && self.id == "codex"
+            && let Some(config) = self
+                .locations
+                .iter()
+                .find(|location| location.file == "config")
+        {
+            warnings.extend(crate::codex_threads::disconnect(&config.path).log());
         }
         Ok(DisconnectOutcome::new(changed, warnings))
     }

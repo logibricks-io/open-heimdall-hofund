@@ -80,7 +80,8 @@ pub(crate) async fn exchange(
     let email = who(host, &endpoints.userinfo, set.access()).await?;
     let blob = SecretObject::new()
         .with_number("v", 1)
-        .with_secret("refresh_token", refresh_token);
+        .with_secret("refresh_token", refresh_token)
+        .with_text("email", &email);
     let blob = project::settle(host, endpoints, set.access(), wanted, blob).await;
     Ok(SignedIn {
         id: account_id_from(&["google", &email.to_ascii_lowercase()]),

@@ -355,7 +355,7 @@ Extend `SignInProgressEvent` with optional `session` and `state`. Old clients ig
 
 ### G-8 Catalog sync
 
-Required for Agents `S` and for startup sync when the public catalog is empty (reference `Init` batches `syncCmd` with `fetchModelsCmd`). `POST /v1/hofund/catalog/sync` with `{version}` returns `{version, ok, error?}`.
+Required for Agents `S` and for startup sync when the public catalog is empty (reference `Init` batches `syncCmd` with `fetchModelsCmd`). `POST /v1/hofund/catalog/sync` with `{version, force?}` returns `{version, ok, error?}`. R-14 sends `force: false` once when the control stream opens, and `force: true` for Agents `S`. A fetch failure stays on `error` with HTTP success. The daemon skips the network when `force` is false and a catalog index is already loaded.
 
 ### G-9 Profile rename
 
@@ -371,7 +371,7 @@ Gap for the Usage page sparkline and by-model table. `GET /usage` **`rows_trunca
 
 ### G-12 Model exposure flags
 
-`ModelEntry` (`crates/control-proto/src/models.rs`) carries only id, display name, context and max output; `model_entries` (`control.rs`) drops the image, video and decision flags, so the TUI cannot compute the default enabled set. Add, additively, either the per-model `draws` / `films` / `decides` flags on the model list or the `default_exposed` id list on the picks response. Until G-12 lands, the TUI shows the model list read-only when `picks` is empty and sends no Replace.
+`ModelEntry` (`crates/control-proto/src/models.rs`) carries only id, display name, context and max output; `model_entries` (`control.rs`) drops the image, video and decision flags, so the TUI cannot compute the default enabled set. R-14 adds `default_exposed` on `PicksResponse`: ids of listed models that are not image, video, or router models. An empty `default_exposed` means the server has no list yet. The TUI shows the model list read-only, and sends no Replace, only when both `picks` and `default_exposed` are empty.
 
 ## 4. Gateway handoff
 

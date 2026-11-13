@@ -22,6 +22,7 @@
 
 mod agent;
 mod body;
+mod cancellation;
 mod completion;
 mod config;
 mod duplex;
@@ -68,6 +69,7 @@ pub use balance::{
 };
 pub use billed::BilledUsage;
 pub use body::{Body, BodyStream};
+pub use cancellation::StoppedWaiting;
 pub use checkin::{CheckinAccountStatus, CheckinOutcome, CheckinRecord, CheckinResult};
 pub use completion::{Completion, CountOutcome, PROBE_CAP, ProbeReport};
 pub use config::{BuildError, ConfigError, RawTable, RawValue, Schema, ValidConfig};
@@ -76,14 +78,17 @@ pub use error::{PluginError, PluginErrorKind};
 pub use forward::{Forward, RawAnswer, RawBody};
 pub use hofund_ir::{
     BlockStart, ContentBlockStart, ContentBlockStop, ContentPart, Extensions, ImagePart,
-    ImageSource, Message, MessageDelta, MessageStart, MessageStop, Request, Response, Role, Stop,
-    StopReason, StreamEvent, TextDelta, TextPart, too_long, words_of,
+    ImageSource, Message, MessageDelta, MessageStart, MessageStop, Request, Response, Role,
+    StillWorking, Stop, StopReason, StreamEvent, TextDelta, TextPart, Tool, ToolArguments,
+    ToolChoiceMode, ToolResultPart, too_long, words_of,
 };
 pub use host::{
-    AccountLease, AccountsHandle, AuthResult, BindBlocked, ClockHandle, DirHandle, GatewayHandle,
-    HostContext, HttpHandle, Job, JobId, JobSpec, LOOPBACK_CANCEL_PATH, LoopbackBinding,
-    LoopbackHandle, LoopbackSpec, ObserveHandle, PipedChild, ProcessHandle, RedirectHost,
-    SchedulerHandle, SecretsHandle, SpawnRequest, Spawned, SurfaceHost,
+    AccountLease, AccountsHandle, AuthResult, BRIDGE_CALLBACK_PATH_PREFIX, BindBlocked,
+    BridgeCallbackGuard, BridgeCallbackHandle, BridgeCallbackHandler, BridgeCallbackReply,
+    ClockHandle, DirHandle, GatewayHandle, HostContext, HttpHandle, Job, JobId, JobSpec,
+    LOOPBACK_CANCEL_PATH, LongLivedChild, LoopbackBinding, LoopbackHandle, LoopbackSpec,
+    ObserveHandle, PipedChild, ProcessHandle, RedirectHost, SchedulerHandle, SecretsHandle,
+    SpawnRequest, Spawned, SurfaceHost,
 };
 pub use http_budget::{HostReadBudget, read_budget, set_read_budget};
 pub use id::{
@@ -132,9 +137,13 @@ mod tests {
         assert_impl_all!(crate::ClockHandle: Send, Sync);
         assert_impl_all!(crate::SchedulerHandle: Send, Sync);
         assert_impl_all!(crate::ProcessHandle: Send, Sync);
+        assert_impl_all!(crate::LongLivedChild: Send, Sync);
         assert_impl_all!(crate::DirHandle: Send, Sync);
         assert_impl_all!(crate::ObserveHandle: Send, Sync);
         assert_impl_all!(crate::LoopbackHandle: Send, Sync);
+        assert_impl_all!(crate::BridgeCallbackHandle: Send, Sync);
+        assert_impl_all!(crate::BridgeCallbackGuard: Send);
+        assert_impl_all!(crate::BridgeCallbackReply: Send, Sync);
         assert_impl_all!(crate::SurfaceHost: Send, Sync);
         assert_impl_all!(crate::PluginError: Send, Sync);
         assert_impl_all!(Arc<dyn crate::DynUpstreamFactory>: Send, Sync);

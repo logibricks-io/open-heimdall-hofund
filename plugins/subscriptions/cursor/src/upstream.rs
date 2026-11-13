@@ -594,8 +594,11 @@ mod tests {
         let _guard = crate::http2_memory::test_lock();
         crate::http2_memory::reset_for_tests();
         block_on(async {
-            let h1 =
-                Http1Server::start(vec![Http1Response::new(400).body(b"bad run".to_vec())]).await;
+            let h1 = Http1Server::start(vec![
+                Http1Response::new(400).body(b"bad run".to_vec()),
+                Http1Response::new(200),
+            ])
+            .await;
             let host = pooled_host();
             crate::http2_memory::remember(host.context());
             let account = store_account(&host).await;
@@ -607,7 +610,7 @@ mod tests {
                 .expect_err("synthetic end frame");
             assert_eq!(error.status(), Some(502));
             assert!(error.message().contains("bad run"));
-            assert_eq!(h1.requests().len(), 1);
+            assert_eq!(h1.requests().len(), 2);
         });
     }
 }

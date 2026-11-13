@@ -1,6 +1,6 @@
 [package]
 name = "hofund-plugin-subscription-zed"
-description = "Zed subscription: import credentials, mint model tokens, and serve OpenAI Responses upstream."
+description = "Zed subscription: native sign-in, credential import, model tokens, and upstream relay."
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
@@ -16,6 +16,7 @@ hofund-plugin-sdk = { workspace = true }
 
 [dev-dependencies]
 hofund-kit-subscription = { workspace = true }
+hofund-plugin-sdk = { workspace = true, features = ["rsa-test"] }
 tempfile = { workspace = true }
 
 [lints]

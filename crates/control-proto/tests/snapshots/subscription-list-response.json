@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "subscriptions": [
+    {
+      "id": "example",
+      "name": "Example Subscription",
+      "flow": "pkce",
+      "accounts": [
+        {
+          "id": "account-1",
+          "label": "work@example.test",
+          "ready": true,
+          "needs_sign_in": null
+        }
+      ]
+    }
+  ]
+}
