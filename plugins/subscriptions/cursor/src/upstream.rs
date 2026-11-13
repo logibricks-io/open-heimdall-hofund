@@ -7,8 +7,8 @@ use std::sync::{Arc, Mutex};
 use hofund_plugin_api::{
     AccountId, BlockStart, Completion, ContentBlockStart, ContentBlockStop, Extensions,
     HostContext, MessageDelta, MessageStart, MessageStop, PluginError, ProbeQuery, ProbeReport,
-    ProtocolId, Request, Stop, StopReason, StreamEvent, TextDelta, ToolArgumentsDelta,
-    UpstreamProvider,
+    ProtocolId, Request, Stop, StopReason, StreamEvent, TextDelta, ThinkingDelta,
+    ToolArgumentsDelta, UpstreamProvider,
 };
 use hofund_plugin_sdk::futures::{self, StreamExt};
 
@@ -107,6 +107,15 @@ impl UpstreamProvider for CursorUpstream {
                             FirstOutput::Text(text),
                         ));
                     }
+                    Ok(RunEvent::Server(ServerEvent::ThinkingDelta(text))) => {
+                        return Ok(completion_stream(
+                            run,
+                            response_id,
+                            model,
+                            tools,
+                            FirstOutput::Thinking(text),
+                        ));
+                    }
                     Ok(RunEvent::Server(ServerEvent::Exec(request)))
                         if is_caller_call(&tools, &request) =>
                     {
@@ -155,12 +164,14 @@ struct CursorStreamState {
     pending: VecDeque<StreamEvent>,
     next_index: u32,
     open_text: Option<u32>,
+    open_thinking: Option<u32>,
     emitted_calls: usize,
     finished: bool,
 }
 
 enum FirstOutput {
     Text(String),
+    Thinking(String),
     Tool(ExecRequest),
 }
 
@@ -190,11 +201,13 @@ fn completion_stream(
         pending,
         next_index: 0,
         open_text: None,
+        open_thinking: None,
         emitted_calls: 0,
         finished: false,
     };
     match first {
         FirstOutput::Text(text) => state.emit_text(text),
+        FirstOutput::Thinking(text) => state.emit_thinking(text),
         FirstOutput::Tool(request) => state.emit_tool(request),
     }
     Completion::Stream(Box::pin(futures::unfold(state, |mut state| async move {
@@ -211,6 +224,7 @@ fn completion_stream(
 
 impl CursorStreamState {
     fn emit_text(&mut self, text: String) {
+        self.close_thinking();
         let index = *self.open_text.get_or_insert_with(|| {
             let index = self.next_index;
             self.next_index += 1;
@@ -229,6 +243,30 @@ impl CursorStreamState {
         }));
     }
 
+    fn emit_thinking(&mut self, text: String) {
+        self.close_text();
+        let index = *self.open_thinking.get_or_insert_with(|| {
+            let index = self.next_index;
+            self.next_index += 1;
+            self.pending
+                .push_back(StreamEvent::ContentBlockStart(ContentBlockStart {
+                    index,
+                    block: BlockStart::Thinking {
+                        redacted: false,
+                        data: None,
+                    },
+                    extensions: Extensions::new(),
+                }));
+            index
+        });
+        self.pending
+            .push_back(StreamEvent::ThinkingDelta(ThinkingDelta {
+                index,
+                text,
+                extensions: Extensions::new(),
+            }));
+    }
+
     fn emit_tool(&mut self, request: ExecRequest) {
         let crate::proto::ExecKind::McpArguments {
             name,
@@ -239,6 +277,7 @@ impl CursorStreamState {
             return;
         };
         self.close_text();
+        self.close_thinking();
         let index = self.next_index;
         self.next_index += 1;
         self.emitted_calls += 1;
@@ -273,6 +312,16 @@ impl CursorStreamState {
         }
     }
 
+    fn close_thinking(&mut self) {
+        if let Some(index) = self.open_thinking.take() {
+            self.pending
+                .push_back(StreamEvent::ContentBlockStop(ContentBlockStop {
+                    index,
+                    extensions: Extensions::new(),
+                }));
+        }
+    }
+
     fn finish(&mut self, reason: StopReason) {
         self.pending
             .push_back(StreamEvent::MessageDelta(MessageDelta {
@@ -284,6 +333,7 @@ impl CursorStreamState {
                 extensions: Extensions::new(),
             }));
         self.close_text();
+        self.close_thinking();
         self.pending
             .push_back(StreamEvent::MessageStop(MessageStop {
                 extensions: Extensions::new(),
@@ -305,6 +355,12 @@ async fn next_completion_event(
         match state.run.next().await {
             Some(Ok(RunEvent::Server(ServerEvent::TextDelta(text)))) => {
                 state.emit_text(text);
+            }
+            Some(Ok(RunEvent::Server(ServerEvent::ThinkingDelta(text)))) => {
+                state.emit_thinking(text);
+            }
+            Some(Ok(RunEvent::Server(ServerEvent::ThinkingCompleted))) => {
+                state.close_thinking();
             }
             Some(Ok(RunEvent::Server(ServerEvent::Exec(request))))
                 if is_caller_call(&state.tools, &request) =>
@@ -358,8 +414,8 @@ mod tests {
     use hofund_plugin_api::{
         AccountId, BlockStart, Completion, ContentBlockStart, ContentBlockStop, Extensions,
         Message, MessageDelta, MessageStop, PluginError, PluginId, PluginKind, ProtocolId, Request,
-        Role, SecretString, Stop, StopReason, StreamEvent, TextDelta, ToolArgumentsDelta,
-        UpstreamProvider,
+        Role, SecretString, Stop, StopReason, StreamEvent, TextDelta, ThinkingDelta,
+        ToolArgumentsDelta, UpstreamProvider,
     };
     use hofund_plugin_sdk::futures::StreamExt;
     use hofund_plugin_sdk::json::{from_value, json};
@@ -400,6 +456,10 @@ mod tests {
 
     fn thinking_frame(text: &str) -> Vec<u8> {
         interaction(4, Pb::new().string(1, text))
+    }
+
+    fn thinking_completed_frame() -> Vec<u8> {
+        interaction(5, Pb::new())
     }
 
     fn turn_end_frame() -> Vec<u8> {
@@ -677,12 +737,13 @@ mod tests {
     }
 
     #[test]
-    fn execute_waits_for_text_then_streams_the_stop_trio_without_usage() {
+    fn execute_waits_for_thinking_then_streams_a_separate_text_block_without_usage() {
         let _guard = crate::http2_memory::test_lock();
         crate::http2_memory::reset_for_tests();
         block_on(async {
             let body = [
-                thinking_frame("not emitted"),
+                thinking_frame("plan"),
+                thinking_completed_frame(),
                 text_frame("hel"),
                 text_frame("lo"),
                 turn_end_frame(),
@@ -717,16 +778,33 @@ mod tests {
                 [
                     StreamEvent::ContentBlockStart(ContentBlockStart {
                         index: 0,
+                        block: BlockStart::Thinking {
+                            redacted: false,
+                            data: None,
+                        },
+                        extensions: Extensions::new(),
+                    }),
+                    StreamEvent::ThinkingDelta(ThinkingDelta {
+                        index: 0,
+                        text: "plan".to_owned(),
+                        extensions: Extensions::new(),
+                    }),
+                    StreamEvent::ContentBlockStop(ContentBlockStop {
+                        index: 0,
+                        extensions: Extensions::new(),
+                    }),
+                    StreamEvent::ContentBlockStart(ContentBlockStart {
+                        index: 1,
                         block: BlockStart::Text,
                         extensions: Extensions::new(),
                     }),
                     StreamEvent::TextDelta(TextDelta {
-                        index: 0,
+                        index: 1,
                         text: "hel".to_owned(),
                         extensions: Extensions::new(),
                     }),
                     StreamEvent::TextDelta(TextDelta {
-                        index: 0,
+                        index: 1,
                         text: "lo".to_owned(),
                         extensions: Extensions::new(),
                     }),
@@ -739,7 +817,7 @@ mod tests {
                         extensions: Extensions::new(),
                     }),
                     StreamEvent::ContentBlockStop(ContentBlockStop {
-                        index: 0,
+                        index: 1,
                         extensions: Extensions::new(),
                     }),
                     StreamEvent::MessageStop(MessageStop {
@@ -750,10 +828,67 @@ mod tests {
             assert!(
                 events
                     .iter()
-                    .all(|event| !matches!(event, StreamEvent::ThinkingDelta(_)))
+                    .all(|event| !matches!(event, StreamEvent::SignatureDelta(_))),
+                "no signature is invented: {events:?}"
+            );
+            let text_blocks: Vec<_> = events
+                .iter()
+                .filter_map(|event| match event {
+                    StreamEvent::TextDelta(delta) => Some(delta.text.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert!(
+                text_blocks.iter().all(|text| !text.contains("plan")),
+                "thinking bytes must be absent from the text block: {text_blocks:?}"
             );
             assert_eq!(h2.requests().len(), 1);
             assert_eq!(h2.requests()[0].path(), "/agent.v1.AgentService/Run");
+        });
+    }
+
+    #[test]
+    fn execute_returns_after_the_first_thinking_delta_without_waiting_for_eof() {
+        let _guard = crate::http2_memory::test_lock();
+        crate::http2_memory::reset_for_tests();
+        block_on(async {
+            let h2 = Http2Server::start(vec![
+                Http2Response::new(200)
+                    .data(thinking_frame("plan"))
+                    .hold_open(),
+            ])
+            .await;
+            let h1 = Http1Server::start(vec![config_reply(h2.base_url())]).await;
+            let host = pooled_host();
+            let account = store_account(&host).await;
+            let upstream = upstream(&host, &h1, h2.base_url(), account);
+            let Completion::Stream(mut stream) = upstream
+                .execute(text_request(), ProtocolId::OPENAI_CHAT)
+                .await
+                .expect("first thinking event is enough")
+            else {
+                panic!("stream");
+            };
+            let start = stream.next().await.expect("start").expect("start event");
+            assert!(matches!(start, StreamEvent::MessageStart(_)));
+            let block = stream.next().await.expect("block").expect("block event");
+            assert!(matches!(
+                block,
+                StreamEvent::ContentBlockStart(ContentBlockStart {
+                    block: BlockStart::Thinking {
+                        redacted: false,
+                        data: None,
+                    },
+                    ..
+                })
+            ));
+            let delta = stream.next().await.expect("delta").expect("delta event");
+            assert!(matches!(
+                delta,
+                StreamEvent::ThinkingDelta(ThinkingDelta { ref text, index: 0, .. })
+                    if text == "plan"
+            ));
+            drop(stream);
         });
     }
 

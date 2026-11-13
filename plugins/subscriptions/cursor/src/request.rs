@@ -270,6 +270,21 @@ fn join_split_calls(messages: Vec<&Message>) -> Vec<Vec<&Message>> {
 
 fn assistant_blob(messages: &[&Message], pending: &mut Vec<String>) -> Vec<u8> {
     let mut content = Vec::new();
+    for part in messages
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter_map(|part| match part {
+            ContentPart::Thinking(part) if !part.text.is_empty() => Some(part),
+            _ => None,
+        })
+    {
+        // Replay thinking as its own AI SDK reasoning part. Do not copy the
+        // bytes into the text part, and do not invent a signature.
+        content.push(object([
+            ("text", Value::String(part.text.clone())),
+            ("type", Value::String("reasoning".to_owned())),
+        ]));
+    }
     let text = messages
         .iter()
         .map(|message| text_of(message))
@@ -589,9 +604,17 @@ mod tests {
             .expect("assistant blob");
         assert_eq!(
             assistant["content"],
-            json!([{"text": "answer", "type": "text"}])
+            json!([
+                {"text": "hidden", "type": "reasoning"},
+                {"text": "answer", "type": "text"}
+            ])
         );
-        assert!(!assistant.to_string().contains("hidden"));
+        let text_part = &assistant["content"][1];
+        assert_eq!(text_part["type"], "text");
+        assert!(
+            !text_part.to_string().contains("hidden"),
+            "thinking bytes must be absent from the text block: {text_part}"
+        );
 
         let user_turn = proto::fields(&mapped.blobs[&user_turn_id(&mapped)]);
         assert_eq!(
@@ -783,18 +806,26 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(assistants.len(), 1, "split calls join into one assistant");
         let content = assistants[0]["content"].as_array().expect("parts");
-        assert_eq!(content.len(), 3, "text and two calls");
-        assert_eq!(content[0], json!({"text": "reading", "type": "text"}));
-        assert!(!assistants[0].to_string().contains("hidden reasoning"));
-        assert_eq!(content[1]["type"], "tool-call");
-        assert_eq!(content[1]["toolCallId"], "call_alpha\nfc_1");
-        assert_eq!(content[1]["toolName"], "CallDynamicTool");
+        assert_eq!(content.len(), 4, "reasoning, text and two calls");
         assert_eq!(
-            content[1]["args"],
+            content[0],
+            json!({"text": "hidden reasoning", "type": "reasoning"})
+        );
+        assert_eq!(content[1], json!({"text": "reading", "type": "text"}));
+        assert!(
+            !content[1].to_string().contains("hidden reasoning"),
+            "thinking bytes must be absent from the text block: {}",
+            content[1]
+        );
+        assert_eq!(content[2]["type"], "tool-call");
+        assert_eq!(content[2]["toolCallId"], "call_alpha\nfc_1");
+        assert_eq!(content[2]["toolName"], "CallDynamicTool");
+        assert_eq!(
+            content[2]["args"],
             json!({"namespace": "tools", "toolName": "lookup", "arguments": {"key": "a"}})
         );
-        assert_eq!(content[2]["toolCallId"], "toolu_b__fc_2");
-        assert_eq!(content[2]["args"]["arguments"], json!({}));
+        assert_eq!(content[3]["toolCallId"], "toolu_b__fc_2");
+        assert_eq!(content[3]["args"]["arguments"], json!({}));
 
         let tool = blobs
             .iter()
