@@ -1185,7 +1185,7 @@ fn r55c_image_generation_and_edit_are_plain_json_for_both_sites() {
             "/images/edits",
             RawBody::new(
                 "application/json",
-                br#"{"model":"hunyuan-image-alpha","prompt":"make it red","n":1,"size":"auto","response_format":"b64_json","image":["data:image/png;base64,aGk="]}"#.to_vec(),
+                br#"{"model":"hunyuan-image-alpha","prompt":"make it red","n":1,"size":"auto","response_format":"b64_json","image":"data:image/png;base64,aGk="}"#.to_vec(),
             ),
         ))
         .expect("edit");
@@ -1196,7 +1196,7 @@ fn r55c_image_generation_and_edit_are_plain_json_for_both_sites() {
         assert_eq!(calls[2].header("content-encoding"), None);
         let sent: json::Value = json::from_slice(calls[2].body()).expect("request");
         assert_eq!(sent["model"], "hunyuan-image-alpha-edit");
-        assert_eq!(sent["image"][0], "data:image/png;base64,aGk=");
+        assert_eq!(sent["image"], json::json!(["data:image/png;base64,aGk="]));
         assert!(sent.get("size").is_none());
         assert!(sent.get("response_format").is_none());
     }

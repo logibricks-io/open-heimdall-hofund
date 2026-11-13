@@ -332,7 +332,13 @@ fn shape_image(object: &mut Map<String, Value>, edit: bool) {
     }
     if edit {
         if let Some(images) = object.get("image") {
-            shaped.insert("image".to_owned(), images.clone());
+            let images = match images {
+                Value::String(image) if image.starts_with("data:") => {
+                    Value::Array(vec![Value::String(image.clone())])
+                }
+                images => images.clone(),
+            };
+            shaped.insert("image".to_owned(), images);
         }
         if gpt && let Some(mask) = object.get("mask") {
             shaped.insert("mask".to_owned(), mask.clone());
