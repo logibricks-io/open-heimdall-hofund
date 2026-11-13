@@ -395,6 +395,7 @@ pub(crate) fn apply_windows(
     for window in windows {
         if !window.blocking()
             || window.scope_model().is_some()
+            || !window.models().is_empty()
             || !window.excluded_models().is_empty()
         {
             continue;

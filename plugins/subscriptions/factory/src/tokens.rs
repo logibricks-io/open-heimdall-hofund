@@ -15,11 +15,8 @@ use crate::Endpoints;
 use crate::WORKOS_CLIENT_ID;
 use crate::api;
 
-/// How long before expiry an OAuth access token is refreshed.
-pub(crate) const REFRESH_MARGIN: Duration = Duration::from_secs(5 * 60);
-
-/// After a transient refresh failure, an unexpired token may still be used.
-pub(crate) const RETRYABLE_GRACE: Duration = Duration::from_secs(30);
+/// How long before expiry a request refreshes an OAuth access token.
+pub(crate) const REFRESH_MARGIN: Duration = Duration::from_secs(2 * 60);
 
 /// Secret flag when refresh is permanently refused.
 pub(crate) const LAPSED: &str = "lapsed";
@@ -59,6 +56,8 @@ pub(crate) struct Bearer {
     pub(crate) token: SecretString,
     pub(crate) region: Option<String>,
     pub(crate) active_org: Option<String>,
+    pub(crate) prem_base_host: Option<String>,
+    pub(crate) oauth: bool,
 }
 
 fn bearer_from_blob(blob: &SecretObject) -> Result<Bearer, PluginError> {
@@ -66,6 +65,8 @@ fn bearer_from_blob(blob: &SecretObject) -> Result<Bearer, PluginError> {
         token: bearer_of(blob)?,
         region: blob.text("region").map(str::to_owned),
         active_org: blob.text("active_organization_id").map(str::to_owned),
+        prem_base_host: blob.text("prem_base_host").map(str::to_owned),
+        oauth: kind(blob) == AuthKind::Oauth,
     })
 }
 
@@ -219,15 +220,12 @@ async fn refresh_oauth(
         .await
     {
         Ok(reply) => reply,
-        Err(_error)
-            if !expired(&blob, host.clock().now())
-                && ms_remaining(&blob, host.clock().now()) > RETRYABLE_GRACE =>
-        {
+        Err(_error) if !expired(&blob, host.clock().now()) => {
             return bearer_from_blob(&blob);
         }
         Err(error) => return Err(error),
     };
-    if api::sign_in_lapsed(reply.status()) {
+    if (400..500).contains(&reply.status()) && reply.status() != 429 {
         let error = token_error(reply.status(), reply.body());
         lease
             .commit(None, blob.with_flag(LAPSED, true).to_secret())
@@ -235,9 +233,7 @@ async fn refresh_oauth(
         return Err(error);
     }
     if !(200..300).contains(&reply.status()) {
-        if !expired(&blob, host.clock().now())
-            && ms_remaining(&blob, host.clock().now()) > RETRYABLE_GRACE
-        {
+        if !expired(&blob, host.clock().now()) {
             return bearer_from_blob(&blob);
         }
         return Err(PluginError::status_error(
@@ -258,29 +254,40 @@ async fn refresh_oauth(
         .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
         .map(|duration| duration.as_millis() as u64)
         .unwrap_or_else(|| expires_ms_from_access(&access, host.clock().now()));
-    let region = blob.text("region").map(str::to_owned);
-    let active_org = blob.text("active_organization_id").map(str::to_owned);
-    let next = blob
+    let mut next = blob
         .with_secret("access_token", &access)
         .with_secret("refresh_token", &refresh)
         .with_number("expires_ms", expires_ms);
+    let who_base = endpoints.api_base_for_region(next.text("region"));
+    if let Ok(who) = api::whoami(
+        &host,
+        who_base,
+        &access,
+        next.text("active_organization_id"),
+    )
+    .await
+        && let Some(org) = who
+            .get("orgId")
+            .and_then(Value::as_str)
+            .filter(|org| !org.is_empty())
+    {
+        next = next.with_text("active_organization_id", org);
+        next = optional_text(next, "region", who.get("region").and_then(Value::as_str));
+        next = optional_text(
+            next,
+            "prem_base_host",
+            who.get("premBaseHostV2").and_then(Value::as_str),
+        );
+    }
     lease.commit(None, next.to_secret()).await?;
-    Ok(Bearer {
-        token: access,
-        region,
-        active_org,
-    })
+    bearer_from_blob(&next)
 }
 
-fn ms_remaining(blob: &SecretObject, now: SystemTime) -> Duration {
-    let ms = expires_ms(blob);
-    if ms == 0 {
-        return Duration::from_secs(3600);
+fn optional_text(blob: SecretObject, key: &str, value: Option<&str>) -> SecretObject {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) => blob.with_text(key, value),
+        None => blob.without(key),
     }
-    let Ok(at) = ms_to_system(ms) else {
-        return Duration::ZERO;
-    };
-    at.duration_since(now).unwrap_or(Duration::ZERO)
 }
 
 fn default_expiry_ms(now: SystemTime) -> u64 {

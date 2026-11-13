@@ -99,6 +99,7 @@ async fn store_workos_pair(
     let uid = first_string(&who, &["userId"]);
     let region = first_string(&who, &["region"]);
     let active_org = first_string(&who, &["orgId"]);
+    let prem_base_host = first_string(&who, &["premBaseHostV2"]);
     let label = email
         .clone()
         .or(uid.clone())
@@ -124,6 +125,9 @@ async fn store_workos_pair(
     }
     if let Some(ref reg) = region {
         blob = blob.with_text("region", reg);
+    }
+    if let Some(ref host) = prem_base_host {
+        blob = blob.with_text("prem_base_host", host);
     }
     if let Some(ref org) = active_org {
         blob = blob.with_text("active_organization_id", org);
@@ -153,7 +157,7 @@ pub(crate) async fn import_api_key(
     let email = first_string(&who, &["email"]);
     let uid = first_string(&who, &["userId"]);
     let region = first_string(&who, &["region"]);
-    let active_org = first_string(&who, &["orgId"]);
+    let prem_base_host = first_string(&who, &["premBaseHostV2"]);
     let label = email
         .clone()
         .or(uid.clone())
@@ -177,8 +181,8 @@ pub(crate) async fn import_api_key(
     if let Some(ref reg) = region {
         blob = blob.with_text("region", reg);
     }
-    if let Some(ref org) = active_org {
-        blob = blob.with_text("active_organization_id", org);
+    if let Some(ref host) = prem_base_host {
+        blob = blob.with_text("prem_base_host", host);
     }
     Ok(SignedIn {
         id,

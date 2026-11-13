@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::{API_VERSION, ControlError, ControlErrorKind, FieldIssue, MAX_ID_BYTES, MAX_IDS};
 
 /// Minimal secret-free model entry.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct ModelEntry {
     /// Model id.
@@ -14,10 +14,16 @@ pub struct ModelEntry {
     pub context: Option<u64>,
     /// Optional output-token limit.
     pub max_output: Option<u64>,
+    /// Current token multiplier, when the subscription reports one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate: Option<f64>,
+    /// Pre-promotion token multiplier, or zero when no promotion is active.
+    #[serde(rename = "rateWas", default)]
+    pub rate_was: f64,
 }
 
 /// Cached or refreshed provider model list.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct ModelListResponse {
     /// Body wire version.

@@ -248,7 +248,10 @@ async fn quota_peeks(entry: &Opened, known: &[(AccountId, String)]) -> Vec<(Stri
             Ok(windows) => {
                 let mut used = 0.0_f64;
                 for window in &windows {
-                    if window.scope_model().is_some() || !window.excluded_models().is_empty() {
+                    if window.scope_model().is_some()
+                        || !window.models().is_empty()
+                        || !window.excluded_models().is_empty()
+                    {
                         continue;
                     }
                     if window.blocking() {
@@ -376,6 +379,7 @@ async fn quota_peeks_instance(
                 let mut used = 0.0_f64;
                 for window in &windows {
                     if window.scope_model().is_some()
+                        || !window.models().is_empty()
                         || !window.excluded_models().is_empty()
                         || !window.blocking()
                     {

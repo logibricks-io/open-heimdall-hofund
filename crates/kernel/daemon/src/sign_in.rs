@@ -154,6 +154,10 @@ pub struct QuotaLine {
     pub blocking: bool,
     /// The one model the window applies to, when scoped.
     pub scope_model: Option<String>,
+    /// Models the window applies to, or all models when empty.
+    pub models: Vec<String>,
+    /// Provider display text that is not a percentage or amount.
+    pub display: String,
 }
 
 /// One built subscription with the host its commands use.
@@ -466,6 +470,8 @@ async fn quota_in(opened: &[Opened], id: Option<&str>) -> Result<Vec<QuotaListin
                                 .map(|at| at.duration_since(now).map_or(0, |left| left.as_secs())),
                             blocking: window.blocking(),
                             scope_model: window.scope_model().map(str::to_owned),
+                            models: window.models().to_vec(),
+                            display: window.display().to_owned(),
                         })
                         .collect()
                 })
@@ -502,6 +508,8 @@ pub fn quota_json(listings: &[QuotaListing]) -> String {
                                 "resets_in_secs": window.resets_in_secs,
                                 "blocking": window.blocking,
                                 "scope_model": window.scope_model,
+                                "models": window.models,
+                                "display": window.display,
                             })
                         })
                         .collect();
