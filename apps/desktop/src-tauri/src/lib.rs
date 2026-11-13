@@ -64,6 +64,20 @@ pub fn run() -> Result<(), String> {
                     dispatch(&handle, &id).await;
                 });
             });
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+                loop {
+                    interval.tick().await;
+                    let snapshot = {
+                        let state = handle.state::<AppState>();
+                        let mut control = state.control.lock().await;
+                        control.refresh_tray().await;
+                        control.snapshot(&hofund_daemon::agent_session())
+                    };
+                    let _ = publish(&handle, &snapshot);
+                }
+            });
             Ok(())
         })
         .run(tauri::generate_context!())
@@ -189,6 +203,7 @@ async fn snapshot(
     state: tauri::State<'_, AppState>,
 ) -> Result<Snapshot, String> {
     let mut control = state.control.lock().await;
+    control.refresh_tray().await;
     let snapshot = control.snapshot(&hofund_daemon::agent_session());
     drop(control);
     publish(&app, &snapshot)?;

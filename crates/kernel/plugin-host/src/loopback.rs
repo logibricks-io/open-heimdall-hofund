@@ -73,10 +73,16 @@ impl Shared {
     }
 }
 
+#[derive(Clone)]
+enum Mode {
+    OAuth { state: String },
+    QueryToken { success_url: &'static str },
+}
+
 struct Session {
     plugin: PluginKey,
     redirect_uri: String,
-    state: String,
+    mode: Mode,
     shared: Arc<Shared>,
     receiver: Mutex<Option<oneshot::Receiver<Outcome>>>,
     shutdown: Mutex<Option<oneshot::Sender<()>>>,
@@ -169,7 +175,15 @@ impl LoopbackRegistry {
                     if let Some(line) = line
                         && !line.trim().is_empty()
                     {
-                        match parse_pasted_callback(&line, &entry.redirect_uri, &entry.state) {
+                        let parsed = match &entry.mode {
+                            Mode::OAuth { state } => {
+                                parse_pasted_callback(&line, &entry.redirect_uri, state)
+                            }
+                            Mode::QueryToken { .. } => {
+                                parse_pasted_query_token(&line, &entry.redirect_uri)
+                            }
+                        };
+                        match parsed {
                             Ok(proof) => {
                                 entry.shared.finish(Ok(proof));
                             }
@@ -217,11 +231,22 @@ impl LoopbackBackend for LoopbackRegistry {
         session: &str,
         spec: &LoopbackSpec,
     ) -> Result<LoopbackBinding, PluginError> {
-        let state = spec
-            .state()
-            .filter(|state| !state.is_empty())
-            .ok_or_else(|| PluginError::config("loopback sign-in needs an expected state"))?
-            .to_owned();
+        let mode = match (spec.state(), spec.query_token_success_url()) {
+            (Some(state), None) if !state.is_empty() => Mode::OAuth {
+                state: state.to_owned(),
+            },
+            (None, Some(success_url)) => Mode::QueryToken { success_url },
+            (None, None) => {
+                return Err(PluginError::config(
+                    "loopback sign-in needs an expected state",
+                ));
+            }
+            _ => {
+                return Err(PluginError::config(
+                    "query-token sign-in cannot use an expected state",
+                ));
+            }
+        };
         let runtime = tokio::runtime::Handle::try_current()
             .map_err(|_| PluginError::internal("loopback listener needs a tokio runtime"))?;
         let mut sessions = self
@@ -274,7 +299,7 @@ impl LoopbackBackend for LoopbackRegistry {
             runtime.spawn(serve(
                 listener,
                 spec.callback_path(),
-                state.clone(),
+                mode.clone(),
                 Arc::clone(&shared),
                 shutdown_rx,
             ));
@@ -284,7 +309,7 @@ impl LoopbackBackend for LoopbackRegistry {
             Arc::new(Session {
                 plugin: plugin.clone(),
                 redirect_uri: redirect_uri.clone(),
-                state,
+                mode,
                 shared,
                 receiver: Mutex::new(Some(receiver)),
                 shutdown: Mutex::new(Some(shutdown_tx)),
@@ -317,7 +342,7 @@ fn listen(port: u16) -> std::io::Result<TcpListener> {
 async fn serve(
     listener: TcpListener,
     path: &'static str,
-    state: String,
+    mode: Mode,
     shared: Arc<Shared>,
     mut shutdown: oneshot::Receiver<()>,
 ) {
@@ -338,14 +363,14 @@ async fn serve(
             }
             accepted = listener.accept() => {
                 if let Ok((stream, _)) = accepted {
-                    tokio::spawn(answer(stream, path, state.clone(), Arc::clone(&shared)));
+                    tokio::spawn(answer(stream, path, mode.clone(), Arc::clone(&shared)));
                 }
             }
         }
     }
 }
 
-async fn answer(mut stream: TcpStream, path: &'static str, state: String, shared: Arc<Shared>) {
+async fn answer(mut stream: TcpStream, path: &'static str, mode: Mode, shared: Arc<Shared>) {
     let Ok(Some(target)) = tokio::time::timeout(HEADER_TIMEOUT, read_target(&mut stream)).await
     else {
         let _ = respond(
@@ -357,18 +382,72 @@ async fn answer(mut stream: TcpStream, path: &'static str, state: String, shared
         .await;
         return;
     };
-    let (status, title, text) = route(&target, path, &state, &shared);
-    let _ = respond(&mut stream, status, title, text).await;
+    match route(&target, path, &mode, &shared) {
+        Route::Page(status, title, text) => {
+            let _ = respond(&mut stream, status, title, text).await;
+        }
+        Route::Redirect(location) => {
+            let _ = redirect(&mut stream, location).await;
+        }
+    }
+}
+
+enum Route {
+    Page(u16, &'static str, &'static str),
+    Redirect(&'static str),
 }
 
 /// Decides the reply for one request target and delivers any outcome.
-fn route(
-    target: &str,
+fn route(target: &str, path: &str, mode: &Mode, shared: &Shared) -> Route {
+    let (request_path, query) = target.split_once('?').unwrap_or((target, ""));
+    if let Mode::QueryToken { success_url } = mode {
+        return route_query_token(query, success_url, shared);
+    }
+    let (status, title, text) = route_oauth(
+        request_path,
+        query,
+        path,
+        match mode {
+            Mode::OAuth { state } => state,
+            Mode::QueryToken { .. } => unreachable!(),
+        },
+        shared,
+    );
+    Route::Page(status, title, text)
+}
+
+fn route_query_token(query: &str, success_url: &'static str, shared: &Shared) -> Route {
+    if !shared.is_open() {
+        return Route::Page(
+            409,
+            "Sign-in finished",
+            "This sign-in has already finished.",
+        );
+    }
+    let params = CallbackParams::parse(query);
+    match (params.user_id, params.access_token) {
+        (Some(user_id), Some(access_token)) if !user_id.is_empty() && !access_token.is_empty() => {
+            if shared.finish(Ok(SignInProof::query_token(user_id, access_token))) {
+                Route::Redirect(success_url)
+            } else {
+                Route::Page(
+                    409,
+                    "Sign-in finished",
+                    "This sign-in has already finished.",
+                )
+            }
+        }
+        _ => Route::Page(404, "Not found", "There is nothing here."),
+    }
+}
+
+fn route_oauth(
+    request_path: &str,
+    query: &str,
     path: &str,
     state: &str,
     shared: &Shared,
 ) -> (u16, &'static str, &'static str) {
-    let (request_path, query) = target.split_once('?').unwrap_or((target, ""));
     if request_path == LOOPBACK_CANCEL_PATH {
         if shared.finish(Err(PluginError::cancelled("the sign-in was cancelled"))) {
             return (
@@ -449,6 +528,8 @@ struct CallbackParams {
     state: Option<String>,
     code: Option<String>,
     error: Option<String>,
+    user_id: Option<String>,
+    access_token: Option<String>,
 }
 
 impl CallbackParams {
@@ -459,6 +540,8 @@ impl CallbackParams {
                 "state" => &mut params.state,
                 "code" => &mut params.code,
                 "error" => &mut params.error,
+                "user_id" => &mut params.user_id,
+                "access_token" => &mut params.access_token,
                 _ => continue,
             };
             if slot.is_none() {
@@ -519,6 +602,16 @@ async fn respond(
     stream.shutdown().await
 }
 
+async fn redirect(stream: &mut TcpStream, location: &str) -> std::io::Result<()> {
+    let reply = format!(
+        "HTTP/1.1 302 Found\r\nLocation: {location}\r\n\
+         Cache-Control: no-store\r\nReferrer-Policy: no-referrer\r\n\
+         X-Content-Type-Options: nosniff\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
+    );
+    stream.write_all(reply.as_bytes()).await?;
+    stream.shutdown().await
+}
+
 /// Checks an address the user pasted from the browser.
 ///
 /// The host must be `localhost`, `127.0.0.1`, or `::1`, and the port, path,
@@ -561,6 +654,34 @@ pub fn parse_pasted_callback(
         Some(code) if !code.is_empty() => Ok(SignInProof::callback(code, state.to_owned())),
         _ => Err(PluginError::config(
             "the pasted address has no authorization code",
+        )),
+    }
+}
+
+fn parse_pasted_query_token(raw: &str, redirect_uri: &str) -> Result<SignInProof, PluginError> {
+    let mismatch = || PluginError::config("the pasted address is not for this sign-in");
+    let expected = url::Url::parse(redirect_uri)
+        .map_err(|_| PluginError::internal("the loopback redirect URI does not parse"))?;
+    let pasted = url::Url::parse(raw.trim()).map_err(|_| mismatch())?;
+    let host_ok = matches!(
+        pasted.host(),
+        Some(url::Host::Domain("localhost"))
+            | Some(url::Host::Ipv4(Ipv4Addr::LOCALHOST))
+            | Some(url::Host::Ipv6(std::net::Ipv6Addr::LOCALHOST))
+    );
+    if pasted.scheme() != "http"
+        || !host_ok
+        || pasted.port_or_known_default() != expected.port_or_known_default()
+    {
+        return Err(mismatch());
+    }
+    let params = CallbackParams::parse(pasted.query().unwrap_or(""));
+    match (params.user_id, params.access_token) {
+        (Some(user_id), Some(access_token)) if !user_id.is_empty() && !access_token.is_empty() => {
+            Ok(SignInProof::query_token(user_id, access_token))
+        }
+        _ => Err(PluginError::config(
+            "the pasted address has no user id and access token",
         )),
     }
 }
@@ -775,6 +896,107 @@ mod tests {
             .await
             .expect("claimed");
         assert_eq!(code(&proof), "first-code");
+    }
+
+    #[tokio::test]
+    async fn query_token_accepts_any_path_and_redirects_once() {
+        const SUCCESS: &str = "https://zed.test/native_app_signin_succeeded";
+        let registry = LoopbackRegistry::new();
+        let session = session();
+        let binding = registry
+            .bind(
+                &key(),
+                &session,
+                &LoopbackSpec::ephemeral()
+                    .path("/")
+                    .redirect_host(RedirectHost::Ipv4)
+                    .query_token(SUCCESS),
+            )
+            .expect("bind");
+        assert!(binding.redirect_uri().starts_with("http://127.0.0.1:"));
+        let _idle = TcpStream::connect(("127.0.0.1", binding.port()))
+            .await
+            .expect("idle");
+        for target in [
+            "/missing-token?user_id=user-1",
+            "/empty-token?user_id=user-1&access_token=",
+            "/missing-user?access_token=encrypted-secret",
+            "/empty-user?user_id=&access_token=encrypted-secret",
+        ] {
+            let (status, _) = get(binding.port(), target).await;
+            assert_eq!(status, 404, "{target}");
+        }
+        let (status, reply) = tokio::time::timeout(
+            Duration::from_secs(3),
+            get(
+                binding.port(),
+                "/any/path?user_id=user-1&access_token=encrypted-secret",
+            ),
+        )
+        .await
+        .expect("answered while another connection idles");
+        assert_eq!(status, 302);
+        assert!(
+            reply
+                .to_ascii_lowercase()
+                .contains(&format!("location: {}", SUCCESS.to_ascii_lowercase())),
+            "{reply}"
+        );
+        assert!(!reply.contains("encrypted-secret"));
+        let (status, _) = get(
+            binding.port(),
+            "/second?user_id=user-2&access_token=other-secret",
+        )
+        .await;
+        assert_eq!(status, 409);
+        let proof = registry
+            .await_callback(&session, no_paste(), WAIT)
+            .await
+            .expect("claimed");
+        let SignInProof::QueryToken {
+            user_id,
+            access_token,
+        } = proof
+        else {
+            panic!("not a query-token proof");
+        };
+        assert_eq!(user_id, "user-1");
+        assert_eq!(access_token.expose_secret(), "encrypted-secret");
+    }
+
+    #[tokio::test]
+    async fn query_token_can_complete_from_a_pasted_address_on_any_path() {
+        let registry = LoopbackRegistry::new();
+        let session = session();
+        let binding = registry
+            .bind(
+                &key(),
+                &session,
+                &LoopbackSpec::ephemeral().query_token("https://zed.test/succeeded"),
+            )
+            .expect("bind");
+        let port = binding.port();
+        let paste = stream::iter(vec![
+            format!("https://127.0.0.1:{port}/x?user_id=user&access_token=token"),
+            format!("http://evil.test:{port}/x?user_id=user&access_token=token"),
+            format!(
+                "http://127.0.0.1:{}/x?user_id=user&access_token=token",
+                port ^ 1
+            ),
+            format!("http://127.0.0.1:{port}/x?user_id=&access_token=token"),
+            format!("http://127.0.0.1:{port}/x?user_id=user&access_token="),
+            format!(
+                "http://127.0.0.1:{port}/elsewhere?user_id=user-pasted&access_token=token-pasted"
+            ),
+        ]);
+        let proof = registry
+            .await_callback(&session, Box::pin(paste), WAIT)
+            .await
+            .expect("pasted");
+        assert!(matches!(
+            proof,
+            SignInProof::QueryToken { user_id, .. } if user_id == "user-pasted"
+        ));
     }
 
     #[tokio::test]

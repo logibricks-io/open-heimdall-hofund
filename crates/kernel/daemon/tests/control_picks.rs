@@ -608,3 +608,32 @@ async fn provider_test_selection_error_sends_no_request() {
     support::shutdown(running).await;
     server.verify().await;
 }
+
+#[tokio::test]
+async fn picks_default_exposed_skips_image_video_and_router_models() {
+    let server = MockServer::start().await;
+    let dir = Scratch::new("exposed");
+    seed(
+        &dir.0,
+        "chat",
+        &json!({
+            "version": 1,
+            "id": "chat",
+            "fetched_at": 1234,
+            "list": [
+                {"id": "chat-a"},
+                {"id": "picture", "draws": true},
+                {"id": "clip", "films": true},
+                {"id": "router", "decides": true}
+            ],
+            "picks": [],
+            "delisted": []
+        }),
+    );
+    let running = start(&dir.0, &config(&server.uri(), "")).await;
+    let control = Control::new(&dir.0, &running);
+    let picks = control.picks().await;
+    assert!(picks.picks.is_empty());
+    assert_eq!(picks.default_exposed, ["chat-a"]);
+    support::shutdown(running).await;
+}

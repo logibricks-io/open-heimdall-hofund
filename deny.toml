@@ -43,7 +43,7 @@ multiple-versions = "deny"
 wildcards = "deny"
 workspace-default-features = "allow"
 external-default-features = "allow"
-# The HTTP stack does not agree on these crates. Skipping the older copy keeps
+# Some dependency generations cannot be unified. Skipping the named copy keeps
 # the ban in force for every other duplicate.
 skip = [
     { crate = "base64@0.21.7", reason = "tauri-utils depends on swift-rs, which depends on base64 0.21, while hyper-util depends on 0.23" },
@@ -76,6 +76,12 @@ skip = [
     { crate = "linux-raw-sys@0.4.15", reason = "rustix 0.38 depends on linux-raw-sys 0.4 while rustix 1.x uses linux-raw-sys 0.12" },
     { crate = "windows-sys@0.52.0", reason = "ring 0.17 depends on windows-sys 0.52 while tokio depends on 0.61" },
     { crate = "winnow@0.5.40", reason = "gtk3-macros depends on toml_edit 0.19 and winnow 0.5 while the workspace toml uses winnow 1" },
+    { crate = "block-buffer@0.10.4", reason = "rsa 0.10 uses digest 0.11 and block-buffer 0.12 while the existing digest 0.10 stack uses block-buffer 0.10" },
+    { crate = "cpufeatures@0.2.17", reason = "rsa 0.10 uses crypto-bigint 0.7 and cpufeatures 0.3 while the existing encryption stack uses cpufeatures 0.2" },
+    { crate = "crypto-common@0.1.7", reason = "rsa 0.10 uses crypto-common 0.2 while the existing encryption stack uses crypto-common 0.1" },
+    { crate = "digest@0.10.7", reason = "rsa 0.10 uses digest 0.11 while existing hashes and encryption use digest 0.10" },
+    { crate = "hmac@0.12.1", reason = "dbus-secret-service 4 and secret-service 4 pin hkdf 0.12 (hmac 0.12) while rsa 0.10, used by hofund-plugin-sdk for Zed sign-in, requires hmac 0.13" },
+    { crate = "sha2@0.10.9", reason = "rsa 0.10 uses sha2 0.11 while existing workspace hashes use sha2 0.10" },
 ]
 
 [sources]

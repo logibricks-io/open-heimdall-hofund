@@ -946,7 +946,9 @@ impl StreamEncoder for ConverseEncoder {
                 }
                 return Ok(Vec::new());
             }
-            StreamEvent::MessageStop(_) | StreamEvent::Ping(_) => return Ok(Vec::new()),
+            StreamEvent::MessageStop(_) | StreamEvent::Ping(_) | StreamEvent::StillWorking(_) => {
+                return Ok(Vec::new());
+            }
             StreamEvent::Unknown(unknown) => {
                 return Err(unsupported(format!(
                     "Converse cannot send stream event `{}`",

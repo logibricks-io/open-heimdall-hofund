@@ -1945,6 +1945,8 @@ struct StreamEncoder {
     next_output: u32,
     completed: bool,
     tools: ToolMap,
+    /// A `response.created` has already gone on the wire.
+    start_written: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -1965,16 +1967,21 @@ impl StreamEncoder {
     fn push(&mut self, event: &StreamEvent) -> Result<(), CodecError> {
         match event {
             StreamEvent::MessageStart(start) => {
-                self.id.clone_from(&start.id);
-                self.model.clone_from(&start.model);
                 Usage::merge_patch(&mut self.usage, start.usage.as_ref());
-                self.write(
-                    "response.created",
-                    serde_json::json!({
-                        "type": "response.created",
-                        "response": self.skeleton("in_progress"),
-                    }),
-                );
+                if self.start_written {
+                    // usage already merged; keep the placeholder id/model on the wire
+                } else {
+                    self.id.clone_from(&start.id);
+                    self.model.clone_from(&start.model);
+                    self.start_written = true;
+                    self.write(
+                        "response.created",
+                        serde_json::json!({
+                            "type": "response.created",
+                            "response": self.skeleton("in_progress"),
+                        }),
+                    );
+                }
             }
             StreamEvent::ContentBlockStart(start) => self.open_block(start)?,
             StreamEvent::TextDelta(delta) => {
@@ -2083,6 +2090,15 @@ impl StreamEncoder {
                 let mut payload = Object::new();
                 ping.extensions.merge_into(&mut payload);
                 self.write("ping", Value::Object(payload));
+            }
+            StreamEvent::StillWorking(_) => {
+                self.write(
+                    "response.in_progress",
+                    serde_json::json!({
+                        "type": "response.in_progress",
+                        "response": self.skeleton("in_progress"),
+                    }),
+                );
             }
             StreamEvent::Unknown(unknown) => {
                 self.write(&unknown.name, unknown.payload.clone());
