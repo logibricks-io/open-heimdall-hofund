@@ -6,7 +6,7 @@ The UI is a client of the control plane. It does not link `gateway`, `router`, `
 
 ## 1. Scope
 
-Six reference pages, in order, selected by `1` through `6`, `]`, and `[` (`internal/tui/tui.go:pageKey`, `internal/tui/pages.go:pageNames`). Hofund keeps that order and those keys. The `]` and `[` cycle wraps only those six pages. Four surfaces the reference UI does not have as pages are in this release because the v0.2.0 plan asks for them: Accounts (`7`), Settings (`8`), Logs (`9`), and Help (`?`). Accounts, Settings, and Logs do not participate in the `]`/`[` cycle. Sessions and Library ship their screens with the shell; Sessions fills in when R-30 and R-44 exist. Library list rows arrive in R-45; mutating library behavior waits for section 5.
+Six reference pages, in order, selected by `1` through `6`, `]`, and `[` (`internal/tui/tui.go:pageKey`, `internal/tui/pages.go:pageNames`). Hofund keeps that order and those keys. The `]` and `[` cycle wraps only those six pages. Four surfaces the reference UI does not have as pages are in this release because the v0.2.0 plan asks for them: Accounts (`7`), Settings (`8`), Logs (`9`), and Help (`?`). Accounts, Settings, and Logs do not participate in the `]`/`[` cycle. Sessions and Library ship their screens with the shell; Sessions fills in when R-30 and R-44 exist. Library draws read-only rows in R-45; mutating library behavior waits for section 5.
 
 Global keys (`internal/tui/tui.go:Update`, `updateList`, `View`):
 
@@ -152,7 +152,7 @@ Check-in copy is English. The reference prints a short native label. Hofund prin
 
 List columns (`sessListLines`): age, agent, folder basename, tokens, cost, title. Stats (`sessLines`, `sessChart`): totals and a daily bar.
 
-### Library (page 6) — shell in R-11, read-only rows in R-45
+### Library (page 6) — read-only rows in R-45
 
 `internal/tui/library.go:updateLibrary`, `viewLibrary`, `openLibAdd`, `openLibAgents`, `openServer`, `editInstructions`.
 
@@ -415,7 +415,7 @@ Two TUIs: the second sees the lock and attaches. It must not shut the daemon dow
 
 ## 5. Sessions and Library APIs
 
-R-44 binds to the Sessions routes below. **R-45** binds only to `GET /v1/hofund/library` for read-only rows. Session **recording** (writes that populate session files) is out of scope for this contract; R-30 owns recording separately. R-30 and R-36 implement the routes. Paths stay stable if fields are added.
+R-44 binds to the Sessions routes below. **R-45** binds only to `GET /v1/hofund/library` for read-only rows and implements that GET. Session **recording** (writes that populate session files) is out of scope for this contract; R-30 owns recording separately. R-36 owns the remaining library control routes. Paths stay stable if fields are added.
 
 Library **mutating** routes (`sync`, instructions, MCP, skills, found import/remove, RTK) and any local commands they may spawn on the daemon host are **not** to be wired from the TUI until a later security design review passes. Section 5 still documents request and response shapes for that follow-on work.
 
@@ -441,9 +441,9 @@ Consent is part of the list call so the empty state matches `sessNothing`.
 
 `GET/PATCH /v1/hofund/sessions/reads` is `{version, asked, enabled: [agent id]}`. The empty state points at `hofund sessions read`. The page does not toggle consent itself in R-44.
 
-### Library (R-36)
+### Library (read-only GET in R-45)
 
-`GET /v1/hofund/library` returns `{version, dir, error?, rows: [{kind, name, on: [agent id], about, bad, own}], agents: [{id, name, instructions, mcp, skills}]}`. `kind` is `instructions`, `mcp`, `skill`, `found-mcp`, `found-skill`, or `rtk`. R-45 uses this response only.
+`GET /v1/hofund/library` returns `{version, dir, error?, rows: [{kind, name, on: [agent id], about, bad, own}], agents: [{id, name, instructions, mcp, skills}]}`. `kind` is `instructions`, `mcp`, `skill`, `found-mcp`, `found-skill`, or `rtk`. R-45 uses this response only. A successful empty response renders the Library page and its directory, not the deferred-route frame; a 404 retains that frame.
 
 Deferred mutating routes (the TUI must not call them until the security review in the section introduction passes):
 
