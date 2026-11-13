@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 
 use hofund_plugin_api::{
@@ -20,6 +21,7 @@ use std::time::Duration;
 
 mod agent_sign_in;
 mod api;
+mod checkin;
 mod creds;
 mod device;
 mod discover;
@@ -58,7 +60,8 @@ static SPEC: SubscriptionSpec = SubscriptionSpec::from_static(
     "Z Code",
     SignInFlowKind::TokenFile,
 )
-.with_agent_sign_in(AGENT_SIGN_IN);
+.with_agent_sign_in(AGENT_SIGN_IN)
+.with_daily_checkin(true);
 
 /// Registers the Z Code subscription.
 #[must_use]
@@ -158,6 +161,7 @@ impl SubscriptionFactory for ZcodeFactory {
             device_file,
             team_keys: Arc::new(TokenCache::new(Duration::ZERO)),
             pending: Mutex::new(HashMap::new()),
+            touch_seq: AtomicU64::new(0),
         }))
     }
 }
@@ -168,6 +172,7 @@ struct Zcode {
     device_file: PathBuf,
     team_keys: Arc<TokenCache<SecretString>>,
     pending: Mutex<HashMap<String, sign_in::Pending>>,
+    touch_seq: AtomicU64,
 }
 
 #[hofund_plugin_sdk::async_trait]
@@ -284,6 +289,22 @@ impl Subscription for Zcode {
             self.team_keys.remove(account);
         }
         result
+    }
+
+    async fn daily_checkin(
+        &self,
+        account: &AccountId,
+        host: &HostContext,
+    ) -> Result<hofund_plugin_api::CheckinResult, PluginError> {
+        checkin::run(
+            account,
+            host,
+            Arc::clone(&self.endpoints),
+            &self.device_file,
+            &self.team_keys,
+            &self.touch_seq,
+        )
+        .await
     }
 
     async fn quota(

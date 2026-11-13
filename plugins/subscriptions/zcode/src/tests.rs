@@ -1120,3 +1120,110 @@ fn r57b_browser_sign_in_rejects_an_insecure_authorize_url() {
     assert!(error.message().contains("no sign-in page"));
     assert_eq!(host.http().calls().len(), 1);
 }
+
+fn claim_fixture(status: u16, claim: &str) -> (hofund_plugin_api::CheckinResult, TestHost) {
+    let dir = tempfile::tempdir().expect("dir");
+    let home = dir.path().join(".zcode");
+    write_jwt_only_credentials(&home, "u-checkin");
+    let host = host(&dir);
+    let id =
+        block_on(discover::import(&home, discover::REFERENCE, host.context())).expect("import");
+    host.http().enqueue(
+        json!({"code": 0, "data": {"deliveries": [{"banner": {
+            "background": {"args": {"zcode_plan": {"name": "Weekend Build"}}},
+            "buttons": [{"action": {"type": "claim_zcode_plan", "args": {"plan_id": "weekend"}}}]
+        }}]}})
+        .to_string()
+        .into_bytes(),
+    );
+    host.http().enqueue_response(status, &[], claim.to_owned());
+    let result =
+        block_on(subscription(&host).daily_checkin(&id, host.context())).expect("check-in");
+    (result, host)
+}
+
+#[test]
+fn r57b_checkin_claims_marketing_offers_with_versioned_headers() {
+    let (result, host) = claim_fixture(200, r#"{"code":0,"msg":""}"#);
+    assert_eq!(result.outcome(), hofund_plugin_api::CheckinOutcome::Claimed);
+    assert_eq!(result.message(), "claimed Weekend Build");
+    assert_eq!(result.recheck_at(), None);
+    let calls = host.http().calls();
+    assert_eq!(calls.len(), 2);
+    assert!(calls[0].uri().contains("/api/v1/marketing/touch?seq=0"));
+    assert_eq!(calls[0].header("x-zcode-app-version"), Some("3.17.2"));
+    assert_eq!(calls[0].header("user-agent"), Some("ZCode/3.17.2"));
+    assert_eq!(
+        calls[1].uri(),
+        "https://zcode.test/api/v1/zcode-plan/billing/claim"
+    );
+    assert_eq!(calls[1].header("x-zcode-app-version"), Some("3.17.2"));
+    assert_eq!(calls[1].header("x-platform").is_some(), true);
+    assert_eq!(
+        hofund_plugin_sdk::json::from_slice::<hofund_plugin_sdk::json::Value>(calls[1].body())
+            .expect("claim body"),
+        json!({"plan_id": "weekend"})
+    );
+}
+
+#[test]
+fn r57b_checkin_maps_done_ineligible_captcha_and_unknown() {
+    let (done, _) = claim_fixture(200, r#"{"code":1003,"msg":"target already exists"}"#);
+    assert_eq!(done.outcome(), hofund_plugin_api::CheckinOutcome::Done);
+    assert_eq!(done.recheck_at(), None);
+    let (ineligible, _) = claim_fixture(400, r#"{"code":1004,"msg":"not eligible yet"}"#);
+    assert_eq!(
+        ineligible.outcome(),
+        hofund_plugin_api::CheckinOutcome::Ineligible
+    );
+    assert!(ineligible.recheck_at().is_some());
+    let (captcha, _) = claim_fixture(400, r#"{"code":3007,"msg":"captcha verify failed"}"#);
+    assert_eq!(
+        captcha.outcome(),
+        hofund_plugin_api::CheckinOutcome::Captcha
+    );
+    assert!(captcha.message().contains("claim it in the Z Code app"));
+    assert_eq!(captcha.recheck_at(), None);
+    let (unknown, _) = claim_fixture(500, "not json");
+    assert_eq!(unknown.outcome(), hofund_plugin_api::CheckinOutcome::Failed);
+    assert_eq!(unknown.recheck_at(), None);
+}
+
+#[test]
+fn r57b_empty_feed_rechecks_and_api_keys_do_not_claim() {
+    let dir = tempfile::tempdir().expect("dir");
+    let home = dir.path().join(".zcode");
+    write_jwt_only_credentials(&home, "u-inactive");
+    let inactive_host = host(&dir);
+    let id = block_on(discover::import(
+        &home,
+        discover::REFERENCE,
+        inactive_host.context(),
+    ))
+    .expect("import");
+    inactive_host.http().enqueue(
+        json!({"code": 0, "data": {"deliveries": []}})
+            .to_string()
+            .into_bytes(),
+    );
+    let inactive =
+        block_on(subscription(&inactive_host).daily_checkin(&id, inactive_host.context()))
+            .expect("inactive");
+    assert_eq!(
+        inactive.outcome(),
+        hofund_plugin_api::CheckinOutcome::Inactive
+    );
+    assert!(inactive.recheck_at().is_some());
+    assert_eq!(inactive_host.http().calls().len(), 1);
+
+    let dir = tempfile::tempdir().expect("dir");
+    let key_host = host(&dir);
+    let id = seed_plan_key(&key_host, "plan.key.secret", "key@zcode.test");
+    let ineligible = block_on(subscription(&key_host).daily_checkin(&id, key_host.context()))
+        .expect("ineligible");
+    assert_eq!(
+        ineligible.outcome(),
+        hofund_plugin_api::CheckinOutcome::Ineligible
+    );
+    assert!(key_host.http().calls().is_empty());
+}

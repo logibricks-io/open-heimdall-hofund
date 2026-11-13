@@ -265,7 +265,15 @@ fn locale() -> String {
         .replace('_', "-")
 }
 
-fn platform() -> String {
+pub(crate) fn marketing_language() -> String {
+    if locale().to_ascii_lowercase().starts_with("zh") {
+        "zh-CN".to_owned()
+    } else {
+        "en-US".to_owned()
+    }
+}
+
+pub(crate) fn platform() -> String {
     format!("{}-{}", node_os(), node_arch())
 }
 
