@@ -61,7 +61,7 @@ pub fn apply_control_event(app: &mut App, payload: &EventPayload) {
             app.request_event_resync();
         }
         EventPayload::RequestStarted(_) | EventPayload::RequestFinished(_) => {
-            // Logs page only in later work; Usage G-11 refetch is R-15.
+            // No whole-period G-11 summary exists to refetch yet.
         }
         EventPayload::ListenerRelistenFailed(_)
         | EventPayload::MemberCooled(_)

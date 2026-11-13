@@ -7,6 +7,7 @@ mod probe;
 mod providers;
 pub mod sessions;
 mod status;
+pub mod usage;
 
 pub use accounts::{AccountsAction, AccountsPage};
 pub use agents::AgentPage;
@@ -14,6 +15,7 @@ pub use frame::PageShell;
 pub use probe::{ProbeOutcome, apply_probe_to_shell, read_path};
 pub use providers::ProviderPage;
 pub use sessions::SessionsPage;
+pub use usage::{UsageAction, UsagePage};
 
 use hofund_control_proto::SessionResume;
 use ratatui::buffer::Buffer;
@@ -41,7 +43,7 @@ pub trait Page: Send {
 }
 
 /// Result of a page key handler.
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Debug, PartialEq, Default)]
 pub enum PageKeyOutcome {
     /// Nothing special.
     #[default]
@@ -60,6 +62,8 @@ pub enum PageKeyOutcome {
     ClosePicker,
     /// User picked a model or folder filter.
     PickFilter(String),
+    /// Usage page action.
+    Usage(UsageAction),
 }
 
 /// Box of all pages.
@@ -67,7 +71,7 @@ pub struct Pages {
     agents: PageShell,
     providers: PageShell,
     routing: PageShell,
-    usage: PageShell,
+    usage: UsagePage,
     sessions: SessionsPage,
     library: PageShell,
     accounts: AccountsPage,
@@ -79,7 +83,7 @@ impl Default for Pages {
             agents: PageShell::new(PageId::Agents, "No agents loaded yet."),
             providers: PageShell::new(PageId::Providers, "No providers loaded yet."),
             routing: PageShell::new(PageId::Routing, "No routing groups loaded yet."),
-            usage: PageShell::new(PageId::Usage, "No usage loaded yet."),
+            usage: UsagePage::new(),
             sessions: SessionsPage::new(),
             library: PageShell::new(PageId::Library, "Loading library…"),
             accounts: AccountsPage::new(),
@@ -94,9 +98,8 @@ impl Pages {
             PageId::Agents => Some(&mut self.agents),
             PageId::Providers => Some(&mut self.providers),
             PageId::Routing => Some(&mut self.routing),
-            PageId::Usage => Some(&mut self.usage),
             PageId::Library => Some(&mut self.library),
-            PageId::Sessions | PageId::Accounts => None,
+            PageId::Sessions | PageId::Usage | PageId::Accounts => None,
         }
     }
 
@@ -122,10 +125,21 @@ impl Pages {
         &self.accounts
     }
 
+    /// Mutable Usage page.
+    pub fn usage_mut(&mut self) -> &mut UsagePage {
+        &mut self.usage
+    }
+
+    /// Immutable Usage page.
+    #[must_use]
+    pub fn usage(&self) -> &UsagePage {
+        &self.usage
+    }
+
     /// Mutable page by id (shell pages only).
     pub fn mut_page(&mut self, id: PageId) -> &mut PageShell {
         self.mut_shell(id)
-            .expect("dedicated page is not a PageShell; use its accessor")
+            .expect("dedicated page is not a PageShell; use page_dyn or its typed accessor")
     }
 
     /// Draws a page as a trait object.
@@ -149,10 +163,9 @@ impl Pages {
             PageId::Agents => &self.agents,
             PageId::Providers => &self.providers,
             PageId::Routing => &self.routing,
-            PageId::Usage => &self.usage,
             PageId::Library => &self.library,
-            PageId::Sessions | PageId::Accounts => {
-                panic!("dedicated page is not a PageShell; use page_dyn or its accessor")
+            PageId::Sessions | PageId::Usage | PageId::Accounts => {
+                panic!("dedicated page is not a PageShell; use page_dyn or its typed accessor")
             }
         }
     }
@@ -161,7 +174,10 @@ impl Pages {
     pub fn apply_probe(&mut self, id: PageId, outcome: ProbeOutcome) {
         match id {
             PageId::Sessions => self.sessions.apply_probe(outcome),
-            _ => apply_probe_to_shell(self.mut_shell(id).expect("shell page"), outcome),
+            PageId::Library => {
+                apply_probe_to_shell(self.mut_shell(id).expect("library shell"), outcome)
+            }
+            _ => {}
         }
     }
 }

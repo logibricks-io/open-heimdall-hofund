@@ -9,7 +9,7 @@ use hofund_control_client::hofund_control_proto::{
 };
 
 use crate::intent::{ControlIntent, PageEffect, Secret};
-use crate::pages::{AgentPage, Page, PageKeyOutcome, Pages, ProviderPage};
+use crate::pages::{AgentPage, Page, PageKeyOutcome, Pages, ProviderPage, UsageAction};
 use crate::session::{
     AccountsOutcome, AgentSnapshot, Finished, ModelView, PlanView, ProviderSnapshot, SessionOutcome,
 };
@@ -177,6 +177,7 @@ impl App {
         match self.page {
             PageId::Sessions => self.pages.sessions_mut().reload(read_gen),
             PageId::Accounts => self.pages.accounts_mut().reload(read_gen),
+            PageId::Usage => self.pages.usage_mut().reload(read_gen),
             page => self.pages.mut_page(page).reload(read_gen),
         }
         self.queue_page_load(read_gen);
@@ -198,6 +199,14 @@ impl App {
             }
             PageId::Agents => self.queue(ControlIntent::LoadAgents { generation }),
             PageId::Accounts => self.queue(ControlIntent::LoadAccounts { generation }),
+            PageId::Usage => {
+                self.queue(ControlIntent::LoadUsage {
+                    generation,
+                    period: self.pages.usage().period(),
+                });
+                self.queue(ControlIntent::LoadUsageSettings { generation });
+                self.queue(ControlIntent::LoadQuotaAlerts { generation });
+            }
             _ => {}
         }
     }
@@ -219,6 +228,10 @@ impl App {
             self.queue(ControlIntent::CatalogSync { force: false });
         }
         let _ = self.reload_open_page();
+        if self.page == PageId::Usage {
+            let intent = self.pages.usage_mut().open_quotas(Instant::now());
+            self.queue(intent);
+        }
     }
 
     /// Returns the next read generation without consuming.
@@ -253,6 +266,10 @@ impl App {
         self.page = page;
         self.mode = Mode::List;
         let _ = self.reload_open_page();
+        if page == PageId::Usage {
+            let intent = self.pages.usage_mut().open_quotas(Instant::now());
+            self.queue(intent);
+        }
     }
 
     /// Handles a terminal key when not in a pending mutation (except quit).
@@ -286,6 +303,10 @@ impl App {
             }
             KeyCode::Char('r') => {
                 let _ = self.reload_open_page();
+                if self.page == PageId::Usage {
+                    let intent = self.pages.usage_mut().refresh_quotas(Instant::now());
+                    self.queue(intent);
+                }
                 return AppAction::Reload;
             }
             KeyCode::Char(c @ '1'..='6') => {
@@ -320,6 +341,7 @@ impl App {
             PageId::Agents => self.agents.captures(),
             PageId::Sessions => self.pages.sessions().captures(),
             PageId::Accounts => self.pages.accounts().captures(),
+            PageId::Usage => self.pages.usage().captures(),
             _ => false,
         }
     }
@@ -333,6 +355,10 @@ impl App {
             let action = self.pages.accounts_mut().on_accounts_key(key);
             self.apply_effect(action.effect);
             return action.open_url.map_or(AppAction::None, AppAction::OpenUrl);
+        }
+        if self.page == PageId::Usage {
+            let outcome = self.pages.usage_mut().on_key(key);
+            return self.apply_usage_outcome(outcome);
         }
         if self.page == PageId::Providers && (self.providers.active() || self.providers.captures())
         {
@@ -372,6 +398,56 @@ impl App {
                 let _ = self.reload_open_page();
                 AppAction::Reload
             }
+            PageKeyOutcome::Usage(_) => AppAction::None,
+        }
+    }
+
+    fn apply_usage_outcome(&mut self, outcome: PageKeyOutcome) -> AppAction {
+        match outcome {
+            PageKeyOutcome::Reload => {
+                let _ = self.reload_open_page();
+                AppAction::Reload
+            }
+            PageKeyOutcome::Usage(UsageAction::ToggleQuotaLeft) => {
+                if let Some(intent) = self.pages.usage_mut().toggle_quota_left() {
+                    self.apply_effect(PageEffect::mutation("saving quota display", intent));
+                }
+                AppAction::None
+            }
+            PageKeyOutcome::Usage(UsageAction::CheckIn) => {
+                self.apply_effect(PageEffect::mutation(
+                    "checking in every account",
+                    ControlIntent::RunCheckins,
+                ));
+                AppAction::None
+            }
+            PageKeyOutcome::Usage(UsageAction::SetUsageAlert(value)) => {
+                self.apply_effect(PageEffect::mutation(
+                    "saving usage alert",
+                    ControlIntent::SetQuotaAlert {
+                        usage: Some(value),
+                        balance: None,
+                    },
+                ));
+                AppAction::None
+            }
+            PageKeyOutcome::Usage(UsageAction::SetBalanceAlert(value)) => {
+                self.apply_effect(PageEffect::mutation(
+                    "saving balance alert",
+                    ControlIntent::SetQuotaAlert {
+                        usage: None,
+                        balance: Some(value),
+                    },
+                ));
+                AppAction::None
+            }
+            PageKeyOutcome::None
+            | PageKeyOutcome::CursorUp
+            | PageKeyOutcome::CursorDown
+            | PageKeyOutcome::Resume(_)
+            | PageKeyOutcome::FlashResumeUnavailable
+            | PageKeyOutcome::ClosePicker
+            | PageKeyOutcome::PickFilter(_) => AppAction::None,
         }
     }
 
@@ -447,6 +523,77 @@ impl App {
             }),
             SessionOutcome::Keys { id, token, result } => self.apply_keys(id, token, result),
             SessionOutcome::Balances(result) => self.apply_balances(result),
+            SessionOutcome::Usage { generation, result } => {
+                self.apply_read_result(generation, |app| match result {
+                    Ok(response) => app.pages.usage_mut().apply_usage(response),
+                    Err(message) => app.pages.usage_mut().apply_usage_error(message),
+                });
+            }
+            SessionOutcome::UsageSettings { generation, result } => {
+                self.apply_read_result(generation, |app| {
+                    if let Ok(settings) = result {
+                        if settings.disk_revision.len() == 64 {
+                            app.disk_revision.clone_from(&settings.disk_revision);
+                        }
+                        app.pages.usage_mut().apply_settings(settings);
+                    }
+                });
+            }
+            SessionOutcome::Quotas { token, result } => match result {
+                Ok(response) => {
+                    if let Some(intent) = self.pages.usage_mut().apply_quotas(
+                        token,
+                        response,
+                        self.page == PageId::Usage,
+                    ) {
+                        self.queue(intent);
+                    }
+                }
+                Err(message) => self.pages.usage_mut().apply_quotas_error(token, message),
+            },
+            SessionOutcome::Checkins(result) => {
+                self.finish_pending();
+                match result {
+                    Ok((text, ok)) => self.set_flash_ttl(text, ok),
+                    Err(message) => self.set_flash_ttl(message, false),
+                }
+            }
+            SessionOutcome::QuotaAlerts { generation, result } => {
+                self.apply_read_result(generation, |app| match result {
+                    Ok(alerts) => app.pages.usage_mut().apply_alerts(alerts),
+                    Err(message) => app.pages.usage_mut().apply_alerts_error(message),
+                });
+            }
+            SessionOutcome::QuotaAlertSaved(result) => {
+                self.finish_pending();
+                match result {
+                    Ok(response) => {
+                        let alerts =
+                            hofund_control_client::hofund_control_proto::QuotaAlertsResponse {
+                                version: response.version,
+                                usage_alert: response.usage_alert,
+                                balance_alert: response.balance_alert,
+                            };
+                        self.pages.usage_mut().apply_alerts(alerts);
+                        self.set_flash_ttl("saved quota alerts", true);
+                    }
+                    Err(message) => self.set_flash_ttl(message, false),
+                }
+            }
+            SessionOutcome::QuotaLeftSaved { result, previous } => {
+                self.finish_pending();
+                match result {
+                    Ok(settings) => {
+                        self.disk_revision.clone_from(&settings.disk_revision);
+                        self.pages.usage_mut().apply_settings(settings);
+                        self.set_flash_ttl("saved quota display", true);
+                    }
+                    Err(message) => {
+                        self.pages.usage_mut().rollback_quota_left(previous);
+                        self.set_flash_ttl(message, false);
+                    }
+                }
+            }
             SessionOutcome::Profiles { token, result } => self.apply_profiles(token, result),
             SessionOutcome::RouteModels {
                 generation,

@@ -53,6 +53,10 @@ fn draw_body(app: &App, area: Rect, buf: &mut Buffer, theme: &Theme) {
         app.pages.accounts().draw(area, buf, theme);
         return;
     }
+    if app.page == crate::state::PageId::Usage {
+        app.pages.usage().draw_body(area, buf, theme);
+        return;
+    }
     app.pages.page(app.page).draw_body(area, buf, theme);
 }
 
@@ -64,6 +68,7 @@ fn interactive_page(app: &App) -> bool {
     (app.page == crate::state::PageId::Providers && app.providers.active())
         || (app.page == crate::state::PageId::Agents && app.agents.active())
         || app.page == crate::state::PageId::Accounts
+        || app.page == crate::state::PageId::Usage
 }
 
 fn draw_header(app: &App, area: Rect, buf: &mut Buffer, theme: &Theme) {
@@ -138,6 +143,7 @@ fn draw_footer(app: &App, area: Rect, buf: &mut Buffer, theme: &Theme) {
             crate::state::PageId::Providers => app.providers.hint_lines(),
             crate::state::PageId::Agents => app.agents.hint_lines(),
             crate::state::PageId::Accounts => app.pages.accounts().hint_lines(),
+            crate::state::PageId::Usage => app.pages.usage().hint_lines(),
             _ => ("", ""),
         };
         let text = vec![

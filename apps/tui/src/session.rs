@@ -1,14 +1,18 @@
 //! Runs one control intent and returns a result the UI can apply.
 
+use std::time::Duration;
+
 use hofund_control_client::hofund_control_proto::{
     API_VERSION, AccountImportRequest, AccountSwitchRequest, AgentAction, AgentConnectRequest,
     AgentDisconnectRequest, AgentHiddenSetRequest, AgentModelRequest, AgentModelsResponse,
     AgentPickedOnlyRequest, AgentPlanRequest, AgentStatusEntry, AgentSummary, CatalogSyncRequest,
-    DiscoveredAccount, ModelEntry, PicksResponse, PicksSetRequest, PresetEntry,
+    CheckinRunRequest, DiscoveredAccount, ModelEntry, PicksResponse, PicksSetRequest, PresetEntry,
     ProfileRenameRequest, ProfileSummary, ProviderCreateRequest, ProviderDeleteRequest,
     ProviderKey, ProviderKeyAction, ProviderKeyRequest, ProviderPatchRequest, ProviderSummary,
-    ProviderTestRequest, QuotaKind, QuotaQuery, SignInProofRequest, SignInStartRequest,
-    SignInStartResponse, SignInStatusResponse, SubscriptionEntry, SubscriptionRefreshRequest,
+    ProviderTestRequest, QuotaAlertsResponse, QuotaAlertsSetRequest, QuotaAlertsSetResponse,
+    QuotaKind, QuotaQuery, QuotaResponse, SettingsPatchRequest, SettingsResponse,
+    SignInProofRequest, SignInStartRequest, SignInStartResponse, SignInStatusResponse,
+    SubscriptionEntry, SubscriptionRefreshRequest, UsageQuery, UsageResponse,
 };
 use hofund_control_client::{Client, ClientError};
 
@@ -212,6 +216,45 @@ pub enum SessionOutcome {
     },
     /// Balance lines.
     Balances(Result<Vec<String>, String>),
+    /// Period usage.
+    Usage {
+        /// Read generation.
+        generation: u64,
+        /// Usage response, or a redacted error.
+        result: Result<UsageResponse, String>,
+    },
+    /// G-5 Usage settings.
+    UsageSettings {
+        /// Read generation.
+        generation: u64,
+        /// Settings response, or a redacted error.
+        result: Result<SettingsResponse, String>,
+    },
+    /// Quota cards.
+    Quotas {
+        /// Quota generation.
+        token: u64,
+        /// Quota response, or a redacted error.
+        result: Result<QuotaResponse, String>,
+    },
+    /// Joined daily check-in result.
+    Checkins(Result<(String, bool), String>),
+    /// Quota alert thresholds.
+    QuotaAlerts {
+        /// Read generation.
+        generation: u64,
+        /// Alert response, or a redacted error.
+        result: Result<QuotaAlertsResponse, String>,
+    },
+    /// Saved quota alert thresholds.
+    QuotaAlertSaved(Result<QuotaAlertsSetResponse, String>),
+    /// Saved G-5 used/left setting.
+    QuotaLeftSaved {
+        /// Settings response, or a redacted error.
+        result: Result<SettingsResponse, String>,
+        /// Value to restore on failure.
+        previous: bool,
+    },
     /// Profiles.
     Profiles {
         /// Read token.
@@ -298,6 +341,28 @@ impl ControlIntent {
                 result: Err(message),
             },
             Self::LoadBalances => SessionOutcome::Balances(Err(message)),
+            Self::LoadUsage { generation, .. } => SessionOutcome::Usage {
+                generation: *generation,
+                result: Err(message),
+            },
+            Self::LoadUsageSettings { generation } => SessionOutcome::UsageSettings {
+                generation: *generation,
+                result: Err(message),
+            },
+            Self::LoadQuotas { token, .. } => SessionOutcome::Quotas {
+                token: *token,
+                result: Err(message),
+            },
+            Self::RunCheckins => SessionOutcome::Checkins(Err(message)),
+            Self::LoadQuotaAlerts { generation } => SessionOutcome::QuotaAlerts {
+                generation: *generation,
+                result: Err(message),
+            },
+            Self::SetQuotaAlert { .. } => SessionOutcome::QuotaAlertSaved(Err(message)),
+            Self::SetQuotaLeft { previous, .. } => SessionOutcome::QuotaLeftSaved {
+                result: Err(message),
+                previous: *previous,
+            },
             Self::LoadProfiles { token } => SessionOutcome::Profiles {
                 token: *token,
                 result: Err(message),
@@ -506,6 +571,74 @@ pub async fn execute(client: &Client, intent: ControlIntent) -> SessionOutcome {
             }
         }
         ControlIntent::LoadBalances => SessionOutcome::Balances(load_balances(client).await),
+        ControlIntent::LoadUsage { generation, period } => SessionOutcome::Usage {
+            generation,
+            result: client
+                .usage(UsageQuery::with_breakdown(
+                    period,
+                    hofund_control_client::hofund_control_proto::UsageBreakdownBy::Agent,
+                ))
+                .await
+                .map_err(|error| explain(error, None)),
+        },
+        ControlIntent::LoadUsageSettings { generation } => SessionOutcome::UsageSettings {
+            generation,
+            result: client
+                .settings()
+                .await
+                .map_err(|error| explain(error, None)),
+        },
+        ControlIntent::LoadQuotas { token, kept, delay } => {
+            if delay {
+                tokio::time::sleep(Duration::from_millis(1500)).await;
+            }
+            let query = if kept {
+                QuotaQuery::kept()
+            } else {
+                QuotaQuery::fresh()
+            };
+            SessionOutcome::Quotas {
+                token,
+                result: client
+                    .quotas(query)
+                    .await
+                    .map_err(|error| explain(error, None)),
+            }
+        }
+        ControlIntent::RunCheckins => SessionOutcome::Checkins(run_checkins(client).await),
+        ControlIntent::LoadQuotaAlerts { generation } => SessionOutcome::QuotaAlerts {
+            generation,
+            result: client
+                .quota_alerts()
+                .await
+                .map_err(|error| explain(error, None)),
+        },
+        ControlIntent::SetQuotaAlert { usage, balance } => {
+            let mut request = QuotaAlertsSetRequest::new();
+            request.usage_alert = usage;
+            request.balance_alert = balance;
+            SessionOutcome::QuotaAlertSaved(
+                client
+                    .set_quota_alerts(request)
+                    .await
+                    .map_err(|error| explain(error, None)),
+            )
+        }
+        ControlIntent::SetQuotaLeft {
+            revision,
+            value,
+            previous,
+        } => {
+            let mut request = SettingsPatchRequest::new(revision);
+            request.quota_left = Some(value);
+            SessionOutcome::QuotaLeftSaved {
+                result: client
+                    .patch_settings(&request)
+                    .await
+                    .map_err(|error| explain(error, None)),
+                previous,
+            }
+        }
         ControlIntent::LoadRouteModels { agent, generation } => match client.route_models().await {
             Ok(response) => SessionOutcome::RouteModels {
                 generation,
@@ -1029,6 +1162,49 @@ async fn load_balances(client: &Client) -> Result<Vec<String>, String> {
             format!("{} {amount}", quota.name)
         })
         .collect())
+}
+
+async fn run_checkins(client: &Client) -> Result<(String, bool), String> {
+    let list = client
+        .checkins()
+        .await
+        .map_err(|error| explain(error, None))?;
+    if list.accounts.is_empty() {
+        return Ok(("no accounts have a daily check-in".to_owned(), true));
+    }
+    let mut parts = Vec::new();
+    let mut ok = true;
+    for row in list.accounts {
+        let who = format!("{}/{}", row.subscription, row.account);
+        match client
+            .run_checkin(CheckinRunRequest::new(row.subscription, row.account))
+            .await
+        {
+            Ok(response) => {
+                let outcome = if response.outcome.is_empty() {
+                    "unknown".to_owned()
+                } else {
+                    response.outcome
+                };
+                let mut part = format!("check-in {who}: {outcome}");
+                if !response.detail.is_empty() {
+                    part.push_str(&format!(" · {}", response.detail));
+                }
+                if outcome.eq_ignore_ascii_case("failed")
+                    || outcome.eq_ignore_ascii_case("failure")
+                    || outcome.eq_ignore_ascii_case("error")
+                {
+                    ok = false;
+                }
+                parts.push(part);
+            }
+            Err(error) => {
+                ok = false;
+                parts.push(format!("check-in {who}: failed · {}", explain(error, None)));
+            }
+        }
+    }
+    Ok((parts.join("; "), ok))
 }
 
 fn finished(
