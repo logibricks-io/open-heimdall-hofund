@@ -137,6 +137,47 @@ fn config_items(root: &Value) -> Option<&Vec<Value>> {
         .and_then(Value::as_array)
 }
 
+fn effort_names(map: &hofund_plugin_sdk::json::Map<String, Value>, id: &str) -> Vec<String> {
+    const ORDER: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+    let reasoning = map.get("reasoning");
+    let listed = reasoning
+        .and_then(|reasoning| reasoning.get("supportedEfforts"))
+        .and_then(Value::as_array)
+        .filter(|efforts| !efforts.is_empty());
+    let mut efforts = if let Some(listed) = listed {
+        listed
+            .iter()
+            .filter_map(|effort| effort.as_str().map(str::to_owned))
+            .collect::<Vec<_>>()
+    } else {
+        if map.get("supportsReasoning").and_then(Value::as_bool) != Some(true) {
+            return Vec::new();
+        }
+        let own = reasoning
+            .and_then(|reasoning| reasoning.get("effort"))
+            .and_then(Value::as_str)
+            .filter(|own| ORDER.contains(own));
+        ORDER
+            .iter()
+            .filter(|effort| matches!(**effort, "low" | "high" | "max") || Some(**effort) == own)
+            .map(|effort| (*effort).to_owned())
+            .collect()
+    };
+    if efforts.is_empty() {
+        return efforts;
+    }
+    let only_reasoning = map.get("onlyReasoning").and_then(Value::as_bool) == Some(true);
+    let can_disable = reasoning
+        .and_then(|reasoning| reasoning.get("canDisableThinking"))
+        .and_then(Value::as_bool);
+    let off = (!only_reasoning && can_disable != Some(false))
+        || matches!(id, "deepseek-v4.1-flash" | "deepseek-v4.1-flash-sg");
+    if off {
+        efforts.insert(0, "none".to_owned());
+    }
+    efforts
+}
+
 pub(crate) fn parse_config(body: &[u8], site: Site) -> Result<ModelList, PluginError> {
     let root: Value = hofund_plugin_sdk::json::from_slice(body)
         .map_err(|_| PluginError::decode("WorkBuddy config JSON is invalid"))?;
@@ -189,7 +230,8 @@ pub(crate) fn parse_config(body: &[u8], site: Site) -> Result<ModelList, PluginE
                     "text".to_owned()
                 }])
                 .with_image_input(Some(image_input))
-                .with_draws(draws),
+                .with_draws(draws)
+                .with_efforts(effort_names(map, id)),
             );
         }
     }
@@ -197,6 +239,19 @@ pub(crate) fn parse_config(body: &[u8], site: Site) -> Result<ModelList, PluginE
         return Err(PluginError::decode("WorkBuddy config listed no models"));
     }
     Ok(ModelList::new(models, None))
+}
+
+fn declared_efforts(site: Site, id: &str) -> &'static [&'static str] {
+    match (site, id) {
+        (Site::China, "hy4-preview-f") => &["high"],
+        (Site::China, "hy3" | "hy3-x") | (_, "hy3") => &["low", "high"],
+        (Site::China, "deepseek-v4.1-flash") => &["none", "low", "high", "max"],
+        (_, "glm-5.3" | "glm-5.3-flash") => &["low", "high", "max"],
+        (_, "glm-5.2") => &["high", "xhigh"],
+        (Site::China, "kimi-k3-1") => &["low", "high", "xhigh"],
+        (Site::China, "deepseek-v4-pro") => &["none", "high", "xhigh"],
+        _ => &[],
+    }
 }
 
 pub(crate) fn declared(site: Site) -> ModelList {
@@ -220,6 +275,12 @@ pub(crate) fn declared(site: Site) -> ModelList {
                         })
                         .with_output_modalities(vec!["text".to_owned()])
                         .with_image_input(Some(image))
+                        .with_efforts(
+                            declared_efforts(site, id)
+                                .iter()
+                                .map(|effort| (*effort).to_owned())
+                                .collect(),
+                        )
                 })
         })
         .collect();

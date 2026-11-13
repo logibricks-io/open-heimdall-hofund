@@ -29,12 +29,64 @@ const TYPES: &[&str] = &[
 const EFFORTLESS_NAME: char = '_';
 
 pub(crate) fn prepare(body: &mut Map<String, Value>, after_tools: bool) -> HashMap<String, String> {
+    as_reasoning(body);
     let names = fit_tools(body);
     normalize_tool_choice(body);
     if after_tools {
         reply_after_tools(body);
     }
     names
+}
+
+fn as_reasoning(body: &mut Map<String, Value>) {
+    let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for message in messages {
+        if message.get("role").and_then(Value::as_str) != Some("assistant") {
+            continue;
+        }
+        let Some(message) = message.as_object_mut() else {
+            continue;
+        };
+        if !message.contains_key("reasoning_content") && !message.contains_key("reasoning_details")
+        {
+            continue;
+        }
+        let direct = message
+            .get("reasoning_content")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let details = message
+            .get("reasoning_details")
+            .and_then(Value::as_array)
+            .map(|details| {
+                details
+                    .iter()
+                    .filter_map(|detail| {
+                        detail
+                            .get("text")
+                            .or_else(|| detail.get("summary"))
+                            .and_then(Value::as_str)
+                    })
+                    .collect::<String>()
+            })
+            .unwrap_or_default();
+        let text = if direct.is_empty() {
+            details
+        } else {
+            direct.to_owned()
+        };
+        let own = message
+            .get("reasoning")
+            .and_then(Value::as_str)
+            .is_some_and(|reasoning| !reasoning.is_empty());
+        if !text.is_empty() && !own {
+            message.insert("reasoning".to_owned(), Value::String(text));
+        }
+        message.remove("reasoning_content");
+        message.remove("reasoning_details");
+    }
 }
 
 pub(crate) fn restore(value: &mut Value, names: &HashMap<String, String>) {
@@ -959,5 +1011,30 @@ mod tests {
         assert!(!after_tools_refusal(r#"{"code":111530}"#));
         assert!(!after_tools_refusal(r#"{"code":11153.0}"#));
         assert!(!after_tools_refusal(r#"{"requestId":"11153"}"#));
+    }
+
+    #[test]
+    fn r55c_reasoning_history_uses_the_upstream_field() {
+        let mut body = json!({"messages": [
+            {"role": "assistant", "content": "", "reasoning_content": "first thought", "model_id": "kimi-k2.6"},
+            {"role": "assistant", "content": "", "reasoning_details": [
+                {"type": "reasoning.text", "text": "second "},
+                {"type": "reasoning.text", "summary": "thought"},
+            ]},
+            {"role": "assistant", "content": "", "reasoning": "own words", "reasoning_content": "ignored"},
+            {"role": "assistant", "content": "plain"},
+        ]});
+        prepare(body.as_object_mut().expect("body"), false);
+        assert_eq!(body["messages"][0]["reasoning"], "first thought");
+        assert_eq!(body["messages"][1]["reasoning"], "second thought");
+        assert_eq!(body["messages"][2]["reasoning"], "own words");
+        for message in body["messages"].as_array().expect("messages") {
+            assert!(message.get("reasoning_content").is_none());
+            assert!(message.get("reasoning_details").is_none());
+        }
+        assert_eq!(
+            body["messages"][3],
+            json!({"role": "assistant", "content": "plain"})
+        );
     }
 }

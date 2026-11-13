@@ -275,6 +275,56 @@ fn r55c_model_images_follow_site_and_edit_tags() {
 }
 
 #[test]
+fn r55c_effort_lists_match_the_frozen_config() {
+    let list = crate::models::parse_config(
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/fixtures/config-efforts.json"
+        )),
+        Site::International,
+    )
+    .expect("parse");
+    let efforts = |id: &str| {
+        list.models()
+            .iter()
+            .find(|model| model.id() == id)
+            .unwrap_or_else(|| panic!("model {id}"))
+            .efforts()
+            .to_vec()
+    };
+    for id in ["fast-model", "kimi-k3", "gemini-3.5-flash"] {
+        assert_eq!(efforts(id), ["low", "medium", "high", "max"]);
+    }
+    assert_eq!(efforts("primary-model"), ["low", "high", "max"]);
+    assert_eq!(
+        efforts("deepseek-v4.1-flash-sg"),
+        ["none", "low", "high", "max"]
+    );
+    assert_eq!(efforts("hy3"), ["low", "high"]);
+    assert_eq!(
+        efforts("gpt-5.6-sol"),
+        ["none", "low", "medium", "high", "xhigh", "max"]
+    );
+    assert_eq!(efforts("glm-5.2"), ["none", "high", "xhigh"]);
+    assert!(efforts("default-model").is_empty());
+
+    let china = crate::models::declared(Site::China);
+    let deepseek = china
+        .models()
+        .iter()
+        .find(|model| model.id() == "deepseek-v4.1-flash")
+        .expect("deepseek");
+    assert_eq!(deepseek.efforts(), ["none", "low", "high", "max"]);
+    let international = crate::models::declared(Site::International);
+    let glm = international
+        .models()
+        .iter()
+        .find(|model| model.id() == "glm-5.2")
+        .expect("glm");
+    assert_eq!(glm.efforts(), ["high", "xhigh"]);
+}
+
+#[test]
 fn a2c_37_quota_without_credit_fields_is_empty() {
     let summary = quota::summary(br#"{"data":{"other":1}}"#, Site::China).expect("q");
     assert!(summary.windows.is_empty());
@@ -987,4 +1037,41 @@ fn r55c_image_envelope_refusal_and_unsupported_path_are_safe() {
     .expect_err("unsupported");
     assert_eq!(error.kind(), PluginErrorKind::Unsupported);
     assert_eq!(host.http().calls().len(), 1);
+}
+
+#[test]
+fn r55c_reasoning_history_is_sent_as_reasoning() {
+    use hofund_plugin_api::{ContentPart, Extensions, Message, Role};
+
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, 4_000_000_000_000);
+    host.http().enqueue(
+        br#"{"id":"chatcmpl-1","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"ok"}}]}"#,
+    );
+    let upstream = subscription(&host, None)
+        .upstream(&id, host.context())
+        .expect("upstream");
+    let mut request = after_tools_request("kimi-k2.6", false);
+    request.messages.insert(
+        1,
+        Message {
+            role: Role::Assistant,
+            content: vec![ContentPart::thinking(
+                "The user wants the files. Codeword ZEBRA-42.",
+            )],
+            extensions: Extensions::new(),
+        },
+    );
+    block_on(upstream.execute(request, ProtocolId::OPENAI_CHAT)).expect("served");
+    let body = chat_body(host.http().calls()[0].body());
+    let assistant = &body["messages"][1];
+    assert_eq!(
+        assistant["reasoning"],
+        "The user wants the files. Codeword ZEBRA-42."
+    );
+    assert!(assistant.get("reasoning_content").is_none());
+    assert!(assistant.get("reasoning_details").is_none());
+    assert_eq!(body["messages"][2]["role"], "tool");
+    assert_eq!(body["messages"][3]["role"], "user");
 }
