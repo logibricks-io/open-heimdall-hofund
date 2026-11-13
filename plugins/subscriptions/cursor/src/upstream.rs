@@ -11,7 +11,6 @@ use hofund_plugin_api::{
     ToolArgumentsDelta, UpstreamProvider, Usage,
 };
 use hofund_plugin_sdk::futures::{self, StreamExt};
-use hofund_plugin_sdk::oauth::secret_text;
 
 use crate::agent_host::AgentHost;
 use crate::cli::KeychainCache;
@@ -29,11 +28,13 @@ pub(crate) struct CursorUpstream {
     agent_home: PathBuf,
     program: Option<PathBuf>,
     keychain: Arc<Mutex<KeychainCache>>,
-    skip_keychain: bool,
+    keychain_enabled: bool,
     agent_host: AgentHost,
     limits: Limits,
     #[cfg(test)]
     test_conversation_id: Option<String>,
+    #[cfg(test)]
+    mapped_max_mode: Mutex<Vec<bool>>,
 }
 
 impl CursorUpstream {
@@ -44,7 +45,7 @@ impl CursorUpstream {
         agent_home: PathBuf,
         program: Option<PathBuf>,
         keychain: Arc<Mutex<KeychainCache>>,
-        skip_keychain: bool,
+        keychain_enabled: bool,
     ) -> Self {
         Self {
             account,
@@ -53,11 +54,13 @@ impl CursorUpstream {
             agent_home,
             program,
             keychain,
-            skip_keychain,
+            keychain_enabled,
             agent_host: AgentHost::default(),
             limits: Limits::default(),
             #[cfg(test)]
             test_conversation_id: None,
+            #[cfg(test)]
+            mapped_max_mode: Mutex::new(Vec::new()),
         }
     }
 
@@ -77,7 +80,24 @@ impl CursorUpstream {
                 conversation_id
             }
         };
-        request::map_with_mode(request, conversation_id, max_mode)
+        let mapped = request::map_with_mode(request, conversation_id, max_mode)?;
+        #[cfg(test)]
+        self.mapped_max_mode
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(max_mode);
+        Ok(mapped)
+    }
+
+    /// Max Mode flags used by each [`Self::mapped_request`] call on this instance.
+    #[cfg(test)]
+    fn take_mapped_max_mode(&self) -> Vec<bool> {
+        std::mem::take(
+            &mut *self
+                .mapped_max_mode
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
     }
 }
 
@@ -96,13 +116,13 @@ impl UpstreamProvider for CursorUpstream {
             &self.agent_home,
             self.program.clone(),
             &self.keychain,
-            self.skip_keychain,
+            self.keychain_enabled,
         )
         .await?;
         let response_id = hofund_plugin_sdk::uuid::v4()
             .map(|id| format!("msg_{id}"))
             .map_err(|error| PluginError::io(format!("cannot create a response id: {error}")))?;
-        let team_id = team::id_for_token(secret_text(&token));
+        let team_id = team::header_value(&token);
         let mut max_mode = crate::max_only::contains(&model);
         let mut conversation_id_hold: Option<String> = None;
         let mut retried_max = false;
@@ -116,6 +136,7 @@ impl UpstreamProvider for CursorUpstream {
             args.limits = self.limits;
             let mut retried = false;
             'runs: loop {
+                let since_ms = crate::tokens::unix_ms(self.host.clock().now());
                 let attempt = run_stream(
                     &self.host,
                     &self.endpoints,
@@ -142,6 +163,7 @@ impl UpstreamProvider for CursorUpstream {
                                     conversation_id,
                                     inbound,
                                     team_id.clone(),
+                                    since_ms,
                                 ),
                                 FirstOutput::Text(text),
                             ));
@@ -158,6 +180,7 @@ impl UpstreamProvider for CursorUpstream {
                                     conversation_id,
                                     inbound,
                                     team_id.clone(),
+                                    since_ms,
                                 ),
                                 FirstOutput::Thinking(text),
                             ));
@@ -176,6 +199,7 @@ impl UpstreamProvider for CursorUpstream {
                                     conversation_id,
                                     inbound,
                                     team_id.clone(),
+                                    since_ms,
                                 ),
                                 FirstOutput::Tool(request),
                             ));
@@ -184,7 +208,7 @@ impl UpstreamProvider for CursorUpstream {
                         Ok(RunEvent::Server(_)) | Ok(RunEvent::ToolStepEnd) => continue,
                         Ok(RunEvent::Trailer(frame)) => failure::trailer(&frame.payload),
                         Ok(RunEvent::ErrorBody { status, body }) => failure::body(status, &body),
-                        Err(error) => error,
+                        Err(error) => failure::timeout_before_text(error),
                     };
                     if !retried && failure::regional(error.message()) {
                         crate::http2_memory::clear();
@@ -240,6 +264,7 @@ struct CursorStreamState {
     inbound: ProtocolId,
     team_id: Option<String>,
     limits: Limits,
+    since_ms: i64,
 }
 
 struct StreamContext {
@@ -250,6 +275,7 @@ struct StreamContext {
     inbound: ProtocolId,
     team_id: Option<String>,
     limits: Limits,
+    since_ms: i64,
 }
 
 fn stream_context(
@@ -258,6 +284,7 @@ fn stream_context(
     conversation_id: String,
     inbound: ProtocolId,
     team_id: Option<String>,
+    since_ms: i64,
 ) -> StreamContext {
     StreamContext {
         host: upstream.host.clone(),
@@ -267,6 +294,7 @@ fn stream_context(
         inbound,
         team_id,
         limits: upstream.limits,
+        since_ms,
     }
 }
 
@@ -313,6 +341,7 @@ fn completion_stream(
         inbound: context.inbound,
         team_id: context.team_id,
         limits: context.limits,
+        since_ms: context.since_ms,
     };
     match first {
         FirstOutput::Text(text) => state.emit_text(text),
@@ -514,23 +543,18 @@ async fn next_completion_event(
 }
 
 async fn poll_step_usage(state: &mut CursorStreamState) -> Option<Usage> {
-    let since_ms = tokens_unix_ms(state);
     usage::poll_dashboard(usage::PollArgs {
         host: &state.host,
         endpoints: &state.endpoints,
         token: &state.token,
         conversation_id: &state.conversation_id,
         team_id: state.team_id.as_deref(),
-        since_ms,
+        since_ms: state.since_ms,
         inbound: state.inbound,
         limits: state.limits,
     })
     .await
     .or_else(|| Some(usage::zeros()))
-}
-
-fn tokens_unix_ms(state: &CursorStreamState) -> i64 {
-    crate::tokens::unix_ms(state.host.clock().now())
 }
 
 fn empty_reply() -> PluginError {
@@ -1254,6 +1278,165 @@ mod tests {
     }
 
     #[test]
+    fn tool_completed_without_partial_seals_server_completed_calls() {
+        let _guard = crate::http2_memory::test_lock();
+        crate::http2_memory::reset_for_tests();
+        block_on_paused(async {
+            let body = [
+                tool_update_frame(3, "server-1"),
+                tool_update_frame(3, "server-2"),
+                mcp_frame(21, "lookup", "caller-3"),
+                tool_count_frame(3),
+                checkpoint_frame(1),
+                heartbeat_frame(),
+                heartbeat_frame(),
+            ]
+            .concat();
+            let h2 = Http2Server::start(vec![Http2Response::new(200).data(body).hold_open()]).await;
+            let h1 = Http1Server::start(vec![config_reply(h2.base_url())]).await;
+            let host = pooled_host();
+            let account = store_account(&host).await;
+            let upstream = upstream(&host, &h1, h2.base_url(), account);
+            let attempt = async {
+                let completion = upstream
+                    .execute(tool_request(), ProtocolId::OPENAI_CHAT)
+                    .await?;
+                collect(completion).await
+            };
+            let control = async {
+                advance_time(Duration::from_secs(241)).await;
+                std::future::pending::<()>().await;
+            };
+            let Race::Left(events) = race(attempt, control).await else {
+                unreachable!("control remains pending")
+            };
+            let events = events.expect("the tool count seals the step before quiet");
+            let calls = events
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        event,
+                        StreamEvent::ContentBlockStart(ContentBlockStart {
+                            block: BlockStart::ToolCall { .. },
+                            ..
+                        })
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(calls.len(), 1, "server-completed calls are not re-run");
+            assert!(events.iter().any(|event| matches!(
+                event,
+                StreamEvent::MessageDelta(MessageDelta {
+                    stop: Some(Stop {
+                        reason: StopReason::ToolUse,
+                        ..
+                    }),
+                    ..
+                })
+            )));
+            assert!(matches!(events.last(), Some(StreamEvent::MessageStop(_))));
+        });
+    }
+
+    #[test]
+    fn http1_tool_completed_without_partial_flushes_close_and_seals_tool_step() {
+        let _guard = crate::http2_memory::test_lock();
+        crate::http2_memory::reset_for_tests();
+        block_on_paused(async {
+            let body = [
+                tool_update_frame(3, "server-1"),
+                tool_update_frame(3, "server-2"),
+                mcp_frame(21, "lookup", "caller-3"),
+                tool_count_frame(3),
+                checkpoint_frame(1),
+                heartbeat_frame(),
+                heartbeat_frame(),
+            ]
+            .concat();
+            let h1 = Http1Server::start(vec![
+                Http1Response::chunked(vec![body]).hold_open(),
+                Http1Response::new(200),
+                Http1Response::new(200),
+                Http1Response::new(200).body(br#"{"usageEvents":[]}"#.to_vec()),
+            ])
+            .await;
+            let host = pooled_host();
+            crate::http2_memory::remember(host.context());
+            let account = store_account(&host).await;
+            let mut upstream = upstream(&host, &h1, "http://127.0.0.1:9", account);
+            // Keep usage_interval at zero so the quiet watchdog cannot start a
+            // burst of in-stream polls. give_up must be long enough for one
+            // post-seal request now that a zero remaining budget no longer
+            // starts a poll.
+            upstream.limits.usage_give_up = Duration::from_secs(6);
+            let attempt = async {
+                let completion = upstream
+                    .execute(tool_request(), ProtocolId::OPENAI_CHAT)
+                    .await?;
+                collect(completion).await
+            };
+            let control = async {
+                advance_until_usage_polls(&h1, 1).await;
+                advance_time(Duration::from_secs(241)).await;
+                std::future::pending::<()>().await;
+            };
+            let Race::Left(events) = race(attempt, control).await else {
+                unreachable!("control remains pending")
+            };
+            let events = events.expect("the tool count seals the HTTP/1.1 step before quiet");
+            let calls = events
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        event,
+                        StreamEvent::ContentBlockStart(ContentBlockStart {
+                            block: BlockStart::ToolCall { .. },
+                            ..
+                        })
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(calls.len(), 1, "server-completed calls are not re-run");
+            assert!(events.iter().any(|event| matches!(
+                event,
+                StreamEvent::MessageDelta(MessageDelta {
+                    stop: Some(Stop {
+                        reason: StopReason::ToolUse,
+                        ..
+                    }),
+                    ..
+                })
+            )));
+            assert!(matches!(events.last(), Some(StreamEvent::MessageStop(_))));
+
+            let requests = h1.requests();
+            assert_eq!(
+                requests.len(),
+                4,
+                "RunSSE, opening append, close exec, and usage poll"
+            );
+            assert_eq!(requests[0].path(), "/agent.v1.AgentService/RunSSE");
+            assert_eq!(
+                requests[3].path(),
+                "/aiserver.v1.DashboardService/GetFilteredUsageEvents"
+            );
+            let appends = requests
+                .iter()
+                .filter(|request| request.path() == "/aiserver.v1.BidiService/BidiAppend")
+                .collect::<Vec<_>>();
+            assert_eq!(appends.len(), 2);
+            let opening = proto::fields(appends[0].body());
+            assert_eq!(opening[2].as_varint(), Some(0));
+            let close = proto::fields(appends[1].body());
+            assert_eq!(
+                close[0].as_string().as_deref(),
+                Some(proto::to_hex(&proto::close_exec(21)).as_str())
+            );
+            assert_eq!(close[2].as_varint(), Some(1));
+        });
+    }
+
+    #[test]
     fn checkpoint_pending_count_seals_the_tool_step_before_heartbeats() {
         let _guard = crate::http2_memory::test_lock();
         crate::http2_memory::reset_for_tests();
@@ -1394,8 +1577,11 @@ mod tests {
         let _guard = crate::http2_memory::test_lock();
         crate::http2_memory::reset_for_tests();
         block_on(async {
-            let h1 =
-                Http1Server::start(vec![Http1Response::new(400).body(b"bad run".to_vec())]).await;
+            let h1 = Http1Server::start(vec![
+                Http1Response::new(400).body(b"bad run".to_vec()),
+                Http1Response::new(200),
+            ])
+            .await;
             let host = pooled_host();
             crate::http2_memory::remember(host.context());
             let account = store_account(&host).await;
@@ -1407,7 +1593,7 @@ mod tests {
                 .expect_err("synthetic end frame");
             assert_eq!(error.status(), Some(400));
             assert!(error.message().contains("bad run"));
-            assert_eq!(h1.requests().len(), 1);
+            assert_eq!(h1.requests().len(), 2);
         });
     }
 
@@ -1658,6 +1844,7 @@ mod tests {
             let h1 = Http1Server::start(vec![
                 config_reply(old.base_url()),
                 Http1Response::new(401).body(b"account is in another region".to_vec()),
+                Http1Response::new(200),
                 config_reply(regional.base_url()),
             ])
             .await;
@@ -1688,9 +1875,14 @@ mod tests {
             )));
             assert_eq!(old.requests().len(), 0);
             assert_eq!(regional.requests().len(), 1);
-            assert_eq!(h1.requests().len(), 3);
+            assert_eq!(h1.requests().len(), 4);
+            assert_eq!(h1.requests()[1].path(), "/agent.v1.AgentService/RunSSE");
             assert_eq!(
                 h1.requests()[2].path(),
+                "/aiserver.v1.BidiService/BidiAppend"
+            );
+            assert_eq!(
+                h1.requests()[3].path(),
                 "/aiserver.v1.ServerConfigService/GetServerConfig"
             );
             assert!(!http2_memory::blocked(
@@ -1713,6 +1905,7 @@ mod tests {
             let h1 = Http1Server::start(vec![
                 config_reply(h2.base_url()),
                 Http1Response::new(401).body(b"account is in another region".to_vec()),
+                Http1Response::new(200),
                 config_reply(h2.base_url()),
             ])
             .await;
@@ -1742,9 +1935,9 @@ mod tests {
                 StreamEvent::TextDelta(TextDelta { text, .. }) if text == "same host retry"
             )));
             assert_eq!(h2.requests().len(), 1);
-            assert_eq!(h1.requests().len(), 3);
+            assert_eq!(h1.requests().len(), 4);
             assert_eq!(
-                h1.requests()[2].path(),
+                h1.requests()[3].path(),
                 "/aiserver.v1.ServerConfigService/GetServerConfig"
             );
         });
@@ -1763,6 +1956,7 @@ mod tests {
             let h1 = Http1Server::start(vec![
                 config_reply(old.base_url()),
                 Http1Response::new(401).body(b"account is in another region".to_vec()),
+                Http1Response::new(200),
                 config_reply(regional.base_url()),
             ])
             .await;
@@ -1784,7 +1978,7 @@ mod tests {
             assert_eq!(error.status(), Some(403));
             assert!(error.message().contains("still the wrong region"));
             assert_eq!(regional.requests().len(), 1);
-            assert_eq!(h1.requests().len(), 3);
+            assert_eq!(h1.requests().len(), 4);
         });
     }
 
@@ -1823,8 +2017,11 @@ mod tests {
         http2_memory::reset_for_tests();
         block_on(async {
             let h2 = Http2Server::start(Vec::new()).await;
-            let h1 =
-                Http1Server::start(vec![Http1Response::new(400).body(b"bad run".to_vec())]).await;
+            let h1 = Http1Server::start(vec![
+                Http1Response::new(400).body(b"bad run".to_vec()),
+                Http1Response::new(200),
+            ])
+            .await;
             let host = pooled_host();
             http2_memory::remember(host.context());
             let account = store_account(&host).await;
@@ -1835,7 +2032,7 @@ mod tests {
                 .map(|_| ())
                 .expect_err("ordinary failure");
             assert_eq!(error.status(), Some(400));
-            assert_eq!(h1.requests().len(), 1);
+            assert_eq!(h1.requests().len(), 2);
             assert_eq!(h2.requests().len(), 0);
         });
     }
@@ -1899,10 +2096,19 @@ mod tests {
 
     async fn advance_until_usage_polls(h1: &Http1Server, want: usize) {
         let path = "/aiserver.v1.DashboardService/GetFilteredUsageEvents";
-        // Sleep on the paused clock instead of mixing yield_times() with
-        // advance_time(). yield_now() can look idle to Tokio and auto-advance
-        // to the next poller timer, overshooting past the second poll.
+        // Yield so execute can run, then step the paused clock for first-wait
+        // and retry sleeps. Check after each yield so a first poll with a zero
+        // first-wait is visible before further clock jumps.
         for _ in 0..200 {
+            let seen = h1
+                .requests()
+                .iter()
+                .filter(|request| request.path() == path)
+                .count();
+            if seen >= want {
+                return;
+            }
+            yield_times(2).await;
             let seen = h1
                 .requests()
                 .iter()
@@ -2039,17 +2245,103 @@ mod tests {
     }
 
     #[test]
+    fn dashboard_poll_claims_events_timestamped_at_run_start() {
+        let _guard = crate::http2_memory::test_lock();
+        crate::http2_memory::reset_for_tests();
+        block_on_paused(async {
+            let host = pooled_host();
+            let start_ms = crate::tokens::unix_ms(host.context().clock().now());
+            let hit = usage_events_body(TEST_CONVERSATION, start_ms, 11, 2, 0, 0, 0);
+            let h2 = Http2Server::start(vec![
+                Http2Response::new(200).data(tool_step_body()).hold_open(),
+            ])
+            .await;
+            let h1 = Http1Server::start(vec![
+                config_reply(h2.base_url()),
+                Http1Response::new(200).body(hit),
+            ])
+            .await;
+            let account = store_account(&host).await;
+            let mut upstream = upstream(&host, &h1, h2.base_url(), account);
+            restore_production_usage_limits(&mut upstream);
+            let completion = upstream
+                .execute(tool_request(), ProtocolId::OPENAI_CHAT)
+                .await
+                .expect("execute");
+            advance_time(Duration::from_secs(2)).await;
+            let attempt = collect(completion);
+            let control = async {
+                advance_until_usage_polls(&h1, 1).await;
+                std::future::pending::<()>().await;
+            };
+            let Race::Left(result) = race(attempt, control).await else {
+                unreachable!("control remains pending")
+            };
+            let events = result.expect("stream");
+            assert_eq!(
+                last_message_usage(&events).expect("usage"),
+                &usage::from_dashboard(
+                    usage::DashboardTotals {
+                        input: 11,
+                        output: 2,
+                        cache_read: 0,
+                        cache_write: 0,
+                        reasoning: 0,
+                    },
+                    ProtocolId::OPENAI_CHAT,
+                )
+            );
+        });
+    }
+
+    #[test]
+    fn dashboard_poll_does_not_start_a_request_after_the_give_up_deadline() {
+        let _guard = crate::http2_memory::test_lock();
+        crate::http2_memory::reset_for_tests();
+        block_on_paused(async {
+            let h2 = Http2Server::start(vec![
+                Http2Response::new(200).data(tool_step_body()).hold_open(),
+            ])
+            .await;
+            let h1 = Http1Server::start(vec![config_reply(h2.base_url())]).await;
+            let host = pooled_host();
+            let account = store_account(&host).await;
+            let mut upstream = upstream(&host, &h1, h2.base_url(), account);
+            restore_production_usage_limits(&mut upstream);
+            upstream.limits.usage_first_wait = Duration::ZERO;
+            upstream.limits.usage_give_up = Duration::ZERO;
+            upstream.limits.usage_request = Duration::from_secs(5);
+            let events = collect(
+                upstream
+                    .execute(tool_request(), ProtocolId::OPENAI_CHAT)
+                    .await
+                    .expect("execute"),
+            )
+            .await
+            .expect("stream");
+            assert_eq!(last_message_usage(&events).expect("usage"), &usage::zeros());
+            let polls = h1
+                .requests()
+                .iter()
+                .filter(|request| {
+                    request.path() == "/aiserver.v1.DashboardService/GetFilteredUsageEvents"
+                })
+                .count();
+            assert_eq!(polls, 0, "no dashboard request after the give-up deadline");
+        });
+    }
+
+    #[test]
     fn dashboard_poll_sends_team_header_and_body_when_section_5_4_matches() {
         let _guard = crate::http2_memory::test_lock();
         crate::http2_memory::reset_for_tests();
-        crate::team::clear_cache();
         let config_dir = tempfile::tempdir().expect("team config");
         std::fs::write(
             config_dir.path().join("cli-config.json"),
-            r#"{"authId":"u1","activeTeamId":42}"#,
+            r#"{"authInfo":{"authId":"u1","activeTeamId":42}}"#,
         )
         .expect("cli-config");
-        crate::auth::set_test_config_dir(Some(config_dir.path().to_path_buf()));
+        let _team = crate::team::begin_test(Some(config_dir.path().to_path_buf()));
         block_on(async {
             let hit = usage_events_body(TEST_CONVERSATION, 2_000_000_000_000, 11, 2, 0, 0, 0);
             let h2 = Http2Server::start(vec![
@@ -2082,6 +2374,8 @@ mod tests {
                 .await
                 .expect("store");
             let mut upstream = upstream(&host, &h1, h2.base_url(), id);
+            restore_production_usage_limits(&mut upstream);
+            upstream.limits.usage_first_wait = Duration::ZERO;
             upstream.test_conversation_id = Some(TEST_CONVERSATION.to_owned());
             let events = collect(
                 upstream
@@ -2116,8 +2410,6 @@ mod tests {
                 hofund_plugin_sdk::json::from_slice(poll.body()).expect("body");
             assert_eq!(body["teamId"], 42);
         });
-        crate::team::clear_cache();
-        crate::auth::set_test_config_dir(None);
     }
 
     fn max_model_request() -> Request {
@@ -2170,7 +2462,6 @@ mod tests {
             let host = pooled_host();
             let account = store_account(&host).await;
             let upstream = upstream(&host, &h1, h2.base_url(), account);
-            crate::request::take_mapped_max_mode();
             let Completion::Stream(stream) = upstream
                 .execute(max_model_request(), ProtocolId::OPENAI_CHAT)
                 .await
@@ -2187,7 +2478,7 @@ mod tests {
                 "{events:?}"
             );
             assert_eq!(
-                crate::request::take_mapped_max_mode(),
+                upstream.take_mapped_max_mode(),
                 [false, true],
                 "first attempt is off; the retry is Max Mode"
             );
@@ -2205,7 +2496,11 @@ mod tests {
                 panic!("stream");
             };
             drop(collect(Completion::Stream(stream)).await.expect("second"));
-            assert_eq!(crate::request::take_mapped_max_mode(), [true]);
+            assert_eq!(
+                upstream.take_mapped_max_mode(),
+                [true],
+                "later execute is a single Max Mode Run"
+            );
             assert_eq!(
                 h2.requests().len(),
                 3,
@@ -2233,7 +2528,6 @@ mod tests {
             let host = pooled_host();
             let account = store_account(&host).await;
             let upstream = upstream(&host, &h1, h2.base_url(), account);
-            crate::request::take_mapped_max_mode();
             let error = upstream
                 .execute(max_model_request(), ProtocolId::OPENAI_CHAT)
                 .await
@@ -2245,7 +2539,7 @@ mod tests {
                 "{}",
                 error.message()
             );
-            assert_eq!(crate::request::take_mapped_max_mode(), [true]);
+            assert_eq!(upstream.take_mapped_max_mode(), [true]);
             assert_eq!(h2.requests().len(), 1);
         });
         crate::max_only::clear();
@@ -2269,7 +2563,6 @@ mod tests {
             let host = pooled_host();
             let account = store_account(&host).await;
             let upstream = upstream(&host, &h1, h2.base_url(), account);
-            crate::request::take_mapped_max_mode();
             let error = upstream
                 .execute(max_model_request(), ProtocolId::OPENAI_CHAT)
                 .await
@@ -2277,7 +2570,7 @@ mod tests {
                 .expect_err("unrelated failure");
             assert_eq!(error.status(), Some(502));
             assert!(error.message().contains("upstream exploded"));
-            assert_eq!(crate::request::take_mapped_max_mode(), [false]);
+            assert_eq!(upstream.take_mapped_max_mode(), [false]);
             assert_eq!(h2.requests().len(), 1);
             assert!(!crate::max_only::contains("gpt-5.6-luna-high"));
         });

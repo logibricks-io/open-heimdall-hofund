@@ -62,8 +62,8 @@ pub struct Http1Response {
     chunks: Vec<Vec<u8>>,
     chunked: bool,
     chunk_delay: Duration,
+    header_gate: Option<watch::Receiver<bool>>,
     hold_open: bool,
-    park: Option<watch::Receiver<bool>>,
 }
 
 impl Http1Response {
@@ -76,8 +76,8 @@ impl Http1Response {
             chunks: Vec::new(),
             chunked: false,
             chunk_delay: Duration::ZERO,
+            header_gate: None,
             hold_open: false,
-            park: None,
         }
     }
 
@@ -112,21 +112,17 @@ impl Http1Response {
         self
     }
 
+    /// Parks the status and header block until `gate` becomes `true`.
+    #[must_use]
+    pub fn park_headers(mut self, gate: watch::Receiver<bool>) -> Self {
+        self.header_gate = Some(gate);
+        self
+    }
+
     /// Leaves the response body open until server shutdown.
     #[must_use]
     pub fn hold_open(mut self) -> Self {
         self.hold_open = true;
-        self
-    }
-
-    /// Parks the response until `gate` becomes `true`.
-    ///
-    /// The request is recorded first. A dropped sender without a release
-    /// never writes the response, so a test can assert a concurrency
-    /// barrier without a delayed sleep that later races the client.
-    #[must_use]
-    pub fn park(mut self, gate: watch::Receiver<bool>) -> Self {
-        self.park = Some(gate);
         self
     }
 }
@@ -236,7 +232,7 @@ async fn serve_http1(
         .expect("response scripts")
         .pop_front()
         .unwrap_or_else(|| Http1Response::new(200));
-    if let Some(mut gate) = response.park.clone() {
+    if let Some(mut gate) = response.header_gate {
         loop {
             if *gate.borrow() {
                 break;
@@ -395,19 +391,19 @@ impl RecordedHttp2Request {
     }
 }
 
-/// Keeps parked HTTP/2 HEADERS unreleased until dropped or [`HeaderPark::release`].
+/// Keeps parked response headers unreleased until dropped or [`HeaderPark::release`].
 pub struct HeaderPark {
     tx: watch::Sender<bool>,
 }
 
 impl HeaderPark {
-    /// Lets the waiting stream send HEADERS.
+    /// Lets the waiting response send headers.
     pub fn release(self) {
         let _ = self.tx.send(true);
     }
 }
 
-/// A park handle and the gate consumed by [`Http2Response::park_headers`].
+/// A park handle and gate for HTTP/1 or HTTP/2 response headers.
 #[must_use]
 pub fn header_park() -> (HeaderPark, watch::Receiver<bool>) {
     let (tx, rx) = watch::channel(false);

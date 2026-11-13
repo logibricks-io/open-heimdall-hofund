@@ -79,7 +79,8 @@ impl UpstreamProvider for ZcodeUpstream {
             request,
             inbound,
         )
-        .await;
+        .await
+        .map_err(crate::http_auth::classify_upstream_error);
         if let Err(error) = &result
             && matches!(error.kind(), hofund_plugin_api::PluginErrorKind::Auth)
             && stored.auth.team()

@@ -53,6 +53,9 @@ pub struct WindowInfo {
     /// The one model this window covers, or all models.
     #[serde(default)]
     pub scope_model: Option<String>,
+    /// Models exempt from an account-wide window.
+    #[serde(default)]
+    pub excluded_models: Vec<String>,
     /// Window length, used to derive a history cycle's start.
     #[serde(default)]
     pub window_span: Option<Duration>,
@@ -69,6 +72,7 @@ impl WindowInfo {
             span,
             blocking: true,
             scope_model: None,
+            excluded_models: Vec::new(),
             window_span: None,
             reset_after: None,
         }
@@ -126,6 +130,7 @@ impl WindowInfo {
             span,
             blocking: window.blocking(),
             scope_model: window.scope_model().map(str::to_owned),
+            excluded_models: window.excluded_models().to_vec(),
             window_span: None,
             reset_after: None,
         }
@@ -541,6 +546,7 @@ impl QuotaStore {
                             unit: info.span.unit.clone(),
                             blocking: info.blocking,
                             scope_model: info.scope_model.clone(),
+                            excluded_models: info.excluded_models.clone(),
                             window_span: window_span(info),
                             runs_out_at: info.span.runs_out_at.as_ref().and_then(parse_quota_time),
                             runs_out: info.span.runs_out,
@@ -575,6 +581,7 @@ pub fn standing(quota: &Quota, windows: &[WindowInfo], now: SystemTime) -> Quota
         .filter(|info| {
             info.blocking
                 && info.scope_model.is_none()
+                && info.excluded_models.is_empty()
                 && info.span.used >= 100.0
                 && !info
                     .span
@@ -813,6 +820,8 @@ pub struct AllowanceWindow {
     pub blocking: bool,
     /// The model this window covers, or all models.
     pub scope_model: Option<String>,
+    /// Models exempt from an account-wide window.
+    pub excluded_models: Vec<String>,
     /// Window length, when known.
     pub window_span: Option<Duration>,
     /// When a remaining portion lapses apart from the reset.
@@ -828,6 +837,10 @@ impl AllowanceWindow {
         self.scope_model
             .as_deref()
             .is_none_or(|scope| scope.eq_ignore_ascii_case(model))
+            && !self
+                .excluded_models
+                .iter()
+                .any(|excluded| excluded.eq_ignore_ascii_case(model))
     }
 
     fn expired(&self, now: SystemTime) -> bool {
@@ -2171,6 +2184,22 @@ mod tests {
     }
 
     #[test]
+    fn account_window_exclusions_leave_free_models_available() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = QuotaStore::new(dir.path());
+        let now = at(1_900_000_000);
+        let plugin = PluginWindow::new("day", 100, Some(100), None)
+            .expect("window")
+            .with_excluded_models(vec!["SWE-2".to_owned(), "swe-2-high".to_owned()]);
+        store.record_success(quota("p", "a"), vec![WindowInfo::from_plugin(&plugin)], now);
+        let allowance = &store.allowances(now)[0];
+        assert!(!allowance.available("paid-model", now));
+        assert!(allowance.available("swe-2", now));
+        assert!(allowance.available("SWE-2-HIGH", now));
+        assert_eq!(allowance.fullest("swe-2", now), None);
+    }
+
+    #[test]
     fn q9d_held_allowance_frees_after_reset_and_matches_scope_case_insensitively() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = QuotaStore::new(dir.path());
@@ -2305,6 +2334,7 @@ mod tests {
                     unit: String::new(),
                     blocking: true,
                     scope_model: None,
+                    excluded_models: Vec::new(),
                     window_span: None,
                     runs_out_at: None,
                     runs_out: 0.0,
@@ -2320,6 +2350,7 @@ mod tests {
                     unit: String::new(),
                     blocking: true,
                     scope_model: None,
+                    excluded_models: Vec::new(),
                     window_span: None,
                     runs_out_at: None,
                     runs_out: 0.0,

@@ -1,0 +1,25 @@
+[package]
+name = "hofund-sessions"
+description = "Consent-gated, bounded reads of local coding-agent sessions."
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+hofund-plugin-api = { workspace = true }
+hofund-usage = { workspace = true }
+libc = "0.2.180"
+serde = { version = "1.0.228", default-features = false, features = ["derive"] }
+serde_json = "1.0.154"
+tempfile = { workspace = true }
+thiserror = "2.0.21"
+zstd = { workspace = true }
+
+[lints]
+workspace = true

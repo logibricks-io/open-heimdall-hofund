@@ -163,12 +163,26 @@ impl<'a> EngineCredential<'a> {
         Ok(self.put(target)?.map(|change| change.path().to_path_buf()))
     }
 
-    /// Whether the item holds the key. No store means not connected.
-    pub(crate) fn connected(&self, target: &GatewayTarget) -> Result<bool, AgentError> {
+    /// Whether the item holds the key. No store means not connected; a store
+    /// that cannot be read also means not connected, with a warning naming it.
+    pub(crate) fn connected(&self, target: &GatewayTarget) -> (bool, Option<String>) {
         let Ok(store) = self.store() else {
-            return Ok(false);
+            return (false, None);
         };
-        holds(store, &self.item(target), target.token())
+        let item = self.item(target);
+        match store.read(&item) {
+            Ok(held) => (
+                held.is_some_and(|secret| secret.expose_secret() == target.token()),
+                None,
+            ),
+            Err(error) => (
+                false,
+                Some(format!(
+                    "the OS credential store could not be read ({error}), so the item for {} is shown as not connected",
+                    item.url()
+                )),
+            ),
+        }
     }
 
     /// Removes the item when it still holds the key hofund wrote, or with

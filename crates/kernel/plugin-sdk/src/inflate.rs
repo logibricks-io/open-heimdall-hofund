@@ -1,8 +1,10 @@
 //! Inflate helpers for plugin frame decoding.
 
-use std::io::Read;
+use std::io::{Read, Write};
 
+use flate2::Compression;
 use flate2::read::GzDecoder;
+use flate2::write::GzEncoder;
 use hofund_plugin_api::PluginError;
 
 /// Maximum inflated output size for one gzip blob.
@@ -37,6 +39,21 @@ pub fn gzip(input: &[u8]) -> Result<Vec<u8>, PluginError> {
         output.extend_from_slice(&chunk[..read]);
     }
     Ok(output)
+}
+
+/// Compresses one blob as gzip with the same pure-Rust backend as [`gzip`].
+///
+/// # Errors
+///
+/// Returns [`PluginError`] if the in-memory gzip writer fails.
+pub fn compress(input: &[u8]) -> Result<Vec<u8>, PluginError> {
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder
+        .write_all(input)
+        .map_err(|error| PluginError::io(format!("gzip compression failed: {error}")))?;
+    encoder
+        .finish()
+        .map_err(|error| PluginError::io(format!("gzip compression failed: {error}")))
 }
 
 #[cfg(test)]
