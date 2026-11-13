@@ -205,16 +205,15 @@ fn a2c_36_desktop_rereads_rotated_token_on_upstream() {
         secret_text(&stored.credential.access),
         "wb-access-rotated-on-disk"
     );
-    host.http().enqueue(
-        br#"{"id":"chatcmpl-1","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"ok"}}]}"#,
-    );
+    enqueue_empty_config(&host);
+    enqueue_chat_ok(&host);
     let upstream = subscription(&host, None)
         .upstream(&id, host.context())
         .expect("upstream");
     let query = ProbeQuery::new(ProtocolId::OPENAI_CHAT, "deepseek-v3").expect("query");
     block_on(upstream.probe(&query)).expect("probe");
     assert!(
-        host.http().calls()[0]
+        host.http().calls()[1]
             .sensitive_headers()
             .iter()
             .any(|name| name.eq_ignore_ascii_case("authorization"))
@@ -382,15 +381,14 @@ fn a2c_24_upstream_sends_workbuddy_user_agent() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
     let id = seed(&host, 4_000_000_000_000);
-    host.http().enqueue(
-        br#"{"id":"chatcmpl-1","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"ok"}}]}"#,
-    );
+    enqueue_empty_config(&host);
+    enqueue_chat_ok(&host);
     let upstream = subscription(&host, None)
         .upstream(&id, host.context())
         .expect("upstream");
     let query = ProbeQuery::new(ProtocolId::OPENAI_CHAT, "deepseek-v3").expect("query");
     block_on(upstream.probe(&query)).expect("probe");
-    let call = &host.http().calls()[0];
+    let call = &host.http().calls()[1];
     assert_eq!(call.uri(), format!("{CN}/v2/chat/completions"));
     assert_eq!(call.header("content-encoding"), Some("gzip"));
     let body = hofund_plugin_sdk::inflate::gzip(call.body()).expect("gzip chat body");
@@ -504,6 +502,7 @@ fn r55_upstream_restriction_rests_account_with_reference_hint() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
     let id = seed(&host, 4_000_000_000_000);
+    enqueue_empty_config(&host);
     host.http().enqueue_response(
         403,
         &[],
@@ -782,28 +781,27 @@ fn r55_api_key_sign_in_works_for_both_sites_without_exposing_key() {
                 .is_empty()
         );
         assert!(host.http().calls().is_empty());
-        host.http().enqueue(
-            br#"{"id":"chatcmpl-1","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"ok"}}]}"#,
-        );
+        enqueue_empty_config(&host);
+        enqueue_chat_ok(&host);
         let upstream = sub.upstream(&id, host.context()).expect("upstream");
         let query = ProbeQuery::new(ProtocolId::OPENAI_CHAT, "deepseek-v3").expect("query");
         block_on(upstream.probe(&query)).expect("key chat");
         let calls = host.http().calls();
-        assert_eq!(calls.len(), 1);
+        assert_eq!(calls.len(), 2);
         assert!(
-            calls[0]
+            calls[1]
                 .sensitive_headers()
                 .iter()
                 .any(|name| name == "x-api-key")
         );
         assert!(
-            calls[0]
+            calls[1]
                 .sensitive_headers()
                 .iter()
                 .any(|name| name == "authorization")
         );
         assert!(
-            !calls[0]
+            !calls[1]
                 .sensitive_headers()
                 .iter()
                 .any(|name| name == "x-domain")
@@ -856,6 +854,207 @@ fn chat_body(bytes: &[u8]) -> json::Value {
     json::from_slice(&body).expect("chat JSON")
 }
 
+const CHAT_OK: &[u8] = br#"{"id":"chatcmpl-1","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"ok"}}]}"#;
+
+fn enqueue_chat_ok(host: &TestHost) {
+    host.http().enqueue(CHAT_OK);
+}
+
+fn enqueue_empty_config(host: &TestHost) {
+    host.http().enqueue(br#"{"code":0,"data":{"models":[]}}"#);
+}
+
+fn chat_request(model: &str) -> hofund_plugin_api::Request {
+    hofund_plugin_api::Request::new(model)
+}
+
+fn run_chat(
+    upstream: &Arc<dyn hofund_plugin_api::UpstreamProvider>,
+    request: hofund_plugin_api::Request,
+) {
+    block_on(upstream.execute(request, ProtocolId::OPENAI_CHAT)).expect("chat");
+}
+
+fn budget_request(model: &str, limit: u64, max_tokens_field: bool) -> hofund_plugin_api::Request {
+    let mut request = chat_request(model);
+    request.params.max_tokens = Some(limit);
+    if max_tokens_field {
+        request.params.extensions.insert(
+            "originalChatTokenField",
+            json::Value::String("max_tokens".to_owned()),
+        );
+    }
+    request
+}
+
+#[test]
+fn r55c_default_effort_uses_each_models_valid_config_default() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, 4_000_000_000_000);
+    let upstream = subscription(&host, None)
+        .upstream(&id, host.context())
+        .expect("upstream");
+    host.http()
+        .enqueue(include_bytes!("fixtures/config-default-efforts.json").to_vec());
+    for model in ["deepseek-v4.1-flash", "glm-5.2", "fallback-default"] {
+        enqueue_chat_ok(&host);
+        run_chat(&upstream, chat_request(model));
+    }
+    let calls = host.http().calls();
+    assert_eq!(calls.len(), 4);
+    assert!(calls[0].uri().ends_with("/v3/config"));
+    for (call, effort) in calls[1..].iter().zip(["high", "xhigh", "medium"]) {
+        assert!(call.uri().ends_with("/v2/chat/completions"));
+        assert_eq!(call.header("content-encoding"), Some("gzip"));
+        assert_eq!(chat_body(call.body())["reasoning_effort"], effort);
+    }
+}
+
+#[test]
+fn r55c_explicit_effort_is_preserved_without_reading_config() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, 4_000_000_000_000);
+    let upstream = subscription(&host, None)
+        .upstream(&id, host.context())
+        .expect("upstream");
+    for effort in ["none", "low", "max"] {
+        enqueue_chat_ok(&host);
+        let mut request = chat_request("deepseek-v4.1-flash");
+        request
+            .extensions
+            .insert("reasoning_effort", json::json!(effort));
+        run_chat(&upstream, request);
+    }
+    enqueue_chat_ok(&host);
+    let mut nested = chat_request("deepseek-v4.1-flash");
+    nested
+        .extensions
+        .insert("reasoning", json::json!({"effort": "low"}));
+    run_chat(&upstream, nested);
+
+    let calls = host.http().calls();
+    assert_eq!(calls.len(), 4);
+    for (call, effort) in calls[..3].iter().zip(["none", "low", "max"]) {
+        assert_eq!(chat_body(call.body())["reasoning_effort"], effort);
+    }
+    let nested = chat_body(calls[3].body());
+    assert!(nested.get("reasoning_effort").is_none());
+    assert_eq!(nested["reasoning"], json::json!({"effort": "low"}));
+}
+
+#[test]
+fn r55c_models_without_a_valid_default_stay_unchanged() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, 4_000_000_000_000);
+    let upstream = subscription(&host, None)
+        .upstream(&id, host.context())
+        .expect("upstream");
+    host.http()
+        .enqueue(include_bytes!("fixtures/config-default-efforts.json").to_vec());
+    for model in ["auto", "odd-default", "not-listed"] {
+        enqueue_chat_ok(&host);
+        run_chat(&upstream, chat_request(model));
+    }
+    let calls = host.http().calls();
+    assert_eq!(calls.len(), 4);
+    for call in &calls[1..] {
+        assert!(chat_body(call.body()).get("reasoning_effort").is_none());
+    }
+}
+
+#[test]
+fn r55c_failed_default_config_leaves_chats_unchanged_and_is_cached() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, 4_000_000_000_000);
+    let upstream = subscription(&host, None)
+        .upstream(&id, host.context())
+        .expect("upstream");
+    host.http().enqueue_response(502, &[], b"down");
+    for _ in 0..2 {
+        enqueue_chat_ok(&host);
+        run_chat(&upstream, chat_request("deepseek-v4.1-flash"));
+    }
+    let calls = host.http().calls();
+    assert_eq!(calls.len(), 3);
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| call.uri().ends_with("/v3/config"))
+            .count(),
+        1
+    );
+    for call in &calls[1..] {
+        assert!(chat_body(call.body()).get("reasoning_effort").is_none());
+    }
+}
+
+#[test]
+fn r55c_small_budgets_suppress_only_the_default_effort() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, 4_000_000_000_000);
+    let upstream = subscription(&host, None)
+        .upstream(&id, host.context())
+        .expect("upstream");
+    host.http()
+        .enqueue(include_bytes!("fixtures/config-default-efforts.json").to_vec());
+    for limit in [64, 100, 256, 1000, 1024] {
+        enqueue_chat_ok(&host);
+        run_chat(
+            &upstream,
+            budget_request("deepseek-v4.1-flash", limit, true),
+        );
+    }
+    enqueue_chat_ok(&host);
+    run_chat(&upstream, budget_request("deepseek-v4.1-flash", 64, false));
+    enqueue_chat_ok(&host);
+    let mut explicit = budget_request("deepseek-v4.1-flash", 64, true);
+    explicit
+        .extensions
+        .insert("reasoning_effort", json::json!("low"));
+    run_chat(&upstream, explicit);
+    for (limit, max_tokens_field) in [(1025, true), (32000, false), (0, true)] {
+        enqueue_chat_ok(&host);
+        run_chat(
+            &upstream,
+            budget_request("deepseek-v4.1-flash", limit, max_tokens_field),
+        );
+    }
+
+    let calls = host.http().calls();
+    assert_eq!(calls.len(), 11);
+    let bodies = calls[1..]
+        .iter()
+        .map(|call| chat_body(call.body()))
+        .collect::<Vec<_>>();
+    for body in &bodies[..6] {
+        assert!(body.get("reasoning_effort").is_none());
+    }
+    assert_eq!(bodies[6]["reasoning_effort"], "low");
+    for body in &bodies[7..] {
+        assert_eq!(body["reasoning_effort"], "high");
+    }
+
+    let dir = tempfile::tempdir().expect("dir");
+    let ai_host = host_at(&dir, SystemTime::UNIX_EPOCH);
+    let id = seed_site(&ai_host, 4_000_000_000_000, Site::International);
+    let upstream = subscription(&ai_host, None)
+        .upstream(&id, ai_host.context())
+        .expect("upstream");
+    ai_host
+        .http()
+        .enqueue(include_bytes!("fixtures/config-default-efforts.json").to_vec());
+    enqueue_chat_ok(&ai_host);
+    run_chat(&upstream, budget_request("deepseek-v4.1-flash", 64, true));
+    let calls = ai_host.http().calls();
+    assert_eq!(calls.len(), 2);
+    assert!(chat_body(calls[1].body()).get("reasoning_effort").is_none());
+}
+
 fn after_tools_request(model: &str, prefill: bool) -> hofund_plugin_api::Request {
     use hofund_plugin_api::{ContentPart, Extensions, Message, Request, Role, ToolResultPart};
 
@@ -881,15 +1080,14 @@ fn r55c_after_tools_refusal_retries_once_and_learns_per_model() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
     let id = seed(&host, 4_000_000_000_000);
+    enqueue_empty_config(&host);
     host.http().enqueue_response(
         400,
         &[],
         br#"{"code":11153,"msg":"the conversation must end with a user message"}"#.to_vec(),
     );
     for _ in 0..3 {
-        host.http().enqueue(
-            br#"{"id":"chatcmpl-1","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"ok"}}]}"#,
-        );
+        enqueue_chat_ok(&host);
     }
     let upstream = subscription(&host, None)
         .upstream(&id, host.context())
@@ -903,7 +1101,7 @@ fn r55c_after_tools_refusal_retries_once_and_learns_per_model() {
             .expect("served");
     }
     let calls = host.http().calls();
-    assert_eq!(calls.len(), 4);
+    assert_eq!(calls.len(), 5);
     let roles = |at: usize| {
         chat_body(calls[at].body())["messages"]
             .as_array()
@@ -912,11 +1110,11 @@ fn r55c_after_tools_refusal_retries_once_and_learns_per_model() {
             .map(|message| message["role"].as_str().expect("role").to_owned())
             .collect::<Vec<_>>()
     };
-    assert_eq!(roles(0), ["user", "tool", "user"]);
-    assert_eq!(roles(1), ["user", "tool", "assistant", "user"]);
-    assert_eq!(chat_body(calls[1].body())["messages"][2]["content"], "");
+    assert_eq!(roles(1), ["user", "tool", "user"]);
     assert_eq!(roles(2), ["user", "tool", "assistant", "user"]);
-    assert_eq!(roles(3), ["user", "tool", "user"]);
+    assert_eq!(chat_body(calls[2].body())["messages"][2]["content"], "");
+    assert_eq!(roles(3), ["user", "tool", "assistant", "user"]);
+    assert_eq!(roles(4), ["user", "tool", "user"]);
 }
 
 #[test]
@@ -924,6 +1122,7 @@ fn r55c_after_tools_prefill_is_not_retried() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
     let id = seed(&host, 4_000_000_000_000);
+    enqueue_empty_config(&host);
     host.http().enqueue_response(
         400,
         &[],
@@ -939,7 +1138,7 @@ fn r55c_after_tools_prefill_is_not_retried() {
     .err()
     .expect("prefill refused");
     assert_eq!(error.status(), Some(400));
-    assert_eq!(host.http().calls().len(), 1);
+    assert_eq!(host.http().calls().len(), 2);
 }
 
 #[test]
@@ -1043,9 +1242,8 @@ fn r55c_reasoning_history_is_sent_as_reasoning() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
     let id = seed(&host, 4_000_000_000_000);
-    host.http().enqueue(
-        br#"{"id":"chatcmpl-1","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"ok"}}]}"#,
-    );
+    enqueue_empty_config(&host);
+    enqueue_chat_ok(&host);
     let upstream = subscription(&host, None)
         .upstream(&id, host.context())
         .expect("upstream");
@@ -1061,7 +1259,7 @@ fn r55c_reasoning_history_is_sent_as_reasoning() {
         },
     );
     block_on(upstream.execute(request, ProtocolId::OPENAI_CHAT)).expect("served");
-    let body = chat_body(host.http().calls()[0].body());
+    let body = chat_body(host.http().calls()[1].body());
     let assistant = &body["messages"][1];
     assert_eq!(
         assistant["reasoning"],

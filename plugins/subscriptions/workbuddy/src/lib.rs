@@ -128,6 +128,7 @@ impl SubscriptionFactory for WorkBuddyFactory {
             flow: SignInFlow::TokenFile,
             pending: Mutex::new(HashMap::new()),
             after_tools: Arc::new(Mutex::new(HashSet::new())),
+            effort_defaults: Arc::new(models::EffortDefaults::new()),
         }))
     }
 }
@@ -137,6 +138,7 @@ struct WorkBuddy {
     flow: SignInFlow,
     pending: Mutex<HashMap<String, sign_in::Pending>>,
     after_tools: Arc<Mutex<HashSet<String>>>,
+    effort_defaults: Arc<models::EffortDefaults>,
 }
 
 #[hofund_plugin_sdk::async_trait]
@@ -323,6 +325,7 @@ impl Subscription for WorkBuddy {
             host.clone(),
             Arc::clone(&self.endpoints),
             Arc::clone(&self.after_tools),
+            Arc::clone(&self.effort_defaults),
         )))
     }
 

@@ -16,11 +16,49 @@ use crate::refresh;
 use crate::site::Site;
 use crate::tools;
 
+const SMALL_BUDGET: u64 = 1024;
+
+fn names_effort(request: &Request) -> bool {
+    request.params.effort.is_some()
+        || request.extensions.get("reasoning_effort").is_some()
+        || request
+            .extensions
+            .get("reasoning")
+            .and_then(Value::as_object)
+            .is_some_and(|reasoning| reasoning.contains_key("effort"))
+}
+
+fn apply_default_effort(body: &mut Map<String, Value>, default: Option<&str>) {
+    let names_effort = body.contains_key("reasoning_effort")
+        || body
+            .get("reasoning")
+            .and_then(Value::as_object)
+            .is_some_and(|reasoning| reasoning.contains_key("effort"));
+    if names_effort {
+        return;
+    }
+    let limit = body
+        .get("max_tokens")
+        .filter(|limit| !limit.is_null())
+        .or_else(|| body.get("max_completion_tokens"))
+        .and_then(Value::as_u64);
+    if limit.is_some_and(|limit| limit > 0 && limit <= SMALL_BUDGET) {
+        return;
+    }
+    if let Some(default) = default {
+        body.insert(
+            "reasoning_effort".to_owned(),
+            Value::String(default.to_owned()),
+        );
+    }
+}
+
 pub(crate) struct WorkBuddyUpstream {
     account: AccountId,
     host: HostContext,
     endpoints: Arc<Endpoints>,
     after_tools: Arc<Mutex<HashSet<String>>>,
+    effort_defaults: Arc<crate::models::EffortDefaults>,
 }
 
 impl WorkBuddyUpstream {
@@ -29,12 +67,14 @@ impl WorkBuddyUpstream {
         host: HostContext,
         endpoints: Arc<Endpoints>,
         after_tools: Arc<Mutex<HashSet<String>>>,
+        effort_defaults: Arc<crate::models::EffortDefaults>,
     ) -> Self {
         Self {
             account,
             host,
             endpoints,
             after_tools,
+            effort_defaults,
         }
     }
 
@@ -79,6 +119,19 @@ impl WorkBuddyUpstream {
     ) -> Result<Completion, PluginError> {
         let base = self.endpoints.base_for(stored.credential.site);
         let url = format!("{base}/v2");
+        let default_effort = if names_effort(&request) {
+            None
+        } else {
+            self.effort_defaults
+                .get(
+                    &self.host,
+                    Arc::clone(&self.endpoints),
+                    stored,
+                    &self.account,
+                    &request.model,
+                )
+                .await
+        };
         let mut header_rows: Vec<(String, String)> =
             creds::signed_headers(&stored.credential, base)
                 .into_iter()
@@ -95,6 +148,7 @@ impl WorkBuddyUpstream {
             .headers(header_rows)
             .request_body_gzip(true)
             .rewrite(Arc::new(move |body| {
+                apply_default_effort(body, default_effort.as_deref());
                 let fitted_names = tools::prepare(body, after_tools);
                 *fitted
                     .lock()

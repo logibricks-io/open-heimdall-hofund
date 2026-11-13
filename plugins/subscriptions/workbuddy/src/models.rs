@@ -1,14 +1,110 @@
 //! Model list from WorkBuddy `/v3/config`.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use hofund_plugin_api::{HostContext, ModelList, ModelSpec, PluginError};
+use hofund_plugin_api::{AccountId, HostContext, ModelList, ModelSpec, PluginError};
 use hofund_plugin_sdk::json::Value;
 use hofund_plugin_sdk::{Call, Reply};
 
 use crate::Endpoints;
 use crate::creds::{Stored, apply_signed_headers};
 use crate::site::Site;
+
+const EFFORT_CONFIG_TTL: Duration = Duration::from_secs(60);
+
+pub(crate) struct EffortDefaults {
+    entries: Mutex<HashMap<AccountId, EffortEntry>>,
+}
+
+struct EffortEntry {
+    at: std::time::SystemTime,
+    defaults: HashMap<String, String>,
+}
+
+impl EffortDefaults {
+    pub(crate) fn new() -> Self {
+        Self {
+            entries: Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub(crate) async fn get(
+        &self,
+        host: &HostContext,
+        endpoints: Arc<Endpoints>,
+        stored: &Stored,
+        account: &AccountId,
+        model: &str,
+    ) -> Option<String> {
+        let now = host.clock().now();
+        let cached = self
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(account)
+            .filter(|entry| {
+                now.duration_since(entry.at)
+                    .is_ok_and(|age| age < EFFORT_CONFIG_TTL)
+            })
+            .map(|entry| entry.defaults.get(model).cloned());
+        if let Some(default) = cached {
+            return default;
+        }
+        let defaults = config(host, endpoints, stored)
+            .await
+            .ok()
+            .map(|reply| configured_defaults(reply.body()))
+            .unwrap_or_default();
+        let default = defaults.get(model).cloned();
+        self.entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                account.clone(),
+                EffortEntry {
+                    at: host.clock().now(),
+                    defaults,
+                },
+            );
+        default
+    }
+}
+
+fn configured_defaults(body: &[u8]) -> HashMap<String, String> {
+    let Ok(root) = hofund_plugin_sdk::json::from_slice::<Value>(body) else {
+        return HashMap::new();
+    };
+    let Some(items) = config_items(&root) else {
+        return HashMap::new();
+    };
+    items
+        .iter()
+        .filter_map(|item| {
+            let map = item.as_object()?;
+            let id = map.get("id")?.as_str()?;
+            let default = default_effort_of(map, id)?;
+            Some((id.to_owned(), default))
+        })
+        .collect()
+}
+
+fn default_effort_of(
+    map: &hofund_plugin_sdk::json::Map<String, Value>,
+    id: &str,
+) -> Option<String> {
+    let reasoning = map.get("reasoning")?;
+    let own = reasoning
+        .get("defaultEffort")
+        .or_else(|| reasoning.get("effort"))?
+        .as_str()?;
+    effort_names(map, id)
+        .into_iter()
+        .filter(|effort| effort != "none")
+        .any(|effort| effort == own)
+        .then(|| own.to_owned())
+}
 
 const CN_MODELS: &[(&str, &str, u64)] = &[
     ("auto", "Auto", 168000),
