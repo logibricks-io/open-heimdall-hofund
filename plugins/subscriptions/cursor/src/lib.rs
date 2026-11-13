@@ -21,6 +21,7 @@ mod connect;
 mod discover;
 mod endpoints;
 mod exchange;
+mod failure;
 mod frame;
 mod http2_memory;
 mod import;

@@ -99,24 +99,23 @@ Every other gap below maps to an existing plan item.
 | b | import sources | Agent home `.cursor` auth + keychain | `AgentSignIn` + discover (`lib.rs:37-41`) | Partial | Team id from cli-config for billing (`cursor/index.mjs:120-177`) |
 | c | token storage | Plugin session store; core mover side logins | Daemon secret blob + optional agent read-only | Partial | Persist team/active org metadata if needed for quota |
 | d | refresh | `cursor-agent status` / token TTL (`cursor/index.mjs:182-194`, CLI_MARK) | `refresh.rs` + `session.rs` spawn status | Partial | Serialize refresh like plugin; API key token refresh |
-| e | upstream wire | Connect bidi `AgentService/Run` + HTTP/1 RunSSE + BidiAppend (`cursor/index.mjs:13-17`, `44-46`) | `run.rs` incrementally reads either transport, answers KV/exec, and sends heartbeats; `upstream.rs` opens one stateless Run per execute | Partial | Region retry and stall handling (**R-8g**); tools and detailed errors (**R-8g**, **R-9**) |
+| e | upstream wire | Connect bidi `AgentService/Run` + HTTP/1 RunSSE + BidiAppend (`cursor/index.mjs:13-17`, `44-46`) | `run.rs` incrementally reads either transport, answers KV/exec, sends heartbeats, and enforces monotonic idle/quiet limits; `upstream.rs` opens one stateless Run per execute and retries one regional failure after fresh host discovery | Partial | Tools (**R-9**) |
 | f | inbound shapes | OpenAI-compatible chat to plugin fetch (`cursor/index.mjs:29-30`) | Canonical IR text history maps to stable JSON transcript blobs plus the protobuf user turn in `request.rs`; gateway codecs supply the IR | Partial | Tools and images (**R-9**) |
-| g | streaming | Connect stream / RunSSE (`cursor/index.mjs:13-17`) | `Completion::Stream` starts only after the first text delta, then emits text and the clean EndTurn trio; empty turns may end without it | Partial | Usage, reasoning, tools, and empty-reply/stall wording (**R-8g**, **R-9**) |
+| g | streaming | Connect stream / RunSSE (`cursor/index.mjs:13-17`) | `Completion::Stream` starts only after the first text delta, then emits text and the clean EndTurn trio; an empty turn is a non-cooling 502, pre-text stalls have idle/quiet diagnostics, and post-text stalls say the upstream stopped sending | Partial | Usage, reasoning, and tools (**R-9**) |
 | h | tool calls | MCP `CallDynamicTool` (`cursor/index.mjs:21-26`, `51`) | Not served | Missing | **R-9** |
 | i | images | unverified in core; plugin native session handles blobs | Not served | Missing | **R-9** |
 | j | reasoning | Plugin tests `reasoning.test.mjs`; max mode | Not served | Missing | **R-9** |
 | k | quota / usage | Connect `GetCurrentPeriodUsage`, team header (`cursor/index.mjs:171-176`, `connect.rs` parity) | `quota()` via Connect unary (`lib.rs:306-322`, `connect.rs:9-38`) | Partial | Deferred/step usage, credit events (`cursor/deferred-usage.test.mjs`) — **R-9** |
 | l | model list | Plugin catalog + agent list; core `cursor_models.go` contexts | `cursor-agent models` parse + family fold (`models.rs`, `lib.rs:337-362`) | Partial | Server-side catalog merge like plugin (`catalog.test.mjs`) |
 | m | multi-account | Team id per token (`activeTeamId`) | Multiple accounts; team header not evident in hofund Connect calls | Partial | `x-cursor-team-id` on chat + usage (**R-8**) |
-| n | error classification | Plugin maps budget/refusal (`errors.test.mjs`) | Connect HTTP errors and generic 502 Run terminal failures | Partial | Region, empty-reply, stall, and full error-table mapping (**R-8g**, **R-9**) |
+| n | error classification | Plugin maps budget/refusal (`errors.test.mjs`) | `failure.rs` implements the text-only section 6 table: regional/permission 403, status-style 401, quota vs rate 429, context overflow and invalid input 400, unavailable 503, other Connect codes 502, and unchanged bare HTTP statuses | Partial | Max Mode retry (**R-9**) |
 | o | warmup / keepalive | none found (no keepalive in the Cursor core or its auth plugin) | None | N/A | — |
 | p | agent sign-in | Core `cursorStatus` mark (`cursor.go:59-80`) | discover/import (`lib.rs:383-396`) | Done | — |
 | q | extras | HTTP/2 fallback, ghost mode, client version string (`cursor/index.mjs:48`, `connect.rs:24-26`) | Run headers and HTTP/2 transport plus RunSSE/BidiAppend fallback in `run.rs`, with loopback tests | Partial | Team-id discovery hook is still optional and production execute passes `None` |
 
 ### Gaps (Cursor)
 
-- Region retry, empty-reply/stall wording, and full Run error classification — **R-8g**, **R-9**
-- Tools, reasoning, images, usage detail — **L**, **R-9**
+- Tools, reasoning, images, usage detail, effort, and Max Mode — **L**, **R-9**
 - CURSOR_API_KEY exchange sign-in — **M**, **R-8**
 - Team billing header — **S**, **R-8**
 
