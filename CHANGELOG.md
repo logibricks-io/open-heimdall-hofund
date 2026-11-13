@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- v0.2.0 release checklist and runbook (Must #12): preflight of remaining
+  must-list work, dry-run including the Windows `hofund.exe serve` check
+  (#357), version-bump and tag steps that this tree has not performed,
+  and real-account smoke deferred to Palmer (#58, #304, #310). This entry
+  does not bump the crate version or ship a tag.
 - Documentation honesty for the v0.2.0 freeze (Must #11, #274):
   `docs/feature-parity.md` snapshot and Summary counts match the Matrix
   (an xtask invariant refuses drift); README, CLI help, and subscription crate
