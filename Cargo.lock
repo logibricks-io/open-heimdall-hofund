@@ -2251,7 +2251,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "signal-hook 0.4.5",
+ "signal-hook 0.4.6",
  "tempfile",
  "tokio",
  "toml 0.8.2",
@@ -5054,7 +5054,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5562,9 +5562,9 @@ dependencies = [
 
 [[package]]
 name = "signal-hook"
-version = "0.4.5"
+version = "0.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b29ffa27d3d59a049bb328258de100f8012848d1b08d444e08bbc02ac468435e"
+checksum = "49f7447afd772ca79ad17ae0a3972a6b0df0cb4b80990fd82707593e9e012a74"
 dependencies = [
  "libc",
  "signal-hook-registry",
