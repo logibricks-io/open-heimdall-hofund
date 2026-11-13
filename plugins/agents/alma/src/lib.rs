@@ -10,8 +10,8 @@
 use std::path::{Path, PathBuf};
 
 use hofund_plugin_api::{
-    PluginError, SessionDatabase, SessionFile, SessionFormat, SessionLocator, SessionParser,
-    SessionRecord, SessionStore, SessionTokens, SessionValue,
+    PluginError, SessionDatabase, SessionDay, SessionFile, SessionFormat, SessionLocator,
+    SessionParser, SessionRecord, SessionStore, SessionTokens, SessionValue,
 };
 use hofund_plugin_sdk::{chrono, json};
 use json::Value;
@@ -248,7 +248,7 @@ fn apply_usage(
     thread_id: &str,
     record: &mut SessionRecord,
 ) -> Result<(), PluginError> {
-    let sql = "SELECT model, provider_id, input_tokens, output_tokens, cached_input_tokens, cache_write_input_tokens FROM usage_records WHERE thread_id = ?";
+    let sql = "SELECT model, provider_id, input_tokens, output_tokens, cached_input_tokens, cache_write_input_tokens, date, timestamp FROM usage_records WHERE thread_id = ?";
     let rows = database
         .query(sql, &[thread_id])
         .map_err(|_| PluginError::decode("cannot read alma usage"))?;
@@ -266,9 +266,11 @@ fn apply_usage(
             u64::try_from(cache_read).unwrap_or(0),
             u64::try_from(cache_write).unwrap_or(0),
         );
-        record.add_usage(name, tokens);
+        let date = usage_date(&text_at(row, 6), &text_at(row, 7), record.last_ms);
+        record.add_usage(name.clone(), tokens);
+        record.add_day(SessionDay::new(date, name, tokens));
     }
-    let sql = "SELECT model, provider_id, input_tokens, output_tokens FROM aux_usage_records WHERE thread_id = ?";
+    let sql = "SELECT model, provider_id, input_tokens, output_tokens, date, timestamp FROM aux_usage_records WHERE thread_id = ?";
     let rows = database
         .query(sql, &[thread_id])
         .map_err(|_| PluginError::decode("cannot read alma aux usage"))?;
@@ -278,17 +280,39 @@ fn apply_usage(
         let input = i64::try_from(int_at(row, 2)).unwrap_or(0).max(0);
         let output = i64::try_from(int_at(row, 3)).unwrap_or(0).max(0);
         let name = alma_model(&model, &provider);
-        record.add_usage(
-            name,
-            SessionTokens::new(
-                u64::try_from(input).unwrap_or(0),
-                u64::try_from(output).unwrap_or(0),
-                0,
-                0,
-            ),
+        let tokens = SessionTokens::new(
+            u64::try_from(input).unwrap_or(0),
+            u64::try_from(output).unwrap_or(0),
+            0,
+            0,
         );
+        let date = usage_date(&text_at(row, 4), &text_at(row, 5), record.last_ms);
+        record.add_usage(name.clone(), tokens);
+        record.add_day(SessionDay::new(date, name, tokens));
     }
     Ok(())
+}
+
+fn usage_date(date: &str, timestamp: &str, fallback_ms: i64) -> String {
+    let ms = alma_time_ms(timestamp);
+    if let Some(at) = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms)
+        && ms > 0
+    {
+        return at
+            .with_timezone(&chrono::Local)
+            .format("%Y-%m-%d")
+            .to_string();
+    }
+    if let Ok(date) = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d") {
+        return date.format("%Y-%m-%d").to_string();
+    }
+    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(fallback_ms)
+        .map(|at| {
+            at.with_timezone(&chrono::Local)
+                .format("%Y-%m-%d")
+                .to_string()
+        })
+        .unwrap_or_default()
 }
 
 fn alma_model(model: &str, provider_id: &str) -> String {
@@ -499,6 +523,10 @@ mod tests {
             }
             Err(PluginError::decode("unexpected alma test query"))
         }
+
+        fn revision(&self) -> Result<i64, PluginError> {
+            Ok(1)
+        }
     }
 
     fn thread_row(id: &str, title: &str) -> Vec<SessionValue> {
@@ -569,7 +597,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_usage_subtracts_cached_input_tokens() {
+    fn apply_usage_subtracts_cached_input_tokens_and_adds_daily_totals() {
         let mut db = FakeDb::empty();
         db.usage.insert(
             "t1".into(),
@@ -580,16 +608,48 @@ mod tests {
                 SessionValue::Integer(2),
                 SessionValue::Integer(3),
                 SessionValue::Integer(1),
+                SessionValue::Text("2026-10-01".into()),
+                SessionValue::Text("2026-10-01T10:00:05.000Z".into()),
+            ]],
+        );
+        db.aux.insert(
+            "t1".into(),
+            vec![vec![
+                SessionValue::Text("aux".into()),
+                SessionValue::Text(String::new()),
+                SessionValue::Integer(4),
+                SessionValue::Integer(1),
+                SessionValue::Text("2026-10-02".into()),
+                SessionValue::Text(String::new()),
             ]],
         );
         let mut record = SessionRecord::new("alma", "alma:t1", "x");
         apply_usage(&db, "t1", &mut record).expect("usage");
         let tokens = record.tokens();
-        assert_eq!(tokens.input, 7);
-        assert_eq!(tokens.output, 2);
+        assert_eq!(tokens.input, 11);
+        assert_eq!(tokens.output, 3);
         assert_eq!(tokens.cache_read, 3);
         assert_eq!(tokens.cache_write, 1);
         assert_eq!(record.models.get("gpt").map(|t| t.input), Some(7));
+        let expected = chrono::DateTime::parse_from_rfc3339("2026-10-01T10:00:05.000Z")
+            .expect("timestamp")
+            .with_timezone(&chrono::Local)
+            .format("%Y-%m-%d")
+            .to_string();
+        let day = record
+            .days
+            .iter()
+            .find(|day| day.model == "gpt")
+            .expect("usage day");
+        assert_eq!(day.date, expected);
+        assert_eq!(day.tokens, SessionTokens::new(7, 2, 3, 1));
+        let aux = record
+            .days
+            .iter()
+            .find(|day| day.model == "aux")
+            .expect("aux day");
+        assert_eq!(aux.date, "2026-10-02");
+        assert_eq!(aux.tokens, SessionTokens::new(4, 1, 0, 0));
     }
 
     #[test]

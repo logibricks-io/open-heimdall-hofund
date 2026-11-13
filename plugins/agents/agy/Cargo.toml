@@ -13,7 +13,6 @@ rust-version.workspace = true
 [dependencies]
 hofund-plugin-api = { workspace = true }
 hofund-plugin-sdk = { workspace = true }
-rusqlite = { version = "0.41.0", default-features = false, features = ["bundled"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

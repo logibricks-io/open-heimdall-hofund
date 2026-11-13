@@ -379,6 +379,8 @@ pub struct SessionFile {
     pub format: SessionFormat,
     /// Additional listed files that form the same session.
     pub related: Vec<PathBuf>,
+    /// Related SQLite databases read through the kernel's bounded connection.
+    pub related_databases: Vec<PathBuf>,
 }
 
 impl SessionFile {
@@ -391,6 +393,7 @@ impl SessionFile {
             compression: SessionCompression::None,
             format: SessionFormat::JsonLines,
             related: Vec::new(),
+            related_databases: Vec::new(),
         }
     }
 
@@ -412,6 +415,13 @@ impl SessionFile {
     #[must_use]
     pub fn with_related(mut self, related: Vec<PathBuf>) -> Self {
         self.related = related;
+        self
+    }
+
+    /// Adds related SQLite databases opened and bounded by the kernel.
+    #[must_use]
+    pub fn with_related_databases(mut self, databases: Vec<PathBuf>) -> Self {
+        self.related_databases = databases;
         self
     }
 }

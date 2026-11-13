@@ -1,4 +1,4 @@
-//! Cursor session discovery and parsing for CLI chats and editor transcripts.
+//! Cursor session discovery and parsing for CLI chats and editor databases/transcripts.
 
 #![deny(missing_docs, unreachable_pub, rust_2018_idioms)]
 #![warn(
@@ -40,11 +40,13 @@ impl CursorStore {
     /// Uses explicit roots, for tests.
     #[must_use]
     pub fn with_roots(cli_root: impl Into<PathBuf>, data_root: impl Into<PathBuf>) -> Self {
+        let data_root = data_root.into();
         Self {
             locator: CursorLocator {
                 root: cli_root.into(),
+                data_root: data_root.clone(),
             },
-            data_root: data_root.into(),
+            data_root,
         }
     }
 
@@ -62,10 +64,11 @@ impl Default for CursorStore {
     }
 }
 
-/// CLI config directory locator.
+/// CLI config and editor data locator.
 #[derive(Clone, Debug)]
 pub struct CursorLocator {
     root: PathBuf,
+    data_root: PathBuf,
 }
 
 impl SessionLocator for CursorLocator {
@@ -75,6 +78,10 @@ impl SessionLocator for CursorLocator {
 
     fn present(&self) -> bool {
         self.root.join("chats").is_dir()
+            || self.data_root.join("projects").is_dir()
+            || editor_database_paths(&self.data_root)
+                .into_iter()
+                .any(|path| path.is_file())
     }
 }
 
@@ -91,6 +98,7 @@ impl SessionStore for CursorStore {
         let mut files = cli_chat_files(root)?;
         let cli_ids: BTreeSet<String> = files.iter().map(|file| file.id.clone()).collect();
         files.extend(editor_transcript_files(&self.data_root, &cli_ids)?);
+        files.extend(editor_database_files(&self.data_root));
         Ok(files)
     }
 
@@ -116,6 +124,9 @@ impl SessionStore for CursorStore {
         file: &SessionFile,
         database: &dyn SessionDatabase,
     ) -> Result<Vec<SessionRecord>, PluginError> {
+        if file.path.file_name().and_then(|name| name.to_str()) == Some("state.vscdb") {
+            return read_editor_kv(database, &file.path);
+        }
         let chat_dir = file
             .path
             .parent()
@@ -140,9 +151,9 @@ impl SessionStore for CursorStore {
         Ok(vec![record])
     }
 
-    fn resume_argv(&self, session_id: &str, _path: &Path) -> Option<Vec<String>> {
+    fn resume_argv(&self, session_id: &str, path: &Path) -> Option<Vec<String>> {
         let id = session_id.strip_prefix(&format!("{AGENT}:"))?;
-        if !safe_id(id) {
+        if !safe_id(id) || path.file_name().and_then(|name| name.to_str()) != Some("store.db") {
             return None;
         }
         Some(vec![
@@ -270,6 +281,25 @@ fn editor_transcript_files(
     Ok(files)
 }
 
+fn editor_database_paths(data_root: &Path) -> Vec<PathBuf> {
+    vec![
+        data_root.join("state.vscdb"),
+        data_root.join("globalStorage/state.vscdb"),
+        data_root.join("User/globalStorage/state.vscdb"),
+    ]
+}
+
+fn editor_database_files(data_root: &Path) -> Vec<SessionFile> {
+    editor_database_paths(data_root)
+        .into_iter()
+        .filter(|path| path.is_file())
+        .enumerate()
+        .map(|(index, path)| {
+            SessionFile::new(format!("editor-{index}"), path).with_format(SessionFormat::Sqlite)
+        })
+        .collect()
+}
+
 fn walk_transcript_jsonl(projects: &Path, out: &mut Vec<PathBuf>) -> Result<(), PluginError> {
     let entries =
         std::fs::read_dir(projects).map_err(|_| PluginError::io("cannot list cursor projects"))?;
@@ -345,6 +375,105 @@ fn transcript_has_messages(path: &Path) -> Result<bool, PluginError> {
         }
     }
     Ok(false)
+}
+
+fn read_editor_kv(
+    database: &dyn SessionDatabase,
+    path: &Path,
+) -> Result<Vec<SessionRecord>, PluginError> {
+    let rows = database
+        .query("SELECT key, value FROM cursorDiskKV", &[])
+        .map_err(|_| PluginError::decode("cannot read cursor editor sessions"))?;
+    let cut = rows.cut;
+    let mut seen = BTreeSet::new();
+    let mut records = Vec::new();
+    for row in &rows.values {
+        let key = kv_text(row.first());
+        let Some(key_id) = key.strip_prefix("composerData:") else {
+            continue;
+        };
+        let text = kv_text(row.get(1));
+        let Ok(value) = json::from_str::<Value>(&text) else {
+            continue;
+        };
+        let id = value
+            .get("composerId")
+            .or_else(|| value.get("id"))
+            .and_then(Value::as_str)
+            .unwrap_or(key_id);
+        if !safe_id(id) || !seen.insert(id.to_owned()) {
+            continue;
+        }
+        let public_id = format!("{AGENT}:{id}");
+        let mut record = SessionRecord::new(AGENT, &public_id, path);
+        if let Some(title) = ["name", "title", "customTitle"]
+            .into_iter()
+            .find_map(|key| {
+                value
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .map(cursor_title)
+                    .filter(|title| !title.is_empty())
+            })
+        {
+            record.title = title;
+        }
+        if let Some(cwd) = ["cwd", "folder", "workspace"].into_iter().find_map(|key| {
+            value.get(key).and_then(|value| {
+                value
+                    .as_str()
+                    .or_else(|| value.get("path").and_then(Value::as_str))
+            })
+        }) {
+            cwd.clone_into(&mut record.cwd);
+        }
+        record.start_ms = editor_ms(&value, &["createdAt", "createdAtMs", "created_at"]);
+        record.last_ms = editor_ms(
+            &value,
+            &[
+                "lastUpdatedAt",
+                "updatedAt",
+                "lastUpdatedAtMs",
+                "updated_at",
+            ],
+        )
+        .max(record.start_ms);
+        record.cut = cut;
+        records.push(record);
+    }
+    records.sort_by(|left, right| left.id.cmp(&right.id));
+    Ok(records)
+}
+
+fn kv_text(value: Option<&SessionValue>) -> String {
+    match value {
+        Some(SessionValue::Text(text)) => text.clone(),
+        Some(SessionValue::Blob(bytes)) => String::from_utf8_lossy(bytes).into_owned(),
+        _ => String::new(),
+    }
+}
+
+fn editor_ms(value: &Value, keys: &[&str]) -> i64 {
+    for key in keys {
+        let Some(value) = value.get(*key) else {
+            continue;
+        };
+        if let Some(ms) = value.as_i64() {
+            return ms;
+        }
+        if let Some(ms) = value.as_u64().and_then(|ms| i64::try_from(ms).ok()) {
+            return ms;
+        }
+        if let Some(text) = value.as_str() {
+            if let Ok(ms) = text.parse() {
+                return ms;
+            }
+            if let Ok(at) = chrono::DateTime::parse_from_rfc3339(text) {
+                return at.timestamp_millis();
+            }
+        }
+    }
+    0
 }
 
 fn chat_meta_sidecar(file: &SessionFile) -> Option<PathBuf> {
@@ -987,5 +1116,88 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(files.len(), 1, "{files:?}");
         assert_eq!(files[0].id, "sess-demo-001");
+    }
+
+    #[test]
+    fn editor_transcripts_cannot_be_resumed() {
+        let store = CursorStore::with_root(fixture_root());
+        let editor =
+            fixture_root().join("projects/demo-slug/agent-transcripts/sess-trans-002.jsonl");
+        assert_eq!(store.resume_argv("cursor:sess-trans-002", &editor), None);
+        assert_eq!(
+            store.resume_argv(
+                "cursor:sess-demo-001",
+                &fixture_root().join("chats/hash/sess-demo-001/store.db"),
+            ),
+            Some(vec![
+                "cursor-agent".to_owned(),
+                "--resume".to_owned(),
+                "sess-demo-001".to_owned(),
+            ])
+        );
+    }
+
+    #[test]
+    fn discovers_editor_state_database() {
+        let temp = tempfile::tempdir().expect("temp");
+        let root = temp.path();
+        let database = root.join("User/globalStorage/state.vscdb");
+        std::fs::create_dir_all(database.parent().expect("parent")).expect("storage");
+        std::fs::write(&database, b"fixture").expect("database");
+        let store = CursorStore::with_root(root);
+        let files = store.files(root).expect("files");
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, database);
+        assert_eq!(files[0].format, SessionFormat::Sqlite);
+        assert!(store.locator().present());
+    }
+
+    #[test]
+    fn parses_editor_composer_kv_rows() {
+        struct EditorDb;
+
+        impl SessionDatabase for EditorDb {
+            fn query(
+                &self,
+                sql: &str,
+                params: &[&str],
+            ) -> Result<hofund_plugin_api::SessionRows, PluginError> {
+                assert_eq!(sql, "SELECT key, value FROM cursorDiskKV");
+                assert_eq!(params, &[] as &[&str]);
+                Ok(hofund_plugin_api::SessionRows::new(
+                    vec![
+                        vec![
+                            SessionValue::Text("composerData:editor-1".into()),
+                            SessionValue::Text(
+                                r#"{"name":"Editor chat","folder":"/work/cursor","createdAt":1000,"lastUpdatedAt":2000}"#
+                                    .into(),
+                            ),
+                        ],
+                        vec![
+                            SessionValue::Text("bubbleId:editor-1:bubble".into()),
+                            SessionValue::Text("ignored".into()),
+                        ],
+                    ],
+                    false,
+                ))
+            }
+
+            fn revision(&self) -> Result<i64, PluginError> {
+                Ok(1)
+            }
+        }
+
+        let records = read_editor_kv(&EditorDb, Path::new("state.vscdb")).expect("records");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].id, "cursor:editor-1");
+        assert_eq!(records[0].title, "Editor chat");
+        assert_eq!(records[0].cwd, "/work/cursor");
+        assert_eq!(records[0].start_ms, 1_000);
+        assert_eq!(records[0].last_ms, 2_000);
+        let store = CursorStore::with_root("unused");
+        assert_eq!(
+            store.resume_argv("cursor:editor-1", Path::new("state.vscdb")),
+            None
+        );
     }
 }

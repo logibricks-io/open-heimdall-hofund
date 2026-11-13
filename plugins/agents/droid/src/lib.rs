@@ -348,7 +348,7 @@ impl DroidParser {
             return;
         }
         let at = line_time(value);
-        self.saw(at, self.state.record.main);
+        self.saw(at);
         let Some(message) = value.get("message") else {
             return;
         };
@@ -360,17 +360,15 @@ impl DroidParser {
         }
     }
 
-    fn saw(&mut self, at: Option<DateTime<Utc>>, main: bool) {
+    fn saw(&mut self, at: Option<DateTime<Utc>>) {
         let Some(at) = at else {
             return;
         };
         let ms = at.timestamp_millis();
-        if main || self.state.record.start_ms == 0 {
-            if self.state.record.start_ms == 0 || ms < self.state.record.start_ms {
-                self.state.record.start_ms = ms;
-            }
-            self.state.record.last_ms = self.state.record.last_ms.max(ms);
+        if self.state.record.start_ms == 0 || ms < self.state.record.start_ms {
+            self.state.record.start_ms = ms;
         }
+        self.state.record.last_ms = self.state.record.last_ms.max(ms);
     }
 
     fn user(&mut self, message: &Value, at: Option<DateTime<Utc>>) {
@@ -637,6 +635,39 @@ mod tests {
             json::from_str(&std::fs::read_to_string(fixture("droid-main.json")).expect("golden"))
                 .expect("golden JSON");
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn later_child_messages_advance_last_ms() {
+        let temp = tempfile::tempdir().expect("temp");
+        let path = temp.path().join("child.jsonl");
+        let file = SessionFile::new("child", &path);
+        let store = DroidStore::with_root(temp.path());
+        let mut parser = store.parser(&file, None).expect("parser");
+        for value in [
+            json::json!({
+                "type": "session_start",
+                "id": "child",
+                "callingSessionId": "parent"
+            }),
+            json::json!({
+                "type": "message",
+                "timestamp": 1_000,
+                "message": {"role": "assistant", "content": "first"}
+            }),
+            json::json!({
+                "type": "message",
+                "timestamp": 2_000,
+                "message": {"role": "assistant", "content": "later"}
+            }),
+        ] {
+            parser.push(&value).expect("push");
+        }
+        let record = parser.finish().expect("finish").record.expect("record");
+        assert!(!record.main);
+        assert_eq!(record.parent_id.as_deref(), Some("droid:parent"));
+        assert_eq!(record.start_ms, 1_000);
+        assert_eq!(record.last_ms, 2_000);
     }
 
     #[test]

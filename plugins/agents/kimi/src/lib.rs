@@ -673,7 +673,11 @@ fn title_line(text: &str) -> String {
     }
     let mut line = trimmed.replace('\n', " ");
     if line.len() > 120 {
-        line.truncate(120);
+        let mut end = 120;
+        while !line.is_char_boundary(end) {
+            end -= 1;
+        }
+        line.truncate(end);
     }
     line
 }
@@ -745,6 +749,13 @@ mod tests {
             .copied()
             .expect("model tokens");
         assert_eq!(tokens, SessionTokens::new(20_888, 2_176, 317_440, 0));
+    }
+
+    #[test]
+    fn kimi_title_truncates_on_a_utf8_boundary() {
+        let title = title_line(&format!("{}é", "a".repeat(119)));
+        assert_eq!(title, "a".repeat(119));
+        assert!(title.len() <= 120);
     }
 
     #[test]

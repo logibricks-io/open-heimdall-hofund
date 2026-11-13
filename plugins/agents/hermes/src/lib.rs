@@ -578,7 +578,11 @@ fn title_or_trim(raw: &str) -> String {
         return String::new();
     }
     if trimmed.len() > 120 {
-        format!("{}…", &trimmed[..120])
+        let mut end = 120;
+        while !trimmed.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}…", &trimmed[..end])
     } else {
         trimmed.to_owned()
     }
@@ -713,7 +717,13 @@ mod tests {
 
     use hofund_plugin_api::{SessionFormat, SessionStore};
 
-    use super::HermesStore;
+    use super::{HermesStore, title_or_trim};
+
+    #[test]
+    fn title_truncates_on_a_utf8_boundary() {
+        let title = title_or_trim(&format!("{}é", "a".repeat(119)));
+        assert_eq!(title, format!("{}…", "a".repeat(119)));
+    }
 
     fn fixture_home() -> std::path::PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))

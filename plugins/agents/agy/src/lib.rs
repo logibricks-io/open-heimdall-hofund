@@ -9,16 +9,14 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 
-use chrono::{Local, TimeZone, Utc};
+use chrono::{Local, TimeZone};
 use hofund_plugin_api::{
-    PluginError, SessionFile, SessionLocator, SessionParse, SessionParser, SessionRecord,
-    SessionStore, SessionTokens,
+    PluginError, SessionDatabase, SessionDay, SessionFile, SessionFormat, SessionLocator,
+    SessionParse, SessionParser, SessionRecord, SessionStore, SessionTokens, SessionValue,
 };
 use hofund_plugin_sdk::{chrono, json, serde};
 use json::Value;
-use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 
 /// The session agent id.
@@ -79,7 +77,7 @@ impl SessionStore for AgyStore {
     }
 
     fn files(&self, root: &Path) -> Result<Vec<SessionFile>, PluginError> {
-        let summaries = load_summaries(&root.join("conversation_summaries.db"));
+        let summaries = root.join("conversation_summaries.db");
         let brain = root.join("brain");
         let Ok(entries) = std::fs::read_dir(&brain) else {
             return Ok(Vec::new());
@@ -100,9 +98,8 @@ impl SessionStore for AgyStore {
                 continue;
             }
             let mut file = SessionFile::new(format!("{AGENT}:{id}"), path);
-            if let Some(summary) = summaries.get(&id) {
-                file = file.with_related(vec![root.join("conversation_summaries.db")]);
-                let _ = summary;
+            if summaries.is_file() {
+                file = file.with_related_databases(vec![summaries.clone()]);
             }
             files.push(file);
         }
@@ -119,13 +116,20 @@ impl SessionStore for AgyStore {
             .map(json::from_str::<AgyState>)
             .transpose()
             .map_err(|_| PluginError::decode("invalid agy parser state"))?;
-        let conversation = conversation_id(file);
-        let summaries = load_summaries(&self.locator.root.join("conversation_summaries.db"));
-        let summary = summaries.get(&conversation);
         Ok(Box::new(AgyParser {
-            data_root: self.locator.root.clone(),
-            state: restored.unwrap_or_else(|| AgyState::new(file, summary)),
+            state: restored.unwrap_or_else(|| AgyState::new(file)),
         }))
+    }
+
+    fn read_database(
+        &self,
+        file: &SessionFile,
+        database: &dyn SessionDatabase,
+    ) -> Result<Vec<SessionRecord>, PluginError> {
+        if file.format != SessionFormat::Sqlite {
+            return Err(PluginError::decode("unexpected agy file format"));
+        }
+        Ok(read_summary(file, database)?.into_iter().collect())
     }
 
     fn resume_argv(&self, session_id: &str, _path: &Path) -> Option<Vec<String>> {
@@ -173,137 +177,52 @@ fn safe_id(id: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
 }
 
-#[derive(Clone, Debug)]
-struct AgySummary {
-    title: String,
-    cwd: String,
-    last_ms: i64,
-    rev: String,
-}
-
-type SummaryCache = Option<(PathBuf, String, HashMap<String, AgySummary>)>;
-
-static SUMMARY_CACHE: Mutex<SummaryCache> = Mutex::new(None);
-
-fn load_summaries(path: &Path) -> HashMap<String, AgySummary> {
-    let rev = revision_of(path);
-    let mut guard = SUMMARY_CACHE.lock().expect("agy summaries");
-    if let Some((cached, cached_rev, rows)) = guard.as_ref()
-        && cached == path
-        && cached_rev == &rev
-    {
-        return rows.clone();
-    }
-    let rows = read_summaries(path).unwrap_or_default();
-    *guard = Some((path.to_path_buf(), rev, rows.clone()));
-    rows
-}
-
-fn revision_of(path: &Path) -> String {
-    let mut rev = String::new();
-    for suffix in ["", "-wal"] {
-        let candidate = if suffix.is_empty() {
-            path.to_path_buf()
-        } else {
-            PathBuf::from(format!("{}{suffix}", path.display()))
-        };
-        if let Ok(meta) = std::fs::metadata(&candidate) {
-            if let Ok(modified) = meta.modified()
-                && let Ok(duration) = modified.duration_since(std::time::UNIX_EPOCH)
-            {
-                rev.push_str(&duration.as_nanos().to_string());
-                rev.push(':');
-                rev.push_str(&meta.len().to_string());
-                rev.push(';');
-            }
-        } else if suffix.is_empty() {
-            return String::new();
-        }
-    }
-    rev
-}
-
-fn read_summaries(path: &Path) -> Result<HashMap<String, AgySummary>, PluginError> {
-    if !path.is_file() {
-        return Ok(HashMap::new());
-    }
-    // Open by filesystem path, not a `file:` URI. A URI built from a raw
-    // Windows path (`D:\…` or a `\\?\` verbatim path from canonicalize)
-    // is not a valid SQLite URI, so titles would fall back to JSONL.
-    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(|_| PluginError::io("cannot open agy summaries"))?;
-    connection
-        .execute_batch("PRAGMA query_only = ON")
-        .map_err(|_| PluginError::io("cannot bound agy summaries"))?;
-    let mut statement = connection
-        .prepare(
-            "SELECT conversation_id, title, workspace_uris, last_modified_time FROM conversation_summaries",
+fn read_summary(
+    file: &SessionFile,
+    database: &dyn SessionDatabase,
+) -> Result<Option<SessionRecord>, PluginError> {
+    let conversation = conversation_id(file);
+    let rows = database
+        .query(
+            "SELECT title, workspace_uris, last_modified_time FROM conversation_summaries WHERE conversation_id = ?",
+            &[conversation.as_str()],
         )
-        .map_err(|_| PluginError::decode("cannot query agy summaries"))?;
-    let mut rows = statement
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, rusqlite::types::Value>(3)?,
-            ))
-        })
-        .map_err(|_| PluginError::decode("cannot read agy summaries"))?;
-    let mut out = HashMap::new();
-    while let Some(row) = rows
-        .next()
-        .transpose()
-        .map_err(|_| PluginError::decode("cannot read agy summaries"))?
-    {
-        let (id, title, workspace_uris, last) = row;
-        if id.is_empty() {
-            continue;
-        }
-        let mut cwd = String::new();
-        let title_text = title.unwrap_or_default();
-        if let Some(raw) = workspace_uris.as_deref()
-            && let Ok(Value::Array(uris)) = json::from_str::<Value>(raw)
-        {
-            for uri in uris {
-                if let Some(u) = uri.as_str()
-                    && let Some(folder) = agy_folder(u)
-                {
-                    cwd = folder;
-                    break;
-                }
+        .map_err(|_| PluginError::decode("cannot read agy summary"))?;
+    let Some(row) = rows.values.first() else {
+        return Ok(None);
+    };
+    let mut record = SessionRecord::new(AGENT, format!("{AGENT}:{conversation}"), &file.path);
+    record.title = session_text(row.first());
+    let workspace = session_text(row.get(1));
+    if let Ok(Value::Array(uris)) = json::from_str::<Value>(&workspace) {
+        for uri in uris {
+            if let Some(uri) = uri.as_str()
+                && let Some(folder) = agy_folder(uri)
+            {
+                record.cwd = folder;
+                break;
             }
         }
-        let last_ms = agy_time_ms(&last);
-        let summary = AgySummary {
-            title: title_text.clone(),
-            cwd: cwd.clone(),
-            last_ms,
-            rev: agy_rev(&title_text, &cwd, last_ms),
-        };
-        out.insert(id, summary);
     }
-    Ok(out)
+    record.start_ms = agy_time_ms(row.get(2));
+    record.last_ms = record.start_ms;
+    Ok(Some(record))
 }
 
-fn agy_rev(title: &str, cwd: &str, last_ms: i64) -> String {
-    format!("{title}\0{cwd}\0{}", chrono_to_rfc3339(last_ms))
-}
-
-fn chrono_to_rfc3339(ms: i64) -> String {
-    if ms <= 0 {
-        return String::new();
-    }
-    Utc.timestamp_millis_opt(ms)
-        .single()
-        .map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true))
-        .unwrap_or_default()
-}
-
-fn agy_time_ms(value: &rusqlite::types::Value) -> i64 {
+fn session_text(value: Option<&SessionValue>) -> String {
     match value {
-        rusqlite::types::Value::Integer(ms) => *ms,
-        rusqlite::types::Value::Text(text) => {
+        Some(SessionValue::Text(text)) => text.clone(),
+        Some(SessionValue::Integer(value)) => value.to_string(),
+        Some(SessionValue::Real(value)) => value.to_string(),
+        Some(SessionValue::Blob(bytes)) => String::from_utf8_lossy(bytes).into_owned(),
+        _ => String::new(),
+    }
+}
+
+fn agy_time_ms(value: Option<&SessionValue>) -> i64 {
+    match value {
+        Some(SessionValue::Integer(ms)) => *ms,
+        Some(SessionValue::Text(text)) => {
             if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(text.trim()) {
                 parsed.timestamp_millis()
             } else if let Ok(parsed) =
@@ -314,9 +233,9 @@ fn agy_time_ms(value: &rusqlite::types::Value) -> i64 {
                 0
             }
         }
-        rusqlite::types::Value::Blob(bytes) => agy_time_ms(&rusqlite::types::Value::Text(
+        Some(SessionValue::Blob(bytes)) => agy_time_ms(Some(&SessionValue::Text(
             String::from_utf8_lossy(bytes).into_owned(),
-        )),
+        ))),
         _ => 0,
     }
 }
@@ -358,10 +277,6 @@ struct AgyState {
     #[serde(default)]
     steps: HashMap<i32, StepTokens>,
     #[serde(default)]
-    db_revision: String,
-    #[serde(default)]
-    named: String,
-    #[serde(default)]
     first: String,
 }
 
@@ -373,36 +288,20 @@ struct StepTokens {
 }
 
 impl AgyState {
-    fn new(file: &SessionFile, summary: Option<&AgySummary>) -> Self {
+    fn new(file: &SessionFile) -> Self {
         let id = conversation_id(file);
         let mut record = SessionRecord::new(AGENT, format!("{AGENT}:{id}"), &file.path);
         record.title.clear();
-        let mut db_revision = String::new();
-        let mut named = String::new();
-        if let Some(summary) = summary {
-            if !summary.title.is_empty() {
-                named.clone_from(&summary.title);
-            }
-            summary.cwd.clone_into(&mut record.cwd);
-            if summary.last_ms > 0 {
-                record.start_ms = summary.last_ms;
-                record.last_ms = summary.last_ms;
-            }
-            db_revision.clone_from(&summary.rev);
-        }
         Self {
             record,
             last_step: -1,
             steps: HashMap::new(),
-            db_revision,
-            named,
             first: String::new(),
         }
     }
 }
 
 struct AgyParser {
-    data_root: PathBuf,
     state: AgyState,
 }
 
@@ -415,12 +314,10 @@ impl AgyParser {
             .strip_prefix(&format!("{AGENT}:"))
             .unwrap_or(&self.state.record.id)
             .to_owned();
-        let title = if !self.state.named.is_empty() {
-            self.state.named.clone()
-        } else if !self.state.first.is_empty() {
-            self.state.first.clone()
-        } else {
+        let title = if self.state.first.is_empty() {
             fallback
+        } else {
+            self.state.first.clone()
         };
         self.state.record.title = title;
     }
@@ -477,6 +374,9 @@ impl SessionParser for AgyParser {
                         },
                     );
                     self.state.record.add_usage(AGY_MODEL, tokens);
+                    self.state
+                        .record
+                        .add_day(SessionDay::new(date, AGY_MODEL, tokens));
                 }
             }
         }
@@ -501,23 +401,6 @@ impl SessionParser for AgyParser {
     }
 
     fn finish(mut self: Box<Self>) -> Result<SessionParse, PluginError> {
-        let summaries = load_summaries(&self.data_root.join("conversation_summaries.db"));
-        let conversation = self
-            .state
-            .record
-            .id
-            .strip_prefix(&format!("{AGENT}:"))
-            .unwrap_or(&self.state.record.id)
-            .to_owned();
-        if let Some(summary) = summaries.get(&conversation) {
-            self.state.db_revision.clone_from(&summary.rev);
-            if !summary.title.is_empty() {
-                self.state.named.clone_from(&summary.title);
-            }
-            if !summary.cwd.is_empty() {
-                self.state.record.cwd.clone_from(&summary.cwd);
-            }
-        }
         self.finish_title();
         let state = json::to_string(&self.state)
             .map_err(|_| PluginError::decode("cannot serialize agy state"))?;
@@ -617,17 +500,27 @@ mod tests {
         let store = AgyStore::with_root(root.clone());
         let files = store.files(&root).expect("files");
         assert_eq!(files.len(), 3);
+        assert!(
+            files
+                .iter()
+                .all(|file| file.related_databases == [root.join("conversation_summaries.db")])
+        );
         let two = files
             .iter()
             .find(|f| f.id.ends_with("9c462bce-9709-47a1-9655-4ddd39f54270"))
             .expect("two-turn conversation");
         let record = parse_transcript(&store, two);
-        assert_eq!(record.title, "Hello from the fake.");
-        assert_eq!(record.cwd, "/work/proj");
+        assert_eq!(record.title, "again");
         let tokens = record.models.get(AGY_MODEL).copied().unwrap_or_default();
         assert_eq!(tokens.input, 1404);
         assert_eq!(tokens.output, 18);
         assert_eq!(tokens.cache_read, 600);
+        let daily = record
+            .days
+            .iter()
+            .find(|day| day.model == AGY_MODEL)
+            .expect("daily usage");
+        assert_eq!(daily.tokens, tokens);
         let nr = files
             .iter()
             .find(|f| f.id.ends_with("1fcab41f-d57c-4ef4-b4d3-6bcdb84853e5"))
@@ -637,41 +530,40 @@ mod tests {
     }
 
     #[test]
-    fn summaries_open_after_canonicalize_and_special_path_chars() {
-        let temp = tempfile::tempdir().expect("temp");
-        // `#` starts a URI fragment and `%` is incomplete percent-encoding, so
-        // both would break a naive `file:{path}?mode=ro` URI on every OS.
-        // `?` is reserved in Windows filenames (ERROR_INVALID_NAME), so it is
-        // not used here; Unix would accept it, but `#` already covers truncation.
-        let dir = temp.path().join("conv#root%dir");
-        std::fs::create_dir_all(&dir).expect("mkdir");
-        let path = dir.join("conversation_summaries.db");
-        Connection::open(&path)
-            .expect("create")
-            .execute_batch(
-                "CREATE TABLE conversation_summaries (
-                    conversation_id TEXT,
-                    title TEXT,
-                    workspace_uris TEXT,
-                    last_modified_time INTEGER
-                );
-                INSERT INTO conversation_summaries
-                VALUES ('id-1', 'Hello from the fake.', NULL, 0);",
-            )
-            .expect("schema");
-        let opened = path.canonicalize().expect("canonicalize");
-        #[cfg(windows)]
-        {
-            let display = opened.to_string_lossy();
-            assert!(
-                display.starts_with("\\\\?\\") || display.starts_with("//?/"),
-                "windows canonicalize should be a verbatim path, got {opened:?}"
-            );
+    fn summary_uses_kernel_database_rows() {
+        struct SummaryDb;
+
+        impl SessionDatabase for SummaryDb {
+            fn query(
+                &self,
+                sql: &str,
+                params: &[&str],
+            ) -> Result<hofund_plugin_api::SessionRows, PluginError> {
+                assert!(sql.contains("WHERE conversation_id = ?"));
+                assert_eq!(params, ["id-1"]);
+                Ok(hofund_plugin_api::SessionRows::new(
+                    vec![vec![
+                        SessionValue::Text("Saved title".into()),
+                        SessionValue::Text(r#"["file:///work/proj"]"#.into()),
+                        SessionValue::Text("2026-10-25T09:49:15Z".into()),
+                    ]],
+                    false,
+                ))
+            }
+
+            fn revision(&self) -> Result<i64, PluginError> {
+                Ok(1)
+            }
         }
-        let rows = load_summaries(&opened);
-        assert_eq!(
-            rows.get("id-1").map(|summary| summary.title.as_str()),
-            Some("Hello from the fake.")
-        );
+
+        let file = SessionFile::new("agy:id-1", "conversation_summaries.db")
+            .with_format(SessionFormat::Sqlite);
+        let summary = read_summary(&file, &SummaryDb)
+            .expect("summary")
+            .expect("row");
+        assert_eq!(summary.id, "agy:id-1");
+        assert_eq!(summary.title, "Saved title");
+        assert_eq!(summary.cwd, "/work/proj");
+        assert!(summary.last_ms > 0);
     }
 }

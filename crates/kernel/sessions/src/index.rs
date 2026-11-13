@@ -189,7 +189,7 @@ impl SessionIndex {
         let mut entries = BTreeMap::new();
         let mut dropped = false;
         for entry in disk.entries {
-            if consent.allows(&entry.record.agent)
+            if record_allowed(consent, &entry.record.agent)
                 && entry.path == entry.record.path
                 && within_root(&entry.root, &entry.path)
                 && entry
@@ -248,7 +248,7 @@ impl SessionIndex {
             .map(|entry| entry.record.agent.clone())
             .collect();
         for agent in before_allowed {
-            if !consent.allows(&agent) {
+            if !record_allowed(consent, &agent) {
                 self.entries.retain(|_, entry| entry.record.agent != agent);
                 self.dirty = true;
             }
@@ -373,7 +373,7 @@ impl SessionIndex {
     fn drop_disallowed(&mut self, consent: &Consent) {
         let before = self.entries.len();
         self.entries
-            .retain(|_, entry| consent.allows(&entry.record.agent));
+            .retain(|_, entry| record_allowed(consent, &entry.record.agent));
         self.dirty |= before != self.entries.len();
     }
 
@@ -395,6 +395,7 @@ impl SessionIndex {
                 let mut record = SessionRecord::new(&agent, &entry.key, &entry.path);
                 record.agent.clone_from(&agent);
                 record.title.clone_from(&entry.key);
+                record.main = entry.main;
                 let key = (root.clone(), entry.path.clone(), record.id.clone());
                 seen.insert(key.clone());
                 self.entries.insert(
@@ -512,11 +513,7 @@ impl SessionIndex {
             }
             Err(error) => return Err(error.into()),
         };
-        let related = file
-            .related
-            .iter()
-            .map(|path| file_stamp(root, path))
-            .collect::<Result<Vec<_>, _>>()?;
+        let related = related_stamps(root, file)?;
         seen.insert(key.clone());
         let old = self.entries.get(&key).cloned();
         if let Some(old) = &old
@@ -531,6 +528,7 @@ impl SessionIndex {
             old.file_id == file.id
                 && file.format == SessionFormat::JsonLines
                 && file.related.is_empty()
+                && file.related_databases.is_empty()
                 && file.compression == hofund_plugin_api::SessionCompression::None
                 && stamp.size > old.size
                 && stamp.modified_ns >= old.modified_ns
@@ -576,6 +574,13 @@ impl SessionIndex {
         self.dirty = true;
         Ok(())
     }
+}
+
+fn record_allowed(consent: &Consent, agent: &str) -> bool {
+    consent.allows(agent)
+        || agent
+            .split_once("@wsl:")
+            .is_some_and(|(base, _)| consent.allows(base))
 }
 
 fn sort_newest(records: &mut [SessionRecord]) {
@@ -671,6 +676,19 @@ fn holds_family(keeper: &SessionRecord, other: &SessionRecord) -> bool {
 
 fn preferred_keeper(left: &SessionRecord, right: &SessionRecord) -> bool {
     left.last_ms > right.last_ms || (left.last_ms == right.last_ms && left.id > right.id)
+}
+
+fn related_stamps(root: &Path, file: &SessionFile) -> io::Result<Vec<FileStamp>> {
+    let mut stamps = file
+        .related
+        .iter()
+        .map(|path| file_stamp(root, path))
+        .collect::<Result<Vec<_>, _>>()?;
+    for path in &file.related_databases {
+        stamps.push(file_stamp(root, path)?);
+        stamps.extend(sqlite_sidecar_stamps(root, path)?);
+    }
+    Ok(stamps)
 }
 
 fn sqlite_sidecar_stamps(root: &Path, path: &Path) -> io::Result<Vec<FileStamp>> {
@@ -813,7 +831,34 @@ fn parse_file(
     if let Some(error) = parser_error {
         return Err(error.into());
     }
-    Ok((parser.finish()?, outcome))
+    let mut parsed = parser.finish()?;
+    for path in &file.related_databases {
+        let database = crate::sqlite::open_ro(root, path)?;
+        let related_file =
+            SessionFile::new(file.id.clone(), path).with_format(SessionFormat::Sqlite);
+        for related in store.read_database(&related_file, &database)? {
+            if let Some(record) = parsed.record.as_mut() {
+                merge_related_record(record, &related);
+            }
+        }
+    }
+    Ok((parsed, outcome))
+}
+
+fn merge_related_record(record: &mut SessionRecord, related: &SessionRecord) {
+    if record.id != related.id {
+        return;
+    }
+    if !related.title.is_empty() {
+        record.title.clone_from(&related.title);
+    }
+    if !related.cwd.is_empty() {
+        record.cwd.clone_from(&related.cwd);
+    }
+    if related.start_ms > 0 && (record.start_ms == 0 || related.start_ms < record.start_ms) {
+        record.start_ms = related.start_ms;
+    }
+    record.last_ms = record.last_ms.max(related.last_ms);
 }
 
 #[cfg(test)]
@@ -1204,6 +1249,64 @@ mod tests {
         assert_eq!(records[0].agent, "agent@wsl:Ubuntu");
     }
 
+    #[test]
+    fn wsl_raw_agent_consent_survives_list_and_children_stay_grouped() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config = temp.path().join("config");
+        std::fs::create_dir_all(config.join("state")).expect("state");
+        let home = r"\\wsl.localhost\Ubuntu\home\me";
+        let files = vec![
+            crate::wsl::WslEntry {
+                agent: "agent".to_owned(),
+                key: "agent:parent".to_owned(),
+                path: PathBuf::from(format!(r"{home}\.agent\parent.jsonl")),
+                main: true,
+                size: 10,
+                modified_ns: 1,
+            },
+            crate::wsl::WslEntry {
+                agent: "agent".to_owned(),
+                key: "agent:child".to_owned(),
+                path: PathBuf::from(format!(r"{home}\.agent\child.jsonl")),
+                main: false,
+                size: 10,
+                modified_ns: 1,
+            },
+        ];
+        let cache = crate::wsl::WslCache::from([(
+            "Ubuntu".to_owned(),
+            crate::wsl::WslListing {
+                home: home.to_owned(),
+                running: false,
+                files,
+            },
+        )]);
+        crate::wsl::save_cache(&crate::wsl::wsl_cache_path(&config), &cache).expect("cache");
+        let mut consent = Consent::new(&config);
+        consent.settle();
+        consent
+            .set_reads(Some(false), [("agent".to_owned(), true)])
+            .expect("raw agent consent");
+
+        let mut index = SessionIndex::load(&config, &consent);
+        index.refresh(&consent, &[]).expect("refresh");
+        let records = index.list(&consent);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].id, "agent:parent");
+        assert_eq!(index.entries.len(), 2);
+        assert!(
+            index
+                .entries
+                .values()
+                .any(|entry| entry.record.id == "agent:child" && !entry.record.main)
+        );
+
+        consent
+            .set_reads(None, [("agent".to_owned(), false)])
+            .expect("revoke");
+        assert_eq!(index.list(&consent), Vec::<SessionRecord>::new());
+    }
+
     struct ScriptedStore {
         locator: FakeLocator,
         files: Vec<SessionFile>,
@@ -1516,6 +1619,52 @@ mod tests {
     }
 
     #[test]
+    fn wal_only_related_database_change_reparses_the_transcript() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let agent_root = temp.path().join("agent");
+        std::fs::create_dir(&agent_root).expect("agent");
+        let transcript = agent_root.join("one.jsonl");
+        std::fs::write(&transcript, b"{\"prompt\":\"fallback\"}\n").expect("transcript");
+        let database_path = agent_root.join("conversation_summaries.db");
+        let connection = rusqlite::Connection::open(&database_path).expect("database");
+        connection
+            .execute_batch(
+                "PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0;
+                 CREATE TABLE items (id TEXT); INSERT INTO items VALUES ('first');",
+            )
+            .expect("wal fixture");
+        let mut summary = SessionRecord::new("fake", "fake:one", &database_path);
+        summary.title = "old summary".to_owned();
+        let file = SessionFile::new("one", &transcript)
+            .with_related_databases(vec![database_path.clone()]);
+        let store = ScriptedStore::new(&agent_root, vec![file]).with_records(vec![summary]);
+        let config = temp.path().join("config");
+        let consent = allow_all(&config);
+        let stores: [&dyn SessionStore; 1] = [&store];
+        let mut index = SessionIndex::load(&config, &consent);
+        index.refresh(&consent, &stores).expect("first");
+        assert_eq!(index.list(&consent)[0].title, "old summary");
+        index.refresh(&consent, &stores).expect("unchanged");
+        assert_eq!(store.parses.load(Ordering::SeqCst), 1);
+        let main_stamp = std::fs::metadata(&database_path).expect("main database");
+
+        let mut summary = SessionRecord::new("fake", "fake:one", &database_path);
+        summary.title = "WAL summary".to_owned();
+        *store.db_records.lock().expect("records") = vec![summary];
+        connection
+            .execute("INSERT INTO items VALUES ('wal-only')", [])
+            .expect("wal update");
+        index.refresh(&consent, &stores).expect("wal refresh");
+
+        assert_eq!(store.parses.load(Ordering::SeqCst), 2);
+        assert_eq!(store.db_reads.load(Ordering::SeqCst), 2);
+        assert_eq!(index.list(&consent)[0].title, "WAL summary");
+        let after = std::fs::metadata(&database_path).expect("main database");
+        assert_eq!(after.len(), main_stamp.len());
+        assert_eq!(after.modified().ok(), main_stamp.modified().ok());
+    }
+
+    #[test]
     fn refresh_database_reuses_an_unchanged_stamp_and_drops_stale_rows() {
         let temp = tempfile::tempdir().expect("temp dir");
         let agent_root = temp.path().join("agent");
@@ -1647,7 +1796,7 @@ mod tests {
     }
 
     #[test]
-    fn refresh_database_returns_ok_for_a_missing_file_and_err_for_a_directory() {
+    fn refresh_database_returns_ok_for_a_missing_file_and_a_directory() {
         let temp = tempfile::tempdir().expect("temp dir");
         let agent_root = temp.path().join("agent");
         std::fs::create_dir(&agent_root).expect("agent");
@@ -1665,11 +1814,11 @@ mod tests {
         let dir_file = SessionFile::new("dir", &directory).with_format(SessionFormat::Sqlite);
         index
             .refresh_database(&store, &agent_root, &dir_file, &mut seen)
-            .expect_err("a directory is not a missing file");
+            .expect("a directory is skipped");
     }
 
     #[test]
-    fn refresh_file_returns_ok_for_a_missing_file_and_err_for_a_directory() {
+    fn refresh_file_returns_ok_for_a_missing_file_and_a_directory() {
         let temp = tempfile::tempdir().expect("temp dir");
         let agent_root = temp.path().join("agent");
         std::fs::create_dir(&agent_root).expect("agent");
@@ -1687,7 +1836,7 @@ mod tests {
         let dir_file = SessionFile::new("dir", &directory);
         index
             .refresh_file(&store, &agent_root, &dir_file, &mut seen)
-            .expect_err("a directory is not a missing file");
+            .expect("a directory is skipped");
     }
 
     #[test]
@@ -1754,6 +1903,7 @@ mod tests {
         assert_eq!(ids, ["fake:a2", "fake:b"]);
     }
 
+    #[test]
     fn dedup_forks_preserves_already_filtered_usage() {
         let event = SessionUsageEvent::new(
             SessionTokens::new(20, 8, 4, 2),
@@ -2023,7 +2173,7 @@ mod tests {
         let dir_stores: [&dyn SessionStore; 1] = [&dir_store];
         index
             .refresh(&consent, &dir_stores)
-            .expect_err("a directory is not a regular file");
+            .expect("a directory is skipped");
         assert_eq!(dir_parses.load(Ordering::SeqCst), 0);
         assert_eq!(index.list(&consent), Vec::<SessionRecord>::new());
     }

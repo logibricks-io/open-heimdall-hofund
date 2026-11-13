@@ -15,5 +15,8 @@ hofund-plugin-api = { workspace = true }
 hofund-plugin-sdk = { workspace = true }
 regex = { version = "1.13.1" }
 
+[dev-dependencies]
+tempfile = { workspace = true }
+
 [lints]
 workspace = true

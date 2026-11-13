@@ -7,6 +7,7 @@
     clippy::must_use_candidate
 )]
 
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 
 use chrono::{Local, TimeZone};
@@ -222,20 +223,31 @@ struct DshHead {
 }
 
 fn read_head(path: &Path) -> Result<Option<DshHead>, PluginError> {
-    let bytes = if path
+    const MAX_HEADER_BYTES: usize = 1024 * 1024;
+
+    let file = std::fs::File::open(path).map_err(|_| PluginError::io("cannot read dsh session"))?;
+    let reader: Box<dyn Read> = if path
         .extension()
         .is_some_and(|ext| ext == "zstd" || ext == "zst")
     {
-        let raw = std::fs::read(path).map_err(|_| PluginError::io("cannot read dsh session"))?;
-        zstd::bulk::decompress(&raw, 1024 * 1024)
-            .map_err(|_| PluginError::decode("cannot decompress dsh session header"))?
+        let decoder = zstd::stream::read::Decoder::new(file)
+            .map_err(|_| PluginError::decode("cannot decompress dsh session header"))?;
+        Box::new(decoder)
     } else {
-        std::fs::read(path).map_err(|_| PluginError::io("cannot read dsh session"))?
+        Box::new(file)
     };
-    let Ok(text) = std::str::from_utf8(&bytes) else {
+    let mut bounded = BufReader::new(reader.take((MAX_HEADER_BYTES + 1) as u64));
+    let mut bytes = Vec::new();
+    bounded
+        .read_until(b'\n', &mut bytes)
+        .map_err(|_| PluginError::io("cannot read dsh session header"))?;
+    if bytes.len() > MAX_HEADER_BYTES {
         return Ok(None);
-    };
-    let Some(first) = text.lines().next() else {
+    }
+    while matches!(bytes.last(), Some(b'\n' | b'\r')) {
+        bytes.pop();
+    }
+    let Ok(first) = std::str::from_utf8(&bytes) else {
         return Ok(None);
     };
     let Ok(value) = json::from_str::<Value>(first) else {
@@ -549,5 +561,25 @@ mod tests {
         let record = parsed.record.expect("record");
         assert_eq!(record.title, "Build script tidy");
         assert_eq!(record.cwd, "/work/dsh");
+    }
+
+    #[test]
+    fn lists_compressed_session_larger_than_one_mib() {
+        let temp = tempfile::tempdir().expect("temp");
+        let root = temp.path();
+        let session = root.join("sessions/work/large");
+        std::fs::create_dir_all(&session).expect("session dir");
+        let mut body = b"{\"type\":\"session\",\"id\":\"large\",\"cwd\":\"/work\"}\n".to_vec();
+        body.extend_from_slice(b"{\"type\":\"padding\",\"text\":\"");
+        body.extend(std::iter::repeat_n(b'x', 1024 * 1024));
+        body.extend_from_slice(b"\"}\n");
+        let compressed = zstd::bulk::compress(&body, 3).expect("compress");
+        std::fs::write(session.join("session.jsonl.zstd"), compressed).expect("compressed");
+
+        let store = DshStore::with_root(root);
+        let files = store.files(root).expect("files");
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].id, "dsh:large");
+        assert_eq!(files[0].compression, SessionCompression::Zstd);
     }
 }
