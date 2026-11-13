@@ -43,7 +43,7 @@ impl fmt::Debug for Secret {
 }
 
 /// One control operation produced by a key.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq)]
 pub enum ControlIntent {
     /// `GET /providers`, presets, and status.
     LoadProviders {
@@ -147,6 +147,50 @@ pub enum ControlIntent {
     },
     /// Fresh quota balances.
     LoadBalances,
+    /// Period usage with the agent breakdown.
+    LoadUsage {
+        /// Read generation.
+        generation: u64,
+        /// Reporting period.
+        period: hofund_control_client::hofund_control_proto::UsagePeriod,
+    },
+    /// G-5 Usage settings.
+    LoadUsageSettings {
+        /// Read generation.
+        generation: u64,
+    },
+    /// Quota cards, optionally after the deferred-read retry delay.
+    LoadQuotas {
+        /// Quota generation, independent of the period read.
+        token: u64,
+        /// Read kept cards instead of asking vendors.
+        kept: bool,
+        /// Wait 1.5 seconds before polling a deferred read.
+        delay: bool,
+    },
+    /// List and run every daily check-in.
+    RunCheckins,
+    /// Quota alert thresholds.
+    LoadQuotaAlerts {
+        /// Read generation.
+        generation: u64,
+    },
+    /// Persist one quota alert threshold.
+    SetQuotaAlert {
+        /// Usage percent, when editing that threshold.
+        usage: Option<u8>,
+        /// Balance amount, when editing that threshold.
+        balance: Option<f64>,
+    },
+    /// Persist the Usage used/left setting.
+    SetQuotaLeft {
+        /// Expected settings disk revision.
+        revision: String,
+        /// New value.
+        value: bool,
+        /// Value to restore if the write fails.
+        previous: bool,
+    },
     /// Route model ids for an agent picker.
     LoadRouteModels {
         /// Agent id.
@@ -329,6 +373,41 @@ impl fmt::Debug for ControlIntent {
                 .field("secret", secret)
                 .finish(),
             Self::LoadBalances => formatter.write_str("LoadBalances"),
+            Self::LoadUsage { generation, period } => formatter
+                .debug_struct("LoadUsage")
+                .field("generation", generation)
+                .field("period", period)
+                .finish(),
+            Self::LoadUsageSettings { generation } => formatter
+                .debug_struct("LoadUsageSettings")
+                .field("generation", generation)
+                .finish(),
+            Self::LoadQuotas { token, kept, delay } => formatter
+                .debug_struct("LoadQuotas")
+                .field("token", token)
+                .field("kept", kept)
+                .field("delay", delay)
+                .finish(),
+            Self::RunCheckins => formatter.write_str("RunCheckins"),
+            Self::LoadQuotaAlerts { generation } => formatter
+                .debug_struct("LoadQuotaAlerts")
+                .field("generation", generation)
+                .finish(),
+            Self::SetQuotaAlert { usage, balance } => formatter
+                .debug_struct("SetQuotaAlert")
+                .field("usage", usage)
+                .field("balance", balance)
+                .finish(),
+            Self::SetQuotaLeft {
+                revision,
+                value,
+                previous,
+            } => formatter
+                .debug_struct("SetQuotaLeft")
+                .field("revision", revision)
+                .field("value", value)
+                .field("previous", previous)
+                .finish(),
             Self::LoadRouteModels { agent, generation } => formatter
                 .debug_struct("LoadRouteModels")
                 .field("agent", agent)
@@ -409,6 +488,7 @@ impl ControlIntent {
     pub fn budget(&self) -> Duration {
         match self {
             Self::CatalogSync { .. } => Duration::from_secs(45),
+            Self::RunCheckins => Duration::from_secs(120),
             Self::LoadProviders { .. }
             | Self::LoadAgents { .. }
             | Self::OpenModels { .. }
@@ -416,6 +496,10 @@ impl ControlIntent {
             | Self::LoadRouteModels { .. }
             | Self::LoadAgentModels { .. }
             | Self::LoadBalances
+            | Self::LoadUsage { .. }
+            | Self::LoadUsageSettings { .. }
+            | Self::LoadQuotas { .. }
+            | Self::LoadQuotaAlerts { .. }
             | Self::LoadProfiles { .. }
             | Self::LoadKeys { .. } => Duration::from_secs(15),
             _ => Duration::from_secs(30),
@@ -433,6 +517,10 @@ impl ControlIntent {
                 | Self::LoadRouteModels { .. }
                 | Self::LoadAgentModels { .. }
                 | Self::LoadBalances
+                | Self::LoadUsage { .. }
+                | Self::LoadUsageSettings { .. }
+                | Self::LoadQuotas { .. }
+                | Self::LoadQuotaAlerts { .. }
                 | Self::LoadProfiles { .. }
                 | Self::LoadKeys { .. }
         )
@@ -445,6 +533,9 @@ impl ControlIntent {
             | Self::LoadAgents { generation }
             | Self::RefreshModels { generation, .. }
             | Self::OpenModels { generation, .. }
+            | Self::LoadUsage { generation, .. }
+            | Self::LoadUsageSettings { generation }
+            | Self::LoadQuotaAlerts { generation }
             | Self::LoadRouteModels { generation, .. }
             | Self::LoadAgentModels { generation, .. }
                 if *generation == 0 =>
