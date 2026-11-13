@@ -2341,11 +2341,14 @@ fn held_response(
             }
         }
     });
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, content_type)
-        .body(Body::from_stream(body))
-        .unwrap_or_else(|_| text_response(StatusCode::INTERNAL_SERVER_ERROR, "stream"))
+    with_named_session(
+        Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, content_type)
+            .body(Body::from_stream(body))
+            .unwrap_or_else(|_| text_response(StatusCode::INTERNAL_SERVER_ERROR, "stream")),
+        &ledger.session_id,
+    )
 }
 
 fn stream_error(error: &RouterError) -> (StatusCode, String) {

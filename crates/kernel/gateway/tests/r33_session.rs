@@ -2,10 +2,13 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use futures_util::StreamExt;
 use hofund_codec::{
     Codec, ECHO_SESSION_HEADER, OpenAiChat, OpenAiResponses, SESSION_HEADERS,
     STREAM_CLIENT_PREFIXES, session_of,
@@ -112,8 +115,6 @@ impl Member for FixtureMember {
 }
 
 fn http_gateway(reply: Reply) -> (axum::Router, tempfile::TempDir) {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let usage = Arc::new(Ledger::open(&dir.path().join("usage.sqlite")).expect("usage"));
     let member = FixtureMember {
         member_id: MemberId::from_preset(
             PresetId::try_from("primary").expect("preset"),
@@ -122,6 +123,12 @@ fn http_gateway(reply: Reply) -> (axum::Router, tempfile::TempDir) {
         reply,
     };
     let routes = BTreeMap::from([("demo".to_owned(), vec![Arc::new(member) as Arc<dyn Member>])]);
+    gateway_with_router(Router::new(routes, FailoverPolicy::default()))
+}
+
+fn gateway_with_router(router: Router) -> (axum::Router, tempfile::TempDir) {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let usage = Arc::new(Ledger::open(&dir.path().join("usage.sqlite")).expect("usage"));
     let codecs: HashMap<String, Arc<dyn Codec>> = HashMap::from([
         (
             "/v1/chat/completions".to_owned(),
@@ -129,13 +136,7 @@ fn http_gateway(reply: Reply) -> (axum::Router, tempfile::TempDir) {
         ),
         ("/v1/responses".to_owned(), Arc::new(OpenAiResponses)),
     ]);
-    let app = Gateway::new(
-        Snapshot::new(Router::new(routes, FailoverPolicy::default())),
-        "secret".to_owned(),
-        codecs,
-        usage,
-    )
-    .into_router();
+    let app = Gateway::new(Snapshot::new(router), "secret".to_owned(), codecs, usage).into_router();
     (app, dir)
 }
 
@@ -220,5 +221,122 @@ async fn r33_compacting_stream_error_echoes_named_session() {
             .get(ECHO_SESSION_HEADER)
             .and_then(|value| value.to_str().ok()),
         Some("compacting-session")
+    );
+}
+
+struct HeldMember {
+    member_id: MemberId,
+    hits: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl Member for HeldMember {
+    fn id(&self) -> &MemberId {
+        &self.member_id
+    }
+
+    fn route_id(&self) -> &str {
+        "primary"
+    }
+
+    fn protocol(&self) -> &str {
+        "test"
+    }
+
+    async fn execute(
+        &self,
+        _request: ModelRequest,
+        _inbound: &str,
+    ) -> Result<Completion, PluginError> {
+        if self.hits.fetch_add(1, Ordering::SeqCst) == 0 {
+            Err(PluginError::status_error(503, "busy"))
+        } else {
+            Ok(Completion::Raw(BodyStream::from_bytes(
+                RAW_CHAT_STREAM.as_bytes().to_vec(),
+            )))
+        }
+    }
+}
+
+fn held_gateway() -> (axum::Router, tempfile::TempDir, Arc<AtomicUsize>) {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let member = Arc::new(HeldMember {
+        member_id: MemberId::from_preset(
+            PresetId::try_from("primary").expect("preset"),
+            MemberKey::from_static("row"),
+        ),
+        hits: Arc::clone(&hits),
+    });
+    let mut hop = hofund_router::Hop::new(member);
+    hop.patience = Some(Duration::from_secs(60));
+    let router = Router::from_hops(
+        BTreeMap::from([("demo".to_owned(), vec![hop])]),
+        FailoverPolicy::default(),
+    );
+    let (app, dir) = gateway_with_router(router);
+    (app, dir, hits)
+}
+
+#[tokio::test(start_paused = true)]
+async fn r33_held_stream_http_response_echoes_named_session() {
+    for session_id in ["held-session", ""] {
+        let (app, _dir, hits) = held_gateway();
+        let response = post(
+            app,
+            "/v1/chat/completions",
+            CHAT_STREAM_REQUEST,
+            Some(session_id),
+            false,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            response
+                .headers()
+                .get(ECHO_SESSION_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            (!session_id.is_empty()).then_some(session_id)
+        );
+        let first = response
+            .into_body()
+            .into_data_stream()
+            .next()
+            .await
+            .expect("keepalive")
+            .expect("chunk");
+        assert_eq!(first.as_ref(), b": keepalive\n\n");
+    }
+}
+
+#[tokio::test]
+async fn r33_spend_cap_http_response_echoes_named_session() {
+    let member = FixtureMember {
+        member_id: MemberId::from_preset(
+            PresetId::try_from("primary").expect("preset"),
+            MemberKey::from_static("row"),
+        ),
+        reply: Reply::Raw,
+    };
+    let routes = BTreeMap::from([("demo".to_owned(), vec![Arc::new(member) as Arc<dyn Member>])]);
+    let router = Router::new(routes, FailoverPolicy::default())
+        .with_member_skip(Arc::new(|_, _, _, _, _| true))
+        .with_spend_cap_exhausted(Arc::new(|_| Some(Some(120))));
+    let (app, _dir) = gateway_with_router(router);
+    let response = post(
+        app,
+        "/v1/chat/completions",
+        CHAT_UNARY_REQUEST,
+        Some("spend-cap-session"),
+        false,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        response
+            .headers()
+            .get(ECHO_SESSION_HEADER)
+            .and_then(|value| value.to_str().ok()),
+        Some("spend-cap-session")
     );
 }
