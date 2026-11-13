@@ -302,19 +302,6 @@ fn os_category() -> &'static str {
     }
 }
 
-#[cfg(unix)]
-fn os_release() -> String {
-    std::process::Command::new("uname")
-        .arg("-r")
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
-        .filter(|release| !release.is_empty())
-        .unwrap_or_else(|| "unknown".to_owned())
-}
-
-#[cfg(not(unix))]
 fn os_release() -> String {
     "unknown".to_owned()
 }
