@@ -5,13 +5,14 @@ use std::time::Instant;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use hofund_control_client::hofund_control_proto::{
-    AgentAction, AgentModelsResponse, ProfileSummary, ProviderKey,
+    AgentAction, AgentModelsResponse, GroupDeleteResponse, GroupListResponse,
+    GroupMemberCandidatesResponse, GroupWriteResponse, ProfileSummary, ProviderKey,
 };
 
 use crate::intent::{ControlIntent, PageEffect};
 use crate::pages::{AgentPage, Page, PageKeyOutcome, Pages, ProviderPage, UsageAction};
 use crate::session::{
-    AgentSnapshot, Finished, ModelView, PlanView, ProviderSnapshot, SessionOutcome,
+    AgentSnapshot, Finished, ModelView, PlanView, ProviderSnapshot, RouteSnapshot, SessionOutcome,
 };
 use crate::state::{FLASH_TTL, Flash, GatewayPresence, Generation, Mode, PageId, PendingOp};
 
@@ -163,6 +164,7 @@ impl App {
         let read_gen = self.generation;
         match self.page {
             PageId::Sessions => self.pages.sessions_mut().reload(read_gen),
+            PageId::Routing => self.pages.routing_mut().reload(read_gen),
             PageId::Usage => self.pages.usage_mut().reload(read_gen),
             page => self.pages.mut_page(page).reload(read_gen),
         }
@@ -184,6 +186,7 @@ impl App {
                 }
             }
             PageId::Agents => self.queue(ControlIntent::LoadAgents { generation }),
+            PageId::Routing => self.queue(ControlIntent::LoadGroups { generation }),
             PageId::Usage => {
                 self.queue(ControlIntent::LoadUsage {
                     generation,
@@ -247,6 +250,7 @@ impl App {
         self.flash = None;
         self.providers.disarm_confirm();
         self.agents.cancel_profile_request();
+        self.pages.routing_mut().leave();
         self.page = page;
         self.mode = Mode::List;
         let _ = self.reload_open_page();
@@ -319,6 +323,7 @@ impl App {
         match self.page {
             PageId::Providers => self.providers.captures(),
             PageId::Agents => self.agents.captures(),
+            PageId::Routing => self.pages.routing().captures(),
             PageId::Sessions => self.pages.sessions().captures(),
             PageId::Usage => self.pages.usage().captures(),
             _ => false,
@@ -329,6 +334,11 @@ impl App {
         if self.page == PageId::Sessions {
             let outcome = self.pages.sessions_mut().on_key(key);
             return self.apply_sessions_outcome(outcome);
+        }
+        if self.page == PageId::Routing {
+            let effect = self.pages.routing_mut().on_key(key);
+            self.apply_effect(effect);
+            return AppAction::None;
         }
         if self.page == PageId::Usage {
             let outcome = self.pages.usage_mut().on_key(key);
@@ -585,6 +595,21 @@ impl App {
                 action,
                 result,
             } => self.apply_plan(agent, action, result),
+            SessionOutcome::Groups { generation, result } => {
+                self.apply_groups(generation, result);
+            }
+            SessionOutcome::GroupCandidates { token, result } => {
+                self.apply_group_candidates(token, result);
+            }
+            SessionOutcome::RouteView { generation, result } => {
+                self.apply_route_view(generation, result);
+            }
+            SessionOutcome::GroupWrite {
+                id,
+                success,
+                result,
+            } => self.apply_group_write(id, success, result),
+            SessionOutcome::GroupDelete { id, result } => self.apply_group_delete(id, result),
             SessionOutcome::Finished(finished) => self.apply_finished(finished),
             SessionOutcome::Catalog(result) => self.apply_catalog(result),
         }
@@ -744,6 +769,72 @@ impl App {
             Ok(plan) => self
                 .agents
                 .apply_plan(&agent, action, plan.revision, plan.lines),
+            Err(message) => self.set_flash_ttl(message, false),
+        }
+    }
+
+    fn apply_groups(&mut self, generation: Generation, result: Result<GroupListResponse, String>) {
+        self.apply_read_result(generation, |app| match result {
+            Ok(response) => {
+                app.disk_revision.clone_from(&response.disk_revision);
+                app.pages.routing_mut().apply_load(response);
+            }
+            Err(message) => {
+                app.pages.routing_mut().apply_load_error(message.clone());
+                app.set_flash_ttl(message, false);
+            }
+        });
+    }
+
+    fn apply_group_candidates(
+        &mut self,
+        token: u64,
+        result: Result<GroupMemberCandidatesResponse, String>,
+    ) {
+        match result {
+            Ok(response) => self.pages.routing_mut().apply_candidates(token, response),
+            Err(message) => self.set_flash_ttl(message, false),
+        }
+    }
+
+    fn apply_route_view(&mut self, generation: Generation, result: Result<RouteSnapshot, String>) {
+        self.apply_read_result(generation, |app| match result {
+            Ok(snapshot) => app.pages.routing_mut().apply_route_view(snapshot),
+            Err(message) => app.set_flash_ttl(message, false),
+        });
+    }
+
+    fn apply_group_write(
+        &mut self,
+        id: String,
+        success: String,
+        result: Result<GroupWriteResponse, String>,
+    ) {
+        self.finish_pending();
+        match result {
+            Ok(response) => {
+                self.disk_revision.clone_from(&response.disk_revision);
+                self.pages.routing_mut().apply_group_write(
+                    &id,
+                    response.group,
+                    response.disk_revision,
+                );
+                self.set_flash_ttl(success, true);
+            }
+            Err(message) => self.set_flash_ttl(message, false),
+        }
+    }
+
+    fn apply_group_delete(&mut self, id: String, result: Result<GroupDeleteResponse, String>) {
+        self.finish_pending();
+        match result {
+            Ok(response) => {
+                self.disk_revision.clone_from(&response.disk_revision);
+                self.pages
+                    .routing_mut()
+                    .apply_group_delete(&id, response.disk_revision);
+                self.set_flash_ttl(format!("deleted {id}"), true);
+            }
             Err(message) => self.set_flash_ttl(message, false),
         }
     }

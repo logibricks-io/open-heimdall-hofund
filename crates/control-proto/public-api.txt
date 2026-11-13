@@ -363,10 +363,12 @@ GroupCreateRequest.expected_revision
 GroupCreateRequest.first_member
 GroupCreateRequest.name
 GroupCreateRequest.version
+GroupCreateRequest::fn new (expected_revision : String , name : String , first_member : String) -> Self
 GroupCreateRequest::fn validate (& self) -> Result < () , ControlError >
 GroupDeleteRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
 GroupDeleteRequest.expected_revision
 GroupDeleteRequest.version
+GroupDeleteRequest::fn new (expected_revision : String) -> Self
 GroupDeleteRequest::fn validate (& self) -> Result < () , ControlError >
 GroupDeleteResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
 GroupDeleteResponse.disk_revision
@@ -393,6 +395,7 @@ GroupMemberWire.effort
 GroupMemberWire.enabled
 GroupMemberWire.fast
 GroupMemberWire.reference
+GroupMemberWire::fn new (reference : String) -> Self
 GroupPatchRequest #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
 GroupPatchRequest.classifier
 GroupPatchRequest.context
@@ -409,6 +412,7 @@ GroupPatchRequest::fn validate (& self) -> Result < () , ControlError >
 GroupRestoreRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
 GroupRestoreRequest.expected_revision
 GroupRestoreRequest.version
+GroupRestoreRequest::fn new (expected_revision : String) -> Self
 GroupRestoreRequest::fn validate (& self) -> Result < () , ControlError >
 GroupRule #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
 GroupRule.line
