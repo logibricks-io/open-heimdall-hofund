@@ -386,9 +386,8 @@ fn discover(workspace: &Path) -> Result<Vec<(String, String)>, String> {
             let manifest = entry.path().join("plugin.toml");
             if !manifest.is_file() {
                 if kind == "agents" {
-                    let data_only = entry.path().join("agent.toml").is_file()
-                        && !entry.path().join("Cargo.toml").exists();
-                    if data_only {
+                    let declarative_agent = entry.path().join("agent.toml").is_file();
+                    if declarative_agent {
                         continue;
                     }
                     return Err(format!(

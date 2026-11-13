@@ -40,6 +40,7 @@ mod checkin;
 mod config_ops;
 mod config_write;
 mod control;
+mod control_accounts;
 mod control_agents;
 mod control_groups;
 mod control_local;
@@ -48,8 +49,10 @@ mod control_presets;
 mod control_profiles;
 mod control_provider_summary;
 mod control_provider_write;
+mod control_settings;
 mod credits_modes;
 mod events;
+mod log_tail;
 mod measurements;
 mod membership;
 mod models;
@@ -73,13 +76,17 @@ mod spend_cap_live;
 mod spend_caps;
 mod subscriptions;
 mod terminate;
+mod tray;
 mod warmup;
 mod watch;
 
 pub use account_discovery::{
     DiscoverReport, accounts_discover_in, format_report, import_if_configured,
 };
-pub use agent_login::{accounts_import_in, accounts_switch_in};
+#[cfg(feature = "test-util")]
+#[doc(hidden)]
+pub use agent_login::set_test_agent_home;
+pub use agent_login::{accounts_import_in, accounts_project_in, accounts_switch_in};
 pub use models::{
     Cached, ModelLimits, ModelsHost, Picks, ProbeOutcome, ProviderModels, RefreshTiming,
 };
@@ -91,7 +98,11 @@ pub use sign_in::{
     SignInOptions, SubscriptionListing, quota_json, subscription_list, subscription_quota,
     subscription_refresh, subscription_sign_in, subscription_sign_out, subscriptions_json,
 };
-pub use terminate::{ConsoleEvent, Termination, TolerantWriter, finish, serve_until_signal};
+pub use terminate::{
+    ConsoleEvent, Signals, Termination, TolerantWriter, finish, serve_until_signal,
+    serve_until_signals,
+};
+pub use tray::{TrayStatus, tray_status};
 
 /// A configuration, credential, or startup failure.
 #[derive(Debug)]
@@ -324,6 +335,9 @@ pub struct StartOptions {
     /// Overrides `HOFUND_OWNER_PID` on the status response, for tests.
     #[doc(hidden)]
     pub hofund_owner_pid: Option<u32>,
+    /// Overrides the ten-minute control sign-in deadline, for expiry tests.
+    #[doc(hidden)]
+    pub sign_in_deadline: Option<std::time::Duration>,
 }
 
 /// Binds the model address and serves until shutdown.
@@ -518,6 +532,11 @@ async fn start_inner(
         }
     });
     let route_trace = hofund_router::RouteTraceBook::new();
+    let network_access = hofund_gateway::NetworkAccess::new(hofund_config::effective_network(
+        &config,
+        hofund_config::allow_ips_env().as_deref(),
+        hofund_config::trust_proxy_env().as_deref(),
+    ));
     let mut gateway = Gateway::with_token_file(
         snapshot.clone(),
         token.clone(),
@@ -525,6 +544,7 @@ async fn start_inner(
         inbound_codecs(),
         Arc::clone(&usage),
     )
+    .with_network_access(network_access.clone())
     .with_route_trace(Arc::clone(&route_trace))
     .with_key_store(Arc::clone(&key_store))
     .with_surfaces(registry.surfaces())
@@ -559,6 +579,7 @@ async fn start_inner(
         .await
         .map_err(|error| DaemonError::new(error.to_string()))?;
     running = running.with_resource(Arc::clone(&route_trace));
+    running = running.with_resource(Arc::clone(&quotas) as Arc<dyn hofund_gateway::QuotaSource>);
     if let Some(hook) = options.relisten_hook {
         running = running.with_bind_hook(hook);
     }
@@ -598,6 +619,7 @@ async fn start_inner(
             runtime_revision,
             config_ops::ConfigOpsRouting {
                 listener,
+                network_access,
                 visible_catalog: Arc::clone(&visible_catalog),
                 snapshot: snapshot.clone(),
             },
@@ -623,6 +645,11 @@ async fn start_inner(
                 shutdown_request,
             )
             .with_status_metadata(status_serves, options.hofund_owner_pid)
+            .with_sign_in_deadline(
+                options
+                    .sign_in_deadline
+                    .unwrap_or(sign_in::SIGN_IN_DEADLINE),
+            )
             .with_router(snapshot)
             .with_agent_hooks(options.agent_session, Some(token_generation))
             .with_quotas(Arc::clone(&quotas))
@@ -711,7 +738,16 @@ async fn start_inner(
         Arc::clone(&registry),
     );
     let probes = runtime.spawn_probes();
-    let running = running.with_resource(AffinityFlush(runtime.affinity()));
+    let running = running
+        .with_resource(AffinityFlush(runtime.affinity()))
+        .with_after_drain({
+            let runtime = Arc::clone(&runtime);
+            move || async move {
+                runtime
+                    .shutdown_upstreams(runtime::PROVIDER_SHUTDOWN_DEADLINE)
+                    .await;
+            }
+        });
     Ok(running
         .with_task(refresh)
         .with_task(maintenance)
@@ -748,15 +784,18 @@ pub async fn serve(path: &Path) -> Result<(), DaemonError> {
 
 async fn serve_reason(path: &Path) -> Result<Termination, DaemonError> {
     let running = start(path).await?;
+    // Handlers first: a SIGTERM sent on reading the notice must drain.
+    let signals = Signals::register();
     terminate::notice(&format!("listening on http://{}", running.local_addr));
-    Ok(serve_until_signal(running).await)
+    Ok(serve_until_signals(running, signals).await)
 }
 
 /// Waits for Ctrl-C or a control `POST /v1/hofund/shutdown`, then drains.
 ///
 /// Linked control listeners stop first, the model listener then finishes its
-/// in-flight requests, and daemon resources such as the control lock and
-/// socket are released when the server is dropped.
+/// in-flight requests, constructed upstream providers are shut down, and
+/// daemon resources such as the control lock and socket are released when
+/// the server is dropped.
 ///
 /// # Errors
 ///

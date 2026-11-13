@@ -152,6 +152,7 @@ AuthResult
 AuthResult #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
 AuthResult::const fn accepted (self) -> bool
 AuthResult::const fn new (accepted : bool) -> Self
+BRIDGE_CALLBACK_PATH_PREFIX
 BalanceCard
 BalanceCard #[non_exhaustive] derives(Clone, Debug, Default, PartialEq)
 BalanceCard::const fn account_wide (& self) -> bool
@@ -245,6 +246,20 @@ BodyStream::fn from_bytes (bytes : impl Into < Bytes >) -> Self
 BodyStream::fn from_stream (stream : impl Stream < Item = Result < Bytes , PluginError > > + Send + 'static ,) -> Self
 BodyStream::fn resume (chunk : Bytes , rest : Self) -> Self
 BodyStream::fn unfold < T , F , Fut > (state : T , next : F) -> Self where T : Send + 'static , F : FnMut (T) -> Fut + Send + 'static , Fut : Future < Output = Option < (Result < Vec < u8 > , PluginError > , T) > > + Send + 'static ,
+BridgeCallbackGuard
+BridgeCallbackGuard #[non_exhaustive]
+BridgeCallbackGuard::fn callback_url (& self) -> & str
+BridgeCallbackHandle
+BridgeCallbackHandle #[non_exhaustive] derives(Clone)
+BridgeCallbackHandle::fn base_url (& self) -> Result < String , PluginError >
+BridgeCallbackHandle::fn register (& self , token : & str , handler : Arc < dyn BridgeCallbackHandler > ,) -> Result < BridgeCallbackGuard , PluginError >
+BridgeCallbackHandler
+BridgeCallbackHandler::fn handle (& self , body : Bytes) -> BoxFuture < '_ , BridgeCallbackReply >
+BridgeCallbackReply
+BridgeCallbackReply #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
+BridgeCallbackReply::const fn status (& self) -> u16
+BridgeCallbackReply::fn body (& self) -> & [u8]
+BridgeCallbackReply::fn new (status : u16 , body : impl Into < Bytes >) -> Self
 BuildContext
 BuildContext #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
 BuildContext::const fn new (protocol : ProtocolId) -> Self
@@ -309,6 +324,8 @@ ConnectionStatus::const fn installed (& self) -> bool
 ConnectionStatus::const fn managed (& self) -> bool
 ConnectionStatus::fn new (id : & 'static str , display_name : & 'static str , installed : bool , connected : bool , managed : bool , paths : Vec < PathBuf > ,) -> Self
 ConnectionStatus::fn paths (& self) -> & [PathBuf]
+ConnectionStatus::fn warnings (& self) -> & [String]
+ConnectionStatus::fn with_warnings (mut self , warnings : Vec < String >) -> Self
 ContentBlockStart
 ContentBlockStop
 ContentPart
@@ -446,6 +463,8 @@ HostContext #[non_exhaustive] derives(Clone)
 HostContext::const fn key (& self) -> & PluginKey
 HostContext::const fn plugin (& self) -> & PluginId
 HostContext::fn accounts (& self) -> & AccountsHandle
+HostContext::fn bridge_callback (& self) -> & BridgeCallbackHandle
+HostContext::fn bridge_mcp_helper (& self) -> Result < SpawnRequest , PluginError >
 HostContext::fn clock (& self) -> & ClockHandle
 HostContext::fn dirs (& self) -> & DirHandle
 HostContext::fn from_backends (plugin : PluginId , http : Arc < dyn HttpBackend > , secrets : Arc < dyn SecretsBackend > , accounts : Arc < dyn AccountBackend > , clock : Arc < dyn ClockBackend > , scheduler : Arc < dyn SchedulerBackend > , process : Arc < dyn ProcessBackend > , dirs : Arc < dyn DirBackend > , observe : Arc < dyn ObserveBackend > ,) -> Self
@@ -456,6 +475,8 @@ HostContext::fn observe (& self) -> & ObserveHandle
 HostContext::fn scheduler (& self) -> & SchedulerHandle
 HostContext::fn secrets (& self) -> & SecretsHandle
 HostContext::fn spawn_process (& self) -> & ProcessHandle
+HostContext::fn with_bridge_callback (mut self , bridge : Arc < dyn BridgeCallbackBackend >) -> Self
+HostContext::fn with_bridge_mcp_program (mut self , program : PathBuf) -> Self
 HostContext::fn with_loopback (mut self , loopback : Arc < dyn LoopbackBackend >) -> Self
 HostReadBudget
 HostReadBudget derives(Clone, Copy, Debug, PartialEq, Eq)
@@ -519,6 +540,16 @@ ListQuery::fn new () -> Self
 ListQuery::fn page (& self) -> Option < & str >
 ListQuery::fn with_limit (mut self , limit : u32) -> Self
 ListQuery::fn with_page (mut self , page : impl Into < String >) -> Self
+LongLivedChild
+LongLivedChild #[non_exhaustive]
+LongLivedChild::async fn close_stdin (& self) -> Result < () , PluginError >
+LongLivedChild::async fn wait (& self) -> Result < i32 , PluginError >
+LongLivedChild::async fn write_stdin (& self , bytes : Bytes) -> Result < () , PluginError >
+LongLivedChild::fn id (& self) -> u32
+LongLivedChild::fn kill (& self) -> Result < () , PluginError >
+LongLivedChild::fn on_kill (& self , hook : Box < dyn FnOnce () + Send >)
+LongLivedChild::fn stderr_tail (& self) -> Bytes
+LongLivedChild::fn stdout_stream (& self) -> Result < BodyStream , PluginError >
 LoopbackBinding
 LoopbackBinding #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 LoopbackBinding::const fn blocked (& self) -> Option < BindBlocked >
@@ -536,6 +567,8 @@ LoopbackSpec::const fn ephemeral () -> Self
 LoopbackSpec::const fn fixed (port : u16) -> Self
 LoopbackSpec::const fn host (& self) -> RedirectHost
 LoopbackSpec::const fn path (mut self , path : & 'static str) -> Self
+LoopbackSpec::const fn query_token (mut self , success_url : & 'static str) -> Self
+LoopbackSpec::const fn query_token_success_url (& self) -> Option < & 'static str >
 LoopbackSpec::const fn redirect_host (mut self , host : RedirectHost) -> Self
 LoopbackSpec::const fn requested_port (& self) -> Option < u16 >
 LoopbackSpec::fn expect_state (mut self , state : impl Into < String >) -> Self
@@ -734,6 +767,8 @@ PluginError::const fn is_credit (& self) -> bool
 PluginError::const fn kind (& self) -> PluginErrorKind
 PluginError::const fn reset_after (& self) -> Option < Duration >
 PluginError::const fn retry_after (& self) -> Option < Duration >
+PluginError::const fn skip_failover_same_plugin (mut self) -> Self
+PluginError::const fn skips_failover_same_plugin (& self) -> bool
 PluginError::const fn status (& self) -> Option < u16 >
 PluginError::const fn with_credit_soon (mut self) -> Self
 PluginError::const fn without_cooldown (mut self) -> Self
@@ -814,6 +849,7 @@ ProbeReport::fn snippet (& self) -> & str
 ProcessHandle
 ProcessHandle #[non_exhaustive] derives(Clone)
 ProcessHandle::async fn spawn (& self , request : & SpawnRequest) -> Result < Spawned , PluginError >
+ProcessHandle::async fn spawn_long_lived (& self , request : & SpawnRequest , env_deny : & [OsString] ,) -> Result < LongLivedChild , PluginError >
 ProcessHandle::async fn spawn_piped (& self , request : & SpawnRequest) -> Result < PipedChild , PluginError >
 ProcessHandle::async fn wait (& self , spawned : Spawned) -> Result < i32 , PluginError >
 ProcessHandle::fn kill (& self , spawned : Spawned) -> Result < () , PluginError >
@@ -847,6 +883,7 @@ QuotaObservation::const fn with_window_reset (mut self , after : Duration) -> Se
 QuotaObservation::fn from_stored (plugin : PluginId) -> Self
 QuotaObservation::fn plugin (& self) -> & PluginId
 QuotaObservation::fn window (& self) -> Option < & str >
+QuotaObservation::fn with_window (mut self , window : impl Into < String >) -> Self
 QuotaQuery
 QuotaQuery #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 QuotaQuery::fn account (& self) -> Option < & AccountId >
@@ -881,9 +918,11 @@ QuotaWindow::const fn limit (& self) -> Option < u64 >
 QuotaWindow::const fn resets_at (& self) -> Option < SystemTime >
 QuotaWindow::const fn used (& self) -> u64
 QuotaWindow::const fn with_blocking (mut self , blocking : bool) -> Self
+QuotaWindow::fn excluded_models (& self) -> & [String]
 QuotaWindow::fn name (& self) -> & str
 QuotaWindow::fn new (name : impl Into < String > , used : u64 , limit : Option < u64 > , resets_at : Option < SystemTime > ,) -> Result < Self , PluginError >
 QuotaWindow::fn scope_model (& self) -> Option < & str >
+QuotaWindow::fn with_excluded_models (mut self , models : Vec < String >) -> Self
 QuotaWindow::fn with_scope_model (mut self , model : impl Into < String >) -> Self
 RawAnswer
 RawAnswer #[non_exhaustive] derives(Debug)
@@ -944,6 +983,88 @@ SecretString
 SecretsHandle
 SecretsHandle #[non_exhaustive] derives(Clone)
 SecretsHandle::async fn get (& self , id : & str) -> Result < Option < SecretString > , PluginError >
+SessionCompression
+SessionCompression #[non_exhaustive] derives(Clone, Copy, Debug, Default, PartialEq, Eq)
+SessionCompression::None
+SessionCompression::Zstd
+SessionDay
+SessionDay #[non_exhaustive] derives(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)
+SessionDay.date
+SessionDay.model
+SessionDay.tokens
+SessionDay::fn new (date : impl Into < String > , model : impl Into < String > , tokens : SessionTokens) -> Self
+SessionFile
+SessionFile #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
+SessionFile.compression
+SessionFile.id
+SessionFile.path
+SessionFile::const fn with_compression (mut self , compression : SessionCompression) -> Self
+SessionFile::fn new (id : impl Into < String > , path : impl Into < PathBuf >) -> Self
+SessionLocator
+SessionLocator::fn present (& self) -> bool
+SessionLocator::fn roots (& self) -> Vec < PathBuf >
+SessionParse
+SessionParse #[non_exhaustive] derives(Clone, Debug, Default, PartialEq)
+SessionParse.record
+SessionParse.state
+SessionParse::fn new (record : SessionRecord , state : impl Into < String >) -> Self
+SessionParser
+SessionParser::fn finish (self : Box < Self >) -> Result < SessionParse , PluginError >
+SessionParser::fn push (& mut self , value : & serde_json :: Value) -> Result < () , PluginError >
+SessionRecord
+SessionRecord #[non_exhaustive] derives(Clone, Debug, Deserialize, PartialEq, Serialize)
+SessionRecord.agent
+SessionRecord.copies
+SessionRecord.copy
+SessionRecord.cost
+SessionRecord.cut
+SessionRecord.cwd
+SessionRecord.days
+SessionRecord.family_ids
+SessionRecord.family_leaf
+SessionRecord.family_root
+SessionRecord.forked_from
+SessionRecord.id
+SessionRecord.last_ms
+SessionRecord.main
+SessionRecord.models
+SessionRecord.parent_id
+SessionRecord.path
+SessionRecord.start_ms
+SessionRecord.subagents
+SessionRecord.title
+SessionRecord.unpriced
+SessionRecord.usage
+SessionRecord::fn add_day (& mut self , day : SessionDay)
+SessionRecord::fn add_usage (& mut self , model : impl Into < String > , tokens : SessionTokens)
+SessionRecord::fn model_ids (& self) -> Vec < String >
+SessionRecord::fn new (agent : impl Into < String > , id : impl Into < String > , path : impl Into < PathBuf >) -> Self
+SessionRecord::fn tokens (& self) -> SessionTokens
+SessionRecord::fn with_parent (mut self , parent_id : impl Into < String >) -> Self
+SessionStore
+SessionStore::fn agent (& self) -> & str
+SessionStore::fn files (& self , root : & Path) -> Result < Vec < SessionFile > , PluginError >
+SessionStore::fn locator (& self) -> & dyn SessionLocator
+SessionStore::fn parser (& self , file : & SessionFile , state : Option < & str > ,) -> Result < Box < dyn SessionParser > , PluginError >
+SessionTokens
+SessionTokens #[non_exhaustive] derives(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)
+SessionTokens.cache_read
+SessionTokens.cache_write
+SessionTokens.cache_write_1h
+SessionTokens.input
+SessionTokens.output
+SessionTokens::const fn new (input : u64 , output : u64 , cache_read : u64 , cache_write : u64) -> Self
+SessionTokens::fn add (& mut self , other : Self)
+SessionTokens::fn is_zero (self) -> bool
+SessionTokens::fn total (self) -> u64
+SessionTokens::fn with_cache_write_1h (mut self , tokens : u64) -> Self
+SessionUsageEvent
+SessionUsageEvent #[non_exhaustive] derives(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)
+SessionUsageEvent.checkpoint
+SessionUsageEvent.date
+SessionUsageEvent.model
+SessionUsageEvent.tokens
+SessionUsageEvent::fn new (checkpoint : SessionTokens , tokens : SessionTokens , model : impl Into < String > , date : impl Into < String > ,) -> Self
 SignInChallenge
 SignInChallenge #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 SignInChallenge::DeviceCode
@@ -978,9 +1099,11 @@ SignInProof #[non_exhaustive] derives(Clone)
 SignInProof::Await
 SignInProof::Callback
 SignInProof::Device
+SignInProof::QueryToken
 SignInProof::Token
 SignInProof::fn callback (code : impl Into < SecretString > , state : impl Into < String >) -> Self
 SignInProof::fn device (user_code : impl Into < SecretString >) -> Self
+SignInProof::fn query_token (user_id : impl Into < String > , access_token : impl Into < SecretString >) -> Self
 SignInProof::fn token (token : impl Into < SecretString >) -> Self
 Slot
 Slot #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
@@ -1011,8 +1134,14 @@ SpawnRequest::fn program (& self) -> & Path
 Spawned
 Spawned #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
 Spawned::const fn id (self) -> u32
+StillWorking
 Stop
 StopReason
+StoppedWaiting
+StoppedWaiting derives(Clone, Debug, Default)
+StoppedWaiting::fn is_stopped (& self) -> bool
+StoppedWaiting::fn new () -> Self
+StoppedWaiting::fn stop (& self)
 StreamEvent
 Subscription
 Subscription::async fn account_status (& self , account : & AccountId , host : & HostContext ,) -> Result < AccountStatus , PluginError >
@@ -1030,6 +1159,7 @@ Subscription::async fn quota (& self , account : & AccountId , host : & HostCont
 Subscription::async fn quota_reset_credits (& self , account : & AccountId , host : & HostContext ,) -> Result < Option < QuotaResetCredits > , PluginError >
 Subscription::async fn refresh (& self , account : & AccountId , host : & HostContext) -> Result < () , PluginError >
 Subscription::async fn remove_account (& self , account : & AccountId , host : & HostContext ,) -> Result < () , PluginError >
+Subscription::async fn set_project (& self , email : & str , project : & str , host : & HostContext ,) -> Result < () , PluginError >
 Subscription::async fn shutdown (& self , deadline : Duration) -> Result < () , PluginError >
 Subscription::async fn start_sign_in (& self , ctx : & SignInCtx , host : & HostContext ,) -> Result < SignInChallenge , PluginError >
 Subscription::async fn write_agent_sign_in (& self , account : & AccountId , home : & std :: path :: Path , host : & HostContext ,) -> Result < () , PluginError >
@@ -1074,6 +1204,7 @@ TierId
 TierId #[non_exhaustive] derives(Clone, Debug)
 TierId::const fn from_static (value : & 'static str) -> Self
 TierId::fn as_str (& self) -> & str
+Tool
 ToolArguments
 ToolArgumentsDelta
 ToolChoice
@@ -1134,6 +1265,7 @@ WriteCtx #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 WriteCtx::fn home (& self) -> & Path
 WriteCtx::fn new (home : impl Into < PathBuf >) -> Self
 const API
+const BRIDGE_CALLBACK_PATH_PREFIX
 const LOOPBACK_CANCEL_PATH
 const PROBE_CAP
 fn read_budget (request : & http :: Request < crate :: Body >) -> Option < Duration >
@@ -1150,6 +1282,10 @@ kernel::AccountLeaseBackend
 kernel::AccountLeaseBackend::async fn commit (self : Box < Self > , label : Option < String > , secret : SecretString ,) -> Result < () , PluginError >
 kernel::AccountLeaseBackend::fn account (& self) -> & Account
 kernel::AccountLeaseBackend::fn secret (& self) -> & SecretString
+kernel::BridgeCallbackBackend
+kernel::BridgeCallbackBackend::fn base_url (& self) -> Result < String , PluginError >
+kernel::BridgeCallbackBackend::fn register (& self , plugin : & PluginKey , token : & str , handler : std :: sync :: Arc < dyn crate :: BridgeCallbackHandler > ,) -> Result < String , PluginError >
+kernel::BridgeCallbackBackend::fn unregister (& self , plugin : & PluginKey , token : & str)
 kernel::ClockBackend
 kernel::ClockBackend::fn monotonic (& self) -> Duration
 kernel::ClockBackend::fn now (& self) -> SystemTime
@@ -1175,6 +1311,14 @@ kernel::HttpBackend::fn pooled_client (& self) -> Option < Arc < dyn Any + Send 
 kernel::HttpRequest
 kernel::HttpResponse
 kernel::Job
+kernel::LongLivedChildBackend
+kernel::LongLivedChildBackend::async fn close_stdin (& self) -> Result < () , PluginError >
+kernel::LongLivedChildBackend::async fn wait (& self) -> Result < i32 , PluginError >
+kernel::LongLivedChildBackend::async fn write_stdin (& self , bytes : Bytes) -> Result < () , PluginError >
+kernel::LongLivedChildBackend::fn id (& self) -> u32
+kernel::LongLivedChildBackend::fn kill (& self) -> Result < () , PluginError >
+kernel::LongLivedChildBackend::fn stderr_tail (& self) -> Bytes
+kernel::LongLivedChildBackend::fn take_stdout (& self) -> Option < BodyStream >
 kernel::LoopbackBackend
 kernel::LoopbackBackend::fn bind (& self , plugin : & PluginKey , session : & str , spec : & crate :: LoopbackSpec ,) -> Result < crate :: LoopbackBinding , PluginError >
 kernel::LoopbackBackend::fn release (& self , plugin : & PluginKey , session : & str)
@@ -1188,6 +1332,7 @@ kernel::PipedChildBackend::fn id (& self) -> u32
 kernel::PipedChildBackend::fn take_stdout (& self) -> Option < BodyStream >
 kernel::ProcessBackend
 kernel::ProcessBackend::async fn spawn (& self , program : PathBuf , args : Vec < std :: ffi :: OsString > , env : Vec < (std :: ffi :: OsString , std :: ffi :: OsString) > , cwd : PathBuf ,) -> Result < u32 , PluginError >
+kernel::ProcessBackend::async fn spawn_long_lived (& self , program : PathBuf , args : Vec < std :: ffi :: OsString > , env : Vec < (std :: ffi :: OsString , std :: ffi :: OsString) > , cwd : PathBuf , env_deny : Vec < std :: ffi :: OsString > ,) -> Result < Box < dyn LongLivedChildBackend > , PluginError >
 kernel::ProcessBackend::async fn spawn_piped (& self , program : PathBuf , args : Vec < std :: ffi :: OsString > , env : Vec < (std :: ffi :: OsString , std :: ffi :: OsString) > , cwd : PathBuf ,) -> Result < Box < dyn PipedChildBackend > , PluginError >
 kernel::ProcessBackend::async fn wait (& self , id : u32) -> Result < i32 , PluginError >
 kernel::ProcessBackend::fn kill (& self , id : u32) -> Result < () , PluginError >

@@ -17,12 +17,17 @@ pub(crate) struct Credential {
     pub api_server: String,
     pub devin_api: String,
     pub label: String,
+    pub plan: String,
+    pub org_id: String,
+    pub team_id: String,
 }
 
 /// Stored account metadata.
 #[derive(Clone, Debug)]
 pub(crate) struct Stored {
     pub credential: Credential,
+    pub cli_path: Option<PathBuf>,
+    pub needs_sign_in: bool,
 }
 
 impl Stored {
@@ -33,6 +38,33 @@ impl Stored {
             ));
         };
         parse_secret(&secret)
+    }
+
+    pub(crate) async fn live(host: &HostContext, account: &AccountId) -> Result<Self, PluginError> {
+        let stored = Self::load(host, account).await?;
+        if stored.cli_path.is_none() {
+            return Ok(stored);
+        }
+        let lease = host
+            .accounts()
+            .lease(account, std::time::Duration::from_secs(30))
+            .await?;
+        let stored = parse_secret(lease.secret())?;
+        let Some(path) = stored.cli_path.clone() else {
+            return Ok(stored);
+        };
+        let Ok(mut latest) = read_credentials(&path) else {
+            return Ok(stored);
+        };
+        latest.label = stored.credential.label;
+        latest.plan = stored.credential.plan;
+        latest.org_id = stored.credential.org_id;
+        latest.team_id = stored.credential.team_id;
+        Ok(Stored {
+            credential: latest,
+            cli_path: Some(path),
+            needs_sign_in: stored.needs_sign_in,
+        })
     }
 }
 
@@ -56,23 +88,65 @@ pub(crate) fn parse_secret(secret: &SecretString) -> Result<Stored, PluginError>
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
         .unwrap_or_else(|| default_label(&key));
+    let cli_path = if blob.text("cli") == Some("true") {
+        blob.text("cli_path")
+            .map(PathBuf::from)
+            .or_else(|| default_credentials_path().ok())
+    } else {
+        None
+    };
     Ok(Stored {
         credential: Credential {
             key,
             api_server,
             devin_api,
             label,
+            plan: blob.text("plan").unwrap_or_default().to_owned(),
+            org_id: blob.text("org_id").unwrap_or_default().to_owned(),
+            team_id: blob.text("team_id").unwrap_or_default().to_owned(),
         },
+        cli_path,
+        needs_sign_in: blob.flag("needs_sign_in"),
     })
 }
 
+pub(crate) async fn mark_needs_sign_in(
+    host: &HostContext,
+    account: &AccountId,
+) -> Result<(), PluginError> {
+    let lease = host
+        .accounts()
+        .lease(account, std::time::Duration::from_secs(30))
+        .await?;
+    let blob = SecretObject::parse(lease.secret())?;
+    lease
+        .commit(None, blob.with_flag("needs_sign_in", true).to_secret())
+        .await
+}
+
 pub(crate) fn secret_blob(credential: &Credential) -> SecretObject {
-    SecretObject::new()
+    let mut blob = SecretObject::new()
         .with_number("v", 1)
         .with_secret("api_key", &credential.key)
         .with_text("api_server", &credential.api_server)
         .with_text("devin_api", &credential.devin_api)
-        .with_text("label", &credential.label)
+        .with_text("label", &credential.label);
+    for (key, value) in [
+        ("plan", &credential.plan),
+        ("org_id", &credential.org_id),
+        ("team_id", &credential.team_id),
+    ] {
+        if !value.is_empty() {
+            blob = blob.with_text(key, value);
+        }
+    }
+    blob
+}
+
+pub(crate) fn cli_secret_blob(credential: &Credential, path: &Path) -> SecretObject {
+    secret_blob(credential)
+        .with_text("cli", "true")
+        .with_text("cli_path", &path.to_string_lossy())
 }
 
 /// Label-based account id for seeded accounts and tests.
@@ -144,6 +218,9 @@ pub(crate) fn parse_credentials_toml(text: &str) -> Result<Credential, PluginErr
         key,
         api_server,
         devin_api,
+        plan: String::new(),
+        org_id: String::new(),
+        team_id: String::new(),
     })
 }
 
@@ -195,15 +272,19 @@ pub(crate) fn read_credentials(path: &Path) -> Result<Credential, PluginError> {
 }
 
 pub(crate) fn default_credentials_path() -> Result<PathBuf, PluginError> {
-    let base = std::env::var("XDG_DATA_HOME")
-        .ok()
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var("HOME")
-                .ok()
-                .map(|home| PathBuf::from(home).join(".local").join("share"))
-        })
-        .ok_or_else(|| PluginError::io("cannot resolve the Devin credentials directory"))?;
+    let base = if cfg!(windows) {
+        std::env::var("APPDATA").ok().map(PathBuf::from)
+    } else {
+        std::env::var("XDG_DATA_HOME")
+            .ok()
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var("HOME")
+                    .ok()
+                    .map(|home| PathBuf::from(home).join(".local").join("share"))
+            })
+    }
+    .ok_or_else(|| PluginError::io("cannot resolve the Devin credentials directory"))?;
     Ok(base.join("devin").join("credentials.toml"))
 }
 

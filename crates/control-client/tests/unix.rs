@@ -334,3 +334,40 @@ async fn discovery_overlong_socket_path_falls_back_to_tcp() {
     );
     assert!(error.to_string().contains("TCP"), "{error}");
 }
+
+/// Matches [`OPEN_WAIT`] in the client library.
+const OPEN_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+#[tokio::test]
+async fn unix_handshake_times_out_when_the_peer_never_answers() {
+    let dir = Scratch::new("silent-peer");
+    let socket = dir.join("control.sock");
+    let listener = UnixListener::bind(&socket).expect("bind Unix server");
+    let server = tokio::spawn(async move {
+        let (_stream, _) = listener.accept().await.expect("accept");
+        // Hold the connection open and never speak HTTP.
+        std::future::pending::<()>().await;
+    });
+
+    let started = std::time::Instant::now();
+    let error = tokio::time::timeout(
+        OPEN_WAIT + std::time::Duration::from_secs(3),
+        Client::unix(&socket, TOKEN).health(),
+    )
+    .await
+    .expect("handshake timeout must return before the outer bound")
+    .expect_err("silent peer");
+    let elapsed = started.elapsed();
+    assert!(elapsed >= OPEN_WAIT, "timed out too early: {elapsed:?}");
+    assert!(
+        elapsed < OPEN_WAIT + std::time::Duration::from_secs(3),
+        "timed out too late: {elapsed:?}"
+    );
+    let message = error.to_string();
+    assert!(
+        message.contains("control Unix handshake timed out after 5s"),
+        "{message}"
+    );
+    assert!(error.is_unavailable(), "{message}");
+    server.abort();
+}

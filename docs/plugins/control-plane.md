@@ -191,6 +191,7 @@ All routes except `GET /health` require authentication. DTO names below are sket
 | `POST /v1/hofund/config/reload` | `ReloadRequest` with expected revision | `ConfigResponse` | CLI `config reload` and the file watcher use the same internal operation |
 | `GET /v1/hofund/providers` | `EmptyRequest` | `ProviderListResponse` with extended secret-free summaries (`enabled`, `listed`, masked key, preset hints) | CLI and desktop Providers page |
 | `GET /v1/hofund/presets` | `EmptyRequest` | `PresetListResponse` | TUI preset picker (R-7a) |
+| `POST /v1/hofund/catalog/sync` | `CatalogSyncRequest` (`version`, optional `force`) | `CatalogSyncResponse` (`version`, `ok`, optional `error`) | TUI startup sync and Agents `S` (R-14 G-8). `force: false` does not fetch when an index is already loaded |
 | `POST /v1/hofund/providers` | `ProviderCreateRequest` with expected disk revision | `ProviderWriteResponse` | TUI add provider (R-7a) |
 | `PATCH /v1/hofund/providers/{id}` | `ProviderPatchRequest` with expected disk revision | `ProviderWriteResponse`; agent reseat when disabled | TUI provider field edits (R-7a) |
 | `DELETE /v1/hofund/providers/{id}` | `ProviderDeleteRequest` with expected disk revision | `ProviderDeleteResponse`; agent reseat in the same write | TUI delete provider (R-7a) |
@@ -204,7 +205,7 @@ All routes except `GET /health` require authentication. DTO names below are sket
 | `POST /v1/hofund/providers/{id}/test` | `ProviderTestRequest` with optional model ids | `ProviderTestResponse` | CLI `provider test`, preserving the #28 operation through L |
 | `GET /v1/hofund/providers/{id}/models` | `EmptyRequest` | `ModelListResponse` | Desktop cached-list view |
 | `POST /v1/hofund/providers/{id}/models/refresh` | `EmptyRequest` | `ModelListResponse` with refreshed ids and pick changes | CLI `provider models <id>` with no ids, `provider refresh` or `fetch`, desktop refresh |
-| `GET /v1/hofund/providers/{id}/picks` | `EmptyRequest` | `PicksResponse` | CLI and desktop current host-state picks |
+| `GET /v1/hofund/providers/{id}/picks` | `EmptyRequest` | `PicksResponse`, including additive `default_exposed` when the cached list can name a default enabled set | CLI and desktop current host-state picks; TUI model picker (R-14 G-12) |
 | `PUT /v1/hofund/providers/{id}/picks` | `PicksSetRequest` | `PicksResponse` | CLI `provider models <id> <ids...>` and desktop pick editor |
 | `GET /v1/hofund/models` | `EmptyRequest` | `RouteModelListResponse` | Agent plan and CLI route listing; omits retired, deprecated, and disabled route models |
 | `POST /v1/hofund/models/disable` | `CatalogModelRequest` with `model` | `CatalogDisabledListResponse` | CLI `models disable`; adds one pattern to `[catalog].disabled` through config apply |
