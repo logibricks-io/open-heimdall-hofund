@@ -324,10 +324,13 @@ wire::Sent::async fn complete (self) -> Result < Completion , PluginError >
 wire::Sent::async fn fold (self) -> Result < Completion , PluginError >
 wire::Sent::fn headers (& self) -> & http :: HeaderMap
 wire::Sent::fn watch (mut self , limit : usize , watch : Watch) -> Self
+wire::StatusClassify
 wire::Target derives(Clone)
 wire::Target::const fn allocation_quota_rate (mut self , enabled : bool) -> Self
 wire::Target::const fn chatgpt_codex_zstd (mut self , enabled : bool) -> Self
+wire::Target::const fn generate_in_body (mut self , enabled : bool) -> Self
 wire::Target::const fn request_body_gzip (mut self , enabled : bool) -> Self
+wire::Target::fn classify_status (mut self , classify : StatusClassify) -> Self
 wire::Target::fn credential (mut self , credential : CredentialStyle) -> Self
 wire::Target::fn headers (mut self , headers : Vec < (String , String) >) -> Self
 wire::Target::fn method_root (mut self , root : & 'static str) -> Self

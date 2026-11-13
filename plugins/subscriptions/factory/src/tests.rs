@@ -505,3 +505,113 @@ fn r52_fast_responses_base_model_uses_fast_id_and_priority() {
     assert_eq!(body["service_tier"], "priority");
     assert_eq!(call.uri(), "https://factory.test/api/llm/o/v1/responses");
 }
+
+#[test]
+fn r52_gemini_stream_uses_generate_with_model_and_thinking_config() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_oauth(&host);
+    host.http().enqueue_response(
+        200,
+        &[("content-type", "text/event-stream")],
+        b"data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"ok\"}]}}]}\n\n".to_vec(),
+    );
+    let sub = subscription(&host);
+    let upstream = sub.upstream(&id, host.context()).expect("upstream");
+    let query = ProbeQuery::new(ProtocolId::GENERATIVE_LANGUAGE, "gemini-4-argon").expect("query");
+    let mut request = query.minimal_request();
+    request.stream = true;
+    request.extensions.insert(
+        "generationConfig",
+        json!({"thinkingConfig": {"includeThoughts": true, "thinkingLevel": "high"}}),
+    );
+    block_on(upstream.execute(request, ProtocolId::GENERATIVE_LANGUAGE)).expect("stream");
+    let calls = host.http().calls();
+    let call = calls.last().expect("model call");
+    assert_eq!(call.uri(), "https://factory.test/api/llm/g/v1/generate");
+    let body: hofund_plugin_sdk::json::Value =
+        hofund_plugin_sdk::json::from_slice(call.body()).expect("body");
+    assert_eq!(body["model"], "gemini-4-argon");
+    assert_eq!(
+        body["generationConfig"]["thinkingConfig"]["thinkingLevel"],
+        "high"
+    );
+    assert!(
+        body["systemInstruction"]["parts"][0]["text"]
+            .as_str()
+            .is_some_and(|text| text.starts_with("You are Droid,"))
+    );
+    assert!(body.get("stream").is_none());
+    assert!(
+        call.sensitive_headers()
+            .iter()
+            .any(|name| name == "x-api-provider")
+    );
+}
+
+#[test]
+fn r52_content_policy_is_a_non_cooling_request_refusal_without_a_retry() {
+    for (body, upstream_error) in [
+        (
+            r#"{"code":"content_policy_rejected","detail":"blocked"}"#,
+            false,
+        ),
+        (
+            r#"{"error":{"code":"content_policy_rejected","message":"blocked"}}"#,
+            false,
+        ),
+        (
+            r#"{"code":"content_policy_rejected","detail":"blocked"}"#,
+            true,
+        ),
+    ] {
+        let dir = tempfile::tempdir().expect("dir");
+        let host = host(&dir);
+        let id = seed_oauth(&host);
+        let headers: &[(&str, &str)] = if upstream_error {
+            &[("x-factory-upstream-error", "1")]
+        } else {
+            &[]
+        };
+        host.http()
+            .enqueue_response(403, headers, body.as_bytes().to_vec());
+        let sub = subscription(&host);
+        let upstream = sub.upstream(&id, host.context()).expect("upstream");
+        let query = ProbeQuery::new(ProtocolId::OPENAI_CHAT, "glm-5.3").expect("query");
+        let error = block_on(upstream.execute(query.minimal_request(), ProtocolId::OPENAI_CHAT))
+            .err()
+            .expect("refused");
+        assert_eq!(host.http().calls().len(), 1);
+        if upstream_error {
+            assert_eq!(error.status(), Some(403));
+            assert!(error.cools());
+        } else {
+            assert_eq!(error.status(), Some(400));
+            assert!(!error.cools());
+            assert!(error.skips_failover_same_plugin());
+            assert!(error.message().contains("reads the whole conversation"));
+            assert!(error.message().contains("content_policy_rejected"));
+        }
+    }
+}
+
+#[test]
+fn r52_rate_limit_keeps_retry_after_and_cools() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_oauth(&host);
+    host.http()
+        .enqueue_response(429, &[("retry-after", "17")], b"slow down".to_vec());
+    let sub = subscription(&host);
+    let upstream = sub.upstream(&id, host.context()).expect("upstream");
+    let query = ProbeQuery::new(ProtocolId::OPENAI_CHAT, "glm-5.3").expect("query");
+    let error = block_on(upstream.execute(query.minimal_request(), ProtocolId::OPENAI_CHAT))
+        .err()
+        .expect("rate limit");
+    assert_eq!(error.status(), Some(429));
+    assert_eq!(
+        error.retry_after(),
+        Some(std::time::Duration::from_secs(17))
+    );
+    assert!(error.cools());
+}

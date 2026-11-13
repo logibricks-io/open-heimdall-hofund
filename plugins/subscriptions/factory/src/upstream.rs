@@ -6,8 +6,10 @@ use hofund_plugin_api::{
     AccountId, Completion, CredentialStyle, HostContext, PluginError, ProbeQuery, ProbeReport,
     ProtocolId, Request, UpstreamProvider,
 };
+use hofund_plugin_sdk::HeaderMap;
+use hofund_plugin_sdk::json::Value;
 use hofund_plugin_sdk::url::Url;
-use hofund_plugin_sdk::wire::{self, Target};
+use hofund_plugin_sdk::wire::{self, StatusClassify, Target};
 
 use crate::Endpoints;
 use crate::client;
@@ -62,7 +64,9 @@ impl FactoryUpstream {
         let target = Target::new(wire, format!("{api_base}{path}"))
             .credential(CredentialStyle::Bearer)
             .headers(headers)
-            .rewrite(models::request_rewrite(wire));
+            .generate_in_body(wire == ProtocolId::GENERATIVE_LANGUAGE)
+            .rewrite(models::request_rewrite(wire, &request.model))
+            .classify_status(classify_status());
         wire::execute(
             self.host.http(),
             &target,
@@ -72,6 +76,38 @@ impl FactoryUpstream {
         )
         .await
     }
+}
+
+fn classify_status() -> StatusClassify {
+    Arc::new(|status, headers, body, error| {
+        if !content_refused(status, headers, body) {
+            return error;
+        }
+        PluginError::status_error(
+            400,
+            format!(
+                "{} — Factory's usage policy check reads the whole conversation, so this session's requests are refused again until the text that tripped it is gone: start a new session, or remove or reword what the conversation quotes (another agent's system prompt or instructions pasted in a message or a tool's output are the usual cause)",
+                error.message()
+            ),
+        )
+        .without_cooldown()
+        .skip_failover_same_plugin()
+    })
+}
+
+fn content_refused(status: u16, headers: &HeaderMap, body: &[u8]) -> bool {
+    if status != 403 || headers.contains_key("x-factory-upstream-error") {
+        return false;
+    }
+    let Ok(value) = hofund_plugin_sdk::json::from_slice::<Value>(body) else {
+        return false;
+    };
+    value.get("code").and_then(Value::as_str) == Some("content_policy_rejected")
+        || value
+            .get("error")
+            .and_then(|error| error.get("code"))
+            .and_then(Value::as_str)
+            == Some("content_policy_rejected")
 }
 
 fn llm_base(endpoints: &Endpoints, bearer: &Bearer) -> Result<String, PluginError> {

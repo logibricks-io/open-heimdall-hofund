@@ -662,10 +662,14 @@ pub(crate) fn outbound_llm_headers(model: &str) -> Vec<(String, String)> {
 
 /// Request body and added headers for one upstream wire.
 #[must_use]
-pub(crate) fn request_rewrite(wire: ProtocolId) -> Rewrite {
+pub(crate) fn request_rewrite(wire: ProtocolId, model: &str) -> Rewrite {
+    let model = model.to_owned();
     Arc::new(move |body| {
         let added = fast_body(body, wire);
         client_body(body, wire);
+        if wire == ProtocolId::GENERATIVE_LANGUAGE {
+            body.insert("model".to_owned(), Value::String(model.clone()));
+        }
         added
     })
 }
