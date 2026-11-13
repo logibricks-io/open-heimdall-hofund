@@ -24,7 +24,7 @@ Legend: **Done** = matches the reference at checklist granularity; **Partial** =
 | Gemini CLI (Code Assist) | 8 | 6 | 2 | 2 | 0 |
 | Google Antigravity | 10 | 4 | 2 | 1 | 0 |
 | SuperGrok (`grok`) | 10 | 6 | 0 | 2 | 0 |
-| Qoder (international + Qoder CN) | 1 | 10 | 9 | 0 | 0 |
+| Qoder (international + Qoder CN) | 1 | 11 | 7 | 1 | 0 |
 | CodeBuddy / WorkBuddy (CN + international) | 7 | 6 | 3 | 0 | 3 |
 | Z Code (`zcode`) | 7 | 8 | 2 | 0 | 2 |
 
@@ -504,28 +504,28 @@ Structured-output prose for Chat, Responses, and Messages shipped in R-13b (`str
 | a1 | sign-in: device / PKCE | plugin `index.mjs:6-10` desktop PKCE device flow | `lib.rs:145-157` import-only; unsupported native sign-in | Missing | Device PKCE sign-in (R-54) |
 | a2 | browser OAuth | qoder.com page in plugin | none | Missing | R-54 |
 | a3 | API key / paste | import credential JSON | `import.rs:7-17` user paste import | Partial | — |
-| a4 | agent credential discovery | plugin reads agent `credential.json` | none | Missing | Agent home discover (R-54) |
+| a4 | agent credential discovery | no agent credential export; native runtime helper only | none; no invented credential path | N/A | — |
 | b | import sources | legacy `qoder.json` migrate (`qoder.go:47-74`) | JSON import only | Partial | Legacy file migrate (R-54) |
 | c | token storage | plugin-owned; job + refresh tokens | `creds.rs` SecretObject | Done | — |
 | d | refresh | job token refresh; single-use refresh token (`index.mjs:9-10`) | `refresh.rs:16-46` lease + forced renew on 401 | Partial | `RELOGIN_GAP` / renew serialization (R-54) |
-| e | upstream wire | SSE `agent_chat_generation` + COSY envelope (`index.mjs:45-54`) | OpenAI Chat `.../chat/completions` (`upstream.rs:43-47`) | Missing | COSY SSE wire (R-54) |
+| e | upstream wire | SSE `agent_chat_generation` + COSY envelope (`index.mjs:45-54`) | OpenAI Chat `.../chat/completions` plus cached native identity, hostname, and client headers (`identity.rs`, `upstream.rs`) | Missing | COSY SSE wire (R-54) |
 | f | inbound shapes | OpenAI chat in IR → Qoder codec in plugin | Chat completions passthrough | Missing | R-54 |
 | g | streaming | COSY SSE `agent_chat_generation` (`packages/qoder/index.mjs:13-18`, `CHAT_PATH` line 45) | OpenAI Chat to `{base}/chat/completions` (`upstream.rs:43-54`) | Missing | COSY SSE stream (**R-54**) |
 | h | tool calls | XML-in-text lifted in plugin | unverified on hofund path | Missing | R-54 |
 | i | images | plugin tests | unverified | Partial | R-54 |
 | j | reasoning | model config in plugin | unverified | Partial | R-54 |
-| k | quota / usage | openapi account-context; plugin usage | `quota.rs` via openapi URL (`lib.rs:218-221`) | Partial | No silent fallback vs plugin |
-| l | model list | `/algo/api/v2/model/list` with device headers in plugin | `/api/v1/models` openapi (`models.rs:19-21`) | Partial | COSY/device headers on list (R-54) |
+| k | quota / usage | openapi account-context; plugin usage | `quota.rs` via openapi URL with reference client headers | Partial | No silent fallback vs plugin |
+| l | model list | `/algo/api/v2/model/list` with device headers in plugin | `/api/v1/models` openapi with reference device headers (`identity.rs`, `models.rs`) | Partial | COSY envelope and native model-list endpoint (R-54) |
 | m | multi-account | separate subscriptions `qoder` and `qoder-cn` (`qoder.go:28-31`) | one plugin, `Site` in creds (`creds.rs:10-38`) | Partial | Split config ids or document unified id (R-54) |
 | n | error classification | lapsed / NeedsSignIn in plugin | 401 → refresh (`upstream.rs:68-71`) | Partial | NeedsSignIn on 400 refresh (R-25 #612) |
-| o | daily check-in | `qoder_checkin.go` + plugin campaigns | `checkin.rs` + `with_daily_checkin` | Partial | 30-minute recheck for `qoder`, Qoder CN and `zcode` (`plugin_checkin.go:274` `pluginRechecks`; interval `wbCheckinEvery` `workbuddy_checkin.go:55`, used in `checkin.go:110-117`) (R-54) |
-| p | agent sign-in | plugin device identity | none | Missing | R-54 |
+| o | daily check-in | `qoder_checkin.go` + plugin campaigns with native identity | `checkin.rs` + `with_daily_checkin` + cached native identity/client headers | Partial | 30-minute recheck for `qoder`, Qoder CN and `zcode` (`plugin_checkin.go:274` `pluginRechecks`; interval `wbCheckinEvery` `workbuddy_checkin.go:55`, used in `checkin.go:110-117`) (R-54) |
+| p | agent sign-in / device identity | device PKCE sign-in and native runtime identity | import-only sign-in; native runtime identity and separate global/CN homes in `identity.rs` | Partial | Device PKCE sign-in (R-54) |
 | q | extras | Qoder CN VPC instance hosts (`index.mjs:29-36`); COSY_VERSION desktop | CN/global endpoints only (`lib.rs:37-71`) | Missing | VPC enterprise sign-in (R-54) |
 
 **Gaps**
 
 - Replace Chat Completions stub with COSY SSE upstream — **L**, **R-54**.
-- Native device PKCE sign-in + agent credential discover — **L**, **R-54**.
+- Native device PKCE sign-in — **L**, **R-54**. No agent credential discovery is planned from the reference's native runtime helper.
 - Qoder CN VPC instance URLs — **M**, **R-54**.
 - Refresh renew serialization (**R-54**) + NeedsSignIn mapping (**R-25** `#612`) — **S**.
 
