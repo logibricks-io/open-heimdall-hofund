@@ -72,22 +72,24 @@ pub(crate) fn map_with_mode(
 /// Maps a request with a fresh conversation, message, and per-execute temp path.
 #[cfg(test)]
 pub(crate) fn map(request: &Request) -> Result<MappedRequest, PluginError> {
+    let _lock = map_lock();
     map_with_mode(request, None, false)
 }
 
-/// Enables the process-wide Max Mode mapping log for the current test.
-///
-/// Mapping calls outside an active guard do not append, so unrelated `map()`
-/// tests cannot contaminate execute assertions.
+/// Enables the Max Mode mapping log for the current test and excludes other
+/// test-only [`map`] callers until the guard is dropped.
 #[cfg(test)]
 pub(crate) fn start_mapped_max_mode() -> MappedMaxMode {
+    let lock = map_lock();
     *mapped_max_mode() = Some(Vec::new());
-    MappedMaxMode
+    MappedMaxMode { _lock: lock }
 }
 
 /// Max Mode flags recorded while a [`start_mapped_max_mode`] guard is held.
 #[cfg(test)]
-pub(crate) struct MappedMaxMode;
+pub(crate) struct MappedMaxMode {
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
 
 #[cfg(test)]
 impl MappedMaxMode {
@@ -105,6 +107,16 @@ impl Drop for MappedMaxMode {
         *mapped_max_mode() = None;
     }
 }
+
+#[cfg(test)]
+fn map_lock() -> std::sync::MutexGuard<'static, ()> {
+    MAP_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[cfg(test)]
+static MAP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(test)]
 fn record_mapped_max_mode(max_mode: bool) {
