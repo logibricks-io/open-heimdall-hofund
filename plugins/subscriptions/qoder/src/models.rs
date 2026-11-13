@@ -9,6 +9,7 @@ use hofund_plugin_sdk::oauth::secret_text;
 
 use crate::Endpoints;
 use crate::creds::Stored;
+use crate::identity;
 use crate::refresh;
 
 pub(crate) async fn list(
@@ -20,7 +21,11 @@ pub(crate) async fn list(
         "{}/api/v1/models",
         endpoints.openapi_for(stored.credential.site)
     );
-    let reply = Call::get(url)
+    let mut call = Call::get(url);
+    for (name, value) in identity::model_headers(&stored.credential) {
+        call = call.sensitive_header(name, value);
+    }
+    let reply = call
         .sensitive_header(
             "authorization",
             format!("Bearer {}", secret_text(&stored.credential.token)),

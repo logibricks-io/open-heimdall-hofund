@@ -16,7 +16,7 @@ pub(crate) const LAPSED: &str = "lapsed";
 pub(crate) const LAPSED_REASON: &str = "Qoder refused the stored sign-in; import credentials again";
 
 /// Which Qoder deployment an account uses.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Site {
     Global,
     China,

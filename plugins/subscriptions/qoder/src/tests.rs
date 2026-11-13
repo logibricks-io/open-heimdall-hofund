@@ -1,20 +1,22 @@
 //! Unit tests against recording host backends; no network.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-use hofund_kit_subscription::{TestHost, block_on};
+use hofund_kit_subscription::{PipedScript, TestHost, block_on, poll_once};
 use hofund_plugin_api::{
     AccountId, AccountStatus, PluginErrorKind, PluginId, PluginKind, ProbeQuery, ProtocolId,
-    RawTable, SecretString, Subscription, SubscriptionFactory,
+    RawTable, SecretString, SignInFlow, Subscription, SubscriptionFactory,
 };
 use hofund_plugin_sdk::json;
 use hofund_plugin_sdk::oauth::{SecretObject, secret_text};
 
 use crate::creds::{self, Credential, Site, Stored};
+use crate::identity::{Devices, TestEnv};
 use crate::models;
 use crate::quota;
-use crate::{Endpoints, factory_with_endpoints};
+use crate::{Endpoints, Qoder, factory_with_endpoints};
 
 const OPENAPI: &str = "https://qoder.test";
 const CHAT: &str = "https://qoder-chat.test/v1";
@@ -54,11 +56,66 @@ fn subscription(host: &TestHost) -> Arc<dyn Subscription> {
     factory.build(&cfg, host.context()).expect("build")
 }
 
+fn subscription_with_devices(_host: &TestHost, devices: Arc<Devices>) -> Arc<dyn Subscription> {
+    Arc::new(Qoder {
+        endpoints: Arc::new(endpoints()),
+        devices,
+        flow: SignInFlow::Bridge {
+            command: hofund_plugin_api::BinaryName::new("qodercli"),
+        },
+        pending: Mutex::new(HashMap::new()),
+    })
+}
+
+fn test_devices(dir: &tempfile::TempDir) -> Arc<Devices> {
+    let runtime = dir.path().join("runtime-info-fixture");
+    std::fs::write(&runtime, "fixture").expect("runtime fixture");
+    let env = TestEnv::new(dir.path())
+        .var("QODER_RUNTIME_INFO", runtime.as_os_str())
+        .var("QODERCN_RUNTIME_INFO", runtime.as_os_str());
+    Arc::new(Devices::for_test(env, "fixture-host"))
+}
+
+fn native_script(environment: &'static str) -> PipedScript {
+    PipedScript::new()
+        .line(r#"{"machineToken":"fixture-native-token","machineType":"7"}"#)
+        .exits(move |spawn| {
+            assert_eq!(spawn.arg_strings(), [environment]);
+            Vec::new()
+        })
+}
+
+macro_rules! header {
+    ($call:expr, $name:expr) => {
+        ($call).header($name)
+    };
+}
+
+macro_rules! sensitive {
+    ($call:expr, $name:expr) => {
+        ($call)
+            .sensitive_headers()
+            .iter()
+            .any(|header| header.eq_ignore_ascii_case($name))
+    };
+}
+
+fn paired<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    headers
+        .iter()
+        .find(|(key, _)| key == name)
+        .map(|(_, value)| value.as_str())
+}
+
 fn seed(host: &TestHost) -> AccountId {
     seed_with_expiry(host, 1)
 }
 
 fn seed_with_expiry(host: &TestHost, expires_at: i64) -> AccountId {
+    seed_site_with_expiry(host, expires_at, Site::Global)
+}
+
+fn seed_site_with_expiry(host: &TestHost, expires_at: i64, site: Site) -> AccountId {
     let credential = Credential {
         uid: "uid-1".to_owned(),
         email: "me@example.test".to_owned(),
@@ -67,7 +124,7 @@ fn seed_with_expiry(host: &TestHost, expires_at: i64) -> AccountId {
         refresh_token: SecretString::from(REFRESH.to_owned()),
         expires_at,
         machine_id: "machine".to_owned(),
-        site: Site::Global,
+        site,
     };
     let id = creds::account_id(&credential);
     block_on(async {
@@ -240,13 +297,21 @@ fn a2c_9_daily_checkin_uses_bearer() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
     let id = seed_with_expiry(&host, 4_000_000_000_000);
+    host.process().script_piped(native_script("3"));
     host.http().enqueue(
         br#"{"campaigns":[{"campaignId":"daily","actionType":"CLAIM_BENEFIT","claimStatus":"CLAIMABLE","startAt":0,"endAt":4102444800,"benefit":{"amount":100}}]}"#,
     );
     host.http()
         .enqueue(br#"{"status":"CLAIMED","benefit":{"amount":100}}"#);
-    let result = block_on(subscription(&host).daily_checkin(&id, host.context())).expect("checkin");
+    let sub = subscription_with_devices(&host, test_devices(&dir));
+    let result = block_on(sub.daily_checkin(&id, host.context())).expect("checkin");
     assert_eq!(result.outcome(), hofund_plugin_api::CheckinOutcome::Claimed);
+    for call in host.http().calls() {
+        assert!(sensitive!(&call, "cosy-machinetoken"));
+        assert!(sensitive!(&call, "cosy-machinetype"));
+        assert_eq!(header!(&call, "cosy-clienttype"), Some("10"));
+        assert_eq!(header!(&call, "user-agent"), Some("Qoder"));
+    }
 }
 
 #[test]
@@ -297,6 +362,7 @@ fn a2c_13_checkin_refreshes_expired_token() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host_at(&dir, after_expiry());
     let id = seed_with_expiry(&host, 1);
+    host.process().script_piped(native_script("3"));
     host.http().enqueue(
         json::json!({
             "token": "qoder-access-for-checkin",
@@ -311,7 +377,8 @@ fn a2c_13_checkin_refreshes_expired_token() {
     );
     host.http()
         .enqueue(br#"{"status":"CLAIMED","benefit":{"amount":100}}"#);
-    let result = block_on(subscription(&host).daily_checkin(&id, host.context())).expect("checkin");
+    let sub = subscription_with_devices(&host, test_devices(&dir));
+    let result = block_on(sub.daily_checkin(&id, host.context())).expect("checkin");
     assert_eq!(result.outcome(), hofund_plugin_api::CheckinOutcome::Claimed);
     let calls = host.http().calls();
     assert_eq!(calls.len(), 3);
@@ -341,4 +408,234 @@ fn a2c_account_id_uses_uid() {
 fn a2c_11b_quota_without_total_is_empty() {
     let windows = quota::windows(br#"{"quota":{"used":25}}"#).expect("windows");
     assert!(windows.is_empty());
+}
+
+#[test]
+fn r54_chat_uses_cached_native_identity_and_hostname() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_with_expiry(&host, 4_000_000_000_000);
+    host.process().script_piped(native_script("3"));
+    for _ in 0..2 {
+        host.http().enqueue(
+            br#"{"id":"chatcmpl-1","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"ok"}}]}"#,
+        );
+    }
+    let devices = test_devices(&dir);
+    let sub = subscription_with_devices(&host, Arc::clone(&devices));
+    let upstream = sub.upstream(&id, host.context()).expect("upstream");
+    let query = ProbeQuery::new(ProtocolId::OPENAI_CHAT, "qfmodel").expect("query");
+    let stored = block_on(Stored::load(host.context(), &id)).expect("stored");
+
+    let cold = block_on(devices.chat_headers(host.context(), &stored.credential));
+    assert_eq!(paired(&cold, "Cosy-MachineToken"), None);
+    assert_eq!(paired(&cold, "Cosy-MachineType"), None);
+    block_on(upstream.probe(&query)).expect("cold chat");
+    assert_eq!(host.process().piped_spawns().len(), 0);
+
+    block_on(devices.checkin_identity(host.context(), &stored.credential))
+        .expect("check-in identity")
+        .expect("native identity");
+    assert_eq!(host.process().piped_spawns().len(), 1);
+    block_on(upstream.probe(&query)).expect("cached chat");
+    assert_eq!(host.process().piped_spawns().len(), 1);
+
+    let calls = host.http().calls();
+    assert_eq!(calls.len(), 2);
+    for (index, call) in calls.iter().enumerate() {
+        for name in ["cosy-machinehostname", "cosy-machineid", "cache-control"] {
+            assert!(sensitive!(call, name), "missing {name}");
+        }
+        assert!(!sensitive!(call, "cosy-clientip"));
+        assert_eq!(header!(call, "cosy-clientip"), None);
+        if index == 0 {
+            assert!(!sensitive!(call, "cosy-machinetoken"));
+            assert!(!sensitive!(call, "cosy-machinetype"));
+            assert_eq!(header!(call, "cosy-machinetoken"), None);
+            assert_eq!(header!(call, "cosy-machinetype"), None);
+        } else {
+            assert!(sensitive!(call, "cosy-machinetoken"));
+            assert!(sensitive!(call, "cosy-machinetype"));
+        }
+    }
+    let headers = block_on(devices.chat_headers(host.context(), &stored.credential));
+    assert_eq!(paired(&headers, "Cache-Control"), Some("no-cache"));
+    assert_eq!(
+        paired(&headers, "Cosy-MachineToken"),
+        Some("fixture-native-token")
+    );
+    assert_eq!(paired(&headers, "Cosy-MachineType"), Some("7"));
+    assert_eq!(
+        paired(&headers, "Cosy-MachineHostname"),
+        Some("fixture-host")
+    );
+    assert_eq!(paired(&headers, "Cosy-MachineId"), Some("machine"));
+    assert_eq!(host.process().piped_spawns().len(), 1);
+}
+
+#[test]
+fn r54_chat_keeps_cached_identity_during_checkin_refresh() {
+    let dir = tempfile::tempdir().expect("dir");
+    let initial_host = host(&dir);
+    let id = seed_with_expiry(&initial_host, 4_000_000_000_000);
+    let devices = test_devices(&dir);
+    let stored = block_on(Stored::load(initial_host.context(), &id)).expect("stored");
+    initial_host.process().script_piped(native_script("3"));
+    block_on(devices.checkin_identity(initial_host.context(), &stored.credential))
+        .expect("initial identity")
+        .expect("native identity");
+
+    let refresh_host = host_at(
+        &dir,
+        SystemTime::UNIX_EPOCH + Duration::from_secs(60 * 60 + 1),
+    );
+    let expired = block_on(devices.chat_headers(refresh_host.context(), &stored.credential));
+    assert_eq!(paired(&expired, "Cosy-MachineToken"), None);
+    assert_eq!(paired(&expired, "Cosy-MachineType"), None);
+    assert_eq!(refresh_host.process().piped_spawns().len(), 0);
+
+    refresh_host.process().script_piped(PipedScript::new());
+    let mut refresh =
+        Box::pin(devices.checkin_identity(refresh_host.context(), &stored.credential));
+    block_on(async {
+        assert!(poll_once(refresh.as_mut()).is_pending());
+    });
+    assert_eq!(refresh_host.process().piped_spawns().len(), 1);
+
+    let headers = block_on(devices.chat_headers(refresh_host.context(), &stored.credential));
+    assert_eq!(
+        paired(&headers, "Cosy-MachineToken"),
+        Some("fixture-native-token")
+    );
+    assert_eq!(paired(&headers, "Cosy-MachineType"), Some("7"));
+    assert_eq!(refresh_host.process().piped_spawns().len(), 1);
+}
+
+#[test]
+fn r54_cancelled_checkin_refresh_can_be_retried() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_with_expiry(&host, 4_000_000_000_000);
+    let devices = test_devices(&dir);
+    let stored = block_on(Stored::load(host.context(), &id)).expect("stored");
+    host.process().script_piped(PipedScript::new());
+
+    let mut abandoned = Box::pin(devices.checkin_identity(host.context(), &stored.credential));
+    block_on(async {
+        assert!(poll_once(abandoned.as_mut()).is_pending());
+    });
+    assert_eq!(host.process().piped_spawns().len(), 1);
+    drop(abandoned);
+
+    host.process().script_piped(native_script("3"));
+    block_on(devices.checkin_identity(host.context(), &stored.credential))
+        .expect("retried identity")
+        .expect("native identity");
+    assert_eq!(host.process().piped_spawns().len(), 2);
+    let headers = block_on(devices.chat_headers(host.context(), &stored.credential));
+    assert_eq!(
+        paired(&headers, "Cosy-MachineToken"),
+        Some("fixture-native-token")
+    );
+}
+
+#[test]
+fn r54_checkin_refreshes_share_one_native_helper() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_with_expiry(&host, 4_000_000_000_000);
+    let devices = test_devices(&dir);
+    let stored = block_on(Stored::load(host.context(), &id)).expect("stored");
+    host.process().script_piped(
+        PipedScript::new().line(r#"{"machineToken":"fixture-native-token","machineType":"7"}"#),
+    );
+
+    let mut first = Box::pin(devices.checkin_identity(host.context(), &stored.credential));
+    let mut second = Box::pin(devices.checkin_identity(host.context(), &stored.credential));
+    block_on(async {
+        assert!(poll_once(first.as_mut()).is_pending());
+        assert!(poll_once(second.as_mut()).is_pending());
+    });
+    assert_eq!(host.process().piped_spawns().len(), 1);
+
+    drop(first);
+    let result = block_on(async {
+        match poll_once(second.as_mut()) {
+            std::task::Poll::Ready(result) => result,
+            std::task::Poll::Pending => {
+                panic!("waiter was not completed after leader cancellation")
+            }
+        }
+    });
+    let error = result.err().expect("cancelled refresh");
+    assert_eq!(error.kind(), PluginErrorKind::Cancelled);
+}
+
+#[test]
+fn r54_model_list_uses_reference_device_headers() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_with_expiry(&host, 4_000_000_000_000);
+    host.http()
+        .enqueue(include_bytes!("fixtures/models.json").as_slice());
+    block_on(subscription(&host).list_models(&id, host.context())).expect("models");
+    let calls = host.http().calls();
+    assert_eq!(calls.len(), 1);
+    for name in [
+        "cosy-clientip",
+        "cosy-machineid",
+        "cosy-machinetoken",
+        "cosy-machinetype",
+    ] {
+        assert!(sensitive!(&calls[0], name), "missing {name}");
+    }
+    assert!(!sensitive!(&calls[0], "cosy-machinehostname"));
+    assert_eq!(header!(&calls[0], "cosy-machinehostname"), None);
+}
+
+#[test]
+fn r54_quota_uses_reference_client_headers() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_with_expiry(&host, 4_000_000_000_000);
+    host.http().enqueue(br#"{"quota":{"total":100,"used":25}}"#);
+    block_on(subscription(&host).quota(&id, host.context())).expect("quota");
+    let calls = host.http().calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(header!(&calls[0], "cosy-clienttype"), Some("10"));
+    assert_eq!(header!(&calls[0], "user-agent"), Some("Qoder"));
+    assert_eq!(header!(&calls[0], "cosy-machinetoken"), None);
+}
+
+#[test]
+fn r54_cn_checkin_reads_identity_from_cn_agent_home() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_site_with_expiry(&host, 4_000_000_000_000, Site::China);
+    let global = dir.path().join("home/.qoder/.bin");
+    let china = dir.path().join("home/.qoder-cn/.bin");
+    std::fs::create_dir_all(&global).expect("global cache");
+    std::fs::create_dir_all(&china).expect("CN cache");
+    std::fs::write(global.join("runtime-info-linux-x64-global"), "fixture").expect("global");
+    let cn_runtime = china.join("runtime-info-linux-x64-cn");
+    std::fs::write(&cn_runtime, "fixture").expect("CN runtime");
+    let devices = Arc::new(Devices::for_test(
+        TestEnv::new(dir.path()).home(&dir.path().join("home")),
+        "fixture-host",
+    ));
+    host.process().script_piped(native_script("0"));
+    host.http().enqueue(
+        br#"{"campaigns":[{"campaignId":"daily","actionType":"CLAIM_BENEFIT","claimStatus":"CLAIMABLE","startAt":0,"endAt":4102444800,"benefit":{"amount":100}}]}"#,
+    );
+    host.http()
+        .enqueue(br#"{"status":"CLAIMED","benefit":{"amount":100}}"#);
+    let sub = subscription_with_devices(&host, devices);
+    block_on(sub.daily_checkin(&id, host.context())).expect("CN check-in");
+    let spawns = host.process().piped_spawns();
+    assert_eq!(spawns.len(), 1);
+    assert_eq!(spawns[0].program, cn_runtime);
+    for call in host.http().calls() {
+        assert!(sensitive!(&call, "cosy-machinetoken"));
+        assert!(sensitive!(&call, "cosy-machinetype"));
+    }
 }
