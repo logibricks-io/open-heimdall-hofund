@@ -26,7 +26,7 @@ pub(crate) struct CursorUpstream {
     agent_home: PathBuf,
     program: Option<PathBuf>,
     keychain: Arc<Mutex<KeychainCache>>,
-    skip_keychain: bool,
+    keychain_enabled: bool,
     agent_host: AgentHost,
 }
 
@@ -38,7 +38,7 @@ impl CursorUpstream {
         agent_home: PathBuf,
         program: Option<PathBuf>,
         keychain: Arc<Mutex<KeychainCache>>,
-        skip_keychain: bool,
+        keychain_enabled: bool,
     ) -> Self {
         Self {
             account,
@@ -47,7 +47,7 @@ impl CursorUpstream {
             agent_home,
             program,
             keychain,
-            skip_keychain,
+            keychain_enabled,
             agent_host: AgentHost::default(),
         }
     }
@@ -69,7 +69,7 @@ impl UpstreamProvider for CursorUpstream {
             &self.agent_home,
             self.program.clone(),
             &self.keychain,
-            self.skip_keychain,
+            self.keychain_enabled,
         )
         .await?;
         let response_id = hofund_plugin_sdk::uuid::v4()
