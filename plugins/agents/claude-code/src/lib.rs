@@ -130,9 +130,11 @@ fn parser_for(
         .map(json::from_str::<ClaudeState>)
         .transpose()
         .map_err(|_| PluginError::decode("invalid Claude Code parser state"))?;
-    Ok(Box::new(ClaudeParser {
-        state: restored.unwrap_or_else(|| ClaudeState::new(agent, file, parent)),
-    }))
+    let mut state = restored.unwrap_or_else(|| ClaudeState::new(agent, file, parent));
+    if state.agent.is_empty() {
+        agent.clone_into(&mut state.agent);
+    }
+    Ok(Box::new(ClaudeParser { state }))
 }
 
 pub(crate) fn collect_cc_files(
@@ -282,6 +284,7 @@ struct SeenUsage {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(crate = "hofund_plugin_sdk::serde")]
 struct ClaudeState {
+    #[serde(default)]
     agent: String,
     record: SessionRecord,
     custom: String,
@@ -1018,6 +1021,32 @@ mod tests {
         assert_eq!(record.family_root, first);
         assert_eq!(record.family_leaf, second);
         assert_eq!(record.family_ids, [first, second]);
+        assert_eq!(record.title, "hello");
+    }
+
+    #[test]
+    fn pre_r31_parser_state_without_agent_is_restored_on_append() {
+        let file = SessionFile::new("sess", "sess.jsonl");
+        let encoded = json::to_value(super::ClaudeState::new(AGENT, &file, None)).expect("state");
+        let mut object = encoded;
+        assert!(
+            object
+                .as_object_mut()
+                .expect("object")
+                .remove("agent")
+                .is_some()
+        );
+        let raw = json::to_string(&object).expect("json");
+        let mut parser = super::parser_for(AGENT, &file, Some(&raw)).expect("restore");
+        parser
+            .push(&json::json!({
+                "type": "user",
+                "timestamp": "2026-01-01T00:00:00Z",
+                "message": {"content": "hello"}
+            }))
+            .expect("append");
+        let record = parser.finish().expect("finish").record.expect("record");
+        assert_eq!(record.agent, AGENT);
         assert_eq!(record.title, "hello");
     }
 }

@@ -989,6 +989,7 @@ SessionCompression::None
 SessionCompression::Zstd
 SessionDatabase
 SessionDatabase::fn query (& self , sql : & str , params : & [& str]) -> Result < SessionRows , PluginError >
+SessionDatabase::fn revision (& self) -> Result < i64 , PluginError >
 SessionDay
 SessionDay #[non_exhaustive] derives(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)
 SessionDay.date

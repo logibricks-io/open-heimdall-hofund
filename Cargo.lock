@@ -2441,6 +2441,7 @@ version = "0.1.0"
 dependencies = [
  "hofund-plugin-api",
  "hofund-plugin-sdk",
+ "tempfile",
 ]
 
 [[package]]
@@ -2602,6 +2603,10 @@ dependencies = [
  "hofund-kit-upstream",
  "hofund-plugin-agent-claude",
  "hofund-plugin-agent-codex",
+ "hofund-plugin-agent-gemini",
+ "hofund-plugin-agent-omp",
+ "hofund-plugin-agent-opencode",
+ "hofund-plugin-agent-pi",
  "hofund-plugin-api",
  "hofund-plugin-azure",
  "hofund-plugin-bedrock",

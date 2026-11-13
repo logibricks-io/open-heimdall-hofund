@@ -444,6 +444,13 @@ pub trait SessionDatabase {
     ///
     /// Returns [`PluginError`] when SQLite rejects or cannot read the query.
     fn query(&self, sql: &str, params: &[&str]) -> Result<SessionRows, PluginError>;
+
+    /// A content revision that changes when the database is written.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when the revision cannot be read.
+    fn revision(&self) -> Result<i64, PluginError>;
 }
 
 /// A completed parse and the opaque state needed by the next incremental read.
