@@ -1,7 +1,7 @@
 //! One Cursor Run over bidirectional HTTP/2 or the HTTP/1.1 fallback.
 
 use std::borrow::Cow;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::task::Poll;
@@ -36,6 +36,8 @@ pub(crate) struct Limits {
     pub idle: Duration,
     /// Accumulated wait during a heartbeat-only period.
     pub quiet: Duration,
+    /// Wait for a tool count after the last non-heartbeat frame.
+    pub tool_count_wait: Duration,
     /// Process-global HTTP/2-unavailable memory lifetime.
     pub http2_memory: Duration,
     /// Maximum non-2xx response body retained for later error classification.
@@ -49,6 +51,7 @@ impl Default for Limits {
             heartbeat: Duration::from_secs(5),
             idle: Duration::from_secs(60),
             quiet: Duration::from_secs(240),
+            tool_count_wait: Duration::from_secs(60),
             http2_memory: Duration::from_secs(10 * 60),
             error_drain: 1024 * 1024,
         }
@@ -68,6 +71,8 @@ pub(crate) struct RunArgs<'a> {
     pub os: Cow<'a, str>,
     /// Temporary directory returned to environment execs.
     pub temp_dir: Cow<'a, str>,
+    /// Caller tools selected for this request.
+    pub tools: Vec<proto::ToolDef>,
     /// Transport limits.
     pub limits: Limits,
 }
@@ -78,6 +83,8 @@ pub(crate) struct RunArgs<'a> {
 pub(crate) struct RunOutput {
     /// Decoded non-trailer server messages.
     pub events: Vec<ServerEvent>,
+    /// Tool steps sealed by a count, checkpoint, or count wait.
+    pub tool_steps: usize,
     /// Connect trailers, including synthetic HTTP/1.1 failures.
     pub trailers: Vec<Frame>,
     /// Drained non-2xx HTTP/2 response body.
@@ -90,6 +97,8 @@ pub(crate) struct RunOutput {
 pub(crate) enum RunEvent {
     /// A decoded server message.
     Server(ServerEvent),
+    /// The caller has every tool call in this step.
+    ToolStepEnd,
     /// A Connect trailer, including a synthetic HTTP/1.1 failure.
     Trailer(Frame),
     /// A drained non-2xx HTTP/2 response body and its status.
@@ -126,6 +135,7 @@ pub(crate) async fn run(
     while let Some(event) = stream.next().await {
         match event? {
             RunEvent::Server(event) => output.events.push(event),
+            RunEvent::ToolStepEnd => output.tool_steps += 1,
             RunEvent::Trailer(trailer) => output.trailers.push(trailer),
             RunEvent::ErrorBody { body, .. } => output.error_body = Some(body),
         }
@@ -263,6 +273,7 @@ fn heartbeat(duration: Duration) -> Heartbeat<'static> {
 enum StallKind {
     Idle,
     Quiet,
+    ToolCount,
 }
 
 impl StallKind {
@@ -270,6 +281,7 @@ impl StallKind {
         match self {
             Self::Idle => "idle",
             Self::Quiet => "quiet",
+            Self::ToolCount => "tool count",
         }
     }
 }
@@ -278,6 +290,7 @@ struct Stall {
     host: HostContext,
     limits: Limits,
     last_frame_at: Duration,
+    last_non_heartbeat_at: Duration,
     last_frame: String,
     heartbeat_only: bool,
     quiet_wait: Duration,
@@ -287,8 +300,10 @@ type StallWait = Pin<Box<dyn std::future::Future<Output = StallKind> + Send + 's
 
 impl Stall {
     fn new(host: &HostContext, limits: Limits) -> Self {
+        let now = host.clock().monotonic();
         Self {
-            last_frame_at: host.clock().monotonic(),
+            last_frame_at: now,
+            last_non_heartbeat_at: now,
             host: host.clone(),
             limits,
             last_frame: "none".to_owned(),
@@ -297,7 +312,7 @@ impl Stall {
         }
     }
 
-    fn wait(&self) -> StallWait {
+    fn wait(&self, step: &ToolStep) -> StallWait {
         let now = self.host.clock().monotonic();
         let idle = self
             .limits
@@ -306,16 +321,30 @@ impl Stall {
         let quiet = self
             .heartbeat_only
             .then_some(self.limits.quiet.saturating_sub(self.quiet_wait));
+        let tool_count = step.count_wait_armed().then_some(
+            self.limits
+                .tool_count_wait
+                .saturating_sub(now.saturating_sub(self.last_non_heartbeat_at)),
+        );
         Box::pin(async move {
-            match quiet {
-                Some(quiet) => match race(sleep(idle), sleep(quiet)).await {
-                    Race::Left(()) => StallKind::Idle,
-                    Race::Right(()) => StallKind::Quiet,
-                },
-                None => {
-                    sleep(idle).await;
-                    StallKind::Idle
+            let base = async move {
+                match quiet {
+                    Some(quiet) => match race(sleep(idle), sleep(quiet)).await {
+                        Race::Left(()) => StallKind::Idle,
+                        Race::Right(()) => StallKind::Quiet,
+                    },
+                    None => {
+                        sleep(idle).await;
+                        StallKind::Idle
+                    }
                 }
+            };
+            match tool_count {
+                Some(tool_count) => match race(base, sleep(tool_count)).await {
+                    Race::Left(kind) => kind,
+                    Race::Right(()) => StallKind::ToolCount,
+                },
+                None => base.await,
             }
         })
     }
@@ -329,7 +358,8 @@ impl Stall {
     }
 
     fn frame(&mut self, heartbeat: bool, kind: &str) {
-        self.last_frame_at = self.host.clock().monotonic();
+        let now = self.host.clock().monotonic();
+        self.last_frame_at = now;
         self.last_frame = kind.to_owned();
         if heartbeat {
             if !self.heartbeat_only {
@@ -337,6 +367,7 @@ impl Stall {
             }
             self.heartbeat_only = true;
         } else {
+            self.last_non_heartbeat_at = now;
             self.heartbeat_only = false;
             self.quiet_wait = Duration::ZERO;
         }
@@ -347,12 +378,90 @@ impl Stall {
     }
 }
 
+#[derive(Default)]
+struct ToolStep {
+    calls: usize,
+    answered: usize,
+    listed: Option<u64>,
+    started: HashSet<String>,
+    partial: HashSet<String>,
+    execs: HashSet<String>,
+    completed: HashSet<String>,
+    finished: bool,
+}
+
+impl ToolStep {
+    fn count_wait_armed(&self) -> bool {
+        self.calls > 0
+            && self.listed.is_none()
+            && !self.finished
+            && !self.partial.iter().any(|id| {
+                !self.started.contains(id)
+                    && !self.execs.contains(id)
+                    && !self.completed.contains(id)
+            })
+    }
+
+    fn observe(&mut self, event: &ServerEvent) -> bool {
+        match event {
+            ServerEvent::ToolStarted(id) => {
+                self.started.insert(id.clone());
+            }
+            ServerEvent::PartialTool(id) => {
+                self.partial.insert(id.clone());
+            }
+            ServerEvent::ToolCompleted(id) => {
+                if !id.is_empty() && !self.started.contains(id) && !self.execs.contains(id) {
+                    self.completed.insert(id.clone());
+                }
+            }
+            ServerEvent::ToolCallCount(count) => self.listed = Some(*count),
+            ServerEvent::Checkpoint(pending) => {
+                if self.listed.is_some_and(|count| count > 0)
+                    && self.calls > 0
+                    && *pending == self.calls
+                {
+                    self.finished = true;
+                    return true;
+                }
+            }
+            _ => return false,
+        }
+        self.seal_if_done()
+    }
+
+    fn seal_if_done(&mut self) -> bool {
+        if self.finished {
+            return false;
+        }
+        let complete = self.listed.is_some_and(|listed| {
+            listed > 0
+                && u64::try_from(self.calls + self.answered + self.completed.len())
+                    .unwrap_or(u64::MAX)
+                    >= listed
+        });
+        if !complete {
+            return false;
+        }
+        if self.calls > 0 {
+            self.finished = true;
+            return true;
+        }
+        self.listed = None;
+        self.answered = 0;
+        self.partial.clear();
+        self.completed.clear();
+        false
+    }
+}
+
 struct Http2State<'a> {
     reader: DuplexReader,
     writer: Option<DuplexWriter>,
     decoder: Option<FrameDecoder>,
     heartbeat: Heartbeat<'a>,
     stall: Stall,
+    step: ToolStep,
     args: RunArgs<'a>,
     pending: VecDeque<RunEvent>,
     finished: bool,
@@ -380,6 +489,7 @@ async fn run_http2<'a>(
         decoder: Some(FrameDecoder::new()),
         heartbeat,
         stall,
+        step: ToolStep::default(),
         args,
         pending: VecDeque::new(),
         finished: false,
@@ -407,15 +517,20 @@ async fn next_http2(state: &mut Http2State<'_>) -> Result<Option<RunEvent>, Plug
         let wait_started = state.stall.host.clock().monotonic();
         let outcome = race(
             race(state.reader.reader().next_chunk(), &mut state.heartbeat),
-            state.stall.wait(),
+            state.stall.wait(&state.step),
         )
         .await;
         state.stall.finish_wait(wait_started);
         match outcome {
             Race::Left(Race::Left(Some(Ok(chunk)))) => {
                 let decoder = state.decoder.as_mut().expect("open decoder");
-                let (events, replies) =
-                    decode_chunk(decoder, &chunk, &state.args, &mut state.stall)?;
+                let (events, replies) = decode_chunk(
+                    decoder,
+                    &chunk,
+                    &state.args,
+                    &mut state.stall,
+                    &mut state.step,
+                )?;
                 for payload in replies {
                     state
                         .writer
@@ -424,12 +539,19 @@ async fn next_http2(state: &mut Http2State<'_>) -> Result<Option<RunEvent>, Plug
                         .write(frame::encode(0, &payload)?.into())
                         .await?;
                 }
+                let step_end = events
+                    .iter()
+                    .any(|event| matches!(event, RunEvent::ToolStepEnd));
                 state.pending.extend(events);
+                if step_end {
+                    state.finished = true;
+                }
             }
             Race::Left(Race::Left(Some(Err(error)))) => return Err(error),
             Race::Left(Race::Left(None)) => {
                 let decoder = state.decoder.take().expect("open decoder");
-                let (events, replies) = finish_decoder(decoder, &state.args, &mut state.stall)?;
+                let (events, replies) =
+                    finish_decoder(decoder, &state.args, &mut state.stall, &mut state.step)?;
                 for payload in replies {
                     state
                         .writer
@@ -451,6 +573,10 @@ async fn next_http2(state: &mut Http2State<'_>) -> Result<Option<RunEvent>, Plug
                     .await?;
                 state.heartbeat = heartbeat(state.args.limits.heartbeat);
             }
+            Race::Right(StallKind::ToolCount) => {
+                state.finished = true;
+                return Ok(Some(RunEvent::ToolStepEnd));
+            }
             Race::Right(kind) => return Err(state.stall.error(kind)),
         }
     }
@@ -463,6 +589,7 @@ struct Http1State<'a> {
     decoder: Option<FrameDecoder>,
     heartbeat: Heartbeat<'a>,
     stall: Stall,
+    step: ToolStep,
     args: RunArgs<'a>,
     pending: VecDeque<RunEvent>,
     finished: bool,
@@ -539,6 +666,7 @@ async fn run_http1<'a>(
         decoder: Some(FrameDecoder::new()),
         heartbeat,
         stall,
+        step: ToolStep::default(),
         args,
         pending: VecDeque::new(),
         finished: false,
@@ -573,22 +701,39 @@ async fn next_http1(state: &mut Http1State<'_>) -> Result<Option<RunEvent>, Plug
                 race(state.response.body_mut().next_chunk(), &mut state.heartbeat),
                 next_ready(&mut state.appends.in_flight),
             ),
-            state.stall.wait(),
+            state.stall.wait(&state.step),
         )
         .await;
         state.stall.finish_wait(wait_started);
         match outcome {
             Race::Left(Race::Left(Race::Left(Some(Ok(chunk))))) => {
                 let decoder = state.decoder.as_mut().expect("open decoder");
-                let (events, replies) =
-                    decode_chunk(decoder, &chunk, &state.args, &mut state.stall)?;
+                let (events, replies) = decode_chunk(
+                    decoder,
+                    &chunk,
+                    &state.args,
+                    &mut state.stall,
+                    &mut state.step,
+                )?;
                 state.appends.pending.extend(replies);
+                let step_end = events
+                    .iter()
+                    .any(|event| matches!(event, RunEvent::ToolStepEnd));
+                if step_end {
+                    if let Err(failure) = state.appends.flush(state.context.clone()).await {
+                        state
+                            .pending
+                            .push_back(RunEvent::Trailer(synthetic_end(failure)?));
+                    }
+                    state.finished = true;
+                }
                 state.pending.extend(events);
             }
             Race::Left(Race::Left(Race::Left(Some(Err(error))))) => return Err(error),
             Race::Left(Race::Left(Race::Left(None))) => {
                 let decoder = state.decoder.take().expect("open decoder");
-                let (events, replies) = finish_decoder(decoder, &state.args, &mut state.stall)?;
+                let (events, replies) =
+                    finish_decoder(decoder, &state.args, &mut state.stall, &mut state.step)?;
                 state.appends.pending.extend(replies);
                 state.pending.extend(events);
                 if let Err(failure) = state.appends.flush(state.context.clone()).await {
@@ -606,6 +751,10 @@ async fn next_http1(state: &mut Http1State<'_>) -> Result<Option<RunEvent>, Plug
             Race::Left(Race::Right(Err(failure))) => {
                 state.finished = true;
                 return Ok(Some(RunEvent::Trailer(synthetic_end(failure)?)));
+            }
+            Race::Right(StallKind::ToolCount) => {
+                state.finished = true;
+                return Ok(Some(RunEvent::ToolStepEnd));
             }
             Race::Right(kind) => return Err(state.stall.error(kind)),
         }
@@ -836,11 +985,14 @@ fn decode_chunk(
     chunk: &[u8],
     args: &RunArgs<'_>,
     stall: &mut Stall,
+    step: &mut ToolStep,
 ) -> Result<(Vec<RunEvent>, Vec<Vec<u8>>), PluginError> {
     let mut events = Vec::new();
     let mut replies = Vec::new();
     for decoded in decoder.push(chunk)? {
-        push_frame(decoded, args, &mut events, &mut replies, stall);
+        if push_frame(decoded, args, &mut events, &mut replies, stall, step) {
+            break;
+        }
     }
     Ok((events, replies))
 }
@@ -849,11 +1001,14 @@ fn finish_decoder(
     decoder: FrameDecoder,
     args: &RunArgs<'_>,
     stall: &mut Stall,
+    step: &mut ToolStep,
 ) -> Result<(Vec<RunEvent>, Vec<Vec<u8>>), PluginError> {
     let mut events = Vec::new();
     let mut replies = Vec::new();
     for decoded in decoder.finish()? {
-        push_frame(decoded, args, &mut events, &mut replies, stall);
+        if push_frame(decoded, args, &mut events, &mut replies, stall, step) {
+            break;
+        }
     }
     Ok((events, replies))
 }
@@ -864,11 +1019,12 @@ fn push_frame(
     events: &mut Vec<RunEvent>,
     replies: &mut Vec<Vec<u8>>,
     stall: &mut Stall,
-) {
+    step: &mut ToolStep,
+) -> bool {
     if decoded.is_trailer() {
         stall.frame(false, "trailer");
         events.push(RunEvent::Trailer(decoded));
-        return;
+        return false;
     }
     let decoded_events = proto::decode_server(&decoded.payload).0;
     let heartbeat = !decoded_events.is_empty()
@@ -880,7 +1036,7 @@ fn push_frame(
         Some(ServerEvent::ThinkingDelta(_)) => "thinking",
         Some(ServerEvent::Heartbeat) => "heartbeat",
         Some(ServerEvent::TurnEnd(_)) => "turn end",
-        Some(ServerEvent::Checkpoint) => "checkpoint",
+        Some(ServerEvent::Checkpoint(_)) => "checkpoint",
         Some(ServerEvent::Kv(_)) => "KV request",
         Some(ServerEvent::Exec(_)) => "exec request",
         Some(_) => "message",
@@ -888,12 +1044,22 @@ fn push_frame(
     };
     stall.frame(heartbeat, kind);
     for event in decoded_events {
-        reply_for(&event, args, replies);
+        let done = reply_for(&event, args, replies, step) || step.observe(&event);
         events.push(RunEvent::Server(event));
+        if done {
+            events.push(RunEvent::ToolStepEnd);
+            return true;
+        }
     }
+    false
 }
 
-fn reply_for(event: &ServerEvent, args: &RunArgs<'_>, replies: &mut Vec<Vec<u8>>) {
+fn reply_for(
+    event: &ServerEvent,
+    args: &RunArgs<'_>,
+    replies: &mut Vec<Vec<u8>>,
+    step: &mut ToolStep,
+) -> bool {
     match event {
         ServerEvent::Kv(request) => match &request.kind {
             proto::KvKind::Get { digest } => {
@@ -905,27 +1071,48 @@ fn reply_for(event: &ServerEvent, args: &RunArgs<'_>, replies: &mut Vec<Vec<u8>>
             }
             proto::KvKind::Store => replies.push(proto::kv_store_ack(&request.id)),
         },
-        ServerEvent::Exec(request) => match request.kind {
-            proto::ExecKind::Environment => {
-                replies.push(proto::exec_env_result(
-                    request.id,
-                    &request.exec_id,
-                    &args.os,
-                    &args.temp_dir,
-                ));
-                replies.push(proto::close_exec(request.id));
+        ServerEvent::Exec(request) => {
+            match &request.kind {
+                proto::ExecKind::Environment => {
+                    replies.push(proto::exec_env_result(
+                        request.id,
+                        &request.exec_id,
+                        &args.os,
+                        &args.temp_dir,
+                    ));
+                    replies.push(proto::close_exec(request.id));
+                }
+                proto::ExecKind::ListTools => {
+                    replies.push(proto::exec_tools_result(
+                        request.id,
+                        &request.exec_id,
+                        &args.tools,
+                    ));
+                    replies.push(proto::close_exec(request.id));
+                    step.answered += 1;
+                }
+                proto::ExecKind::McpArguments { name, call_id, .. } => {
+                    step.execs.insert(call_id.clone());
+                    if args.tools.iter().any(|tool| tool.name == *name) {
+                        step.calls += 1;
+                        replies.push(proto::close_exec(request.id));
+                    } else {
+                        step.answered += 1;
+                        replies.push(proto::refuse_exec(request.id));
+                        replies.push(proto::close_exec(request.id));
+                    }
+                }
+                proto::ExecKind::Other => {
+                    step.answered += 1;
+                    replies.push(proto::refuse_exec(request.id));
+                    replies.push(proto::close_exec(request.id));
+                }
             }
-            proto::ExecKind::ListTools => {
-                replies.push(proto::exec_tools_result(request.id, &request.exec_id, &[]));
-                replies.push(proto::close_exec(request.id));
-            }
-            proto::ExecKind::McpArguments { .. } | proto::ExecKind::Other => {
-                replies.push(proto::refuse_exec(request.id));
-                replies.push(proto::close_exec(request.id));
-            }
-        },
+            return step.seal_if_done();
+        }
         _ => {}
     }
+    false
 }
 
 #[cfg(test)]
@@ -977,6 +1164,7 @@ mod tests {
             blobs: std::borrow::Cow::Borrowed(blobs),
             os: std::borrow::Cow::Borrowed("linux"),
             temp_dir: std::borrow::Cow::Borrowed("/tmp/r8f2"),
+            tools: Vec::new(),
             limits: Limits::default(),
         }
     }
@@ -1014,6 +1202,25 @@ mod tests {
                     .varint(1, u64::from(id))
                     .string(15, exec_id)
                     .bytes(field, &[]),
+            )
+            .finish()
+    }
+
+    fn server_mcp(id: u32, name: &str, call_id: &str) -> Vec<u8> {
+        Pb::new()
+            .message(
+                2,
+                Pb::new()
+                    .varint(1, u64::from(id))
+                    .string(15, "exec-mcp")
+                    .bytes(
+                        11,
+                        &Pb::new()
+                            .string(1, &format!("tools-{name}"))
+                            .string(3, call_id)
+                            .string(5, name)
+                            .finish(),
+                    ),
             )
             .finish()
     }
@@ -1697,6 +1904,86 @@ mod tests {
             assert!(!lower.contains("hofund"));
             assert!(!lower.contains(&reference_name));
             assert_clean_http1(&h1);
+        });
+    }
+
+    #[test]
+    fn http2_repeats_selected_tools_and_closes_only_accepted_mcp_without_refusal() {
+        let _guard = http2_memory::test_lock();
+        http2_memory::reset_for_tests();
+        block_on(async {
+            let server_payloads = [
+                server_exec(36, "exec-tools", 36),
+                server_mcp(41, "lookup", "call-accepted"),
+                server_mcp(42, "cursor_owned", "call-refused"),
+            ];
+            let body = server_payloads
+                .iter()
+                .flat_map(|payload| server_frame(payload.clone()))
+                .collect();
+            let h2 = Http2Server::start(vec![Http2Response::new(200).data(body)]).await;
+            let h1 = Http1Server::start(vec![config_reply(h2.base_url())]).await;
+            let host = pooled_host();
+            let endpoints = endpoints(&h1, h2.base_url());
+            let tool = proto::ToolDef {
+                name: "lookup".to_owned(),
+                description: "find a value".to_owned(),
+                schema: hofund_plugin_sdk::json::json!({"type": "object"}),
+            };
+            let mut args = empty_run_args();
+            args.tools = vec![tool.clone()];
+            let output = run(
+                host.context(),
+                &endpoints,
+                &AgentHost::default(),
+                &token(),
+                args,
+            )
+            .await
+            .expect("run");
+            let expected_events = server_payloads
+                .iter()
+                .flat_map(|payload| proto::decode_server(payload).0)
+                .collect::<Vec<_>>();
+            assert_eq!(output.events, expected_events);
+            assert_eq!(output.tool_steps, 0);
+
+            let expected = vec![
+                proto::exec_tools_result(36, "exec-tools", std::slice::from_ref(&tool)),
+                proto::close_exec(36),
+                proto::close_exec(41),
+                proto::refuse_exec(42),
+                proto::close_exec(42),
+            ];
+            let expected_written = std::iter::once(proto::client_run(b"opening"))
+                .chain(expected)
+                .flat_map(|payload| frame::encode(0, &payload).expect("client frame"))
+                .collect::<Vec<_>>();
+            for _ in 0..100 {
+                if h2.requests()[0].data().concat().len() >= expected_written.len() {
+                    break;
+                }
+                yield_times(2).await;
+            }
+            assert_eq!(h2.requests()[0].data().concat(), expected_written);
+            for frame in frame::FrameDecoder::new()
+                .push(&expected_written)
+                .expect("written frames")
+            {
+                for result in proto::fields(&frame.payload)
+                    .into_iter()
+                    .filter(|field| field.number == 2)
+                {
+                    assert!(
+                        result
+                            .as_message()
+                            .expect("exec result")
+                            .iter()
+                            .all(|field| field.number != 11),
+                        "neither accepted nor refused execs receive a tool result"
+                    );
+                }
+            }
         });
     }
 

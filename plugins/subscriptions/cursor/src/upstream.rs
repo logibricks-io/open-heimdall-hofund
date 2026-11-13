@@ -1,4 +1,4 @@
-//! Cursor text upstream backed by one stateless Run per execute.
+//! Cursor text and caller-tool upstream backed by one stateless Run per execute.
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -7,7 +7,8 @@ use std::sync::{Arc, Mutex};
 use hofund_plugin_api::{
     AccountId, BlockStart, Completion, ContentBlockStart, ContentBlockStop, Extensions,
     HostContext, MessageDelta, MessageStart, MessageStop, PluginError, ProbeQuery, ProbeReport,
-    ProtocolId, Request, Stop, StopReason, StreamEvent, TextDelta, UpstreamProvider,
+    ProtocolId, Request, Stop, StopReason, StreamEvent, TextDelta, ToolArgumentsDelta,
+    UpstreamProvider,
 };
 use hofund_plugin_sdk::futures::{self, StreamExt};
 
@@ -15,7 +16,7 @@ use crate::agent_host::AgentHost;
 use crate::cli::KeychainCache;
 use crate::endpoints::Endpoints;
 use crate::failure::{self, EMPTY_REPLY};
-use crate::proto::ServerEvent;
+use crate::proto::{ExecRequest, ServerEvent, ToolDef};
 use crate::run::{Limits, RunEvent, RunStream, run_stream};
 use crate::{request, session};
 
@@ -65,6 +66,7 @@ impl UpstreamProvider for CursorUpstream {
     ) -> Result<Completion, PluginError> {
         let model = request.model.clone();
         let mapped = request::map(&request)?;
+        let tools = mapped.tools.clone();
         let token = session::access_token(
             &self.host,
             &self.endpoints,
@@ -97,10 +99,27 @@ impl UpstreamProvider for CursorUpstream {
             while let Some(event) = run.next().await {
                 let error = match event {
                     Ok(RunEvent::Server(ServerEvent::TextDelta(text))) => {
-                        return Ok(text_stream(run, response_id, model, text));
+                        return Ok(completion_stream(
+                            run,
+                            response_id,
+                            model,
+                            tools,
+                            FirstOutput::Text(text),
+                        ));
+                    }
+                    Ok(RunEvent::Server(ServerEvent::Exec(request)))
+                        if is_caller_call(&tools, &request) =>
+                    {
+                        return Ok(completion_stream(
+                            run,
+                            response_id,
+                            model,
+                            tools,
+                            FirstOutput::Tool(request),
+                        ));
                     }
                     Ok(RunEvent::Server(ServerEvent::TurnEnd(_))) => return Err(empty_reply()),
-                    Ok(RunEvent::Server(_)) => continue,
+                    Ok(RunEvent::Server(_)) | Ok(RunEvent::ToolStepEnd) => continue,
                     Ok(RunEvent::Trailer(frame)) => failure::trailer(&frame.payload),
                     Ok(RunEvent::ErrorBody { status, body }) => failure::body(status, &body),
                     Err(error) => failure::timeout_before_text(error),
@@ -130,34 +149,56 @@ impl UpstreamProvider for CursorUpstream {
     }
 }
 
-struct TextStreamState {
+struct CursorStreamState {
     run: RunStream<'static>,
+    tools: Vec<ToolDef>,
     pending: VecDeque<StreamEvent>,
+    next_index: u32,
+    open_text: Option<u32>,
+    emitted_calls: usize,
     finished: bool,
 }
 
-fn text_stream(run: RunStream<'static>, id: String, model: String, first: String) -> Completion {
-    let pending = VecDeque::from([
-        StreamEvent::MessageStart(MessageStart {
-            id: Some(id),
-            model: Some(model),
-            usage: None,
-            extensions: Extensions::new(),
-        }),
-        StreamEvent::ContentBlockStart(ContentBlockStart {
-            index: 0,
-            block: BlockStart::Text,
-            extensions: Extensions::new(),
-        }),
-        text_delta(first),
-    ]);
-    let state = TextStreamState {
+enum FirstOutput {
+    Text(String),
+    Tool(ExecRequest),
+}
+
+fn is_caller_call(tools: &[ToolDef], request: &ExecRequest) -> bool {
+    let crate::proto::ExecKind::McpArguments { name, .. } = &request.kind else {
+        return false;
+    };
+    tools.iter().any(|tool| tool.name == *name)
+}
+
+fn completion_stream(
+    run: RunStream<'static>,
+    id: String,
+    model: String,
+    tools: Vec<ToolDef>,
+    first: FirstOutput,
+) -> Completion {
+    let pending = VecDeque::from([StreamEvent::MessageStart(MessageStart {
+        id: Some(id),
+        model: Some(model),
+        usage: None,
+        extensions: Extensions::new(),
+    })]);
+    let mut state = CursorStreamState {
         run,
+        tools,
         pending,
+        next_index: 0,
+        open_text: None,
+        emitted_calls: 0,
         finished: false,
     };
+    match first {
+        FirstOutput::Text(text) => state.emit_text(text),
+        FirstOutput::Tool(request) => state.emit_tool(request),
+    }
     Completion::Stream(Box::pin(futures::unfold(state, |mut state| async move {
-        match next_text_event(&mut state).await {
+        match next_completion_event(&mut state).await {
             Ok(Some(event)) => Some((Ok(event), state)),
             Ok(None) => None,
             Err(error) => {
@@ -168,7 +209,92 @@ fn text_stream(run: RunStream<'static>, id: String, model: String, first: String
     })))
 }
 
-async fn next_text_event(state: &mut TextStreamState) -> Result<Option<StreamEvent>, PluginError> {
+impl CursorStreamState {
+    fn emit_text(&mut self, text: String) {
+        let index = *self.open_text.get_or_insert_with(|| {
+            let index = self.next_index;
+            self.next_index += 1;
+            self.pending
+                .push_back(StreamEvent::ContentBlockStart(ContentBlockStart {
+                    index,
+                    block: BlockStart::Text,
+                    extensions: Extensions::new(),
+                }));
+            index
+        });
+        self.pending.push_back(StreamEvent::TextDelta(TextDelta {
+            index,
+            text,
+            extensions: Extensions::new(),
+        }));
+    }
+
+    fn emit_tool(&mut self, request: ExecRequest) {
+        let crate::proto::ExecKind::McpArguments {
+            name,
+            call_id,
+            arguments,
+        } = request.kind
+        else {
+            return;
+        };
+        self.close_text();
+        let index = self.next_index;
+        self.next_index += 1;
+        self.emitted_calls += 1;
+        self.pending.extend([
+            StreamEvent::ContentBlockStart(ContentBlockStart {
+                index,
+                block: BlockStart::ToolCall {
+                    id: call_id.replace('\n', "__"),
+                    name,
+                },
+                extensions: Extensions::new(),
+            }),
+            StreamEvent::ToolArgumentsDelta(ToolArgumentsDelta {
+                index,
+                partial_json: arguments.to_string(),
+                extensions: Extensions::new(),
+            }),
+            StreamEvent::ContentBlockStop(ContentBlockStop {
+                index,
+                extensions: Extensions::new(),
+            }),
+        ]);
+    }
+
+    fn close_text(&mut self) {
+        if let Some(index) = self.open_text.take() {
+            self.pending
+                .push_back(StreamEvent::ContentBlockStop(ContentBlockStop {
+                    index,
+                    extensions: Extensions::new(),
+                }));
+        }
+    }
+
+    fn finish(&mut self, reason: StopReason) {
+        self.pending
+            .push_back(StreamEvent::MessageDelta(MessageDelta {
+                stop: Some(Stop {
+                    reason,
+                    sequence: None,
+                }),
+                usage: None,
+                extensions: Extensions::new(),
+            }));
+        self.close_text();
+        self.pending
+            .push_back(StreamEvent::MessageStop(MessageStop {
+                extensions: Extensions::new(),
+            }));
+        self.finished = true;
+    }
+}
+
+async fn next_completion_event(
+    state: &mut CursorStreamState,
+) -> Result<Option<StreamEvent>, PluginError> {
     loop {
         if let Some(event) = state.pending.pop_front() {
             return Ok(Some(event));
@@ -178,27 +304,18 @@ async fn next_text_event(state: &mut TextStreamState) -> Result<Option<StreamEve
         }
         match state.run.next().await {
             Some(Ok(RunEvent::Server(ServerEvent::TextDelta(text)))) => {
-                return Ok(Some(text_delta(text)));
+                state.emit_text(text);
             }
+            Some(Ok(RunEvent::Server(ServerEvent::Exec(request))))
+                if is_caller_call(&state.tools, &request) =>
+            {
+                state.emit_tool(request);
+            }
+            Some(Ok(RunEvent::ToolStepEnd)) => state.finish(StopReason::ToolUse),
             Some(Ok(RunEvent::Server(ServerEvent::TurnEnd(_)))) => {
-                state.pending.extend([
-                    StreamEvent::MessageDelta(MessageDelta {
-                        stop: Some(Stop {
-                            reason: StopReason::EndTurn,
-                            sequence: None,
-                        }),
-                        usage: None,
-                        extensions: Extensions::new(),
-                    }),
-                    StreamEvent::ContentBlockStop(ContentBlockStop {
-                        index: 0,
-                        extensions: Extensions::new(),
-                    }),
-                    StreamEvent::MessageStop(MessageStop {
-                        extensions: Extensions::new(),
-                    }),
-                ]);
-                state.finished = true;
+                if state.emitted_calls == 0 {
+                    state.finish(StopReason::EndTurn);
+                }
             }
             Some(Ok(RunEvent::Server(_))) => {}
             Some(Ok(RunEvent::Trailer(frame))) => {
@@ -213,17 +330,15 @@ async fn next_text_event(state: &mut TextStreamState) -> Result<Option<StreamEve
                 state.finished = true;
                 return Err(failure::after_output(error));
             }
-            None => state.finished = true,
+            None => {
+                if state.emitted_calls > 0 {
+                    state.finish(StopReason::ToolUse);
+                } else {
+                    state.finished = true;
+                }
+            }
         }
     }
-}
-
-fn text_delta(text: String) -> StreamEvent {
-    StreamEvent::TextDelta(TextDelta {
-        index: 0,
-        text,
-        extensions: Extensions::new(),
-    })
 }
 
 fn empty_reply() -> PluginError {
@@ -243,7 +358,8 @@ mod tests {
     use hofund_plugin_api::{
         AccountId, BlockStart, Completion, ContentBlockStart, ContentBlockStop, Extensions,
         Message, MessageDelta, MessageStop, PluginError, PluginId, PluginKind, ProtocolId, Request,
-        Role, SecretString, Stop, StopReason, StreamEvent, TextDelta, UpstreamProvider,
+        Role, SecretString, Stop, StopReason, StreamEvent, TextDelta, ToolArgumentsDelta,
+        UpstreamProvider,
     };
     use hofund_plugin_sdk::futures::StreamExt;
     use hofund_plugin_sdk::json::{from_value, json};
@@ -347,6 +463,95 @@ mod tests {
         Request::new("auto").with_messages(vec![Message::new(Role::User)])
     }
 
+    fn tool_request() -> Request {
+        from_value(json!({
+            "model": "auto",
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "look up weather"}]}],
+            "tools": [{
+                "name": "lookup",
+                "description": "find a value",
+                "input_schema": {"type": "object", "properties": {"query": {"type": "string"}}}
+            }]
+        }))
+        .expect("tool request")
+    }
+
+    fn exec_frame(id: u32, exec_id: &str, field: u32, body: Pb) -> Vec<u8> {
+        let payload = Pb::new()
+            .message(
+                2,
+                Pb::new()
+                    .varint(1, u64::from(id))
+                    .string(15, exec_id)
+                    .bytes(field, &body.finish()),
+            )
+            .finish();
+        frame::encode(0, &payload).expect("exec frame")
+    }
+
+    fn list_tools_frame(id: u32) -> Vec<u8> {
+        exec_frame(id, "list-tools", 36, Pb::new())
+    }
+
+    fn mcp_frame(id: u32, name: &str, call_id: &str) -> Vec<u8> {
+        let arguments = Pb::new()
+            .string(1, &format!("tools-{name}"))
+            .bytes(
+                2,
+                &Pb::new()
+                    .string(1, "query")
+                    .bytes(2, &proto::pb_value(&json!("weather")))
+                    .finish(),
+            )
+            .string(3, call_id)
+            .string(5, name);
+        exec_frame(id, "call-tool", 11, arguments)
+    }
+
+    fn tool_update_frame(field: u32, call_id: &str) -> Vec<u8> {
+        interaction(field, Pb::new().string(1, call_id))
+    }
+
+    fn tool_count_frame(count: u64) -> Vec<u8> {
+        interaction(27, Pb::new().varint(1, count))
+    }
+
+    fn checkpoint_frame(pending: usize) -> Vec<u8> {
+        let mut state = Pb::new();
+        for index in 0..pending {
+            state = state.string(4, &format!("call-{index}"));
+        }
+        let payload = Pb::new().bytes(3, &state.finish()).finish();
+        frame::encode(0, &payload).expect("checkpoint frame")
+    }
+
+    fn heartbeat_frame() -> Vec<u8> {
+        interaction(13, Pb::new())
+    }
+
+    async fn client_payloads(server: &Http2Server, minimum: usize) -> Vec<Vec<u8>> {
+        for attempt in 0..100 {
+            let chunks = server.requests()[0].data().to_vec();
+            let bytes = chunks.concat();
+            let frames = frame::FrameDecoder::new()
+                .push(&bytes)
+                .expect("client frames");
+            if frames.len() >= minimum {
+                return frames.into_iter().map(|frame| frame.payload).collect();
+            }
+            if attempt == 99 {
+                panic!(
+                    "recorded at least {minimum} client frames, got {} in {} bytes across {} chunks",
+                    frames.len(),
+                    bytes.len(),
+                    chunks.len()
+                );
+            }
+            yield_times(2).await;
+        }
+        unreachable!()
+    }
+
     async fn collect(completion: Completion) -> Result<Vec<StreamEvent>, PluginError> {
         let Completion::Stream(mut stream) = completion else {
             panic!("Cursor execute returns a stream");
@@ -356,6 +561,119 @@ mod tests {
             events.push(event?);
         }
         Ok(events)
+    }
+
+    #[test]
+    fn requested_mcp_exec_emits_one_caller_tool_and_answers_tool_discovery() {
+        let _guard = crate::http2_memory::test_lock();
+        crate::http2_memory::reset_for_tests();
+        block_on(async {
+            let body = [
+                list_tools_frame(7),
+                mcp_frame(8, "lookup", "call_one\nfc_9"),
+                tool_count_frame(1),
+                checkpoint_frame(1),
+                heartbeat_frame(),
+            ]
+            .concat();
+            let h2 = Http2Server::start(vec![Http2Response::new(200).data(body).hold_open()]).await;
+            let h1 = Http1Server::start(vec![config_reply(h2.base_url())]).await;
+            let host = pooled_host();
+            let account = store_account(&host).await;
+            let upstream = upstream(&host, &h1, h2.base_url(), account);
+            let Completion::Stream(mut stream) = upstream
+                .execute(tool_request(), ProtocolId::OPENAI_CHAT)
+                .await
+                .expect("tool execute")
+            else {
+                panic!("stream");
+            };
+            let mut events = Vec::new();
+            while let Some(event) = stream.next().await {
+                events.push(event.expect("tool stream"));
+            }
+            let [StreamEvent::MessageStart(_), rest @ ..] = events.as_slice() else {
+                panic!("message start first: {events:?}");
+            };
+            assert_eq!(
+                rest,
+                [
+                    StreamEvent::ContentBlockStart(ContentBlockStart {
+                        index: 0,
+                        block: BlockStart::ToolCall {
+                            id: "call_one__fc_9".to_owned(),
+                            name: "lookup".to_owned(),
+                        },
+                        extensions: Extensions::new(),
+                    }),
+                    StreamEvent::ToolArgumentsDelta(ToolArgumentsDelta {
+                        index: 0,
+                        partial_json: "{\"query\":\"weather\"}".to_owned(),
+                        extensions: Extensions::new(),
+                    }),
+                    StreamEvent::ContentBlockStop(ContentBlockStop {
+                        index: 0,
+                        extensions: Extensions::new(),
+                    }),
+                    StreamEvent::MessageDelta(MessageDelta {
+                        stop: Some(Stop {
+                            reason: StopReason::ToolUse,
+                            sequence: None,
+                        }),
+                        usage: None,
+                        extensions: Extensions::new(),
+                    }),
+                    StreamEvent::MessageStop(MessageStop {
+                        extensions: Extensions::new(),
+                    }),
+                ]
+            );
+
+            drop(stream);
+        });
+    }
+
+    #[test]
+    fn unknown_mcp_exec_is_refused_without_a_caller_tool_or_result_write() {
+        let _guard = crate::http2_memory::test_lock();
+        crate::http2_memory::reset_for_tests();
+        block_on(async {
+            let body = [
+                mcp_frame(12, "cursor_owned", "call-unknown"),
+                text_frame("continued"),
+                turn_end_frame(),
+            ]
+            .concat();
+            let h2 = Http2Server::start(vec![Http2Response::new(200).data(body)]).await;
+            let h1 = Http1Server::start(vec![config_reply(h2.base_url())]).await;
+            let host = pooled_host();
+            let account = store_account(&host).await;
+            let upstream = upstream(&host, &h1, h2.base_url(), account);
+            let Completion::Stream(mut stream) = upstream
+                .execute(tool_request(), ProtocolId::OPENAI_CHAT)
+                .await
+                .expect("text after refusal")
+            else {
+                panic!("stream");
+            };
+            let mut events = Vec::new();
+            while let Some(event) = stream.next().await {
+                events.push(event.expect("text stream"));
+            }
+            assert!(events.iter().all(|event| !matches!(
+                event,
+                StreamEvent::ContentBlockStart(ContentBlockStart {
+                    block: BlockStart::ToolCall { .. },
+                    ..
+                }) | StreamEvent::ToolArgumentsDelta(_)
+            )));
+            assert!(events.iter().any(|event| matches!(
+                event,
+                StreamEvent::TextDelta(TextDelta { text, .. }) if text == "continued"
+            )));
+
+            drop(stream);
+        });
     }
 
     #[test]
@@ -440,6 +758,55 @@ mod tests {
     }
 
     #[test]
+    fn execute_returns_after_the_first_tool_event_without_waiting_for_eof() {
+        let _guard = crate::http2_memory::test_lock();
+        crate::http2_memory::reset_for_tests();
+        block_on(async {
+            let h2 = Http2Server::start(vec![
+                Http2Response::new(200)
+                    .data(mcp_frame(9, "lookup", "call-early"))
+                    .hold_open(),
+            ])
+            .await;
+            let h1 = Http1Server::start(vec![config_reply(h2.base_url())]).await;
+            let host = pooled_host();
+            let account = store_account(&host).await;
+            let upstream = upstream(&host, &h1, h2.base_url(), account);
+            let Completion::Stream(mut stream) = upstream
+                .execute(tool_request(), ProtocolId::OPENAI_CHAT)
+                .await
+                .expect("first tool event is enough")
+            else {
+                panic!("stream");
+            };
+            let start = stream.next().await.expect("start").expect("start event");
+            assert!(matches!(start, StreamEvent::MessageStart(_)));
+            let block = stream.next().await.expect("block").expect("block event");
+            assert!(matches!(
+                block,
+                StreamEvent::ContentBlockStart(ContentBlockStart {
+                    block: BlockStart::ToolCall { ref id, ref name },
+                    ..
+                }) if id == "call-early" && name == "lookup"
+            ));
+            let arguments = stream.next().await.expect("arguments").expect("arguments");
+            assert!(matches!(
+                arguments,
+                StreamEvent::ToolArgumentsDelta(ToolArgumentsDelta { ref partial_json, .. })
+                    if partial_json == "{\"query\":\"weather\"}"
+            ));
+            let stop = stream.next().await.expect("stop").expect("stop event");
+            assert!(matches!(stop, StreamEvent::ContentBlockStop(_)));
+            assert!(
+                client_payloads(&h2, 2)
+                    .await
+                    .contains(&proto::close_exec(9))
+            );
+            drop(stream);
+        });
+    }
+
+    #[test]
     fn execute_returns_after_the_first_delta_without_waiting_for_eof() {
         let _guard = crate::http2_memory::test_lock();
         crate::http2_memory::reset_for_tests();
@@ -509,6 +876,257 @@ mod tests {
     }
 
     #[test]
+    fn stall_550_seals_one_caller_call_after_two_server_completed_calls() {
+        let _guard = crate::http2_memory::test_lock();
+        crate::http2_memory::reset_for_tests();
+        block_on_paused(async {
+            let body = [
+                tool_update_frame(7, "server-1"),
+                tool_update_frame(3, "server-1"),
+                tool_update_frame(7, "server-2"),
+                tool_update_frame(3, "server-2"),
+                mcp_frame(21, "lookup", "caller-3"),
+                tool_count_frame(3),
+                checkpoint_frame(1),
+                heartbeat_frame(),
+                heartbeat_frame(),
+            ]
+            .concat();
+            let h2 = Http2Server::start(vec![Http2Response::new(200).data(body).hold_open()]).await;
+            let h1 = Http1Server::start(vec![config_reply(h2.base_url())]).await;
+            let host = pooled_host();
+            let account = store_account(&host).await;
+            let upstream = upstream(&host, &h1, h2.base_url(), account);
+            let attempt = async {
+                let completion = upstream
+                    .execute(tool_request(), ProtocolId::OPENAI_CHAT)
+                    .await?;
+                collect(completion).await
+            };
+            let control = async {
+                advance_time(Duration::from_secs(241)).await;
+                std::future::pending::<()>().await;
+            };
+            let Race::Left(events) = race(attempt, control).await else {
+                unreachable!("control remains pending")
+            };
+            let events = events.expect("the tool count seals the step before quiet");
+            let calls = events
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        event,
+                        StreamEvent::ContentBlockStart(ContentBlockStart {
+                            block: BlockStart::ToolCall { .. },
+                            ..
+                        })
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(calls.len(), 1, "server-completed calls are not re-run");
+            assert!(events.iter().any(|event| matches!(
+                event,
+                StreamEvent::MessageDelta(MessageDelta {
+                    stop: Some(Stop {
+                        reason: StopReason::ToolUse,
+                        ..
+                    }),
+                    ..
+                })
+            )));
+            assert!(matches!(events.last(), Some(StreamEvent::MessageStop(_))));
+        });
+    }
+
+    #[test]
+    fn tool_completed_without_partial_seals_server_completed_calls() {
+        let _guard = crate::http2_memory::test_lock();
+        crate::http2_memory::reset_for_tests();
+        block_on_paused(async {
+            let body = [
+                tool_update_frame(3, "server-1"),
+                tool_update_frame(3, "server-2"),
+                mcp_frame(21, "lookup", "caller-3"),
+                tool_count_frame(3),
+                checkpoint_frame(1),
+                heartbeat_frame(),
+                heartbeat_frame(),
+            ]
+            .concat();
+            let h2 = Http2Server::start(vec![Http2Response::new(200).data(body).hold_open()]).await;
+            let h1 = Http1Server::start(vec![config_reply(h2.base_url())]).await;
+            let host = pooled_host();
+            let account = store_account(&host).await;
+            let upstream = upstream(&host, &h1, h2.base_url(), account);
+            let attempt = async {
+                let completion = upstream
+                    .execute(tool_request(), ProtocolId::OPENAI_CHAT)
+                    .await?;
+                collect(completion).await
+            };
+            let control = async {
+                advance_time(Duration::from_secs(241)).await;
+                std::future::pending::<()>().await;
+            };
+            let Race::Left(events) = race(attempt, control).await else {
+                unreachable!("control remains pending")
+            };
+            let events = events.expect("the tool count seals the step before quiet");
+            let calls = events
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        event,
+                        StreamEvent::ContentBlockStart(ContentBlockStart {
+                            block: BlockStart::ToolCall { .. },
+                            ..
+                        })
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(calls.len(), 1, "server-completed calls are not re-run");
+            assert!(events.iter().any(|event| matches!(
+                event,
+                StreamEvent::MessageDelta(MessageDelta {
+                    stop: Some(Stop {
+                        reason: StopReason::ToolUse,
+                        ..
+                    }),
+                    ..
+                })
+            )));
+            assert!(matches!(events.last(), Some(StreamEvent::MessageStop(_))));
+        });
+    }
+
+    #[test]
+    fn http1_tool_completed_without_partial_flushes_close_and_seals_tool_step() {
+        let _guard = crate::http2_memory::test_lock();
+        crate::http2_memory::reset_for_tests();
+        block_on_paused(async {
+            let body = [
+                tool_update_frame(3, "server-1"),
+                tool_update_frame(3, "server-2"),
+                mcp_frame(21, "lookup", "caller-3"),
+                tool_count_frame(3),
+                checkpoint_frame(1),
+                heartbeat_frame(),
+                heartbeat_frame(),
+            ]
+            .concat();
+            let h1 = Http1Server::start(vec![
+                Http1Response::chunked(vec![body]).hold_open(),
+                Http1Response::new(200),
+                Http1Response::new(200),
+            ])
+            .await;
+            let host = pooled_host();
+            crate::http2_memory::remember(host.context());
+            let account = store_account(&host).await;
+            let upstream = upstream(&host, &h1, "http://127.0.0.1:9", account);
+            let attempt = async {
+                let completion = upstream
+                    .execute(tool_request(), ProtocolId::OPENAI_CHAT)
+                    .await?;
+                collect(completion).await
+            };
+            let control = async {
+                advance_time(Duration::from_secs(241)).await;
+                std::future::pending::<()>().await;
+            };
+            let Race::Left(events) = race(attempt, control).await else {
+                unreachable!("control remains pending")
+            };
+            let events = events.expect("the tool count seals the HTTP/1.1 step before quiet");
+            let calls = events
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        event,
+                        StreamEvent::ContentBlockStart(ContentBlockStart {
+                            block: BlockStart::ToolCall { .. },
+                            ..
+                        })
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(calls.len(), 1, "server-completed calls are not re-run");
+            assert!(events.iter().any(|event| matches!(
+                event,
+                StreamEvent::MessageDelta(MessageDelta {
+                    stop: Some(Stop {
+                        reason: StopReason::ToolUse,
+                        ..
+                    }),
+                    ..
+                })
+            )));
+            assert!(matches!(events.last(), Some(StreamEvent::MessageStop(_))));
+
+            let requests = h1.requests();
+            assert_eq!(requests.len(), 3, "RunSSE, opening append, and close exec");
+            assert_eq!(requests[0].path(), "/agent.v1.AgentService/RunSSE");
+            let appends = requests
+                .iter()
+                .filter(|request| request.path() == "/aiserver.v1.BidiService/BidiAppend")
+                .collect::<Vec<_>>();
+            assert_eq!(appends.len(), 2);
+            let opening = proto::fields(appends[0].body());
+            assert_eq!(opening[2].as_varint(), Some(0));
+            let close = proto::fields(appends[1].body());
+            assert_eq!(
+                close[0].as_string().as_deref(),
+                Some(proto::to_hex(&proto::close_exec(21)).as_str())
+            );
+            assert_eq!(close[2].as_varint(), Some(1));
+        });
+    }
+
+    #[test]
+    fn checkpoint_pending_count_seals_the_tool_step_before_heartbeats() {
+        let _guard = crate::http2_memory::test_lock();
+        crate::http2_memory::reset_for_tests();
+        block_on_paused(async {
+            let body = [
+                mcp_frame(22, "lookup", "caller-checkpoint"),
+                tool_count_frame(3),
+                checkpoint_frame(1),
+                heartbeat_frame(),
+            ]
+            .concat();
+            let h2 = Http2Server::start(vec![Http2Response::new(200).data(body).hold_open()]).await;
+            let h1 = Http1Server::start(vec![config_reply(h2.base_url())]).await;
+            let host = pooled_host();
+            let account = store_account(&host).await;
+            let upstream = upstream(&host, &h1, h2.base_url(), account);
+            let attempt = async {
+                let completion = upstream
+                    .execute(tool_request(), ProtocolId::OPENAI_CHAT)
+                    .await?;
+                collect(completion).await
+            };
+            let control = async {
+                advance_time(Duration::from_secs(241)).await;
+                std::future::pending::<()>().await;
+            };
+            let Race::Left(events) = race(attempt, control).await else {
+                unreachable!("control remains pending")
+            };
+            let events = events.expect("checkpoint seals the step");
+            assert!(events.iter().any(|event| matches!(
+                event,
+                StreamEvent::MessageDelta(MessageDelta {
+                    stop: Some(Stop {
+                        reason: StopReason::ToolUse,
+                        ..
+                    }),
+                    ..
+                })
+            )));
+        });
+    }
+
+    #[test]
     fn a_turn_without_text_returns_the_empty_reply_error() {
         let _guard = crate::http2_memory::test_lock();
         crate::http2_memory::reset_for_tests();
@@ -539,47 +1157,35 @@ mod tests {
     }
 
     #[test]
-    fn tools_and_images_fail_before_opening_a_run() {
+    fn images_fail_before_opening_a_tool_bearing_run() {
         let _guard = crate::http2_memory::test_lock();
         crate::http2_memory::reset_for_tests();
         block_on(async {
-            for (body, phrase) in [
-                (
-                    json!({
-                        "model": "auto",
-                        "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
-                        "tools": [{"name": "lookup", "input_schema": {"type": "object"}}]
-                    }),
-                    "tools are not served",
-                ),
-                (
-                    json!({
-                        "model": "auto",
-                        "messages": [{"role": "user", "content": [{
-                            "type": "image",
-                            "source": {"type": "url", "url": "https://image.test/a.png"}
-                        }]}]
-                    }),
-                    "images are not served",
-                ),
-            ] {
-                let h2 = Http2Server::start(Vec::new()).await;
-                let h1 = Http1Server::start(Vec::new()).await;
-                let host = pooled_host();
-                let account = store_account(&host).await;
-                let upstream = upstream(&host, &h1, h2.base_url(), account);
-                let request: Request = from_value(body).expect("request");
-                let error = upstream
-                    .execute(request, ProtocolId::OPENAI_CHAT)
-                    .await
-                    .map(|_| ())
-                    .expect_err("unsupported content");
-                assert_eq!(error.status(), Some(404));
-                assert!(error.message().contains(phrase));
-                assert!(!error.cools());
-                assert_eq!(h2.requests().len(), 0);
-                assert_eq!(h1.requests().len(), 0, "not even agent discovery");
-            }
+            let h2 = Http2Server::start(Vec::new()).await;
+            let h1 = Http1Server::start(Vec::new()).await;
+            let host = pooled_host();
+            let account = store_account(&host).await;
+            let upstream = upstream(&host, &h1, h2.base_url(), account);
+            let request: Request = from_value(json!({
+                "model": "auto",
+                "messages": [{"role": "user", "content": [
+                    {"type": "text", "text": "hi"},
+                    {"type": "image", "source": {"type": "url", "url": "https://image.test/a.png"}}
+                ]}],
+                "tools": [{"name": "lookup", "input_schema": {"type": "object"}}]
+            }))
+            .expect("request");
+            let error = upstream
+                .execute(request, ProtocolId::OPENAI_CHAT)
+                .await
+                .map(|_| ())
+                .expect_err("unsupported image");
+            assert_eq!(error.status(), Some(404));
+            assert!(error.message().contains("images are not served"));
+            assert!(!error.message().contains("tools are not served"));
+            assert!(!error.cools());
+            assert_eq!(h2.requests().len(), 0);
+            assert_eq!(h1.requests().len(), 0, "not even agent discovery");
         });
     }
 
@@ -733,6 +1339,77 @@ mod tests {
                 host.context(),
                 Duration::from_secs(600)
             ));
+        });
+    }
+
+    #[test]
+    fn heartbeats_do_not_extend_the_tool_count_wait() {
+        let _guard = http2_memory::test_lock();
+        http2_memory::reset_for_tests();
+        block_on_paused(async {
+            let body = [
+                mcp_frame(31, "lookup", "call-without-count"),
+                heartbeat_frame(),
+                heartbeat_frame(),
+                heartbeat_frame(),
+            ]
+            .concat();
+            let h2 = Http2Server::start(vec![
+                Http2Response::new(200)
+                    .data(body)
+                    .data_delay(Duration::from_secs(1))
+                    .hold_open(),
+            ])
+            .await;
+            let h1 = Http1Server::start(vec![config_reply(h2.base_url())]).await;
+            let host = pooled_host();
+            let account = store_account(&host).await;
+            let mut upstream = upstream(&host, &h1, h2.base_url(), account);
+            upstream.limits = Limits {
+                idle: Duration::from_secs(20),
+                quiet: Duration::from_secs(20),
+                tool_count_wait: Duration::from_secs(2),
+                heartbeat: Duration::from_secs(60),
+                ..Limits::default()
+            };
+            let attempt = async {
+                let completion = upstream
+                    .execute(tool_request(), ProtocolId::OPENAI_CHAT)
+                    .await?;
+                collect(completion).await
+            };
+            let control = async {
+                // Wait until the HTTP/2 Run is accepted (response headers
+                // are immediate; DATA is delayed 1s). Then expire only the
+                // data delay and the 2s tool-count wait. A further 20s jump
+                // can also complete idle/quiet and is not needed to prove
+                // that heartbeats do not extend the count wait.
+                for _ in 0..100 {
+                    if !h2.requests().is_empty() {
+                        break;
+                    }
+                    yield_times(2).await;
+                }
+                advance_time(Duration::from_secs(1)).await;
+                yield_times(10).await;
+                advance_time(Duration::from_millis(2_001)).await;
+                yield_times(10).await;
+                std::future::pending::<()>().await;
+            };
+            let Race::Left(events) = race(attempt, control).await else {
+                unreachable!("control remains pending")
+            };
+            let events = events.expect("count wait ends with ToolUse, not a quiet stall");
+            assert!(events.iter().any(|event| matches!(
+                event,
+                StreamEvent::MessageDelta(MessageDelta {
+                    stop: Some(Stop {
+                        reason: StopReason::ToolUse,
+                        ..
+                    }),
+                    ..
+                })
+            )));
         });
     }
 

@@ -1,19 +1,26 @@
-//! Text-only canonical-request mapping for one Cursor Run.
+//! Canonical-request mapping for one Cursor Run.
 
 use std::collections::{BTreeMap, HashMap};
 
-use hofund_plugin_api::{ContentPart, Message, PluginError, Request, Role};
+use hofund_plugin_api::{
+    ContentPart, Message, PluginError, Request, Role, ToolArguments, ToolChoiceMode, ToolResultPart,
+};
 use hofund_plugin_sdk::digest::sha256;
 use hofund_plugin_sdk::json::{Map, Value};
 
-use crate::proto::{self, AgentRunParams, Pb};
+use crate::proto::{self, AgentRunParams, Pb, ToolDef};
 use crate::run::{Limits, RunArgs};
+
+const CALL: &str = "CallDynamicTool";
+const NAMESPACE: &str = "tools";
+const NO_RESULT: &str = "Tool use was interrupted and did not produce a result.";
 
 /// A fully owned request opening and every blob its state references.
 #[derive(Debug)]
 pub(crate) struct MappedRequest {
     pub(crate) opening: Vec<u8>,
     pub(crate) blobs: HashMap<Vec<u8>, Vec<u8>>,
+    pub(crate) tools: Vec<ToolDef>,
     os: String,
     temp_dir: String,
 }
@@ -27,6 +34,7 @@ impl MappedRequest {
             blobs: std::borrow::Cow::Owned(self.blobs),
             os: std::borrow::Cow::Owned(proto::goos_name_for(&self.os).to_owned()),
             temp_dir: std::borrow::Cow::Owned(self.temp_dir),
+            tools: self.tools,
             limits: Limits::default(),
         }
     }
@@ -62,6 +70,7 @@ fn build(
     temp_dir: &str,
 ) -> Result<MappedRequest, PluginError> {
     reject_unsupported(request)?;
+    let tools = tools_of(request);
 
     let mut blobs = HashMap::new();
     let mut transcript_blob_ids = Vec::new();
@@ -76,18 +85,59 @@ fn build(
                 last_user_text = Some(text);
                 transcript.push(message);
             }
-            Role::Assistant => transcript.push(message),
-            Role::Tool => {}
+            Role::Assistant | Role::Tool => transcript.push(message),
         }
     }
-    if !system_text.is_empty() {
-        let blob = system_blob(&system_text.join("\n"));
+    let mut system = system_text.join("\n");
+    if !tools.is_empty() {
+        system.push_str(&catalog(&tools));
+    }
+    if !system.is_empty() {
+        let blob = system_blob(&system);
         transcript_blob_ids.push(insert_blob(&mut blobs, blob));
     }
-    for message in transcript {
-        let blob = transcript_blob(message);
-        transcript_blob_ids.push(insert_blob(&mut blobs, blob));
+
+    let mut pending = Vec::new();
+    let mut results = Vec::new();
+    for group in join_split_calls(transcript) {
+        match group[0].role {
+            Role::Assistant => {
+                answer_pending(
+                    &mut blobs,
+                    &mut transcript_blob_ids,
+                    &mut pending,
+                    &mut results,
+                );
+                let blob = assistant_blob(&group, &mut pending);
+                transcript_blob_ids.push(insert_blob(&mut blobs, blob));
+            }
+            Role::Tool => {
+                for message in group {
+                    collect_results(message, &mut pending, &mut results);
+                }
+            }
+            Role::User => {
+                for message in &group {
+                    collect_results(message, &mut pending, &mut results);
+                }
+                answer_pending(
+                    &mut blobs,
+                    &mut transcript_blob_ids,
+                    &mut pending,
+                    &mut results,
+                );
+                let blob = user_blob(group[0]);
+                transcript_blob_ids.push(insert_blob(&mut blobs, blob));
+            }
+            Role::System | Role::Developer => unreachable!("system messages are not in transcript"),
+        }
     }
+    answer_pending(
+        &mut blobs,
+        &mut transcript_blob_ids,
+        &mut pending,
+        &mut results,
+    );
 
     let user_turn = Pb::new()
         .string(1, last_user_text.as_deref().unwrap_or("."))
@@ -114,27 +164,19 @@ fn build(
         user_turn_blob_id: &user_turn_blob_id,
         os,
         temp_dir,
-        tools: &[],
+        tools: &tools,
         inline_images: false,
     }));
     Ok(MappedRequest {
         opening,
         blobs,
+        tools,
         os: os.to_owned(),
         temp_dir: temp_dir.to_owned(),
     })
 }
 
 fn reject_unsupported(request: &Request) -> Result<(), PluginError> {
-    let has_tool_part = request.messages.iter().any(|message| {
-        message
-            .content
-            .iter()
-            .any(|part| matches!(part, ContentPart::ToolCall(_) | ContentPart::ToolResult(_)))
-    });
-    if !request.tools.is_empty() || has_tool_part {
-        return Err(PluginError::status_error(404, "tools are not served").without_cooldown());
-    }
     let has_image = request.messages.iter().any(|message| {
         message
             .content
@@ -145,6 +187,40 @@ fn reject_unsupported(request: &Request) -> Result<(), PluginError> {
         return Err(PluginError::status_error(404, "images are not served").without_cooldown());
     }
     Ok(())
+}
+
+fn tools_of(request: &Request) -> Vec<ToolDef> {
+    request
+        .tools
+        .iter()
+        .filter(|tool| match &request.tool_choice {
+            Some(choice) => match &choice.mode {
+                ToolChoiceMode::None => false,
+                ToolChoiceMode::Named { name } => &tool.name == name,
+                ToolChoiceMode::Auto | ToolChoiceMode::Required => true,
+            },
+            None => true,
+        })
+        .map(|tool| ToolDef {
+            name: tool.name.clone(),
+            description: tool.description.clone().unwrap_or_default(),
+            schema: tool.input_schema.clone(),
+        })
+        .collect()
+}
+
+fn catalog(tools: &[ToolDef]) -> String {
+    let mut text = format!(
+        "\n\n<dynamic_tool_catalog>\nThe MCP namespace \"{NAMESPACE}\" has the tools below. They are reached only through `{CALL}`, never as tools of their own. Each entry is the exact call to make; its arguments must match the schema given. The schemas are complete, so there is no need to call `GetDynamicTools` first.\n"
+    );
+    for tool in tools {
+        text.push_str(&format!(
+            "<call>{CALL}({{\"namespace\":\"{NAMESPACE}\",\"toolName\":\"{}\",\"arguments\":{{...}}}})\n{}\narguments schema: {}\n</call>\n",
+            tool.name, tool.description, tool.schema
+        ));
+    }
+    text.push_str("</dynamic_tool_catalog>");
+    text
 }
 
 fn text_of(message: &Message) -> String {
@@ -167,12 +243,90 @@ fn system_blob(text: &str) -> Vec<u8> {
     .into_bytes()
 }
 
-fn transcript_blob(message: &Message) -> Vec<u8> {
-    let role = match message.role {
-        Role::User => "user",
-        Role::Assistant => "assistant",
-        _ => unreachable!("only user and assistant messages reach transcript blobs"),
+fn join_split_calls(messages: Vec<&Message>) -> Vec<Vec<&Message>> {
+    let mut groups: Vec<Vec<&Message>> = Vec::new();
+    for message in messages {
+        let join = message.role == Role::Assistant
+            && groups.last().is_some_and(|previous| {
+                previous[0].role == Role::Assistant
+                    && previous.iter().any(|message| {
+                        message
+                            .content
+                            .iter()
+                            .any(|part| matches!(part, ContentPart::ToolCall(_)))
+                    })
+            });
+        if join {
+            groups
+                .last_mut()
+                .expect("a joined assistant group exists")
+                .push(message);
+        } else {
+            groups.push(vec![message]);
+        }
+    }
+    groups
+}
+
+fn assistant_blob(messages: &[&Message], pending: &mut Vec<String>) -> Vec<u8> {
+    let mut content = Vec::new();
+    let text = messages
+        .iter()
+        .map(|message| text_of(message))
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    if !text.is_empty() {
+        content.push(object([
+            ("text", Value::String(text)),
+            ("type", Value::String("text".to_owned())),
+        ]));
+    }
+    for call in messages
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter_map(|part| match part {
+            ContentPart::ToolCall(call) => Some(call),
+            _ => None,
+        })
+    {
+        content.push(object([
+            (
+                "args",
+                object([
+                    ("arguments", tool_arguments(&call.arguments)),
+                    ("namespace", Value::String(NAMESPACE.to_owned())),
+                    ("toolName", Value::String(call.name.clone())),
+                ]),
+            ),
+            ("toolCallId", Value::String(call_id(&call.id))),
+            ("toolName", Value::String(CALL.to_owned())),
+            ("type", Value::String("tool-call".to_owned())),
+        ]));
+        pending.push(call.id.clone());
+    }
+    object([
+        ("content", Value::Array(content)),
+        ("role", Value::String("assistant".to_owned())),
+    ])
+    .to_string()
+    .into_bytes()
+}
+
+fn tool_arguments(arguments: &ToolArguments) -> Value {
+    let value = match arguments {
+        ToolArguments::Json { value } => value.clone(),
+        ToolArguments::Raw { text } => {
+            hofund_plugin_sdk::json::from_str(text).unwrap_or_else(|_| Value::Object(Map::new()))
+        }
     };
+    match value {
+        Value::Object(_) => value,
+        _ => Value::Object(Map::new()),
+    }
+}
+
+fn user_blob(message: &Message) -> Vec<u8> {
     let content = message
         .content
         .iter()
@@ -186,10 +340,93 @@ fn transcript_blob(message: &Message) -> Vec<u8> {
         .collect();
     object([
         ("content", Value::Array(content)),
-        ("role", Value::String(role.to_owned())),
+        ("role", Value::String("user".to_owned())),
     ])
     .to_string()
     .into_bytes()
+}
+
+fn collect_results(message: &Message, pending: &mut Vec<String>, results: &mut Vec<Value>) {
+    for result in message.content.iter().filter_map(|part| match part {
+        ContentPart::ToolResult(result) => Some(result),
+        _ => None,
+    }) {
+        let Some(index) = pending.iter().position(|id| id == &result.id) else {
+            continue;
+        };
+        pending.remove(index);
+        results.push(tool_result(result));
+    }
+}
+
+fn tool_result(result: &ToolResultPart) -> Value {
+    let text = result
+        .content
+        .iter()
+        .filter_map(|part| match part {
+            ContentPart::Text(part) => Some(part.text.as_str()),
+            _ => None,
+        })
+        .collect::<String>();
+    let parsed =
+        hofund_plugin_sdk::json::from_str(&text).unwrap_or_else(|_| Value::String(text.clone()));
+    let mut value = object([
+        (
+            "experimental_content",
+            Value::Array(vec![object([
+                ("text", Value::String(text)),
+                ("type", Value::String("text".to_owned())),
+            ])]),
+        ),
+        ("result", parsed),
+        ("toolCallId", Value::String(call_id(&result.id))),
+        ("toolName", Value::String(CALL.to_owned())),
+        ("type", Value::String("tool-result".to_owned())),
+    ]);
+    if result.is_error {
+        let Value::Object(fields) = &mut value else {
+            unreachable!("tool result is an object")
+        };
+        fields.insert("isError".to_owned(), Value::Bool(true));
+    }
+    value
+}
+
+fn no_result(id: &str) -> Value {
+    let result = ToolResultPart {
+        id: id.to_owned(),
+        is_error: true,
+        content: vec![ContentPart::text(NO_RESULT)],
+        extensions: Default::default(),
+    };
+    tool_result(&result)
+}
+
+fn answer_pending(
+    blobs: &mut HashMap<Vec<u8>, Vec<u8>>,
+    transcript_blob_ids: &mut Vec<[u8; 32]>,
+    pending: &mut Vec<String>,
+    results: &mut Vec<Value>,
+) {
+    results.extend(pending.drain(..).map(|id| no_result(&id)));
+    if results.is_empty() {
+        return;
+    }
+    let blob = object([
+        ("content", Value::Array(std::mem::take(results))),
+        ("role", Value::String("tool".to_owned())),
+    ])
+    .to_string()
+    .into_bytes();
+    transcript_blob_ids.push(insert_blob(blobs, blob));
+}
+
+fn call_id(id: &str) -> String {
+    if id.starts_with("call_") {
+        id.replacen("__fc_", "\nfc_", 1)
+    } else {
+        id.to_owned()
+    }
 }
 
 fn object<const N: usize>(entries: [(&str, Value); N]) -> Value {
@@ -419,14 +656,169 @@ mod tests {
         assert_eq!(second.len(), 36);
     }
 
-    #[test]
-    fn tools_are_rejected_before_images() {
-        let mut request: Request = from_value(json!({
+    fn request_with_tools() -> Request {
+        from_value(json!({
             "model": "auto",
             "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
-            "tools": [{"name": "lookup", "input_schema": {"type": "object"}}]
+            "tools": [
+                {"name": "lookup", "description": "find a value", "input_schema": {"type": "object", "properties": {"key": {"type": "string"}}}},
+                {"name": "shell", "input_schema": {"type": "object"}}
+            ]
+        }))
+        .expect("request")
+    }
+
+    fn selected(request: Request) -> super::MappedRequest {
+        map_with(&request, options()).expect("tool mapping")
+    }
+
+    fn tool_names(fields: &[Field], number: u32) -> Vec<String> {
+        fields
+            .iter()
+            .filter(|field| field.number == number)
+            .map(|tool| {
+                tool.as_message()
+                    .and_then(|tool| field(&tool, 1).as_string())
+                    .expect("tool name")
+            })
+            .collect()
+    }
+
+    #[test]
+    fn tool_choice_none_sends_no_defs_or_catalog() {
+        let mapped = selected(
+            request_with_tools().with_tool_choice(Some(hofund_plugin_api::ToolChoice::none())),
+        );
+        assert!(mapped.tools.is_empty());
+        let request = agent_request(&mapped.opening);
+        assert!(field(&request, 4).as_message().expect("wrapper").is_empty());
+        let action = field(&request, 2).as_message().expect("action");
+        let action = field(&action, 2).as_message().expect("action context");
+        let context = field(&action, 2).as_message().expect("request context");
+        assert!(context.iter().all(|field| field.number != 7));
+        assert!(
+            json_blobs(&mapped)
+                .iter()
+                .all(|blob| blob["role"] != "system")
+        );
+    }
+
+    #[test]
+    fn named_tool_choice_sends_only_that_function_and_its_catalog() {
+        let mapped = selected(
+            request_with_tools()
+                .with_tool_choice(Some(hofund_plugin_api::ToolChoice::named("shell"))),
+        );
+        assert_eq!(mapped.tools.len(), 1);
+        assert_eq!(mapped.tools[0].name, "shell");
+        assert_eq!(mapped.tools[0].description, "");
+        let request = agent_request(&mapped.opening);
+        assert_eq!(
+            tool_names(&field(&request, 4).as_message().expect("wrapper"), 1),
+            ["shell"]
+        );
+        let system = json_blobs(&mapped)
+            .into_iter()
+            .find(|blob| blob["role"] == "system")
+            .expect("catalog system blob");
+        let text = system["content"].as_str().expect("catalog text");
+        assert!(text.contains("The MCP namespace \"tools\""));
+        assert!(text.contains(
+            "CallDynamicTool({\"namespace\":\"tools\",\"toolName\":\"shell\",\"arguments\":{...}})"
+        ));
+        assert!(!text.contains("toolName\":\"lookup"));
+    }
+
+    #[test]
+    fn default_tool_choice_sends_all_defs_and_appends_the_catalog_to_system_text() {
+        let mut request = request_with_tools();
+        request
+            .messages
+            .insert(0, message(Role::System, &["keep me"]));
+        let mapped = selected(request);
+        assert_eq!(mapped.tools.len(), 2);
+        let request = agent_request(&mapped.opening);
+        assert_eq!(
+            tool_names(&field(&request, 4).as_message().expect("wrapper"), 1),
+            ["lookup", "shell"]
+        );
+        let action = field(&request, 2).as_message().expect("action");
+        let action = field(&action, 2).as_message().expect("action context");
+        let context = field(&action, 2).as_message().expect("request context");
+        assert_eq!(tool_names(&context, 7), ["lookup", "shell"]);
+        let system = json_blobs(&mapped)
+            .into_iter()
+            .find(|blob| blob["role"] == "system")
+            .expect("system catalog");
+        let text = system["content"].as_str().expect("system text");
+        assert!(text.starts_with("keep me\n\n<dynamic_tool_catalog>"));
+        assert!(text.contains("find a value\narguments schema: {\"type\":\"object\",\"properties\":{\"key\":{\"type\":\"string\"}}}"));
+    }
+
+    #[test]
+    fn history_encodes_joined_dynamic_calls_results_no_result_and_replay_ids() {
+        let request: Request = from_value(json!({
+            "model": "auto",
+            "messages": [
+                {"role": "user", "content": [{"type": "text", "text": "read both"}]},
+                {"role": "assistant", "content": [
+                    {"type": "thinking", "text": "hidden reasoning"},
+                    {"type": "text", "text": "reading"},
+                    {"type": "tool_call", "id": "call_alpha__fc_1", "name": "lookup", "arguments": {"form": "json", "value": {"key": "a"}}}
+                ]},
+                {"role": "assistant", "content": [
+                    {"type": "tool_call", "id": "toolu_b__fc_2", "name": "lookup", "arguments": {"form": "raw", "text": "not json"}}
+                ]},
+                {"role": "tool", "content": [
+                    {"type": "tool_result", "id": "call_alpha__fc_1", "content": [{"type": "text", "text": "{\"ok\":true}"}]}
+                ]}
+            ]
         }))
         .expect("request");
+        let mapped = map_with(&request, options()).expect("history mapping");
+        let blobs = json_blobs(&mapped);
+        let assistants = blobs
+            .iter()
+            .filter(|blob| blob["role"] == "assistant")
+            .collect::<Vec<_>>();
+        assert_eq!(assistants.len(), 1, "split calls join into one assistant");
+        let content = assistants[0]["content"].as_array().expect("parts");
+        assert_eq!(content.len(), 3, "text and two calls");
+        assert_eq!(content[0], json!({"text": "reading", "type": "text"}));
+        assert!(!assistants[0].to_string().contains("hidden reasoning"));
+        assert_eq!(content[1]["type"], "tool-call");
+        assert_eq!(content[1]["toolCallId"], "call_alpha\nfc_1");
+        assert_eq!(content[1]["toolName"], "CallDynamicTool");
+        assert_eq!(
+            content[1]["args"],
+            json!({"namespace": "tools", "toolName": "lookup", "arguments": {"key": "a"}})
+        );
+        assert_eq!(content[2]["toolCallId"], "toolu_b__fc_2");
+        assert_eq!(content[2]["args"]["arguments"], json!({}));
+
+        let tool = blobs
+            .iter()
+            .find(|blob| blob["role"] == "tool")
+            .expect("results");
+        let results = tool["content"].as_array().expect("result parts");
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0]["toolCallId"], "call_alpha\nfc_1");
+        assert_eq!(results[0]["result"], json!({"ok": true}));
+        assert_eq!(
+            results[0]["experimental_content"][0]["text"],
+            "{\"ok\":true}"
+        );
+        assert_eq!(results[1]["toolCallId"], "toolu_b__fc_2");
+        assert_eq!(results[1]["isError"], true);
+        assert_eq!(
+            results[1]["experimental_content"][0]["text"],
+            "Tool use was interrupted and did not produce a result."
+        );
+    }
+
+    #[test]
+    fn images_still_fail_before_mapping_a_tool_request() {
+        let mut request = request_with_tools();
         request.messages[0]
             .content
             .push(ContentPart::Image(ImagePart {
@@ -436,50 +828,16 @@ mod tests {
                 detail: None,
                 extensions: Default::default(),
             }));
-        let error = map_with(&request, options()).expect_err("tools are not served");
-        assert_eq!(error.status(), Some(404));
-        assert!(error.message().contains("tools are not served"));
-        assert!(!error.cools());
-    }
-
-    #[test]
-    fn tool_parts_are_rejected_and_images_have_their_own_404() {
-        for content in [
-            json!({"type": "tool_call", "id": "call-1", "name": "lookup", "arguments": {"form": "raw", "text": "{}"}}),
-            json!({"type": "tool_result", "id": "call-1", "content": [{"type": "text", "text": "done"}]}),
-        ] {
-            let request: Request = from_value(json!({
-                "model": "auto",
-                "messages": [{"role": "user", "content": [content]}]
-            }))
-            .expect("request");
-            let error = map_with(&request, options()).expect_err("tool part");
-            assert_eq!(error.status(), Some(404));
-            assert!(error.message().contains("tools are not served"));
-            assert!(!error.cools());
-        }
-
-        let request: Request = from_value(json!({
-            "model": "auto",
-            "messages": [{"role": "user", "content": [{
-                "type": "image",
-                "source": {"type": "url", "url": "https://image.test/a.png"}
-            }]}]
-        }))
-        .expect("request");
-        let error = map_with(&request, options()).expect_err("image part");
+        let error = map_with(&request, options()).expect_err("images are not served");
         assert_eq!(error.status(), Some(404));
         assert!(error.message().contains("images are not served"));
+        assert!(!error.message().contains("tools are not served"));
         assert!(!error.cools());
     }
 
     #[test]
     fn outbound_mapping_contains_no_product_or_gateway_branding() {
-        let mapped = map_with(
-            &Request::new("auto").with_messages(vec![message(Role::User, &["hello"])]),
-            options(),
-        )
-        .expect("mapping");
+        let mapped = map_with(&request_with_tools(), options()).expect("mapping");
         let mut bytes = mapped.opening.clone();
         for blob in mapped.blobs.values() {
             bytes.extend_from_slice(blob);

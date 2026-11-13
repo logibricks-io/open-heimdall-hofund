@@ -1206,6 +1206,8 @@ TierId::const fn from_static (value : & 'static str) -> Self
 TierId::fn as_str (& self) -> & str
 Tool
 ToolArguments
+ToolArgumentsDelta
+ToolChoice
 ToolChoiceMode
 ToolResultPart
 UpstreamFactory
