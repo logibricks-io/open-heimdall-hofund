@@ -36,6 +36,7 @@ mod sign_in;
 mod team;
 mod tokens;
 mod upstream;
+mod usage;
 
 pub(crate) use endpoints::Endpoints;
 
@@ -390,8 +391,17 @@ impl Subscription for Cursor {
             self.keychain_enabled,
         )
         .await?;
-        let body =
-            connect::unary(host, &self.endpoints, "GetCurrentPeriodUsage", &token, "{}").await?;
+        let team_id = team::header_value(&token);
+        let body = connect::unary_opts(
+            host,
+            &self.endpoints,
+            "GetCurrentPeriodUsage",
+            &token,
+            "{}",
+            team_id.as_deref(),
+            None,
+        )
+        .await?;
         quota::period_windows(&body)
     }
 

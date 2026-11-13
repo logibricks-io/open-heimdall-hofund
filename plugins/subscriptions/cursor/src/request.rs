@@ -21,16 +21,17 @@ pub(crate) struct MappedRequest {
     pub(crate) opening: Vec<u8>,
     pub(crate) blobs: HashMap<Vec<u8>, Vec<u8>>,
     pub(crate) tools: Vec<ToolDef>,
+    pub(crate) conversation_id: String,
     os: String,
     temp_dir: String,
 }
 
 impl MappedRequest {
     /// Moves every byte into a stream that can outlive `execute`.
-    pub(crate) fn into_args(self) -> RunArgs<'static> {
+    pub(crate) fn into_args(self, team_id: Option<String>) -> RunArgs<'static> {
         RunArgs {
             opening: self.opening,
-            team_id: None,
+            team_id,
             blobs: std::borrow::Cow::Owned(self.blobs),
             os: std::borrow::Cow::Owned(proto::goos_name_for(&self.os).to_owned()),
             temp_dir: std::borrow::Cow::Owned(self.temp_dir),
@@ -40,21 +41,37 @@ impl MappedRequest {
     }
 }
 
-/// Maps a request with a fresh conversation, message, and per-execute temp path.
-pub(crate) fn map(request: &Request) -> Result<MappedRequest, PluginError> {
-    let message_id = new_uuid()?;
-    let conversation_id = new_uuid()?;
+fn map_ids(
+    request: &Request,
+    conversation_id: &str,
+    message_id: &str,
+) -> Result<MappedRequest, PluginError> {
     let temp_dir = std::env::temp_dir()
         .join(format!("cursor-{message_id}"))
         .to_string_lossy()
         .into_owned();
     build(
         request,
-        &conversation_id,
-        &message_id,
+        conversation_id,
+        message_id,
         std::env::consts::OS,
         &temp_dir,
     )
+}
+
+/// Maps a request with a fresh conversation, message, and per-execute temp path.
+pub(crate) fn map(request: &Request) -> Result<MappedRequest, PluginError> {
+    map_ids(request, &new_uuid()?, &new_uuid()?)
+}
+
+/// Maps a request onto a known conversation id. The temp path is still chosen
+/// by the product helper above, so test code does not call `std::env::temp_dir`.
+#[cfg(test)]
+pub(crate) fn map_with_conversation(
+    request: &Request,
+    conversation_id: &str,
+) -> Result<MappedRequest, PluginError> {
+    map_ids(request, conversation_id, &new_uuid()?)
 }
 
 fn new_uuid() -> Result<String, PluginError> {
@@ -171,6 +188,7 @@ fn build(
         opening,
         blobs,
         tools,
+        conversation_id: conversation_id.to_owned(),
         os: os.to_owned(),
         temp_dir: temp_dir.to_owned(),
     })
@@ -660,7 +678,7 @@ mod tests {
                 .is_empty()
         );
         assert!(request.iter().all(|field| field.number != 19));
-        assert_eq!(mapped.into_args().os, "darwin");
+        assert_eq!(mapped.into_args(None).os, "darwin");
     }
 
     #[test]

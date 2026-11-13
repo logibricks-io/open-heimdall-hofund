@@ -7,8 +7,8 @@ use std::sync::{Arc, Mutex};
 use hofund_plugin_api::{
     AccountId, BlockStart, Completion, ContentBlockStart, ContentBlockStop, Extensions,
     HostContext, MessageDelta, MessageStart, MessageStop, PluginError, ProbeQuery, ProbeReport,
-    ProtocolId, Request, Stop, StopReason, StreamEvent, TextDelta, ThinkingDelta,
-    ToolArgumentsDelta, UpstreamProvider,
+    ProtocolId, Request, SecretString, Stop, StopReason, StreamEvent, TextDelta, ThinkingDelta,
+    ToolArgumentsDelta, UpstreamProvider, Usage,
 };
 use hofund_plugin_sdk::futures::{self, StreamExt};
 
@@ -18,7 +18,7 @@ use crate::endpoints::Endpoints;
 use crate::failure::{self, EMPTY_REPLY};
 use crate::proto::{ExecRequest, ServerEvent, ToolDef};
 use crate::run::{Limits, RunEvent, RunStream, run_stream};
-use crate::{request, session};
+use crate::{request, session, team, usage};
 
 /// Account and process facilities needed by one stateless Cursor Run.
 pub(crate) struct CursorUpstream {
@@ -31,6 +31,8 @@ pub(crate) struct CursorUpstream {
     keychain_enabled: bool,
     agent_host: AgentHost,
     limits: Limits,
+    #[cfg(test)]
+    test_conversation_id: Option<String>,
 }
 
 impl CursorUpstream {
@@ -53,7 +55,17 @@ impl CursorUpstream {
             keychain_enabled,
             agent_host: AgentHost::default(),
             limits: Limits::default(),
+            #[cfg(test)]
+            test_conversation_id: None,
         }
+    }
+
+    fn mapped_request(&self, request: &Request) -> Result<request::MappedRequest, PluginError> {
+        #[cfg(test)]
+        if let Some(id) = self.test_conversation_id.as_deref() {
+            return request::map_with_conversation(request, id);
+        }
+        request::map(request)
     }
 }
 
@@ -62,11 +74,12 @@ impl UpstreamProvider for CursorUpstream {
     async fn execute(
         &self,
         request: Request,
-        _inbound: ProtocolId,
+        inbound: ProtocolId,
     ) -> Result<Completion, PluginError> {
         let model = request.model.clone();
-        let mapped = request::map(&request)?;
+        let mapped = self.mapped_request(&request)?;
         let tools = mapped.tools.clone();
+        let conversation_id = mapped.conversation_id.clone();
         let token = session::access_token(
             &self.host,
             &self.endpoints,
@@ -80,10 +93,12 @@ impl UpstreamProvider for CursorUpstream {
         let response_id = hofund_plugin_sdk::uuid::v4()
             .map(|id| format!("msg_{id}"))
             .map_err(|error| PluginError::io(format!("cannot create a response id: {error}")))?;
-        let mut args = mapped.into_args();
+        let team_id = team::header_value(&token);
+        let mut args = mapped.into_args(team_id.clone());
         args.limits = self.limits;
         let mut retried = false;
         'runs: loop {
+            let since_ms = crate::tokens::unix_ms(self.host.clock().now());
             let attempt = run_stream(
                 &self.host,
                 &self.endpoints,
@@ -104,6 +119,14 @@ impl UpstreamProvider for CursorUpstream {
                             response_id,
                             model,
                             tools,
+                            stream_context(
+                                self,
+                                token.clone(),
+                                conversation_id,
+                                inbound,
+                                team_id.clone(),
+                                since_ms,
+                            ),
                             FirstOutput::Text(text),
                         ));
                     }
@@ -113,6 +136,14 @@ impl UpstreamProvider for CursorUpstream {
                             response_id,
                             model,
                             tools,
+                            stream_context(
+                                self,
+                                token.clone(),
+                                conversation_id,
+                                inbound,
+                                team_id.clone(),
+                                since_ms,
+                            ),
                             FirstOutput::Thinking(text),
                         ));
                     }
@@ -124,6 +155,14 @@ impl UpstreamProvider for CursorUpstream {
                             response_id,
                             model,
                             tools,
+                            stream_context(
+                                self,
+                                token.clone(),
+                                conversation_id,
+                                inbound,
+                                team_id.clone(),
+                                since_ms,
+                            ),
                             FirstOutput::Tool(request),
                         ));
                     }
@@ -137,7 +176,13 @@ impl UpstreamProvider for CursorUpstream {
                     crate::http2_memory::clear();
                     let fresh = self
                         .agent_host
-                        .resolve(&self.host, &self.endpoints, &token, true, args.team_id)
+                        .resolve(
+                            &self.host,
+                            &self.endpoints,
+                            &token,
+                            true,
+                            args.team_id.as_deref(),
+                        )
                         .await;
                     if http1 || fresh != agent_url {
                         retried = true;
@@ -167,6 +212,45 @@ struct CursorStreamState {
     open_thinking: Option<u32>,
     emitted_calls: usize,
     finished: bool,
+    host: HostContext,
+    endpoints: Endpoints,
+    token: SecretString,
+    conversation_id: String,
+    inbound: ProtocolId,
+    team_id: Option<String>,
+    limits: Limits,
+    since_ms: i64,
+}
+
+struct StreamContext {
+    host: HostContext,
+    endpoints: Endpoints,
+    token: SecretString,
+    conversation_id: String,
+    inbound: ProtocolId,
+    team_id: Option<String>,
+    limits: Limits,
+    since_ms: i64,
+}
+
+fn stream_context(
+    upstream: &CursorUpstream,
+    token: SecretString,
+    conversation_id: String,
+    inbound: ProtocolId,
+    team_id: Option<String>,
+    since_ms: i64,
+) -> StreamContext {
+    StreamContext {
+        host: upstream.host.clone(),
+        endpoints: (*upstream.endpoints).clone(),
+        token,
+        conversation_id,
+        inbound,
+        team_id,
+        limits: upstream.limits,
+        since_ms,
+    }
 }
 
 enum FirstOutput {
@@ -187,6 +271,7 @@ fn completion_stream(
     id: String,
     model: String,
     tools: Vec<ToolDef>,
+    context: StreamContext,
     first: FirstOutput,
 ) -> Completion {
     let pending = VecDeque::from([StreamEvent::MessageStart(MessageStart {
@@ -204,6 +289,14 @@ fn completion_stream(
         open_thinking: None,
         emitted_calls: 0,
         finished: false,
+        host: context.host,
+        endpoints: context.endpoints,
+        token: context.token,
+        conversation_id: context.conversation_id,
+        inbound: context.inbound,
+        team_id: context.team_id,
+        limits: context.limits,
+        since_ms: context.since_ms,
     };
     match first {
         FirstOutput::Text(text) => state.emit_text(text),
@@ -322,14 +415,14 @@ impl CursorStreamState {
         }
     }
 
-    fn finish(&mut self, reason: StopReason) {
+    fn finish(&mut self, reason: StopReason, usage: Option<Usage>) {
         self.pending
             .push_back(StreamEvent::MessageDelta(MessageDelta {
                 stop: Some(Stop {
                     reason,
                     sequence: None,
                 }),
-                usage: None,
+                usage,
                 extensions: Extensions::new(),
             }));
         self.close_text();
@@ -367,10 +460,16 @@ async fn next_completion_event(
             {
                 state.emit_tool(request);
             }
-            Some(Ok(RunEvent::ToolStepEnd)) => state.finish(StopReason::ToolUse),
-            Some(Ok(RunEvent::Server(ServerEvent::TurnEnd(_)))) => {
+            Some(Ok(RunEvent::ToolStepEnd)) => {
+                let usage = poll_step_usage(state).await;
+                state.finish(StopReason::ToolUse, usage);
+            }
+            Some(Ok(RunEvent::Server(ServerEvent::TurnEnd(turn)))) => {
                 if state.emitted_calls == 0 {
-                    state.finish(StopReason::EndTurn);
+                    state.finish(
+                        StopReason::EndTurn,
+                        Some(usage::from_turn(&turn, state.inbound)),
+                    );
                 }
             }
             Some(Ok(RunEvent::Server(_))) => {}
@@ -388,13 +487,29 @@ async fn next_completion_event(
             }
             None => {
                 if state.emitted_calls > 0 {
-                    state.finish(StopReason::ToolUse);
+                    let usage = poll_step_usage(state).await;
+                    state.finish(StopReason::ToolUse, usage);
                 } else {
                     state.finished = true;
                 }
             }
         }
     }
+}
+
+async fn poll_step_usage(state: &mut CursorStreamState) -> Option<Usage> {
+    usage::poll_dashboard(usage::PollArgs {
+        host: &state.host,
+        endpoints: &state.endpoints,
+        token: &state.token,
+        conversation_id: &state.conversation_id,
+        team_id: state.team_id.as_deref(),
+        since_ms: state.since_ms,
+        inbound: state.inbound,
+        limits: state.limits,
+    })
+    .await
+    .or_else(|| Some(usage::zeros()))
 }
 
 fn empty_reply() -> PluginError {
@@ -415,7 +530,7 @@ mod tests {
         AccountId, BlockStart, Completion, ContentBlockStart, ContentBlockStop, Extensions,
         Message, MessageDelta, MessageStop, PluginError, PluginId, PluginKind, ProtocolId, Request,
         Role, SecretString, Stop, StopReason, StreamEvent, TextDelta, ThinkingDelta,
-        ToolArgumentsDelta, UpstreamProvider,
+        ToolArgumentsDelta, UpstreamProvider, Usage,
     };
     use hofund_plugin_sdk::futures::StreamExt;
     use hofund_plugin_sdk::json::{from_value, json};
@@ -429,6 +544,7 @@ mod tests {
     use crate::proto::{self, Pb};
     use crate::run::Limits;
     use crate::tokens;
+    use crate::usage;
 
     fn pooled_host() -> TestHost {
         TestHost::open_for_with_pooled_http_and_tokio_monotonic(
@@ -508,7 +624,7 @@ mod tests {
             client_version: "cli-test".to_owned(),
             ..Endpoints::default()
         });
-        CursorUpstream::new(
+        let mut upstream = CursorUpstream::new(
             account,
             host.context().clone(),
             endpoints,
@@ -516,7 +632,50 @@ mod tests {
             None,
             Arc::new(Mutex::new(KeychainCache::default())),
             true,
+        );
+        // Existing tool tests must not wait on the production 1.5s/6s poll window.
+        upstream.limits.usage_first_wait = Duration::ZERO;
+        upstream.limits.usage_interval = Duration::ZERO;
+        upstream.limits.usage_give_up = Duration::ZERO;
+        upstream
+    }
+
+    const TEST_CONVERSATION: &str = "00000000-0000-4000-8000-0000000000c1";
+
+    fn field14_usage(inbound: ProtocolId) -> Usage {
+        usage::from_turn(
+            &crate::proto::TurnUsage {
+                input: 100,
+                output: 20,
+                cache_read: 30,
+                cache_write: 40,
+                reasoning: 5,
+            },
+            inbound,
         )
+    }
+
+    fn usage_events_body(
+        conversation_id: &str,
+        timestamp: i64,
+        input: u64,
+        output: u64,
+        cache_read: u64,
+        cache_write: u64,
+        reasoning: u64,
+    ) -> Vec<u8> {
+        hofund_plugin_sdk::json::to_vec(&json!({
+            "usageEvents": [{
+                "conversationId": conversation_id,
+                "timestamp": timestamp,
+                "inputTokens": input,
+                "outputTokens": output,
+                "cacheReadTokens": cache_read,
+                "cacheWriteTokens": cache_write,
+                "thinkingTokens": reasoning,
+            }]
+        }))
+        .expect("usage events body")
     }
 
     fn text_request() -> Request {
@@ -680,7 +839,7 @@ mod tests {
                             reason: StopReason::ToolUse,
                             sequence: None,
                         }),
-                        usage: None,
+                        usage: Some(usage::zeros()),
                         extensions: Extensions::new(),
                     }),
                     StreamEvent::MessageStop(MessageStop {
@@ -737,7 +896,7 @@ mod tests {
     }
 
     #[test]
-    fn execute_waits_for_thinking_then_streams_a_separate_text_block_without_usage() {
+    fn execute_waits_for_thinking_then_streams_a_separate_text_block_with_field14_usage() {
         let _guard = crate::http2_memory::test_lock();
         crate::http2_memory::reset_for_tests();
         block_on(async {
@@ -813,7 +972,7 @@ mod tests {
                             reason: StopReason::EndTurn,
                             sequence: None,
                         }),
-                        usage: None,
+                        usage: Some(field14_usage(ProtocolId::OPENAI_CHAT)),
                         extensions: Extensions::new(),
                     }),
                     StreamEvent::ContentBlockStop(ContentBlockStop {
@@ -1153,12 +1312,18 @@ mod tests {
                 Http1Response::chunked(vec![body]).hold_open(),
                 Http1Response::new(200),
                 Http1Response::new(200),
+                Http1Response::new(200).body(br#"{"usageEvents":[]}"#.to_vec()),
             ])
             .await;
             let host = pooled_host();
             crate::http2_memory::remember(host.context());
             let account = store_account(&host).await;
-            let upstream = upstream(&host, &h1, "http://127.0.0.1:9", account);
+            let mut upstream = upstream(&host, &h1, "http://127.0.0.1:9", account);
+            // Keep usage_interval at zero so the quiet watchdog cannot start a
+            // burst of in-stream polls. give_up must be long enough for one
+            // post-seal request now that a zero remaining budget no longer
+            // starts a poll.
+            upstream.limits.usage_give_up = Duration::from_secs(6);
             let attempt = async {
                 let completion = upstream
                     .execute(tool_request(), ProtocolId::OPENAI_CHAT)
@@ -1166,6 +1331,7 @@ mod tests {
                 collect(completion).await
             };
             let control = async {
+                advance_until_usage_polls(&h1, 1).await;
                 advance_time(Duration::from_secs(241)).await;
                 std::future::pending::<()>().await;
             };
@@ -1199,8 +1365,16 @@ mod tests {
             assert!(matches!(events.last(), Some(StreamEvent::MessageStop(_))));
 
             let requests = h1.requests();
-            assert_eq!(requests.len(), 3, "RunSSE, opening append, and close exec");
+            assert_eq!(
+                requests.len(),
+                4,
+                "RunSSE, opening append, close exec, and usage poll"
+            );
             assert_eq!(requests[0].path(), "/agent.v1.AgentService/RunSSE");
+            assert_eq!(
+                requests[3].path(),
+                "/aiserver.v1.DashboardService/GetFilteredUsageEvents"
+            );
             let appends = requests
                 .iter()
                 .filter(|request| request.path() == "/aiserver.v1.BidiService/BidiAppend")
@@ -1385,7 +1559,7 @@ mod tests {
                 idle: Duration::from_secs(2),
                 quiet: Duration::from_secs(20),
                 heartbeat: Duration::from_secs(60),
-                ..Limits::default()
+                ..upstream.limits
             };
             let attempt = upstream.execute(text_request(), ProtocolId::OPENAI_CHAT);
             let control = async {
@@ -1440,7 +1614,7 @@ mod tests {
                 idle: Duration::from_secs(20),
                 quiet: Duration::from_secs(3),
                 heartbeat: Duration::from_secs(60),
-                ..Limits::default()
+                ..upstream.limits
             };
             let attempt = upstream.execute(text_request(), ProtocolId::OPENAI_CHAT);
             let control = async {
@@ -1505,7 +1679,7 @@ mod tests {
                 quiet: Duration::from_secs(20),
                 tool_count_wait: Duration::from_secs(2),
                 heartbeat: Duration::from_secs(60),
-                ..Limits::default()
+                ..upstream.limits
             };
             let attempt = async {
                 let completion = upstream
@@ -1567,7 +1741,7 @@ mod tests {
                 idle: Duration::from_secs(2),
                 quiet: Duration::from_secs(20),
                 heartbeat: Duration::from_secs(60),
-                ..Limits::default()
+                ..upstream.limits
             };
             let Completion::Stream(mut stream) = upstream
                 .execute(text_request(), ProtocolId::OPENAI_CHAT)
@@ -1804,6 +1978,364 @@ mod tests {
             assert_eq!(error.status(), Some(400));
             assert_eq!(h1.requests().len(), 2);
             assert_eq!(h2.requests().len(), 0);
+        });
+    }
+
+    #[test]
+    fn field14_usage_follows_inbound_input_includes_cache() {
+        let _guard = crate::http2_memory::test_lock();
+        crate::http2_memory::reset_for_tests();
+        block_on(async {
+            for protocol in [
+                ProtocolId::OPENAI_CHAT,
+                ProtocolId::OPENAI_RESPONSES,
+                ProtocolId::GENERATIVE_LANGUAGE,
+                ProtocolId::ANTHROPIC_MESSAGES,
+                ProtocolId::BEDROCK_CONVERSE,
+            ] {
+                let body = [text_frame("ok"), turn_end_frame()].concat();
+                let h2 = Http2Server::start(vec![Http2Response::new(200).data(body)]).await;
+                let h1 = Http1Server::start(vec![config_reply(h2.base_url())]).await;
+                let host = pooled_host();
+                let account = store_account(&host).await;
+                let upstream = upstream(&host, &h1, h2.base_url(), account);
+                let events = collect(
+                    upstream
+                        .execute(text_request(), protocol)
+                        .await
+                        .expect("execute"),
+                )
+                .await
+                .expect("stream");
+                let usage = events
+                    .iter()
+                    .find_map(|event| match event {
+                        StreamEvent::MessageDelta(delta) => delta.usage.clone(),
+                        _ => None,
+                    })
+                    .expect("usage on last delta");
+                assert_eq!(usage, field14_usage(protocol), "{protocol:?}");
+            }
+        });
+    }
+
+    fn restore_production_usage_limits(upstream: &mut CursorUpstream) {
+        let defaults = Limits::default();
+        upstream.limits.usage_first_wait = defaults.usage_first_wait;
+        upstream.limits.usage_interval = defaults.usage_interval;
+        upstream.limits.usage_give_up = defaults.usage_give_up;
+        upstream.limits.usage_request = defaults.usage_request;
+        upstream.test_conversation_id = Some(TEST_CONVERSATION.to_owned());
+    }
+
+    fn tool_step_body() -> Vec<u8> {
+        [
+            list_tools_frame(7),
+            mcp_frame(8, "lookup", "call_one\nfc_9"),
+            tool_count_frame(1),
+            checkpoint_frame(1),
+        ]
+        .concat()
+    }
+
+    async fn advance_until_usage_polls(h1: &Http1Server, want: usize) {
+        let path = "/aiserver.v1.DashboardService/GetFilteredUsageEvents";
+        for _ in 0..40 {
+            let seen = h1
+                .requests()
+                .iter()
+                .filter(|request| request.path() == path)
+                .count();
+            if seen >= want {
+                return;
+            }
+            yield_times(2).await;
+            advance_time(Duration::from_millis(100)).await;
+        }
+    }
+
+    fn last_message_usage(events: &[StreamEvent]) -> Option<&Usage> {
+        events.iter().rev().find_map(|event| match event {
+            StreamEvent::MessageDelta(delta) => delta.usage.as_ref(),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn dashboard_usage_arrives_on_the_second_poll() {
+        let _guard = crate::http2_memory::test_lock();
+        crate::http2_memory::reset_for_tests();
+        block_on_paused(async {
+            let h2 = Http2Server::start(vec![
+                Http2Response::new(200).data(tool_step_body()).hold_open(),
+            ])
+            .await;
+            let hit = usage_events_body(TEST_CONVERSATION, 2_000_000_000_000, 30, 8, 12, 7, 3);
+            let h1 = Http1Server::start(vec![
+                config_reply(h2.base_url()),
+                Http1Response::new(200).body(br#"{"usageEvents":[]}"#.to_vec()),
+                Http1Response::new(200).body(hit),
+            ])
+            .await;
+            let host = pooled_host();
+            let account = store_account(&host).await;
+            let mut upstream = upstream(&host, &h1, h2.base_url(), account);
+            restore_production_usage_limits(&mut upstream);
+            let completion = upstream
+                .execute(tool_request(), ProtocolId::OPENAI_CHAT)
+                .await
+                .expect("execute");
+            let attempt = collect(completion);
+            let control = async {
+                advance_until_usage_polls(&h1, 2).await;
+                std::future::pending::<()>().await;
+            };
+            let Race::Left(result) = race(attempt, control).await else {
+                unreachable!("control remains pending")
+            };
+            let events = result.expect("stream");
+            let usage = last_message_usage(&events).expect("usage");
+            assert_eq!(
+                usage,
+                &usage::from_dashboard(
+                    usage::DashboardTotals {
+                        input: 30,
+                        output: 8,
+                        cache_read: 12,
+                        cache_write: 7,
+                        reasoning: 3,
+                    },
+                    ProtocolId::OPENAI_CHAT,
+                )
+            );
+            let polls: Vec<_> = h1
+                .requests()
+                .into_iter()
+                .filter(|request| {
+                    request.path() == "/aiserver.v1.DashboardService/GetFilteredUsageEvents"
+                })
+                .collect();
+            assert_eq!(polls.len(), 2, "first miss then hit: {polls:?}");
+            let body: hofund_plugin_sdk::json::Value =
+                hofund_plugin_sdk::json::from_slice(polls[0].body()).expect("poll body");
+            assert!(body["startDate"].as_str().is_some(), "{body}");
+            assert!(body["endDate"].as_str().is_some(), "{body}");
+            assert_eq!(body["page"], 1);
+            assert_eq!(body["pageSize"], 50);
+            assert!(body.get("teamId").is_none(), "{body}");
+        });
+    }
+
+    #[test]
+    fn dashboard_deadline_miss_emits_zeros_and_does_not_block() {
+        let _guard = crate::http2_memory::test_lock();
+        crate::http2_memory::reset_for_tests();
+        block_on_paused(async {
+            let h2 = Http2Server::start(vec![
+                Http2Response::new(200).data(tool_step_body()).hold_open(),
+            ])
+            .await;
+            let h1 = Http1Server::start(vec![config_reply(h2.base_url())]).await;
+            let host = pooled_host();
+            let account = store_account(&host).await;
+            let mut upstream = upstream(&host, &h1, h2.base_url(), account);
+            restore_production_usage_limits(&mut upstream);
+            let completion = upstream
+                .execute(tool_request(), ProtocolId::ANTHROPIC_MESSAGES)
+                .await
+                .expect("execute");
+            let attempt = collect(completion);
+            let control = async {
+                for _ in 0..40 {
+                    yield_times(2).await;
+                    advance_time(Duration::from_millis(250)).await;
+                }
+                std::future::pending::<()>().await;
+            };
+            let Race::Left(result) = race(attempt, control).await else {
+                unreachable!("control remains pending")
+            };
+            let events = result.expect("stream");
+            assert_eq!(last_message_usage(&events).expect("usage"), &usage::zeros());
+            let polls = h1
+                .requests()
+                .iter()
+                .filter(|request| {
+                    request.path() == "/aiserver.v1.DashboardService/GetFilteredUsageEvents"
+                })
+                .count();
+            assert!(
+                polls >= 1,
+                "at least one poll before the deadline, got {polls}"
+            );
+        });
+    }
+
+    #[test]
+    fn dashboard_poll_claims_events_timestamped_at_run_start() {
+        let _guard = crate::http2_memory::test_lock();
+        crate::http2_memory::reset_for_tests();
+        block_on_paused(async {
+            let host = pooled_host();
+            let start_ms = crate::tokens::unix_ms(host.context().clock().now());
+            let hit = usage_events_body(TEST_CONVERSATION, start_ms, 11, 2, 0, 0, 0);
+            let h2 = Http2Server::start(vec![
+                Http2Response::new(200).data(tool_step_body()).hold_open(),
+            ])
+            .await;
+            let h1 = Http1Server::start(vec![
+                config_reply(h2.base_url()),
+                Http1Response::new(200).body(hit),
+            ])
+            .await;
+            let account = store_account(&host).await;
+            let mut upstream = upstream(&host, &h1, h2.base_url(), account);
+            restore_production_usage_limits(&mut upstream);
+            let completion = upstream
+                .execute(tool_request(), ProtocolId::OPENAI_CHAT)
+                .await
+                .expect("execute");
+            advance_time(Duration::from_secs(2)).await;
+            let attempt = collect(completion);
+            let control = async {
+                advance_until_usage_polls(&h1, 1).await;
+                std::future::pending::<()>().await;
+            };
+            let Race::Left(result) = race(attempt, control).await else {
+                unreachable!("control remains pending")
+            };
+            let events = result.expect("stream");
+            assert_eq!(
+                last_message_usage(&events).expect("usage"),
+                &usage::from_dashboard(
+                    usage::DashboardTotals {
+                        input: 11,
+                        output: 2,
+                        cache_read: 0,
+                        cache_write: 0,
+                        reasoning: 0,
+                    },
+                    ProtocolId::OPENAI_CHAT,
+                )
+            );
+        });
+    }
+
+    #[test]
+    fn dashboard_poll_does_not_start_a_request_after_the_give_up_deadline() {
+        let _guard = crate::http2_memory::test_lock();
+        crate::http2_memory::reset_for_tests();
+        block_on_paused(async {
+            let h2 = Http2Server::start(vec![
+                Http2Response::new(200).data(tool_step_body()).hold_open(),
+            ])
+            .await;
+            let h1 = Http1Server::start(vec![config_reply(h2.base_url())]).await;
+            let host = pooled_host();
+            let account = store_account(&host).await;
+            let mut upstream = upstream(&host, &h1, h2.base_url(), account);
+            restore_production_usage_limits(&mut upstream);
+            upstream.limits.usage_first_wait = Duration::ZERO;
+            upstream.limits.usage_give_up = Duration::ZERO;
+            upstream.limits.usage_request = Duration::from_secs(5);
+            let events = collect(
+                upstream
+                    .execute(tool_request(), ProtocolId::OPENAI_CHAT)
+                    .await
+                    .expect("execute"),
+            )
+            .await
+            .expect("stream");
+            assert_eq!(last_message_usage(&events).expect("usage"), &usage::zeros());
+            let polls = h1
+                .requests()
+                .iter()
+                .filter(|request| {
+                    request.path() == "/aiserver.v1.DashboardService/GetFilteredUsageEvents"
+                })
+                .count();
+            assert_eq!(polls, 0, "no dashboard request after the give-up deadline");
+        });
+    }
+
+    #[test]
+    fn dashboard_poll_sends_team_header_and_body_when_section_5_4_matches() {
+        let _guard = crate::http2_memory::test_lock();
+        crate::http2_memory::reset_for_tests();
+        let config_dir = tempfile::tempdir().expect("team config");
+        std::fs::write(
+            config_dir.path().join("cli-config.json"),
+            r#"{"authInfo":{"authId":"u1","activeTeamId":42}}"#,
+        )
+        .expect("cli-config");
+        let _team = crate::team::begin_test(Some(config_dir.path().to_path_buf()));
+        block_on(async {
+            let hit = usage_events_body(TEST_CONVERSATION, 2_000_000_000_000, 11, 2, 0, 0, 0);
+            let h2 = Http2Server::start(vec![
+                Http2Response::new(200).data(tool_step_body()).hold_open(),
+            ])
+            .await;
+            let h1 = Http1Server::start(vec![
+                config_reply(h2.base_url()),
+                Http1Response::new(200).body(hit),
+            ])
+            .await;
+            let host = pooled_host();
+            let id = AccountId::from_static("a-00000000000000f4");
+            let account = host
+                .context()
+                .accounts()
+                .account(id.clone(), "team@example.test")
+                .expect("account");
+            let jwt = "eyJhbGciOiJub25lIn0.eyJzdWIiOiJ1MSIsImVtYWlsIjoibWVAZXhhbXBsZS5jb20ifQ.sig";
+            let blob = tokens::blob_oauth(
+                &SecretString::from(jwt.to_owned()),
+                &SecretString::from("unused-refresh-token".to_owned()),
+                4_000_000_000_000,
+                "team@example.test",
+                None,
+            );
+            host.context()
+                .accounts()
+                .upsert(account, blob.to_secret())
+                .await
+                .expect("store");
+            let mut upstream = upstream(&host, &h1, h2.base_url(), id);
+            restore_production_usage_limits(&mut upstream);
+            upstream.limits.usage_first_wait = Duration::ZERO;
+            upstream.test_conversation_id = Some(TEST_CONVERSATION.to_owned());
+            let events = collect(
+                upstream
+                    .execute(tool_request(), ProtocolId::ANTHROPIC_MESSAGES)
+                    .await
+                    .expect("execute"),
+            )
+            .await
+            .expect("stream");
+            assert_eq!(
+                last_message_usage(&events).expect("usage"),
+                &usage::from_dashboard(
+                    usage::DashboardTotals {
+                        input: 11,
+                        output: 2,
+                        cache_read: 0,
+                        cache_write: 0,
+                        reasoning: 0,
+                    },
+                    ProtocolId::ANTHROPIC_MESSAGES,
+                )
+            );
+            let poll = h1
+                .requests()
+                .into_iter()
+                .find(|request| {
+                    request.path() == "/aiserver.v1.DashboardService/GetFilteredUsageEvents"
+                })
+                .expect("poll");
+            assert_eq!(poll.header("x-cursor-team-id"), Some("42"));
+            let body: hofund_plugin_sdk::json::Value =
+                hofund_plugin_sdk::json::from_slice(poll.body()).expect("body");
+            assert_eq!(body["teamId"], 42);
         });
     }
 }
