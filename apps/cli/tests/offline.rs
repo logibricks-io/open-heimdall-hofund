@@ -714,36 +714,61 @@ impl Drop for Daemon {
     }
 }
 
+fn model_address_from_status(stdout: &str) -> Option<SocketAddr> {
+    stdout.lines().find_map(|line| {
+        let rest = line.strip_prefix("model address: ")?;
+        let addr = rest.split(' ').next()?;
+        addr.parse().ok()
+    })
+}
+
 #[test]
 fn hofund_addr_overrides_listen_for_daemon_and_healthcheck() {
-    let configured = free_port();
-    let effective = free_port();
-    let scratch = Scratch::new(&format!("127.0.0.1:{configured}"), ROUTED)
-        .with_env("HOFUND_ADDR", &format!("127.0.0.1:{effective}"));
+    // Hold the configured listen address so it cannot be stolen and so a
+    // daemon that still bound `listen` would fail to start. The daemon binds
+    // HOFUND_ADDR=127.0.0.1:0 itself (no drop-then-bind gap) and reports the
+    // bound address through status; healthcheck then uses that address.
+    let configured = TcpListener::bind("127.0.0.1:0").expect("bind configured");
+    let configured_addr = configured.local_addr().expect("addr");
+    let scratch =
+        Scratch::new(&configured_addr.to_string(), ROUTED).with_env("HOFUND_ADDR", "127.0.0.1:0");
     let mut daemon_command = scratch.command(hofundd(), &[]);
     daemon_command.stdout(Stdio::null()).stderr(Stdio::null());
     let mut daemon = Daemon(Some(spawn(&mut daemon_command)));
 
-    // The healthcheck follows HOFUND_ADDR to the daemon's model listener.
     let started = Instant::now();
-    loop {
-        let out = scratch.hofund_with(hofund(), &["healthcheck"]);
-        if out.code == Some(0) {
-            assert_eq!(
-                out.stdout.trim_end(),
-                format!("ok: hofund gateway at 127.0.0.1:{effective}")
-            );
-            break;
+    let effective = loop {
+        let out = scratch.hofund(&["status"]);
+        if out.code == Some(0) && out.stdout.starts_with("daemon running") {
+            if let Some(addr) = model_address_from_status(&out.stdout) {
+                assert_ne!(
+                    addr.port(),
+                    0,
+                    "status reported an unbound model address: {out:#?}"
+                );
+                assert_ne!(
+                    addr, configured_addr,
+                    "the daemon bound the configured address despite HOFUND_ADDR"
+                );
+                break addr;
+            }
         }
         assert!(
             started.elapsed() < DEADLINE,
             "daemon never answered: {out:#?}"
         );
         std::thread::sleep(Duration::from_millis(100));
-    }
-    assert!(
-        std::net::TcpStream::connect(("127.0.0.1", configured)).is_err(),
-        "the daemon bound the configured address despite HOFUND_ADDR"
+    };
+
+    // Healthcheck follows HOFUND_ADDR, so point it at the already-bound
+    // address the daemon handed back rather than at port 0.
+    let mut health = scratch.command(hofund(), &["healthcheck"]);
+    health.env("HOFUND_ADDR", effective.to_string());
+    let health_out = finish(spawn(&mut health), DEADLINE);
+    assert_eq!(health_out.status.code(), Some(0), "{health_out:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&health_out.stdout).trim_end(),
+        format!("ok: hofund gateway at {effective}")
     );
 
     // Online commands find the daemon through discovery.
@@ -751,9 +776,7 @@ fn hofund_addr_overrides_listen_for_daemon_and_healthcheck() {
     let report = out.ok();
     assert!(report.starts_with("daemon running (pid "), "{report}");
     assert!(
-        report.contains(&format!(
-            "model address: 127.0.0.1:{effective} (environment)"
-        )),
+        report.contains(&format!("model address: {effective} (environment)")),
         "{report}"
     );
     let out = scratch.hofund(&["config", "reload"]);
