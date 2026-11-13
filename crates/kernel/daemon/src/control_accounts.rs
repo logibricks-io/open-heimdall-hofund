@@ -38,6 +38,7 @@ struct ControlSession {
     state: Mutex<SignInSessionState>,
     challenge: Mutex<Option<WireChallenge>>,
     paste: tokio::sync::mpsc::UnboundedSender<String>,
+    managed_browser: bool,
     cancel: Mutex<Option<oneshot::Sender<()>>>,
 }
 
@@ -165,6 +166,7 @@ impl AccountOps {
             state: Mutex::new(SignInSessionState::Pending),
             challenge: Mutex::new(None),
             paste,
+            managed_browser: entry.instance.flow().kind() == SignInFlowKind::Bridge,
             cancel: Mutex::new(Some(cancel)),
         });
         sessions.insert(session_id.clone(), Arc::clone(&session));
@@ -271,7 +273,18 @@ impl AccountOps {
             return Err(conflict("this sign-in is not accepting proof"));
         }
         let challenge = session.challenge.lock().expect("sign-in challenge").clone();
+        let managed_open_url =
+            session.managed_browser && matches!(challenge, Some(WireChallenge::OpenUrl { .. }));
         match (challenge, request.url, request.token) {
+            (Some(WireChallenge::OpenUrl { url: page }), Some(url), None) if managed_open_url => {
+                let next = sign_in::open_pasted_callback(&page, &url)
+                    .await
+                    .map_err(|_| invalid("the pasted callback was rejected"))?;
+                if let Some(url) = next {
+                    *session.challenge.lock().expect("sign-in challenge") =
+                        Some(WireChallenge::OpenUrl { url });
+                }
+            }
             (Some(WireChallenge::OpenUrl { .. }), Some(url), None) => {
                 self.loopback
                     .submit_pasted_callback(session.id(), &url)
@@ -285,7 +298,7 @@ impl AccountOps {
             }
             _ => return Err(invalid("the proof does not match this sign-in challenge")),
         }
-        if session.state() == SignInSessionState::NeedsProof {
+        if session.state() == SignInSessionState::NeedsProof && !managed_open_url {
             self.set_state(&session, SignInSessionState::Pending);
         }
         Ok(session.response())

@@ -44,6 +44,8 @@ pub(crate) struct Credential {
     pub client_id_hash: String,
     pub token_url: String,
     pub ide_token_path: String,
+    pub db_key: String,
+    pub cli_db_path: String,
 }
 
 #[derive(Clone, Debug)]
@@ -106,6 +108,8 @@ pub(crate) fn parse_secret(secret: &SecretString) -> Result<Stored, PluginError>
     let client_id_hash = blob.text("client_id_hash").unwrap_or("").to_owned();
     let token_url = blob.text("token_url").unwrap_or("").to_owned();
     let ide_token_path = blob.text("ide_token_path").unwrap_or("").to_owned();
+    let db_key = blob.text("db_key").unwrap_or("").to_owned();
+    let cli_db_path = blob.text("cli_db_path").unwrap_or("").to_owned();
     let expires_at = blob.number("expires_at").and_then(|secs| {
         if secs == 0 {
             None
@@ -128,6 +132,8 @@ pub(crate) fn parse_secret(secret: &SecretString) -> Result<Stored, PluginError>
             client_id_hash,
             token_url,
             ide_token_path,
+            db_key,
+            cli_db_path,
         },
     })
 }
@@ -149,6 +155,11 @@ pub(crate) fn secret_blob(credential: &Credential) -> SecretObject {
     if !credential.ide_token_path.is_empty() {
         blob = blob.with_text("ide_token_path", &credential.ide_token_path);
     }
+    if !credential.db_key.is_empty() {
+        blob = blob
+            .with_text("db_key", &credential.db_key)
+            .with_text("cli_db_path", &credential.cli_db_path);
+    }
     if let Some(at) = credential
         .expires_at
         .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
@@ -169,6 +180,15 @@ pub(crate) fn agent_account_id(home: &Path) -> AccountId {
 pub(crate) fn account_id_for_home(home: &Path, credential: &Credential) -> AccountId {
     let _ = credential;
     agent_account_id(home)
+}
+
+pub(crate) fn browser_account_id(credential: &Credential) -> AccountId {
+    account_id_from(&[
+        "kiro",
+        "browser",
+        &credential.label,
+        &credential.provider.to_ascii_lowercase(),
+    ])
 }
 
 /// Resolves the agent home directory the same way the daemon does for [`AgentSignIn`].
@@ -305,6 +325,8 @@ pub(crate) fn parse_token_json(text: &str, cache_dir: &Path) -> Result<Credentia
         client_id_hash,
         token_url,
         ide_token_path: String::new(),
+        db_key: String::new(),
+        cli_db_path: String::new(),
     })
 }
 
