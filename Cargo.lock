@@ -2243,6 +2243,8 @@ dependencies = [
  "hofund-router",
  "hofund-secrets",
  "hofund-usage",
+ "libc",
+ "nix",
  "notify",
  "regex",
  "reqwest 0.12.28",

@@ -96,7 +96,7 @@ pub fn import_if_configured(path: &Path, config: &Config) -> Result<(), DaemonEr
     })
 }
 
-async fn discover_opened(
+pub(crate) async fn discover_opened(
     opened: &[Opened],
     registry: &dyn DaemonRegistry,
     _config: &Config,
@@ -195,6 +195,7 @@ mod tests {
             warnings: Vec::new(),
             catalog: hofund_config::CatalogSettings::default(),
             usage: hofund_config::UsageSettings::default(),
+            lan_allow: Vec::new(),
         }
     }
 
