@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use hofund_control_proto::{
-    API_VERSION, SessionCarryResponse, SessionListResponse, decode_response,
+    API_VERSION, SessionCarryResponse, SessionDetailResponse, SessionListResponse, decode_response,
 };
 use hofund_daemon::{
     CompiledPreset, ControlRuntime, DaemonRegistry, Running, StartOptions, start_linked,
@@ -196,6 +196,15 @@ impl SessionStore for StaticStore {
             record: self.record.clone(),
         }))
     }
+
+    fn resume_argv(&self, session_id: &str, _path: &Path) -> Option<Vec<String>> {
+        let bare = session_id.split_once(':').map_or(session_id, |(_, id)| id);
+        Some(vec![
+            self.agent.to_owned(),
+            "--session".to_owned(),
+            bare.to_owned(),
+        ])
+    }
 }
 
 fn write_session(root: &Path, agent: &'static str, bare: &str) -> SessionRecord {
@@ -376,5 +385,93 @@ async fn carry_between_claude_and_codex_is_unprocessable() {
         let text = response.text().await.expect("body");
         assert!(text.contains("can't be carried over"), "{body}: {text}");
     }
+    support::shutdown(running).await;
+}
+
+#[tokio::test]
+async fn read_only_pi_session_hides_resume_and_rejects_carry() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let pi_root = dir.path().join("pi");
+    let omp_root = dir.path().join("omp").join("sessions");
+    std::fs::create_dir_all(&omp_root).expect("omp root");
+    let mut record = write_session(&pi_root, "pi", "ro");
+    record.cwd = "/work/pi".to_owned();
+    record.read_only = true;
+    let pi = Arc::new(StaticStore {
+        agent: "pi",
+        root: pi_root,
+        record,
+    }) as Arc<dyn SessionStore>;
+    let omp = Arc::new(OmpStore::with_session_roots([omp_root])) as Arc<dyn SessionStore>;
+    let registry = Arc::new(PiOmpRegistry {
+        stores: vec![pi, omp],
+    });
+    let config = dir.path().join("hofund.toml");
+    std::fs::write(&config, "listen = \"127.0.0.1:0\"\n").expect("config");
+    let mut consent = Consent::new(dir.path());
+    consent.settle();
+    consent
+        .set_reads(Some(true), [])
+        .expect("consent on for pi and omp");
+    let running = start_linked(
+        &config,
+        registry,
+        StartOptions {
+            control_listen: Some("127.0.0.1:0".parse().expect("control address")),
+            control_runtime: Some(ControlRuntime::new(None, dir.path().to_path_buf())),
+            ..StartOptions::default()
+        },
+    )
+    .await
+    .expect("daemon");
+
+    let response = support::client()
+        .get(format!(
+            "http://{}/v1/hofund/sessions",
+            running.control_local_addr().expect("control")
+        ))
+        .bearer_auth(token(dir.path()))
+        .send()
+        .await
+        .expect("list");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let list: SessionListResponse =
+        decode_response(API_VERSION, &response.bytes().await.expect("list body")).expect("list");
+    let row = list
+        .sessions
+        .iter()
+        .find(|session| session.id == "pi:ro")
+        .expect("pi session");
+    assert!(row.read_only, "list should project record.read_only");
+    assert!(
+        row.resume.is_none(),
+        "read-only sessions must not expose resume"
+    );
+
+    let response = support::client()
+        .get(format!(
+            "http://{}/v1/hofund/sessions/pi:ro",
+            running.control_local_addr().expect("control")
+        ))
+        .bearer_auth(token(dir.path()))
+        .send()
+        .await
+        .expect("detail");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let detail: SessionDetailResponse =
+        decode_response(API_VERSION, &response.bytes().await.expect("detail body"))
+            .expect("detail");
+    assert!(detail.session.read_only);
+    assert!(detail.session.resume.is_none());
+
+    let response = post_json(
+        &running,
+        dir.path(),
+        "/v1/hofund/sessions/carry",
+        r#"{"version":1,"id":"pi:ro","to":"omp"}"#,
+    )
+    .await;
+    assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+
     support::shutdown(running).await;
 }

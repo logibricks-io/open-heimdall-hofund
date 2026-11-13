@@ -435,9 +435,12 @@ impl SessionControl {
                     .stores
                     .iter()
                     .any(|store| store.agent() == "omp" && store.locator().present());
-                let command =
-                    hofund_sessions::carry::pi_to_omp_command(&record, omp_present, false)
-                        .ok_or_else(session_not_found)?;
+                let command = hofund_sessions::carry::pi_to_omp_command(
+                    &record,
+                    omp_present,
+                    record.read_only,
+                )
+                .ok_or_else(session_not_found)?;
                 let mut response = SessionCarryResponse::default();
                 response.agent = "omp".to_owned();
                 response.id.clone_from(&record.id);
@@ -633,8 +636,8 @@ fn session_summary(record: &SessionRecord, stores: &[Arc<dyn SessionStore>]) -> 
     summary.tokens = wire_tokens(record.tokens());
     summary.cost = record.cost;
     summary.unpriced = record.unpriced;
-    summary.read_only = false;
-    summary.gateway = false;
+    summary.read_only = record.read_only;
+    summary.gateway = record.gateway;
     let store = hofund_sessions::resume::store_for_agent(stores, &record.agent);
     summary.resume =
         hofund_sessions::resume::resume_command(record, store, summary.read_only).map(|command| {
