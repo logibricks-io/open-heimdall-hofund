@@ -1,0 +1,8 @@
+id = "omp"
+display_name = "omp"
+binary = "omp"
+
+# This crate currently ships the session reader only. Connect file
+# slots for ~/.omp/agent (YAML, same family as Pi) are not declared
+# yet. A file-less, credential-less agent.toml is not compiled into
+# the shipped connect catalog; the id is reserved until slots exist.

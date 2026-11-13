@@ -1,0 +1,12 @@
+[
+  {
+    "id": "opencode:ses_json",
+    "title": "Read the JSON fallback",
+    "cwd": "/work/json",
+    "start_ms": 1767225600000,
+    "last_ms": 1767225602000,
+    "tokens": {"input":8,"output":5,"cache_read":2,"cache_write":1,"cache_write_1h":0},
+    "models": {"model-json":{"input":8,"output":5,"cache_read":2,"cache_write":1,"cache_write_1h":0}},
+    "subagents": []
+  }
+]

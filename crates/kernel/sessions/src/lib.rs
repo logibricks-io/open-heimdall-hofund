@@ -18,4 +18,5 @@ pub mod merge;
 pub mod open;
 pub mod pricing;
 pub mod read;
+mod sqlite;
 mod storage;

@@ -442,6 +442,12 @@ fn load_agents(
             .map_err(|error| format!("read {source}: {error}"))?;
         let agent = parse(&text, &source, &id, plugin_ids, &occupied, inbound_ids)?;
         occupied.push(agent.id.clone());
+        // A description with no files and no credential is a session-reader
+        // stub. Keep the reserved id, but do not ship a connect adapter until
+        // file slots are declared.
+        if agent.files.is_empty() && agent.credential.is_none() {
+            continue;
+        }
         agents.push(agent);
     }
     Ok(agents)

@@ -2155,6 +2155,10 @@ dependencies = [
  "hofund-model-catalog",
  "hofund-plugin-agent-claude",
  "hofund-plugin-agent-codex",
+ "hofund-plugin-agent-gemini",
+ "hofund-plugin-agent-omp",
+ "hofund-plugin-agent-opencode",
+ "hofund-plugin-agent-pi",
  "hofund-plugin-api",
  "hofund-secrets",
  "hofund-sessions",
@@ -2415,6 +2419,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "hofund-plugin-agent-gemini"
+version = "0.1.0"
+dependencies = [
+ "hofund-plugin-api",
+ "hofund-plugin-sdk",
+ "tempfile",
+]
+
+[[package]]
+name = "hofund-plugin-agent-omp"
+version = "0.1.0"
+dependencies = [
+ "hofund-plugin-api",
+ "hofund-plugin-sdk",
+]
+
+[[package]]
+name = "hofund-plugin-agent-opencode"
+version = "0.1.0"
+dependencies = [
+ "hofund-plugin-api",
+ "hofund-plugin-sdk",
+ "tempfile",
+]
+
+[[package]]
+name = "hofund-plugin-agent-pi"
+version = "0.1.0"
+dependencies = [
+ "hofund-plugin-api",
+ "hofund-plugin-sdk",
+ "tempfile",
+]
+
+[[package]]
 name = "hofund-plugin-api"
 version = "0.1.0"
 dependencies = [
@@ -2565,6 +2604,10 @@ dependencies = [
  "hofund-kit-upstream",
  "hofund-plugin-agent-claude",
  "hofund-plugin-agent-codex",
+ "hofund-plugin-agent-gemini",
+ "hofund-plugin-agent-omp",
+ "hofund-plugin-agent-opencode",
+ "hofund-plugin-agent-pi",
  "hofund-plugin-api",
  "hofund-plugin-azure",
  "hofund-plugin-bedrock",
@@ -2898,9 +2941,13 @@ name = "hofund-sessions"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "hofund-plugin-agent-omp",
+ "hofund-plugin-agent-opencode",
+ "hofund-plugin-agent-pi",
  "hofund-plugin-api",
  "hofund-usage",
  "libc",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",

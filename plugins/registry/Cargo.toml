@@ -46,6 +46,10 @@ futures-util = "0.3.32"
 hofund-plugin-api = { workspace = true, features = ["kernel-internal"] }
 hofund-plugin-agent-claude = { workspace = true }
 hofund-plugin-agent-codex = { workspace = true }
+hofund-plugin-agent-gemini = { workspace = true }
+hofund-plugin-agent-omp = { workspace = true }
+hofund-plugin-agent-opencode = { workspace = true }
+hofund-plugin-agent-pi = { workspace = true }
 hofund-plugin-sdk = { workspace = true }
 hofund-plugin-azure = { workspace = true, optional = true }
 hofund-plugin-bedrock = { workspace = true, optional = true }
