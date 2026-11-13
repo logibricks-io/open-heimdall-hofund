@@ -1,5 +1,5 @@
-//! Kiro subscription: import IDE or CLI token files, refresh social sign-ins,
-//! read usage limits, and serve Anthropic Messages chat with streams, tools, and images.
+//! Kiro subscription: browser sign-in, IDE or CLI import, source-aware refresh,
+//! usage limits, and Anthropic Messages chat with streams, tools, and images.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
