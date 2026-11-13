@@ -10,20 +10,28 @@ use hofund_plugin_sdk::wire::{self, Target};
 
 use crate::Endpoints;
 use crate::creds::Stored;
+use crate::identity::Devices;
 use crate::refresh;
 
 pub(crate) struct QoderUpstream {
     account: AccountId,
     host: HostContext,
     endpoints: Arc<Endpoints>,
+    devices: Arc<Devices>,
 }
 
 impl QoderUpstream {
-    pub(crate) fn new(account: AccountId, host: HostContext, endpoints: Arc<Endpoints>) -> Self {
+    pub(crate) fn new(
+        account: AccountId,
+        host: HostContext,
+        endpoints: Arc<Endpoints>,
+        devices: Arc<Devices>,
+    ) -> Self {
         Self {
             account,
             host,
             endpoints,
+            devices,
         }
     }
 
@@ -44,7 +52,13 @@ impl QoderUpstream {
             "{}/chat/completions",
             self.endpoints.chat_for(stored.credential.site)
         );
-        let target = Target::new(ProtocolId::OPENAI_CHAT, base).credential(CredentialStyle::Bearer);
+        let headers = self
+            .devices
+            .chat_headers(&self.host, &stored.credential)
+            .await;
+        let target = Target::new(ProtocolId::OPENAI_CHAT, base)
+            .credential(CredentialStyle::Bearer)
+            .headers(headers);
         wire::execute(
             self.host.http(),
             &target,

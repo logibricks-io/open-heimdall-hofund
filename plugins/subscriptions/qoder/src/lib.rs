@@ -13,6 +13,7 @@ use hofund_plugin_sdk::Contribution;
 
 mod checkin;
 mod creds;
+mod identity;
 mod import;
 mod models;
 mod quota;
@@ -118,6 +119,7 @@ impl SubscriptionFactory for QoderFactory {
     ) -> Result<Arc<dyn Subscription>, BuildError> {
         Ok(Arc::new(Qoder {
             endpoints: Arc::clone(&self.endpoints),
+            devices: Arc::new(identity::Devices::new()),
             flow: SignInFlow::Bridge {
                 command: hofund_plugin_api::BinaryName::new("qodercli"),
             },
@@ -128,6 +130,7 @@ impl SubscriptionFactory for QoderFactory {
 
 struct Qoder {
     endpoints: Arc<Endpoints>,
+    devices: Arc<identity::Devices>,
     flow: SignInFlow,
     pending: Mutex<HashMap<String, ()>>,
 }
@@ -219,7 +222,7 @@ impl Subscription for Qoder {
             "{}/api/v1/adapter/user/account-context?include=user,plan,quota",
             self.endpoints.openapi_for(stored.credential.site)
         );
-        let reply = hofund_plugin_sdk::Call::get(url)
+        let reply = identity::apply_quota(hofund_plugin_sdk::Call::get(url))
             .sensitive_header(
                 "authorization",
                 format!(
@@ -259,6 +262,7 @@ impl Subscription for Qoder {
             account.clone(),
             host.clone(),
             Arc::clone(&self.endpoints),
+            Arc::clone(&self.devices),
         )))
     }
 
@@ -267,7 +271,13 @@ impl Subscription for Qoder {
         account: &AccountId,
         host: &HostContext,
     ) -> Result<hofund_plugin_api::CheckinResult, PluginError> {
-        checkin::run(account, host, Arc::clone(&self.endpoints)).await
+        checkin::run(
+            account,
+            host,
+            Arc::clone(&self.endpoints),
+            Arc::clone(&self.devices),
+        )
+        .await
     }
 
     async fn import_accounts(
