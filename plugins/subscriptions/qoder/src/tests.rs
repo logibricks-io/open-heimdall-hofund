@@ -435,6 +435,7 @@ fn r54_chat_uses_persistent_native_identity_and_hostname() {
             "cosy-machinetype",
             "cosy-machinehostname",
             "cosy-machineid",
+            "cache-control",
         ] {
             assert!(sensitive!(&call, name), "missing {name}");
         }
@@ -443,6 +444,7 @@ fn r54_chat_uses_persistent_native_identity_and_hostname() {
     }
     let stored = block_on(Stored::load(host.context(), &id)).expect("stored");
     let headers = block_on(devices.chat_headers(host.context(), &stored.credential));
+    assert_eq!(paired(&headers, "Cache-Control"), Some("no-cache"));
     assert_eq!(
         paired(&headers, "Cosy-MachineToken"),
         Some("fixture-native-token")

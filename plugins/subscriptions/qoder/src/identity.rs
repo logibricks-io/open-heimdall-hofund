@@ -58,6 +58,7 @@ impl Devices {
         credential: &Credential,
     ) -> Vec<(String, String)> {
         let mut headers = common_headers(credential, false);
+        headers.push(("Cache-Control".to_owned(), "no-cache".to_owned()));
         if let Some(identity) = self.native(host, credential).await.ok().flatten() {
             headers.extend(identity.headers());
         }
