@@ -53,6 +53,10 @@ fn draw_body(app: &App, area: Rect, buf: &mut Buffer, theme: &Theme) {
         app.pages.sessions().draw_body(area, buf, theme);
         return;
     }
+    if app.page == crate::state::PageId::Library {
+        app.pages.library().draw_body(area, buf, theme);
+        return;
+    }
     if app.page == crate::state::PageId::Accounts {
         app.pages.accounts().draw(area, buf, theme);
         return;

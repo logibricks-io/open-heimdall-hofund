@@ -42,6 +42,24 @@ pub enum WorkerMsg {
         /// List and stats outcome.
         outcome: Box<SessionsLoadOutcome>,
     },
+    /// Library fetch finished.
+    LibraryLoad {
+        /// Read generation this fetch was started with.
+        generation: u64,
+        /// Library outcome.
+        outcome: LibraryLoadOutcome,
+    },
+}
+
+/// Result of loading the Library page.
+#[derive(Clone, Debug)]
+pub enum LibraryLoadOutcome {
+    /// Route missing in this build.
+    NotInBuild,
+    /// The control call succeeded.
+    Ok(hofund_control_proto::LibraryResponse),
+    /// Any error.
+    Err(String),
 }
 
 /// Result of loading the Sessions page.
@@ -112,6 +130,21 @@ pub fn apply_worker_msg(app: &mut App, msg: WorkerMsg) {
                 }
             });
         }
+        WorkerMsg::LibraryLoad {
+            generation,
+            outcome,
+        } => {
+            app.apply_read_result(generation, |app| {
+                let library = app.pages.library_mut();
+                match outcome {
+                    LibraryLoadOutcome::NotInBuild => {
+                        library.apply_probe(ProbeOutcome::NotInBuild);
+                    }
+                    LibraryLoadOutcome::Ok(view) => library.apply_load(view),
+                    LibraryLoadOutcome::Err(message) => library.apply_load_error(message),
+                }
+            });
+        }
     }
 }
 
@@ -153,6 +186,33 @@ pub fn schedule_sessions_fetch(
     });
 }
 
+/// Schedules a Library fetch when a client exists.
+pub fn schedule_library_fetch(
+    client: Option<&Client>,
+    work_tx: &mpsc::Sender<WorkerMsg>,
+    generation: u64,
+) {
+    let Some(client) = client.cloned() else {
+        return;
+    };
+    let work_tx = work_tx.clone();
+    tokio::spawn(async move {
+        let outcome = match client.library().await {
+            Ok(view) => LibraryLoadOutcome::Ok(view),
+            Err(error) if error.http_status().is_some_and(|s| s.as_u16() == 404) => {
+                LibraryLoadOutcome::NotInBuild
+            }
+            Err(error) => LibraryLoadOutcome::Err(error.to_string()),
+        };
+        let _ = work_tx
+            .send(WorkerMsg::LibraryLoad {
+                generation,
+                outcome,
+            })
+            .await;
+    });
+}
+
 /// Schedules load work for the open page when a client exists.
 pub fn schedule_open_page_load(
     app: &App,
@@ -168,6 +228,7 @@ pub fn schedule_open_page_load(
             let stats = sessions.stats_query();
             schedule_sessions_fetch(client, work_tx, list, stats, generation);
         }
+        PageId::Library => schedule_library_fetch(client, work_tx, generation),
         other if read_path(other).is_some() => {
             schedule_page_probe(client, work_tx, other, generation);
         }

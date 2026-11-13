@@ -3,6 +3,7 @@
 mod accounts;
 mod agents;
 mod frame;
+mod library;
 mod probe;
 mod providers;
 pub mod routing;
@@ -13,6 +14,7 @@ pub mod usage;
 pub use accounts::{AccountsAction, AccountsPage};
 pub use agents::AgentPage;
 pub use frame::PageShell;
+pub use library::LibraryPage;
 pub use probe::{ProbeOutcome, apply_probe_to_shell, read_path};
 pub use providers::ProviderPage;
 pub use routing::RoutingPage;
@@ -75,7 +77,7 @@ pub struct Pages {
     routing: RoutingPage,
     usage: UsagePage,
     sessions: SessionsPage,
-    library: PageShell,
+    library: LibraryPage,
     accounts: AccountsPage,
 }
 
@@ -87,7 +89,7 @@ impl Default for Pages {
             routing: RoutingPage::new(),
             usage: UsagePage::new(),
             sessions: SessionsPage::new(),
-            library: PageShell::new(PageId::Library, "Loading library…"),
+            library: LibraryPage::new(),
             accounts: AccountsPage::new(),
         }
     }
@@ -99,8 +101,11 @@ impl Pages {
         match id {
             PageId::Agents => Some(&mut self.agents),
             PageId::Providers => Some(&mut self.providers),
-            PageId::Library => Some(&mut self.library),
-            PageId::Routing | PageId::Sessions | PageId::Usage | PageId::Accounts => None,
+            PageId::Routing
+            | PageId::Sessions
+            | PageId::Library
+            | PageId::Usage
+            | PageId::Accounts => None,
         }
     }
 
@@ -113,6 +118,17 @@ impl Pages {
     #[must_use]
     pub fn sessions(&self) -> &SessionsPage {
         &self.sessions
+    }
+
+    /// Mutable Library page.
+    pub fn library_mut(&mut self) -> &mut LibraryPage {
+        &mut self.library
+    }
+
+    /// Immutable Library page.
+    #[must_use]
+    pub fn library(&self) -> &LibraryPage {
+        &self.library
     }
 
     /// Mutable accounts page.
@@ -174,8 +190,11 @@ impl Pages {
         match id {
             PageId::Agents => &self.agents,
             PageId::Providers => &self.providers,
-            PageId::Library => &self.library,
-            PageId::Routing | PageId::Sessions | PageId::Usage | PageId::Accounts => {
+            PageId::Routing
+            | PageId::Sessions
+            | PageId::Library
+            | PageId::Usage
+            | PageId::Accounts => {
                 panic!("dedicated page is not a PageShell; use page_dyn or its typed accessor")
             }
         }
@@ -185,9 +204,7 @@ impl Pages {
     pub fn apply_probe(&mut self, id: PageId, outcome: ProbeOutcome) {
         match id {
             PageId::Sessions => self.sessions.apply_probe(outcome),
-            PageId::Library => {
-                apply_probe_to_shell(self.mut_shell(id).expect("library shell"), outcome)
-            }
+            PageId::Library => self.library.apply_probe(outcome),
             _ => {}
         }
     }
