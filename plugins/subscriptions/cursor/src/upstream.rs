@@ -569,7 +569,8 @@ mod tests {
 
     use hofund_kit_subscription::{
         Http1Response, Http1Server, Http2Response, Http2Server, TestHost, advance_time, block_on,
-        block_on_paused, yield_times,
+        block_on_paused, drive_to_completion, drive_until_http2_opening, drive_until_http2_request,
+        yield_times,
     };
     use hofund_plugin_api::{
         AccountId, BlockStart, Completion, ContentBlockStart, ContentBlockStop, Extensions,
@@ -1242,11 +1243,13 @@ mod tests {
                     .await?;
                 collect(completion).await
             };
+            let mut attempt = std::pin::pin!(attempt);
+            drive_until_http2_opening(attempt.as_mut(), &h2, 1).await;
             let control = async {
                 advance_time(Duration::from_secs(241)).await;
                 std::future::pending::<()>().await;
             };
-            let Race::Left(events) = race(attempt, control).await else {
+            let Race::Left(events) = race(&mut attempt, control).await else {
                 unreachable!("control remains pending")
             };
             let events = events.expect("the tool count seals the step before quiet");
@@ -1303,11 +1306,13 @@ mod tests {
                     .await?;
                 collect(completion).await
             };
+            let mut attempt = std::pin::pin!(attempt);
+            drive_until_http2_opening(attempt.as_mut(), &h2, 1).await;
             let control = async {
                 advance_time(Duration::from_secs(241)).await;
                 std::future::pending::<()>().await;
             };
-            let Race::Left(events) = race(attempt, control).await else {
+            let Race::Left(events) = race(&mut attempt, control).await else {
                 unreachable!("control remains pending")
             };
             let events = events.expect("the tool count seals the step before quiet");
@@ -1459,11 +1464,13 @@ mod tests {
                     .await?;
                 collect(completion).await
             };
+            let mut attempt = std::pin::pin!(attempt);
+            drive_until_http2_opening(attempt.as_mut(), &h2, 1).await;
             let control = async {
                 advance_time(Duration::from_secs(241)).await;
                 std::future::pending::<()>().await;
             };
-            let Race::Left(events) = race(attempt, control).await else {
+            let Race::Left(events) = race(&mut attempt, control).await else {
                 unreachable!("control remains pending")
             };
             let events = events.expect("checkpoint seals the step");
@@ -1614,17 +1621,9 @@ mod tests {
                 ..upstream.limits
             };
             let attempt = upstream.execute(text_request(), ProtocolId::OPENAI_CHAT);
+            let mut attempt = std::pin::pin!(attempt);
+            drive_until_http2_opening(attempt.as_mut(), &h2, 1).await;
             let control = async {
-                for _ in 0..100 {
-                    if h2
-                        .requests()
-                        .first()
-                        .is_some_and(|request| !request.data().is_empty())
-                    {
-                        break;
-                    }
-                    yield_times(2).await;
-                }
                 advance_time(Duration::from_millis(2_001)).await;
                 std::future::pending::<()>().await;
             };
@@ -1669,17 +1668,9 @@ mod tests {
                 ..upstream.limits
             };
             let attempt = upstream.execute(text_request(), ProtocolId::OPENAI_CHAT);
+            let mut attempt = std::pin::pin!(attempt);
+            drive_until_http2_request(attempt.as_mut(), &h2, 1).await;
             let control = async {
-                for _ in 0..100 {
-                    if h2
-                        .requests()
-                        .first()
-                        .is_some_and(|request| !request.data().is_empty())
-                    {
-                        break;
-                    }
-                    yield_times(2).await;
-                }
                 for _ in 0..3 {
                     advance_time(Duration::from_secs(1)).await;
                     yield_times(10).await;
@@ -1739,18 +1730,12 @@ mod tests {
                     .await?;
                 collect(completion).await
             };
+            let mut attempt = std::pin::pin!(attempt);
+            drive_until_http2_request(attempt.as_mut(), &h2, 1).await;
             let control = async {
-                // Wait until the HTTP/2 Run is accepted (response headers
-                // are immediate; DATA is delayed 1s). Then expire only the
-                // data delay and the 2s tool-count wait. A further 20s jump
-                // can also complete idle/quiet and is not needed to prove
-                // that heartbeats do not extend the count wait.
-                for _ in 0..100 {
-                    if !h2.requests().is_empty() {
-                        break;
-                    }
-                    yield_times(2).await;
-                }
+                // Expire only the data delay and the 2s tool-count wait. A
+                // further 20s jump can also complete idle/quiet and is not
+                // needed to prove that heartbeats do not extend the count wait.
                 advance_time(Duration::from_secs(1)).await;
                 yield_times(10).await;
                 advance_time(Duration::from_millis(2_001)).await;
@@ -1786,10 +1771,6 @@ mod tests {
             ])
             .await;
             let h1 = Http1Server::start(vec![config_reply(h2.base_url())]).await;
-            // Let the current-thread accept loops enter accept() before the
-            // client connects. A paused runtime can otherwise auto-advance a
-            // connect timeout and fail execute() with `error sending request`.
-            yield_times(2).await;
             let host = pooled_host();
             let account = store_account(&host).await;
             let mut upstream = upstream(&host, &h1, h2.base_url(), account);
@@ -1799,10 +1780,11 @@ mod tests {
                 heartbeat: Duration::from_secs(60),
                 ..upstream.limits
             };
-            let Completion::Stream(mut stream) = upstream
-                .execute(text_request(), ProtocolId::OPENAI_CHAT)
-                .await
-                .expect("text stream")
+            let execute = upstream.execute(text_request(), ProtocolId::OPENAI_CHAT);
+            let Completion::Stream(mut stream) =
+                hofund_kit_subscription::drive_http2_to_completion(execute, &h2, 1)
+                    .await
+                    .expect("text stream")
             else {
                 panic!("stream")
             };
@@ -2105,7 +2087,8 @@ mod tests {
                 .iter()
                 .filter(|request| request.path() == path)
                 .count();
-            if seen >= want {
+            assert!(seen <= want, "usage polls overshot {want}: {seen}");
+            if seen == want {
                 return;
             }
             yield_times(2).await;
@@ -2114,7 +2097,8 @@ mod tests {
                 .iter()
                 .filter(|request| request.path() == path)
                 .count();
-            if seen >= want {
+            assert!(seen <= want, "usage polls overshot {want}: {seen}");
+            if seen == want {
                 return;
             }
             advance_time(Duration::from_millis(50)).await;
@@ -2154,19 +2138,18 @@ mod tests {
             let account = store_account(&host).await;
             let mut upstream = upstream(&host, &h1, h2.base_url(), account);
             restore_production_usage_limits(&mut upstream);
-            let completion = upstream
-                .execute(tool_request(), ProtocolId::OPENAI_CHAT)
-                .await
-                .expect("execute");
-            let attempt = collect(completion);
-            let control = async {
-                advance_until_usage_polls(&h1, 2).await;
-                std::future::pending::<()>().await;
+            let attempt = async {
+                let completion = upstream
+                    .execute(tool_request(), ProtocolId::OPENAI_CHAT)
+                    .await?;
+                collect(completion).await
             };
-            let Race::Left(result) = race(attempt, control).await else {
-                unreachable!("control remains pending")
+            let mut attempt = std::pin::pin!(attempt);
+            drive_until_http2_opening(attempt.as_mut(), &h2, 1).await;
+            let events = match race(attempt.as_mut(), advance_until_usage_polls(&h1, 2)).await {
+                Race::Left(result) => result.expect("stream"),
+                Race::Right(()) => drive_to_completion(attempt).await.expect("stream"),
             };
-            let events = result.expect("stream");
             let usage = last_message_usage(&events).expect("usage");
             assert_eq!(
                 usage,
@@ -2189,6 +2172,11 @@ mod tests {
                 })
                 .collect();
             assert_eq!(polls.len(), 2, "first miss then hit: {polls:?}");
+            assert_eq!(
+                h1.requests().len(),
+                3,
+                "HTTP/2 must leave only discovery and two usage scripts for HTTP/1"
+            );
             let body: hofund_plugin_sdk::json::Value =
                 hofund_plugin_sdk::json::from_slice(polls[0].body()).expect("poll body");
             assert!(body["startDate"].as_str().is_some(), "{body}");
@@ -2213,11 +2201,14 @@ mod tests {
             let account = store_account(&host).await;
             let mut upstream = upstream(&host, &h1, h2.base_url(), account);
             restore_production_usage_limits(&mut upstream);
-            let completion = upstream
-                .execute(tool_request(), ProtocolId::ANTHROPIC_MESSAGES)
-                .await
-                .expect("execute");
-            let attempt = collect(completion);
+            let attempt = async {
+                let completion = upstream
+                    .execute(tool_request(), ProtocolId::ANTHROPIC_MESSAGES)
+                    .await?;
+                collect(completion).await
+            };
+            let mut attempt = std::pin::pin!(attempt);
+            drive_until_http2_opening(attempt.as_mut(), &h2, 1).await;
             let control = async {
                 for _ in 0..40 {
                     yield_times(2).await;
@@ -2264,20 +2255,19 @@ mod tests {
             let account = store_account(&host).await;
             let mut upstream = upstream(&host, &h1, h2.base_url(), account);
             restore_production_usage_limits(&mut upstream);
-            let completion = upstream
-                .execute(tool_request(), ProtocolId::OPENAI_CHAT)
-                .await
-                .expect("execute");
+            let attempt = async {
+                let completion = upstream
+                    .execute(tool_request(), ProtocolId::OPENAI_CHAT)
+                    .await?;
+                collect(completion).await
+            };
+            let mut attempt = std::pin::pin!(attempt);
+            drive_until_http2_opening(attempt.as_mut(), &h2, 1).await;
             advance_time(Duration::from_secs(2)).await;
-            let attempt = collect(completion);
-            let control = async {
-                advance_until_usage_polls(&h1, 1).await;
-                std::future::pending::<()>().await;
+            let events = match race(attempt.as_mut(), advance_until_usage_polls(&h1, 1)).await {
+                Race::Left(result) => result.expect("stream"),
+                Race::Right(()) => drive_to_completion(attempt).await.expect("stream"),
             };
-            let Race::Left(result) = race(attempt, control).await else {
-                unreachable!("control remains pending")
-            };
-            let events = result.expect("stream");
             assert_eq!(
                 last_message_usage(&events).expect("usage"),
                 &usage::from_dashboard(
@@ -2290,6 +2280,11 @@ mod tests {
                     },
                     ProtocolId::OPENAI_CHAT,
                 )
+            );
+            assert_eq!(
+                h1.requests().len(),
+                2,
+                "HTTP/2 must leave only discovery and one usage script for HTTP/1"
             );
         });
     }
@@ -2311,14 +2306,11 @@ mod tests {
             upstream.limits.usage_first_wait = Duration::ZERO;
             upstream.limits.usage_give_up = Duration::ZERO;
             upstream.limits.usage_request = Duration::from_secs(5);
-            let events = collect(
-                upstream
-                    .execute(tool_request(), ProtocolId::OPENAI_CHAT)
-                    .await
-                    .expect("execute"),
-            )
-            .await
-            .expect("stream");
+            let execute = upstream.execute(tool_request(), ProtocolId::OPENAI_CHAT);
+            let completion = hofund_kit_subscription::drive_http2_to_completion(execute, &h2, 1)
+                .await
+                .expect("execute");
+            let events = collect(completion).await.expect("stream");
             assert_eq!(last_message_usage(&events).expect("usage"), &usage::zeros());
             let polls = h1
                 .requests()

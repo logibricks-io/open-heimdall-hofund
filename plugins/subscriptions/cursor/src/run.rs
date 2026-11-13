@@ -1134,12 +1134,15 @@ mod tests {
 
     use hofund_kit_subscription::{
         Http1Response, Http1Server, Http2Response, Http2Server, TestHost, advance_time, block_on,
-        block_on_paused, header_park, yield_times,
+        block_on_paused, drive_until_http2_opening, drive_until_http2_request, header_park,
+        yield_times,
     };
     use hofund_plugin_api::{PluginId, PluginKind, SecretString};
-    use hofund_plugin_sdk::{Race, race};
+    use hofund_plugin_sdk::{Race, futures::StreamExt, race};
 
-    use super::{Limits, RunArgs, append_deadline, connect_code, run};
+    use super::{
+        Limits, RunArgs, RunEvent, RunOutput, append_deadline, connect_code, run, run_stream,
+    };
     use crate::agent_host::AgentHost;
     use crate::endpoints::Endpoints;
     use crate::frame;
@@ -1402,27 +1405,12 @@ mod tests {
                     ..empty_run_args()
                 },
             );
-            let expire_after_http2_is_recorded = async {
-                for _ in 0..100 {
-                    if !h2.requests().is_empty() {
-                        break;
-                    }
-                    yield_times(2).await;
-                }
-                assert_eq!(
-                    h2.requests().len(),
-                    1,
-                    "HTTP/2 handshake must finish before the header wait expires"
-                );
-                // Let the server enter the header gate before the clock jumps.
-                yield_times(10).await;
-                advance_time(limits.header_wait + Duration::from_millis(1)).await;
-                std::future::pending::<()>().await;
-            };
-            let Race::Left(first) = race(first, expire_after_http2_is_recorded).await else {
-                unreachable!("the control future stays pending after the clock advances");
-            };
-            first.expect("fallback");
+            let mut first = std::pin::pin!(first);
+            drive_until_http2_request(first.as_mut(), &h2, 1).await;
+            advance_time(limits.header_wait + Duration::from_millis(1)).await;
+            hofund_kit_subscription::drive_to_completion(first)
+                .await
+                .expect("fallback");
             assert!(
                 blocked(host.context(), Duration::from_secs(600)),
                 "first header timeout must set HTTP/2 memory"
@@ -1463,7 +1451,8 @@ mod tests {
             assert!(blocked(host.context(), Duration::from_secs(600)));
 
             advance_time(Duration::from_secs(601)).await;
-            let output = run(
+            assert!(!blocked(host.context(), Duration::from_secs(600)));
+            let retry = run_stream(
                 host.context(),
                 &endpoints,
                 &resolver,
@@ -1472,11 +1461,41 @@ mod tests {
                     limits,
                     ..empty_run_args()
                 },
+            );
+            let mut retry = std::pin::pin!(retry);
+            let attempt = match race(
+                retry.as_mut(),
+                hofund_kit_subscription::wait_for_http2_opening(&h2, 2),
             )
             .await
-            .expect("http2 retry");
+            {
+                Race::Left(attempt) => attempt.expect("http2 retry"),
+                Race::Right(()) => hofund_kit_subscription::drive_to_completion(retry)
+                    .await
+                    .expect("http2 retry"),
+            };
+            assert!(
+                !attempt.http1,
+                "HTTP/2 retry must not fall back to the config server"
+            );
+            assert_eq!(attempt.agent_url, h2.base_url());
+            let mut stream = attempt.stream;
+            let mut output = RunOutput::default();
+            while let Some(event) = stream.next().await {
+                match event.expect("http2 retry body") {
+                    RunEvent::Server(event) => output.events.push(event),
+                    RunEvent::ToolStepEnd => output.tool_steps += 1,
+                    RunEvent::Trailer(trailer) => output.trailers.push(trailer),
+                    RunEvent::ErrorBody { body, .. } => output.error_body = Some(body),
+                }
+            }
             assert_eq!(output.events, [ServerEvent::TextDelta("after".into())]);
             assert_eq!(h2.requests().len(), 2);
+            assert_eq!(
+                h1.requests().len(),
+                5,
+                "retry must not consume HTTP/1 scripts"
+            );
             drop(header_release);
         });
     }
@@ -1760,18 +1779,9 @@ mod tests {
                     ..empty_run_args()
                 },
             );
+            let mut session = std::pin::pin!(session);
+            drive_until_http2_opening(session.as_mut(), &h2, 1).await;
             let control = async {
-                for _ in 0..100 {
-                    if h2
-                        .requests()
-                        .first()
-                        .is_some_and(|request| !request.data().is_empty())
-                    {
-                        break;
-                    }
-                    yield_times(2).await;
-                }
-                assert!(!h2.requests()[0].data().is_empty());
                 for _ in 0..3 {
                     yield_times(10).await;
                     advance_time(Duration::from_secs(1)).await;
