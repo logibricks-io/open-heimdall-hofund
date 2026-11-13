@@ -1,0 +1,6 @@
+id = "cursor"
+display_name = "Cursor"
+binary = "cursor-agent"
+
+# Session reader only. Connect slots ship separately.
+# A file-less agent.toml is not compiled into the shipped connect catalog.

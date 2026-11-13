@@ -1,0 +1,28 @@
+[
+  {
+    "id": "claude-desktop:desktop-one",
+    "agent": "claude-desktop",
+    "app": "",
+    "title": "Desktop question",
+    "cwd": "/work/desktop",
+    "start_ms": 1794312000000,
+    "last_ms": 1794312001000,
+    "tokens": {
+      "input": 10,
+      "output": 2,
+      "cache_read": 3,
+      "cache_write": 1,
+      "cache_write_1h": 0
+    },
+    "models": {
+      "claude-haiku-5-5": {
+        "input": 10,
+        "output": 2,
+        "cache_read": 3,
+        "cache_write": 1,
+        "cache_write_1h": 0
+      }
+    },
+    "subagents": []
+  }
+]

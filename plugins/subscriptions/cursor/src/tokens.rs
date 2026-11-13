@@ -13,6 +13,10 @@ pub(crate) const REFRESH: &str = "refresh_token";
 pub(crate) const EXPIRES_MS: &str = "expires_ms";
 pub(crate) const PLAN: &str = "plan";
 pub(crate) const LABEL: &str = "label";
+/// Stored Cursor API key. The exchanged access token is never written here.
+pub(crate) const API_KEY: &str = "api_key";
+pub(crate) const AUTH_TYPE: &str = "auth_type";
+pub(crate) const AUTH_TYPE_API: &str = "api";
 
 /// How long before expiry a token is renewed through cursor-agent.
 pub(crate) const REFRESH_MARGIN: Duration = Duration::from_secs(5 * 60);
@@ -51,6 +55,42 @@ pub(crate) fn parse_blob(secret: &SecretString) -> Result<SecretObject, PluginEr
 
 pub(crate) fn is_agent(blob: &SecretObject) -> bool {
     blob.text(REFRESH).is_some_and(|mark| mark == AGENT_MARK)
+}
+
+/// A blob that stores a Cursor API key and no exchanged access token.
+pub(crate) fn blob_api_key(key: &SecretString, label: &str, plan: Option<&str>) -> SecretObject {
+    let mut blob = SecretObject::new()
+        .with_secret(API_KEY, key)
+        .with_text(AUTH_TYPE, AUTH_TYPE_API)
+        .with_text(LABEL, label);
+    if let Some(plan) = plan.filter(|p| !p.is_empty()) {
+        blob = blob.with_text(PLAN, plan);
+    }
+    blob
+}
+
+pub(crate) fn is_api_key(blob: &SecretObject) -> bool {
+    blob.secret(API_KEY).is_some_and(|key| {
+        !hofund_plugin_sdk::oauth::secret_text(&key)
+            .trim()
+            .is_empty()
+    })
+}
+
+pub(crate) fn api_key(blob: &SecretObject) -> Option<SecretString> {
+    blob.secret(API_KEY)
+        .filter(|key| !hofund_plugin_sdk::oauth::secret_text(key).trim().is_empty())
+}
+
+/// SHA-256 hex of an API key, used as the in-memory cache key.
+pub(crate) fn key_hash(key: &str) -> String {
+    let digest = hofund_plugin_sdk::digest::sha256(key.as_bytes());
+    let mut name = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        write!(name, "{byte:02x}").expect("write to a string");
+    }
+    name
 }
 
 pub(crate) fn expires_ms(blob: &SecretObject) -> Option<u64> {

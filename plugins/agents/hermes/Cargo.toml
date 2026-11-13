@@ -1,0 +1,19 @@
+[package]
+name = "hofund-plugin-agent-hermes"
+description = "Hermes Agent session locator and read-only state.db parser."
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+hofund-plugin-api = { workspace = true }
+hofund-plugin-sdk = { workspace = true }
+sha2 = { workspace = true }
+
+[lints]
+workspace = true

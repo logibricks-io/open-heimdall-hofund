@@ -1,11 +1,16 @@
 //! Page implementations.
 
+mod agents;
 mod frame;
 mod probe;
+mod providers;
 pub mod sessions;
+mod status;
 
+pub use agents::AgentPage;
 pub use frame::PageShell;
 pub use probe::{ProbeOutcome, apply_probe_to_shell, read_path};
+pub use providers::ProviderPage;
 pub use sessions::SessionsPage;
 
 use hofund_control_proto::SessionResume;
@@ -34,9 +39,10 @@ pub trait Page: Send {
 }
 
 /// Result of a page key handler.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub enum PageKeyOutcome {
     /// Nothing special.
+    #[default]
     None,
     /// Move cursor up (for tests).
     CursorUp,
@@ -101,7 +107,7 @@ impl Pages {
         &self.sessions
     }
 
-    /// Mutable page by id.
+    /// Mutable page by id (shell pages only).
     pub fn mut_page(&mut self, id: PageId) -> &mut PageShell {
         self.mut_shell(id)
             .expect("sessions page is not a PageShell; use sessions_mut")
@@ -130,7 +136,7 @@ impl Pages {
             PageId::Usage => &self.usage,
             PageId::Library => &self.library,
             PageId::Sessions => {
-                panic!("sessions page is SessionsPage; use page_dyn or sessions_mut")
+                panic!("sessions page is SessionsPage; use page_dyn or sessions")
             }
         }
     }
@@ -139,11 +145,7 @@ impl Pages {
     pub fn apply_probe(&mut self, id: PageId, outcome: ProbeOutcome) {
         match id {
             PageId::Sessions => self.sessions.apply_probe(outcome),
-            _ => apply_probe_to_shell(
-                self.mut_shell(id)
-                    .expect("sessions uses SessionsPage::apply_probe"),
-                outcome,
-            ),
+            _ => apply_probe_to_shell(self.mut_shell(id).expect("shell page"), outcome),
         }
     }
 }

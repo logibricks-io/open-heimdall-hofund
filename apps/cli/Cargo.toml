@@ -17,10 +17,30 @@ path = "src/main.rs"
 
 [dependencies]
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+hofund-bridge-mcp = { workspace = true }
 hofund-config = { workspace = true }
 hofund-control-client = { workspace = true }
 hofund-plugin-agent-claude = { workspace = true }
+hofund-plugin-agent-cindy = { workspace = true }
+hofund-plugin-agent-cline = { workspace = true }
 hofund-plugin-agent-codex = { workspace = true }
+hofund-plugin-agent-agy = { workspace = true }
+hofund-plugin-agent-alma = { workspace = true }
+hofund-plugin-agent-cursor = { workspace = true }
+hofund-plugin-agent-droid = { workspace = true }
+hofund-plugin-agent-dsh = { workspace = true }
+hofund-plugin-agent-gemini = { workspace = true }
+hofund-plugin-agent-grok = { workspace = true }
+hofund-plugin-agent-hermes = { workspace = true }
+hofund-plugin-agent-kimi = { workspace = true }
+hofund-plugin-agent-minimax-code = { workspace = true }
+hofund-plugin-agent-omp = { workspace = true }
+hofund-plugin-agent-opencode = { workspace = true }
+hofund-plugin-agent-pi = { workspace = true }
+hofund-plugin-agent-qoder = { workspace = true }
+hofund-plugin-agent-raft = { workspace = true }
+hofund-plugin-agent-workbuddy = { workspace = true }
+hofund-plugin-agent-zcode = { workspace = true }
 hofund-plugin-api = { workspace = true }
 hofund-sessions = { workspace = true }
 hofund-usage = { workspace = true }

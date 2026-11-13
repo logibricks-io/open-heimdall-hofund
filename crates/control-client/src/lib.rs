@@ -10,17 +10,17 @@ use hofund_control_proto::{
     AgentChangeResponse, AgentConnectRequest, AgentDisconnectRequest, AgentHiddenSetRequest,
     AgentListResponse, AgentModelRequest, AgentModelsResponse, AgentPickedOnlyRequest,
     AgentPlanRequest, AgentPlanResponse, AgentStatusResponse, AgentVisibleSetRequest,
-    CatalogDisabledListResponse, CatalogModelRequest, CheckinListResponse, CheckinRunRequest,
-    CheckinRunResponse, ConfigApplyRequest, ConfigResponse, ConfigValidateRequest,
-    ConfigValidationResponse, ControlError, ErrorEnvelope, EventEnvelope, GatewayKeyRequest,
-    GatewayKeyResponse, GatewayKeyRestoreRequest, GroupCreateRequest, GroupDeleteRequest,
-    GroupDeleteResponse, GroupListResponse, GroupMemberCandidatesResponse, GroupPatchRequest,
-    GroupRestoreRequest, GroupWriteResponse, HealthResponse, MAX_RESPONSE_BODY_BYTES,
-    ModelListResponse, PicksResponse, PicksSetRequest, PresetListResponse, ProfileDetailResponse,
-    ProfileListResponse, ProfileRenameRequest, ProfileSaveRequest, ProfileSwitchRequest,
-    ProfileSwitchResponse, ProviderCreateRequest, ProviderDeleteRequest, ProviderDeleteResponse,
-    ProviderKeyRequest, ProviderKeysResponse, ProviderListResponse, ProviderPatchRequest,
-    ProviderRenameRequest, ProviderRenameResponse, ProviderSpendCapRequest,
+    CatalogDisabledListResponse, CatalogModelRequest, CatalogSyncRequest, CatalogSyncResponse,
+    CheckinListResponse, CheckinRunRequest, CheckinRunResponse, ConfigApplyRequest, ConfigResponse,
+    ConfigValidateRequest, ConfigValidationResponse, ControlError, ErrorEnvelope, EventEnvelope,
+    GatewayKeyRequest, GatewayKeyResponse, GatewayKeyRestoreRequest, GroupCreateRequest,
+    GroupDeleteRequest, GroupDeleteResponse, GroupListResponse, GroupMemberCandidatesResponse,
+    GroupPatchRequest, GroupRestoreRequest, GroupWriteResponse, HealthResponse,
+    MAX_RESPONSE_BODY_BYTES, ModelListResponse, PicksResponse, PicksSetRequest, PresetListResponse,
+    ProfileDetailResponse, ProfileListResponse, ProfileRenameRequest, ProfileSaveRequest,
+    ProfileSwitchRequest, ProfileSwitchResponse, ProviderCreateRequest, ProviderDeleteRequest,
+    ProviderDeleteResponse, ProviderKeyRequest, ProviderKeysResponse, ProviderListResponse,
+    ProviderPatchRequest, ProviderRenameRequest, ProviderRenameResponse, ProviderSpendCapRequest,
     ProviderSpendCapsResponse, ProviderTestRequest, ProviderTestResponse, ProviderWriteResponse,
     QuotaAlertsResponse, QuotaAlertsSetRequest, QuotaAlertsSetResponse, QuotaCreditsModesResponse,
     QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryQuery, QuotaHistoryResponse,
@@ -50,6 +50,17 @@ pub use model_health::{probe_address, probe_model_health};
 
 /// How long a failed one-shot `hofundd` may take to exit before it is killed.
 const ONE_SHOT_EXIT_WAIT: Duration = Duration::from_secs(5);
+
+/// How long a control TCP or Unix connect, plus the HTTP handshake and
+/// first response, may take. A peer that never accepts, or that accepts
+/// but never speaks HTTP, would otherwise block until an outer deadline
+/// fires.
+const OPEN_WAIT: Duration = Duration::from_secs(5);
+
+/// How long a one-shot `hofundd` may take to complete the HTTP handshake
+/// and first response. A child that never speaks HTTP would otherwise
+/// block the client until an outer test or process deadline fires.
+const ONE_SHOT_HANDSHAKE_WAIT: Duration = OPEN_WAIT;
 
 /// The most one-shot standard error kept while waiting for its response.
 const ONE_SHOT_STDERR_LIMIT: usize = 16 * 1024;
@@ -300,6 +311,192 @@ impl Client {
         self.get("/v1/hofund/status").await
     }
 
+    /// Gets terminal UI settings.
+    pub async fn settings(&self) -> Result<hofund_control_proto::SettingsResponse, ClientError> {
+        self.get("/v1/hofund/settings").await
+    }
+
+    /// Patches terminal UI settings against a disk revision.
+    pub async fn patch_settings(
+        &self,
+        request: &hofund_control_proto::SettingsPatchRequest,
+    ) -> Result<hofund_control_proto::SettingsResponse, ClientError> {
+        self.request(
+            http::Method::PATCH,
+            "/v1/hofund/settings",
+            Some(json_body(request)?),
+        )
+        .await
+    }
+
+    /// Reads one bounded daemon log chunk.
+    pub async fn logs(
+        &self,
+        after: u64,
+        max_bytes: Option<usize>,
+    ) -> Result<hofund_control_proto::LogTailResponse, ClientError> {
+        let mut query = hofund_control_proto::LogTailQuery::default();
+        query.after = after;
+        if let Some(max_bytes) = max_bytes {
+            query.max_bytes = max_bytes;
+        }
+        self.get(&format!("/v1/hofund/logs?{}", query.encode()))
+            .await
+    }
+
+    /// Lists subscriptions and their secret-free account rows.
+    pub async fn subscriptions(
+        &self,
+    ) -> Result<hofund_control_proto::SubscriptionListResponse, ClientError> {
+        self.get("/v1/hofund/subscriptions").await
+    }
+
+    /// Starts a background subscription sign-in.
+    pub async fn start_sign_in(
+        &self,
+        id: &str,
+        request: &hofund_control_proto::SignInStartRequest,
+    ) -> Result<hofund_control_proto::SignInStartResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            &format!("/v1/hofund/subscriptions/{}/sign-in", encode_segment(id)),
+            Some(json_body(request)?),
+        )
+        .await
+    }
+
+    /// Polls a subscription sign-in session.
+    pub async fn sign_in_status(
+        &self,
+        id: &str,
+        session: &str,
+    ) -> Result<hofund_control_proto::SignInStatusResponse, ClientError> {
+        self.get(&format!(
+            "/v1/hofund/subscriptions/{}/sign-in/{}",
+            encode_segment(id),
+            encode_segment(session)
+        ))
+        .await
+    }
+
+    /// Supplies a pasted callback URL or token to a sign-in session.
+    pub async fn sign_in_proof(
+        &self,
+        id: &str,
+        session: &str,
+        request: &hofund_control_proto::SignInProofRequest,
+    ) -> Result<hofund_control_proto::SignInStatusResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            &format!(
+                "/v1/hofund/subscriptions/{}/sign-in/{}/proof",
+                encode_segment(id),
+                encode_segment(session)
+            ),
+            Some(json_body(request)?),
+        )
+        .await
+    }
+
+    /// Cancels a sign-in session and releases its loopback listener.
+    pub async fn sign_in_cancel(
+        &self,
+        id: &str,
+        session: &str,
+    ) -> Result<hofund_control_proto::SignInCancelResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            &format!(
+                "/v1/hofund/subscriptions/{}/sign-in/{}/cancel",
+                encode_segment(id),
+                encode_segment(session)
+            ),
+            Some(json_body(&hofund_control_proto::SignInCancelRequest::new())?),
+        )
+        .await
+    }
+
+    /// Refreshes one or all accounts of a subscription.
+    pub async fn refresh_subscription(
+        &self,
+        id: &str,
+        request: &hofund_control_proto::SubscriptionRefreshRequest,
+    ) -> Result<hofund_control_proto::SubscriptionRefreshResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            &format!("/v1/hofund/subscriptions/{}/refresh", encode_segment(id)),
+            Some(json_body(request)?),
+        )
+        .await
+    }
+
+    /// Switches an agent's remembered sign-in.
+    pub async fn switch_account(
+        &self,
+        request: &hofund_control_proto::AccountSwitchRequest,
+    ) -> Result<hofund_control_proto::AccountSwitchResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            "/v1/hofund/accounts/switch",
+            Some(json_body(request)?),
+        )
+        .await
+    }
+
+    /// Imports an account export on the daemon host.
+    pub async fn import_account(
+        &self,
+        request: &hofund_control_proto::AccountImportRequest,
+    ) -> Result<hofund_control_proto::AccountImportResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            "/v1/hofund/accounts/import",
+            Some(json_body(request)?),
+        )
+        .await
+    }
+
+    /// Finds account sign-ins in agent files.
+    pub async fn discover_accounts(
+        &self,
+    ) -> Result<hofund_control_proto::AccountDiscoverResponse, ClientError> {
+        self.get("/v1/hofund/accounts/discover").await
+    }
+
+    /// Imports newly discovered account sign-ins.
+    pub async fn import_discovered_accounts(
+        &self,
+    ) -> Result<hofund_control_proto::AccountDiscoverImportResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            "/v1/hofund/accounts/discover",
+            Some(json_body(
+                &hofund_control_proto::AccountDiscoverAddRequest::new(),
+            )?),
+        )
+        .await
+    }
+
+    /// Removes a stored account.
+    pub async fn remove_account(
+        &self,
+        id: &str,
+        account: &str,
+    ) -> Result<hofund_control_proto::AccountRemoveResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            &format!(
+                "/v1/hofund/subscriptions/{}/accounts/{}/remove",
+                encode_segment(id),
+                encode_segment(account)
+            ),
+            Some(json_body(
+                &hofund_control_proto::AccountRemoveRequest::new(),
+            )?),
+        )
+        .await
+    }
+
     /// GETs a path and returns once the status line is known.
     ///
     /// On success the body is discarded. On failure the error envelope is decoded when present.
@@ -441,6 +638,22 @@ impl Client {
     /// Lists preset catalog rows.
     pub async fn presets(&self) -> Result<PresetListResponse, ClientError> {
         self.get("/v1/hofund/presets").await
+    }
+
+    /// Syncs the public model catalog.
+    ///
+    /// `force` fetches even when an index is already loaded. Agents `S` uses
+    /// that. Startup uses `force: false`, which is a no-op once a cache exists.
+    pub async fn sync_catalog(
+        &self,
+        request: &CatalogSyncRequest,
+    ) -> Result<CatalogSyncResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            "/v1/hofund/catalog/sync",
+            Some(json_body(request)?),
+        )
+        .await
     }
 
     /// Creates a configured provider.
@@ -1221,27 +1434,57 @@ impl Client {
     ) -> Result<http::Response<Incoming>, ClientError> {
         match &self.endpoint {
             Endpoint::Tcp(addr) => {
-                let stream = TcpStream::connect(addr)
-                    .await
-                    .map_err(|error| connect_error("control TCP connection failed", error))?;
-                self.open_over(stream, method, path, body, last_event_id, addr.to_string())
-                    .await
+                let deadline = tokio::time::Instant::now() + OPEN_WAIT;
+                let stream = match tokio::time::timeout_at(deadline, TcpStream::connect(addr)).await
+                {
+                    Ok(Ok(stream)) => stream,
+                    Ok(Err(error)) => {
+                        return Err(connect_error("control TCP connection failed", error));
+                    }
+                    Err(_) => return Err(open_timeout("control TCP connection")),
+                };
+                match tokio::time::timeout_at(
+                    deadline,
+                    self.open_over(stream, method, path, body, last_event_id, addr.to_string()),
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => Err(open_timeout("control TCP handshake")),
+                }
             }
             #[cfg(unix)]
             Endpoint::Unix(socket) => {
                 verify_unix_socket(socket)?;
-                let stream = tokio::net::UnixStream::connect(socket)
-                    .await
-                    .map_err(|error| connect_error("control Unix connection failed", error))?;
-                self.open_over(
-                    stream,
-                    method,
-                    path,
-                    body,
-                    last_event_id,
-                    LOCAL_IPC_HOST.to_owned(),
+                let deadline = tokio::time::Instant::now() + OPEN_WAIT;
+                let stream = match tokio::time::timeout_at(
+                    deadline,
+                    tokio::net::UnixStream::connect(socket),
                 )
                 .await
+                {
+                    Ok(Ok(stream)) => stream,
+                    Ok(Err(error)) => {
+                        return Err(connect_error("control Unix connection failed", error));
+                    }
+                    Err(_) => return Err(open_timeout("control Unix connection")),
+                };
+                match tokio::time::timeout_at(
+                    deadline,
+                    self.open_over(
+                        stream,
+                        method,
+                        path,
+                        body,
+                        last_event_id,
+                        LOCAL_IPC_HOST.to_owned(),
+                    ),
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => Err(open_timeout("control Unix handshake")),
+                }
             }
             Endpoint::OneShot { exe, config } => {
                 self.open_one_shot(exe, config, method, path, body, last_event_id)
@@ -1278,11 +1521,13 @@ impl Client {
         let diagnostics = OneShotStderr::start(stderr);
         let io = tokio::io::join(stdout, stdin);
         let host = LOCAL_IPC_HOST.to_owned();
-        match self
-            .open_over(io, method, path, body, last_event_id, host)
-            .await
+        match tokio::time::timeout(
+            ONE_SHOT_HANDSHAKE_WAIT,
+            self.open_over(io, method, path, body, last_event_id, host),
+        )
+        .await
         {
-            Ok(response) => {
+            Ok(Ok(response)) => {
                 // Pass the child's diagnostics through from here on. It
                 // exits once the response is read and the connection
                 // drops; reap it in the background.
@@ -1292,15 +1537,8 @@ impl Client {
                 });
                 Ok(response)
             }
-            Err(error) => {
-                let status = match tokio::time::timeout(ONE_SHOT_EXIT_WAIT, child.wait()).await {
-                    Ok(Ok(status)) => status.to_string(),
-                    Ok(Err(wait)) => format!("unknown status: {wait}"),
-                    Err(_) => {
-                        let _ = child.kill().await;
-                        "still running; killed".to_owned()
-                    }
-                };
+            Ok(Err(error)) => {
+                let status = wait_or_kill_one_shot(&mut child).await;
                 // A child that exits before answering explains why on
                 // standard error; that beats the transport error.
                 let reason = diagnostics
@@ -1310,6 +1548,24 @@ impl Client {
                 Err(ClientError::Transport(format!(
                     "one-shot hofundd failed ({status}): {reason}"
                 )))
+            }
+            Err(_elapsed) => {
+                // The child is still running and will not exit on its own.
+                let _ = child.kill().await;
+                let status = wait_or_kill_one_shot(&mut child).await;
+                let reason = diagnostics.finish().await.unwrap_or_default();
+                let message = if reason.is_empty() {
+                    format!(
+                        "one-shot hofundd handshake timed out after {}s ({status})",
+                        ONE_SHOT_HANDSHAKE_WAIT.as_secs()
+                    )
+                } else {
+                    format!(
+                        "one-shot hofundd handshake timed out after {}s ({status}): {reason}",
+                        ONE_SHOT_HANDSHAKE_WAIT.as_secs()
+                    )
+                };
+                Err(ClientError::Transport(message))
             }
         }
     }
@@ -1350,6 +1606,18 @@ impl Client {
             .send_request(request)
             .await
             .map_err(|error| transport("control HTTP request failed", error))
+    }
+}
+
+/// Waits briefly for a one-shot child to exit, then kills it.
+async fn wait_or_kill_one_shot(child: &mut tokio::process::Child) -> String {
+    match tokio::time::timeout(ONE_SHOT_EXIT_WAIT, child.wait()).await {
+        Ok(Ok(status)) => status.to_string(),
+        Ok(Err(wait)) => format!("unknown status: {wait}"),
+        Err(_) => {
+            let _ = child.kill().await;
+            "still running; killed".to_owned()
+        }
     }
 }
 
@@ -1526,11 +1794,17 @@ fn verify_unix_socket_for(path: &std::path::Path, expected_uid: u32) -> Result<(
     Ok(())
 }
 
+fn open_timeout(what: &str) -> ClientError {
+    ClientError::ConnectionUnavailable(format!("{what} timed out after {}s", OPEN_WAIT.as_secs()))
+}
+
 fn connect_error(context: &str, error: std::io::Error) -> ClientError {
     let message = format!("{context}: {error}");
     if matches!(
         error.kind(),
-        std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+        std::io::ErrorKind::ConnectionRefused
+            | std::io::ErrorKind::NotFound
+            | std::io::ErrorKind::TimedOut
     ) {
         ClientError::ConnectionUnavailable(message)
     } else {

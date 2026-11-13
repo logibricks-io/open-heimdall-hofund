@@ -41,7 +41,8 @@ pub use request::Request;
 pub use response::{Response, Stop, StopReason};
 pub use stream::{
     BlockStart, ContentBlockStart, ContentBlockStop, MessageDelta, MessageStart, MessageStop, Ping,
-    SignatureDelta, StreamEvent, TextDelta, ThinkingDelta, ToolArgumentsDelta, UnknownEvent,
+    SignatureDelta, StillWorking, StreamEvent, TextDelta, ThinkingDelta, ToolArgumentsDelta,
+    UnknownEvent,
 };
 pub use tools::{Tool, ToolChoice, ToolChoiceMode};
 pub use usage::{Usage, normalize_cache_write};

@@ -25,7 +25,7 @@ use crate::gateway::{HandoffDeps, HandoffState, WATCH_INTERVAL, run_handoff_tick
 use crate::quit::{QuitAction, perform_quit};
 use crate::runtime::{
     HandoffSnapshot, WorkerMsg, apply_control_followup, apply_worker_msg, open_event_stream,
-    schedule_open_page_load,
+    schedule_intents, schedule_open_page_load,
 };
 use crate::state::{GatewayPresence, PageId};
 use crate::theme::Theme;
@@ -104,6 +104,7 @@ async fn async_main(config: &Path, no_color: bool) -> Result<QuitAction, String>
                 }
                 apply_worker_msg(&mut app, msg);
                 open_control_if_needed(&live, &mut app, &mut control, &work_tx).await;
+                schedule_intents(&mut app, live.client().as_ref(), &work_tx);
                 draw(&mut terminal, &app, &theme)?;
             }
             event = async {
@@ -121,7 +122,8 @@ async fn async_main(config: &Path, no_color: bool) -> Result<QuitAction, String>
                         } else if followup.resync_stream {
                             try_reopen_control_stream(&live, &mut app, &mut control, None).await;
                         }
-                        schedule_open_page_load(&app, live.client().as_ref(), &work_tx);
+                        schedule_probe_for_open_page(&app, live.client().as_ref(), &work_tx);
+                        schedule_intents(&mut app, live.client().as_ref(), &work_tx);
                         draw(&mut terminal, &app, &theme)?;
                     }
                     Some(Err(error)) => {
@@ -137,9 +139,6 @@ async fn async_main(config: &Path, no_color: bool) -> Result<QuitAction, String>
                     Ok(Event::Key(key)) if key.kind == KeyEventKind::Press => {
                         match app.handle_key(key) {
                             AppAction::Quit => break,
-                            AppAction::Reload => {
-                                schedule_open_page_load(&app, live.client().as_ref(), &work_tx);
-                            }
                             AppAction::Resume(resume) => match run_resume(
                                 &mut terminal,
                                 &app,
@@ -157,8 +156,10 @@ async fn async_main(config: &Path, no_color: bool) -> Result<QuitAction, String>
                             AppAction::Flash { text, ok } => {
                                 app.set_flash(crate::state::Flash::new(text, ok));
                             }
-                            AppAction::None => {}
+                            AppAction::Reload | AppAction::None => {}
                         }
+                        schedule_probe_for_open_page(&app, live.client().as_ref(), &work_tx);
+                        schedule_intents(&mut app, live.client().as_ref(), &work_tx);
                         draw(&mut terminal, &app, &theme)?;
                     }
                     Ok(Event::Resize(_, _)) => {
@@ -288,7 +289,7 @@ async fn open_control_if_needed(
         return;
     }
     try_reopen_control_stream(live, app, control, None).await;
-    schedule_open_page_load(app, live.client().as_ref(), work_tx);
+    schedule_probe_for_open_page(app, live.client().as_ref(), work_tx);
 }
 
 /// Records a failed control stream open without exiting the UI loop.
@@ -312,7 +313,10 @@ async fn try_reopen_control_stream(
         return;
     };
     match open_event_stream(&client, last_event_id).await {
-        Ok(stream) => *control = Some(stream),
+        Ok(stream) => {
+            *control = Some(stream);
+            app.on_control_attached();
+        }
         Err(message) => apply_event_stream_open_failure(app, control, message),
     }
 }
@@ -329,6 +333,14 @@ async fn reconnect_after_token(
         Ok(_client) => try_reopen_control_stream(live, app, control, None).await,
         Err(message) => apply_event_stream_open_failure(app, control, message),
     }
+}
+
+fn schedule_probe_for_open_page(
+    app: &App,
+    client: Option<&hofund_control_client::Client>,
+    work_tx: &mpsc::Sender<WorkerMsg>,
+) {
+    schedule_open_page_load(app, client, work_tx);
 }
 
 fn run_resume(

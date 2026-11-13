@@ -13,14 +13,20 @@ use std::time::Duration;
 use serde::Deserialize;
 use thiserror::Error;
 
+mod allow;
 mod groups_write;
 mod migrate;
 pub mod pass_headers;
 mod provider_rename;
 mod provider_write;
 mod ruleparse;
+mod settings;
 mod visible;
 
+pub use allow::{
+    ALLOW_IPS_ENV, IpNetwork, NetworkSettings, TRUST_PROXY_ENV, allow_ips_env, effective_network,
+    trust_proxy_env,
+};
 pub use groups_write::{
     edit_group_create, edit_group_delete, edit_group_patch, edit_group_restore, group_id_from_name,
     validate_group_rules,
@@ -34,6 +40,7 @@ pub use provider_write::{
     validate_provider_base_url,
 };
 pub use ruleparse::{ParsedRule, parse_rule_line, rule_rename_group_ref, rule_without_line};
+pub use settings::{SettingsEdit, edit_settings};
 pub use visible::{
     AgentModels, CatalogEntry, VisibleCatalog, build_catalog_index, catalog_for_agent,
     edit_agent_hidden_models, edit_agent_picked_models, edit_agent_picked_only, edit_agent_visible,
@@ -50,6 +57,12 @@ pub use visible::{
 pub struct Config {
     /// Address the gateway binds.
     pub listen: SocketAddr,
+    /// Canonical IP addresses and CIDR networks allowed to use the model listener.
+    /// Empty imposes no network restriction. Loopback is always allowed.
+    pub allow_ips: Vec<String>,
+    /// Whether a local proxy's forwarding headers retain loopback-only privileges.
+    /// Forwarding headers never select the address checked by `allow_ips`.
+    pub trust_proxy: bool,
     /// Path of the bearer-token file, as written in the TOML.
     pub token_file: String,
     /// Path of the usage database, as written in the TOML.
@@ -71,14 +84,17 @@ pub struct Config {
     /// Per-agent model visibility settings.
     pub agents: AgentModels,
     /// When true, the daemon may read agents' own sign-in files and import
-    /// accounts. Set with boolean `discover` under `[subscriptions.options]`.
+    /// accounts. Set with top-level `discover_agent_accounts`, or with legacy
+    /// boolean `discover` under `[subscriptions.options]`.
     pub discover_agent_accounts: bool,
     /// Deprecated keys that still loaded. The next release rejects them.
     pub warnings: Vec<String>,
     /// models.dev catalog mirror, refresh, and per-model overrides.
     pub catalog: CatalogSettings,
-    /// Usage display currency and optional per-model list prices.
+    /// Usage display currency, quota bar direction, and optional per-model list prices.
     pub usage: UsageSettings,
+    /// LAN peers allowed in a later enforcement change. Stored but not enforced here.
+    pub lan_allow: Vec<String>,
 }
 
 /// Failover thresholds.
@@ -199,6 +215,8 @@ pub struct UsageSettings {
     pub currency: UsageCurrency,
     /// Fixed yuan per dollar; when set, live FX is not fetched.
     pub cny_per_usd: Option<f64>,
+    /// Whether terminal quota bars show remaining rather than used percentages.
+    pub quota_left: bool,
     /// Custom list prices keyed like the reference `ModelPrices` map.
     pub prices: BTreeMap<String, ModelPriceOverride>,
 }
@@ -1020,6 +1038,8 @@ impl fmt::Debug for Config {
         formatter
             .debug_struct("Config")
             .field("listen", &self.listen)
+            .field("allow_ips", &self.allow_ips)
+            .field("trust_proxy", &self.trust_proxy)
             .field("token_file", &self.token_file)
             .field("usage_file", &self.usage_file)
             .field("failover", &self.failover)
@@ -1248,6 +1268,7 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
     let listen = raw.listen.parse::<SocketAddr>().map_err(|_| {
         ConfigError::Invalid(format!("listen `{}` is not an ip:port address", raw.listen))
     })?;
+    let allow_ips = allow::clean_allow_ips(&raw.allow_ips)?;
     if raw.token_file.is_empty() {
         return Err(ConfigError::Invalid("token_file is empty".to_owned()));
     }
@@ -1481,8 +1502,11 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
     let agents = visible::agent_models_of(raw.agents)?;
     let catalog = catalog_settings(raw.catalog)?;
     let usage = usage_settings(raw.usage)?;
+    discover_agent_accounts |= raw.discover_agent_accounts.unwrap_or(false);
     Ok(Config {
         listen,
+        allow_ips,
+        trust_proxy: raw.trust_proxy,
         token_file: raw.token_file,
         usage_file: raw.usage_file,
         failover: Failover {
@@ -1498,6 +1522,7 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
         catalog,
         usage,
         discover_agent_accounts,
+        lan_allow: raw.lan_allow,
         warnings,
     })
 }
@@ -1977,6 +2002,8 @@ struct RawUsage {
     #[serde(default)]
     cny_per_usd: Option<f64>,
     #[serde(default)]
+    quota_left: bool,
+    #[serde(default)]
     prices: BTreeMap<String, RawModelPrice>,
 }
 
@@ -2056,6 +2083,7 @@ fn usage_settings(raw: RawUsage) -> Result<UsageSettings, ConfigError> {
     Ok(UsageSettings {
         currency,
         cny_per_usd: raw.cny_per_usd,
+        quota_left: raw.quota_left,
         prices,
     })
 }
@@ -2404,6 +2432,10 @@ fn patience_of(kind: &str, id: &str, value: Option<&Value>) -> Result<Patience, 
 struct RawFile {
     #[serde(default = "default_listen")]
     listen: String,
+    #[serde(default)]
+    allow_ips: Vec<String>,
+    #[serde(default)]
+    trust_proxy: bool,
     #[serde(default = "default_token_file")]
     token_file: String,
     #[serde(default = "default_usage_file")]
@@ -2420,6 +2452,10 @@ struct RawFile {
     routes: Vec<RawRoute>,
     #[serde(default)]
     subscriptions: Vec<RawSubscription>,
+    #[serde(default)]
+    discover_agent_accounts: Option<bool>,
+    #[serde(default)]
+    lan_allow: Vec<String>,
     #[serde(default)]
     agents: visible::RawAgentModels,
     #[serde(default)]

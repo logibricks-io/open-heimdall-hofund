@@ -1,0 +1,44 @@
+{
+  "agent": "gemini",
+  "id": "gemini:jsonl-s",
+  "path": "",
+  "cwd": "",
+  "title": "private",
+  "start_ms": 1790942400000,
+  "last_ms": 1790942405000,
+  "models": {
+    "gemini-model": {
+      "input": 60,
+      "output": 15,
+      "cache_read": 40,
+      "cache_write": 0,
+      "cache_write_1h": 0
+    }
+  },
+  "days": [
+    {
+      "date": "2026-10-02",
+      "model": "gemini-model",
+      "tokens": {
+        "input": 60,
+        "output": 15,
+        "cache_read": 40,
+        "cache_write": 0,
+        "cache_write_1h": 0
+      }
+    }
+  ],
+  "cost": 0.0,
+  "unpriced": 0,
+  "main": true,
+  "parent_id": null,
+  "subagents": [],
+  "copies": [],
+  "family_root": "",
+  "family_leaf": "",
+  "family_ids": [],
+  "copy": false,
+  "forked_from": null,
+  "usage": [],
+  "cut": false
+}

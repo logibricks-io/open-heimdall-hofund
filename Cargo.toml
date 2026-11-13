@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "apps/bridge-mcp",
     "apps/cli",
     "apps/desktop/src-tauri",
     "apps/hofundd",
@@ -18,7 +19,26 @@ members = [
     "crates/kernel/plugin-host",
     "crates/kernel/plugin-sdk",
     "plugins/agents/claude-code",
+    "plugins/agents/cindy",
+    "plugins/agents/cline",
     "plugins/agents/codex",
+    "plugins/agents/agy",
+    "plugins/agents/alma",
+    "plugins/agents/cursor",
+    "plugins/agents/droid",
+    "plugins/agents/dsh",
+    "plugins/agents/gemini-cli",
+    "plugins/agents/grok",
+    "plugins/agents/hermes",
+    "plugins/agents/kimi",
+    "plugins/agents/minimax-code",
+    "plugins/agents/omp",
+    "plugins/agents/opencode",
+    "plugins/agents/pi",
+    "plugins/agents/qoder",
+    "plugins/agents/raft",
+    "plugins/agents/workbuddy",
+    "plugins/agents/zcode",
     "plugins/inbound/codex-catalog",
     "plugins/inbound/retrieval",
     "plugins/inbound/echo",
@@ -33,6 +53,7 @@ members = [
     "plugins/providers/relay",
     "plugins/providers/remote-gateway",
     "plugins/registry",
+    "plugins/subscriptions/antigravity",
     "plugins/subscriptions/claude",
     "plugins/subscriptions/codex",
     "plugins/subscriptions/copilot",
@@ -74,6 +95,7 @@ rust-version = "1.99.1"
 # a version is a wildcard, which `cargo deny` rejects.
 [workspace.dependencies]
 hofund-agent = { version = "0.1.0", path = "crates/kernel/agent" }
+hofund-bridge-mcp = { version = "0.1.0", path = "apps/bridge-mcp" }
 hofund-codec = { version = "0.1.0", path = "crates/kernel/codec" }
 hofund-config = { version = "0.1.0", path = "crates/kernel/config" }
 hofund-model-catalog = { version = "0.1.0", path = "crates/kernel/model-catalog" }
@@ -87,7 +109,26 @@ hofund-kit-subscription = { version = "0.1.0", path = "kits/subscription" }
 hofund-kit-upstream = { version = "0.1.0", path = "kits/upstream" }
 hofund-plugin-api = { version = "0.1.0", path = "crates/kernel/plugin-api" }
 hofund-plugin-agent-claude = { version = "0.1.0", path = "plugins/agents/claude-code" }
+hofund-plugin-agent-cindy = { version = "0.1.0", path = "plugins/agents/cindy" }
+hofund-plugin-agent-cline = { version = "0.1.0", path = "plugins/agents/cline" }
 hofund-plugin-agent-codex = { version = "0.1.0", path = "plugins/agents/codex" }
+hofund-plugin-agent-agy = { version = "0.1.0", path = "plugins/agents/agy" }
+hofund-plugin-agent-alma = { version = "0.1.0", path = "plugins/agents/alma" }
+hofund-plugin-agent-cursor = { version = "0.1.0", path = "plugins/agents/cursor" }
+hofund-plugin-agent-droid = { version = "0.1.0", path = "plugins/agents/droid" }
+hofund-plugin-agent-dsh = { version = "0.1.0", path = "plugins/agents/dsh" }
+hofund-plugin-agent-gemini = { version = "0.1.0", path = "plugins/agents/gemini-cli" }
+hofund-plugin-agent-grok = { version = "0.1.0", path = "plugins/agents/grok" }
+hofund-plugin-agent-hermes = { version = "0.1.0", path = "plugins/agents/hermes" }
+hofund-plugin-agent-kimi = { version = "0.1.0", path = "plugins/agents/kimi" }
+hofund-plugin-agent-minimax-code = { version = "0.1.0", path = "plugins/agents/minimax-code" }
+hofund-plugin-agent-omp = { version = "0.1.0", path = "plugins/agents/omp" }
+hofund-plugin-agent-opencode = { version = "0.1.0", path = "plugins/agents/opencode" }
+hofund-plugin-agent-pi = { version = "0.1.0", path = "plugins/agents/pi" }
+hofund-plugin-agent-qoder = { version = "0.1.0", path = "plugins/agents/qoder" }
+hofund-plugin-agent-raft = { version = "0.1.0", path = "plugins/agents/raft" }
+hofund-plugin-agent-workbuddy = { version = "0.1.0", path = "plugins/agents/workbuddy" }
+hofund-plugin-agent-zcode = { version = "0.1.0", path = "plugins/agents/zcode" }
 hofund-plugin-azure = { version = "0.1.0", path = "plugins/providers/azure" }
 hofund-plugin-bedrock = { version = "0.1.0", path = "plugins/providers/bedrock" }
 hofund-plugin-bedrock-mantle = { version = "0.1.0", path = "plugins/providers/bedrock-mantle" }
@@ -102,6 +143,7 @@ hofund-plugin-plan-quota = { version = "0.1.0", path = "plugins/providers/plan-q
 hofund-plugin-registry = { version = "0.1.0", path = "plugins/registry" }
 hofund-plugin-relay = { version = "0.1.0", path = "plugins/providers/relay" }
 hofund-plugin-remote-gateway = { version = "0.1.0", path = "plugins/providers/remote-gateway" }
+hofund-plugin-subscription-antigravity = { version = "0.1.0", path = "plugins/subscriptions/antigravity" }
 hofund-plugin-subscription-claude = { version = "0.1.0", path = "plugins/subscriptions/claude" }
 hofund-plugin-subscription-codex = { version = "0.1.0", path = "plugins/subscriptions/codex" }
 hofund-plugin-subscription-copilot = { version = "0.1.0", path = "plugins/subscriptions/copilot" }
@@ -124,9 +166,11 @@ hofund-secrets = { version = "0.1.0", path = "crates/kernel/secrets" }
 hofund-sessions = { version = "0.1.0", path = "crates/kernel/sessions" }
 hofund-tui = { version = "0.1.0", path = "apps/tui" }
 hofund-usage = { version = "0.1.0", path = "crates/kernel/usage" }
+base64 = "0.23.1"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 crossterm = "0.28.1"
 ratatui = "0.29.0"
+rusqlite = { version = "0.41.0", default-features = false, features = ["bundled"] }
 sha2 = "0.10.9"
 tempfile = "3.27.0"
 zstd = "0.13.3"

@@ -22,6 +22,10 @@ use hofund_plugin_sdk::{chrono, json, serde};
 use json::Value;
 use serde::{Deserialize, Serialize};
 
+mod desktop;
+
+pub use desktop::{ClaudeDesktopLocator, ClaudeDesktopStore, DESKTOP_AGENT};
+
 /// The session agent id.
 pub const AGENT: &str = "claude";
 
@@ -93,35 +97,7 @@ impl SessionStore for ClaudeStore {
     }
 
     fn files(&self, root: &Path) -> Result<Vec<SessionFile>, PluginError> {
-        let projects = root.join("projects");
-        let mut paths = Vec::new();
-        if !projects.exists() {
-            return Ok(Vec::new());
-        }
-        walk_linked(&projects, &projects, &mut paths)
-            .map_err(|_| PluginError::io("cannot list Claude Code sessions"))?;
-        let mut files = Vec::new();
-        for path in paths {
-            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-                continue;
-            };
-            let id = name.strip_suffix(".jsonl").map(str::to_owned);
-            if path
-                .parent()
-                .and_then(Path::file_name)
-                .is_some_and(|dir| dir == "subagents")
-            {
-                if name.starts_with("agent-")
-                    && let Some(id) = id
-                {
-                    files.push(SessionFile::new(id, path));
-                }
-            } else if let Some(id) = id {
-                files.push(SessionFile::new(id, path));
-            }
-        }
-        files.sort_by(|left, right| left.path.cmp(&right.path));
-        Ok(files)
+        collect_cc_files(AGENT, &root.join("projects"))
     }
 
     fn parser(
@@ -129,14 +105,7 @@ impl SessionStore for ClaudeStore {
         file: &SessionFile,
         state: Option<&str>,
     ) -> Result<Box<dyn SessionParser>, PluginError> {
-        let parent = subagent_parent(file);
-        let restored = state
-            .map(json::from_str::<ClaudeState>)
-            .transpose()
-            .map_err(|_| PluginError::decode("invalid Claude Code parser state"))?;
-        Ok(Box::new(ClaudeParser {
-            state: restored.unwrap_or_else(|| ClaudeState::new(file, parent)),
-        }))
+        parser_for(AGENT, file, state)
     }
 
     fn transcript_available(&self) -> bool {
@@ -151,7 +120,110 @@ impl SessionStore for ClaudeStore {
     }
 }
 
-fn subagent_parent(file: &SessionFile) -> Option<String> {
+fn parser_for(
+    agent: &str,
+    file: &SessionFile,
+    state: Option<&str>,
+) -> Result<Box<dyn SessionParser>, PluginError> {
+    let parent = subagent_parent(agent, file);
+    let restored = state
+        .map(json::from_str::<ClaudeState>)
+        .transpose()
+        .map_err(|_| PluginError::decode("invalid Claude Code parser state"))?;
+    let mut state = restored.unwrap_or_else(|| ClaudeState::new(agent, file, parent));
+    if state.agent.is_empty() {
+        agent.clone_into(&mut state.agent);
+    }
+    Ok(Box::new(ClaudeParser { state }))
+}
+
+pub(crate) fn collect_cc_files(
+    _agent: &str,
+    projects: &Path,
+) -> Result<Vec<SessionFile>, PluginError> {
+    let mut paths = Vec::new();
+    if !projects.exists() {
+        return Ok(Vec::new());
+    }
+    walk_linked(projects, projects, &mut paths)
+        .map_err(|_| PluginError::io("cannot list Claude Code sessions"))?;
+    let mut files = Vec::new();
+    for path in paths {
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let id = name.strip_suffix(".jsonl").map(str::to_owned);
+        if path
+            .parent()
+            .and_then(Path::file_name)
+            .is_some_and(|dir| dir == "subagents")
+        {
+            if name.starts_with("agent-")
+                && let Some(id) = id
+            {
+                files.push(SessionFile::new(id, path));
+            }
+        } else if let Some(id) = id {
+            files.push(SessionFile::new(id, path));
+        }
+    }
+    files.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(files)
+}
+
+pub(crate) fn walk_desktop_homes(root: &Path) -> Result<Vec<PathBuf>, PluginError> {
+    let mode = root.join("local-agent-mode-sessions");
+    let mut homes = Vec::new();
+    if mode.is_dir() {
+        for account in entries(&mode)? {
+            if !account
+                .file_type()
+                .map_err(|_| PluginError::io("cannot list Claude Desktop sessions"))?
+                .is_dir()
+            {
+                continue;
+            }
+            for org in entries(&account.path())? {
+                if !org
+                    .file_type()
+                    .map_err(|_| PluginError::io("cannot list Claude Desktop sessions"))?
+                    .is_dir()
+                {
+                    continue;
+                }
+                for local in entries(&org.path())? {
+                    let name = local.file_name();
+                    let Some(name) = name.to_str() else {
+                        continue;
+                    };
+                    if !name.starts_with("local_") {
+                        continue;
+                    }
+                    let claude = local.path().join(".claude");
+                    if claude.is_dir() {
+                        homes.push(claude);
+                    }
+                }
+            }
+        }
+    }
+    homes.sort();
+    homes.dedup();
+    Ok(homes)
+}
+
+fn entries(path: &Path) -> Result<Vec<std::fs::DirEntry>, PluginError> {
+    let Ok(directory) = std::fs::read_dir(path) else {
+        return Ok(Vec::new());
+    };
+    let mut entries = directory
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| PluginError::io("cannot read session directory"))?;
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+    Ok(entries)
+}
+
+fn subagent_parent(agent: &str, file: &SessionFile) -> Option<String> {
     let is_sub = file
         .path
         .parent()
@@ -166,7 +238,14 @@ fn subagent_parent(file: &SessionFile) -> Option<String> {
         .and_then(Path::parent)
         .and_then(Path::file_name)
         .and_then(|name| name.to_str())?;
-    Some(format!("{AGENT}:{parent}"))
+    Some(format!("{agent}:{parent}"))
+}
+
+fn desktop_entrypoint(value: &Value) -> bool {
+    value
+        .get("entrypoint")
+        .and_then(Value::as_str)
+        .is_some_and(|entry| entry == "claude-desktop" || entry == "claude-desktop-3p")
 }
 
 fn walk_linked(root: &Path, lexical: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
@@ -205,6 +284,8 @@ struct SeenUsage {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(crate = "hofund_plugin_sdk::serde")]
 struct ClaudeState {
+    #[serde(default)]
+    agent: String,
     record: SessionRecord,
     custom: String,
     named: String,
@@ -218,14 +299,15 @@ struct ClaudeState {
 }
 
 impl ClaudeState {
-    fn new(file: &SessionFile, parent: Option<String>) -> Self {
-        let id = format!("{AGENT}:{}", file.id);
-        let mut record = SessionRecord::new(AGENT, &id, &file.path);
+    fn new(agent: &str, file: &SessionFile, parent: Option<String>) -> Self {
+        let id = format!("{agent}:{}", file.id);
+        let mut record = SessionRecord::new(agent, &id, &file.path);
         record.title.clone_from(&file.id);
         if let Some(parent) = parent {
             record = record.with_parent(parent);
         }
         Self {
+            agent: agent.to_owned(),
             record,
             custom: String::new(),
             named: String::new(),
@@ -242,7 +324,7 @@ impl ClaudeState {
         let fallback = self
             .record
             .id
-            .strip_prefix(&format!("{AGENT}:"))
+            .strip_prefix(&format!("{}:", self.agent))
             .unwrap_or(&self.record.id)
             .to_owned();
         self.record.title = if !self.custom.is_empty() {
@@ -266,6 +348,12 @@ struct ClaudeParser {
 
 impl ClaudeParser {
     fn line(&mut self, value: &Value) {
+        if self.state.agent == AGENT
+            && self.state.record.app.is_empty()
+            && desktop_entrypoint(value)
+        {
+            DESKTOP_AGENT.clone_into(&mut self.state.record.app);
+        }
         let at = value
             .get("timestamp")
             .and_then(Value::as_str)
@@ -285,9 +373,10 @@ impl ClaudeParser {
         if self.state.record.main
             && let Some(session) = value.get("sessionId").and_then(Value::as_str)
             && !session.is_empty()
-            && self.state.record.id == format!("{AGENT}:{}", file_stem_id(&self.state.record))
+            && self.state.record.id
+                == format!("{}:{}", self.state.agent, file_stem_id(&self.state.record))
         {
-            self.state.record.id = format!("{AGENT}:{session}");
+            self.state.record.id = format!("{}:{session}", self.state.agent);
         }
 
         let kind = value.get("type").and_then(Value::as_str).unwrap_or("");
@@ -446,9 +535,8 @@ impl SessionParser for ClaudeParser {
 fn file_stem_id(record: &SessionRecord) -> String {
     record
         .id
-        .strip_prefix(&format!("{AGENT}:"))
-        .unwrap_or(&record.id)
-        .to_owned()
+        .split_once(':')
+        .map_or_else(|| record.id.clone(), |(_, id)| id.to_owned())
 }
 
 fn counter(value: &Value, key: &str) -> u64 {
@@ -695,6 +783,25 @@ mod tests {
     }
 
     #[test]
+    fn claude_entrypoint_tags_desktop_app_usage() {
+        let path = fixture("desktop/entrypoint.jsonl");
+        let file = SessionFile::new("desktop-tab", &path);
+        let store = ClaudeStore::with_root(fixture("root"));
+        let mut parser = store.parser(&file, None).expect("parser");
+        let input = std::fs::File::open(&path).expect("fixture");
+        for line in BufReader::new(input).lines() {
+            let line = line.expect("UTF-8");
+            let value = json::from_str(&line).expect("JSON");
+            parser.push(&value).expect("push");
+        }
+        let record = parser.finish().expect("finish").record.expect("record");
+        assert_eq!(record.agent, AGENT);
+        assert_eq!(record.app, DESKTOP_AGENT);
+        assert_eq!(record.tokens().input, 4);
+        assert_eq!(record.tokens().output, 1);
+    }
+
+    #[test]
     fn claude_transcript_reads_fixture_content() {
         let path = fixture("root/projects/-work-app/11111111-2222-3333-4444-555555555555.jsonl");
         let file = SessionFile::new("fixture", &path);
@@ -726,5 +833,220 @@ mod tests {
                 .iter()
                 .all(|file| file.path.starts_with(temp.path().join("linked")))
         );
+    }
+
+    #[test]
+    fn subagent_parent_reads_the_parent_session_dir() {
+        let child = SessionFile::new("child", "sessions/parent/subagents/child.jsonl");
+        assert_eq!(
+            subagent_parent("claude", &child).as_deref(),
+            Some("claude:parent")
+        );
+        let main = SessionFile::new("main", "sessions/parent/main.jsonl");
+        assert_eq!(subagent_parent("claude", &main), None);
+    }
+
+    #[test]
+    fn desktop_entrypoint_matches_desktop_ids_only() {
+        assert!(desktop_entrypoint(
+            &json::json!({"entrypoint": "claude-desktop"})
+        ));
+        assert!(desktop_entrypoint(
+            &json::json!({"entrypoint": "claude-desktop-3p"})
+        ));
+        assert!(!desktop_entrypoint(
+            &json::json!({"entrypoint": "claude-code"})
+        ));
+        assert!(!desktop_entrypoint(&json::json!({})));
+    }
+
+    #[test]
+    fn file_stem_id_strips_the_agent_prefix() {
+        let record = SessionRecord::new("claude", "claude:abc", "p");
+        assert_eq!(file_stem_id(&record), "abc");
+        let record = SessionRecord::new("claude", "nocolon", "p");
+        assert_eq!(file_stem_id(&record), "nocolon");
+    }
+
+    fn record_from(id: &str, path: &str, values: &[Value]) -> SessionRecord {
+        let file = SessionFile::new(id, path);
+        let store = ClaudeStore::with_root(fixture("root"));
+        let mut parser = store.parser(&file, None).expect("parser");
+        for value in values {
+            parser.push(value).expect("push");
+        }
+        parser
+            .finish()
+            .expect("finish")
+            .record
+            .expect("session record")
+    }
+
+    #[test]
+    fn claude_roots_return_the_configured_root() {
+        let store = ClaudeStore::with_root("/tmp/claude-root");
+        assert_eq!(store.locator().roots(), [PathBuf::from("/tmp/claude-root")]);
+    }
+
+    #[test]
+    fn line_keeps_the_file_id_when_session_id_is_empty() {
+        let record = record_from(
+            "abc",
+            "projects/app/abc.jsonl",
+            &[json::json!({
+                "sessionId": "",
+                "cwd": "/work",
+                "timestamp": "2020-01-02T00:00:02Z"
+            })],
+        );
+        assert_eq!(record.id, "claude:abc");
+        assert_eq!(record.cwd, "/work");
+    }
+
+    #[test]
+    fn line_adopts_session_id_keeps_first_cwd_and_time_bounds() {
+        let record = record_from(
+            "abc",
+            "projects/app/abc.jsonl",
+            &[
+                json::json!({
+                    "sessionId": "11111111-2222-4333-8444-555555555555",
+                    "cwd": "/first",
+                    "timestamp": "2020-01-02T00:00:02Z"
+                }),
+                json::json!({
+                    "sessionId": "99999999-2222-4333-8444-555555555555",
+                    "cwd": "/second",
+                    "timestamp": "2020-01-02T00:00:01Z"
+                }),
+            ],
+        );
+        assert_eq!(record.id, "claude:99999999-2222-4333-8444-555555555555");
+        assert_eq!(record.cwd, "/first");
+        let early = chrono::DateTime::parse_from_rfc3339("2020-01-02T00:00:01Z")
+            .expect("rfc3339")
+            .timestamp_millis();
+        let late = chrono::DateTime::parse_from_rfc3339("2020-01-02T00:00:02Z")
+            .expect("rfc3339")
+            .timestamp_millis();
+        assert_eq!(record.start_ms, early);
+        assert_eq!(record.last_ms, late);
+    }
+
+    #[test]
+    fn line_prefers_custom_title_then_named_then_prompt() {
+        let custom = record_from(
+            "abc",
+            "projects/app/abc.jsonl",
+            &[
+                json::json!({"type": "user", "message": {"content": "plain prompt"}}),
+                json::json!({"type": "ai-title", "aiTitle": "named"}),
+                json::json!({"type": "custom-title", "customTitle": "custom"}),
+            ],
+        );
+        assert_eq!(custom.title, "custom");
+
+        let named = record_from(
+            "abc",
+            "projects/app/abc.jsonl",
+            &[
+                json::json!({"type": "user", "message": {"content": "plain prompt"}}),
+                json::json!({"type": "ai-title", "aiTitle": "named"}),
+                json::json!({"type": "summary", "summary": "ignored summary"}),
+            ],
+        );
+        assert_eq!(named.title, "named");
+
+        let from_summary = record_from(
+            "abc",
+            "projects/app/abc.jsonl",
+            &[json::json!({"type": "summary", "summary": "from summary"})],
+        );
+        assert_eq!(from_summary.title, "from summary");
+    }
+
+    #[test]
+    fn line_ignores_custom_title_and_sidechain_ids_for_subagents() {
+        let uuid = "11111111-2222-4333-8444-555555555555";
+        let record = record_from(
+            "child",
+            "projects/app/parent/subagents/child.jsonl",
+            &[
+                json::json!({"type": "custom-title", "customTitle": "Nope"}),
+                json::json!({
+                    "type": "user",
+                    "uuid": uuid,
+                    "message": {"content": "child prompt"}
+                }),
+                json::json!({
+                    "type": "user",
+                    "isSidechain": true,
+                    "uuid": "22222222-2222-4333-8444-555555555555",
+                    "message": {"content": "side"}
+                }),
+            ],
+        );
+        assert!(!record.main);
+        assert_eq!(record.title, "child prompt");
+        assert_eq!(record.family_ids, Vec::<String>::new());
+    }
+
+    #[test]
+    fn line_records_main_message_uuids_and_compact_summaries() {
+        let first = "11111111-2222-4333-8444-555555555555";
+        let second = "22222222-2222-4333-8444-555555555555";
+        let record = record_from(
+            "abc",
+            "projects/app/abc.jsonl",
+            &[
+                json::json!({
+                    "type": "user",
+                    "uuid": first,
+                    "message": {"content": "hello"}
+                }),
+                json::json!({
+                    "type": "user",
+                    "uuid": second,
+                    "isCompactSummary": true,
+                    "message": {"content": "later"}
+                }),
+                json::json!({
+                    "type": "user",
+                    "isSidechain": true,
+                    "uuid": "33333333-2222-4333-8444-555555555555",
+                    "message": {"content": "side"}
+                }),
+            ],
+        );
+        assert_eq!(record.family_root, first);
+        assert_eq!(record.family_leaf, second);
+        assert_eq!(record.family_ids, [first, second]);
+        assert_eq!(record.title, "hello");
+    }
+
+    #[test]
+    fn pre_r31_parser_state_without_agent_is_restored_on_append() {
+        let file = SessionFile::new("sess", "sess.jsonl");
+        let encoded = json::to_value(super::ClaudeState::new(AGENT, &file, None)).expect("state");
+        let mut object = encoded;
+        assert!(
+            object
+                .as_object_mut()
+                .expect("object")
+                .remove("agent")
+                .is_some()
+        );
+        let raw = json::to_string(&object).expect("json");
+        let mut parser = super::parser_for(AGENT, &file, Some(&raw)).expect("restore");
+        parser
+            .push(&json::json!({
+                "type": "user",
+                "timestamp": "2026-01-01T00:00:00Z",
+                "message": {"content": "hello"}
+            }))
+            .expect("append");
+        let record = parser.finish().expect("finish").record.expect("record");
+        assert_eq!(record.agent, AGENT);
+        assert_eq!(record.title, "hello");
     }
 }

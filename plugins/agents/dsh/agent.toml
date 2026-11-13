@@ -1,0 +1,5 @@
+id = "dsh"
+display_name = "DeepSeek Harness"
+binary = "dsh"
+
+# Session reader only in R-32. No connect adapter in this tree.

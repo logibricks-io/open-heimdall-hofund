@@ -6,13 +6,13 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Days, Local, NaiveDate, NaiveTime, TimeZone};
 use hofund_control_proto::{
-    ControlError, ControlErrorKind, SessionConsent, SessionDayStats, SessionDetailResponse,
-    SessionListQuery, SessionListResponse, SessionManageAgent, SessionManageQuery,
-    SessionManageResponse, SessionOverviewDay, SessionOverviewQuery, SessionOverviewResponse,
-    SessionOverviewTop, SessionProgressResponse, SessionReadAgent, SessionReadsPatchRequest,
-    SessionReadsResponse, SessionSearchHit, SessionSearchQuery, SessionSearchResponse,
-    SessionStatShare, SessionStatsQuery, SessionStatsResponse, SessionSummary, SessionTokenTotals,
-    SessionTranscriptPart, SessionTranscriptResponse,
+    ControlError, ControlErrorKind, DEFAULT_SESSION_LIST_LIMIT, SessionConsent, SessionDayStats,
+    SessionDetailResponse, SessionListQuery, SessionListResponse, SessionManageAgent,
+    SessionManageQuery, SessionManageResponse, SessionOverviewDay, SessionOverviewQuery,
+    SessionOverviewResponse, SessionOverviewTop, SessionProgressResponse, SessionReadAgent,
+    SessionReadsPatchRequest, SessionReadsResponse, SessionSearchHit, SessionSearchQuery,
+    SessionSearchResponse, SessionStatShare, SessionStatsQuery, SessionStatsResponse,
+    SessionSummary, SessionTokenTotals, SessionTranscriptPart, SessionTranscriptResponse,
 };
 use hofund_gateway::control::ControlFailure;
 use hofund_model_catalog::EffectivePricer;
@@ -144,52 +144,59 @@ impl SessionControl {
             .collect();
         let mut response = SessionOverviewResponse::default();
         response.count = u64::try_from(matching.len()).unwrap_or(u64::MAX);
-        let mut costs: Vec<f64> = matching.iter().map(|record| record.cost).collect();
-        costs.sort_by(f64::total_cmp);
-        if !costs.is_empty() {
-            let rank = ((costs.len() as f64) * 0.5).ceil() as usize;
-            response.median_cost = costs[rank.saturating_sub(1)];
-        }
+        let mut costs = Vec::with_capacity(matching.len());
+        let mut top = Vec::with_capacity(matching.len());
         let mut days: BTreeMap<String, SessionOverviewDay> = BTreeMap::new();
-        for record in &matching {
+        for record in matching.iter().copied() {
+            let mut record_cost = 0.0;
             let mut seen = BTreeSet::new();
             for day in &record.days {
                 if since_text
                     .as_deref()
                     .is_some_and(|since| day.date.as_str() < since)
+                    || (!query.model.is_empty() && day.model != query.model)
                     || !seen.insert(day.date.clone())
                 {
                     continue;
                 }
                 let mut cost = 0.0;
-                for share in record.days.iter().filter(|share| share.date == day.date) {
+                for share in record.days.iter().filter(|share| {
+                    share.date == day.date && (query.model.is_empty() || share.model == query.model)
+                }) {
                     cost += self
                         .price_for(&record.agent, &share.model)
                         .map_or(0.0, |price| token_cost(price, share.tokens));
                 }
+                record_cost += cost;
                 let entry = days.entry(day.date.clone()).or_default();
                 entry.date.clone_from(&day.date);
                 entry.count = entry.count.saturating_add(1);
                 entry.cost += cost;
             }
+            costs.push(record_cost);
+            top.push((record, record_cost));
+        }
+        costs.sort_by(f64::total_cmp);
+        if !costs.is_empty() {
+            let rank = ((costs.len() as f64) * 0.5).ceil() as usize;
+            response.median_cost = costs[rank.saturating_sub(1)];
         }
         response.by_day = days.into_values().collect();
-        let mut top: Vec<&&SessionRecord> =
-            matching.iter().filter(|record| record.cost > 0.0).collect();
+        top.retain(|(_, cost)| *cost > 0.0);
         top.sort_by(|left, right| {
             right
-                .cost
-                .total_cmp(&left.cost)
-                .then_with(|| left.id.cmp(&right.id))
+                .1
+                .total_cmp(&left.1)
+                .then_with(|| left.0.id.cmp(&right.0.id))
         });
         response.top = top
             .into_iter()
             .take(8)
-            .map(|record| {
+            .map(|(record, cost)| {
                 let mut row = SessionOverviewTop::default();
                 row.id.clone_from(&record.id);
                 row.title.clone_from(&record.title);
-                row.cost = record.cost;
+                row.cost = cost;
                 row
             })
             .collect();
@@ -271,18 +278,35 @@ impl SessionControl {
         query: SessionSearchQuery,
         cancelled: &AtomicBool,
     ) -> Result<SessionSearchResponse, ControlFailure> {
+        self.search_with_budget(query, cancelled, Duration::from_secs(8))
+    }
+
+    fn search_with_budget(
+        &self,
+        query: SessionSearchQuery,
+        cancelled: &AtomicBool,
+        time_budget: Duration,
+    ) -> Result<SessionSearchResponse, ControlFailure> {
         const HIT_CAP: usize = 200;
-        const TIME_BUDGET: Duration = Duration::from_secs(8);
 
         let started = Instant::now();
+        let is_stopped = || cancelled.load(Ordering::SeqCst) || started.elapsed() >= time_budget;
         let needle = query.q.to_lowercase();
-        let records = self.records()?;
         let mut response = SessionSearchResponse::default();
+        if is_stopped() {
+            response.cut = true;
+            return Ok(response);
+        }
+        let records = self.records()?;
+        if is_stopped() {
+            response.cut = true;
+            return Ok(response);
+        }
         for record in records
             .iter()
             .filter(|record| query.agent.is_empty() || record.agent == query.agent)
         {
-            if cancelled.load(Ordering::SeqCst) || started.elapsed() >= TIME_BUDGET {
+            if is_stopped() {
                 response.cut = true;
                 break;
             }
@@ -296,10 +320,27 @@ impl SessionControl {
             let Ok((root, file)) = self.session_file(store.as_ref(), record, None) else {
                 continue;
             };
-            let Ok(transcript) = hofund_sessions::read::transcript(&root, store.as_ref(), &file)
-            else {
-                continue;
+            if is_stopped() {
+                response.cut = true;
+                break;
+            }
+            let transcript = match hofund_sessions::read::transcript_with_cancel(
+                &root,
+                store.as_ref(),
+                &file,
+                &is_stopped,
+            ) {
+                Ok(Some(transcript)) => transcript,
+                Ok(None) => {
+                    response.cut = true;
+                    break;
+                }
+                Err(_) => continue,
             };
+            if is_stopped() {
+                response.cut = true;
+                break;
+            }
             if let Some(excerpt) = transcript
                 .parts
                 .iter()
@@ -345,20 +386,11 @@ impl SessionControl {
                 .cmp(&left.count)
                 .then_with(|| left.agent.cmp(&right.agent))
         });
-        response.agent = if !query.agent.is_empty()
-            && response.agents.iter().any(|row| row.agent == query.agent)
-        {
-            query.agent
-        } else {
-            response
-                .agents
-                .first()
-                .map(|row| row.agent.clone())
-                .unwrap_or_default()
-        };
+        response.agent = query.agent;
         response.sessions = records
             .iter()
             .filter(|record| response.agent.is_empty() || record.agent == response.agent)
+            .take(DEFAULT_SESSION_LIST_LIMIT)
             .map(session_summary)
             .collect();
         response.trash_dir = self
@@ -561,6 +593,7 @@ fn session_summary(record: &SessionRecord) -> SessionSummary {
     summary.cwd.clone_from(&record.cwd);
     summary.last_ms = record.last_ms;
     summary.models = record.model_ids();
+    summary.subagents.clone_from(&record.subagents);
     summary.tokens = wire_tokens(record.tokens());
     summary.cost = record.cost;
     summary.unpriced = record.unpriced;
@@ -737,4 +770,59 @@ fn session_internal() -> ControlFailure {
         "sessions",
     )
     .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use hofund_model_catalog::{
+        CatalogSettings, EffectivePricer, ListPriceLookup, ModelCatalog, Price, ReqwestFetcher,
+    };
+
+    use super::*;
+
+    struct NoListPrices;
+
+    impl ListPriceLookup for NoListPrices {
+        fn list_price(&self, _provider_id: &str, _model: &str) -> Option<Price> {
+            None
+        }
+    }
+
+    fn control(dir: &Path) -> SessionControl {
+        let fetcher = ReqwestFetcher::new().expect("catalog fetcher");
+        let catalog = ModelCatalog::open(dir, CatalogSettings::default(), Arc::new(fetcher))
+            .expect("catalog");
+        let pricing = EffectivePricer::new(
+            hofund_config::UsageSettings::default(),
+            catalog,
+            Arc::new(NoListPrices),
+        );
+        SessionControl::new(&dir.join("hofund.toml"), Vec::new(), Arc::new(pricing))
+    }
+
+    fn query() -> SessionSearchQuery {
+        let mut query = SessionSearchQuery::default();
+        query.q = "needle".to_owned();
+        query
+    }
+
+    #[test]
+    fn search_stops_immediately_when_the_budget_is_expired() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let response = control(dir.path())
+            .search_with_budget(query(), &AtomicBool::new(false), Duration::ZERO)
+            .unwrap_or_else(|_| panic!("search failed"));
+        assert!(response.cut);
+        assert!(response.hits.is_empty());
+    }
+
+    #[test]
+    fn search_stops_immediately_when_the_request_is_cancelled() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let response = control(dir.path())
+            .search_with_budget(query(), &AtomicBool::new(true), Duration::from_secs(8))
+            .unwrap_or_else(|_| panic!("search failed"));
+        assert!(response.cut);
+        assert!(response.hits.is_empty());
+    }
 }

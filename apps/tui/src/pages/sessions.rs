@@ -94,6 +94,12 @@ impl SessionsPage {
         self.load_error.as_deref()
     }
 
+    /// Last fetch generation recorded.
+    #[must_use]
+    pub fn fetch_gen(&self) -> u64 {
+        self.read_generation
+    }
+
     /// `days` query for the active range tab.
     #[must_use]
     pub fn days(&self) -> u32 {
@@ -362,6 +368,12 @@ impl SessionsPage {
     /// Clears an open picker.
     pub fn close_picker(&mut self) {
         self.picker = None;
+    }
+
+    /// Whether the filter picker is open and should capture keys.
+    #[must_use]
+    pub fn captures(&self) -> bool {
+        self.picker.is_some()
     }
 }
 

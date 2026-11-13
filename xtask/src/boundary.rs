@@ -19,7 +19,25 @@ use syn::visit::Visit;
 const ALLOWED_DEPS: &[&str] = &["hofund-plugin-api", "hofund-plugin-sdk"];
 
 /// Extra runtime dependencies reviewed for one plugin package.
-const PLUGIN_EXTRA_DEPS: &[(&str, &[&str])] = &[("hofund-plugin-subscription-claude", &["regex"])];
+const PLUGIN_EXTRA_DEPS: &[(&str, &[&str])] = &[
+    ("hofund-plugin-agent-cline", &["regex"]),
+    ("hofund-plugin-agent-cursor", &["regex"]),
+    ("hofund-plugin-agent-dsh", &["regex", "zstd"]),
+    ("hofund-plugin-agent-hermes", &["sha2"]),
+    ("hofund-plugin-agent-minimax-code", &["base64"]),
+    ("hofund-plugin-agent-workbuddy", &["regex"]),
+    (
+        "hofund-plugin-subscription-claude",
+        &[
+            "bytes",
+            "futures-util",
+            "regex",
+            "ring",
+            "serde",
+            "serde_json",
+        ],
+    ),
+];
 
 fn plugin_allows_dep(package: &str, name: &str) -> bool {
     PLUGIN_EXTRA_DEPS
@@ -1147,7 +1165,8 @@ pub fn linkers_of(workspace: &Path, package: &str) -> Result<BTreeSet<String>, S
     Ok(linkers)
 }
 
-/// The plugin's link closure must be the API and SDK closures, plus itself.
+/// The plugin's link closure must be the API and SDK closures, plus itself
+/// and the closures of any reviewed `PLUGIN_EXTRA_DEPS` for that package.
 ///
 /// # Errors
 ///
@@ -1165,12 +1184,30 @@ pub fn link_allowance(workspace: &Path, package: &str) -> Result<(), String> {
     let root = workspace_package_id(&meta, package, workspace)?;
     allowed.insert(root.clone());
     let linked = closure(&meta, &root);
+    // Reviewed extra deps (PLUGIN_EXTRA_DEPS) are already allowed in the
+    // manifest check. Their normal/build closures must be allowed here too,
+    // or a plugin that legitimately links rusqlite (etc.) fails on transitives
+    // that are not already in the API/SDK closure.
+    if let Some((_, extras)) = PLUGIN_EXTRA_DEPS.iter().find(|(pkg, _)| *pkg == package) {
+        for id in &linked {
+            if package_name_of(&meta, id).is_some_and(|name| extras.contains(&name)) {
+                allowed.extend(closure(&meta, id));
+            }
+        }
+    }
     let extra: Vec<&String> = linked.difference(&allowed).collect();
     if extra.is_empty() {
         Ok(())
     } else {
         Err(format!("{package} links {}", extra_list(&extra)))
     }
+}
+
+fn package_name_of<'a>(meta: &'a Metadata, id: &str) -> Option<&'a str> {
+    meta.ids_by_manifest
+        .iter()
+        .find(|(_, pkg_id, _)| pkg_id == id)
+        .map(|(name, _, _)| name.as_str())
 }
 
 fn extra_list(names: &[&String]) -> String {
@@ -1851,6 +1888,16 @@ cc = "1"
             None
         );
         assert_eq!(
+            dependency_error(
+                "futures-util",
+                &[],
+                false,
+                None,
+                Some("hofund-plugin-subscription-claude")
+            ),
+            None
+        );
+        assert_eq!(
             dependency_error("chrono", &[], false, None, Some("hofund-plugin-echo")).as_deref(),
             Some("depends on chrono")
         );
@@ -2032,7 +2079,31 @@ cc = "1"
             .expect("workspace")
             .to_path_buf();
         super::link_allowance(&workspace, "hofund-plugin-fixture").expect("fixture closure");
+        super::link_allowance(&workspace, "hofund-plugin-agent-agy")
+            .expect("agy stays inside the default api/sdk allowance");
+        super::link_allowance(&workspace, "hofund-plugin-agent-hermes")
+            .expect("reviewed sha2 closure is part of the allowance");
         let ids = super::link_ids(&workspace, "hofund-plugin-fixture").expect("ids");
+        let agy = super::link_ids(&workspace, "hofund-plugin-agent-agy").expect("agy ids");
+        let hermes = super::link_ids(&workspace, "hofund-plugin-agent-hermes").expect("hermes ids");
+        assert!(
+            agy.iter()
+                .all(|id| !(id.contains("rusqlite@") || id.contains("#rusqlite@"))),
+            "agy no longer links rusqlite, got {agy:?}"
+        );
+        assert!(
+            hermes
+                .iter()
+                .any(|id| id.contains("sha2@") || id.contains("#sha2@")),
+            "hermes must actually link sha2, got {hermes:?}"
+        );
+        assert!(
+            ids.iter().all(|id| !(id.contains("rusqlite@")
+                || id.contains("#rusqlite@")
+                || id.contains("sha2@")
+                || id.contains("#sha2@"))),
+            "the fixture must not inherit a sibling plugin's extra dep: {ids:?}"
+        );
         assert!(
             ids.iter()
                 .any(|id| id.contains("crates/kernel/plugin-api#")),

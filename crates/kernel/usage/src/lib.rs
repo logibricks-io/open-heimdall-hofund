@@ -14,6 +14,7 @@ use thiserror::Error;
 mod attribution;
 mod decode;
 mod fx;
+pub mod gateway_sessions;
 mod key;
 mod limits;
 mod price;
@@ -26,6 +27,7 @@ pub use attribution::{
 };
 pub use decode::{FlowTracker, decode_of, decode_row, decode_window, row_tokens_per_second};
 pub use fx::{CnyRate, DisplayCurrency, Fx, RateFetcher};
+pub use gateway_sessions::{GatewayModelTotals, GatewaySession, gateway_sessions, local_date};
 pub use key::{CallerModel, CallerTotals};
 pub use limits::{KeyUsage, UsageDetails};
 pub use price::{RowPricing, TokenPrice, token_bearing};
@@ -90,6 +92,9 @@ pub fn window_start<Tz: TimeZone>(window: Window, now: DateTime<Tz>) -> Option<i
 
 /// Outcome marker for a try handed to another member after billing tokens.
 pub const OUTCOME_HANDED_ON: &str = "handed_on";
+
+/// Outcome marker for a request abandoned on the gateway's own waiter's deadline.
+pub const OUTCOME_STOPPED_WAITING: &str = "stopped_waiting";
 
 /// Whether a row counts toward request totals.
 #[must_use]
@@ -159,7 +164,8 @@ pub struct Row {
     pub cost_usd: Option<f64>,
     /// List price per million tokens stored on the row.
     pub price: Option<TokenPrice>,
-    /// Row kind for handed-off, refusal, or turned-away tries; empty for ordinary rows.
+    /// Row kind for a handoff, refusal, stopped wait, or other special outcome;
+    /// empty for ordinary rows.
     pub outcome: String,
     /// Five-byte API-key fingerprint of the provider key that served the request.
     /// Empty when the member has no API key.
@@ -178,6 +184,12 @@ pub struct Row {
     pub served_model: String,
     /// Client session id from gateway headers when recorded.
     pub session_id: String,
+    /// First native session header, when one was sent.
+    pub native_session_id: String,
+    /// Request path for hub tool calls.
+    pub endpoint: String,
+    /// Empty for model calls, `mcp` for hub tool calls.
+    pub kind: String,
 }
 
 /// One successful request as routing measurements read it.
@@ -263,7 +275,10 @@ impl Ledger {
             ("outcome", "TEXT NOT NULL DEFAULT ''"),
             ("provider_key_id", "TEXT NOT NULL DEFAULT ''"),
             ("client_agent", "TEXT NOT NULL DEFAULT ''"),
-            ("session_id", "TEXT NOT NULL DEFAULT ''"),
+            ("session_id", "TEXT"),
+            ("native_session_id", "TEXT"),
+            ("endpoint", "TEXT"),
+            ("kind", "TEXT NOT NULL DEFAULT ''"),
             ("first_text_ms", "INTEGER"),
             ("first_reasoning_ms", "INTEGER"),
             ("flow_ms", "INTEGER"),
@@ -320,8 +335,8 @@ impl Ledger {
                         reasoning_tokens, reasoning_hidden,
                         priced, cost_usd, price_input, price_output, price_cache_read,
                         price_cache_write, price_cache_write_1h, outcome, provider_key_id,
-                        client_agent, ttft_ms, session_id, first_text_ms, first_reasoning_ms,
-                        flow_ms, served_model
+                        client_agent, ttft_ms, session_id, native_session_id, endpoint, kind,
+                        first_text_ms, first_reasoning_ms, flow_ms, served_model
                  FROM requests ORDER BY id",
             )
             .map_err(|error| UsageError(error.to_string()))?;
@@ -457,8 +472,8 @@ impl Ledger {
                         reasoning_tokens, reasoning_hidden,
                         priced, cost_usd, price_input, price_output, price_cache_read,
                         price_cache_write, price_cache_write_1h, outcome, provider_key_id,
-                        client_agent, ttft_ms, session_id, first_text_ms, first_reasoning_ms,
-                        flow_ms, served_model
+                        client_agent, ttft_ms, session_id, native_session_id, endpoint, kind,
+                        first_text_ms, first_reasoning_ms, flow_ms, served_model
                  FROM requests WHERE created_unix >= ?1 ORDER BY id DESC LIMIT ?2",
             )
             .map_err(|error| UsageError(error.to_string()))?;
@@ -557,12 +572,19 @@ fn read_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Row> {
         provider_key_id: row.get(23)?,
         client_agent: normalize_client_agent(&row.get::<_, String>(24)?),
         ttft_ms: row.get(25)?,
-        session_id: row.get(26)?,
-        first_text_ms: row.get(27)?,
-        first_reasoning_ms: row.get(28)?,
-        flow_ms: row.get(29)?,
-        served_model: row.get(30)?,
+        session_id: row.get::<_, Option<String>>(26)?.unwrap_or_default(),
+        native_session_id: row.get::<_, Option<String>>(27)?.unwrap_or_default(),
+        endpoint: row.get::<_, Option<String>>(28)?.unwrap_or_default(),
+        kind: row.get(29)?,
+        first_text_ms: row.get(30)?,
+        first_reasoning_ms: row.get(31)?,
+        flow_ms: row.get(32)?,
+        served_model: row.get(33)?,
     })
+}
+
+pub(crate) fn sql_nullable_text(value: &str) -> Option<&str> {
+    if value.is_empty() { None } else { Some(value) }
 }
 
 fn totals_of_rows(rows: &[Row]) -> Totals {
@@ -911,6 +933,44 @@ mod tests {
     }
 
     #[test]
+    fn r33_ledger_adds_gateway_session_columns() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("usage.sqlite");
+        {
+            let connection = rusqlite::Connection::open(&path).expect("old database");
+            connection
+                .execute_batch(
+                    "CREATE TABLE requests (
+                        id INTEGER PRIMARY KEY,
+                        created_unix INTEGER NOT NULL,
+                        model TEXT NOT NULL,
+                        upstream TEXT NOT NULL,
+                        input_tokens INTEGER,
+                        output_tokens INTEGER,
+                        latency_ms INTEGER NOT NULL,
+                        status TEXT NOT NULL,
+                        session_id TEXT NOT NULL DEFAULT ''
+                    );
+                    INSERT INTO requests (created_unix, model, upstream, latency_ms, status, session_id)
+                    VALUES (1, 'old', 'up', 1, '200', '');",
+                )
+                .expect("old schema");
+        }
+        let ledger = Ledger::open(&path).expect("migrate");
+        let mut row = row(2, None, None);
+        row.session_id = "sess".to_owned();
+        row.native_session_id = "native".to_owned();
+        row.endpoint = "/v1/chat".to_owned();
+        row.kind = "mcp".to_owned();
+        ledger.record(&row).expect("insert");
+        let rows = ledger.rows().expect("rows");
+        assert_eq!(rows[1].session_id, "sess");
+        assert_eq!(rows[1].native_session_id, "native");
+        assert_eq!(rows[1].endpoint, "/v1/chat");
+        assert_eq!(rows[1].kind, "mcp");
+    }
+
+    #[test]
     fn b4c_routing_rows_keep_ttft_and_migrate_an_old_ledger() {
         let dir = tempfile::tempdir().expect("temp dir");
         let path = dir.path().join("usage.sqlite");
@@ -965,5 +1025,19 @@ mod tests {
             )
             .expect("plan");
         assert!(plan.contains("requests_created_unix"), "{plan}");
+    }
+
+    #[test]
+    fn d84_stopped_waiting_is_a_request_outcome() {
+        assert!(super::counts_as_request(super::OUTCOME_STOPPED_WAITING));
+        let dir = tempfile::tempdir().expect("temp dir");
+        let ledger = Ledger::open(&dir.path().join("usage.sqlite")).expect("ledger");
+        let mut stopped = row(20, None, None);
+        stopped.status = "504".to_owned();
+        stopped.outcome = super::OUTCOME_STOPPED_WAITING.to_owned();
+        ledger.record(&stopped).expect("record");
+        let (rows, totals) = ledger.summary(None, 10).expect("summary");
+        assert_eq!(rows[0].outcome, "stopped_waiting");
+        assert_eq!(totals.requests, 1);
     }
 }

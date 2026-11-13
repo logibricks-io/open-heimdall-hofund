@@ -1,0 +1,1 @@
+{"id":"m_assistant","role":"assistant","modelID":"model-json","time":{"created":1767225601000,"completed":1767225602000},"tokens":{"input":8,"output":4,"reasoning":1,"cache":{"read":2,"write":1}}}

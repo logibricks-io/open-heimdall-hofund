@@ -11,9 +11,13 @@
 )]
 
 pub mod consent;
+pub mod gateway_hidden;
 pub mod index;
 pub mod json;
+pub mod merge;
 pub mod open;
 pub mod pricing;
 pub mod read;
+mod sqlite;
 mod storage;
+pub mod wsl;

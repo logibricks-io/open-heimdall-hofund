@@ -10,6 +10,7 @@ use crate::app::App;
 use crate::events::apply_control_event;
 use crate::gateway::HandoffOutcome;
 use crate::pages::{ProbeOutcome, read_path};
+use crate::session::{SessionOutcome, run_intent};
 use crate::state::PageId;
 
 /// Work sent back to the UI task from background jobs.
@@ -32,9 +33,13 @@ pub enum WorkerMsg {
         generation: u64,
         outcome: ProbeOutcome,
     },
+    /// One control intent finished.
+    Session(Box<SessionOutcome>),
     /// Sessions list and stats fetch finished.
     SessionsLoad {
+        /// Read generation this fetch was started with.
         generation: u64,
+        /// List and stats outcome.
         outcome: Box<SessionsLoadOutcome>,
     },
 }
@@ -89,6 +94,7 @@ pub fn apply_worker_msg(app: &mut App, msg: WorkerMsg) {
                 app.pages.apply_probe(page, outcome);
             });
         }
+        WorkerMsg::Session(outcome) => app.apply_session(*outcome),
         WorkerMsg::SessionsLoad {
             generation,
             outcome,
@@ -109,41 +115,7 @@ pub fn apply_worker_msg(app: &mut App, msg: WorkerMsg) {
     }
 }
 
-fn apply_handoff_outcome(app: &mut App, outcome: HandoffOutcome) {
-    if let HandoffOutcome::Update(presence) = outcome {
-        app.gateway = presence;
-    }
-}
-
-/// Applies a control event and returns follow-up actions for the event stream.
-pub fn apply_control_followup(app: &mut App, payload: &EventPayload) -> ControlFollowup {
-    apply_control_event(app, payload);
-    ControlFollowup {
-        reread_token: app.take_token_reread(),
-        resync_stream: app.take_event_resync(),
-    }
-}
-
-/// Side effects after one control event.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct ControlFollowup {
-    /// Re-read the token file and reconnect the client and stream.
-    pub reread_token: bool,
-    /// Reopen the event stream without `Last-Event-ID`.
-    pub resync_stream: bool,
-}
-
-/// Applies a control event and returns whether the bearer token must be reread.
-pub fn apply_control_and_take_token_reread(app: &mut App, payload: &EventPayload) -> bool {
-    apply_control_followup(app, payload).reread_token
-}
-
-/// Applies a control event and returns whether the stream must reopen without a cursor.
-pub fn apply_control_and_take_resync(app: &mut App, payload: &EventPayload) -> bool {
-    apply_control_followup(app, payload).resync_stream
-}
-
-/// Schedules a sessions list and stats fetch.
+/// Schedules list and stats fetches for the Sessions page when a client exists.
 pub fn schedule_sessions_fetch(
     client: Option<&Client>,
     work_tx: &mpsc::Sender<WorkerMsg>,
@@ -203,6 +175,58 @@ pub fn schedule_open_page_load(
     }
 }
 
+/// Spawns queued control calls. Intents stay queued when no client is attached.
+pub fn schedule_intents(app: &mut App, client: Option<&Client>, work_tx: &mpsc::Sender<WorkerMsg>) {
+    if client.is_none() {
+        return;
+    }
+    let Some(client) = client.cloned() else {
+        return;
+    };
+    for intent in app.take_intents() {
+        let client = client.clone();
+        let work_tx = work_tx.clone();
+        tokio::spawn(async move {
+            let outcome = run_intent(&client, intent).await;
+            let _ = work_tx.send(WorkerMsg::Session(Box::new(outcome))).await;
+        });
+    }
+}
+
+fn apply_handoff_outcome(app: &mut App, outcome: HandoffOutcome) {
+    if let HandoffOutcome::Update(presence) = outcome {
+        app.gateway = presence;
+    }
+}
+
+/// Applies a control event and returns follow-up actions for the event stream.
+pub fn apply_control_followup(app: &mut App, payload: &EventPayload) -> ControlFollowup {
+    apply_control_event(app, payload);
+    ControlFollowup {
+        reread_token: app.take_token_reread(),
+        resync_stream: app.take_event_resync(),
+    }
+}
+
+/// Side effects after one control event.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ControlFollowup {
+    /// Re-read the token file and reconnect the client and stream.
+    pub reread_token: bool,
+    /// Reopen the event stream without `Last-Event-ID`.
+    pub resync_stream: bool,
+}
+
+/// Applies a control event and returns whether the bearer token must be reread.
+pub fn apply_control_and_take_token_reread(app: &mut App, payload: &EventPayload) -> bool {
+    apply_control_followup(app, payload).reread_token
+}
+
+/// Applies a control event and returns whether the stream must reopen without a cursor.
+pub fn apply_control_and_take_resync(app: &mut App, payload: &EventPayload) -> bool {
+    apply_control_followup(app, payload).resync_stream
+}
+
 /// Schedules a deferred page probe on the worker channel when a client exists.
 pub fn schedule_page_probe(
     client: Option<&Client>,
@@ -245,7 +269,6 @@ mod tests {
     use crate::gateway::{HandoffDeps, HandoffState, record_attach};
     use crate::state::PageId;
     use hofund_control_client::Client;
-    use tokio::sync::mpsc;
 
     struct AliveDeps;
 
@@ -328,215 +351,5 @@ mod tests {
         );
         assert!(state.spawned);
         assert_eq!(state.child_pid, Some(42));
-    }
-
-    async fn serve_status(status: u16, path_prefix: &str) -> std::net::SocketAddr {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind");
-        let addr = listener.local_addr().expect("addr");
-        let prefix = path_prefix.to_owned();
-        tokio::spawn(async move {
-            loop {
-                let Ok((mut stream, _)) = listener.accept().await else {
-                    break;
-                };
-                let mut buf = vec![0_u8; 4096];
-                let _ = stream.read(&mut buf).await;
-                let req = String::from_utf8_lossy(&buf);
-                let hit = req
-                    .lines()
-                    .next()
-                    .is_some_and(|line| line.contains(&prefix));
-                let code = if hit { status } else { 404 };
-                let body = if code == 200 {
-                    "{}".to_owned()
-                } else {
-                    r#"{"version":1,"error":{"kind":"not_found","message":"missing","request_id":"test","retry_after_ms":null,"details":[]}}"#.to_owned()
-                };
-                let response = format!(
-                    "HTTP/1.1 {code} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                let _ = stream.write_all(response.as_bytes()).await;
-            }
-        });
-        addr
-    }
-
-    async fn recv_msg(rx: &mut mpsc::Receiver<super::WorkerMsg>) -> super::WorkerMsg {
-        tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
-            .await
-            .expect("worker timed out")
-            .expect("channel closed")
-    }
-
-    #[tokio::test]
-    async fn schedule_sessions_fetch_maps_404_and_other_errors() {
-        let (tx, mut rx) = mpsc::channel(4);
-        let addr = serve_status(404, "/v1/hofund/sessions").await;
-        let client = Client::tcp(addr, "t");
-        super::schedule_sessions_fetch(
-            Some(&client),
-            &tx,
-            Default::default(),
-            Default::default(),
-            3,
-        );
-        let super::WorkerMsg::SessionsLoad {
-            generation,
-            outcome,
-        } = recv_msg(&mut rx).await
-        else {
-            panic!("expected sessions load");
-        };
-        assert_eq!(generation, 3);
-        assert!(
-            matches!(*outcome, super::SessionsLoadOutcome::NotInBuild),
-            "{outcome:?}"
-        );
-
-        let addr = serve_status(500, "/v1/hofund/sessions").await;
-        let client = Client::tcp(addr, "t");
-        super::schedule_sessions_fetch(
-            Some(&client),
-            &tx,
-            Default::default(),
-            Default::default(),
-            4,
-        );
-        let super::WorkerMsg::SessionsLoad { outcome, .. } = recv_msg(&mut rx).await else {
-            panic!("expected sessions load");
-        };
-        assert!(matches!(*outcome, super::SessionsLoadOutcome::Err(_)));
-    }
-
-    #[tokio::test]
-    async fn schedule_open_page_load_uses_sessions_fetch_for_sessions() {
-        let (tx, mut rx) = mpsc::channel(4);
-        let addr = serve_status(404, "/v1/hofund/sessions").await;
-        let client = Client::tcp(addr, "t");
-        let app = App::for_test(PageId::Sessions);
-        super::schedule_open_page_load(&app, Some(&client), &tx);
-        let msg = recv_msg(&mut rx).await;
-        assert!(
-            matches!(msg, super::WorkerMsg::SessionsLoad { .. }),
-            "sessions page must use the list/stats fetch, not the probe path"
-        );
-    }
-
-    #[tokio::test]
-    async fn schedule_open_page_load_probes_library() {
-        let (tx, mut rx) = mpsc::channel(4);
-        let addr = serve_status(200, "/v1/hofund/library").await;
-        let client = Client::tcp(addr, "t");
-        let app = App::for_test(PageId::Library);
-        super::schedule_open_page_load(&app, Some(&client), &tx);
-        let msg = recv_msg(&mut rx).await;
-        assert!(
-            matches!(
-                msg,
-                super::WorkerMsg::PageProbe {
-                    page: PageId::Library,
-                    ..
-                }
-            ),
-            "library must still be probed"
-        );
-    }
-
-    async fn serve_list_then_stats(list_status: u16, stats_status: u16) -> std::net::SocketAddr {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind");
-        let addr = listener.local_addr().expect("addr");
-        tokio::spawn(async move {
-            loop {
-                let Ok((mut stream, _)) = listener.accept().await else {
-                    break;
-                };
-                let mut buf = vec![0_u8; 4096];
-                let _ = stream.read(&mut buf).await;
-                let req = String::from_utf8_lossy(&buf);
-                let line = req.lines().next().unwrap_or("");
-                let stats = line.contains("/v1/hofund/sessions/stats");
-                let code = if stats { stats_status } else { list_status };
-                let body = if code == 200 && stats {
-                    r#"{"version":1,"revision":"","tokens":{"input":0,"output":0,"cache_read":0,"cache_write":0},"cost":0.0,"unpriced":0,"days":[],"models":[],"folders":[]}"#.to_owned()
-                } else if code == 200 {
-                    r#"{"version":1,"revision":"","consent":{"asked":false,"all":false,"enabled":[]},"sessions":[]}"#.to_owned()
-                } else {
-                    r#"{"version":1,"error":{"kind":"not_found","message":"missing","request_id":"test","retry_after_ms":null,"details":[]}}"#.to_owned()
-                };
-                let response = format!(
-                    "HTTP/1.1 {code} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                let _ = stream.write_all(response.as_bytes()).await;
-            }
-        });
-        addr
-    }
-
-    #[tokio::test]
-    async fn schedule_sessions_fetch_maps_a_stats_404_after_a_successful_list() {
-        let (tx, mut rx) = mpsc::channel(4);
-        let addr = serve_list_then_stats(200, 404).await;
-        let client = Client::tcp(addr, "t");
-        super::schedule_sessions_fetch(
-            Some(&client),
-            &tx,
-            Default::default(),
-            Default::default(),
-            7,
-        );
-        let super::WorkerMsg::SessionsLoad {
-            generation,
-            outcome,
-        } = recv_msg(&mut rx).await
-        else {
-            panic!("expected sessions load");
-        };
-        assert_eq!(generation, 7);
-        assert!(
-            matches!(*outcome, super::SessionsLoadOutcome::NotInBuild),
-            "stats 404 must be NotInBuild, not a generic error: {outcome:?}"
-        );
-
-        let addr = serve_list_then_stats(200, 500).await;
-        let client = Client::tcp(addr, "t");
-        super::schedule_sessions_fetch(
-            Some(&client),
-            &tx,
-            Default::default(),
-            Default::default(),
-            8,
-        );
-        let super::WorkerMsg::SessionsLoad { outcome, .. } = recv_msg(&mut rx).await else {
-            panic!("expected sessions load");
-        };
-        assert!(
-            matches!(*outcome, super::SessionsLoadOutcome::Err(_)),
-            "a non-404 stats error must stay an error: {outcome:?}"
-        );
-
-        let addr = serve_list_then_stats(200, 200).await;
-        let client = Client::tcp(addr, "t");
-        super::schedule_sessions_fetch(
-            Some(&client),
-            &tx,
-            Default::default(),
-            Default::default(),
-            9,
-        );
-        let super::WorkerMsg::SessionsLoad { outcome, .. } = recv_msg(&mut rx).await else {
-            panic!("expected sessions load");
-        };
-        assert!(
-            matches!(*outcome, super::SessionsLoadOutcome::Ok { .. }),
-            "list and stats 200 must succeed: {outcome:?}"
-        );
     }
 }

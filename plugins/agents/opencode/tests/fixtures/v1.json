@@ -1,0 +1,12 @@
+[
+  {
+    "id": "opencode:ses_v1",
+    "title": "Legacy session",
+    "cwd": "/work/legacy",
+    "start_ms": 1767225600000,
+    "last_ms": 1767225602000,
+    "tokens": {"input":10,"output":7,"cache_read":3,"cache_write":1,"cache_write_1h":0},
+    "models": {"model-v1":{"input":10,"output":7,"cache_read":3,"cache_write":1,"cache_write_1h":0}},
+    "subagents": []
+  }
+]
