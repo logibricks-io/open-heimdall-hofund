@@ -509,8 +509,11 @@ impl AccountsPage {
         }
         let url = matches!(dialog.challenge, SignInChallenge::OpenUrl { .. });
         dialog.proof.clear();
-        if !url && looks_like_path(&proof) {
-            return PageEffect::flash("use i to import a file; paste token text here", false);
+        if looks_like_path(&proof) {
+            return PageEffect::flash(
+                "use i to import a file; paste a callback URL or token text here",
+                false,
+            );
         }
         PageEffect::mutation(
             "submitting sign-in proof",

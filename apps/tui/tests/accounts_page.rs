@@ -219,6 +219,45 @@ async fn token_errors_and_debug_output_never_echo_proof_material() {
     assert!(!debug.contains("device-secret.test"), "{debug}");
 }
 
+#[tokio::test]
+async fn pkce_proof_rejects_filesystem_paths() {
+    let server = FakeServer::start(SubscriptionFlow::Pkce).await;
+    let client = hofund_control_client::Client::tcp(server.address, "token");
+    let mut app = loaded_app(&client).await;
+    app.handle_key(key('a'));
+    drive(&client, &mut app).await;
+    for character in "/tmp/export.json".chars() {
+        app.handle_key(key(character));
+    }
+    app.handle_key(enter());
+    assert!(app.take_intents().is_empty());
+    assert_eq!(
+        server.count(
+            "POST",
+            "/v1/hofund/subscriptions/example/sign-in/session-1/proof"
+        ),
+        0,
+        "a PKCE proof path must not be posted as a callback URL"
+    );
+    assert!(!render(&app).contains("/tmp/export.json"));
+
+    for character in "http://localhost/callback?code=callback-ok".chars() {
+        app.handle_key(key(character));
+    }
+    app.handle_key(enter());
+    drive(&client, &mut app).await;
+    let call = server.last_call(
+        "POST",
+        "/v1/hofund/subscriptions/example/sign-in/session-1/proof",
+    );
+    assert_eq!(
+        call.body["url"],
+        "http://localhost/callback?code=callback-ok"
+    );
+    assert!(call.body.get("token").is_none());
+    assert!(!render(&app).contains("callback-ok"));
+}
+
 #[test]
 fn newer_reload_drops_older_account_read_and_mutations_block_keys() {
     let mut app = App::for_test(PageId::Accounts);
