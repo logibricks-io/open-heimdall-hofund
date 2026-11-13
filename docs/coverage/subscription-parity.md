@@ -12,21 +12,21 @@ Legend: **Done** = matches the reference at checklist granularity; **Partial** =
 
 | Vendor section | Done | Partial | Missing | N/A | Unverified |
 |---|---|---|---|---|---|
-| Claude Pro/Max (`claude`) | 1 | 11 | 9 | 2 | 0 |
+| Claude Pro/Max (`claude`) | 1 | 17 | 3 | 2 | 0 |
 | Cursor (`cursor`) | 1 | 15 | 3 | 2 | 0 |
-| Devin (`devin`) | 2 | 5 | 11 | 1 | 0 |
+| Devin (`devin`) | 11 | 6 | 1 | 1 | 0 |
 | Zed (`zed`) | 0 | 6 | 1 | 3 | 0 |
 | Kiro (`kiro`) | 0 | 13 | 5 | 1 | 0 |
 | Factory / Droid (`factory`) | 1 | 15 | 0 | 3 | 0 |
 | Cline / ClinePass (`cline`) | 2 | 12 | 1 | 3 | 1 |
 | ChatGPT / Codex (`codex` backend) and ChatGPT API (`chatgpt-api`) | 8 | 11 | 2 | 0 | 0 |
-| GitHub Copilot (github.com and GHE) | 10 | 5 | 2 | 5 | 0 |
+| GitHub Copilot (github.com and GHE) | 15 | 2 | 0 | 5 | 0 |
 | Gemini CLI (Code Assist) | 8 | 6 | 2 | 2 | 0 |
-| Google Antigravity | 0 | 0 | 16 | 1 | 0 |
+| Google Antigravity | 10 | 4 | 2 | 1 | 0 |
 | SuperGrok (`grok`) | 10 | 6 | 0 | 2 | 0 |
 | Qoder (international + Qoder CN) | 1 | 10 | 9 | 0 | 0 |
 | CodeBuddy / WorkBuddy (CN + international) | 7 | 6 | 3 | 0 | 3 |
-| Z Code (`zcode`) | 6 | 9 | 2 | 0 | 2 |
+| Z Code (`zcode`) | 7 | 8 | 2 | 0 | 2 |
 
 Gaps that had no plan item before this audit (the supervisor's v0.2.0 plan and backlog now carry them under the item named):
 
@@ -44,7 +44,7 @@ Every other gap below maps to an existing plan item.
 
 **Reference files read:** `internal/provider/claude_signin.go`, `claude_auth.go`, `claude_dirs.go`, `claude_setup_token.go`, `claude_limits.go`, `claude_usage_cli.go`, `claude_warmup.go`, `claude_warmup.go`, `claude_probe.go`; `internal/gateway/claude_subscription.go`; `internal/claudebridge/mcp.go`.
 
-**Hofund path:** `plugins/subscriptions/claude/src/` (`lib.rs`, `cli.rs`, `creds.rs`, `account.rs`, `agent_sign_in.rs`, `discover.rs`, `import.rs`, `lock.rs`).
+**Hofund path:** `plugins/subscriptions/claude/src/` (`lib.rs`, `cli.rs`, `creds.rs`, `account.rs`, `agent_sign_in.rs`, `discover.rs`, `import.rs`, `lock.rs`, `upstream.rs`, `bridge/`).
 
 | # | capability | reference v0.1.3005 behaviour | hofund 08035c9 | status | gap to close |
 |---|------------|------------------------------|----------------|--------|--------------|
@@ -58,23 +58,23 @@ Every other gap below maps to an existing plan item.
 | b2 | import: keychain / other tools | Keychain item `claudeDirService` (`claude_dirs.go:42-58`) | File-only `.credentials.json` in agent home | Partial | Keychain import path |
 | c | token storage and encryption | Per-account config dir + optional macOS Keychain; the reference `logins.json` holds metadata (`claude_dirs.go`) | Encrypted account lease via daemon secret store; copies creds to account dir on use (`account.rs`, `creds.rs`) | Partial | Keychain parity; encryption model differs (hofund central store) — acceptable if behaviour matches |
 | d | refresh | Claude Code refreshes; `invalid_grant` → Refused, not rested (`claude_auth.go:1-12`, `25-41`) | `account::refresh` via `claude auth status --json` (`lib.rs:403-404`, `account.rs`) | Partial | Map refusal strings to `NeedsSignIn` / Refused like `ClaudeSignInRequired` (`claude_auth.go:25-41`) |
-| e | upstream request wire | No direct Anthropic HTTP; subprocess + MCP bridge (`claude_subscription.go:3-29`, `claudebridge/mcp.go:54-59`) | `upstream()` returns unsupported (`lib.rs:427-434`) | Missing | MCP bridge + long-lived runs (`claude_subscription.go:74-79`) |
-| f | inbound API shapes | Gateway `serveClaudeSubscription` for Anthropic Messages and translated Chat/Responses paths (`gateway.go:4995`, `claude_subscription.go:6041+`) | Not served | Missing | Chat Completions, Responses, Messages → bridge (`R-6`) |
-| g | streaming | Bridge streams Claude Code stdout/SSE to caller (`claude_subscription.go` run loop) | Not served | Missing | Stream bridge events to IR |
-| h | tool calls | MCP `tools/call` blocks; results on next HTTP request (`claude_subscription.go:9-13`, `mcp.go:36-48`) | Not served | Missing | Tool parking protocol (`R-6`) |
-| i | images | Gateway image tests pass through bridge (`claude_images_test.go` cited in tree) | Not served | Missing | Image blocks via bridge |
-| j | reasoning / thinking | Effort / think-off **staged** in gateway (`6158-6161`, `6072-6076`, `anthropic.go:281-291`) | Not served | Missing | Effort and extended thinking via CLI; hofund uses **`X-Hofund-Cache-Marks`** (neutral header) instead of reference vendor-prefixed cache opt-in header (`claude_cache.go:36-38`) |
+| e | upstream request wire | No direct Anthropic HTTP; subprocess + MCP bridge (`claude_subscription.go:3-29`, `claudebridge/mcp.go:54-59`) | `upstream()` serves text, tools, images, and resume through Claude Code (`upstream.rs`, `bridge/`; PRs #753–#761 and R-6g). Tests use a fake runner. | Partial | Real Claude Code process and account (#304); WSL/proxy paths still unverified |
+| f | inbound API shapes | Gateway `serveClaudeSubscription` for Anthropic Messages and translated Chat/Responses paths (`gateway.go:4995`, `claude_subscription.go:6041+`) | Gateway codecs already translate Chat/Responses/Messages to IR; the plugin serves those turns through the bridge | Partial | Real-account protocol smoke (#304) |
+| g | streaming | Bridge streams Claude Code stdout/SSE to caller (`claude_subscription.go` run loop) | stream-json decoded to IR events, including `StillWorking` keepalive (`bridge/decode.rs`, `bridge/keepalive.rs`) | Partial | Live LongLivedChild keepalive wrapper and real-binary stream (#304) |
+| h | tool calls | MCP `tools/call` blocks; results on next HTTP request (`claude_subscription.go:9-13`, `mcp.go:36-48`) | Tool parking plus MCP callback via `bridge-mcp-stdio` (`bridge/park.rs`, PRs #753, #756, #759) | Partial | Live helper + callback against a real Claude Code process (#304) |
+| i | images | Gateway image tests pass through bridge (`claude_images_test.go` cited in tree) | Image blocks on the `-p` stream-json prompt (`bridge/images.rs`, PR #761). URL sources are not fetched; 2000 px / 5 MiB refit is not applied | Partial | Pixel fitting (#698); TUI URL fetch |
+| j | reasoning / thinking | Effort / think-off **staged** in gateway (`6158-6161`, `6072-6076`, `anthropic.go:281-291`) | Gateway A–B extensions plus plugin CLI flags and `setEffort` (`bridge/flags.rs`, PR #761). Neutral **`X-Hofund-Cache-Marks`** instead of the reference vendor-prefixed cache opt-in header (`claude_cache.go:36-38`) | Partial | Real-account effort/`setEffort` (#304) |
 | k | quota / usage | `claude -p /usage` parse (`claude_usage_cli.go:50-57`); plus `NoteClaudeLimits` from stream headers (`claude_limits.go:69-71`) | `quota()` unsupported (`lib.rs:407-414`) | Missing | `/usage` CLI + header-derived windows (`R-5`) |
 | l | model list | From Claude Code / catalog in gateway context (unverified detail); usage scopes per model in limits | `list_models()` unsupported (`lib.rs:417-424`) | Missing | Model list + scoped week windows (`R-5`) |
 | m | multi-account | Multiple saved logins, routing, agent switch (`claude_routed_signin_test.go` etc.) | Daemon multi-account + agent switch with locks | Partial | Quota-aware routing needs row k |
-| n | error classification | `ClaudeSignInRequired`, refusal vs retry (`claude_auth.go`); subscription refusals move account (`gateway/refusal_accounts_test.go`) | Refresh/auth errors only; no upstream | Partial | Rest/cooldown from bridge refusals when upstream exists |
+| n | error classification | `ClaudeSignInRequired`, refusal vs retry (`claude_auth.go`); subscription refusals move account (`gateway/refusal_accounts_test.go`) | `bridge/failure.rs` maps sign-in, extra-usage, too-long, quota, 429, and crash text; room-full 503 sets vendor-neutral `skip_failover_same_plugin` (R-6g). Sign-in lapses are pinned to the login version captured at run start | Partial | Real-account classification (#304); image/timeout live wrapping still thin |
 | o | daily warmup | `KeepClaudeWindowsWarm` / `claude_warmup.go:77-79` | `daily_warmup` on spec + `account::warmup` (`lib.rs:54-63`, `454-459`) | Partial | Gateway-coordinated warm request path (probe) vs CLI-only warm-up |
 | p | agent sign-in switching | Switch with locks, CAS on refresh token (`logins.go` patterns; docs in subscriptions.md) | `write_agent_sign_in`, discover/import (`lib.rs:437-475`) | Partial | Full lock parity documented in subscriptions.md gaps (overage quota) |
 | q | vendor extras | WSL Claude, per-login proxy (`claude_signin.go:139-145`), setup-token inference-only | Proxy/WSL/setup-token absent | Partial | Proxy env for sign-in and runs; setup-token (`R-5`, `R-6`) |
 
 ### Gaps (Claude)
 
-- MCP subscription bridge and multi-protocol gateway translation — **L**, **R-6**
+- MCP subscription bridge and multi-protocol gateway translation — implemented on the R-6 stack (PRs #753–#761 and R-6g), not merged; real-account smoke remains **#304**
 - Quota from `/usage` + stream header limits — **L**, **R-5**
 - Model list and scoped quota windows — **M**, **R-5**
 - macOS Keychain credential path — **M**, **R-5**
@@ -129,34 +129,33 @@ Every other gap below maps to an existing plan item.
 
 | # | capability | reference v0.1.3005 behaviour | hofund 08035c9 | status | gap to close |
 |---|------------|------------------------------|----------------|--------|--------------|
-| a1 | sign-in: CLI PKCE | Plugin: loopback PKCE via `app.devin.ai` (`devin/index.mjs:28-31`, `SIGN_IN_TIMEOUT`) | Bridge flow imports existing CLI creds only (`lib.rs:105-127`) | Partial | Interactive PKCE sign-in in plugin — not in hofund |
-| a2 | sign-in: reuse CLI | Read `credentials.toml` (`devin.go:54-67`) | `creds.rs` + discover | Done | — |
+| a1 | sign-in: CLI PKCE | Plugin: loopback PKCE via `app.devin.ai` (`devin/index.mjs:28-31`, `SIGN_IN_TIMEOUT`) | `sign_in.rs` + loopback PKCE, fixed-server `ExchangeDevinCLIPKCECode`, and GetUserStatus identity; offline callback/exchange tests | Done | — |
+| a2 | sign-in: reuse CLI | Read `credentials.toml` (`devin.go:54-67`) | `creds.rs` + discover; CLI-sourced accounts re-read their imported TOML under a 30 s lease on execute; browser accounts do not | Done | — |
 | a3 | API key / device | N/A | N/A | N/A | — |
-| b | import | Side login mover + CLI path | XDG `credentials.toml` discover/import | Done | — |
+| b | import | Side login mover + CLI path | XDG/agent `credentials.toml` discover/import with identity labels and string `cli = "true"` source metadata | Done | — |
 | c | token storage | Plugin + TOML on disk | Daemon secret; atomic agent write on switch | Partial | — |
 | d | refresh | Plugin renews tokens (unverified); core reads CLI | `refresh` loads stored only (`lib.rs:174-176`) | Partial | OAuth refresh if CLI tokens expire (**R-12**) |
-| e | upstream wire | Protobuf Connect `GetChatMessage` on `server.codeium.com` (`devin/index.mjs:28-32`) | `upstream.rs` explicitly refuses (`devin/upstream.rs:20-35`) | Missing | Protobuf chat RPC (**R-12**, **R-13**) |
-| f | inbound shapes | Chat completions + Anthropic for Claude models (`devin/index.mjs:19-26`) | Not served | Missing | Dual npm routing (**R-12**) |
-| g | streaming | Connect stream from GetChatMessage | Not served | Missing | **R-12** |
-| h | tool calls | Plugin `tool-ids.test.mjs`, split calls | Not served | Missing | **R-13** |
-| i | images | Plugin `images.test.mjs`, `devin_images.go` in core catalog | Not served | Missing | **R-13** |
-| j | reasoning / thinking | `thinking-signature.test.mjs`, effort variants | Not served | Missing | **R-13** |
-| k | quota / usage | Plugin `usage.test.mjs` | `quota()` empty vec (`lib.rs:179-185`) | Missing | Usage RPC (**R-13**) |
-| l | model list | CLI JSON + `GetCliModelConfigs` (`devin/index.mjs:44-134`) | `list_models` refuses offline CLI (`lib.rs:187-195`) | Missing | Live model list (**R-12**) |
+| e | upstream wire | Protobuf Connect `GetChatMessage` on `server.codeium.com` (`devin/index.mjs:28-32`) | `upstream.rs` unary POST with literal Basic auth, 300 s read budget, origin override, and tool field 10 | Done | — |
+| f | inbound shapes | Chat completions + Anthropic for Claude models (`devin/index.mjs:19-26`) | Chat, Responses, and Messages IR execute; catalog advertises Chat endpoint only | Partial | Per-model inbound routing (**R-13**) |
+| g | streaming | Connect stream from GetChatMessage | Incremental text, reasoning, tool-start, and argument-delta IR events; content-or-tool-gated success | Done | — |
+| h | tool calls | Plugin `tool-ids.test.mjs`, split calls | R-13b encodes field-6 calls and field-7 results, joins split calls, fills interrupted results, sanitizes ids, offers history-only tools, and streams tool-only replies with usage | Done | — |
+| i | images | Plugin `images.test.mjs`, `devin_images.go` in core catalog | R-13b encodes inline field-10 images, omits URL-only images, and keeps direct or `FROM`/`NOTE`-associated tool-result images on their tool prompts | Done | — |
+| j | reasoning / thinking | `thinking-signature.test.mjs`, effort variants | R-13b replays unsigned reasoning on non-Claude uids, signed Claude thinking on fields 11/12/18, and fragmented Claude signatures from fields 10/21 with a 512-entry type map | Done | — |
+| k | quota / usage | Plugin `usage.test.mjs` | R-13a `quota.rs` reads daily/weekly and informational ACU windows; free ids survive as model exclusions; field 7 becomes finish usage with cache counters and output estimation | Partial | Plan/balance presentation and organization metadata are not represented by `Subscription::quota` |
+| l | model list | CLI JSON + `GetCliModelConfigs` (`devin/index.mjs:44-134`) | Live raw-protobuf RPC, isolated CLI fallback, embedded snapshot, per-account freshness/retry cache, tier-4 free flags, and matching-variant list prices | Done | — |
 | m | multi-account | EU host `eu.codeium.com` (plugin) | unverified in hofund | Partial | Region selection (**R-12**) |
-| n | error classification | Plugin `errors.test.mjs` | Not served | Missing | **R-13** |
+| n | error classification | Plugin `errors.test.mjs` | `errors.rs` section 6 HTTP/Connect mapping, exact empty-reply and broken-stream errors | Done | Tool/image-specific cases (**R-13**) |
 | o | keepalive | `keepalive.test.mjs` | None | Missing | **R-13** (new to the plan in this audit) |
 | p | agent sign-in | Core installs CLI (`devin.go:8-12`) | `agent_sign_in.rs` write TOML | Partial | CLI install helper like core (`DevinExecutable`) |
-| q | extras | gzip request, identity headers, CLI version pin (`devin/index.mjs:33-36`) | Not served | Missing | **R-12** |
+| q | extras | gzip request, identity headers, CLI version pin (`devin/index.mjs:33-36`) | `connect/` message tables + SDK `protobuf`; 8083/8333 gzip tests; HTTP encoding header, metadata, and sensitive Basic auth | Done | — |
 
 ### Gaps (Devin)
 
-- GetChatMessage upstream (protobuf, streaming) — **L**, **R-12**, **R-13**
-- Models list from CLI/API — **M**, **R-12**
-- Tools, images, reasoning, usage — **L**, **R-13**
-- PKCE sign-in (not only import) — **M**, **R-12**
+- Messages cache marks — **L**, **R-13**
 - CLI install/bootstrap — **S**, **R-12** (new to the plan in this audit)
 - Keepalive (`keepalive.test.mjs`) — **S**, **R-13** (new to the plan in this audit)
+
+Structured-output prose for Chat, Responses, and Messages shipped in R-13b (`structured-output.test.mjs` behavior; `structured_text` in `upstream.rs`).
 
 ---
 
@@ -168,8 +167,8 @@ Every other gap below maps to an existing plan item.
 
 | # | capability | reference v0.1.3005 behaviour | hofund 08035c9 | status | gap to close |
 |---|------------|------------------------------|----------------|--------|--------------|
-| a1 | sign-in: native app RSA loopback | Plugin opens `zed.dev/native_app_signin` (`zed/index.mjs:8-13`) | `start_sign_in` unsupported — import only (`lib.rs:113-120`) | Missing | Native sign-in flow (**R-56**, **R-16**) |
-| a2 | sign-in: import saved creds | Core `zedCreds` mover (`zed.go:14-34`) | `import.rs` + `TokenFile` flow | Partial | — |
+| a1 | sign-in: native app RSA loopback | Plugin opens `zed.dev/native_app_signin` (`zed/index.mjs:8-13`) | `sign_in.rs` + kernel query-token loopback; RSA-2048, OAEP-SHA256 + v1.5 fallback, 10-minute driver deadline; `r56_*` tests with loopback and mock `/client/users/me` | Done | Mocks only; no real-account smoke |
+| a2 | sign-in: import saved creds | Core `zedCreds` mover (`zed.go:14-34`) | `import.rs` remains alongside `Pkce` loopback flow | Partial | — |
 | a3 | API key / device | N/A | N/A | N/A | — |
 | b | import | Built-in side logins | `hofund subscription import` | Partial | — |
 | c | token storage | Plugin holds user id + access + system id | `creds.rs` stored secret | Partial | — |
@@ -190,7 +189,6 @@ Every other gap below maps to an existing plan item.
 
 ### Gaps (Zed)
 
-- Native app sign-in (RSA loopback) — **L**, **R-56**
 - Org picker UI for multi-account (stored org + automatic repick only)
 - Plan-only quota windows (no allowance meters; matches reference)
 - Gateway-facing Zed client API shapes beyond subscription upstream (parity doc only; not in R-16 scope)
@@ -357,15 +355,15 @@ Every other gap below maps to an existing plan item.
 
 **hofund path:** `plugins/subscriptions/copilot/`.
 
-| # | capability | reference v0.1.3005 | hofund 08035c9 | status | gap to close |
-|---|------------|----------------------|----------------|--------|--------------|
+| # | capability | reference v0.1.3005 | hofund R-48 | status | gap to close |
+|---|------------|----------------------|-------------|--------|--------------|
 | a1 | sign-in: device flow | `copilot_signin.go:31-38`, `59-86` GitHub device OAuth app (client id in `copilot_signin.go`) | `sign_in.rs`, `lib.rs:138-150` device flow | Done | — |
 | a2 | sign-in: browser OAuth | N/A (device only for reference-added accounts) | N/A | N/A | — |
 | a3 | sign-in: API key | N/A | N/A | N/A | — |
 | a4 | sign-in: paste | N/A | N/A | N/A | — |
-| a5 | sign-in: editor / CLI login reuse | `copilot_accounts.go:3-8`, `copilot_cli.go:81+` read editors’/CLI OAuth, never write | no editor config read in copilot plugin | Missing | Read Copilot CLI/editor side login (R-48) |
+| a5 | sign-in: editor / CLI login reuse | `copilot_accounts.go:3-8`, `copilot_cli.go:81+` read editors’/CLI OAuth, never write | `discover.rs`, `session.rs`; editor `apps.json`/`hosts.json`, CLI JSONC and keychain reads; direct CLI sessions; read-only stale/recovery fixtures | Done | — |
 | a6 | sign-in: GHE host option | `copilot_ghe.go`, `CopilotHost` in sign-in | `site.rs:9-40`, `lib.rs:72-81` `host` config → `.ghe.com` URLs | Done | — |
-| b | import sources | Side login from editor token metadata (`copilot_accounts.go`) | none | Missing | Side-login import (R-48) |
+| b | import sources | Side login from editor token metadata (`copilot_accounts.go`) | `discover_agent_sign_in` / `import_agent_sign_in`; hofund stores only source path, host, and login, never the external token | Done | — |
 | c | token storage | GitHub token in `logins.json`; Copilot session token minted per request | encrypted account secret + `TokenCache<Session>` (`session.rs`) | Done | — |
 | d | refresh | GitHub token long-lived; Copilot `copilot_internal/v2/token` remint (`copilot_accounts.go` session) | `session.rs` cache with margin, 401 remint (`upstream.rs:105-114`) | Done | — |
 | e | upstream wire | Session `endpoints.api` (githubcopilot.com or GHE host) JSON | `upstream.rs:81-90` bearer to session base | Done | — |
@@ -374,19 +372,17 @@ Every other gap below maps to an existing plan item.
 | h | tool calls | Copilot tool schemas | standard IR tools on wire | Partial | unverified against GHE tenant |
 | i | images | Vision header when images present | `upstream.rs:137-139` `Copilot-Vision-Request` | Done | — |
 | j | reasoning | model-dependent | unverified | Partial | — |
-| k | quota / usage | `copilot_internal/user` plan, premium requests | `quota.rs` GitHub Copilot user API | Partial | Plan label / SKU display (`copilot_entitlement.go`) (R-48) |
+| k | quota / usage | `copilot_internal/user` plan, premium requests | `quota.rs` plan/SKU labels on cards; guarded entitlement persistence and missing-field retention in `session.rs` and `lib.rs` | Done | — |
 | l | model list | From session + internal APIs | `models.rs` list + terms acceptance | Done | — |
-| m | multi-account | Editor account + reference device accounts (`copilot_accounts.go`) | multiple reference-signed accounts only | Partial | Editor “side” account pool (R-48) |
-| n | error classification | `copilot_lapsed.go`, `copilot_refused.go` | 401 session remint; seat check at sign-in (`sign_in.rs`) | Partial | Entitlement/lapsed mapping parity (R-48) |
+| m | multi-account | Editor account + reference device accounts (`copilot_accounts.go`) | device/editor/CLI coexistence; host-qualified ids and labels; legacy bare GHE label migration; two-host offline quota fixtures | Done | — |
+| n | error classification | `copilot_lapsed.go`, `copilot_refused.go` | session and quota 401 lapse, replacement-token guard, stale external `NeedsSignIn`, Auto/model refusal and session-loss mapping | Done | — |
 | o | daily check-in / warmup | N/A | N/A | N/A | — |
 | p | agent sign-in switch | Editor account is read-only reference | no agent sign-in on copilot spec | N/A | — |
-| q | extras | Editor version headers, initiator, API version | `session.rs:26+`, `upstream.rs:128-140` | Done | GHE live tenant verification (R-48) |
+| q | extras | Editor version headers, initiator, API version | editor/CLI/session/model/chat versions plus Auto `2026-08-01` and `2025-10-01`; offline GHE host, naming, and base-URL fixtures | Done | Live GHE tenant verification remains unverified |
 
 **Gaps**
 
-- Read VS Code / Copilot CLI side login without overwriting — **M**, **R-48**.
-- Plan/SKU labels and entitlement refresh on quota cards — **S**, **R-48**.
-- GHE data-residency integration test — **S**, **R-48**.
+- Live GHE data-residency tenant verification — not done; R-48 covers host URLs, host-qualified account names, plan/usage, and API base selection with offline fixtures only.
 
 ---
 
@@ -409,17 +405,16 @@ Every other gap below maps to an existing plan item.
 | h | tool calls | Gateway plain schema / function declarations (`codeassist.go`) | `plain_code_assist_tools` in upstream rewrite (`upstream.rs:48-49`) | Partial | Full tool parity vs gateway tests unverified |
 | i | images | Generative Language parts | via IR content parts | Partial | unverified |
 | j | reasoning / thinking | Thought signatures, skip validator (`codeassist.go:29-31`) | unverified in gemini plugin | Partial | Thought signature parity (R-49) |
-| k | quota / usage | `retrieveUserQuota` per model windows | `quota.rs` buckets from same RPC | Done | — |
-| l | model list | `fetchAvailableModels` + tier entitlements (`google.go:1073+`) | `quota.rs` models from `retrieveUserQuota` only (`lib.rs:358-364`) | Partial | `fetchAvailableModels` + tier handling (R-49) |
+| k | quota / usage | `retrieveUserQuota` per model windows | `quota.rs` buckets from same RPC; R-49 applies the experiment-driven quota-id mapping | Done | — |
+| l | model list | `retrieveUserQuota` preview signal + `listExperiments` flags choose Gemini CLI 0.61's catalog (`google.go:854-999`, `1180-1236`); `fetchAvailableModels` is Antigravity's path | `models.rs` ports the flag ids, catalog filtering, display names, and image flags; hourly per-instance cache; offline reference cases | Done | — |
 | m | multi-account | Multiple google logins | multiple accounts | Done | — |
 | n | error classification | RetryInfo → retry-after (`codeassist.go`) | `wire` retry_delay in feature-parity doc | Partial | Individual-account refusal persistence (`google.go:330+`) |
 | o | daily check-in / warmup | N/A | N/A | N/A | — |
 | p | agent sign-in | read gemini home only in reference docs | no `AgentSignIn` on gemini spec | Missing | Optional discover of `~/.gemini/oauth_creds.json` (R-49) |
-| q | extras | Code Assist Standard/Enterprise project onboarding; model-name mapping from the reference catalog | `project.rs` loadCodeAssist/onboardUser; model-name mapping not applied (`docs/feature-parity.md` row 3.4) | Partial | Model name mapping (R-49) |
+| q | extras | Code Assist Standard/Enterprise project onboarding; `SetGoogleProject` names or clears an account's stored Cloud project; model-name mapping from the reference catalog | `project.rs` loadCodeAssist/onboardUser and leased account updates; `hofund accounts project gemini <email> <gcp-project-id>` trims, stores, and clears the project used by execute and quota; `models.rs` maps listed, outgoing, and quota ids from the same experiments; offline tests only | Done | — |
 
 **Gaps**
 
-- `fetchAvailableModels` and entitlement-tier fallbacks — **L**, **R-49**.
 - Google account import formats — **M**, **R-49**.
 - Gateway-grade tool/thought-signature edge cases — **M**, **R-49**.
 
@@ -431,33 +426,33 @@ Every other gap below maps to an existing plan item.
 
 **Community:** `packages/antigravity-cloak/` (middleware for turned-away prompts).
 
-**hofund path:** none (`docs/feature-parity.md:3.4` “Antigravity is not started”; agent adapter only under `plugins/agents/antigravity/`).
+**hofund path:** `plugins/subscriptions/antigravity/src/`; the existing desktop adapter remains separate under `plugins/agents/antigravity/`.
 
-| # | capability | reference v0.1.3005 | hofund 08035c9 | status | gap to close |
-|---|------------|----------------------|----------------|--------|--------------|
-| a1 | sign-in: loopback OAuth (Antigravity client) | `google.go:82-90` separate client, `/oauth-callback`, `localhost` | missing subscription plugin | Missing | New plugin with Antigravity OAuth client (R-49) |
-| b | import sources | `google_import.go` refresh token imports | none | Missing | Same import module as gemini family (R-49) |
-| c | token storage | logins.json + in-memory refresh | none | Missing | R-49 |
-| d | refresh | same as Google subscriptions | none | Missing | R-49 |
-| e | upstream wire | `daily-cloudcode-pa.googleapis.com` + prod load base (`google.go:98-100`) | none | Missing | R-49 |
-| f | inbound shapes | Same Code Assist envelope; effort variant IDs (`antigravity_models.go`) | none | Missing | R-49 |
-| g | streaming | SSE envelope | none | Missing | R-49 |
-| h | tools | tool declarations and thought signatures (`internal/gateway/codeassist.go`) | none | Missing | R-49 |
-| i | images | inline image parts on the Code Assist wire (`internal/gateway/codeassist.go`) | none | Missing | R-49 |
-| j | reasoning | thought signatures / thinking config, cloak and turned-away detection (`codeassist.go`, `packages/antigravity-cloak`) | none | Missing | R-49 |
-| k | quota / usage | `retrieveUserQuota` + per-account fetchAvailableModels union | none | Missing | R-49 |
-| l | model list | `antigravity_pool.go:15-49` union across accounts; effort folding (`antigravity_models.go`) | none | Missing | R-49 |
-| m | multi-account | Pool catalog union | none | Missing | R-49 |
-| n | error classification | 429 “turned away” prompts (`codeassist.go:51-66`) | none | Missing | R-49 |
+| # | capability | reference v0.1.3005 | hofund R-49c | status | gap to close |
+|---|------------|----------------------|--------------|--------|--------------|
+| a1 | sign-in: loopback OAuth (Antigravity client) | `google.go:82-90` embeds Antigravity's installed-app client, `/oauth-callback`, `localhost` | `sign_in.rs` and `lib.rs`: same scopes, PKCE, localhost path; client from plugin `client_id`/`client_secret` or `HOFUND_ANTIGRAVITY_CLIENT_*` env (hofund does not ship the 3005 literals). Offline tests use a fake client (`r49c_oauth_*`) | Done | Operator must supply the installed-app client; 3005 embeds it |
+| b | import sources | `google_import.go` refresh token imports | none | Missing | Antigravity Cockpit/Manager/CLIProxyAPI export import (R-49 follow-up) |
+| c | token storage | logins.json + in-memory refresh | Account store keeps the refresh token; `tokens.rs` keeps access tokens in memory | Done | — |
+| d | refresh | same as Google subscriptions | `tokens.rs`: oauth2.googleapis.com, two-minute margin, lapsed grants; offline refresh/refusal tests | Done | — |
+| e | upstream wire | `daily-cloudcode-pa.googleapis.com` + prod load base (`google.go:98-100`) | `Endpoints`, `project.rs`, and `upstream.rs` use those bases and the Antigravity Code Assist envelope | Done | — |
+| f | inbound shapes | Same Code Assist envelope; effort variant IDs (`antigravity_models.go`) | SDK codecs translate inbound wires; `models.rs` folds families and `upstream.rs` picks effort variants; offline unary test | Done | — |
+| g | streaming | SSE envelope | `upstream.rs` lifts each `response` frame on `streamGenerateContent?alt=sse`; offline stream test | Done | — |
+| h | tools | tool declarations and thought signatures (`internal/gateway/codeassist.go`) | Standard IR tools plus `plain_code_assist_tools`; no Antigravity-specific full gateway equivalence run | Partial | Thought-signature and tool-history edge cases remain unverified |
+| i | images | inline image parts on the Code Assist wire (`internal/gateway/codeassist.go`) | Standard IR image parts and model image flags | Partial | Offline image-request fixture remains |
+| j | reasoning | thought signatures / thinking config, cloak and turned-away detection (`codeassist.go`, `packages/antigravity-cloak`) | Effort ids/levels, reference prompt cloak, and non-cooling 400 mapping are tested offline; thought-signature edges are not | Partial | Thought-signature parity and live verification remain |
+| k | quota / usage | `fetchAvailableModels` model quota plus `retrieveUserQuotaSummary` shared windows | `quota.rs` reads both, including reset times and omitted-fraction exhaustion; offline test | Done | — |
+| l | model list | `antigravity_pool.go:15-49` union across accounts; effort folding (`antigravity_models.go`) | `models.rs` parses picker order, filters hidden/disabled ids, falls back through tiers, folds families, and merges account unions; offline tests | Done | — |
+| m | multi-account | Pool catalog union | One Google email has distinct Gemini and Antigravity account ids; all stored Antigravity accounts join the union in account order | Done | — |
+| n | error classification | 429 “turned away” prompts (`codeassist.go:51-66`) | `upstream.rs` distinguishes prompt refusal from real quota and returns a non-cooling 400 with the reference hint | Done | — |
 | o | check-in / warmup | N/A | N/A | N/A | — |
-| p | agent sign-in | Antigravity desktop agent separate | agent.toml only, no subscription | Missing | R-49 |
-| q | extras | Ban-risk warning in UI; version manifest URL (`google.go:68`) | unverified | Missing | R-49 |
+| p | agent sign-in | Antigravity desktop agent separate | Desktop `agent.toml` only; no subscription sign-in switch | Missing | Agent sign-in switching is not in R-49c |
+| q | extras | Ban-risk warning in UI; version manifest URL (`google.go:68`) | Full account-suspension warning prints before CLI sign-in and remains in docs; request version is the fixed reference fallback | Partial | Dynamic version-manifest refresh remains |
 
 **Gaps**
 
-- Entire Antigravity subscription plugin — **L**, **R-49**.
-- Multi-account model pool + effort variant catalog — **M**, **R-49**.
-- Prompt cloak / turned-away detection — **M**, **R-49**.
+- Refresh-token export import and agent sign-in switching — **M**, R-49 follow-up.
+- Full tool/image/thought-signature gateway fixtures and dynamic app-version refresh — **M**, R-49 follow-up.
+- Real-account verification is not performed in this slice.
 
 ---
 
@@ -578,39 +573,44 @@ Every other gap below maps to an existing plan item.
 
 ## Z Code (`zcode`)
 
-**Reference files read:** `zcode.go`, `zcode_device.go`, `zcode_team.go`, `migrate_zcode.go`; plugin `packages/zcode/index.mjs`, `README.md` (check-in gifts).
+**Reference files read:** `zcode.go`, `zcode_device.go`, `zcode_team.go`, `migrate_zcode.go`, `plugin_checkin.go`, `workbuddy.go`, `internal/agent/zcode.go`, and `internal/appdir/zcode.go`. The earlier audit cited plugin `packages/zcode/index.mjs` and `README.md`, but that package is absent from the frozen tag; plugin-only wire details not also visible in Go remain unverified.
 
 **hofund path:** `plugins/subscriptions/zcode/`.
 
-| # | capability | reference v0.1.3005 | hofund 08035c9 | status | gap to close |
-|---|------------|----------------------|----------------|--------|--------------|
-| a1 | sign-in: device / portal OAuth | plugin sign-in flows in `index.mjs` | `lib.rs:166-176` import/discover only | Partial | Full portal sign-in in plugin (R-57) |
+| # | capability | reference v0.1.3005 | hofund 08035c9 + R-57 | status | gap to close |
+|---|------------|----------------------|-----------------------|--------|--------------|
+| a1 | sign-in: device / portal OAuth | plugin sign-in flows in `index.mjs` | `lib.rs` import/discover only | Partial | Full portal sign-in; the flow is not fully visible in the frozen Go sources (**R-57b**) |
 | a2 | API key import | plugin supports key plans | credential import via agent store | Partial | — |
-| a3 | paste / browser | plugin OAuth | unsupported in start_sign_in | Missing | R-57 |
+| a3 | paste / browser | plugin OAuth | unsupported in `start_sign_in` | Missing | **R-57b**; no guessed OAuth or paste wire |
 | b | import sources | encrypted `~/.zcode/v2/credentials.json` (`zcode.go:14-18`) | `creds.rs` decrypt + `discover.rs` | Done | — |
-| c | token storage | logins.json for reference-added; encrypted agent store read | SecretObject + device mid (`creds.rs:459+`) | Done | — |
-| d | refresh | JWT refresh near expiry in plugin | `refresh.rs` business API refresh | Partial | unverified vs plugin JWT rules |
-| e | upstream wire | Anthropic plan API bases (`zcode.go:47-48`); Start Plan accounts go to `START_BASE` (`zcode/index.mjs:33`, used at `:2371`) | `upstream.rs:66-74` Messages on plan base; JWT-only Start Plan import refused (`tests.rs:424`) | Partial | Start Plan routing (R-57) |
-| f | inbound shapes | Messages only upstream | `upstream.rs:60-63` rejects non-Messages | Done | — |
+| c | token storage | logins.json for reference-added; encrypted agent store read | SecretObject + device mid (`creds.rs`) | Done | — |
+| d | refresh | JWT refresh near expiry in plugin | `refresh.rs` re-imports through the account lease, preserves `lapsed` for the same team token, clears it for a rotated token, and rejects non-absolute credential paths (`r57_*` tests) | Partial | Plugin JWT renewal rules remain unverified (**R-57b**) |
+| e | upstream wire | Anthropic plan API bases (`zcode.go:47-48`); Start Plan accounts go to `START_BASE` (`zcode/index.mjs:33`, used at `:2371`) | `upstream.rs` Messages on plan base; JWT-only Start Plan import refused | Partial | Start Plan routing and its required request transformations; the base is visible but the full plugin wire is not (**R-57b**) |
+| f | inbound shapes | Messages only upstream | `upstream.rs` rejects non-Messages | Done | — |
 | g | streaming | Anthropic SSE | wire streaming | Done | — |
 | h | tool calls | Anthropic tools | standard Messages wire | Partial | unverified |
-| i | images | per-model `supportsImage` (`packages/zcode/index.mjs:1690`) | unverified | unverified | Confirm in **R-57** |
-| j | reasoning | per-model reasoning levels mapped to thinking budgets (`packages/zcode/index.mjs:1691`, `1753-1765`) | unverified | unverified | Confirm in **R-57** |
+| i | images | per-model `supportsImage` (`packages/zcode/index.mjs:1690`) | no verified per-model mapping | unverified | Plugin catalog shape is absent from the frozen tag (**R-57b**) |
+| j | reasoning | per-model reasoning levels mapped to thinking budgets (`packages/zcode/index.mjs:1691`, `1753-1765`) | no verified per-model mapping | unverified | Plugin levels and budgets are absent from the frozen tag (**R-57b**) |
 | k | quota / usage | monitor `/api/monitor/usage/quota/limit` personal/team | `quota.rs` monitor endpoints | Done | — |
-| l | model list | portal + plan APIs in plugin | `models.rs` | Partial | Gift/check-in tied models unverified |
-| m | multi-account | team seats from `setting.json` (`zcode_team.go`) | `team.rs` project keys | Done | — |
-| n | error classification | ZCodeRestricted hint code 3012 (`workbuddy.go:254-260` shared pattern) | unverified in zcode plugin | Partial | R-57 |
-| o | daily check-in | plugin `auth.checkin` gift plans (`index.mjs:2740+`) | no check-in in zcode plugin | Missing | Daily gift check-in, with the 30-minute recheck the reference applies to `zcode` (`plugin_checkin.go:274`) (R-57) |
-| p | agent sign-in switch | agent switching into Z Code config (reference gap in subscriptions.md) | `agent_sign_in.rs` write | Partial | Agent connect for zcode (R-57) |
-| q | extras | `X-Device-Mid`, `X-Device-Mid` (`api.rs:80` on the hofund side); plugin pins `APP_VERSION` 3.17.2 for User-Agent and `X-ZCode-App-Version`, and the vendor gates on it (`zcode/index.mjs:34-38`); core `zcode.go:55` still says 3.14.3 | `device.rs`; `APP_VERSION` 3.14.3 in `lib.rs:45` | Partial | Send 3.17.2 in User-Agent and `X-ZCode-App-Version` (R-57) |
+| l | model list | portal + plan APIs in plugin | `models.rs` | Partial | Gift/check-in tied models unverified (**R-57b**) |
+| m | multi-account | team seats from `setting.json` (`zcode_team.go`); plugin 0.1.20 labels a team account `<email> (team)` (`migrate_zcode.go`) | `team.rs` project keys and separate `(team)` labels (`r57_team_accounts_have_a_separate_label`) | Done | — |
+| n | error classification | ZCodeRestricted hint code 3012 (`workbuddy.go`); the account rests for two hours (`zcode_blocked_test.go`) | `http_auth.rs` keeps HTTP 405, adds the risk-control/support hint and two-hour retry hint (`r57_3012_has_a_risk_control_hint_and_cooldown`) | Done | — |
+| o | daily check-in | plugin `auth.checkin` gift plans (`index.mjs:2740+`); 30-minute recheck (`plugin_checkin.go`) | no check-in in zcode plugin | Missing | Claim endpoints, payloads, and result mapping are not fully visible in the frozen Go sources, so neither claims nor recheck scheduling are guessed (**R-57b**) |
+| p | agent sign-in switch | agent switching into Z Code config; team keys are created when absent (`zcode_team.go` comments) | `agent_sign_in.rs` refuses credential switching; separate team labels implemented | Partial | Agent config switching and missing-key creation request body remain unverified (**R-57b**) |
+| q | extras | `X-Device-Mid`; plugin pins `APP_VERSION` 3.17.2 for User-Agent and `X-ZCode-App-Version`; core `zcode.go` still says 3.14.3 | `device.rs`; `APP_VERSION` 3.14.3 in `lib.rs` | Partial | Send 3.17.2 in User-Agent and `X-ZCode-App-Version` (**R-57b**) |
 
-**Gaps**
+**R-57 completed**
 
-- Daily marketing/check-in gift flow — **M**, **R-57**.
-- Native portal sign-in (not import-only) — **M**, **R-57**.
-- Risk-control / restricted account handling (3012) — **S**, **R-57**.
-- Agent switching parity — **S**, **R-57**.
-- Start Plan routing to the plan base (`START_BASE`) — **S**, **R-57**.
-- Send app version 3.17.2 in User-Agent and `X-ZCode-App-Version` — **S**, **R-57**.
+- Kept `lapsed` across same-secret team refresh re-imports, serialized re-import through the account lease, failed closed on relative credential paths, and added separate team labels (#613 follow-ups).
+- Mapped code 3012 to the reference's user-facing risk-control hint and two-hour cooldown.
+
+**Gaps (R-57b)**
+
+- Daily marketing/check-in gift flow and its 30-minute recheck — **M**.
+- Native portal sign-in (not import-only) — **M**.
+- Agent switching and creating a missing team key — **M**.
+- Start Plan routing and request shaping — **M**.
+- Per-model image and reasoning mappings — **M**.
+- Send app version 3.17.2 in User-Agent and `X-ZCode-App-Version` — **S**.
 
 ---

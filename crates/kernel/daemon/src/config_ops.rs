@@ -158,6 +158,7 @@ pub(crate) enum ReloadOrigin {
 /// Listener and model-list state shared with config edits.
 pub(crate) struct ConfigOpsRouting {
     pub(crate) listener: ModelListener,
+    pub(crate) network_access: hofund_gateway::NetworkAccess,
     pub(crate) visible_catalog: Arc<RwLock<VisibleCatalog>>,
     pub(crate) snapshot: Snapshot,
 }
@@ -290,6 +291,11 @@ impl ConfigOps {
         self.routing.listener.view(&self.live().config)
     }
 
+    /// The effective network-access settings shared with the model listener.
+    pub(crate) fn network_access(&self) -> hofund_config::NetworkSettings {
+        self.routing.network_access.settings()
+    }
+
     /// The published configuration.
     pub(crate) fn live(&self) -> Arc<LiveConfig> {
         Arc::clone(&self.live.read().expect("live config"))
@@ -335,6 +341,38 @@ impl ConfigOps {
         text: String,
     ) -> Result<ConfigResponse, ControlFailure> {
         self.apply_with_key_moves(expected, text, Vec::new()).await
+    }
+
+    /// Applies terminal settings without moving the model listener. A changed
+    /// listen address becomes restart-pending instead of rebinding in the call.
+    pub(crate) async fn apply_settings(
+        self: &Arc<Self>,
+        expected: &str,
+        edit: hofund_config::SettingsEdit,
+    ) -> Result<ConfigResponse, ControlFailure> {
+        let _gate = self.gate.lock().await;
+        let ops = Arc::clone(self);
+        let expected = expected.to_owned();
+        let staged = run_blocking(move || {
+            let _lock = ops.lock()?;
+            let (disk_revision, text) = ops.read_disk()?;
+            if disk_revision != expected {
+                return Err(stale_revision());
+            }
+            let updated = hofund_config::edit_settings(&text, &edit).map_err(|error| {
+                let issue = config_issue(&error, &text);
+                let mut failure = ControlError::new(
+                    ControlErrorKind::Unprocessable,
+                    issue.message.clone(),
+                    "settings",
+                );
+                failure.details = vec![issue];
+                ControlFailure::from(failure)
+            })?;
+            ops.apply_with_lock_held(&disk_revision, updated, Vec::new())
+        })
+        .await?;
+        Ok(self.finish_settings(staged).await)
     }
 
     /// Adds one pattern to `[catalog].disabled` and publishes the config.
@@ -580,10 +618,33 @@ impl ConfigOps {
 
     /// Moves the listener, then records and announces the publication.
     async fn finish(&self, staged: Staged) -> ConfigResponse {
-        let listen = self.routing.listener.follow(&staged.config).await;
+        self.finish_inner(staged, true).await
+    }
+
+    async fn finish_settings(&self, staged: Staged) -> ConfigResponse {
+        self.finish_inner(staged, false).await
+    }
+
+    async fn finish_inner(&self, staged: Staged, follow_listener: bool) -> ConfigResponse {
+        self.routing
+            .network_access
+            .replace(hofund_config::effective_network(
+                &staged.config,
+                hofund_config::allow_ips_env().as_deref(),
+                hofund_config::trust_proxy_env().as_deref(),
+            ));
+        let listen = if follow_listener {
+            self.routing.listener.follow(&staged.config).await
+        } else {
+            None
+        };
+        let mut pending_restart = restart_diff(&self.started, &staged.config);
+        if !follow_listener && self.started.listen != staged.config.listen {
+            pending_restart.push("listen".to_owned());
+        }
         let mut live = self.live.write().expect("live config");
         let next = Arc::new(LiveConfig {
-            pending_restart: restart_diff(&self.started, &staged.config),
+            pending_restart,
             not_applied: listen.iter().map(|(issue, _)| issue.clone()).collect(),
             config: staged.config,
             runtime_revision: staged.runtime_revision,
@@ -681,7 +742,7 @@ async fn run_blocking<T: Send + 'static>(
 /// One sanitized issue for a load failure. TOML syntax errors quote the
 /// offending source line, which may hold a secret, so only the position line
 /// and the final description are kept.
-fn config_issue(error: &ConfigError, text: &str) -> FieldIssue {
+pub(crate) fn config_issue(error: &ConfigError, text: &str) -> FieldIssue {
     match error {
         ConfigError::Syntax(message) => {
             let mut lines = message
@@ -694,6 +755,9 @@ fn config_issue(error: &ConfigError, text: &str) -> FieldIssue {
                 .filter(|line| !line.starts_with('|') && !line.contains('|'))
                 .unwrap_or("invalid TOML");
             FieldIssue::new("config", "syntax", format!("{position}: {description}"))
+        }
+        ConfigError::Invalid(message) if message.starts_with("allow_ips entry ") => {
+            FieldIssue::new("config", "invalid", message.clone())
         }
         ConfigError::Invalid(message) => FieldIssue::new("config", "invalid", scrub(message, text)),
         ConfigError::Read(message) => FieldIssue::new("config", "read", scrub(message, text)),
@@ -831,6 +895,9 @@ mod tests {
             revision(text.as_bytes()),
             ConfigOpsRouting {
                 listener: ModelListener::new(None, None, tokio::sync::watch::channel(None).0),
+                network_access: hofund_gateway::NetworkAccess::new(
+                    hofund_config::effective_network(&config, None, None),
+                ),
                 visible_catalog: Arc::new(RwLock::new(VisibleCatalog::build(
                     Arc::clone(&config),
                     &snapshot.load().models(),

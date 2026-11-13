@@ -6,9 +6,12 @@
 
 use std::collections::VecDeque;
 use std::ffi::{OsStr, OsString};
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll, Waker};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -64,6 +67,7 @@ enum Ending {
 pub struct PipedScript {
     lines: Vec<String>,
     ending: Ending,
+    status: i32,
 }
 
 impl Default for PipedScript {
@@ -79,6 +83,7 @@ impl PipedScript {
         Self {
             lines: Vec::new(),
             ending: Ending::Hang,
+            status: 0,
         }
     }
 
@@ -107,6 +112,16 @@ impl PipedScript {
         self.ending = Ending::OnStdin(Box::new(reply));
         self
     }
+
+    /// Sets the exit status reported after the child exits.
+    ///
+    /// A hanging script never reports a status until it is dropped; `exit_code`
+    /// stays pending so a caller timeout can win.
+    #[must_use]
+    pub fn status(mut self, code: i32) -> Self {
+        self.status = code;
+        self
+    }
 }
 
 /// What every scripted child of one backend reports into.
@@ -116,6 +131,54 @@ pub(crate) struct Shared {
     pub(crate) dropped: AtomicUsize,
 }
 
+enum ExitWait {
+    Open(Vec<Waker>),
+    Code(i32),
+}
+
+struct ExitCell {
+    inner: Mutex<ExitWait>,
+}
+
+impl ExitCell {
+    fn open() -> Arc<Self> {
+        Arc::new(Self {
+            inner: Mutex::new(ExitWait::Open(Vec::new())),
+        })
+    }
+
+    fn finish(&self, code: i32) {
+        let mut inner = self.inner.lock().expect("child lock");
+        let previous = std::mem::replace(&mut *inner, ExitWait::Code(code));
+        if let ExitWait::Open(wakers) = previous {
+            for waker in wakers {
+                waker.wake();
+            }
+        }
+    }
+}
+
+struct ExitCodeWait {
+    cell: Arc<ExitCell>,
+}
+
+impl Future for ExitCodeWait {
+    type Output = i32;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut inner = self.cell.inner.lock().expect("child lock");
+        match &mut *inner {
+            ExitWait::Code(code) => Poll::Ready(*code),
+            ExitWait::Open(wakers) => {
+                if !wakers.iter().any(|waker| waker.will_wake(cx.waker())) {
+                    wakers.push(cx.waker().clone());
+                }
+                Poll::Pending
+            }
+        }
+    }
+}
+
 pub(crate) struct ScriptedChild {
     id: u32,
     spawn: PipedSpawn,
@@ -123,6 +186,8 @@ pub(crate) struct ScriptedChild {
     stdout: Mutex<Option<BodyStream>>,
     on_stdin: Mutex<Option<OnStdin>>,
     shared: Arc<Shared>,
+    exit: Arc<ExitCell>,
+    status: i32,
 }
 
 impl ScriptedChild {
@@ -136,10 +201,13 @@ impl ScriptedChild {
         let stdout =
             BodyStream::from_stream(futures_util::stream::poll_fn(move |cx| rx.poll_recv(cx)));
         send(&tx, script.lines);
+        let exit = ExitCell::open();
+        let status = script.status;
         let (tx, on_stdin) = match script.ending {
             Ending::Hang => (Some(tx), None),
-            Ending::Exit(exit) => {
-                send(&tx, exit(&spawn));
+            Ending::Exit(on_exit) => {
+                send(&tx, on_exit(&spawn));
+                exit.finish(status);
                 (None, None)
             }
             Ending::OnStdin(reply) => (Some(tx), Some(reply)),
@@ -151,6 +219,8 @@ impl ScriptedChild {
             stdout: Mutex::new(Some(stdout)),
             on_stdin: Mutex::new(on_stdin),
             shared,
+            exit,
+            status,
         }
     }
 }
@@ -184,6 +254,7 @@ impl PipedChildBackend for ScriptedChild {
         if let Some(reply) = reply {
             send(sender, reply(&self.spawn, &bytes));
             *tx = None;
+            self.exit.finish(self.status);
         }
         Ok(())
     }
@@ -194,6 +265,13 @@ impl PipedChildBackend for ScriptedChild {
 
     fn take_stdout(&self) -> Option<BodyStream> {
         self.stdout.lock().expect("child lock").take()
+    }
+
+    async fn exit_code(&self) -> Result<i32, PluginError> {
+        Ok(ExitCodeWait {
+            cell: Arc::clone(&self.exit),
+        }
+        .await)
     }
 }
 
@@ -209,4 +287,28 @@ pub(crate) struct Piped {
     pub(crate) scripts: Mutex<VecDeque<PipedScript>>,
     pub(crate) spawns: Mutex<Vec<PipedSpawn>>,
     pub(crate) shared: Arc<Shared>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PipedScript;
+    use crate::RecordingProcess;
+    use hofund_plugin_api::kernel::ProcessBackend;
+    use std::path::PathBuf;
+
+    #[tokio::test]
+    async fn scripted_child_reports_a_nonzero_exit_status() {
+        let process = RecordingProcess::default();
+        process.script_piped(PipedScript::new().exits(|_| Vec::new()).status(44));
+        let child = process
+            .spawn_piped(
+                PathBuf::from("/usr/bin/security"),
+                Vec::new(),
+                Vec::new(),
+                PathBuf::from("/tmp"),
+            )
+            .await
+            .expect("spawn");
+        assert_eq!(child.exit_code().await.expect("exit"), 44);
+    }
 }

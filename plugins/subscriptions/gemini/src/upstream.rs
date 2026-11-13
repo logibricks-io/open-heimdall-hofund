@@ -12,7 +12,7 @@ use hofund_plugin_sdk::json::{Map, Value};
 use hofund_plugin_sdk::oauth::{TokenCache, new_state};
 use hofund_plugin_sdk::wire::{self, Target};
 
-use crate::{Endpoints, project, tokens};
+use crate::{Endpoints, models, project, tokens};
 
 /// Code Assist's method root; calls go to `{code_assist}/v1internal:{method}`.
 const ROOT: &str = "v1internal";
@@ -22,6 +22,7 @@ pub(crate) struct GeminiUpstream {
     pub(crate) host: HostContext,
     pub(crate) endpoints: Arc<Endpoints>,
     pub(crate) tokens: Arc<TokenCache<SecretString>>,
+    pub(crate) experiments: Arc<models::Experiments>,
     /// The project the config names, if any.
     pub(crate) project: Option<String>,
 }
@@ -33,21 +34,22 @@ impl GeminiUpstream {
         project: &str,
         request: Request,
         inbound: ProtocolId,
+        flags: models::Flags,
     ) -> Result<Completion, PluginError> {
-        let model = request.model.clone();
+        let shown_model = request.model.clone();
         let prompt = new_state()?;
         let envelope_project = project.to_owned();
-        let envelope_model = model.clone();
+        let envelope_model = flags.wire(bare(&shown_model));
         let target = Target::new(
             ProtocolId::GENERATIVE_LANGUAGE,
             self.endpoints.code_assist.clone(),
         )
         .credential(CredentialStyle::Bearer)
         .method_root(ROOT)
-        .headers(headers(&model))
+        .headers(headers(&shown_model))
         .rewrite(Arc::new(move |body| {
             hofund_plugin_sdk::plain_code_assist_tools(body);
-            envelope(body, bare(&envelope_model), &envelope_project, &prompt);
+            envelope(body, &envelope_model, &envelope_project, &prompt);
             Vec::new()
         }))
         .unwrap(Arc::new(lift));
@@ -72,7 +74,20 @@ impl UpstreamProvider for GeminiUpstream {
             self.project.as_deref(),
         )
         .await?;
-        match self.send(&access, &project, request.clone(), inbound).await {
+        let flags = self
+            .experiments
+            .read(
+                &self.host,
+                &self.endpoints,
+                &self.account,
+                &project,
+                &access,
+            )
+            .await;
+        match self
+            .send(&access, &project, request.clone(), inbound, flags)
+            .await
+        {
             Err(error) if error.status() == Some(401) => {
                 // Google refused a token it issued: drop it, refresh once,
                 // and send again.
@@ -80,7 +95,7 @@ impl UpstreamProvider for GeminiUpstream {
                 let renewed =
                     tokens::access(&self.host, &self.endpoints, &self.tokens, &self.account)
                         .await?;
-                self.send(&renewed, &project, request, inbound).await
+                self.send(&renewed, &project, request, inbound, flags).await
             }
             other => other,
         }

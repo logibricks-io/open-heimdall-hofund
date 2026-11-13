@@ -118,11 +118,10 @@ pub(crate) async fn poll_dashboard(args: PollArgs<'_>) -> Option<Usage> {
     loop {
         let elapsed = args.host.clock().monotonic().saturating_sub(started);
         let remaining = args.limits.usage_give_up.saturating_sub(elapsed);
-        let budget = if remaining.is_zero() {
-            args.limits.usage_request
-        } else {
-            args.limits.usage_request.min(remaining)
-        };
+        if remaining.is_zero() {
+            return None;
+        }
+        let budget = args.limits.usage_request.min(remaining);
         if let Some(totals) = one_poll(&args, budget).await {
             return Some(from_dashboard(totals, args.inbound));
         }
