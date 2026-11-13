@@ -128,6 +128,11 @@ impl SessionUsageEvent {
     }
 }
 
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde skip_serializing_if takes &T
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 /// One parsed session file. Non-main records merge into their parent.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[non_exhaustive]
@@ -184,7 +189,9 @@ pub struct SessionRecord {
     /// Whether `models` and `days` already exclude copied pre-fork usage.
     ///
     /// When true, the kernel must not rebuild them from checkpoint comparison.
-    #[serde(default)]
+    /// False is omitted so existing serialized goldens and cached records keep
+    /// their previous shape.
+    #[serde(default, skip_serializing_if = "is_false")]
     pub fork_usage_filtered: bool,
     /// Usage observations used for checkpoint dedup.
     #[serde(default)]
