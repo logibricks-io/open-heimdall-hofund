@@ -7,7 +7,7 @@ use hofund_plugin_sdk::Call;
 use hofund_plugin_sdk::json::Value;
 
 use crate::Endpoints;
-use crate::creds::{Stored, bearer_headers};
+use crate::creds::{Stored, apply_signed_headers};
 
 pub(crate) async fn list_account(
     host: &HostContext,
@@ -16,16 +16,11 @@ pub(crate) async fn list_account(
 ) -> Result<ModelList, PluginError> {
     let base = endpoints.base_for(stored.credential.site);
     let url = format!("{base}/v3/config");
-    let mut call = Call::get(url)
-        .header("Accept", "application/json")
-        .header("User-Agent", stored.credential.site.user_agent());
-    for (name, value) in bearer_headers(&stored.credential) {
-        if name == "Authorization" {
-            call = call.sensitive_header("authorization", value);
-        } else if name != "User-Agent" {
-            call = call.header(name, value);
-        }
-    }
+    let call = apply_signed_headers(
+        Call::get(url).header("Accept", "application/json"),
+        &stored.credential,
+        base,
+    );
     let reply = call.fetch(host.http()).await?;
     match reply.status() {
         200..=299 => parse_config(reply.body()),
