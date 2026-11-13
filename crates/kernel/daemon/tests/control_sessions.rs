@@ -362,6 +362,26 @@ async fn list_stats_overview_and_progress_use_the_fake_store() {
 }
 
 #[tokio::test]
+async fn library_without_a_store_returns_an_empty_view_and_real_directory() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let running = start(dir.path()).await;
+    let response = get(&running, dir.path(), "/v1/hofund/library").await;
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let view: hofund_control_proto::LibraryResponse =
+        decode_response(API_VERSION, &response.bytes().await.expect("library body"))
+            .expect("library view");
+    assert_eq!(view.version, API_VERSION);
+    assert_eq!(
+        view.dir,
+        dir.path().join("library").to_string_lossy().as_ref()
+    );
+    assert!(view.rows.is_empty());
+    assert!(view.agents.is_empty());
+    assert_eq!(view.error, None);
+    support::shutdown(running).await;
+}
+
+#[tokio::test]
 async fn bad_days_return_a_control_error_without_reading_the_index() {
     let dir = tempfile::tempdir().expect("temp dir");
     let running = start(dir.path()).await;

@@ -15,7 +15,7 @@ use hofund_control_proto::{
     ConfigValidateRequest, ConfigValidationResponse, ControlError, ErrorEnvelope, EventEnvelope,
     GatewayKeyRequest, GatewayKeyResponse, GatewayKeyRestoreRequest, GroupCreateRequest,
     GroupDeleteRequest, GroupDeleteResponse, GroupListResponse, GroupMemberCandidatesResponse,
-    GroupPatchRequest, GroupRestoreRequest, GroupWriteResponse, HealthResponse,
+    GroupPatchRequest, GroupRestoreRequest, GroupWriteResponse, HealthResponse, LibraryResponse,
     MAX_RESPONSE_BODY_BYTES, ModelListResponse, PicksResponse, PicksSetRequest, PresetListResponse,
     ProfileDetailResponse, ProfileListResponse, ProfileRenameRequest, ProfileSaveRequest,
     ProfileSwitchRequest, ProfileSwitchResponse, ProviderCreateRequest, ProviderDeleteRequest,
@@ -309,6 +309,11 @@ impl Client {
     /// Gets daemon status.
     pub async fn status(&self) -> Result<StatusResponse, ClientError> {
         self.get("/v1/hofund/status").await
+    }
+
+    /// Reads the library without changing it.
+    pub async fn library(&self) -> Result<LibraryResponse, ClientError> {
+        self.get("/v1/hofund/library").await
     }
 
     /// Gets terminal UI settings.
@@ -1913,6 +1918,7 @@ mod route_tests {
         let encoded = match path {
             "/v1/hofund/health" => serde_json::to_vec(&proto::HealthResponse::default()),
             "/v1/hofund/status" => serde_json::to_vec(&proto::StatusResponse::default()),
+            "/v1/hofund/library" => serde_json::to_vec(&proto::LibraryResponse::default()),
             "/v1/hofund/providers" => serde_json::to_vec(&proto::ProviderListResponse::default()),
             "/v1/hofund/providers/provider-1/models"
             | "/v1/hofund/providers/provider-1/models/refresh" => {
@@ -2160,6 +2166,7 @@ mod route_tests {
             .set_agent_model("agent/1", model_request.clone())
             .await
             .expect("set agent model");
+        client.library().await.expect("library");
         server.abort();
 
         let recorded = std::mem::take(&mut *recorded.lock().expect("recorded"));
@@ -2195,6 +2202,7 @@ mod route_tests {
                 (http::Method::POST, "/v1/hofund/config/apply"),
                 (http::Method::POST, "/v1/hofund/config/reload"),
                 (http::Method::POST, "/v1/hofund/agents/agent%2F1/model"),
+                (http::Method::GET, "/v1/hofund/library"),
             ]
         );
 

@@ -15,8 +15,8 @@ use hofund_control_proto::{
     ControlErrorKind, FieldIssue, GatewayKey, GatewayKeyAction, GatewayKeyLimit, GatewayKeyRequest,
     GatewayKeyResponse, GatewayKeyRestoreRequest, GroupCreateRequest, GroupDeleteRequest,
     GroupDeleteResponse, GroupListResponse, GroupMemberCandidatesResponse, GroupPatchRequest,
-    GroupRestoreRequest, GroupWriteResponse, HealthResponse, ModelEntry, ModelListResponse,
-    PicksResponse, PicksSetRequest, PresetListResponse, ProfileDeleteRequest,
+    GroupRestoreRequest, GroupWriteResponse, HealthResponse, LibraryResponse, ModelEntry,
+    ModelListResponse, PicksResponse, PicksSetRequest, PresetListResponse, ProfileDeleteRequest,
     ProfileDetailResponse, ProfileListResponse, ProfileRenameRequest, ProfileSaveRequest,
     ProfileSwitchRequest, ProfileSwitchResponse, ProviderCreateRequest, ProviderDeleteRequest,
     ProviderDeleteResponse, ProviderKeyRequest, ProviderKeysResponse, ProviderListResponse,
@@ -1427,6 +1427,11 @@ impl ControlState for DaemonControl {
             })?;
             Ok(checkin_run_response(record))
         })
+    }
+
+    fn library(&self) -> ControlFuture<'_, LibraryResponse> {
+        let config_path = self.config_path.clone();
+        Box::pin(async move { Ok(super::control_library::read(&config_path)) })
     }
 
     fn sessions(&self, query: SessionListQuery) -> ControlFuture<'_, SessionListResponse> {
