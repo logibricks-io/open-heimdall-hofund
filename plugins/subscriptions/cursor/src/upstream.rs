@@ -2407,6 +2407,7 @@ mod tests {
         http2_memory::reset_for_tests();
         let _max = crate::max_only::test_lock();
         crate::max_only::clear();
+        let mapped = crate::request::start_mapped_max_mode();
         block_on(async {
             let success = [text_frame("hi"), turn_end_frame()].concat();
             let h2 = Http2Server::start(vec![
@@ -2425,7 +2426,6 @@ mod tests {
             let host = pooled_host();
             let account = store_account(&host).await;
             let upstream = upstream(&host, &h1, h2.base_url(), account);
-            crate::request::take_mapped_max_mode();
             let Completion::Stream(stream) = upstream
                 .execute(max_model_request(), ProtocolId::OPENAI_CHAT)
                 .await
@@ -2442,7 +2442,7 @@ mod tests {
                 "{events:?}"
             );
             assert_eq!(
-                crate::request::take_mapped_max_mode(),
+                mapped.take(),
                 [false, true],
                 "first attempt is off; the retry is Max Mode"
             );
@@ -2460,7 +2460,11 @@ mod tests {
                 panic!("stream");
             };
             drop(collect(Completion::Stream(stream)).await.expect("second"));
-            assert_eq!(crate::request::take_mapped_max_mode(), [true]);
+            assert_eq!(
+                mapped.take(),
+                [true],
+                "later execute is a single Max Mode Run"
+            );
             assert_eq!(
                 h2.requests().len(),
                 3,
@@ -2477,6 +2481,7 @@ mod tests {
         let _max = crate::max_only::test_lock();
         crate::max_only::clear();
         crate::max_only::remember("gpt-5.6-luna-high");
+        let mapped = crate::request::start_mapped_max_mode();
         block_on(async {
             let h2 = Http2Server::start(vec![
                 Http2Response::new(200)
@@ -2488,7 +2493,6 @@ mod tests {
             let host = pooled_host();
             let account = store_account(&host).await;
             let upstream = upstream(&host, &h1, h2.base_url(), account);
-            crate::request::take_mapped_max_mode();
             let error = upstream
                 .execute(max_model_request(), ProtocolId::OPENAI_CHAT)
                 .await
@@ -2500,7 +2504,7 @@ mod tests {
                 "{}",
                 error.message()
             );
-            assert_eq!(crate::request::take_mapped_max_mode(), [true]);
+            assert_eq!(mapped.take(), [true]);
             assert_eq!(h2.requests().len(), 1);
         });
         crate::max_only::clear();
@@ -2512,6 +2516,7 @@ mod tests {
         http2_memory::reset_for_tests();
         let _max = crate::max_only::test_lock();
         crate::max_only::clear();
+        let mapped = crate::request::start_mapped_max_mode();
         block_on(async {
             let trailer = frame::encode(
                 frame::FLAG_TRAILER,
@@ -2524,7 +2529,6 @@ mod tests {
             let host = pooled_host();
             let account = store_account(&host).await;
             let upstream = upstream(&host, &h1, h2.base_url(), account);
-            crate::request::take_mapped_max_mode();
             let error = upstream
                 .execute(max_model_request(), ProtocolId::OPENAI_CHAT)
                 .await
@@ -2532,7 +2536,7 @@ mod tests {
                 .expect_err("unrelated failure");
             assert_eq!(error.status(), Some(502));
             assert!(error.message().contains("upstream exploded"));
-            assert_eq!(crate::request::take_mapped_max_mode(), [false]);
+            assert_eq!(mapped.take(), [false]);
             assert_eq!(h2.requests().len(), 1);
             assert!(!crate::max_only::contains("gpt-5.6-luna-high"));
         });

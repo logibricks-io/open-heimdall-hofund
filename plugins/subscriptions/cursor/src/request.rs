@@ -65,12 +65,7 @@ pub(crate) fn map_with_mode(
         max_mode,
     )?;
     #[cfg(test)]
-    {
-        MAPPED_MAX_MODE
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(max_mode);
-    }
+    record_mapped_max_mode(max_mode);
     Ok(mapped)
 }
 
@@ -80,18 +75,53 @@ pub(crate) fn map(request: &Request) -> Result<MappedRequest, PluginError> {
     map_with_mode(request, None, false)
 }
 
-/// Max Mode flags used by each [`map_with_mode`] call, in call order (tests only).
+/// Enables the process-wide Max Mode mapping log for the current test.
+///
+/// Mapping calls outside an active guard do not append, so unrelated `map()`
+/// tests cannot contaminate execute assertions.
 #[cfg(test)]
-pub(crate) fn take_mapped_max_mode() -> Vec<bool> {
-    std::mem::take(
-        &mut *MAPPED_MAX_MODE
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner),
-    )
+pub(crate) fn start_mapped_max_mode() -> MappedMaxMode {
+    *mapped_max_mode() = Some(Vec::new());
+    MappedMaxMode
+}
+
+/// Max Mode flags recorded while a [`start_mapped_max_mode`] guard is held.
+#[cfg(test)]
+pub(crate) struct MappedMaxMode;
+
+#[cfg(test)]
+impl MappedMaxMode {
+    pub(crate) fn take(&self) -> Vec<bool> {
+        mapped_max_mode()
+            .as_mut()
+            .map(std::mem::take)
+            .unwrap_or_default()
+    }
 }
 
 #[cfg(test)]
-static MAPPED_MAX_MODE: std::sync::Mutex<Vec<bool>> = std::sync::Mutex::new(Vec::new());
+impl Drop for MappedMaxMode {
+    fn drop(&mut self) {
+        *mapped_max_mode() = None;
+    }
+}
+
+#[cfg(test)]
+fn record_mapped_max_mode(max_mode: bool) {
+    if let Some(flags) = mapped_max_mode().as_mut() {
+        flags.push(max_mode);
+    }
+}
+
+#[cfg(test)]
+fn mapped_max_mode() -> std::sync::MutexGuard<'static, Option<Vec<bool>>> {
+    MAPPED_MAX_MODE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[cfg(test)]
+static MAPPED_MAX_MODE: std::sync::Mutex<Option<Vec<bool>>> = std::sync::Mutex::new(None);
 
 fn new_uuid() -> Result<String, PluginError> {
     hofund_plugin_sdk::uuid::v4()
