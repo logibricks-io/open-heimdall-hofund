@@ -12,9 +12,14 @@ use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll, Waker};
 
+mod servers;
+
 pub use hofund_plugin_host::{
     PipedScript, PipedSpawn, RecordingHttp, RecordingObserve, RecordingProcess, RecordingScheduler,
     RecordingSecrets, TestHost, test_host,
+};
+pub use servers::{
+    HeaderPark, Http1Response, Http1Server, Http2Response, Http2Server, header_park,
 };
 
 /// Sends one HTTP/1.1 GET to a test sign-in listener and returns its reply.

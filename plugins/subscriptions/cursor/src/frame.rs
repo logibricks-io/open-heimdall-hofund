@@ -34,6 +34,7 @@ impl Frame {
     }
 
     /// Whether flag bit 0 was set on the wire (payload is already inflated).
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn is_gzip(&self) -> bool {
         self.flags & FLAG_GZIP != 0
@@ -157,6 +158,7 @@ impl FrameDecoder {
 /// # Errors
 ///
 /// Same as [`FrameDecoder::finish`].
+#[cfg(test)]
 pub(crate) fn decode_all(data: &[u8]) -> Result<Vec<Frame>, PluginError> {
     let mut decoder = FrameDecoder::new();
     let mut frames = decoder.push(data)?;

@@ -2,14 +2,15 @@
 
 /// Default Cursor API and website bases.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[doc(hidden)]
 pub struct Endpoints {
     /// Browser sign-in site.
-    pub(crate) website: String,
+    pub website: String,
     /// Connect API base (`api2`).
-    pub(crate) api: String,
+    pub api: String,
+    /// Default agent API origin when server config has no usable override.
+    pub agent: String,
     /// Client version sent on API calls.
-    pub(crate) client_version: String,
+    pub client_version: String,
 }
 
 impl Default for Endpoints {
@@ -17,6 +18,7 @@ impl Default for Endpoints {
         Self {
             website: "https://cursor.com".to_owned(),
             api: "https://api2.cursor.sh".to_owned(),
+            agent: "https://agentn.global.api5.cursor.sh".to_owned(),
             client_version: "cli-2026.09.23-86fc751".to_owned(),
         }
     }
@@ -39,6 +41,13 @@ impl Endpoints {
 
     pub(crate) fn oauth_refresh(&self) -> String {
         format!("{}/auth/refresh", self.api.trim_end_matches('/'))
+    }
+
+    pub(crate) fn server_config(&self) -> String {
+        format!(
+            "{}/aiserver.v1.ServerConfigService/GetServerConfig",
+            self.api.trim_end_matches('/')
+        )
     }
 
     pub(crate) fn exchange_user_api_key(&self) -> String {

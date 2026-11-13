@@ -2248,6 +2248,8 @@ dependencies = [
  "hofund-router",
  "hofund-secrets",
  "hofund-usage",
+ "libc",
+ "nix",
  "notify",
  "regex",
  "reqwest 0.12.28",
@@ -2355,8 +2357,11 @@ dependencies = [
 name = "hofund-kit-subscription"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "futures-util",
+ "h2",
  "hofund-plugin-host",
+ "http",
  "tokio",
 ]
 

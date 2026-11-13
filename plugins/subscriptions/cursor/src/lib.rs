@@ -13,6 +13,7 @@ use hofund_plugin_api::{
 use hofund_plugin_sdk::Contribution;
 use hofund_plugin_sdk::oauth::{Pkce, SecretObject, secret_text};
 
+mod agent_host;
 mod agent_sign_in;
 mod auth;
 mod cli;
@@ -20,16 +21,16 @@ mod connect;
 mod discover;
 mod endpoints;
 mod exchange;
-/// Connect framing. Wired into a Run session in a later R-8 slice.
-#[allow(dead_code)]
 mod frame;
+mod http2_memory;
 mod import;
 mod models;
-/// Hand-written protobuf codec. Wired into a Run session in a later R-8 slice.
-#[allow(dead_code)]
 mod proto;
 mod quota;
 mod refresh;
+/// Run transport. Request mapping and the upstream provider arrive in R-8f2/f3.
+#[allow(dead_code)]
+mod run;
 mod session;
 mod sign_in;
 mod team;
