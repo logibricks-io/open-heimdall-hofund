@@ -121,6 +121,7 @@ fn expected_deps(package: &str) -> Option<&'static [&'static str]> {
             "hofund-quirks",
             "hofund-router",
             "hofund-secrets",
+            "hofund-sessions",
             "hofund-usage",
         ],
         "hofund-gateway" => &[
@@ -156,6 +157,8 @@ fn expected_deps(package: &str) -> Option<&'static [&'static str]> {
         "hofund-plugin-plan-quota" => &["hofund-plugin-api", "hofund-plugin-sdk"],
         "hofund-plugin-registry" => &[
             "hofund-plugin-api",
+            "hofund-plugin-agent-claude",
+            "hofund-plugin-agent-codex",
             "hofund-plugin-azure",
             "hofund-plugin-bedrock",
             "hofund-plugin-bedrock-mantle",

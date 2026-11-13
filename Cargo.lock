@@ -2247,6 +2247,7 @@ dependencies = [
  "hofund-quirks",
  "hofund-router",
  "hofund-secrets",
+ "hofund-sessions",
  "hofund-usage",
  "libc",
  "nix",
@@ -2562,6 +2563,8 @@ dependencies = [
  "hofund-agent",
  "hofund-kit-agent",
  "hofund-kit-upstream",
+ "hofund-plugin-agent-claude",
+ "hofund-plugin-agent-codex",
  "hofund-plugin-api",
  "hofund-plugin-azure",
  "hofund-plugin-bedrock",
@@ -2894,6 +2897,7 @@ dependencies = [
 name = "hofund-sessions"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "hofund-plugin-api",
  "hofund-usage",
  "libc",

@@ -164,6 +164,9 @@ flowchart BT
   gateway --> pluginHost
   sessions --> pluginApi
   sessions --> usage
+  pluginRegistry --> pluginAgentClaude["plugin-agent-claude<br/>session reader"]
+  pluginRegistry --> pluginAgentCodex["plugin-agent-codex<br/>session reader"]
+  daemon --> sessions
   daemon --> gateway
   daemon --> config
   daemon --> secrets
@@ -212,6 +215,8 @@ for the built-in factories. Those factories still call the `provider`
 adapters. `provider` depends on `plugin-sdk` for SigV4 and token parsing.
 `daemon` depends on `plugin-registry` and
 `plugin-host` so it can call `factory` and build a `HostContext`. It depends on
+`sessions` for the control plane's consent-gated listing and reports; the
+registry supplies the linked reader plugins. It depends on
 `plugin-sdk` for the bounded pager used by an exact configured model-list URL.
 It depends on `agent` so the control plane can plan, connect, and disconnect
 agent configs and refresh them after a token rotation.

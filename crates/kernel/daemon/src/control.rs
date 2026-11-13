@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::TimeZone;
@@ -26,10 +26,14 @@ use hofund_control_proto::{
     QuotaAlertsResponse, QuotaAlertsSetRequest, QuotaAlertsSetResponse, QuotaCreditsModesResponse,
     QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryQuery, QuotaHistoryResponse,
     QuotaQuery, QuotaResponse, RouteListResponse, RouteModel, RouteModelListResponse, RouteQuery,
-    RouteReserve, ServeRole, SessionRouteResponse, ShutdownRequest, ShutdownResponse,
-    ShutdownState, StatusResponse, TokenRotateRequest, TokenRotateResponse, UnroutedListResponse,
-    UsageBreakdownBy, UsageBreakdownGroup, UsagePeriod, UsageQuery, UsageResponse, UsageRow,
-    UsageTotals, WarmupAccountRow, WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
+    RouteReserve, ServeRole, SessionDetailResponse, SessionListQuery, SessionListResponse,
+    SessionManageQuery, SessionManageResponse, SessionOverviewQuery, SessionOverviewResponse,
+    SessionProgressResponse, SessionReadsPatchRequest, SessionReadsResponse, SessionRouteResponse,
+    SessionSearchQuery, SessionSearchResponse, SessionStatsQuery, SessionStatsResponse,
+    SessionTranscriptResponse, ShutdownRequest, ShutdownResponse, ShutdownState, StatusResponse,
+    TokenRotateRequest, TokenRotateResponse, UnroutedListResponse, UsageBreakdownBy,
+    UsageBreakdownGroup, UsagePeriod, UsageQuery, UsageResponse, UsageRow, UsageTotals,
+    WarmupAccountRow, WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
 };
 use hofund_control_proto::{
     ConfigApplyRequest, ConfigResponse, ConfigValidateRequest, ConfigValidationResponse,
@@ -50,6 +54,7 @@ use tokio::sync::watch;
 use super::config_ops::{ConfigOps, ReloadOrigin};
 use super::control_agents::AgentOps;
 use super::control_profiles::ProfileOps;
+use super::control_sessions::SessionControl;
 use super::events::{EventBus, SnapshotSource};
 use super::models::{PicksError, Timed, test_timeout};
 use super::{DaemonError, DaemonRegistry, ErrorKind, ModelsHost, Picks, control_map, membership};
@@ -64,6 +69,7 @@ pub(crate) struct DaemonControl {
     cooldowns: Arc<Cooldowns>,
     usage: Arc<Ledger>,
     keys: Arc<KeyStore>,
+    sessions: Arc<SessionControl>,
     agents: AgentOps,
     profiles: ProfileOps,
     accounts: Option<Arc<super::control_accounts::AccountOps>>,
@@ -89,10 +95,17 @@ impl DaemonControl {
         cooldowns: Arc<Cooldowns>,
         usage: Arc<Ledger>,
         keys: Arc<KeyStore>,
+        session_pricing: Arc<hofund_model_catalog::EffectivePricer>,
         token_path: PathBuf,
         shutdown: watch::Sender<bool>,
     ) -> Self {
         let registry_agents = registry.agents();
+        let session_stores = registry.session_stores();
+        let sessions = Arc::new(SessionControl::new(
+            config_path,
+            session_stores,
+            session_pricing,
+        ));
         let routes_from = Arc::clone(&ops);
         let listener_from = Arc::clone(&ops);
         Self {
@@ -119,6 +132,7 @@ impl DaemonControl {
             accounts: None,
             usage,
             keys,
+            sessions,
             ops,
             router: None,
             shutdown,
@@ -1414,6 +1428,98 @@ impl ControlState for DaemonControl {
         })
     }
 
+    fn sessions(&self, query: SessionListQuery) -> ControlFuture<'_, SessionListResponse> {
+        let sessions = Arc::clone(&self.sessions);
+        Box::pin(session_task(sessions, move |sessions| {
+            sessions.list(query, chrono::Local::now())
+        }))
+    }
+
+    fn session_stats(&self, query: SessionStatsQuery) -> ControlFuture<'_, SessionStatsResponse> {
+        let sessions = Arc::clone(&self.sessions);
+        Box::pin(session_task(sessions, move |sessions| {
+            sessions.stats(query, chrono::Local::now())
+        }))
+    }
+
+    fn session_overview(
+        &self,
+        query: SessionOverviewQuery,
+    ) -> ControlFuture<'_, SessionOverviewResponse> {
+        let sessions = Arc::clone(&self.sessions);
+        Box::pin(session_task(sessions, move |sessions| {
+            sessions.overview(query, chrono::Local::now())
+        }))
+    }
+
+    fn session_progress(&self) -> ControlFuture<'_, SessionProgressResponse> {
+        let sessions = Arc::clone(&self.sessions);
+        Box::pin(async move { Ok(sessions.progress()) })
+    }
+
+    fn session(&self, id: String) -> ControlFuture<'_, SessionDetailResponse> {
+        let sessions = Arc::clone(&self.sessions);
+        Box::pin(session_task(sessions, move |sessions| sessions.detail(&id)))
+    }
+
+    fn session_transcript(
+        &self,
+        id: String,
+        sub: Option<String>,
+    ) -> ControlFuture<'_, SessionTranscriptResponse> {
+        let sessions = Arc::clone(&self.sessions);
+        Box::pin(session_task(sessions, move |sessions| {
+            sessions.transcript(&id, sub.as_deref())
+        }))
+    }
+
+    fn session_markdown(&self, id: String) -> ControlFuture<'_, String> {
+        let sessions = Arc::clone(&self.sessions);
+        Box::pin(session_task(sessions, move |sessions| {
+            sessions.markdown(&id)
+        }))
+    }
+
+    fn session_search(
+        &self,
+        query: SessionSearchQuery,
+    ) -> ControlFuture<'_, SessionSearchResponse> {
+        let sessions = Arc::clone(&self.sessions);
+        Box::pin(async move {
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let _cancel_on_drop = CancelOnDrop(Arc::clone(&cancelled));
+            session_task(sessions, move |sessions| {
+                sessions.search(query, cancelled.as_ref())
+            })
+            .await
+        })
+    }
+
+    fn session_manage(
+        &self,
+        query: SessionManageQuery,
+    ) -> ControlFuture<'_, SessionManageResponse> {
+        let sessions = Arc::clone(&self.sessions);
+        Box::pin(session_task(sessions, move |sessions| {
+            sessions.manage(query)
+        }))
+    }
+
+    fn session_reads(&self) -> ControlFuture<'_, SessionReadsResponse> {
+        let sessions = Arc::clone(&self.sessions);
+        Box::pin(session_task(sessions, move |sessions| sessions.reads()))
+    }
+
+    fn patch_session_reads(
+        &self,
+        request: SessionReadsPatchRequest,
+    ) -> ControlFuture<'_, SessionReadsResponse> {
+        let sessions = Arc::clone(&self.sessions);
+        Box::pin(session_task(sessions, move |sessions| {
+            sessions.patch_reads(request)
+        }))
+    }
+
     fn usage(&self, query: UsageQuery) -> ControlFuture<'_, UsageResponse> {
         let ledger = Arc::clone(&self.usage);
         let config = self.ops.live().config.clone();
@@ -2124,6 +2230,29 @@ fn quotas_unavailable() -> ControlFailure {
         "quotas",
     )
     .into()
+}
+
+struct CancelOnDrop(Arc<AtomicBool>);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+async fn session_task<T: Send + 'static>(
+    sessions: Arc<SessionControl>,
+    operation: impl FnOnce(&SessionControl) -> Result<T, ControlFailure> + Send + 'static,
+) -> Result<T, ControlFailure> {
+    tokio::task::spawn_blocking(move || operation(&sessions))
+        .await
+        .map_err(|_| {
+            ControlError::new(
+                ControlErrorKind::Internal,
+                "session route task failed",
+                "sessions",
+            )
+        })?
 }
 
 fn internal(message: String) -> ControlError {

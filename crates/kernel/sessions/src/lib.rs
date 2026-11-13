@@ -15,4 +15,5 @@ pub mod index;
 pub mod json;
 pub mod open;
 pub mod pricing;
+pub mod read;
 mod storage;

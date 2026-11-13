@@ -19,9 +19,10 @@ use hofund_control_proto::{
     ProviderTestRequest, ProviderTestResponse, ProviderWriteResponse, QuotaAlertsResponse,
     QuotaAlertsSetRequest, QuotaAlertsSetResponse, QuotaCreditsModesResponse,
     QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryQuery, QuotaHistoryResponse,
-    QuotaQuery, QuotaResponse, RouteModelListResponse, ShutdownRequest, ShutdownResponse,
-    StatusResponse, TokenRotateRequest, TokenRotateResponse, UsageQuery, UsageResponse,
-    WarmupListResponse, WarmupRunRequest, WarmupRunResponse, decode_error_envelope,
+    QuotaQuery, QuotaResponse, RouteModelListResponse, SessionListQuery, SessionOverviewQuery,
+    SessionStatsQuery, ShutdownRequest, ShutdownResponse, StatusResponse, TokenRotateRequest,
+    TokenRotateResponse, UsageQuery, UsageResponse, WarmupListResponse, WarmupRunRequest,
+    WarmupRunResponse, decode_error_envelope,
 };
 use hofund_control_proto::{
     ConfigApplyRequest, ConfigResponse, ConfigValidateRequest, ConfigValidationResponse,
@@ -223,6 +224,82 @@ impl ControlState for FakeControlState {
         self.reply(format!(
             "run_checkin:{}:{}",
             request.subscription, request.account
+        ))
+    }
+
+    fn sessions(
+        &self,
+        query: SessionListQuery,
+    ) -> ControlFuture<'_, hofund_control_proto::SessionListResponse> {
+        self.reply(format!("sessions:{:?}:{}", query.days, query.limit()))
+    }
+
+    fn session_stats(
+        &self,
+        query: SessionStatsQuery,
+    ) -> ControlFuture<'_, hofund_control_proto::SessionStatsResponse> {
+        self.reply(format!("session_stats:{:?}", query.days))
+    }
+
+    fn session_overview(
+        &self,
+        query: SessionOverviewQuery,
+    ) -> ControlFuture<'_, hofund_control_proto::SessionOverviewResponse> {
+        self.reply(format!("session_overview:{}", query.agent))
+    }
+
+    fn session_progress(&self) -> ControlFuture<'_, hofund_control_proto::SessionProgressResponse> {
+        self.reply("session_progress")
+    }
+
+    fn session(
+        &self,
+        id: String,
+    ) -> ControlFuture<'_, hofund_control_proto::SessionDetailResponse> {
+        self.reply(format!("session:{id}"))
+    }
+
+    fn session_transcript(
+        &self,
+        id: String,
+        sub: Option<String>,
+    ) -> ControlFuture<'_, hofund_control_proto::SessionTranscriptResponse> {
+        self.reply(format!("session_transcript:{id}:{sub:?}"))
+    }
+
+    fn session_markdown(&self, id: String) -> ControlFuture<'_, String> {
+        self.calls
+            .lock()
+            .expect("calls")
+            .push(format!("session_markdown:{id}"));
+        Box::pin(async move { Ok(format!("# {id}")) })
+    }
+
+    fn session_search(
+        &self,
+        query: hofund_control_proto::SessionSearchQuery,
+    ) -> ControlFuture<'_, hofund_control_proto::SessionSearchResponse> {
+        self.reply(format!("session_search:{}:{}", query.agent, query.q))
+    }
+
+    fn session_manage(
+        &self,
+        query: hofund_control_proto::SessionManageQuery,
+    ) -> ControlFuture<'_, hofund_control_proto::SessionManageResponse> {
+        self.reply(format!("session_manage:{}", query.agent))
+    }
+
+    fn session_reads(&self) -> ControlFuture<'_, hofund_control_proto::SessionReadsResponse> {
+        self.reply("session_reads")
+    }
+
+    fn patch_session_reads(
+        &self,
+        request: hofund_control_proto::SessionReadsPatchRequest,
+    ) -> ControlFuture<'_, hofund_control_proto::SessionReadsResponse> {
+        self.reply(format!(
+            "patch_session_reads:{:?}",
+            request.expected_revision
         ))
     }
 
@@ -462,6 +539,40 @@ fn operation_routes() -> Vec<(Method, &'static str, Vec<u8>)> {
             "/v1/hofund/agents/agent/model",
             json!(&AgentModelRequest::new(Some("m".to_owned()))),
         ),
+        (
+            Method::GET,
+            "/v1/hofund/sessions?days=7&limit=2",
+            Vec::new(),
+        ),
+        (Method::GET, "/v1/hofund/sessions/stats?days=0", Vec::new()),
+        (
+            Method::GET,
+            "/v1/hofund/sessions/overview?agent=fake",
+            Vec::new(),
+        ),
+        (Method::GET, "/v1/hofund/sessions/progress", Vec::new()),
+        (
+            Method::GET,
+            "/v1/hofund/sessions/search?agent=fake&q=Needle",
+            Vec::new(),
+        ),
+        (
+            Method::GET,
+            "/v1/hofund/sessions/manage?agent=fake",
+            Vec::new(),
+        ),
+        (Method::GET, "/v1/hofund/sessions/reads", Vec::new()),
+        (
+            Method::PATCH,
+            "/v1/hofund/sessions/reads",
+            br#"{"version":1,"agents":{"fake":true}}"#.to_vec(),
+        ),
+        (Method::GET, "/v1/hofund/sessions/fake%3Aone", Vec::new()),
+        (
+            Method::GET,
+            "/v1/hofund/sessions/fake%3Aone/transcript?sub=child",
+            Vec::new(),
+        ),
         (Method::GET, "/v1/hofund/usage?period=day", Vec::new()),
         (Method::GET, "/v1/hofund/quotas?kept=1", Vec::new()),
         (
@@ -619,6 +730,16 @@ async fn control_routes_success_and_error_envelopes_against_fake_state() {
             "connect_agent:agent",
             "disconnect_agent:agent",
             "set_agent_model:agent:Some(\"m\")",
+            "sessions:Some(7):2",
+            "session_stats:Some(0)",
+            "session_overview:fake",
+            "session_progress",
+            "session_search:fake:Needle",
+            "session_manage:fake",
+            "session_reads",
+            "patch_session_reads:None",
+            "session:fake:one",
+            "session_transcript:fake:one:Some(\"child\")",
             "usage:Day",
             "quotas:kept=true",
             "quota_history:Some(\"7\"):Some(\"acct\"):Some(\"Me@x.io\")",
@@ -910,6 +1031,78 @@ async fn query_and_body_rejections_use_control_envelopes() {
             envelope.error.kind,
             ControlErrorKind::BadRequest | ControlErrorKind::UnsupportedVersion
         ));
+    }
+}
+
+#[tokio::test]
+async fn session_markdown_is_a_body_only_markdown_response() {
+    let state = Arc::new(FakeControlState::default());
+    let (status, headers, body) = call(
+        app(&state),
+        Method::GET,
+        "/v1/hofund/sessions/fake%3Aone/markdown",
+        Vec::new(),
+        true,
+        false,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        headers.get(header::CONTENT_TYPE).expect("content type"),
+        "text/markdown; charset=utf-8"
+    );
+    assert_no_store(&headers);
+    assert_eq!(body, b"# fake:one");
+    assert_eq!(
+        state.calls.lock().expect("calls").as_slice(),
+        ["session_markdown:fake:one"]
+    );
+}
+
+#[tokio::test]
+async fn session_queries_reject_bad_days_before_dispatch() {
+    let state = Arc::new(FakeControlState::default());
+    for path in [
+        "/v1/hofund/sessions?days=2",
+        "/v1/hofund/sessions/stats?days=all",
+        "/v1/hofund/sessions/overview?days=-1",
+        "/v1/hofund/sessions?limit=0",
+        "/v1/hofund/sessions?unknown=x",
+        "/v1/hofund/sessions/search?q=",
+        "/v1/hofund/sessions/search",
+    ] {
+        let (status, headers, body) =
+            call(app(&state), Method::GET, path, Vec::new(), true, false).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+        assert_no_store(&headers);
+        assert_error(&body, ControlErrorKind::BadRequest);
+    }
+    assert!(state.calls.lock().expect("calls").is_empty());
+}
+
+#[tokio::test]
+async fn session_write_routes_remain_not_found() {
+    let state = Arc::new(FakeControlState::default());
+    for path in [
+        "/v1/hofund/sessions/fake%3Aone/export",
+        "/v1/hofund/sessions/delete",
+        "/v1/hofund/sessions/restore",
+        "/v1/hofund/sessions/purge",
+        "/v1/hofund/sessions/carry",
+        "/v1/hofund/sessions/relocate",
+        "/v1/hofund/sessions/recording",
+    ] {
+        let (status, _, body) = call(
+            app(&state),
+            Method::POST,
+            path,
+            br#"{"version":1}"#.to_vec(),
+            true,
+            true,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+        assert_error(&body, ControlErrorKind::NotFound);
     }
 }
 

@@ -25,10 +25,13 @@ use hofund_control_proto::{
     QuotaAlertsResponse, QuotaAlertsSetRequest, QuotaAlertsSetResponse, QuotaCreditsModesResponse,
     QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryQuery, QuotaHistoryResponse,
     QuotaQuery, QuotaResponse, ReloadRequest, RouteListResponse, RouteModelListResponse,
-    RouteQuery, SessionRouteResponse, ShutdownRequest, ShutdownResponse, StatusResponse,
-    TokenRotateRequest, TokenRotateResponse, Topic, UnroutedListResponse, UsageQuery,
-    UsageResponse, WarmupListResponse, WarmupRunRequest, WarmupRunResponse, decode_error_envelope,
-    decode_response,
+    RouteQuery, SessionDetailResponse, SessionListQuery, SessionListResponse, SessionManageQuery,
+    SessionManageResponse, SessionOverviewQuery, SessionOverviewResponse, SessionProgressResponse,
+    SessionReadsPatchRequest, SessionReadsResponse, SessionRouteResponse, SessionSearchQuery,
+    SessionSearchResponse, SessionStatsQuery, SessionStatsResponse, SessionTranscriptResponse,
+    ShutdownRequest, ShutdownResponse, StatusResponse, TokenRotateRequest, TokenRotateResponse,
+    Topic, UnroutedListResponse, UsageQuery, UsageResponse, WarmupListResponse, WarmupRunRequest,
+    WarmupRunResponse, decode_error_envelope, decode_response,
 };
 use http::header;
 use http_body_util::{BodyExt, Full, Limited};
@@ -1086,6 +1089,171 @@ impl Client {
         .await
     }
 
+    /// Lists consent-filtered sessions.
+    pub async fn sessions(
+        &self,
+        query: SessionListQuery,
+    ) -> Result<SessionListResponse, ClientError> {
+        let mut fields = Vec::new();
+        if let Some(days) = query.days {
+            fields.push(("days", days.to_string()));
+        }
+        if !query.model.is_empty() {
+            fields.push(("model", query.model));
+        }
+        if !query.folder.is_empty() {
+            fields.push(("folder", query.folder));
+        }
+        if let Some(limit) = query.limit {
+            fields.push(("limit", limit.to_string()));
+        }
+        self.get(&with_query("/v1/hofund/sessions", fields)).await
+    }
+
+    /// Reports session usage by day, model, and folder.
+    pub async fn session_stats(
+        &self,
+        query: SessionStatsQuery,
+    ) -> Result<SessionStatsResponse, ClientError> {
+        let mut fields = Vec::new();
+        if let Some(days) = query.days {
+            fields.push(("days", days.to_string()));
+        }
+        if !query.model.is_empty() {
+            fields.push(("model", query.model));
+        }
+        if !query.folder.is_empty() {
+            fields.push(("folder", query.folder));
+        }
+        self.get(&with_query("/v1/hofund/sessions/stats", fields))
+            .await
+    }
+
+    /// Summarizes sessions in a filtered range.
+    pub async fn session_overview(
+        &self,
+        query: SessionOverviewQuery,
+    ) -> Result<SessionOverviewResponse, ClientError> {
+        let mut fields = Vec::new();
+        if let Some(days) = query.days {
+            fields.push(("days", days.to_string()));
+        }
+        for (key, value) in [
+            ("agent", query.agent),
+            ("model", query.model),
+            ("cwd", query.cwd),
+        ] {
+            if !value.is_empty() {
+                fields.push((key, value));
+            }
+        }
+        self.get(&with_query("/v1/hofund/sessions/overview", fields))
+            .await
+    }
+
+    /// Reports session index progress.
+    pub async fn session_progress(&self) -> Result<SessionProgressResponse, ClientError> {
+        self.get("/v1/hofund/sessions/progress").await
+    }
+
+    /// Returns one listed session.
+    pub async fn session(&self, id: &str) -> Result<SessionDetailResponse, ClientError> {
+        self.get(&format!("/v1/hofund/sessions/{}", encode_segment(id)))
+            .await
+    }
+
+    /// Reads one session or listed subagent transcript.
+    pub async fn session_transcript(
+        &self,
+        id: &str,
+        sub: Option<&str>,
+    ) -> Result<SessionTranscriptResponse, ClientError> {
+        let path = format!("/v1/hofund/sessions/{}/transcript", encode_segment(id));
+        let path = sub.map_or(path.clone(), |sub| {
+            with_query(&path, vec![("sub", sub.to_owned())])
+        });
+        self.get(&path).await
+    }
+
+    /// Reads one session as Markdown without creating a local file.
+    pub async fn session_markdown(&self, id: &str) -> Result<String, ClientError> {
+        let response = self
+            .open(
+                http::Method::GET,
+                &format!("/v1/hofund/sessions/{}/markdown", encode_segment(id)),
+                None,
+                None,
+            )
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(error_response(status, response.into_body()).await);
+        }
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        if !content_type.starts_with("text/markdown") {
+            return Err(ClientError::Transport(
+                "session Markdown response has the wrong content type".to_owned(),
+            ));
+        }
+        let body = Limited::new(response.into_body(), MAX_RESPONSE_BODY_BYTES)
+            .collect()
+            .await
+            .map_err(|error| transport("control response body failed", error))?
+            .to_bytes();
+        String::from_utf8(body.to_vec())
+            .map_err(|_| ClientError::Transport("session Markdown is not UTF-8".to_owned()))
+    }
+
+    /// Searches consent-filtered session transcripts.
+    pub async fn session_search(
+        &self,
+        query: SessionSearchQuery,
+    ) -> Result<SessionSearchResponse, ClientError> {
+        let mut fields = Vec::new();
+        if !query.agent.is_empty() {
+            fields.push(("agent", query.agent));
+        }
+        fields.push(("q", query.q));
+        self.get(&with_query("/v1/hofund/sessions/search", fields))
+            .await
+    }
+
+    /// Lists read-only session management state.
+    pub async fn session_manage(
+        &self,
+        query: SessionManageQuery,
+    ) -> Result<SessionManageResponse, ClientError> {
+        let fields = if query.agent.is_empty() {
+            Vec::new()
+        } else {
+            vec![("agent", query.agent)]
+        };
+        self.get(&with_query("/v1/hofund/sessions/manage", fields))
+            .await
+    }
+
+    /// Returns session read consent.
+    pub async fn session_reads(&self) -> Result<SessionReadsResponse, ClientError> {
+        self.get("/v1/hofund/sessions/reads").await
+    }
+
+    /// Updates session read consent with optional optimistic concurrency.
+    pub async fn patch_session_reads(
+        &self,
+        request: SessionReadsPatchRequest,
+    ) -> Result<SessionReadsResponse, ClientError> {
+        self.request(
+            http::Method::PATCH,
+            "/v1/hofund/sessions/reads",
+            Some(json_body(&request)?),
+        )
+        .await
+    }
+
     /// Reports usage for a period.
     pub async fn usage(&self, query: UsageQuery) -> Result<UsageResponse, ClientError> {
         let url = format!("/v1/hofund/usage?{}", query.encode());
@@ -1567,6 +1735,19 @@ fn json_body<T: serde::Serialize>(request: &T) -> Result<Vec<u8>, ClientError> {
         .map_err(|_| ClientError::Transport("cannot encode control request".to_owned()))
 }
 
+fn with_query(path: &str, fields: Vec<(&str, String)>) -> String {
+    let query = fields
+        .into_iter()
+        .map(|(key, value)| format!("{key}={}", encode_segment(&value)))
+        .collect::<Vec<_>>()
+        .join("&");
+    if query.is_empty() {
+        path.to_owned()
+    } else {
+        format!("{path}?{query}")
+    }
+}
+
 fn encode_segment(id: &str) -> String {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let mut encoded = String::with_capacity(id.len());
@@ -1759,6 +1940,32 @@ mod route_tests {
             | "/v1/hofund/agents/agent%2F1/model" => {
                 serde_json::to_vec(&proto::AgentChangeResponse::default())
             }
+            "/v1/hofund/sessions" => serde_json::to_vec(&proto::SessionListResponse::default()),
+            "/v1/hofund/sessions/stats" => {
+                serde_json::to_vec(&proto::SessionStatsResponse::default())
+            }
+            "/v1/hofund/sessions/overview" => {
+                serde_json::to_vec(&proto::SessionOverviewResponse::default())
+            }
+            "/v1/hofund/sessions/progress" => {
+                serde_json::to_vec(&proto::SessionProgressResponse::default())
+            }
+            "/v1/hofund/sessions/fake%3Aone" => {
+                serde_json::to_vec(&proto::SessionDetailResponse::default())
+            }
+            "/v1/hofund/sessions/fake%3Aone/transcript" => {
+                serde_json::to_vec(&proto::SessionTranscriptResponse::default())
+            }
+            "/v1/hofund/sessions/fake%3Aone/markdown" => Ok(b"# Fixture".to_vec()),
+            "/v1/hofund/sessions/search" => {
+                serde_json::to_vec(&proto::SessionSearchResponse::default())
+            }
+            "/v1/hofund/sessions/manage" => {
+                serde_json::to_vec(&proto::SessionManageResponse::default())
+            }
+            "/v1/hofund/sessions/reads" => {
+                serde_json::to_vec(&proto::SessionReadsResponse::default())
+            }
             "/v1/hofund/usage" => serde_json::to_vec(&proto::UsageResponse::default()),
             "/v1/hofund/token/rotate" => serde_json::to_vec(&proto::TokenRotateResponse::default()),
             "/v1/hofund/shutdown" => serde_json::to_vec(&proto::ShutdownResponse::default()),
@@ -1844,8 +2051,13 @@ mod route_tests {
                                     content_types,
                                     body,
                                 });
+                                let content_type = if path.ends_with("/markdown") {
+                                    "text/markdown; charset=utf-8"
+                                } else {
+                                    "application/json"
+                                };
                                 let response = http::Response::builder()
-                                    .header(http::header::CONTENT_TYPE, "application/json")
+                                    .header(http::header::CONTENT_TYPE, content_type)
                                     .body(Full::new(std::io::Cursor::new(reply_body(&path))))
                                     .expect("response");
                                 Ok::<_, Infallible>(response)
@@ -2060,6 +2272,82 @@ mod route_tests {
                 .iter()
                 .all(|request| request.last_event_id.is_none())
         );
+    }
+
+    #[tokio::test]
+    async fn session_methods_encode_their_query_strings() {
+        use hofund_control_proto::{SessionListQuery, SessionOverviewQuery, SessionStatsQuery};
+
+        let (address, recorded, server) = recording_server().await;
+        let client = super::Client::tcp(address, "test-token");
+        let mut list = SessionListQuery::default();
+        list.days = Some(7);
+        list.model = "model/a".to_owned();
+        list.folder = "/work dir".to_owned();
+        list.limit = Some(2);
+        client.sessions(list).await.expect("session list");
+        client
+            .session_stats(SessionStatsQuery::default())
+            .await
+            .expect("session stats");
+        let mut overview = SessionOverviewQuery::default();
+        overview.agent = "fake".to_owned();
+        overview.cwd = "/work dir".to_owned();
+        client
+            .session_overview(overview)
+            .await
+            .expect("session overview");
+        client.session_progress().await.expect("session progress");
+        client.session("fake:one").await.expect("session detail");
+        client
+            .session_transcript("fake:one", Some("child/agent"))
+            .await
+            .expect("session transcript");
+        let markdown = client
+            .session_markdown("fake:one")
+            .await
+            .expect("session Markdown");
+        assert_eq!(markdown, "# Fixture");
+        let mut search = hofund_control_proto::SessionSearchQuery::default();
+        search.agent = "fake".to_owned();
+        search.q = "two words".to_owned();
+        client.session_search(search).await.expect("session search");
+        let mut manage = hofund_control_proto::SessionManageQuery::default();
+        manage.agent = "fake".to_owned();
+        client.session_manage(manage).await.expect("session manage");
+        client.session_reads().await.expect("session reads");
+        client
+            .patch_session_reads(hofund_control_proto::SessionReadsPatchRequest::default())
+            .await
+            .expect("PATCH reads");
+        server.abort();
+
+        let paths: Vec<String> = recorded
+            .lock()
+            .expect("recorded")
+            .iter()
+            .map(|request| request.path_and_query.clone())
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                "/v1/hofund/sessions?days=7&model=model%2Fa&folder=%2Fwork%20dir&limit=2",
+                "/v1/hofund/sessions/stats",
+                "/v1/hofund/sessions/overview?agent=fake&cwd=%2Fwork%20dir",
+                "/v1/hofund/sessions/progress",
+                "/v1/hofund/sessions/fake%3Aone",
+                "/v1/hofund/sessions/fake%3Aone/transcript?sub=child%2Fagent",
+                "/v1/hofund/sessions/fake%3Aone/markdown",
+                "/v1/hofund/sessions/search?agent=fake&q=two%20words",
+                "/v1/hofund/sessions/manage?agent=fake",
+                "/v1/hofund/sessions/reads",
+                "/v1/hofund/sessions/reads",
+            ]
+        );
+        let recorded = recorded.lock().expect("recorded");
+        let last = recorded.last().expect("PATCH request");
+        assert_eq!(last.method, http::Method::PATCH);
+        assert_eq!(last.body, br#"{"version":1}"#);
     }
 
     #[tokio::test]

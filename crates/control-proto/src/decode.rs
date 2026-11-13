@@ -23,10 +23,13 @@ use crate::{
     ProviderSpendCapsResponse, ProviderTestRequest, ProviderTestResponse, ProviderWriteResponse,
     QuotaAlertsResponse, QuotaAlertsSetRequest, QuotaAlertsSetResponse, QuotaCreditsModesResponse,
     QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryResponse, QuotaResponse,
-    ReloadRequest, RouteListResponse, RouteModelListResponse, SessionRouteResponse,
-    SettingsPatchRequest, SettingsResponse, ShutdownRequest, ShutdownResponse, SignInCancelRequest,
-    SignInCancelResponse, SignInProofRequest, SignInStartRequest, SignInStartResponse,
-    SignInStatusResponse, StatusResponse, SubscriptionListResponse, SubscriptionRefreshRequest,
+    ReloadRequest, RouteListResponse, RouteModelListResponse, SessionDetailResponse,
+    SessionListResponse, SessionManageResponse, SessionOverviewResponse, SessionProgressResponse,
+    SessionReadsPatchRequest, SessionReadsResponse, SessionRouteResponse, SessionSearchResponse,
+    SessionStatsResponse, SessionTranscriptResponse, SettingsPatchRequest, SettingsResponse,
+    ShutdownRequest, ShutdownResponse, SignInCancelRequest, SignInCancelResponse,
+    SignInProofRequest, SignInStartRequest, SignInStartResponse, SignInStatusResponse,
+    StatusResponse, SubscriptionListResponse, SubscriptionRefreshRequest,
     SubscriptionRefreshResponse, TokenRotateRequest, TokenRotateResponse, UnroutedListResponse,
     UsageResponse, WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
 };
@@ -266,6 +269,7 @@ request!(GroupCreateRequest, validate);
 request!(GroupPatchRequest, validate);
 request!(GroupDeleteRequest, validate);
 request!(GroupRestoreRequest, validate);
+request!(SessionReadsPatchRequest, validate);
 request!(SettingsPatchRequest, validate);
 request!(SignInStartRequest, validate);
 request!(SignInProofRequest, validate);
@@ -323,8 +327,6 @@ impl Response for EventEnvelope {
 response!(
     HealthResponse,
     StatusResponse,
-    SettingsResponse,
-    LogTailResponse,
     ConfigValidationResponse,
     ProviderListResponse,
     ProviderRenameResponse,
@@ -335,7 +337,28 @@ response!(
     PicksResponse,
     RouteModelListResponse,
     RouteListResponse,
+    SessionDetailResponse,
+    SessionListResponse,
+    SessionManageResponse,
+    SessionOverviewResponse,
+    SessionProgressResponse,
+    SessionReadsResponse,
     SessionRouteResponse,
+    SessionSearchResponse,
+    SessionStatsResponse,
+    SessionTranscriptResponse,
+    SettingsResponse,
+    LogTailResponse,
+    SignInStartResponse,
+    SignInStatusResponse,
+    SignInCancelResponse,
+    AccountSwitchResponse,
+    AccountImportResponse,
+    AccountDiscoverResponse,
+    AccountDiscoverImportResponse,
+    AccountRemoveResponse,
+    SubscriptionListResponse,
+    SubscriptionRefreshResponse,
     UnroutedListResponse,
     AgentListResponse,
     AgentStatusResponse,
@@ -367,16 +390,6 @@ response!(
     GroupWriteResponse,
     GroupDeleteResponse,
     GroupMemberCandidatesResponse,
-    SubscriptionListResponse,
-    SignInStartResponse,
-    SignInStatusResponse,
-    SignInCancelResponse,
-    SubscriptionRefreshResponse,
-    AccountSwitchResponse,
-    AccountImportResponse,
-    AccountDiscoverResponse,
-    AccountDiscoverImportResponse,
-    AccountRemoveResponse,
 );
 
 #[cfg(test)]
