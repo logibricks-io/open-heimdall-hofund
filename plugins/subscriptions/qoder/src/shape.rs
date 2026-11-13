@@ -400,11 +400,23 @@ fn qoder_messages(messages: &[Value]) -> Vec<Value> {
             });
             add_reasoning(&mut assistant, message);
             out.push(assistant);
-            let open = calls
+            let open: Vec<String> = calls
                 .iter()
                 .filter_map(|call| call.get("id").and_then(Value::as_str).map(str::to_owned))
                 .collect();
-            turn = Some((open, HashSet::new()));
+            let kept = messages
+                .iter()
+                .skip(index + 1)
+                .take_while(|message| message.get("role").and_then(Value::as_str) == Some("tool"))
+                .filter_map(|message| {
+                    message
+                        .get("tool_call_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+                .filter(|id| open.contains(id))
+                .collect();
+            turn = Some((open, kept));
             continue;
         }
         let mut blocks = blocks_of(&message["content"]);
@@ -683,6 +695,31 @@ mod tests {
             &json!({"oneOf": [{"type": "object"}, {"$ref": "#/$defs/X"}], "$defs": {"X": {"type": "object"}}}),
         );
         assert_eq!(schema["type"], "object");
+    }
+
+    #[test]
+    fn r54b_unknown_result_id_does_not_take_an_explicitly_named_call() {
+        let messages = vec![
+            json!({"role": "user", "content": "both"}),
+            json!({"role": "assistant", "content": "", "tool_calls": [
+                {"id": "a", "type": "function", "function": {"name": "f", "arguments": "{}"}},
+                {"id": "b", "type": "function", "function": {"name": "g", "arguments": "{}"}}
+            ]}),
+            json!({"role": "tool", "tool_call_id": "lost", "content": "B"}),
+            json!({"role": "tool", "tool_call_id": "a", "content": "A"}),
+        ];
+        let shaped = super::qoder_messages(&messages);
+        let results: Vec<_> = shaped
+            .iter()
+            .filter(|message| message["role"] == "tool")
+            .map(|message| {
+                (
+                    message["tool_call_id"].as_str().expect("result id"),
+                    message["content"].as_str().expect("result content"),
+                )
+            })
+            .collect();
+        assert_eq!(results, [("b", "B"), ("a", "A")]);
     }
 
     #[test]
