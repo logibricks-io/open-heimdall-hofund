@@ -1,4 +1,4 @@
-//! Anthropic Messages upstream on the GLM plan base URL.
+//! Anthropic Messages upstream on coding-plan and Start Plan base URLs.
 
 use std::path::PathBuf;
 use std::sync::Arc;

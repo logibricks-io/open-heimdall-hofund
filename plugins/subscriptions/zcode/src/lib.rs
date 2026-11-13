@@ -1,8 +1,8 @@
 //! Z Code (Z.ai) subscription.
 //!
-//! Imports the agent's encrypted credential store, resolves team plan keys when
-//! needed, lists GLM models, reads personal or team monitor quota, and serves
-//! Anthropic Messages on the plan API base.
+//! Signs in through the portal or encrypted agent store, resolves team plan
+//! keys, lists provider-config and gift models, reads plan and gift quotas, and
+//! serves Anthropic Messages on coding-plan and Start Plan API bases.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

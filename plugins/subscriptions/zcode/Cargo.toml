@@ -1,6 +1,6 @@
 [package]
 name = "hofund-plugin-subscription-zcode"
-description = "Z Code subscription: agent credential import, GLM plan upstream, and quota reads."
+description = "Z Code subscription: browser and agent sign-in, plan and gift upstream, models, quota, and check-in."
 version.workspace = true
 authors.workspace = true
 edition.workspace = true

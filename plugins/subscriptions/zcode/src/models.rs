@@ -1,4 +1,4 @@
-//! GLM model list from the plan Anthropic-compatible API.
+//! GLM model lists from provider config and live gift balances.
 
 use hofund_plugin_api::{AccountId, HostContext, ModelList, ModelSpec, PluginError, SecretString};
 #[cfg(test)]
