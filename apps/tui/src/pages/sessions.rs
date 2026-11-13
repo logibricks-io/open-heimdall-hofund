@@ -425,13 +425,14 @@ fn draw_list(page: &SessionsPage, area: Rect, buf: &mut Buffer, theme: &Theme) {
         draw_bar(page, theme),
         Line::from(""),
     ];
-    let body_lines = area.height.saturating_sub(4).max(3) as usize;
-    let window = list_window(area.height, 3, sessions.len(), page.cursor);
+    let footer_lines: u16 = if page.resume_target().is_some() { 2 } else { 0 };
+    let item_rows = area.height.saturating_sub(3 + footer_lines).max(3);
+    let window = list_window(item_rows, 3, sessions.len(), page.cursor);
     for (index, session) in sessions
         .iter()
         .enumerate()
         .skip(window.start)
-        .take(window.visible.min(body_lines))
+        .take(window.visible)
     {
         let marker = if index == page.cursor { "> " } else { "  " };
         let style = if index == page.cursor {
@@ -439,7 +440,7 @@ fn draw_list(page: &SessionsPage, area: Rect, buf: &mut Buffer, theme: &Theme) {
         } else {
             theme.text_style()
         };
-        let line = format_list_row(session, body_lines);
+        let line = format_list_row(session, item_rows as usize);
         lines.push(Line::from(vec![
             Span::styled(marker, theme.cursor_style()),
             Span::styled(line, style),
@@ -581,7 +582,8 @@ fn draw_picker(area: Rect, buf: &mut Buffer, theme: &Theme, picker: &FilterPicke
         )),
         Line::from(""),
     ];
-    let window = list_window(area.height, 4, picker.items.len(), picker.cursor);
+    let item_rows = area.height.saturating_sub(3).max(3);
+    let window = list_window(item_rows, 3, picker.items.len(), picker.cursor);
     for (index, item) in picker
         .items
         .iter()
@@ -832,10 +834,17 @@ fn trunc_field(value: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{SESS_RANGES, SessionsPage, day_chart, fmt_tokens, sess_ago, token_spent};
+    use crate::pages::Page;
+    use crate::theme::Theme;
+    use crate::ui::buffer_text;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use hofund_control_proto::{
         SessionConsent, SessionDayStats, SessionListResponse, SessionResume, SessionStatsResponse,
         SessionSummary, SessionTokenTotals,
     };
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
 
     #[test]
     fn ranges_match_contract() {
@@ -943,5 +952,113 @@ mod tests {
         row.tokens = tokens;
         row.cost = 0.01;
         row
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::empty())
+    }
+
+    fn loaded_page(count: usize, with_resume: bool) -> SessionsPage {
+        let mut page = SessionsPage::new();
+        let mut list = SessionListResponse::default();
+        list.sessions = (0..count)
+            .map(|index| {
+                let mut row = sample(&format!("s{index}"), 1);
+                row.title = format!("title-{index}");
+                if with_resume {
+                    let mut resume = SessionResume::default();
+                    resume.argv = vec![
+                        "agent".to_owned(),
+                        "--resume".to_owned(),
+                        format!("s{index}"),
+                    ];
+                    resume.cwd = "/work/hofund".to_owned();
+                    row.resume = Some(resume);
+                }
+                row
+            })
+            .collect();
+        page.set_fixture_list(list, SessionStatsResponse::default());
+        page
+    }
+
+    fn render_sessions(page: &SessionsPage, width: u16, height: u16) -> String {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| {
+                page.draw_body(
+                    Rect::new(0, 0, width, height),
+                    frame.buffer_mut(),
+                    &Theme::monochrome(),
+                )
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        buffer_text(buffer, width, height)
+    }
+
+    #[test]
+    fn list_keeps_the_selected_row_visible_past_the_first_viewport() {
+        let mut page = loaded_page(20, false);
+        for _ in 0..12 {
+            assert_eq!(
+                page.on_key(key(KeyCode::Down)),
+                super::PageKeyOutcome::CursorDown
+            );
+        }
+        let text = render_sessions(&page, 80, 10);
+        assert!(text.contains("title-12"), "{text}");
+        assert!(
+            text.lines()
+                .any(|line| line.contains('>') && line.contains("title-12")),
+            "{text}"
+        );
+        assert!(!text.contains("title-0"), "{text}");
+    }
+
+    #[test]
+    fn list_viewport_accounts_for_the_resume_hint() {
+        let mut page = loaded_page(20, true);
+        for _ in 0..12 {
+            let _ = page.on_key(key(KeyCode::Down));
+        }
+        let text = render_sessions(&page, 80, 10);
+        assert!(text.contains("title-12"), "{text}");
+        assert!(
+            text.lines()
+                .any(|line| line.contains('>') && line.contains("title-12")),
+            "{text}"
+        );
+        assert!(text.contains("enter runs"), "{text}");
+    }
+
+    #[test]
+    fn picker_keeps_the_selected_row_visible_past_the_first_viewport() {
+        let mut page = loaded_page(1, false);
+        let mut stats = SessionStatsResponse::default();
+        stats.models = (0..20)
+            .map(|index| {
+                let mut share = hofund_control_proto::SessionStatShare::default();
+                share.name = format!("model-{index}");
+                share
+            })
+            .collect();
+        let mut list = SessionListResponse::default();
+        list.sessions = vec![sample("s0", 1)];
+        page.set_fixture_list(list, stats);
+        let _ = page.on_key(KeyEvent::new(KeyCode::Char('M'), KeyModifiers::SHIFT));
+        // items are [all models, model-0, ...]; 13 downs selects model-12.
+        for _ in 0..13 {
+            let _ = page.on_key(key(KeyCode::Down));
+        }
+        let text = render_sessions(&page, 40, 10);
+        assert!(text.contains("model-12"), "{text}");
+        assert!(
+            text.lines()
+                .any(|line| line.contains('>') && line.contains("model-12")),
+            "{text}"
+        );
+        assert!(!text.contains("model-0"), "{text}");
     }
 }
