@@ -16,7 +16,7 @@ Legend: **Done** = matches the reference at checklist granularity; **Partial** =
 | Cursor (`cursor`) | 1 | 15 | 3 | 2 | 0 |
 | Devin (`devin`) | 11 | 6 | 1 | 1 | 0 |
 | Zed (`zed`) | 0 | 6 | 1 | 3 | 0 |
-| Kiro (`kiro`) | 0 | 13 | 5 | 1 | 0 |
+| Kiro (`kiro`) | 0 | 17 | 1 | 2 | 0 |
 | Factory / Droid (`factory`) | 1 | 15 | 0 | 3 | 0 |
 | Cline / ClinePass (`cline`) | 2 | 12 | 1 | 3 | 1 |
 | ChatGPT / Codex (`codex` backend) and ChatGPT API (`chatgpt-api`) | 8 | 11 | 2 | 0 | 0 |
@@ -209,12 +209,12 @@ Structured-output prose for Chat, Responses, and Messages shipped in R-13b (`str
 | b | import | IDE cache file; CLI DB | Token file discover | Partial | CLI DB path (**R-51**) |
 | c | token storage | Write-back to CLI DB or IDE file on refresh (`kiro/index.mjs:183-200`) | `creds.rs` write-back helpers for IDE path | Partial | SQLite write-back (**R-51**) |
 | d | refresh | CLI first, else OIDC/refreshToken (`kiro.go:301-374`; plugin `refresh.test.mjs`) | `refresh.rs` lease + social/IDC; external-idp refused (`refresh.rs:88-91`) | Partial | kiro-cli delegated refresh; 400 lapsed mapping (**R-24**, **R-51**) |
-| e | upstream wire | Event-stream `generateAssistantResponse` (`kiro/index.mjs:16-18`; `upstream.rs:44-48`) | Same endpoint, unary decode only | Partial | Streaming request/response (**R-51**) |
-| f | inbound shapes | Anthropic Messages only (`kiro/index.mjs:14-18`) | Messages only (`upstream.rs:109-112`) | Partial | Chat/Responses N/A |
-| g | streaming | AWS event stream to Messages SSE | `kiro_body.rs` rejects `stream: true` (`kiro_body.rs:9-11`) | Missing | Stream decode to IR (**R-51**) |
-| h | tool calls | Plugin tool tests (`tool-names.test.mjs`) | Rejected in `kiro_body.rs` | Missing | **R-51** |
-| i | images | `image-size.test.mjs` | Rejected text-only | Missing | **R-51** |
-| j | reasoning / effort | `effort.test.mjs` | unverified | Missing | **R-51** |
+| e | upstream wire | Event-stream `generateAssistantResponse` (`kiro/index.mjs:16-18`; `upstream.rs:44-48`) | Same endpoint and headers; `open_raw` feeds unary and streaming decoders | Partial | Mock/loopback verification only (**R-51**) |
+| f | inbound shapes | Anthropic Messages only (`kiro/index.mjs:14-18`) | Messages only; Chat/Responses are not invented | N/A | — |
+| g | streaming | AWS event stream to Messages SSE | `kiro_stream.rs` incrementally emits IR text, tool starts, argument deltas, block stops, and finish events | Partial | Mock/loopback verification only (**R-51**) |
+| h | tool calls | Plugin tool tests (`tool-names.test.mjs`) | `kiro_body.rs` maps declarations, normalized ids/names, split calls, and matched/missing results; replies restore caller names | Partial | Mock/loopback verification only (**R-51**) |
+| i | images | `image-size.test.mjs` | Inline user/tool-result images use format + `source.bytes`; only the latest image group is resent | Partial | Over-5-MiB Base64 images are refused; deterministic shrink/note behavior is not implemented (**R-51**) |
+| j | reasoning / effort | `effort.test.mjs` | Enabled/adaptive thinking maps to the reference budget tags; structured output is added to instructions | Partial | Model-listed native effort fields and reasoning reply events (**R-51**) |
 | k | quota / usage | `Get-Usage-Limits` (`kiro.go` comments; plugin `usage.test.mjs`) | `quota.rs` with profile ARN (`lib.rs:63-69`) | Partial | Builder ID profile ARN defaults (**R-51**) |
 | l | model list | Plugin lists from API | `models.rs` | Partial | Profile-scoped list refresh |
 | m | multi-account | uid by login provider (`kiro/index.mjs:53-65`) | Account ids from label/provider | Partial | Stable ids (#607) (**R-24**) |
@@ -225,7 +225,7 @@ Structured-output prose for Chat, Responses, and Messages shipped in R-13b (`str
 
 ### Gaps (Kiro)
 
-- Streaming Messages upstream with tools/images — **L**, **R-51**
+- Live-account verification, oversized-image resizing, and native effort/reasoning fields — **M**, **R-51**
 - kiro-cli SQLite import + refresh delegation + write-back — **L**, **R-51**
 - Browser/portal sign-in — **L**, **R-51**
 - external-idp refresh — **M**, **R-51**
