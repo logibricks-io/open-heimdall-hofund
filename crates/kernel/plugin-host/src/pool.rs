@@ -233,6 +233,27 @@ pub fn close_idle_after_region(profile: &HttpProfile, limits: HttpLimits) {
     let _ = refresh_shared(shared, &key);
 }
 
+/// Replaces the duplex client for `profile` and `dial`.
+///
+/// A header-timeout abort can leave the HTTP/2 connection active on the
+/// server (no idle slot; the first stream is still open). The next Run
+/// would otherwise multiplex onto that session and can read garbage as
+/// Connect frames. A new client forces a fresh dial.
+pub(crate) fn refresh_duplex_client(
+    profile: &HttpProfile,
+    limits: HttpLimits,
+    dial: DuplexDial,
+) -> Result<(), PluginError> {
+    let key = ClientKey {
+        profile: profile.clone(),
+        limits,
+        mode: ClientMode::Duplex,
+        duplex_dial: dial,
+    };
+    let shared = client_handle(profile, limits, ClientMode::Duplex, dial)?;
+    refresh_shared(&shared, &key)
+}
+
 /// Evicts `key` and returns a new pooled client with the same settings.
 ///
 /// # Errors
@@ -1105,12 +1126,18 @@ mod tests {
         (port, hits)
     }
 
-    fn hold_after_headers() -> (u16, Arc<AtomicUsize>) {
+    fn hold_after_headers() -> (
+        u16,
+        Arc<AtomicUsize>,
+        Arc<Mutex<Option<std::time::Instant>>>,
+    ) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let port = listener.local_addr().expect("addr").port();
         let hits = Arc::new(AtomicUsize::new(0));
+        let headers_written = Arc::new(Mutex::new(None));
         std::thread::spawn({
             let hits = Arc::clone(&hits);
+            let headers_written = Arc::clone(&headers_written);
             move || {
                 let Ok((mut stream, _)) = listener.accept() else {
                     return;
@@ -1120,10 +1147,11 @@ mod tests {
                 let _ = stream.write_all(
                     b"HTTP/1.1 200 OK\r\ncontent-length: 4\r\nconnection: close\r\n\r\n",
                 );
+                *headers_written.lock().expect("headers time") = Some(std::time::Instant::now());
                 std::thread::sleep(Duration::from_secs(30));
             }
         });
-        (port, hits)
+        (port, hits, headers_written)
     }
 
     fn stall() -> (u16, Arc<AtomicUsize>) {
@@ -1712,16 +1740,23 @@ mod tests {
     async fn per_call_read_budget_shorter_than_the_pool_default_fires_first() {
         let _guard = exclusive().await;
         let pool_limits = HttpLimits::new(Duration::from_secs(2), Duration::from_secs(60));
-        let (port, _) = hold_after_headers();
+        let (port, _, headers_written) = hold_after_headers();
         let context = http(pool_limits);
-        let started = std::time::Instant::now();
         let error = Call::get(format!("http://127.0.0.1:{port}/stall"))
             .read_timeout(Duration::from_millis(400))
             .send(context.http())
             .await
             .expect_err("short budget");
         assert_eq!(error.kind(), PluginErrorKind::Timeout);
-        assert!(started.elapsed() < Duration::from_millis(900));
+        let started = headers_written
+            .lock()
+            .expect("headers time")
+            .expect("headers written before the read budget fires");
+        // Time the idle wait from the response headers, not bind/connect, so
+        // macOS CI setup jitter is outside the window. 1500ms matches the
+        // sibling stall test and stays far below the 60s pool read default
+        // and the 2s connect timeout.
+        assert!(started.elapsed() < Duration::from_millis(1500));
         assert!(started.elapsed() > Duration::from_millis(250));
     }
 

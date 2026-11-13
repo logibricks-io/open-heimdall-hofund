@@ -43,6 +43,10 @@ impl DaemonRegistry for LinkedRegistry {
         hofund_plugin_registry::surfaces()
     }
 
+    fn session_stores(&self) -> Vec<Arc<dyn hofund_plugin_api::SessionStore>> {
+        hofund_plugin_registry::session_stores()
+    }
+
     fn subscription(&self, id: &str) -> Option<Arc<dyn DynSubscriptionFactory>> {
         hofund_plugin_registry::subscription(id)
     }

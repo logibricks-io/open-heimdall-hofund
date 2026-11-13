@@ -107,6 +107,7 @@ pub struct QuotaWindow {
     resets_at: Option<SystemTime>,
     blocking: bool,
     scope_model: Option<String>,
+    excluded_models: Vec<String>,
 }
 
 impl QuotaWindow {
@@ -138,6 +139,7 @@ impl QuotaWindow {
             resets_at,
             blocking: true,
             scope_model: None,
+            excluded_models: Vec::new(),
         })
     }
 
@@ -158,6 +160,13 @@ impl QuotaWindow {
         self
     }
 
+    /// Excludes models from an otherwise account-wide window.
+    #[must_use]
+    pub fn with_excluded_models(mut self, models: Vec<String>) -> Self {
+        self.excluded_models = models;
+        self
+    }
+
     /// Whether an exhausted window stops routing to the account.
     #[must_use]
     pub const fn blocking(&self) -> bool {
@@ -168,6 +177,12 @@ impl QuotaWindow {
     #[must_use]
     pub fn scope_model(&self) -> Option<&str> {
         self.scope_model.as_deref()
+    }
+
+    /// Models exempt from this account-wide window.
+    #[must_use]
+    pub fn excluded_models(&self) -> &[String] {
+        &self.excluded_models
     }
 
     /// Window name.
@@ -270,6 +285,13 @@ impl QuotaObservation {
     #[must_use]
     pub const fn with_spending_credits(mut self, spending: bool) -> Self {
         self.spending_credits = spending;
+        self
+    }
+
+    /// Sets the window name the vendor used for this observation.
+    #[must_use]
+    pub fn with_window(mut self, window: impl Into<String>) -> Self {
+        self.window = Some(window.into());
         self
     }
 
@@ -1331,6 +1353,13 @@ pub enum SignInProof {
         /// The `state` value the helper checked.
         state: String,
     },
+    /// A native-app callback carrying an encrypted access token.
+    QueryToken {
+        /// The provider's user id.
+        user_id: String,
+        /// The encrypted access token.
+        access_token: SecretString,
+    },
     /// A device-flow code.
     Device {
         /// The user code.
@@ -1350,6 +1379,15 @@ impl SignInProof {
         Self::Callback {
             code: code.into(),
             state: state.into(),
+        }
+    }
+
+    /// A native-app query-token proof.
+    #[must_use]
+    pub fn query_token(user_id: impl Into<String>, access_token: impl Into<SecretString>) -> Self {
+        Self::QueryToken {
+            user_id: user_id.into(),
+            access_token: access_token.into(),
         }
     }
 
@@ -1375,6 +1413,11 @@ impl std::fmt::Debug for SignInProof {
                 .debug_struct("Callback")
                 .field("code", &"<redacted>")
                 .field("state", state)
+                .finish(),
+            Self::QueryToken { user_id, .. } => formatter
+                .debug_struct("QueryToken")
+                .field("user_id", user_id)
+                .field("access_token", &"<redacted>")
                 .finish(),
             Self::Device { .. } => formatter.write_str("Device { user_code: <redacted> }"),
             Self::Token(_) => formatter.write_str("Token(<redacted>)"),
@@ -3291,9 +3334,14 @@ mod tests {
         let window = QuotaWindow::new("weekly", 1, Some(10), None).expect("window");
         assert!(window.blocking());
         assert_eq!(window.scope_model(), None);
-        let window = window.with_blocking(false).with_scope_model("model-a");
+        assert_eq!(window.excluded_models(), &[] as &[String]);
+        let window = window
+            .with_blocking(false)
+            .with_scope_model("model-a")
+            .with_excluded_models(vec!["model-b".to_owned()]);
         assert!(!window.blocking());
         assert_eq!(window.scope_model(), Some("model-a"));
+        assert_eq!(window.excluded_models(), ["model-b"]);
     }
 
     #[test]
@@ -3338,5 +3386,9 @@ mod tests {
         assert_eq!(ctx.option("label"), None);
         assert!(SignInCtx::new(plugin).with_option("", "x").is_err());
         assert_eq!(format!("{:?}", SignInProof::Await), "Await");
+        let proof = SignInProof::query_token("user-1", "ciphertext-secret");
+        let shown = format!("{proof:?}");
+        assert!(shown.contains("user-1"));
+        assert!(!shown.contains("ciphertext-secret"));
     }
 }

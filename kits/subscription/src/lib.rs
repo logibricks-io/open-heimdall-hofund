@@ -3,16 +3,45 @@
 //! This crate is unpublished and is only a dev-dependency of a subscription
 //! plugin. [`test_host`] builds a `hofund_plugin_host::HostContext` with fake
 //! backends. [`block_on`], [`join_all`], [`drive_until`], and [`poll_once`] drive async plugin
-//! calls without a plugin depending on tokio. Conformance tests land in PR D.
+//! calls without a plugin depending on tokio. [`FakeClaude`] is an in-process stand-in for the Claude Code binary: it records argv, env, and stdin, checks optional assertions, and returns a scripted stdout fixture. Conformance tests land in PR D.
+
+mod fake_claude;
+pub use fake_claude::{FakeClaude, FakeClaudeError, RunRecord};
 
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll, Waker};
 
+mod servers;
+
 pub use hofund_plugin_host::{
     PipedScript, PipedSpawn, RecordingHttp, RecordingObserve, RecordingProcess, RecordingScheduler,
     RecordingSecrets, TestHost, test_host,
 };
+pub use servers::{
+    HeaderPark, Http1Response, Http1Server, Http2Response, Http2Server, header_park,
+};
+
+/// Sends one HTTP/1.1 GET to a test sign-in listener and returns its reply.
+///
+/// # Errors
+///
+/// Returns an I/O error when the listener is closed or the exchange fails.
+pub async fn loopback_get(port: u16, target: &str) -> std::io::Result<(u16, String)> {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port)).await?;
+    stream
+        .write_all(format!("GET {target} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").as_bytes())
+        .await?;
+    let mut reply = String::new();
+    stream.read_to_string(&mut reply).await?;
+    let status = reply
+        .get(9..12)
+        .and_then(|status| status.parse().ok())
+        .unwrap_or(0);
+    Ok((status, reply))
+}
 
 /// Runs `future` on a paused Tokio clock so tests can [`advance_time`].
 ///

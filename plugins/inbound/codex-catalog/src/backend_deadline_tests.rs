@@ -3,7 +3,7 @@
 use std::collections::VecDeque;
 use std::future::poll_fn;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::task::{Poll, Waker};
 use std::time::Duration;
 
@@ -29,10 +29,12 @@ impl Clock {
             clock.asked.lock().expect("asked").push(within);
             let clock = clock.clone();
             Box::pin(poll_fn(move |context| {
+                // fire_after can fire between a check and registration; block_on would park forever.
+                let mut waker = clock.waker.lock().expect("waker");
                 if clock.fired.load(Ordering::SeqCst) {
                     Poll::Ready(())
                 } else {
-                    *clock.waker.lock().expect("waker") = Some(context.waker().clone());
+                    *waker = Some(context.waker().clone());
                     Poll::Pending
                 }
             }))
@@ -44,8 +46,12 @@ impl Clock {
     }
 
     fn fire(&self) {
-        self.fired.store(true, Ordering::SeqCst);
-        if let Some(waker) = self.waker.lock().expect("waker").take() {
+        let waker = {
+            let mut waker = self.waker.lock().expect("waker");
+            self.fired.store(true, Ordering::SeqCst);
+            waker.take()
+        };
+        if let Some(waker) = waker {
             waker.wake();
         }
     }
@@ -63,6 +69,7 @@ impl Drop for Dropped {
 struct DeadlineKernel {
     answers: Mutex<VecDeque<Option<Result<HttpResponse, PluginError>>>>,
     calls: Arc<AtomicUsize>,
+    call_ready: Arc<(Mutex<()>, Condvar)>,
     dropped: Arc<AtomicUsize>,
     markers: Mutex<Vec<StoppedWaiting>>,
 }
@@ -90,7 +97,12 @@ impl DeadlineKernel {
 #[async_trait]
 impl Kernel for DeadlineKernel {
     async fn call(&self, request: HttpRequest) -> Result<HttpResponse, PluginError> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
+        {
+            let (lock, ready) = &*self.call_ready;
+            let _guard = lock.lock().expect("call wait");
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            ready.notify_all();
+        }
         self.markers.lock().expect("markers").push(
             request
                 .extensions()
@@ -123,15 +135,20 @@ impl Kernel for DeadlineKernel {
 
 fn fire_after(
     calls: &Arc<AtomicUsize>,
+    call_ready: &Arc<(Mutex<()>, Condvar)>,
     wanted: usize,
     clock: &Clock,
 ) -> std::thread::JoinHandle<()> {
     let calls = Arc::clone(calls);
+    let call_ready = Arc::clone(call_ready);
     let clock = clock.clone();
     std::thread::spawn(move || {
+        let (lock, ready) = &*call_ready;
+        let mut guard = lock.lock().expect("call wait");
         while calls.load(Ordering::SeqCst) < wanted {
-            std::thread::yield_now();
+            guard = ready.wait(guard).expect("call wait");
         }
+        drop(guard);
         clock.fire();
     })
 }
@@ -213,7 +230,7 @@ fn d84_1_a_silent_summary_compacts_locally_and_drops_the_call() {
     assert_eq!(COMPACT_WITHIN, Duration::from_secs(240));
     let clock = Clock::default();
     let kernel = DeadlineKernel::default().pending();
-    let fired = fire_after(&kernel.calls, 1, &clock);
+    let fired = fire_after(&kernel.calls, &kernel.call_ready, 1, &clock);
     let (status, kind, body) = compact(&kernel, &clock.state());
     fired.join().expect("clock thread");
     assert_eq!((status, kind.as_str()), (200, "text/event-stream"));
@@ -230,7 +247,7 @@ fn d84_2_the_same_budget_covers_a_pending_text_retry() {
     let kernel = DeadlineKernel::default()
         .answering(413, json!({"error": {"message": "too big"}}).to_string())
         .pending();
-    let fired = fire_after(&kernel.calls, 2, &clock);
+    let fired = fire_after(&kernel.calls, &kernel.call_ready, 2, &clock);
     let (status, _, body) = compact(&kernel, &clock.state());
     fired.join().expect("clock thread");
     assert_eq!(status, 200, "{body}");
@@ -250,7 +267,7 @@ fn d84_2_the_same_budget_covers_a_pending_text_retry() {
 fn d84_3_expiry_during_the_first_ask_never_starts_the_text_retry() {
     let clock = Clock::default();
     let kernel = DeadlineKernel::default().pending();
-    let fired = fire_after(&kernel.calls, 1, &clock);
+    let fired = fire_after(&kernel.calls, &kernel.call_ready, 1, &clock);
     let (status, _, body) = compact(&kernel, &clock.state());
     fired.join().expect("clock thread");
     assert_eq!(status, 200, "{body}");

@@ -1,6 +1,6 @@
 [package]
 name = "hofund-plugin-subscription-devin"
-description = "Devin subscription: import CLI credentials and serve chat on the stored Devin API base."
+description = "Devin subscription: browser PKCE, CLI credential import, and chat on the stored Devin API base."
 version.workspace = true
 authors.workspace = true
 edition.workspace = true

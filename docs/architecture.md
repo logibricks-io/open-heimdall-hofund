@@ -28,7 +28,10 @@ Sibling repositories:
 Kernel library crates live at `crates/kernel/<name>`. `crates/control-proto`
 and `crates/control-client` are shared by the kernel and the shells, so they
 stay beside it in `crates/`. The binaries are under `apps/`: `apps/cli`
-(`hofund`), `apps/hofundd` and `apps/desktop`.
+(`hofund`), `apps/hofundd` and `apps/desktop`. The hidden stdio MCP helper
+used by a long-lived coding-agent subprocess lives at `apps/bridge-mcp`
+(package `hofund-bridge-mcp`); `hofund` and `hofundd` both expose it as the
+hidden `bridge-mcp-stdio` subcommand.
 
 The menu-bar app lives at `apps/desktop` (Tauri v2, package `hofund-desktop`).
 Nothing in `crates/` depends on it. It depends on `hofund-daemon` and
@@ -161,6 +164,9 @@ flowchart BT
   gateway --> pluginHost
   sessions --> pluginApi
   sessions --> usage
+  pluginRegistry --> pluginAgentClaude["plugin-agent-claude<br/>session reader"]
+  pluginRegistry --> pluginAgentCodex["plugin-agent-codex<br/>session reader"]
+  daemon --> sessions
   daemon --> gateway
   daemon --> config
   daemon --> secrets
@@ -209,6 +215,8 @@ for the built-in factories. Those factories still call the `provider`
 adapters. `provider` depends on `plugin-sdk` for SigV4 and token parsing.
 `daemon` depends on `plugin-registry` and
 `plugin-host` so it can call `factory` and build a `HostContext`. It depends on
+`sessions` for the control plane's consent-gated listing and reports; the
+registry supplies the linked reader plugins. It depends on
 `plugin-sdk` for the bounded pager used by an exact configured model-list URL.
 It depends on `agent` so the control plane can plan, connect, and disconnect
 agent configs and refresh them after a token rotation.
@@ -240,6 +248,7 @@ This table covers normal and build dependencies, including their target-specific
 | Package | May depend on |
 | --- | --- |
 | `hofund-ir` | — |
+| `hofund-bridge-mcp` | — |
 | `hofund-codec` | `hofund-ir` |
 | `hofund-quirks` | `hofund-ir` |
 | `hofund-plugin-api` | `hofund-ir` |
@@ -254,19 +263,20 @@ This table covers normal and build dependencies, including their target-specific
 | `hofund-plugin-plan-quota` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-upstream` (tests) |
 | `hofund-plugin-relay` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-upstream` (tests) |
 | `hofund-plugin-retrieval` | `hofund-plugin-api`, `hofund-plugin-sdk` |
-| `hofund-plugin-registry` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-plugin-codex-catalog`, `hofund-plugin-echo`, `hofund-plugin-muse`, `hofund-plugin-ollama`, `hofund-plugin-plan-quota`, `hofund-plugin-relay`, `hofund-plugin-retrieval`, `hofund-plugin-subscription-claude`, `hofund-plugin-subscription-cline`, `hofund-plugin-subscription-codex`, `hofund-plugin-subscription-copilot`, `hofund-plugin-subscription-cursor`, `hofund-plugin-subscription-devin`, `hofund-plugin-subscription-factory`, `hofund-plugin-subscription-gemini`, `hofund-plugin-subscription-grok`, `hofund-plugin-subscription-kiro`, `hofund-plugin-subscription-qoder`, `hofund-plugin-subscription-workbuddy`, `hofund-plugin-subscription-zed`, `hofund-plugin-subscription-zcode`, `hofund-provider`, `hofund-quirks`, `hofund-agent` (tests), `hofund-kit-upstream` (tests), `hofund-kit-agent` (tests) |
+| `hofund-plugin-registry` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-plugin-codex-catalog`, `hofund-plugin-echo`, `hofund-plugin-muse`, `hofund-plugin-ollama`, `hofund-plugin-plan-quota`, `hofund-plugin-relay`, `hofund-plugin-retrieval`, `hofund-plugin-subscription-antigravity`, `hofund-plugin-subscription-claude`, `hofund-plugin-subscription-cline`, `hofund-plugin-subscription-codex`, `hofund-plugin-subscription-copilot`, `hofund-plugin-subscription-cursor`, `hofund-plugin-subscription-devin`, `hofund-plugin-subscription-factory`, `hofund-plugin-subscription-gemini`, `hofund-plugin-subscription-grok`, `hofund-plugin-subscription-kiro`, `hofund-plugin-subscription-qoder`, `hofund-plugin-subscription-workbuddy`, `hofund-plugin-subscription-zed`, `hofund-plugin-subscription-zcode`, `hofund-provider`, `hofund-quirks`, `hofund-agent` (tests), `hofund-kit-upstream` (tests), `hofund-kit-agent` (tests) |
 | `hofund-plugin-subscription-devin` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
 | `hofund-plugin-subscription-factory` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
 | `hofund-plugin-subscription-kiro` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
 | `hofund-plugin-subscription-qoder` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
 | `hofund-plugin-subscription-workbuddy` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
 | `hofund-plugin-subscription-zcode` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests), `hofund-plugin-sdk` (tests) |
-| `hofund-plugin-subscription-zed` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
-| `hofund-plugin-subscription-claude` | `hofund-plugin-api`, `hofund-plugin-sdk`, `regex`, `hofund-kit-subscription` (tests) |
+| `hofund-plugin-subscription-zed` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests), `hofund-plugin-sdk` (tests) |
+| `hofund-plugin-subscription-claude` | `hofund-plugin-api`, `hofund-plugin-sdk`, `bytes`, `futures-util`, `regex`, `ring`, `serde`, `serde_json`, `hofund-kit-subscription` (tests) |
 | `hofund-plugin-subscription-cline` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
 | `hofund-plugin-subscription-codex` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
 | `hofund-plugin-subscription-copilot` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
 | `hofund-plugin-subscription-cursor` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
+| `hofund-plugin-subscription-antigravity` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
 | `hofund-plugin-subscription-gemini` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
 | `hofund-plugin-subscription-grok` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
 | `hofund-plugin-host` | `hofund-plugin-api`, `hofund-plugin-sdk` (tests) |
@@ -285,8 +295,8 @@ This table covers normal and build dependencies, including their target-specific
 | `hofund-usage` | — |
 | `hofund-agent` | `hofund-config`, `hofund-plugin-api` |
 | `hofund-daemon` | `hofund-codec`, `hofund-config`, `hofund-control-proto`, `hofund-gateway`, `hofund-model-catalog`, `hofund-plugin-api`, `hofund-plugin-host`, `hofund-plugin-registry` (tests also enable `test-fixtures`), `hofund-plugin-sdk`, `hofund-provider`, `hofund-quirks`, `hofund-router`, `hofund-secrets`, `hofund-usage`, `hofund-agent`, `hofund-control-client` (tests; dev `hofund-agent` enables `test-fixtures`) |
-| `hofund-daemon-bin` | `hofund-daemon`, `hofund-plugin-api`, `hofund-plugin-registry` |
-| `hofund-cli` | `hofund-config`, `hofund-control-client`, `hofund-model-catalog`, `hofund-plugin-agent-claude`, `hofund-plugin-agent-codex`, `hofund-plugin-api`, `hofund-secrets`, `hofund-sessions`, `hofund-usage` |
+| `hofund-daemon-bin` | `hofund-daemon`, `hofund-plugin-api`, `hofund-plugin-registry`, `hofund-bridge-mcp` |
+| `hofund-cli` | `hofund-config`, `hofund-control-client`, `hofund-model-catalog`, `hofund-plugin-agent-claude`, `hofund-plugin-agent-codex`, `hofund-plugin-api`, `hofund-secrets`, `hofund-sessions`, `hofund-usage`, `hofund-bridge-mcp` |
 | `hofund-tui` | `hofund-config`, `hofund-control-client`, `hofund-secrets` |
 | `hofund-desktop` | `hofund-daemon`, `hofund-agent` |
 | `xtask` | — |
@@ -358,6 +368,7 @@ The `control-client` and gateway `control-proto` edges landed in L3; the
 | `plugin-subscription-codex` | ChatGPT (Codex) subscription: browser sign-in, token refresh, and the Responses upstream. |
 | `plugin-subscription-claude` | Claude Code subscription: sign-in and refresh by running the `claude` command line in a private config directory. |
 | `plugin-subscription-copilot` | GitHub Copilot subscription, on github.com or a `<name>.ghe.com` enterprise host: device sign-in, session tokens, quota, the account model list, and per-model Chat Completions, Responses and Messages routing. |
+| `plugin-subscription-antigravity` | Google Antigravity subscription: browser sign-in, Code Assist project setup, token refresh, account-pooled models, quota, and the daily request upstream. The installed-app OAuth client is not shipped; set `client_id` / `client_secret` on the plugin or `HOFUND_ANTIGRAVITY_CLIENT_ID` / `HOFUND_ANTIGRAVITY_CLIENT_SECRET`. |
 | `plugin-subscription-gemini` | Gemini CLI (Code Assist) subscription: browser sign-in, Code Assist project setup, and token refresh. |
 | `plugin-subscription-grok` | Grok Build subscription: CLI device sign-in, auth.json import, CLI token renewal, Responses upstream, and allowance quota. |
 | `plugin-subscription-cline` | Cline subscription: WorkOS device sign-in or API key, token refresh, recommended-models list, chat upstream, and ClinePass quota. |
@@ -377,9 +388,13 @@ The `control-client` and gateway `control-proto` edges landed in L3; the
 | `usage` | Request and token usage records. |
 | `daemon` | The daemon library. Wires config, secrets, the gateway, and the control plane around an injected `DaemonRegistry`. |
 | `hofundd` | The `hofundd` binary and process composition root. Links the plugin registry, owns the runtime, logging, signals, and drain. |
+| `bridge-mcp` | Hidden stdio MCP helper (`apps/bridge-mcp`). `hofund` and `hofundd` expose it as the `bridge-mcp-stdio` subcommand. It lists tools and POSTs `tools/call` to a loopback callback with the HTTP proxy disabled. |
 | `cli` | The `hofund` binary at `apps/cli`, a shell like the desktop. `hofund serve` runs `hofundd`. Runtime commands go to the running daemon over the control plane, or to one-shot `hofundd` when none runs. |
 | `desktop` | Menu-bar shell at `apps/desktop`. Renders status and calls the daemon and the agent adapters. |
 | `xtask` | Local workspace tasks and the architecture tests. |
+
+The 3005 reference embeds Antigravity's installed-app OAuth client. hofund does not ship those literals. Configure `client_id` and `client_secret` on the `antigravity` plugin, or set `HOFUND_ANTIGRAVITY_CLIENT_ID` and `HOFUND_ANTIGRAVITY_CLIENT_SECRET` (environment values override config). Sign-in and refresh fail to build without a complete pair. 3005 does not read the desktop app's own files for this client (Antigravity's CLI stores tokens in the system keyring). Gemini Code Assist on hofund still ships Gemini CLI's installed-app client, as on main.
+
 
 ## Routing strategies and measurements
 

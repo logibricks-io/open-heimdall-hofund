@@ -275,6 +275,67 @@ impl SessionRecord {
     }
 }
 
+/// One transcript content part.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
+pub struct SessionPart {
+    /// Speaker: user, assistant, or tool.
+    pub role: String,
+    /// Content kind: text, thinking, `tool_use`, `tool_result`, context, or image.
+    pub kind: String,
+    /// Tool name when the part is a call or result.
+    pub name: String,
+    /// Text content.
+    pub text: String,
+}
+
+impl SessionPart {
+    /// Constructs one content part.
+    #[must_use]
+    pub fn new(
+        role: impl Into<String>,
+        kind: impl Into<String>,
+        name: impl Into<String>,
+        text: impl Into<String>,
+    ) -> Self {
+        Self {
+            role: role.into(),
+            kind: kind.into(),
+            name: name.into(),
+            text: text.into(),
+        }
+    }
+}
+
+/// A session transcript read from its own file.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
+pub struct SessionTranscript {
+    /// Content parts in file order.
+    pub parts: Vec<SessionPart>,
+    /// Whether input limits omitted later content.
+    pub cut: bool,
+    /// Optional source label; native agent files leave it empty.
+    pub source: String,
+}
+
+/// Incremental transcript parser supplied by a session plugin.
+pub trait SessionTranscriptParser: Send {
+    /// Consumes one depth-checked JSON value.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when the value cannot be interpreted.
+    fn push(&mut self, value: &serde_json::Value) -> Result<(), PluginError>;
+
+    /// Finishes the transcript.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when the transcript cannot be completed.
+    fn finish(self: Box<Self>) -> Result<SessionTranscript, PluginError>;
+}
+
 /// Compression the kernel removes before bounded JSONL parsing.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
@@ -390,8 +451,83 @@ pub trait SessionStore: Send + Sync {
         state: Option<&str>,
     ) -> Result<Box<dyn SessionParser>, PluginError>;
 
+    /// Whether this store can read a transcript from a listed file.
+    fn transcript_available(&self) -> bool {
+        false
+    }
+
+    /// Starts a transcript parser for `file`. The kernel opens and bounds it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when this store does not support transcript reads.
+    fn transcript_parser(
+        &self,
+        file: &SessionFile,
+    ) -> Result<Box<dyn SessionTranscriptParser>, PluginError> {
+        let _ = file;
+        Err(PluginError::unsupported(
+            "session transcripts are not supported by this store",
+        ))
+    }
+
     /// Extra `(agent, session id)` pairs that suppress a matching gateway row.
     fn gateway_dedup_pairs(&self, _record: &SessionRecord) -> Vec<(String, String)> {
         Vec::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SessionDay, SessionRecord, SessionTokens};
+
+    #[test]
+    fn token_counters_add_and_report_totals() {
+        let tokens = SessionTokens::new(2, 3, 4, 10).with_cache_write_1h(6);
+        assert_eq!(tokens.cache_write_1h, 6);
+        assert!(!tokens.is_zero());
+        assert_eq!(tokens.total(), 19);
+        assert!(SessionTokens::default().is_zero());
+        assert_eq!(SessionTokens::default().total(), 0);
+
+        let mut sum = SessionTokens::new(1, 0, 0, 0);
+        sum.add(SessionTokens::new(0, 2, 0, 0));
+        assert_eq!(sum, SessionTokens::new(1, 2, 0, 0));
+    }
+
+    #[test]
+    fn session_record_usage_and_days_ignore_zeros_and_merge() {
+        let mut record = SessionRecord::new("fake", "fake:one", "/sessions/one.jsonl");
+        record.add_usage("m", SessionTokens::default());
+        assert_eq!(record.models.len(), 0);
+        record.add_usage("m", SessionTokens::new(2, 0, 0, 0));
+        record.add_usage("m", SessionTokens::new(0, 3, 0, 0));
+        assert_eq!(record.model_ids(), vec!["m".to_owned()]);
+        assert_eq!(record.tokens(), SessionTokens::new(2, 3, 0, 0));
+
+        record.add_day(SessionDay::new("2026-01-01", "m", SessionTokens::default()));
+        assert_eq!(record.days.len(), 0);
+        record.add_day(SessionDay::new(
+            "2026-01-01",
+            "m",
+            SessionTokens::new(1, 0, 0, 0),
+        ));
+        record.add_day(SessionDay::new(
+            "2026-01-01",
+            "m",
+            SessionTokens::new(0, 4, 0, 0),
+        ));
+        record.add_day(SessionDay::new(
+            "2026-01-02",
+            "m",
+            SessionTokens::new(1, 0, 0, 0),
+        ));
+        record.add_day(SessionDay::new(
+            "2026-01-01",
+            "other",
+            SessionTokens::new(1, 0, 0, 0),
+        ));
+        assert_eq!(record.days.len(), 3);
+        assert_eq!(record.days[0].tokens, SessionTokens::new(1, 4, 0, 0));
     }
 }

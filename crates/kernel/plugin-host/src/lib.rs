@@ -17,7 +17,9 @@
 mod account_secrets;
 mod accounts;
 mod agent_credentials;
+mod bridge_callback;
 mod duplex;
+mod long_lived;
 mod loopback;
 mod piped;
 mod pool;
@@ -35,8 +37,9 @@ use tokio::sync::Notify;
 
 use async_trait::async_trait;
 use hofund_plugin_api::kernel::{
-    AccountBackend, ClockBackend, DirBackend, HttpRequest, HttpResponse, Job, LoopbackBackend,
-    PipedChildBackend, ProcessBackend, SchedulerBackend, SecretsBackend,
+    AccountBackend, BridgeCallbackBackend, ClockBackend, DirBackend, HttpRequest, HttpResponse,
+    Job, LongLivedChildBackend, LoopbackBackend, PipedChildBackend, ProcessBackend,
+    SchedulerBackend, SecretsBackend,
 };
 use hofund_plugin_api::{
     AuthResult, Body, BodyStream, HostContext, MemberId, PluginError, PluginId, PluginKey,
@@ -46,6 +49,7 @@ use hofund_plugin_api::{
 pub use account_secrets::{MemoryAccountSecretsGuard, memory_account_secrets};
 pub use accounts::{AccountStorageKind, AccountStore, StoreError};
 pub use agent_credentials::native_credential_store;
+pub use bridge_callback::BridgeCallbackRegistry;
 pub use hofund_plugin_api::kernel::{GatewayBackend, HttpBackend, ObserveBackend};
 pub use loopback::LoopbackRegistry;
 pub use pool::{
@@ -266,25 +270,30 @@ pub fn runtime_host_with_observe_for(
     let root = root.into();
     let accounts = AccountStore::open(root.join("accounts.json"))?;
     let plugin = PluginKey::new(kind, plugin);
-    Ok(host_context_for(
-        kind,
-        plugin.id().clone(),
-        Arc::new(PooledHttp::with_limits(HttpProfile::direct(), limits)),
-        Arc::new(KeySecrets {
-            plugin,
-            api_key: api_key.into(),
-        }),
-        Arc::new(accounts),
-        Arc::new(SystemClock),
-        Arc::new(RecordingScheduler::default()),
-        Arc::new(StdProcess::default()),
-        Arc::new(RootDirs {
-            root,
-            #[cfg(test)]
-            _guard: None,
-        }),
-        observe,
-    ))
+    Ok(
+        host_context_for(
+            kind,
+            plugin.id().clone(),
+            Arc::new(PooledHttp::with_limits(HttpProfile::direct(), limits)),
+            Arc::new(KeySecrets {
+                plugin,
+                api_key: api_key.into(),
+            }),
+            Arc::new(accounts),
+            Arc::new(SystemClock),
+            Arc::new(RecordingScheduler::default()),
+            Arc::new(StdProcess::default()),
+            Arc::new(RootDirs {
+                root,
+                #[cfg(test)]
+                _guard: None,
+            }),
+            observe,
+        )
+        .with_bridge_callback(
+            Arc::new(BridgeCallbackRegistry::new()) as Arc<dyn BridgeCallbackBackend>
+        ),
+    )
 }
 
 /// One `api_key` secret. [`Debug`] is not implemented.
@@ -335,6 +344,7 @@ pub struct TestHost {
     process: Arc<RecordingProcess>,
     observe: Arc<RecordingObserve>,
     loopback: Arc<LoopbackRegistry>,
+    bridge_callback: Arc<BridgeCallbackRegistry>,
 }
 
 impl TestHost {
@@ -390,6 +400,63 @@ impl TestHost {
         Self::open_with_clock(kind, plugin, root, Arc::new(TokioMonotonicClock::default()))
     }
 
+    /// Like [`Self::open_for_with_tokio_monotonic`], with real pooled HTTP on the context.
+    ///
+    /// The [`Self::http`] recording handle remains available, but is not installed on
+    /// [`Self::context`]. Tests use loopback servers and inspect their records.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the account file cannot be created.
+    #[must_use]
+    pub fn open_for_with_pooled_http_and_tokio_monotonic(
+        kind: PluginKind,
+        plugin: PluginId,
+        root: impl Into<PathBuf>,
+    ) -> Self {
+        let root = root.into();
+        let http = Arc::new(RecordingHttp::default());
+        let secrets = Arc::new(RecordingSecrets::default());
+        let scheduler = Arc::new(RecordingScheduler::default());
+        let process = Arc::new(RecordingProcess::default());
+        let observe = Arc::new(RecordingObserve::default());
+        let loopback = Arc::new(LoopbackRegistry::new());
+        let bridge_callback = Arc::new(BridgeCallbackRegistry::new());
+        let accounts = AccountStore::open_with_backend(
+            root.join("accounts.json"),
+            Arc::new(account_secrets::MemoryAccountSecrets::default()),
+        )
+        .expect("test host account file");
+        let context = host_context_for(
+            kind,
+            plugin,
+            Arc::new(PooledHttp::new(HttpProfile::direct())),
+            Arc::clone(&secrets) as Arc<dyn SecretsBackend>,
+            Arc::new(accounts),
+            Arc::new(TokioMonotonicClock::default()),
+            Arc::clone(&scheduler) as Arc<dyn SchedulerBackend>,
+            Arc::clone(&process) as Arc<dyn ProcessBackend>,
+            Arc::new(RootDirs {
+                root,
+                #[cfg(test)]
+                _guard: None,
+            }),
+            Arc::clone(&observe) as Arc<dyn ObserveBackend>,
+        )
+        .with_loopback(Arc::clone(&loopback) as Arc<dyn LoopbackBackend>)
+        .with_bridge_callback(Arc::clone(&bridge_callback) as Arc<dyn BridgeCallbackBackend>);
+        Self {
+            context,
+            http,
+            secrets,
+            scheduler,
+            process,
+            observe,
+            loopback,
+            bridge_callback,
+        }
+    }
+
     /// Like [`Self::open_for`], with a fixed monotonic clock reading.
     ///
     /// # Panics
@@ -423,6 +490,7 @@ impl TestHost {
         let process = Arc::new(RecordingProcess::default());
         let observe = Arc::new(RecordingObserve::default());
         let loopback = Arc::new(LoopbackRegistry::new());
+        let bridge_callback = Arc::new(BridgeCallbackRegistry::new());
         let accounts = AccountStore::open_with_backend(
             root.join("accounts.json"),
             Arc::new(account_secrets::MemoryAccountSecrets::default()),
@@ -444,7 +512,8 @@ impl TestHost {
             }),
             Arc::clone(&observe) as Arc<dyn ObserveBackend>,
         )
-        .with_loopback(Arc::clone(&loopback) as Arc<dyn LoopbackBackend>);
+        .with_loopback(Arc::clone(&loopback) as Arc<dyn LoopbackBackend>)
+        .with_bridge_callback(Arc::clone(&bridge_callback) as Arc<dyn BridgeCallbackBackend>);
         Self {
             context,
             http,
@@ -453,6 +522,7 @@ impl TestHost {
             process,
             observe,
             loopback,
+            bridge_callback,
         }
     }
 
@@ -460,6 +530,13 @@ impl TestHost {
     #[must_use]
     pub fn context(&self) -> &HostContext {
         &self.context
+    }
+
+    /// Overrides the helper program [`HostContext::bridge_mcp_helper`] returns.
+    #[must_use]
+    pub fn with_bridge_mcp_program(mut self, program: PathBuf) -> Self {
+        self.context = self.context.with_bridge_mcp_program(program);
+        self
     }
 
     /// Scripted HTTP responses and the calls the plugin made.
@@ -497,6 +574,12 @@ impl TestHost {
     #[must_use]
     pub fn loopback(&self) -> &LoopbackRegistry {
         &self.loopback
+    }
+
+    /// The dedicated bridge callback listener the plugin registered on.
+    #[must_use]
+    pub fn bridge_callback(&self) -> &BridgeCallbackRegistry {
+        &self.bridge_callback
     }
 }
 
@@ -738,6 +821,19 @@ impl ProcessBackend for StdProcess {
     ) -> Result<Box<dyn PipedChildBackend>, PluginError> {
         let request = SpawnRequest::new(program, args, env, cwd)?;
         let child = accounts::run_blocking(move || piped::spawn(&request)).await?;
+        Ok(Box::new(child))
+    }
+
+    async fn spawn_long_lived(
+        &self,
+        program: PathBuf,
+        args: Vec<OsString>,
+        env: Vec<(OsString, OsString)>,
+        cwd: PathBuf,
+        env_deny: Vec<OsString>,
+    ) -> Result<Box<dyn LongLivedChildBackend>, PluginError> {
+        let request = SpawnRequest::new(program, args, env, cwd)?;
+        let child = accounts::run_blocking(move || long_lived::spawn(&request, &env_deny)).await?;
         Ok(Box::new(child))
     }
 }
@@ -2097,5 +2193,40 @@ mod tests {
             .remove_account(&account, host.context())
             .await
             .expect("default remove");
+    }
+
+    #[test]
+    fn bridge_mcp_helper_uses_the_current_executable_and_subcommand_prefix() {
+        let root = root();
+        let host = super::TestHost::open(plugin(), root.to_path_buf());
+        let helper = host.context().bridge_mcp_helper().expect("helper");
+        assert_eq!(
+            helper.program(),
+            std::env::current_exe().expect("exe").as_path()
+        );
+        assert_eq!(
+            helper.args(),
+            [std::ffi::OsString::from("bridge-mcp-stdio")].as_slice()
+        );
+        assert!(helper.env().is_empty());
+        assert!(helper.cwd().is_absolute());
+    }
+
+    #[test]
+    fn bridge_mcp_helper_can_use_an_injected_program() {
+        let root = root();
+        let program = if cfg!(windows) {
+            std::path::PathBuf::from(r"C:\Program Files\hofund\hofund.exe")
+        } else {
+            std::path::PathBuf::from("/usr/bin/hofund")
+        };
+        let host = super::TestHost::open(plugin(), root.to_path_buf())
+            .with_bridge_mcp_program(program.clone());
+        let helper = host.context().bridge_mcp_helper().expect("helper");
+        assert_eq!(helper.program(), program.as_path());
+        assert_eq!(
+            helper.args(),
+            [std::ffi::OsString::from("bridge-mcp-stdio")].as_slice()
+        );
     }
 }

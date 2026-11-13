@@ -10,25 +10,28 @@ use hofund_control_proto::{
     AgentChangeResponse, AgentConnectRequest, AgentDisconnectRequest, AgentHiddenSetRequest,
     AgentListResponse, AgentModelRequest, AgentModelsResponse, AgentPickedOnlyRequest,
     AgentPlanRequest, AgentPlanResponse, AgentStatusResponse, AgentVisibleSetRequest,
-    CatalogDisabledListResponse, CatalogModelRequest, CheckinListResponse, CheckinRunRequest,
-    CheckinRunResponse, ConfigApplyRequest, ConfigResponse, ConfigValidateRequest,
-    ConfigValidationResponse, ControlError, ErrorEnvelope, EventEnvelope, GatewayKeyRequest,
-    GatewayKeyResponse, GatewayKeyRestoreRequest, GroupCreateRequest, GroupDeleteRequest,
-    GroupDeleteResponse, GroupListResponse, GroupMemberCandidatesResponse, GroupPatchRequest,
-    GroupRestoreRequest, GroupWriteResponse, HealthResponse, MAX_RESPONSE_BODY_BYTES,
-    ModelListResponse, PicksResponse, PicksSetRequest, PresetListResponse, ProfileDetailResponse,
-    ProfileListResponse, ProfileRenameRequest, ProfileSaveRequest, ProfileSwitchRequest,
-    ProfileSwitchResponse, ProviderCreateRequest, ProviderDeleteRequest, ProviderDeleteResponse,
-    ProviderKeyRequest, ProviderKeysResponse, ProviderListResponse, ProviderPatchRequest,
-    ProviderRenameRequest, ProviderRenameResponse, ProviderSpendCapRequest,
+    CatalogDisabledListResponse, CatalogModelRequest, CatalogSyncRequest, CatalogSyncResponse,
+    CheckinListResponse, CheckinRunRequest, CheckinRunResponse, ConfigApplyRequest, ConfigResponse,
+    ConfigValidateRequest, ConfigValidationResponse, ControlError, ErrorEnvelope, EventEnvelope,
+    GatewayKeyRequest, GatewayKeyResponse, GatewayKeyRestoreRequest, GroupCreateRequest,
+    GroupDeleteRequest, GroupDeleteResponse, GroupListResponse, GroupMemberCandidatesResponse,
+    GroupPatchRequest, GroupRestoreRequest, GroupWriteResponse, HealthResponse,
+    MAX_RESPONSE_BODY_BYTES, ModelListResponse, PicksResponse, PicksSetRequest, PresetListResponse,
+    ProfileDetailResponse, ProfileListResponse, ProfileRenameRequest, ProfileSaveRequest,
+    ProfileSwitchRequest, ProfileSwitchResponse, ProviderCreateRequest, ProviderDeleteRequest,
+    ProviderDeleteResponse, ProviderKeyRequest, ProviderKeysResponse, ProviderListResponse,
+    ProviderPatchRequest, ProviderRenameRequest, ProviderRenameResponse, ProviderSpendCapRequest,
     ProviderSpendCapsResponse, ProviderTestRequest, ProviderTestResponse, ProviderWriteResponse,
     QuotaAlertsResponse, QuotaAlertsSetRequest, QuotaAlertsSetResponse, QuotaCreditsModesResponse,
     QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryQuery, QuotaHistoryResponse,
     QuotaQuery, QuotaResponse, ReloadRequest, RouteListResponse, RouteModelListResponse,
-    RouteQuery, SessionRouteResponse, ShutdownRequest, ShutdownResponse, StatusResponse,
-    TokenRotateRequest, TokenRotateResponse, Topic, UnroutedListResponse, UsageQuery,
-    UsageResponse, WarmupListResponse, WarmupRunRequest, WarmupRunResponse, decode_error_envelope,
-    decode_response,
+    RouteQuery, SessionDetailResponse, SessionListQuery, SessionListResponse, SessionManageQuery,
+    SessionManageResponse, SessionOverviewQuery, SessionOverviewResponse, SessionProgressResponse,
+    SessionReadsPatchRequest, SessionReadsResponse, SessionRouteResponse, SessionSearchQuery,
+    SessionSearchResponse, SessionStatsQuery, SessionStatsResponse, SessionTranscriptResponse,
+    ShutdownRequest, ShutdownResponse, StatusResponse, TokenRotateRequest, TokenRotateResponse,
+    Topic, UnroutedListResponse, UsageQuery, UsageResponse, WarmupListResponse, WarmupRunRequest,
+    WarmupRunResponse, decode_error_envelope, decode_response,
 };
 use http::header;
 use http_body_util::{BodyExt, Full, Limited};
@@ -308,6 +311,192 @@ impl Client {
         self.get("/v1/hofund/status").await
     }
 
+    /// Gets terminal UI settings.
+    pub async fn settings(&self) -> Result<hofund_control_proto::SettingsResponse, ClientError> {
+        self.get("/v1/hofund/settings").await
+    }
+
+    /// Patches terminal UI settings against a disk revision.
+    pub async fn patch_settings(
+        &self,
+        request: &hofund_control_proto::SettingsPatchRequest,
+    ) -> Result<hofund_control_proto::SettingsResponse, ClientError> {
+        self.request(
+            http::Method::PATCH,
+            "/v1/hofund/settings",
+            Some(json_body(request)?),
+        )
+        .await
+    }
+
+    /// Reads one bounded daemon log chunk.
+    pub async fn logs(
+        &self,
+        after: u64,
+        max_bytes: Option<usize>,
+    ) -> Result<hofund_control_proto::LogTailResponse, ClientError> {
+        let mut query = hofund_control_proto::LogTailQuery::default();
+        query.after = after;
+        if let Some(max_bytes) = max_bytes {
+            query.max_bytes = max_bytes;
+        }
+        self.get(&format!("/v1/hofund/logs?{}", query.encode()))
+            .await
+    }
+
+    /// Lists subscriptions and their secret-free account rows.
+    pub async fn subscriptions(
+        &self,
+    ) -> Result<hofund_control_proto::SubscriptionListResponse, ClientError> {
+        self.get("/v1/hofund/subscriptions").await
+    }
+
+    /// Starts a background subscription sign-in.
+    pub async fn start_sign_in(
+        &self,
+        id: &str,
+        request: &hofund_control_proto::SignInStartRequest,
+    ) -> Result<hofund_control_proto::SignInStartResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            &format!("/v1/hofund/subscriptions/{}/sign-in", encode_segment(id)),
+            Some(json_body(request)?),
+        )
+        .await
+    }
+
+    /// Polls a subscription sign-in session.
+    pub async fn sign_in_status(
+        &self,
+        id: &str,
+        session: &str,
+    ) -> Result<hofund_control_proto::SignInStatusResponse, ClientError> {
+        self.get(&format!(
+            "/v1/hofund/subscriptions/{}/sign-in/{}",
+            encode_segment(id),
+            encode_segment(session)
+        ))
+        .await
+    }
+
+    /// Supplies a pasted callback URL or token to a sign-in session.
+    pub async fn sign_in_proof(
+        &self,
+        id: &str,
+        session: &str,
+        request: &hofund_control_proto::SignInProofRequest,
+    ) -> Result<hofund_control_proto::SignInStatusResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            &format!(
+                "/v1/hofund/subscriptions/{}/sign-in/{}/proof",
+                encode_segment(id),
+                encode_segment(session)
+            ),
+            Some(json_body(request)?),
+        )
+        .await
+    }
+
+    /// Cancels a sign-in session and releases its loopback listener.
+    pub async fn sign_in_cancel(
+        &self,
+        id: &str,
+        session: &str,
+    ) -> Result<hofund_control_proto::SignInCancelResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            &format!(
+                "/v1/hofund/subscriptions/{}/sign-in/{}/cancel",
+                encode_segment(id),
+                encode_segment(session)
+            ),
+            Some(json_body(&hofund_control_proto::SignInCancelRequest::new())?),
+        )
+        .await
+    }
+
+    /// Refreshes one or all accounts of a subscription.
+    pub async fn refresh_subscription(
+        &self,
+        id: &str,
+        request: &hofund_control_proto::SubscriptionRefreshRequest,
+    ) -> Result<hofund_control_proto::SubscriptionRefreshResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            &format!("/v1/hofund/subscriptions/{}/refresh", encode_segment(id)),
+            Some(json_body(request)?),
+        )
+        .await
+    }
+
+    /// Switches an agent's remembered sign-in.
+    pub async fn switch_account(
+        &self,
+        request: &hofund_control_proto::AccountSwitchRequest,
+    ) -> Result<hofund_control_proto::AccountSwitchResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            "/v1/hofund/accounts/switch",
+            Some(json_body(request)?),
+        )
+        .await
+    }
+
+    /// Imports an account export on the daemon host.
+    pub async fn import_account(
+        &self,
+        request: &hofund_control_proto::AccountImportRequest,
+    ) -> Result<hofund_control_proto::AccountImportResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            "/v1/hofund/accounts/import",
+            Some(json_body(request)?),
+        )
+        .await
+    }
+
+    /// Finds account sign-ins in agent files.
+    pub async fn discover_accounts(
+        &self,
+    ) -> Result<hofund_control_proto::AccountDiscoverResponse, ClientError> {
+        self.get("/v1/hofund/accounts/discover").await
+    }
+
+    /// Imports newly discovered account sign-ins.
+    pub async fn import_discovered_accounts(
+        &self,
+    ) -> Result<hofund_control_proto::AccountDiscoverImportResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            "/v1/hofund/accounts/discover",
+            Some(json_body(
+                &hofund_control_proto::AccountDiscoverAddRequest::new(),
+            )?),
+        )
+        .await
+    }
+
+    /// Removes a stored account.
+    pub async fn remove_account(
+        &self,
+        id: &str,
+        account: &str,
+    ) -> Result<hofund_control_proto::AccountRemoveResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            &format!(
+                "/v1/hofund/subscriptions/{}/accounts/{}/remove",
+                encode_segment(id),
+                encode_segment(account)
+            ),
+            Some(json_body(
+                &hofund_control_proto::AccountRemoveRequest::new(),
+            )?),
+        )
+        .await
+    }
+
     /// GETs a path and returns once the status line is known.
     ///
     /// On success the body is discarded. On failure the error envelope is decoded when present.
@@ -449,6 +638,22 @@ impl Client {
     /// Lists preset catalog rows.
     pub async fn presets(&self) -> Result<PresetListResponse, ClientError> {
         self.get("/v1/hofund/presets").await
+    }
+
+    /// Syncs the public model catalog.
+    ///
+    /// `force` fetches even when an index is already loaded. Agents `S` uses
+    /// that. Startup uses `force: false`, which is a no-op once a cache exists.
+    pub async fn sync_catalog(
+        &self,
+        request: &CatalogSyncRequest,
+    ) -> Result<CatalogSyncResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            "/v1/hofund/catalog/sync",
+            Some(json_body(request)?),
+        )
+        .await
     }
 
     /// Creates a configured provider.
@@ -879,6 +1084,171 @@ impl Client {
         self.request(
             http::Method::POST,
             "/v1/hofund/checkins/run",
+            Some(json_body(&request)?),
+        )
+        .await
+    }
+
+    /// Lists consent-filtered sessions.
+    pub async fn sessions(
+        &self,
+        query: SessionListQuery,
+    ) -> Result<SessionListResponse, ClientError> {
+        let mut fields = Vec::new();
+        if let Some(days) = query.days {
+            fields.push(("days", days.to_string()));
+        }
+        if !query.model.is_empty() {
+            fields.push(("model", query.model));
+        }
+        if !query.folder.is_empty() {
+            fields.push(("folder", query.folder));
+        }
+        if let Some(limit) = query.limit {
+            fields.push(("limit", limit.to_string()));
+        }
+        self.get(&with_query("/v1/hofund/sessions", fields)).await
+    }
+
+    /// Reports session usage by day, model, and folder.
+    pub async fn session_stats(
+        &self,
+        query: SessionStatsQuery,
+    ) -> Result<SessionStatsResponse, ClientError> {
+        let mut fields = Vec::new();
+        if let Some(days) = query.days {
+            fields.push(("days", days.to_string()));
+        }
+        if !query.model.is_empty() {
+            fields.push(("model", query.model));
+        }
+        if !query.folder.is_empty() {
+            fields.push(("folder", query.folder));
+        }
+        self.get(&with_query("/v1/hofund/sessions/stats", fields))
+            .await
+    }
+
+    /// Summarizes sessions in a filtered range.
+    pub async fn session_overview(
+        &self,
+        query: SessionOverviewQuery,
+    ) -> Result<SessionOverviewResponse, ClientError> {
+        let mut fields = Vec::new();
+        if let Some(days) = query.days {
+            fields.push(("days", days.to_string()));
+        }
+        for (key, value) in [
+            ("agent", query.agent),
+            ("model", query.model),
+            ("cwd", query.cwd),
+        ] {
+            if !value.is_empty() {
+                fields.push((key, value));
+            }
+        }
+        self.get(&with_query("/v1/hofund/sessions/overview", fields))
+            .await
+    }
+
+    /// Reports session index progress.
+    pub async fn session_progress(&self) -> Result<SessionProgressResponse, ClientError> {
+        self.get("/v1/hofund/sessions/progress").await
+    }
+
+    /// Returns one listed session.
+    pub async fn session(&self, id: &str) -> Result<SessionDetailResponse, ClientError> {
+        self.get(&format!("/v1/hofund/sessions/{}", encode_segment(id)))
+            .await
+    }
+
+    /// Reads one session or listed subagent transcript.
+    pub async fn session_transcript(
+        &self,
+        id: &str,
+        sub: Option<&str>,
+    ) -> Result<SessionTranscriptResponse, ClientError> {
+        let path = format!("/v1/hofund/sessions/{}/transcript", encode_segment(id));
+        let path = sub.map_or(path.clone(), |sub| {
+            with_query(&path, vec![("sub", sub.to_owned())])
+        });
+        self.get(&path).await
+    }
+
+    /// Reads one session as Markdown without creating a local file.
+    pub async fn session_markdown(&self, id: &str) -> Result<String, ClientError> {
+        let response = self
+            .open(
+                http::Method::GET,
+                &format!("/v1/hofund/sessions/{}/markdown", encode_segment(id)),
+                None,
+                None,
+            )
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(error_response(status, response.into_body()).await);
+        }
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        if !content_type.starts_with("text/markdown") {
+            return Err(ClientError::Transport(
+                "session Markdown response has the wrong content type".to_owned(),
+            ));
+        }
+        let body = Limited::new(response.into_body(), MAX_RESPONSE_BODY_BYTES)
+            .collect()
+            .await
+            .map_err(|error| transport("control response body failed", error))?
+            .to_bytes();
+        String::from_utf8(body.to_vec())
+            .map_err(|_| ClientError::Transport("session Markdown is not UTF-8".to_owned()))
+    }
+
+    /// Searches consent-filtered session transcripts.
+    pub async fn session_search(
+        &self,
+        query: SessionSearchQuery,
+    ) -> Result<SessionSearchResponse, ClientError> {
+        let mut fields = Vec::new();
+        if !query.agent.is_empty() {
+            fields.push(("agent", query.agent));
+        }
+        fields.push(("q", query.q));
+        self.get(&with_query("/v1/hofund/sessions/search", fields))
+            .await
+    }
+
+    /// Lists read-only session management state.
+    pub async fn session_manage(
+        &self,
+        query: SessionManageQuery,
+    ) -> Result<SessionManageResponse, ClientError> {
+        let fields = if query.agent.is_empty() {
+            Vec::new()
+        } else {
+            vec![("agent", query.agent)]
+        };
+        self.get(&with_query("/v1/hofund/sessions/manage", fields))
+            .await
+    }
+
+    /// Returns session read consent.
+    pub async fn session_reads(&self) -> Result<SessionReadsResponse, ClientError> {
+        self.get("/v1/hofund/sessions/reads").await
+    }
+
+    /// Updates session read consent with optional optimistic concurrency.
+    pub async fn patch_session_reads(
+        &self,
+        request: SessionReadsPatchRequest,
+    ) -> Result<SessionReadsResponse, ClientError> {
+        self.request(
+            http::Method::PATCH,
+            "/v1/hofund/sessions/reads",
             Some(json_body(&request)?),
         )
         .await
@@ -1365,6 +1735,19 @@ fn json_body<T: serde::Serialize>(request: &T) -> Result<Vec<u8>, ClientError> {
         .map_err(|_| ClientError::Transport("cannot encode control request".to_owned()))
 }
 
+fn with_query(path: &str, fields: Vec<(&str, String)>) -> String {
+    let query = fields
+        .into_iter()
+        .map(|(key, value)| format!("{key}={}", encode_segment(&value)))
+        .collect::<Vec<_>>()
+        .join("&");
+    if query.is_empty() {
+        path.to_owned()
+    } else {
+        format!("{path}?{query}")
+    }
+}
+
 fn encode_segment(id: &str) -> String {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let mut encoded = String::with_capacity(id.len());
@@ -1557,6 +1940,32 @@ mod route_tests {
             | "/v1/hofund/agents/agent%2F1/model" => {
                 serde_json::to_vec(&proto::AgentChangeResponse::default())
             }
+            "/v1/hofund/sessions" => serde_json::to_vec(&proto::SessionListResponse::default()),
+            "/v1/hofund/sessions/stats" => {
+                serde_json::to_vec(&proto::SessionStatsResponse::default())
+            }
+            "/v1/hofund/sessions/overview" => {
+                serde_json::to_vec(&proto::SessionOverviewResponse::default())
+            }
+            "/v1/hofund/sessions/progress" => {
+                serde_json::to_vec(&proto::SessionProgressResponse::default())
+            }
+            "/v1/hofund/sessions/fake%3Aone" => {
+                serde_json::to_vec(&proto::SessionDetailResponse::default())
+            }
+            "/v1/hofund/sessions/fake%3Aone/transcript" => {
+                serde_json::to_vec(&proto::SessionTranscriptResponse::default())
+            }
+            "/v1/hofund/sessions/fake%3Aone/markdown" => Ok(b"# Fixture".to_vec()),
+            "/v1/hofund/sessions/search" => {
+                serde_json::to_vec(&proto::SessionSearchResponse::default())
+            }
+            "/v1/hofund/sessions/manage" => {
+                serde_json::to_vec(&proto::SessionManageResponse::default())
+            }
+            "/v1/hofund/sessions/reads" => {
+                serde_json::to_vec(&proto::SessionReadsResponse::default())
+            }
             "/v1/hofund/usage" => serde_json::to_vec(&proto::UsageResponse::default()),
             "/v1/hofund/token/rotate" => serde_json::to_vec(&proto::TokenRotateResponse::default()),
             "/v1/hofund/shutdown" => serde_json::to_vec(&proto::ShutdownResponse::default()),
@@ -1642,8 +2051,13 @@ mod route_tests {
                                     content_types,
                                     body,
                                 });
+                                let content_type = if path.ends_with("/markdown") {
+                                    "text/markdown; charset=utf-8"
+                                } else {
+                                    "application/json"
+                                };
                                 let response = http::Response::builder()
-                                    .header(http::header::CONTENT_TYPE, "application/json")
+                                    .header(http::header::CONTENT_TYPE, content_type)
                                     .body(Full::new(std::io::Cursor::new(reply_body(&path))))
                                     .expect("response");
                                 Ok::<_, Infallible>(response)
@@ -1858,6 +2272,82 @@ mod route_tests {
                 .iter()
                 .all(|request| request.last_event_id.is_none())
         );
+    }
+
+    #[tokio::test]
+    async fn session_methods_encode_their_query_strings() {
+        use hofund_control_proto::{SessionListQuery, SessionOverviewQuery, SessionStatsQuery};
+
+        let (address, recorded, server) = recording_server().await;
+        let client = super::Client::tcp(address, "test-token");
+        let mut list = SessionListQuery::default();
+        list.days = Some(7);
+        list.model = "model/a".to_owned();
+        list.folder = "/work dir".to_owned();
+        list.limit = Some(2);
+        client.sessions(list).await.expect("session list");
+        client
+            .session_stats(SessionStatsQuery::default())
+            .await
+            .expect("session stats");
+        let mut overview = SessionOverviewQuery::default();
+        overview.agent = "fake".to_owned();
+        overview.cwd = "/work dir".to_owned();
+        client
+            .session_overview(overview)
+            .await
+            .expect("session overview");
+        client.session_progress().await.expect("session progress");
+        client.session("fake:one").await.expect("session detail");
+        client
+            .session_transcript("fake:one", Some("child/agent"))
+            .await
+            .expect("session transcript");
+        let markdown = client
+            .session_markdown("fake:one")
+            .await
+            .expect("session Markdown");
+        assert_eq!(markdown, "# Fixture");
+        let mut search = hofund_control_proto::SessionSearchQuery::default();
+        search.agent = "fake".to_owned();
+        search.q = "two words".to_owned();
+        client.session_search(search).await.expect("session search");
+        let mut manage = hofund_control_proto::SessionManageQuery::default();
+        manage.agent = "fake".to_owned();
+        client.session_manage(manage).await.expect("session manage");
+        client.session_reads().await.expect("session reads");
+        client
+            .patch_session_reads(hofund_control_proto::SessionReadsPatchRequest::default())
+            .await
+            .expect("PATCH reads");
+        server.abort();
+
+        let paths: Vec<String> = recorded
+            .lock()
+            .expect("recorded")
+            .iter()
+            .map(|request| request.path_and_query.clone())
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                "/v1/hofund/sessions?days=7&model=model%2Fa&folder=%2Fwork%20dir&limit=2",
+                "/v1/hofund/sessions/stats",
+                "/v1/hofund/sessions/overview?agent=fake&cwd=%2Fwork%20dir",
+                "/v1/hofund/sessions/progress",
+                "/v1/hofund/sessions/fake%3Aone",
+                "/v1/hofund/sessions/fake%3Aone/transcript?sub=child%2Fagent",
+                "/v1/hofund/sessions/fake%3Aone/markdown",
+                "/v1/hofund/sessions/search?agent=fake&q=two%20words",
+                "/v1/hofund/sessions/manage?agent=fake",
+                "/v1/hofund/sessions/reads",
+                "/v1/hofund/sessions/reads",
+            ]
+        );
+        let recorded = recorded.lock().expect("recorded");
+        let last = recorded.last().expect("PATCH request");
+        assert_eq!(last.method, http::Method::PATCH);
+        assert_eq!(last.body, br#"{"version":1}"#);
     }
 
     #[tokio::test]

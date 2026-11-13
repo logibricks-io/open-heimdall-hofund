@@ -66,6 +66,7 @@ pub enum PluginErrorKind {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 #[error("{message}")]
+#[allow(clippy::struct_excessive_bools)] // independent protocol flags, not a state machine
 pub struct PluginError {
     kind: PluginErrorKind,
     message: String,
@@ -75,6 +76,7 @@ pub struct PluginError {
     credit: bool,
     credit_soon: bool,
     cooldown: bool,
+    skip_failover_same_plugin: bool,
     billed: Option<Box<BilledUsage>>,
     #[source]
     cause: Option<Box<dyn Error + Send + Sync>>,
@@ -91,6 +93,7 @@ impl PluginError {
             credit: false,
             credit_soon: false,
             cooldown: true,
+            skip_failover_same_plugin: false,
             billed: None,
             cause: None,
         }
@@ -294,6 +297,22 @@ impl PluginError {
         self.cooldown
     }
 
+    /// Marks that later route members with the same plugin id must not be asked.
+    ///
+    /// Other plugins may still be tried when the failover policy allows it. The
+    /// router reads this flag; it does not match on the error message.
+    #[must_use]
+    pub const fn skip_failover_same_plugin(mut self) -> Self {
+        self.skip_failover_same_plugin = true;
+        self
+    }
+
+    /// Whether later members with the same plugin id must be skipped.
+    #[must_use]
+    pub const fn skips_failover_same_plugin(&self) -> bool {
+        self.skip_failover_same_plugin
+    }
+
     /// The underlying error, when one was attached.
     ///
     /// Named `cause` so it does not shadow [`Error::source`].
@@ -374,5 +393,16 @@ mod tests {
         assert_eq!(error.kind(), PluginErrorKind::Unsupported);
         assert_eq!(error.status(), None);
         assert_eq!(error.retry_after(), None);
+    }
+
+    #[test]
+    fn skip_failover_same_plugin_is_off_by_default() {
+        let error = PluginError::status_error(503, "full").without_cooldown();
+        assert!(!error.skips_failover_same_plugin());
+        assert!(!error.cools());
+        let flagged = error.skip_failover_same_plugin();
+        assert!(flagged.skips_failover_same_plugin());
+        assert!(!flagged.cools());
+        assert_eq!(flagged.status(), Some(503));
     }
 }

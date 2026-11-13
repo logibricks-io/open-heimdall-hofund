@@ -1,10 +1,15 @@
 //! Page implementations (empty shells in R-11).
 
+mod agents;
 mod frame;
 mod probe;
+mod providers;
+mod status;
 
+pub use agents::AgentPage;
 pub use frame::PageShell;
 pub use probe::{ProbeOutcome, apply_probe_to_shell, read_path};
+pub use providers::ProviderPage;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;

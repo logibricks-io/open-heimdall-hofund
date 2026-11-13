@@ -5,6 +5,8 @@
 //! names do not belong in this crate. Generative Language paths are matched
 //! in `endpoints`.
 
+mod allow;
+mod bridge_effort;
 pub mod control;
 mod endpoints;
 mod issue_keys;
@@ -24,6 +26,7 @@ pub mod session_headers;
 mod stream_timing;
 mod usage_handoff;
 
+pub use allow::NetworkAccess;
 pub use endpoints::{GENERATIVE_LIST, GENERATIVE_STREAM, GENERATIVE_UNARY};
 #[doc(hidden)]
 pub use quotas::{
@@ -92,6 +95,7 @@ pub struct Gateway {
 
 struct Inner {
     snapshot: Snapshot,
+    network_access: allow::NetworkAccess,
     tokens: TokenState,
     keys: Option<Arc<KeyStore>>,
     oidc_rules: Option<RuleStore>,
@@ -542,6 +546,7 @@ impl Gateway {
         Self {
             inner: Arc::new(Inner {
                 snapshot,
+                network_access: allow::NetworkAccess::default(),
                 tokens: TokenState::new(token, token_file),
                 keys: None,
                 oidc_rules: None,
@@ -564,6 +569,15 @@ impl Gateway {
                 session_header_names: hofund_codec::kernel_session_header_names(),
             }),
         }
+    }
+
+    /// Shares network-access settings that the daemon replaces on config reload.
+    #[must_use]
+    pub fn with_network_access(mut self, access: allow::NetworkAccess) -> Self {
+        Arc::get_mut(&mut self.inner)
+            .expect("gateway is not shared yet")
+            .network_access = access;
+        self
     }
 
     /// Sets plugin-appended session header names after the kernel list.
@@ -948,6 +962,17 @@ impl Running {
         None
     }
 
+    /// Returns the quota report source stored with [`Self::with_resource`].
+    #[must_use]
+    pub fn quota_source(&self) -> Option<Arc<dyn QuotaSource>> {
+        for resource in &self.resources {
+            if let Some(source) = resource.downcast_ref::<Arc<dyn QuotaSource>>() {
+                return Some(Arc::clone(source));
+            }
+        }
+        None
+    }
+
     /// Links a control listener to this server's lifetime.
     #[doc(hidden)]
     #[must_use]
@@ -1057,6 +1082,10 @@ fn request_router(app: &Arc<Inner>) -> axum::Router {
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(app),
             issue_keys::refused_guard,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(app),
+            allow::guard,
         ))
 }
 
@@ -1970,6 +1999,7 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
             ),
         );
     }
+    bridge_effort::apply(codec.id(), &bytes, &mut model_request);
     let reservation = match reserve_for_codec(
         &app,
         codec.as_ref(),

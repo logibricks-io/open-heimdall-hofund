@@ -16,7 +16,8 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Local};
 use hofund_plugin_api::{
     PluginError, SessionCompression, SessionDay, SessionFile, SessionLocator, SessionParse,
-    SessionParser, SessionRecord, SessionStore, SessionTokens, SessionUsageEvent,
+    SessionParser, SessionPart, SessionRecord, SessionStore, SessionTokens, SessionTranscript,
+    SessionTranscriptParser, SessionUsageEvent,
 };
 use hofund_plugin_sdk::{chrono, json, serde};
 use json::Value;
@@ -141,6 +142,17 @@ impl SessionStore for CodexStore {
         Ok(Box::new(CodexParser {
             state: restored.unwrap_or_else(|| CodexState::new(file)),
         }))
+    }
+
+    fn transcript_available(&self) -> bool {
+        true
+    }
+
+    fn transcript_parser(
+        &self,
+        _file: &SessionFile,
+    ) -> Result<Box<dyn SessionTranscriptParser>, PluginError> {
+        Ok(Box::new(CodexTranscriptParser::default()))
     }
 }
 
@@ -555,6 +567,118 @@ fn title_line(text: &str) -> String {
     }
 }
 
+#[derive(Default)]
+struct CodexTranscriptParser {
+    transcript: SessionTranscript,
+}
+
+impl SessionTranscriptParser for CodexTranscriptParser {
+    fn push(&mut self, value: &Value) -> Result<(), PluginError> {
+        if value.get("type").and_then(Value::as_str) != Some("response_item") {
+            return Ok(());
+        }
+        let Some(payload) = value.get("payload") else {
+            return Ok(());
+        };
+        let kind = payload.get("type").and_then(Value::as_str).unwrap_or("");
+        let role = payload.get("role").and_then(Value::as_str).unwrap_or("");
+        let name = payload.get("name").and_then(Value::as_str).unwrap_or("");
+        let words = |key: &str, separator: &str| {
+            payload
+                .get(key)
+                .and_then(Value::as_array)
+                .map(|parts| {
+                    parts
+                        .iter()
+                        .filter_map(|part| part.get("text").and_then(Value::as_str))
+                        .collect::<Vec<_>>()
+                        .join(separator)
+                })
+                .unwrap_or_default()
+        };
+        let part = match kind {
+            "message" if matches!(role, "user" | "assistant") => {
+                Some(text_part(role, &words("content", "\n")))
+            }
+            "reasoning" => Some(SessionPart::new(
+                "assistant",
+                "thinking",
+                "",
+                words("summary", "\n\n"),
+            )),
+            "function_call" => Some(SessionPart::new(
+                "assistant",
+                "tool_use",
+                name,
+                payload
+                    .get("arguments")
+                    .and_then(Value::as_str)
+                    .unwrap_or(""),
+            )),
+            "custom_tool_call" => Some(SessionPart::new(
+                "assistant",
+                "tool_use",
+                name,
+                payload.get("input").and_then(Value::as_str).unwrap_or(""),
+            )),
+            "local_shell_call" => Some(SessionPart::new(
+                "assistant",
+                "tool_use",
+                "shell",
+                payload
+                    .get("action")
+                    .and_then(|action| action.get("command"))
+                    .and_then(Value::as_array)
+                    .map(|command| {
+                        command
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    })
+                    .unwrap_or_default(),
+            )),
+            "function_call_output" | "custom_tool_call_output" => Some(SessionPart::new(
+                "tool",
+                "tool_result",
+                "",
+                payload.get("output").map(codex_output).unwrap_or_default(),
+            )),
+            _ => None,
+        };
+        self.transcript.parts.extend(part);
+        Ok(())
+    }
+
+    fn finish(self: Box<Self>) -> Result<SessionTranscript, PluginError> {
+        Ok(self.transcript)
+    }
+}
+
+fn text_part(role: &str, text: &str) -> SessionPart {
+    let trimmed = text.trim();
+    let kind = if trimmed.starts_with('<') || trimmed.starts_with("# AGENTS.md") {
+        "context"
+    } else {
+        "text"
+    };
+    SessionPart::new(role, kind, "", text)
+}
+
+fn codex_output(output: &Value) -> String {
+    if let Some(text) = output.as_str() {
+        return text.to_owned();
+    }
+    for key in ["content", "output"] {
+        if let Some(text) = output.get(key).and_then(Value::as_str)
+            && !text.is_empty()
+        {
+            return text.to_owned();
+        }
+    }
+    json::to_string(output).unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::{BufRead, BufReader};
@@ -616,6 +740,33 @@ mod tests {
                 .iter()
                 .any(|file| file.compression == SessionCompression::Zstd)
         );
+    }
+
+    #[test]
+    fn codex_transcript_reads_fixture_content() {
+        let path = fixture(
+            "home/sessions/2026/09/20/rollout-2026-09-20T15-48-28-01a0bdc9-b5fd-7e63-9658-68bc8dce5ecd.jsonl",
+        );
+        let file = SessionFile::new("fixture", &path);
+        let store = CodexStore::with_root(fixture("home"));
+        let mut parser = store.transcript_parser(&file).expect("parser");
+        for line in BufReader::new(std::fs::File::open(path).expect("fixture")).lines() {
+            let value = json::from_str(&line.expect("line")).expect("JSON");
+            parser.push(&value).expect("push");
+        }
+        parser
+            .push(&json::json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"text": "Documented"}]
+                }
+            }))
+            .expect("assistant");
+        let transcript = parser.finish().expect("transcript");
+        assert!(transcript.parts.iter().any(|part| part.role == "user"));
+        assert!(transcript.parts.iter().any(|part| part.role == "assistant"));
     }
 
     #[cfg(unix)]

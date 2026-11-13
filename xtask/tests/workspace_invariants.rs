@@ -15,6 +15,7 @@ mod plugin_rules;
 /// Workspace-relative paths of every Cargo package, in the same order as the
 /// root `[workspace] members` list is asserted below.
 const MEMBERS: &[&str] = &[
+    "apps/bridge-mcp",
     "apps/cli",
     "apps/desktop/src-tauri",
     "apps/hofundd",
@@ -47,6 +48,7 @@ const MEMBERS: &[&str] = &[
     "plugins/providers/relay",
     "plugins/providers/remote-gateway",
     "plugins/registry",
+    "plugins/subscriptions/antigravity",
     "plugins/subscriptions/claude",
     "plugins/subscriptions/codex",
     "plugins/subscriptions/copilot",
@@ -78,7 +80,9 @@ const MEMBERS: &[&str] = &[
 fn expected_deps(package: &str) -> Option<&'static [&'static str]> {
     Some(match package {
         "hofund-agent" => &["hofund-config", "hofund-plugin-api"],
+        "hofund-bridge-mcp" => &[],
         "hofund-cli" => &[
+            "hofund-bridge-mcp",
             "hofund-config",
             "hofund-control-client",
             "hofund-model-catalog",
@@ -96,6 +100,7 @@ fn expected_deps(package: &str) -> Option<&'static [&'static str]> {
         "hofund-control-client" => &["hofund-control-proto"],
         "hofund-control-proto" => &[],
         "hofund-daemon-bin" => &[
+            "hofund-bridge-mcp",
             "hofund-daemon",
             "hofund-plugin-api",
             "hofund-plugin-registry",
@@ -116,6 +121,7 @@ fn expected_deps(package: &str) -> Option<&'static [&'static str]> {
             "hofund-quirks",
             "hofund-router",
             "hofund-secrets",
+            "hofund-sessions",
             "hofund-usage",
         ],
         "hofund-gateway" => &[
@@ -151,6 +157,8 @@ fn expected_deps(package: &str) -> Option<&'static [&'static str]> {
         "hofund-plugin-plan-quota" => &["hofund-plugin-api", "hofund-plugin-sdk"],
         "hofund-plugin-registry" => &[
             "hofund-plugin-api",
+            "hofund-plugin-agent-claude",
+            "hofund-plugin-agent-codex",
             "hofund-plugin-azure",
             "hofund-plugin-bedrock",
             "hofund-plugin-bedrock-mantle",
@@ -164,6 +172,7 @@ fn expected_deps(package: &str) -> Option<&'static [&'static str]> {
             "hofund-plugin-relay",
             "hofund-plugin-remote-gateway",
             "hofund-plugin-sdk",
+            "hofund-plugin-subscription-antigravity",
             "hofund-plugin-subscription-claude",
             "hofund-plugin-subscription-cline",
             "hofund-plugin-subscription-codex",
@@ -183,6 +192,7 @@ fn expected_deps(package: &str) -> Option<&'static [&'static str]> {
         ],
         "hofund-plugin-relay" => &["hofund-plugin-api", "hofund-plugin-sdk"],
         "hofund-plugin-remote-gateway" => &["hofund-plugin-api", "hofund-plugin-sdk"],
+        "hofund-plugin-subscription-antigravity" => &["hofund-plugin-api", "hofund-plugin-sdk"],
         "hofund-plugin-subscription-claude" => &["hofund-plugin-api", "hofund-plugin-sdk"],
         "hofund-plugin-subscription-cline" => &["hofund-plugin-api", "hofund-plugin-sdk"],
         "hofund-plugin-subscription-codex" => &["hofund-plugin-api", "hofund-plugin-sdk"],
@@ -229,6 +239,7 @@ fn expected_deps(package: &str) -> Option<&'static [&'static str]> {
 fn expected_dev_deps(package: &str) -> Option<&'static [&'static str]> {
     Some(match package {
         "hofund-agent" => &[],
+        "hofund-bridge-mcp" => &[],
         "hofund-cli" => &["hofund-control-proto"],
         "hofund-tui" => &["hofund-control-proto"],
         "hofund-codec" => &[],
@@ -282,6 +293,7 @@ fn expected_dev_deps(package: &str) -> Option<&'static [&'static str]> {
         "hofund-plugin-google-vertex" => &["hofund-kit-upstream"],
         "hofund-plugin-relay" => &["hofund-kit-upstream"],
         "hofund-plugin-remote-gateway" => &["hofund-kit-upstream"],
+        "hofund-plugin-subscription-antigravity" => &["hofund-kit-subscription"],
         "hofund-plugin-subscription-claude" => &["hofund-kit-subscription", "hofund-plugin-sdk"],
         "hofund-plugin-subscription-cline" => &["hofund-kit-subscription"],
         "hofund-plugin-subscription-codex" => &["hofund-kit-subscription"],
@@ -295,7 +307,7 @@ fn expected_dev_deps(package: &str) -> Option<&'static [&'static str]> {
         "hofund-plugin-subscription-qoder" => &["hofund-kit-subscription"],
         "hofund-plugin-subscription-workbuddy" => &["hofund-kit-subscription"],
         "hofund-plugin-subscription-zcode" => &["hofund-kit-subscription", "hofund-plugin-sdk"],
-        "hofund-plugin-subscription-zed" => &["hofund-kit-subscription"],
+        "hofund-plugin-subscription-zed" => &["hofund-kit-subscription", "hofund-plugin-sdk"],
         "hofund-plugin-sdk" => &[],
         "hofund-provider" => &["hofund-config", "hofund-ir", "hofund-quirks"],
         "hofund-quirks" => &[],
@@ -479,6 +491,7 @@ fn dependency_graph_matches_architecture() {
 
     for package in [
         "hofund-agent",
+        "hofund-bridge-mcp",
         "hofund-cli",
         "hofund-tui",
         "hofund-codec",
@@ -512,6 +525,7 @@ fn dependency_graph_matches_architecture() {
         "hofund-plugin-relay",
         "hofund-plugin-remote-gateway",
         "hofund-plugin-sdk",
+        "hofund-plugin-subscription-antigravity",
         "hofund-plugin-subscription-claude",
         "hofund-plugin-subscription-cline",
         "hofund-plugin-subscription-codex",
