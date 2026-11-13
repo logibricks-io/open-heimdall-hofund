@@ -1,0 +1,99 @@
+{
+  "agent": "codex",
+  "id": "codex:01a0bdc9-b5fd-7e63-9658-68bc8dce5ecd",
+  "path": "",
+  "cwd": "/work/fixture",
+  "title": "Add a README",
+  "start_ms": 1789919308100,
+  "last_ms": 1789919410000,
+  "models": {
+    "fixture-astra": {
+      "input": 6000,
+      "output": 300,
+      "cache_read": 4000,
+      "cache_write": 0,
+      "cache_write_1h": 0
+    },
+    "fixture-luna": {
+      "input": 2000,
+      "output": 200,
+      "cache_read": 10000,
+      "cache_write": 0,
+      "cache_write_1h": 0
+    }
+  },
+  "days": [
+    {
+      "date": "2026-09-20",
+      "model": "fixture-astra",
+      "tokens": {
+        "input": 6000,
+        "output": 300,
+        "cache_read": 4000,
+        "cache_write": 0,
+      "cache_write_1h": 0
+      }
+    },
+    {
+      "date": "2026-09-20",
+      "model": "fixture-luna",
+      "tokens": {
+        "input": 2000,
+        "output": 200,
+        "cache_read": 10000,
+        "cache_write": 0,
+      "cache_write_1h": 0
+      }
+    }
+  ],
+  "cost": 0.0,
+  "unpriced": 0,
+  "main": true,
+  "parent_id": null,
+  "subagents": [],
+  "copies": [],
+  "family_root": "",
+  "family_leaf": "",
+  "family_ids": [],
+  "copy": false,
+  "forked_from": null,
+  "usage": [
+    {
+      "checkpoint": {
+        "input": 10000,
+        "output": 300,
+        "cache_read": 4000,
+        "cache_write": 0,
+        "cache_write_1h": 0
+      },
+      "tokens": {
+        "input": 6000,
+        "output": 300,
+        "cache_read": 4000,
+        "cache_write": 0,
+        "cache_write_1h": 0
+      },
+      "model": "fixture-astra",
+      "date": "2026-09-20"
+    },
+    {
+      "checkpoint": {
+        "input": 22000,
+        "output": 500,
+        "cache_read": 14000,
+        "cache_write": 0,
+        "cache_write_1h": 0
+      },
+      "tokens": {
+        "input": 2000,
+        "output": 200,
+        "cache_read": 10000,
+        "cache_write": 0,
+        "cache_write_1h": 0
+      },
+      "model": "fixture-luna",
+      "date": "2026-09-20"
+    }
+  ],
+  "cut": false
+}

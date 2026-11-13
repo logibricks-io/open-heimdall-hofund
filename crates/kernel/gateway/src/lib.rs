@@ -5,6 +5,8 @@
 //! names do not belong in this crate. Generative Language paths are matched
 //! in `endpoints`.
 
+mod allow;
+mod bridge_effort;
 pub mod control;
 mod endpoints;
 mod issue_keys;
@@ -20,9 +22,11 @@ mod readonly;
 mod refusal_handover;
 mod relisten;
 mod responses_ws;
+pub mod session_headers;
 mod stream_timing;
 mod usage_handoff;
 
+pub use allow::NetworkAccess;
 pub use endpoints::{GENERATIVE_LIST, GENERATIVE_STREAM, GENERATIVE_UNARY};
 #[doc(hidden)]
 pub use quotas::{
@@ -33,6 +37,7 @@ pub use relisten::{Relisten, RelistenError};
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
+use std::future::Future;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -52,19 +57,20 @@ use endpoints::{
 };
 use futures_util::{Stream, StreamExt, TryStreamExt};
 use hofund_codec::{
-    Codec, EndWatch, SESSION_HEADERS, STREAM_CLIENT_PREFIXES, SUBAGENT_HEADER, StreamEncoder,
-    compacts_in_stream_client, conversation_key, turn_in,
+    Codec, ECHO_SESSION_HEADER, EndWatch, SESSION_HEADERS, STREAM_CLIENT_PREFIXES, SUBAGENT_HEADER,
+    StreamEncoder, compacts_in_stream_client, conversation_key, native_session_of, session_of,
+    turn_in,
 };
 use hofund_config::VisibleCatalog;
 use hofund_ir::{BlockStart, Request as ModelRequest, StreamEvent, too_long, words_of};
 use hofund_plugin_api::{
-    BodyStream, InboundSurface, Method, PluginError, PluginErrorKind, ProtocolId,
+    BodyStream, InboundSurface, Method, PluginError, PluginErrorKind, ProtocolId, StoppedWaiting,
 };
 use hofund_plugin_host::HttpBackend;
 use hofund_router::{AttemptHook, Completion, RouteScope, Routed, RouterError, Snapshot, WaitHook};
 use hofund_secrets::oidc::RuleStore;
 use hofund_secrets::{Identity, KeyStore};
-use hofund_usage::{Ledger, Row, UNKNOWN_CLIENT_AGENT};
+use hofund_usage::{Ledger, OUTCOME_STOPPED_WAITING, Row, UNKNOWN_CLIENT_AGENT};
 use thiserror::Error;
 use tokio::net::TcpListener;
 use tokio::sync::{oneshot, watch};
@@ -74,9 +80,10 @@ const BODY_LIMIT: usize = 8 * 1024 * 1024;
 /// The largest body a surface takes: room for a speech-to-text upload, which
 /// the common speech-to-text APIs cap at 25 MB.
 const SURFACE_BODY_LIMIT: usize = 32 * 1024 * 1024;
-/// How long a surface call may take: a forwarded transcription of a long
-/// recording takes minutes.
-const SURFACE_TIMEOUT: Duration = Duration::from_secs(180);
+/// How long a surface call may take. This outlasts the 240-second inbound
+/// compaction budget with room to build its local summary, while staying below
+/// the client's 300-second silent-stream limit.
+const SURFACE_TIMEOUT: Duration = Duration::from_secs(285);
 
 /// Resolves the agent id on an authenticated request, when known.
 pub type RequestAgentHook = Arc<dyn Fn(&HeaderMap, &Identity) -> Option<String> + Send + Sync>;
@@ -88,6 +95,7 @@ pub struct Gateway {
 
 struct Inner {
     snapshot: Snapshot,
+    network_access: allow::NetworkAccess,
     tokens: TokenState,
     keys: Option<Arc<KeyStore>>,
     oidc_rules: Option<RuleStore>,
@@ -116,6 +124,8 @@ struct Inner {
     model_catalog: Option<Arc<hofund_model_catalog::ModelCatalog>>,
     /// Effective list prices for usage rows.
     pricer: Option<Arc<hofund_model_catalog::EffectivePricer>>,
+    /// Ordered client header names for [`session_of`], including plugin extras.
+    session_header_names: Vec<String>,
 }
 
 struct TokenState {
@@ -258,6 +268,7 @@ struct RequestTrack {
     finished: bool,
     drop_status: u16,
     cancel_usage: Option<(Arc<Ledger>, UsageMeta)>,
+    stopped_waiting: Option<StoppedWaiting>,
     reservation: Option<limits::Reservation>,
 }
 
@@ -280,6 +291,7 @@ impl RequestTrack {
             finished: false,
             drop_status: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
             cancel_usage: None,
+            stopped_waiting: None,
             reservation: None,
         }
     }
@@ -305,6 +317,27 @@ impl RequestTrack {
             self.in_flight.fetch_sub(1, Ordering::SeqCst);
             self.active = false;
         }
+    }
+
+    fn stop_waiting(
+        &mut self,
+        marker: StoppedWaiting,
+        usage: Arc<Ledger>,
+        request: &ModelRequest,
+        identity: &Identity,
+    ) {
+        self.stopped_waiting = Some(marker);
+        self.cancel_usage = Some((
+            usage,
+            UsageMeta::new(
+                request,
+                "",
+                &request.model,
+                self.started,
+                identity,
+                UNKNOWN_CLIENT_AGENT,
+            ),
+        ));
     }
 
     fn client_waiting(&mut self, usage: Arc<Ledger>, request: &ModelRequest, identity: &Identity) {
@@ -355,6 +388,7 @@ impl RequestTrack {
             finished: self.finished,
             drop_status: self.drop_status,
             cancel_usage: self.cancel_usage.take(),
+            stopped_waiting: self.stopped_waiting.clone(),
             reservation: self.reservation.take(),
         };
         self.active = false;
@@ -368,11 +402,26 @@ impl Drop for RequestTrack {
         if !self.finished {
             // Panic, cancellation, or a path that forgot finish: still emit and
             // return the counter to zero.
-            let status = self.drop_status;
-            if status == 499
-                && let Some((usage, meta)) = self.cancel_usage.take()
-            {
-                write_usage_simple(&usage, &meta, None, StatusCode::from_u16(499).expect("499"));
+            let stopped = self
+                .stopped_waiting
+                .as_ref()
+                .is_some_and(StoppedWaiting::is_stopped);
+            let status = if stopped {
+                StatusCode::GATEWAY_TIMEOUT.as_u16()
+            } else {
+                self.drop_status
+            };
+            if let Some((usage, meta)) = self.cancel_usage.take() {
+                if stopped {
+                    write_usage_stopped_waiting(&usage, &meta);
+                } else if status == 499 {
+                    write_usage_simple(
+                        &usage,
+                        &meta,
+                        None,
+                        StatusCode::from_u16(499).expect("499"),
+                    );
+                }
             }
             self.end_with(None, status, None, None);
         } else {
@@ -398,6 +447,9 @@ fn unix_ms_now() -> u64 {
 #[doc(hidden)]
 pub const CONTROL_DRAIN: std::time::Duration = std::time::Duration::from_secs(4);
 
+/// Hook run after the HTTP drain, before [`Running`] is dropped.
+type AfterDrainHook = Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send>;
+
 /// A bound server.
 pub struct Running {
     /// The address the listener accepted at start. After a relisten,
@@ -415,6 +467,7 @@ pub struct Running {
     sockets: Option<Arc<responses_ws::SocketRegistry>>,
     relisten: Option<Relisten>,
     fatal: Option<watch::Receiver<Option<String>>>,
+    after_drain: Option<AfterDrainHook>,
 }
 
 /// The listener could not be bound.
@@ -493,6 +546,7 @@ impl Gateway {
         Self {
             inner: Arc::new(Inner {
                 snapshot,
+                network_access: allow::NetworkAccess::default(),
                 tokens: TokenState::new(token, token_file),
                 keys: None,
                 oidc_rules: None,
@@ -512,8 +566,27 @@ impl Gateway {
                 route_trace: None,
                 model_catalog: None,
                 pricer: None,
+                session_header_names: hofund_codec::kernel_session_header_names(),
             }),
         }
+    }
+
+    /// Shares network-access settings that the daemon replaces on config reload.
+    #[must_use]
+    pub fn with_network_access(mut self, access: allow::NetworkAccess) -> Self {
+        Arc::get_mut(&mut self.inner)
+            .expect("gateway is not shared yet")
+            .network_access = access;
+        self
+    }
+
+    /// Sets plugin-appended session header names after the kernel list.
+    #[must_use]
+    pub fn with_session_header_names(mut self, names: Vec<String>) -> Self {
+        Arc::get_mut(&mut self.inner)
+            .expect("gateway is not shared yet")
+            .session_header_names = names;
+        self
     }
 
     /// Shares the visibility catalog the daemon updates on config reload.
@@ -574,7 +647,7 @@ impl Gateway {
     }
 
     /// Mounts inbound surfaces. A request that matches one is authenticated,
-    /// then handled inside the inbound span with a 60 second deadline.
+    /// then handled inside the inbound span with a 285 second deadline.
     ///
     /// Codec routes stay on their own paths. A surface is reached from the
     /// fallback, so a codec path wins when both could match.
@@ -743,6 +816,7 @@ impl Running {
             sockets: None,
             relisten: None,
             fatal: None,
+            after_drain: None,
         }
     }
 
@@ -862,12 +936,38 @@ impl Running {
         self
     }
 
+    /// Runs `hook` after the HTTP drain, before this server is dropped.
+    ///
+    /// The daemon uses this to shut constructed upstream providers down so
+    /// parked children are not orphaned.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_after_drain<F, Fut>(mut self, hook: F) -> Self
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        self.after_drain = Some(Box::new(move || Box::pin(hook())));
+        self
+    }
+
     /// Returns the routing trace book stored with [`Self::with_resource`].
     #[must_use]
     pub fn route_trace_book(&self) -> Option<Arc<hofund_router::RouteTraceBook>> {
         for resource in &self.resources {
             if let Some(book) = resource.downcast_ref::<Arc<hofund_router::RouteTraceBook>>() {
                 return Some(Arc::clone(book));
+            }
+        }
+        None
+    }
+
+    /// Returns the quota report source stored with [`Self::with_resource`].
+    #[must_use]
+    pub fn quota_source(&self) -> Option<Arc<dyn QuotaSource>> {
+        for resource in &self.resources {
+            if let Some(source) = resource.downcast_ref::<Arc<dyn QuotaSource>>() {
+                return Some(Arc::clone(source));
             }
         }
         None
@@ -914,6 +1014,8 @@ impl Running {
     /// Asks the server to stop, aborts attached tasks, and waits for the server.
     /// Control listeners close connections that outlast their drain deadline.
     /// Responses sockets close after their turns; dropping a bounded drain cuts them.
+    /// After the HTTP drain, any [`Self::with_after_drain`] hook runs so
+    /// constructed upstream providers can shut down before they are dropped.
     pub async fn shutdown(mut self) {
         self.request_shutdown();
         for task in self.attached.drain(..) {
@@ -943,6 +1045,9 @@ impl Running {
                     let _ = task.await;
                 }
             }
+        }
+        if let Some(hook) = self.after_drain.take() {
+            hook().await;
         }
     }
 }
@@ -977,6 +1082,10 @@ fn request_router(app: &Arc<Inner>) -> axum::Router {
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(app),
             issue_keys::refused_guard,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(app),
+            allow::guard,
         ))
 }
 
@@ -1731,6 +1840,7 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
     let uri = request.uri().clone();
     let headers = request.headers().clone();
     let inherited = request.extensions().get::<Identity>().cloned();
+    let stopped_waiting = request.extensions().get::<StoppedWaiting>().cloned();
     if path == "/v1/messages/count_tokens" {
         return count_tokens(app, headers, uri, request, inherited, "/v1/messages", None).await;
     }
@@ -1772,13 +1882,22 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
             identity_headers.push((name, value));
         }
     }
-    let session = client_session(&identity_headers);
+    let header_pairs = request_header_pairs(&headers);
+    let session_names: Vec<&str> = app
+        .session_header_names
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let ledger_session = session_of(&session_names, &header_pairs);
+    let routing_session = native_session_of(&identity_headers);
+    let endpoint = path.clone();
+    let kind = usage_kind(&path);
     let watched = unrouted_watched(&path);
     let mut unrouted_hold = watched
         .then(|| {
             app.route_trace
                 .as_ref()
-                .map(|book| book.hold_unrouted(&session, "", codec.id(), "body"))
+                .map(|book| book.hold_unrouted(&routing_session, "", codec.id(), "body"))
         })
         .flatten();
     if let Some(hold) = &unrouted_hold {
@@ -1880,6 +1999,7 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
             ),
         );
     }
+    bridge_effort::apply(codec.id(), &bytes, &mut model_request);
     let reservation = match reserve_for_codec(
         &app,
         codec.as_ref(),
@@ -1922,6 +2042,9 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
         },
     )
     .with_reservation(reservation);
+    if let Some(marker) = stopped_waiting {
+        track.stop_waiting(marker, Arc::clone(&app.usage), &model_request, &identity);
+    }
     let turn = turn_in(&model_request);
     let conversation = hofund_router::affinity::Conversation::new(
         conversation_key(&model_request.model, &identity_headers, &bytes),
@@ -1949,7 +2072,7 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
     let agent = trace_agent_label(&identity_headers, &identity);
     let trace = app.route_trace.as_ref().map(|book| {
         book.begin(hofund_router::RouteMeta {
-            session: session.clone(),
+            session: routing_session.clone(),
             agent,
             gateway_key: identity.key_id.clone(),
             request_id: request_id.clone(),
@@ -2002,7 +2125,12 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
                     started,
                     identity,
                     &client_agent,
-                    &session,
+                    &RequestLedger {
+                        session_id: ledger_session.clone(),
+                        native_session_id: routing_session.clone(),
+                        endpoint: endpoint.clone(),
+                        kind: kind.clone(),
+                    },
                     track,
                     capture,
                     dispatch,
@@ -2027,7 +2155,12 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
                 started,
                 &identity,
                 &client_agent,
-                &session,
+                &RequestLedger {
+                    session_id: ledger_session.clone(),
+                    native_session_id: routing_session.clone(),
+                    endpoint: endpoint.clone(),
+                    kind: kind.clone(),
+                },
                 &mut track,
                 capture,
             )
@@ -2042,6 +2175,12 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
             started,
             &identity,
             &client_agent,
+            &RequestLedger {
+                session_id: ledger_session.clone(),
+                native_session_id: routing_session.clone(),
+                endpoint,
+                kind,
+            },
             &mut track,
         ),
     }
@@ -2068,6 +2207,14 @@ type DispatchFuture =
     Pin<Box<dyn std::future::Future<Output = Result<Routed, RouterError>> + Send>>;
 type BytesStream = Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>>;
 
+#[derive(Clone)]
+struct RequestLedger {
+    session_id: String,
+    native_session_id: String,
+    endpoint: String,
+    kind: String,
+}
+
 struct HeldResponse {
     dispatch: Option<DispatchFuture>,
     app: Arc<Inner>,
@@ -2076,7 +2223,7 @@ struct HeldResponse {
     started: Instant,
     identity: Identity,
     client_agent: String,
-    session_id: String,
+    ledger: RequestLedger,
     track: Option<RequestTrack>,
     capture: Option<prev_response::Capture>,
     incoming: Option<BytesStream>,
@@ -2092,7 +2239,7 @@ fn held_response(
     started: Instant,
     identity: Identity,
     client_agent: &str,
-    session_id: &str,
+    ledger: &RequestLedger,
     track: RequestTrack,
     capture: Option<prev_response::Capture>,
     dispatch: DispatchFuture,
@@ -2106,7 +2253,7 @@ fn held_response(
         started,
         identity,
         client_agent: client_agent.to_owned(),
-        session_id: session_id.to_owned(),
+        ledger: ledger.clone(),
         track: Some(track),
         capture,
         incoming: None,
@@ -2156,7 +2303,7 @@ fn held_response(
                                 state.started,
                                 &state.identity,
                                 &state.client_agent,
-                                &state.session_id,
+                                &state.ledger,
                                 state.track.as_mut().expect("held request track"),
                                 state.capture.take(),
                             )
@@ -2181,6 +2328,7 @@ fn held_response(
                                 state.started,
                                 &state.identity,
                                 &state.client_agent,
+                                &state.ledger,
                                 state.track.as_mut().expect("held request track"),
                             );
                             let bytes = state
@@ -2193,11 +2341,14 @@ fn held_response(
             }
         }
     });
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, content_type)
-        .body(Body::from_stream(body))
-        .unwrap_or_else(|_| text_response(StatusCode::INTERNAL_SERVER_ERROR, "stream"))
+    with_named_session(
+        Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, content_type)
+            .body(Body::from_stream(body))
+            .unwrap_or_else(|_| text_response(StatusCode::INTERNAL_SERVER_ERROR, "stream")),
+        &ledger.session_id,
+    )
 }
 
 fn stream_error(error: &RouterError) -> (StatusCode, String) {
@@ -2454,24 +2605,29 @@ fn unrouted_timeout_before_routing(
     )
 }
 
-fn client_session(headers: &[(&str, &str)]) -> String {
-    SESSION_HEADERS
+fn request_header_pairs(headers: &HeaderMap) -> Vec<(&str, &str)> {
+    headers
         .iter()
-        .find_map(|name| {
-            headers
-                .iter()
-                .find(|(header, _)| header.eq_ignore_ascii_case(name))
-                .map(|(_, value)| (*value).trim())
-                .filter(|value| !value.is_empty())
-        })
-        .map(|value| {
-            if value.chars().count() > 128 {
-                value.chars().take(128).collect()
-            } else {
-                value.to_owned()
-            }
-        })
-        .unwrap_or_default()
+        .filter_map(|(name, value)| Some((name.as_str(), value.to_str().ok()?)))
+        .collect()
+}
+
+fn usage_kind(path: &str) -> String {
+    if path.contains("tools/call") {
+        "mcp".to_owned()
+    } else {
+        String::new()
+    }
+}
+
+fn with_named_session(mut response: Response, session_id: &str) -> Response {
+    if session_id.is_empty() {
+        return response;
+    }
+    if let Ok(value) = HeaderValue::from_str(session_id) {
+        response.headers_mut().insert(ECHO_SESSION_HEADER, value);
+    }
+    response
 }
 
 fn route_scope(identity: &Identity) -> RouteScope {
@@ -2617,7 +2773,7 @@ async fn success(
     started: Instant,
     identity: &Identity,
     client_agent: &str,
-    session_id: &str,
+    ledger: &RequestLedger,
     track: &mut RequestTrack,
     capture: Option<prev_response::Capture>,
 ) -> Response {
@@ -2629,12 +2785,12 @@ async fn success(
         started,
         identity,
         client_agent,
-    );
+    )
+    .with_ledger(ledger);
     meta.provider_key_id = provider_key_id.to_owned();
-    meta.session_id = session_id.to_owned();
     let member = Some(upstream.to_owned());
     let capture = prev_response::ReplyCapture::new(capture);
-    match completion {
+    let response = match completion {
         Completion::Unary(response) => {
             if let Some(usage) = response.usage.as_ref() {
                 limits::observe_usage(
@@ -2671,7 +2827,7 @@ async fn success(
                 input.and_then(|value| u64::try_from(value).ok()),
                 output.and_then(|value| u64::try_from(value).ok()),
             );
-            body
+            with_named_session(body, &ledger.session_id)
         }
         Completion::Stream(events) => {
             let encoder = codec.stream_encoder_for(request);
@@ -2715,11 +2871,14 @@ async fn success(
                     ))
                 };
             let body = capture_stream(body, capture);
-            Response::builder()
-                .status(StatusCode::OK)
-                .header(header::CONTENT_TYPE, codec.stream_content_type())
-                .body(Body::from_stream(body))
-                .unwrap_or_else(|_| text_response(StatusCode::INTERNAL_SERVER_ERROR, "stream"))
+            with_named_session(
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header(header::CONTENT_TYPE, codec.stream_content_type())
+                    .body(Body::from_stream(body))
+                    .unwrap_or_else(|_| text_response(StatusCode::INTERNAL_SERVER_ERROR, "stream")),
+                &ledger.session_id,
+            )
         }
         Completion::Raw(body) => {
             if let Some(continuation) = continuation {
@@ -2792,7 +2951,8 @@ async fn success(
             track.end_with(member, StatusCode::BAD_GATEWAY.as_u16(), None, None);
             text_response(StatusCode::BAD_GATEWAY, "unsupported completion")
         }
-    }
+    };
+    with_named_session(response, &ledger.session_id)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2923,17 +3083,22 @@ fn failure(
     started: Instant,
     identity: &Identity,
     client_agent: &str,
+    ledger: &RequestLedger,
     track: &mut RequestTrack,
 ) -> Response {
     if let RouterError::PreviousResponseNotFound { id } = &error {
         write_usage_app(
             app.as_ref(),
-            &UsageMeta::new(request, "", &request.model, started, identity, client_agent),
+            &UsageMeta::new(request, "", &request.model, started, identity, client_agent)
+                .with_ledger(ledger),
             None,
             StatusCode::BAD_REQUEST,
         );
         track.end_with(None, StatusCode::BAD_REQUEST.as_u16(), None, None);
-        return json_response(StatusCode::BAD_REQUEST, prev_response::not_found_body(id));
+        return with_named_session(
+            json_response(StatusCode::BAD_REQUEST, prev_response::not_found_body(id)),
+            &ledger.session_id,
+        );
     }
     let (status, upstream, message) = match &error {
         RouterError::NoRoute { .. } => (StatusCode::NOT_FOUND, String::new(), error.to_string()),
@@ -2947,7 +3112,7 @@ fn failure(
             scope_error(&error, identity),
         ),
         RouterError::SpendCapReached { retry_after } => {
-            return spend_cap_response(codec, *retry_after);
+            return with_named_session(spend_cap_response(codec, *retry_after), &ledger.session_id);
         }
         RouterError::Upstream { upstream_id, error } => (
             status_of(error),
@@ -2964,7 +3129,8 @@ fn failure(
             started,
             identity,
             client_agent,
-        ),
+        )
+        .with_ledger(ledger),
         None,
         status,
     );
@@ -2980,15 +3146,18 @@ fn failure(
         && (status == StatusCode::PAYLOAD_TOO_LARGE
             || too_long(status.as_u16(), &words_of(&message)))
     {
-        return Response::builder()
-            .status(StatusCode::OK)
-            .header(header::CONTENT_TYPE, codec.stream_content_type())
-            .body(Body::from(
-                codec.encode_stream_error(status.as_u16(), &message),
-            ))
-            .unwrap_or_else(|_| text_response(StatusCode::INTERNAL_SERVER_ERROR, "stream"));
+        return with_named_session(
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, codec.stream_content_type())
+                .body(Body::from(
+                    codec.encode_stream_error(status.as_u16(), &message),
+                ))
+                .unwrap_or_else(|_| text_response(StatusCode::INTERNAL_SERVER_ERROR, "stream")),
+            &ledger.session_id,
+        );
     }
-    coded(codec, status, &message)
+    with_named_session(coded(codec, status, &message), &ledger.session_id)
 }
 
 /// Text that ends a stream that broke off after it began; an inbound
@@ -3037,6 +3206,9 @@ struct UsageMeta {
     identity: Identity,
     client_agent: String,
     session_id: String,
+    native_session_id: String,
+    endpoint: String,
+    kind: String,
     input: Option<i64>,
     output: Option<i64>,
     ttft_ms: Option<i64>,
@@ -3064,6 +3236,9 @@ impl UsageMeta {
             identity: identity.clone(),
             client_agent: client_agent.to_owned(),
             session_id: String::new(),
+            native_session_id: String::new(),
+            endpoint: String::new(),
+            kind: String::new(),
             input: None,
             output: None,
             ttft_ms: None,
@@ -3071,6 +3246,14 @@ impl UsageMeta {
             saw_reasoning: false,
             stream_timing: stream_timing::StreamTiming::new(started),
         }
+    }
+
+    fn with_ledger(mut self, ledger: &RequestLedger) -> Self {
+        self.session_id = ledger.session_id.clone();
+        self.native_session_id = ledger.native_session_id.clone();
+        self.endpoint = ledger.endpoint.clone();
+        self.kind = ledger.kind.clone();
+        self
     }
 }
 
@@ -3491,6 +3674,7 @@ fn finish_record(row: &mut RecordOnEnd, status: StatusCode) {
         status,
         row.pricer.as_deref(),
         row.provider_free,
+        "",
     );
     if let Some(track) = row.track.as_mut() {
         track.end_with(
@@ -3508,7 +3692,19 @@ fn write_usage_simple(
     tokens: Option<(Option<i64>, Option<i64>)>,
     status: StatusCode,
 ) {
-    write_usage(usage, meta, tokens, status, None, false);
+    write_usage(usage, meta, tokens, status, None, false, "");
+}
+
+fn write_usage_stopped_waiting(usage: &Ledger, meta: &UsageMeta) {
+    write_usage(
+        usage,
+        meta,
+        None,
+        StatusCode::GATEWAY_TIMEOUT,
+        None,
+        false,
+        OUTCOME_STOPPED_WAITING,
+    );
 }
 
 fn write_usage_app(
@@ -3524,6 +3720,7 @@ fn write_usage_app(
         status,
         app.pricer.as_deref(),
         false,
+        "",
     );
 }
 
@@ -3534,6 +3731,7 @@ fn write_usage(
     status: StatusCode,
     pricer: Option<&hofund_model_catalog::EffectivePricer>,
     provider_free: bool,
+    outcome: &str,
 ) {
     let (input_tokens, output_tokens) = tokens.unwrap_or((None, None));
     let mut details = meta.details;
@@ -3576,10 +3774,14 @@ fn write_usage(
         provider_key_id: meta.provider_key_id.clone(),
         client_agent: meta.client_agent.clone(),
         session_id: meta.session_id.clone(),
+        native_session_id: meta.native_session_id.clone(),
+        endpoint: meta.endpoint.clone(),
+        kind: meta.kind.clone(),
         served_model: meta.served_model.clone(),
         first_text_ms: details.first_text_ms,
         first_reasoning_ms: details.first_reasoning_ms,
         flow_ms: details.flow_ms,
+        outcome: outcome.to_owned(),
         ..Default::default()
     };
     if details.uncached_input_tokens.is_none() {
@@ -3696,6 +3898,21 @@ fn text_response(status: StatusCode, message: &str) -> Response {
 }
 
 #[cfg(test)]
+mod surface_timeout_tests {
+    use std::time::Duration;
+
+    use super::SURFACE_TIMEOUT;
+
+    #[test]
+    fn d84_surface_timeout_outlives_the_inbound_compaction_budget() {
+        // The inbound plugin's whole compaction budget is 240 seconds; the
+        // local summary still needs time before the client leaves at 300.
+        assert!(SURFACE_TIMEOUT > Duration::from_secs(240));
+        assert!(SURFACE_TIMEOUT < Duration::from_secs(300));
+    }
+}
+
+#[cfg(test)]
 mod request_event_tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
@@ -3735,6 +3952,7 @@ mod request_event_tests {
             finished: false,
             drop_status: 500,
             cancel_usage: None,
+            stopped_waiting: None,
             reservation: None,
         };
         // Mirror begin's increment (begin also calls started).
@@ -3777,6 +3995,7 @@ mod request_event_tests {
                 finished: false,
                 drop_status: 500,
                 cancel_usage: None,
+                stopped_waiting: None,
                 reservation: None,
             };
             counter.fetch_add(1, Ordering::SeqCst);

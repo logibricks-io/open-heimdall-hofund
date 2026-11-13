@@ -23,11 +23,13 @@
 )]
 
 pub use async_trait::async_trait;
+pub use chrono;
 pub use hofund_codec::plain_code_assist_tools;
 pub use hofund_quirks::apply as apply_quirks;
 pub use hofund_quirks::{refused_passthrough, without_passthrough};
 /// Response headers, as [`wire::Sent::headers`] returns them.
 pub use http::HeaderMap;
+pub use serde;
 pub use serde_json as json;
 pub use tracing;
 /// The URL parser, so a plugin checks a URL the way the host does.
@@ -60,14 +62,16 @@ pub mod oauth;
 pub mod page;
 pub mod probe;
 pub mod process;
+pub mod protobuf;
 pub mod register;
+pub mod rsa;
 pub mod sigv4;
 pub mod time;
 pub mod transport;
 pub mod uuid;
 pub mod wire;
 
-pub use futures::{FuturesUnordered, Race, race};
+pub use futures::{FuturesUnordered, Race, next_ready, race};
 pub use inflate::gzip;
 pub use oauth::{AccessToken, TokenError, form_body, parse_access_token, refresh_form};
 pub use page::{

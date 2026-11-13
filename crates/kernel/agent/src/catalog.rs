@@ -685,6 +685,14 @@ impl Engine {
                 )?;
             }
         }
+        if self.id == "codex"
+            && let Some(config) = self
+                .locations
+                .iter()
+                .find(|location| location.file == "config")
+        {
+            let _ = crate::codex_threads::connect(&config.path).log();
+        }
         Ok(with_change(plan, stored))
     }
 
@@ -1382,9 +1390,13 @@ impl Engine {
         session: &Session,
         target: &GatewayTarget,
     ) -> Result<ConnectionStatus, AgentError> {
-        let mut connected = true;
+        // An agent with no files (and no credential) is not connected. A
+        // vacuous "all slots match" would let token rotation refresh a stub
+        // description that was never applied.
+        let chosen = self.chosen()?;
+        let mut connected = !chosen.is_empty() || self.credential()?.is_some();
         let mut paths = Vec::new();
-        for chosen in self.chosen()? {
+        for chosen in chosen {
             paths.push(chosen.path.clone());
             let Chosen {
                 file,
@@ -1462,8 +1474,11 @@ impl Engine {
                 connected = false;
             }
         }
+        let mut warnings = Vec::new();
         if connected && let Some(credential) = self.credential()? {
-            connected = credential.connected(target)?;
+            let (held, warning) = credential.connected(target);
+            connected = held;
+            warnings.extend(warning);
         }
         if connected && self.status_blocked(session, target) {
             connected = false;
@@ -1479,7 +1494,8 @@ impl Engine {
             connected,
             managed,
             paths,
-        ))
+        )
+        .with_warnings(warnings))
     }
 
     fn status_blocked(&self, session: &Session, target: &GatewayTarget) -> bool {
@@ -1562,6 +1578,15 @@ impl Engine {
                 self.id,
             )?);
             changed = true;
+        }
+        if changed
+            && self.id == "codex"
+            && let Some(config) = self
+                .locations
+                .iter()
+                .find(|location| location.file == "config")
+        {
+            warnings.extend(crate::codex_threads::disconnect(&config.path).log());
         }
         Ok(DisconnectOutcome::new(changed, warnings))
     }

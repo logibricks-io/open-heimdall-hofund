@@ -1,0 +1,2 @@
+{"type":"session","id":"omp-profile","cwd":"/work/profile","title":"Profile session","timestamp":"2026-01-04T00:00:00Z"}
+{"type":"model_usage","model":"model-profile","usage":{"input":4,"output":1,"cacheRead":0,"cacheWrite":0},"timestamp":"2026-01-04T00:00:01Z"}

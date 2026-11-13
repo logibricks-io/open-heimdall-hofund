@@ -13,7 +13,7 @@ use std::net::{SocketAddr, TcpListener};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 /// The longest any single CLI or build step may run.
@@ -27,11 +27,22 @@ fn hofund() -> &'static Path {
     Path::new(env!("CARGO_BIN_EXE_hofund"))
 }
 
-/// Builds `hofundd` beside `hofund` once per test process.
+/// Path to `hofundd` beside `hofund`, building it once if needed.
+///
+/// `cargo test --workspace` compiles this binary before tests run, so the
+/// common path does not spawn cargo. A nested `cargo build` inherits the
+/// parent jobserver; on a 3-core macOS runner the default harness starts
+/// three offline cases at once and can hold every token, so that build
+/// waits until the tests themselves finish and is killed at the 120s
+/// child deadline with empty `--quiet` output.
 fn hofundd() -> &'static Path {
     static BUILT: OnceLock<PathBuf> = OnceLock::new();
     BUILT.get_or_init(|| {
         let bin_dir = hofund().parent().expect("bin dir");
+        let built = bin_dir.join("hofundd");
+        if built.is_file() {
+            return built;
+        }
         let target = bin_dir.parent().expect("target dir");
         let mut build = Command::new(env!("CARGO"));
         build
@@ -44,6 +55,9 @@ fn hofundd() -> &'static Path {
                 "hofundd",
             ])
             .env("CARGO_TARGET_DIR", target)
+            // Do not wait on the parent `cargo test` jobserver.
+            .env_remove("CARGO_MAKEFLAGS")
+            .env_remove("MAKEFLAGS")
             .current_dir(env!("CARGO_MANIFEST_DIR"))
             .stdin(Stdio::null());
         if bin_dir.file_name().is_some_and(|name| name == "release") {
@@ -51,11 +65,21 @@ fn hofundd() -> &'static Path {
         }
         let output = finish(spawn(&mut build), DEADLINE);
         assert!(output.status.success(), "building hofundd: {output:?}");
-        let built = bin_dir.join("hofundd");
         assert!(built.is_file(), "{} missing after build", built.display());
         built
     })
 }
+
+/// One offline case at a time. Each case may spawn several `hofund` /
+/// `hofundd` processes, and one-shot `edit_picks` starts a fresh `hofundd`
+/// per GET and PUT. Running those in parallel on a 3-core macOS CI runner
+/// oversubscribed the machine and pushed
+/// `concurrent_one_shot_picks_serialize_on_state_lock` past the 120s child
+/// deadline on #768 and #771 (earlier runs logged >60s and then passed).
+/// The deadline itself is unchanged. The lock is held for the Scratch
+/// lifetime so a case cannot wait for the suite lock while already holding
+/// child processes.
+static SUITE: Mutex<()> = Mutex::new(());
 
 /// Spawns `command`, retrying while another test's fork still holds a
 /// freshly written executable open.
@@ -91,6 +115,7 @@ fn finish(mut child: Child, deadline: Duration) -> Output {
 
 /// A scratch install: config, token, home, and runtime roots.
 struct Scratch {
+    _suite: std::sync::MutexGuard<'static, ()>,
     _dir: tempfile::TempDir,
     root: PathBuf,
     config: PathBuf,
@@ -102,6 +127,7 @@ struct Scratch {
 
 impl Scratch {
     fn new(listen: &str, extra: &str) -> Self {
+        let suite = SUITE.lock().unwrap_or_else(|error| error.into_inner());
         // Under /tmp so the control socket path stays within the Unix
         // socket length limit (104 bytes on macOS, whose default temporary
         // directory is long); a daemon that cannot bind it falls back to
@@ -125,6 +151,7 @@ impl Scratch {
         )
         .expect("config");
         Self {
+            _suite: suite,
             _dir: dir,
             root,
             config,
@@ -395,13 +422,15 @@ fn offline_status_local_report() {
         "{report}"
     );
     assert_eq!(lines[4], "model address: 0.0.0.0:4100 (config)");
-    assert_eq!(lines.len(), 5, "{report}");
+    assert_eq!(lines[5], "allow list: unrestricted");
+    assert_eq!(lines[6], "trust proxy: false");
+    assert_eq!(lines.len(), 7, "{report}");
 
     let scratch = scratch.with_env("HOFUND_ADDR", "127.0.0.1:4200");
     let out = scratch.hofund(&["status"]);
     assert!(
         out.ok()
-            .ends_with("model address: 127.0.0.1:4200 (environment)"),
+            .contains("model address: 127.0.0.1:4200 (environment)"),
         "{out:#?}"
     );
     scratch.assert_no_daemon_state();
@@ -656,6 +685,9 @@ fn healthcheck_probes_model_gateway_not_control() {
     assert!(!scratch.config.parent().expect("cfg").join("token").exists());
 
     // A 200 from something that is not hofund fails.
+    // Drop the first scratch first: Scratch holds the suite lock,
+    // and a shadowing `let scratch` would lock again on this thread.
+    drop(scratch);
     let other = fake_health("{\"status\":\"ok\"}");
     let scratch = Scratch::new(&other.addr.to_string(), ROUTED);
     let out = scratch.hofund_with(hofund(), &["healthcheck"]);
@@ -682,36 +714,62 @@ impl Drop for Daemon {
     }
 }
 
+fn model_address_from_status(stdout: &str) -> Option<SocketAddr> {
+    stdout.lines().find_map(|line| {
+        let rest = line.strip_prefix("model address: ")?;
+        let addr = rest.split(' ').next()?;
+        addr.parse().ok()
+    })
+}
+
 #[test]
 fn hofund_addr_overrides_listen_for_daemon_and_healthcheck() {
-    let configured = free_port();
-    let effective = free_port();
-    let scratch = Scratch::new(&format!("127.0.0.1:{configured}"), ROUTED)
-        .with_env("HOFUND_ADDR", &format!("127.0.0.1:{effective}"));
+    // Hold the configured listen address so it cannot be stolen and so a
+    // daemon that still bound `listen` would fail to start. The daemon binds
+    // HOFUND_ADDR=127.0.0.1:0 itself (no drop-then-bind gap) and reports the
+    // bound address through status; healthcheck then uses that address.
+    let configured = TcpListener::bind("127.0.0.1:0").expect("bind configured");
+    let configured_addr = configured.local_addr().expect("addr");
+    let scratch =
+        Scratch::new(&configured_addr.to_string(), ROUTED).with_env("HOFUND_ADDR", "127.0.0.1:0");
     let mut daemon_command = scratch.command(hofundd(), &[]);
     daemon_command.stdout(Stdio::null()).stderr(Stdio::null());
     let mut daemon = Daemon(Some(spawn(&mut daemon_command)));
 
-    // The healthcheck follows HOFUND_ADDR to the daemon's model listener.
     let started = Instant::now();
-    loop {
-        let out = scratch.hofund_with(hofund(), &["healthcheck"]);
-        if out.code == Some(0) {
-            assert_eq!(
-                out.stdout.trim_end(),
-                format!("ok: hofund gateway at 127.0.0.1:{effective}")
+    let effective = loop {
+        let out = scratch.hofund(&["status"]);
+        if out.code == Some(0)
+            && out.stdout.starts_with("daemon running")
+            && let Some(addr) = model_address_from_status(&out.stdout)
+        {
+            assert_ne!(
+                addr.port(),
+                0,
+                "status reported an unbound model address: {out:#?}"
             );
-            break;
+            assert_ne!(
+                addr, configured_addr,
+                "the daemon bound the configured address despite HOFUND_ADDR"
+            );
+            break addr;
         }
         assert!(
             started.elapsed() < DEADLINE,
             "daemon never answered: {out:#?}"
         );
         std::thread::sleep(Duration::from_millis(100));
-    }
-    assert!(
-        std::net::TcpStream::connect(("127.0.0.1", configured)).is_err(),
-        "the daemon bound the configured address despite HOFUND_ADDR"
+    };
+
+    // Healthcheck follows HOFUND_ADDR, so point it at the already-bound
+    // address the daemon handed back rather than at port 0.
+    let mut health = scratch.command(hofund(), &["healthcheck"]);
+    health.env("HOFUND_ADDR", effective.to_string());
+    let health_out = finish(spawn(&mut health), DEADLINE);
+    assert_eq!(health_out.status.code(), Some(0), "{health_out:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&health_out.stdout).trim_end(),
+        format!("ok: hofund gateway at {effective}")
     );
 
     // Online commands find the daemon through discovery.
@@ -719,9 +777,7 @@ fn hofund_addr_overrides_listen_for_daemon_and_healthcheck() {
     let report = out.ok();
     assert!(report.starts_with("daemon running (pid "), "{report}");
     assert!(
-        report.contains(&format!(
-            "model address: 127.0.0.1:{effective} (environment)"
-        )),
+        report.contains(&format!("model address: {effective} (environment)")),
         "{report}"
     );
     let out = scratch.hofund(&["config", "reload"]);

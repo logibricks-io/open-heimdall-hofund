@@ -1,0 +1,2 @@
+{"type":"session","id":"pi-custom","cwd":"/work/custom","title":"Custom session","timestamp":"2026-01-02T00:00:00Z"}
+{"type":"message","message":{"role":"assistant","model":"model-custom","content":[],"usage":{"input":2,"output":1,"cacheRead":0,"cacheWrite":0}},"timestamp":"2026-01-02T00:00:01Z"}

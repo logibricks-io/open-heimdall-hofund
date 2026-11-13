@@ -30,14 +30,35 @@ pub fn draw(app: &App, area: Rect, buf: &mut Buffer, theme: &Theme) {
     if app.mode == Mode::Help {
         draw_help(chunks[1], buf, theme);
     } else {
-        app.pages.page(app.page).draw_body(chunks[1], buf, theme);
+        draw_body(app, chunks[1], buf, theme);
     }
     draw_status(app, chunks[2], buf, theme);
     draw_footer(app, chunks[3], buf, theme);
 }
 
-fn footer_lines(_app: &App) -> u16 {
-    1
+fn draw_body(app: &App, area: Rect, buf: &mut Buffer, theme: &Theme) {
+    if app.page == crate::state::PageId::Providers && app.providers.active() {
+        app.providers.draw(area, buf, theme);
+        return;
+    }
+    if app.page == crate::state::PageId::Agents && app.agents.active() {
+        app.agents.draw(area, buf, theme);
+        return;
+    }
+    if app.page == crate::state::PageId::Sessions {
+        app.pages.sessions().draw_body(area, buf, theme);
+        return;
+    }
+    app.pages.page(app.page).draw_body(area, buf, theme);
+}
+
+fn footer_lines(app: &App) -> u16 {
+    if interactive_page(app) { 2 } else { 1 }
+}
+
+fn interactive_page(app: &App) -> bool {
+    (app.page == crate::state::PageId::Providers && app.providers.active())
+        || (app.page == crate::state::PageId::Agents && app.agents.active())
 }
 
 fn draw_header(app: &App, area: Rect, buf: &mut Buffer, theme: &Theme) {
@@ -100,6 +121,25 @@ fn draw_status(app: &App, area: Rect, buf: &mut Buffer, theme: &Theme) {
 }
 
 fn draw_footer(app: &App, area: Rect, buf: &mut Buffer, theme: &Theme) {
+    if interactive_page(app) && app.mode != Mode::Help {
+        let lines = match app.page {
+            crate::state::PageId::Providers => app.providers.hint_lines(),
+            crate::state::PageId::Agents => app.agents.hint_lines(),
+            _ => ("", ""),
+        };
+        let text = vec![
+            Line::from(Span::styled(
+                format!("{PAD}{}", lines.0),
+                theme.muted_style(),
+            )),
+            Line::from(Span::styled(
+                format!("{PAD}{}", lines.1),
+                theme.muted_style(),
+            )),
+        ];
+        Paragraph::new(text).render(area, buf);
+        return;
+    }
     let hints = if app.mode == Mode::Help {
         "esc  back"
     } else {
@@ -113,7 +153,7 @@ fn draw_footer(app: &App, area: Rect, buf: &mut Buffer, theme: &Theme) {
             crate::state::PageId::Routing => "↑↓  group  1–6  pages  r  reload  ?  help  q  quit",
             crate::state::PageId::Usage => "←→  period  1–6  pages  r  reload  ?  help  q  quit",
             crate::state::PageId::Sessions => {
-                "↑↓  session  1–6  pages  r  reload  ?  help  q  quit"
+                "↑↓  session  ←→  range  s  stats  ↵  resume  M/f  filter  1–6  r  reload  q  quit"
             }
             crate::state::PageId::Library => "↑↓  item  1–6  pages  r  reload  ?  help  q  quit",
         }

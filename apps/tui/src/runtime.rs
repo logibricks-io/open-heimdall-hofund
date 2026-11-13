@@ -1,6 +1,8 @@
 //! Async UI loop helpers (keyboard, control events, workers).
 
-use hofund_control_client::hofund_control_proto::{EventPayload, Topic};
+use hofund_control_client::hofund_control_proto::{
+    EventPayload, SessionListQuery, SessionStatsQuery, Topic,
+};
 use hofund_control_client::{Client, EventStream};
 use tokio::sync::mpsc;
 
@@ -8,6 +10,7 @@ use crate::app::App;
 use crate::events::apply_control_event;
 use crate::gateway::HandoffOutcome;
 use crate::pages::{ProbeOutcome, read_path};
+use crate::session::{SessionOutcome, run_intent};
 use crate::state::PageId;
 
 /// Work sent back to the UI task from background jobs.
@@ -30,6 +33,31 @@ pub enum WorkerMsg {
         generation: u64,
         outcome: ProbeOutcome,
     },
+    /// One control intent finished.
+    Session(Box<SessionOutcome>),
+    /// Sessions list and stats fetch finished.
+    SessionsLoad {
+        /// Read generation this fetch was started with.
+        generation: u64,
+        /// List and stats outcome.
+        outcome: Box<SessionsLoadOutcome>,
+    },
+}
+
+/// Result of loading the Sessions page.
+#[derive(Clone, Debug)]
+pub enum SessionsLoadOutcome {
+    /// Route missing in this build.
+    NotInBuild,
+    /// Both control calls succeeded.
+    Ok {
+        /// Session list body.
+        list: hofund_control_proto::SessionListResponse,
+        /// Stats body.
+        stats: Box<hofund_control_proto::SessionStatsResponse>,
+    },
+    /// Any error.
+    Err(String),
 }
 
 /// Handoff fields needed on quit (updated each tick).
@@ -66,6 +94,102 @@ pub fn apply_worker_msg(app: &mut App, msg: WorkerMsg) {
                 app.pages.apply_probe(page, outcome);
             });
         }
+        WorkerMsg::Session(outcome) => app.apply_session(*outcome),
+        WorkerMsg::SessionsLoad {
+            generation,
+            outcome,
+        } => {
+            app.apply_read_result(generation, |app| {
+                let sessions = app.pages.sessions_mut();
+                match *outcome {
+                    SessionsLoadOutcome::NotInBuild => {
+                        sessions.apply_probe(ProbeOutcome::NotInBuild);
+                    }
+                    SessionsLoadOutcome::Ok { list, stats } => {
+                        sessions.apply_load(list, *stats);
+                    }
+                    SessionsLoadOutcome::Err(message) => sessions.apply_load_error(message),
+                }
+            });
+        }
+    }
+}
+
+/// Schedules list and stats fetches for the Sessions page when a client exists.
+pub fn schedule_sessions_fetch(
+    client: Option<&Client>,
+    work_tx: &mpsc::Sender<WorkerMsg>,
+    list: SessionListQuery,
+    stats: SessionStatsQuery,
+    generation: u64,
+) {
+    let Some(client) = client.cloned() else {
+        return;
+    };
+    let work_tx = work_tx.clone();
+    tokio::spawn(async move {
+        let outcome = match client.sessions(list).await {
+            Err(error) if error.http_status().is_some_and(|s| s.as_u16() == 404) => {
+                SessionsLoadOutcome::NotInBuild
+            }
+            Err(error) => SessionsLoadOutcome::Err(error.to_string()),
+            Ok(list) => match client.session_stats(stats).await {
+                Ok(stats) => SessionsLoadOutcome::Ok {
+                    list,
+                    stats: Box::new(stats),
+                },
+                Err(error) if error.http_status().is_some_and(|s| s.as_u16() == 404) => {
+                    SessionsLoadOutcome::NotInBuild
+                }
+                Err(error) => SessionsLoadOutcome::Err(error.to_string()),
+            },
+        };
+        let _ = work_tx
+            .send(WorkerMsg::SessionsLoad {
+                generation,
+                outcome: Box::new(outcome),
+            })
+            .await;
+    });
+}
+
+/// Schedules load work for the open page when a client exists.
+pub fn schedule_open_page_load(
+    app: &App,
+    client: Option<&Client>,
+    work_tx: &mpsc::Sender<WorkerMsg>,
+) {
+    let page = app.page;
+    let generation = app.pages.page_dyn(page).fetch_gen();
+    match page {
+        PageId::Sessions => {
+            let sessions = app.pages.sessions();
+            let list = sessions.list_query();
+            let stats = sessions.stats_query();
+            schedule_sessions_fetch(client, work_tx, list, stats, generation);
+        }
+        other if read_path(other).is_some() => {
+            schedule_page_probe(client, work_tx, other, generation);
+        }
+        _ => {}
+    }
+}
+
+/// Spawns queued control calls. Intents stay queued when no client is attached.
+pub fn schedule_intents(app: &mut App, client: Option<&Client>, work_tx: &mpsc::Sender<WorkerMsg>) {
+    if client.is_none() {
+        return;
+    }
+    let Some(client) = client.cloned() else {
+        return;
+    };
+    for intent in app.take_intents() {
+        let client = client.clone();
+        let work_tx = work_tx.clone();
+        tokio::spawn(async move {
+            let outcome = run_intent(&client, intent).await;
+            let _ = work_tx.send(WorkerMsg::Session(Box::new(outcome))).await;
+        });
     }
 }
 

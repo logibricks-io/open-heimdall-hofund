@@ -1,0 +1,25 @@
+{
+  "sessionId": "json-s",
+  "messages": [
+    {
+      "id": "u",
+      "type": "user",
+      "timestamp": "2026-10-02T12:00:00Z",
+      "content": [{"text": "question"}]
+    },
+    {
+      "id": "a",
+      "type": "gemini",
+      "timestamp": "2026-10-02T12:00:02Z",
+      "model": "gemini-model",
+      "tokens": {"input": 5, "output": 1, "cached": 0}
+    },
+    {
+      "id": "b",
+      "type": "gemini",
+      "timestamp": "2026-10-02T12:00:04Z",
+      "model": "gemini-model",
+      "tokens": {"input": 8, "output": 2}
+    }
+  ]
+}

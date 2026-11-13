@@ -7,7 +7,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph, Widget};
 
 use super::{Page, PageKeyOutcome};
-use crate::state::{Generation, PageId};
+use crate::state::PageId;
 use crate::theme::Theme;
 use crate::ui::list_window;
 
@@ -18,7 +18,7 @@ pub struct PageShell {
     cursor: usize,
     rows: Vec<String>,
     message: String,
-    fetch_gen: Generation,
+    read_generation: u64,
 }
 
 impl PageShell {
@@ -30,7 +30,7 @@ impl PageShell {
             cursor: 0,
             rows: Vec::new(),
             message: empty_message.into(),
-            fetch_gen: 0,
+            read_generation: 0,
         }
     }
 
@@ -65,8 +65,8 @@ impl PageShell {
 
     /// Last fetch generation recorded.
     #[must_use]
-    pub fn fetch_gen(&self) -> Generation {
-        self.fetch_gen
+    pub fn fetch_gen(&self) -> u64 {
+        self.read_generation
     }
 
     /// Body message (for tests).
@@ -91,7 +91,7 @@ impl Page for PageShell {
     }
 
     fn reload(&mut self, generation: u64) {
-        self.fetch_gen = generation;
+        self.read_generation = generation;
     }
 
     fn on_key(&mut self, key: KeyEvent) -> PageKeyOutcome {
@@ -152,5 +152,9 @@ impl Page for PageShell {
         Paragraph::new(lines)
             .block(Block::default())
             .render(area, buf);
+    }
+
+    fn fetch_gen(&self) -> u64 {
+        self.read_generation
     }
 }

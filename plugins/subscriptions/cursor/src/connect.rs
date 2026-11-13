@@ -1,5 +1,7 @@
 //! Connect JSON calls to Cursor's dashboard API.
 
+use std::time::Duration;
+
 use hofund_plugin_api::{HostContext, PluginError, SecretString};
 use hofund_plugin_sdk::Call;
 use hofund_plugin_sdk::json::Value;
@@ -13,8 +15,21 @@ pub(crate) async fn unary(
     token: &SecretString,
     body: &str,
 ) -> Result<Value, PluginError> {
+    let team_id = crate::team::header_value(token);
+    unary_opts(host, endpoints, path, token, body, team_id.as_deref(), None).await
+}
+
+pub(crate) async fn unary_opts(
+    host: &HostContext,
+    endpoints: &Endpoints,
+    path: &str,
+    token: &SecretString,
+    body: &str,
+    team_id: Option<&str>,
+    read_timeout: Option<Duration>,
+) -> Result<Value, PluginError> {
     let url = endpoints.dashboard(path);
-    let reply = Call::post(url)
+    let mut request = Call::post(url)
         .header("content-type", "application/json")
         .header("connect-protocol-version", "1")
         .sensitive_header(
@@ -23,10 +38,14 @@ pub(crate) async fn unary(
         )
         .header("x-cursor-client-version", &endpoints.client_version)
         .header("x-cursor-client-type", "cli")
-        .header("x-ghost-mode", "true")
-        .bytes(body.as_bytes())
-        .fetch(host.http())
-        .await?;
+        .header("x-ghost-mode", "true");
+    if let Some(team) = team_id.filter(|value| !value.is_empty()) {
+        request = request.header("x-cursor-team-id", team);
+    }
+    if let Some(budget) = read_timeout {
+        request = request.read_timeout(budget);
+    }
+    let reply = request.bytes(body.as_bytes()).fetch(host.http()).await?;
     if !(200..300).contains(&reply.status()) {
         return Err(PluginError::status_error(
             reply.status(),

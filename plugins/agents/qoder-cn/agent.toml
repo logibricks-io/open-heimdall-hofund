@@ -1,0 +1,5 @@
+id = "qoder-cn"
+display_name = "Qoder CN"
+binary = "qodercli"
+
+# Session reader only in R-32. Connect adapter lands with agent config files.

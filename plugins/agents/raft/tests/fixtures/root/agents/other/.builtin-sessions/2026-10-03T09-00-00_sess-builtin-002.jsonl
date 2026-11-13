@@ -1,0 +1,3 @@
+{"type":"session","version":3,"id":"sess-builtin-002","timestamp":"2026-10-03T09:00:00.000Z","cwd":"/workspace/other"}
+{"type":"title_change","timestamp":"2026-10-03T09:00:01.000Z","title":"Builtin agent run"}
+{"type":"usage","timestamp":"2026-10-03T09:00:02.000Z","model":"other-model","usage":{"input":1,"output":2,"cacheRead":0,"cacheWrite":0}}

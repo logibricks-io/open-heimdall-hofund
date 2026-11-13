@@ -154,6 +154,7 @@ fn event_label(event: &StreamEvent) -> String {
         StreamEvent::MessageDelta(_) => "message_delta".to_owned(),
         StreamEvent::MessageStop(_) => "message_stop".to_owned(),
         StreamEvent::Ping(_) => "ping".to_owned(),
+        StreamEvent::StillWorking(_) => "still_working".to_owned(),
         StreamEvent::Unknown(_) => "unknown".to_owned(),
     }
 }

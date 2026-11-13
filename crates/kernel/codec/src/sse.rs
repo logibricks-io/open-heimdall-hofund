@@ -118,6 +118,18 @@ pub(crate) fn data_frame(json: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Writes an SSE comment (`: text` followed by a blank line).
+///
+/// An empty `text` still emits a comment line so the client sees activity.
+pub(crate) fn write_comment(out: &mut Vec<u8>, text: &str) {
+    out.push(b':');
+    if !text.is_empty() {
+        out.push(b' ');
+        out.extend_from_slice(text.as_bytes());
+    }
+    out.extend_from_slice(b"\n\n");
+}
+
 pub(crate) fn write_event(out: &mut Vec<u8>, event: Option<&str>, data: &str) {
     if let Some(event) = event {
         out.extend_from_slice(b"event: ");

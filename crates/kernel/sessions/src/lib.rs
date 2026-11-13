@@ -1,0 +1,25 @@
+//! Consent-gated access to coding-agent session records.
+//!
+//! Agent plugins locate and parse files. This crate owns consent, path
+//! containment, parser input bounds, and the shared session index.
+
+#![deny(missing_docs, unreachable_pub, rust_2018_idioms)]
+#![warn(
+    clippy::pedantic,
+    clippy::missing_errors_doc,
+    clippy::must_use_candidate
+)]
+
+pub mod carry;
+pub mod consent;
+pub mod gateway_hidden;
+pub mod index;
+pub mod json;
+pub mod merge;
+pub mod open;
+pub mod pricing;
+pub mod read;
+pub mod resume;
+mod sqlite;
+mod storage;
+pub mod wsl;

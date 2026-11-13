@@ -16,6 +16,7 @@ name = "hofundd"
 path = "src/main.rs"
 
 [dependencies]
+hofund-bridge-mcp = { workspace = true }
 hofund-daemon = { workspace = true }
 hofund-plugin-api = { workspace = true }
 hofund-plugin-registry = { workspace = true }
