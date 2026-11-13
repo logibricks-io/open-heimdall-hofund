@@ -1,4 +1,4 @@
-  ◉ hofund   1 agents   2 providers   3 routing   4 usage   5 sessions   6 library                  
+  ◉ hofund   1 agents   2 providers   3 routing   4 usage   5 sessions   6 library   7 accounts     
   No agents loaded yet.                                                                             
                                                                                                     
                                                                                                     

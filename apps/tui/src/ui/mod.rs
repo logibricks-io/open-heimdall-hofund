@@ -53,6 +53,10 @@ fn draw_body(app: &App, area: Rect, buf: &mut Buffer, theme: &Theme) {
         app.pages.sessions().draw_body(area, buf, theme);
         return;
     }
+    if app.page == crate::state::PageId::Accounts {
+        app.pages.accounts().draw(area, buf, theme);
+        return;
+    }
     if app.page == crate::state::PageId::Usage {
         app.pages.usage().draw_body(area, buf, theme);
         return;
@@ -67,6 +71,7 @@ fn footer_lines(app: &App) -> u16 {
 fn interactive_page(app: &App) -> bool {
     (app.page == crate::state::PageId::Providers && app.providers.active())
         || (app.page == crate::state::PageId::Agents && app.agents.active())
+        || app.page == crate::state::PageId::Accounts
         || app.page == crate::state::PageId::Routing
         || app.page == crate::state::PageId::Usage
 }
@@ -75,7 +80,10 @@ fn draw_header(app: &App, area: Rect, buf: &mut Buffer, theme: &Theme) {
     let mut spans: Vec<Span> = Vec::new();
     spans.push(Span::styled(format!("{PAD}◉ hofund"), theme.title_style()));
     spans.push(Span::raw("  "));
-    for page in crate::state::PageId::CYCLE {
+    for page in crate::state::PageId::CYCLE
+        .into_iter()
+        .chain([crate::state::PageId::Accounts])
+    {
         let label = page.pill_label();
         if page == app.page {
             spans.push(Span::styled(format!(" {label} "), theme.pill_style()));
@@ -96,6 +104,10 @@ fn draw_help(area: Rect, buf: &mut Buffer, theme: &Theme) {
         Line::from(""),
         Line::from(Span::styled(
             format!("{PAD}Keys for this page will appear here."),
+            theme.muted_style(),
+        )),
+        Line::from(Span::styled(
+            format!("{PAD}7 Accounts: sign in, switch, import, discover, refresh, and remove."),
             theme.muted_style(),
         )),
         Line::from(Span::styled(
@@ -135,6 +147,7 @@ fn draw_footer(app: &App, area: Rect, buf: &mut Buffer, theme: &Theme) {
         let lines = match app.page {
             crate::state::PageId::Providers => app.providers.hint_lines(),
             crate::state::PageId::Agents => app.agents.hint_lines(),
+            crate::state::PageId::Accounts => app.pages.accounts().hint_lines(),
             crate::state::PageId::Routing => app.pages.routing().hint_lines(),
             crate::state::PageId::Usage => app.pages.usage().hint_lines(),
             _ => ("", ""),
@@ -168,6 +181,7 @@ fn draw_footer(app: &App, area: Rect, buf: &mut Buffer, theme: &Theme) {
                 "↑↓  session  ←→  range  s  stats  ↵  resume  M/f  filter  1–6  r  reload  q  quit"
             }
             crate::state::PageId::Library => "↑↓  item  1–6  pages  r  reload  ?  help  q  quit",
+            crate::state::PageId::Accounts => "7 accounts  r  reload  ?  help  q  quit",
         }
     };
     Paragraph::new(Line::from(Span::styled(

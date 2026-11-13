@@ -1,5 +1,6 @@
 //! Page implementations.
 
+mod accounts;
 mod agents;
 mod frame;
 mod probe;
@@ -9,6 +10,7 @@ pub mod sessions;
 mod status;
 pub mod usage;
 
+pub use accounts::{AccountsAction, AccountsPage};
 pub use agents::AgentPage;
 pub use frame::PageShell;
 pub use probe::{ProbeOutcome, apply_probe_to_shell, read_path};
@@ -66,7 +68,7 @@ pub enum PageKeyOutcome {
     Usage(UsageAction),
 }
 
-/// Box of all six pages.
+/// Box of all pages.
 pub struct Pages {
     agents: PageShell,
     providers: PageShell,
@@ -74,6 +76,7 @@ pub struct Pages {
     usage: UsagePage,
     sessions: SessionsPage,
     library: PageShell,
+    accounts: AccountsPage,
 }
 
 impl Default for Pages {
@@ -85,6 +88,7 @@ impl Default for Pages {
             usage: UsagePage::new(),
             sessions: SessionsPage::new(),
             library: PageShell::new(PageId::Library, "Loading library…"),
+            accounts: AccountsPage::new(),
         }
     }
 }
@@ -96,7 +100,7 @@ impl Pages {
             PageId::Agents => Some(&mut self.agents),
             PageId::Providers => Some(&mut self.providers),
             PageId::Library => Some(&mut self.library),
-            PageId::Routing | PageId::Sessions | PageId::Usage => None,
+            PageId::Routing | PageId::Sessions | PageId::Usage | PageId::Accounts => None,
         }
     }
 
@@ -109,6 +113,17 @@ impl Pages {
     #[must_use]
     pub fn sessions(&self) -> &SessionsPage {
         &self.sessions
+    }
+
+    /// Mutable accounts page.
+    pub fn accounts_mut(&mut self) -> &mut AccountsPage {
+        &mut self.accounts
+    }
+
+    /// Immutable accounts page.
+    #[must_use]
+    pub fn accounts(&self) -> &AccountsPage {
+        &self.accounts
     }
 
     /// Mutable Routing page.
@@ -149,6 +164,7 @@ impl Pages {
             PageId::Usage => &self.usage,
             PageId::Sessions => &self.sessions,
             PageId::Library => &self.library,
+            PageId::Accounts => &self.accounts,
         }
     }
 
@@ -159,7 +175,7 @@ impl Pages {
             PageId::Agents => &self.agents,
             PageId::Providers => &self.providers,
             PageId::Library => &self.library,
-            PageId::Routing | PageId::Sessions | PageId::Usage => {
+            PageId::Routing | PageId::Sessions | PageId::Usage | PageId::Accounts => {
                 panic!("dedicated page is not a PageShell; use page_dyn or its typed accessor")
             }
         }

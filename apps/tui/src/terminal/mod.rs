@@ -1,6 +1,7 @@
 //! Terminal entry, async loop, and live gateway dependencies.
 
 pub(crate) mod deps;
+pub(crate) mod open;
 pub(crate) mod resume;
 pub(crate) mod spawn;
 
@@ -93,6 +94,8 @@ async fn async_main(config: &Path, no_color: bool) -> Result<QuitAction, String>
 
     let mut keys = EventStream::new();
     let mut control: Option<ControlEventStream> = None;
+    let mut sign_in_ticks = tokio::time::interval(std::time::Duration::from_secs(1));
+    sign_in_ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
         tokio::select! {
@@ -133,6 +136,13 @@ async fn async_main(config: &Path, no_color: bool) -> Result<QuitAction, String>
                     }
                 }
             }
+            _ = sign_in_ticks.tick() => {
+                if app.sign_in_dirty() {
+                    app.poll_sign_in();
+                    schedule_intents(&mut app, live.client().as_ref(), &work_tx);
+                    draw(&mut terminal, &app, &theme)?;
+                }
+            }
             maybe = keys.next() => {
                 let Some(event) = maybe else { break };
                 match event {
@@ -153,6 +163,13 @@ async fn async_main(config: &Path, no_color: bool) -> Result<QuitAction, String>
                                     app.set_flash(crate::state::Flash::new(message, false))
                                 }
                             },
+                            AppAction::OpenUrl(url) => {
+                                let result = open::open_url(url.expose());
+                                match result {
+                                    Ok(()) => app.set_flash_ttl("asked the OS to open sign-in", true),
+                                    Err(message) => app.set_flash_ttl(message, false),
+                                }
+                            }
                             AppAction::Flash { text, ok } => {
                                 app.set_flash(crate::state::Flash::new(text, ok));
                             }
