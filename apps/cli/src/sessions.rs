@@ -11,16 +11,33 @@ use hofund_model_catalog::{EffectivePricer, ListPriceLookup, ModelCatalog, Reqwe
 use hofund_plugin_api::{SessionRecord, SessionStore, SessionTokens};
 use hofund_sessions::consent::Consent;
 use hofund_sessions::index::SessionIndex;
+use hofund_sessions::merge::merge_gateway_sessions;
 use hofund_sessions::pricing::{TokenPrice, price_records, token_cost};
+use hofund_usage::Ledger;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+use hofund_plugin_agent_agy::AgyStore;
+use hofund_plugin_agent_alma::AlmaStore;
+use hofund_plugin_agent_cindy::CindyStore;
 use hofund_plugin_agent_claude::{ClaudeDesktopStore, ClaudeStore};
+use hofund_plugin_agent_cline::ClineStore;
 use hofund_plugin_agent_codex::CodexStore;
+use hofund_plugin_agent_cursor::CursorStore;
+use hofund_plugin_agent_droid::DroidStore;
+use hofund_plugin_agent_dsh::DshStore;
 use hofund_plugin_agent_gemini::GeminiStore;
+use hofund_plugin_agent_grok::GrokStore;
+use hofund_plugin_agent_hermes::HermesStore;
+use hofund_plugin_agent_kimi::KimiStore;
+use hofund_plugin_agent_minimax_code::MiniMaxStore;
 use hofund_plugin_agent_omp::OmpStore;
 use hofund_plugin_agent_opencode::OpenCodeStore;
 use hofund_plugin_agent_pi::PiStore;
+use hofund_plugin_agent_qoder::{QoderCnStore, QoderStore};
+use hofund_plugin_agent_raft::RaftStore;
+use hofund_plugin_agent_workbuddy::{CodeBuddyStore, WorkBuddyAiStore, WorkBuddyStore};
+use hofund_plugin_agent_zcode::ZCodeStore;
 
 pub(crate) const HELP: &str = "\
 usage: hofund sessions [--days N|today|all] [--model MODEL] [--folder FOLDER] [--limit N] [--json]
@@ -112,16 +129,52 @@ pub(crate) fn parse(words: &[&str], flags: Flags) -> Result<Command, String> {
 
 pub(crate) fn run(config: &Path, command: &Command) -> Result<String, String> {
     let claude = ClaudeStore::new();
+    let cindy = CindyStore::new();
+    let cline = ClineStore::new();
     let codex = CodexStore::new();
+    let cursor = CursorStore::new();
+    let droid = DroidStore::new();
+    let grok = GrokStore::new();
+    let hermes = HermesStore::new();
+    let kimi = KimiStore::new();
+    let minimax = MiniMaxStore::new();
+    let qoder = QoderStore::new();
+    let qoder_cn = QoderCnStore::new();
+    let raft = RaftStore::new();
+    let workbuddy = WorkBuddyStore::new();
+    let workbuddy_ai = WorkBuddyAiStore::new();
+    let codebuddy = CodeBuddyStore::new();
+    let agy = AgyStore::new();
+    let alma = AlmaStore::new();
+    let dsh = DshStore::new();
+    let zcode = ZCodeStore::new();
     let opencode = OpenCodeStore::new();
     let pi = PiStore::new();
     let omp = OmpStore::new();
     let gemini = GeminiStore::new();
     let claude_desktop = ClaudeDesktopStore::new();
-    let stores: [&dyn SessionStore; 7] = [
+    let stores: [&dyn SessionStore; 25] = [
         &claude,
         &claude_desktop,
+        &cindy,
+        &cline,
         &codex,
+        &cursor,
+        &droid,
+        &grok,
+        &hermes,
+        &kimi,
+        &minimax,
+        &qoder,
+        &qoder_cn,
+        &raft,
+        &workbuddy,
+        &workbuddy_ai,
+        &codebuddy,
+        &agy,
+        &alma,
+        &dsh,
+        &zcode,
         &opencode,
         &pi,
         &omp,
@@ -150,6 +203,24 @@ fn run_with(
             let pricing = pricing(config);
             for record in &mut records {
                 price_record(record, pricing.as_ref());
+            }
+            let usage_path = load_path(config)
+                .map_err(|error| error.to_string())
+                .map(|settings| config.parent().unwrap_or(config).join(settings.usage_file));
+            if let Ok(path) = usage_path
+                && let Ok(ledger) = Ledger::open(&path)
+            {
+                let extra = stores
+                    .iter()
+                    .flat_map(|store| {
+                        records
+                            .iter()
+                            .filter(|record| record.agent == store.agent())
+                            .flat_map(|record| store.gateway_dedup_pairs(record))
+                    })
+                    .collect::<Vec<_>>();
+                records = merge_gateway_sessions(&config_dir, records, &ledger, extra)
+                    .map_err(|error| error.to_string())?;
             }
             if let Some(days) = options.days {
                 stats(&records, options, days, now, pricing.as_ref())
@@ -293,8 +364,8 @@ fn session_json(record: &SessionRecord) -> Value {
         "cost": record.cost,
         "unpriced": record.unpriced,
         "resume": Value::Null,
-        "read_only": false,
-        "gateway": false,
+        "read_only": record.read_only,
+        "gateway": record.gateway,
     })
 }
 
@@ -650,6 +721,41 @@ mod tests {
     }
 
     #[test]
+    fn stats_include_merged_gateway_only_days() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let ledger = Ledger::open(&temp.path().join("usage.sqlite")).expect("ledger");
+        ledger
+            .record(&hofund_usage::Row {
+                created_unix: 1_600_000_000,
+                model: "model".to_owned(),
+                upstream: "up".to_owned(),
+                input_tokens: Some(2),
+                output_tokens: Some(3),
+                latency_ms: 1,
+                status: "200".to_owned(),
+                client_agent: "fixture".to_owned(),
+                session_id: "gateway-only".to_owned(),
+                ..hofund_usage::Row::default()
+            })
+            .expect("row");
+        let records = merge_gateway_sessions(temp.path(), Vec::new(), &ledger, [])
+            .expect("merge gateway rows");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].days.len(), 1);
+        let options = Options {
+            days: Some(0),
+            json: true,
+            ..list_options()
+        };
+        let out = stats(&records, &options, 0, Local::now(), None).expect("stats");
+        let value: Value = serde_json::from_str(&out).expect("JSON");
+        assert_eq!(value["tokens"]["input"], 2);
+        assert_eq!(value["tokens"]["output"], 3);
+        assert_eq!(value["days"].as_array().map(Vec::len), Some(1));
+        assert_eq!(value["models"][0]["name"], "model");
+    }
+
+    #[test]
     fn read_change_rejects_unknown_before_writing() {
         let temp = tempfile::tempdir().expect("temp dir");
         let mut consent = Consent::new(temp.path());
@@ -663,6 +769,407 @@ mod tests {
             std::fs::read_to_string(consent.path()).expect("consent"),
             "{\"asked\":false}\n"
         );
+    }
+
+    #[test]
+    fn minimax_reader_is_consent_gated_through_index() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config = temp.path().join("hofund.toml");
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../plugins/agents/minimax-code/tests/fixtures/root")
+            .canonicalize()
+            .expect("minimax fixtures");
+        let minimax = MiniMaxStore::with_root(root);
+        let stores: [&dyn SessionStore; 1] = [&minimax];
+        let list = Command::List(Options {
+            days: None,
+            model: String::new(),
+            folder: String::new(),
+            limit: 20,
+            json: false,
+        });
+        let on = Command::Read(Some(ReadChange {
+            on: true,
+            targets: vec!["minimax-code".to_owned()],
+        }));
+        run_with(&config, &on, &stores, Local::now()).expect("consent");
+        let listed = run_with(&config, &list, &stores, Local::now()).expect("list");
+        assert!(listed.contains("Hello minimax"), "{listed}");
+    }
+
+    #[test]
+    fn cindy_reader_is_consent_gated_through_index() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config = temp.path().join("hofund.toml");
+        let config_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../plugins/agents/cindy/tests/fixtures/config")
+            .canonicalize()
+            .expect("cindy fixtures");
+        let cindy = CindyStore::with_config_root(config_root);
+        let stores: [&dyn SessionStore; 1] = [&cindy];
+        let list = Command::List(Options {
+            days: None,
+            model: String::new(),
+            folder: String::new(),
+            limit: 20,
+            json: false,
+        });
+        let off = run_with(&config, &list, &stores, Local::now()).expect("off list");
+        assert!(off.contains("reads are off"));
+        let on = Command::Read(Some(ReadChange {
+            on: true,
+            targets: vec!["cindy".to_owned()],
+        }));
+        run_with(&config, &on, &stores, Local::now()).expect("consent");
+        let listed = run_with(&config, &list, &stores, Local::now()).expect("list");
+        assert!(listed.contains("Ship the cindy reader"), "{listed}");
+        assert!(listed.contains("Global build session"), "{listed}");
+    }
+
+    #[test]
+    fn cursor_reader_is_consent_gated_through_index() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config = temp.path().join("hofund.toml");
+        let cursor_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../plugins/agents/cursor/tests/fixtures/root")
+            .canonicalize()
+            .expect("cursor fixtures");
+        let cursor = CursorStore::with_root(cursor_root);
+        let stores: [&dyn SessionStore; 1] = [&cursor];
+        let list = Command::List(Options {
+            days: None,
+            model: String::new(),
+            folder: String::new(),
+            limit: 20,
+            json: false,
+        });
+        let off = run_with(&config, &list, &stores, Local::now()).expect("off list");
+        assert!(off.contains("reads are off"));
+        let on = Command::Read(Some(ReadChange {
+            on: true,
+            targets: vec!["cursor".to_owned()],
+        }));
+        run_with(&config, &on, &stores, Local::now()).expect("consent");
+        let listed = run_with(&config, &list, &stores, Local::now()).expect("list");
+        assert!(listed.contains("Ship the cursor reader"), "{listed}");
+        assert!(listed.contains("Editor transcript title"), "{listed}");
+    }
+
+    #[test]
+    fn qoder_reader_is_consent_gated_through_index() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config = temp.path().join("hofund.toml");
+        let qoder_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../plugins/agents/qoder/tests/fixtures/root")
+            .canonicalize()
+            .expect("qoder fixtures");
+        let qoder = QoderStore::with_root(qoder_root);
+        let stores: [&dyn SessionStore; 1] = [&qoder];
+        let list = Command::List(Options {
+            days: None,
+            model: String::new(),
+            folder: String::new(),
+            limit: 20,
+            json: false,
+        });
+        let on = Command::Read(Some(ReadChange {
+            on: true,
+            targets: vec!["qoder".to_owned()],
+        }));
+        run_with(&config, &on, &stores, Local::now()).expect("consent");
+        let listed = run_with(&config, &list, &stores, Local::now()).expect("list");
+        assert!(listed.contains("Explain the cache"), "{listed}");
+    }
+
+    #[test]
+    fn alma_reader_is_consent_gated_through_index() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config = temp.path().join("hofund.toml");
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../plugins/agents/alma/tests/fixtures/root")
+            .canonicalize()
+            .expect("alma fixtures");
+        let alma = AlmaStore::with_root(root);
+        let stores: [&dyn SessionStore; 1] = [&alma];
+        let list = Command::List(Options {
+            days: None,
+            model: String::new(),
+            folder: String::new(),
+            limit: 20,
+            json: false,
+        });
+        let on = Command::Read(Some(ReadChange {
+            on: true,
+            targets: vec!["alma".to_owned()],
+        }));
+        run_with(&config, &on, &stores, Local::now()).expect("consent");
+        let listed = run_with(&config, &list, &stores, Local::now()).expect("list");
+        assert!(listed.contains("Fix the build"), "{listed}");
+    }
+
+    #[test]
+    fn agy_reader_is_consent_gated_through_index() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config = temp.path().join("hofund.toml");
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../plugins/agents/agy/tests/fixtures/root")
+            .canonicalize()
+            .expect("agy fixtures");
+        let agy = AgyStore::with_root(root);
+        let stores: [&dyn SessionStore; 1] = [&agy];
+        let list = Command::List(Options {
+            days: None,
+            model: String::new(),
+            folder: String::new(),
+            limit: 20,
+            json: false,
+        });
+        let on = Command::Read(Some(ReadChange {
+            on: true,
+            targets: vec!["agy".to_owned()],
+        }));
+        run_with(&config, &on, &stores, Local::now()).expect("consent");
+        let listed = run_with(&config, &list, &stores, Local::now()).expect("list");
+        assert!(listed.contains("Hello from the fake."), "{listed}");
+    }
+
+    #[test]
+    fn dsh_reader_is_consent_gated_through_index() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config = temp.path().join("hofund.toml");
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../plugins/agents/dsh/tests/fixtures/root")
+            .canonicalize()
+            .expect("dsh fixtures");
+        let dsh = DshStore::with_root(root);
+        let stores: [&dyn SessionStore; 1] = [&dsh];
+        let list = Command::List(Options {
+            days: None,
+            model: String::new(),
+            folder: String::new(),
+            limit: 20,
+            json: false,
+        });
+        let on = Command::Read(Some(ReadChange {
+            on: true,
+            targets: vec!["dsh".to_owned()],
+        }));
+        run_with(&config, &on, &stores, Local::now()).expect("consent");
+        let listed = run_with(&config, &list, &stores, Local::now()).expect("list");
+        assert!(listed.contains("Build script tidy"), "{listed}");
+    }
+
+    #[test]
+    fn zcode_reader_is_consent_gated_through_index() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config = temp.path().join("hofund.toml");
+        let home = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../plugins/agents/zcode/tests/fixtures/root")
+            .canonicalize()
+            .expect("zcode fixtures");
+        let zcode = ZCodeStore::with_home(home);
+        let stores: [&dyn SessionStore; 1] = [&zcode];
+        let list = Command::List(Options {
+            days: None,
+            model: String::new(),
+            folder: String::new(),
+            limit: 20,
+            json: false,
+        });
+        let on = Command::Read(Some(ReadChange {
+            on: true,
+            targets: vec!["zcode".to_owned()],
+        }));
+        run_with(&config, &on, &stores, Local::now()).expect("consent");
+        let listed = run_with(&config, &list, &stores, Local::now()).expect("list");
+        assert!(listed.contains("Port the parser to Go"), "{listed}");
+    }
+
+    #[test]
+    fn workbuddy_reader_is_consent_gated_through_index() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config = temp.path().join("hofund.toml");
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../plugins/agents/workbuddy/tests/fixtures/root")
+            .canonicalize()
+            .expect("workbuddy fixtures");
+        let workbuddy = WorkBuddyStore::with_root(root);
+        let stores: [&dyn SessionStore; 1] = [&workbuddy];
+        let list = Command::List(Options {
+            days: None,
+            model: String::new(),
+            folder: String::new(),
+            limit: 20,
+            json: false,
+        });
+        let on = Command::Read(Some(ReadChange {
+            on: true,
+            targets: vec!["workbuddy".to_owned()],
+        }));
+        run_with(&config, &on, &stores, Local::now()).expect("consent");
+        let listed = run_with(&config, &list, &stores, Local::now()).expect("list");
+        assert!(listed.contains("Launch notes draft"), "{listed}");
+    }
+
+    #[test]
+    fn hermes_reader_is_consent_gated_through_index() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config = temp.path().join("hofund.toml");
+        let hermes_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../plugins/agents/hermes/tests/fixtures/root/.hermes")
+            .canonicalize()
+            .expect("hermes fixtures");
+        let hermes = HermesStore::with_home(hermes_root);
+        let stores: [&dyn SessionStore; 1] = [&hermes];
+        let list = Command::List(Options {
+            days: None,
+            model: String::new(),
+            folder: String::new(),
+            limit: 20,
+            json: false,
+        });
+        let on = Command::Read(Some(ReadChange {
+            on: true,
+            targets: vec!["hermes".to_owned()],
+        }));
+        run_with(&config, &on, &stores, Local::now()).expect("consent");
+        let listed = run_with(&config, &list, &stores, Local::now()).expect("list");
+        assert!(listed.contains("A Hermes task"), "{listed}");
+    }
+
+    #[test]
+    fn cline_reader_is_consent_gated_through_index() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config = temp.path().join("hofund.toml");
+        let cline_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../plugins/agents/cline/tests/fixtures/root/sessions")
+            .canonicalize()
+            .expect("cline fixtures");
+        let cline = ClineStore::with_sessions_dir(cline_root);
+        let stores: [&dyn SessionStore; 1] = [&cline];
+        let list = Command::List(Options {
+            days: None,
+            model: String::new(),
+            folder: String::new(),
+            limit: 20,
+            json: false,
+        });
+        let on = Command::Read(Some(ReadChange {
+            on: true,
+            targets: vec!["cline".to_owned()],
+        }));
+        run_with(&config, &on, &stores, Local::now()).expect("consent");
+        let listed = run_with(&config, &list, &stores, Local::now()).expect("list");
+        assert!(listed.contains("Importer speed-up"), "{listed}");
+    }
+
+    #[test]
+    fn kimi_reader_is_consent_gated_through_index() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config = temp.path().join("hofund.toml");
+        let kimi_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../plugins/agents/kimi/tests/fixtures/root")
+            .canonicalize()
+            .expect("kimi fixtures");
+        let kimi = KimiStore::with_root(kimi_root);
+        let stores: [&dyn SessionStore; 1] = [&kimi];
+        let list = Command::List(Options {
+            days: None,
+            model: String::new(),
+            folder: String::new(),
+            limit: 20,
+            json: false,
+        });
+        let on = Command::Read(Some(ReadChange {
+            on: true,
+            targets: vec!["kimi".to_owned()],
+        }));
+        run_with(&config, &on, &stores, Local::now()).expect("consent");
+        let listed = run_with(&config, &list, &stores, Local::now()).expect("list");
+        assert!(listed.contains("Review the diff"), "{listed}");
+    }
+
+    #[test]
+    fn grok_reader_is_consent_gated_through_index() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config = temp.path().join("hofund.toml");
+        let grok_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../plugins/agents/grok/tests/fixtures/root")
+            .canonicalize()
+            .expect("grok fixtures");
+        let grok = GrokStore::with_root(grok_root);
+        let stores: [&dyn SessionStore; 1] = [&grok];
+        let list = Command::List(Options {
+            days: None,
+            model: String::new(),
+            folder: String::new(),
+            limit: 20,
+            json: false,
+        });
+        let on = Command::Read(Some(ReadChange {
+            on: true,
+            targets: vec!["grok".to_owned()],
+        }));
+        run_with(&config, &on, &stores, Local::now()).expect("consent");
+        let listed = run_with(&config, &list, &stores, Local::now()).expect("list");
+        assert!(listed.contains("Parser port"), "{listed}");
+    }
+
+    #[test]
+    fn droid_reader_is_consent_gated_through_index() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config = temp.path().join("hofund.toml");
+        let droid_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../plugins/agents/droid/tests/fixtures/root")
+            .canonicalize()
+            .expect("droid fixtures");
+        let droid = DroidStore::with_root(droid_root);
+        let stores: [&dyn SessionStore; 1] = [&droid];
+        let list = Command::List(Options {
+            days: None,
+            model: String::new(),
+            folder: String::new(),
+            limit: 20,
+            json: false,
+        });
+        let off = run_with(&config, &list, &stores, Local::now()).expect("off list");
+        assert!(off.contains("reads are off"));
+        let on = Command::Read(Some(ReadChange {
+            on: true,
+            targets: vec!["droid".to_owned()],
+        }));
+        run_with(&config, &on, &stores, Local::now()).expect("consent");
+        let listed = run_with(&config, &list, &stores, Local::now()).expect("list");
+        assert!(listed.contains("Login bug"), "{listed}");
+    }
+
+    #[test]
+    fn raft_reader_is_consent_gated_through_index() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config = temp.path().join("hofund.toml");
+        let raft_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../plugins/agents/raft/tests/fixtures/root")
+            .canonicalize()
+            .expect("raft fixtures");
+        let raft = RaftStore::with_root(raft_root);
+        let stores: [&dyn SessionStore; 1] = [&raft];
+        let list = Command::List(Options {
+            days: None,
+            model: String::new(),
+            folder: String::new(),
+            limit: 20,
+            json: false,
+        });
+        let off = run_with(&config, &list, &stores, Local::now()).expect("off list");
+        assert!(off.contains("reads are off"));
+        let on = Command::Read(Some(ReadChange {
+            on: true,
+            targets: vec!["raft".to_owned()],
+        }));
+        run_with(&config, &on, &stores, Local::now()).expect("consent");
+        let listed = run_with(&config, &list, &stores, Local::now()).expect("list");
+        assert!(listed.contains("Ship the raft reader"), "{listed}");
+        assert!(listed.contains("Builtin agent run"), "{listed}");
     }
 
     #[test]

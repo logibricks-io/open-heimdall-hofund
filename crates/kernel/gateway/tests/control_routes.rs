@@ -368,6 +368,13 @@ impl ControlState for FakeControlState {
         self.reply("presets")
     }
 
+    fn sync_catalog(
+        &self,
+        _request: hofund_control_proto::CatalogSyncRequest,
+    ) -> ControlFuture<'_, hofund_control_proto::CatalogSyncResponse> {
+        self.reply("catalog_sync")
+    }
+
     fn groups(&self) -> ControlFuture<'_, GroupListResponse> {
         self.reply("groups")
     }
@@ -468,6 +475,11 @@ fn operation_routes() -> Vec<(Method, &'static str, Vec<u8>)> {
             delete_provider,
         ),
         (Method::GET, "/v1/hofund/presets", Vec::new()),
+        (
+            Method::POST,
+            "/v1/hofund/catalog/sync",
+            json!(&hofund_control_proto::CatalogSyncRequest::new(false)),
+        ),
         (Method::GET, "/v1/hofund/groups", Vec::new()),
         (Method::POST, "/v1/hofund/groups", create_group),
         (Method::PATCH, "/v1/hofund/groups/group", patch_group),
@@ -705,6 +717,7 @@ async fn control_routes_success_and_error_envelopes_against_fake_state() {
             "patch_provider:provider",
             "delete_provider:provider",
             "presets",
+            "catalog_sync",
             "groups",
             "create_group",
             "patch_group:group",

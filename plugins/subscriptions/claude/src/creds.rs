@@ -174,6 +174,15 @@ fn non_empty<'a>(object: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
         .filter(|value| !value.is_empty())
 }
 
+/// The access token in a credentials file, when present.
+pub(crate) fn access_token(text: &str) -> Option<String> {
+    let Value::Object(root) = hofund_plugin_sdk::json::from_str::<Value>(text).ok()? else {
+        return None;
+    };
+    let oauth = root.get("claudeAiOauth")?.as_object()?;
+    non_empty(oauth, "accessToken").map(str::to_owned)
+}
+
 /// The refresh token in a credentials file, when present.
 pub(crate) fn refresh_token(text: &str) -> Option<String> {
     let Value::Object(root) = hofund_plugin_sdk::json::from_str::<Value>(text).ok()? else {

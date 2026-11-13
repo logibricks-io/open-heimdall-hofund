@@ -58,6 +58,20 @@ pub(crate) fn model_listen(
     effective_listen(&loaded, env).map_err(|error| error.to_string())
 }
 
+/// Effective model-listener access settings for an offline status report.
+///
+/// # Errors
+///
+/// Returns a message when the config does not load.
+pub(crate) fn network_settings(config: &Path) -> Result<hofund_config::NetworkSettings, String> {
+    let loaded = load_path(config).map_err(|error| format!("{}: {error}", config.display()))?;
+    Ok(hofund_config::effective_network(
+        &loaded,
+        hofund_config::allow_ips_env().as_deref(),
+        hofund_config::trust_proxy_env().as_deref(),
+    ))
+}
+
 /// The `HOFUND_ADDR` value in this process.
 pub(crate) fn listen_env() -> Option<String> {
     addr_env()

@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Local};
 use hofund_plugin_api::{
     PluginError, SessionDay, SessionFile, SessionLocator, SessionParse, SessionParser,
-    SessionRecord, SessionStore, SessionTokens,
+    SessionRecord, SessionStore, SessionTokens, SessionUsageEvent,
 };
 use hofund_plugin_sdk::{chrono, json, serde};
 use json::Value;
@@ -158,52 +158,12 @@ impl SessionStore for OmpStore {
         }))
     }
 
-    fn resume_argv(&self, session_id: &str, path: &Path) -> Option<Vec<String>> {
+    fn resume_argv(&self, session_id: &str, _path: &Path) -> Option<Vec<String>> {
         let id = session_id
             .strip_prefix(&format!("{AGENT}:"))
             .unwrap_or(session_id);
-        if let Some(profile) = omp_profile(path) {
-            if !safe_omp_profile(&profile) {
-                return None;
-            }
-            return Some(vec![
-                "omp".to_owned(),
-                "--profile".to_owned(),
-                profile,
-                "--resume".to_owned(),
-                id.to_owned(),
-            ]);
-        }
         Some(vec!["omp".to_owned(), "--resume".to_owned(), id.to_owned()])
     }
-}
-
-fn omp_profile(path: &Path) -> Option<String> {
-    let sessions = path.parent()?.parent()?;
-    let agent = sessions.parent()?;
-    let profile = agent.parent()?;
-    let profiles = profile.parent()?;
-    let omp_home = profiles.parent()?;
-    if sessions.file_name()?.to_str()? != "sessions"
-        || agent.file_name()?.to_str()? != "agent"
-        || profiles.file_name()?.to_str()? != "profiles"
-        || omp_home.file_name()?.to_str()? != ".omp"
-    {
-        return None;
-    }
-    profile.file_name()?.to_str().map(str::to_owned)
-}
-
-fn safe_omp_profile(profile: &str) -> bool {
-    let mut bytes = profile.bytes();
-    let Some(first) = bytes.next() else {
-        return false;
-    };
-    (first.is_ascii_lowercase() || first.is_ascii_digit())
-        && profile.len() <= 64
-        && bytes.all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'-')
-        })
 }
 
 fn entries(path: &Path) -> Result<Vec<std::fs::DirEntry>, PluginError> {
@@ -253,6 +213,8 @@ struct OmpState {
     since: i64,
     #[serde(default)]
     header_seen: bool,
+    #[serde(default)]
+    checkpoint: SessionTokens,
 }
 
 impl OmpState {
@@ -272,6 +234,7 @@ impl OmpState {
             model: String::new(),
             since: 0,
             header_seen: false,
+            checkpoint: SessionTokens::default(),
         }
     }
 
@@ -320,14 +283,18 @@ impl OmpParser {
                 }
             }
             "model_change" => self.model_change(value),
-            "usage" | "model_usage" if !copied => {
+            "usage" | "model_usage" => {
                 if let Some(model) = value.get("model").and_then(Value::as_str) {
-                    self.count(model, value.get("usage"), at.as_ref());
+                    self.count(model, value.get("usage"), at.as_ref(), copied);
+                } else if copied {
+                    self.count("", value.get("usage"), at.as_ref(), copied);
                 }
             }
-            "compaction" | "branch_summary" if !copied && !self.state.model.is_empty() => {
-                let model = self.state.model.clone();
-                self.count(&model, value.get("usage"), at.as_ref());
+            "compaction" | "branch_summary" => {
+                if copied || !self.state.model.is_empty() {
+                    let model = self.state.model.clone();
+                    self.count(&model, value.get("usage"), at.as_ref(), copied);
+                }
             }
             "message" => self.message(value, copied, at.as_ref()),
             _ => {}
@@ -357,6 +324,7 @@ impl OmpParser {
         {
             self.state.since = ms;
             self.state.record.forked_from = Some(format!("{AGENT}:{parent}"));
+            self.state.record.fork_usage_filtered = true;
         }
         if let Some(title) = value.get("title").and_then(Value::as_str) {
             self.state.named = title_line(title);
@@ -393,18 +361,15 @@ impl OmpParser {
             "assistant" => {
                 if let Some(model) = message.get("model").and_then(Value::as_str) {
                     model.clone_into(&mut self.state.model);
-                }
-                if copied {
-                    return;
-                }
-                if let Some(model) = message.get("model").and_then(Value::as_str) {
-                    self.count(model, message.get("usage"), at);
+                    self.count(model, message.get("usage"), at, copied);
+                } else if copied {
+                    self.count("", message.get("usage"), at, copied);
                 }
             }
             _ => {
-                if !copied && !self.state.model.is_empty() {
+                if copied || !self.state.model.is_empty() {
                     let model = self.state.model.clone();
-                    self.count(&model, message.get("usage"), at);
+                    self.count(&model, message.get("usage"), at, copied);
                 }
             }
         }
@@ -415,6 +380,7 @@ impl OmpParser {
         model: &str,
         usage: Option<&Value>,
         at: Option<&DateTime<chrono::FixedOffset>>,
+        copied: bool,
     ) {
         let Some(usage) = usage else {
             return;
@@ -428,9 +394,21 @@ impl OmpParser {
         if tokens.is_zero() {
             return;
         }
+        self.state.checkpoint.add(tokens);
+        if copied {
+            return;
+        }
+        let date = at.map_or_else(String::new, |at| {
+            at.with_timezone(&Local).format("%Y-%m-%d").to_string()
+        });
+        self.state.record.usage.push(SessionUsageEvent::new(
+            self.state.checkpoint,
+            tokens,
+            model,
+            &date,
+        ));
         self.state.record.add_usage(model, tokens);
-        if let Some(at) = at {
-            let date = at.with_timezone(&Local).format("%Y-%m-%d").to_string();
+        if !date.is_empty() {
             self.state
                 .record
                 .add_day(SessionDay::new(date, model, tokens));

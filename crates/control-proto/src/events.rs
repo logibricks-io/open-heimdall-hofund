@@ -531,14 +531,18 @@ impl Default for AgentChangedEvent {
     }
 }
 
-/// Reserved minimal sign-in progress payload.
+/// Sign-in progress without callback URLs, device codes, or token material.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct SignInProgressEvent {
     /// Provider or account-owner id.
     pub provider: String,
-    /// Opaque sign-in state label.
-    pub state: String,
+    /// Opaque sign-in session id, when the event belongs to a control session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+    /// Opaque sign-in state label, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
 }
 
 /// Quota alert notification payload (no raw account secrets).

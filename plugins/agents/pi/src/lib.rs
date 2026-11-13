@@ -10,12 +10,13 @@
     clippy::must_use_candidate
 )]
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Local};
 use hofund_plugin_api::{
     PluginError, SessionDay, SessionFile, SessionLocator, SessionParse, SessionParser,
-    SessionRecord, SessionStore, SessionTokens,
+    SessionRecord, SessionStore, SessionTokens, SessionUsageEvent,
 };
 use hofund_plugin_sdk::{chrono, json, serde};
 use json::Value;
@@ -34,9 +35,7 @@ impl PiStore {
     /// Uses Pi's environment overrides, agent home, and `settings.json`.
     #[must_use]
     pub fn new() -> Self {
-        let root = std::env::var_os("PI_CODING_AGENT_DIR")
-            .filter(|value| !value.is_empty())
-            .map_or_else(|| home_dir().join(".pi").join("agent"), PathBuf::from);
+        let root = agent_root_from_override(std::env::var_os("PI_CODING_AGENT_DIR"));
         let session = std::env::var_os("PI_CODING_AGENT_SESSION_DIR")
             .filter(|value| !value.is_empty())
             .map(PathBuf::from)
@@ -90,15 +89,105 @@ fn expand_home(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
+fn agent_root_from_override(override_dir: Option<OsString>) -> PathBuf {
+    override_dir
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .map_or_else(
+            || home_dir().join(".pi").join("agent"),
+            |path| expand_home(&path),
+        )
+}
+
 fn configured_session_dir(root: &Path) -> Option<PathBuf> {
     let bytes = std::fs::read(root.join("settings.json")).ok()?;
-    let settings: Value = json::from_slice(&bytes).ok()?;
+    let settings: Value = json::from_slice(&strip_jsonc(&bytes)).ok()?;
     settings
         .get("sessionDir")
         .and_then(Value::as_str)
         .filter(|path| !path.is_empty())
         .map(PathBuf::from)
         .map(|path| expand_home(&path))
+}
+
+fn strip_jsonc(input: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(input.len());
+    let mut index = 0;
+    let mut string = false;
+    let mut escaped = false;
+    while index < input.len() {
+        let byte = input[index];
+        if string {
+            out.push(byte);
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                string = false;
+            }
+            index += 1;
+            continue;
+        }
+        if byte == b'"' {
+            string = true;
+            out.push(byte);
+            index += 1;
+        } else if byte == b'/' && input.get(index + 1) == Some(&b'/') {
+            index += 2;
+            while index < input.len() && input[index] != b'\n' {
+                index += 1;
+            }
+        } else if byte == b'/' && input.get(index + 1) == Some(&b'*') {
+            index += 2;
+            while index + 1 < input.len() && &input[index..index + 2] != b"*/" {
+                if input[index] == b'\n' {
+                    out.push(b'\n');
+                }
+                index += 1;
+            }
+            index = (index + 2).min(input.len());
+        } else {
+            out.push(byte);
+            index += 1;
+        }
+    }
+    strip_trailing_commas(&out)
+}
+
+fn strip_trailing_commas(input: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(input.len());
+    let mut string = false;
+    let mut escaped = false;
+    for (index, byte) in input.iter().copied().enumerate() {
+        if string {
+            out.push(byte);
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                string = false;
+            }
+            continue;
+        }
+        if byte == b'"' {
+            string = true;
+            out.push(byte);
+            continue;
+        }
+        if byte == b',' {
+            let mut next = index + 1;
+            while input.get(next).is_some_and(u8::is_ascii_whitespace) {
+                next += 1;
+            }
+            if matches!(input.get(next), Some(b'}' | b']')) {
+                continue;
+            }
+        }
+        out.push(byte);
+    }
+    out
 }
 
 /// Directory-only Pi locator.
@@ -216,6 +305,8 @@ struct PiState {
     prompt: String,
     model: String,
     since: i64,
+    #[serde(default)]
+    checkpoint: SessionTokens,
 }
 
 impl PiState {
@@ -228,6 +319,7 @@ impl PiState {
             prompt: String::new(),
             model: String::new(),
             since: 0,
+            checkpoint: SessionTokens::default(),
         }
     }
 
@@ -276,14 +368,18 @@ impl PiParser {
                 }
             }
             "model_change" => self.model_change(value),
-            "usage" | "model_usage" if !copied => {
+            "usage" | "model_usage" => {
                 if let Some(model) = value.get("model").and_then(Value::as_str) {
-                    self.count(model, value.get("usage"), at.as_ref());
+                    self.count(model, value.get("usage"), at.as_ref(), copied);
+                } else if copied {
+                    self.count("", value.get("usage"), at.as_ref(), copied);
                 }
             }
-            "compaction" | "branch_summary" if !copied && !self.state.model.is_empty() => {
-                let model = self.state.model.clone();
-                self.count(&model, value.get("usage"), at.as_ref());
+            "compaction" | "branch_summary" => {
+                if copied || !self.state.model.is_empty() {
+                    let model = self.state.model.clone();
+                    self.count(&model, value.get("usage"), at.as_ref(), copied);
+                }
             }
             "message" => self.message(value, copied, at.as_ref()),
             _ => {}
@@ -314,6 +410,7 @@ impl PiParser {
         {
             self.state.since = ms;
             self.state.record.forked_from = Some(format!("{AGENT}:{parent}"));
+            self.state.record.fork_usage_filtered = true;
         }
         if let Some(title) = value.get("title").and_then(Value::as_str) {
             self.state.named = title_line(title);
@@ -350,18 +447,15 @@ impl PiParser {
             "assistant" => {
                 if let Some(model) = message.get("model").and_then(Value::as_str) {
                     model.clone_into(&mut self.state.model);
-                }
-                if copied {
-                    return;
-                }
-                if let Some(model) = message.get("model").and_then(Value::as_str) {
-                    self.count(model, message.get("usage"), at);
+                    self.count(model, message.get("usage"), at, copied);
+                } else if copied {
+                    self.count("", message.get("usage"), at, copied);
                 }
             }
             _ => {
-                if !copied && !self.state.model.is_empty() {
+                if copied || !self.state.model.is_empty() {
                     let model = self.state.model.clone();
-                    self.count(&model, message.get("usage"), at);
+                    self.count(&model, message.get("usage"), at, copied);
                 }
             }
         }
@@ -372,6 +466,7 @@ impl PiParser {
         model: &str,
         usage: Option<&Value>,
         at: Option<&DateTime<chrono::FixedOffset>>,
+        copied: bool,
     ) {
         let Some(usage) = usage else {
             return;
@@ -385,9 +480,21 @@ impl PiParser {
         if tokens.is_zero() {
             return;
         }
+        self.state.checkpoint.add(tokens);
+        if copied {
+            return;
+        }
+        let date = at.map_or_else(String::new, |at| {
+            at.with_timezone(&Local).format("%Y-%m-%d").to_string()
+        });
+        self.state.record.usage.push(SessionUsageEvent::new(
+            self.state.checkpoint,
+            tokens,
+            model,
+            &date,
+        ));
         self.state.record.add_usage(model, tokens);
-        if let Some(at) = at {
-            let date = at.with_timezone(&Local).format("%Y-%m-%d").to_string();
+        if !date.is_empty() {
             self.state
                 .record
                 .add_day(SessionDay::new(date, model, tokens));
@@ -445,5 +552,43 @@ fn title_line(text: &str) -> String {
         format!("{}…", kept.trim_end())
     } else {
         kept
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn jsonc_settings_configure_the_session_root() {
+        let root = tempfile::tempdir().expect("temp dir");
+        std::fs::write(
+            root.path().join("settings.json"),
+            br#"{
+              // Pi accepts line comments.
+              /* And block comments. */
+              "sessionDir": "~/custom-sessions",
+            }"#,
+        )
+        .expect("settings");
+        let store = PiStore::with_root(root.path());
+        assert!(
+            store
+                .locator()
+                .roots()
+                .contains(&home_dir().join("custom-sessions"))
+        );
+    }
+
+    #[test]
+    fn agent_root_override_expands_home() {
+        assert_eq!(
+            agent_root_from_override(Some(OsString::from("~/pi"))),
+            home_dir().join("pi")
+        );
+        assert_eq!(
+            agent_root_from_override(Some(OsString::from("~"))),
+            home_dir()
+        );
     }
 }

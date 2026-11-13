@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "state": "needs_proof",
+  "challenge": {
+    "type": "instructions",
+    "text": "Paste the credential text."
+  }
+}

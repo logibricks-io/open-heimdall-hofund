@@ -76,16 +76,18 @@ impl SessionLocator for FakeLocator {
 }
 
 struct FakeStore {
+    agent: String,
     locator: FakeLocator,
     last_ms: i64,
-    date: String,
+    days: Vec<hofund_plugin_api::SessionDay>,
     count: usize,
+    child: bool,
 }
 
 struct FakeParser {
     record: SessionRecord,
     last_ms: i64,
-    date: String,
+    days: Vec<hofund_plugin_api::SessionDay>,
 }
 
 impl SessionParser for FakeParser {
@@ -93,13 +95,10 @@ impl SessionParser for FakeParser {
         self.record.title = "Offline fixture".to_owned();
         self.record.cwd = "/work/project".to_owned();
         self.record.last_ms = self.last_ms;
-        self.record
-            .add_usage("model", SessionTokens::new(4, 3, 2, 1));
-        self.record.add_day(hofund_plugin_api::SessionDay::new(
-            self.date.clone(),
-            "model",
-            SessionTokens::new(4, 3, 2, 1),
-        ));
+        for day in &self.days {
+            self.record.add_usage(day.model.clone(), day.tokens);
+            self.record.add_day(day.clone());
+        }
         Ok(())
     }
 
@@ -110,7 +109,7 @@ impl SessionParser for FakeParser {
 
 impl SessionStore for FakeStore {
     fn agent(&self) -> &str {
-        "fake"
+        &self.agent
     }
 
     fn locator(&self) -> &dyn SessionLocator {
@@ -120,11 +119,7 @@ impl SessionStore for FakeStore {
     fn files(&self, root: &Path) -> Result<Vec<SessionFile>, PluginError> {
         Ok((0..self.count)
             .map(|index| {
-                let id = if index == 0 {
-                    "one".to_owned()
-                } else {
-                    format!("session-{index}")
-                };
+                let id = session_file_id(index, self.child);
                 SessionFile::new(&id, root.join(format!("{id}.jsonl")))
             })
             .collect())
@@ -135,10 +130,18 @@ impl SessionStore for FakeStore {
         file: &SessionFile,
         _state: Option<&str>,
     ) -> Result<Box<dyn SessionParser>, PluginError> {
+        let mut record = SessionRecord::new(
+            &self.agent,
+            format!("{}:{}", self.agent, file.id),
+            &file.path,
+        );
+        if self.child && file.id == "child" {
+            record = record.with_parent(format!("{}:one", self.agent));
+        }
         Ok(Box::new(FakeParser {
-            record: SessionRecord::new("fake", format!("fake:{}", file.id), &file.path),
+            record,
             last_ms: self.last_ms,
-            date: self.date.clone(),
+            days: self.days.clone(),
         }))
     }
 
@@ -148,9 +151,12 @@ impl SessionStore for FakeStore {
 
     fn transcript_parser(
         &self,
-        _file: &SessionFile,
+        file: &SessionFile,
     ) -> Result<Box<dyn SessionTranscriptParser>, PluginError> {
-        Ok(Box::new(FakeTranscriptParser::default()))
+        Ok(Box::new(FakeTranscriptParser {
+            child: file.id == "child",
+            transcript: SessionTranscript::default(),
+        }))
     }
 
     fn resume_argv(&self, session_id: &str, _path: &Path) -> Option<Vec<String>> {
@@ -166,22 +172,58 @@ impl SessionStore for FakeStore {
     }
 }
 
-#[derive(Default)]
 struct FakeTranscriptParser {
+    child: bool,
     transcript: SessionTranscript,
 }
 
 impl SessionTranscriptParser for FakeTranscriptParser {
     fn push(&mut self, _value: &serde_json::Value) -> Result<(), PluginError> {
+        let (question, answer) = if self.child {
+            ("Child question", "Child answer")
+        } else {
+            ("Offline question", "Offline answer")
+        };
         self.transcript.parts = vec![
-            SessionPart::new("user", "text", "", "Offline question"),
-            SessionPart::new("assistant", "text", "", "Offline answer"),
+            SessionPart::new("user", "text", "", question),
+            SessionPart::new("assistant", "text", "", answer),
         ];
         Ok(())
     }
 
     fn finish(self: Box<Self>) -> Result<SessionTranscript, PluginError> {
         Ok(self.transcript)
+    }
+}
+
+fn session_file_id(index: usize, child: bool) -> String {
+    match (index, child) {
+        (0, _) => "one".to_owned(),
+        (1, true) => "child".to_owned(),
+        _ => format!("session-{index}"),
+    }
+}
+
+fn fake_store(dir: &Path, agent: &str, count: usize) -> FakeStore {
+    let now = Local::now();
+    let root = dir.join(agent);
+    std::fs::create_dir(&root).expect("agent root");
+    for index in 0..count {
+        let id = session_file_id(index, false);
+        std::fs::write(root.join(format!("{id}.jsonl")), b"{\"fixture\":true}\n")
+            .expect("session fixture");
+    }
+    FakeStore {
+        agent: agent.to_owned(),
+        locator: FakeLocator { root },
+        last_ms: now.timestamp_millis(),
+        days: vec![hofund_plugin_api::SessionDay::new(
+            now.date_naive().to_string(),
+            "model",
+            SessionTokens::new(4, 3, 2, 1),
+        )],
+        count,
+        child: false,
     }
 }
 
@@ -194,31 +236,21 @@ async fn start_with_reads(dir: &Path, reads: bool) -> Running {
 }
 
 async fn start_with_count(dir: &Path, reads: bool, count: usize) -> Running {
-    let now = Local::now();
-    let agent = dir.join("agent");
-    std::fs::create_dir(&agent).expect("agent root");
-    for index in 0..count {
-        let id = if index == 0 {
-            "one".to_owned()
-        } else {
-            format!("session-{index}")
-        };
-        std::fs::write(agent.join(format!("{id}.jsonl")), b"{\"fixture\":true}\n")
-            .expect("session fixture");
-    }
-    let store = FakeStore {
-        locator: FakeLocator { root: agent },
-        last_ms: now.timestamp_millis(),
-        date: now.date_naive().to_string(),
-        count,
-    };
+    let store = fake_store(dir, "fake", count);
+    start_with_stores(dir, reads, vec![store]).await
+}
+
+async fn start_with_stores(dir: &Path, reads: bool, stores: Vec<FakeStore>) -> Running {
     let registry = Arc::new(FakeRegistry {
-        stores: vec![Arc::new(store)],
+        stores: stores
+            .into_iter()
+            .map(|store| Arc::new(store) as Arc<dyn SessionStore>)
+            .collect(),
     });
     let config = dir.join("hofund.toml");
     std::fs::write(
         &config,
-        "listen = \"127.0.0.1:0\"\n[usage.prices.\"*/model\"]\ninput = 1.0\noutput = 1.0\ncache_read = 1.0\ncache_write = 1.0\n",
+        "listen = \"127.0.0.1:0\"\n[usage.prices.\"*/model\"]\ninput = 1.0\noutput = 1.0\ncache_read = 1.0\ncache_write = 1.0\n[usage.prices.\"*/other\"]\ninput = 1.0\noutput = 1.0\ncache_read = 1.0\ncache_write = 1.0\n",
     )
     .expect("config");
     let mut consent = Consent::new(dir);
@@ -490,8 +522,130 @@ async fn search_is_case_folded_and_manage_is_read_only() {
         &response.bytes().await.expect("default manage body"),
     )
     .expect("default manage");
-    assert_eq!(default_view.agent, "fake");
+    assert_eq!(default_view.agent, "");
     assert_eq!(default_view.sessions.len(), 1);
+    support::shutdown(running).await;
+}
+
+#[tokio::test]
+async fn manage_lists_every_agent_and_preserves_a_zero_match_filter() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let running = start_with_stores(
+        dir.path(),
+        true,
+        vec![
+            fake_store(dir.path(), "many", 2),
+            fake_store(dir.path(), "few", 1),
+        ],
+    )
+    .await;
+
+    let response = get(&running, dir.path(), "/v1/hofund/sessions/manage").await;
+    let all: SessionManageResponse =
+        decode_response(API_VERSION, &response.bytes().await.expect("manage body"))
+            .expect("manage");
+    assert_eq!(all.agent, "");
+    assert_eq!(all.sessions.len(), 3);
+    assert_eq!(all.agents.len(), 2);
+    assert_eq!(all.agents[0].agent, "many");
+    assert_eq!(all.agents[0].count, 2);
+    assert_eq!(all.agents[1].agent, "few");
+    assert_eq!(all.agents[1].count, 1);
+
+    let response = get(
+        &running,
+        dir.path(),
+        "/v1/hofund/sessions/manage?agent=missing",
+    )
+    .await;
+    let missing: SessionManageResponse =
+        decode_response(API_VERSION, &response.bytes().await.expect("manage body"))
+            .expect("manage");
+    assert_eq!(missing.agent, "missing");
+    assert!(missing.sessions.is_empty());
+    assert_eq!(missing.agents, all.agents);
+    support::shutdown(running).await;
+}
+
+#[tokio::test]
+async fn overview_costs_use_only_the_filtered_days_and_model() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let now = Local::now();
+    let yesterday = now
+        .date_naive()
+        .checked_sub_days(chrono::Days::new(1))
+        .expect("yesterday");
+    let mut store = fake_store(dir.path(), "fake", 1);
+    store.days = vec![
+        hofund_plugin_api::SessionDay::new(
+            now.date_naive().to_string(),
+            "model",
+            SessionTokens::new(4, 3, 2, 1),
+        ),
+        hofund_plugin_api::SessionDay::new(
+            now.date_naive().to_string(),
+            "other",
+            SessionTokens::new(40, 30, 20, 10),
+        ),
+        hofund_plugin_api::SessionDay::new(
+            yesterday.to_string(),
+            "model",
+            SessionTokens::new(400, 300, 200, 100),
+        ),
+    ];
+    let running = start_with_stores(dir.path(), true, vec![store]).await;
+
+    let response = get(
+        &running,
+        dir.path(),
+        "/v1/hofund/sessions/overview?days=1&model=model",
+    )
+    .await;
+    let overview: SessionOverviewResponse =
+        decode_response(API_VERSION, &response.bytes().await.expect("overview body"))
+            .expect("overview");
+    let expected = 10.0 / 1_000_000.0;
+    assert_eq!(overview.count, 1);
+    assert_eq!(overview.median_cost, expected);
+    assert_eq!(overview.by_day.len(), 1);
+    assert_eq!(overview.by_day[0].cost, expected);
+    assert_eq!(overview.top.len(), 1);
+    assert_eq!(overview.top[0].cost, expected);
+    support::shutdown(running).await;
+}
+
+#[tokio::test]
+async fn detail_lists_a_subagent_and_reads_its_transcript() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let mut store = fake_store(dir.path(), "fake", 2);
+    store.child = true;
+    std::fs::write(
+        store.locator.root.join("child.jsonl"),
+        b"{\"fixture\":true}\n",
+    )
+    .expect("child fixture");
+    let running = start_with_stores(dir.path(), true, vec![store]).await;
+
+    let response = get(&running, dir.path(), "/v1/hofund/sessions/fake:one").await;
+    let detail: SessionDetailResponse =
+        decode_response(API_VERSION, &response.bytes().await.expect("detail body"))
+            .expect("detail");
+    assert_eq!(detail.session.subagents, vec!["fake:child"]);
+
+    let response = get(
+        &running,
+        dir.path(),
+        "/v1/hofund/sessions/fake:one/transcript?sub=fake:child",
+    )
+    .await;
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let transcript: SessionTranscriptResponse = decode_response(
+        API_VERSION,
+        &response.bytes().await.expect("transcript body"),
+    )
+    .expect("transcript");
+    assert_eq!(transcript.parts[0].text, "Child question");
+    assert_eq!(transcript.parts[1].text, "Child answer");
     support::shutdown(running).await;
 }
 

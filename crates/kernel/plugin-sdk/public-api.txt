@@ -57,6 +57,9 @@ const page::PAGE_LIMIT
 const probe::ERROR_CAP
 const probe::PROBE_WAIT
 const probe::STREAM_CAP
+const protobuf::FLAG_END
+const protobuf::FLAG_GZIP
+const protobuf::MAX_FRAME_PAYLOAD
 const wire::FORWARD_CAP
 cursor_pages
 daily_checkin::fn read_enabled (raw : & RawTable) -> Result < bool , ConfigError >
@@ -71,10 +74,16 @@ futures::FuturesUnordered
 futures::Race derives(Clone, Copy, Debug, PartialEq, Eq)
 futures::Race::Left
 futures::Race::Right
+futures::Stream
+futures::StreamExt
+futures::async fn next_ready < F > (futures : & mut FuturesUnordered < F >) -> F :: Output where F : std :: future :: Future ,
 futures::async fn race < A , B > (left : A , right : B) -> Race < A :: Output , B :: Output > where A : std :: future :: Future , B : std :: future :: Future ,
+futures::empty
+futures::unfold
 gemini_models
 gemini_models_with_dropped
 gzip
+inflate::fn compress (input : & [u8]) -> Result < Vec < u8 > , PluginError >
 inflate::fn gzip (input : & [u8]) -> Result < Vec < u8 > , PluginError >
 json
 json_error_message
@@ -102,7 +111,9 @@ mod oauth
 mod page
 mod probe
 mod process
+mod protobuf
 mod register
+mod rsa
 mod sigv4
 mod time
 mod time::zone
@@ -110,6 +121,7 @@ mod transport
 mod uuid
 mod wire
 next_cursor
+next_ready
 oauth::AccessToken
 oauth::AccessToken::const fn expires_in (& self) -> Duration
 oauth::AccessToken::fn expose_secret (& self) -> & str
@@ -136,6 +148,7 @@ oauth::fn parse_iam_access_token (body : & [u8]) -> Result < IamAccessToken , To
 oauth::fn refresh_form (client_id : & str , client_secret : & str , refresh_token : & str) -> String
 oauth::fn refresh_secret_form (client_id : & str , client_secret : & str , refresh_token : & SecretString ,) -> String
 oauth::new_state
+oauth::new_state_with_random_bytes
 oauth::parse_token_set
 oauth::same_secret
 oauth::secret_text
@@ -174,6 +187,38 @@ probe::fn status_hint (body : & [u8]) -> String
 probe::fn stream_report (body : & [u8]) -> Result < ProbeReport , PluginError >
 process::fn find_in (name : BinaryName , path : Option < & OsStr > , pathext : Option < & OsStr >) -> Option < PathBuf >
 process::fn find_program (name : BinaryName) -> Option < PathBuf >
+protobuf::Field derives(Clone, Debug, PartialEq, Eq)
+protobuf::Field.number
+protobuf::Field.value
+protobuf::Field::fn as_bytes (& self) -> Option < & [u8] >
+protobuf::Field::fn as_message (& self) -> Option < Vec < Field > >
+protobuf::Field::fn as_string (& self) -> Option < String >
+protobuf::Field::fn as_varint (& self) -> Option < u64 >
+protobuf::Frame derives(Clone, Debug, PartialEq, Eq)
+protobuf::Frame.flags
+protobuf::Frame.payload
+protobuf::Frame::fn is_end (& self) -> bool
+protobuf::Frame::fn is_gzip (& self) -> bool
+protobuf::Frames derives(Clone, Debug)
+protobuf::ProtoBuf derives(Clone, Debug, Default)
+protobuf::ProtoBuf::fn bytes (mut self , field : u32 , value : & [u8]) -> Self
+protobuf::ProtoBuf::fn double (self , field : u32 , value : f64) -> Self
+protobuf::ProtoBuf::fn finish (self) -> Vec < u8 >
+protobuf::ProtoBuf::fn fixed32 (mut self , field : u32 , bits : u32) -> Self
+protobuf::ProtoBuf::fn fixed64 (mut self , field : u32 , bits : u64) -> Self
+protobuf::ProtoBuf::fn message (self , field : u32 , inner : Self) -> Self
+protobuf::ProtoBuf::fn new () -> Self
+protobuf::ProtoBuf::fn string (self , field : u32 , value : & str) -> Self
+protobuf::ProtoBuf::fn varint (mut self , field : u32 , value : u64) -> Self
+protobuf::WireValue derives(Clone, Debug, PartialEq, Eq)
+protobuf::WireValue::Bytes
+protobuf::WireValue::Fixed32
+protobuf::WireValue::Fixed64
+protobuf::WireValue::Varint
+protobuf::fn deframe (input : & [u8]) -> Result < Frame , PluginError >
+protobuf::fn fields (buf : & [u8]) -> Vec < Field >
+protobuf::fn frame (flags : u8 , payload : & [u8]) -> Result < Vec < u8 > , PluginError >
+protobuf::fn frames (input : & [u8]) -> Frames < '_ >
 race
 refresh_form
 refused_passthrough
@@ -185,6 +230,12 @@ register::Contribution::fn surface (mut self , surface : impl InboundSurface) ->
 register::Contribution::fn surfaces (& self) -> & [Arc < dyn InboundSurface >]
 register::Contribution::fn upstream (mut self , factory : impl DynUpstreamFactory) -> Self
 register::Contribution::fn upstreams (& self) -> & [Arc < dyn DynUpstreamFactory >]
+rsa::PrivateKey
+rsa::PrivateKey::fn decrypt (& self , encoded : & str) -> Result < SecretString , PluginError >
+rsa::PrivateKey::fn generate () -> Result < Self , PluginError >
+rsa::PrivateKey::fn public_key_pkcs1_base64url (& self) -> Result < String , PluginError >
+rsa::fn encrypt_oaep_for_test (public_key : & str , plaintext : & str) -> Result < String , PluginError >
+rsa::fn encrypt_pkcs1_for_test (public_key : & str , plaintext : & str) -> Result < String , PluginError >
 serde
 sigv4::AwsSigner derives(Clone)
 sigv4::AwsSigner::fn fixed (mut self , unix_secs : u64 , host : impl Into < String >) -> Self

@@ -19,7 +19,7 @@ pub struct SessionListQuery {
     pub model: String,
     /// Case-insensitive working-folder substring.
     pub folder: String,
-    /// Maximum rows; absent uses [`DEFAULT_SESSION_LIST_LIMIT`].
+    /// Maximum rows, clamped to [`DEFAULT_SESSION_LIST_LIMIT`]; absent uses that default.
     pub limit: Option<usize>,
 }
 
@@ -54,7 +54,9 @@ impl SessionListQuery {
     /// Effective row cap.
     #[must_use]
     pub fn limit(&self) -> usize {
-        self.limit.unwrap_or(DEFAULT_SESSION_LIST_LIMIT)
+        self.limit
+            .unwrap_or(DEFAULT_SESSION_LIST_LIMIT)
+            .min(DEFAULT_SESSION_LIST_LIMIT)
     }
 }
 
@@ -165,6 +167,8 @@ pub struct SessionSummary {
     pub last_ms: i64,
     /// Token-bearing model ids.
     pub models: Vec<String>,
+    /// Listed subagent ids accepted by the transcript `sub` selector.
+    pub subagents: Vec<String>,
     /// Total token counters.
     pub tokens: SessionTokenTotals,
     /// USD cost.
@@ -563,7 +567,7 @@ pub struct SessionManageResponse {
     pub agents: Vec<SessionManageAgent>,
     /// Active agent filter.
     pub agent: String,
-    /// Listed sessions.
+    /// Listed sessions, capped at [`DEFAULT_SESSION_LIST_LIMIT`].
     pub sessions: Vec<SessionSummary>,
     /// Trash rows; empty until session mutation ships.
     pub trash: Vec<SessionTrashRow>,
@@ -886,6 +890,12 @@ mod tests {
                 .expect("one")
                 .limit(),
             1
+        );
+        assert_eq!(
+            SessionListQuery::parse(Some("limit=5001"))
+                .expect("excessive")
+                .limit(),
+            DEFAULT_SESSION_LIST_LIMIT
         );
         let error = SessionListQuery::parse(Some("limit=0")).expect_err("zero");
         assert_eq!(error.kind, ControlErrorKind::BadRequest);

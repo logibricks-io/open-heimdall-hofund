@@ -9,7 +9,7 @@ use hofund_plugin_api::{
 };
 use thiserror::Error;
 
-use crate::index::read_incremental;
+use crate::index::read_incremental_cancellable;
 use crate::open::{OpenError, open_session_file};
 
 const MAX_TRANSCRIPT_BYTES: usize = 400_000;
@@ -41,6 +41,27 @@ pub fn transcript(
     store: &dyn SessionStore,
     file: &SessionFile,
 ) -> Result<SessionTranscript, SessionReadError> {
+    transcript_with_cancel(root, store, file, || false)?
+        .ok_or_else(|| io::Error::new(io::ErrorKind::Interrupted, "session read cancelled").into())
+}
+
+/// Reads a transcript incrementally, stopping between input chunks when asked.
+///
+/// Returns `Ok(None)` when cancellation is observed. Consent and selection are
+/// checked by the caller before this function.
+///
+/// # Errors
+///
+/// Returns [`SessionReadError`] when opening, bounded reading, or parsing fails.
+pub fn transcript_with_cancel(
+    root: &std::path::Path,
+    store: &dyn SessionStore,
+    file: &SessionFile,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<Option<SessionTranscript>, SessionReadError> {
+    if cancelled() {
+        return Ok(None);
+    }
     let mut parser = store.transcript_parser(file)?;
     let mut opened = open_session_file(root, &file.path)?;
     let mut parser_error = None;
@@ -52,10 +73,12 @@ pub fn transcript(
         }
     };
     let outcome = match file.compression {
-        SessionCompression::None => read_incremental(&mut opened, 0, &mut on_value)?,
+        SessionCompression::None => {
+            read_incremental_cancellable(&mut opened, 0, &mut on_value, &mut cancelled)
+        }
         SessionCompression::Zstd => {
             let mut decoder = zstd::stream::read::Decoder::new(opened)?;
-            read_incremental(&mut decoder, 0, &mut on_value)?
+            read_incremental_cancellable(&mut decoder, 0, &mut on_value, &mut cancelled)
         }
         _ => {
             return Err(io::Error::new(
@@ -65,13 +88,23 @@ pub fn transcript(
             .into());
         }
     };
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(error) if error.kind() == io::ErrorKind::Interrupted && cancelled() => {
+            return Ok(None);
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if cancelled() {
+        return Ok(None);
+    }
     if let Some(error) = parser_error {
         return Err(error.into());
     }
     let mut transcript = parser.finish()?;
     transcript.cut |= outcome.cut;
     bound(&mut transcript);
-    Ok(transcript)
+    Ok(Some(transcript))
 }
 
 fn bound(transcript: &mut SessionTranscript) {

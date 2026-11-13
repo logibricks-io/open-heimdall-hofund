@@ -1,10 +1,10 @@
-//! CLI entry for agent sign-in switching.
+//! CLI entries for agent sign-in switching and account settings.
 
 use std::path::Path;
 
 use crate::{DaemonError, sign_in::with_opened};
 
-use super::{accounts_import, accounts_switch};
+use super::{accounts_import, accounts_project, accounts_switch};
 
 /// Runs `hofund accounts switch <agent> <reference>`.
 ///
@@ -44,4 +44,43 @@ pub fn accounts_import_in(path: &Path, file: &Path) -> Result<Vec<String>, Daemo
     let text = std::fs::read_to_string(file)
         .map_err(|error| DaemonError::new(format!("cannot read {}: {error}", file.display())))?;
     with_opened(path, async |opened| accounts_import(opened, &text).await)
+}
+
+/// Runs `hofund accounts project <subscription> <email> <project>`.
+///
+/// # Errors
+///
+/// Returns [`DaemonError`] when the subscription or account cannot be found,
+/// or the account store write fails.
+pub fn accounts_project_in(
+    path: &Path,
+    subscription: &str,
+    email: &str,
+    project: &str,
+) -> Result<(), DaemonError> {
+    with_opened(path, async |opened| {
+        accounts_project(opened, subscription, email, project).await
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn r49_accounts_project_in_rejects_an_unlinked_subscription() {
+        let dir = tempfile::tempdir().expect("dir");
+        let config = dir.path().join("hofund.toml");
+        std::fs::write(
+            &config,
+            "[[subscriptions]]\nid = \"not-linked\"\naccounts = \"*\"\n",
+        )
+        .expect("config");
+        let error = accounts_project_in(&config, "not-linked", "u@example.test", "project-1")
+            .expect_err("no such plugin is linked");
+        assert_eq!(
+            error.to_string(),
+            "no subscription plugin `not-linked` is linked"
+        );
+    }
 }

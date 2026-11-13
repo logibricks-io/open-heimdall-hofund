@@ -55,10 +55,7 @@ impl OpenCodeStore {
                     }
                 },
             );
-        Self {
-            locator: OpenCodeLocator { root },
-            database,
-        }
+        Self::from_parts(root, database)
     }
 
     /// Uses an explicit data root and its `opencode.db`.
@@ -66,8 +63,15 @@ impl OpenCodeStore {
     pub fn with_root(root: impl Into<PathBuf>) -> Self {
         let root = root.into();
         let database = root.join("opencode.db");
+        Self::from_parts(root, database)
+    }
+
+    fn from_parts(root: PathBuf, database: PathBuf) -> Self {
         Self {
-            locator: OpenCodeLocator { root },
+            locator: OpenCodeLocator {
+                root,
+                database: database.clone(),
+            },
             database,
         }
     }
@@ -91,15 +95,22 @@ fn home_dir() -> PathBuf {
 #[derive(Clone, Debug)]
 pub struct OpenCodeLocator {
     root: PathBuf,
+    database: PathBuf,
 }
 
 impl SessionLocator for OpenCodeLocator {
     fn roots(&self) -> Vec<PathBuf> {
-        vec![self.root.clone()]
+        let mut roots = vec![self.root.clone()];
+        if let Some(parent) = self.database.parent()
+            && parent != self.root
+        {
+            roots.push(parent.to_path_buf());
+        }
+        roots
     }
 
     fn present(&self) -> bool {
-        self.root.is_dir()
+        self.root.is_dir() || self.database.is_file()
     }
 }
 
@@ -113,7 +124,7 @@ impl SessionStore for OpenCodeStore {
     }
 
     fn files(&self, root: &Path) -> Result<Vec<SessionFile>, PluginError> {
-        if self.database.is_file() {
+        if self.database.is_file() && self.database.parent().is_some_and(|parent| parent == root) {
             return Ok(vec![
                 SessionFile::new("database", &self.database).with_format(SessionFormat::Sqlite),
             ]);
@@ -335,7 +346,8 @@ impl OpenCodeParser {
         if role != "assistant" {
             return;
         }
-        if let Some(completed) = value.pointer("/time/completed").and_then(Value::as_i64) {
+        let completed = value.pointer("/time/completed").and_then(Value::as_i64);
+        if let Some(completed) = completed {
             self.saw(completed);
         }
         if self.state.record.cwd.is_empty()
@@ -367,7 +379,7 @@ impl OpenCodeParser {
             return;
         }
         self.state.record.add_usage(model, tokens);
-        if let Some(date) = local_date(created) {
+        if let Some(date) = local_date(completed.unwrap_or(created)) {
             self.state
                 .record
                 .add_day(SessionDay::new(date, model, tokens));
@@ -437,11 +449,16 @@ fn read_database(
     let has_legacy = has_table(database, "session")?;
     let migrated = has_v2 && has_table(database, "kv")? && migrated(database)?;
     let mut infos = Vec::new();
+    let mut infos_cut = false;
     if has_v2 {
-        infos.extend(read_infos(database, true, false)?);
+        let (rows, cut) = read_infos(database, true, false)?;
+        infos_cut |= cut;
+        infos.extend(rows);
     }
     if has_legacy && (!has_v2 || !migrated) {
-        infos.extend(read_infos(database, false, has_v2)?);
+        let (rows, cut) = read_infos(database, false, has_v2)?;
+        infos_cut |= cut;
+        infos.extend(rows);
     }
     let mut records = Vec::new();
     let mut parents = BTreeMap::new();
@@ -457,12 +474,13 @@ fn read_database(
             .get("v2")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        if v2 {
-            read_v2_messages(database, &info.id, &mut parser)?;
+        let messages_cut = if v2 {
+            read_v2_messages(database, &info.id, &mut parser)?
         } else {
-            read_v1_messages(database, &info.id, &mut parser)?;
-        }
+            read_v1_messages(database, &info.id, &mut parser)?
+        };
         parser.state.finish_title();
+        parser.state.record.cut |= infos_cut || messages_cut;
         records.push(parser.state.record);
     }
     for record in &mut records {
@@ -517,7 +535,7 @@ fn read_infos(
     database: &dyn SessionDatabase,
     v2: bool,
     exclude_v2: bool,
-) -> Result<Vec<Info>, PluginError> {
+) -> Result<(Vec<Info>, bool), PluginError> {
     let sql = match (v2, exclude_v2) {
         (true, _) => {
             "SELECT id, COALESCE(parent_id, ''), directory, COALESCE(title, ''), time_created, time_updated FROM session_v2"
@@ -530,31 +548,36 @@ fn read_infos(
         }
     };
     let rows = database.query(sql, &[])?;
-    Ok(rows.values.into_iter().filter_map(|row| {
-        if row.len() < 6 {
-            return None;
-        }
-        let id = text(&row[0])?.to_owned();
-        let parent = text(&row[1]).unwrap_or("").to_owned();
-        let value = json!({
-            "id": id,
-            "parentID": parent,
-            "directory": text(&row[2]).unwrap_or(""),
-            "title": text(&row[3]).unwrap_or(""),
-            "time": {"created": integer(&row[4]).unwrap_or(0), "updated": integer(&row[5]).unwrap_or(0)},
-            "v2": v2,
-        });
-        Some(Info { id, parent, value })
-    }).collect())
+    let infos = rows
+        .values
+        .into_iter()
+        .filter_map(|row| {
+            if row.len() < 6 {
+                return None;
+            }
+            let id = text(&row[0])?.to_owned();
+            let parent = text(&row[1]).unwrap_or("").to_owned();
+            let value = json!({
+                "id": id,
+                "parentID": parent,
+                "directory": text(&row[2]).unwrap_or(""),
+                "title": text(&row[3]).unwrap_or(""),
+                "time": {"created": integer(&row[4]).unwrap_or(0), "updated": integer(&row[5]).unwrap_or(0)},
+                "v2": v2,
+            });
+            Some(Info { id, parent, value })
+        })
+        .collect();
+    Ok((infos, rows.cut))
 }
 
 fn read_v1_messages(
     database: &dyn SessionDatabase,
     id: &str,
     parser: &mut OpenCodeParser,
-) -> Result<(), PluginError> {
+) -> Result<bool, PluginError> {
     if !has_table(database, "message")? {
-        return Ok(());
+        return Ok(false);
     }
     let rows = database.query("SELECT data FROM message WHERE session_id = ?", &[id])?;
     for value in rows
@@ -565,11 +588,13 @@ fn read_v1_messages(
     {
         parser.message(&value);
     }
+    let mut cut = rows.cut;
     if !parser.state.first_user.is_empty() && has_table(database, "part")? {
         let parts = database.query(
             "SELECT data FROM part WHERE message_id = ? ORDER BY id",
             &[&parser.state.first_user],
         )?;
+        cut |= parts.cut;
         for part in parts
             .values
             .iter()
@@ -579,14 +604,14 @@ fn read_v1_messages(
             parser.part(&part);
         }
     }
-    Ok(())
+    Ok(cut)
 }
 
 fn read_v2_messages(
     database: &dyn SessionDatabase,
     id: &str,
     parser: &mut OpenCodeParser,
-) -> Result<(), PluginError> {
+) -> Result<bool, PluginError> {
     let rows = database.query(
         "SELECT id, type, data FROM session_message WHERE session_id = ? AND type IN ('user', 'assistant', 'compaction', 'skill') ORDER BY seq",
         &[id],
@@ -633,7 +658,7 @@ fn read_v2_messages(
             parser.part(&json!({"type":"text", "text":text, "messageID":message_id}));
         }
     }
-    Ok(())
+    Ok(rows.cut)
 }
 
 fn text(value: &SessionValue) -> Option<&str> {
@@ -680,5 +705,210 @@ fn title_line(text: &str) -> String {
         format!("{}…", kept.trim_end())
     } else {
         kept
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AGENT, OpenCodeStore, read_database};
+    use hofund_plugin_api::{
+        PluginError, SessionDatabase, SessionFile, SessionFormat, SessionRows, SessionStore,
+        SessionValue,
+    };
+    use hofund_plugin_sdk::{
+        chrono::{Local, TimeZone},
+        json,
+    };
+
+    struct CutDatabase {
+        infos: SessionRows,
+    }
+
+    impl SessionDatabase for CutDatabase {
+        fn query(&self, sql: &str, params: &[&str]) -> Result<SessionRows, PluginError> {
+            let normalized = sql.to_ascii_lowercase();
+            if normalized.contains("sqlite_master") {
+                let found = i64::from(params.first().copied() == Some("session"));
+                return Ok(SessionRows::new(
+                    vec![vec![SessionValue::Integer(found)]],
+                    false,
+                ));
+            }
+            if normalized.contains("from session_v2") {
+                return Ok(SessionRows::new(Vec::new(), false));
+            }
+            if normalized.contains("from session") {
+                return Ok(self.infos.clone());
+            }
+            Ok(SessionRows::new(Vec::new(), false))
+        }
+
+        fn revision(&self) -> Result<i64, PluginError> {
+            Ok(1)
+        }
+    }
+
+    struct DailyUsageDatabase {
+        v2: bool,
+        created: i64,
+        completed: i64,
+    }
+
+    impl DailyUsageDatabase {
+        fn infos(&self) -> SessionRows {
+            SessionRows::new(
+                vec![vec![
+                    SessionValue::Text("ses_one".to_owned()),
+                    SessionValue::Text(String::new()),
+                    SessionValue::Text("/work".to_owned()),
+                    SessionValue::Text("one".to_owned()),
+                    SessionValue::Integer(self.created),
+                    SessionValue::Integer(self.completed),
+                ]],
+                false,
+            )
+        }
+
+        fn message(&self) -> String {
+            let time = json::json!({"created": self.created, "completed": self.completed});
+            let tokens = json::json!({"input": 5, "output": 1});
+            let data = if self.v2 {
+                json::json!({"time": time, "model": {"id": "m"}, "tokens": tokens})
+            } else {
+                json::json!({
+                    "role": "assistant",
+                    "modelID": "m",
+                    "time": time,
+                    "tokens": tokens
+                })
+            };
+            json::to_string(&data).expect("message JSON")
+        }
+    }
+
+    impl SessionDatabase for DailyUsageDatabase {
+        fn query(&self, sql: &str, params: &[&str]) -> Result<SessionRows, PluginError> {
+            let normalized = sql.to_ascii_lowercase();
+            if normalized.contains("sqlite_master") {
+                let table = params.first().copied().unwrap_or("");
+                let found = if self.v2 {
+                    table == "session_v2"
+                } else {
+                    matches!(table, "session" | "message")
+                };
+                return Ok(SessionRows::new(
+                    vec![vec![SessionValue::Integer(i64::from(found))]],
+                    false,
+                ));
+            }
+            if normalized.contains("from session_message") && self.v2 {
+                return Ok(SessionRows::new(
+                    vec![vec![
+                        SessionValue::Text("msg_one".to_owned()),
+                        SessionValue::Text("assistant".to_owned()),
+                        SessionValue::Text(self.message()),
+                    ]],
+                    false,
+                ));
+            }
+            if normalized.contains("from session_v2") || normalized.contains("from session") {
+                return Ok(self.infos());
+            }
+            if normalized.contains("from message") && !self.v2 {
+                return Ok(SessionRows::new(
+                    vec![vec![SessionValue::Text(self.message())]],
+                    false,
+                ));
+            }
+            Ok(SessionRows::new(Vec::new(), false))
+        }
+
+        fn revision(&self) -> Result<i64, PluginError> {
+            Ok(1)
+        }
+    }
+
+    #[test]
+    fn database_usage_uses_completion_day_for_v1_and_v2() {
+        let created = Local
+            .with_ymd_and_hms(2026, 1, 1, 23, 59, 59)
+            .single()
+            .expect("created local time")
+            .timestamp_millis();
+        let completed = Local
+            .with_ymd_and_hms(2026, 1, 2, 0, 0, 1)
+            .single()
+            .expect("completed local time")
+            .timestamp_millis();
+        let file = SessionFile::new("database", "opencode.db").with_format(SessionFormat::Sqlite);
+        for v2 in [false, true] {
+            let database = DailyUsageDatabase {
+                v2,
+                created,
+                completed,
+            };
+            let records = read_database(&file, &database).expect("records");
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].days.len(), 1);
+            assert_eq!(records[0].days[0].date, "2026-01-02");
+            assert_eq!(records[0].days[0].tokens.input, 5);
+            assert_eq!(records[0].days[0].tokens.output, 1);
+        }
+    }
+
+    #[test]
+    fn truncated_session_queries_mark_records_cut() {
+        let infos = SessionRows::new(
+            vec![vec![
+                SessionValue::Text("ses_one".to_owned()),
+                SessionValue::Text(String::new()),
+                SessionValue::Text("/work".to_owned()),
+                SessionValue::Text("one".to_owned()),
+                SessionValue::Integer(1),
+                SessionValue::Integer(2),
+            ]],
+            true,
+        );
+        let file = SessionFile::new("database", "opencode.db").with_format(SessionFormat::Sqlite);
+        let records = read_database(&file, &CutDatabase { infos }).expect("records");
+        assert_eq!(records.len(), 1);
+        assert!(
+            records[0].cut,
+            "truncated info query should mark the record cut"
+        );
+        assert_eq!(records[0].id, format!("{AGENT}:ses_one"));
+    }
+
+    #[test]
+    fn absolute_and_relative_database_overrides_are_listed_under_their_parent_root() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let data = temp.path().join("xdg").join("opencode");
+        std::fs::create_dir_all(&data).expect("data");
+        let other = temp.path().join("other");
+        std::fs::create_dir_all(&other).expect("other");
+        let absolute = other.join("custom.db");
+        std::fs::write(&absolute, b"").expect("absolute db");
+        let store = OpenCodeStore::from_parts(data.clone(), absolute.clone());
+        let roots = store.locator().roots();
+        assert!(roots.contains(&data));
+        assert!(roots.contains(&other));
+        let listed = store.files(&other).expect("absolute listing");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].path, absolute);
+        assert_eq!(listed[0].format, SessionFormat::Sqlite);
+        assert_eq!(
+            store.files(&data).expect("default root"),
+            Vec::<SessionFile>::new()
+        );
+
+        let relative = data.join("nested").join("rel.db");
+        std::fs::create_dir_all(relative.parent().expect("parent")).expect("nested");
+        std::fs::write(&relative, b"").expect("relative db");
+        let store = OpenCodeStore::from_parts(data.clone(), relative.clone());
+        let parent = relative.parent().expect("parent").to_path_buf();
+        assert!(store.locator().roots().contains(&parent));
+        let listed = store.files(&parent).expect("relative listing");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].path, relative);
     }
 }

@@ -3,6 +3,7 @@
 //! Requests reject unknown fields. Responses and events accept additive fields
 //! and use unknown enum fallbacks so older clients can read newer peers.
 
+mod accounts;
 mod agents;
 mod checkins;
 mod common;
@@ -14,6 +15,7 @@ mod events;
 mod gateway_keys;
 mod groups;
 mod limits;
+mod logs;
 mod models;
 mod presets;
 mod profiles;
@@ -22,6 +24,7 @@ mod providers;
 mod quotas;
 mod route_view;
 mod sessions;
+mod settings;
 mod shutdown;
 mod spend_caps;
 mod status;
@@ -30,6 +33,7 @@ mod usage;
 mod version;
 mod warmups;
 
+pub use accounts::*;
 pub use agents::*;
 pub use checkins::*;
 pub use common::*;
@@ -41,6 +45,7 @@ pub use events::*;
 pub use gateway_keys::*;
 pub use groups::*;
 pub use limits::*;
+pub use logs::*;
 pub use models::*;
 pub use presets::*;
 pub use profiles::*;
@@ -49,6 +54,7 @@ pub use providers::*;
 pub use quotas::*;
 pub use route_view::*;
 pub use sessions::*;
+pub use settings::*;
 pub use shutdown::*;
 pub use spend_caps::*;
 pub use status::*;

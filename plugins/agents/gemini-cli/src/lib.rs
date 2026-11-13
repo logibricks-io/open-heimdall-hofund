@@ -154,26 +154,46 @@ impl SessionStore for GeminiStore {
         if !gemini_on_path() {
             return None;
         }
-        let id = session_id
-            .strip_prefix(&format!("{AGENT}:"))
-            .unwrap_or(session_id);
-        Some(vec![
-            "gemini".to_owned(),
-            "--resume".to_owned(),
-            id.to_owned(),
-        ])
+        Some(resume_command(session_id))
     }
 }
 
 fn gemini_on_path() -> bool {
+    gemini_in(std::env::var_os("PATH"))
+}
+
+fn gemini_names() -> &'static [&'static str] {
     #[cfg(windows)]
-    let names = ["gemini.exe", "gemini.cmd", "gemini"];
+    {
+        &["gemini.exe", "gemini.cmd", "gemini"]
+    }
     #[cfg(not(windows))]
-    let names = ["gemini"];
-    std::env::var_os("PATH").is_some_and(|path| {
+    {
+        &["gemini"]
+    }
+}
+
+fn gemini_in(path: Option<std::ffi::OsString>) -> bool {
+    let names = gemini_names();
+    path.is_some_and(|path| {
         std::env::split_paths(&path)
             .any(|directory| names.iter().any(|name| directory.join(name).is_file()))
     })
+}
+
+fn resume_command(session_id: &str) -> Vec<String> {
+    let id = session_id
+        .strip_prefix(&format!("{AGENT}:"))
+        .unwrap_or(session_id);
+    vec!["gemini".to_owned(), "--resume".to_owned(), id.to_owned()]
+}
+
+#[cfg(test)]
+fn resume_argv_in(path: Option<std::ffi::OsString>, session_id: &str) -> Option<Vec<String>> {
+    if !gemini_in(path) {
+        return None;
+    }
+    Some(resume_command(session_id))
 }
 
 fn entries(path: &Path) -> Result<Vec<std::fs::DirEntry>, PluginError> {
@@ -326,7 +346,9 @@ impl GeminiState {
             self.messages.remove(&id);
         }
         let order_ids = patch_ids(patch, "OrderIDs");
-        if !order_ids.is_empty() {
+        if order_ids.is_empty() {
+            self.order.retain(|id| self.messages.contains_key(id));
+        } else {
             let mut keep = Vec::new();
             for id in &self.order {
                 if self.messages.contains_key(id) && !order_ids.iter().any(|item| item == id) {
@@ -554,11 +576,281 @@ mod tests {
     }
 
     #[test]
-    fn gemini_resume_is_absent_without_a_binary() {
+    fn gemini_resume_argv_depends_on_the_binary() {
         let store = GeminiStore::with_home(".");
+        let path = Path::new("session.jsonl");
+        if gemini_on_path() {
+            assert_eq!(
+                store.resume_argv("gemini:s", path),
+                Some(vec![
+                    "gemini".to_owned(),
+                    "--resume".to_owned(),
+                    "s".to_owned(),
+                ])
+            );
+        } else {
+            assert_eq!(store.resume_argv("gemini:s", path), None);
+        }
+    }
+
+    #[test]
+    fn present_is_false_without_the_tmp_directory() {
+        let present = GeminiLocator {
+            home: fixture("home"),
+        };
+        assert!(present.present());
+        let missing = GeminiLocator {
+            home: fixture("missing-home"),
+        };
+        assert!(!missing.present());
+    }
+
+    #[test]
+    fn home_paths_are_not_empty() {
+        assert!(!gemini_home().as_os_str().is_empty());
+        assert!(!home_dir().as_os_str().is_empty());
+    }
+
+    #[test]
+    fn gemini_on_path_matches_the_injected_lookup() {
+        assert_eq!(gemini_on_path(), gemini_in(std::env::var_os("PATH")));
+    }
+
+    fn write_gemini_stub(dir: &Path) {
+        #[cfg(windows)]
+        let name = "gemini.exe";
+        #[cfg(not(windows))]
+        let name = "gemini";
+        std::fs::write(dir.join(name), b"").expect("stub");
+    }
+
+    #[test]
+    fn gemini_in_finds_a_named_binary_on_the_injected_path() {
+        let present = tempfile::tempdir().expect("temp dir");
+        write_gemini_stub(present.path());
+        assert!(gemini_in(Some(present.path().into())));
+        let missing = tempfile::tempdir().expect("temp dir");
+        assert!(!gemini_in(Some(missing.path().into())));
+        assert!(!gemini_in(None));
+        assert!(!gemini_in(Some(std::ffi::OsString::new())));
+    }
+
+    #[test]
+    fn resume_argv_in_depends_on_the_injected_path() {
+        let present = tempfile::tempdir().expect("temp dir");
+        write_gemini_stub(present.path());
         assert_eq!(
-            store.resume_argv("gemini:s", Path::new("/tmp/session.jsonl")),
+            resume_argv_in(Some(present.path().into()), "gemini:s"),
+            Some(vec![
+                "gemini".to_owned(),
+                "--resume".to_owned(),
+                "s".to_owned(),
+            ])
+        );
+        let missing = tempfile::tempdir().expect("temp dir");
+        assert_eq!(
+            resume_argv_in(Some(missing.path().into()), "gemini:s"),
             None
         );
+        assert_eq!(resume_argv_in(None, "gemini:s"), None);
+    }
+
+    fn fresh_state() -> GeminiState {
+        GeminiState::new(&SessionFile::new("s0", "session-s0.json"))
+    }
+
+    #[test]
+    fn line_keeps_the_file_id_when_the_session_field_is_empty() {
+        let mut state = fresh_state();
+        assert_eq!(state.record.id, "gemini:s0");
+        state.session.clear();
+        state.line(&json::json!({"type": "noop"}));
+        assert_eq!(state.record.id, "gemini:s0");
+    }
+
+    #[test]
+    fn line_ignores_empty_session_id_and_tracks_time_bounds() {
+        let mut state = fresh_state();
+        state.line(&json::json!({"sessionId": ""}));
+        assert_eq!(state.record.id, "gemini:s0");
+        state.line(&json::json!({"sessionId": "real"}));
+        assert_eq!(state.record.id, "gemini:real");
+        state.put(&json::json!({
+            "id": "a",
+            "type": "user",
+            "timestamp": "2020-01-02T00:00:02Z",
+            "content": "hi"
+        }));
+        state.put(&json::json!({
+            "id": "b",
+            "type": "user",
+            "timestamp": "2020-01-02T00:00:01Z"
+        }));
+        state.put(&json::json!({
+            "id": "",
+            "type": "user",
+            "timestamp": "2020-01-02T00:00:00Z"
+        }));
+        assert_eq!(state.order, ["a", "b"]);
+        let early = chrono::DateTime::parse_from_rfc3339("2020-01-02T00:00:01Z")
+            .expect("rfc3339")
+            .timestamp_millis();
+        let late = chrono::DateTime::parse_from_rfc3339("2020-01-02T00:00:02Z")
+            .expect("rfc3339")
+            .timestamp_millis();
+        assert_eq!(state.record.start_ms, early);
+        assert_eq!(state.record.last_ms, late);
+        assert_eq!(state.prompt, "hi");
+    }
+
+    #[test]
+    fn rebuild_usage_skips_non_gemini_or_empty_model() {
+        let mut state = fresh_state();
+        state.put(&json::json!({
+            "id": "g",
+            "type": "gemini",
+            "model": "m",
+            "timestamp": "2020-01-02T00:00:00Z",
+            "tokens": {"input": 4, "output": 1, "cached": 1}
+        }));
+        state.put(&json::json!({
+            "id": "u",
+            "type": "user",
+            "model": "m",
+            "timestamp": "2020-01-02T00:00:01Z",
+            "tokens": {"input": 9, "output": 9}
+        }));
+        state.put(&json::json!({
+            "id": "e",
+            "type": "gemini",
+            "model": "",
+            "timestamp": "2020-01-02T00:00:02Z",
+            "tokens": {"input": 9, "output": 9}
+        }));
+        state.rebuild_usage();
+        let tokens = state.record.tokens();
+        assert_eq!(tokens.input, 3);
+        assert_eq!(tokens.output, 1);
+        assert_eq!(state.record.models.get("m").map(|item| item.input), Some(3));
+    }
+
+    #[test]
+    fn patch_removes_ids_and_patch_ids_reads_arrays() {
+        assert_eq!(
+            patch_ids(&json::json!({"RemoveIDs": ["a", "b"]}), "RemoveIDs"),
+            ["a", "b"]
+        );
+        assert_eq!(
+            patch_ids(&json::json!({}), "RemoveIDs"),
+            Vec::<String>::new()
+        );
+        let mut state = fresh_state();
+        state.put(&json::json!({"id": "a", "type": "user", "timestamp": "2020-01-02T00:00:00Z"}));
+        state.put(&json::json!({"id": "b", "type": "user", "timestamp": "2020-01-02T00:00:01Z"}));
+        state.patch(&json::json!({"RemoveIDs": ["a"]}));
+        assert!(!state.messages.contains_key("a"));
+        assert!(state.messages.contains_key("b"));
+        assert_eq!(state.order, ["b"]);
+    }
+
+    #[test]
+    fn remove_then_re_add_does_not_double_count_usage() {
+        let message = json::json!({
+            "id": "a",
+            "type": "gemini",
+            "model": "m",
+            "timestamp": "2020-01-02T00:00:00Z",
+            "tokens": {"input": 5, "output": 1}
+        });
+        let mut state = fresh_state();
+        state.put(&message);
+        state.patch(&json::json!({"RemoveIDs": ["a"]}));
+        assert!(!state.messages.contains_key("a"));
+        assert!(!state.order.iter().any(|id| id == "a"));
+        state.put(&message);
+        state.rebuild_usage();
+        assert_eq!(state.order, ["a"]);
+        let tokens = state.record.tokens();
+        assert_eq!(tokens.input, 5);
+        assert_eq!(tokens.output, 1);
+    }
+
+    #[test]
+    fn locator_roots_return_the_configured_home() {
+        let store = GeminiStore::with_home("/tmp/gemini-home");
+        assert_eq!(store.locator().roots(), [PathBuf::from("/tmp/gemini-home")]);
+    }
+
+    #[test]
+    fn set_applies_before_patch_on_the_same_value() {
+        let mut state = fresh_state();
+        state.line(&json::json!({
+            "$set": {
+                "sessionId": "s1",
+                "messages": [
+                    {
+                        "id": "a",
+                        "type": "user",
+                        "content": "drop",
+                        "timestamp": "2020-01-02T00:00:00Z"
+                    },
+                    {
+                        "id": "b",
+                        "type": "user",
+                        "content": "keep",
+                        "timestamp": "2020-01-02T00:00:01Z"
+                    }
+                ]
+            },
+            "$patch": { "RemoveIDs": ["a"] }
+        }));
+        assert_eq!(state.session, "s1");
+        assert_eq!(state.record.id, "gemini:s1");
+        // $set must run first so RemoveIDs can see message "a" and remove it
+        // from both the message map and the order.
+        assert!(!state.messages.contains_key("a"));
+        assert!(state.messages.contains_key("b"));
+        assert_eq!(state.order, ["b"]);
+    }
+
+    #[test]
+    fn empty_set_session_id_is_ignored() {
+        let mut state = fresh_state();
+        state.line(&json::json!({ "$set": { "sessionId": "" } }));
+        assert_eq!(state.session, "s0");
+        assert_eq!(state.record.id, "gemini:s0");
+        state.line(&json::json!({ "$set": { "sessionId": "real" } }));
+        assert_eq!(state.session, "real");
+        assert_eq!(state.record.id, "gemini:real");
+    }
+
+    #[test]
+    fn line_puts_only_when_id_and_type_are_both_present() {
+        let mut state = fresh_state();
+        state.line(&json::json!({"id": "only-id"}));
+        state.line(&json::json!({"type": "user"}));
+        assert_eq!(state.order, Vec::<String>::new());
+        state.line(&json::json!({
+            "id": "ok",
+            "type": "user",
+            "content": "hi",
+            "timestamp": "2020-01-02T00:00:00Z"
+        }));
+        assert_eq!(state.order, ["ok"]);
+    }
+
+    #[test]
+    fn patch_order_ids_keep_leftovers_then_the_named_ids() {
+        let mut state = fresh_state();
+        for (id, content) in [("a", "one"), ("b", "two"), ("c", "three")] {
+            state.put(&json::json!({
+                "id": id,
+                "type": "user",
+                "content": content,
+                "timestamp": "2020-01-02T00:00:00Z"
+            }));
+        }
+        state.patch(&json::json!({ "OrderIDs": ["c", "a"] }));
+        assert_eq!(state.order, ["b", "c", "a"]);
     }
 }

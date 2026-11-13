@@ -831,32 +831,16 @@ async fn reload_listen_with_hofund_addr_reports_not_applied_env_override() {
 
     let scratch = Scratch::new("relisten-env");
     let original = config("");
+    let env = free_addr();
     let binds = Arc::new(AtomicUsize::new(0));
-    // `free_addr` drops the probe socket before the daemon binds, so another
-    // test can take the port. Retry with a fresh address on EADDRINUSE.
-    let (running, env) = {
-        let mut started = None;
-        for _ in 0..8 {
-            let env = free_addr();
-            let counter = Arc::clone(&binds);
-            let mut options = options(&scratch);
-            options.hofund_addr = Some(format!(" {env} "));
-            options.relisten_hook = Some(hofund_daemon::BindHook::new(move |_| {
-                counter.fetch_add(1, Ordering::SeqCst);
-                Ok(())
-            }));
-            std::fs::write(scratch.path(), &original).expect("config");
-            match start_with_options(&scratch.path(), options).await {
-                Ok(running) => {
-                    started = Some((running, env));
-                    break;
-                }
-                Err(err) if err.to_string().contains("Address already in use") => continue,
-                Err(err) => panic!("daemon: {err:?}"),
-            }
-        }
-        started.expect("could not bind a free HOFUND_ADDR after retries")
-    };
+    let counter = Arc::clone(&binds);
+    let mut options = options(&scratch);
+    options.hofund_addr = Some(format!(" {env} "));
+    options.relisten_hook = Some(hofund_daemon::BindHook::new(move |_| {
+        counter.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }));
+    let running = start_with(&scratch.path(), &original, options).await;
     let client = Client::new(&running, &scratch);
     assert_eq!(running.listen_addr(), env);
 
@@ -899,5 +883,44 @@ async fn reload_listen_with_hofund_addr_reports_not_applied_env_override() {
         ] => assert_eq!(first.not_applied, applied.not_applied),
         other => panic!("expected config_reloaded/snapshot_published pairs, got {other:?}"),
     }
+    support::shutdown(running).await;
+}
+
+#[tokio::test]
+async fn r22_apply_and_reload_replace_allow_list_and_trust_proxy_without_restart() {
+    let scratch = Scratch::new("network-access-reload");
+    let original = config("allow_ips = [\"192.0.2.1\"]\ntrust_proxy = false\n");
+    let running = start_with(&scratch.path(), &original, options(&scratch)).await;
+    let client = Client::new(&running, &scratch);
+    let initial = client.status().await;
+    assert_eq!(initial.model_listener.allow_ips, ["192.0.2.1"]);
+    assert!(!initial.model_listener.trust_proxy);
+    assert!(!initial.model_listener.allow_ips_invalid);
+
+    let applied_text = config("allow_ips = [\"198.51.100.9/24\"]\ntrust_proxy = true\n");
+    let (status, body) = client.apply(&revision(&original), &applied_text).await;
+    ok(status, &body);
+    let applied = client.status().await;
+    assert_eq!(applied.model_listener.allow_ips, ["198.51.100.0/24"]);
+    assert!(applied.model_listener.trust_proxy);
+    assert!(!applied.model_listener.allow_ips_invalid);
+
+    let reloaded_text = config("allow_ips = [\"203.0.113.7\"]\ntrust_proxy = false\n");
+    std::fs::write(scratch.path(), &reloaded_text).expect("hand edit");
+    let (status, body) = client.reload(&revision(&reloaded_text)).await;
+    ok(status, &body);
+    let reloaded = client.status().await;
+    assert_eq!(reloaded.model_listener.allow_ips, ["203.0.113.7"]);
+    assert!(!reloaded.model_listener.trust_proxy);
+    assert!(!reloaded.model_listener.allow_ips_invalid);
+
+    let (status, body) = client
+        .apply(
+            &revision(&reloaded_text),
+            &config("allow_ips = [\"not-an-ip\"]\n"),
+        )
+        .await;
+    assert_eq!(failure(status, &body, 422), ControlErrorKind::InvalidConfig);
+    assert!(String::from_utf8_lossy(&body).contains("not-an-ip"));
     support::shutdown(running).await;
 }
