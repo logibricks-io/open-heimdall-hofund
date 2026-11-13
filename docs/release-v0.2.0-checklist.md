@@ -10,10 +10,10 @@ happens. This page is the v0.2.0-specific preflight: what still remains
 to cut the tag, what a dry-run must prove, and which smoke stays with Palmer.
 
 The reference freeze for this release is the inspiration project's `v0.1.3005` (`6abacd46`).
-hofund `main` at the time of writing is `74dbebbc` (R-34: session resume argv
-and Pi-to-omp carry, #798, 2026-11-13). Workspace version strings still say
-`0.1.0`. **v0.2.0 is not tagged, and no GitHub Release has been published
-from this tree.**
+hofund `main` at the time of writing is `f320d119` (Must #11 documentation
+honesty, #776, 2026-11-13, which sits on R-34 `74dbebbc`). Workspace version
+strings still say `0.1.0`. **v0.2.0 is not tagged, and no GitHub Release has
+been published from this tree.**
 
 ## What this pull request does not do
 
@@ -29,17 +29,16 @@ from this tree.**
 
 ## Honest preflight (2026-11-13)
 
-Scores and user-facing honesty for what is on `main` are the subject of
-Must #11,
-[PR #776](https://github.com/logibricks-io/open-heimdall-hofund/pull/776)
-(`feat/must11-docs-honesty`). Land that pull request (or equivalent wording)
-before the tag so the tagged docs match the landed surface.
+Scores and user-facing honesty for what is on `main` landed as Must #11
+([PR #776](https://github.com/logibricks-io/open-heimdall-hofund/pull/776),
+squash `f320d119`). The tagged docs must keep matching the landed surface;
+this checklist does not replace that invariant.
 
 Most subscription and routing work is verified with mocks only.
 
 ### Already on `main` (do not redo)
 
-| Must item | State on `74dbebbc` (2026-11-13) |
+| Must item | State on `f320d119` (2026-11-13) |
 | --- | --- |
 | Usage reports 9.4 / 9.9 | Merged (#665) |
 | D-71, D-73, D-74, D-75 | Merged (R-4) |
@@ -60,12 +59,12 @@ Most subscription and routing work is verified with mocks only.
 | R-25 stability follow-ups | Merged (#751, #752) |
 | 15.3 TUI Providers / Agents | Merged (#740) |
 | Sessions R-29–R-34 and TUI Sessions (R-44) | Merged (#792, #794–#799). Library writes and true 4.2–4.4 recording/MCP execution are not on `main`. |
+| #776 Must #11 documentation honesty + #274 | Merged (`f320d119`). Snapshot counts and user-facing docs match the landed surface. |
 
 ### Still open or unstarted at the cut (re-check before tagging)
 
 | Item | State |
 | --- | --- |
-| #776 Must #11 documentation honesty + #274 | Open docs PR; should land before the tag. |
 | #777 (this PR) Must #12 checklist only | Open docs PR; does not bump or tag. |
 | Library writes (row 6 / R-35+) | No open implementation PR. Palmer included Library in the v0.2.0 scope; it is unstarted. |
 | True 4.2–4.4 session recording / capture, library mutate, MCP execution | Held. |
@@ -109,7 +108,7 @@ the to-be-tagged commit, with **0.2.0**:
 3. Move notes from `[Unreleased]` in `CHANGELOG.md` to
    `[0.2.0] - YYYY-MM-DD`. Be honest about what is on that commit: Cursor
    R-8/R-9, Claude H8, and Devin R-12/R-13 request serving are already on
-   `74dbebbc` (mocks only). Keep Kiro as unary text-only unless a later
+   `f320d119` (mocks only). Keep Kiro as unary text-only unless a later
    change landed. Do not list Library writes or true 4.2–4.4 recording/MCP
    execution as released.
 4. Commit those files. The tag is created from that commit, not from a
