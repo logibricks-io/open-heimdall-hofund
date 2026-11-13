@@ -4,7 +4,9 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::time::Duration;
 
-use hofund_control_client::hofund_control_proto::AgentAction;
+use hofund_control_client::hofund_control_proto::{
+    AgentAction, GroupCreateRequest, GroupPatchRequest,
+};
 
 /// Credential text that debug output never prints.
 #[derive(Clone, PartialEq, Eq)]
@@ -276,6 +278,47 @@ pub enum ControlIntent {
         /// New name.
         to: String,
     },
+    /// `GET /groups`.
+    LoadGroups {
+        /// Read generation.
+        generation: u64,
+    },
+    /// `GET /groups/member-candidates` for a member or classifier picker.
+    LoadGroupCandidates {
+        /// Identifies this picker read.
+        token: u64,
+    },
+    /// Reads recent decisions, one session, and unrouted holds.
+    LoadRouteView {
+        /// Read generation.
+        generation: u64,
+    },
+    /// `POST /groups`.
+    CreateGroup {
+        /// Create body.
+        request: GroupCreateRequest,
+    },
+    /// `PATCH /groups/{id}`.
+    PatchGroup {
+        /// Group id before an optional rename.
+        id: String,
+        /// Single-field or ordered-list patch.
+        request: GroupPatchRequest,
+    },
+    /// `DELETE /groups/{id}`.
+    DeleteGroup {
+        /// Group id.
+        id: String,
+        /// Expected disk revision.
+        revision: String,
+    },
+    /// `POST /groups/{id}/restore`.
+    RestoreGroup {
+        /// Hidden found group id.
+        id: String,
+        /// Expected disk revision.
+        revision: String,
+    },
     /// `POST /catalog/sync`.
     CatalogSync {
         /// Fetch even when an index is already loaded.
@@ -474,6 +517,36 @@ impl fmt::Debug for ControlIntent {
                 .field("from", from)
                 .field("to", to)
                 .finish(),
+            Self::LoadGroups { generation } => formatter
+                .debug_struct("LoadGroups")
+                .field("generation", generation)
+                .finish(),
+            Self::LoadGroupCandidates { token } => formatter
+                .debug_struct("LoadGroupCandidates")
+                .field("token", token)
+                .finish(),
+            Self::LoadRouteView { generation } => formatter
+                .debug_struct("LoadRouteView")
+                .field("generation", generation)
+                .finish(),
+            Self::CreateGroup { request } => formatter
+                .debug_struct("CreateGroup")
+                .field("name", &request.name)
+                .field("first_member", &request.first_member)
+                .finish(),
+            Self::PatchGroup { id, request } => formatter
+                .debug_struct("PatchGroup")
+                .field("id", id)
+                .field("request", request)
+                .finish(),
+            Self::DeleteGroup { id, .. } => formatter
+                .debug_struct("DeleteGroup")
+                .field("id", id)
+                .finish(),
+            Self::RestoreGroup { id, .. } => formatter
+                .debug_struct("RestoreGroup")
+                .field("id", id)
+                .finish(),
             Self::CatalogSync { force } => formatter
                 .debug_struct("CatalogSync")
                 .field("force", force)
@@ -495,6 +568,9 @@ impl ControlIntent {
             | Self::RefreshModels { .. }
             | Self::LoadRouteModels { .. }
             | Self::LoadAgentModels { .. }
+            | Self::LoadGroups { .. }
+            | Self::LoadGroupCandidates { .. }
+            | Self::LoadRouteView { .. }
             | Self::LoadBalances
             | Self::LoadUsage { .. }
             | Self::LoadUsageSettings { .. }
@@ -516,6 +592,9 @@ impl ControlIntent {
                 | Self::OpenModels { .. }
                 | Self::LoadRouteModels { .. }
                 | Self::LoadAgentModels { .. }
+                | Self::LoadGroups { .. }
+                | Self::LoadGroupCandidates { .. }
+                | Self::LoadRouteView { .. }
                 | Self::LoadBalances
                 | Self::LoadUsage { .. }
                 | Self::LoadUsageSettings { .. }
@@ -538,6 +617,8 @@ impl ControlIntent {
             | Self::LoadQuotaAlerts { generation }
             | Self::LoadRouteModels { generation, .. }
             | Self::LoadAgentModels { generation, .. }
+            | Self::LoadGroups { generation }
+            | Self::LoadRouteView { generation }
                 if *generation == 0 =>
             {
                 *generation = current;
