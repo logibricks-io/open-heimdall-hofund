@@ -111,9 +111,9 @@ pub use records::{
 pub use redaction::{redact_token, safe_url};
 pub use secrecy::SecretString;
 pub use session::{
-    SessionCompression, SessionDay, SessionFile, SessionLocator, SessionParse, SessionParser,
-    SessionPart, SessionRecord, SessionStore, SessionTokens, SessionTranscript,
-    SessionTranscriptParser, SessionUsageEvent,
+    SessionCompression, SessionDatabase, SessionDay, SessionFile, SessionFormat, SessionLocator,
+    SessionParse, SessionParser, SessionPart, SessionRecord, SessionRows, SessionStore,
+    SessionTokens, SessionTranscript, SessionTranscriptParser, SessionUsageEvent, SessionValue,
 };
 pub use subscription::{DynSubscriptionFactory, Subscription, SubscriptionFactory};
 pub use upstream::{
