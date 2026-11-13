@@ -41,6 +41,14 @@ pub(crate) fn timeout_before_text(error: PluginError) -> PluginError {
     }
 }
 
+/// Cursor's refusal of a model asked for without Max Mode.
+///
+/// Matches `max[ _]mode[ _]required` or `requires max mode`, case-insensitive.
+pub(crate) fn max_required(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("requires max mode") || lower.replace('_', " ").contains("max mode required")
+}
+
 /// Maps a Connect trailer without requiring a socket or a transport error.
 pub(crate) fn trailer(payload: &[u8]) -> PluginError {
     match connect_fields(payload) {

@@ -33,6 +33,8 @@ pub(crate) struct CursorUpstream {
     limits: Limits,
     #[cfg(test)]
     test_conversation_id: Option<String>,
+    #[cfg(test)]
+    mapped_max_mode: Mutex<Vec<bool>>,
 }
 
 impl CursorUpstream {
@@ -57,15 +59,45 @@ impl CursorUpstream {
             limits: Limits::default(),
             #[cfg(test)]
             test_conversation_id: None,
+            #[cfg(test)]
+            mapped_max_mode: Mutex::new(Vec::new()),
         }
     }
 
-    fn mapped_request(&self, request: &Request) -> Result<request::MappedRequest, PluginError> {
+    fn mapped_request(
+        &self,
+        request: &Request,
+        max_mode: bool,
+        conversation_id: Option<&str>,
+    ) -> Result<request::MappedRequest, PluginError> {
+        let conversation_id = {
+            #[cfg(test)]
+            {
+                conversation_id.or(self.test_conversation_id.as_deref())
+            }
+            #[cfg(not(test))]
+            {
+                conversation_id
+            }
+        };
+        let mapped = request::map_with_mode(request, conversation_id, max_mode)?;
         #[cfg(test)]
-        if let Some(id) = self.test_conversation_id.as_deref() {
-            return request::map_with_conversation(request, id);
-        }
-        request::map(request)
+        self.mapped_max_mode
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(max_mode);
+        Ok(mapped)
+    }
+
+    /// Max Mode flags used by each [`Self::mapped_request`] call on this instance.
+    #[cfg(test)]
+    fn take_mapped_max_mode(&self) -> Vec<bool> {
+        std::mem::take(
+            &mut *self
+                .mapped_max_mode
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
     }
 }
 
@@ -77,9 +109,6 @@ impl UpstreamProvider for CursorUpstream {
         inbound: ProtocolId,
     ) -> Result<Completion, PluginError> {
         let model = request.model.clone();
-        let mapped = self.mapped_request(&request)?;
-        let tools = mapped.tools.clone();
-        let conversation_id = mapped.conversation_id.clone();
         let token = session::access_token(
             &self.host,
             &self.endpoints,
@@ -94,104 +123,120 @@ impl UpstreamProvider for CursorUpstream {
             .map(|id| format!("msg_{id}"))
             .map_err(|error| PluginError::io(format!("cannot create a response id: {error}")))?;
         let team_id = team::header_value(&token);
-        let mut args = mapped.into_args(team_id.clone());
-        args.limits = self.limits;
-        let mut retried = false;
-        'runs: loop {
-            let since_ms = crate::tokens::unix_ms(self.host.clock().now());
-            let attempt = run_stream(
-                &self.host,
-                &self.endpoints,
-                &self.agent_host,
-                &token,
-                args.clone(),
-            )
-            .await?;
-            let http1 = attempt.http1;
-            let agent_url = attempt.agent_url;
-            let mut run = attempt.stream;
+        let mut max_mode = crate::max_only::contains(&model);
+        let mut conversation_id_hold: Option<String> = None;
+        let mut retried_max = false;
+        'max: loop {
+            let mapped =
+                self.mapped_request(&request, max_mode, conversation_id_hold.as_deref())?;
+            let tools = mapped.tools.clone();
+            let conversation_id = mapped.conversation_id.clone();
+            conversation_id_hold = Some(conversation_id.clone());
+            let mut args = mapped.into_args(team_id.clone());
+            args.limits = self.limits;
+            let mut retried = false;
+            'runs: loop {
+                let since_ms = crate::tokens::unix_ms(self.host.clock().now());
+                let attempt = run_stream(
+                    &self.host,
+                    &self.endpoints,
+                    &self.agent_host,
+                    &token,
+                    args.clone(),
+                )
+                .await?;
+                let http1 = attempt.http1;
+                let agent_url = attempt.agent_url;
+                let mut run = attempt.stream;
 
-            while let Some(event) = run.next().await {
-                let error = match event {
-                    Ok(RunEvent::Server(ServerEvent::TextDelta(text))) => {
-                        return Ok(completion_stream(
-                            run,
-                            response_id,
-                            model,
-                            tools,
-                            stream_context(
-                                self,
-                                token.clone(),
-                                conversation_id,
-                                inbound,
-                                team_id.clone(),
-                                since_ms,
-                            ),
-                            FirstOutput::Text(text),
-                        ));
+                while let Some(event) = run.next().await {
+                    let error = match event {
+                        Ok(RunEvent::Server(ServerEvent::TextDelta(text))) => {
+                            return Ok(completion_stream(
+                                run,
+                                response_id,
+                                model,
+                                tools,
+                                stream_context(
+                                    self,
+                                    token.clone(),
+                                    conversation_id,
+                                    inbound,
+                                    team_id.clone(),
+                                    since_ms,
+                                ),
+                                FirstOutput::Text(text),
+                            ));
+                        }
+                        Ok(RunEvent::Server(ServerEvent::ThinkingDelta(text))) => {
+                            return Ok(completion_stream(
+                                run,
+                                response_id,
+                                model,
+                                tools,
+                                stream_context(
+                                    self,
+                                    token.clone(),
+                                    conversation_id,
+                                    inbound,
+                                    team_id.clone(),
+                                    since_ms,
+                                ),
+                                FirstOutput::Thinking(text),
+                            ));
+                        }
+                        Ok(RunEvent::Server(ServerEvent::Exec(request)))
+                            if is_caller_call(&tools, &request) =>
+                        {
+                            return Ok(completion_stream(
+                                run,
+                                response_id,
+                                model,
+                                tools,
+                                stream_context(
+                                    self,
+                                    token.clone(),
+                                    conversation_id,
+                                    inbound,
+                                    team_id.clone(),
+                                    since_ms,
+                                ),
+                                FirstOutput::Tool(request),
+                            ));
+                        }
+                        Ok(RunEvent::Server(ServerEvent::TurnEnd(_))) => return Err(empty_reply()),
+                        Ok(RunEvent::Server(_)) | Ok(RunEvent::ToolStepEnd) => continue,
+                        Ok(RunEvent::Trailer(frame)) => failure::trailer(&frame.payload),
+                        Ok(RunEvent::ErrorBody { status, body }) => failure::body(status, &body),
+                        Err(error) => failure::timeout_before_text(error),
+                    };
+                    if !retried && failure::regional(error.message()) {
+                        crate::http2_memory::clear();
+                        let fresh = self
+                            .agent_host
+                            .resolve(
+                                &self.host,
+                                &self.endpoints,
+                                &token,
+                                true,
+                                args.team_id.as_deref(),
+                            )
+                            .await;
+                        if http1 || fresh != agent_url {
+                            retried = true;
+                            continue 'runs;
+                        }
                     }
-                    Ok(RunEvent::Server(ServerEvent::ThinkingDelta(text))) => {
-                        return Ok(completion_stream(
-                            run,
-                            response_id,
-                            model,
-                            tools,
-                            stream_context(
-                                self,
-                                token.clone(),
-                                conversation_id,
-                                inbound,
-                                team_id.clone(),
-                                since_ms,
-                            ),
-                            FirstOutput::Thinking(text),
-                        ));
+                    if !retried_max && !max_mode && failure::max_required(error.message()) {
+                        crate::max_only::remember(&model);
+                        max_mode = true;
+                        retried_max = true;
+                        continue 'max;
                     }
-                    Ok(RunEvent::Server(ServerEvent::Exec(request)))
-                        if is_caller_call(&tools, &request) =>
-                    {
-                        return Ok(completion_stream(
-                            run,
-                            response_id,
-                            model,
-                            tools,
-                            stream_context(
-                                self,
-                                token.clone(),
-                                conversation_id,
-                                inbound,
-                                team_id.clone(),
-                                since_ms,
-                            ),
-                            FirstOutput::Tool(request),
-                        ));
-                    }
-                    Ok(RunEvent::Server(ServerEvent::TurnEnd(_))) => return Err(empty_reply()),
-                    Ok(RunEvent::Server(_)) | Ok(RunEvent::ToolStepEnd) => continue,
-                    Ok(RunEvent::Trailer(frame)) => failure::trailer(&frame.payload),
-                    Ok(RunEvent::ErrorBody { status, body }) => failure::body(status, &body),
-                    Err(error) => failure::timeout_before_text(error),
-                };
-                if !retried && failure::regional(error.message()) {
-                    crate::http2_memory::clear();
-                    let fresh = self
-                        .agent_host
-                        .resolve(
-                            &self.host,
-                            &self.endpoints,
-                            &token,
-                            true,
-                            args.team_id.as_deref(),
-                        )
-                        .await;
-                    if http1 || fresh != agent_url {
-                        retried = true;
-                        continue 'runs;
-                    }
+                    return Err(error);
                 }
-                return Err(error);
+                return Err(empty_reply());
             }
-            return Err(empty_reply());
         }
     }
 
@@ -1734,6 +1779,10 @@ mod tests {
             ])
             .await;
             let h1 = Http1Server::start(vec![config_reply(h2.base_url())]).await;
+            // Let the current-thread accept loops enter accept() before the
+            // client connects. A paused runtime can otherwise auto-advance a
+            // connect timeout and fail execute() with `error sending request`.
+            yield_times(2).await;
             let host = pooled_host();
             let account = store_account(&host).await;
             let mut upstream = upstream(&host, &h1, h2.base_url(), account);
@@ -2040,7 +2089,10 @@ mod tests {
 
     async fn advance_until_usage_polls(h1: &Http1Server, want: usize) {
         let path = "/aiserver.v1.DashboardService/GetFilteredUsageEvents";
-        for _ in 0..40 {
+        // Yield so execute can run, then step the paused clock for first-wait
+        // and retry sleeps. Check after each yield so a first poll with a zero
+        // first-wait is visible before further clock jumps.
+        for _ in 0..200 {
             let seen = h1
                 .requests()
                 .iter()
@@ -2050,8 +2102,22 @@ mod tests {
                 return;
             }
             yield_times(2).await;
-            advance_time(Duration::from_millis(100)).await;
+            let seen = h1
+                .requests()
+                .iter()
+                .filter(|request| request.path() == path)
+                .count();
+            if seen >= want {
+                return;
+            }
+            advance_time(Duration::from_millis(50)).await;
         }
+        let seen = h1
+            .requests()
+            .iter()
+            .filter(|request| request.path() == path)
+            .count();
+        panic!("timed out waiting for {want} usage polls, saw {seen}");
     }
 
     fn last_message_usage(events: &[StreamEvent]) -> Option<&Usage> {
@@ -2337,5 +2403,170 @@ mod tests {
                 hofund_plugin_sdk::json::from_slice(poll.body()).expect("body");
             assert_eq!(body["teamId"], 42);
         });
+    }
+
+    fn max_model_request() -> Request {
+        Request::new("gpt-5.6-luna-high").with_messages(vec![Message::new(Role::User)])
+    }
+
+    fn max_required_trailer(model: &str) -> Vec<u8> {
+        let detail = format!(
+            "The model \"{model}\" requires Max Mode to be enabled. Please enable Max Mode and try again."
+        );
+        let payload = json!({
+            "error": {
+                "code": "failed_precondition",
+                "message": "Error",
+                "details": [{
+                    "debug": {
+                        "error": "ERROR_MAX_MODE_REQUIRED",
+                        "details": {
+                            "title": "Max Mode Required",
+                            "detail": detail
+                        }
+                    }
+                }]
+            }
+        });
+        frame::encode(frame::FLAG_TRAILER, payload.to_string().as_bytes()).expect("trailer")
+    }
+
+    #[test]
+    fn max_required_retries_once_with_max_mode_bits_and_is_remembered() {
+        let _http2 = http2_memory::test_lock();
+        http2_memory::reset_for_tests();
+        let _max = crate::max_only::test_lock();
+        crate::max_only::clear();
+        block_on(async {
+            let success = [text_frame("hi"), turn_end_frame()].concat();
+            let h2 = Http2Server::start(vec![
+                Http2Response::new(200)
+                    .data(max_required_trailer("gpt-5.6-luna-high"))
+                    .hold_open(),
+                Http2Response::new(200).data(success.clone()),
+                Http2Response::new(200).data(success),
+            ])
+            .await;
+            let h1 = Http1Server::start(vec![
+                config_reply(h2.base_url()),
+                config_reply(h2.base_url()),
+            ])
+            .await;
+            let host = pooled_host();
+            let account = store_account(&host).await;
+            let upstream = upstream(&host, &h1, h2.base_url(), account);
+            let Completion::Stream(stream) = upstream
+                .execute(max_model_request(), ProtocolId::OPENAI_CHAT)
+                .await
+                .expect("retry succeeds; the router does not see the first failure")
+            else {
+                panic!("stream");
+            };
+            let events = collect(Completion::Stream(stream)).await.expect("events");
+            assert!(
+                events.iter().any(|event| matches!(
+                    event,
+                    StreamEvent::TextDelta(TextDelta { text, .. }) if text == "hi"
+                )),
+                "{events:?}"
+            );
+            assert_eq!(
+                upstream.take_mapped_max_mode(),
+                [false, true],
+                "first attempt is off; the retry is Max Mode"
+            );
+            assert_eq!(
+                h2.requests().len(),
+                2,
+                "one refusal then one Max Mode retry"
+            );
+
+            let Completion::Stream(stream) = upstream
+                .execute(max_model_request(), ProtocolId::OPENAI_CHAT)
+                .await
+                .expect("remembered id starts in Max Mode")
+            else {
+                panic!("stream");
+            };
+            drop(collect(Completion::Stream(stream)).await.expect("second"));
+            assert_eq!(
+                upstream.take_mapped_max_mode(),
+                [true],
+                "later execute is a single Max Mode Run"
+            );
+            assert_eq!(
+                h2.requests().len(),
+                3,
+                "later execute is a single Max Mode Run"
+            );
+        });
+        crate::max_only::clear();
+    }
+
+    #[test]
+    fn already_max_mode_does_not_retry_a_second_max_required_failure() {
+        let _http2 = http2_memory::test_lock();
+        http2_memory::reset_for_tests();
+        let _max = crate::max_only::test_lock();
+        crate::max_only::clear();
+        crate::max_only::remember("gpt-5.6-luna-high");
+        block_on(async {
+            let h2 = Http2Server::start(vec![
+                Http2Response::new(200)
+                    .data(max_required_trailer("gpt-5.6-luna-high"))
+                    .hold_open(),
+            ])
+            .await;
+            let h1 = Http1Server::start(vec![config_reply(h2.base_url())]).await;
+            let host = pooled_host();
+            let account = store_account(&host).await;
+            let upstream = upstream(&host, &h1, h2.base_url(), account);
+            let error = upstream
+                .execute(max_model_request(), ProtocolId::OPENAI_CHAT)
+                .await
+                .map(|_| ())
+                .expect_err("already Max Mode is not retried");
+            assert_eq!(error.status(), Some(502));
+            assert!(
+                crate::failure::max_required(error.message()),
+                "{}",
+                error.message()
+            );
+            assert_eq!(upstream.take_mapped_max_mode(), [true]);
+            assert_eq!(h2.requests().len(), 1);
+        });
+        crate::max_only::clear();
+    }
+
+    #[test]
+    fn a_non_max_required_error_is_not_retried_as_max_mode() {
+        let _http2 = http2_memory::test_lock();
+        http2_memory::reset_for_tests();
+        let _max = crate::max_only::test_lock();
+        crate::max_only::clear();
+        block_on(async {
+            let trailer = frame::encode(
+                frame::FLAG_TRAILER,
+                br#"{"error":{"code":"internal","message":"upstream exploded"}}"#,
+            )
+            .expect("trailer");
+            let h2 =
+                Http2Server::start(vec![Http2Response::new(200).data(trailer).hold_open()]).await;
+            let h1 = Http1Server::start(vec![config_reply(h2.base_url())]).await;
+            let host = pooled_host();
+            let account = store_account(&host).await;
+            let upstream = upstream(&host, &h1, h2.base_url(), account);
+            let error = upstream
+                .execute(max_model_request(), ProtocolId::OPENAI_CHAT)
+                .await
+                .map(|_| ())
+                .expect_err("unrelated failure");
+            assert_eq!(error.status(), Some(502));
+            assert!(error.message().contains("upstream exploded"));
+            assert_eq!(upstream.take_mapped_max_mode(), [false]);
+            assert_eq!(h2.requests().len(), 1);
+            assert!(!crate::max_only::contains("gpt-5.6-luna-high"));
+        });
+        crate::max_only::clear();
     }
 }

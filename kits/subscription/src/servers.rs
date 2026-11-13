@@ -175,6 +175,10 @@ impl Http1Server {
                 }
             }
         });
+        // Current-thread test runtimes do not poll this accept task until the
+        // caller awaits. Yield once so the listener is already in accept()
+        // before execute() starts a connect.
+        tokio::task::yield_now().await;
         Self {
             base_url: format!("http://{address}"),
             requests,
@@ -538,6 +542,10 @@ impl Http2Server {
                 }
             }
         });
+        // Current-thread test runtimes do not poll this accept task until the
+        // caller awaits. Yield once so the listener is already in accept()
+        // before execute() starts a connect.
+        tokio::task::yield_now().await;
         Self {
             base_url: format!("http://{address}"),
             port: address.port(),

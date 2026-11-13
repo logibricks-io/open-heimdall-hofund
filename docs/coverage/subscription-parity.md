@@ -99,23 +99,23 @@ Every other gap below maps to an existing plan item.
 | b | import sources | Agent home `.cursor` auth + keychain | `AgentSignIn` + discover (`lib.rs:37-41`) | Partial | Team id from cli-config for billing (`cursor/index.mjs:120-177`) |
 | c | token storage | Plugin session store; core mover side logins | Daemon secret blob + optional agent read-only | Partial | Persist team/active org metadata if needed for quota |
 | d | refresh | `cursor-agent status` / token TTL (`cursor/index.mjs:182-194`, CLI_MARK) | `refresh.rs` + `session.rs` spawn status | Partial | Serialize refresh like plugin; API key token refresh |
-| e | upstream wire | Connect bidi `AgentService/Run` + HTTP/1 RunSSE + BidiAppend (`cursor/index.mjs:13-17`, `44-46`) | `run.rs` incrementally reads either transport, answers KV/exec and selected field-36 tool lists, sends heartbeats, and enforces monotonic idle/quiet/tool-count limits; `upstream.rs` opens one stateless Run per execute and retries one regional failure after fresh host discovery | Partial | Reasoning, usage, images, effort, and Max Mode (**R-9**) |
+| e | upstream wire | Connect bidi `AgentService/Run` + HTTP/1 RunSSE + BidiAppend (`cursor/index.mjs:13-17`, `44-46`) | `run.rs` incrementally reads either transport, answers KV/exec and selected field-36 tool lists, sends heartbeats, and enforces monotonic idle/quiet/tool-count limits; `upstream.rs` opens one stateless Run per execute, retries one regional failure after fresh host discovery, and retries once on a `maxRequired` refusal when the first attempt was not Max Mode | Partial | Images and effort (**R-9**) |
 | f | inbound shapes | OpenAI-compatible chat to plugin fetch (`cursor/index.mjs:29-30`) | Canonical IR text and tool history maps to stable JSON transcript blobs plus the protobuf user turn in `request.rs`; selected tools become context/wrapper definitions and the dynamic catalog; gateway codecs supply the IR | Partial | Images (**R-9**) |
 | g | streaming | Connect stream / RunSSE (`cursor/index.mjs:13-17`) | `Completion::Stream` starts after the first text delta or caller tool event, then emits text or full-argument tool blocks and the clean EndTurn/ToolUse ending; an empty turn is a non-cooling 502, pre-output stalls have idle/quiet diagnostics, and post-output stalls say the upstream stopped sending | Partial | Usage and reasoning (**R-9**) |
 | h | tool calls | MCP `CallDynamicTool` (`cursor/index.mjs:21-26`, `51`) | Selected MCP execs emit caller tool blocks; unknown/Cursor-owned execs stay refused; server-completed calls are not emitted; counts, checkpoints, and the 60-second count wait seal steps | Partial | Streaming argument deltas and Cursor-owned tools are deferred |
 | i | images | unverified in core; plugin native session handles blobs | Not served | Missing | **R-9** |
-| j | reasoning | Plugin tests `reasoning.test.mjs`; max mode | Not served | Missing | **R-9** |
+| j | reasoning | Plugin tests `reasoning.test.mjs` | Not served in this coverage snapshot; R-9b later landed thinking blocks | Missing | **R-9** |
 | k | quota / usage | Connect `GetCurrentPeriodUsage`, team header (`cursor/index.mjs:171-176`, `connect.rs` parity) | `quota()` via Connect unary (`lib.rs:306-322`, `connect.rs:9-38`) | Partial | Deferred/step usage, credit events (`cursor/deferred-usage.test.mjs`) — **R-9** |
 | l | model list | Plugin catalog + agent list; core `cursor_models.go` contexts | `cursor-agent models` parse + family fold (`models.rs`, `lib.rs:337-362`) | Partial | Server-side catalog merge like plugin (`catalog.test.mjs`) |
 | m | multi-account | Team id per token (`activeTeamId`) | Multiple accounts; team header not evident in hofund Connect calls | Partial | `x-cursor-team-id` on chat + usage (**R-8**) |
-| n | error classification | Plugin maps budget/refusal (`errors.test.mjs`) | `failure.rs` implements the text-only section 6 table: regional/permission 403, status-style 401, quota vs rate 429, context overflow and invalid input 400, unavailable 503, other Connect codes 502, and unchanged bare HTTP statuses | Partial | Max Mode retry (**R-9**) |
+| n | error classification | Plugin maps budget/refusal (`errors.test.mjs`) | `failure.rs` implements the text-only section 6 table: regional/permission 403, status-style 401, quota vs rate 429, context overflow and invalid input 400, unavailable 503, other Connect codes 502, and unchanged bare HTTP statuses. R-9d retries once on a `maxRequired` refusal when the first attempt was not Max Mode | Partial | — |
 | o | warmup / keepalive | none found (no keepalive in the Cursor core or its auth plugin) | None | N/A | — |
 | p | agent sign-in | Core `cursorStatus` mark (`cursor.go:59-80`) | discover/import (`lib.rs:383-396`) | Done | — |
 | q | extras | HTTP/2 fallback, ghost mode, client version string (`cursor/index.mjs:48`, `connect.rs:24-26`) | Run headers and HTTP/2 transport plus RunSSE/BidiAppend fallback in `run.rs`, with loopback tests | Partial | Team-id discovery hook is still optional and production execute passes `None` |
 
 ### Gaps (Cursor)
 
-- Reasoning, images, usage detail, effort, and Max Mode — **L**, **R-9**
+- Images and effort remain later R-9; Max Mode retry landed in R-9d — **L**, **R-9**
 - CURSOR_API_KEY exchange sign-in — **M**, **R-8**
 - Team billing header — **S**, **R-8**
 
