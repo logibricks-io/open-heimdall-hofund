@@ -14,6 +14,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (#357), version-bump and tag steps that this tree has not performed,
   and real-account smoke deferred to Palmer (#58, #304, #310). This entry
   does not bump the crate version or ship a tag.
+- Documentation honesty for the v0.2.0 freeze (Must #11, #274):
+  `docs/feature-parity.md` snapshot and Summary counts match the Matrix
+  (an xtask invariant refuses drift); README, CLI help, and subscription crate
+  docs describe what `main` actually serves. Cursor R-8/R-9, Claude Code bridge
+  H8, and Devin R-12/R-13 request serving are on `main` (mocks only; real-account
+  smoke is still outstanding). Sessions R-29–R-34 and the R-44 TUI Sessions page,
+  and the R-14 TUI Providers/Agents pages, are on `main`. Library writes and true
+  4.2–4.4 recording/MCP execution remain unlanded. v0.2.0 is not tagged.
 - R-22: LAN allow list and trusted proxy. Top-level `allow_ips` (IPs and CIDRs)
   and `trust_proxy`, overridable by `HOFUND_ALLOW_IPS` / `HOFUND_TRUST_PROXY`;
   non-listed peers get a JSON 403 before authentication, loopback is always
@@ -99,8 +107,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Qoder, Zed, and WorkBuddy subscription plugins (`hofund-plugin-subscription-qoder`,
   `-zed`, `-workbuddy`): user-supplied credential import for Qoder and Zed, WorkBuddy
   desktop auth from CodeBuddyExtension, refresh, model lists, OpenAI chat upstream
-  (Zed cloud completions remain unsupported), WorkBuddy billing quota, Qoder and
-  WorkBuddy daily check-in, and deterministic `a2c_*` tests (A-2c, feature-parity
+  (Zed POST `/completions` landed later in R-16; this slice did not serve them),
+  WorkBuddy billing quota, Qoder and WorkBuddy daily check-in, and deterministic
+  `a2c_*` tests (A-2c, feature-parity row 3.5 partial).
 - Z Code subscription plugin (`hofund-plugin-subscription-zcode`): agent
   `credentials.json` import with AES-GCM decryption, team plan key resolution,
   monitor usage quota, GLM model list, Anthropic Messages upstream on Z.ai or

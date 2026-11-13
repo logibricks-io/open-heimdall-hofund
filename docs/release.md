@@ -5,7 +5,9 @@ The v0.2.0-specific cut — including what is still unmerged and which
 smoke stays with Palmer — is
 [docs/release-v0.2.0-checklist.md](release-v0.2.0-checklist.md). That
 checklist does not bump the version or create a tag. **v0.2.0 is not
-tagged, and no GitHub Release has been published from this tree.**
+tagged, and no GitHub Release has been published from this tree.** Do not
+treat this document as evidence that a release already shipped. Workspace
+version strings may still say 0.1.0 until that cut.
 
 Version 0.1.0 is prepared in the tree: the workspace version, this process,
 and the changelog. Pushing a tag publishes a GitHub release. Do not push a
