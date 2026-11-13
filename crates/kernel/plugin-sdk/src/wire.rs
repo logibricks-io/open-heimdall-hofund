@@ -132,6 +132,7 @@ pub struct Target {
     state: Arc<hofund_quirks::RequestState>,
     allocation_quota_rate: bool,
     chatgpt_codex_zstd: bool,
+    request_body_gzip: bool,
 }
 
 impl Target {
@@ -154,6 +155,7 @@ impl Target {
             state: Arc::new(hofund_quirks::RequestState::default()),
             allocation_quota_rate: false,
             chatgpt_codex_zstd: false,
+            request_body_gzip: false,
         }
     }
 
@@ -161,6 +163,13 @@ impl Target {
     #[must_use]
     pub const fn chatgpt_codex_zstd(mut self, enabled: bool) -> Self {
         self.chatgpt_codex_zstd = enabled;
+        self
+    }
+
+    /// Gzip-compresses POST bodies sent by [`execute`] and [`send`].
+    #[must_use]
+    pub const fn request_body_gzip(mut self, enabled: bool) -> Self {
+        self.request_body_gzip = enabled;
         self
     }
 
@@ -266,6 +275,7 @@ impl fmt::Debug for Target {
             .field("state", &self.state)
             .field("allocation_quota_rate", &self.allocation_quota_rate)
             .field("chatgpt_codex_zstd", &self.chatgpt_codex_zstd)
+            .field("request_body_gzip", &self.request_body_gzip)
             .finish()
     }
 }
@@ -579,6 +589,10 @@ pub async fn send(
                 body = compressed;
                 call = call.replace_header("content-encoding", "zstd", false);
             }
+        }
+        if target.request_body_gzip {
+            body = crate::inflate::compress(&body)?;
+            call = call.replace_header("content-encoding", "gzip", false);
         }
         call.header("content-type", "application/json").bytes(body)
     };

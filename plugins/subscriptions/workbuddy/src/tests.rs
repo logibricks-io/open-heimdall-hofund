@@ -295,6 +295,14 @@ fn a2c_24_upstream_sends_workbuddy_user_agent() {
     let query = ProbeQuery::new(ProtocolId::OPENAI_CHAT, "deepseek-v3").expect("query");
     block_on(upstream.probe(&query)).expect("probe");
     let call = &host.http().calls()[0];
+    assert_eq!(call.uri(), format!("{CN}/v2/chat/completions"));
+    assert_eq!(call.header("content-encoding"), Some("gzip"));
+    let body = hofund_plugin_sdk::inflate::gzip(call.body()).expect("gzip chat body");
+    let body: json::Value = json::from_slice(&body).expect("chat JSON");
+    assert_eq!(
+        body.get("model").and_then(json::Value::as_str),
+        Some("deepseek-v3")
+    );
     assert!(
         call.sensitive_headers()
             .iter()
