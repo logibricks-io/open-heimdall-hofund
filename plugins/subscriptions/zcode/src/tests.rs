@@ -998,13 +998,15 @@ fn r57b_start_balance_drives_quota_and_gift_models() {
     let sub = subscription(&host);
     let windows = block_on(sub.quota(&id, host.context())).expect("quota");
     assert!(windows.iter().any(|window| window.used() == 25));
+    host.http()
+        .enqueue_response(503, &[], "config unavailable".to_owned());
     host.http().enqueue(balance.to_string().into_bytes());
     let models = block_on(sub.list_models(&id, host.context())).expect("models");
     let ids: Vec<&str> = models.models().iter().map(|model| model.id()).collect();
     assert!(ids.contains(&"GLM-5.3-Flash"));
     assert!(ids.contains(&"GLM-5.3-Flash-Trial"));
     let calls = host.http().calls();
-    assert_eq!(calls.len(), 2);
+    assert_eq!(calls.len(), 3);
     for call in calls {
         assert!(call.uri().contains("app_version=3.17.2"));
         assert_eq!(call.header("user-agent"), Some("ZCode/3.17.2"));
@@ -1226,4 +1228,61 @@ fn r57b_empty_feed_rechecks_and_api_keys_do_not_claim() {
         hofund_plugin_api::CheckinOutcome::Ineligible
     );
     assert!(key_host.http().calls().is_empty());
+}
+
+#[test]
+fn r57b_provider_config_sets_images_reasoning_and_limits() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_plan_key(&host, "plan.key.secret", "models@zcode.test");
+    host.http().enqueue(
+        json!({"code": 0, "data": {"configs": {
+            "builtin_provider_config_json": "https://cdn.zcode.test/builtin.json"
+        }}})
+        .to_string()
+        .into_bytes(),
+    );
+    host.http().enqueue(
+        json!({
+            "revision": 9,
+            "config": {
+                "providerConfigRules": {"providerRules": [{
+                    "providerId": "account:zai-individual-coding-plan",
+                    "builtinModelIds": ["GLM-5.3"]
+                }]},
+                "modelConfigRules": {"modelRules": [{
+                    "modelMatch": "GLM-5\\.3",
+                    "config": {
+                        "properties": {
+                            "contextWindow": 1_000_000,
+                            "inputFormat": {"supportsImage": true}
+                        },
+                        "optionSpecs": {
+                            "maxOutputTokens": {"max": 128_000},
+                            "reasoningLevel": {"values": ["low", "high", "max"]}
+                        }
+                    }
+                }]}
+            }
+        })
+        .to_string()
+        .into_bytes(),
+    );
+    let models = block_on(subscription(&host).list_models(&id, host.context())).expect("models");
+    assert_eq!(models.models().len(), 1);
+    let model = &models.models()[0];
+    assert_eq!(model.id(), "GLM-5.3");
+    assert_eq!(model.context(), 1_000_000);
+    assert_eq!(model.max_output(), 128_000);
+    assert_eq!(model.image_input(), Some(true));
+    assert_eq!(model.efforts(), ["low", "high", "max"]);
+    assert_eq!(model.input_modalities(), ["text", "image"]);
+    assert_eq!(
+        models.source_url(),
+        Some("https://cdn.zcode.test/builtin.json")
+    );
+    let calls = host.http().calls();
+    assert_eq!(calls.len(), 2);
+    assert!(calls[0].uri().contains("app_version=3.17.2"));
+    assert_eq!(calls[1].header("user-agent"), Some("ZCode/3.17.2"));
 }

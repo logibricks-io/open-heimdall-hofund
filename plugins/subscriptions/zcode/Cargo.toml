@@ -13,6 +13,7 @@ rust-version.workspace = true
 [dependencies]
 hofund-plugin-api = { workspace = true }
 hofund-plugin-sdk = { workspace = true }
+regex = "1.13.1"
 
 [dev-dependencies]
 hofund-kit-subscription = { workspace = true }

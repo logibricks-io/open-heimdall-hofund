@@ -28,6 +28,7 @@ mod discover;
 mod gift;
 mod http_auth;
 mod models;
+mod provider_config;
 mod quota;
 mod refresh;
 mod session;
