@@ -18,6 +18,8 @@ members = [
     "crates/kernel/plugin-api",
     "crates/kernel/plugin-host",
     "crates/kernel/plugin-sdk",
+    "plugins/agents/claude-code",
+    "plugins/agents/codex",
     "plugins/inbound/codex-catalog",
     "plugins/inbound/retrieval",
     "plugins/inbound/echo",
@@ -54,6 +56,7 @@ members = [
     "crates/kernel/quirks",
     "crates/kernel/router",
     "crates/kernel/secrets",
+    "crates/kernel/sessions",
     "crates/kernel/usage",
     "xtask",
 ]
@@ -86,6 +89,8 @@ hofund-kit-agent = { version = "0.1.0", path = "kits/agent" }
 hofund-kit-subscription = { version = "0.1.0", path = "kits/subscription" }
 hofund-kit-upstream = { version = "0.1.0", path = "kits/upstream" }
 hofund-plugin-api = { version = "0.1.0", path = "crates/kernel/plugin-api" }
+hofund-plugin-agent-claude = { version = "0.1.0", path = "plugins/agents/claude-code" }
+hofund-plugin-agent-codex = { version = "0.1.0", path = "plugins/agents/codex" }
 hofund-plugin-azure = { version = "0.1.0", path = "plugins/providers/azure" }
 hofund-plugin-bedrock = { version = "0.1.0", path = "plugins/providers/bedrock" }
 hofund-plugin-bedrock-mantle = { version = "0.1.0", path = "plugins/providers/bedrock-mantle" }
@@ -120,6 +125,7 @@ hofund-provider = { version = "0.1.0", path = "crates/kernel/provider" }
 hofund-quirks = { version = "0.1.0", path = "crates/kernel/quirks" }
 hofund-router = { version = "0.1.0", path = "crates/kernel/router" }
 hofund-secrets = { version = "0.1.0", path = "crates/kernel/secrets" }
+hofund-sessions = { version = "0.1.0", path = "crates/kernel/sessions" }
 hofund-tui = { version = "0.1.0", path = "apps/tui" }
 hofund-usage = { version = "0.1.0", path = "crates/kernel/usage" }
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }

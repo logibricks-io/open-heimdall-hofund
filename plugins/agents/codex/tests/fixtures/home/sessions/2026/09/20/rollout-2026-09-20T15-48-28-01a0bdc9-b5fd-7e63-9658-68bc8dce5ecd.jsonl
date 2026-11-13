@@ -1,0 +1,7 @@
+{"timestamp":"2026-09-20T15:48:28.100Z","type":"session_meta","payload":{"id":"01a0bdc9-b5fd-7e63-9658-68bc8dce5ecd","cwd":"/work/fixture","source":"cli","model_provider":"fixture"}}
+{"timestamp":"2026-09-20T15:48:29.100Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Add a README"}]}}
+{"timestamp":"2026-09-20T15:48:29.300Z","type":"turn_context","payload":{"cwd":"/work/fixture","model":"fixture-astra"}}
+{"timestamp":"2026-09-20T15:48:36.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10000,"cached_input_tokens":4000,"output_tokens":300},"last_token_usage":{"input_tokens":10000,"cached_input_tokens":4000,"output_tokens":300}}}}
+{"timestamp":"2026-09-20T15:48:36.100Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10000,"cached_input_tokens":4000,"output_tokens":300},"last_token_usage":{"input_tokens":10000,"cached_input_tokens":4000,"output_tokens":300}}}}
+{"timestamp":"2026-09-20T15:50:00.000Z","type":"turn_context","payload":{"cwd":"/work/fixture","model":"fixture-luna"}}
+{"timestamp":"2026-09-20T15:50:10.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":22000,"cached_input_tokens":14000,"output_tokens":500},"last_token_usage":{"input_tokens":12000,"cached_input_tokens":10000,"output_tokens":200}}}}

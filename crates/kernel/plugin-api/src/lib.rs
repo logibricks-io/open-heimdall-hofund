@@ -51,6 +51,7 @@ mod quota_reset;
 mod records;
 mod redaction;
 pub mod responses_ws;
+mod session;
 mod subscription;
 mod upstream;
 mod warmup;
@@ -108,6 +109,10 @@ pub use records::{
 };
 pub use redaction::{redact_token, safe_url};
 pub use secrecy::SecretString;
+pub use session::{
+    SessionCompression, SessionDay, SessionFile, SessionLocator, SessionParse, SessionParser,
+    SessionRecord, SessionStore, SessionTokens, SessionUsageEvent,
+};
 pub use subscription::{DynSubscriptionFactory, Subscription, SubscriptionFactory};
 pub use upstream::{
     BuildContext, CredentialStyle, DynUpstreamFactory, HeaderName, ListKind, UpstreamFactory,

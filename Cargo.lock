@@ -2153,11 +2153,16 @@ dependencies = [
  "hofund-control-client",
  "hofund-control-proto",
  "hofund-model-catalog",
+ "hofund-plugin-agent-claude",
+ "hofund-plugin-agent-codex",
+ "hofund-plugin-api",
  "hofund-secrets",
+ "hofund-sessions",
  "hofund-usage",
  "http",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "tokio",
  "toml_edit 0.25.17+spec-1.1.0",
@@ -2391,6 +2396,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "hofund-plugin-agent-claude"
+version = "0.1.0"
+dependencies = [
+ "hofund-plugin-api",
+ "hofund-plugin-sdk",
+ "tempfile",
+]
+
+[[package]]
+name = "hofund-plugin-agent-codex"
+version = "0.1.0"
+dependencies = [
+ "hofund-plugin-api",
+ "hofund-plugin-sdk",
+ "tempfile",
+]
+
+[[package]]
 name = "hofund-plugin-api"
 version = "0.1.0"
 dependencies = [
@@ -2401,6 +2424,8 @@ dependencies = [
  "http",
  "quote",
  "secrecy",
+ "serde",
+ "serde_json",
  "static_assertions",
  "syn 3.0.9",
  "thiserror 2.0.21",
@@ -2863,6 +2888,20 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "hofund-sessions"
+version = "0.1.0"
+dependencies = [
+ "hofund-plugin-api",
+ "hofund-usage",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "zstd",
 ]
 
 [[package]]

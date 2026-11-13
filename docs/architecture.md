@@ -66,6 +66,7 @@ flowchart BT
   daemon --> controlProto
   gateway --> controlProto
   secrets["secrets<br/>credentials"]
+  sessions["sessions<br/>consent-gated local session index"]
   usage["usage<br/>consumption records"]
   agent["agent<br/>config adapters"]
   pluginApi["plugin-api<br/>plugin contract"]
@@ -161,6 +162,8 @@ flowchart BT
   gateway --> secrets
   gateway --> pluginApi
   gateway --> pluginHost
+  sessions --> pluginApi
+  sessions --> usage
   daemon --> gateway
   daemon --> config
   daemon --> secrets
@@ -195,7 +198,9 @@ reaches the daemon through `control-client` and reads its config and token
 through `config` and `secrets`, and runs `hofundd` for `serve`,
 `subscription`, and one-shot operations. It has no `daemon` edge; an
 `xtask` test checks with `cargo metadata` that only `hofundd`, the daemon
-crate, and the desktop link `plugin-registry`.
+crate, and the desktop link `plugin-registry`. `cli` also links `sessions`
+and the two reader plugins for the local read-only `hofund sessions` command;
+it never writes into agent homes through that path.
 `plugin-api` depends on `ir`. `plugin-sdk` depends on `codec`, `ir`,
 `plugin-api`, and `quirks`. It uses `codec` for the Chat and Responses
 transport and `ir` to fold a stream into one response.
@@ -242,6 +247,8 @@ This table covers normal and build dependencies, including their target-specific
 | `hofund-codec` | `hofund-ir` |
 | `hofund-quirks` | `hofund-ir` |
 | `hofund-plugin-api` | `hofund-ir` |
+| `hofund-plugin-agent-claude` | `hofund-plugin-api`, `hofund-plugin-sdk` |
+| `hofund-plugin-agent-codex` | `hofund-plugin-api`, `hofund-plugin-sdk` |
 | `hofund-plugin-sdk` | `chrono`, `chrono-tz`, `hofund-codec`, `hofund-ir`, `hofund-plugin-api`, `hofund-quirks`, `iana-time-zone` |
 | `hofund-plugin-fixture` | `hofund-plugin-api` |
 | `hofund-plugin-echo` | `hofund-plugin-api`, `hofund-plugin-sdk` |
@@ -279,11 +286,12 @@ This table covers normal and build dependencies, including their target-specific
 | `hofund-control-client` | `hofund-control-proto` |
 | `hofund-control-proto` | — |
 | `hofund-secrets` | — |
+| `hofund-sessions` | `hofund-plugin-api`, `hofund-usage` |
 | `hofund-usage` | — |
 | `hofund-agent` | `hofund-config`, `hofund-plugin-api` |
 | `hofund-daemon` | `hofund-codec`, `hofund-config`, `hofund-control-proto`, `hofund-gateway`, `hofund-model-catalog`, `hofund-plugin-api`, `hofund-plugin-host`, `hofund-plugin-registry` (tests also enable `test-fixtures`), `hofund-plugin-sdk`, `hofund-provider`, `hofund-quirks`, `hofund-router`, `hofund-secrets`, `hofund-usage`, `hofund-agent`, `hofund-control-client` (tests; dev `hofund-agent` enables `test-fixtures`) |
 | `hofund-daemon-bin` | `hofund-daemon`, `hofund-plugin-api`, `hofund-plugin-registry`, `hofund-bridge-mcp` |
-| `hofund-cli` | `hofund-config`, `hofund-control-client`, `hofund-model-catalog`, `hofund-secrets`, `hofund-usage`, `hofund-bridge-mcp` |
+| `hofund-cli` | `hofund-config`, `hofund-control-client`, `hofund-model-catalog`, `hofund-plugin-agent-claude`, `hofund-plugin-agent-codex`, `hofund-plugin-api`, `hofund-secrets`, `hofund-sessions`, `hofund-usage`, `hofund-bridge-mcp` |
 | `hofund-tui` | `hofund-config`, `hofund-control-client`, `hofund-secrets` |
 | `hofund-desktop` | `hofund-daemon`, `hofund-agent` |
 | `xtask` | — |
@@ -371,6 +379,7 @@ The `control-client` and gateway `control-proto` edges landed in L3; the
 | `control-client` | Typed control calls and ordered discovery over TCP and Unix local IPC. Re-exports the proto for UI callers. |
 | `control-proto` | Versioned serde DTOs, events, error envelope, and wire version. No HTTP, Tokio, daemon, router, provider, or plugin-api dependency. |
 | `secrets` | Credential storage and resolution. |
+| `sessions` | Consent, path containment, bounded parsing, and the local session index. No agent ids or HTTP. |
 | `usage` | Request and token usage records. |
 | `daemon` | The daemon library. Wires config, secrets, the gateway, and the control plane around an injected `DaemonRegistry`. |
 | `hofundd` | The `hofundd` binary and process composition root. Links the plugin registry, owns the runtime, logging, signals, and drain. |
