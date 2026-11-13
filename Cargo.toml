@@ -22,18 +22,22 @@ members = [
     "plugins/agents/cindy",
     "plugins/agents/cline",
     "plugins/agents/codex",
-    "plugins/agents/minimax-code",
+    "plugins/agents/agy",
+    "plugins/agents/alma",
     "plugins/agents/cursor",
     "plugins/agents/droid",
+    "plugins/agents/dsh",
+    "plugins/agents/gemini-cli",
     "plugins/agents/grok",
     "plugins/agents/hermes",
     "plugins/agents/kimi",
+    "plugins/agents/minimax-code",
+    "plugins/agents/omp",
+    "plugins/agents/opencode",
+    "plugins/agents/pi",
     "plugins/agents/qoder",
     "plugins/agents/raft",
     "plugins/agents/workbuddy",
-    "plugins/agents/agy",
-    "plugins/agents/alma",
-    "plugins/agents/dsh",
     "plugins/agents/zcode",
     "plugins/inbound/codex-catalog",
     "plugins/inbound/retrieval",
@@ -108,18 +112,22 @@ hofund-plugin-agent-claude = { version = "0.1.0", path = "plugins/agents/claude-
 hofund-plugin-agent-cindy = { version = "0.1.0", path = "plugins/agents/cindy" }
 hofund-plugin-agent-cline = { version = "0.1.0", path = "plugins/agents/cline" }
 hofund-plugin-agent-codex = { version = "0.1.0", path = "plugins/agents/codex" }
-hofund-plugin-agent-minimax-code = { version = "0.1.0", path = "plugins/agents/minimax-code" }
+hofund-plugin-agent-agy = { version = "0.1.0", path = "plugins/agents/agy" }
+hofund-plugin-agent-alma = { version = "0.1.0", path = "plugins/agents/alma" }
 hofund-plugin-agent-cursor = { version = "0.1.0", path = "plugins/agents/cursor" }
 hofund-plugin-agent-droid = { version = "0.1.0", path = "plugins/agents/droid" }
+hofund-plugin-agent-dsh = { version = "0.1.0", path = "plugins/agents/dsh" }
+hofund-plugin-agent-gemini = { version = "0.1.0", path = "plugins/agents/gemini-cli" }
 hofund-plugin-agent-grok = { version = "0.1.0", path = "plugins/agents/grok" }
 hofund-plugin-agent-hermes = { version = "0.1.0", path = "plugins/agents/hermes" }
 hofund-plugin-agent-kimi = { version = "0.1.0", path = "plugins/agents/kimi" }
+hofund-plugin-agent-minimax-code = { version = "0.1.0", path = "plugins/agents/minimax-code" }
+hofund-plugin-agent-omp = { version = "0.1.0", path = "plugins/agents/omp" }
+hofund-plugin-agent-opencode = { version = "0.1.0", path = "plugins/agents/opencode" }
+hofund-plugin-agent-pi = { version = "0.1.0", path = "plugins/agents/pi" }
 hofund-plugin-agent-qoder = { version = "0.1.0", path = "plugins/agents/qoder" }
 hofund-plugin-agent-raft = { version = "0.1.0", path = "plugins/agents/raft" }
 hofund-plugin-agent-workbuddy = { version = "0.1.0", path = "plugins/agents/workbuddy" }
-hofund-plugin-agent-agy = { version = "0.1.0", path = "plugins/agents/agy" }
-hofund-plugin-agent-alma = { version = "0.1.0", path = "plugins/agents/alma" }
-hofund-plugin-agent-dsh = { version = "0.1.0", path = "plugins/agents/dsh" }
 hofund-plugin-agent-zcode = { version = "0.1.0", path = "plugins/agents/zcode" }
 hofund-plugin-azure = { version = "0.1.0", path = "plugins/providers/azure" }
 hofund-plugin-bedrock = { version = "0.1.0", path = "plugins/providers/bedrock" }

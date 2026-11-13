@@ -18,16 +18,20 @@ use sha2::{Digest, Sha256};
 use hofund_plugin_agent_agy::AgyStore;
 use hofund_plugin_agent_alma::AlmaStore;
 use hofund_plugin_agent_cindy::CindyStore;
-use hofund_plugin_agent_claude::ClaudeStore;
+use hofund_plugin_agent_claude::{ClaudeDesktopStore, ClaudeStore};
 use hofund_plugin_agent_cline::ClineStore;
 use hofund_plugin_agent_codex::CodexStore;
 use hofund_plugin_agent_cursor::CursorStore;
 use hofund_plugin_agent_droid::DroidStore;
 use hofund_plugin_agent_dsh::DshStore;
+use hofund_plugin_agent_gemini::GeminiStore;
 use hofund_plugin_agent_grok::GrokStore;
 use hofund_plugin_agent_hermes::HermesStore;
 use hofund_plugin_agent_kimi::KimiStore;
 use hofund_plugin_agent_minimax_code::MiniMaxStore;
+use hofund_plugin_agent_omp::OmpStore;
+use hofund_plugin_agent_opencode::OpenCodeStore;
+use hofund_plugin_agent_pi::PiStore;
 use hofund_plugin_agent_qoder::{QoderCnStore, QoderStore};
 use hofund_plugin_agent_raft::RaftStore;
 use hofund_plugin_agent_workbuddy::{CodeBuddyStore, WorkBuddyAiStore, WorkBuddyStore};
@@ -142,8 +146,14 @@ pub(crate) fn run(config: &Path, command: &Command) -> Result<String, String> {
     let alma = AlmaStore::new();
     let dsh = DshStore::new();
     let zcode = ZCodeStore::new();
-    let stores: [&dyn SessionStore; 20] = [
+    let opencode = OpenCodeStore::new();
+    let pi = PiStore::new();
+    let omp = OmpStore::new();
+    let gemini = GeminiStore::new();
+    let claude_desktop = ClaudeDesktopStore::new();
+    let stores: [&dyn SessionStore; 25] = [
         &claude,
+        &claude_desktop,
         &cindy,
         &cline,
         &codex,
@@ -163,6 +173,10 @@ pub(crate) fn run(config: &Path, command: &Command) -> Result<String, String> {
         &alma,
         &dsh,
         &zcode,
+        &opencode,
+        &pi,
+        &omp,
+        &gemini,
     ];
     run_with(config, command, &stores, Local::now())
 }

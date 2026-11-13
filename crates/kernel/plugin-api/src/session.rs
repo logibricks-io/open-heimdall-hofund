@@ -128,9 +128,15 @@ impl SessionUsageEvent {
     }
 }
 
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde skip_serializing_if takes &T
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 /// One parsed session file. Non-main records merge into their parent.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[non_exhaustive]
+#[allow(clippy::struct_excessive_bools)] // independent session flags, not a state machine
 pub struct SessionRecord {
     /// Agent plugin id.
     pub agent: String,
@@ -174,9 +180,19 @@ pub struct SessionRecord {
     /// Whether this record is a pure copy rather than a subagent.
     #[serde(default)]
     pub copy: bool,
+    /// Usage attribution when the session ran outside this agent's files.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub app: String,
     /// Parent checkpoint source for a fork, when one is named.
     #[serde(default)]
     pub forked_from: Option<String>,
+    /// Whether `models` and `days` already exclude copied pre-fork usage.
+    ///
+    /// When true, the kernel must not rebuild them from checkpoint comparison.
+    /// False is omitted so existing serialized goldens and cached records keep
+    /// their previous shape.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub fork_usage_filtered: bool,
     /// Usage observations used for checkpoint dedup.
     #[serde(default)]
     pub usage: Vec<SessionUsageEvent>,
@@ -209,7 +225,9 @@ impl SessionRecord {
             family_leaf: String::new(),
             family_ids: Vec::new(),
             copy: false,
+            app: String::new(),
             forked_from: None,
+            fork_usage_filtered: false,
             usage: Vec::new(),
             cut: false,
         }
@@ -440,6 +458,13 @@ pub trait SessionDatabase {
     ///
     /// Returns [`PluginError`] when SQLite rejects or cannot read the query.
     fn query(&self, sql: &str, params: &[&str]) -> Result<SessionRows, PluginError>;
+
+    /// A content revision that changes when the database is written.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when the revision cannot be read.
+    fn revision(&self) -> Result<i64, PluginError>;
 }
 
 /// A completed parse and the opaque state needed by the next incremental read.
@@ -515,6 +540,25 @@ pub trait SessionStore: Send + Sync {
         state: Option<&str>,
     ) -> Result<Box<dyn SessionParser>, PluginError>;
 
+    /// Reads every session in a kernel-opened SQLite database.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when the plugin does not support SQLite or the
+    /// database rows cannot be interpreted.
+    fn read_database(
+        &self,
+        _file: &SessionFile,
+        _database: &dyn SessionDatabase,
+    ) -> Result<Vec<SessionRecord>, PluginError> {
+        Err(PluginError::decode("session store does not support SQLite"))
+    }
+
+    /// Returns resume argv for a later explicit resume action, without spawning it.
+    fn resume_argv(&self, _session_id: &str, _path: &Path) -> Option<Vec<String>> {
+        None
+    }
+
     /// Whether this store can read a transcript from a listed file.
     fn transcript_available(&self) -> bool {
         false
@@ -533,25 +577,6 @@ pub trait SessionStore: Send + Sync {
         Err(PluginError::unsupported(
             "session transcripts are not supported by this store",
         ))
-    }
-
-    /// Reads every session in a kernel-opened SQLite database.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`PluginError`] when the plugin does not support SQLite or the
-    /// database rows cannot be interpreted.
-    fn read_database(
-        &self,
-        _file: &SessionFile,
-        _database: &dyn SessionDatabase,
-    ) -> Result<Vec<SessionRecord>, PluginError> {
-        Err(PluginError::decode("session store does not support SQLite"))
-    }
-
-    /// Returns resume argv for a later explicit resume action, without spawning it.
-    fn resume_argv(&self, _session_id: &str, _path: &Path) -> Option<Vec<String>> {
-        None
     }
 }
 

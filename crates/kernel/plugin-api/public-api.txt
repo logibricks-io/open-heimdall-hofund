@@ -989,6 +989,7 @@ SessionCompression::None
 SessionCompression::Zstd
 SessionDatabase
 SessionDatabase::fn query (& self , sql : & str , params : & [& str]) -> Result < SessionRows , PluginError >
+SessionDatabase::fn revision (& self) -> Result < i64 , PluginError >
 SessionDay
 SessionDay #[non_exhaustive] derives(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)
 SessionDay.date
@@ -1032,6 +1033,7 @@ SessionPart::fn new (role : impl Into < String > , kind : impl Into < String > ,
 SessionRecord
 SessionRecord #[non_exhaustive] derives(Clone, Debug, Deserialize, PartialEq, Serialize)
 SessionRecord.agent
+SessionRecord.app
 SessionRecord.copies
 SessionRecord.copy
 SessionRecord.cost
@@ -1041,6 +1043,7 @@ SessionRecord.days
 SessionRecord.family_ids
 SessionRecord.family_leaf
 SessionRecord.family_root
+SessionRecord.fork_usage_filtered
 SessionRecord.forked_from
 SessionRecord.id
 SessionRecord.last_ms

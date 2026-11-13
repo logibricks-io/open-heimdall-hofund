@@ -1,0 +1,5 @@
+fixed-width title that is not JSON
+{"type":"session","id":"omp-main","cwd":"/work/omp","timestamp":"2026-01-03T00:00:00Z"}
+{"type":"message","message":{"role":"user","content":"Initial omp prompt"},"timestamp":"2026-01-03T00:00:01Z"}
+{"type":"title_change","title":"omp main session","timestamp":"2026-01-03T00:00:02Z"}
+{"type":"message","message":{"role":"assistant","model":"model-omp","content":[],"usage":{"input":5,"output":2,"cacheRead":1,"cacheWrite":0}},"timestamp":"2026-01-03T00:00:03Z"}

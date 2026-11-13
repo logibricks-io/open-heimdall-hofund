@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use hofund_plugin_api::{
-    PluginError, SessionDay, SessionFile, SessionFormat, SessionParse, SessionRecord, SessionStore,
+    PluginError, SessionDatabase, SessionDay, SessionFile, SessionFormat, SessionParse,
+    SessionRecord, SessionStore,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -156,6 +157,8 @@ struct CacheEntry {
     state: String,
     #[serde(default)]
     related: Vec<FileStamp>,
+    #[serde(default)]
+    revision: i64,
     record: SessionRecord,
 }
 
@@ -405,6 +408,7 @@ impl SessionIndex {
                         offset: 0,
                         state: String::new(),
                         related: Vec::new(),
+                        revision: 0,
                         record,
                     },
                 );
@@ -426,8 +430,15 @@ impl SessionIndex {
         let stamp = match file_stamp(root, &file.path) {
             Ok(stamp) => stamp,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+                match std::fs::metadata(&file.path) {
+                    Ok(metadata) if !metadata.is_file() => return Ok(()),
+                    _ => return Err(error.into()),
+                }
+            }
             Err(error) => return Err(error.into()),
         };
+        let related = sqlite_sidecar_stamps(root, &file.path)?;
         let old: Vec<_> = self
             .entries
             .iter()
@@ -438,7 +449,9 @@ impl SessionIndex {
             .collect();
         if !old.is_empty()
             && old.iter().all(|(_, entry)| {
-                entry.size == stamp.size && entry.modified_ns == stamp.modified_ns
+                entry.size == stamp.size
+                    && entry.modified_ns == stamp.modified_ns
+                    && entry.related == related
             })
         {
             seen.extend(old.into_iter().map(|(key, _)| key));
@@ -448,6 +461,7 @@ impl SessionIndex {
             entry.root != root || entry.path != file.path || entry.record.agent != store.agent()
         });
         let database = crate::sqlite::open_ro(root, &file.path)?;
+        let revision = database.revision()?;
         let records = store.read_database(file, &database)?;
         for mut record in records {
             store.agent().clone_into(&mut record.agent);
@@ -464,7 +478,8 @@ impl SessionIndex {
                     modified_ns: stamp.modified_ns,
                     offset: 0,
                     state: String::new(),
-                    related: Vec::new(),
+                    related: related.clone(),
+                    revision,
                     record,
                 },
             );
@@ -489,6 +504,12 @@ impl SessionIndex {
         let stamp = match file_stamp(root, &file.path) {
             Ok(stamp) => stamp,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+                match std::fs::metadata(&file.path) {
+                    Ok(metadata) if !metadata.is_file() => return Ok(()),
+                    _ => return Err(error.into()),
+                }
+            }
             Err(error) => return Err(error.into()),
         };
         let related = file
@@ -548,6 +569,7 @@ impl SessionIndex {
                 offset: outcome.offset,
                 state,
                 related,
+                revision: 0,
                 record,
             },
         );
@@ -568,6 +590,9 @@ fn sort_newest(records: &mut [SessionRecord]) {
 fn dedup_forks(records: &mut [SessionRecord]) {
     let parents = records.to_vec();
     for record in records {
+        if record.fork_usage_filtered {
+            continue;
+        }
         let Some(parent_id) = record.forked_from.as_deref() else {
             continue;
         };
@@ -646,6 +671,22 @@ fn holds_family(keeper: &SessionRecord, other: &SessionRecord) -> bool {
 
 fn preferred_keeper(left: &SessionRecord, right: &SessionRecord) -> bool {
     left.last_ms > right.last_ms || (left.last_ms == right.last_ms && left.id > right.id)
+}
+
+fn sqlite_sidecar_stamps(root: &Path, path: &Path) -> io::Result<Vec<FileStamp>> {
+    let mut stamps = Vec::new();
+    for suffix in ["-wal", "-shm"] {
+        let mut sidecar = path.as_os_str().to_os_string();
+        sidecar.push(suffix);
+        let sidecar = PathBuf::from(sidecar);
+        match file_stamp(root, &sidecar) {
+            Ok(stamp) => stamps.push(stamp),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) if error.kind() == io::ErrorKind::InvalidData => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(stamps)
 }
 
 fn file_stamp(root: &Path, path: &Path) -> io::Result<FileStamp> {
@@ -783,7 +824,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use hofund_plugin_api::{
-        SessionCompression, SessionLocator, SessionParser, SessionTokens, SessionUsageEvent,
+        SessionCompression, SessionDatabase, SessionLocator, SessionParser, SessionTokens,
+        SessionUsageEvent, SessionValue,
     };
 
     use super::*;
@@ -879,6 +921,7 @@ mod tests {
             offset: 3,
             state: String::new(),
             related: Vec::new(),
+            revision: 0,
             record,
         };
         let state = temp.path().join("state");
@@ -998,6 +1041,24 @@ mod tests {
                 record: SessionRecord::new("fake", "fake:one", &file.path),
                 pushes: Arc::clone(&self.pushes),
             }))
+        }
+
+        fn read_database(
+            &self,
+            file: &SessionFile,
+            database: &dyn SessionDatabase,
+        ) -> Result<Vec<SessionRecord>, PluginError> {
+            let rows = database.query("SELECT id FROM sessions ORDER BY id", &[])?;
+            Ok(rows
+                .values
+                .iter()
+                .filter_map(|row| {
+                    let SessionValue::Text(id) = row.first()? else {
+                        return None;
+                    };
+                    Some(SessionRecord::new("fake", format!("fake:{id}"), &file.path))
+                })
+                .collect())
         }
     }
 
@@ -1693,6 +1754,41 @@ mod tests {
         assert_eq!(ids, ["fake:a2", "fake:b"]);
     }
 
+    fn dedup_forks_preserves_already_filtered_usage() {
+        let event = SessionUsageEvent::new(
+            SessionTokens::new(20, 8, 4, 2),
+            SessionTokens::new(10, 4, 2, 1),
+            "model",
+            "2026-11-11",
+        );
+        let mut parent = SessionRecord::new("fake", "fake:parent", "parent");
+        parent.usage.push(event.clone());
+        let mut filtered = SessionRecord::new("fake", "fake:filtered", "filtered");
+        let mut unfiltered = SessionRecord::new("fake", "fake:unfiltered", "unfiltered");
+        for child in [&mut filtered, &mut unfiltered] {
+            child.forked_from = Some(parent.id.clone());
+            child.usage.push(event.clone());
+            child.add_usage(event.model.clone(), event.tokens);
+            child.add_day(SessionDay::new(
+                event.date.clone(),
+                event.model.clone(),
+                event.tokens,
+            ));
+        }
+        filtered.fork_usage_filtered = true;
+        let filtered_usage = filtered.usage.clone();
+        let filtered_days = filtered.days.clone();
+        let unfiltered_usage = unfiltered.usage.clone();
+        let mut records = vec![parent, filtered, unfiltered];
+        dedup_forks(&mut records);
+        assert_eq!(records[1].tokens(), event.tokens);
+        assert_eq!(records[1].days, filtered_days);
+        assert_eq!(records[1].usage, filtered_usage);
+        assert_eq!(records[2].tokens(), SessionTokens::default());
+        assert_eq!(records[2].days.len(), 0);
+        assert_eq!(records[2].usage, unfiltered_usage);
+    }
+
     #[test]
     fn file_and_line_caps_are_the_contract_products() {
         assert_eq!(MAX_FILE_BYTES, 512 * 1024 * 1024);
@@ -1841,6 +1937,7 @@ mod tests {
             offset: 3,
             state: String::new(),
             related: Vec::new(),
+            revision: 0,
             record,
         };
         let state = temp.path().join("state");
@@ -1950,6 +2047,7 @@ mod tests {
                 offset: 16,
                 state: String::new(),
                 related: Vec::new(),
+                revision: 0,
                 record,
             }],
         );
@@ -2058,6 +2156,7 @@ mod tests {
                 offset: 10_000,
                 state: "{}".to_owned(),
                 related: Vec::new(),
+                revision: 0,
                 record,
             }],
         );
@@ -2119,6 +2218,7 @@ mod tests {
                 offset: 3,
                 state: String::new(),
                 related: Vec::new(),
+                revision: 0,
                 record: parent,
             },
             CacheEntry {
@@ -2130,6 +2230,7 @@ mod tests {
                 offset: 3,
                 state: String::new(),
                 related: Vec::new(),
+                revision: 0,
                 record: child,
             },
         ];
@@ -2192,6 +2293,7 @@ mod tests {
                     offset: 3,
                     state: String::new(),
                     related: Vec::new(),
+                    revision: 0,
                     record: other,
                 },
                 CacheEntry {
@@ -2203,6 +2305,7 @@ mod tests {
                     offset: 3,
                     state: String::new(),
                     related: Vec::new(),
+                    revision: 0,
                     record: wrong,
                 },
                 CacheEntry {
@@ -2214,6 +2317,7 @@ mod tests {
                     offset: 3,
                     state: String::new(),
                     related: Vec::new(),
+                    revision: 0,
                     record: child,
                 },
             ],
@@ -2313,5 +2417,62 @@ mod tests {
         assert_eq!(hide_pure_copies(&mut records).len(), 0);
         assert!(records[0].main);
         assert!(records[1].main);
+    }
+
+    #[test]
+    fn sqlite_refresh_sees_wal_commits_when_the_main_file_stamp_is_unchanged() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let root = temp.path().join("agent");
+        std::fs::create_dir(&root).expect("root");
+        let path = root.join("sessions.db");
+        let writer = rusqlite::Connection::open(&path).expect("writer");
+        writer
+            .execute_batch(
+                "PRAGMA journal_mode = WAL;
+                 CREATE TABLE sessions (id TEXT PRIMARY KEY);
+                 INSERT INTO sessions (id) VALUES ('one');",
+            )
+            .expect("schema");
+        let stamp = |path: &std::path::Path| {
+            let metadata = std::fs::metadata(path).expect("metadata");
+            (metadata.len(), metadata.modified().expect("mtime"))
+        };
+        let config = temp.path().join("config");
+        let consent = settled(&config);
+        let (store, _) = FakeStore::new(&root);
+        let store = store.listing(vec![
+            SessionFile::new("database", &path).with_format(SessionFormat::Sqlite),
+        ]);
+        let stores: [&dyn SessionStore; 1] = [&store];
+        let mut index = SessionIndex::load(&config, &consent);
+        index.refresh(&consent, &stores).expect("first refresh");
+        assert_eq!(index.list(&consent).len(), 1);
+        let first = stamp(&path);
+
+        writer
+            .execute("INSERT INTO sessions (id) VALUES ('two')", [])
+            .expect("wal insert");
+        let after = stamp(&path);
+        if after != first {
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .expect("open db");
+            file.set_times(std::fs::FileTimes::new().set_modified(first.1))
+                .expect("restore mtime");
+        }
+        assert_eq!(
+            std::fs::metadata(&path).expect("metadata").len(),
+            first.0,
+            "WAL commit should leave the main database size unchanged"
+        );
+        assert!(
+            path.with_file_name("sessions.db-wal").is_file(),
+            "writer should have a WAL sidecar"
+        );
+
+        index.refresh(&consent, &stores).expect("wal refresh");
+        let ids: Vec<_> = index.list(&consent).into_iter().map(|row| row.id).collect();
+        assert_eq!(ids, vec!["fake:one".to_owned(), "fake:two".to_owned()]);
     }
 }

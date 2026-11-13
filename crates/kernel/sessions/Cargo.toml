@@ -22,5 +22,10 @@ tempfile = { workspace = true }
 thiserror = "2.0.21"
 zstd = { workspace = true }
 
+[dev-dependencies]
+hofund-plugin-agent-omp = { workspace = true }
+hofund-plugin-agent-opencode = { workspace = true }
+hofund-plugin-agent-pi = { workspace = true }
+
 [lints]
 workspace = true

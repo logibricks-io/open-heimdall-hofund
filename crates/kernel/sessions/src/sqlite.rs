@@ -103,6 +103,12 @@ impl SessionDatabase for ReadOnlyDatabase {
         self.remaining.set(allowed - values.len());
         Ok(SessionRows::new(values, cut))
     }
+
+    fn revision(&self) -> Result<i64, PluginError> {
+        self.connection
+            .query_row("PRAGMA data_version", [], |row| row.get(0))
+            .map_err(|_| PluginError::decode("cannot read session database revision"))
+    }
 }
 
 #[cfg(test)]

@@ -254,20 +254,24 @@ This table covers normal and build dependencies, including their target-specific
 | `hofund-plugin-api` | `hofund-ir` |
 | `hofund-plugin-agent-claude` | `hofund-plugin-api`, `hofund-plugin-sdk` |
 | `hofund-plugin-agent-codex` | `hofund-plugin-api`, `hofund-plugin-sdk` |
+| `hofund-plugin-agent-agy` | `hofund-plugin-api`, `hofund-plugin-sdk` |
+| `hofund-plugin-agent-alma` | `hofund-plugin-api`, `hofund-plugin-sdk` |
 | `hofund-plugin-agent-cindy` | `hofund-plugin-api`, `hofund-plugin-sdk` |
 | `hofund-plugin-agent-cline` | `hofund-plugin-api`, `hofund-plugin-sdk` |
 | `hofund-plugin-agent-cursor` | `hofund-plugin-api`, `hofund-plugin-sdk` |
-| `hofund-plugin-agent-minimax-code` | `hofund-plugin-api`, `hofund-plugin-sdk` |
 | `hofund-plugin-agent-droid` | `hofund-plugin-api`, `hofund-plugin-sdk` |
+| `hofund-plugin-agent-dsh` | `hofund-plugin-api`, `hofund-plugin-sdk` |
+| `hofund-plugin-agent-gemini` | `hofund-plugin-api`, `hofund-plugin-sdk` |
 | `hofund-plugin-agent-grok` | `hofund-plugin-api`, `hofund-plugin-sdk` |
 | `hofund-plugin-agent-hermes` | `hofund-plugin-api`, `hofund-plugin-sdk` |
 | `hofund-plugin-agent-kimi` | `hofund-plugin-api`, `hofund-plugin-sdk` |
+| `hofund-plugin-agent-minimax-code` | `hofund-plugin-api`, `hofund-plugin-sdk` |
+| `hofund-plugin-agent-omp` | `hofund-plugin-api`, `hofund-plugin-sdk` |
+| `hofund-plugin-agent-opencode` | `hofund-plugin-api`, `hofund-plugin-sdk` |
+| `hofund-plugin-agent-pi` | `hofund-plugin-api`, `hofund-plugin-sdk` |
 | `hofund-plugin-agent-qoder` | `hofund-plugin-api`, `hofund-plugin-sdk` |
 | `hofund-plugin-agent-raft` | `hofund-plugin-api`, `hofund-plugin-sdk` |
 | `hofund-plugin-agent-workbuddy` | `hofund-plugin-api`, `hofund-plugin-sdk` |
-| `hofund-plugin-agent-agy` | `hofund-plugin-api`, `hofund-plugin-sdk` |
-| `hofund-plugin-agent-alma` | `hofund-plugin-api`, `hofund-plugin-sdk` |
-| `hofund-plugin-agent-dsh` | `hofund-plugin-api`, `hofund-plugin-sdk` |
 | `hofund-plugin-agent-zcode` | `hofund-plugin-api`, `hofund-plugin-sdk` |
 | `hofund-plugin-sdk` | `chrono`, `chrono-tz`, `hofund-codec`, `hofund-ir`, `hofund-plugin-api`, `hofund-quirks`, `iana-time-zone` |
 | `hofund-plugin-fixture` | `hofund-plugin-api` |
@@ -278,7 +282,7 @@ This table covers normal and build dependencies, including their target-specific
 | `hofund-plugin-plan-quota` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-upstream` (tests) |
 | `hofund-plugin-relay` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-upstream` (tests) |
 | `hofund-plugin-retrieval` | `hofund-plugin-api`, `hofund-plugin-sdk` |
-| `hofund-plugin-registry` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-plugin-codex-catalog`, `hofund-plugin-echo`, `hofund-plugin-muse`, `hofund-plugin-ollama`, `hofund-plugin-plan-quota`, `hofund-plugin-relay`, `hofund-plugin-retrieval`, `hofund-plugin-subscription-antigravity`, `hofund-plugin-subscription-claude`, `hofund-plugin-subscription-cline`, `hofund-plugin-subscription-codex`, `hofund-plugin-subscription-copilot`, `hofund-plugin-subscription-cursor`, `hofund-plugin-subscription-devin`, `hofund-plugin-subscription-factory`, `hofund-plugin-subscription-gemini`, `hofund-plugin-subscription-grok`, `hofund-plugin-subscription-kiro`, `hofund-plugin-subscription-qoder`, `hofund-plugin-subscription-workbuddy`, `hofund-plugin-subscription-zed`, `hofund-plugin-subscription-zcode`, `hofund-provider`, `hofund-quirks`, `hofund-agent` (tests), `hofund-kit-upstream` (tests), `hofund-kit-agent` (tests) |
+| `hofund-plugin-registry` | `hofund-plugin-api`, `hofund-plugin-agent-claude`, `hofund-plugin-agent-codex`, `hofund-plugin-agent-gemini`, `hofund-plugin-agent-omp`, `hofund-plugin-agent-opencode`, `hofund-plugin-agent-pi`, `hofund-plugin-sdk`, `hofund-plugin-codex-catalog`, `hofund-plugin-echo`, `hofund-plugin-muse`, `hofund-plugin-ollama`, `hofund-plugin-plan-quota`, `hofund-plugin-relay`, `hofund-plugin-retrieval`, `hofund-plugin-subscription-antigravity`, `hofund-plugin-subscription-claude`, `hofund-plugin-subscription-cline`, `hofund-plugin-subscription-codex`, `hofund-plugin-subscription-copilot`, `hofund-plugin-subscription-cursor`, `hofund-plugin-subscription-devin`, `hofund-plugin-subscription-factory`, `hofund-plugin-subscription-gemini`, `hofund-plugin-subscription-grok`, `hofund-plugin-subscription-kiro`, `hofund-plugin-subscription-qoder`, `hofund-plugin-subscription-workbuddy`, `hofund-plugin-subscription-zed`, `hofund-plugin-subscription-zcode`, `hofund-provider`, `hofund-quirks`, `hofund-agent` (tests), `hofund-kit-upstream` (tests), `hofund-kit-agent` (tests) |
 | `hofund-plugin-subscription-devin` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
 | `hofund-plugin-subscription-factory` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
 | `hofund-plugin-subscription-kiro` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
@@ -306,12 +310,12 @@ This table covers normal and build dependencies, including their target-specific
 | `hofund-control-client` | `hofund-control-proto` |
 | `hofund-control-proto` | — |
 | `hofund-secrets` | — |
-| `hofund-sessions` | `hofund-plugin-api`, `hofund-usage`, `rusqlite` |
+| `hofund-sessions` | `hofund-plugin-api`, `hofund-usage`, `hofund-plugin-agent-omp`, `hofund-plugin-agent-opencode`, `hofund-plugin-agent-pi` (tests) |
 | `hofund-usage` | — |
 | `hofund-agent` | `hofund-config`, `hofund-plugin-api` |
 | `hofund-daemon` | `hofund-codec`, `hofund-config`, `hofund-control-proto`, `hofund-gateway`, `hofund-model-catalog`, `hofund-plugin-api`, `hofund-plugin-host`, `hofund-plugin-registry` (tests also enable `test-fixtures`), `hofund-plugin-sdk`, `hofund-provider`, `hofund-quirks`, `hofund-router`, `hofund-secrets`, `hofund-usage`, `hofund-agent`, `hofund-control-client` (tests; dev `hofund-agent` enables `test-fixtures`) |
 | `hofund-daemon-bin` | `hofund-daemon`, `hofund-plugin-api`, `hofund-plugin-registry`, `hofund-bridge-mcp` |
-| `hofund-cli` | `hofund-config`, `hofund-control-client`, `hofund-model-catalog`, `hofund-plugin-agent-agy`, `hofund-plugin-agent-alma`, `hofund-plugin-agent-cindy`, `hofund-plugin-agent-claude`, `hofund-plugin-agent-cline`, `hofund-plugin-agent-codex`, `hofund-plugin-agent-cursor`, `hofund-plugin-agent-droid`, `hofund-plugin-agent-dsh`, `hofund-plugin-agent-grok`, `hofund-plugin-agent-hermes`, `hofund-plugin-agent-kimi`, `hofund-plugin-agent-minimax-code`, `hofund-plugin-agent-qoder`, `hofund-plugin-agent-raft`, `hofund-plugin-agent-workbuddy`, `hofund-plugin-agent-zcode`, `hofund-plugin-api`, `hofund-secrets`, `hofund-sessions`, `hofund-usage`, `hofund-bridge-mcp` |
+| `hofund-cli` | `hofund-config`, `hofund-control-client`, `hofund-model-catalog`, `hofund-plugin-agent-agy`, `hofund-plugin-agent-alma`, `hofund-plugin-agent-cindy`, `hofund-plugin-agent-claude`, `hofund-plugin-agent-cline`, `hofund-plugin-agent-codex`, `hofund-plugin-agent-cursor`, `hofund-plugin-agent-droid`, `hofund-plugin-agent-dsh`, `hofund-plugin-agent-gemini`, `hofund-plugin-agent-grok`, `hofund-plugin-agent-hermes`, `hofund-plugin-agent-kimi`, `hofund-plugin-agent-minimax-code`, `hofund-plugin-agent-omp`, `hofund-plugin-agent-opencode`, `hofund-plugin-agent-pi`, `hofund-plugin-agent-qoder`, `hofund-plugin-agent-raft`, `hofund-plugin-agent-workbuddy`, `hofund-plugin-agent-zcode`, `hofund-plugin-api`, `hofund-secrets`, `hofund-sessions`, `hofund-usage`, `hofund-bridge-mcp` |
 | `hofund-tui` | `hofund-config`, `hofund-control-client`, `hofund-secrets` |
 | `hofund-desktop` | `hofund-daemon`, `hofund-agent` |
 | `xtask` | — |
