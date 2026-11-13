@@ -13,6 +13,7 @@ rust-version.workspace = true
 [dependencies]
 hofund-plugin-api = { workspace = true }
 hofund-plugin-sdk = { workspace = true }
+rusqlite = { workspace = true }
 
 [dev-dependencies]
 hofund-kit-subscription = { workspace = true }

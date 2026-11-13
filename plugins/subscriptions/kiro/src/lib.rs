@@ -15,6 +15,7 @@ use hofund_plugin_sdk::Contribution;
 use hofund_plugin_sdk::oauth::secret_text;
 
 mod agent_sign_in;
+mod cli_db;
 mod creds;
 mod discover;
 mod kiro_body;
@@ -85,6 +86,17 @@ impl Default for Endpoints {
 pub fn factory_with_endpoints(endpoints: Endpoints) -> KiroFactory {
     KiroFactory {
         endpoints: Arc::new(endpoints),
+        cli_command: None,
+    }
+}
+
+/// Builds a factory with an injected kiro-cli program for offline tests.
+#[doc(hidden)]
+#[must_use]
+pub fn factory_with_cli_command(endpoints: Endpoints, command: PathBuf) -> KiroFactory {
+    KiroFactory {
+        endpoints: Arc::new(endpoints),
+        cli_command: Some(command),
     }
 }
 
@@ -92,6 +104,7 @@ pub fn factory_with_endpoints(endpoints: Endpoints) -> KiroFactory {
 #[derive(Clone, Debug)]
 pub struct KiroFactory {
     endpoints: Arc<Endpoints>,
+    cli_command: Option<PathBuf>,
 }
 
 /// Validated config: no options yet.
@@ -126,6 +139,7 @@ impl SubscriptionFactory for KiroFactory {
     ) -> Result<Arc<dyn Subscription>, BuildError> {
         Ok(Arc::new(Kiro {
             endpoints: Arc::clone(&self.endpoints),
+            cli_command: self.cli_command.clone(),
             flow: SignInFlow::Bridge {
                 command: BinaryName::new("kiro-cli"),
             },
@@ -136,6 +150,7 @@ impl SubscriptionFactory for KiroFactory {
 
 struct Kiro {
     endpoints: Arc<Endpoints>,
+    cli_command: Option<PathBuf>,
     flow: SignInFlow,
     pending: Mutex<HashMap<String, PathBuf>>,
 }
@@ -241,7 +256,14 @@ impl Subscription for Kiro {
         if stored.fresh_at(host.clock().now()) {
             return Ok(());
         }
-        refresh::refresh_stale(host, account, &stored, &self.endpoints).await
+        refresh::refresh_stale(
+            host,
+            account,
+            &stored,
+            &self.endpoints,
+            self.cli_command.as_deref(),
+        )
+        .await
     }
 
     async fn quota(
@@ -249,7 +271,13 @@ impl Subscription for Kiro {
         account: &AccountId,
         host: &HostContext,
     ) -> Result<Vec<QuotaWindow>, PluginError> {
-        let stored = refresh::ensure_fresh(host, account, Arc::clone(&self.endpoints)).await?;
+        let stored = refresh::ensure_fresh(
+            host,
+            account,
+            Arc::clone(&self.endpoints),
+            self.cli_command.as_deref(),
+        )
+        .await?;
         let url = self.endpoints.usage_url(
             creds::effective_profile_arn(&stored.credential),
             &stored.credential.region,
@@ -294,6 +322,7 @@ impl Subscription for Kiro {
             account.clone(),
             host.clone(),
             Arc::clone(&self.endpoints),
+            self.cli_command.clone(),
         )))
     }
 
@@ -325,5 +354,7 @@ impl Subscription for Kiro {
 
 #[cfg(test)]
 mod conformance;
+#[cfg(test)]
+mod r51b_tests;
 #[cfg(test)]
 mod tests;

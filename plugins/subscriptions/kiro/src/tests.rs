@@ -64,6 +64,8 @@ fn seed(
         client_id_hash: String::new(),
         token_url: String::new(),
         ide_token_path: String::new(),
+        db_key: String::new(),
+        cli_db_path: String::new(),
     };
     let id = creds::account_id_for_home(home, &credential);
     block_on(async {
@@ -90,7 +92,7 @@ fn a2b_21_discover_import_fixture_token() {
         "kiro-refresh-1",
         "2099-01-01T00:00:00Z",
     );
-    let rows = discover::list(&home).expect("list");
+    let rows = discover::list_at(&home, None).expect("list");
     assert_eq!(rows.len(), 1);
     let host = host(&dir);
     let id =
@@ -216,6 +218,8 @@ fn a2b_26_secrets_not_in_debug_or_errors() {
         client_id_hash: String::new(),
         token_url: String::new(),
         ide_token_path: String::new(),
+        db_key: String::new(),
+        cli_db_path: String::new(),
     };
     assert!(!format!("{credential:?}").contains(token));
     let error = creds::read_token_file(std::path::Path::new("/no/such/kiro-auth-token.json"));
@@ -324,6 +328,8 @@ fn a2b_31_idc_refresh_posts_to_oidc_token() {
         client_id_hash: String::new(),
         token_url: String::new(),
         ide_token_path: String::new(),
+        db_key: String::new(),
+        cli_db_path: String::new(),
     };
     let id = creds::account_id_for_home(&home, &credential);
     block_on(async {
@@ -507,6 +513,8 @@ fn a2b_34_history_and_system_prompt_are_encoded() {
         client_id_hash: String::new(),
         token_url: String::new(),
         ide_token_path: String::new(),
+        db_key: String::new(),
+        cli_db_path: String::new(),
     };
     let encoded = crate::kiro_body::encode(&request, &credential).expect("encode");
     let body = std::str::from_utf8(&encoded).expect("utf8");
@@ -544,6 +552,8 @@ fn test_credential() -> Credential {
         client_id_hash: String::new(),
         token_url: String::new(),
         ide_token_path: String::new(),
+        db_key: String::new(),
+        cli_db_path: String::new(),
     }
 }
 

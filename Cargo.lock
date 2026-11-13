@@ -2981,6 +2981,7 @@ dependencies = [
  "hofund-kit-subscription",
  "hofund-plugin-api",
  "hofund-plugin-sdk",
+ "rusqlite",
  "tempfile",
 ]
 
