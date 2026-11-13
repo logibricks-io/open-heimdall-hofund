@@ -81,6 +81,8 @@ async fn refresh_stale(
             "X-Refresh-Token",
             secret_text(&stored.credential.refresh).to_owned(),
         )
+        .header("X-Auth-Refresh-Source", "plugin")
+        .header("X-Domain", creds::domain(&stored.credential, base))
         .bytes(b"{}")
         .fetch(host.http())
         .await?;

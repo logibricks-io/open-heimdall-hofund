@@ -90,6 +90,8 @@ fn seed(host: &TestHost, expires: i64) -> AccountId {
         label: "wb-user".to_owned(),
         site: Site::China,
         desktop: false,
+        api_key: false,
+        enterprise_id: String::new(),
         auth_path: String::new(),
     };
     let id = creds::account_id(&credential);
@@ -292,6 +294,8 @@ fn a2c_26_secrets_not_in_debug() {
         label: String::new(),
         site: Site::China,
         desktop: false,
+        api_key: false,
+        enterprise_id: String::new(),
         auth_path: String::new(),
     };
     assert!(!format!("{credential:?}").contains(key));
@@ -351,4 +355,24 @@ fn a2c_22c_agent_home_dir_is_codebuddy_extension_data() {
         ".local/share/CodeBuddyExtension/Data"
     };
     assert_eq!(crate::auth_store::AGENT_HOME_DIR, expected);
+}
+
+#[test]
+fn r55_upstream_restriction_rests_account_with_reference_hint() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, 4_000_000_000_000);
+    host.http().enqueue_response(
+        403,
+        &[],
+        br#"{"data":{"code":"11140"},"msg":"request illegal"}"#.to_vec(),
+    );
+    let upstream = subscription(&host, None)
+        .upstream(&id, host.context())
+        .expect("upstream");
+    let query = ProbeQuery::new(ProtocolId::OPENAI_CHAT, "deepseek-v3").expect("query");
+    let error = block_on(upstream.probe(&query)).expect_err("restricted");
+    assert_eq!(error.status(), Some(403));
+    assert_eq!(error.retry_after(), Some(Duration::from_secs(2 * 60 * 60)));
+    assert!(error.message().ends_with(crate::errors::RESTRICTED_HINT));
 }

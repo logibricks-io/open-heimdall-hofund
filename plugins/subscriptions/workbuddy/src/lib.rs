@@ -16,6 +16,7 @@ mod auth_store;
 mod checkin;
 mod creds;
 mod discover;
+mod errors;
 mod models;
 mod quota;
 mod refresh;
@@ -264,17 +265,13 @@ impl Subscription for WorkBuddy {
         let stored = refresh::ensure_fresh(host, Arc::clone(&self.endpoints), account).await?;
         let base = self.endpoints.base_for(stored.credential.site);
         let url = format!("{base}/billing/meter/get-user-resource-summary");
-        let mut call = hofund_plugin_sdk::Call::post(url)
-            .header("Accept", "application/json")
-            .header("Content-Type", "application/json")
-            .header("User-Agent", stored.credential.site.user_agent());
-        for (name, value) in creds::bearer_headers(&stored.credential) {
-            if name == "Authorization" {
-                call = call.sensitive_header("authorization", value);
-            } else if name != "User-Agent" {
-                call = call.header(name, value);
-            }
-        }
+        let call = creds::apply_signed_headers(
+            hofund_plugin_sdk::Call::post(url)
+                .header("Accept", "application/json")
+                .header("Content-Type", "application/json"),
+            &stored.credential,
+            base,
+        );
         let reply = call.bytes(b"{}").fetch(host.http()).await?;
         match reply.status() {
             200..=299 => quota::windows(reply.body()),
