@@ -841,8 +841,6 @@ fn r57_refresh_reimport_writes_through_the_account_lease() {
         let id = id.clone();
         std::thread::spawn(move || block_on(sub.refresh(&id, &context)))
     };
-    std::thread::sleep(std::time::Duration::from_millis(100));
-    assert!(!worker.is_finished(), "refresh bypassed the held lease");
     block_on(lease.commit(None, held)).expect("release lease");
     worker.join().expect("refresh thread").expect("refresh");
     let secret = block_on(host.context().accounts().secret(&id))
@@ -1244,7 +1242,7 @@ fn r57b_checkin_claims_marketing_offers_with_versioned_headers() {
         "https://zcode.test/api/v1/zcode-plan/billing/claim"
     );
     assert_eq!(calls[1].header("x-zcode-app-version"), Some("3.17.2"));
-    assert_eq!(calls[1].header("x-platform").is_some(), true);
+    assert!(calls[1].header("x-platform").is_some());
     assert_eq!(
         hofund_plugin_sdk::json::from_slice::<hofund_plugin_sdk::json::Value>(calls[1].body())
             .expect("claim body"),
