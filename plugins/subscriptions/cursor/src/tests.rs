@@ -7,8 +7,8 @@ use hofund_kit_subscription::{
     PipedScript, TestHost, advance_time, block_on, block_on_paused, join_all, yield_times,
 };
 use hofund_plugin_api::{
-    PluginErrorKind, PluginId, PluginKind, RawTable, RawValue, SignInCtx, SignInProof,
-    Subscription, SubscriptionFactory,
+    PluginErrorKind, PluginId, PluginKind, RawTable, RawValue, SecretString, SignInCtx,
+    SignInProof, Subscription, SubscriptionFactory,
 };
 use hofund_plugin_sdk::oauth::{SecretObject, account_id_from};
 
@@ -1267,6 +1267,51 @@ fn r8d_quota_period_body_stays_empty_object_when_team_header_is_sent() {
         "GetCurrentPeriodUsage body stays {{}} when the team id is sent"
     );
     assert_eq!(team.as_deref(), Some("7"));
+}
+
+#[test]
+fn who_is_sends_team_header_when_section_5_4_matches() {
+    let config = tempfile::tempdir().expect("config");
+    write_cli_config(
+        config.path(),
+        r#"{"authInfo":{"authId":"auth0|user","activeTeamId":42}}"#,
+    );
+    let _guard = crate::team::begin_test(Some(config.path().to_path_buf()));
+    crate::team::set_test_now_ms(Some(1_000));
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let token = SecretString::from(jwt_with_sub(
+        "who@example.test",
+        "auth0|user",
+        4_000_000_000,
+    ));
+    host.http().enqueue_response(
+        200,
+        &[("content-type", "application/json")],
+        br#"{"email":"who@example.test"}"#,
+    );
+    host.http().enqueue_response(
+        200,
+        &[("content-type", "application/json")],
+        br#"{"planInfo":{"plan":"pro"}}"#,
+    );
+    block_on(crate::connect::who_is(host.context(), &endpoints(), &token)).expect("who_is");
+    let me = endpoints().dashboard("GetMe");
+    let plan = endpoints().dashboard("GetPlanInfo");
+    let calls = host.http().calls();
+    for path in [me, plan] {
+        let call = calls
+            .iter()
+            .find(|call| call.uri().contains(&path))
+            .unwrap_or_else(|| panic!("missing {path}"));
+        assert_eq!(
+            call.header("x-cursor-team-id")
+                .map(str::to_owned)
+                .as_deref(),
+            Some("42"),
+            "{path}"
+        );
+    }
 }
 
 #[test]

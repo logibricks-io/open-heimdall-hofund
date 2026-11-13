@@ -98,6 +98,7 @@ impl UpstreamProvider for CursorUpstream {
         args.limits = self.limits;
         let mut retried = false;
         'runs: loop {
+            let since_ms = crate::tokens::unix_ms(self.host.clock().now());
             let attempt = run_stream(
                 &self.host,
                 &self.endpoints,
@@ -124,6 +125,7 @@ impl UpstreamProvider for CursorUpstream {
                                 conversation_id,
                                 inbound,
                                 team_id.clone(),
+                                since_ms,
                             ),
                             FirstOutput::Text(text),
                         ));
@@ -140,6 +142,7 @@ impl UpstreamProvider for CursorUpstream {
                                 conversation_id,
                                 inbound,
                                 team_id.clone(),
+                                since_ms,
                             ),
                             FirstOutput::Thinking(text),
                         ));
@@ -158,6 +161,7 @@ impl UpstreamProvider for CursorUpstream {
                                 conversation_id,
                                 inbound,
                                 team_id.clone(),
+                                since_ms,
                             ),
                             FirstOutput::Tool(request),
                         ));
@@ -215,6 +219,7 @@ struct CursorStreamState {
     inbound: ProtocolId,
     team_id: Option<String>,
     limits: Limits,
+    since_ms: i64,
 }
 
 struct StreamContext {
@@ -225,6 +230,7 @@ struct StreamContext {
     inbound: ProtocolId,
     team_id: Option<String>,
     limits: Limits,
+    since_ms: i64,
 }
 
 fn stream_context(
@@ -233,6 +239,7 @@ fn stream_context(
     conversation_id: String,
     inbound: ProtocolId,
     team_id: Option<String>,
+    since_ms: i64,
 ) -> StreamContext {
     StreamContext {
         host: upstream.host.clone(),
@@ -242,6 +249,7 @@ fn stream_context(
         inbound,
         team_id,
         limits: upstream.limits,
+        since_ms,
     }
 }
 
@@ -288,6 +296,7 @@ fn completion_stream(
         inbound: context.inbound,
         team_id: context.team_id,
         limits: context.limits,
+        since_ms: context.since_ms,
     };
     match first {
         FirstOutput::Text(text) => state.emit_text(text),
@@ -489,23 +498,18 @@ async fn next_completion_event(
 }
 
 async fn poll_step_usage(state: &mut CursorStreamState) -> Option<Usage> {
-    let since_ms = tokens_unix_ms(state);
     usage::poll_dashboard(usage::PollArgs {
         host: &state.host,
         endpoints: &state.endpoints,
         token: &state.token,
         conversation_id: &state.conversation_id,
         team_id: state.team_id.as_deref(),
-        since_ms,
+        since_ms: state.since_ms,
         inbound: state.inbound,
         limits: state.limits,
     })
     .await
     .or_else(|| Some(usage::zeros()))
-}
-
-fn tokens_unix_ms(state: &CursorStreamState) -> i64 {
-    crate::tokens::unix_ms(state.host.clock().now())
 }
 
 fn empty_reply() -> PluginError {
@@ -1314,7 +1318,12 @@ mod tests {
             let host = pooled_host();
             crate::http2_memory::remember(host.context());
             let account = store_account(&host).await;
-            let upstream = upstream(&host, &h1, "http://127.0.0.1:9", account);
+            let mut upstream = upstream(&host, &h1, "http://127.0.0.1:9", account);
+            // Keep usage_interval at zero so the quiet watchdog cannot start a
+            // burst of in-stream polls. give_up must be long enough for one
+            // post-seal request now that a zero remaining budget no longer
+            // starts a poll.
+            upstream.limits.usage_give_up = Duration::from_secs(6);
             let attempt = async {
                 let completion = upstream
                     .execute(tool_request(), ProtocolId::OPENAI_CHAT)
@@ -1322,6 +1331,7 @@ mod tests {
                 collect(completion).await
             };
             let control = async {
+                advance_until_usage_polls(&h1, 1).await;
                 advance_time(Duration::from_secs(241)).await;
                 std::future::pending::<()>().await;
             };
@@ -2162,6 +2172,93 @@ mod tests {
     }
 
     #[test]
+    fn dashboard_poll_claims_events_timestamped_at_run_start() {
+        let _guard = crate::http2_memory::test_lock();
+        crate::http2_memory::reset_for_tests();
+        block_on_paused(async {
+            let host = pooled_host();
+            let start_ms = crate::tokens::unix_ms(host.context().clock().now());
+            let hit = usage_events_body(TEST_CONVERSATION, start_ms, 11, 2, 0, 0, 0);
+            let h2 = Http2Server::start(vec![
+                Http2Response::new(200).data(tool_step_body()).hold_open(),
+            ])
+            .await;
+            let h1 = Http1Server::start(vec![
+                config_reply(h2.base_url()),
+                Http1Response::new(200).body(hit),
+            ])
+            .await;
+            let account = store_account(&host).await;
+            let mut upstream = upstream(&host, &h1, h2.base_url(), account);
+            restore_production_usage_limits(&mut upstream);
+            let completion = upstream
+                .execute(tool_request(), ProtocolId::OPENAI_CHAT)
+                .await
+                .expect("execute");
+            advance_time(Duration::from_secs(2)).await;
+            let attempt = collect(completion);
+            let control = async {
+                advance_until_usage_polls(&h1, 1).await;
+                std::future::pending::<()>().await;
+            };
+            let Race::Left(result) = race(attempt, control).await else {
+                unreachable!("control remains pending")
+            };
+            let events = result.expect("stream");
+            assert_eq!(
+                last_message_usage(&events).expect("usage"),
+                &usage::from_dashboard(
+                    usage::DashboardTotals {
+                        input: 11,
+                        output: 2,
+                        cache_read: 0,
+                        cache_write: 0,
+                        reasoning: 0,
+                    },
+                    ProtocolId::OPENAI_CHAT,
+                )
+            );
+        });
+    }
+
+    #[test]
+    fn dashboard_poll_does_not_start_a_request_after_the_give_up_deadline() {
+        let _guard = crate::http2_memory::test_lock();
+        crate::http2_memory::reset_for_tests();
+        block_on_paused(async {
+            let h2 = Http2Server::start(vec![
+                Http2Response::new(200).data(tool_step_body()).hold_open(),
+            ])
+            .await;
+            let h1 = Http1Server::start(vec![config_reply(h2.base_url())]).await;
+            let host = pooled_host();
+            let account = store_account(&host).await;
+            let mut upstream = upstream(&host, &h1, h2.base_url(), account);
+            restore_production_usage_limits(&mut upstream);
+            upstream.limits.usage_first_wait = Duration::ZERO;
+            upstream.limits.usage_give_up = Duration::ZERO;
+            upstream.limits.usage_request = Duration::from_secs(5);
+            let events = collect(
+                upstream
+                    .execute(tool_request(), ProtocolId::OPENAI_CHAT)
+                    .await
+                    .expect("execute"),
+            )
+            .await
+            .expect("stream");
+            assert_eq!(last_message_usage(&events).expect("usage"), &usage::zeros());
+            let polls = h1
+                .requests()
+                .iter()
+                .filter(|request| {
+                    request.path() == "/aiserver.v1.DashboardService/GetFilteredUsageEvents"
+                })
+                .count();
+            assert_eq!(polls, 0, "no dashboard request after the give-up deadline");
+        });
+    }
+
+    #[test]
     fn dashboard_poll_sends_team_header_and_body_when_section_5_4_matches() {
         let _guard = crate::http2_memory::test_lock();
         crate::http2_memory::reset_for_tests();
@@ -2204,6 +2301,8 @@ mod tests {
                 .await
                 .expect("store");
             let mut upstream = upstream(&host, &h1, h2.base_url(), id);
+            restore_production_usage_limits(&mut upstream);
+            upstream.limits.usage_first_wait = Duration::ZERO;
             upstream.test_conversation_id = Some(TEST_CONVERSATION.to_owned());
             let events = collect(
                 upstream

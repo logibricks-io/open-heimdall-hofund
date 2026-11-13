@@ -15,7 +15,8 @@ pub(crate) async fn unary(
     token: &SecretString,
     body: &str,
 ) -> Result<Value, PluginError> {
-    unary_opts(host, endpoints, path, token, body, None, None).await
+    let team_id = crate::team::header_value(token);
+    unary_opts(host, endpoints, path, token, body, team_id.as_deref(), None).await
 }
 
 pub(crate) async fn unary_opts(
