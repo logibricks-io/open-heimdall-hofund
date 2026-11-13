@@ -51,7 +51,7 @@ enum RoutingMode {
     },
     Picker(Picker),
     Ask(Ask),
-    Route(RouteState),
+    Route(Box<RouteState>),
 }
 
 #[derive(Clone, Debug)]
@@ -354,7 +354,7 @@ impl RoutingPage {
                 return PageEffect::none();
             }
             KeyCode::Char('v') => {
-                self.mode = RoutingMode::Route(RouteState::default());
+                self.mode = RoutingMode::Route(Box::default());
                 return PageEffect::read(ControlIntent::LoadRouteView { generation: 0 });
             }
             _ => {}
@@ -853,7 +853,7 @@ impl RoutingPage {
             AskThen::Family { id } => {
                 self.mode = RoutingMode::Group { id: id.clone() };
                 self.patch(id, |request| {
-                    request.family = Some((!ask.buffer.trim().is_empty()).then(|| ask.buffer));
+                    request.family = Some((!ask.buffer.trim().is_empty()).then_some(ask.buffer));
                 })
             }
             AskThen::Context { id } => {
