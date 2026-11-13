@@ -939,6 +939,150 @@ mod tests {
     }
 
     #[test]
+    fn tool_completed_without_partial_seals_server_completed_calls() {
+        let _guard = crate::http2_memory::test_lock();
+        crate::http2_memory::reset_for_tests();
+        block_on_paused(async {
+            let body = [
+                tool_update_frame(3, "server-1"),
+                tool_update_frame(3, "server-2"),
+                mcp_frame(21, "lookup", "caller-3"),
+                tool_count_frame(3),
+                checkpoint_frame(1),
+                heartbeat_frame(),
+                heartbeat_frame(),
+            ]
+            .concat();
+            let h2 = Http2Server::start(vec![Http2Response::new(200).data(body).hold_open()]).await;
+            let h1 = Http1Server::start(vec![config_reply(h2.base_url())]).await;
+            let host = pooled_host();
+            let account = store_account(&host).await;
+            let upstream = upstream(&host, &h1, h2.base_url(), account);
+            let attempt = async {
+                let completion = upstream
+                    .execute(tool_request(), ProtocolId::OPENAI_CHAT)
+                    .await?;
+                collect(completion).await
+            };
+            let control = async {
+                advance_time(Duration::from_secs(241)).await;
+                std::future::pending::<()>().await;
+            };
+            let Race::Left(events) = race(attempt, control).await else {
+                unreachable!("control remains pending")
+            };
+            let events = events.expect("the tool count seals the step before quiet");
+            let calls = events
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        event,
+                        StreamEvent::ContentBlockStart(ContentBlockStart {
+                            block: BlockStart::ToolCall { .. },
+                            ..
+                        })
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(calls.len(), 1, "server-completed calls are not re-run");
+            assert!(events.iter().any(|event| matches!(
+                event,
+                StreamEvent::MessageDelta(MessageDelta {
+                    stop: Some(Stop {
+                        reason: StopReason::ToolUse,
+                        ..
+                    }),
+                    ..
+                })
+            )));
+            assert!(matches!(events.last(), Some(StreamEvent::MessageStop(_))));
+        });
+    }
+
+    #[test]
+    fn http1_tool_completed_without_partial_flushes_close_and_seals_tool_step() {
+        let _guard = crate::http2_memory::test_lock();
+        crate::http2_memory::reset_for_tests();
+        block_on_paused(async {
+            let body = [
+                tool_update_frame(3, "server-1"),
+                tool_update_frame(3, "server-2"),
+                mcp_frame(21, "lookup", "caller-3"),
+                tool_count_frame(3),
+                checkpoint_frame(1),
+                heartbeat_frame(),
+                heartbeat_frame(),
+            ]
+            .concat();
+            let h1 = Http1Server::start(vec![
+                Http1Response::chunked(vec![body]).hold_open(),
+                Http1Response::new(200),
+                Http1Response::new(200),
+            ])
+            .await;
+            let host = pooled_host();
+            crate::http2_memory::remember(host.context());
+            let account = store_account(&host).await;
+            let upstream = upstream(&host, &h1, "http://127.0.0.1:9", account);
+            let attempt = async {
+                let completion = upstream
+                    .execute(tool_request(), ProtocolId::OPENAI_CHAT)
+                    .await?;
+                collect(completion).await
+            };
+            let control = async {
+                advance_time(Duration::from_secs(241)).await;
+                std::future::pending::<()>().await;
+            };
+            let Race::Left(events) = race(attempt, control).await else {
+                unreachable!("control remains pending")
+            };
+            let events = events.expect("the tool count seals the HTTP/1.1 step before quiet");
+            let calls = events
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        event,
+                        StreamEvent::ContentBlockStart(ContentBlockStart {
+                            block: BlockStart::ToolCall { .. },
+                            ..
+                        })
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(calls.len(), 1, "server-completed calls are not re-run");
+            assert!(events.iter().any(|event| matches!(
+                event,
+                StreamEvent::MessageDelta(MessageDelta {
+                    stop: Some(Stop {
+                        reason: StopReason::ToolUse,
+                        ..
+                    }),
+                    ..
+                })
+            )));
+            assert!(matches!(events.last(), Some(StreamEvent::MessageStop(_))));
+
+            let requests = h1.requests();
+            assert_eq!(requests.len(), 3, "RunSSE, opening append, and close exec");
+            assert_eq!(requests[0].path(), "/agent.v1.AgentService/RunSSE");
+            let appends = requests
+                .iter()
+                .filter(|request| request.path() == "/aiserver.v1.BidiService/BidiAppend")
+                .collect::<Vec<_>>();
+            assert_eq!(appends.len(), 2);
+            let opening = proto::fields(appends[0].body());
+            assert_eq!(opening[2].as_varint(), Some(0));
+            let close = proto::fields(appends[1].body());
+            assert_eq!(
+                close[0].as_string().as_deref(),
+                Some(proto::to_hex(&proto::close_exec(21)).as_str())
+            );
+            assert_eq!(close[2].as_varint(), Some(1));
+        });
+    }
+
+    #[test]
     fn checkpoint_pending_count_seals_the_tool_step_before_heartbeats() {
         let _guard = crate::http2_memory::test_lock();
         crate::http2_memory::reset_for_tests();

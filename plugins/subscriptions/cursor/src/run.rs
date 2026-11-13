@@ -411,11 +411,7 @@ impl ToolStep {
                 self.partial.insert(id.clone());
             }
             ServerEvent::ToolCompleted(id) => {
-                if !id.is_empty()
-                    && self.partial.contains(id)
-                    && !self.started.contains(id)
-                    && !self.execs.contains(id)
-                {
+                if !id.is_empty() && !self.started.contains(id) && !self.execs.contains(id) {
                     self.completed.insert(id.clone());
                 }
             }
