@@ -81,8 +81,8 @@ pub use hofund_ir::{
     BlockStart, ContentBlockStart, ContentBlockStop, ContentPart, Extensions, ImagePart,
     ImageSource, Message, MessageDelta, MessageStart, MessageStop, Request, Response, Role,
     StillWorking, Stop, StopReason, StreamEvent, TextDelta, TextPart, ThinkingDelta, Tool,
-    ToolArguments, ToolArgumentsDelta, ToolChoice, ToolChoiceMode, ToolResultPart, Usage, too_long,
-    words_of,
+    ToolArguments, ToolArgumentsDelta, ToolCallPart, ToolChoice, ToolChoiceMode, ToolResultPart,
+    Usage, too_long, words_of,
 };
 pub use host::{
     AccountLease, AccountsHandle, AuthResult, BRIDGE_CALLBACK_PATH_PREFIX, BindBlocked,

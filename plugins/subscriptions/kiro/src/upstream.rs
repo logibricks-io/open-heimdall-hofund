@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use hofund_plugin_api::{
-    AccountId, Completion, ContentPart, HostContext, Message, PluginError, ProbeQuery, ProbeReport,
-    ProtocolId, Request, Response, Role, Stop, StopReason, UpstreamProvider,
+    AccountId, BodyStream, Completion, ContentPart, HostContext, PluginError, ProbeQuery,
+    ProbeReport, ProtocolId, Request, Response, UpstreamProvider,
 };
 use hofund_plugin_sdk::Call;
 use hofund_plugin_sdk::json::{self, Value};
@@ -13,6 +13,8 @@ use hofund_plugin_sdk::oauth::secret_text;
 use crate::creds::{self, Stored};
 use crate::refresh;
 use crate::{Endpoints, kiro_body, kiro_stream};
+
+const ERROR_BODY_CAP: usize = 1024 * 1024;
 
 pub(crate) struct KiroUpstream {
     account: AccountId,
@@ -33,20 +35,17 @@ impl KiroUpstream {
         refresh::ensure_fresh(&self.host, &self.account, Arc::clone(&self.endpoints)).await
     }
 
-    async fn send(
-        &self,
-        stored: &Stored,
-        request: Request,
-        _inbound: ProtocolId,
-    ) -> Result<Completion, PluginError> {
+    async fn send(&self, stored: &Stored, request: Request) -> Result<Completion, PluginError> {
         let profile = creds::effective_profile_arn(&stored.credential);
         let base = self.endpoints.chat_base(profile, &stored.credential.region);
         let url = format!("{base}/generateAssistantResponse");
+        let names = kiro_body::tool_names(&request);
         let body = kiro_body::encode(&request, &stored.credential)?;
         let mut call = Call::post(url)
             .header("content-type", "application/json")
             .header("accept", "application/vnd.amazon.eventstream")
             .header("x-amzn-codewhisperer-optout", "true")
+            .header("x-amzn-kiro-agent-mode", "vibe")
             .sensitive_header(
                 "authorization",
                 format!("Bearer {}", secret_text(&stored.credential.access)),
@@ -56,47 +55,78 @@ impl KiroUpstream {
         } else if stored.credential.method == "external-idp" {
             call = call.header("tokentype", "EXTERNAL_IDP");
         }
-        let reply = call.bytes(body).fetch(self.host.http()).await?;
-        if reply.status() == 401 || reply.status() == 403 {
+        let reply = call.bytes(body).open_raw(self.host.http(), 1).await?;
+        let status = reply.status().as_u16();
+        if status == 401 || status == 403 {
             return Err(PluginError::auth(
                 "Kiro refused the sign-in for this request",
             ));
         }
-        if !(200..300).contains(&reply.status()) {
+        if !(200..300).contains(&status) {
+            let body = read_capped(reply.into_body(), ERROR_BODY_CAP).await?;
+            let detail = String::from_utf8_lossy(&body);
             return Err(PluginError::status_error(
-                reply.status(),
-                "Kiro did not complete the request",
+                status,
+                if detail.trim().is_empty() {
+                    "Kiro did not complete the request".to_owned()
+                } else {
+                    format!("Kiro did not complete the request: {}", detail.trim())
+                },
             ));
         }
-        let text =
-            decode_json(reply.body()).or_else(|_| kiro_stream::assistant_text(reply.body()))?;
-        let response = anthropic_response(&request.model, &text);
+        if request.stream {
+            return Ok(kiro_stream::stream(reply.into_body(), request.model, names));
+        }
+        let body = read_all(reply.into_body()).await?;
+        let response = kiro_stream::unary(&body, &request.model, &names)
+            .or_else(|_| decode_json(&body, &request.model))?;
         Ok(Completion::Unary(response))
     }
 }
 
-fn decode_json(body: &[u8]) -> Result<String, PluginError> {
-    let value: Value =
-        json::from_slice(body).map_err(|_| PluginError::decode("Kiro's reply is not JSON"))?;
-    value
-        .get("content")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .ok_or_else(|| PluginError::decode("Kiro's JSON reply has no content"))
+async fn read_all(mut body: BodyStream) -> Result<Vec<u8>, PluginError> {
+    let mut out = Vec::new();
+    while let Some(chunk) = body.next_chunk().await {
+        out.extend_from_slice(&chunk.map_err(|error| {
+            PluginError::decode(format!("Kiro's reply broke off: {}", error.message()))
+        })?);
+    }
+    Ok(out)
 }
 
-fn anthropic_response(model: &str, text: &str) -> Box<Response> {
-    let mut message = Message::new(Role::Assistant);
+async fn read_capped(mut body: BodyStream, cap: usize) -> Result<Vec<u8>, PluginError> {
+    let mut out = Vec::new();
+    while out.len() < cap {
+        let Some(chunk) = body.next_chunk().await else {
+            break;
+        };
+        let chunk = chunk.map_err(|error| {
+            PluginError::decode(format!("Kiro's reply broke off: {}", error.message()))
+        })?;
+        let remaining = cap - out.len();
+        out.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+    }
+    Ok(out)
+}
+
+fn decode_json(body: &[u8], model: &str) -> Result<Box<Response>, PluginError> {
+    let value: Value =
+        json::from_slice(body).map_err(|_| PluginError::decode("Kiro's reply is not JSON"))?;
+    let text = value
+        .get("content")
+        .and_then(Value::as_str)
+        .ok_or_else(|| PluginError::decode("Kiro's JSON reply has no content"))?;
+    let mut message = hofund_plugin_api::Message::new(hofund_plugin_api::Role::Assistant);
     message.content.push(ContentPart::text(text));
-    Box::new(
+    Ok(Box::new(
         Response::new(message)
             .with_id(Some("msg_kiro_probe".to_owned()))
             .with_model(Some(model.to_owned()))
-            .with_stop(Some(Stop {
-                reason: StopReason::EndTurn,
+            .with_stop(Some(hofund_plugin_api::Stop {
+                reason: hofund_plugin_api::StopReason::EndTurn,
                 sequence: None,
             })),
-    )
+    ))
 }
 
 #[hofund_plugin_sdk::async_trait]
@@ -113,7 +143,7 @@ impl UpstreamProvider for KiroUpstream {
         }
         kiro_body::reject_unsupported(&request)?;
         let stored = self.stored().await?;
-        self.send(&stored, request, inbound).await
+        self.send(&stored, request).await
     }
 
     async fn probe(&self, query: &ProbeQuery) -> Result<ProbeReport, PluginError> {
