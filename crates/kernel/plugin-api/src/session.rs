@@ -141,9 +141,6 @@ fn is_false(value: &bool) -> bool {
 pub struct SessionRecord {
     /// Agent plugin id.
     pub agent: String,
-    /// Attribution agent for desktop variants, when different from `agent`.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub app: String,
     /// Public session id, normally prefixed with the agent id.
     pub id: String,
     /// Lexical path supplied by the plugin.
@@ -184,7 +181,7 @@ pub struct SessionRecord {
     /// Whether this record is a pure copy rather than a subagent.
     #[serde(default)]
     pub copy: bool,
-    /// Usage attribution when the session ran outside this agent's files.
+    /// Attribution agent for desktop variants or sessions run outside this agent's files.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub app: String,
     /// Parent checkpoint source for a fork, when one is named.
@@ -240,7 +237,6 @@ impl SessionRecord {
             fork_usage_filtered: false,
             usage: Vec::new(),
             cut: false,
-            app: String::new(),
             read_only: false,
             gateway: false,
         }

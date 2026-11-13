@@ -50,21 +50,31 @@ fn native_gateway_keys(
 ) -> BTreeSet<(String, String)> {
     let mut keys = BTreeSet::new();
     for record in native {
-        keys.insert((record.agent.clone(), record.id.clone()));
+        insert_native_key(&mut keys, &record.agent, &record.id);
         if !record.app.is_empty() {
-            keys.insert((record.app.clone(), record.id.clone()));
+            insert_native_key(&mut keys, &record.app, &record.id);
         }
         for id in &record.copies {
-            keys.insert((record.agent.clone(), id.clone()));
+            insert_native_key(&mut keys, &record.agent, id);
         }
         for id in &record.subagents {
-            keys.insert((record.agent.clone(), id.clone()));
+            insert_native_key(&mut keys, &record.agent, id);
         }
     }
     for pair in extra {
         keys.insert(pair);
     }
     keys
+}
+
+fn insert_native_key(keys: &mut BTreeSet<(String, String)>, agent: &str, id: &str) {
+    keys.insert((agent.to_owned(), id.to_owned()));
+    if let Some(raw) = id
+        .strip_prefix(agent)
+        .and_then(|suffix| suffix.strip_prefix(':'))
+    {
+        keys.insert((agent.to_owned(), raw.to_owned()));
+    }
 }
 
 fn gateway_to_record(session: GatewaySession) -> SessionRecord {
@@ -89,6 +99,21 @@ fn gateway_to_record(session: GatewaySession) -> SessionRecord {
             )
             .with_cache_write_1h(model.cache_write_1h_tokens),
         );
+    }
+    for day in session.days {
+        record.add_day(hofund_plugin_api::SessionDay::new(
+            day.date,
+            day.model.model,
+            hofund_plugin_api::SessionTokens::new(
+                day.model.input_tokens,
+                day.model.output_tokens,
+                day.model.cache_read_tokens,
+                day.model
+                    .cache_write_5m_tokens
+                    .saturating_add(day.model.cache_write_1h_tokens),
+            )
+            .with_cache_write_1h(day.model.cache_write_1h_tokens),
+        ));
     }
     record
 }
@@ -178,5 +203,40 @@ mod tests {
             merge_gateway_sessions(dir.path(), Vec::new(), &ledger, []).expect("merge");
         assert_eq!(gateway_only.len(), 5);
         assert!(gateway_only.iter().all(|record| record.gateway));
+    }
+
+    #[test]
+    fn r33_prefixed_native_ids_dedup_main_copies_subagents_and_app() {
+        let dir = tempfile::tempdir().expect("dir");
+        let ledger = Ledger::open(&dir.path().join("usage.sqlite")).expect("ledger");
+        for (agent, session) in [
+            ("opencode", "ses_v1"),
+            ("opencode", "copy_v1"),
+            ("opencode", "sub_v1"),
+            ("desktop", "app_v1"),
+        ] {
+            ledger
+                .record(&Row {
+                    created_unix: 10,
+                    model: "m".to_owned(),
+                    upstream: "up".to_owned(),
+                    input_tokens: Some(1),
+                    latency_ms: 1,
+                    status: "200".to_owned(),
+                    client_agent: agent.to_owned(),
+                    session_id: session.to_owned(),
+                    ..Row::default()
+                })
+                .expect("row");
+        }
+        let mut main = SessionRecord::new("opencode", "opencode:ses_v1", "main.jsonl");
+        main.copies.push("opencode:copy_v1".into());
+        main.subagents.push("opencode:sub_v1".into());
+        let mut app = SessionRecord::new("opencode", "desktop:app_v1", "app.jsonl");
+        app.app = "desktop".into();
+        let merged =
+            merge_gateway_sessions(dir.path(), vec![main, app], &ledger, []).expect("merge");
+        assert_eq!(merged.len(), 2);
+        assert!(merged.iter().all(|record| !record.gateway));
     }
 }

@@ -670,6 +670,41 @@ mod tests {
     }
 
     #[test]
+    fn stats_include_merged_gateway_only_days() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let ledger = Ledger::open(&temp.path().join("usage.sqlite")).expect("ledger");
+        ledger
+            .record(&hofund_usage::Row {
+                created_unix: 1_600_000_000,
+                model: "model".to_owned(),
+                upstream: "up".to_owned(),
+                input_tokens: Some(2),
+                output_tokens: Some(3),
+                latency_ms: 1,
+                status: "200".to_owned(),
+                client_agent: "fixture".to_owned(),
+                session_id: "gateway-only".to_owned(),
+                ..hofund_usage::Row::default()
+            })
+            .expect("row");
+        let records = merge_gateway_sessions(temp.path(), Vec::new(), &ledger, [])
+            .expect("merge gateway rows");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].days.len(), 1);
+        let options = Options {
+            days: Some(0),
+            json: true,
+            ..list_options()
+        };
+        let out = stats(&records, &options, 0, Local::now(), None).expect("stats");
+        let value: Value = serde_json::from_str(&out).expect("JSON");
+        assert_eq!(value["tokens"]["input"], 2);
+        assert_eq!(value["tokens"]["output"], 3);
+        assert_eq!(value["days"].as_array().map(Vec::len), Some(1));
+        assert_eq!(value["models"][0]["name"], "model");
+    }
+
+    #[test]
     fn read_change_rejects_unknown_before_writing() {
         let temp = tempfile::tempdir().expect("temp dir");
         let mut consent = Consent::new(temp.path());

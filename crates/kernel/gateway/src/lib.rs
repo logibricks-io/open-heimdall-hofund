@@ -2787,7 +2787,7 @@ async fn success(
     meta.provider_key_id = provider_key_id.to_owned();
     let member = Some(upstream.to_owned());
     let capture = prev_response::ReplyCapture::new(capture);
-    match completion {
+    let response = match completion {
         Completion::Unary(response) => {
             if let Some(usage) = response.usage.as_ref() {
                 limits::observe_usage(
@@ -2948,7 +2948,8 @@ async fn success(
             track.end_with(member, StatusCode::BAD_GATEWAY.as_u16(), None, None);
             text_response(StatusCode::BAD_GATEWAY, "unsupported completion")
         }
-    }
+    };
+    with_named_session(response, &ledger.session_id)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3108,7 +3109,7 @@ fn failure(
             scope_error(&error, identity),
         ),
         RouterError::SpendCapReached { retry_after } => {
-            return spend_cap_response(codec, *retry_after);
+            return with_named_session(spend_cap_response(codec, *retry_after), &ledger.session_id);
         }
         RouterError::Upstream { upstream_id, error } => (
             status_of(error),
@@ -3142,13 +3143,16 @@ fn failure(
         && (status == StatusCode::PAYLOAD_TOO_LARGE
             || too_long(status.as_u16(), &words_of(&message)))
     {
-        return Response::builder()
-            .status(StatusCode::OK)
-            .header(header::CONTENT_TYPE, codec.stream_content_type())
-            .body(Body::from(
-                codec.encode_stream_error(status.as_u16(), &message),
-            ))
-            .unwrap_or_else(|_| text_response(StatusCode::INTERNAL_SERVER_ERROR, "stream"));
+        return with_named_session(
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, codec.stream_content_type())
+                .body(Body::from(
+                    codec.encode_stream_error(status.as_u16(), &message),
+                ))
+                .unwrap_or_else(|_| text_response(StatusCode::INTERNAL_SERVER_ERROR, "stream")),
+            &ledger.session_id,
+        );
     }
     with_named_session(coded(codec, status, &message), &ledger.session_id)
 }

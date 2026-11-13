@@ -29,6 +29,15 @@ pub struct GatewayModelTotals {
     pub priced: bool,
 }
 
+/// One local date and model's token totals inside a gateway session.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct GatewayDay {
+    /// Local calendar date in `YYYY-MM-DD` form.
+    pub date: String,
+    /// Token totals for this date and model.
+    pub model: GatewayModelTotals,
+}
+
 /// A gateway session aggregated from the usage ledger.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct GatewaySession {
@@ -44,6 +53,8 @@ pub struct GatewaySession {
     pub title: String,
     /// Tokens by model.
     pub models: Vec<GatewayModelTotals>,
+    /// Tokens by local date and model.
+    pub days: Vec<GatewayDay>,
     /// Total input tokens.
     pub input_tokens: u64,
     /// Total output tokens.
@@ -103,6 +114,7 @@ struct Acc {
     start_unix: i64,
     last_unix: i64,
     models: BTreeMap<String, GatewayModelTotals>,
+    days: BTreeMap<(String, String), GatewayModelTotals>,
     input_tokens: u64,
     output_tokens: u64,
     cache_read_tokens: u64,
@@ -163,6 +175,23 @@ impl Acc {
         model.cache_write_5m_tokens = model.cache_write_5m_tokens.saturating_add(cache_write_5m);
         model.cache_write_1h_tokens = model.cache_write_1h_tokens.saturating_add(cache_write_1h);
         model.reasoning_tokens = model.reasoning_tokens.saturating_add(reasoning);
+        let date = local_date(row.created_unix);
+        if !date.is_empty() {
+            let day = self
+                .days
+                .entry((date, row.model.clone()))
+                .or_insert_with(|| GatewayModelTotals {
+                    model: row.model.clone(),
+                    priced: true,
+                    ..GatewayModelTotals::default()
+                });
+            day.input_tokens = day.input_tokens.saturating_add(input);
+            day.output_tokens = day.output_tokens.saturating_add(output);
+            day.cache_read_tokens = day.cache_read_tokens.saturating_add(cache_read);
+            day.cache_write_5m_tokens = day.cache_write_5m_tokens.saturating_add(cache_write_5m);
+            day.cache_write_1h_tokens = day.cache_write_1h_tokens.saturating_add(cache_write_1h);
+            day.reasoning_tokens = day.reasoning_tokens.saturating_add(reasoning);
+        }
         if row.priced {
             let cost = row.cost_usd.unwrap_or(0.0);
             model.cost_usd += cost;
@@ -185,6 +214,11 @@ impl Acc {
                 .cmp(&left_total)
                 .then_with(|| left.model.cmp(&right.model))
         });
+        let days = self
+            .days
+            .into_iter()
+            .map(|((date, _), model)| GatewayDay { date, model })
+            .collect();
         Some(GatewaySession {
             agent: self.agent,
             id: self.id.clone(),
@@ -192,6 +226,7 @@ impl Acc {
             last_unix: self.last_unix,
             title: self.id,
             models,
+            days,
             input_tokens: self.input_tokens,
             output_tokens: self.output_tokens,
             cache_read_tokens: self.cache_read_tokens,
@@ -288,6 +323,39 @@ mod tests {
         assert_eq!(s1.input_tokens, 4);
         assert_eq!(s1.output_tokens, 6);
         assert!((s1.cost_usd - 0.02).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn r33_gateway_sessions_accumulates_local_date_and_model_days() {
+        let dir = tempfile::tempdir().expect("dir");
+        let ledger = Ledger::open(&dir.path().join("usage.sqlite")).expect("ledger");
+        let first = 1_600_000_000;
+        let second = first + 86_400;
+        for row in [
+            row(first, "fixture-a", "s1", "m1", 1, 2),
+            row(first + 1, "fixture-a", "s1", "m1", 2, 3),
+            row(second, "fixture-a", "s1", "m2", 4, 5),
+        ] {
+            ledger.record(&row).expect("row");
+        }
+        let session = &gateway_sessions(&ledger, None).expect("sessions")[0];
+        assert_eq!(session.days.len(), 2);
+        let first_date = local_date(first);
+        let second_date = local_date(second);
+        assert_ne!(first_date, second_date);
+        let day = session
+            .days
+            .iter()
+            .find(|day| day.date == first_date && day.model.model == "m1")
+            .expect("first day and model");
+        assert_eq!(day.model.input_tokens, 3);
+        assert_eq!(day.model.output_tokens, 5);
+        assert!(
+            session
+                .days
+                .iter()
+                .any(|day| day.date == second_date && day.model.model == "m2")
+        );
     }
 
     #[test]
