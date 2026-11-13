@@ -66,6 +66,7 @@ AgentDescription::const fn request_agent_header (& self) -> Option < & 'static s
 AgentDescription::const fn requires (& self) -> & 'static [crate :: id :: SurfaceId]
 AgentDescription::const fn restore_model_on_clear (& self) -> bool
 AgentDescription::const fn route (& self) -> AgentRoute
+AgentDescription::const fn session_headers (& self) -> & 'static [& 'static str]
 AgentDescription::const fn sets (& self) -> & 'static [AgentSet]
 AgentDescription::const fn status_checks (& self) -> & 'static [AgentStatusCheck]
 AgentDescription::const fn visible (& self) -> Visible
@@ -82,6 +83,7 @@ AgentDescription::const fn with_model_table (mut self , table : & 'static str) -
 AgentDescription::const fn with_nested_turn_headers (mut self , headers : & 'static [& 'static str]) -> Self
 AgentDescription::const fn with_remove (mut self , remove : & 'static [AgentRemove]) -> Self
 AgentDescription::const fn with_request_agent_header (mut self , header : & 'static str) -> Self
+AgentDescription::const fn with_session_headers (mut self , headers : & 'static [& 'static str]) -> Self
 AgentDescription::const fn with_status_checks (mut self , checks : & 'static [AgentStatusCheck]) -> Self
 AgentFactory
 AgentFactory::Config
@@ -1045,12 +1047,14 @@ SessionRecord.family_leaf
 SessionRecord.family_root
 SessionRecord.fork_usage_filtered
 SessionRecord.forked_from
+SessionRecord.gateway
 SessionRecord.id
 SessionRecord.last_ms
 SessionRecord.main
 SessionRecord.models
 SessionRecord.parent_id
 SessionRecord.path
+SessionRecord.read_only
 SessionRecord.start_ms
 SessionRecord.subagents
 SessionRecord.title
@@ -1070,6 +1074,7 @@ SessionRows::const fn new (values : Vec < Vec < SessionValue > > , cut : bool) -
 SessionStore
 SessionStore::fn agent (& self) -> & str
 SessionStore::fn files (& self , root : & Path) -> Result < Vec < SessionFile > , PluginError >
+SessionStore::fn gateway_dedup_pairs (& self , _record : & SessionRecord) -> Vec < (String , String) >
 SessionStore::fn locator (& self) -> & dyn SessionLocator
 SessionStore::fn parser (& self , file : & SessionFile , state : Option < & str > ,) -> Result < Box < dyn SessionParser > , PluginError >
 SessionStore::fn read_database (& self , _file : & SessionFile , _database : & dyn SessionDatabase ,) -> Result < Vec < SessionRecord > , PluginError >

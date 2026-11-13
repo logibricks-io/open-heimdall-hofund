@@ -180,7 +180,7 @@ pub struct SessionRecord {
     /// Whether this record is a pure copy rather than a subagent.
     #[serde(default)]
     pub copy: bool,
-    /// Usage attribution when the session ran outside this agent's files.
+    /// Attribution agent for desktop variants or sessions run outside this agent's files.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub app: String,
     /// Parent checkpoint source for a fork, when one is named.
@@ -198,6 +198,12 @@ pub struct SessionRecord {
     pub usage: Vec<SessionUsageEvent>,
     /// Whether input bounds or the agent format omitted some content.
     pub cut: bool,
+    /// Whether this row is read-only in the session list.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub read_only: bool,
+    /// Whether this row is projected from the gateway ledger.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub gateway: bool,
 }
 
 impl SessionRecord {
@@ -230,6 +236,8 @@ impl SessionRecord {
             fork_usage_filtered: false,
             usage: Vec::new(),
             cut: false,
+            read_only: false,
+            gateway: false,
         }
     }
 
@@ -577,6 +585,11 @@ pub trait SessionStore: Send + Sync {
         Err(PluginError::unsupported(
             "session transcripts are not supported by this store",
         ))
+    }
+
+    /// Extra `(agent, session id)` pairs that suppress a matching gateway row.
+    fn gateway_dedup_pairs(&self, _record: &SessionRecord) -> Vec<(String, String)> {
+        Vec::new()
     }
 }
 

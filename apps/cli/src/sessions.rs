@@ -11,7 +11,9 @@ use hofund_model_catalog::{EffectivePricer, ListPriceLookup, ModelCatalog, Reqwe
 use hofund_plugin_api::{SessionRecord, SessionStore, SessionTokens};
 use hofund_sessions::consent::Consent;
 use hofund_sessions::index::SessionIndex;
+use hofund_sessions::merge::merge_gateway_sessions;
 use hofund_sessions::pricing::{TokenPrice, price_records, token_cost};
+use hofund_usage::Ledger;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
@@ -150,6 +152,24 @@ fn run_with(
             let pricing = pricing(config);
             for record in &mut records {
                 price_record(record, pricing.as_ref());
+            }
+            let usage_path = load_path(config)
+                .map_err(|error| error.to_string())
+                .map(|settings| config.parent().unwrap_or(config).join(settings.usage_file));
+            if let Ok(path) = usage_path
+                && let Ok(ledger) = Ledger::open(&path)
+            {
+                let extra = stores
+                    .iter()
+                    .flat_map(|store| {
+                        records
+                            .iter()
+                            .filter(|record| record.agent == store.agent())
+                            .flat_map(|record| store.gateway_dedup_pairs(record))
+                    })
+                    .collect::<Vec<_>>();
+                records = merge_gateway_sessions(&config_dir, records, &ledger, extra)
+                    .map_err(|error| error.to_string())?;
             }
             if let Some(days) = options.days {
                 stats(&records, options, days, now, pricing.as_ref())
@@ -293,8 +313,8 @@ fn session_json(record: &SessionRecord) -> Value {
         "cost": record.cost,
         "unpriced": record.unpriced,
         "resume": Value::Null,
-        "read_only": false,
-        "gateway": false,
+        "read_only": record.read_only,
+        "gateway": record.gateway,
     })
 }
 
@@ -647,6 +667,41 @@ mod tests {
         let out = stats(&[record], &options, 0, Local::now(), None).expect("stats");
         assert!(out.contains("2026-11-10"));
         assert!(out.contains("tokens: 10"));
+    }
+
+    #[test]
+    fn stats_include_merged_gateway_only_days() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let ledger = Ledger::open(&temp.path().join("usage.sqlite")).expect("ledger");
+        ledger
+            .record(&hofund_usage::Row {
+                created_unix: 1_600_000_000,
+                model: "model".to_owned(),
+                upstream: "up".to_owned(),
+                input_tokens: Some(2),
+                output_tokens: Some(3),
+                latency_ms: 1,
+                status: "200".to_owned(),
+                client_agent: "fixture".to_owned(),
+                session_id: "gateway-only".to_owned(),
+                ..hofund_usage::Row::default()
+            })
+            .expect("row");
+        let records = merge_gateway_sessions(temp.path(), Vec::new(), &ledger, [])
+            .expect("merge gateway rows");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].days.len(), 1);
+        let options = Options {
+            days: Some(0),
+            json: true,
+            ..list_options()
+        };
+        let out = stats(&records, &options, 0, Local::now(), None).expect("stats");
+        let value: Value = serde_json::from_str(&out).expect("JSON");
+        assert_eq!(value["tokens"]["input"], 2);
+        assert_eq!(value["tokens"]["output"], 3);
+        assert_eq!(value["days"].as_array().map(Vec::len), Some(1));
+        assert_eq!(value["models"][0]["name"], "model");
     }
 
     #[test]

@@ -22,6 +22,7 @@ mod readonly;
 mod refusal_handover;
 mod relisten;
 mod responses_ws;
+pub mod session_headers;
 mod stream_timing;
 mod usage_handoff;
 
@@ -56,8 +57,9 @@ use endpoints::{
 };
 use futures_util::{Stream, StreamExt, TryStreamExt};
 use hofund_codec::{
-    Codec, EndWatch, SESSION_HEADERS, STREAM_CLIENT_PREFIXES, SUBAGENT_HEADER, StreamEncoder,
-    compacts_in_stream_client, conversation_key, turn_in,
+    Codec, ECHO_SESSION_HEADER, EndWatch, SESSION_HEADERS, STREAM_CLIENT_PREFIXES, SUBAGENT_HEADER,
+    StreamEncoder, compacts_in_stream_client, conversation_key, native_session_of, session_of,
+    turn_in,
 };
 use hofund_config::VisibleCatalog;
 use hofund_ir::{BlockStart, Request as ModelRequest, StreamEvent, too_long, words_of};
@@ -122,6 +124,8 @@ struct Inner {
     model_catalog: Option<Arc<hofund_model_catalog::ModelCatalog>>,
     /// Effective list prices for usage rows.
     pricer: Option<Arc<hofund_model_catalog::EffectivePricer>>,
+    /// Ordered client header names for [`session_of`], including plugin extras.
+    session_header_names: Vec<String>,
 }
 
 struct TokenState {
@@ -562,6 +566,7 @@ impl Gateway {
                 route_trace: None,
                 model_catalog: None,
                 pricer: None,
+                session_header_names: hofund_codec::kernel_session_header_names(),
             }),
         }
     }
@@ -572,6 +577,15 @@ impl Gateway {
         Arc::get_mut(&mut self.inner)
             .expect("gateway is not shared yet")
             .network_access = access;
+        self
+    }
+
+    /// Sets plugin-appended session header names after the kernel list.
+    #[must_use]
+    pub fn with_session_header_names(mut self, names: Vec<String>) -> Self {
+        Arc::get_mut(&mut self.inner)
+            .expect("gateway is not shared yet")
+            .session_header_names = names;
         self
     }
 
@@ -1868,13 +1882,22 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
             identity_headers.push((name, value));
         }
     }
-    let session = client_session(&identity_headers);
+    let header_pairs = request_header_pairs(&headers);
+    let session_names: Vec<&str> = app
+        .session_header_names
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let ledger_session = session_of(&session_names, &header_pairs);
+    let routing_session = native_session_of(&identity_headers);
+    let endpoint = path.clone();
+    let kind = usage_kind(&path);
     let watched = unrouted_watched(&path);
     let mut unrouted_hold = watched
         .then(|| {
             app.route_trace
                 .as_ref()
-                .map(|book| book.hold_unrouted(&session, "", codec.id(), "body"))
+                .map(|book| book.hold_unrouted(&routing_session, "", codec.id(), "body"))
         })
         .flatten();
     if let Some(hold) = &unrouted_hold {
@@ -2049,7 +2072,7 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
     let agent = trace_agent_label(&identity_headers, &identity);
     let trace = app.route_trace.as_ref().map(|book| {
         book.begin(hofund_router::RouteMeta {
-            session: session.clone(),
+            session: routing_session.clone(),
             agent,
             gateway_key: identity.key_id.clone(),
             request_id: request_id.clone(),
@@ -2102,7 +2125,12 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
                     started,
                     identity,
                     &client_agent,
-                    &session,
+                    &RequestLedger {
+                        session_id: ledger_session.clone(),
+                        native_session_id: routing_session.clone(),
+                        endpoint: endpoint.clone(),
+                        kind: kind.clone(),
+                    },
                     track,
                     capture,
                     dispatch,
@@ -2127,7 +2155,12 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
                 started,
                 &identity,
                 &client_agent,
-                &session,
+                &RequestLedger {
+                    session_id: ledger_session.clone(),
+                    native_session_id: routing_session.clone(),
+                    endpoint: endpoint.clone(),
+                    kind: kind.clone(),
+                },
                 &mut track,
                 capture,
             )
@@ -2142,6 +2175,12 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
             started,
             &identity,
             &client_agent,
+            &RequestLedger {
+                session_id: ledger_session.clone(),
+                native_session_id: routing_session.clone(),
+                endpoint,
+                kind,
+            },
             &mut track,
         ),
     }
@@ -2168,6 +2207,14 @@ type DispatchFuture =
     Pin<Box<dyn std::future::Future<Output = Result<Routed, RouterError>> + Send>>;
 type BytesStream = Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>>;
 
+#[derive(Clone)]
+struct RequestLedger {
+    session_id: String,
+    native_session_id: String,
+    endpoint: String,
+    kind: String,
+}
+
 struct HeldResponse {
     dispatch: Option<DispatchFuture>,
     app: Arc<Inner>,
@@ -2176,7 +2223,7 @@ struct HeldResponse {
     started: Instant,
     identity: Identity,
     client_agent: String,
-    session_id: String,
+    ledger: RequestLedger,
     track: Option<RequestTrack>,
     capture: Option<prev_response::Capture>,
     incoming: Option<BytesStream>,
@@ -2192,7 +2239,7 @@ fn held_response(
     started: Instant,
     identity: Identity,
     client_agent: &str,
-    session_id: &str,
+    ledger: &RequestLedger,
     track: RequestTrack,
     capture: Option<prev_response::Capture>,
     dispatch: DispatchFuture,
@@ -2206,7 +2253,7 @@ fn held_response(
         started,
         identity,
         client_agent: client_agent.to_owned(),
-        session_id: session_id.to_owned(),
+        ledger: ledger.clone(),
         track: Some(track),
         capture,
         incoming: None,
@@ -2256,7 +2303,7 @@ fn held_response(
                                 state.started,
                                 &state.identity,
                                 &state.client_agent,
-                                &state.session_id,
+                                &state.ledger,
                                 state.track.as_mut().expect("held request track"),
                                 state.capture.take(),
                             )
@@ -2281,6 +2328,7 @@ fn held_response(
                                 state.started,
                                 &state.identity,
                                 &state.client_agent,
+                                &state.ledger,
                                 state.track.as_mut().expect("held request track"),
                             );
                             let bytes = state
@@ -2293,11 +2341,14 @@ fn held_response(
             }
         }
     });
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, content_type)
-        .body(Body::from_stream(body))
-        .unwrap_or_else(|_| text_response(StatusCode::INTERNAL_SERVER_ERROR, "stream"))
+    with_named_session(
+        Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, content_type)
+            .body(Body::from_stream(body))
+            .unwrap_or_else(|_| text_response(StatusCode::INTERNAL_SERVER_ERROR, "stream")),
+        &ledger.session_id,
+    )
 }
 
 fn stream_error(error: &RouterError) -> (StatusCode, String) {
@@ -2554,24 +2605,29 @@ fn unrouted_timeout_before_routing(
     )
 }
 
-fn client_session(headers: &[(&str, &str)]) -> String {
-    SESSION_HEADERS
+fn request_header_pairs(headers: &HeaderMap) -> Vec<(&str, &str)> {
+    headers
         .iter()
-        .find_map(|name| {
-            headers
-                .iter()
-                .find(|(header, _)| header.eq_ignore_ascii_case(name))
-                .map(|(_, value)| (*value).trim())
-                .filter(|value| !value.is_empty())
-        })
-        .map(|value| {
-            if value.chars().count() > 128 {
-                value.chars().take(128).collect()
-            } else {
-                value.to_owned()
-            }
-        })
-        .unwrap_or_default()
+        .filter_map(|(name, value)| Some((name.as_str(), value.to_str().ok()?)))
+        .collect()
+}
+
+fn usage_kind(path: &str) -> String {
+    if path.contains("tools/call") {
+        "mcp".to_owned()
+    } else {
+        String::new()
+    }
+}
+
+fn with_named_session(mut response: Response, session_id: &str) -> Response {
+    if session_id.is_empty() {
+        return response;
+    }
+    if let Ok(value) = HeaderValue::from_str(session_id) {
+        response.headers_mut().insert(ECHO_SESSION_HEADER, value);
+    }
+    response
 }
 
 fn route_scope(identity: &Identity) -> RouteScope {
@@ -2717,7 +2773,7 @@ async fn success(
     started: Instant,
     identity: &Identity,
     client_agent: &str,
-    session_id: &str,
+    ledger: &RequestLedger,
     track: &mut RequestTrack,
     capture: Option<prev_response::Capture>,
 ) -> Response {
@@ -2729,12 +2785,12 @@ async fn success(
         started,
         identity,
         client_agent,
-    );
+    )
+    .with_ledger(ledger);
     meta.provider_key_id = provider_key_id.to_owned();
-    meta.session_id = session_id.to_owned();
     let member = Some(upstream.to_owned());
     let capture = prev_response::ReplyCapture::new(capture);
-    match completion {
+    let response = match completion {
         Completion::Unary(response) => {
             if let Some(usage) = response.usage.as_ref() {
                 limits::observe_usage(
@@ -2771,7 +2827,7 @@ async fn success(
                 input.and_then(|value| u64::try_from(value).ok()),
                 output.and_then(|value| u64::try_from(value).ok()),
             );
-            body
+            with_named_session(body, &ledger.session_id)
         }
         Completion::Stream(events) => {
             let encoder = codec.stream_encoder_for(request);
@@ -2815,11 +2871,14 @@ async fn success(
                     ))
                 };
             let body = capture_stream(body, capture);
-            Response::builder()
-                .status(StatusCode::OK)
-                .header(header::CONTENT_TYPE, codec.stream_content_type())
-                .body(Body::from_stream(body))
-                .unwrap_or_else(|_| text_response(StatusCode::INTERNAL_SERVER_ERROR, "stream"))
+            with_named_session(
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header(header::CONTENT_TYPE, codec.stream_content_type())
+                    .body(Body::from_stream(body))
+                    .unwrap_or_else(|_| text_response(StatusCode::INTERNAL_SERVER_ERROR, "stream")),
+                &ledger.session_id,
+            )
         }
         Completion::Raw(body) => {
             if let Some(continuation) = continuation {
@@ -2892,7 +2951,8 @@ async fn success(
             track.end_with(member, StatusCode::BAD_GATEWAY.as_u16(), None, None);
             text_response(StatusCode::BAD_GATEWAY, "unsupported completion")
         }
-    }
+    };
+    with_named_session(response, &ledger.session_id)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3023,17 +3083,22 @@ fn failure(
     started: Instant,
     identity: &Identity,
     client_agent: &str,
+    ledger: &RequestLedger,
     track: &mut RequestTrack,
 ) -> Response {
     if let RouterError::PreviousResponseNotFound { id } = &error {
         write_usage_app(
             app.as_ref(),
-            &UsageMeta::new(request, "", &request.model, started, identity, client_agent),
+            &UsageMeta::new(request, "", &request.model, started, identity, client_agent)
+                .with_ledger(ledger),
             None,
             StatusCode::BAD_REQUEST,
         );
         track.end_with(None, StatusCode::BAD_REQUEST.as_u16(), None, None);
-        return json_response(StatusCode::BAD_REQUEST, prev_response::not_found_body(id));
+        return with_named_session(
+            json_response(StatusCode::BAD_REQUEST, prev_response::not_found_body(id)),
+            &ledger.session_id,
+        );
     }
     let (status, upstream, message) = match &error {
         RouterError::NoRoute { .. } => (StatusCode::NOT_FOUND, String::new(), error.to_string()),
@@ -3047,7 +3112,7 @@ fn failure(
             scope_error(&error, identity),
         ),
         RouterError::SpendCapReached { retry_after } => {
-            return spend_cap_response(codec, *retry_after);
+            return with_named_session(spend_cap_response(codec, *retry_after), &ledger.session_id);
         }
         RouterError::Upstream { upstream_id, error } => (
             status_of(error),
@@ -3064,7 +3129,8 @@ fn failure(
             started,
             identity,
             client_agent,
-        ),
+        )
+        .with_ledger(ledger),
         None,
         status,
     );
@@ -3080,15 +3146,18 @@ fn failure(
         && (status == StatusCode::PAYLOAD_TOO_LARGE
             || too_long(status.as_u16(), &words_of(&message)))
     {
-        return Response::builder()
-            .status(StatusCode::OK)
-            .header(header::CONTENT_TYPE, codec.stream_content_type())
-            .body(Body::from(
-                codec.encode_stream_error(status.as_u16(), &message),
-            ))
-            .unwrap_or_else(|_| text_response(StatusCode::INTERNAL_SERVER_ERROR, "stream"));
+        return with_named_session(
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, codec.stream_content_type())
+                .body(Body::from(
+                    codec.encode_stream_error(status.as_u16(), &message),
+                ))
+                .unwrap_or_else(|_| text_response(StatusCode::INTERNAL_SERVER_ERROR, "stream")),
+            &ledger.session_id,
+        );
     }
-    coded(codec, status, &message)
+    with_named_session(coded(codec, status, &message), &ledger.session_id)
 }
 
 /// Text that ends a stream that broke off after it began; an inbound
@@ -3137,6 +3206,9 @@ struct UsageMeta {
     identity: Identity,
     client_agent: String,
     session_id: String,
+    native_session_id: String,
+    endpoint: String,
+    kind: String,
     input: Option<i64>,
     output: Option<i64>,
     ttft_ms: Option<i64>,
@@ -3164,6 +3236,9 @@ impl UsageMeta {
             identity: identity.clone(),
             client_agent: client_agent.to_owned(),
             session_id: String::new(),
+            native_session_id: String::new(),
+            endpoint: String::new(),
+            kind: String::new(),
             input: None,
             output: None,
             ttft_ms: None,
@@ -3171,6 +3246,14 @@ impl UsageMeta {
             saw_reasoning: false,
             stream_timing: stream_timing::StreamTiming::new(started),
         }
+    }
+
+    fn with_ledger(mut self, ledger: &RequestLedger) -> Self {
+        self.session_id = ledger.session_id.clone();
+        self.native_session_id = ledger.native_session_id.clone();
+        self.endpoint = ledger.endpoint.clone();
+        self.kind = ledger.kind.clone();
+        self
     }
 }
 
@@ -3691,6 +3774,9 @@ fn write_usage(
         provider_key_id: meta.provider_key_id.clone(),
         client_agent: meta.client_agent.clone(),
         session_id: meta.session_id.clone(),
+        native_session_id: meta.native_session_id.clone(),
+        endpoint: meta.endpoint.clone(),
+        kind: meta.kind.clone(),
         served_model: meta.served_model.clone(),
         first_text_ms: details.first_text_ms,
         first_reasoning_ms: details.first_reasoning_ms,

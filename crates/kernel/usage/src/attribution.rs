@@ -115,8 +115,10 @@ impl Ledger {
                 "CASE WHEN upstream LIKE 'account:%' THEN upstream ELSE 'none' END".to_owned(),
             ),
             BreakdownDimension::Session => (
-                "CASE WHEN session_id = '' THEN 'none' ELSE session_id END".to_owned(),
-                "CASE WHEN session_id = '' THEN 'none' ELSE session_id END".to_owned(),
+                "CASE WHEN session_id IS NULL OR TRIM(session_id) = '' THEN 'none' ELSE session_id END"
+                    .to_owned(),
+                "CASE WHEN session_id IS NULL OR TRIM(session_id) = '' THEN 'none' ELSE session_id END"
+                    .to_owned(),
             ),
             BreakdownDimension::Day => (
                 "date(created_unix, 'unixepoch', 'localtime')".to_owned(),

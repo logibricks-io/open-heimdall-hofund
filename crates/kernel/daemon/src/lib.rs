@@ -520,6 +520,8 @@ async fn start_inner(
         &snapshot.load().models(),
     )));
     let agent_descriptions = registry.agents();
+    let session_header_names =
+        hofund_gateway::session_headers::gateway_session_header_names(agent_descriptions);
     let request_agent: hofund_gateway::RequestAgentHook = Arc::new({
         let descriptions = agent_descriptions;
         move |headers, identity| {
@@ -551,7 +553,8 @@ async fn start_inner(
     .with_surfaces(registry.surfaces())
     .with_surface_http(surface_http(&config, max_idle_per_host))
     .with_visible_catalog(Arc::clone(&visible_catalog))
-    .with_request_agent(request_agent);
+    .with_request_agent(request_agent)
+    .with_session_header_names(session_header_names);
     let quotas = Arc::new(quotas::DaemonQuotas::new(
         Arc::clone(&runtime),
         Arc::clone(&usage),
