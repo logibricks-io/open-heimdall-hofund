@@ -1,5 +1,5 @@
 //! Kiro subscription: import IDE or CLI token files, refresh social sign-ins,
-//! read usage limits, and serve unary text-only chat (no stream, tools, or images).
+//! read usage limits, and serve Anthropic Messages chat with streams, tools, and images.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

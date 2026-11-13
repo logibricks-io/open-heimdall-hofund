@@ -1,6 +1,6 @@
 [package]
 name = "hofund-plugin-subscription-kiro"
-description = "Kiro subscription: import IDE tokens, refresh social sign-ins, usage limits, and unary text-only chat."
+description = "Kiro subscription: import IDE tokens, refresh social sign-ins, usage limits, and Messages chat."
 version.workspace = true
 authors.workspace = true
 edition.workspace = true

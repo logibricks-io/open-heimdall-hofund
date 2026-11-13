@@ -3,11 +3,13 @@
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
-use hofund_kit_subscription::{TestHost, block_on};
+use hofund_kit_subscription::{Http1Response, Http1Server, TestHost, block_on};
 use hofund_plugin_api::{
-    AccountId, ContentPart, Message, PluginId, PluginKind, ProbeQuery, ProtocolId, RawTable,
-    Request, Role, SecretString, Subscription, SubscriptionFactory,
+    AccountId, Completion, ContentPart, Extensions, ImagePart, ImageSource, Message, PluginId,
+    PluginKind, ProbeQuery, ProtocolId, RawTable, Request, Role, SecretString, StreamEvent,
+    Subscription, SubscriptionFactory, Tool, ToolArguments, ToolCallPart, ToolResultPart,
 };
+use hofund_plugin_sdk::json::{self, Value, json};
 use hofund_plugin_sdk::oauth::{SecretObject, secret_text};
 
 use crate::creds::{self, Credential, TOKEN_FILE};
@@ -514,7 +516,7 @@ fn a2b_34_history_and_system_prompt_are_encoded() {
     assert!(body.contains("last"));
     let mut streaming = request.clone();
     streaming.stream = true;
-    assert!(crate::kiro_body::reject_unsupported(&streaming).is_err());
+    crate::kiro_body::reject_unsupported(&streaming).expect("streaming is supported");
 }
 
 #[test]
@@ -525,4 +527,566 @@ fn a2b_44_kiro_region_prefers_profile_arn_then_eu_fallback() {
     );
     assert_eq!(creds::kiro_region("", "eu-west-1"), "eu-central-1");
     assert_eq!(creds::kiro_region("", "ap-south-1"), "us-east-1");
+}
+
+fn test_credential() -> Credential {
+    Credential {
+        access: SecretString::from("a".to_owned()),
+        refresh: SecretString::from("r".to_owned()),
+        expires_at: None,
+        region: "us-east-1".to_owned(),
+        profile_arn: "arn:aws:codewhisperer:us-east-1:1:profile/P".to_owned(),
+        label: "Kiro".to_owned(),
+        method: "social".to_owned(),
+        provider: String::new(),
+        client_id: String::new(),
+        client_secret: SecretString::from(String::new()),
+        client_id_hash: String::new(),
+        token_url: String::new(),
+        ide_token_path: String::new(),
+    }
+}
+
+fn encoded(request: &Request) -> Value {
+    let bytes = crate::kiro_body::encode(request, &test_credential()).expect("encode");
+    json::from_slice(&bytes).expect("request JSON")
+}
+
+fn message(role: Role, content: Vec<ContentPart>) -> Message {
+    Message {
+        role,
+        content,
+        extensions: Extensions::new(),
+    }
+}
+
+fn call(id: &str, name: &str, input: Value) -> ContentPart {
+    ContentPart::ToolCall(ToolCallPart {
+        id: id.to_owned(),
+        name: name.to_owned(),
+        arguments: ToolArguments::Json { value: input },
+        extensions: Extensions::new(),
+    })
+}
+
+fn result(id: &str, content: Vec<ContentPart>) -> ContentPart {
+    ContentPart::ToolResult(ToolResultPart {
+        id: id.to_owned(),
+        is_error: false,
+        content,
+        extensions: Extensions::new(),
+    })
+}
+
+fn image(media_type: &str, data: &str) -> ContentPart {
+    ContentPart::Image(ImagePart {
+        source: ImageSource::Base64 {
+            media_type: media_type.to_owned(),
+            data: data.to_owned(),
+        },
+        detail: None,
+        extensions: Extensions::new(),
+    })
+}
+
+fn tool(name: &str, input_schema: Value) -> Tool {
+    Tool {
+        name: name.to_owned(),
+        description: Some(format!("Use {name}")),
+        input_schema,
+        extensions: Extensions::new(),
+    }
+}
+
+fn frame(event_type: &str, payload: Value) -> Vec<u8> {
+    let payload = json::to_vec(&payload).expect("payload");
+    let headers = [
+        b"\x0b:event-type\x07".as_slice(),
+        &(event_type.len() as u16).to_be_bytes(),
+        event_type.as_bytes(),
+    ]
+    .concat();
+    let total = 12 + headers.len() + payload.len() + 4;
+    let mut frame = Vec::with_capacity(total);
+    frame.extend_from_slice(&(total as u32).to_be_bytes());
+    frame.extend_from_slice(&(headers.len() as u32).to_be_bytes());
+    frame.extend_from_slice(&[0, 0, 0, 0]);
+    frame.extend_from_slice(&headers);
+    frame.extend_from_slice(&payload);
+    frame.extend_from_slice(&[0, 0, 0, 0]);
+    frame
+}
+
+#[test]
+fn r51_1_tool_names_ids_and_history_match_the_reference_shape() {
+    const LONG: &str = "mcp__plugin_cloudflare_cloudflare-docs__search_cloudflare_documentation";
+    const LONG2: &str = "mcp__plugin_cloudflare_cloudflare-docs__migrate_pages_to_workers_guide";
+    let request = Request::new("claude-opus-4.5")
+        .with_messages(vec![
+            message(Role::User, vec![ContentPart::text("search")]),
+            message(
+                Role::Assistant,
+                vec![call("odd id/1", LONG, json!({"q": "workers"}))],
+            ),
+            message(
+                Role::User,
+                vec![result("odd id/1", vec![ContentPart::text("found")])],
+            ),
+        ])
+        .with_tools(vec![
+            tool(LONG, json!({"type": "object", "properties": {}})),
+            tool(LONG2, json!({"properties": {"q": {"type": "string"}}})),
+            tool("Read", json!({})),
+        ]);
+    let body = encoded(&request);
+    let state = &body["conversationState"];
+    let tools = state["currentMessage"]["userInputMessage"]["userInputMessageContext"]["tools"]
+        .as_array()
+        .expect("tools");
+    let names: Vec<_> = tools
+        .iter()
+        .map(|tool| tool["toolSpecification"]["name"].as_str().expect("name"))
+        .collect();
+    assert_eq!(names.len(), 3);
+    assert_ne!(names[0], names[1]);
+    assert!(names[0].starts_with("mcp__plugin_cloudflare_cloudflare-docs__"));
+    assert!(names.iter().all(|name| {
+        !name.is_empty()
+            && name.len() <= 64
+            && name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte))
+    }));
+    assert_eq!(names[2], "Read");
+    assert_eq!(
+        tools[1]["toolSpecification"]["inputSchema"]["json"],
+        json!({"type": "object", "properties": {"q": {"type": "string"}}})
+    );
+    assert_eq!(
+        tools[2]["toolSpecification"]["inputSchema"]["json"],
+        json!({"type": "object", "properties": {}})
+    );
+    let history_call = &state["history"][1]["assistantResponseMessage"]["toolUses"][0];
+    assert_eq!(history_call["name"], names[0]);
+    assert!(
+        history_call["toolUseId"]
+            .as_str()
+            .expect("normalized id")
+            .starts_with("t_")
+    );
+    assert_eq!(
+        state["currentMessage"]["userInputMessage"]["userInputMessageContext"]["toolResults"][0]["toolUseId"],
+        history_call["toolUseId"]
+    );
+}
+
+#[test]
+fn r51_2_split_calls_keep_real_and_missing_results() {
+    let mut request = Request::new("claude-sonnet-4.5").with_messages(vec![
+        message(Role::User, vec![ContentPart::text("read a and b")]),
+        message(
+            Role::Assistant,
+            vec![call("toolu_a", "read", json!({"path": "a"}))],
+        ),
+        message(
+            Role::Assistant,
+            vec![call("toolu_b", "read", json!({"path": "b"}))],
+        ),
+        message(
+            Role::User,
+            vec![result("toolu_b", vec![ContentPart::text("B!")])],
+        ),
+    ]);
+    let body = encoded(&request);
+    let state = &body["conversationState"];
+    assert_eq!(
+        state["history"][1]["assistantResponseMessage"]["toolUses"]
+            .as_array()
+            .expect("calls")
+            .len(),
+        2
+    );
+    let results =
+        state["currentMessage"]["userInputMessage"]["userInputMessageContext"]["toolResults"]
+            .as_array()
+            .expect("results");
+    assert_eq!(results[0]["content"][0]["text"], "B!");
+    assert_eq!(results[1]["toolUseId"], "toolu_a");
+    assert_eq!(
+        results[1]["content"][0]["text"],
+        "Tool use was interrupted and did not produce a result."
+    );
+    request.messages[3]
+        .content
+        .insert(0, result("toolu_a", vec![ContentPart::text("A!")]));
+    let body = encoded(&request);
+    let results =
+        body["conversationState"]["currentMessage"]["userInputMessage"]["userInputMessageContext"]
+            ["toolResults"]
+            .as_array()
+            .expect("results");
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0]["content"][0]["text"], "A!");
+    assert_eq!(results[1]["content"][0]["text"], "B!");
+}
+
+#[test]
+fn r51_3_images_in_results_and_latest_image_rule_are_encoded() {
+    const PNG: &str = "aVBORw0KGgo=";
+    const JPG: &str = "/9j/4AAQSkZJRg==";
+    let request = Request::new("claude-sonnet-4.5")
+        .with_messages(vec![
+            message(Role::User, vec![ContentPart::text("look")]),
+            message(
+                Role::Assistant,
+                vec![call("call_view1", "view_image", json!({"path": "a.png"}))],
+            ),
+            message(
+                Role::User,
+                vec![result(
+                    "call_view1",
+                    vec![
+                        image("image/png", PNG),
+                        ContentPart::text("Screenshot"),
+                        image("image/jpeg", JPG),
+                    ],
+                )],
+            ),
+        ])
+        .with_tools(vec![tool(
+            "view_image",
+            json!({"type": "object", "properties": {}}),
+        )]);
+    let body = encoded(&request);
+    let user = &body["conversationState"]["currentMessage"]["userInputMessage"];
+    assert_eq!(user["images"][0]["format"], "png");
+    assert_eq!(user["images"][0]["source"]["bytes"], PNG);
+    assert_eq!(user["images"][1]["format"], "jpeg");
+    assert_eq!(
+        user["userInputMessageContext"]["toolResults"][0]["content"][0]["text"],
+        "Screenshot"
+    );
+
+    let followed = Request::new("claude-sonnet-4.5").with_messages(vec![
+        request.messages[0].clone(),
+        request.messages[1].clone(),
+        request.messages[2].clone(),
+        message(Role::Assistant, vec![ContentPart::text("seen")]),
+        message(Role::User, vec![ContentPart::text("next")]),
+    ]);
+    let body = encoded(&followed);
+    let state = &body["conversationState"];
+    assert_eq!(
+        state["history"][2]["userInputMessage"]["images"][0]["source"]["bytes"],
+        PNG
+    );
+    assert!(
+        state["currentMessage"]["userInputMessage"]
+            .get("images")
+            .is_none()
+    );
+    let historical_image = encoded(&Request::new("claude-sonnet-4.5").with_messages(vec![
+        request.messages[0].clone(),
+        request.messages[1].clone(),
+        request.messages[2].clone(),
+        message(Role::Assistant, vec![ContentPart::text("seen")]),
+        message(Role::Assistant, vec![ContentPart::text("again")]),
+        message(Role::User, vec![ContentPart::text("next")]),
+    ]));
+    assert_eq!(
+        historical_image["conversationState"]["history"][2]["userInputMessage"]["images"][0]["source"]
+            ["bytes"],
+        PNG
+    );
+}
+
+#[test]
+fn r51_4_image_limit_is_exact_and_oversize_is_refused() {
+    let at_limit = "a".repeat(crate::kiro_body::IMAGE_LIMIT);
+    let request = Request::new("claude-sonnet-4.5").with_messages(vec![message(
+        Role::User,
+        vec![image("image/png", &at_limit), ContentPart::text("look")],
+    )]);
+    let body = encoded(&request);
+    assert_eq!(
+        body["conversationState"]["currentMessage"]["userInputMessage"]["images"][0]["source"]
+            ["bytes"]
+            .as_str()
+            .expect("bytes")
+            .len(),
+        crate::kiro_body::IMAGE_LIMIT
+    );
+    let oversized = Request::new("claude-sonnet-4.5").with_messages(vec![message(
+        Role::User,
+        vec![image("image/png", &format!("{at_limit}bbbb"))],
+    )]);
+    let error = crate::kiro_body::encode(&oversized, &test_credential()).expect_err("too large");
+    assert!(error.message().contains("5242880"));
+    assert!(error.message().contains("cannot resize"));
+}
+
+#[test]
+fn r51_5_context_thinking_and_structured_output_are_encoded() {
+    let mut request = Request::new("claude-opus-4.5").with_messages(vec![
+        message(
+            Role::System,
+            vec![ContentPart::text("SESSION_INSTRUCTIONS")],
+        ),
+        message(Role::User, vec![ContentPart::text("USER_QUESTION")]),
+        message(Role::System, vec![ContentPart::text("ENV_CONTEXT")]),
+    ]);
+    request
+        .extensions
+        .insert("thinking", json!({"type": "adaptive"}));
+    request.extensions.insert(
+        "output_config",
+        json!({
+            "effort": "xhigh",
+            "format": {"type": "json_schema", "schema": {"type": "object", "properties": {"answer": {"type": "string"}}}}
+        }),
+    );
+    let body = encoded(&request);
+    let state = &body["conversationState"];
+    let context = state["history"][0]["userInputMessage"]["content"]
+        .as_str()
+        .expect("context");
+    assert!(context.starts_with(
+        "<thinking_mode>enabled</thinking_mode><max_thinking_length>50000</max_thinking_length>\nSESSION_INSTRUCTIONS"
+    ));
+    assert!(context.contains("Respond with a single JSON value and nothing else"));
+    assert!(context.ends_with("ENV_CONTEXT"));
+    assert_eq!(
+        state["history"][1]["assistantResponseMessage"]["content"],
+        "Understood."
+    );
+    assert_eq!(
+        state["currentMessage"]["userInputMessage"]["content"],
+        "USER_QUESTION"
+    );
+    assert_eq!(state["chatTriggerType"], "MANUAL");
+    assert_eq!(body["agentMode"], "vibe");
+
+    let no_initial_context = encoded(&Request::new("claude-opus-4.5").with_messages(vec![
+        message(Role::User, vec![ContentPart::text("question")]),
+        message(Role::System, vec![ContentPart::text("context")]),
+    ]));
+    assert_eq!(
+        no_initial_context["conversationState"]["history"][0]["userInputMessage"]["content"],
+        "context"
+    );
+    assert_eq!(
+        no_initial_context["conversationState"]["currentMessage"]["userInputMessage"]["content"],
+        "question"
+    );
+}
+
+#[test]
+fn r51_6_unary_event_stream_returns_tools_and_accepts_images() {
+    const LONG: &str = "mcp__plugin_cloudflare_cloudflare-docs__search_cloudflare_documentation";
+    let request = Request::new("claude-sonnet-4.5")
+        .with_messages(vec![message(
+            Role::User,
+            vec![ContentPart::text("search"), image("image/png", "aGVsbG8=")],
+        )])
+        .with_tools(vec![tool(LONG, json!({}))]);
+    let sent = encoded(&request);
+    let short =
+        sent["conversationState"]["currentMessage"]["userInputMessage"]["userInputMessageContext"]
+            ["tools"][0]["toolSpecification"]["name"]
+            .as_str()
+            .expect("short name");
+    let mut body = frame("assistantResponseEvent", json!({"content": "working"}));
+    body.extend_from_slice(&frame(
+        "toolUseEvent",
+        json!({"toolUseId": "tooluse_x", "name": short, "input": "{\"q\":"}),
+    ));
+    body.extend_from_slice(&frame(
+        "toolUseEvent",
+        json!({"toolUseId": "tooluse_x", "input": "\"r2\"}"}),
+    ));
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    host.http().enqueue(body);
+    let id = seed(
+        &host,
+        &dir.path().join("seed-home"),
+        "kiro-access-unary",
+        "kiro-refresh",
+        "2099-01-01T00:00:00Z",
+        "k@example.test",
+    );
+    let upstream = subscription(&host)
+        .upstream(&id, host.context())
+        .expect("upstream");
+    let completion =
+        block_on(upstream.execute(request, ProtocolId::ANTHROPIC_MESSAGES)).expect("unary execute");
+    let Completion::Unary(response) = completion else {
+        panic!("expected unary response");
+    };
+    assert_eq!(response.message.content.len(), 2);
+    let ContentPart::ToolCall(call) = &response.message.content[1] else {
+        panic!("expected tool call");
+    };
+    assert_eq!(call.name, LONG);
+    assert_eq!(call.arguments.to_text(), "{\"q\":\"r2\"}");
+    assert_eq!(
+        response.stop.as_ref().expect("stop").reason,
+        hofund_plugin_api::StopReason::ToolUse
+    );
+    let recorded = host.http().calls();
+    let outbound: Value = json::from_slice(recorded.last().expect("call").body()).expect("JSON");
+    assert_eq!(
+        outbound["conversationState"]["currentMessage"]["userInputMessage"]["images"][0]["source"]
+            ["bytes"],
+        "aGVsbG8="
+    );
+}
+
+#[test]
+fn r51_7_loopback_stream_decodes_chunked_text_and_tool_deltas() {
+    const LONG: &str = "mcp__plugin_cloudflare_cloudflare-docs__search_cloudflare_documentation";
+    let mut request = Request::new("claude-sonnet-4.5")
+        .with_messages(vec![message(Role::User, vec![ContentPart::text("search")])])
+        .with_tools(vec![tool(LONG, json!({}))])
+        .with_stream(true);
+    request.stream = true;
+    let sent = encoded(&request);
+    let short =
+        sent["conversationState"]["currentMessage"]["userInputMessage"]["userInputMessageContext"]
+            ["tools"][0]["toolSpecification"]["name"]
+            .as_str()
+            .expect("short name")
+            .to_owned();
+    let mut body = frame("assistantResponseEvent", json!({"content": "working"}));
+    body.extend_from_slice(&frame(
+        "toolUseEvent",
+        json!({"toolUseId": "tooluse_x", "name": short, "input": "{\"q\":"}),
+    ));
+    body.extend_from_slice(&frame(
+        "toolUseEvent",
+        json!({"toolUseId": "tooluse_x", "input": "\"r2\"}"}),
+    ));
+    body.extend_from_slice(&frame(
+        "toolUseEvent",
+        json!({"toolUseId": "tooluse_y", "name": "Read", "input": {"path": "a"}}),
+    ));
+    let dir = tempfile::tempdir().expect("dir");
+    let host = TestHost::open_for_with_pooled_http_and_tokio_monotonic(
+        PluginKind::Subscription,
+        PluginId::from_static("kiro"),
+        dir.path(),
+    );
+    let id = seed(
+        &host,
+        &dir.path().join("seed-home"),
+        "kiro-access-stream",
+        "kiro-refresh",
+        "2099-01-01T00:00:00Z",
+        "k@example.test",
+    );
+    let events = block_on(async {
+        let server = Http1Server::start(vec![Http1Response::new(200).body(body)]).await;
+        let endpoints = Endpoints {
+            runtime: server.base_url().to_owned(),
+            ..Endpoints::default()
+        };
+        let sub = factory_with_endpoints(endpoints)
+            .build(&KiroConfig, host.context())
+            .expect("build");
+        let upstream = sub.upstream(&id, host.context()).expect("upstream");
+        let Completion::Stream(mut stream) = upstream
+            .execute(request, ProtocolId::ANTHROPIC_MESSAGES)
+            .await
+            .expect("stream execute")
+        else {
+            panic!("expected stream");
+        };
+        let mut events = Vec::new();
+        while let Some(event) =
+            std::future::poll_fn(|context| stream.as_mut().poll_next(context)).await
+        {
+            events.push(event.expect("event"));
+        }
+        let requests = server.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].path(), "/generateAssistantResponse");
+        assert_eq!(requests[0].header("content-type"), Some("application/json"));
+        assert_eq!(
+            requests[0].header("accept"),
+            Some("application/vnd.amazon.eventstream")
+        );
+        server.shutdown().await;
+        events
+    });
+    assert!(matches!(events.first(), Some(StreamEvent::MessageStart(_))));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        StreamEvent::TextDelta(delta) if delta.text == "working"
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        StreamEvent::ContentBlockStart(start)
+            if start.index == 1 && matches!(&start.block, hofund_plugin_api::BlockStart::ToolCall { id, name } if id == "tooluse_x" && name == LONG)
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        StreamEvent::ContentBlockStart(start)
+            if start.index == 2 && matches!(&start.block, hofund_plugin_api::BlockStart::ToolCall { id, name } if id == "tooluse_y" && name == "Read")
+    )));
+    let arguments: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            StreamEvent::ToolArgumentsDelta(delta) => Some(delta.partial_json.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(arguments, ["{\"q\":", "\"r2\"}", "{\"path\":\"a\"}"]);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        StreamEvent::MessageDelta(delta)
+            if delta.stop.as_ref().is_some_and(|stop| stop.reason == hofund_plugin_api::StopReason::ToolUse)
+    )));
+    assert!(matches!(events.last(), Some(StreamEvent::MessageStop(_))));
+}
+
+#[test]
+fn r51_8_decoder_handles_every_byte_boundary_and_rejects_partial_tail() {
+    let mut body = frame("assistantResponseEvent", json!({"content": "hel"}));
+    body.extend_from_slice(&frame("assistantResponseEvent", json!({"content": "lo"})));
+    body.extend_from_slice(&frame(
+        "toolUseEvent",
+        json!({"toolUseId": "call-1", "name": "read", "input": "{\"path\":"}),
+    ));
+    body.extend_from_slice(&frame(
+        "toolUseEvent",
+        json!({"toolUseId": "call-1", "input": "\"a\"}"}),
+    ));
+    let mut decoder = crate::kiro_stream::Decoder::default();
+    let mut texts = String::new();
+    let mut arguments = String::new();
+    let mut tools = 0;
+    for byte in &body {
+        decoder.push(&[*byte]).expect("byte");
+        while let Some(event) = decoder.next_event() {
+            match event {
+                crate::kiro_stream::Event::Text(text) => texts.push_str(&text),
+                crate::kiro_stream::Event::ToolStart { .. } => tools += 1,
+                crate::kiro_stream::Event::ToolArguments(part) => arguments.push_str(&part),
+                crate::kiro_stream::Event::Stop(_) => panic!("early stop"),
+            }
+        }
+    }
+    decoder.finish().expect("finish");
+    assert_eq!(texts, "hello");
+    assert_eq!(arguments, "{\"path\":\"a\"}");
+    assert_eq!(tools, 1);
+    assert!(matches!(
+        decoder.next_event(),
+        Some(crate::kiro_stream::Event::Stop(
+            hofund_plugin_api::StopReason::ToolUse
+        ))
+    ));
+    let mut partial = crate::kiro_stream::Decoder::default();
+    partial.push(&body[..body.len() - 1]).expect("partial");
+    assert!(partial.finish().is_err());
 }
