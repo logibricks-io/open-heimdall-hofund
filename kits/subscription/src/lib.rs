@@ -95,12 +95,141 @@ where
     U: Future<Output = ()>,
     T: std::fmt::Debug,
 {
+    if let Some(result) = drive_until_output(future, until).await {
+        panic!("future finished early: {result:?}")
+    }
+}
+
+async fn drive_until_output<F, U, T>(future: Pin<&mut F>, until: U) -> Option<T>
+where
+    F: Future<Output = T> + ?Sized,
+    U: Future<Output = ()>,
+{
     let until = std::pin::pin!(until);
     match futures_util::future::select(future, until).await {
-        futures_util::future::Either::Left((result, _)) => {
-            panic!("future finished early: {result:?}")
+        futures_util::future::Either::Left((result, _)) => Some(result),
+        futures_util::future::Either::Right(((), _)) => None,
+    }
+}
+
+/// Waits until the `count`th HTTP/2 request is recorded.
+///
+/// The wait always leaves a yield queued, so a paused runtime cannot expire a
+/// client's header wait while loopback accept and handshake I/O is pending.
+///
+/// # Panics
+///
+/// Panics if `count` is zero.
+pub async fn wait_for_http2_request(server: &Http2Server, count: usize) {
+    assert!(count > 0, "HTTP/2 request counts start at one");
+    while server.requests().len() < count {
+        tokio::task::yield_now().await;
+    }
+}
+
+/// Drives `future` until the `count`th HTTP/2 request is recorded.
+///
+/// # Panics
+///
+/// Panics if `count` is zero or `future` completes first.
+pub async fn drive_until_http2_request<F, T>(
+    future: Pin<&mut F>,
+    server: &Http2Server,
+    count: usize,
+) where
+    F: Future<Output = T> + ?Sized,
+{
+    if drive_until_output(future, wait_for_http2_request(server, count))
+        .await
+        .is_some()
+    {
+        panic!("future finished early");
+    }
+}
+
+/// Waits until the `count`th HTTP/2 request records client DATA.
+///
+/// Cursor writes its opening DATA only after response headers arrive, so this
+/// condition proves that the HTTP/2 path was selected instead of HTTP/1 fallback.
+/// Like [`wait_for_http2_request`], it prevents paused-clock auto-advance.
+///
+/// # Panics
+///
+/// Panics if `count` is zero.
+pub async fn wait_for_http2_opening(server: &Http2Server, count: usize) {
+    assert!(count > 0, "HTTP/2 request counts start at one");
+    loop {
+        if server
+            .requests()
+            .get(count - 1)
+            .is_some_and(|request| !request.data().is_empty())
+        {
+            return;
         }
-        futures_util::future::Either::Right(((), _)) => {}
+        tokio::task::yield_now().await;
+    }
+}
+
+/// Drives `future` until the `count`th HTTP/2 request records client DATA.
+///
+/// # Panics
+///
+/// Panics if `count` is zero or `future` completes first.
+pub async fn drive_until_http2_opening<F, T>(
+    future: Pin<&mut F>,
+    server: &Http2Server,
+    count: usize,
+) where
+    F: Future<Output = T> + ?Sized,
+{
+    if drive_until_output(future, wait_for_http2_opening(server, count))
+        .await
+        .is_some()
+    {
+        panic!("future finished early");
+    }
+}
+
+/// Drives `future` to completion without auto-advancing a paused clock.
+///
+/// Use this after a scripted request is recorded but before its loopback
+/// response has settled. The queued yield keeps the runtime from jumping to a
+/// retry or deadline timer while the response is still in flight.
+pub async fn drive_to_completion<F>(future: F) -> F::Output
+where
+    F: Future,
+{
+    let mut future = std::pin::pin!(future);
+    loop {
+        let yield_now = std::pin::pin!(tokio::task::yield_now());
+        match futures_util::future::select(future.as_mut(), yield_now).await {
+            futures_util::future::Either::Left((output, _)) => return output,
+            futures_util::future::Either::Right(((), _)) => {}
+        }
+    }
+}
+
+/// Drives `future` through the HTTP/2 opening gate and then to completion.
+///
+/// An early result is returned as-is. This is needed when a client queues its
+/// opening write and returns before the server records the corresponding DATA.
+pub async fn drive_http2_to_completion<F>(
+    future: F,
+    server: &Http2Server,
+    count: usize,
+) -> F::Output
+where
+    F: Future,
+{
+    let mut future = std::pin::pin!(future);
+    match futures_util::future::select(
+        future.as_mut(),
+        std::pin::pin!(wait_for_http2_opening(server, count)),
+    )
+    .await
+    {
+        futures_util::future::Either::Left((output, _)) => output,
+        futures_util::future::Either::Right(((), _)) => drive_to_completion(future).await,
     }
 }
 
@@ -125,8 +254,14 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::Poll;
+    use std::time::Duration;
 
-    use super::{block_on, join_all, poll_once, yield_times};
+    use bytes::Bytes;
+    use tokio::net::TcpStream;
+
+    use super::{
+        Http2Response, Http2Server, block_on, block_on_paused, join_all, poll_once, yield_times,
+    };
 
     #[test]
     fn join_all_keeps_order() {
@@ -170,6 +305,39 @@ mod tests {
             assert_eq!(ran.load(Ordering::SeqCst), 0);
             yield_times(3).await;
             assert_eq!(ran.load(Ordering::SeqCst), 1);
+        });
+    }
+
+    #[test]
+    fn http2_gate_prevents_paused_header_wait_from_winning_before_accept() {
+        block_on_paused(async {
+            let server = Http2Server::start(vec![Http2Response::new(200)]).await;
+            let attempt = async {
+                let tcp = TcpStream::connect(server.base_url().trim_start_matches("http://"))
+                    .await
+                    .expect("connect");
+                let (mut client, connection) =
+                    h2::client::handshake(tcp).await.expect("client handshake");
+                tokio::spawn(async move {
+                    let _ = connection.await;
+                });
+                let request = http::Request::builder()
+                    .method("POST")
+                    .uri(format!("{}/v1/bidi", server.base_url()))
+                    .body(())
+                    .expect("request");
+                let (response, mut send) =
+                    client.send_request(request, false).expect("send request");
+                send.send_data(Bytes::from_static(b"opening"), true)
+                    .expect("opening DATA");
+                let response = tokio::time::timeout(Duration::from_secs(15), response)
+                    .await
+                    .expect("paused header wait must not precede loopback accept")
+                    .expect("response headers");
+                assert_eq!(response.status(), 200);
+            };
+            super::drive_http2_to_completion(attempt, &server, 1).await;
+            assert_eq!(server.requests()[0].data(), [b"opening".to_vec()]);
         });
     }
 }

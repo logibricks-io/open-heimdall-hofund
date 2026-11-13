@@ -1,6 +1,6 @@
 [package]
 name = "hofund-plugin-subscription-kiro"
-description = "Kiro subscription: import IDE tokens, refresh social sign-ins, usage limits, and Messages chat."
+description = "Kiro subscription: browser sign-in, IDE/CLI import, refresh, usage limits, and Messages chat."
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
@@ -13,6 +13,8 @@ rust-version.workspace = true
 [dependencies]
 hofund-plugin-api = { workspace = true }
 hofund-plugin-sdk = { workspace = true }
+rusqlite = { workspace = true }
+tokio = { version = "1.54.1", features = ["io-util", "net", "rt", "sync", "time"] }
 
 [dev-dependencies]
 hofund-kit-subscription = { workspace = true }

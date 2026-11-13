@@ -16,7 +16,7 @@ Legend: **Done** = matches the reference at checklist granularity; **Partial** =
 | Cursor (`cursor`) | 1 | 15 | 3 | 2 | 0 |
 | Devin (`devin`) | 11 | 6 | 1 | 1 | 0 |
 | Zed (`zed`) | 0 | 6 | 1 | 3 | 0 |
-| Kiro (`kiro`) | 0 | 16 | 1 | 2 | 0 |
+| Kiro (`kiro`) | 6 | 11 | 0 | 2 | 0 |
 | Factory / Droid (`factory`) | 1 | 15 | 0 | 3 | 0 |
 | Cline / ClinePass (`cline`) | 2 | 12 | 1 | 3 | 1 |
 | ChatGPT / Codex (`codex` backend) and ChatGPT API (`chatgpt-api`) | 8 | 11 | 2 | 0 | 0 |
@@ -26,7 +26,7 @@ Legend: **Done** = matches the reference at checklist granularity; **Partial** =
 | SuperGrok (`grok`) | 10 | 6 | 0 | 2 | 0 |
 | Qoder (international + Qoder CN) | 1 | 11 | 7 | 1 | 0 |
 | CodeBuddy / WorkBuddy (CN + international) | 18 | 1 | 0 | 0 | 0 |
-| Z Code (`zcode`) | 7 | 8 | 2 | 0 | 2 |
+| Z Code (`zcode`) | 15 | 4 | 0 | 0 | 0 |
 
 Gaps that had no plan item before this audit (the supervisor's v0.2.0 plan and backlog now carry them under the item named):
 
@@ -201,34 +201,31 @@ Structured-output prose for Chat, Responses, and Messages shipped in R-13b (`str
 
 **Hofund path:** `plugins/subscriptions/kiro/src/`.
 
-| # | capability | reference v0.1.3005 behaviour | hofund 08035c9 | status | gap to close |
-|---|------------|------------------------------|----------------|--------|--------------|
-| a1 | sign-in: remote portal (Google/GitHub/Builder ID/IDC) | Plugin loopback ports + AWS OIDC (`kiro/index.mjs:3-8`, `37-38`) | Bridge defers to IDE/CLI; no portal in crate | Missing | Remote sign-in (**R-51**) |
-| a2 | sign-in: reuse kiro-cli / IDE | `readCLI` / `readIDE` (`kiro/index.mjs:117-181`); core `kiro.go:19-22` | `discover.rs` reads `kiro-auth-token.json` under `KIRO_IDE_CACHE` | Partial | kiro-cli SQLite import (`readCLI`, `kiro.go:65-79`) |
+| # | capability | reference v0.1.3005 behaviour | hofund R-51 | status | gap to close |
+|---|------------|------------------------------|-------------|--------|--------------|
+| a1 | sign-in: remote portal (Google/GitHub/Builder ID/IDC) | Plugin loopback ports + AWS OIDC (`kiro/index.mjs:3-8`, `37-38`) | `portal.rs` binds the documented ports, exchanges social codes, and runs register/authorize/token for Builder ID and enterprise; pasted callbacks forward through the daemon | Done | — |
+| a2 | sign-in: reuse kiro-cli / IDE | `readCLI` / `readIDE` (`kiro/index.mjs:117-181`); core `kiro.go:19-22` | `site=current` reads the CLI DB first, then the IDE token file | Done | — |
 | a3 | sign-in: API key `ksk_` | Plugin + core treat as API key | unverified — method `apikey` in upstream headers (`upstream.rs:54-55`) | Partial | Explicit API key sign-in UX |
-| b | import | IDE cache file; CLI DB | Token file discover | Partial | CLI DB path (**R-51**) |
-| c | token storage | Write-back to CLI DB or IDE file on refresh (`kiro/index.mjs:183-200`) | `creds.rs` write-back helpers for IDE path | Partial | SQLite write-back (**R-51**) |
-| d | refresh | CLI first, else OIDC/refreshToken (`kiro.go:301-374`; plugin `refresh.test.mjs`) | `refresh.rs` lease + social/IDC; external-idp refused (`refresh.rs:88-91`) | Partial | kiro-cli delegated refresh; 400 lapsed mapping (**R-24**, **R-51**) |
+| b | import | IDE cache file; CLI DB | `cli_db.rs` reads `auth_kv` social, odic, and external-idp rows; `discover.rs` keeps IDE import | Done | — |
+| c | token storage | Write-back to CLI DB or IDE file on refresh (`kiro/index.mjs:183-200`) | Source metadata selects compare-and-swap SQLite or IDE JSON write-back after refresh | Done | — |
+| d | refresh | CLI first, else OIDC/refreshToken (`kiro.go:301-374`; plugin `refresh.test.mjs`) | `refresh.rs` delegates `debug refresh-auth-token`, re-reads the CLI DB, and supports social, IDC, and external-idp form refresh | Partial | Refresh 400 lapsed mapping (**R-24**) |
 | e | upstream wire | Event-stream `generateAssistantResponse` (`kiro/index.mjs:16-18`; `upstream.rs:44-48`) | Same endpoint and headers; `open_raw` feeds unary and streaming decoders | Partial | Mock/loopback verification only (**R-51**) |
 | f | inbound shapes | Anthropic Messages only (`kiro/index.mjs:14-18`) | Messages only; Chat/Responses are not invented | N/A | — |
 | g | streaming | AWS event stream to Messages SSE | `kiro_stream.rs` incrementally emits IR text, tool starts, argument deltas, block stops, and finish events | Partial | Mock/loopback verification only (**R-51**) |
 | h | tool calls | Plugin tool tests (`tool-names.test.mjs`) | `kiro_body.rs` maps declarations, normalized ids/names, split calls, and matched/missing results; replies restore caller names | Partial | Mock/loopback verification only (**R-51**) |
 | i | images | `image-size.test.mjs` | Inline user/tool-result images use format + `source.bytes`; only the latest image group is resent | Partial | Over-5-MiB Base64 images are refused; deterministic shrink/note behavior is not implemented (**R-51**) |
 | j | reasoning / effort | `effort.test.mjs` | Enabled/adaptive thinking maps to the reference budget tags; structured output is added to instructions | Partial | Model-listed native effort fields and reasoning reply events (**R-51**) |
-| k | quota / usage | `Get-Usage-Limits` (`kiro.go` comments; plugin `usage.test.mjs`) | `quota.rs` with profile ARN (`lib.rs:63-69`) | Partial | Builder ID profile ARN defaults (**R-51**) |
+| k | quota / usage | `Get-Usage-Limits` (`kiro.go` comments; plugin `usage.test.mjs`) | `quota.rs` with profile ARN and Builder ID default | Partial | Full allowance/bonus window parity |
 | l | model list | Plugin lists from API | `models.rs` | Partial | Profile-scoped list refresh |
-| m | multi-account | uid by login provider (`kiro/index.mjs:53-65`) | Account ids from label/provider | Partial | Stable ids (#607) (**R-24**) |
+| m | multi-account | uid by login provider (`kiro/index.mjs:53-65`) | Browser ids include label/provider; imported ids remain agent-scoped | Partial | Stable ids (#607) (**R-24**) |
 | n | error classification | Plugin `errors.test.mjs`; refresh 400 → lapsed | Generic auth on 401/403 (`upstream.rs:60-63`) | Partial | **R-24** |
 | o | check-in / warmup | N/A | N/A | N/A | — |
-| p | agent sign-in | IDE cache discover | `agent_sign_in.rs` + discover | Partial | CLI DB discover |
-| q | extras | Builder ID profile ARN constant (`kiro/index.mjs:50-51`) | `BUILDER_ID_PROFILE` in `creds.rs:25-26` | Partial | External-idp refresh (**R-51**) |
+| p | agent sign-in | IDE cache and CLI DB discover | `discover.rs` prefers CLI DB, then IDE; `agent_sign_in.rs` keeps IDE switching | Done | — |
+| q | extras | Builder ID profile ARN constant (`kiro/index.mjs:50-51`) | `BUILDER_ID_PROFILE` applies to imported and browser Builder ID sign-ins | Done | — |
 
 ### Gaps (Kiro)
 
 - Live-account verification, oversized-image resizing, and native effort/reasoning fields — **M**, **R-51**
-- kiro-cli SQLite import + refresh delegation + write-back — **L**, **R-51**
-- Browser/portal sign-in — **L**, **R-51**
-- external-idp refresh — **M**, **R-51**
 - Refresh 400 lapsed + stable account ids — **S**, **R-24**
 
 ---
@@ -587,44 +584,46 @@ Structured-output prose for Chat, Responses, and Messages shipped in R-13b (`str
 
 ## Z Code (`zcode`)
 
-**Reference files read:** `zcode.go`, `zcode_device.go`, `zcode_team.go`, `migrate_zcode.go`, `plugin_checkin.go`, `workbuddy.go`, `internal/agent/zcode.go`, and `internal/appdir/zcode.go`. The earlier audit cited plugin `packages/zcode/index.mjs` and `README.md`, but that package is absent from the frozen tag; plugin-only wire details not also visible in Go remain unverified.
+**Reference files read:** `zcode.go`, `zcode_device.go`, `zcode_team.go`, `migrate_zcode.go`, `plugin_checkin.go`, `workbuddy.go`, `internal/agent/zcode.go`, and `internal/appdir/zcode.go`. The earlier audit incorrectly said the plugin package was absent. The frozen community package is present at `packages/zcode` under community commit 1ad712d and was read for R-57b: `index.mjs`, `prompt.mjs`, the sign-in, Start Plan, model, gift, team, usage, and check-in tests, and the recorded marketing fixture. Wire details below now come from that package as well as the Go sources.
 
-**hofund path:** `plugins/subscriptions/zcode/`.
+**hofund path:** `plugins/subscriptions/zcode/`; R-57 and R-57b use deterministic recorded HTTP and fixture tests only.
 
-| # | capability | reference v0.1.3005 | hofund 08035c9 + R-57 | status | gap to close |
-|---|------------|----------------------|-----------------------|--------|--------------|
-| a1 | sign-in: device / portal OAuth | plugin sign-in flows in `index.mjs` | `lib.rs` import/discover only | Partial | Full portal sign-in; the flow is not fully visible in the frozen Go sources (**R-57b**) |
-| a2 | API key import | plugin supports key plans | credential import via agent store | Partial | — |
-| a3 | paste / browser | plugin OAuth | unsupported in `start_sign_in` | Missing | **R-57b**; no guessed OAuth or paste wire |
-| b | import sources | encrypted `~/.zcode/v2/credentials.json` (`zcode.go:14-18`) | `creds.rs` decrypt + `discover.rs` | Done | — |
-| c | token storage | logins.json for reference-added; encrypted agent store read | SecretObject + device mid (`creds.rs`) | Done | — |
-| d | refresh | JWT refresh near expiry in plugin | `refresh.rs` re-imports through the account lease, preserves `lapsed` for the same team token, clears it for a rotated token, and rejects non-absolute credential paths (`r57_*` tests) | Partial | Plugin JWT renewal rules remain unverified (**R-57b**) |
-| e | upstream wire | Anthropic plan API bases (`zcode.go:47-48`); Start Plan accounts go to `START_BASE` (`zcode/index.mjs:33`, used at `:2371`) | `upstream.rs` Messages on plan base; JWT-only Start Plan import refused | Partial | Start Plan routing and its required request transformations; the base is visible but the full plugin wire is not (**R-57b**) |
+| # | capability | reference v0.1.3005 | hofund 08035c9 + R-57 + R-57b | status | gap to close |
+|---|------------|----------------------|--------------------------------|--------|--------------|
+| a1 | sign-in: device / portal OAuth | `authorize()` posts `/api/v1/oauth/cli/init`, validates an HTTPS page, sets the site-specific redirect, and polls `/api/v1/oauth/cli/poll/{flow_id}` | `sign_in.rs` pending sessions implement both sites, business-token exchange, own/team plan resolution, and Start Plan fallback only for a live or pending plan | Done | Recorded mocks only; no live account |
+| a2 | API key import | Plugin supports Z.ai and BigModel key plans | Agent-store import plus `SignInProof::Token` API-key accounts | Done | — |
+| a3 | paste / browser | Automatic browser completion; the reference names no additional paste URL | `start_sign_in` returns an HTTPS `OpenUrl`; `complete_sign_in(Await)` polls and stores the account | Done | No paste flow is invented |
+| b | import sources | encrypted `~/.zcode/v2/credentials.json` (`zcode.go:14-18`) | `creds.rs` decrypt + `discover.rs`, including JWT-only Start Plan stores | Done | — |
+| c | token storage | logins.json for reference-added; encrypted agent store read | SecretObject + per-account device id (`creds.rs`) | Done | — |
+| d | refresh | The frozen plugin says the JWT cannot be refreshed; app-backed accounts reread the app's renewed session | `refresh.rs` re-imports through the account lease and fails closed on an expired browser-only JWT; no renewal endpoint is invented | Partial | Recorded mocks only; browser-only JWTs require sign-in again |
+| e | upstream wire | Plan bases and `START_BASE`; 3.17.2 headers and prompt texts, body dressing, device/session metadata, gift aliases | `upstream.rs` + `start.rs` + `gift.rs` implement JWT-only and trial routing, exact prompt hashes, disabled/enabled reasoning, live-bucket balance checks, and Start quota. Team keys skip personal-plan detection, and expired JWTs leave key-backed plan requests usable | Partial | Dual-account automatic free-first, ToolSearch rewriting, busy retries, and edge-firewall holds are not ported |
 | f | inbound shapes | Messages only upstream | `upstream.rs` rejects non-Messages | Done | — |
 | g | streaming | Anthropic SSE | wire streaming | Done | — |
 | h | tool calls | Anthropic tools | standard Messages wire | Partial | unverified |
-| i | images | per-model `supportsImage` (`packages/zcode/index.mjs:1690`) | no verified per-model mapping | unverified | Plugin catalog shape is absent from the frozen tag (**R-57b**) |
-| j | reasoning | per-model reasoning levels mapped to thinking budgets (`packages/zcode/index.mjs:1691`, `1753-1765`) | no verified per-model mapping | unverified | Plugin levels and budgets are absent from the frozen tag (**R-57b**) |
-| k | quota / usage | monitor `/api/monitor/usage/quota/limit` personal/team | `quota.rs` monitor endpoints | Done | — |
-| l | model list | portal + plan APIs in plugin | `models.rs` | Partial | Gift/check-in tied models unverified (**R-57b**) |
-| m | multi-account | team seats from `setting.json` (`zcode_team.go`); plugin 0.1.20 labels a team account `<email> (team)` (`migrate_zcode.go`) | `team.rs` project keys and separate `(team)` labels (`r57_team_accounts_have_a_separate_label`) | Done | — |
-| n | error classification | ZCodeRestricted hint code 3012 (`workbuddy.go`); the account rests for two hours (`zcode_blocked_test.go`) | `http_auth.rs` keeps HTTP 405, adds the risk-control/support hint and two-hour retry hint (`r57_3012_has_a_risk_control_hint_and_cooldown`) | Done | — |
-| o | daily check-in | plugin `auth.checkin` gift plans (`index.mjs:2740+`); 30-minute recheck (`plugin_checkin.go`) | no check-in in zcode plugin | Missing | Claim endpoints, payloads, and result mapping are not fully visible in the frozen Go sources, so neither claims nor recheck scheduling are guessed (**R-57b**) |
-| p | agent sign-in switch | agent switching into Z Code config; team keys are created when absent (`zcode_team.go` comments) | `agent_sign_in.rs` refuses credential switching; separate team labels implemented | Partial | Agent config switching and missing-key creation request body remain unverified (**R-57b**) |
-| q | extras | `X-Device-Mid`; plugin pins `APP_VERSION` 3.17.2 for User-Agent and `X-ZCode-App-Version`; core `zcode.go` still says 3.14.3 | `device.rs`; `APP_VERSION` 3.14.3 in `lib.rs` | Partial | Send 3.17.2 in User-Agent and `X-ZCode-App-Version` (**R-57b**) |
+| i | images | Per-model `supportsImage` in provider rules (`index.mjs:1690`) | `provider_config.rs` maps the flag to `ModelSpec::image_input` and input modalities | Done | Recorded config fixture only |
+| j | reasoning | Per-model levels and thinking budgets (`index.mjs:1691`, `1753-1765`) | Provider levels map to `ModelSpec::efforts`; `start.rs` maps `none` to disabled thinking and other levels to the reference budgets | Done | Recorded config and wire fixtures only |
+| k | quota / usage | Monitor quota plus Start Plan balance buckets; a live sibling supersedes a spent bucket for the same model | `quota.rs` monitor endpoints and `gift.rs` live/pending windows; spent siblings are non-blocking and recorded quota and trial-routing fixtures cover live-plan selection | Done | — |
+| l | model list | Latest remote/local provider config, static fallback, and gift-tied model entries | `provider_config.rs` chooses by revision; `models.rs` adds Start and `-Trial` entries from every live grant | Done | No 10-minute config cache; mocks only |
+| m | multi-account | team seats from `setting.json`; separate `(team)` labels | `team.rs` project keys and separate labels; native sign-in supports team selection | Done | — |
+| n | error classification | ZCodeRestricted hint code 3012 and two-hour rest | `http_auth.rs` keeps HTTP 405, adds the support hint and cooldown | Done | — |
+| o | daily check-in | `claimDaily` reads marketing/touch and posts `/billing/claim`; codes 0/1003/1004, captcha fail-closed, 30-minute recheck | `checkin.rs` maps all outcomes without a captcha solver; `CheckinResult::recheck_at` and daemon-persisted deadlines rerun inactive, ineligible, and failed claims after 30 minutes | Done | Recorded mocks only |
+| p | agent sign-in switch | Go writes gateway provider config; team keys are created when absent; the encrypted account store is read-only in the reference | `team.rs` creates `zcode-team-api-key` with `keyType: 2`; `agent_sign_in.rs` still refuses credential switching | Partial | No safe encrypted-store account-switch writer is specified, so switching stays fail-closed |
+| q | extras | `X-Device-Mid`; plugin pins `APP_VERSION` 3.17.2 and the marketing/Start version headers | `lib.rs` pins 3.17.2; `api.rs`, `checkin.rs`, and `start.rs` send the reference UA and `X-ZCode-App-Version` where used | Done | — |
 
 **R-57 completed**
 
 - Kept `lapsed` across same-secret team refresh re-imports, serialized re-import through the account lease, failed closed on relative credential paths, and added separate team labels (#613 follow-ups).
 - Mapped code 3012 to the reference's user-facing risk-control hint and two-hour cooldown.
 
-**Gaps (R-57b)**
+**R-57b completed**
 
-- Daily marketing/check-in gift flow and its 30-minute recheck — **M**.
-- Native portal sign-in (not import-only) — **M**.
-- Agent switching and creating a missing team key — **M**.
-- Start Plan routing and request shaping — **M**.
-- Per-model image and reasoning mappings — **M**.
-- Send app version 3.17.2 in User-Agent and `X-ZCode-App-Version` — **S**.
+- Used the present frozen plugin package to add 3.17.2 identity and exact 3.17.2 Start Plan prompts, native Z.ai/BigModel sign-in, Start Plan and gift-balance routing, provider-config image/reasoning metadata, missing team-key creation, and daily marketing claims.
+- Added a plugin API recheck deadline and daemon persistence so inactive, ineligible, and failed Z Code results rerun after 30 minutes without sleeps or wall-clock test dependencies.
+
+**Remaining gaps after R-57b**
+
+- Agent credential switching remains fail-closed; the references do not specify a safe encrypted-store switch writer.
+- Automatic free-first routing for dual accounts, ToolSearch rewriting, busy retries, and edge-firewall holds remain outside this slice.
+- All new behavior is verified with recorded HTTP and fixtures only; no live-account claim is made.
 
 ---

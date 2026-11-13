@@ -12,24 +12,30 @@ use crate::http_auth::{
     auth_for_http_status, key_refused_code, parse_envelope_code, refusal_from_monitor_body,
 };
 use crate::session::{self, Stored};
-use crate::team;
+use crate::{Endpoints, gift, team};
 
 pub(crate) async fn read(
     host: &HostContext,
+    endpoints: &Endpoints,
     account: &AccountId,
     stored: &Stored,
     device_file: &Path,
     team_keys: &TokenCache<SecretString>,
 ) -> Result<Vec<QuotaWindow>, PluginError> {
+    if stored.auth.api_key.is_none() && !stored.auth.team() {
+        return Ok(gift::read(host, endpoints, stored, device_file)
+            .await?
+            .windows);
+    }
     let root = monitor_root(&stored.auth.base);
-    if stored.auth.team() {
+    let body = if stored.auth.team() {
         let url = format!("{root}/api/monitor/usage/quota/limit?type=2");
         let headers = team::team_headers(&stored.auth.base, &stored.auth.org, &stored.auth.project);
         let header_refs: Vec<(&str, &str)> = headers
             .iter()
             .map(|(name, value)| (*name, value.as_str()))
             .collect();
-        let body = fetch_monitor(
+        fetch_monitor(
             host,
             account,
             stored,
@@ -39,26 +45,42 @@ pub(crate) async fn read(
             &header_refs,
             device_file,
         )
-        .await?;
-        return windows_from_monitor(&body);
-    }
-    let plan_key =
-        stored.auth.api_key.as_ref().ok_or_else(|| {
+        .await?
+    } else {
+        let plan_key = stored.auth.api_key.as_ref().ok_or_else(|| {
             PluginError::auth("the stored Z Code sign-in has no plan key for quota")
         })?;
-    let url = format!("{root}/api/monitor/usage/quota/limit");
-    let body = fetch_monitor(
-        host,
-        account,
-        stored,
-        team_keys,
-        &url,
-        plan_key,
-        &[],
-        device_file,
-    )
-    .await?;
-    windows_from_monitor(&body)
+        let url = format!("{root}/api/monitor/usage/quota/limit");
+        fetch_monitor(
+            host,
+            account,
+            stored,
+            team_keys,
+            &url,
+            plan_key,
+            &[],
+            device_file,
+        )
+        .await?
+    };
+    let mut windows = windows_from_monitor(&body)?;
+    if stored.auth.jwt.is_some()
+        && let Ok(balance) = gift::read(host, endpoints, stored, device_file).await
+    {
+        let trial_models: Vec<String> = balance
+            .all_models
+            .iter()
+            .map(|model| gift::gift_id(model).to_ascii_lowercase())
+            .collect();
+        if !trial_models.is_empty() {
+            windows = windows
+                .into_iter()
+                .map(|window| window.with_excluded_models(trial_models.clone()))
+                .collect();
+        }
+        windows.extend(balance.windows);
+    }
+    Ok(windows)
 }
 
 #[allow(clippy::too_many_arguments)]

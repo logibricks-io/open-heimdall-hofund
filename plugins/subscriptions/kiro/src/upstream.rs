@@ -20,19 +20,32 @@ pub(crate) struct KiroUpstream {
     account: AccountId,
     host: HostContext,
     endpoints: Arc<Endpoints>,
+    cli_command: Option<std::path::PathBuf>,
 }
 
 impl KiroUpstream {
-    pub(crate) fn new(account: AccountId, host: HostContext, endpoints: Arc<Endpoints>) -> Self {
+    pub(crate) fn new(
+        account: AccountId,
+        host: HostContext,
+        endpoints: Arc<Endpoints>,
+        cli_command: Option<std::path::PathBuf>,
+    ) -> Self {
         Self {
             account,
             host,
             endpoints,
+            cli_command,
         }
     }
 
     async fn stored(&self) -> Result<Stored, PluginError> {
-        refresh::ensure_fresh(&self.host, &self.account, Arc::clone(&self.endpoints)).await
+        refresh::ensure_fresh(
+            &self.host,
+            &self.account,
+            Arc::clone(&self.endpoints),
+            self.cli_command.as_deref(),
+        )
+        .await
     }
 
     async fn send(&self, stored: &Stored, request: Request) -> Result<Completion, PluginError> {

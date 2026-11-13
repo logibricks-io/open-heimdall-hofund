@@ -34,15 +34,25 @@ pub(crate) async fn import(
 
 pub(crate) async fn store(
     auth: &PlanAuth,
-    home: &Path,
+    _home: &Path,
     host: &HostContext,
 ) -> Result<AccountId, PluginError> {
     let mid = device::device_mid(&device::device_path(host)?)?;
+    store_with_device(auth, &mid, "", host).await
+}
+
+pub(crate) async fn store_with_device(
+    auth: &PlanAuth,
+    device: &str,
+    plan: &str,
+    host: &HostContext,
+) -> Result<AccountId, PluginError> {
     let id = creds::account_id_for(auth);
     let account = host.accounts().account(id.clone(), auth.label.clone())?;
-    host.accounts()
-        .upsert(account, creds::secret_blob(auth, &mid).to_secret())
-        .await?;
-    let _ = home;
+    let mut blob = creds::secret_blob(auth, device);
+    if !plan.is_empty() {
+        blob = blob.with_text("plan", plan);
+    }
+    host.accounts().upsert(account, blob.to_secret()).await?;
     Ok(id)
 }
