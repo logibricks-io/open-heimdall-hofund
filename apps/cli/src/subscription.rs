@@ -166,11 +166,12 @@ usage: hofund subscription list [--json] [--config PATH]
 <id> is a subscription in the config's [[subscriptions]]. A running gateway
 picks up a sign-in or sign-out on its next account check.
 
-Request serving differs by subscription. On this tree: Cursor does not
-serve agent-API requests (sign-in, models, and usage only). Claude Code
-requests are not served. Devin chat is not implemented. Kiro accepts
-unary text-only requests (no stream, tools, or images). Zed serves POST
-/completions. See docs/feature-parity.md.
+Request serving differs by subscription. On this tree: Cursor serves Agent
+Run requests (R-8/R-9, with documented deviations). Claude Code requests
+are served through the MCP bridge (H8). Devin chat is implemented (R-12/R-13).
+Kiro accepts unary text-only requests (no stream, tools, or images). Zed
+serves POST /completions (R-16) and has native RSA loopback sign-in (R-56).
+See docs/feature-parity.md.
 ";
 
 pub const LIST_HELP: &str = "\

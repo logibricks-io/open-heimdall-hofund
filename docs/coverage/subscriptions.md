@@ -3,10 +3,11 @@
 > **Snapshot notice (Must #11):** the inventory below was taken on 2026-10-25
 > against earlier commits. It is kept as a source inventory, not as the
 > current score. Current scores, the v0.2.0 freeze (magpie `v0.1.3005`), and
-> what is actually on `main` (`318912ff`) versus unmerged work are in
-> [docs/feature-parity.md](../feature-parity.md). In particular, Cursor and
-> Claude Code request serving are not on `main`, Devin chat is refused, Kiro
-> is unary text-only, and Zed does serve POST `/completions` (mocks only).
+> what is actually on `main` (`74dbebbc`, 2026-11-13) are in
+> [docs/feature-parity.md](../feature-parity.md). In particular, Cursor R-8/R-9,
+> Claude Code bridge H8, and Devin R-12/R-13 request serving are on `main`
+> (mocks only). Kiro remains unary text-only. Zed serves POST `/completions`
+> (R-16) and has native RSA loopback sign-in (R-56).
 
 - magpie commit: `cbbf3163cb3c87ee0c327a56bc5689ddc5eda947` (yetone/magpie, cloned 2026-10-25 16:19 SGT)
 - Date checked: 2026-10-25

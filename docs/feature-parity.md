@@ -9,15 +9,13 @@ hofund, the Rust rewrite. Each row cites a source path in each repository.
   coverage baseline `cbbf316` (v0.1.1504), and a later note recorded `1e15a7a`
   (v0.1.2360); those are historical. Features that landed in the reference
   after `v0.1.3005` are out of this freeze unless the must-list called them out.
-- **hofund snapshot:** `main` at `318912ff` (R-6: Claude Code bridge design, #736),
-  recounted on 2026-11-11. A row is scored from the code that is on this `main`,
-  not from unmerged pull requests. Older line citations may still name earlier
-  commits; they are kept as provenance, not as a claim that `0d8cfa9` is current.
-  Open work that must not be counted as Done or released on this tree includes
-  (non-exhaustive): the TUI shell (#740), later control and tray slices
-  (#746–#752), Claude Code request serving / H8b (#753–#762), and Cursor
-  agent-API request serving (#763–#775). None of that is merged, and none of it
-  has been smoked on a real account (`#304` stays outstanding).
+- **hofund snapshot:** `main` at `74dbebbc` (R-34: session resume argv and
+  Pi-to-omp carry, #798), recounted on 2026-11-13. A row is scored from the
+  code that is on this `main`, not from unmerged pull requests. Older line
+  citations may still name earlier commits; they are kept as provenance, not
+  as a claim that those commits are current. Library writes (row 6) and true
+  session recording / MCP execution (design 4.2–4.4) are not on `main`.
+  Real-account smoke (`#304`) stays outstanding.
 - **Goal:** rebuild every core magpie capability in Rust and do each one better.
   Copy designs that are good, stable, and efficient. Redesign the parts that are unsound.
   `docs/magpie-comparison.md` records each adopt-or-redesign verdict.
@@ -47,49 +45,51 @@ and hofund paths to the hofund repository. `ref.md:N` means magpie's
 
 | Status | Rows |
 | --- | --- |
-| Done | 43 |
-| Partial | 49 |
-| Missing | 67 |
-| Total counted | 159 |
+| Done | 44 |
+| Partial | 51 |
+| Missing | 65 |
+| Total counted | 160 |
 | Not planned (not counted) | 1 |
 
 | Stage | Counted rows |
 | --- | --- |
-| core | 81 |
+| core | 82 |
 | auxiliary | 78 |
 
 
 ### What is on `main` versus open work
 
-As of `318912ff`, scored against magpie `v0.1.3005`, and **verified with mocks
-only** unless a row says otherwise. Real-account smoke (`#304`) has not been
-run. Do not read an open pull request as merged or released.
+As of `74dbebbc` (2026-11-13), scored against magpie `v0.1.3005`, and
+**verified with mocks only** unless a row says otherwise. Real-account smoke
+(`#304`) has not been run. Do not read an open pull request as merged or
+released.
 
 Fourteen subscription plugins ship under `plugins/subscriptions` on this
 `main`: `claude`, `cline`, `codex`, `copilot`, `cursor`, `devin`, `factory`,
 `gemini`, `grok`, `kiro`, `qoder`, `workbuddy`, `zcode`, and `zed`. Request
-serving is not uniform:
+serving is not uniform; the Matrix rows are authoritative:
 
-- **Cursor:** sign-in, cursor-agent import, models, and usage. `upstream()`
-  returns unsupported: "requests through Cursor's agent API are not served
-  yet." The Run implementation lives on open PRs #763–#775 and is not on
-  `main`.
+- **Cursor:** sign-in, import, models, usage, and Agent Run request serving
+  (R-8/R-9, including tools, thinking, usage events, Max Mode, and images,
+  with the documented deviations in the Cursor upstream table).
 - **Claude Pro/Max:** sign-in, refresh, models, quota, setup-token accounts,
-  and import. `upstream()` returns unsupported: "requests through Claude Code
-  are not served yet." The bridge design is on `main` (#736 / row 3.2). The
-  H8b implementation is on open PRs #753–#762 and is not merged or smoked.
-- **Devin:** credential import, models, and related account work.
-  `DevinUpstream::execute` and `probe` refuse with "Devin subscription chat is
-  not implemented."
+  import, and request serving through the Claude Code MCP bridge (H8 / row 3.2).
+- **Devin:** credential import, models, quota, and subscription chat
+  (R-12/R-13, including tools, images, and signed thinking).
 - **Kiro:** import, social refresh, usage limits, and a **unary text-only**
   `generateAssistantResponse` path. Streaming, tools, and images are refused.
-- **Zed:** import, model-token mint, models, plan quota, and POST
-  `/completions` upstream (R-16). This is not login-and-quota-only. Native RSA
-  loopback sign-in and some live quota paths remain open in row 3.5.
+- **Zed:** native RSA loopback sign-in (R-56), import, model-token mint,
+  models, plan quota, and POST `/completions` upstream (R-16).
 - **Grok, Cline, Factory, Qoder, WorkBuddy, Z Code, Codex, Copilot, Gemini
-  Code Assist:** these plugins serve the upstreams documented in rows 3.1–3.5
-  (mocks only), with the gaps listed there. **Antigravity** (row 3.4) has no
-  subscription plugin yet.
+  Code Assist, and Antigravity:** these plugins serve the upstreams documented
+  in rows 3.1–3.5 (mocks only), with the gaps listed there.
+
+The TUI (`apps/tui`, row 15.3) has the R-11 shell, R-14 Providers and Agents
+pages, and the R-44 Sessions page (control list, stats, and argv resume).
+Routing, Usage, and Library are still placeholder shells. Sessions backend
+rows 9.6–9.7 include R-29 through R-34 (readers, control API, WSL listing
+cache, gateway projection, and argv resume/Pi-to-omp carry). Library writes
+(row 6) and true session recording / MCP execution remain unlanded.
 
 Item-by-item inventories in `docs/coverage/` may still show an earlier
 snapshot date; the scores in this file's Matrix are the ones that must stay
@@ -296,7 +296,7 @@ Agent-by-agent status is in [docs/coverage/agents.md](coverage/agents.md).
 | 9.4 | Usage report by period and CSV export | `internal/usageapi`; `internal/cli/main.go:38` | core | Done | `apps/cli/src/{usage,commands}.rs` (period presets, `--days`, `--last`, `--since`, `--group-by` / `--by`, `--csv`, `--json`, `--account`, `--model`); `crates/kernel/usage/src/report.rs`; `crates/control-proto/src/usage.rs` (`UsageQuery::parse`, filters); `crates/kernel/daemon/src/control.rs`. Tests: `crates/kernel/usage/src/report.rs` (`r10_*`), `apps/cli/src/usage.rs` (`r10_*`), `crates/control-proto/src/usage.rs` (`r10_*`), `crates/kernel/daemon/tests/control_usage.rs` (`r10_usage_report_exposes_ttft_speed_and_model_filter`). | Rolling windows end at now; calendar presets use local midnight. `--last` accepts Go `ParseDuration` units plus a whole-value day suffix (`1.5d`), which is a hofund extension; out-of-range values return an error instead of panicking. `--csv` column order matches the reference ledger header; columns hofund does not record (provider, host, route id, tiers, credits, and similar) are empty. |
 | 9.5 | Attribution by agent, provider key and gateway key | `internal/usage/client_agents.go`; `ref.md:340` | core | Done | `crates/kernel/usage/src/{lib,attribution}.rs` (`client_agent` migration, breakdown SQL); `crates/kernel/gateway/src/lib.rs` (`resolve_client_agent`, `with_request_agent`); `crates/kernel/daemon/src/control.rs`; `crates/control-proto/src/usage.rs`; `apps/cli/src/{usage,commands}.rs`; `crates/control-client/src/lib.rs`. Tests: `crates/kernel/gateway/tests/u1c_client_agent.rs` (`u1c_1_`–`u1c_6_`); `crates/kernel/usage/src/attribution.rs` (`u1c_7_`–`u1c_11_`); `crates/kernel/daemon/tests/control_usage.rs` (`u1c_12_`); `apps/cli/src/{usage,commands}.rs` (`u1c_13_`, `u1c_14_`); `crates/control-proto/src/usage.rs` (`u1c_15_`). | Each gateway request stores a detected client agent id (agent plugin hints and gateway key name, else `unknown`). Control and CLI accept `by=agent|provider-key|gateway-key|model|provider|account|session|day` for grouped request, token, cost, and unpriced totals; provider keys are masked in labels. User-configured client-agent aliasing from the reference is not ported (detection only). |
 | 9.6 | Sessions with cost and title; grouping of subagents | `internal/sessions`; `docs/subsystems/gateway-sessions.md` | auxiliary | Partial | R-29: `crates/kernel/sessions` (consent, containment, bounded incremental index, pricing); `crates/kernel/plugin-api/src/session.rs`; Claude and Codex plugin readers with golden fixtures; `apps/cli/src/sessions.rs` (newest-20 list, filters, JSON, daily stats). Kernel tests use `FakeStore`; CLI fixture test covers grouped subagents, zstd, and unchanged source bytes. R-30: typed list, stats, overview, progress, detail, transcript, body-only Markdown, bounded/cancelled search, read-only manage, and revision-checked GET/PATCH reads control routes in `crates/control-proto/src/sessions.rs`, `crates/kernel/daemon/src/control_sessions.rs`, and `crates/kernel/gateway/src/control.rs`; bounded transcript reads live in `crates/kernel/sessions/src/read.rs`, with plugin fixture tests and offline `FakeStore` route tests. R-31 adds `plugins/agents/opencode` and `crates/kernel/sessions/tests/opencode.rs` goldens for v1, v2 with child grouping, mixed migration, completed migration, and JSON fallback. `crates/kernel/sessions/tests/pi_omp.rs` covers Pi named/sessionDir files, omp default/profile/XDG roots, artifact grouping, and resume argv. R-31 also adds Gemini and Claude Desktop readers. R-33 (row 5): `hofund-codec/src/session.rs` (`sessionOf`, `X-Hofund-Session`); ledger columns `session_id`, `native_session_id`, `endpoint`, `kind` in `hofund-usage`; `gateway_sessions` projection; `hofund-sessions/src/merge.rs` and `gateway_hidden.rs`; `SessionStore::gateway_dedup_pairs`; gateway `session_headers` module; `hofund sessions` merges gateway-only rows (`read_only`, `gateway`). Tests: `r33_*` in usage, sessions, codec, gateway. | Plugins own formats and never decide consent. Kernel bounds and canonical/no-follow opens limit hostile files; read-only/query-only SQLite adds row, value, and column caps. Local dates and cache splits feed one pricing snapshot. Plugins declare dedup extras; the kernel never hardcodes raft/pi. R-34 fills list and detail `resume` as `{argv, cwd}` via `hofund-sessions` resume helpers and plugin `resume_argv`, and implements `POST /v1/hofund/sessions/carry` and `POST /api/sessions/carry` for Pi to omp fork argv only. Other file mutations remain later rows. |
-| 9.7 | Read usage from agents' own session files | `internal/sessions/calls_*.go` | auxiliary | Partial | R-29: `crates/kernel/sessions/src/consent.rs`; `plugins/agents/claude-code`; `plugins/agents/codex`; `hofund sessions read [on|off all|AGENT…]`. R-31 adds OpenCode, Pi, omp, Gemini, and Claude Desktop through the same consent and `open_session_file` path, with consent-off and related-symlink-escape goldens. Named section 4.1 tests cover fresh/failed/late-settle consent, traversal, links, FIFO, byte/line/depth caps, SQLite attachment/write refusal and side-file behavior, and escaped cache paths. | Fresh installs read nothing; failed settle is read-nothing without retry; revocation drops cached rows. WSL listing cache remains R-32. |
+| 9.7 | Read usage from agents' own session files | `internal/sessions/calls_*.go` | auxiliary | Partial | R-29: `crates/kernel/sessions/src/consent.rs`; `plugins/agents/claude-code`; `plugins/agents/codex`; `hofund sessions read [on|off all|AGENT…]`. R-31 adds OpenCode, Pi, omp, Gemini, and Claude Desktop through the same consent and `open_session_file` path, with consent-off and related-symlink-escape goldens. Named section 4.1 tests cover fresh/failed/late-settle consent, traversal, links, FIFO, byte/line/depth caps, SQLite attachment/write refusal and side-file behavior, and escaped cache paths. | Fresh installs read nothing; failed settle is read-nothing without retry; revocation drops cached rows. WSL listing cache landed in R-32. |
 | 9.8 | Apps report their own usage (`POST /v1/magpie/usage/requests`) | `internal/gateway/usage_ingest.go`; `ref.md:2096` | auxiliary | Missing | none | Idempotent on a request id, as magpie does. |
 | 9.9 | Output speed and time to first token | `internal/gateway/ttft.go`; `docs/subsystems/gui-shell.md` ("Streamed output speed") | core | Done | `crates/kernel/usage/src/{decode,speed}.rs` (`decode_of`, `flow_ms`, `row_tokens_per_second`); `crates/kernel/gateway/src/{stream_timing,lib}.rs` (stream timing only, no TTFT on non-streamed replies); `crates/control-proto/src/usage.rs`; `apps/cli/src/commands.rs`. Tests: `crates/kernel/usage/src/decode.rs` (`r10_*`); `crates/kernel/gateway/tests/r10_ttft.rs`; `crates/kernel/daemon/tests/control_usage.rs` (`r10_usage_report_exposes_ttft_speed_and_model_filter`). | Non-streamed rows store no TTFT and are excluded from TTFT and speed averages. Speed uses the reference `DecodeOf` rules with optional `flow_ms` (middle-80% content span); burst and held-reply cases tell no speed. |
 | 9.10 | Usage heatmap and summary API (`/v1/magpie/usage`) | `internal/usage/heatmap.go`; `internal/gateway/usage_api.go` | auxiliary | Partial | `crates/kernel/usage/src/lib.rs` (`Window`, `window_start`, `Ledger::summary`); `crates/kernel/daemon/src/control.rs` (`usage`) | The control `GET /usage` route serves today, week, month, or all-time rows and SQL totals from local midnight, capped at the newest 10,000 rows with `rows_truncated`. No heatmap yet. |
@@ -361,7 +361,7 @@ Agent-by-agent status is in [docs/coverage/agents.md](coverage/agents.md).
 | --- | --- | --- | --- | --- | --- | --- |
 | 15.1 | Menu bar tray | `internal/gui`; `magpie tray` | core | Partial | `apps/desktop/src-tauri/src/control.rs` (disabled route, Today, and quota rows; menu-order tests), `src/lib.rs` (60-second refresh), `crates/kernel/daemon/src/tray.rs` and `tests/tray_status.rs` (formatting and live empty-daemon tests). Desktop tests are CI-verified only because GLib is unavailable on the development box. | Remaining: per-card settings/picker, localized text, and icon glyphs. |
 | 15.2 | App window with pages: Agents, Providers, Routing, Usage, Sessions, Library, Masking, Plugins, Gateway, Settings | `internal/gui/assets/index.html` (`data-view`); `docs/subsystems/gui-shell.md` | auxiliary | Missing | `apps/desktop/ui` (tray only) | Tauri window over the local API (row 12.3). Pages ship in impact order: Providers, Routing, Usage, Agents. |
-| 15.3 | Terminal UI (`magpie tui`) | `internal/tui` | core | Partial | `apps/tui` (`hofund-tui`), `docs/tui-design.md` | R-11 shell plus R-14 Agents and Providers: add, edit, test, refresh, picks, remote preset, connect, model, visibility, and profiles through the control API. Routing, Usage, Sessions, and Library stay later rows. |
+| 15.3 | Terminal UI (`magpie tui`) | `internal/tui` | core | Partial | `apps/tui` (`hofund-tui`), `docs/tui-design.md`; R-14 Providers and Agents pages; R-44 Sessions page (`apps/tui/src/pages/sessions.rs`, argv resume after leaving the alternate screen) | R-11 shell plus R-14 Agents and Providers: add, edit, test, refresh, picks, remote preset, connect, model, visibility, and profiles through the control API. R-44 adds the Sessions page with a control list, stats, and user-initiated argv resume. Routing, Usage, and Library are still placeholder shells. |
 | 15.4 | Browser UI (`magpie web`, `--lan`) | `internal/cli/main.go:38`; `ref.md:2380` | auxiliary | Missing | none | Serve the same frontend as the desktop window, behind the gateway token. |
 | 15.5 | Get started onboarding | `internal/gui/assets/i18n.js` ("Get started") | auxiliary | Missing | none | First-run wizard: add a provider, connect an agent, send a test request. |
 | 15.6 | UI languages: English, Simplified Chinese, Traditional Chinese, Japanese, German | `internal/gui/assets/i18n.js` | auxiliary | Missing | none | Fluent (`.ftl`) message files, English by default. Translations live only in locale files. |

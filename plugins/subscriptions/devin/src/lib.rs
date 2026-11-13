@@ -1,5 +1,5 @@
-//! Devin subscription plugin: import CLI credentials, models, and quota.
-//! Subscription chat is not implemented.
+//! Devin subscription plugin: browser PKCE, CLI credential import, and chat
+//! on the stored Devin API base.
 
 use std::collections::HashMap;
 use std::path::Path;

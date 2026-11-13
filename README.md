@@ -26,8 +26,9 @@ Heimdall is the gate. Hofund is the sword that guards it.
 **v0.2.0 is not tagged.** This tree is scored against a frozen reference
 (magpie `v0.1.3005`). No GitHub Release has been published; the tag step is
 in [docs/release.md](docs/release.md). What follows is what is on `main`
-(`318912ff`), not what lives only on open pull requests. Most subscription
-and routing work is verified with mocks only; real-account smoke is not done.
+(`74dbebbc`, 2026-11-13), not what lives only on open pull requests. Most
+subscription and routing work is verified with mocks only; real-account
+smoke is not done.
 
 The canonical IR, the Anthropic Messages, OpenAI Chat Completions, OpenAI
 Responses, and Generative Language codecs, quirk profiles, upstream adapters,
@@ -36,15 +37,14 @@ Codex CLI, Gemini CLI, and OpenCode, and the menu-bar app are implemented.
 See [docs/codecs.md](docs/codecs.md). Fourteen subscription plugins ship
 under `plugins/subscriptions`. Request serving is not uniform:
 
-- **Cursor:** sign-in, cursor-agent import, models, and usage only. Requests
-  through Cursor's agent API are not served on this tree.
-- **Claude Pro/Max:** sign-in, refresh, models, and quota. Requests through
-  Claude Code are not served on this tree (the bridge design is on `main`;
-  the implementation is unmerged).
-- **Devin:** sign-in and account work only. Subscription chat is not
-  implemented.
+- **Cursor:** sign-in, import, models, usage, and Agent Run request serving
+  (R-8/R-9; documented deviations in `docs/feature-parity.md`).
+- **Claude Pro/Max:** sign-in, refresh, models, quota, and request serving
+  through the Claude Code MCP bridge (H8).
+- **Devin:** sign-in, import, models, quota, and subscription chat (R-12/R-13).
 - **Kiro:** unary text-only requests (no stream, tools, or images).
-- **Zed:** POST `/completions` upstream is on this tree (mocks only).
+- **Zed:** native RSA loopback sign-in (R-56) and POST `/completions` upstream
+  (R-16; mocks only).
 
 See [docs/feature-parity.md](docs/feature-parity.md) for the scored matrix
 and for what is still unmerged.

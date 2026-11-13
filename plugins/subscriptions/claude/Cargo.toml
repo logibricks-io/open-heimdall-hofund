@@ -1,6 +1,6 @@
 [package]
 name = "hofund-plugin-subscription-claude"
-description = "Claude Code subscription: sign-in through the claude command line, credentials kept per account. Requests through Claude Code are not served."
+description = "Claude Code subscription: sign-in through the claude command line, credentials kept per account, and request serving through the MCP bridge."
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
