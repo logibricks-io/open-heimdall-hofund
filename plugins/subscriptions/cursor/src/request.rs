@@ -116,6 +116,7 @@ fn build(
 
     let mut pending = Vec::new();
     let mut results = Vec::new();
+    let mut inline_images = false;
     for group in join_split_calls(transcript) {
         match group[0].role {
             Role::Assistant => {
@@ -143,7 +144,7 @@ fn build(
                     &mut pending,
                     &mut results,
                 );
-                let blob = user_blob(group[0]);
+                let blob = user_blob(&group, &mut inline_images);
                 transcript_blob_ids.push(insert_blob(&mut blobs, blob));
             }
             Role::System | Role::Developer => unreachable!("system messages are not in transcript"),
@@ -185,7 +186,7 @@ fn build(
         os,
         temp_dir,
         tools: &tools,
-        inline_images: has_inline_image(request),
+        inline_images,
         max_mode,
     }));
     Ok(MappedRequest {
@@ -255,16 +256,19 @@ fn system_blob(text: &str) -> Vec<u8> {
 fn join_split_calls(messages: Vec<&Message>) -> Vec<Vec<&Message>> {
     let mut groups: Vec<Vec<&Message>> = Vec::new();
     for message in messages {
-        let join = message.role == Role::Assistant
-            && groups.last().is_some_and(|previous| {
-                previous[0].role == Role::Assistant
-                    && previous.iter().any(|message| {
-                        message
-                            .content
-                            .iter()
-                            .any(|part| matches!(part, ContentPart::ToolCall(_)))
-                    })
-            });
+        let join = groups.last().is_some_and(|previous| {
+            if message.role == Role::User && previous[0].role == Role::User {
+                return true;
+            }
+            message.role == Role::Assistant
+                && previous[0].role == Role::Assistant
+                && previous.iter().any(|message| {
+                    message
+                        .content
+                        .iter()
+                        .any(|part| matches!(part, ContentPart::ToolCall(_)))
+                })
+        });
         if join {
             groups
                 .last_mut()
@@ -350,11 +354,17 @@ fn tool_arguments(arguments: &ToolArguments) -> Value {
     }
 }
 
-fn user_blob(message: &Message) -> Vec<u8> {
-    let content = message
-        .content
+fn user_blob(messages: &[&Message], inline_images: &mut bool) -> Vec<u8> {
+    let content = messages
         .iter()
-        .filter_map(user_content_part)
+        .flat_map(|message| &message.content)
+        .filter_map(|part| {
+            let value = user_content_part(part)?;
+            if matches!(part, ContentPart::Image(image) if inline_image_bytes(image).is_some()) {
+                *inline_images = true;
+            }
+            Some(value)
+        })
         .collect();
     object([
         ("content", Value::Array(content)),
@@ -383,17 +393,6 @@ fn user_content_part(part: &ContentPart) -> Option<Value> {
         ])),
         _ => None,
     }
-}
-
-fn has_inline_image(request: &Request) -> bool {
-    request
-        .messages
-        .iter()
-        .flat_map(|message| &message.content)
-        .any(|part| match part {
-            ContentPart::Image(image) => inline_image_bytes(image).is_some(),
-            _ => false,
-        })
 }
 
 fn image_content_part(image: &ImagePart) -> Value {
@@ -1107,6 +1106,40 @@ mod tests {
         assert_eq!(field(&request, 19).as_varint(), Some(1));
         let user_turn = proto::fields(&mapped.blobs[&user_turn_id(&mapped)]);
         assert_eq!(field(&user_turn, 1).as_string().as_deref(), Some("see"));
+    }
+
+    #[test]
+    fn an_image_in_a_later_grouped_user_message_is_serialized_and_sets_field_19() {
+        let png = "aGVsbG8="; // "hello"
+        let mut later = Message::new(Role::User);
+        later.content.push(ContentPart::Image(ImagePart {
+            source: ImageSource::Base64 {
+                media_type: "image/png".to_owned(),
+                data: png.to_owned(),
+            },
+            detail: None,
+            extensions: Default::default(),
+        }));
+        let request =
+            Request::new("auto").with_messages(vec![message(Role::User, &["first"]), later]);
+        let mapped = map_with(&request, options()).expect("grouped user images");
+        let user = json_blobs(&mapped)
+            .into_iter()
+            .find(|blob| blob["role"] == "user")
+            .expect("user blob");
+        assert_eq!(
+            user["content"],
+            json!([
+                {"text": "first", "type": "text"},
+                {
+                    "type": "image",
+                    "mimeType": "image/png",
+                    "image": {"__type": "Uint8Array", "hex": "68656c6c6f"}
+                }
+            ])
+        );
+        let request = agent_request(&mapped.opening);
+        assert_eq!(field(&request, 19).as_varint(), Some(1));
     }
 
     #[test]
