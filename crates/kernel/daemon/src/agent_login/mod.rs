@@ -17,6 +17,9 @@ pub use state::{AgentState, agent_home, policy_from_config, read, write};
 #[cfg(test)]
 pub(crate) use state::{TestHomeGuard, push_test_agent_homes};
 
+#[cfg(feature = "test-util")]
+pub use state::set_test_agent_home;
+
 use std::path::Path;
 use std::time::Duration;
 
@@ -103,6 +106,11 @@ pub async fn accounts_switch(
             );
         }
         to
+    } else if let Some((id, _)) = known
+        .iter()
+        .find(|(id, _)| id.as_str().eq_ignore_ascii_case(reference))
+    {
+        id.to_string()
     } else {
         account_by_name(&rows, &aliases, reference).map_err(DaemonError::new)?
     };

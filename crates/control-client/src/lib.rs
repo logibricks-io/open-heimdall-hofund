@@ -308,6 +308,192 @@ impl Client {
         self.get("/v1/hofund/status").await
     }
 
+    /// Gets terminal UI settings.
+    pub async fn settings(&self) -> Result<hofund_control_proto::SettingsResponse, ClientError> {
+        self.get("/v1/hofund/settings").await
+    }
+
+    /// Patches terminal UI settings against a disk revision.
+    pub async fn patch_settings(
+        &self,
+        request: &hofund_control_proto::SettingsPatchRequest,
+    ) -> Result<hofund_control_proto::SettingsResponse, ClientError> {
+        self.request(
+            http::Method::PATCH,
+            "/v1/hofund/settings",
+            Some(json_body(request)?),
+        )
+        .await
+    }
+
+    /// Reads one bounded daemon log chunk.
+    pub async fn logs(
+        &self,
+        after: u64,
+        max_bytes: Option<usize>,
+    ) -> Result<hofund_control_proto::LogTailResponse, ClientError> {
+        let mut query = hofund_control_proto::LogTailQuery::default();
+        query.after = after;
+        if let Some(max_bytes) = max_bytes {
+            query.max_bytes = max_bytes;
+        }
+        self.get(&format!("/v1/hofund/logs?{}", query.encode()))
+            .await
+    }
+
+    /// Lists subscriptions and their secret-free account rows.
+    pub async fn subscriptions(
+        &self,
+    ) -> Result<hofund_control_proto::SubscriptionListResponse, ClientError> {
+        self.get("/v1/hofund/subscriptions").await
+    }
+
+    /// Starts a background subscription sign-in.
+    pub async fn start_sign_in(
+        &self,
+        id: &str,
+        request: &hofund_control_proto::SignInStartRequest,
+    ) -> Result<hofund_control_proto::SignInStartResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            &format!("/v1/hofund/subscriptions/{}/sign-in", encode_segment(id)),
+            Some(json_body(request)?),
+        )
+        .await
+    }
+
+    /// Polls a subscription sign-in session.
+    pub async fn sign_in_status(
+        &self,
+        id: &str,
+        session: &str,
+    ) -> Result<hofund_control_proto::SignInStatusResponse, ClientError> {
+        self.get(&format!(
+            "/v1/hofund/subscriptions/{}/sign-in/{}",
+            encode_segment(id),
+            encode_segment(session)
+        ))
+        .await
+    }
+
+    /// Supplies a pasted callback URL or token to a sign-in session.
+    pub async fn sign_in_proof(
+        &self,
+        id: &str,
+        session: &str,
+        request: &hofund_control_proto::SignInProofRequest,
+    ) -> Result<hofund_control_proto::SignInStatusResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            &format!(
+                "/v1/hofund/subscriptions/{}/sign-in/{}/proof",
+                encode_segment(id),
+                encode_segment(session)
+            ),
+            Some(json_body(request)?),
+        )
+        .await
+    }
+
+    /// Cancels a sign-in session and releases its loopback listener.
+    pub async fn sign_in_cancel(
+        &self,
+        id: &str,
+        session: &str,
+    ) -> Result<hofund_control_proto::SignInCancelResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            &format!(
+                "/v1/hofund/subscriptions/{}/sign-in/{}/cancel",
+                encode_segment(id),
+                encode_segment(session)
+            ),
+            Some(json_body(&hofund_control_proto::SignInCancelRequest::new())?),
+        )
+        .await
+    }
+
+    /// Refreshes one or all accounts of a subscription.
+    pub async fn refresh_subscription(
+        &self,
+        id: &str,
+        request: &hofund_control_proto::SubscriptionRefreshRequest,
+    ) -> Result<hofund_control_proto::SubscriptionRefreshResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            &format!("/v1/hofund/subscriptions/{}/refresh", encode_segment(id)),
+            Some(json_body(request)?),
+        )
+        .await
+    }
+
+    /// Switches an agent's remembered sign-in.
+    pub async fn switch_account(
+        &self,
+        request: &hofund_control_proto::AccountSwitchRequest,
+    ) -> Result<hofund_control_proto::AccountSwitchResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            "/v1/hofund/accounts/switch",
+            Some(json_body(request)?),
+        )
+        .await
+    }
+
+    /// Imports an account export on the daemon host.
+    pub async fn import_account(
+        &self,
+        request: &hofund_control_proto::AccountImportRequest,
+    ) -> Result<hofund_control_proto::AccountImportResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            "/v1/hofund/accounts/import",
+            Some(json_body(request)?),
+        )
+        .await
+    }
+
+    /// Finds account sign-ins in agent files.
+    pub async fn discover_accounts(
+        &self,
+    ) -> Result<hofund_control_proto::AccountDiscoverResponse, ClientError> {
+        self.get("/v1/hofund/accounts/discover").await
+    }
+
+    /// Imports newly discovered account sign-ins.
+    pub async fn import_discovered_accounts(
+        &self,
+    ) -> Result<hofund_control_proto::AccountDiscoverImportResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            "/v1/hofund/accounts/discover",
+            Some(json_body(
+                &hofund_control_proto::AccountDiscoverAddRequest::new(),
+            )?),
+        )
+        .await
+    }
+
+    /// Removes a stored account.
+    pub async fn remove_account(
+        &self,
+        id: &str,
+        account: &str,
+    ) -> Result<hofund_control_proto::AccountRemoveResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            &format!(
+                "/v1/hofund/subscriptions/{}/accounts/{}/remove",
+                encode_segment(id),
+                encode_segment(account)
+            ),
+            Some(json_body(
+                &hofund_control_proto::AccountRemoveRequest::new(),
+            )?),
+        )
+        .await
+    }
+
     /// GETs a path and returns once the status line is known.
     ///
     /// On success the body is discarded. On failure the error envelope is decoded when present.

@@ -2,28 +2,33 @@ use serde::de::DeserializeOwned;
 use serde_json::error::Category;
 
 use crate::{
-    API_VERSION, AgentChangeResponse, AgentConnectRequest, AgentDisconnectRequest,
-    AgentHiddenSetRequest, AgentListResponse, AgentModelRequest, AgentModelsResponse,
-    AgentPickedOnlyRequest, AgentPlanRequest, AgentPlanResponse, AgentStatusResponse,
-    AgentVisibleSetRequest, CatalogDisabledListResponse, CatalogModelRequest, CatalogSyncRequest,
-    CatalogSyncResponse, CheckinListResponse, CheckinRunRequest, CheckinRunResponse,
-    ConfigApplyRequest, ConfigResponse, ConfigValidateRequest, ConfigValidationResponse,
-    ControlError, ControlErrorKind, ErrorEnvelope, EventEnvelope, FieldIssue, GatewayKeyRequest,
-    GatewayKeyResponse, GatewayKeyRestoreRequest, GroupCreateRequest, GroupDeleteRequest,
-    GroupDeleteResponse, GroupListResponse, GroupMemberCandidatesResponse, GroupPatchRequest,
-    GroupRestoreRequest, GroupWriteResponse, HealthResponse, MAX_REQUEST_BODY_BYTES,
-    MAX_RESPONSE_BODY_BYTES, ModelListResponse, PicksResponse, PicksSetRequest, PresetListResponse,
-    ProfileDeleteRequest, ProfileDetailResponse, ProfileListResponse, ProfileRenameRequest,
-    ProfileSaveRequest, ProfileSwitchRequest, ProfileSwitchResponse, ProviderCreateRequest,
-    ProviderDeleteRequest, ProviderDeleteResponse, ProviderKeyRequest, ProviderKeysResponse,
-    ProviderListResponse, ProviderPatchRequest, ProviderRenameRequest, ProviderRenameResponse,
-    ProviderSpendCapRequest, ProviderSpendCapsResponse, ProviderTestRequest, ProviderTestResponse,
-    ProviderWriteResponse, QuotaAlertsResponse, QuotaAlertsSetRequest, QuotaAlertsSetResponse,
-    QuotaCreditsModesResponse, QuotaCreditsSetRequest, QuotaCreditsSetResponse,
-    QuotaHistoryResponse, QuotaResponse, ReloadRequest, RouteListResponse, RouteModelListResponse,
-    SessionRouteResponse, ShutdownRequest, ShutdownResponse, StatusResponse, TokenRotateRequest,
-    TokenRotateResponse, UnroutedListResponse, UsageResponse, WarmupListResponse, WarmupRunRequest,
-    WarmupRunResponse,
+    API_VERSION, AccountDiscoverAddRequest, AccountDiscoverImportResponse, AccountDiscoverResponse,
+    AccountImportRequest, AccountImportResponse, AccountRemoveRequest, AccountRemoveResponse,
+    AccountSwitchRequest, AccountSwitchResponse, AgentChangeResponse, AgentConnectRequest,
+    AgentDisconnectRequest, AgentHiddenSetRequest, AgentListResponse, AgentModelRequest,
+    AgentModelsResponse, AgentPickedOnlyRequest, AgentPlanRequest, AgentPlanResponse,
+    AgentStatusResponse, AgentVisibleSetRequest, CatalogDisabledListResponse, CatalogModelRequest,
+    CatalogSyncRequest, CatalogSyncResponse, CheckinListResponse, CheckinRunRequest,
+    CheckinRunResponse, ConfigApplyRequest, ConfigResponse, ConfigValidateRequest,
+    ConfigValidationResponse, ControlError, ControlErrorKind, ErrorEnvelope, EventEnvelope,
+    FieldIssue, GatewayKeyRequest, GatewayKeyResponse, GatewayKeyRestoreRequest,
+    GroupCreateRequest, GroupDeleteRequest, GroupDeleteResponse, GroupListResponse,
+    GroupMemberCandidatesResponse, GroupPatchRequest, GroupRestoreRequest, GroupWriteResponse,
+    HealthResponse, LogTailResponse, MAX_REQUEST_BODY_BYTES, MAX_RESPONSE_BODY_BYTES,
+    ModelListResponse, PicksResponse, PicksSetRequest, PresetListResponse, ProfileDeleteRequest,
+    ProfileDetailResponse, ProfileListResponse, ProfileRenameRequest, ProfileSaveRequest,
+    ProfileSwitchRequest, ProfileSwitchResponse, ProviderCreateRequest, ProviderDeleteRequest,
+    ProviderDeleteResponse, ProviderKeyRequest, ProviderKeysResponse, ProviderListResponse,
+    ProviderPatchRequest, ProviderRenameRequest, ProviderRenameResponse, ProviderSpendCapRequest,
+    ProviderSpendCapsResponse, ProviderTestRequest, ProviderTestResponse, ProviderWriteResponse,
+    QuotaAlertsResponse, QuotaAlertsSetRequest, QuotaAlertsSetResponse, QuotaCreditsModesResponse,
+    QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryResponse, QuotaResponse,
+    ReloadRequest, RouteListResponse, RouteModelListResponse, SessionRouteResponse,
+    SettingsPatchRequest, SettingsResponse, ShutdownRequest, ShutdownResponse, SignInCancelRequest,
+    SignInCancelResponse, SignInProofRequest, SignInStartRequest, SignInStartResponse,
+    SignInStatusResponse, StatusResponse, SubscriptionListResponse, SubscriptionRefreshRequest,
+    SubscriptionRefreshResponse, TokenRotateRequest, TokenRotateResponse, UnroutedListResponse,
+    UsageResponse, WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
 };
 
 mod sealed {
@@ -261,6 +266,15 @@ request!(GroupCreateRequest, validate);
 request!(GroupPatchRequest, validate);
 request!(GroupDeleteRequest, validate);
 request!(GroupRestoreRequest, validate);
+request!(SettingsPatchRequest, validate);
+request!(SignInStartRequest, validate);
+request!(SignInProofRequest, validate);
+request!(SubscriptionRefreshRequest, validate);
+request!(AccountSwitchRequest, validate);
+request!(AccountImportRequest, validate);
+request!(AccountDiscoverAddRequest, validate);
+request!(SignInCancelRequest);
+request!(AccountRemoveRequest);
 
 impl sealed::Sealed for ConfigResponse {}
 impl Response for ConfigResponse {
@@ -309,6 +323,8 @@ impl Response for EventEnvelope {
 response!(
     HealthResponse,
     StatusResponse,
+    SettingsResponse,
+    LogTailResponse,
     ConfigValidationResponse,
     ProviderListResponse,
     ProviderRenameResponse,
@@ -351,6 +367,16 @@ response!(
     GroupWriteResponse,
     GroupDeleteResponse,
     GroupMemberCandidatesResponse,
+    SubscriptionListResponse,
+    SignInStartResponse,
+    SignInStatusResponse,
+    SignInCancelResponse,
+    SubscriptionRefreshResponse,
+    AccountSwitchResponse,
+    AccountImportResponse,
+    AccountDiscoverResponse,
+    AccountDiscoverImportResponse,
+    AccountRemoveResponse,
 );
 
 #[cfg(test)]

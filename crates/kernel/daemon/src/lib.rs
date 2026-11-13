@@ -40,6 +40,7 @@ mod checkin;
 mod config_ops;
 mod config_write;
 mod control;
+mod control_accounts;
 mod control_agents;
 mod control_groups;
 mod control_local;
@@ -48,8 +49,10 @@ mod control_presets;
 mod control_profiles;
 mod control_provider_summary;
 mod control_provider_write;
+mod control_settings;
 mod credits_modes;
 mod events;
+mod log_tail;
 mod measurements;
 mod membership;
 mod models;
@@ -80,6 +83,9 @@ mod watch;
 pub use account_discovery::{
     DiscoverReport, accounts_discover_in, format_report, import_if_configured,
 };
+#[cfg(feature = "test-util")]
+#[doc(hidden)]
+pub use agent_login::set_test_agent_home;
 pub use agent_login::{accounts_import_in, accounts_project_in, accounts_switch_in};
 pub use models::{
     Cached, ModelLimits, ModelsHost, Picks, ProbeOutcome, ProviderModels, RefreshTiming,
@@ -329,6 +335,9 @@ pub struct StartOptions {
     /// Overrides `HOFUND_OWNER_PID` on the status response, for tests.
     #[doc(hidden)]
     pub hofund_owner_pid: Option<u32>,
+    /// Overrides the ten-minute control sign-in deadline, for expiry tests.
+    #[doc(hidden)]
+    pub sign_in_deadline: Option<std::time::Duration>,
 }
 
 /// Binds the model address and serves until shutdown.
@@ -636,6 +645,11 @@ async fn start_inner(
                 shutdown_request,
             )
             .with_status_metadata(status_serves, options.hofund_owner_pid)
+            .with_sign_in_deadline(
+                options
+                    .sign_in_deadline
+                    .unwrap_or(sign_in::SIGN_IN_DEADLINE),
+            )
             .with_router(snapshot)
             .with_agent_hooks(options.agent_session, Some(token_generation))
             .with_quotas(Arc::clone(&quotas))
