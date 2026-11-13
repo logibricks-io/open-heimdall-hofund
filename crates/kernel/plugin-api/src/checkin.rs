@@ -51,6 +51,7 @@ pub struct CheckinResult {
     credit: f64,
     streak: i32,
     message: String,
+    recheck_at: Option<SystemTime>,
 }
 
 impl CheckinResult {
@@ -62,6 +63,7 @@ impl CheckinResult {
             credit: 0.0,
             streak: 0,
             message: message.into(),
+            recheck_at: None,
         }
     }
 
@@ -70,6 +72,13 @@ impl CheckinResult {
     pub fn with_rewards(mut self, credit: f64, streak: i32) -> Self {
         self.credit = credit;
         self.streak = streak;
+        self
+    }
+
+    /// Asks the scheduler to run this account again at `recheck_at` within the same day.
+    #[must_use]
+    pub const fn with_recheck_at(mut self, recheck_at: SystemTime) -> Self {
+        self.recheck_at = Some(recheck_at);
         self
     }
 
@@ -95,6 +104,12 @@ impl CheckinResult {
     #[must_use]
     pub fn message(&self) -> &str {
         &self.message
+    }
+
+    /// When this account should be checked again, if the vendor requested it.
+    #[must_use]
+    pub const fn recheck_at(&self) -> Option<SystemTime> {
+        self.recheck_at
     }
 }
 

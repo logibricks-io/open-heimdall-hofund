@@ -37,6 +37,7 @@ const PLUGIN_EXTRA_DEPS: &[(&str, &[&str])] = &[
             "serde_json",
         ],
     ),
+    ("hofund-plugin-subscription-zcode", &["regex"]),
 ];
 
 fn plugin_allows_dep(package: &str, name: &str) -> bool {

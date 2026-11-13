@@ -298,7 +298,9 @@ CheckinResult
 CheckinResult #[non_exhaustive] derives(Clone, Debug, PartialEq)
 CheckinResult::const fn credit (& self) -> f64
 CheckinResult::const fn outcome (& self) -> CheckinOutcome
+CheckinResult::const fn recheck_at (& self) -> Option < SystemTime >
 CheckinResult::const fn streak (& self) -> i32
+CheckinResult::const fn with_recheck_at (mut self , recheck_at : SystemTime) -> Self
 CheckinResult::fn message (& self) -> & str
 CheckinResult::fn new (outcome : CheckinOutcome , message : impl Into < String >) -> Self
 CheckinResult::fn with_rewards (mut self , credit : f64 , streak : i32) -> Self
