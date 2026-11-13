@@ -1,0 +1,5 @@
+{"type":"session_start","id":"d0000000-0000-4000-8000-00000000000a","title":"Login bug","owner":"me","version":2,"cwd":"/work/droid"}
+{"type":"message","id":"m1","timestamp":"2026-09-27T08:00:00.000Z","message":{"role":"user","content":[{"type":"text","text":"<system-reminder>house rules</system-reminder>"}]}}
+{"type":"message","id":"m2","timestamp":"2026-09-27T08:00:05.000Z","message":{"role":"user","content":[{"type":"text","text":"Fix the   login bug"}]}}
+{"type":"message","id":"m3","timestamp":"2026-09-27T08:01:00.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Reading"},{"type":"tool_use","id":"t1","name":"Read","input":{}}]}}
+{"type":"message","id":"m4","timestamp":"2026-09-27T08:02:00.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}}

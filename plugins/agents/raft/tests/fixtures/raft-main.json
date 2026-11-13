@@ -1,0 +1,44 @@
+{
+  "agent": "raft",
+  "id": "raft:sess-raft-001",
+  "path": "",
+  "cwd": "/workspace/demo",
+  "title": "Ship the raft reader",
+  "start_ms": 1790949018588,
+  "last_ms": 1790949040407,
+  "models": {
+    "demo-model": {
+      "input": 100,
+      "output": 50,
+      "cache_read": 10,
+      "cache_write": 5,
+      "cache_write_1h": 0
+    }
+  },
+  "days": [
+    {
+      "date": "2026-10-02",
+      "model": "demo-model",
+      "tokens": {
+        "input": 100,
+        "output": 50,
+        "cache_read": 10,
+        "cache_write": 5,
+        "cache_write_1h": 0
+      }
+    }
+  ],
+  "cost": 0.0,
+  "unpriced": 0,
+  "main": true,
+  "parent_id": null,
+  "subagents": [],
+  "copies": [],
+  "family_root": "",
+  "family_leaf": "",
+  "family_ids": [],
+  "copy": false,
+  "forked_from": null,
+  "usage": [],
+  "cut": false
+}

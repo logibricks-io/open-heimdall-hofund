@@ -170,4 +170,89 @@ mod tests {
         after.sort();
         assert_eq!(before, after);
     }
+
+    #[test]
+    fn sqlite_with_select_is_allowed() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("sessions.db");
+        Connection::open(&path)
+            .expect("create")
+            .execute_batch("CREATE TABLE items (id TEXT)")
+            .expect("schema");
+        let database = open_ro(temp.path(), &path).expect("read-only database");
+        let rows = database
+            .query("WITH x AS (SELECT 1 AS n) SELECT n FROM x", &[])
+            .expect("with");
+        assert_eq!(rows.values[0][0], SessionValue::Integer(1));
+        assert!(!rows.cut);
+    }
+
+    #[test]
+    fn sqlite_rejects_writes_before_prepare_with_a_read_only_error() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("sessions.db");
+        Connection::open(&path)
+            .expect("create")
+            .execute_batch("CREATE TABLE items (id TEXT)")
+            .expect("schema");
+        let database = open_ro(temp.path(), &path).expect("read-only database");
+        let error = database.query("DELETE FROM items", &[]).expect_err("write");
+        assert!(error.to_string().contains("not read-only"), "{error}");
+    }
+
+    #[test]
+    fn sqlite_rejects_select_that_names_attach() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("sessions.db");
+        Connection::open(&path)
+            .expect("create")
+            .execute_batch("CREATE TABLE items (id TEXT)")
+            .expect("schema");
+        let database = open_ro(temp.path(), &path).expect("read-only database");
+        let error = database
+            .query("SELECT attach FROM items", &[])
+            .expect_err("attach word");
+        assert!(error.to_string().contains("not read-only"), "{error}");
+    }
+
+    #[test]
+    fn sqlite_trimmed_select_is_allowed() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("sessions.db");
+        Connection::open(&path)
+            .expect("create")
+            .execute_batch("CREATE TABLE items (id TEXT)")
+            .expect("schema");
+        let database = open_ro(temp.path(), &path).expect("read-only database");
+        let rows = database
+            .query("\n\tSELECT COUNT(*) FROM items", &[])
+            .expect("trimmed");
+        assert_eq!(rows.values[0][0], SessionValue::Integer(0));
+    }
+
+    #[test]
+    fn sqlite_query_enforces_the_remaining_row_budget() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("sessions.db");
+        Connection::open(&path)
+            .expect("create")
+            .execute_batch(
+                "CREATE TABLE items (id INTEGER); INSERT INTO items (id) VALUES (1), (2), (3);",
+            )
+            .expect("schema");
+        let database = open_ro(temp.path(), &path).expect("read-only database");
+        database.remaining.set(2);
+        let first = database
+            .query("SELECT id FROM items ORDER BY id", &[])
+            .expect("first page");
+        assert_eq!(first.values.len(), 2);
+        assert!(first.cut);
+        assert_eq!(database.remaining.get(), 0);
+        let second = database
+            .query("SELECT id FROM items ORDER BY id", &[])
+            .expect("exhausted");
+        assert_eq!(second.values.len(), 0);
+        assert!(second.cut);
+        assert_eq!(database.remaining.get(), 0);
+    }
 }

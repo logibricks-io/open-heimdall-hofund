@@ -1,0 +1,5 @@
+id = "alma"
+display_name = "Alma"
+binary = "alma"
+
+# Session reader only in R-32. No resume argv and no connect adapter in this tree.

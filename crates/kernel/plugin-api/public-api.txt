@@ -1005,10 +1005,12 @@ SessionFile.format
 SessionFile.id
 SessionFile.path
 SessionFile.related
+SessionFile.related_databases
 SessionFile::const fn with_compression (mut self , compression : SessionCompression) -> Self
 SessionFile::const fn with_format (mut self , format : SessionFormat) -> Self
 SessionFile::fn new (id : impl Into < String > , path : impl Into < PathBuf >) -> Self
 SessionFile::fn with_related (mut self , related : Vec < PathBuf >) -> Self
+SessionFile::fn with_related_databases (mut self , databases : Vec < PathBuf >) -> Self
 SessionFormat
 SessionFormat #[non_exhaustive] derives(Clone, Copy, Debug, Default, PartialEq, Eq)
 SessionFormat::Json

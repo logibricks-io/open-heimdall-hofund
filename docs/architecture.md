@@ -254,10 +254,25 @@ This table covers normal and build dependencies, including their target-specific
 | `hofund-plugin-api` | `hofund-ir` |
 | `hofund-plugin-agent-claude` | `hofund-plugin-api`, `hofund-plugin-sdk` |
 | `hofund-plugin-agent-codex` | `hofund-plugin-api`, `hofund-plugin-sdk` |
+| `hofund-plugin-agent-agy` | `hofund-plugin-api`, `hofund-plugin-sdk` |
+| `hofund-plugin-agent-alma` | `hofund-plugin-api`, `hofund-plugin-sdk` |
+| `hofund-plugin-agent-cindy` | `hofund-plugin-api`, `hofund-plugin-sdk` |
+| `hofund-plugin-agent-cline` | `hofund-plugin-api`, `hofund-plugin-sdk` |
+| `hofund-plugin-agent-cursor` | `hofund-plugin-api`, `hofund-plugin-sdk` |
+| `hofund-plugin-agent-droid` | `hofund-plugin-api`, `hofund-plugin-sdk` |
+| `hofund-plugin-agent-dsh` | `hofund-plugin-api`, `hofund-plugin-sdk` |
+| `hofund-plugin-agent-gemini` | `hofund-plugin-api`, `hofund-plugin-sdk` |
+| `hofund-plugin-agent-grok` | `hofund-plugin-api`, `hofund-plugin-sdk` |
+| `hofund-plugin-agent-hermes` | `hofund-plugin-api`, `hofund-plugin-sdk` |
+| `hofund-plugin-agent-kimi` | `hofund-plugin-api`, `hofund-plugin-sdk` |
+| `hofund-plugin-agent-minimax-code` | `hofund-plugin-api`, `hofund-plugin-sdk` |
+| `hofund-plugin-agent-omp` | `hofund-plugin-api`, `hofund-plugin-sdk` |
 | `hofund-plugin-agent-opencode` | `hofund-plugin-api`, `hofund-plugin-sdk` |
 | `hofund-plugin-agent-pi` | `hofund-plugin-api`, `hofund-plugin-sdk` |
-| `hofund-plugin-agent-omp` | `hofund-plugin-api`, `hofund-plugin-sdk` |
-| `hofund-plugin-agent-gemini` | `hofund-plugin-api`, `hofund-plugin-sdk` |
+| `hofund-plugin-agent-qoder` | `hofund-plugin-api`, `hofund-plugin-sdk` |
+| `hofund-plugin-agent-raft` | `hofund-plugin-api`, `hofund-plugin-sdk` |
+| `hofund-plugin-agent-workbuddy` | `hofund-plugin-api`, `hofund-plugin-sdk` |
+| `hofund-plugin-agent-zcode` | `hofund-plugin-api`, `hofund-plugin-sdk` |
 | `hofund-plugin-sdk` | `chrono`, `chrono-tz`, `hofund-codec`, `hofund-ir`, `hofund-plugin-api`, `hofund-quirks`, `iana-time-zone` |
 | `hofund-plugin-fixture` | `hofund-plugin-api` |
 | `hofund-plugin-echo` | `hofund-plugin-api`, `hofund-plugin-sdk` |
@@ -300,7 +315,7 @@ This table covers normal and build dependencies, including their target-specific
 | `hofund-agent` | `hofund-config`, `hofund-plugin-api` |
 | `hofund-daemon` | `hofund-codec`, `hofund-config`, `hofund-control-proto`, `hofund-gateway`, `hofund-model-catalog`, `hofund-plugin-api`, `hofund-plugin-host`, `hofund-plugin-registry` (tests also enable `test-fixtures`), `hofund-plugin-sdk`, `hofund-provider`, `hofund-quirks`, `hofund-router`, `hofund-secrets`, `hofund-usage`, `hofund-agent`, `hofund-control-client` (tests; dev `hofund-agent` enables `test-fixtures`) |
 | `hofund-daemon-bin` | `hofund-daemon`, `hofund-plugin-api`, `hofund-plugin-registry`, `hofund-bridge-mcp` |
-| `hofund-cli` | `hofund-config`, `hofund-control-client`, `hofund-model-catalog`, `hofund-plugin-agent-claude`, `hofund-plugin-agent-codex`, `hofund-plugin-agent-gemini`, `hofund-plugin-agent-omp`, `hofund-plugin-agent-opencode`, `hofund-plugin-agent-pi`, `hofund-plugin-api`, `hofund-secrets`, `hofund-sessions`, `hofund-usage`, `hofund-bridge-mcp` |
+| `hofund-cli` | `hofund-config`, `hofund-control-client`, `hofund-model-catalog`, `hofund-plugin-agent-agy`, `hofund-plugin-agent-alma`, `hofund-plugin-agent-cindy`, `hofund-plugin-agent-claude`, `hofund-plugin-agent-cline`, `hofund-plugin-agent-codex`, `hofund-plugin-agent-cursor`, `hofund-plugin-agent-droid`, `hofund-plugin-agent-dsh`, `hofund-plugin-agent-gemini`, `hofund-plugin-agent-grok`, `hofund-plugin-agent-hermes`, `hofund-plugin-agent-kimi`, `hofund-plugin-agent-minimax-code`, `hofund-plugin-agent-omp`, `hofund-plugin-agent-opencode`, `hofund-plugin-agent-pi`, `hofund-plugin-agent-qoder`, `hofund-plugin-agent-raft`, `hofund-plugin-agent-workbuddy`, `hofund-plugin-agent-zcode`, `hofund-plugin-api`, `hofund-secrets`, `hofund-sessions`, `hofund-usage`, `hofund-bridge-mcp` |
 | `hofund-tui` | `hofund-config`, `hofund-control-client`, `hofund-secrets` |
 | `hofund-desktop` | `hofund-daemon`, `hofund-agent` |
 | `xtask` | — |

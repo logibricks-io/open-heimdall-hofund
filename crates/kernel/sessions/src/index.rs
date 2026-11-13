@@ -189,7 +189,7 @@ impl SessionIndex {
         let mut entries = BTreeMap::new();
         let mut dropped = false;
         for entry in disk.entries {
-            if consent.allows(&entry.record.agent)
+            if record_allowed(consent, &entry.record.agent)
                 && entry.path == entry.record.path
                 && within_root(&entry.root, &entry.path)
                 && entry
@@ -248,7 +248,7 @@ impl SessionIndex {
             .map(|entry| entry.record.agent.clone())
             .collect();
         for agent in before_allowed {
-            if !consent.allows(&agent) {
+            if !record_allowed(consent, &agent) {
                 self.entries.retain(|_, entry| entry.record.agent != agent);
                 self.dirty = true;
             }
@@ -281,6 +281,7 @@ impl SessionIndex {
         let before = self.entries.len();
         self.entries.retain(|key, _| seen.contains(key));
         self.dirty |= before != self.entries.len();
+        self.merge_wsl_cache(consent, &mut seen);
         self.save_if_dirty()
     }
 
@@ -372,8 +373,49 @@ impl SessionIndex {
     fn drop_disallowed(&mut self, consent: &Consent) {
         let before = self.entries.len();
         self.entries
-            .retain(|_, entry| consent.allows(&entry.record.agent));
+            .retain(|_, entry| record_allowed(consent, &entry.record.agent));
         self.dirty |= before != self.entries.len();
+    }
+
+    fn merge_wsl_cache(&mut self, consent: &Consent, seen: &mut BTreeSet<EntryKey>) {
+        let Some(config_dir) = self.path.parent().and_then(|state| state.parent()) else {
+            return;
+        };
+        let cache = crate::wsl::load_cache(&crate::wsl::wsl_cache_path(config_dir));
+        for (distro, listing) in &cache {
+            if crate::wsl::distro_running_for_merge(distro, listing.running) {
+                continue;
+            }
+            let root = PathBuf::from(&listing.home);
+            for entry in &listing.files {
+                let agent = crate::wsl::wsl_agent_id(&entry.agent, distro);
+                if !consent.allows(&entry.agent) && !consent.allows(&agent) {
+                    continue;
+                }
+                let mut record = SessionRecord::new(&agent, &entry.key, &entry.path);
+                record.agent.clone_from(&agent);
+                record.title.clone_from(&entry.key);
+                record.main = entry.main;
+                let key = (root.clone(), entry.path.clone(), record.id.clone());
+                seen.insert(key.clone());
+                self.entries.insert(
+                    key,
+                    CacheEntry {
+                        root: root.clone(),
+                        path: entry.path.clone(),
+                        file_id: record.id.clone(),
+                        size: entry.size,
+                        modified_ns: entry.modified_ns,
+                        offset: 0,
+                        state: String::new(),
+                        related: Vec::new(),
+                        revision: 0,
+                        record,
+                    },
+                );
+                self.dirty = true;
+            }
+        }
     }
 
     fn refresh_database(
@@ -471,11 +513,7 @@ impl SessionIndex {
             }
             Err(error) => return Err(error.into()),
         };
-        let related = file
-            .related
-            .iter()
-            .map(|path| file_stamp(root, path))
-            .collect::<Result<Vec<_>, _>>()?;
+        let related = related_stamps(root, file)?;
         seen.insert(key.clone());
         let old = self.entries.get(&key).cloned();
         if let Some(old) = &old
@@ -490,6 +528,7 @@ impl SessionIndex {
             old.file_id == file.id
                 && file.format == SessionFormat::JsonLines
                 && file.related.is_empty()
+                && file.related_databases.is_empty()
                 && file.compression == hofund_plugin_api::SessionCompression::None
                 && stamp.size > old.size
                 && stamp.modified_ns >= old.modified_ns
@@ -535,6 +574,13 @@ impl SessionIndex {
         self.dirty = true;
         Ok(())
     }
+}
+
+fn record_allowed(consent: &Consent, agent: &str) -> bool {
+    consent.allows(agent)
+        || agent
+            .split_once("@wsl:")
+            .is_some_and(|(base, _)| consent.allows(base))
 }
 
 fn sort_newest(records: &mut [SessionRecord]) {
@@ -630,6 +676,19 @@ fn holds_family(keeper: &SessionRecord, other: &SessionRecord) -> bool {
 
 fn preferred_keeper(left: &SessionRecord, right: &SessionRecord) -> bool {
     left.last_ms > right.last_ms || (left.last_ms == right.last_ms && left.id > right.id)
+}
+
+fn related_stamps(root: &Path, file: &SessionFile) -> io::Result<Vec<FileStamp>> {
+    let mut stamps = file
+        .related
+        .iter()
+        .map(|path| file_stamp(root, path))
+        .collect::<Result<Vec<_>, _>>()?;
+    for path in &file.related_databases {
+        stamps.push(file_stamp(root, path)?);
+        stamps.extend(sqlite_sidecar_stamps(root, path)?);
+    }
+    Ok(stamps)
 }
 
 fn sqlite_sidecar_stamps(root: &Path, path: &Path) -> io::Result<Vec<FileStamp>> {
@@ -772,7 +831,34 @@ fn parse_file(
     if let Some(error) = parser_error {
         return Err(error.into());
     }
-    Ok((parser.finish()?, outcome))
+    let mut parsed = parser.finish()?;
+    for path in &file.related_databases {
+        let database = crate::sqlite::open_ro(root, path)?;
+        let related_file =
+            SessionFile::new(file.id.clone(), path).with_format(SessionFormat::Sqlite);
+        for related in store.read_database(&related_file, &database)? {
+            if let Some(record) = parsed.record.as_mut() {
+                merge_related_record(record, &related);
+            }
+        }
+    }
+    Ok((parsed, outcome))
+}
+
+fn merge_related_record(record: &mut SessionRecord, related: &SessionRecord) {
+    if record.id != related.id {
+        return;
+    }
+    if !related.title.is_empty() {
+        record.title.clone_from(&related.title);
+    }
+    if !related.cwd.is_empty() {
+        record.cwd.clone_from(&related.cwd);
+    }
+    if related.start_ms > 0 && (record.start_ms == 0 || related.start_ms < record.start_ms) {
+        record.start_ms = related.start_ms;
+    }
+    record.last_ms = record.last_ms.max(related.last_ms);
 }
 
 #[cfg(test)]
@@ -783,8 +869,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use hofund_plugin_api::{
-        SessionDatabase, SessionLocator, SessionParser, SessionTokens, SessionUsageEvent,
-        SessionValue,
+        SessionCompression, SessionDatabase, SessionLocator, SessionParser, SessionTokens,
+        SessionUsageEvent, SessionValue,
     };
 
     use super::*;
@@ -1122,6 +1208,702 @@ mod tests {
     }
 
     #[test]
+
+    fn refresh_merges_a_stopped_wsl_cache_when_either_agent_id_is_allowed() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config = temp.path().join("config");
+        std::fs::create_dir_all(config.join("state")).expect("state");
+        let mut cache = crate::wsl::WslCache::new();
+        cache.insert(
+            "Ubuntu".to_owned(),
+            crate::wsl::WslListing {
+                home: r"\\wsl.localhost\Ubuntu\home\me".to_owned(),
+                running: false,
+                files: vec![crate::wsl::WslEntry {
+                    agent: "agent".to_owned(),
+                    key: "agent:abc".to_owned(),
+                    path: PathBuf::from(r"\\wsl.localhost\Ubuntu\home\me\.agent\abc.jsonl"),
+                    main: true,
+                    size: 10,
+                    modified_ns: 1,
+                }],
+            },
+        );
+        crate::wsl::save_cache(&crate::wsl::wsl_cache_path(&config), &cache).expect("cache");
+
+        let mut consent = Consent::new(&config);
+        consent.settle();
+        // Allow only the remapped id. The cache row's raw agent is `agent`.
+        consent
+            .set_reads(
+                Some(false),
+                [(crate::wsl::wsl_agent_id("agent", "Ubuntu"), true)],
+            )
+            .expect("consent");
+
+        let mut index = SessionIndex::load(&config, &consent);
+        index.refresh(&consent, &[]).expect("refresh");
+        let records = index.list(&consent);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].id, "agent:abc");
+        assert_eq!(records[0].agent, "agent@wsl:Ubuntu");
+    }
+
+    #[test]
+    fn wsl_raw_agent_consent_survives_list_and_children_stay_grouped() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config = temp.path().join("config");
+        std::fs::create_dir_all(config.join("state")).expect("state");
+        let home = r"\\wsl.localhost\Ubuntu\home\me";
+        let files = vec![
+            crate::wsl::WslEntry {
+                agent: "agent".to_owned(),
+                key: "agent:parent".to_owned(),
+                path: PathBuf::from(format!(r"{home}\.agent\parent.jsonl")),
+                main: true,
+                size: 10,
+                modified_ns: 1,
+            },
+            crate::wsl::WslEntry {
+                agent: "agent".to_owned(),
+                key: "agent:child".to_owned(),
+                path: PathBuf::from(format!(r"{home}\.agent\child.jsonl")),
+                main: false,
+                size: 10,
+                modified_ns: 1,
+            },
+        ];
+        let cache = crate::wsl::WslCache::from([(
+            "Ubuntu".to_owned(),
+            crate::wsl::WslListing {
+                home: home.to_owned(),
+                running: false,
+                files,
+            },
+        )]);
+        crate::wsl::save_cache(&crate::wsl::wsl_cache_path(&config), &cache).expect("cache");
+        let mut consent = Consent::new(&config);
+        consent.settle();
+        consent
+            .set_reads(Some(false), [("agent".to_owned(), true)])
+            .expect("raw agent consent");
+
+        let mut index = SessionIndex::load(&config, &consent);
+        index.refresh(&consent, &[]).expect("refresh");
+        let records = index.list(&consent);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].id, "agent:parent");
+        assert_eq!(index.entries.len(), 2);
+        assert!(
+            index
+                .entries
+                .values()
+                .any(|entry| entry.record.id == "agent:child" && !entry.record.main)
+        );
+
+        consent
+            .set_reads(None, [("agent".to_owned(), false)])
+            .expect("revoke");
+        assert_eq!(index.list(&consent), Vec::<SessionRecord>::new());
+    }
+
+    struct ScriptedStore {
+        locator: FakeLocator,
+        files: Vec<SessionFile>,
+        parses: Arc<AtomicUsize>,
+        parse_states: Arc<Mutex<Vec<Option<String>>>>,
+        db_reads: Arc<AtomicUsize>,
+        db_records: Mutex<Vec<SessionRecord>>,
+    }
+
+    impl ScriptedStore {
+        fn new(root: &Path, files: Vec<SessionFile>) -> Self {
+            Self {
+                locator: FakeLocator {
+                    root: root.to_path_buf(),
+                },
+                files,
+                parses: Arc::new(AtomicUsize::new(0)),
+                parse_states: Arc::new(Mutex::new(Vec::new())),
+                db_reads: Arc::new(AtomicUsize::new(0)),
+                db_records: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn with_records(self, records: Vec<SessionRecord>) -> Self {
+            *self.db_records.lock().expect("records") = records;
+            self
+        }
+
+        fn states(&self) -> Vec<Option<String>> {
+            self.parse_states.lock().expect("states").clone()
+        }
+    }
+
+    impl SessionStore for ScriptedStore {
+        fn agent(&self) -> &'static str {
+            "fake"
+        }
+
+        fn locator(&self) -> &dyn SessionLocator {
+            &self.locator
+        }
+
+        fn files(&self, _root: &Path) -> Result<Vec<SessionFile>, PluginError> {
+            Ok(self.files.clone())
+        }
+
+        fn parser(
+            &self,
+            file: &SessionFile,
+            state: Option<&str>,
+        ) -> Result<Box<dyn SessionParser>, PluginError> {
+            self.parses.fetch_add(1, Ordering::SeqCst);
+            self.parse_states
+                .lock()
+                .expect("states")
+                .push(state.map(str::to_owned));
+            Ok(Box::new(FakeParser {
+                record: SessionRecord::new("fake", format!("fake:{}", file.id), &file.path),
+                pushes: Arc::new(Mutex::new(Vec::new())),
+            }))
+        }
+
+        fn read_database(
+            &self,
+            file: &SessionFile,
+            _database: &dyn hofund_plugin_api::SessionDatabase,
+        ) -> Result<Vec<SessionRecord>, PluginError> {
+            self.db_reads.fetch_add(1, Ordering::SeqCst);
+            Ok(self
+                .db_records
+                .lock()
+                .expect("records")
+                .iter()
+                .filter(|record| record.path == file.path)
+                .cloned()
+                .collect())
+        }
+    }
+
+    fn write_sqlite(path: &Path) {
+        rusqlite::Connection::open(path)
+            .expect("create")
+            .execute_batch("CREATE TABLE items (id TEXT); INSERT INTO items (id) VALUES ('x');")
+            .expect("schema");
+    }
+
+    fn allow_all(config: &Path) -> Consent {
+        let mut consent = Consent::new(config);
+        consent.settle();
+        consent.set_reads(Some(true), []).expect("consent");
+        consent
+    }
+
+    fn bump_mtime(path: &Path, later: bool) {
+        let time = if later {
+            std::time::SystemTime::now() + std::time::Duration::from_secs(2)
+        } else {
+            std::time::UNIX_EPOCH + std::time::Duration::from_secs(1)
+        };
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("open")
+            .set_times(std::fs::FileTimes::new().set_modified(time))
+            .expect("mtime");
+    }
+
+    #[test]
+    fn read_document_accepts_a_bounded_json_object() {
+        let body = br#"{"prompt":"hello"}"#;
+        let mut seen = 0;
+        let outcome = read_document(&mut body.as_slice(), |value| {
+            assert_eq!(value["prompt"], "hello");
+            seen += 1;
+        })
+        .expect("read");
+        assert_eq!(seen, 1);
+        assert_eq!(outcome.offset, body.len() as u64);
+        assert_eq!(outcome.lines, 1);
+        assert!(!outcome.cut);
+    }
+
+    #[test]
+    fn read_document_cuts_when_the_document_exceeds_the_line_cap() {
+        let bytes = vec![b'x'; MAX_LINE_BYTES + 1];
+        let mut seen = 0;
+        let outcome = read_document(&mut bytes.as_slice(), |_| seen += 1).expect("read");
+        assert_eq!(seen, 0);
+        assert_eq!(outcome.lines, 0);
+        assert!(outcome.cut);
+        assert_eq!(outcome.offset, MAX_LINE_BYTES as u64);
+    }
+
+    #[test]
+    fn read_document_keeps_a_document_at_the_line_cap() {
+        let bytes = vec![b' '; MAX_LINE_BYTES];
+        let outcome = read_document(&mut bytes.as_slice(), |_| panic!("no value")).expect("read");
+        assert!(!outcome.cut);
+        assert_eq!(outcome.lines, 0);
+        assert_eq!(outcome.offset, MAX_LINE_BYTES as u64);
+    }
+
+    #[test]
+    fn parse_file_rejects_a_sqlite_source() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("one.db");
+        write_sqlite(&path);
+        let file = SessionFile::new("one", &path).with_format(SessionFormat::Sqlite);
+        let store = ScriptedStore::new(temp.path(), vec![file.clone()]);
+        let error = parse_file(&store, temp.path(), &file, 0, None).expect_err("sqlite");
+        assert!(
+            error
+                .to_string()
+                .contains("SQLite source reached the JSON parser"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn parse_file_reads_zstd_jsonl_from_the_start() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("one.jsonl.zst");
+        let compressed = zstd::bulk::compress(
+            br#"{"prompt":"hello"}
+"#
+            .as_slice(),
+            3,
+        )
+        .expect("compress");
+        std::fs::write(&path, compressed).expect("write");
+        let file = SessionFile::new("one", &path).with_compression(SessionCompression::Zstd);
+        let store = ScriptedStore::new(temp.path(), vec![file.clone()]);
+        let (parsed, outcome) = parse_file(&store, temp.path(), &file, 0, None).expect("parse");
+        assert_eq!(outcome.lines, 1);
+        assert!(!outcome.cut);
+        assert_eq!(parsed.record.expect("record").title, "fake prompt");
+    }
+
+    #[test]
+    fn parse_file_json_counts_related_documents_and_cuts_oversize() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let main = temp.path().join("one.json");
+        let related = temp.path().join("two.json");
+        let oversize = temp.path().join("three.json");
+        std::fs::write(&main, br#"{"prompt":"hello"}"#).expect("main");
+        std::fs::write(&related, br#"{"prompt":"again"}"#).expect("related");
+        std::fs::write(&oversize, vec![b'x'; MAX_LINE_BYTES + 1]).expect("oversize");
+        let file = SessionFile::new("one", &main)
+            .with_format(SessionFormat::Json)
+            .with_related(vec![related, oversize]);
+        let store = ScriptedStore::new(temp.path(), vec![file.clone()]);
+        let (parsed, outcome) = parse_file(&store, temp.path(), &file, 0, None).expect("parse");
+        assert_eq!(outcome.lines, 2);
+        assert!(outcome.cut);
+        assert_eq!(outcome.offset, MAX_LINE_BYTES as u64);
+        assert_eq!(parsed.record.expect("record").title, "fake prompt");
+    }
+
+    #[test]
+    fn refresh_appends_only_grown_uncompressed_jsonl() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let agent_root = temp.path().join("agent");
+        std::fs::create_dir(&agent_root).expect("agent");
+        let path = agent_root.join("one.jsonl");
+        std::fs::write(&path, b"{\"prompt\":\"hello\"}\n").expect("session");
+        let config = temp.path().join("config");
+        let consent = allow_all(&config);
+        let store = ScriptedStore::new(&agent_root, vec![SessionFile::new("one", &path)]);
+        let stores: [&dyn SessionStore; 1] = [&store];
+        let mut index = SessionIndex::load(&config, &consent);
+        index.refresh(&consent, &stores).expect("first");
+        assert_eq!(store.parses.load(Ordering::SeqCst), 1);
+        assert_eq!(store.states(), [None]);
+
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("append");
+        file.write_all(b"{\"prompt\":\"later\"}\n").expect("write");
+        drop(file);
+        bump_mtime(&path, true);
+        index.refresh(&consent, &stores).expect("append");
+        assert_eq!(store.parses.load(Ordering::SeqCst), 2);
+        assert_eq!(store.states()[1].as_deref(), Some("{}"));
+    }
+
+    #[test]
+    fn refresh_does_not_append_a_same_size_rewrite() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let agent_root = temp.path().join("agent");
+        std::fs::create_dir(&agent_root).expect("agent");
+        let path = agent_root.join("one.jsonl");
+        std::fs::write(&path, b"{\"prompt\":\"hello\"}\n").expect("session");
+        let config = temp.path().join("config");
+        let consent = allow_all(&config);
+        let store = ScriptedStore::new(&agent_root, vec![SessionFile::new("one", &path)]);
+        let stores: [&dyn SessionStore; 1] = [&store];
+        let mut index = SessionIndex::load(&config, &consent);
+        index.refresh(&consent, &stores).expect("first");
+        std::fs::write(&path, b"{\"prompt\":\"howdy\"}\n").expect("rewrite");
+        bump_mtime(&path, true);
+        index.refresh(&consent, &stores).expect("rewrite");
+        assert_eq!(store.parses.load(Ordering::SeqCst), 2);
+        assert_eq!(store.states(), [None, None]);
+    }
+
+    #[test]
+    fn refresh_does_not_append_when_mtime_moves_backwards() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let agent_root = temp.path().join("agent");
+        std::fs::create_dir(&agent_root).expect("agent");
+        let path = agent_root.join("one.jsonl");
+        std::fs::write(&path, b"{\"prompt\":\"hello\"}\n").expect("session");
+        let config = temp.path().join("config");
+        let consent = allow_all(&config);
+        let store = ScriptedStore::new(&agent_root, vec![SessionFile::new("one", &path)]);
+        let stores: [&dyn SessionStore; 1] = [&store];
+        let mut index = SessionIndex::load(&config, &consent);
+        index.refresh(&consent, &stores).expect("first");
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("append");
+        file.write_all(b"{\"prompt\":\"later\"}\n").expect("write");
+        drop(file);
+        bump_mtime(&path, false);
+        index.refresh(&consent, &stores).expect("older mtime");
+        assert_eq!(store.parses.load(Ordering::SeqCst), 2);
+        assert_eq!(store.states(), [None, None]);
+    }
+
+    #[test]
+    fn refresh_does_not_append_related_or_compressed_files() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let agent_root = temp.path().join("agent");
+        std::fs::create_dir(&agent_root).expect("agent");
+        let path = agent_root.join("one.jsonl.zst");
+        let related = agent_root.join("two.jsonl");
+        let compressed = zstd::bulk::compress(
+            br#"{"prompt":"hello"}
+"#
+            .as_slice(),
+            3,
+        )
+        .expect("compress");
+        std::fs::write(&path, compressed).expect("zstd");
+        std::fs::write(&related, b"{\"prompt\":\"side\"}\n").expect("related");
+        let config = temp.path().join("config");
+        let consent = allow_all(&config);
+        let file = SessionFile::new("one", &path)
+            .with_compression(SessionCompression::Zstd)
+            .with_related(vec![related]);
+        let store = ScriptedStore::new(&agent_root, vec![file]);
+        let stores: [&dyn SessionStore; 1] = [&store];
+        let mut index = SessionIndex::load(&config, &consent);
+        index.refresh(&consent, &stores).expect("first");
+        let more = zstd::bulk::compress(
+            br#"{"prompt":"hello"}
+{"prompt":"later"}
+"#
+            .as_slice(),
+            3,
+        )
+        .expect("compress more");
+        std::fs::write(&path, more).expect("grow");
+        bump_mtime(&path, true);
+        index.refresh(&consent, &stores).expect("grown zstd");
+        assert_eq!(store.parses.load(Ordering::SeqCst), 2);
+        assert_eq!(store.states(), [None, None]);
+    }
+
+    #[test]
+    fn wal_only_related_database_change_reparses_the_transcript() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let agent_root = temp.path().join("agent");
+        std::fs::create_dir(&agent_root).expect("agent");
+        let transcript = agent_root.join("one.jsonl");
+        std::fs::write(&transcript, b"{\"prompt\":\"fallback\"}\n").expect("transcript");
+        let database_path = agent_root.join("conversation_summaries.db");
+        let connection = rusqlite::Connection::open(&database_path).expect("database");
+        connection
+            .execute_batch(
+                "PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0;
+                 CREATE TABLE items (id TEXT); INSERT INTO items VALUES ('first');",
+            )
+            .expect("wal fixture");
+        let mut summary = SessionRecord::new("fake", "fake:one", &database_path);
+        summary.title = "old summary".to_owned();
+        let file = SessionFile::new("one", &transcript)
+            .with_related_databases(vec![database_path.clone()]);
+        let store = ScriptedStore::new(&agent_root, vec![file]).with_records(vec![summary]);
+        let config = temp.path().join("config");
+        let consent = allow_all(&config);
+        let stores: [&dyn SessionStore; 1] = [&store];
+        let mut index = SessionIndex::load(&config, &consent);
+        index.refresh(&consent, &stores).expect("first");
+        assert_eq!(index.list(&consent)[0].title, "old summary");
+        index.refresh(&consent, &stores).expect("unchanged");
+        assert_eq!(store.parses.load(Ordering::SeqCst), 1);
+        let main_stamp = std::fs::metadata(&database_path).expect("main database");
+
+        let mut summary = SessionRecord::new("fake", "fake:one", &database_path);
+        summary.title = "WAL summary".to_owned();
+        *store.db_records.lock().expect("records") = vec![summary];
+        connection
+            .execute("INSERT INTO items VALUES ('wal-only')", [])
+            .expect("wal update");
+        index.refresh(&consent, &stores).expect("wal refresh");
+
+        assert_eq!(store.parses.load(Ordering::SeqCst), 2);
+        assert_eq!(store.db_reads.load(Ordering::SeqCst), 2);
+        assert_eq!(index.list(&consent)[0].title, "WAL summary");
+        let after = std::fs::metadata(&database_path).expect("main database");
+        assert_eq!(after.len(), main_stamp.len());
+        assert_eq!(after.modified().ok(), main_stamp.modified().ok());
+    }
+
+    #[test]
+    fn refresh_database_reuses_an_unchanged_stamp_and_drops_stale_rows() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let agent_root = temp.path().join("agent");
+        std::fs::create_dir(&agent_root).expect("agent");
+        let path = agent_root.join("sessions.db");
+        write_sqlite(&path);
+        let first = vec![
+            SessionRecord::new("fake", "fake:a", &path),
+            SessionRecord::new("fake", "fake:b", &path),
+        ];
+        let store = ScriptedStore::new(
+            &agent_root,
+            vec![SessionFile::new("db", &path).with_format(SessionFormat::Sqlite)],
+        )
+        .with_records(first);
+        let config = temp.path().join("config");
+        let consent = allow_all(&config);
+        let stores: [&dyn SessionStore; 1] = [&store];
+        let mut index = SessionIndex::load(&config, &consent);
+        index.refresh(&consent, &stores).expect("first");
+        assert_eq!(store.db_reads.load(Ordering::SeqCst), 1);
+        let mut ids: Vec<_> = index.list(&consent).into_iter().map(|row| row.id).collect();
+        ids.sort();
+        assert_eq!(ids, ["fake:a", "fake:b"]);
+
+        index.refresh(&consent, &stores).expect("reuse");
+        assert_eq!(store.db_reads.load(Ordering::SeqCst), 1);
+
+        *store.db_records.lock().expect("records") =
+            vec![SessionRecord::new("fake", "fake:c", &path)];
+        // Keep the same bytes but move mtime so the stamp changes.
+        bump_mtime(&path, true);
+        index.refresh(&consent, &stores).expect("rewritten");
+        assert_eq!(store.db_reads.load(Ordering::SeqCst), 2);
+        let ids: Vec<_> = index.list(&consent).into_iter().map(|row| row.id).collect();
+        assert_eq!(ids, ["fake:c"]);
+    }
+
+    #[test]
+    fn refresh_database_skips_missing_and_escaped_paths() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let agent_root = temp.path().join("agent");
+        std::fs::create_dir(&agent_root).expect("agent");
+        let missing = agent_root.join("missing.db");
+        let outside = temp.path().join("outside.db");
+        write_sqlite(&outside);
+        let store = ScriptedStore::new(
+            &agent_root,
+            vec![
+                SessionFile::new("missing", &missing).with_format(SessionFormat::Sqlite),
+                SessionFile::new("outside", &outside).with_format(SessionFormat::Sqlite),
+            ],
+        )
+        .with_records(vec![SessionRecord::new("fake", "fake:outside", &outside)]);
+        let config = temp.path().join("config");
+        let consent = allow_all(&config);
+        let stores: [&dyn SessionStore; 1] = [&store];
+        let mut index = SessionIndex::load(&config, &consent);
+        index.refresh(&consent, &stores).expect("refresh");
+        assert_eq!(store.db_reads.load(Ordering::SeqCst), 0);
+        assert_eq!(index.list(&consent), Vec::<SessionRecord>::new());
+    }
+
+    #[test]
+    fn refresh_file_skips_an_escaped_path() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let agent_root = temp.path().join("agent");
+        std::fs::create_dir(&agent_root).expect("agent");
+        let outside = temp.path().join("outside.jsonl");
+        std::fs::write(&outside, b"{\"prompt\":\"hello\"}\n").expect("outside");
+        let store = ScriptedStore::new(&agent_root, vec![SessionFile::new("one", &outside)]);
+        let config = temp.path().join("config");
+        let consent = allow_all(&config);
+        let stores: [&dyn SessionStore; 1] = [&store];
+        let mut index = SessionIndex::load(&config, &consent);
+        index.refresh(&consent, &stores).expect("refresh");
+        assert_eq!(store.parses.load(Ordering::SeqCst), 0);
+        assert_eq!(index.list(&consent), Vec::<SessionRecord>::new());
+    }
+
+    #[test]
+    fn read_incremental_keeps_the_starting_offset_without_a_newline() {
+        let body = br#"{"prompt":"hello"}"#;
+        let outcome = read_incremental(&mut body.as_slice(), 42, |_| panic!("no complete line"))
+            .expect("read");
+        assert_eq!(outcome.offset, 42);
+        assert_eq!(outcome.lines, 0);
+        assert!(!outcome.cut);
+    }
+
+    #[test]
+    fn parse_file_jsonl_counts_related_documents_and_cuts_oversize() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let main = temp.path().join("one.jsonl");
+        let related = temp.path().join("two.jsonl");
+        let oversize = temp.path().join("three.jsonl");
+        std::fs::write(&main, b"{\"prompt\":\"hello\"}\n").expect("main");
+        std::fs::write(&related, b"{\"prompt\":\"again\"}\n").expect("related");
+        let mut long = vec![b'x'; MAX_LINE_BYTES + 1];
+        long.push(b'\n');
+        std::fs::write(&oversize, long).expect("oversize");
+        let file = SessionFile::new("one", &main).with_related(vec![related, oversize]);
+        let store = ScriptedStore::new(temp.path(), vec![file.clone()]);
+        let (parsed, outcome) = parse_file(&store, temp.path(), &file, 0, None).expect("parse");
+        assert_eq!(outcome.lines, 2);
+        assert!(outcome.cut);
+        assert_eq!(parsed.record.expect("record").title, "fake prompt");
+    }
+
+    #[test]
+    fn refresh_file_marks_the_record_cut_when_the_read_is_truncated() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let agent_root = temp.path().join("agent");
+        std::fs::create_dir(&agent_root).expect("agent");
+        let path = agent_root.join("one.jsonl");
+        let mut body = br#"{"prompt":"hello"}"#.to_vec();
+        body.push(b'\n');
+        body.extend(vec![b'x'; MAX_LINE_BYTES + 1]);
+        body.push(b'\n');
+        std::fs::write(&path, body).expect("cut file");
+        let store = ScriptedStore::new(&agent_root, vec![SessionFile::new("one", &path)]);
+        let config = temp.path().join("config");
+        let consent = allow_all(&config);
+        let stores: [&dyn SessionStore; 1] = [&store];
+        let mut index = SessionIndex::load(&config, &consent);
+        index.refresh(&consent, &stores).expect("refresh");
+        let record = index.get(&consent, "fake:one").expect("record");
+        assert!(record.cut);
+    }
+
+    #[test]
+    fn refresh_database_returns_ok_for_a_missing_file_and_a_directory() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let agent_root = temp.path().join("agent");
+        std::fs::create_dir(&agent_root).expect("agent");
+        let missing = agent_root.join("missing.db");
+        let directory = agent_root.join("dir.db");
+        std::fs::create_dir(&directory).expect("directory");
+        let store = ScriptedStore::new(&agent_root, Vec::new());
+        let config = temp.path().join("config");
+        let mut index = SessionIndex::load(&config, &allow_all(&config));
+        let mut seen = BTreeSet::new();
+        let missing_file = SessionFile::new("missing", &missing).with_format(SessionFormat::Sqlite);
+        index
+            .refresh_database(&store, &agent_root, &missing_file, &mut seen)
+            .expect("missing is not an error");
+        let dir_file = SessionFile::new("dir", &directory).with_format(SessionFormat::Sqlite);
+        index
+            .refresh_database(&store, &agent_root, &dir_file, &mut seen)
+            .expect("a directory is skipped");
+    }
+
+    #[test]
+    fn refresh_file_returns_ok_for_a_missing_file_and_a_directory() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let agent_root = temp.path().join("agent");
+        std::fs::create_dir(&agent_root).expect("agent");
+        let missing = agent_root.join("missing.jsonl");
+        let directory = agent_root.join("dir.jsonl");
+        std::fs::create_dir(&directory).expect("directory");
+        let store = ScriptedStore::new(&agent_root, Vec::new());
+        let config = temp.path().join("config");
+        let mut index = SessionIndex::load(&config, &allow_all(&config));
+        let mut seen = BTreeSet::new();
+        let missing_file = SessionFile::new("missing", &missing);
+        index
+            .refresh_file(&store, &agent_root, &missing_file, &mut seen)
+            .expect("missing is not an error");
+        let dir_file = SessionFile::new("dir", &directory);
+        index
+            .refresh_file(&store, &agent_root, &dir_file, &mut seen)
+            .expect("a directory is skipped");
+    }
+
+    #[test]
+    fn refresh_database_does_not_reuse_a_sibling_or_drop_it_on_a_rewrite() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let agent_root = temp.path().join("agent");
+        std::fs::create_dir(&agent_root).expect("agent");
+        let path_a = agent_root.join("a.db");
+        let path_b = agent_root.join("b.db");
+        write_sqlite(&path_a);
+        write_sqlite(&path_b);
+        let shared = std::time::SystemTime::now() + std::time::Duration::from_secs(2);
+        for path in [&path_a, &path_b] {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(path)
+                .expect("open")
+                .set_times(std::fs::FileTimes::new().set_modified(shared))
+                .expect("mtime");
+        }
+        let file_a = SessionFile::new("a", &path_a).with_format(SessionFormat::Sqlite);
+        let file_b = SessionFile::new("b", &path_b).with_format(SessionFormat::Sqlite);
+        let mut store = ScriptedStore::new(&agent_root, vec![file_a.clone(), file_b.clone()])
+            .with_records(vec![
+                SessionRecord::new("fake", "fake:a", &path_a),
+                SessionRecord::new("fake", "fake:b", &path_b),
+            ]);
+        let config = temp.path().join("config");
+        let consent = allow_all(&config);
+        let mut index = SessionIndex::load(&config, &consent);
+        index.refresh(&consent, &[&store]).expect("first");
+        let mut ids: Vec<_> = index.list(&consent).into_iter().map(|row| row.id).collect();
+        ids.sort();
+        assert_eq!(ids, ["fake:a", "fake:b"]);
+
+        // Dropping B from the listing must drop B from the index. A reuse
+        // path that also treats B as "old" would keep it in `seen`.
+        store.files = vec![file_a.clone()];
+        *store.db_records.lock().expect("records") =
+            vec![SessionRecord::new("fake", "fake:a", &path_a)];
+        index.refresh(&consent, &[&store]).expect("without b");
+        let ids: Vec<_> = index.list(&consent).into_iter().map(|row| row.id).collect();
+        assert_eq!(ids, ["fake:a"]);
+
+        store.files = vec![file_a.clone(), file_b.clone()];
+        *store.db_records.lock().expect("records") = vec![
+            SessionRecord::new("fake", "fake:a", &path_a),
+            SessionRecord::new("fake", "fake:b", &path_b),
+        ];
+        index.refresh(&consent, &[&store]).expect("restore b");
+        bump_mtime(&path_a, true);
+        *store.db_records.lock().expect("records") =
+            vec![SessionRecord::new("fake", "fake:a2", &path_a)];
+        let mut seen = BTreeSet::new();
+        index
+            .refresh_database(&store, &agent_root, &file_a, &mut seen)
+            .expect("rewrite a");
+        let mut ids: Vec<_> = index
+            .entries
+            .values()
+            .map(|entry| entry.record.id.clone())
+            .collect();
+        ids.sort();
+        assert_eq!(ids, ["fake:a2", "fake:b"]);
+    }
+
+    #[test]
     fn dedup_forks_preserves_already_filtered_usage() {
         let event = SessionUsageEvent::new(
             SessionTokens::new(20, 8, 4, 2),
@@ -1379,14 +2161,20 @@ mod tests {
         let config = temp.path().join("config");
         let consent = settled(&config);
         let (store, parses) = FakeStore::new(&agent_root);
-        let store = store.listing(vec![
-            SessionFile::new("dir", directory),
-            SessionFile::new("missing", missing),
-        ]);
+        let store = store.listing(vec![SessionFile::new("missing", missing)]);
         let stores: [&dyn SessionStore; 1] = [&store];
         let mut index = SessionIndex::load(&config, &consent);
-        index.refresh(&consent, &stores).expect("skip non-files");
+        index.refresh(&consent, &stores).expect("skip missing");
         assert_eq!(parses.load(Ordering::SeqCst), 0);
+        assert_eq!(index.list(&consent), Vec::<SessionRecord>::new());
+
+        let (dir_store, dir_parses) = FakeStore::new(&agent_root);
+        let dir_store = dir_store.listing(vec![SessionFile::new("dir", directory)]);
+        let dir_stores: [&dyn SessionStore; 1] = [&dir_store];
+        index
+            .refresh(&consent, &dir_stores)
+            .expect("a directory is skipped");
+        assert_eq!(dir_parses.load(Ordering::SeqCst), 0);
         assert_eq!(index.list(&consent), Vec::<SessionRecord>::new());
     }
 

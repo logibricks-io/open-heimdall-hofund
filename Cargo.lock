@@ -2153,12 +2153,27 @@ dependencies = [
  "hofund-control-client",
  "hofund-control-proto",
  "hofund-model-catalog",
+ "hofund-plugin-agent-agy",
+ "hofund-plugin-agent-alma",
+ "hofund-plugin-agent-cindy",
  "hofund-plugin-agent-claude",
+ "hofund-plugin-agent-cline",
  "hofund-plugin-agent-codex",
+ "hofund-plugin-agent-cursor",
+ "hofund-plugin-agent-droid",
+ "hofund-plugin-agent-dsh",
  "hofund-plugin-agent-gemini",
+ "hofund-plugin-agent-grok",
+ "hofund-plugin-agent-hermes",
+ "hofund-plugin-agent-kimi",
+ "hofund-plugin-agent-minimax-code",
  "hofund-plugin-agent-omp",
  "hofund-plugin-agent-opencode",
  "hofund-plugin-agent-pi",
+ "hofund-plugin-agent-qoder",
+ "hofund-plugin-agent-raft",
+ "hofund-plugin-agent-workbuddy",
+ "hofund-plugin-agent-zcode",
  "hofund-plugin-api",
  "hofund-secrets",
  "hofund-sessions",
@@ -2401,11 +2416,48 @@ dependencies = [
 ]
 
 [[package]]
+name = "hofund-plugin-agent-agy"
+version = "0.1.0"
+dependencies = [
+ "hofund-plugin-api",
+ "hofund-plugin-sdk",
+ "tempfile",
+]
+
+[[package]]
+name = "hofund-plugin-agent-alma"
+version = "0.1.0"
+dependencies = [
+ "hofund-plugin-api",
+ "hofund-plugin-sdk",
+ "tempfile",
+]
+
+[[package]]
+name = "hofund-plugin-agent-cindy"
+version = "0.1.0"
+dependencies = [
+ "hofund-plugin-api",
+ "hofund-plugin-sdk",
+ "tempfile",
+]
+
+[[package]]
 name = "hofund-plugin-agent-claude"
 version = "0.1.0"
 dependencies = [
  "hofund-plugin-api",
  "hofund-plugin-sdk",
+ "tempfile",
+]
+
+[[package]]
+name = "hofund-plugin-agent-cline"
+version = "0.1.0"
+dependencies = [
+ "hofund-plugin-api",
+ "hofund-plugin-sdk",
+ "regex",
  "tempfile",
 ]
 
@@ -2419,9 +2471,76 @@ dependencies = [
 ]
 
 [[package]]
+name = "hofund-plugin-agent-cursor"
+version = "0.1.0"
+dependencies = [
+ "hofund-plugin-api",
+ "hofund-plugin-sdk",
+ "regex",
+ "tempfile",
+]
+
+[[package]]
+name = "hofund-plugin-agent-droid"
+version = "0.1.0"
+dependencies = [
+ "hofund-plugin-api",
+ "hofund-plugin-sdk",
+ "tempfile",
+]
+
+[[package]]
+name = "hofund-plugin-agent-dsh"
+version = "0.1.0"
+dependencies = [
+ "hofund-plugin-api",
+ "hofund-plugin-sdk",
+ "regex",
+ "tempfile",
+ "zstd",
+]
+
+[[package]]
 name = "hofund-plugin-agent-gemini"
 version = "0.1.0"
 dependencies = [
+ "hofund-plugin-api",
+ "hofund-plugin-sdk",
+ "tempfile",
+]
+
+[[package]]
+name = "hofund-plugin-agent-grok"
+version = "0.1.0"
+dependencies = [
+ "hofund-plugin-api",
+ "hofund-plugin-sdk",
+ "tempfile",
+]
+
+[[package]]
+name = "hofund-plugin-agent-hermes"
+version = "0.1.0"
+dependencies = [
+ "hofund-plugin-api",
+ "hofund-plugin-sdk",
+ "sha2 0.10.9",
+]
+
+[[package]]
+name = "hofund-plugin-agent-kimi"
+version = "0.1.0"
+dependencies = [
+ "hofund-plugin-api",
+ "hofund-plugin-sdk",
+ "tempfile",
+]
+
+[[package]]
+name = "hofund-plugin-agent-minimax-code"
+version = "0.1.0"
+dependencies = [
+ "base64 0.23.1",
  "hofund-plugin-api",
  "hofund-plugin-sdk",
  "tempfile",
@@ -2451,6 +2570,42 @@ dependencies = [
  "hofund-plugin-api",
  "hofund-plugin-sdk",
  "tempfile",
+]
+
+[[package]]
+name = "hofund-plugin-agent-qoder"
+version = "0.1.0"
+dependencies = [
+ "hofund-plugin-api",
+ "hofund-plugin-sdk",
+ "tempfile",
+]
+
+[[package]]
+name = "hofund-plugin-agent-raft"
+version = "0.1.0"
+dependencies = [
+ "hofund-plugin-api",
+ "hofund-plugin-sdk",
+ "tempfile",
+]
+
+[[package]]
+name = "hofund-plugin-agent-workbuddy"
+version = "0.1.0"
+dependencies = [
+ "hofund-plugin-api",
+ "hofund-plugin-sdk",
+ "regex",
+ "tempfile",
+]
+
+[[package]]
+name = "hofund-plugin-agent-zcode"
+version = "0.1.0"
+dependencies = [
+ "hofund-plugin-api",
+ "hofund-plugin-sdk",
 ]
 
 [[package]]
