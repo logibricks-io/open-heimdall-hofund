@@ -743,11 +743,32 @@ fn client_body(body: &mut Map<String, Value>, wire: ProtocolId) {
                         Some(Value::String(text)) => {
                             *text = with_droid_opening(text);
                         }
-                        Some(Value::Array(parts)) => {
-                            if let Some(Value::Object(part)) = parts.first_mut()
-                                && let Some(Value::String(text)) = part.get_mut("text")
-                            {
-                                *text = with_droid_opening(text);
+                        Some(content @ Value::Array(_)) => {
+                            let Value::Array(parts) = content else {
+                                unreachable!();
+                            };
+                            let all_text = parts.iter().all(|part| {
+                                part.get("type").and_then(Value::as_str) == Some("text")
+                                    && part.get("text").and_then(Value::as_str).is_some()
+                            });
+                            if all_text {
+                                let opened = parts.first().is_some_and(|part| {
+                                    part.get("text")
+                                        .and_then(Value::as_str)
+                                        .is_some_and(|text| text.starts_with(DROID_LINE))
+                                });
+                                if !opened {
+                                    let texts = std::iter::once(DROID_LINE).chain(
+                                        parts.iter().map(|part| {
+                                            part.get("text")
+                                                .and_then(Value::as_str)
+                                                .unwrap_or_default()
+                                        }),
+                                    );
+                                    *content = Value::String(texts.collect::<Vec<_>>().join("\n"));
+                                }
+                            } else {
+                                parts.insert(0, json!({"type": "text", "text": DROID_LINE}));
                             }
                         }
                         _ => {}
@@ -996,6 +1017,48 @@ mod tests {
             .clone();
         fast_body(&mut unavailable, ProtocolId::OPENAI_RESPONSES);
         assert_eq!(unavailable["model"], "gpt-6-sol");
+    }
+
+    #[test]
+    fn r52_chat_system_parts_join_or_gain_a_droid_part() {
+        let mut text = json!({
+            "messages": [{
+                "role": "system",
+                "content": [
+                    {"type": "text", "text": "You are Claude Code."},
+                    {"type": "text", "text": "Be brief."}
+                ]
+            }]
+        })
+        .as_object()
+        .expect("object")
+        .clone();
+        client_body(&mut text, ProtocolId::OPENAI_CHAT);
+        assert_eq!(
+            text["messages"][0]["content"],
+            format!("{DROID_LINE}\nYou are Claude Code.\nBe brief.")
+        );
+
+        let image =
+            json!({"type": "image_url", "image_url": {"url": "https://factory.test/image"}});
+        let mut mixed = json!({
+            "messages": [{
+                "role": "system",
+                "content": [{"type": "text", "text": "Describe the image."}, image]
+            }]
+        })
+        .as_object()
+        .expect("object")
+        .clone();
+        client_body(&mut mixed, ProtocolId::OPENAI_CHAT);
+        assert_eq!(
+            mixed["messages"][0]["content"],
+            json!([
+                {"type": "text", "text": DROID_LINE},
+                {"type": "text", "text": "Describe the image."},
+                image
+            ])
+        );
     }
 
     #[test]
