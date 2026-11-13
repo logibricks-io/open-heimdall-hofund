@@ -9,7 +9,7 @@ use hofund_control_client::hofund_control_proto::{
 };
 
 use crate::intent::{ControlIntent, PageEffect};
-use crate::pages::{AgentPage, Page, Pages, ProviderPage};
+use crate::pages::{AgentPage, Page, PageKeyOutcome, Pages, ProviderPage};
 use crate::session::{
     AgentSnapshot, Finished, ModelView, PlanView, ProviderSnapshot, SessionOutcome,
 };
@@ -161,7 +161,10 @@ impl App {
     pub fn reload_open_page(&mut self) -> Generation {
         self.bump_generation();
         let read_gen = self.generation;
-        self.pages.mut_page(self.page).reload(read_gen);
+        match self.page {
+            PageId::Sessions => self.pages.sessions_mut().reload(read_gen),
+            page => self.pages.mut_page(page).reload(read_gen),
+        }
         self.queue_page_load(read_gen);
         #[cfg(test)]
         {
@@ -257,8 +260,7 @@ impl App {
 
     fn handle_list_key(&mut self, key: KeyEvent) -> AppAction {
         if self.page_captures() {
-            self.dispatch_active_page(key);
-            return AppAction::None;
+            return self.dispatch_active_page(key);
         }
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => return AppAction::Quit,
@@ -289,31 +291,62 @@ impl App {
             }
             _ => {}
         }
-        self.dispatch_active_page(key);
-        AppAction::None
+        self.dispatch_active_page(key)
     }
 
     fn page_captures(&self) -> bool {
         match self.page {
             PageId::Providers => self.providers.captures(),
             PageId::Agents => self.agents.captures(),
+            PageId::Sessions => self.pages.sessions().captures(),
             _ => false,
         }
     }
 
-    fn dispatch_active_page(&mut self, key: KeyEvent) {
+    fn dispatch_active_page(&mut self, key: KeyEvent) -> AppAction {
+        if self.page == PageId::Sessions {
+            let outcome = self.pages.sessions_mut().on_key(key);
+            return self.apply_sessions_outcome(outcome);
+        }
         if self.page == PageId::Providers && (self.providers.active() || self.providers.captures())
         {
             let effect = self.providers.on_key(key);
             self.apply_effect(effect);
-            return;
+            return AppAction::None;
         }
         if self.page == PageId::Agents && (self.agents.active() || self.agents.captures()) {
             let effect = self.agents.on_key(key);
             self.apply_effect(effect);
-            return;
+            return AppAction::None;
         }
         let _ = self.pages.mut_page(self.page).on_key(key);
+        AppAction::None
+    }
+
+    fn apply_sessions_outcome(&mut self, outcome: PageKeyOutcome) -> AppAction {
+        match outcome {
+            PageKeyOutcome::None | PageKeyOutcome::CursorUp | PageKeyOutcome::CursorDown => {
+                AppAction::None
+            }
+            PageKeyOutcome::Reload => {
+                let _ = self.reload_open_page();
+                AppAction::Reload
+            }
+            PageKeyOutcome::Resume(resume) => AppAction::Resume(resume),
+            PageKeyOutcome::FlashResumeUnavailable => AppAction::Flash {
+                text: "this session can't be resumed from here".to_owned(),
+                ok: false,
+            },
+            PageKeyOutcome::ClosePicker => {
+                self.pages.sessions_mut().close_picker();
+                AppAction::None
+            }
+            PageKeyOutcome::PickFilter(value) => {
+                self.pages.sessions_mut().apply_filter_pick(value);
+                let _ = self.reload_open_page();
+                AppAction::Reload
+            }
+        }
     }
 
     /// Starts a pending mutation if none is active.
@@ -643,7 +676,7 @@ fn next_page(current: PageId, delta: i32) -> PageId {
 }
 
 /// Outcome of [`App::handle_key`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AppAction {
     /// Redraw only.
     None,
@@ -651,6 +684,10 @@ pub enum AppAction {
     Reload,
     /// User requested quit.
     Quit,
+    /// Resume an agent in the foreground from argv.
+    Resume(hofund_control_proto::SessionResume),
+    /// Show a flash without a reload.
+    Flash { text: String, ok: bool },
 }
 
 #[cfg(test)]
@@ -718,7 +755,7 @@ mod tests {
     fn reload_increments_page_generation() {
         let mut app = App::for_test(PageId::Sessions);
         let _ = app.reload_open_page();
-        assert_eq!(app.pages.page(PageId::Sessions).fetch_gen(), 2);
+        assert_eq!(app.pages.sessions().fetch_gen(), 2);
     }
 
     #[test]
