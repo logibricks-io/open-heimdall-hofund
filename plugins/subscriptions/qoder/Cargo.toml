@@ -1,6 +1,6 @@
 [package]
 name = "hofund-plugin-subscription-qoder"
-description = "Qoder subscription: import credentials, refresh job tokens, daily check-in, and OpenAI chat upstream."
+description = "Qoder subscription: device PKCE, native COSY SSE, VPC sites, usage, and daily check-in."
 version.workspace = true
 authors.workspace = true
 edition.workspace = true

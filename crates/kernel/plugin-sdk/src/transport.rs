@@ -195,6 +195,19 @@ impl Call {
         }
     }
 
+    /// The absolute URI this call will request.
+    #[must_use]
+    pub fn uri(&self) -> &str {
+        &self.uri
+    }
+
+    /// Replaces the absolute URI, preserving headers and body.
+    #[must_use]
+    pub fn with_uri(mut self, uri: impl Into<String>) -> Self {
+        self.uri = uri.into();
+        self
+    }
+
     /// Sets the body bytes.
     #[must_use]
     pub fn bytes(mut self, body: impl AsRef<[u8]>) -> Self {
