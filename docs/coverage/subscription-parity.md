@@ -556,7 +556,7 @@ Structured-output prose for Chat, Responses, and Messages shipped in R-13b (`str
 | k | quota / usage | profile usage page + billing API | `quota.rs` billing without guessed totals; key accounts return no windows without calling billing | Partial | Profile-page usage remains |
 | l | model list | `/v3/config` in plugin | `models.rs` config fetch with the signed client headers | Done | — |
 | m | multi-account | `workbuddy` vs `workbuddy-ai` provider ids | single plugin, `site::Site` CN vs International (`lib.rs:31-35`) | Partial | Separate subscription ids if needed for routing labels |
-| n | error classification | `WBRestricted` code 11140 (`workbuddy.go:267-299`) | `errors.rs` accepts top-level, `data`, or `error` numeric/string codes, appends the exact hint, and rests the account for two hours (`r55_restriction_*`, upstream test) | Done | — |
+| n | error classification | `WBRestricted` code 11140 (`workbuddy.go:267-299`) | `errors.rs` accepts top-level, `data`, or `error` numeric/string codes and appends the exact hint; the router applies a generic 403 account rest (`r55_restriction_*`, upstream test) | Done | — |
 | o | daily check-in | `workbuddy_checkin.go` + plugin; CN only | `checkin.rs`, `with_daily_checkin`; international and key accounts are inactive | Done | — |
 | p | agent sign-in | desktop auth paths | `AgentSignIn` workbuddy + workbuddy-ai (`lib.rs:31-35`) | Done | — |
 | q | extras | User-Agent must be WorkBuddy/version (`index.mjs:8-9`) | `creds.rs` sends the reference's 5.9.3 app/2.165.0 CLI identity, attribution and chat SDK headers per site (`r55_signed_headers_match_each_site`, `r55_chat_headers_match_the_desktop_cli`) | Done | — |
@@ -565,7 +565,7 @@ Structured-output prose for Chat, Responses, and Messages shipped in R-13b (`str
 
 - Browser and API-key sign-in work for both sites through the existing subscription proof flow, with deterministic recorded-HTTP tests only.
 - Chat, models, quota, check-in, and refresh use the reference's client identity and applicable signing headers; key material is sensitive and never included in errors.
-- Code 11140 produces the reference hint and a two-hour account rest.
+- Code 11140 produces the reference hint; the router applies a generic 403 account rest.
 - Encrypted desktop tokens remain unreadable by design and direct the user to browser sign-in without rendering the encrypted envelope.
 
 **Remaining gaps**
