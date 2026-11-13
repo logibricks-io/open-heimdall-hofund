@@ -326,6 +326,8 @@ ConnectionStatus::fn new (id : & 'static str , display_name : & 'static str , in
 ConnectionStatus::fn paths (& self) -> & [PathBuf]
 ConnectionStatus::fn warnings (& self) -> & [String]
 ConnectionStatus::fn with_warnings (mut self , warnings : Vec < String >) -> Self
+ContentBlockStart
+ContentBlockStop
 ContentPart
 CountOutcome
 CountOutcome #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
@@ -588,7 +590,9 @@ MemberKey #[non_exhaustive] derives(Clone, Debug)
 MemberKey::const fn from_static (value : & 'static str) -> Self
 MemberKey::fn as_str (& self) -> & str
 Message
+MessageDelta
 MessageStart
+MessageStop
 Method
 Method #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
 Method::Delete
@@ -1211,6 +1215,7 @@ SurfaceHost::fn protocols (& self) -> & [ProtocolId]
 SurfaceId
 SurfaceId::as_str
 SurfaceId::from_static
+TextDelta
 TextPart
 TierId
 TierId #[non_exhaustive] derives(Clone, Debug)

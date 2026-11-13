@@ -1,6 +1,6 @@
 # Cursor subscription upstream (R-8, R-9)
 
-Status: design only. The subscription crate already signs in, imports, refreshes, lists models, and reads quota. `Subscription::upstream` still returns unsupported (`plugins/subscriptions/cursor/src/lib.rs:365-372`). This document is the contract for serving a model call on a Cursor account.
+Status: R-8f3 implements text-only request mapping and streamed Agent Run responses over HTTP/2 and the HTTP/1.1 fallback, verified with loopback servers. `Subscription::upstream` returns a provider whose execute resolves the stored token and waits for the first text delta or terminal failure before returning. Usage, region retry, empty-reply/stall wording, tools, images, reasoning, and the full error table remain in their designated later slices. This document is the contract for serving a model call on a Cursor account.
 
 The wire lives in the reference's JavaScript plugin (`packages/cursor/index.mjs`, `native-session.mjs`, and the tests named below). The Go provider (`internal/provider/cursor.go`) is sign-in, keychain, and catalog context only. It does not open `AgentService/Run`. Where the two disagree, the JavaScript plugin is the wire contract, and the Go file is the keychain contract.
 
