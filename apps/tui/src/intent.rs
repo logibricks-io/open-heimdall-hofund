@@ -237,6 +237,97 @@ pub enum ControlIntent {
         /// Fetch even when an index is already loaded.
         force: bool,
     },
+    /// `GET /subscriptions`.
+    LoadAccounts {
+        /// Read generation.
+        generation: u64,
+    },
+    /// `POST /subscriptions/{id}/sign-in`.
+    StartSignIn {
+        /// Subscription id.
+        id: String,
+        /// Mutation generation.
+        generation: u64,
+    },
+    /// `GET /subscriptions/{id}/sign-in/{session}`.
+    PollSignIn {
+        /// Subscription id.
+        id: String,
+        /// Opaque session id.
+        session: String,
+        /// Dialog token that retires older sessions and discovery reads.
+        token: u64,
+    },
+    /// `POST /subscriptions/{id}/sign-in/{session}/proof`.
+    SubmitSignInProof {
+        /// Subscription id.
+        id: String,
+        /// Opaque session id.
+        session: String,
+        /// Dialog token.
+        token: u64,
+        /// Pasted callback URL or token text.
+        proof: Secret,
+        /// Whether the secret is a callback URL rather than token text.
+        url: bool,
+        /// Mutation generation.
+        generation: u64,
+    },
+    /// `POST /subscriptions/{id}/sign-in/{session}/cancel`.
+    CancelSignIn {
+        /// Subscription id.
+        id: String,
+        /// Opaque session id.
+        session: String,
+        /// Dialog token.
+        token: u64,
+        /// Mutation generation.
+        generation: u64,
+    },
+    /// `POST /accounts/switch`.
+    SwitchAccount {
+        /// Subscription plugin's agent id or alias.
+        agent: String,
+        /// Account id or `next`.
+        target: String,
+        /// Mutation generation.
+        generation: u64,
+    },
+    /// `POST /accounts/import`.
+    ImportAccount {
+        /// Export path on the daemon host.
+        path: String,
+        /// Mutation generation.
+        generation: u64,
+    },
+    /// `GET /accounts/discover`.
+    DiscoverAccounts {
+        /// Discovery token retired by a newer read.
+        token: u64,
+    },
+    /// `POST /accounts/discover` with `add: true`.
+    ImportDiscoveredAccounts {
+        /// Mutation generation.
+        generation: u64,
+    },
+    /// `POST /subscriptions/{id}/accounts/{account}/remove`.
+    RemoveAccount {
+        /// Subscription id.
+        id: String,
+        /// Account id.
+        account: String,
+        /// Mutation generation.
+        generation: u64,
+    },
+    /// `POST /subscriptions/{id}/refresh`.
+    RefreshSubscription {
+        /// Subscription id.
+        id: String,
+        /// One account, or all accounts when absent.
+        account: Option<String>,
+        /// Mutation generation.
+        generation: u64,
+    },
 }
 
 impl fmt::Debug for ControlIntent {
@@ -399,6 +490,92 @@ impl fmt::Debug for ControlIntent {
                 .debug_struct("CatalogSync")
                 .field("force", force)
                 .finish(),
+            Self::LoadAccounts { generation } => formatter
+                .debug_struct("LoadAccounts")
+                .field("generation", generation)
+                .finish(),
+            Self::StartSignIn { id, generation } => formatter
+                .debug_struct("StartSignIn")
+                .field("id", id)
+                .field("generation", generation)
+                .finish(),
+            Self::PollSignIn { id, session, token } => formatter
+                .debug_struct("PollSignIn")
+                .field("id", id)
+                .field("session", session)
+                .field("token", token)
+                .finish(),
+            Self::SubmitSignInProof {
+                id,
+                session,
+                token,
+                proof,
+                url,
+                generation,
+            } => formatter
+                .debug_struct("SubmitSignInProof")
+                .field("id", id)
+                .field("session", session)
+                .field("token", token)
+                .field("proof", proof)
+                .field("url", url)
+                .field("generation", generation)
+                .finish(),
+            Self::CancelSignIn {
+                id,
+                session,
+                token,
+                generation,
+            } => formatter
+                .debug_struct("CancelSignIn")
+                .field("id", id)
+                .field("session", session)
+                .field("token", token)
+                .field("generation", generation)
+                .finish(),
+            Self::SwitchAccount {
+                agent,
+                target,
+                generation,
+            } => formatter
+                .debug_struct("SwitchAccount")
+                .field("agent", agent)
+                .field("target", target)
+                .field("generation", generation)
+                .finish(),
+            Self::ImportAccount { path, generation } => formatter
+                .debug_struct("ImportAccount")
+                .field("path", path)
+                .field("generation", generation)
+                .finish(),
+            Self::DiscoverAccounts { token } => formatter
+                .debug_struct("DiscoverAccounts")
+                .field("token", token)
+                .finish(),
+            Self::ImportDiscoveredAccounts { generation } => formatter
+                .debug_struct("ImportDiscoveredAccounts")
+                .field("generation", generation)
+                .finish(),
+            Self::RemoveAccount {
+                id,
+                account,
+                generation,
+            } => formatter
+                .debug_struct("RemoveAccount")
+                .field("id", id)
+                .field("account", account)
+                .field("generation", generation)
+                .finish(),
+            Self::RefreshSubscription {
+                id,
+                account,
+                generation,
+            } => formatter
+                .debug_struct("RefreshSubscription")
+                .field("id", id)
+                .field("account", account)
+                .field("generation", generation)
+                .finish(),
         }
     }
 }
@@ -417,7 +594,10 @@ impl ControlIntent {
             | Self::LoadAgentModels { .. }
             | Self::LoadBalances
             | Self::LoadProfiles { .. }
-            | Self::LoadKeys { .. } => Duration::from_secs(15),
+            | Self::LoadKeys { .. }
+            | Self::LoadAccounts { .. }
+            | Self::PollSignIn { .. }
+            | Self::DiscoverAccounts { .. } => Duration::from_secs(15),
             _ => Duration::from_secs(30),
         }
     }
@@ -435,6 +615,9 @@ impl ControlIntent {
                 | Self::LoadBalances
                 | Self::LoadProfiles { .. }
                 | Self::LoadKeys { .. }
+                | Self::LoadAccounts { .. }
+                | Self::PollSignIn { .. }
+                | Self::DiscoverAccounts { .. }
         )
     }
 
@@ -447,6 +630,15 @@ impl ControlIntent {
             | Self::OpenModels { generation, .. }
             | Self::LoadRouteModels { generation, .. }
             | Self::LoadAgentModels { generation, .. }
+            | Self::LoadAccounts { generation }
+            | Self::StartSignIn { generation, .. }
+            | Self::SubmitSignInProof { generation, .. }
+            | Self::CancelSignIn { generation, .. }
+            | Self::SwitchAccount { generation, .. }
+            | Self::ImportAccount { generation, .. }
+            | Self::ImportDiscoveredAccounts { generation }
+            | Self::RemoveAccount { generation, .. }
+            | Self::RefreshSubscription { generation, .. }
                 if *generation == 0 =>
             {
                 *generation = current;
@@ -461,6 +653,7 @@ impl ControlIntent {
         match self {
             Self::CreateProvider { api_key, .. } => api_key.as_ref().map(Secret::expose),
             Self::ReplaceKey { secret, .. } => Some(secret.expose()),
+            Self::SubmitSignInProof { proof, .. } => Some(proof.expose()),
             _ => None,
         }
     }

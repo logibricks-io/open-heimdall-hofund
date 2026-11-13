@@ -17,6 +17,8 @@ pub enum PageId {
     Sessions,
     /// Library (`6`).
     Library,
+    /// Subscription accounts (`7`, outside the six-page cycle).
+    Accounts,
 }
 
 impl PageId {
@@ -54,17 +56,22 @@ impl PageId {
             Self::Usage => "usage",
             Self::Sessions => "sessions",
             Self::Library => "library",
+            Self::Accounts => "accounts",
         }
     }
 
     /// Header label including the digit key.
     #[must_use]
     pub fn pill_label(self) -> String {
-        let digit = Self::CYCLE
-            .iter()
-            .position(|page| *page == self)
-            .map(|i| i + 1)
-            .unwrap_or(1);
+        let digit = if self == Self::Accounts {
+            7
+        } else {
+            Self::CYCLE
+                .iter()
+                .position(|page| *page == self)
+                .map(|i| i + 1)
+                .unwrap_or(1)
+        };
         format!("{digit} {}", self.slug())
     }
 }

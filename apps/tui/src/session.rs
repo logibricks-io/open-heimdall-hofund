@@ -1,12 +1,14 @@
 //! Runs one control intent and returns a result the UI can apply.
 
 use hofund_control_client::hofund_control_proto::{
-    API_VERSION, AgentAction, AgentConnectRequest, AgentDisconnectRequest, AgentHiddenSetRequest,
-    AgentModelRequest, AgentModelsResponse, AgentPickedOnlyRequest, AgentPlanRequest,
-    AgentStatusEntry, AgentSummary, CatalogSyncRequest, ModelEntry, PicksResponse, PicksSetRequest,
-    PresetEntry, ProfileRenameRequest, ProfileSummary, ProviderCreateRequest,
-    ProviderDeleteRequest, ProviderKey, ProviderKeyAction, ProviderKeyRequest,
-    ProviderPatchRequest, ProviderSummary, ProviderTestRequest, QuotaKind, QuotaQuery,
+    API_VERSION, AccountImportRequest, AccountSwitchRequest, AgentAction, AgentConnectRequest,
+    AgentDisconnectRequest, AgentHiddenSetRequest, AgentModelRequest, AgentModelsResponse,
+    AgentPickedOnlyRequest, AgentPlanRequest, AgentStatusEntry, AgentSummary, CatalogSyncRequest,
+    DiscoveredAccount, ModelEntry, PicksResponse, PicksSetRequest, PresetEntry,
+    ProfileRenameRequest, ProfileSummary, ProviderCreateRequest, ProviderDeleteRequest,
+    ProviderKey, ProviderKeyAction, ProviderKeyRequest, ProviderPatchRequest, ProviderSummary,
+    ProviderTestRequest, QuotaKind, QuotaQuery, SignInProofRequest, SignInStartRequest,
+    SignInStartResponse, SignInStatusResponse, SubscriptionEntry, SubscriptionRefreshRequest,
 };
 use hofund_control_client::{Client, ClientError};
 
@@ -76,6 +78,93 @@ pub struct Finished {
     pub commit_hidden: Option<String>,
     /// Profile list returned by rename or delete.
     pub profiles: Option<Vec<ProfileSummary>>,
+}
+
+/// Account reads and writes. Debug output omits every response body and error.
+#[derive(Clone)]
+pub enum AccountsOutcome {
+    /// Subscription and account list.
+    List {
+        /// Read generation.
+        generation: u64,
+        /// Secret-free rows or a redacted error.
+        result: Result<Vec<SubscriptionEntry>, String>,
+    },
+    /// Sign-in start.
+    Start {
+        /// Mutation generation.
+        generation: u64,
+        /// Subscription id.
+        subscription: String,
+        /// New session and challenge or a redacted error.
+        result: Result<SignInStartResponse, String>,
+    },
+    /// Background sign-in poll.
+    Poll {
+        /// Dialog token.
+        token: u64,
+        /// Subscription id.
+        subscription: String,
+        /// Opaque session id.
+        session: String,
+        /// Current status or a redacted error.
+        result: Result<SignInStatusResponse, String>,
+    },
+    /// Pasted proof submission.
+    Proof {
+        /// Mutation generation.
+        generation: u64,
+        /// Dialog token.
+        token: u64,
+        /// Subscription id.
+        subscription: String,
+        /// Opaque session id.
+        session: String,
+        /// Current status or a redacted error.
+        result: Result<SignInStatusResponse, String>,
+    },
+    /// Sign-in cancellation.
+    Cancel {
+        /// Mutation generation.
+        generation: u64,
+        /// Dialog token.
+        token: u64,
+        /// Subscription id.
+        subscription: String,
+        /// Opaque session id.
+        session: String,
+        /// Success or a redacted error.
+        result: Result<(), String>,
+    },
+    /// Discovery read.
+    Discovered {
+        /// Discovery token.
+        token: u64,
+        /// Secret-free discovered rows or a redacted error.
+        result: Result<Vec<DiscoveredAccount>, String>,
+    },
+    /// A mutation that should reload the account list on success.
+    Mutation {
+        /// Mutation generation.
+        generation: u64,
+        /// Toast on success or a redacted error.
+        result: Result<String, String>,
+    },
+}
+
+impl std::fmt::Debug for AccountsOutcome {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            Self::List { .. } => "List",
+            Self::Start { .. } => "Start",
+            Self::Poll { .. } => "Poll",
+            Self::Proof { .. } => "Proof",
+            Self::Cancel { .. } => "Cancel",
+            Self::Discovered { .. } => "Discovered",
+            Self::Mutation { .. } => "Mutation",
+        };
+        formatter.write_str(name)
+    }
 }
 
 /// One finished control call.
@@ -163,6 +252,8 @@ pub enum SessionOutcome {
     Finished(Finished),
     /// Catalog sync finished.
     Catalog(Result<(), String>),
+    /// Accounts read or mutation finished.
+    Accounts(AccountsOutcome),
 }
 
 impl ControlIntent {
@@ -232,6 +323,66 @@ impl ControlIntent {
                 result: Err(message),
             },
             Self::CatalogSync { .. } => SessionOutcome::Catalog(Err(message)),
+            Self::LoadAccounts { generation } => SessionOutcome::Accounts(AccountsOutcome::List {
+                generation: *generation,
+                result: Err(message),
+            }),
+            Self::StartSignIn { id, generation } => {
+                SessionOutcome::Accounts(AccountsOutcome::Start {
+                    generation: *generation,
+                    subscription: id.clone(),
+                    result: Err(message),
+                })
+            }
+            Self::PollSignIn { id, session, token } => {
+                SessionOutcome::Accounts(AccountsOutcome::Poll {
+                    token: *token,
+                    subscription: id.clone(),
+                    session: session.clone(),
+                    result: Err(message),
+                })
+            }
+            Self::SubmitSignInProof {
+                id,
+                session,
+                token,
+                generation,
+                ..
+            } => SessionOutcome::Accounts(AccountsOutcome::Proof {
+                generation: *generation,
+                token: *token,
+                subscription: id.clone(),
+                session: session.clone(),
+                result: Err(message),
+            }),
+            Self::CancelSignIn {
+                id,
+                session,
+                token,
+                generation,
+            } => SessionOutcome::Accounts(AccountsOutcome::Cancel {
+                generation: *generation,
+                token: *token,
+                subscription: id.clone(),
+                session: session.clone(),
+                result: Err(message),
+            }),
+            Self::DiscoverAccounts { token } => {
+                SessionOutcome::Accounts(AccountsOutcome::Discovered {
+                    token: *token,
+                    result: Err(message),
+                })
+            }
+            Self::SwitchAccount { generation, .. }
+            | Self::ImportAccount { generation, .. }
+            | Self::ImportDiscoveredAccounts { generation }
+            | Self::RemoveAccount { generation, .. }
+            | Self::RefreshSubscription { generation, .. } => {
+                SessionOutcome::Accounts(AccountsOutcome::Mutation {
+                    generation: *generation,
+                    result: Err(message),
+                })
+            }
             Self::ReplacePicks { id, .. } | Self::ResetPicks { id, .. } => {
                 SessionOutcome::Finished(Finished {
                     flash: ("timed out".to_owned(), false),
@@ -492,6 +643,153 @@ pub async fn execute(client: &Client, intent: ControlIntent) -> SessionOutcome {
                 ))),
                 Err(error) => SessionOutcome::Catalog(Err(explain(error, None))),
             }
+        }
+        ControlIntent::LoadAccounts { generation } => {
+            let result = client
+                .subscriptions()
+                .await
+                .map(|response| response.subscriptions)
+                .map_err(|error| explain(error, None));
+            SessionOutcome::Accounts(AccountsOutcome::List { generation, result })
+        }
+        ControlIntent::StartSignIn { id, generation } => {
+            let result = client
+                .start_sign_in(&id, &SignInStartRequest::new())
+                .await
+                .map_err(|error| explain(error, None));
+            SessionOutcome::Accounts(AccountsOutcome::Start {
+                generation,
+                subscription: id,
+                result,
+            })
+        }
+        ControlIntent::PollSignIn { id, session, token } => {
+            let result = client
+                .sign_in_status(&id, &session)
+                .await
+                .map_err(|_| "could not poll sign-in".to_owned());
+            SessionOutcome::Accounts(AccountsOutcome::Poll {
+                token,
+                subscription: id,
+                session,
+                result,
+            })
+        }
+        ControlIntent::SubmitSignInProof {
+            id,
+            session,
+            token,
+            proof,
+            url,
+            generation,
+        } => {
+            let request = if url {
+                SignInProofRequest::url(proof.expose())
+            } else {
+                SignInProofRequest::token(proof.expose())
+            };
+            let result = client
+                .sign_in_proof(&id, &session, &request)
+                .await
+                .map_err(|error| explain(error, secret.as_deref()));
+            SessionOutcome::Accounts(AccountsOutcome::Proof {
+                generation,
+                token,
+                subscription: id,
+                session,
+                result,
+            })
+        }
+        ControlIntent::CancelSignIn {
+            id,
+            session,
+            token,
+            generation,
+        } => {
+            let result = client
+                .sign_in_cancel(&id, &session)
+                .await
+                .map(|_| ())
+                .map_err(|_| "could not cancel sign-in".to_owned());
+            SessionOutcome::Accounts(AccountsOutcome::Cancel {
+                generation,
+                token,
+                subscription: id,
+                session,
+                result,
+            })
+        }
+        ControlIntent::SwitchAccount {
+            agent,
+            target,
+            generation,
+        } => {
+            let result = client
+                .switch_account(&AccountSwitchRequest::new(agent, target))
+                .await
+                .map(|response| format!("switched {} to {}", response.agent, response.account))
+                .map_err(|error| explain(error, None));
+            SessionOutcome::Accounts(AccountsOutcome::Mutation { generation, result })
+        }
+        ControlIntent::ImportAccount { path, generation } => {
+            let result = client
+                .import_account(&AccountImportRequest::new(path))
+                .await
+                .map(|response| {
+                    format!(
+                        "imported {} accounts; skipped {}",
+                        response.imported.len(),
+                        response.skipped.len()
+                    )
+                })
+                .map_err(|error| explain(error, None));
+            SessionOutcome::Accounts(AccountsOutcome::Mutation { generation, result })
+        }
+        ControlIntent::DiscoverAccounts { token } => {
+            let result = client
+                .discover_accounts()
+                .await
+                .map(|response| response.found)
+                .map_err(|error| explain(error, None));
+            SessionOutcome::Accounts(AccountsOutcome::Discovered { token, result })
+        }
+        ControlIntent::ImportDiscoveredAccounts { generation } => {
+            let result = client
+                .import_discovered_accounts()
+                .await
+                .map(|response| format!("imported {} discovered accounts", response.imported.len()))
+                .map_err(|error| explain(error, None));
+            SessionOutcome::Accounts(AccountsOutcome::Mutation { generation, result })
+        }
+        ControlIntent::RemoveAccount {
+            id,
+            account,
+            generation,
+        } => {
+            let result = client
+                .remove_account(&id, &account)
+                .await
+                .map_err(|error| explain(error, None))
+                .and_then(|response| {
+                    if response.removed {
+                        Ok("removed account".to_owned())
+                    } else {
+                        Err("account was not removed".to_owned())
+                    }
+                });
+            SessionOutcome::Accounts(AccountsOutcome::Mutation { generation, result })
+        }
+        ControlIntent::RefreshSubscription {
+            id,
+            account,
+            generation,
+        } => {
+            let result = client
+                .refresh_subscription(&id, &SubscriptionRefreshRequest::new(account))
+                .await
+                .map(|response| format!("refreshed {} accounts", response.refreshed.len()))
+                .map_err(|error| explain(error, None));
+            SessionOutcome::Accounts(AccountsOutcome::Mutation { generation, result })
         }
     }
 }

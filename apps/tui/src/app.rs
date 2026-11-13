@@ -8,10 +8,10 @@ use hofund_control_client::hofund_control_proto::{
     AgentAction, AgentModelsResponse, ProfileSummary, ProviderKey,
 };
 
-use crate::intent::{ControlIntent, PageEffect};
+use crate::intent::{ControlIntent, PageEffect, Secret};
 use crate::pages::{AgentPage, Page, PageKeyOutcome, Pages, ProviderPage};
 use crate::session::{
-    AgentSnapshot, Finished, ModelView, PlanView, ProviderSnapshot, SessionOutcome,
+    AccountsOutcome, AgentSnapshot, Finished, ModelView, PlanView, ProviderSnapshot, SessionOutcome,
 };
 use crate::state::{FLASH_TTL, Flash, GatewayPresence, Generation, Mode, PageId, PendingOp};
 
@@ -114,15 +114,28 @@ impl App {
         self.flash = Some(flash);
     }
 
-    /// Marks sign-in progress (Accounts polling is R-15).
-    pub fn mark_sign_in_dirty(&mut self) {
-        let _ = ();
+    /// Polls immediately when a progress event belongs to the open dialog.
+    pub fn mark_sign_in_dirty(&mut self, provider: &str, session: Option<&str>) {
+        if self.pages.accounts().matches_sign_in(provider, session) {
+            self.queue_sign_in_poll();
+        }
     }
 
-    /// Whether sign-in needs polling (R-15).
+    /// Whether a sign-in dialog needs one-second polling.
     #[must_use]
     pub fn sign_in_dirty(&self) -> bool {
-        false
+        self.pages.accounts().sign_in_active()
+    }
+
+    /// Queues the next dialog poll unless one is already in flight.
+    pub fn poll_sign_in(&mut self) {
+        self.queue_sign_in_poll();
+    }
+
+    fn queue_sign_in_poll(&mut self) {
+        if let Some(intent) = self.pages.accounts_mut().next_poll() {
+            self.queue(intent);
+        }
     }
 
     /// Removes the token reread flag.
@@ -163,6 +176,7 @@ impl App {
         let read_gen = self.generation;
         match self.page {
             PageId::Sessions => self.pages.sessions_mut().reload(read_gen),
+            PageId::Accounts => self.pages.accounts_mut().reload(read_gen),
             page => self.pages.mut_page(page).reload(read_gen),
         }
         self.queue_page_load(read_gen);
@@ -183,6 +197,7 @@ impl App {
                 }
             }
             PageId::Agents => self.queue(ControlIntent::LoadAgents { generation }),
+            PageId::Accounts => self.queue(ControlIntent::LoadAccounts { generation }),
             _ => {}
         }
     }
@@ -233,6 +248,7 @@ impl App {
     pub fn go_to(&mut self, page: PageId) {
         self.flash = None;
         self.providers.disarm_confirm();
+        self.pages.accounts_mut().disarm_confirm();
         self.agents.cancel_profile_request();
         self.page = page;
         self.mode = Mode::List;
@@ -279,6 +295,10 @@ impl App {
                 }
                 return AppAction::None;
             }
+            KeyCode::Char('7') => {
+                self.go_to(PageId::Accounts);
+                return AppAction::None;
+            }
             KeyCode::Char(']') => {
                 let next = next_page(self.page, 1);
                 self.go_to(next);
@@ -299,6 +319,7 @@ impl App {
             PageId::Providers => self.providers.captures(),
             PageId::Agents => self.agents.captures(),
             PageId::Sessions => self.pages.sessions().captures(),
+            PageId::Accounts => self.pages.accounts().captures(),
             _ => false,
         }
     }
@@ -307,6 +328,11 @@ impl App {
         if self.page == PageId::Sessions {
             let outcome = self.pages.sessions_mut().on_key(key);
             return self.apply_sessions_outcome(outcome);
+        }
+        if self.page == PageId::Accounts {
+            let action = self.pages.accounts_mut().on_accounts_key(key);
+            self.apply_effect(action.effect);
+            return action.open_url.map_or(AppAction::None, AppAction::OpenUrl);
         }
         if self.page == PageId::Providers && (self.providers.active() || self.providers.captures())
         {
@@ -440,6 +466,7 @@ impl App {
             } => self.apply_plan(agent, action, result),
             SessionOutcome::Finished(finished) => self.apply_finished(finished),
             SessionOutcome::Catalog(result) => self.apply_catalog(result),
+            SessionOutcome::Accounts(outcome) => self.apply_accounts(outcome),
         }
     }
 
@@ -635,6 +662,144 @@ impl App {
         }
     }
 
+    fn apply_accounts(&mut self, outcome: AccountsOutcome) {
+        match outcome {
+            AccountsOutcome::List { generation, result } => {
+                self.apply_read_result(generation, |app| match result {
+                    Ok(subscriptions) => app.pages.accounts_mut().apply_load(subscriptions),
+                    Err(message) => app.pages.accounts_mut().apply_load_error(message),
+                });
+            }
+            AccountsOutcome::Start {
+                generation,
+                subscription,
+                result,
+            } => {
+                if !self.release_account_pending(generation) {
+                    return;
+                }
+                match result {
+                    Ok(start) => {
+                        if self.pages.accounts_mut().apply_start(&subscription, start) {
+                            self.queue_sign_in_poll();
+                        }
+                    }
+                    Err(message) => self.set_flash_ttl(message, false),
+                }
+            }
+            AccountsOutcome::Poll {
+                token,
+                subscription,
+                session,
+                result,
+            } => match result {
+                Ok(status) => {
+                    let terminal = self.pages.accounts_mut().apply_poll(
+                        token,
+                        &subscription,
+                        &session,
+                        status,
+                    );
+                    self.apply_sign_in_terminal(terminal);
+                }
+                Err(message) => {
+                    if self.pages.accounts_mut().apply_poll_error(token) {
+                        self.set_flash_ttl(message, false);
+                    }
+                }
+            },
+            AccountsOutcome::Proof {
+                generation,
+                token,
+                subscription,
+                session,
+                result,
+            } => {
+                if !self.release_account_pending(generation) {
+                    return;
+                }
+                match result {
+                    Ok(status) => {
+                        let terminal = self.pages.accounts_mut().apply_proof(
+                            token,
+                            &subscription,
+                            &session,
+                            status,
+                        );
+                        self.apply_sign_in_terminal(terminal);
+                        self.queue_sign_in_poll();
+                    }
+                    Err(message) => self.set_flash_ttl(message, false),
+                }
+            }
+            AccountsOutcome::Cancel {
+                generation,
+                token,
+                subscription,
+                session,
+                result,
+            } => {
+                if !self.release_account_pending(generation) {
+                    return;
+                }
+                match result {
+                    Ok(()) => {
+                        if self
+                            .pages
+                            .accounts_mut()
+                            .apply_cancelled(token, &subscription, &session)
+                        {
+                            self.set_flash_ttl("sign-in cancelled", true);
+                        }
+                    }
+                    Err(message) => self.set_flash_ttl(message, false),
+                }
+            }
+            AccountsOutcome::Discovered { token, result } => match result {
+                Ok(found) => {
+                    self.pages.accounts_mut().apply_discovered(token, found);
+                }
+                Err(message) => {
+                    if self.pages.accounts().discovery_is_current(token) {
+                        self.set_flash_ttl(message, false);
+                    }
+                }
+            },
+            AccountsOutcome::Mutation { generation, result } => {
+                if !self.release_account_pending(generation) {
+                    return;
+                }
+                match result {
+                    Ok(message) => {
+                        self.set_flash_ttl(message, true);
+                        if self.page == PageId::Accounts {
+                            let _ = self.reload_open_page();
+                        }
+                    }
+                    Err(message) => self.set_flash_ttl(message, false),
+                }
+            }
+        }
+    }
+
+    fn release_account_pending(&mut self, generation: Generation) -> bool {
+        if self.pending_generation_is(generation) {
+            self.finish_pending();
+            true
+        } else {
+            self.pending.is_none() && generation == self.generation
+        }
+    }
+
+    fn apply_sign_in_terminal(&mut self, terminal: Option<(String, bool, bool)>) {
+        if let Some((message, ok, reload)) = terminal {
+            self.set_flash_ttl(message, ok);
+            if reload && self.page == PageId::Accounts {
+                let _ = self.reload_open_page();
+            }
+        }
+    }
+
     fn queue_agent_visibility(&mut self) {
         let generation = self.generation;
         for agent in self.agents.agent_ids() {
@@ -686,6 +851,8 @@ pub enum AppAction {
     Quit,
     /// Resume an agent in the foreground from argv.
     Resume(hofund_control_proto::SessionResume),
+    /// Ask the OS to open a sensitive sign-in URL without displaying it.
+    OpenUrl(Secret),
     /// Show a flash without a reload.
     Flash { text: String, ok: bool },
 }

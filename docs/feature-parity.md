@@ -85,7 +85,8 @@ serving is not uniform; the Matrix rows are authoritative:
   in rows 3.1–3.5 (mocks only), with the gaps listed there.
 
 The TUI (`apps/tui`, row 15.3) has the R-11 shell, R-14 Providers and Agents
-pages, and the R-44 Sessions page (control list, stats, and argv resume).
+pages, the R-44 Sessions page (control list, stats, and argv resume), and the
+R-15 Accounts page (sign-in, switching, import, discovery, refresh, and removal).
 Routing, Usage, and Library are still placeholder shells. Sessions backend
 rows 9.6–9.7 include R-29 through R-34 (readers, control API, WSL listing
 cache, gateway projection, and argv resume/Pi-to-omp carry). Library writes
@@ -361,7 +362,7 @@ Agent-by-agent status is in [docs/coverage/agents.md](coverage/agents.md).
 | --- | --- | --- | --- | --- | --- | --- |
 | 15.1 | Menu bar tray | `internal/gui`; `magpie tray` | core | Partial | `apps/desktop/src-tauri/src/control.rs` (disabled route, Today, and quota rows; menu-order tests), `src/lib.rs` (60-second refresh), `crates/kernel/daemon/src/tray.rs` and `tests/tray_status.rs` (formatting and live empty-daemon tests). Desktop tests are CI-verified only because GLib is unavailable on the development box. | Remaining: per-card settings/picker, localized text, and icon glyphs. |
 | 15.2 | App window with pages: Agents, Providers, Routing, Usage, Sessions, Library, Masking, Plugins, Gateway, Settings | `internal/gui/assets/index.html` (`data-view`); `docs/subsystems/gui-shell.md` | auxiliary | Missing | `apps/desktop/ui` (tray only) | Tauri window over the local API (row 12.3). Pages ship in impact order: Providers, Routing, Usage, Agents. |
-| 15.3 | Terminal UI (`magpie tui`) | `internal/tui` | core | Partial | `apps/tui` (`hofund-tui`), `docs/tui-design.md`; R-14 Providers and Agents pages; R-44 Sessions page (`apps/tui/src/pages/sessions.rs`, argv resume after leaving the alternate screen) | R-11 shell plus R-14 Agents and Providers: add, edit, test, refresh, picks, remote preset, connect, model, visibility, and profiles through the control API. R-44 adds the Sessions page with a control list, stats, and user-initiated argv resume. Routing, Usage, and Library are still placeholder shells. |
+| 15.3 | Terminal UI (`magpie tui`) | `internal/tui` | core | Partial | `apps/tui` (`hofund-tui`), `docs/tui-design.md`; R-14 Providers and Agents pages; R-44 Sessions page (`apps/tui/src/pages/sessions.rs`, argv resume after leaving the alternate screen); R-15 Accounts page (`apps/tui/src/pages/accounts.rs`, `apps/tui/tests/accounts_page.rs`) | R-11 shell plus R-14 Agents and Providers: add, edit, test, refresh, picks, remote preset, connect, model, visibility, and profiles through the control API. R-44 adds the Sessions page with a control list, stats, and user-initiated argv resume. R-15 Accounts adds polled PKCE, device, and instruction sign-in without displaying secrets, plus switching, import, discovery, refresh, and confirmed removal. Routing, Usage, and Library are still placeholder shells. |
 | 15.4 | Browser UI (`magpie web`, `--lan`) | `internal/cli/main.go:38`; `ref.md:2380` | auxiliary | Missing | none | Serve the same frontend as the desktop window, behind the gateway token. |
 | 15.5 | Get started onboarding | `internal/gui/assets/i18n.js` ("Get started") | auxiliary | Missing | none | First-run wizard: add a provider, connect an agent, send a test request. |
 | 15.6 | UI languages: English, Simplified Chinese, Traditional Chinese, Japanese, German | `internal/gui/assets/i18n.js` | auxiliary | Missing | none | Fluent (`.ftl`) message files, English by default. Translations live only in locale files. |

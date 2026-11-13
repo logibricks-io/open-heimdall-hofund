@@ -41,8 +41,10 @@ pub fn apply_control_event(app: &mut App, payload: &EventPayload) {
                 let _ = app.reload_open_page();
             }
         }
-        EventPayload::SignInProgress(SignInProgressEvent { .. }) => {
-            // Accounts sign-in polling is wired in R-15.
+        EventPayload::SignInProgress(SignInProgressEvent {
+            provider, session, ..
+        }) => {
+            app.mark_sign_in_dirty(provider, session.as_deref());
         }
         EventPayload::QuotaAlert(QuotaAlertEvent { title, body, .. }) => {
             let text = if body.is_empty() {

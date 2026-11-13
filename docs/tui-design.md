@@ -179,7 +179,7 @@ The reference shows accounts as provider rows and usage cards. It has no device-
 |---|---|---|
 | `j`/`k` | Account row | G-6 list |
 | `a` | Start sign-in for a subscription | G-6 start |
-| dialog | Show URL or device code. `o` asks the OS to open the URL. A typed line submits a pasted PKCE callback URL or secret token text only (not a filesystem path; paths belong on Accounts `i` → `POST /v1/hofund/accounts/import`). `esc` cancels | G-6 start, poll `GET .../sign-in/{session}`, proof POST for pasted URL or token text, cancel |
+| dialog | Show sign-in state without rendering the URL or device code. `o` asks the OS to open the URL. A hidden typed line submits a pasted PKCE callback URL or secret token text only (not a filesystem path; paths belong on Accounts `i` → `POST /v1/hofund/accounts/import`). `esc` cancels | G-6 start, poll `GET .../sign-in/{session}`, proof POST for pasted URL or token text, cancel |
 | `enter` | Switch the agent sign-in to this account | G-6 switch |
 | `n` | Switch to the next account with room | G-6 switch target `next` |
 | `i` | Import a file path | G-6 import |
@@ -187,7 +187,7 @@ The reference shows accounts as provider rows and usage cards. It has no device-
 | `d` `d` | Remove the account | G-6 remove |
 | `x` | Refresh tokens for the row | G-6 refresh |
 
-Sign-in never prints a token. The existing `SignInProgressEvent` (`provider`, `state`) is a hint to poll, not the challenge.
+Sign-in never prints a token, callback URL, verification URL, or device user code. The existing `SignInProgressEvent` (`provider`, `state`) is a hint to poll, not the challenge.
 
 ### Settings — R-18, not a reference page
 

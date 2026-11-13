@@ -1,5 +1,6 @@
 //! Page implementations.
 
+mod accounts;
 mod agents;
 mod frame;
 mod probe;
@@ -7,6 +8,7 @@ mod providers;
 pub mod sessions;
 mod status;
 
+pub use accounts::{AccountsAction, AccountsPage};
 pub use agents::AgentPage;
 pub use frame::PageShell;
 pub use probe::{ProbeOutcome, apply_probe_to_shell, read_path};
@@ -60,7 +62,7 @@ pub enum PageKeyOutcome {
     PickFilter(String),
 }
 
-/// Box of all six pages.
+/// Box of all pages.
 pub struct Pages {
     agents: PageShell,
     providers: PageShell,
@@ -68,6 +70,7 @@ pub struct Pages {
     usage: PageShell,
     sessions: SessionsPage,
     library: PageShell,
+    accounts: AccountsPage,
 }
 
 impl Default for Pages {
@@ -79,6 +82,7 @@ impl Default for Pages {
             usage: PageShell::new(PageId::Usage, "No usage loaded yet."),
             sessions: SessionsPage::new(),
             library: PageShell::new(PageId::Library, "Loading library…"),
+            accounts: AccountsPage::new(),
         }
     }
 }
@@ -92,7 +96,7 @@ impl Pages {
             PageId::Routing => Some(&mut self.routing),
             PageId::Usage => Some(&mut self.usage),
             PageId::Library => Some(&mut self.library),
-            PageId::Sessions => None,
+            PageId::Sessions | PageId::Accounts => None,
         }
     }
 
@@ -107,10 +111,21 @@ impl Pages {
         &self.sessions
     }
 
+    /// Mutable accounts page.
+    pub fn accounts_mut(&mut self) -> &mut AccountsPage {
+        &mut self.accounts
+    }
+
+    /// Immutable accounts page.
+    #[must_use]
+    pub fn accounts(&self) -> &AccountsPage {
+        &self.accounts
+    }
+
     /// Mutable page by id (shell pages only).
     pub fn mut_page(&mut self, id: PageId) -> &mut PageShell {
         self.mut_shell(id)
-            .expect("sessions page is not a PageShell; use sessions_mut")
+            .expect("dedicated page is not a PageShell; use its accessor")
     }
 
     /// Draws a page as a trait object.
@@ -123,6 +138,7 @@ impl Pages {
             PageId::Usage => &self.usage,
             PageId::Sessions => &self.sessions,
             PageId::Library => &self.library,
+            PageId::Accounts => &self.accounts,
         }
     }
 
@@ -135,8 +151,8 @@ impl Pages {
             PageId::Routing => &self.routing,
             PageId::Usage => &self.usage,
             PageId::Library => &self.library,
-            PageId::Sessions => {
-                panic!("sessions page is SessionsPage; use page_dyn or sessions")
+            PageId::Sessions | PageId::Accounts => {
+                panic!("dedicated page is not a PageShell; use page_dyn or its accessor")
             }
         }
     }
