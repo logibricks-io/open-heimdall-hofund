@@ -42,7 +42,7 @@ pub(crate) const ZAI_BIZ: &str = "https://api.z.ai";
 pub(crate) const BIGMODEL_BIZ: &str = "https://bigmodel.cn";
 
 /// User-Agent sent on vendor JSON calls, as the reference does.
-pub(crate) const APP_VERSION: &str = "3.14.3";
+pub(crate) const APP_VERSION: &str = "3.17.2";
 
 pub(crate) const AGENT_SIGN_IN: AgentSignIn =
     AgentSignIn::new(&["zcode", "z-code"], "ZCODE_HOME", ".zcode");

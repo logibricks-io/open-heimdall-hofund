@@ -859,3 +859,55 @@ fn r57_other_405_errors_do_not_get_the_3012_hint() {
     assert_eq!(error.message(), "method not allowed (30120)");
     assert_eq!(error.retry_after(), None);
 }
+
+#[test]
+fn r57b_team_key_is_created_with_the_reference_body_and_version() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_team(
+        &host,
+        Site::Zai,
+        ZAI_ANTHROPIC_BASE,
+        "team-biz",
+        "t1",
+        "tp1",
+    );
+    host.http()
+        .enqueue(json!({"code": 200, "data": []}).to_string().into_bytes());
+    host.http().enqueue(
+        json!({"code": 200, "data": {"apiKey": "new-key"}})
+            .to_string()
+            .into_bytes(),
+    );
+    host.http().enqueue(
+        json!({"code": 200, "data": {"secretKey": "secret"}})
+            .to_string()
+            .into_bytes(),
+    );
+    host.http().enqueue(
+        json!({
+            "success": true,
+            "data": {"limits": [{"type": "TOKENS_LIMIT", "unit": 6, "number": 1, "percentage": 1.0}]}
+        })
+        .to_string()
+        .into_bytes(),
+    );
+    let sub = subscription(&host);
+    block_on(sub.quota(&id, host.context())).expect("quota");
+    let calls = host.http().calls();
+    assert_eq!(calls.len(), 4);
+    assert_eq!(calls[1].method(), "POST");
+    assert_eq!(
+        hofund_plugin_sdk::json::from_slice::<hofund_plugin_sdk::json::Value>(calls[1].body())
+            .expect("body"),
+        json!({"name": "zcode-team-api-key", "keyType": 2})
+    );
+    for call in calls {
+        assert_eq!(
+            call.header("user-agent"),
+            Some("ZCode/3.17.2"),
+            "{}",
+            call.uri()
+        );
+    }
+}

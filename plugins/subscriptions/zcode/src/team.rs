@@ -49,7 +49,34 @@ pub(crate) async fn resolve(
         device_file,
     ))
     .await?;
-    let key_id = find_team_key_id(&data)?;
+    let key_id = match find_team_key_id(&data) {
+        Some(id) => id,
+        None => {
+            let body = hofund_plugin_sdk::json::json!({
+                "name": "zcode-team-api-key",
+                "keyType": 2,
+            });
+            let request = api::EnvelopeRequest {
+                method: "POST",
+                body: Some(&body),
+                ..api::EnvelopeRequest::get(
+                    host,
+                    endpoints,
+                    &list_url,
+                    Some(&auth_header),
+                    &header_refs,
+                    device_file,
+                )
+            };
+            let created = api::get_envelope(&request).await?;
+            created
+                .get("apiKey")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| PluginError::decode("Z Code team key creation returned no key id"))?
+                .to_owned()
+        }
+    };
     let copy_url = format!(
         "{biz}/api/biz/v1/organization/{}/projects/{}/api_keys/copy/{key_id}",
         auth.org, auth.project
@@ -68,9 +95,15 @@ pub(crate) async fn resolve(
         .or_else(|| secret.get("apiKeySecret"))
         .or_else(|| secret.get("secretKey"))
         .and_then(Value::as_str)
-        .filter(|value| value.contains('.'))
-        .ok_or_else(|| PluginError::decode("Z Code team key copy returned no secret"))?;
-    Ok(SecretString::from(text.to_owned()))
+        .unwrap_or("");
+    if text.is_empty() {
+        return Ok(SecretString::from(key_id));
+    }
+    if text.contains('.') {
+        Ok(SecretString::from(text.to_owned()))
+    } else {
+        Ok(SecretString::from(format!("{key_id}.{text}")))
+    }
 }
 
 pub(crate) fn business_authorization(auth: &PlanAuth, token: &SecretString) -> SecretString {
@@ -82,7 +115,7 @@ pub(crate) fn business_authorization(auth: &PlanAuth, token: &SecretString) -> S
     }
 }
 
-fn find_team_key_id(data: &Value) -> Result<String, PluginError> {
+fn find_team_key_id(data: &Value) -> Option<String> {
     let rows = data
         .as_array()
         .cloned()
@@ -98,18 +131,16 @@ fn find_team_key_id(data: &Value) -> Result<String, PluginError> {
         if key_type != Some(2) {
             continue;
         }
-        if object
-            .get("name")
-            .and_then(Value::as_str)
-            .is_some_and(|name| name.contains("team"))
-            && let Some(id) = object.get("apiKey").and_then(Value::as_str)
+        if object.get("name").and_then(Value::as_str) == Some("zcode-team-api-key")
+            && let Some(id) = object
+                .get("apiKey")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty())
         {
-            return Ok(id.to_owned());
+            return Some(id.to_owned());
         }
     }
-    Err(PluginError::decode(
-        "Z Code team project has no team coding plan API key",
-    ))
+    None
 }
 
 pub(crate) fn team_headers(base: &str, org: &str, project: &str) -> Vec<(&'static str, String)> {
