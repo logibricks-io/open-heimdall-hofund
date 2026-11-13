@@ -3,7 +3,8 @@
 use std::collections::{BTreeMap, HashMap};
 
 use hofund_plugin_api::{
-    ContentPart, Message, PluginError, Request, Role, ToolArguments, ToolChoiceMode, ToolResultPart,
+    ContentPart, Extensions, ImagePart, ImageSource, Message, PluginError, Request, Role,
+    ToolArguments, ToolChoiceMode, ToolResultPart,
 };
 use hofund_plugin_sdk::digest::sha256;
 use hofund_plugin_sdk::json::{Map, Value};
@@ -86,7 +87,6 @@ fn build(
     temp_dir: &str,
     max_mode: bool,
 ) -> Result<MappedRequest, PluginError> {
-    reject_unsupported(request)?;
     let tools = tools_of(request);
 
     let mut blobs = HashMap::new();
@@ -116,6 +116,7 @@ fn build(
 
     let mut pending = Vec::new();
     let mut results = Vec::new();
+    let mut inline_images = false;
     for group in join_split_calls(transcript) {
         match group[0].role {
             Role::Assistant => {
@@ -143,7 +144,7 @@ fn build(
                     &mut pending,
                     &mut results,
                 );
-                let blob = user_blob(group[0]);
+                let blob = user_blob(&group, &mut inline_images);
                 transcript_blob_ids.push(insert_blob(&mut blobs, blob));
             }
             Role::System | Role::Developer => unreachable!("system messages are not in transcript"),
@@ -156,8 +157,11 @@ fn build(
         &mut results,
     );
 
+    let turn_text = last_user_text
+        .filter(|text| !text.is_empty())
+        .unwrap_or_else(|| ".".to_owned());
     let user_turn = Pb::new()
-        .string(1, last_user_text.as_deref().unwrap_or("."))
+        .string(1, &turn_text)
         .string(2, message_id)
         .varint(4, 1)
         .finish();
@@ -182,7 +186,7 @@ fn build(
         os,
         temp_dir,
         tools: &tools,
-        inline_images: false,
+        inline_images,
         max_mode,
     }));
     Ok(MappedRequest {
@@ -193,19 +197,6 @@ fn build(
         os: os.to_owned(),
         temp_dir: temp_dir.to_owned(),
     })
-}
-
-fn reject_unsupported(request: &Request) -> Result<(), PluginError> {
-    let has_image = request.messages.iter().any(|message| {
-        message
-            .content
-            .iter()
-            .any(|part| matches!(part, ContentPart::Image(_)))
-    });
-    if has_image {
-        return Err(PluginError::status_error(404, "images are not served").without_cooldown());
-    }
-    Ok(())
 }
 
 fn tools_of(request: &Request) -> Vec<ToolDef> {
@@ -265,16 +256,19 @@ fn system_blob(text: &str) -> Vec<u8> {
 fn join_split_calls(messages: Vec<&Message>) -> Vec<Vec<&Message>> {
     let mut groups: Vec<Vec<&Message>> = Vec::new();
     for message in messages {
-        let join = message.role == Role::Assistant
-            && groups.last().is_some_and(|previous| {
-                previous[0].role == Role::Assistant
-                    && previous.iter().any(|message| {
-                        message
-                            .content
-                            .iter()
-                            .any(|part| matches!(part, ContentPart::ToolCall(_)))
-                    })
-            });
+        let join = groups.last().is_some_and(|previous| {
+            if message.role == Role::User && previous[0].role == Role::User {
+                return true;
+            }
+            message.role == Role::Assistant
+                && previous[0].role == Role::Assistant
+                && previous.iter().any(|message| {
+                    message
+                        .content
+                        .iter()
+                        .any(|part| matches!(part, ContentPart::ToolCall(_)))
+                })
+        });
         if join {
             groups
                 .last_mut()
@@ -360,16 +354,16 @@ fn tool_arguments(arguments: &ToolArguments) -> Value {
     }
 }
 
-fn user_blob(message: &Message) -> Vec<u8> {
-    let content = message
-        .content
+fn user_blob(messages: &[&Message], inline_images: &mut bool) -> Vec<u8> {
+    let content = messages
         .iter()
-        .filter_map(|part| match part {
-            ContentPart::Text(part) => Some(object([
-                ("text", Value::String(part.text.clone())),
-                ("type", Value::String("text".to_owned())),
-            ])),
-            _ => None,
+        .flat_map(|message| &message.content)
+        .filter_map(|part| {
+            let value = user_content_part(part)?;
+            if matches!(part, ContentPart::Image(image) if inline_image_bytes(image).is_some()) {
+                *inline_images = true;
+            }
+            Some(value)
         })
         .collect();
     object([
@@ -378,6 +372,156 @@ fn user_blob(message: &Message) -> Vec<u8> {
     ])
     .to_string()
     .into_bytes()
+}
+
+fn user_content_part(part: &ContentPart) -> Option<Value> {
+    match part {
+        ContentPart::Text(part) => Some(object([
+            ("text", Value::String(part.text.clone())),
+            ("type", Value::String("text".to_owned())),
+        ])),
+        ContentPart::Image(image) => Some(image_content_part(image)),
+        ContentPart::Unknown(unknown) if is_file_kind(&unknown.kind) => Some(object([
+            (
+                "text",
+                Value::String(format!(
+                    "[attachment {}]",
+                    file_attachment_name(&unknown.extensions)
+                )),
+            ),
+            ("type", Value::String("text".to_owned())),
+        ])),
+        _ => None,
+    }
+}
+
+fn image_content_part(image: &ImagePart) -> Value {
+    if let Some((mime_type, hex)) = inline_image_bytes(image) {
+        return object([
+            (
+                "image",
+                object([
+                    ("__type", Value::String("Uint8Array".to_owned())),
+                    ("hex", Value::String(hex)),
+                ]),
+            ),
+            ("mimeType", Value::String(mime_type)),
+            ("type", Value::String("image".to_owned())),
+        ]);
+    }
+    let url = match &image.source {
+        ImageSource::Url { url } => url.clone(),
+        ImageSource::Base64 { media_type, data } => {
+            format!("data:{media_type};base64,{data}")
+        }
+    };
+    object([
+        ("text", Value::String(format!("[attachment image: {url}]"))),
+        ("type", Value::String("text".to_owned())),
+    ])
+}
+
+fn inline_image_bytes(image: &ImagePart) -> Option<(String, String)> {
+    let (mime_type, data) = match &image.source {
+        ImageSource::Base64 { media_type, data } => (media_type.clone(), data.clone()),
+        ImageSource::Url { url } => data_url_parts(url)?,
+    };
+    let bytes = decode_base64(&data)?;
+    Some((mime_type, hex_lower(&bytes)))
+}
+
+/// Matches the reference data-URL shape: `data:{type};base64,{payload}`.
+fn data_url_parts(url: &str) -> Option<(String, String)> {
+    let rest = url.strip_prefix("data:")?;
+    let (media_type, data) = rest.split_once(";base64,")?;
+    if media_type.is_empty() || media_type.contains(',') || media_type.contains(';') {
+        return None;
+    }
+    Some((media_type.to_owned(), data.to_owned()))
+}
+
+fn is_file_kind(kind: &str) -> bool {
+    matches!(kind, "file" | "input_file" | "document")
+}
+
+fn file_attachment_name(extensions: &Extensions) -> String {
+    if let Some(name) = extensions
+        .get("file")
+        .and_then(|file| file.get("filename").or_else(|| file.get("name")))
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
+    {
+        return name.to_owned();
+    }
+    for key in ["filename", "name", "title", "file_name"] {
+        if let Some(name) = extensions
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|name| !name.is_empty())
+        {
+            return name.to_owned();
+        }
+    }
+    String::from("file")
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write!(out, "{byte:02x}").expect("write to a string");
+    }
+    out
+}
+
+fn decode_base64(input: &str) -> Option<Vec<u8>> {
+    let bytes: Vec<u8> = input
+        .bytes()
+        .filter(|byte| !byte.is_ascii_whitespace())
+        .collect();
+    if bytes.is_empty() {
+        return Some(Vec::new());
+    }
+    let pad = bytes.iter().rev().take_while(|byte| **byte == b'=').count();
+    if pad > 2 {
+        return None;
+    }
+    let body = &bytes[..bytes.len() - pad];
+    if body.len() % 4 == 1 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(body.len() / 4 * 3 + 2);
+    for chunk in body.chunks(4) {
+        let mut acc = 0_u32;
+        for byte in chunk {
+            acc = (acc << 6) | u32::from(base64_value(*byte)?);
+        }
+        match chunk.len() {
+            2 => out.push((acc >> 4) as u8),
+            3 => {
+                out.push((acc >> 10) as u8);
+                out.push((acc >> 2) as u8);
+            }
+            4 => {
+                out.push((acc >> 16) as u8);
+                out.push((acc >> 8) as u8);
+                out.push(acc as u8);
+            }
+            _ => return None,
+        }
+    }
+    Some(out)
+}
+
+fn base64_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'A'..=b'Z' => Some(byte - b'A'),
+        b'a'..=b'z' => Some(byte - b'a' + 26),
+        b'0'..=b'9' => Some(byte - b'0' + 52),
+        b'+' => Some(62),
+        b'/' => Some(63),
+        _ => None,
+    }
 }
 
 fn collect_results(message: &Message, pending: &mut Vec<String>, results: &mut Vec<Value>) {
@@ -887,7 +1031,7 @@ mod tests {
     }
 
     #[test]
-    fn images_still_fail_before_mapping_a_tool_request() {
+    fn image_urls_become_text_placeholders_and_do_not_set_field_19() {
         let mut request = request_with_tools();
         request.messages[0]
             .content
@@ -898,11 +1042,182 @@ mod tests {
                 detail: None,
                 extensions: Default::default(),
             }));
-        let error = map_with(&request, options()).expect_err("images are not served");
-        assert_eq!(error.status(), Some(404));
-        assert!(error.message().contains("images are not served"));
-        assert!(!error.message().contains("tools are not served"));
-        assert!(!error.cools());
+        let mapped = map_with(&request, options()).expect("url images are mapped");
+        let user = json_blobs(&mapped)
+            .into_iter()
+            .find(|blob| blob["role"] == "user")
+            .expect("user blob");
+        assert_eq!(
+            user["content"],
+            json!([
+                {"text": "hi", "type": "text"},
+                {"text": "[attachment image: https://image.test/a.png]", "type": "text"}
+            ])
+        );
+        let request = agent_request(&mapped.opening);
+        assert!(request.iter().all(|field| field.number != 19));
+    }
+
+    #[test]
+    fn data_url_and_base64_images_become_hex_parts_and_set_field_19() {
+        let png = "aGVsbG8="; // "hello"
+        let mut request = Request::new("auto").with_messages(vec![message(Role::User, &["see"])]);
+        request.messages[0]
+            .content
+            .push(ContentPart::Image(ImagePart {
+                source: ImageSource::Url {
+                    url: format!("data:image/png;base64,{png}"),
+                },
+                detail: None,
+                extensions: Default::default(),
+            }));
+        request.messages[0]
+            .content
+            .push(ContentPart::Image(ImagePart {
+                source: ImageSource::Base64 {
+                    media_type: "image/jpeg".to_owned(),
+                    data: png.to_owned(),
+                },
+                detail: None,
+                extensions: Default::default(),
+            }));
+        let mapped = map_with(&request, options()).expect("inline images");
+        let user = json_blobs(&mapped)
+            .into_iter()
+            .find(|blob| blob["role"] == "user")
+            .expect("user blob");
+        assert_eq!(
+            user["content"],
+            json!([
+                {"text": "see", "type": "text"},
+                {
+                    "type": "image",
+                    "mimeType": "image/png",
+                    "image": {"__type": "Uint8Array", "hex": "68656c6c6f"}
+                },
+                {
+                    "type": "image",
+                    "mimeType": "image/jpeg",
+                    "image": {"__type": "Uint8Array", "hex": "68656c6c6f"}
+                }
+            ])
+        );
+        let request = agent_request(&mapped.opening);
+        assert_eq!(field(&request, 19).as_varint(), Some(1));
+        let user_turn = proto::fields(&mapped.blobs[&user_turn_id(&mapped)]);
+        assert_eq!(field(&user_turn, 1).as_string().as_deref(), Some("see"));
+    }
+
+    #[test]
+    fn an_image_in_a_later_grouped_user_message_is_serialized_and_sets_field_19() {
+        let png = "aGVsbG8="; // "hello"
+        let mut later = Message::new(Role::User);
+        later.content.push(ContentPart::Image(ImagePart {
+            source: ImageSource::Base64 {
+                media_type: "image/png".to_owned(),
+                data: png.to_owned(),
+            },
+            detail: None,
+            extensions: Default::default(),
+        }));
+        let request =
+            Request::new("auto").with_messages(vec![message(Role::User, &["first"]), later]);
+        let mapped = map_with(&request, options()).expect("grouped user images");
+        let user = json_blobs(&mapped)
+            .into_iter()
+            .find(|blob| blob["role"] == "user")
+            .expect("user blob");
+        assert_eq!(
+            user["content"],
+            json!([
+                {"text": "first", "type": "text"},
+                {
+                    "type": "image",
+                    "mimeType": "image/png",
+                    "image": {"__type": "Uint8Array", "hex": "68656c6c6f"}
+                }
+            ])
+        );
+        let request = agent_request(&mapped.opening);
+        assert_eq!(field(&request, 19).as_varint(), Some(1));
+    }
+
+    #[test]
+    fn an_image_only_user_turn_uses_a_dot() {
+        let mut request = Request::new("auto");
+        let mut user = Message::new(Role::User);
+        user.content.push(ContentPart::Image(ImagePart {
+            source: ImageSource::Url {
+                url: "https://image.test/only.png".to_owned(),
+            },
+            detail: None,
+            extensions: Default::default(),
+        }));
+        request.messages.push(user);
+        let mapped = map_with(&request, options()).expect("image-only user");
+        let user_turn = proto::fields(&mapped.blobs[&user_turn_id(&mapped)]);
+        assert_eq!(field(&user_turn, 1).as_string().as_deref(), Some("."));
+        assert!(
+            agent_request(&mapped.opening)
+                .iter()
+                .all(|field| field.number != 19)
+        );
+    }
+
+    #[test]
+    fn file_parts_become_named_attachment_placeholders() {
+        let mut request = Request::new("auto").with_messages(vec![message(Role::User, &["docs"])]);
+        request.messages[0].content.push(
+            from_value(json!({
+                "type": "unknown",
+                "kind": "file",
+                "extensions": {"file": {"filename": "notes.pdf"}}
+            }))
+            .expect("file part"),
+        );
+        request.messages[0].content.push(
+            from_value(json!({
+                "type": "unknown",
+                "kind": "document",
+                "extensions": {}
+            }))
+            .expect("nameless file"),
+        );
+        let mapped = map_with(&request, options()).expect("file parts");
+        let user = json_blobs(&mapped)
+            .into_iter()
+            .find(|blob| blob["role"] == "user")
+            .expect("user blob");
+        assert_eq!(
+            user["content"],
+            json!([
+                {"text": "docs", "type": "text"},
+                {"text": "[attachment notes.pdf]", "type": "text"},
+                {"text": "[attachment file]", "type": "text"}
+            ])
+        );
+    }
+
+    #[test]
+    fn decode_base64_accepts_standard_and_unpadded_payloads() {
+        assert_eq!(
+            super::decode_base64("aGVsbG8=").as_deref(),
+            Some(b"hello".as_slice())
+        );
+        assert_eq!(
+            super::decode_base64("aGVsbG8").as_deref(),
+            Some(b"hello".as_slice())
+        );
+        assert_eq!(
+            super::decode_base64("YQ==").as_deref(),
+            Some(b"a".as_slice())
+        );
+        assert_eq!(
+            super::decode_base64("YWI=").as_deref(),
+            Some(b"ab".as_slice())
+        );
+        assert_eq!(super::decode_base64("").as_deref(), Some(b"".as_slice()));
+        assert!(super::decode_base64("!!!!").is_none());
     }
 
     #[test]
