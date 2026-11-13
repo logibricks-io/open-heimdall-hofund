@@ -21,25 +21,6 @@ where
     }
 }
 
-/// Returns the next completed future in `futures`.
-///
-/// Unlike `StreamExt::next`, this stays pending forever while the set is empty,
-/// so an empty append window cannot starve another branch of a race.
-pub async fn next_ready<F>(futures: &mut FuturesUnordered<F>) -> F::Output
-where
-    F: std::future::Future,
-{
-    use futures_util::StreamExt;
-
-    if futures.is_empty() {
-        return std::future::pending().await;
-    }
-    match futures.next().await {
-        Some(output) => output,
-        None => std::future::pending().await,
-    }
-}
-
 /// Returns whichever future completes first.
 pub async fn race<A, B>(left: A, right: B) -> Race<A::Output, B::Output>
 where
