@@ -739,19 +739,20 @@ fn hofund_addr_overrides_listen_for_daemon_and_healthcheck() {
     let started = Instant::now();
     let effective = loop {
         let out = scratch.hofund(&["status"]);
-        if out.code == Some(0) && out.stdout.starts_with("daemon running") {
-            if let Some(addr) = model_address_from_status(&out.stdout) {
-                assert_ne!(
-                    addr.port(),
-                    0,
-                    "status reported an unbound model address: {out:#?}"
-                );
-                assert_ne!(
-                    addr, configured_addr,
-                    "the daemon bound the configured address despite HOFUND_ADDR"
-                );
-                break addr;
-            }
+        if out.code == Some(0)
+            && out.stdout.starts_with("daemon running")
+            && let Some(addr) = model_address_from_status(&out.stdout)
+        {
+            assert_ne!(
+                addr.port(),
+                0,
+                "status reported an unbound model address: {out:#?}"
+            );
+            assert_ne!(
+                addr, configured_addr,
+                "the daemon bound the configured address despite HOFUND_ADDR"
+            );
+            break addr;
         }
         assert!(
             started.elapsed() < DEADLINE,
