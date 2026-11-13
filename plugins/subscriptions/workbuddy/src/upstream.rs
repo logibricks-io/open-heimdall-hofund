@@ -49,10 +49,12 @@ impl WorkBuddyUpstream {
     ) -> Result<Completion, PluginError> {
         let base = self.endpoints.base_for(stored.credential.site);
         let url = format!("{base}/v1/chat/completions");
-        let header_rows: Vec<(String, String)> = creds::bearer_headers(&stored.credential)
-            .into_iter()
-            .filter(|(name, _)| name != "Authorization")
-            .collect();
+        let mut header_rows: Vec<(String, String)> =
+            creds::signed_headers(&stored.credential, base)
+                .into_iter()
+                .filter(|(name, _)| name != "Authorization")
+                .collect();
+        header_rows.extend(creds::chat_headers());
         let target = Target::new(ProtocolId::OPENAI_CHAT, url)
             .credential(CredentialStyle::Bearer)
             .headers(header_rows);
@@ -64,6 +66,7 @@ impl WorkBuddyUpstream {
             inbound,
         )
         .await
+        .map_err(crate::errors::classify)
     }
 }
 
