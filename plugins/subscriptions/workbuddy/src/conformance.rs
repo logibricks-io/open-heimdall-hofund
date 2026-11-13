@@ -6,14 +6,14 @@ use hofund_plugin_api::{
 };
 
 #[test]
-fn a2c_20_contributes_bridge_with_checkin() {
+fn a2c_20_contributes_token_sign_in_with_checkin() {
     let contribution = crate::contribute();
     let [factory] = contribution.subscriptions() else {
         panic!("one subscription factory");
     };
     assert_eq!(factory.spec().plugin().as_str(), "workbuddy");
     assert!(factory.spec().daily_checkin());
-    assert_eq!(factory.spec().flow(), SignInFlowKind::Bridge);
+    assert_eq!(factory.spec().flow(), SignInFlowKind::TokenFile);
 
     let dir = tempfile::tempdir().expect("dir");
     let host = TestHost::open_for(

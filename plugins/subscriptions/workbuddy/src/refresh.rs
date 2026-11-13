@@ -73,7 +73,7 @@ async fn refresh_stale(
     }
     let base = endpoints.base_for(stored.credential.site);
     let url = format!("{base}/v2/plugin/auth/token/refresh");
-    let reply = Call::post(url)
+    let mut call = Call::post(url)
         .header("Accept", "application/json")
         .header("Content-Type", "application/json")
         .header("User-Agent", stored.credential.site.user_agent())
@@ -82,10 +82,13 @@ async fn refresh_stale(
             secret_text(&stored.credential.refresh).to_owned(),
         )
         .header("X-Auth-Refresh-Source", "plugin")
-        .header("X-Domain", creds::domain(&stored.credential, base))
-        .bytes(b"{}")
-        .fetch(host.http())
-        .await?;
+        .header("X-Domain", creds::domain(&stored.credential, base));
+    if !stored.credential.enterprise_id.is_empty() {
+        call = call
+            .header("X-Enterprise-Id", &stored.credential.enterprise_id)
+            .header("X-Tenant-Id", &stored.credential.enterprise_id);
+    }
+    let reply = call.bytes(b"{}").fetch(host.http()).await?;
     match reply.status() {
         200..=299 => {}
         401 => {

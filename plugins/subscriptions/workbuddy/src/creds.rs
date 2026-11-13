@@ -136,7 +136,15 @@ pub(crate) fn secret_blob(credential: &Credential) -> SecretObject {
 }
 
 pub(crate) fn account_id(credential: &Credential) -> AccountId {
-    account_id_from(&[credential.site.plugin_id(), &credential.uid])
+    if credential.enterprise_id.is_empty() {
+        account_id_from(&[credential.site.plugin_id(), &credential.uid])
+    } else {
+        account_id_from(&[
+            credential.site.plugin_id(),
+            &credential.uid,
+            &credential.enterprise_id,
+        ])
+    }
 }
 
 pub(crate) fn parse_desktop_info(

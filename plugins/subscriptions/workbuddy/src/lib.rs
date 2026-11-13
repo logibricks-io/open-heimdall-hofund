@@ -20,13 +20,14 @@ mod errors;
 mod models;
 mod quota;
 mod refresh;
+mod sign_in;
 mod site;
 mod upstream;
 
 static SPEC: SubscriptionSpec = SubscriptionSpec::from_static(
     PluginId::from_static("workbuddy"),
     "WorkBuddy",
-    SignInFlowKind::Bridge,
+    SignInFlowKind::TokenFile,
 )
 .with_daily_checkin(true)
 .with_agent_sign_in(AgentSignIn::new(
@@ -74,15 +75,14 @@ pub fn factory_with_endpoints(endpoints: Endpoints) -> WorkBuddyFactory {
     factory_with_extension_data(endpoints, None)
 }
 
-/// Builds the factory with an optional CodeBuddyExtension data root (tests).
+/// Builds the factory with the legacy optional desktop data root ignored.
 #[must_use]
 pub fn factory_with_extension_data(
     endpoints: Endpoints,
-    extension_data: Option<PathBuf>,
+    _extension_data: Option<PathBuf>,
 ) -> WorkBuddyFactory {
     WorkBuddyFactory {
         endpoints: Arc::new(endpoints),
-        extension_data,
     }
 }
 
@@ -90,7 +90,6 @@ pub fn factory_with_extension_data(
 #[derive(Clone, Debug)]
 pub struct WorkBuddyFactory {
     endpoints: Arc<Endpoints>,
-    extension_data: Option<PathBuf>,
 }
 
 /// Validated config: no options yet.
@@ -125,10 +124,7 @@ impl SubscriptionFactory for WorkBuddyFactory {
     ) -> Result<Arc<dyn Subscription>, BuildError> {
         Ok(Arc::new(WorkBuddy {
             endpoints: Arc::clone(&self.endpoints),
-            extension_data: self.extension_data.clone(),
-            flow: SignInFlow::Bridge {
-                command: hofund_plugin_api::BinaryName::new("workbuddy"),
-            },
+            flow: SignInFlow::TokenFile,
             pending: Mutex::new(HashMap::new()),
         }))
     }
@@ -136,21 +132,8 @@ impl SubscriptionFactory for WorkBuddyFactory {
 
 struct WorkBuddy {
     endpoints: Arc<Endpoints>,
-    extension_data: Option<PathBuf>,
     flow: SignInFlow,
-    pending: Mutex<HashMap<String, site::Site>>,
-}
-
-impl WorkBuddy {
-    fn data_root(&self, home: Option<&Path>) -> Result<PathBuf, PluginError> {
-        if let Some(dir) = &self.extension_data {
-            return Ok(dir.clone());
-        }
-        if let Some(home) = home {
-            return Ok(home.to_path_buf());
-        }
-        auth_store::extension_data_dir()
-    }
+    pending: Mutex<HashMap<String, sign_in::Pending>>,
 }
 
 #[hofund_plugin_sdk::async_trait]
@@ -166,29 +149,18 @@ impl Subscription for WorkBuddy {
     async fn start_sign_in(
         &self,
         ctx: &SignInCtx,
-        _host: &HostContext,
+        host: &HostContext,
     ) -> Result<SignInChallenge, PluginError> {
         self.pending
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(ctx.session());
-        let site = site::Site::China;
-        let root = self.data_root(None)?;
-        let path = auth_store::auth_path_in(&root, site);
-        if !path.is_file() {
-            return Err(PluginError::auth(format!(
-                "WorkBuddy desktop auth file is missing at {}",
-                path.display()
-            )));
-        }
+        let (pending, challenge) = sign_in::start(ctx, host, &self.endpoints).await?;
         self.pending
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(ctx.session().to_owned(), site);
-        SignInChallenge::instructions(format!(
-            "Import the WorkBuddy desktop auth file at {} (China build).",
-            path.display()
-        ))
+            .insert(ctx.session().to_owned(), pending);
+        Ok(challenge)
     }
 
     async fn complete_sign_in(
@@ -197,28 +169,42 @@ impl Subscription for WorkBuddy {
         proof: SignInProof,
         host: &HostContext,
     ) -> Result<AccountId, PluginError> {
-        let SignInProof::Await = proof else {
-            return Err(PluginError::config(
-                "WorkBuddy sign-in completes once the desktop auth file is imported",
-            ));
-        };
-        let Some(site) = self
-            .pending
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(ctx.session())
-        else {
-            return Err(PluginError::config(
-                "no WorkBuddy sign-in is in progress for this session",
-            ));
-        };
-        let root = self.data_root(None)?;
-        let path = auth_store::auth_path_in(&root, site);
-        let text = std::fs::read_to_string(&path).map_err(|error| {
-            PluginError::auth(format!("{} can't be read ({error})", path.display()))
-        })?;
-        let credential = creds::parse_desktop_info(&text, site, &path)?;
-        discover::store(&credential, host).await
+        match proof {
+            SignInProof::Token(key) => {
+                self.pending
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(ctx.session());
+                sign_in::import_api_key(ctx, host, key).await
+            }
+            SignInProof::Await => {
+                let session = ctx.session();
+                let pending = self
+                    .pending
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .get(session)
+                    .cloned()
+                    .ok_or_else(|| {
+                        PluginError::config("no sign-in is in progress for this session")
+                    })?;
+                let result = sign_in::finish(host, &self.endpoints, pending, || {
+                    self.pending
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .contains_key(session)
+                })
+                .await;
+                self.pending
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(session);
+                result
+            }
+            _ => Err(PluginError::config(
+                "sign-in completes after browser approval or with an API key",
+            )),
+        }
     }
 
     async fn cancel_sign_in(
@@ -263,6 +249,9 @@ impl Subscription for WorkBuddy {
         host: &HostContext,
     ) -> Result<Vec<QuotaWindow>, PluginError> {
         let stored = refresh::ensure_fresh(host, Arc::clone(&self.endpoints), account).await?;
+        if stored.credential.api_key {
+            return Ok(Vec::new());
+        }
         let base = self.endpoints.base_for(stored.credential.site);
         let url = format!("{base}/billing/meter/get-user-resource-summary");
         let call = creds::apply_signed_headers(
