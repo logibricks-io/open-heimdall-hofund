@@ -400,6 +400,63 @@ impl TestHost {
         Self::open_with_clock(kind, plugin, root, Arc::new(TokioMonotonicClock::default()))
     }
 
+    /// Like [`Self::open_for_with_tokio_monotonic`], with real pooled HTTP on the context.
+    ///
+    /// The [`Self::http`] recording handle remains available, but is not installed on
+    /// [`Self::context`]. Tests use loopback servers and inspect their records.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the account file cannot be created.
+    #[must_use]
+    pub fn open_for_with_pooled_http_and_tokio_monotonic(
+        kind: PluginKind,
+        plugin: PluginId,
+        root: impl Into<PathBuf>,
+    ) -> Self {
+        let root = root.into();
+        let http = Arc::new(RecordingHttp::default());
+        let secrets = Arc::new(RecordingSecrets::default());
+        let scheduler = Arc::new(RecordingScheduler::default());
+        let process = Arc::new(RecordingProcess::default());
+        let observe = Arc::new(RecordingObserve::default());
+        let loopback = Arc::new(LoopbackRegistry::new());
+        let bridge_callback = Arc::new(BridgeCallbackRegistry::new());
+        let accounts = AccountStore::open_with_backend(
+            root.join("accounts.json"),
+            Arc::new(account_secrets::MemoryAccountSecrets::default()),
+        )
+        .expect("test host account file");
+        let context = host_context_for(
+            kind,
+            plugin,
+            Arc::new(PooledHttp::new(HttpProfile::direct())),
+            Arc::clone(&secrets) as Arc<dyn SecretsBackend>,
+            Arc::new(accounts),
+            Arc::new(TokioMonotonicClock::default()),
+            Arc::clone(&scheduler) as Arc<dyn SchedulerBackend>,
+            Arc::clone(&process) as Arc<dyn ProcessBackend>,
+            Arc::new(RootDirs {
+                root,
+                #[cfg(test)]
+                _guard: None,
+            }),
+            Arc::clone(&observe) as Arc<dyn ObserveBackend>,
+        )
+        .with_loopback(Arc::clone(&loopback) as Arc<dyn LoopbackBackend>)
+        .with_bridge_callback(Arc::clone(&bridge_callback) as Arc<dyn BridgeCallbackBackend>);
+        Self {
+            context,
+            http,
+            secrets,
+            scheduler,
+            process,
+            observe,
+            loopback,
+            bridge_callback,
+        }
+    }
+
     /// Like [`Self::open_for`], with a fixed monotonic clock reading.
     ///
     /// # Panics
