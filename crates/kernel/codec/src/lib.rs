@@ -25,6 +25,7 @@ mod passthrough;
 mod reasoning_tidy;
 mod refusal;
 pub mod responses_empty;
+mod session;
 mod sse;
 
 pub use anthropic::AnthropicMessages;
@@ -40,6 +41,10 @@ pub use openai_responses::{
 pub use passthrough::{EndWatch, RawTap, StreamEnd};
 pub use refusal::refusal_error;
 pub use responses_empty::EMPTY_REPLY_MESSAGE;
+pub use session::{
+    ECHO_SESSION_HEADER, kernel_session_header_names, merge_extra_session_header_names,
+    native_session_of, session_of, trim_session_value,
+};
 
 use hofund_ir::{Request, Response, StreamEvent};
 

@@ -2,6 +2,8 @@ id = "opencode"
 display_name = "OpenCode"
 binary = "opencode"
 model_prefix = "hofund/"
+# OpenCode may send the same id on this alternate header when x-opencode-session is absent.
+session_headers = ["x-opencode-session-id"]
 
 # The documented global path is ~/.config/opencode/opencode.json or
 # opencode.jsonc, including on Windows (the docs say ~/.config, not %APPDATA%).

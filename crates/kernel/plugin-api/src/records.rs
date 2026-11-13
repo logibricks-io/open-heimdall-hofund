@@ -2476,6 +2476,8 @@ pub struct AgentDescription {
     client_prefixes: &'static [&'static str],
     /// Headers that name this agent even when the user agent names another.
     nested_turn_headers: &'static [&'static str],
+    /// Extra client session header names appended after the kernel list.
+    session_headers: &'static [&'static str],
     detect_paths: &'static [AgentPath],
     remove: &'static [AgentRemove],
     status_checks: &'static [AgentStatusCheck],
@@ -2723,6 +2725,7 @@ impl AgentDescription {
             request_agent_header: None,
             client_prefixes: &[],
             nested_turn_headers: &[],
+            session_headers: &[],
             detect_paths: &[],
             remove: &[],
             status_checks: &[],
@@ -2781,6 +2784,15 @@ impl AgentDescription {
     pub const fn with_nested_turn_headers(mut self, headers: &'static [&'static str]) -> Self {
         assert_tokens(headers);
         self.nested_turn_headers = headers;
+        self
+    }
+
+    /// Extra session header names merged after the kernel list on the gateway.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn with_session_headers(mut self, headers: &'static [&'static str]) -> Self {
+        assert_tokens(headers);
+        self.session_headers = headers;
         self
     }
 
@@ -2977,6 +2989,12 @@ impl AgentDescription {
     #[must_use]
     pub const fn nested_turn_headers(&self) -> &'static [&'static str] {
         self.nested_turn_headers
+    }
+
+    /// Extra session header names appended after the kernel list on the gateway.
+    #[must_use]
+    pub const fn session_headers(&self) -> &'static [&'static str] {
+        self.session_headers
     }
 
     /// Extra install-detection paths.
