@@ -4,14 +4,15 @@
 //! needed, lists GLM models, reads personal or team monitor quota, and serves
 //! Anthropic Messages on the plan API base.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use hofund_plugin_api::{
-    AccountId, AccountStatus, AgentSignIn, BinaryName, BuildError, ConfigError, HeaderName,
-    HostContext, ModelList, PluginError, PluginId, QuotaWindow, RawTable, Schema, SecretString,
-    SignInChallenge, SignInCtx, SignInFlow, SignInFlowKind, SignInProof, Subscription,
-    SubscriptionFactory, SubscriptionSpec, UpstreamProvider, ValidConfig,
+    AccountId, AccountStatus, AgentSignIn, BuildError, ConfigError, HeaderName, HostContext,
+    ModelList, PluginError, PluginId, QuotaWindow, RawTable, Schema, SecretString, SignInChallenge,
+    SignInCtx, SignInFlow, SignInFlowKind, SignInProof, Subscription, SubscriptionFactory,
+    SubscriptionSpec, UpstreamProvider, ValidConfig,
 };
 use hofund_plugin_sdk::Contribution;
 use hofund_plugin_sdk::oauth::TokenCache;
@@ -28,6 +29,7 @@ mod models;
 mod quota;
 mod refresh;
 mod session;
+mod sign_in;
 mod start;
 mod team;
 mod upstream;
@@ -54,7 +56,7 @@ pub(crate) const AGENT_SIGN_IN: AgentSignIn =
 static SPEC: SubscriptionSpec = SubscriptionSpec::from_static(
     PluginId::from_static("zcode"),
     "Z Code",
-    SignInFlowKind::Bridge,
+    SignInFlowKind::TokenFile,
 )
 .with_agent_sign_in(AGENT_SIGN_IN);
 
@@ -152,11 +154,10 @@ impl SubscriptionFactory for ZcodeFactory {
             device::device_path(host).map_err(|error| BuildError::new(error.message()))?;
         Ok(Arc::new(Zcode {
             endpoints: Arc::clone(&self.endpoints),
-            flow: SignInFlow::Bridge {
-                command: BinaryName::new("zcode"),
-            },
+            flow: SignInFlow::TokenFile,
             device_file,
             team_keys: Arc::new(TokenCache::new(Duration::ZERO)),
+            pending: Mutex::new(HashMap::new()),
         }))
     }
 }
@@ -166,6 +167,7 @@ struct Zcode {
     flow: SignInFlow,
     device_file: PathBuf,
     team_keys: Arc<TokenCache<SecretString>>,
+    pending: Mutex<HashMap<String, sign_in::Pending>>,
 }
 
 #[hofund_plugin_sdk::async_trait]
@@ -180,30 +182,75 @@ impl Subscription for Zcode {
 
     async fn start_sign_in(
         &self,
-        _ctx: &SignInCtx,
-        _host: &HostContext,
+        ctx: &SignInCtx,
+        host: &HostContext,
     ) -> Result<SignInChallenge, PluginError> {
-        Err(PluginError::unsupported(
-            "Sign in with the Z Code app, then import with agent discovery or agent connect",
-        ))
+        self.pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(ctx.session());
+        let (pending, challenge) = sign_in::start(ctx, host, &self.endpoints).await?;
+        self.pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(ctx.session().to_owned(), pending);
+        Ok(challenge)
     }
 
     async fn complete_sign_in(
         &self,
-        _ctx: &SignInCtx,
-        _proof: SignInProof,
-        _host: &HostContext,
+        ctx: &SignInCtx,
+        proof: SignInProof,
+        host: &HostContext,
     ) -> Result<AccountId, PluginError> {
-        Err(PluginError::unsupported(
-            "Sign in with the Z Code app, then import with agent discovery or agent connect",
-        ))
+        match proof {
+            SignInProof::Token(key) => {
+                self.pending
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(ctx.session());
+                sign_in::import_api_key(ctx, host, key).await
+            }
+            SignInProof::Await => {
+                let session = ctx.session();
+                let pending = self
+                    .pending
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .get(session)
+                    .cloned()
+                    .ok_or_else(|| {
+                        PluginError::config("no sign-in is in progress for this session")
+                    })?;
+                let result = sign_in::finish(host, &self.endpoints, pending, || {
+                    self.pending
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .contains_key(session)
+                })
+                .await;
+                self.pending
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(session);
+                result
+            }
+            _ => Err(PluginError::config(
+                "sign-in completes after browser approval or with an API key",
+            )),
+        }
     }
 
     async fn cancel_sign_in(
         &self,
-        _ctx: &SignInCtx,
+        ctx: &SignInCtx,
         _host: &HostContext,
     ) -> Result<(), PluginError> {
+        let _ = self
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(ctx.session());
         Ok(())
     }
 
@@ -218,7 +265,15 @@ impl Subscription for Zcode {
             ));
         };
         match session::offline_status(&secret) {
-            Ok(()) => Ok(AccountStatus::Ready),
+            Ok(()) => {
+                let auth = creds::parse_secret(&secret)?;
+                if let Some(jwt) = auth.jwt
+                    && let Err(error) = gift::ensure_live_jwt(host, &jwt)
+                {
+                    return Ok(needs_sign_in(error.message()));
+                }
+                Ok(AccountStatus::Ready)
+            }
             Err(error) => Ok(needs_sign_in(error.message())),
         }
     }

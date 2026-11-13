@@ -11,7 +11,6 @@ use crate::session::Stored;
 use crate::{APP_VERSION, Endpoints, api};
 
 pub(crate) struct Balance {
-    pub live: bool,
     pub plan: String,
     pub all_models: Vec<String>,
     pub usable_models: Vec<String>,
@@ -202,7 +201,6 @@ fn parse(data: &Value, start_only: bool, host_now: f64) -> Result<Balance, Plugi
         );
     }
     Ok(Balance {
-        live,
         plan,
         all_models,
         usable_models,

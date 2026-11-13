@@ -15,14 +15,14 @@ fn host(dir: &tempfile::TempDir) -> TestHost {
 }
 
 #[test]
-fn a2d_1_contributes_one_bridge_subscription() {
+fn a2d_1_contributes_one_browser_subscription() {
     let contribution = crate::contribute();
     assert!(contribution.upstreams().is_empty());
     let [factory] = contribution.subscriptions() else {
         panic!("one subscription factory");
     };
     assert_eq!(factory.spec().plugin().as_str(), "zcode");
-    assert_eq!(factory.spec().flow(), SignInFlowKind::Bridge);
+    assert_eq!(factory.spec().flow(), SignInFlowKind::TokenFile);
 
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);

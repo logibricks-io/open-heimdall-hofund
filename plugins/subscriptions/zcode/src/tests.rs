@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use hofund_kit_subscription::{TestHost, block_on};
 use hofund_plugin_api::{
     AccountId, AccountStatus, PluginErrorKind, PluginId, PluginKind, ProbeQuery, ProtocolId,
-    RawTable, SecretString, SubscriptionFactory,
+    RawTable, SecretString, SignInChallenge, SignInCtx, SignInProof, SubscriptionFactory,
 };
 use hofund_plugin_sdk::json::json;
 use hofund_plugin_sdk::oauth::{SecretObject, secret_text};
@@ -32,6 +32,14 @@ fn subscription(host: &TestHost) -> std::sync::Arc<dyn hofund_plugin_api::Subscr
     let factory = factory_with_endpoints(endpoints());
     let cfg = factory.validate(&RawTable::new()).expect("config");
     factory.build(&cfg, host.context()).expect("build")
+}
+
+fn sign_in_ctx(site: &str) -> SignInCtx {
+    SignInCtx::new(PluginId::from_static("zcode"))
+        .with_session("00000000000000000000000000000001")
+        .expect("session")
+        .with_option("site", site)
+        .expect("site")
 }
 
 fn state_device_file(dir: &tempfile::TempDir) -> PathBuf {
@@ -1002,4 +1010,113 @@ fn r57b_start_balance_drives_quota_and_gift_models() {
         assert_eq!(call.header("user-agent"), Some("ZCode/3.17.2"));
         assert!(call.header("x-device-mid").is_some());
     }
+}
+
+#[test]
+fn r57b_bigmodel_browser_sign_in_resolves_the_coding_plan() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    host.http().enqueue(
+        json!({"code": 0, "data": {
+            "flow_id": "flow-1",
+            "authorize_url": "https://open.bigmodel.cn/login",
+            "poll_interval_sec": 0,
+            "expires_at": 4_102_444_800_i64
+        }})
+        .to_string()
+        .into_bytes(),
+    );
+    host.http().enqueue(
+        json!({"code": 0, "data": {
+            "status": "ready",
+            "bigmodel": {"access_token": "site-token"},
+            "token": "session.jwt.value",
+            "user": {"user_id": "u-browser", "email": "browser@zcode.test"}
+        }})
+        .to_string()
+        .into_bytes(),
+    );
+    host.http().enqueue(
+        json!({"code": 200, "data": {"organizations": [{
+            "organizationId": "own-org",
+            "organizationName": "default",
+            "projects": [{"projectId": "own-project", "projectName": "default", "projectType": 1}]
+        }]}})
+        .to_string()
+        .into_bytes(),
+    );
+    host.http().enqueue(
+        json!({"code": 200, "data": [{"name": "zcode-api-key", "apiKey": "own"}]})
+            .to_string()
+            .into_bytes(),
+    );
+    host.http().enqueue(
+        json!({"code": 200, "data": {"secretKey": "own-secret"}})
+            .to_string()
+            .into_bytes(),
+    );
+    host.http().enqueue(
+        json!({"code": 200, "data": [{"status": "VALID", "productName": "GLM Coding Pro"}]})
+            .to_string()
+            .into_bytes(),
+    );
+    let sub = subscription(&host);
+    let challenge =
+        block_on(sub.start_sign_in(&sign_in_ctx("bigmodel"), host.context())).expect("start");
+    let SignInChallenge::OpenUrl { url } = challenge else {
+        panic!("open URL challenge");
+    };
+    assert!(url.contains("redirect="));
+    assert!(!url.contains("redirect_uri="));
+    assert!(url.contains("app_version%3D3.17.2") || url.contains("app_version=3.17.2"));
+    let id = block_on(sub.complete_sign_in(
+        &sign_in_ctx("bigmodel"),
+        SignInProof::Await,
+        host.context(),
+    ))
+    .expect("complete");
+    let secret = block_on(host.context().accounts().secret(&id))
+        .expect("read")
+        .expect("stored");
+    let blob = SecretObject::parse(&secret).expect("blob");
+    assert_eq!(blob.text("plan"), Some("GLM Coding Pro"));
+    assert_eq!(blob.text("uid"), Some("u-browser"));
+    assert_eq!(
+        blob.secret("api_key").as_ref().map(secret_text),
+        Some("own.own-secret")
+    );
+    let calls = host.http().calls();
+    assert_eq!(calls.len(), 6);
+    assert_eq!(calls[0].method(), "POST");
+    assert!(calls[0].uri().ends_with("/api/v1/oauth/cli/init"));
+    assert_eq!(
+        hofund_plugin_sdk::json::from_slice::<hofund_plugin_sdk::json::Value>(calls[0].body())
+            .expect("init body"),
+        json!({"provider": "bigmodel"})
+    );
+    assert!(
+        calls[0]
+            .sensitive_headers()
+            .contains(&"authorization".to_owned())
+    );
+    assert!(calls[1].uri().contains("/api/v1/oauth/cli/poll/flow-1"));
+}
+
+#[test]
+fn r57b_browser_sign_in_rejects_an_insecure_authorize_url() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    host.http().enqueue(
+        json!({"code": 0, "data": {
+            "flow_id": "flow-1",
+            "authorize_url": "http://open.bigmodel.cn/login"
+        }})
+        .to_string()
+        .into_bytes(),
+    );
+    let sub = subscription(&host);
+    let error = block_on(sub.start_sign_in(&sign_in_ctx("bigmodel"), host.context()))
+        .expect_err("insecure");
+    assert!(error.message().contains("no sign-in page"));
+    assert_eq!(host.http().calls().len(), 1);
 }

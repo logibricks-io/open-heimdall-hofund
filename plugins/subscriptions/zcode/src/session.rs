@@ -15,7 +15,6 @@ pub(crate) struct Stored {
     pub auth: PlanAuth,
     pub api_key: SecretString,
     pub device: String,
-    pub plan: String,
 }
 
 /// Offline readiness for the daemon account tick (no vendor HTTP).
@@ -81,7 +80,6 @@ pub(crate) async fn parse_loaded(
         auth,
         api_key,
         device: blob.text("device").unwrap_or("").to_owned(),
-        plan: blob.text("plan").unwrap_or("").to_owned(),
     })
 }
 
