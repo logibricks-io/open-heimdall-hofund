@@ -1137,9 +1137,11 @@ mod tests {
         block_on_paused, header_park, yield_times,
     };
     use hofund_plugin_api::{PluginId, PluginKind, SecretString};
-    use hofund_plugin_sdk::{Race, race};
+    use hofund_plugin_sdk::{Race, futures::StreamExt, race};
 
-    use super::{Limits, RunArgs, append_deadline, connect_code, run};
+    use super::{
+        Limits, RunArgs, RunEvent, RunOutput, append_deadline, connect_code, run, run_stream,
+    };
     use crate::agent_host::AgentHost;
     use crate::endpoints::Endpoints;
     use crate::frame;
@@ -1463,7 +1465,8 @@ mod tests {
             assert!(blocked(host.context(), Duration::from_secs(600)));
 
             advance_time(Duration::from_secs(601)).await;
-            let output = run(
+            assert!(!blocked(host.context(), Duration::from_secs(600)));
+            let retry = run_stream(
                 host.context(),
                 &endpoints,
                 &resolver,
@@ -1472,11 +1475,48 @@ mod tests {
                     limits,
                     ..empty_run_args()
                 },
-            )
-            .await
-            .expect("http2 retry");
+            );
+            let retry_is_recorded = async {
+                for _ in 0..100 {
+                    if h2.requests().len() >= 2 {
+                        break;
+                    }
+                    yield_times(2).await;
+                }
+                assert_eq!(
+                    h2.requests().len(),
+                    2,
+                    "HTTP/2 retry handshake must finish before its header wait expires"
+                );
+                yield_times(10).await;
+                std::future::pending::<()>().await;
+            };
+            let Race::Left(attempt) = race(retry, retry_is_recorded).await else {
+                unreachable!("the control future stays pending after the retry is recorded");
+            };
+            let attempt = attempt.expect("http2 retry");
+            assert!(
+                !attempt.http1,
+                "HTTP/2 retry must not fall back to the config server"
+            );
+            assert_eq!(attempt.agent_url, h2.base_url());
+            let mut stream = attempt.stream;
+            let mut output = RunOutput::default();
+            while let Some(event) = stream.next().await {
+                match event.expect("http2 retry body") {
+                    RunEvent::Server(event) => output.events.push(event),
+                    RunEvent::ToolStepEnd => output.tool_steps += 1,
+                    RunEvent::Trailer(trailer) => output.trailers.push(trailer),
+                    RunEvent::ErrorBody { body, .. } => output.error_body = Some(body),
+                }
+            }
             assert_eq!(output.events, [ServerEvent::TextDelta("after".into())]);
             assert_eq!(h2.requests().len(), 2);
+            assert_eq!(
+                h1.requests().len(),
+                5,
+                "retry must not consume HTTP/1 scripts"
+            );
             drop(header_release);
         });
     }
