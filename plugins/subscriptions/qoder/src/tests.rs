@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-use hofund_kit_subscription::{PipedScript, TestHost, block_on};
+use hofund_kit_subscription::{PipedScript, TestHost, block_on, join_all, poll_once};
 use hofund_plugin_api::{
     AccountId, AccountStatus, PluginErrorKind, PluginId, PluginKind, ProbeQuery, ProtocolId,
     RawTable, SecretString, SignInFlow, Subscription, SubscriptionFactory,
@@ -308,7 +308,7 @@ fn a2c_9_daily_checkin_uses_bearer() {
     assert_eq!(result.outcome(), hofund_plugin_api::CheckinOutcome::Claimed);
     for call in host.http().calls() {
         assert!(sensitive!(&call, "cosy-machinetoken"));
-        assert_eq!(header!(&call, "cosy-machinetype"), Some("7"));
+        assert!(sensitive!(&call, "cosy-machinetype"));
         assert_eq!(header!(&call, "cosy-clienttype"), Some("10"));
         assert_eq!(header!(&call, "user-agent"), Some("Qoder"));
     }
@@ -411,7 +411,7 @@ fn a2c_11b_quota_without_total_is_empty() {
 }
 
 #[test]
-fn r54_chat_uses_persistent_native_identity_and_hostname() {
+fn r54_chat_uses_cached_native_identity_and_hostname() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
     let id = seed_with_expiry(&host, 4_000_000_000_000);
@@ -425,24 +425,39 @@ fn r54_chat_uses_persistent_native_identity_and_hostname() {
     let sub = subscription_with_devices(&host, Arc::clone(&devices));
     let upstream = sub.upstream(&id, host.context()).expect("upstream");
     let query = ProbeQuery::new(ProtocolId::OPENAI_CHAT, "qfmodel").expect("query");
-    for _ in 0..2 {
-        block_on(upstream.probe(&query)).expect("chat");
-    }
-    assert_eq!(host.process().piped_spawns().len(), 1);
-    for call in host.http().calls() {
-        for name in [
-            "cosy-machinetoken",
-            "cosy-machinetype",
-            "cosy-machinehostname",
-            "cosy-machineid",
-            "cache-control",
-        ] {
-            assert!(sensitive!(&call, name), "missing {name}");
-        }
-        assert!(!sensitive!(&call, "cosy-clientip"));
-        assert_eq!(header!(&call, "cosy-clientip"), None);
-    }
     let stored = block_on(Stored::load(host.context(), &id)).expect("stored");
+
+    let cold = block_on(devices.chat_headers(host.context(), &stored.credential));
+    assert_eq!(paired(&cold, "Cosy-MachineToken"), None);
+    assert_eq!(paired(&cold, "Cosy-MachineType"), None);
+    block_on(upstream.probe(&query)).expect("cold chat");
+    assert_eq!(host.process().piped_spawns().len(), 0);
+
+    block_on(devices.checkin_identity(host.context(), &stored.credential))
+        .expect("check-in identity")
+        .expect("native identity");
+    assert_eq!(host.process().piped_spawns().len(), 1);
+    block_on(upstream.probe(&query)).expect("cached chat");
+    assert_eq!(host.process().piped_spawns().len(), 1);
+
+    let calls = host.http().calls();
+    assert_eq!(calls.len(), 2);
+    for (index, call) in calls.iter().enumerate() {
+        for name in ["cosy-machinehostname", "cosy-machineid", "cache-control"] {
+            assert!(sensitive!(call, name), "missing {name}");
+        }
+        assert!(!sensitive!(call, "cosy-clientip"));
+        assert_eq!(header!(call, "cosy-clientip"), None);
+        if index == 0 {
+            assert!(!sensitive!(call, "cosy-machinetoken"));
+            assert!(!sensitive!(call, "cosy-machinetype"));
+            assert_eq!(header!(call, "cosy-machinetoken"), None);
+            assert_eq!(header!(call, "cosy-machinetype"), None);
+        } else {
+            assert!(sensitive!(call, "cosy-machinetoken"));
+            assert!(sensitive!(call, "cosy-machinetype"));
+        }
+    }
     let headers = block_on(devices.chat_headers(host.context(), &stored.credential));
     assert_eq!(paired(&headers, "Cache-Control"), Some("no-cache"));
     assert_eq!(
@@ -455,6 +470,64 @@ fn r54_chat_uses_persistent_native_identity_and_hostname() {
         Some("fixture-host")
     );
     assert_eq!(paired(&headers, "Cosy-MachineId"), Some("machine"));
+    assert_eq!(host.process().piped_spawns().len(), 1);
+}
+
+#[test]
+fn r54_chat_keeps_cached_identity_during_checkin_refresh() {
+    let dir = tempfile::tempdir().expect("dir");
+    let initial_host = host(&dir);
+    let id = seed_with_expiry(&initial_host, 4_000_000_000_000);
+    let devices = test_devices(&dir);
+    let stored = block_on(Stored::load(initial_host.context(), &id)).expect("stored");
+    initial_host.process().script_piped(native_script("3"));
+    block_on(devices.checkin_identity(initial_host.context(), &stored.credential))
+        .expect("initial identity")
+        .expect("native identity");
+
+    let refresh_host = host_at(
+        &dir,
+        SystemTime::UNIX_EPOCH + Duration::from_secs(60 * 60 + 1),
+    );
+    let expired = block_on(devices.chat_headers(refresh_host.context(), &stored.credential));
+    assert_eq!(paired(&expired, "Cosy-MachineToken"), None);
+    assert_eq!(paired(&expired, "Cosy-MachineType"), None);
+    assert_eq!(refresh_host.process().piped_spawns().len(), 0);
+
+    refresh_host.process().script_piped(PipedScript::new());
+    let mut refresh =
+        Box::pin(devices.checkin_identity(refresh_host.context(), &stored.credential));
+    block_on(async {
+        assert!(poll_once(refresh.as_mut()).is_pending());
+    });
+    assert_eq!(refresh_host.process().piped_spawns().len(), 1);
+
+    let headers = block_on(devices.chat_headers(refresh_host.context(), &stored.credential));
+    assert_eq!(
+        paired(&headers, "Cosy-MachineToken"),
+        Some("fixture-native-token")
+    );
+    assert_eq!(paired(&headers, "Cosy-MachineType"), Some("7"));
+    assert_eq!(refresh_host.process().piped_spawns().len(), 1);
+}
+
+#[test]
+fn r54_checkin_refreshes_share_one_native_helper() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_with_expiry(&host, 4_000_000_000_000);
+    let devices = test_devices(&dir);
+    let stored = block_on(Stored::load(host.context(), &id)).expect("stored");
+    host.process().script_piped(native_script("3"));
+
+    let results = block_on(join_all(vec![
+        Box::pin(devices.checkin_identity(host.context(), &stored.credential)),
+        Box::pin(devices.checkin_identity(host.context(), &stored.credential)),
+    ]));
+    for result in results {
+        result.expect("shared identity").expect("native identity");
+    }
+    assert_eq!(host.process().piped_spawns().len(), 1);
 }
 
 #[test]
@@ -522,6 +595,6 @@ fn r54_cn_checkin_reads_identity_from_cn_agent_home() {
     assert_eq!(spawns[0].program, cn_runtime);
     for call in host.http().calls() {
         assert!(sensitive!(&call, "cosy-machinetoken"));
-        assert_eq!(header!(&call, "cosy-machinetype"), Some("7"));
+        assert!(sensitive!(&call, "cosy-machinetype"));
     }
 }

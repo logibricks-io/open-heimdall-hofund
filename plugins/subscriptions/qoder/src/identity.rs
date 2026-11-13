@@ -2,11 +2,14 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::{OsStr, OsString};
+use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::pin::Pin;
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::task::{Context, Poll, Waker};
 use std::time::{Duration, SystemTime};
 
-use hofund_plugin_api::{HostContext, PluginError, SecretString, SpawnRequest};
+use hofund_plugin_api::{HostContext, PluginError, PluginErrorKind, SecretString, SpawnRequest};
 use hofund_plugin_sdk::json::Value;
 use hofund_plugin_sdk::oauth::secret_text;
 use hofund_plugin_sdk::{Call, digest};
@@ -17,10 +20,53 @@ const IDENTITY_TTL: Duration = Duration::from_secs(60 * 60);
 const PROCESS_WAIT: Duration = Duration::from_secs(20);
 const COSY_VERSION: &str = "1.1.69";
 
+type IdentityKey = (Site, String);
+type NativeResult = Result<Option<NativeIdentity>, NativeError>;
+
 #[derive(Clone)]
 pub(crate) struct NativeIdentity {
     token: SecretString,
     machine_type: String,
+}
+
+#[derive(Clone)]
+struct NativeError {
+    kind: PluginErrorKind,
+    message: String,
+    status: Option<u16>,
+}
+
+impl NativeError {
+    fn from_error(error: &PluginError) -> Self {
+        Self {
+            kind: error.kind(),
+            message: error.message().to_owned(),
+            status: error.status(),
+        }
+    }
+
+    fn into_error(self) -> PluginError {
+        match (self.kind, self.status) {
+            (PluginErrorKind::Connect, _) => PluginError::connect(self.message),
+            (PluginErrorKind::Timeout, _) => PluginError::timeout(self.message),
+            (PluginErrorKind::Transport, _) => PluginError::transport(self.message),
+            (PluginErrorKind::Interrupted, _) => PluginError::interrupted(self.message),
+            (PluginErrorKind::Status, Some(status)) => {
+                PluginError::status_error(status, self.message)
+            }
+            (PluginErrorKind::Decode, _) => PluginError::decode(self.message),
+            (PluginErrorKind::Unsupported, _) => PluginError::unsupported(self.message),
+            (PluginErrorKind::Auth, _) => PluginError::auth(self.message),
+            (PluginErrorKind::Quota, Some(status)) => {
+                PluginError::quota_status(status, self.message)
+            }
+            (PluginErrorKind::Quota, None) => PluginError::quota(self.message),
+            (PluginErrorKind::Config, _) => PluginError::config(self.message),
+            (PluginErrorKind::Cancelled, _) => PluginError::cancelled(self.message),
+            (PluginErrorKind::Io, _) => PluginError::io(self.message),
+            _ => PluginError::internal(self.message),
+        }
+    }
 }
 
 struct CachedIdentity {
@@ -28,9 +74,67 @@ struct CachedIdentity {
     identity: NativeIdentity,
 }
 
+#[derive(Default)]
+struct IdentityEntry {
+    cached: Option<CachedIdentity>,
+    refresh: Option<Arc<Refresh>>,
+}
+
+struct Refresh {
+    inner: Mutex<RefreshState>,
+}
+
+enum RefreshState {
+    Pending(Vec<Waker>),
+    Done(NativeResult),
+}
+
+struct RefreshWait {
+    refresh: Arc<Refresh>,
+}
+
+impl Refresh {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            inner: Mutex::new(RefreshState::Pending(Vec::new())),
+        })
+    }
+
+    fn finish(&self, result: NativeResult) {
+        let mut inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        let previous = std::mem::replace(&mut *inner, RefreshState::Done(result));
+        if let RefreshState::Pending(wakers) = previous {
+            for waker in wakers {
+                waker.wake();
+            }
+        }
+    }
+}
+
+impl Future for RefreshWait {
+    type Output = NativeResult;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut inner = self
+            .refresh
+            .inner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        match &mut *inner {
+            RefreshState::Done(result) => Poll::Ready(result.clone()),
+            RefreshState::Pending(wakers) => {
+                if !wakers.iter().any(|waker| waker.will_wake(cx.waker())) {
+                    wakers.push(cx.waker().clone());
+                }
+                Poll::Pending
+            }
+        }
+    }
+}
+
 pub(crate) struct Devices {
     env: RuntimeEnv,
-    identities: Mutex<HashMap<(Site, String), CachedIdentity>>,
+    identities: Mutex<HashMap<IdentityKey, IdentityEntry>>,
     hostname: OnceLock<String>,
 }
 
@@ -59,7 +163,7 @@ impl Devices {
     ) -> Vec<(String, String)> {
         let mut headers = common_headers(credential, false);
         headers.push(("Cache-Control".to_owned(), "no-cache".to_owned()));
-        if let Some(identity) = self.native(host, credential).await.ok().flatten() {
+        if let Some(identity) = self.chat_identity(host, credential) {
             headers.extend(identity.headers());
         }
         let hostname = self.hostname(host).await;
@@ -67,6 +171,19 @@ impl Devices {
             headers.push(("Cosy-MachineHostname".to_owned(), hostname));
         }
         headers
+    }
+
+    fn chat_identity(&self, host: &HostContext, credential: &Credential) -> Option<NativeIdentity> {
+        let now = host.clock().now();
+        let key = (credential.site, credential.uid.clone());
+        let cache = self
+            .identities
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let entry = cache.get(&key)?;
+        let cached = entry.cached.as_ref()?;
+        let fresh = now.duration_since(cached.read_at).unwrap_or_default() < IDENTITY_TTL;
+        (fresh || entry.refresh.is_some()).then(|| cached.identity.clone())
     }
 
     pub(crate) async fn checkin_identity(
@@ -87,35 +204,62 @@ impl Devices {
                 "Qoder device identity needs the account uid; import credentials again",
             ));
         }
+        enum Start {
+            Cached(NativeIdentity),
+            Wait(Arc<Refresh>),
+            Lead(Arc<Refresh>),
+        }
+
         let now = host.clock().now();
         let key = (credential.site, credential.uid.clone());
-        {
-            let cache = self
+        let start = {
+            let mut cache = self
                 .identities
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if let Some(cached) = cache.get(&key)
+                .unwrap_or_else(PoisonError::into_inner);
+            let entry = cache.entry(key.clone()).or_default();
+            if let Some(cached) = &entry.cached
                 && now.duration_since(cached.read_at).unwrap_or_default() < IDENTITY_TTL
             {
-                return Ok(Some(cached.identity.clone()));
+                Start::Cached(cached.identity.clone())
+            } else if let Some(refresh) = &entry.refresh {
+                Start::Wait(Arc::clone(refresh))
+            } else {
+                let refresh = Refresh::new();
+                entry.refresh = Some(Arc::clone(&refresh));
+                Start::Lead(refresh)
             }
-        }
-        let identity = match read_native(host, &self.env, credential).await {
-            Ok(identity) => identity,
-            Err(_) if credential.site == Site::China => return Ok(None),
-            Err(error) => return Err(error),
         };
-        self.identities
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(
-                key,
-                CachedIdentity {
+        let refresh = match start {
+            Start::Cached(identity) => return Ok(Some(identity)),
+            Start::Wait(refresh) => {
+                return (RefreshWait { refresh })
+                    .await
+                    .map_err(NativeError::into_error);
+            }
+            Start::Lead(refresh) => refresh,
+        };
+        let result = match read_native(host, &self.env, credential).await {
+            Ok(identity) => Ok(Some(identity)),
+            Err(_) if credential.site == Site::China => Ok(None),
+            Err(error) => Err(NativeError::from_error(&error)),
+        };
+        {
+            let mut cache = self
+                .identities
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let entry = cache.entry(key).or_default();
+            if let Ok(Some(identity)) = &result {
+                entry.cached = Some(CachedIdentity {
                     read_at: now,
                     identity: identity.clone(),
-                },
-            );
-        Ok(Some(identity))
+                });
+            }
+            entry.refresh = None;
+        }
+        refresh.finish(result.clone());
+        result.map_err(NativeError::into_error)
     }
 
     async fn hostname(&self, host: &HostContext) -> String {
@@ -146,11 +290,7 @@ pub(crate) fn apply_checkin(mut call: Call, identity: Option<&NativeIdentity>) -
         .header("User-Agent", "Qoder");
     if let Some(identity) = identity {
         for (name, value) in identity.headers() {
-            call = if name == "Cosy-MachineToken" {
-                call.sensitive_header(name, value)
-            } else {
-                call.header(name, value)
-            };
+            call = call.sensitive_header(name, value);
         }
     }
     call
