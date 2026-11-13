@@ -110,6 +110,17 @@ pub struct GroupCreateRequest {
 }
 
 impl GroupCreateRequest {
+    /// Constructs a group create body.
+    #[must_use]
+    pub fn new(expected_revision: String, name: String, first_member: String) -> Self {
+        Self {
+            version: API_VERSION,
+            expected_revision,
+            name,
+            first_member,
+        }
+    }
+
     /// Validates the create request.
     pub fn validate(&self) -> Result<(), ControlError> {
         validate_revision("expected_revision", &self.expected_revision)?;
@@ -185,6 +196,19 @@ fn default_member_enabled() -> bool {
     true
 }
 
+impl GroupMemberWire {
+    /// Constructs an enabled member with the agent's effort and no fast flag.
+    #[must_use]
+    pub fn new(reference: String) -> Self {
+        Self {
+            reference,
+            effort: String::new(),
+            fast: false,
+            enabled: true,
+        }
+    }
+}
+
 impl GroupPatchRequest {
     /// Validates the patch request.
     pub fn validate(&self) -> Result<(), ControlError> {
@@ -235,6 +259,15 @@ pub struct GroupDeleteRequest {
 }
 
 impl GroupDeleteRequest {
+    /// Constructs a group delete body.
+    #[must_use]
+    pub fn new(expected_revision: String) -> Self {
+        Self {
+            version: API_VERSION,
+            expected_revision,
+        }
+    }
+
     /// Validates the delete request.
     pub fn validate(&self) -> Result<(), ControlError> {
         validate_revision("expected_revision", &self.expected_revision)
@@ -253,6 +286,15 @@ pub struct GroupRestoreRequest {
 }
 
 impl GroupRestoreRequest {
+    /// Constructs a group restore body.
+    #[must_use]
+    pub fn new(expected_revision: String) -> Self {
+        Self {
+            version: API_VERSION,
+            expected_revision,
+        }
+    }
+
     /// Validates the restore request.
     pub fn validate(&self) -> Result<(), ControlError> {
         validate_revision("expected_revision", &self.expected_revision)

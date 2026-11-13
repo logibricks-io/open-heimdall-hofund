@@ -114,6 +114,17 @@ mod tests {
     }
 
     #[test]
+    fn config_reload_on_routing_queues_group_read() {
+        let mut app = App::for_test(PageId::Routing);
+        apply_control_event(&mut app, &EventPayload::ConfigReloaded(Default::default()));
+        assert!(
+            app.take_intents().iter().any(|intent| {
+                matches!(intent, crate::intent::ControlIntent::LoadGroups { .. })
+            })
+        );
+    }
+
+    #[test]
     fn quota_alert_replaces_flash() {
         let mut app = App::for_test(PageId::Usage);
         app.set_flash(crate::state::Flash::new("old", true));

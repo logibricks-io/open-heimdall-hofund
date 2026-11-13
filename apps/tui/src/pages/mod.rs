@@ -5,6 +5,7 @@ mod agents;
 mod frame;
 mod probe;
 mod providers;
+pub mod routing;
 pub mod sessions;
 mod status;
 pub mod usage;
@@ -14,6 +15,7 @@ pub use agents::AgentPage;
 pub use frame::PageShell;
 pub use probe::{ProbeOutcome, apply_probe_to_shell, read_path};
 pub use providers::ProviderPage;
+pub use routing::RoutingPage;
 pub use sessions::SessionsPage;
 pub use usage::{UsageAction, UsagePage};
 
@@ -70,7 +72,7 @@ pub enum PageKeyOutcome {
 pub struct Pages {
     agents: PageShell,
     providers: PageShell,
-    routing: PageShell,
+    routing: RoutingPage,
     usage: UsagePage,
     sessions: SessionsPage,
     library: PageShell,
@@ -82,7 +84,7 @@ impl Default for Pages {
         Self {
             agents: PageShell::new(PageId::Agents, "No agents loaded yet."),
             providers: PageShell::new(PageId::Providers, "No providers loaded yet."),
-            routing: PageShell::new(PageId::Routing, "No routing groups loaded yet."),
+            routing: RoutingPage::new(),
             usage: UsagePage::new(),
             sessions: SessionsPage::new(),
             library: PageShell::new(PageId::Library, "Loading library…"),
@@ -97,9 +99,8 @@ impl Pages {
         match id {
             PageId::Agents => Some(&mut self.agents),
             PageId::Providers => Some(&mut self.providers),
-            PageId::Routing => Some(&mut self.routing),
             PageId::Library => Some(&mut self.library),
-            PageId::Sessions | PageId::Usage | PageId::Accounts => None,
+            PageId::Routing | PageId::Sessions | PageId::Usage | PageId::Accounts => None,
         }
     }
 
@@ -123,6 +124,17 @@ impl Pages {
     #[must_use]
     pub fn accounts(&self) -> &AccountsPage {
         &self.accounts
+    }
+
+    /// Mutable Routing page.
+    pub fn routing_mut(&mut self) -> &mut RoutingPage {
+        &mut self.routing
+    }
+
+    /// Immutable Routing page.
+    #[must_use]
+    pub fn routing(&self) -> &RoutingPage {
+        &self.routing
     }
 
     /// Mutable Usage page.
@@ -162,9 +174,8 @@ impl Pages {
         match id {
             PageId::Agents => &self.agents,
             PageId::Providers => &self.providers,
-            PageId::Routing => &self.routing,
             PageId::Library => &self.library,
-            PageId::Sessions | PageId::Usage | PageId::Accounts => {
+            PageId::Routing | PageId::Sessions | PageId::Usage | PageId::Accounts => {
                 panic!("dedicated page is not a PageShell; use page_dyn or its typed accessor")
             }
         }
