@@ -406,6 +406,13 @@ struct Splitter {
     in_call: bool,
     sent: String,
     saw_tool: bool,
+    after: bool,
+}
+
+enum BareStep {
+    Next(String),
+    Wait,
+    Error,
 }
 
 impl Splitter {
@@ -417,6 +424,7 @@ impl Splitter {
             in_call: false,
             sent: String::new(),
             saw_tool: false,
+            after: false,
         }
     }
 
@@ -449,17 +457,34 @@ impl Splitter {
                 }
                 continue;
             }
-            let combined = normalize_bare_xml(&format!("{}{}", self.text, input));
+            let mut combined = format!("{}{}", self.text, input);
             self.text.clear();
+            if self.after {
+                let Some(rest) = self.left(&combined, false) else {
+                    self.text = combined;
+                    break;
+                };
+                combined = rest;
+                if combined.is_empty() {
+                    break;
+                }
+            }
             let wrapped = combined.find(CALL_OPEN);
-            let bare = combined.find("<function=");
-            let marker = match (wrapped, bare) {
-                (Some(left), Some(right)) => Some(left.min(right)),
-                (Some(index), None) | (None, Some(index)) => Some(index),
-                (None, None) => None,
+            let bare = if self.tools.is_empty() {
+                None
+            } else {
+                xml_at(&combined)
             };
-            let Some(index) = marker else {
-                let keep = partial_marker(&combined);
+            if let Some(index) = bare.filter(|index| wrapped.is_none_or(|at| *index < at)) {
+                match self.bare(&mut out, &combined, index, false) {
+                    BareStep::Next(rest) => input = rest,
+                    BareStep::Wait => break,
+                    BareStep::Error => return out,
+                }
+                continue;
+            }
+            let Some(index) = wrapped else {
+                let keep = partial_marker(&combined, !self.tools.is_empty());
                 let end = combined.len() - keep;
                 self.text_out(&mut out, &combined[..end]);
                 self.text = combined[end..].to_owned();
@@ -468,37 +493,58 @@ impl Splitter {
             if index > 0 {
                 self.text_out(&mut out, &combined[..index]);
             }
-            if wrapped == Some(index) {
-                input = combined[index + CALL_OPEN.len()..].to_owned();
-                self.in_call = true;
-                continue;
-            }
-            if quoted(&self.sent) {
-                self.text_out(&mut out, "<function=");
-                input = combined[index + "<function=".len()..].to_owned();
-                continue;
-            }
-            match bare_call(&combined[index..], &self.tools, false) {
-                Bare::Call(call, rest) => {
-                    self.saw_tool = true;
-                    out.push(Piece::Call(call));
-                    input = rest;
-                }
-                Bare::Wait => {
-                    self.text = combined[index..].to_owned();
-                    break;
-                }
-                Bare::Text => {
-                    self.text_out(&mut out, "<function=");
-                    input = combined[index + "<function=".len()..].to_owned();
-                }
-                Bare::Error => {
-                    out.push(Piece::Error("the model's tool call, written as text, was cut short; it is not sent on as the answer".to_owned()));
-                    return out;
-                }
-            }
+            input = combined[index + CALL_OPEN.len()..].to_owned();
+            self.in_call = true;
         }
         out
+    }
+
+    fn bare(&mut self, out: &mut Vec<Piece>, combined: &str, index: usize, end: bool) -> BareStep {
+        let head = &combined[..index];
+        let at = &combined[index..];
+        let opener_end = at.find('>').map_or(at.len(), |end| end + 1);
+        let opener = &at[..opener_end];
+        if quoted(&format!("{}{}", self.sent, head)) {
+            self.text_out(out, &format!("{head}{opener}"));
+            return BareStep::Next(at[opener_end..].to_owned());
+        }
+        match xml_call(at, end, &self.tools) {
+            Bare::Wait => {
+                self.text_out(out, head);
+                self.text = at.to_owned();
+                BareStep::Wait
+            }
+            Bare::Text => {
+                self.text_out(out, &format!("{head}{opener}"));
+                BareStep::Next(at[opener_end..].to_owned())
+            }
+            Bare::Error => {
+                self.text_out(out, head);
+                out.push(Piece::Error("the model's tool call, written as text, was cut short; it is not sent on as the answer".to_owned()));
+                BareStep::Error
+            }
+            Bare::Call(call, rest) => {
+                self.text_out(out, head);
+                self.saw_tool = true;
+                self.after = true;
+                out.push(Piece::Call(call));
+                BareStep::Next(rest)
+            }
+        }
+    }
+
+    fn left(&mut self, combined: &str, end: bool) -> Option<String> {
+        let rest = xml_left(combined);
+        if !end
+            && (rest.is_empty()
+                || XML_CLOSES
+                    .iter()
+                    .any(|close| close.len() > rest.len() && close.starts_with(rest)))
+        {
+            return None;
+        }
+        self.after = false;
+        Some(rest.to_owned())
     }
 
     fn flush(&mut self) -> Vec<Piece> {
@@ -517,23 +563,24 @@ impl Splitter {
                 self.text_out(&mut out, &format!("{CALL_OPEN}{body}"));
             }
         }
-        if !self.text.is_empty() {
-            let text = std::mem::take(&mut self.text);
-            if let Some(index) = text.find("<function=") {
-                if index > 0 {
-                    self.text_out(&mut out, &text[..index]);
-                }
-                match bare_call(&text[index..], &self.tools, true) {
-                    Bare::Call(call, rest) => {
-                        self.saw_tool = true;
-                        out.push(Piece::Call(call));
-                        self.text_out(&mut out, &rest);
-                    }
-                    Bare::Error => out.push(Piece::Error("the model's tool call, written as text, was cut short; it is not sent on as the answer".to_owned())),
-                    Bare::Text | Bare::Wait => self.text_out(&mut out, &text[index..]),
-                }
-            } else {
+        let mut text = std::mem::take(&mut self.text);
+        if self.after {
+            text = self.left(&text, true).unwrap_or_default();
+        }
+        while !text.is_empty() {
+            let Some(index) = (!self.tools.is_empty()).then(|| xml_at(&text)).flatten() else {
                 self.text_out(&mut out, &text);
+                break;
+            };
+            match self.bare(&mut out, &text, index, true) {
+                BareStep::Next(rest) => {
+                    text = if self.after {
+                        self.left(&rest, true).unwrap_or_default()
+                    } else {
+                        rest
+                    };
+                }
+                BareStep::Wait | BareStep::Error => break,
             }
         }
         out
@@ -547,55 +594,88 @@ impl Splitter {
     }
 }
 
-fn normalize_bare_xml(text: &str) -> String {
-    let mut out = text
-        .replace("<antml:", "<")
-        .replace("</antml:", "</")
-        .replace("<function_calls>", "")
-        .replace("</function_calls>", "")
-        .replace("<invoke name=\"", "<function=")
-        .replace("</invoke>", "</function>")
-        .replace("<parameter name=\"", "<parameter=");
-    for marker in ["<function=", "<parameter="] {
-        let mut from = 0;
-        while let Some(found) = out[from..].find(marker) {
-            let start = from + found;
-            let Some(end) = out[start..].find('>').map(|end| start + end) else {
-                break;
-            };
-            if out.as_bytes().get(end.wrapping_sub(1)) == Some(&b'"') {
-                out.remove(end - 1);
-            }
-            from = start + marker.len();
+const XML_CLOSES: &[&str] = &[
+    "</function_calls>",
+    "</antml:function_calls>",
+    "</invoke>",
+    "</antml:invoke>",
+    "</function>",
+];
+
+fn xml_left(text: &str) -> &str {
+    let mut rest = text;
+    loop {
+        rest = rest.trim_start();
+        if let Some(after) = XML_CLOSES.iter().find_map(|close| rest.strip_prefix(close)) {
+            rest = after;
+        } else {
+            return rest;
         }
     }
-    out
 }
 
-fn partial_marker(text: &str) -> usize {
+fn xml_at(text: &str) -> Option<usize> {
+    text.match_indices('<')
+        .map(|(index, _)| index)
+        .find(|index| {
+            let tail = &text[*index..];
+            tail.starts_with("<function=")
+                || tail.starts_with("<function_calls>")
+                || tail.starts_with("<antml:function_calls>")
+                || invoke_marker(tail)
+        })
+}
+
+fn invoke_prefix(text: &str) -> bool {
+    ["<invoke", "<antml:invoke"].iter().any(|prefix| {
+        text.strip_prefix(prefix)
+            .and_then(|rest| rest.chars().next())
+            .is_some_and(char::is_whitespace)
+    })
+}
+
+fn invoke_marker(text: &str) -> bool {
+    if !invoke_prefix(text) {
+        return false;
+    }
+    let rest = text
+        .strip_prefix("<antml:invoke")
+        .or_else(|| text.strip_prefix("<invoke"))
+        .expect("invoke prefix")
+        .trim_start();
+    rest.strip_prefix("name")
+        .is_some_and(|rest| rest.trim_start().strip_prefix('=').is_some())
+}
+
+fn partial_marker(text: &str, xml: bool) -> usize {
     let mut keep = 0;
-    for marker in [
-        CALL_OPEN,
-        "<function=",
-        "<function_calls>",
-        "<antml:function_calls>",
-        "<invoke ",
-        "<antml:invoke ",
-        "</function_calls>",
-        "</antml:function_calls>",
-        "</invoke>",
-        "</antml:invoke>",
-    ] {
+    let markers: &[&str] = if xml {
+        &[
+            CALL_OPEN,
+            "<function=",
+            "<function_calls>",
+            "<antml:function_calls>",
+            "<invoke ",
+            "<antml:invoke ",
+        ]
+    } else {
+        &[CALL_OPEN]
+    };
+    for marker in markers {
         for length in 1..=marker.len().min(text.len()) {
             if text.ends_with(&marker[..length]) {
                 keep = keep.max(length);
             }
         }
     }
-    if let Some(start) = text.rfind('<')
-        && !text[start..].contains('>')
-    {
-        keep = keep.max(text.len() - start);
+    if xml && let Some(start) = text.rfind('<') {
+        let tail = &text[start..];
+        if tail.len() <= 302
+            && !tail.contains('>')
+            && (tail.starts_with("<function=") || invoke_prefix(tail))
+        {
+            keep = keep.max(tail.len());
+        }
     }
     keep
 }
@@ -631,7 +711,7 @@ fn parse_call(body: &str, tools: &[Value]) -> Option<LiftedCall> {
             args: Value::Object(args.clone()).to_string(),
         });
     }
-    match bare_call(body, tools, true) {
+    match xml_call(body, true, tools) {
         Bare::Call(call, _) => Some(call),
         _ => None,
     }
@@ -644,64 +724,153 @@ enum Bare {
     Error,
 }
 
-fn bare_call(text: &str, tools: &[Value], end: bool) -> Bare {
-    let Some(after) = text.strip_prefix("<function=") else {
+fn xml_call(text: &str, end: bool, tools: &[Value]) -> Bare {
+    let mut text = text;
+    if let Some(wrapper) = ["<function_calls>", "<antml:function_calls>"]
+        .iter()
+        .find_map(|wrapper| text.strip_prefix(wrapper).map(|_| *wrapper))
+    {
+        let rest = text[wrapper.len()..].trim_start();
+        if !end && (rest.is_empty() || xml_start_partial(rest)) {
+            return Bare::Wait;
+        }
+        text = rest;
+    }
+    let invoke = invoke_open(text);
+    let function = function_open(text);
+    let Some((name, opened, is_invoke)) = invoke
+        .map(|(name, opened)| (name, opened, true))
+        .or_else(|| function.map(|(name, opened)| (name, opened, false)))
+    else {
+        if !end && xml_open_partial(text) {
+            return Bare::Wait;
+        }
         return Bare::Text;
     };
-    let Some(open) = after.find('>') else {
-        return if end { Bare::Text } else { Bare::Wait };
-    };
-    let name = after[..open].trim();
     if !tools
         .iter()
-        .any(|tool| tool.pointer("/function/name").and_then(Value::as_str) == Some(name))
+        .any(|tool| tool.pointer("/function/name").and_then(Value::as_str) == Some(name.as_str()))
     {
         return Bare::Text;
     }
-    let body = &after[open + 1..];
-    let close = body.find("</function>");
-    let next = body.find("<function=");
+    let body = &text[opened..];
+    let close = if is_invoke {
+        find_close(body, &["</invoke>", "</antml:invoke>"])
+    } else {
+        find_close(body, &["</function>"])
+    };
+    let next = xml_next(body);
     let stop = match (close, next) {
-        (Some(left), Some(right)) => Some(left.min(right)),
-        (Some(index), None) | (None, Some(index)) => Some(index),
+        (Some((left, _)), Some(right)) => Some(left.min(right)),
+        (Some((index, _)), None) | (None, Some(index)) => Some(index),
         (None, None) => None,
     };
-    let Some(stop) = stop else {
-        if !end {
-            return Bare::Wait;
-        }
-        if !body.contains("<parameter=") {
-            return Bare::Text;
-        }
-        return parse_bare_args(name, body, tools, "");
+    let stop = match stop {
+        Some(stop) => stop,
+        None if !end => return Bare::Wait,
+        None => body.len(),
     };
-    let whole = close == Some(stop);
-    parse_bare_args(
-        name,
-        &body[..stop],
-        tools,
-        if whole {
-            &body[stop + "</function>".len()..]
+    let whole = close.is_some_and(|(index, _)| index == stop);
+    let (args, closed, has_parameters) = xml_args(&body[..stop], &name, tools);
+    if !whole && !closed {
+        return if has_parameters {
+            Bare::Error
         } else {
-            &body[stop..]
+            Bare::Text
+        };
+    }
+    let rest = if whole {
+        let (index, length) = close.expect("whole close");
+        &body[index + length..]
+    } else {
+        &body[stop..]
+    };
+    Bare::Call(
+        LiftedCall {
+            name,
+            args: Value::Object(args).to_string(),
         },
+        rest.to_owned(),
     )
 }
 
-fn parse_bare_args(name: &str, body: &str, tools: &[Value], remainder: &str) -> Bare {
+fn xml_start_partial(text: &str) -> bool {
+    ["<invoke ", "<antml:invoke ", "<function="]
+        .iter()
+        .any(|start| start.starts_with(text))
+}
+
+fn xml_open_partial(text: &str) -> bool {
+    xml_start_partial(text)
+        || ((text.starts_with("<function=") || invoke_prefix(text))
+            && text.len() <= 302
+            && !text[1..].chars().any(|ch| matches!(ch, '<' | '>')))
+}
+
+fn invoke_open(text: &str) -> Option<(String, usize)> {
+    if !invoke_prefix(text) {
+        return None;
+    }
+    let rest = text
+        .strip_prefix("<antml:invoke")
+        .or_else(|| text.strip_prefix("<invoke"))?
+        .trim_start()
+        .strip_prefix("name")?
+        .trim_start()
+        .strip_prefix('=')?
+        .trim_start()
+        .strip_prefix('"')?;
+    let end = rest.find('"')?;
+    let name = &rest[..end];
+    let after = rest[end + 1..].trim_start().strip_prefix('>')?;
+    Some((name.trim().to_owned(), text.len() - after.len()))
+}
+
+fn function_open(text: &str) -> Option<(String, usize)> {
+    let rest = text.strip_prefix("<function=")?;
+    let end = rest.find('>')?;
+    Some((rest[..end].trim().to_owned(), end + "<function=>".len()))
+}
+
+fn find_close(text: &str, closes: &[&str]) -> Option<(usize, usize)> {
+    closes
+        .iter()
+        .filter_map(|close| text.find(close).map(|index| (index, close.len())))
+        .min_by_key(|(index, _)| *index)
+}
+
+fn xml_next(text: &str) -> Option<usize> {
+    text.match_indices('<')
+        .map(|(index, _)| index)
+        .find(|index| {
+            let tail = &text[*index..];
+            tail.starts_with("<function=") || invoke_marker(tail)
+        })
+}
+
+fn xml_args(
+    body: &str,
+    name: &str,
+    tools: &[Value],
+) -> (hofund_plugin_sdk::json::Map<String, Value>, bool, bool) {
+    let opens: Vec<_> = body
+        .match_indices('<')
+        .filter_map(|(index, _)| {
+            parameter_open(&body[index..]).map(|(key, used)| (index, index + used, key))
+        })
+        .collect();
+    let mut closed = !opens.is_empty();
     let mut args = hofund_plugin_sdk::json::Map::new();
-    let mut rest = body;
-    while let Some(start) = rest.find("<parameter=") {
-        rest = &rest[start + "<parameter=".len()..];
-        let Some(tag) = rest.find('>') else {
-            return Bare::Error;
-        };
-        let key = rest[..tag].trim();
-        rest = &rest[tag + 1..];
-        let Some(end) = rest.find("</parameter>") else {
-            return Bare::Error;
-        };
-        let value = rest[..end].trim_matches(['\r', '\n']).to_owned();
+    for (position, (_, value_start, key)) in opens.iter().enumerate() {
+        let limit = opens
+            .get(position + 1)
+            .map_or(body.len(), |(next, _, _)| *next);
+        let raw = &body[*value_start..limit];
+        let close = find_close(raw, &["</parameter>", "</antml:parameter>"]);
+        if close.is_none() {
+            closed = false;
+        }
+        let value = trim_xml_newlines(close.map_or(raw, |(index, _)| &raw[..index]));
         let property = tools
             .iter()
             .find(|tool| tool.pointer("/function/name").and_then(Value::as_str) == Some(name))
@@ -711,20 +880,61 @@ fn parse_bare_args(name: &str, body: &str, tools: &[Value], remainder: &str) -> 
             .and_then(Value::as_str)
             == Some("string")
         {
-            Value::String(value)
+            Value::String(value.to_owned())
         } else {
-            hofund_plugin_sdk::json::from_str(value.trim()).unwrap_or(Value::String(value))
+            hofund_plugin_sdk::json::from_str(value.trim())
+                .unwrap_or_else(|_| Value::String(value.to_owned()))
         };
-        args.insert(key.to_owned(), value);
-        rest = &rest[end + "</parameter>".len()..];
+        args.insert(key.clone(), value);
     }
-    Bare::Call(
-        LiftedCall {
-            name: name.to_owned(),
-            args: Value::Object(args).to_string(),
-        },
-        remainder.to_owned(),
-    )
+    let has_parameters = body.match_indices('<').any(|(index, _)| {
+        let tail = &body[index..];
+        ["<parameter", "<antml:parameter"]
+            .iter()
+            .any(|prefix| tail.starts_with(prefix))
+    });
+    (args, closed, has_parameters)
+}
+
+fn parameter_open(text: &str) -> Option<(String, usize)> {
+    let rest = text
+        .strip_prefix("<antml:parameter")
+        .or_else(|| text.strip_prefix("<parameter"))?;
+    if let Some(equal) = rest.strip_prefix('=') {
+        let end = equal.find('>')?;
+        return Some((
+            equal[..end].trim().to_owned(),
+            text.len() - equal.len() + end + 1,
+        ));
+    }
+    if !rest.chars().next().is_some_and(char::is_whitespace) {
+        return None;
+    }
+    let rest = rest
+        .trim_start()
+        .strip_prefix("name")?
+        .trim_start()
+        .strip_prefix('=')?
+        .trim_start()
+        .strip_prefix('"')?;
+    let end = rest.find('"')?;
+    let key = &rest[..end];
+    let after = rest[end + 1..].trim_start().strip_prefix('>')?;
+    Some((key.to_owned(), text.len() - after.len()))
+}
+
+fn trim_xml_newlines(mut text: &str) -> &str {
+    if let Some(rest) = text.strip_prefix("\r\n") {
+        text = rest;
+    } else if let Some(rest) = text.strip_prefix('\n') {
+        text = rest;
+    }
+    if let Some(rest) = text.strip_suffix("\r\n") {
+        text = rest;
+    } else if let Some(rest) = text.strip_suffix('\n') {
+        text = rest;
+    }
+    text
 }
 
 #[cfg(test)]
@@ -750,6 +960,53 @@ mod tests {
         let mut splitter = Splitter::new(Vec::new());
         let pieces = splitter.feed("<tool_call>{\"name\":\"read\",\"arguments\":</tool_call>");
         assert!(matches!(pieces.first(), Some(super::Piece::Error(_))));
+    }
+
+    #[test]
+    fn r54b_xml_that_is_not_a_declared_call_passes_through_byte_for_byte() {
+        fn assert_passthrough(text: &str, tools: Vec<hofund_plugin_sdk::json::Value>) {
+            for size in [1, 3, 8, text.len().max(1)] {
+                let mut splitter = super::Splitter::new(tools.clone());
+                let mut pieces = Vec::new();
+                for chunk in text.as_bytes().chunks(size) {
+                    pieces.extend(splitter.feed(std::str::from_utf8(chunk).expect("chunk")));
+                }
+                pieces.extend(splitter.flush());
+                let mut actual = String::new();
+                for piece in pieces {
+                    match piece {
+                        super::Piece::Text(part) => actual.push_str(&part),
+                        other => panic!("unexpected piece for {text:?}: {other:?}"),
+                    }
+                }
+                assert_eq!(actual, text, "chunk size {size}");
+            }
+        }
+
+        let tools = vec![json!({
+            "type": "function",
+            "function": {"name": "read", "parameters": {"type": "object", "properties": {"path": {"type": "string"}}}}
+        })];
+        let unknown = "<function_calls><invoke name=\"delete_everything\"><parameter name=\"path\">/</parameter></invoke></function_calls>";
+        assert_passthrough(unknown, tools.clone());
+        assert_passthrough(
+            "<function=nope><parameter=x>1</parameter></function>",
+            tools.clone(),
+        );
+        assert_passthrough(
+            "<function_calls><invoke name=\"read\"><parameter name=\"path\">a.go</parameter></invoke></function_calls>",
+            Vec::new(),
+        );
+        for text in [
+            "Claude wraps its calls in <function_calls> tags; each one is an <invoke> block.",
+            "Use `<function_calls><invoke name=\"read\"><parameter name=\"path\">a.go</parameter></invoke></function_calls>` to call it.",
+            "Example:\n```xml\n<function_calls>\n<invoke name=\"read\">\n<parameter name=\"path\">a.go</parameter>\n</invoke>\n</function_calls>\n```\nThat is the format.",
+            "Qwen writes `<function=read>` and then its parameters.",
+            "The <invoke name=\"read\"> tag names a tool, and the call ends later.",
+            "a < b and c > d, <function_calls without a close",
+        ] {
+            assert_passthrough(text, tools.clone());
+        }
     }
 
     #[test]
