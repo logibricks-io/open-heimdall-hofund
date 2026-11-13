@@ -134,7 +134,6 @@ fn is_false(value: &bool) -> bool {
 }
 
 /// One parsed session file. Non-main records merge into their parent.
-#[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[non_exhaustive]
 #[allow(clippy::struct_excessive_bools)] // independent session flags, not a state machine
