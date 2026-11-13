@@ -266,6 +266,56 @@ fn raw_text(completion: Completion) -> String {
 }
 
 #[test]
+fn r54b_selected_display_name_replaces_upstream_auto_in_unary_and_streaming_replies() {
+    for streaming in [false, true] {
+        let dir = tempfile::tempdir().expect("dir");
+        let host = host(&dir);
+        let id = seed(&host, Site::Global, "");
+        host.http()
+            .enqueue(include_bytes!("fixtures/models.json").as_slice());
+        let chunk = json::json!({
+            "model": "auto",
+            "choices": [{"index": 0, "delta": {"content": "OK"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 10}
+        });
+        host.http().enqueue(
+            format!(
+                "{}data: {{\"statusCodeValue\":200,\"body\":\"[DONE]\"}}\n\n",
+                envelope(chunk)
+            )
+            .into_bytes(),
+        );
+        let upstream = subscription(&host)
+            .upstream(&id, host.context())
+            .expect("upstream");
+        let query = ProbeQuery::new(ProtocolId::OPENAI_CHAT, "qfmodel").expect("query");
+        let mut request = query.minimal_request();
+        request.stream = streaming;
+        let completion =
+            block_on(upstream.execute(request, ProtocolId::OPENAI_CHAT)).expect("execute");
+        if streaming {
+            let output = raw_text(completion);
+            let mut events = 0;
+            for data in output
+                .lines()
+                .filter_map(|line| line.strip_prefix("data: "))
+                .filter(|data| *data != "[DONE]")
+            {
+                let event: Value = json::from_str(data).expect("stream event");
+                assert_eq!(event["model"], "Qwen3.8-Flash");
+                events += 1;
+            }
+            assert!(events >= 2, "{output}");
+        } else {
+            let Completion::Unary(answer) = completion else {
+                panic!("unary response expected");
+            };
+            assert_eq!(answer.model.as_deref(), Some("Qwen3.8-Flash"));
+        }
+    }
+}
+
+#[test]
 fn r54b_cosy_body_signature_and_incremental_reply_match_reference() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);

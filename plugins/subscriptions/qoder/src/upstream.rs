@@ -78,6 +78,12 @@ impl QoderUpstream {
                 format!("unknown or disabled Qoder model {:?}", request.model),
             ));
         };
+        let name = model.name.trim();
+        let served_name = if name.is_empty() || name == model.key {
+            model.key.clone()
+        } else {
+            name.to_owned()
+        };
         let site = self.endpoints.resolve(&stored.credential)?;
         let url = format!("{}{CHAT_PATH}", site.chat.trim_end_matches('/'));
         let streaming = request.stream;
@@ -125,7 +131,7 @@ impl QoderUpstream {
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
-        let response = stream::transform(response, tools);
+        let response = stream::transform(response, tools, served_name);
         let completion =
             wire::decode_upstream_response(response, ProtocolId::OPENAI_CHAT, inbound, streaming)
                 .await?;

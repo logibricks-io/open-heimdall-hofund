@@ -12,11 +12,15 @@ use hofund_plugin_sdk::uuid;
 const CALL_OPEN: &str = "<tool_call>";
 const CALL_CLOSE: &str = "</tool_call>";
 
-pub(crate) fn transform(response: HttpResponse, tools: Vec<Value>) -> HttpResponse {
+pub(crate) fn transform(
+    response: HttpResponse,
+    tools: Vec<Value>,
+    served_name: String,
+) -> HttpResponse {
     let (parts, body) = response.into_parts();
     let state = State {
         body,
-        parser: Parser::new(tools),
+        parser: Parser::new(tools, served_name),
         finished: false,
     };
     let body = BodyStream::from_stream(unfold(state, |mut state| async move {
@@ -88,6 +92,7 @@ struct Parser {
     native: HashMap<u64, Native>,
     next_index: u64,
     finish_reason: String,
+    served_name: String,
     said: bool,
     done: bool,
 }
@@ -99,7 +104,7 @@ struct Native {
 }
 
 impl Parser {
-    fn new(tools: Vec<Value>) -> Self {
+    fn new(tools: Vec<Value>, served_name: String) -> Self {
         Self {
             pending: Vec::new(),
             output: VecDeque::new(),
@@ -107,6 +112,7 @@ impl Parser {
             native: HashMap::new(),
             next_index: 0,
             finish_reason: String::new(),
+            served_name,
             said: false,
             done: false,
         }
@@ -158,7 +164,8 @@ impl Parser {
         self.chunk(chunk)
     }
 
-    fn chunk(&mut self, chunk: Value) -> Result<Vec<Frame>, PluginError> {
+    fn chunk(&mut self, mut chunk: Value) -> Result<Vec<Frame>, PluginError> {
+        chunk["model"] = Value::String(self.served_name.clone());
         let mut frames = Vec::new();
         let Some(choice) = chunk
             .get("choices")
@@ -308,7 +315,7 @@ impl Parser {
         } else {
             self.line(&pending)?
         };
-        let terminal = json!({"choices": [{"index": 0, "delta": {}, "finish_reason": null}], "object": "chat.completion.chunk"});
+        let terminal = json!({"choices": [{"index": 0, "delta": {}, "finish_reason": null}], "object": "chat.completion.chunk", "model": self.served_name});
         for piece in self.splitter.flush() {
             self.piece(piece, &terminal, &mut frames)?;
         }
@@ -343,7 +350,7 @@ fn openai_chunk(source: &Value, delta: Value, finish: Option<&str>) -> Value {
         "id": source.get("id").and_then(Value::as_str).unwrap_or("chatcmpl-qoder"),
         "object": "chat.completion.chunk",
         "created": source.get("created").and_then(Value::as_u64).unwrap_or(0),
-        "model": source.get("model").and_then(Value::as_str).unwrap_or("qoder"),
+        "model": source.get("model").and_then(Value::as_str).expect("selected model"),
         "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
     });
     if let Some(usage) = source.get("usage") {
