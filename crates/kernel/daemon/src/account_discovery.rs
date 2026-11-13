@@ -96,7 +96,7 @@ pub fn import_if_configured(path: &Path, config: &Config) -> Result<(), DaemonEr
     })
 }
 
-async fn discover_opened(
+pub(crate) async fn discover_opened(
     opened: &[Opened],
     registry: &dyn DaemonRegistry,
     _config: &Config,
@@ -180,6 +180,8 @@ mod tests {
     fn minimal_config(discover: bool) -> Config {
         Config {
             listen: "127.0.0.1:9".parse().expect("listen"),
+            allow_ips: Vec::new(),
+            trust_proxy: false,
             token_file: "token".to_owned(),
             usage_file: "usage.db".to_owned(),
             failover: hofund_config::Failover::default(),
@@ -193,6 +195,7 @@ mod tests {
             warnings: Vec::new(),
             catalog: hofund_config::CatalogSettings::default(),
             usage: hofund_config::UsageSettings::default(),
+            lan_allow: Vec::new(),
         }
     }
 

@@ -28,7 +28,7 @@ pub(crate) async fn unary_opts(
     read_timeout: Option<Duration>,
 ) -> Result<Value, PluginError> {
     let url = endpoints.dashboard(path);
-    let mut call = Call::post(url)
+    let mut request = Call::post(url)
         .header("content-type", "application/json")
         .header("connect-protocol-version", "1")
         .sensitive_header(
@@ -39,12 +39,12 @@ pub(crate) async fn unary_opts(
         .header("x-cursor-client-type", "cli")
         .header("x-ghost-mode", "true");
     if let Some(team) = team_id.filter(|value| !value.is_empty()) {
-        call = call.header("x-cursor-team-id", team);
+        request = request.header("x-cursor-team-id", team);
     }
     if let Some(budget) = read_timeout {
-        call = call.read_timeout(budget);
+        request = request.read_timeout(budget);
     }
-    let reply = call.bytes(body.as_bytes()).fetch(host.http()).await?;
+    let reply = request.bytes(body.as_bytes()).fetch(host.http()).await?;
     if !(200..300).contains(&reply.status()) {
         return Err(PluginError::status_error(
             reply.status(),

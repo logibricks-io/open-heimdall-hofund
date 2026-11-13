@@ -11,7 +11,6 @@ use hofund_plugin_api::{
     ToolArgumentsDelta, UpstreamProvider, Usage,
 };
 use hofund_plugin_sdk::futures::{self, StreamExt};
-use hofund_plugin_sdk::oauth::secret_text;
 
 use crate::agent_host::AgentHost;
 use crate::cli::KeychainCache;
@@ -29,7 +28,7 @@ pub(crate) struct CursorUpstream {
     agent_home: PathBuf,
     program: Option<PathBuf>,
     keychain: Arc<Mutex<KeychainCache>>,
-    skip_keychain: bool,
+    keychain_enabled: bool,
     agent_host: AgentHost,
     limits: Limits,
     #[cfg(test)]
@@ -44,7 +43,7 @@ impl CursorUpstream {
         agent_home: PathBuf,
         program: Option<PathBuf>,
         keychain: Arc<Mutex<KeychainCache>>,
-        skip_keychain: bool,
+        keychain_enabled: bool,
     ) -> Self {
         Self {
             account,
@@ -53,7 +52,7 @@ impl CursorUpstream {
             agent_home,
             program,
             keychain,
-            skip_keychain,
+            keychain_enabled,
             agent_host: AgentHost::default(),
             limits: Limits::default(),
             #[cfg(test)]
@@ -88,13 +87,13 @@ impl UpstreamProvider for CursorUpstream {
             &self.agent_home,
             self.program.clone(),
             &self.keychain,
-            self.skip_keychain,
+            self.keychain_enabled,
         )
         .await?;
         let response_id = hofund_plugin_sdk::uuid::v4()
             .map(|id| format!("msg_{id}"))
             .map_err(|error| PluginError::io(format!("cannot create a response id: {error}")))?;
-        let team_id = team::id_for_token(secret_text(&token));
+        let team_id = team::header_value(&token);
         let mut args = mapped.into_args(team_id.clone());
         args.limits = self.limits;
         let mut retried = false;
@@ -167,7 +166,7 @@ impl UpstreamProvider for CursorUpstream {
                     Ok(RunEvent::Server(_)) | Ok(RunEvent::ToolStepEnd) => continue,
                     Ok(RunEvent::Trailer(frame)) => failure::trailer(&frame.payload),
                     Ok(RunEvent::ErrorBody { status, body }) => failure::body(status, &body),
-                    Err(error) => error,
+                    Err(error) => failure::timeout_before_text(error),
                 };
                 if !retried && failure::regional(error.message()) {
                     crate::http2_memory::clear();
@@ -1230,6 +1229,159 @@ mod tests {
     }
 
     #[test]
+    fn tool_completed_without_partial_seals_server_completed_calls() {
+        let _guard = crate::http2_memory::test_lock();
+        crate::http2_memory::reset_for_tests();
+        block_on_paused(async {
+            let body = [
+                tool_update_frame(3, "server-1"),
+                tool_update_frame(3, "server-2"),
+                mcp_frame(21, "lookup", "caller-3"),
+                tool_count_frame(3),
+                checkpoint_frame(1),
+                heartbeat_frame(),
+                heartbeat_frame(),
+            ]
+            .concat();
+            let h2 = Http2Server::start(vec![Http2Response::new(200).data(body).hold_open()]).await;
+            let h1 = Http1Server::start(vec![config_reply(h2.base_url())]).await;
+            let host = pooled_host();
+            let account = store_account(&host).await;
+            let upstream = upstream(&host, &h1, h2.base_url(), account);
+            let attempt = async {
+                let completion = upstream
+                    .execute(tool_request(), ProtocolId::OPENAI_CHAT)
+                    .await?;
+                collect(completion).await
+            };
+            let control = async {
+                advance_time(Duration::from_secs(241)).await;
+                std::future::pending::<()>().await;
+            };
+            let Race::Left(events) = race(attempt, control).await else {
+                unreachable!("control remains pending")
+            };
+            let events = events.expect("the tool count seals the step before quiet");
+            let calls = events
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        event,
+                        StreamEvent::ContentBlockStart(ContentBlockStart {
+                            block: BlockStart::ToolCall { .. },
+                            ..
+                        })
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(calls.len(), 1, "server-completed calls are not re-run");
+            assert!(events.iter().any(|event| matches!(
+                event,
+                StreamEvent::MessageDelta(MessageDelta {
+                    stop: Some(Stop {
+                        reason: StopReason::ToolUse,
+                        ..
+                    }),
+                    ..
+                })
+            )));
+            assert!(matches!(events.last(), Some(StreamEvent::MessageStop(_))));
+        });
+    }
+
+    #[test]
+    fn http1_tool_completed_without_partial_flushes_close_and_seals_tool_step() {
+        let _guard = crate::http2_memory::test_lock();
+        crate::http2_memory::reset_for_tests();
+        block_on_paused(async {
+            let body = [
+                tool_update_frame(3, "server-1"),
+                tool_update_frame(3, "server-2"),
+                mcp_frame(21, "lookup", "caller-3"),
+                tool_count_frame(3),
+                checkpoint_frame(1),
+                heartbeat_frame(),
+                heartbeat_frame(),
+            ]
+            .concat();
+            let h1 = Http1Server::start(vec![
+                Http1Response::chunked(vec![body]).hold_open(),
+                Http1Response::new(200),
+                Http1Response::new(200),
+                Http1Response::new(200).body(br#"{"usageEvents":[]}"#.to_vec()),
+            ])
+            .await;
+            let host = pooled_host();
+            crate::http2_memory::remember(host.context());
+            let account = store_account(&host).await;
+            let upstream = upstream(&host, &h1, "http://127.0.0.1:9", account);
+            let attempt = async {
+                let completion = upstream
+                    .execute(tool_request(), ProtocolId::OPENAI_CHAT)
+                    .await?;
+                collect(completion).await
+            };
+            let control = async {
+                advance_time(Duration::from_secs(241)).await;
+                std::future::pending::<()>().await;
+            };
+            let Race::Left(events) = race(attempt, control).await else {
+                unreachable!("control remains pending")
+            };
+            let events = events.expect("the tool count seals the HTTP/1.1 step before quiet");
+            let calls = events
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        event,
+                        StreamEvent::ContentBlockStart(ContentBlockStart {
+                            block: BlockStart::ToolCall { .. },
+                            ..
+                        })
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(calls.len(), 1, "server-completed calls are not re-run");
+            assert!(events.iter().any(|event| matches!(
+                event,
+                StreamEvent::MessageDelta(MessageDelta {
+                    stop: Some(Stop {
+                        reason: StopReason::ToolUse,
+                        ..
+                    }),
+                    ..
+                })
+            )));
+            assert!(matches!(events.last(), Some(StreamEvent::MessageStop(_))));
+
+            let requests = h1.requests();
+            assert_eq!(
+                requests.len(),
+                4,
+                "RunSSE, opening append, close exec, and usage poll"
+            );
+            assert_eq!(requests[0].path(), "/agent.v1.AgentService/RunSSE");
+            assert_eq!(
+                requests[3].path(),
+                "/aiserver.v1.DashboardService/GetFilteredUsageEvents"
+            );
+            let appends = requests
+                .iter()
+                .filter(|request| request.path() == "/aiserver.v1.BidiService/BidiAppend")
+                .collect::<Vec<_>>();
+            assert_eq!(appends.len(), 2);
+            let opening = proto::fields(appends[0].body());
+            assert_eq!(opening[2].as_varint(), Some(0));
+            let close = proto::fields(appends[1].body());
+            assert_eq!(
+                close[0].as_string().as_deref(),
+                Some(proto::to_hex(&proto::close_exec(21)).as_str())
+            );
+            assert_eq!(close[2].as_varint(), Some(1));
+        });
+    }
+
+    #[test]
     fn checkpoint_pending_count_seals_the_tool_step_before_heartbeats() {
         let _guard = crate::http2_memory::test_lock();
         crate::http2_memory::reset_for_tests();
@@ -1363,8 +1515,11 @@ mod tests {
         let _guard = crate::http2_memory::test_lock();
         crate::http2_memory::reset_for_tests();
         block_on(async {
-            let h1 =
-                Http1Server::start(vec![Http1Response::new(400).body(b"bad run".to_vec())]).await;
+            let h1 = Http1Server::start(vec![
+                Http1Response::new(400).body(b"bad run".to_vec()),
+                Http1Response::new(200),
+            ])
+            .await;
             let host = pooled_host();
             crate::http2_memory::remember(host.context());
             let account = store_account(&host).await;
@@ -1376,7 +1531,7 @@ mod tests {
                 .expect_err("synthetic end frame");
             assert_eq!(error.status(), Some(400));
             assert!(error.message().contains("bad run"));
-            assert_eq!(h1.requests().len(), 1);
+            assert_eq!(h1.requests().len(), 2);
         });
     }
 
@@ -1623,6 +1778,7 @@ mod tests {
             let h1 = Http1Server::start(vec![
                 config_reply(old.base_url()),
                 Http1Response::new(401).body(b"account is in another region".to_vec()),
+                Http1Response::new(200),
                 config_reply(regional.base_url()),
             ])
             .await;
@@ -1653,9 +1809,14 @@ mod tests {
             )));
             assert_eq!(old.requests().len(), 0);
             assert_eq!(regional.requests().len(), 1);
-            assert_eq!(h1.requests().len(), 3);
+            assert_eq!(h1.requests().len(), 4);
+            assert_eq!(h1.requests()[1].path(), "/agent.v1.AgentService/RunSSE");
             assert_eq!(
                 h1.requests()[2].path(),
+                "/aiserver.v1.BidiService/BidiAppend"
+            );
+            assert_eq!(
+                h1.requests()[3].path(),
                 "/aiserver.v1.ServerConfigService/GetServerConfig"
             );
             assert!(!http2_memory::blocked(
@@ -1678,6 +1839,7 @@ mod tests {
             let h1 = Http1Server::start(vec![
                 config_reply(h2.base_url()),
                 Http1Response::new(401).body(b"account is in another region".to_vec()),
+                Http1Response::new(200),
                 config_reply(h2.base_url()),
             ])
             .await;
@@ -1707,9 +1869,9 @@ mod tests {
                 StreamEvent::TextDelta(TextDelta { text, .. }) if text == "same host retry"
             )));
             assert_eq!(h2.requests().len(), 1);
-            assert_eq!(h1.requests().len(), 3);
+            assert_eq!(h1.requests().len(), 4);
             assert_eq!(
-                h1.requests()[2].path(),
+                h1.requests()[3].path(),
                 "/aiserver.v1.ServerConfigService/GetServerConfig"
             );
         });
@@ -1728,6 +1890,7 @@ mod tests {
             let h1 = Http1Server::start(vec![
                 config_reply(old.base_url()),
                 Http1Response::new(401).body(b"account is in another region".to_vec()),
+                Http1Response::new(200),
                 config_reply(regional.base_url()),
             ])
             .await;
@@ -1749,7 +1912,7 @@ mod tests {
             assert_eq!(error.status(), Some(403));
             assert!(error.message().contains("still the wrong region"));
             assert_eq!(regional.requests().len(), 1);
-            assert_eq!(h1.requests().len(), 3);
+            assert_eq!(h1.requests().len(), 4);
         });
     }
 
@@ -1788,8 +1951,11 @@ mod tests {
         http2_memory::reset_for_tests();
         block_on(async {
             let h2 = Http2Server::start(Vec::new()).await;
-            let h1 =
-                Http1Server::start(vec![Http1Response::new(400).body(b"bad run".to_vec())]).await;
+            let h1 = Http1Server::start(vec![
+                Http1Response::new(400).body(b"bad run".to_vec()),
+                Http1Response::new(200),
+            ])
+            .await;
             let host = pooled_host();
             http2_memory::remember(host.context());
             let account = store_account(&host).await;
@@ -1800,7 +1966,7 @@ mod tests {
                 .map(|_| ())
                 .expect_err("ordinary failure");
             assert_eq!(error.status(), Some(400));
-            assert_eq!(h1.requests().len(), 1);
+            assert_eq!(h1.requests().len(), 2);
             assert_eq!(h2.requests().len(), 0);
         });
     }
@@ -1999,14 +2165,13 @@ mod tests {
     fn dashboard_poll_sends_team_header_and_body_when_section_5_4_matches() {
         let _guard = crate::http2_memory::test_lock();
         crate::http2_memory::reset_for_tests();
-        crate::team::clear_cache();
         let config_dir = tempfile::tempdir().expect("team config");
         std::fs::write(
             config_dir.path().join("cli-config.json"),
-            r#"{"authId":"u1","activeTeamId":42}"#,
+            r#"{"authInfo":{"authId":"u1","activeTeamId":42}}"#,
         )
         .expect("cli-config");
-        crate::auth::set_test_config_dir(Some(config_dir.path().to_path_buf()));
+        let _team = crate::team::begin_test(Some(config_dir.path().to_path_buf()));
         block_on(async {
             let hit = usage_events_body(TEST_CONVERSATION, 2_000_000_000_000, 11, 2, 0, 0, 0);
             let h2 = Http2Server::start(vec![
@@ -2073,7 +2238,5 @@ mod tests {
                 hofund_plugin_sdk::json::from_slice(poll.body()).expect("body");
             assert_eq!(body["teamId"], 42);
         });
-        crate::team::clear_cache();
-        crate::auth::set_test_config_dir(None);
     }
 }

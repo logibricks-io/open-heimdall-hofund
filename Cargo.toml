@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "apps/bridge-mcp",
     "apps/cli",
     "apps/desktop/src-tauri",
     "apps/hofundd",
@@ -17,6 +18,8 @@ members = [
     "crates/kernel/plugin-api",
     "crates/kernel/plugin-host",
     "crates/kernel/plugin-sdk",
+    "plugins/agents/claude-code",
+    "plugins/agents/codex",
     "plugins/inbound/codex-catalog",
     "plugins/inbound/retrieval",
     "plugins/inbound/echo",
@@ -31,6 +34,7 @@ members = [
     "plugins/providers/relay",
     "plugins/providers/remote-gateway",
     "plugins/registry",
+    "plugins/subscriptions/antigravity",
     "plugins/subscriptions/claude",
     "plugins/subscriptions/codex",
     "plugins/subscriptions/copilot",
@@ -52,6 +56,7 @@ members = [
     "crates/kernel/quirks",
     "crates/kernel/router",
     "crates/kernel/secrets",
+    "crates/kernel/sessions",
     "crates/kernel/usage",
     "xtask",
 ]
@@ -71,6 +76,7 @@ rust-version = "1.99.1"
 # a version is a wildcard, which `cargo deny` rejects.
 [workspace.dependencies]
 hofund-agent = { version = "0.1.0", path = "crates/kernel/agent" }
+hofund-bridge-mcp = { version = "0.1.0", path = "apps/bridge-mcp" }
 hofund-codec = { version = "0.1.0", path = "crates/kernel/codec" }
 hofund-config = { version = "0.1.0", path = "crates/kernel/config" }
 hofund-model-catalog = { version = "0.1.0", path = "crates/kernel/model-catalog" }
@@ -83,6 +89,8 @@ hofund-kit-agent = { version = "0.1.0", path = "kits/agent" }
 hofund-kit-subscription = { version = "0.1.0", path = "kits/subscription" }
 hofund-kit-upstream = { version = "0.1.0", path = "kits/upstream" }
 hofund-plugin-api = { version = "0.1.0", path = "crates/kernel/plugin-api" }
+hofund-plugin-agent-claude = { version = "0.1.0", path = "plugins/agents/claude-code" }
+hofund-plugin-agent-codex = { version = "0.1.0", path = "plugins/agents/codex" }
 hofund-plugin-azure = { version = "0.1.0", path = "plugins/providers/azure" }
 hofund-plugin-bedrock = { version = "0.1.0", path = "plugins/providers/bedrock" }
 hofund-plugin-bedrock-mantle = { version = "0.1.0", path = "plugins/providers/bedrock-mantle" }
@@ -97,6 +105,7 @@ hofund-plugin-plan-quota = { version = "0.1.0", path = "plugins/providers/plan-q
 hofund-plugin-registry = { version = "0.1.0", path = "plugins/registry" }
 hofund-plugin-relay = { version = "0.1.0", path = "plugins/providers/relay" }
 hofund-plugin-remote-gateway = { version = "0.1.0", path = "plugins/providers/remote-gateway" }
+hofund-plugin-subscription-antigravity = { version = "0.1.0", path = "plugins/subscriptions/antigravity" }
 hofund-plugin-subscription-claude = { version = "0.1.0", path = "plugins/subscriptions/claude" }
 hofund-plugin-subscription-codex = { version = "0.1.0", path = "plugins/subscriptions/codex" }
 hofund-plugin-subscription-copilot = { version = "0.1.0", path = "plugins/subscriptions/copilot" }
@@ -116,11 +125,13 @@ hofund-provider = { version = "0.1.0", path = "crates/kernel/provider" }
 hofund-quirks = { version = "0.1.0", path = "crates/kernel/quirks" }
 hofund-router = { version = "0.1.0", path = "crates/kernel/router" }
 hofund-secrets = { version = "0.1.0", path = "crates/kernel/secrets" }
+hofund-sessions = { version = "0.1.0", path = "crates/kernel/sessions" }
 hofund-tui = { version = "0.1.0", path = "apps/tui" }
 hofund-usage = { version = "0.1.0", path = "crates/kernel/usage" }
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 crossterm = "0.28.1"
 ratatui = "0.29.0"
+rusqlite = { version = "0.41.0", default-features = false, features = ["bundled"] }
 sha2 = "0.10.9"
 tempfile = "3.27.0"
 zstd = "0.13.3"
