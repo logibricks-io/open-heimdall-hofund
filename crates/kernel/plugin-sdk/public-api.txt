@@ -327,6 +327,7 @@ wire::Sent::fn watch (mut self , limit : usize , watch : Watch) -> Self
 wire::Target derives(Clone)
 wire::Target::const fn allocation_quota_rate (mut self , enabled : bool) -> Self
 wire::Target::const fn chatgpt_codex_zstd (mut self , enabled : bool) -> Self
+wire::Target::const fn request_body_gzip (mut self , enabled : bool) -> Self
 wire::Target::fn credential (mut self , credential : CredentialStyle) -> Self
 wire::Target::fn headers (mut self , headers : Vec < (String , String) >) -> Self
 wire::Target::fn method_root (mut self , root : & 'static str) -> Self

@@ -48,7 +48,7 @@ impl WorkBuddyUpstream {
         inbound: ProtocolId,
     ) -> Result<Completion, PluginError> {
         let base = self.endpoints.base_for(stored.credential.site);
-        let url = format!("{base}/v1/chat/completions");
+        let url = format!("{base}/v2");
         let mut header_rows: Vec<(String, String)> =
             creds::signed_headers(&stored.credential, base)
                 .into_iter()
@@ -57,7 +57,8 @@ impl WorkBuddyUpstream {
         header_rows.extend(creds::chat_headers());
         let target = Target::new(ProtocolId::OPENAI_CHAT, url)
             .credential(CredentialStyle::Bearer)
-            .headers(header_rows);
+            .headers(header_rows)
+            .request_body_gzip(true);
         wire::execute(
             self.host.http(),
             &target,

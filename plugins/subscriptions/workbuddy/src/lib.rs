@@ -253,25 +253,52 @@ impl Subscription for WorkBuddy {
             return Ok(Vec::new());
         }
         let base = self.endpoints.base_for(stored.credential.site);
-        let url = format!("{base}/billing/meter/get-user-resource-summary");
-        let call = creds::apply_signed_headers(
-            hofund_plugin_sdk::Call::post(url)
-                .header("Accept", "application/json")
-                .header("Content-Type", "application/json"),
+        let reply = meter(
+            host,
             &stored.credential,
             base,
-        );
-        let reply = call.bytes(b"{}").fetch(host.http()).await?;
+            "/billing/meter/get-user-resource-summary",
+            b"{}".to_vec(),
+        )
+        .await?;
         match reply.status() {
-            200..=299 => quota::windows(reply.body()),
-            401 => Err(PluginError::auth(
-                "WorkBuddy refused the sign-in while reading billing",
-            )),
-            status => Err(PluginError::status_error(
-                status,
-                "WorkBuddy did not return billing",
-            )),
+            200..=299 => {}
+            401 => {
+                return Err(PluginError::auth(
+                    "WorkBuddy refused the sign-in while reading billing",
+                ));
+            }
+            status => {
+                return Err(PluginError::status_error(
+                    status,
+                    "WorkBuddy did not return billing",
+                ));
+            }
         }
+        let mut summary = quota::summary(reply.body(), stored.credential.site)?;
+        if summary.windows.is_empty() {
+            if let Ok(reply) = meter(
+                host,
+                &stored.credential,
+                base,
+                "/billing/meter/get-enterprise-user-usage",
+                b"{}".to_vec(),
+            )
+            .await
+                && (200..300).contains(&reply.status())
+                && let Ok(Some(window)) = quota::enterprise(reply.body())
+            {
+                return Ok(vec![window]);
+            }
+            return Ok(summary.windows);
+        }
+        if summary.has_credits() {
+            let now = host.clock().now();
+            if let Ok(packages) = package_list(host, &stored.credential, base, now).await {
+                let _ = summary.apply_packages(&packages, now, stored.credential.site);
+            }
+        }
+        Ok(summary.windows)
     }
 
     async fn list_models(
@@ -318,6 +345,58 @@ impl Subscription for WorkBuddy {
     ) -> Result<AccountId, PluginError> {
         discover::import(home, reference, host).await
     }
+}
+
+async fn meter(
+    host: &HostContext,
+    credential: &creds::Credential,
+    base: &str,
+    path: &str,
+    body: Vec<u8>,
+) -> Result<hofund_plugin_sdk::Reply, PluginError> {
+    let call = creds::apply_signed_headers(
+        hofund_plugin_sdk::Call::post(format!("{base}{path}"))
+            .header("Accept", "application/json")
+            .header("Content-Type", "application/json"),
+        credential,
+        base,
+    );
+    call.bytes(body).fetch(host.http()).await
+}
+
+async fn package_list(
+    host: &HostContext,
+    credential: &creds::Credential,
+    base: &str,
+    now: std::time::SystemTime,
+) -> Result<Vec<hofund_plugin_sdk::json::Value>, PluginError> {
+    let mut out = Vec::new();
+    for (path, free) in [
+        ("/billing/meter/get-user-resource-paid-packages", false),
+        ("/billing/meter/get-user-resource-free-packages", true),
+    ] {
+        for page in 1..=quota::package_page_limit() {
+            let body = if free {
+                quota::free_package_body(page, now)
+            } else {
+                quota::paid_package_body(page)
+            };
+            let reply = meter(host, credential, base, path, body).await?;
+            if !(200..300).contains(&reply.status()) {
+                return Err(PluginError::status_error(
+                    reply.status(),
+                    "WorkBuddy did not return billing packages",
+                ));
+            }
+            let page = quota::package_page(reply.body())?;
+            let count = page.accounts.len();
+            out.extend(page.accounts);
+            if count < 200 || out.len() >= page.total_count {
+                break;
+            }
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

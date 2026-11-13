@@ -227,8 +227,8 @@ fn a2c_28_models_from_config_json() {
 
 #[test]
 fn a2c_37_quota_without_credit_fields_is_empty() {
-    let windows = quota::windows(br#"{"data":{"other":1}}"#).expect("q");
-    assert!(windows.is_empty());
+    let summary = quota::summary(br#"{"data":{"other":1}}"#, Site::China).expect("q");
+    assert!(summary.windows.is_empty());
 }
 
 #[test]
@@ -295,6 +295,14 @@ fn a2c_24_upstream_sends_workbuddy_user_agent() {
     let query = ProbeQuery::new(ProtocolId::OPENAI_CHAT, "deepseek-v3").expect("query");
     block_on(upstream.probe(&query)).expect("probe");
     let call = &host.http().calls()[0];
+    assert_eq!(call.uri(), format!("{CN}/v2/chat/completions"));
+    assert_eq!(call.header("content-encoding"), Some("gzip"));
+    let body = hofund_plugin_sdk::inflate::gzip(call.body()).expect("gzip chat body");
+    let body: json::Value = json::from_slice(&body).expect("chat JSON");
+    assert_eq!(
+        body.get("model").and_then(json::Value::as_str),
+        Some("deepseek-v3")
+    );
     assert!(
         call.sensitive_headers()
             .iter()
@@ -309,8 +317,13 @@ fn a2c_24_upstream_sends_workbuddy_user_agent() {
 
 #[test]
 fn a2c_25_quota_from_billing_mock() {
-    let windows = quota::windows(br#"{"data":{"usedCredits":10,"totalCredits":100}}"#).expect("q");
-    assert_eq!(windows[0].name(), "Credits");
+    let summary = quota::summary(
+        br#"{"data":{"Packages":[{"CycleTotalCapacity":"100","CycleUsedCapacity":"10"}]}}"#,
+        Site::China,
+    )
+    .expect("q");
+    assert_eq!(summary.windows[0].name(), "Credits");
+    assert_eq!(summary.windows[0].used(), 10);
 }
 
 #[test]
@@ -408,6 +421,130 @@ fn r55_upstream_restriction_rests_account_with_reference_hint() {
     assert_eq!(error.status(), Some(403));
     assert_eq!(error.retry_after(), Some(Duration::from_secs(2 * 60 * 60)));
     assert!(error.message().ends_with(crate::errors::RESTRICTED_HINT));
+}
+
+#[test]
+fn r55b_enterprise_profile_usage_uses_enterprise_meter() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, 4_000_000_000_000);
+    host.http().enqueue(
+        br#"{"code":0,"data":{"Packages":[],"SubscriptionPackageCode":"","IsPaidUser":false}}"#,
+    );
+    host.http().enqueue(
+        br#"{"code":0,"data":{"credit":196.13,"cycleStartTime":"2026-10-08 00:00:00","cycleResetTime":"2026-11-09 00:00:00","limitNum":2000}}"#,
+    );
+    let windows = block_on(subscription(&host, None).quota(&id, host.context())).expect("quota");
+    assert_eq!(windows.len(), 1);
+    assert_eq!(windows[0].name(), "Credits");
+    assert_eq!(windows[0].used(), 10);
+    assert_eq!(
+        windows[0].resets_at(),
+        hofund_plugin_sdk::time::parse_rfc3339("2026-11-08T16:00:00Z")
+    );
+    let calls = host.http().calls();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(
+        calls[0].uri(),
+        format!("{CN}/billing/meter/get-user-resource-summary")
+    );
+    assert_eq!(
+        calls[1].uri(),
+        format!("{CN}/billing/meter/get-enterprise-user-usage")
+    );
+    for call in &calls {
+        assert_eq!(call.body(), b"{}");
+        assert_eq!(call.header("content-encoding"), None);
+    }
+}
+
+#[test]
+fn r55b_refused_enterprise_meter_leaves_summary_empty() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, 4_000_000_000_000);
+    host.http().enqueue(br#"{"code":0,"data":{"Packages":[]}}"#);
+    host.http().enqueue_response(
+        400,
+        &[],
+        br#"{"code":10001,"msg":"uid or enterpriseID is empty"}"#.to_vec(),
+    );
+    let windows = block_on(subscription(&host, None).quota(&id, host.context())).expect("quota");
+    assert!(windows.is_empty());
+    assert_eq!(host.http().calls().len(), 2);
+}
+
+#[test]
+fn r55b_profile_usage_adds_listed_extra_and_plan_reset() {
+    let dir = tempfile::tempdir().expect("dir");
+    let now = hofund_plugin_sdk::time::parse_rfc3339("2026-10-26T06:00:00Z").expect("now");
+    let host = host_at(&dir, now);
+    let id = seed(&host, 4_000_000_000_000);
+    host.http().enqueue(
+        br#"{"code":0,"data":{"SubscriptionPackageCode":"","Packages":[{"PackageCode":"TCACA_code_008_cfWoLwvjU4","CycleTotalCapacity":"500","CycleUsedCapacity":"0"}]}}"#,
+    );
+    host.http()
+        .enqueue(br#"{"code":0,"data":{"TotalCount":0,"Accounts":[]}}"#);
+    host.http().enqueue(
+        br#"{"code":0,"data":{"TotalCount":2,"Accounts":[
+            {"PackageCode":"TCACA_code_007_nzdH5h4Nl0","CapacityType":1,"CycleCapacitySizePrecise":"300","CycleCapacityRemainPrecise":"280","DeductionEndTime":1793300000000,"CycleEndTime":"2026-10-30 01:34:42"},
+            {"PackageCode":"TCACA_code_008_cfWoLwvjU4","CapacityType":4,"CycleCapacitySizePrecise":"500","CycleCapacityRemainPrecise":"500","DeductionEndTime":2050936768000,"CycleStartTime":"2026-10-01 00:00:00","CycleEndTime":"2026-10-31 23:59:59"}
+        ]}}"#,
+    );
+    let windows = block_on(subscription(&host, None).quota(&id, host.context())).expect("quota");
+    assert_eq!(windows.len(), 2);
+    assert_eq!(windows[0].name(), "Credits");
+    assert_eq!(windows[0].used(), 0);
+    assert!(windows[0].blocking());
+    assert_eq!(
+        windows[0].resets_at(),
+        hofund_plugin_sdk::time::parse_rfc3339("2026-10-31T15:59:59Z")
+    );
+    assert_eq!(windows[1].name(), "Extra credits");
+    assert_eq!(windows[1].used(), 7);
+    assert!(!windows[1].blocking());
+
+    let calls = host.http().calls();
+    assert_eq!(calls.len(), 3);
+    assert_eq!(
+        calls[1].uri(),
+        format!("{CN}/billing/meter/get-user-resource-paid-packages")
+    );
+    assert_eq!(
+        calls[2].uri(),
+        format!("{CN}/billing/meter/get-user-resource-free-packages")
+    );
+    let paid: json::Value = json::from_slice(calls[1].body()).expect("paid request");
+    assert_eq!(
+        paid.get("PageNumber").and_then(json::Value::as_u64),
+        Some(1)
+    );
+    assert_eq!(
+        paid.get("PageSize").and_then(json::Value::as_u64),
+        Some(200)
+    );
+    assert_eq!(
+        paid.get("NeedRenewInfo").and_then(json::Value::as_bool),
+        Some(true)
+    );
+    assert!(
+        paid.get("PackageCodes")
+            .and_then(json::Value::as_array)
+            .is_some_and(|codes| codes.iter().any(|code| code == "TCACA_code_002_AkiJS3ZHF5"))
+    );
+    let free: json::Value = json::from_slice(calls[2].body()).expect("free request");
+    assert_eq!(
+        free.get("SlicePeriodStartTime")
+            .and_then(json::Value::as_str),
+        Some("2026-10-26 00:00:00")
+    );
+    assert_eq!(
+        free.get("SlicePeriodEndTime").and_then(json::Value::as_str),
+        Some("2026-10-26 23:59:59")
+    );
+    for call in &calls {
+        assert_eq!(call.header("content-encoding"), None);
+    }
 }
 
 fn sign_in_ctx(site: &str) -> SignInCtx {
