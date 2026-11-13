@@ -1260,6 +1260,7 @@ TierId::fn as_str (& self) -> & str
 Tool
 ToolArguments
 ToolArgumentsDelta
+ToolCallPart
 ToolChoice
 ToolChoiceMode
 ToolResultPart
