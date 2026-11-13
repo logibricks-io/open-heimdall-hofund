@@ -21,11 +21,23 @@ Heimdall 是那扇门。Hofund 是守门的剑。
 
 ## 状态
 
-**0.1.0 已准备。** 规范中间表示（IR），Anthropic Messages、OpenAI Chat Completions、OpenAI Responses 与 Generative Language API 的编解码（含流式），quirk 配置，上游适配器，按顺序的故障转移，本地 HTTP 服务，Claude Code、Codex CLI、Gemini CLI、OpenCode 的配置适配器，以及菜单栏应用已经实现。字段对照见 [docs/codecs.md](docs/codecs.md)（英文）。本仓库还没有推送版本标签，也没有发布 GitHub Release。发布步骤见 [docs/release.md](docs/release.md)（英文）。
+**v0.2.0 尚未打标签。** 本仓库按冻结的参考实现（magpie `v0.1.3005`）计分，尚未发布 GitHub Release。发布步骤见 [docs/release.md](docs/release.md)（英文）。以下以当前 `main`（`74dbebbc`，2026-11-13）为准，未合并的 pull request 不记为已发布。多数订阅与路由工作仅有 mock 验证，尚未做真实账号冒烟。
 
-`hofund serve` 默认监听 `127.0.0.1:3425`，除非配置文件另有指定。所有 `/v1` 请求都需要 `hofund token show` 打印的 bearer token。命令有 `serve`、`config check`、`token show`、`token rotate`、`usage`，以及 `agent list`、`agent connect`、`agent disconnect`、`agent status`。
+规范中间表示（IR），Anthropic Messages、OpenAI Chat Completions、OpenAI Responses 与 Generative Language API 的编解码（含流式），quirk 配置，上游适配器，按顺序的故障转移，本地 HTTP 服务，Claude Code、Codex CLI、Gemini CLI、OpenCode 的配置适配器，以及菜单栏应用已经实现。字段对照见 [docs/codecs.md](docs/codecs.md)（英文）。`plugins/subscriptions` 下有十五个订阅插件，但请求转发并不整齐：
 
-## 计划中的能力
+- **Cursor：** 支持登录、导入、查模型和配额，以及 Agent Run 请求转发（R-8/R-9；偏差见 `docs/feature-parity.md`）。
+- **Claude Pro/Max：** 支持登录、刷新、查模型和配额，以及通过 Claude Code MCP 桥接转发请求（H8）。
+- **Devin：** 支持登录、导入、查模型和配额，以及订阅 chat（R-12/R-13）。
+- **Kiro：** 仅支持纯文本、非流式、无工具/图片的单次请求。
+- **Zed：** 支持原生 RSA 回环登录（R-56）和 POST `/completions` 上游（R-16；仅 mock 验证）。
+
+计分表与未合并工作见 [docs/feature-parity.md](docs/feature-parity.md)（英文）。
+
+`hofund serve` 默认监听 `127.0.0.1:3425`，除非配置文件另有指定。所有 `/v1` 请求都需要 `hofund token show` 打印的 bearer token。命令有 `serve`、`config check`、`token show`、`token rotate`、`usage`，以及 `agent list`、`agent connect`、`agent disconnect`、`agent status`，还有 `subscription list`、`sign-in`、`sign-out`、`refresh` 和 `quota`。
+
+## 范围
+
+下列条目已在 `main` 上实现，除非 [docs/feature-parity.md](docs/feature-parity.md)（英文）将对应行标为 Partial 或 Missing。v0.2.0 尚未打标签。
 
 - 以轮辐式（hub-and-spoke）结构在 LLM API 协议之间转换：Anthropic Messages、OpenAI Chat Completions、OpenAI Responses，以及 Generative Language API。每种协议只对照一份规范中间表示（IR）实现一次，而不是做成 N×M 的两两直译。
 - 编码代理的配置适配器（Claude Code、Codex、Gemini CLI、OpenCode 等）。适配器先生成修改计划，再把修改应用到代理自己的配置上，使任意代理都能调用任意模型。
