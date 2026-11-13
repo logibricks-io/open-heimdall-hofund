@@ -182,6 +182,15 @@ pub(crate) fn account_id_for_home(home: &Path, credential: &Credential) -> Accou
     agent_account_id(home)
 }
 
+pub(crate) fn browser_account_id(credential: &Credential) -> AccountId {
+    account_id_from(&[
+        "kiro",
+        "browser",
+        &credential.label,
+        &credential.provider.to_ascii_lowercase(),
+    ])
+}
+
 /// Resolves the agent home directory the same way the daemon does for [`AgentSignIn`].
 pub(crate) fn resolve_agent_home(decl: &AgentSignIn) -> Result<PathBuf, PluginError> {
     let home_env = std::env::var(decl.home_env()).ok();

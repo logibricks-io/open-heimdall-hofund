@@ -745,6 +745,11 @@ where
         let _ = sender.send(challenge.clone());
     }
     let proof = match challenge {
+        SignInChallenge::OpenUrl { url }
+            if subscription.flow().kind() == SignInFlowKind::Bridge =>
+        {
+            return drive_managed_browser(subscription, host, ctx, paste, &url, out).await;
+        }
         SignInChallenge::OpenUrl { url } => {
             say(
                 out,
@@ -794,6 +799,152 @@ where
         .map_err(failed)
 }
 
+async fn drive_managed_browser<P, W>(
+    subscription: &dyn Subscription,
+    host: &HostContext,
+    ctx: &SignInCtx,
+    paste: &mut P,
+    initial_url: &str,
+    out: &mut W,
+) -> Result<AccountId, SignInError>
+where
+    P: Stream<Item = String> + Unpin,
+    W: Write,
+{
+    let failed = |error: hofund_plugin_api::PluginError| SignInError::failed(error.to_string());
+    let mut current_url = initial_url.to_owned();
+    say_browser_url(out, &current_url)?;
+    let finish = subscription.complete_sign_in(ctx, SignInProof::Await, host);
+    tokio::pin!(finish);
+    loop {
+        tokio::select! {
+            result = &mut finish => return result.map_err(failed),
+            line = paste.next() => {
+                match line {
+                    Some(line) if !line.trim().is_empty() => {
+                        let next = open_pasted_callback(&current_url, &line).await.map_err(failed)?;
+                        if let Some(next) = next {
+                            current_url = next;
+                            say_browser_url(out, &current_url)?;
+                        }
+                    }
+                    Some(_) => {}
+                    None => return finish.await.map_err(failed),
+                }
+            }
+        }
+    }
+}
+
+fn say_browser_url<W: Write>(out: &mut W, url: &str) -> Result<(), SignInError> {
+    say(
+        out,
+        &format!(
+            "Open this address in a browser:\n  {url}\n\
+             Waiting for the browser. If it cannot reach this machine, paste the \
+             address the browser ended on and press Enter."
+        ),
+    )
+}
+
+fn is_loopback_http(url: &url::Url) -> bool {
+    url.scheme() == "http"
+        && url.username().is_empty()
+        && url.password().is_none()
+        && matches!(
+            url.host(),
+            Some(url::Host::Domain("localhost"))
+                | Some(url::Host::Ipv4(std::net::Ipv4Addr::LOCALHOST))
+                | Some(url::Host::Ipv6(std::net::Ipv6Addr::LOCALHOST))
+        )
+}
+
+fn loopback_ports(page: &str) -> Vec<u16> {
+    let mut ports = Vec::new();
+    let Ok(page) = url::Url::parse(page) else {
+        return ports;
+    };
+    for (_, value) in page.query_pairs() {
+        let Ok(url) = url::Url::parse(&value) else {
+            continue;
+        };
+        if is_loopback_http(&url)
+            && let Some(port) = url.port_or_known_default()
+            && !ports.contains(&port)
+        {
+            ports.push(port);
+        }
+    }
+    ports
+}
+
+pub(crate) async fn open_pasted_callback(
+    page: &str,
+    raw: &str,
+) -> Result<Option<String>, hofund_plugin_api::PluginError> {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let mismatch =
+        || hofund_plugin_api::PluginError::config("the pasted address is not for this sign-in");
+    let ports = loopback_ports(page);
+    let pasted = url::Url::parse(raw.trim()).map_err(|_| mismatch())?;
+    let port = pasted.port_or_known_default().ok_or_else(mismatch)?;
+    if !is_loopback_http(&pasted) || !ports.contains(&port) {
+        return Err(mismatch());
+    }
+    let mut target = pasted.path().to_owned();
+    if let Some(query) = pasted.query() {
+        target.push('?');
+        target.push_str(query);
+    }
+    let mut stream = tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))
+        .await
+        .map_err(|_| {
+            hofund_plugin_api::PluginError::io("the pasted callback listener is unavailable")
+        })?;
+    let request = format!("GET {target} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .map_err(|_| hofund_plugin_api::PluginError::io("cannot open the pasted callback"))?;
+    let mut reply = String::new();
+    stream
+        .take(64 * 1024)
+        .read_to_string(&mut reply)
+        .await
+        .map_err(|_| hofund_plugin_api::PluginError::io("cannot read the pasted callback reply"))?;
+    let status = reply
+        .split_whitespace()
+        .nth(1)
+        .and_then(|status| status.parse::<u16>().ok())
+        .ok_or_else(|| {
+            hofund_plugin_api::PluginError::decode("the callback listener sent an invalid reply")
+        })?;
+    if status == 404 || status == 409 {
+        return Err(mismatch());
+    }
+    if !(200..400).contains(&status) {
+        return Err(hofund_plugin_api::PluginError::status_error(
+            status,
+            "the callback listener refused the pasted address",
+        ));
+    }
+    let location = reply.lines().find_map(|line| {
+        let (name, value) = line.trim_end_matches('\r').split_once(':')?;
+        name.eq_ignore_ascii_case("location")
+            .then(|| value.trim().to_owned())
+    });
+    let next = location.filter(|location| {
+        url::Url::parse(location).is_ok_and(|next| {
+            next.scheme() == "https"
+                && loopback_ports(location)
+                    .iter()
+                    .any(|next| ports.contains(next))
+        })
+    });
+    Ok(next)
+}
+
 fn say<W: Write>(out: &mut W, text: &str) -> Result<(), SignInError> {
     writeln!(out, "{text}")
         .and_then(|()| out.flush())
@@ -827,6 +978,7 @@ mod tests {
     #[derive(Clone, Copy)]
     enum Mode {
         OpenUrl,
+        ManagedOpenUrl,
         Device,
         Instructions,
         Hang,
@@ -874,6 +1026,9 @@ mod tests {
                         url: "https://auth.example.test/authorize?state=right".to_owned(),
                     })
                 }
+                Mode::ManagedOpenUrl => Ok(SignInChallenge::OpenUrl {
+                    url: "https://app.example.test/signin".to_owned(),
+                }),
                 Mode::Device | Mode::Hang => Ok(SignInChallenge::DeviceCode {
                     user_code: "WDJB-MJHT".to_owned(),
                     verification_url: "https://example.test/device".to_owned(),
@@ -992,7 +1147,13 @@ mod tests {
         let fake = Arc::new(Fake {
             id: plugin,
             mode,
-            flow: SignInFlow::Pkce,
+            flow: if matches!(mode, Mode::ManagedOpenUrl) {
+                SignInFlow::Bridge {
+                    command: hofund_plugin_api::BinaryName::new("fake"),
+                }
+            } else {
+                SignInFlow::Pkce
+            },
             calls: Arc::clone(&calls),
         });
         Rig {
@@ -1482,5 +1643,90 @@ mod tests {
             error.to_string(),
             "this subscription has no per-account project setting"
         );
+    }
+
+    #[tokio::test]
+    async fn r51b_managed_browser_paste_forwards_and_returns_https_redirect() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("listener");
+        let port = listener.local_addr().expect("address").port();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut head = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            while !head.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = stream.read(&mut chunk).await.expect("read");
+                if read == 0 {
+                    break;
+                }
+                head.extend_from_slice(&chunk[..read]);
+            }
+            let request = String::from_utf8(head).expect("request");
+            assert!(request.starts_with("GET /signin/callback?code=synthetic&state=state "));
+            let location = format!(
+                "https://oidc.example.test/authorize?redirect_uri=http%3A%2F%2F127.0.0.1%3A{port}%2Foauth%2Fcallback"
+            );
+            stream
+                .write_all(
+                    format!("HTTP/1.1 302 Found\r\nLocation: {location}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n")
+                        .as_bytes(),
+                )
+                .await
+                .expect("reply");
+            stream.shutdown().await.expect("close");
+            location
+        });
+        let redirect = format!("http://localhost:{port}");
+        let page = url::Url::parse_with_params(
+            "https://app.example.test/signin",
+            &[("redirect_uri", redirect)],
+        )
+        .expect("page")
+        .to_string();
+        let pasted = format!("http://localhost:{port}/signin/callback?code=synthetic&state=state");
+        let next = super::open_pasted_callback(&page, &pasted)
+            .await
+            .expect("pasted callback")
+            .expect("redirect");
+        assert_eq!(next, server.await.expect("server"));
+    }
+
+    #[tokio::test]
+    async fn r51b_managed_browser_paste_rejects_other_hosts_and_ports() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("listener");
+        let port = listener.local_addr().expect("address").port();
+        let page =
+            format!("https://app.example.test/signin?redirect_uri=http%3A%2F%2Flocalhost%3A{port}");
+        for pasted in [
+            "https://example.test/callback?code=synthetic".to_owned(),
+            format!("http://localhost:{}/callback?code=synthetic", port + 1),
+        ] {
+            super::open_pasted_callback(&page, &pasted)
+                .await
+                .expect_err("not this callback");
+        }
+    }
+
+    #[tokio::test]
+    async fn r51b_bridge_open_url_completes_without_kernel_loopback_binding() {
+        let rig = new_rig(Mode::ManagedOpenUrl);
+        let mut out = Vec::new();
+        let result = drive_sign_in(
+            rig.fake.as_ref(),
+            rig.test.context(),
+            rig.test.loopback(),
+            rig.ctx(),
+            stream::empty(),
+            std::future::pending::<()>(),
+            Duration::from_secs(10),
+            &mut out,
+        )
+        .await
+        .expect("managed browser sign-in");
+        assert_eq!(result.as_str(), "fake-account");
+        assert_eq!(*rig.calls.proofs.lock().expect("proofs"), ["await"]);
     }
 }

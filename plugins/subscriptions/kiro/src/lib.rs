@@ -21,6 +21,7 @@ mod discover;
 mod kiro_body;
 mod kiro_stream;
 mod models;
+mod portal;
 mod quota;
 mod refresh;
 mod upstream;
@@ -47,6 +48,14 @@ pub struct Endpoints {
     pub management: String,
     /// Refresh token URL; `{region}` is substituted per account.
     pub refresh: String,
+    /// Portal page for browser sign-in.
+    pub portal: String,
+    /// Social code-exchange service.
+    pub auth: String,
+    /// AWS OIDC base; `{region}` is substituted per sign-in.
+    pub oidc: String,
+    /// Callback ports in reference order. Tests inject port zero.
+    pub callback_ports: Vec<u16>,
 }
 
 impl Endpoints {
@@ -77,6 +86,12 @@ impl Default for Endpoints {
             runtime: "https://runtime.{region}.kiro.dev".to_owned(),
             management: "https://management.{region}.kiro.dev".to_owned(),
             refresh: "https://prod.{region}.auth.desktop.kiro.dev/refreshToken".to_owned(),
+            portal: "https://app.kiro.dev".to_owned(),
+            auth: "https://prod.us-east-1.auth.desktop.kiro.dev".to_owned(),
+            oidc: "https://oidc.{region}.amazonaws.com".to_owned(),
+            callback_ports: vec![
+                3128, 4649, 6588, 8008, 9091, 49153, 50153, 51153, 52153, 53153,
+            ],
         }
     }
 }
@@ -148,19 +163,32 @@ impl SubscriptionFactory for KiroFactory {
     }
 }
 
+enum Pending {
+    Ide(PathBuf),
+    Cli(PathBuf),
+    Browser(portal::Pending),
+}
+
 struct Kiro {
     endpoints: Arc<Endpoints>,
     cli_command: Option<PathBuf>,
     flow: SignInFlow,
-    pending: Mutex<HashMap<String, PathBuf>>,
+    pending: Mutex<HashMap<String, Pending>>,
 }
 
 impl Kiro {
-    fn take_pending(&self, session: &str) -> Option<PathBuf> {
+    fn take_pending(&self, session: &str) -> Option<Pending> {
         self.pending
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(session)
+    }
+
+    fn put_pending(&self, session: &str, pending: Pending) {
+        self.pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(session.to_owned(), pending);
     }
 }
 
@@ -177,24 +205,35 @@ impl Subscription for Kiro {
     async fn start_sign_in(
         &self,
         ctx: &SignInCtx,
-        _host: &HostContext,
+        host: &HostContext,
     ) -> Result<SignInChallenge, PluginError> {
         drop(self.take_pending(ctx.session()));
-        let path = creds::discover_token_path();
-        creds::read_token_file(&path).map_err(|error| {
-            PluginError::auth(format!(
-                "Kiro is not signed in at {}; {}",
-                path.display(),
-                error.message()
-            ))
-        })?;
-        self.pending
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(ctx.session().to_owned(), path);
-        SignInChallenge::instructions(
-            "Kiro is signed in on this machine; confirm to import its token file.",
-        )
+        if matches!(ctx.option("site"), Some("current" | "import")) {
+            if let Ok(path) = cli_db::default_path()
+                && let Some(credential) = cli_db::read_at(&path)?
+            {
+                let _ = credential;
+                self.put_pending(ctx.session(), Pending::Cli(path));
+                return SignInChallenge::instructions(
+                    "kiro-cli is signed in on this machine; confirm to import its database sign-in.",
+                );
+            }
+            let path = creds::discover_token_path();
+            creds::read_token_file(&path).map_err(|error| {
+                PluginError::auth(format!(
+                    "Kiro is not signed in at {}; {}",
+                    path.display(),
+                    error.message()
+                ))
+            })?;
+            self.put_pending(ctx.session(), Pending::Ide(path));
+            return SignInChallenge::instructions(
+                "Kiro is signed in on this machine; confirm to import its token file.",
+            );
+        }
+        let (pending, challenge) = portal::start(ctx, host, Arc::clone(&self.endpoints)).await?;
+        self.put_pending(ctx.session(), Pending::Browser(pending));
+        Ok(challenge)
     }
 
     async fn complete_sign_in(
@@ -205,19 +244,33 @@ impl Subscription for Kiro {
     ) -> Result<AccountId, PluginError> {
         let SignInProof::Await = proof else {
             return Err(PluginError::config(
-                "Kiro sign-in completes once the token file is imported",
+                "Kiro sign-in completes from its browser callback or an existing sign-in",
             ));
         };
-        let Some(path) = self.take_pending(ctx.session()) else {
+        let Some(pending) = self.take_pending(ctx.session()) else {
             return Err(PluginError::config(
                 "no Kiro sign-in is in progress for this session",
             ));
         };
-        let home = path
-            .parent()
-            .ok_or_else(|| PluginError::config("Kiro token file has no parent directory"))?;
-        let credential = creds::read_token_file(&path)?;
-        discover::store(home, &credential, host).await
+        match pending {
+            Pending::Ide(path) => {
+                let home = path.parent().ok_or_else(|| {
+                    PluginError::config("Kiro token file has no parent directory")
+                })?;
+                let credential = creds::read_token_file(&path)?;
+                discover::store(home, &credential, host).await
+            }
+            Pending::Cli(path) => {
+                let credential = cli_db::read_at(&path)?.ok_or_else(|| {
+                    PluginError::auth("kiro-cli no longer has a readable sign-in")
+                })?;
+                discover::store(Path::new(""), &credential, host).await
+            }
+            Pending::Browser(pending) => {
+                let credential = portal::complete(pending).await?;
+                discover::store_browser(&credential, host).await
+            }
+        }
     }
 
     async fn cancel_sign_in(
@@ -354,6 +407,8 @@ impl Subscription for Kiro {
 
 #[cfg(test)]
 mod conformance;
+#[cfg(test)]
+mod portal_tests;
 #[cfg(test)]
 mod r51b_tests;
 #[cfg(test)]

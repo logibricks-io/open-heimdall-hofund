@@ -100,3 +100,17 @@ pub(crate) async fn store(
     }
     store_credential(home, &credential, host).await
 }
+
+pub(crate) async fn store_browser(
+    credential: &Credential,
+    host: &HostContext,
+) -> Result<AccountId, PluginError> {
+    let id = creds::browser_account_id(credential);
+    let account = host
+        .accounts()
+        .account(id.clone(), credential.label.clone())?;
+    host.accounts()
+        .upsert(account, creds::secret_blob(credential).to_secret())
+        .await?;
+    Ok(id)
+}
