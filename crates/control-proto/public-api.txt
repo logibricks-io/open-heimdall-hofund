@@ -426,6 +426,25 @@ HealthResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize,
 HealthResponse.api_version
 HealthResponse.daemon_version
 HealthResponse.version
+LibraryAgent #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+LibraryAgent.id
+LibraryAgent.instructions
+LibraryAgent.mcp
+LibraryAgent.name
+LibraryAgent.skills
+LibraryResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+LibraryResponse.agents
+LibraryResponse.dir
+LibraryResponse.error
+LibraryResponse.rows
+LibraryResponse.version
+LibraryRow #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+LibraryRow.about
+LibraryRow.bad
+LibraryRow.kind
+LibraryRow.name
+LibraryRow.on
+LibraryRow.own
 ListEnvelope derives(Clone, Debug, PartialEq, Serialize, Deserialize)
 ListEnvelope.data
 ListEnvelope.object
