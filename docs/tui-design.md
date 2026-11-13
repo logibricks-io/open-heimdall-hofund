@@ -425,11 +425,11 @@ Consent is part of the list call so the empty state matches `sessNothing`.
 
 `GET /v1/hofund/sessions?days=&model=&folder=&limit=`
 
-`days` is `1`, `7`, `30`, `90`, or `0` for all. Response:
+`days` is `1`, `7`, `30`, `90`, or `0` for all. `limit` defaults to and is clamped at 5000 rows. Response:
 
 ```text
 {version, consent: {asked, enabled: [agent id]},
- sessions: [{id, agent, title, cwd, last_ms, models: [string],
+ sessions: [{id, agent, title, cwd, last_ms, models: [string], subagents: [string],
              tokens, cost, unpriced, resume}]}
 ```
 

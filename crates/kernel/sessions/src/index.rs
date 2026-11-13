@@ -46,7 +46,16 @@ pub struct ReadOutcome {
 pub fn read_incremental<R: Read>(
     reader: &mut R,
     offset: u64,
+    on_value: impl FnMut(&Value),
+) -> io::Result<ReadOutcome> {
+    read_incremental_cancellable(reader, offset, on_value, || false)
+}
+
+pub(crate) fn read_incremental_cancellable<R: Read>(
+    reader: &mut R,
+    offset: u64,
     mut on_value: impl FnMut(&Value),
+    mut cancelled: impl FnMut() -> bool,
 ) -> io::Result<ReadOutcome> {
     let mut outcome = ReadOutcome {
         offset,
@@ -57,6 +66,12 @@ pub fn read_incremental<R: Read>(
     let mut long = false;
     let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
     loop {
+        if cancelled() {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "session read cancelled",
+            ));
+        }
         if position >= MAX_FILE_BYTES {
             outcome.cut = true;
             break;
@@ -64,6 +79,12 @@ pub fn read_incremental<R: Read>(
         let remaining = usize::try_from(MAX_FILE_BYTES - position).unwrap_or(usize::MAX);
         let capacity = buffer.len().min(remaining);
         let read = reader.read(&mut buffer[..capacity])?;
+        if cancelled() {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "session read cancelled",
+            ));
+        }
         if read == 0 {
             break;
         }
@@ -886,6 +907,25 @@ mod tests {
         assert_eq!(one.lines, 1);
         assert_eq!(one.offset, 8);
         assert!(!one.cut);
+    }
+
+    #[test]
+    fn cancellable_incremental_read_stops_between_chunks() {
+        let input = format!("{{}}\n{}{{}}\n", " ".repeat(70_000));
+        let stop = Arc::new(AtomicUsize::new(0));
+        let parsed = Arc::clone(&stop);
+        let cancelled = Arc::clone(&stop);
+        let error = read_incremental_cancellable(
+            &mut std::io::Cursor::new(input),
+            0,
+            move |_| {
+                parsed.fetch_add(1, Ordering::SeqCst);
+            },
+            move || cancelled.load(Ordering::SeqCst) > 0,
+        )
+        .expect_err("cancelled read");
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+        assert_eq!(stop.load(Ordering::SeqCst), 1);
     }
 
     #[test]

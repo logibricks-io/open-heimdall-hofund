@@ -1080,6 +1080,7 @@ SessionSummary.last_ms
 SessionSummary.models
 SessionSummary.read_only
 SessionSummary.resume
+SessionSummary.subagents
 SessionSummary.title
 SessionSummary.tokens
 SessionSummary.unpriced
