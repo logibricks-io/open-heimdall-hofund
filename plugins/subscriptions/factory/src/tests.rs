@@ -184,6 +184,49 @@ fn a2b_13_refresh_rotates_tokens_via_workos() {
     );
 }
 
+fn check_transient_refresh(status: Option<u16>) {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = TestHost::open_for_at(
+        PluginKind::Subscription,
+        plugin(),
+        dir.path(),
+        std::time::UNIX_EPOCH + std::time::Duration::from_millis(4_000_000_000_000 - 60_000),
+    );
+    let id = seed_oauth(&host);
+    match status {
+        Some(status) => {
+            host.http()
+                .enqueue_response(status, &[], b"temporarily unavailable".to_vec())
+        }
+        None => host.http().enqueue_connect("offline"),
+    }
+    let bearer = block_on(tokens::bearer(host.context(), &endpoints(), &id))
+        .expect("request-time refresh keeps an unexpired bearer");
+    assert_eq!(secret_text(&bearer.token), "factory-access-1");
+
+    match status {
+        Some(status) => {
+            host.http()
+                .enqueue_response(status, &[], b"temporarily unavailable".to_vec())
+        }
+        None => host.http().enqueue_connect("offline"),
+    }
+    let error = block_on(tokens::refresh_account(host.context(), &endpoints(), &id))
+        .expect_err("explicit refresh reports transient failure");
+    if let Some(status) = status {
+        assert_eq!(error.status(), Some(status));
+    } else {
+        assert_eq!(error.kind(), PluginErrorKind::Connect);
+    }
+}
+
+#[test]
+fn r52_transient_refresh_grace_is_request_time_only() {
+    for status in [Some(429), Some(503), None] {
+        check_transient_refresh(status);
+    }
+}
+
 #[test]
 fn a2b_14_model_catalog_lists_factory_models() {
     let list = models::catalog_at(std::time::SystemTime::now()).expect("catalog");

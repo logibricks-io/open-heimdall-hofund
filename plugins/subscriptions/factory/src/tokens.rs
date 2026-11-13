@@ -159,7 +159,13 @@ pub(crate) async fn bearer(
     let access = blob
         .secret("access_token")
         .ok_or_else(|| PluginError::auth("the stored Factory sign-in has no access token"))?;
-    let job = refresh_oauth(host.clone(), endpoints.clone(), account.clone(), access);
+    let job = refresh_oauth(
+        host.clone(),
+        endpoints.clone(),
+        account.clone(),
+        access,
+        true,
+    );
     detached(host.scheduler(), "factory-refresh", job).await
 }
 
@@ -181,9 +187,15 @@ pub(crate) async fn refresh_account(
     let access = blob
         .secret("access_token")
         .ok_or_else(|| PluginError::auth("the stored Factory sign-in has no access token"))?;
-    refresh_oauth(host.clone(), endpoints.clone(), account.clone(), access)
-        .await
-        .map(|_| ())
+    refresh_oauth(
+        host.clone(),
+        endpoints.clone(),
+        account.clone(),
+        access,
+        false,
+    )
+    .await
+    .map(|_| ())
 }
 
 async fn refresh_oauth(
@@ -191,6 +203,7 @@ async fn refresh_oauth(
     endpoints: Endpoints,
     account: AccountId,
     stale: SecretString,
+    allow_unexpired_grace: bool,
 ) -> Result<Bearer, PluginError> {
     let lease = host.accounts().lease(&account, LEASE_WAIT).await?;
     let blob = stored(lease.secret())?;
@@ -220,7 +233,7 @@ async fn refresh_oauth(
         .await
     {
         Ok(reply) => reply,
-        Err(_error) if !expired(&blob, host.clock().now()) => {
+        Err(_error) if allow_unexpired_grace && !expired(&blob, host.clock().now()) => {
             return bearer_from_blob(&blob);
         }
         Err(error) => return Err(error),
@@ -233,7 +246,7 @@ async fn refresh_oauth(
         return Err(error);
     }
     if !(200..300).contains(&reply.status()) {
-        if !expired(&blob, host.clock().now()) {
+        if allow_unexpired_grace && !expired(&blob, host.clock().now()) {
             return bearer_from_blob(&blob);
         }
         return Err(PluginError::status_error(
@@ -304,5 +317,5 @@ pub(crate) async fn refresh_for_test(
     account: AccountId,
     stale: SecretString,
 ) -> Result<Bearer, PluginError> {
-    refresh_oauth(host, endpoints, account, stale).await
+    refresh_oauth(host, endpoints, account, stale, true).await
 }
