@@ -9,7 +9,7 @@ use hofund_plugin_api::{
 };
 use hofund_plugin_sdk::json::Value;
 use hofund_plugin_sdk::oauth::{SecretObject, form_body, same_secret, secret_text};
-use hofund_plugin_sdk::{Call, json, process, url};
+use hofund_plugin_sdk::{Call, json, process, tracing, url};
 
 use crate::Endpoints;
 use crate::cli_db;
@@ -54,25 +54,30 @@ pub(crate) async fn refresh_stale(
     if !same_secret(&current_refresh, &stored.credential.refresh) {
         return Ok(());
     }
+    let now = host.clock().now();
     let mut credential = stored.credential.clone();
     let mut refresh_used = credential.refresh.clone();
     if let Some(on_disk) = read_source(&credential) {
-        let changed = !same_secret(&on_disk.access, &credential.access)
-            || !same_secret(&on_disk.refresh, &credential.refresh);
-        if changed && on_disk.fresh_at(host.clock().now()) {
-            credential = on_disk;
+        if on_disk.fresh_at(now) && !same_secret(&on_disk.access, &credential.access) {
             lease
                 .commit(
-                    Some(credential.label.clone()),
-                    creds::secret_blob(&credential).to_secret(),
+                    Some(on_disk.label.clone()),
+                    creds::secret_blob(&on_disk).to_secret(),
                 )
                 .await?;
             return Ok(());
         }
-        if !secret_text(&on_disk.refresh).is_empty() {
-            credential = on_disk;
-            refresh_used = credential.refresh.clone();
+        if on_disk.fresh_at(now) && source_fields_differ(&stored.credential, &on_disk) {
+            lease
+                .commit(
+                    Some(on_disk.label.clone()),
+                    creds::secret_blob(&on_disk).to_secret(),
+                )
+                .await?;
+            return Ok(());
         }
+        credential = on_disk;
+        refresh_used = credential.refresh.clone();
     }
     if !credential.db_key.is_empty()
         && let Some(renewed) = delegated_cli(host, &credential, cli_command).await
@@ -135,6 +140,19 @@ pub(crate) async fn refresh_stale(
         .await?;
     write_back(&credential, &refresh_used);
     Ok(())
+}
+
+fn source_fields_differ(stored: &Credential, on_disk: &Credential) -> bool {
+    stored.profile_arn != on_disk.profile_arn
+        || stored.region != on_disk.region
+        || stored.label != on_disk.label
+        || stored.method != on_disk.method
+        || stored.provider != on_disk.provider
+        || stored.client_id != on_disk.client_id
+        || stored.client_id_hash != on_disk.client_id_hash
+        || stored.token_url != on_disk.token_url
+        || stored.expires_at != on_disk.expires_at
+        || !same_secret(&stored.client_secret, &on_disk.client_secret)
 }
 
 fn read_source(credential: &Credential) -> Option<Credential> {
@@ -202,22 +220,35 @@ fn cli_program(command: Option<&Path>) -> Option<PathBuf> {
     candidates.into_iter().find(|path| path.is_file())
 }
 
+#[allow(clippy::collapsible_if)]
 fn write_back(credential: &Credential, refresh_used: &SecretString) {
     if !credential.db_key.is_empty() && !credential.cli_db_path.is_empty() {
-        let _ = cli_db::write_refresh(
+        if let Err(error) = cli_db::write_refresh(
             Path::new(&credential.cli_db_path),
             &credential.db_key,
             credential,
             refresh_used,
-        );
+        ) {
+            tracing::warn!(
+                target: "hofund_plugin_subscription_kiro",
+                "kiro-cli refresh write-back failed: {}",
+                error.message()
+            );
+        }
     } else if !credential.ide_token_path.is_empty() {
-        let _ = creds::write_token_refresh_fields(
+        if let Err(error) = creds::write_token_refresh_fields(
             Path::new(&credential.ide_token_path),
             &credential.access,
             &credential.refresh,
             credential.expires_at,
             refresh_used,
-        );
+        ) {
+            tracing::warn!(
+                target: "hofund_plugin_subscription_kiro",
+                "Kiro IDE token refresh write-back failed: {}",
+                error.message()
+            );
+        }
     }
 }
 
@@ -290,7 +321,8 @@ async fn refresh_external(
 }
 
 fn refresh_status(status: u16, body: &[u8]) -> Result<Value, PluginError> {
-    if status == 401 || status == 403 {
+    if status == 400 || status == 401 || status == 403 {
+        let _ = body;
         return Err(PluginError::auth(
             "Kiro refused to refresh the sign-in; sign in again",
         ));

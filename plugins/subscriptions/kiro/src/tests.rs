@@ -405,6 +405,75 @@ fn a2b_41_idc_token_file_parsing_and_refresh() {
 }
 
 #[test]
+fn r24_kiro_refresh_400_reports_auth() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let home = dir.path().join("home");
+    let id = seed(
+        &host,
+        &home,
+        "a",
+        "r",
+        "1970-01-01T00:00:01Z",
+        "k@example.test",
+    );
+    host.http().enqueue_response(400, &[], br#"{}"#.to_vec());
+    let error = block_on(subscription(&host).refresh(&id, host.context())).expect_err("400");
+    assert_eq!(error.kind(), hofund_plugin_api::PluginErrorKind::Auth);
+}
+
+#[test]
+fn r24_kiro_refresh_adopts_profile_arn_without_network() {
+    let dir = tempfile::tempdir().expect("dir");
+    let cache = dir.path().join("cache");
+    std::fs::create_dir_all(&cache).expect("dir");
+    write_token(
+        &cache,
+        "shared-access",
+        "shared-refresh",
+        "2099-01-01T00:00:00Z",
+    );
+    let token_path = cache.join(TOKEN_FILE);
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let home = dir.path().join("seed-home");
+    let mut credential = creds::read_token_file(&token_path).expect("read");
+    credential.profile_arn = "arn:stored".to_owned();
+    credential.expires_at = Some(UNIX_EPOCH + Duration::from_secs(1));
+    credential.ide_token_path = token_path.to_string_lossy().into_owned();
+    let id = creds::account_id_for_home(&home, &credential);
+    block_on(async {
+        host.context()
+            .accounts()
+            .upsert(
+                host.context()
+                    .accounts()
+                    .account(id.clone(), "k@example.test".to_owned())
+                    .expect("account"),
+                creds::secret_blob(&credential).to_secret(),
+            )
+            .await
+            .expect("upsert");
+    });
+    std::fs::write(
+        &token_path,
+        r#"{"accessToken":"shared-access","refreshToken":"shared-refresh","expiresAt":"2099-01-01T00:00:00Z","region":"eu-west-1","profileArn":"arn:aws:codewhisperer:eu-west-1:1:profile/EU","email":"k@example.test"}"#,
+    )
+    .expect("write");
+    block_on(sub.refresh(&id, host.context())).expect("adopt");
+    assert!(host.http().calls().is_empty());
+    let secret = block_on(host.context().accounts().secret(&id))
+        .expect("read")
+        .expect("stored");
+    let parsed = SecretObject::parse(&secret).expect("blob");
+    assert_eq!(
+        parsed.text("profile_arn"),
+        Some("arn:aws:codewhisperer:eu-west-1:1:profile/EU")
+    );
+    assert_eq!(parsed.text("region"), Some("eu-west-1"));
+}
+
+#[test]
 fn a2b_43_refresh_adopts_ide_account_without_overwriting_token_file() {
     let dir = tempfile::tempdir().expect("dir");
     let cache = dir.path().join("cache");

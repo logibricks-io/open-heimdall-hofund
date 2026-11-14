@@ -5,16 +5,16 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
 
 use hofund_plugin_api::{AccountId, AgentSignIn, HostContext, PluginError, SecretString};
+use hofund_plugin_sdk::digest;
 use hofund_plugin_sdk::json::{self, Value};
 use hofund_plugin_sdk::oauth::{SecretObject, account_id_from, same_secret, secret_text};
 use hofund_plugin_sdk::time::parse_rfc3339;
 
 fn hash_hex(data: &[u8]) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    data.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
+    digest::sha256(data)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 pub(crate) const REFRESH_MARGIN: Duration = Duration::from_secs(120);
