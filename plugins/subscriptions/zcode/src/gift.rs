@@ -15,6 +15,7 @@ pub(crate) struct Balance {
     pub has_plan: bool,
     pub all_models: Vec<String>,
     pub usable_models: Vec<String>,
+    pub expires_in: Option<Duration>,
     pub windows: Vec<QuotaWindow>,
 }
 
@@ -108,6 +109,13 @@ fn parse(data: &Value, start_only: bool, host_now: f64) -> Result<Balance, Plugi
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| "Start Plan".to_owned());
     let several = live_plans.len() > 1;
+    let mut expires_in = None;
+    for plan in &live_plans {
+        cap_expiry(&mut expires_in, number(plan.get("ends_at")), now);
+        for bucket in balances.iter().filter(|bucket| same_plan(bucket, plan)) {
+            cap_expiry(&mut expires_in, number(bucket.get("expires_at")), now);
+        }
+    }
     let mut usable_models = Vec::new();
     for bucket in balances {
         if !live_plans.iter().any(|plan| same_plan(bucket, plan))
@@ -216,6 +224,7 @@ fn parse(data: &Value, start_only: bool, host_now: f64) -> Result<Balance, Plugi
         has_plan,
         all_models,
         usable_models,
+        expires_in,
         windows,
     })
 }
@@ -317,6 +326,15 @@ fn number(value: Option<&Value>) -> Option<f64> {
         Value::String(text) => text.trim().parse().ok(),
         _ => None,
     })
+}
+
+fn cap_expiry(current: &mut Option<Duration>, expiry: Option<f64>, now: f64) {
+    let remaining = expiry
+        .filter(|expiry| expiry.is_finite() && *expiry > now)
+        .and_then(|expiry| Duration::try_from_secs_f64(expiry - now).ok());
+    if remaining.is_some_and(|remaining| current.is_none_or(|current| remaining < current)) {
+        *current = remaining;
+    }
 }
 
 #[cfg(test)]
