@@ -18,6 +18,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   credit-event paths remain row k follow-ups.
   Refs R-9.
 
+- R-52d: the Factory subscription plugin discovers and imports built-in accounts
+  from mover OAuth and API-key shapes and from reference `factoryCreds` rows in
+  `logins.json`, without calling live whoami. Recorded fixtures only (`r52d_*`).
+  Refs R-52.
+
+- R-6: when Windows has no local `claude` on PATH (and no configured `command`),
+  Claude Code sign-in and short CLI calls (`auth status`, `/usage`, warm-up)
+  resolve the binary in a **running** WSL distro via mocked `wsl.exe` in tests,
+  with one-minute find cache, default-distro-first probes, `WSLENV` for
+  `CLAUDE_CONFIG_DIR`, and `HOFUND_WSL_RUN` argv wrapping (monotonic run
+  sequence; WSL listing and probes spawn through `HostContext`). MCP bridge model
+  turns still require a native path or explicit `command`. Per-login sign-in
+  proxy remains unported. Refs R-6.
+
+- R-49: the Gemini CLI subscription plugin remembers per-account, per-project
+  tier refusals from `fetchAvailableModels` HTTP 400 responses for 24 hours,
+  asks entitlements in reference order, and always ends with a no-tier list
+  before quota and model reads. Offline tests use injected clocks (`r49_*`).
+  Refs R-49.
+
 - R-9i: the Cursor subscription plugin coalesces in-flight `cursor-agent status`
   renewals across concurrent agent-token refreshes and reads platform `auth.json`
   on Windows (`%APPDATA%\\Cursor`) and other non-macOS hosts without touching

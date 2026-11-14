@@ -125,6 +125,13 @@ fn method_url(method: &str) -> String {
     format!("{CODE_ASSIST}/v1internal:{method}")
 }
 
+/// Responses `model_info` reads before quota or model listing.
+fn enqueue_model_info_prereqs(host: &TestHost) {
+    host.http()
+        .enqueue(br#"{"currentTier":{"id":"free-tier"}}"#.to_vec());
+    host.http().enqueue(br#"{"models":{}}"#.to_vec());
+}
+
 fn decode(text: &str) -> String {
     let bytes = text.as_bytes();
     let mut out = Vec::new();
@@ -708,7 +715,9 @@ fn r49_execute_and_quota_use_the_project_named_by_command() {
         hofund_plugin_sdk::json::from_str(&execute).expect("json");
     assert_eq!(execute["project"], "project-from-command");
 
+    enqueue_model_info_prereqs(&host);
     host.http().enqueue(QUOTA_REPLY.as_bytes().to_vec());
+    host.http().enqueue(br#"{"flags":[]}"#.to_vec());
     block_on(sub.quota(&id, host.context())).expect("quota");
     assert_eq!(
         posts_to(&host, &method_url("retrieveUserQuota")),
@@ -1285,6 +1294,7 @@ fn quota_windows_are_model_scoped() {
     let host = host(&dir);
     let id = seed(&host, &signed_in_blob(Some("proj-9")));
     host.http().enqueue(token_reply("acc-1", None, 3600));
+    enqueue_model_info_prereqs(&host);
     host.http().enqueue(QUOTA_REPLY.as_bytes().to_vec());
     host.http().enqueue(br#"{"flags":[]}"#.to_vec());
     let sub = subscription(&host);
@@ -1313,6 +1323,7 @@ fn models_follow_experiments_and_preview_quota() {
     let host = host(&dir);
     let id = seed(&host, &signed_in_blob(Some("proj-9")));
     host.http().enqueue(token_reply("acc-1", None, 3600));
+    enqueue_model_info_prereqs(&host);
     host.http().enqueue(QUOTA_REPLY.as_bytes().to_vec());
     host.http().enqueue(br#"{"flags":[]}"#.to_vec());
     let sub = subscription(&host);
@@ -1373,8 +1384,10 @@ fn r49_latest_experiment_maps_execute_and_quota_and_is_cached() {
     assert_eq!(posts_to(&host, TOKEN_URL).len(), 1);
     assert_eq!(posts_to(&host, &method_url("listExperiments")).len(), 1);
 
+    enqueue_model_info_prereqs(&host);
     host.http()
         .enqueue(br#"{"buckets":[{"modelId":"gemini-3-flash","remainingFraction":0.5}]}"#.to_vec());
+    host.http().enqueue(br#"{"flags":[]}"#.to_vec());
     let windows = block_on(sub.quota(&id, host.context())).expect("quota");
     assert_eq!(windows.len(), 1);
     assert_eq!(windows[0].name(), "gemini-3.8-flash");
@@ -1389,6 +1402,7 @@ fn r49_latest_experiment_controls_the_listed_models() {
     let host = host(&dir);
     let id = seed(&host, &signed_in_blob(Some("proj-9")));
     host.http().enqueue(token_reply("acc-1", None, 3600));
+    enqueue_model_info_prereqs(&host);
     host.http().enqueue(
         br#"{"buckets":[{"modelId":"gemini-3-pro-preview","remainingFraction":1}]}"#.to_vec(),
     );

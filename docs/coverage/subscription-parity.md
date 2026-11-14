@@ -17,11 +17,11 @@ Legend: **Done** = matches the reference at checklist granularity; **Partial** =
 | Devin (`devin`) | 12 | 6 | 0 | 1 | 0 |
 | Zed (`zed`) | 0 | 6 | 1 | 3 | 0 |
 | Kiro (`kiro`) | 8 | 9 | 0 | 2 | 0 |
-| Factory / Droid (`factory`) | 12 | 4 | 0 | 3 | 0 |
+| Factory / Droid (`factory`) | 13 | 3 | 0 | 3 | 0 |
 | Cline / ClinePass (`cline`) | 12 | 4 | 0 | 3 | 0 |
 | ChatGPT / Codex (`codex` backend) and ChatGPT API (`chatgpt-api`) | 10 | 10 | 1 | 0 | 0 |
 | GitHub Copilot (github.com and GHE) | 15 | 2 | 0 | 5 | 0 |
-| Gemini CLI (Code Assist) | 10 | 6 | 0 | 2 | 0 |
+| Gemini CLI (Code Assist) | 13 | 3 | 0 | 2 | 0 |
 | Google Antigravity | 11 | 4 | 1 | 1 | 0 |
 | SuperGrok (`grok`) | 14 | 2 | 0 | 2 | 0 |
 | Qoder (international + Qoder CN) | 13 | 5 | 0 | 2 | 0 |
@@ -48,7 +48,7 @@ Every other gap below maps to an existing plan item.
 
 | # | capability | reference v0.1.3005 behaviour | hofund 08035c9 | status | gap to close |
 |---|------------|------------------------------|----------------|--------|--------------|
-| a1 | sign-in: browser / loopback via Claude Code | `startClaudeSignIn` runs `claude auth login --claudeai` in a temp dir, relays URL via `TookOpenedURL` / `openedURLEnv` (`claude_signin.go:147-198`) | `lib.rs` + `cli.rs`: same command in private dir, link relay + optional browser wait (`lib.rs:3-8`, `36-45`) | Partial | WSL fallback when Windows has no local `claude` (`claude_signin.go:85-111`) not ported |
+| a1 | sign-in: browser / loopback via Claude Code | `startClaudeSignIn` runs `claude auth login --claudeai` in a temp dir, relays URL via `TookOpenedURL` / `openedURLEnv` (`claude_signin.go:147-198`) | `lib.rs` + `cli.rs` + `wslrun.rs` + `launcher.rs`: same command in private dir, link relay + optional browser wait; WSL fallback when Windows has no local `claude` (running distros only, mocked probes) | Partial | Per-login Bun proxy on sign-in (`netproxy.EnvForBunWith`) still Partial; `TookOpenedURL` / opened-URL env not ported; MCP bridge runs still native-only (`upstream.rs` `wsl_distro: None`) |
 | a2 | sign-in: pasted device/browser code | Reads code from sign-in flow stdin when link shows a code (`claude_signin.go:147-151` comment) | `SignInProof::Paste` writes code to child stdin (`lib.rs:342+`, tests in `tests.rs`) | Done | — |
 | a3 | sign-in: device code (standalone) | N/A — always mediated by Claude Code OAuth | N/A | N/A | — |
 | a4 | sign-in: API key | N/A for subscription OAuth | N/A | N/A | — |
@@ -70,7 +70,7 @@ Every other gap below maps to an existing plan item.
 | n | error classification | `ClaudeSignInRequired`, refusal vs retry (`claude_auth.go`); subscription refusals move account (`gateway/refusal_accounts_test.go`) | `bridge/failure.rs` maps sign-in, extra-usage, too-long, quota, 429, and crash text; room-full 503 sets vendor-neutral `skip_failover_same_plugin` (R-6g). Sign-in lapses are pinned to the login version captured at run start | Partial | Real-account classification (#304); image/timeout live wrapping still thin |
 | o | daily warmup | `KeepClaudeWindowsWarm` / `claude_warmup.go:77-79` | `daily_warmup` on spec + `account::warmup` (`lib.rs:54-63`, `454-459`) | Partial | Gateway-coordinated warm request path (probe) vs CLI-only warm-up |
 | p | agent sign-in switching | Switch with locks, CAS on refresh token (`logins.go` patterns; docs in subscriptions.md) | `write_agent_sign_in`, discover/import (`lib.rs:437-475`) | Partial | Full lock parity documented in subscriptions.md gaps (overage quota) |
-| q | vendor extras | WSL Claude, per-login proxy (`claude_signin.go:139-145`), setup-token inference-only | Proxy/WSL/setup-token absent | Partial | Proxy env for sign-in and runs; setup-token (`R-5`, `R-6`) |
+| q | vendor extras | WSL Claude, per-login proxy (`claude_signin.go:139-145`), setup-token inference-only | Sign-in, refresh, `auth status`, `/usage`, and warm-up go through `wsl.exe` when Windows has no native `claude` (`wslrun.rs` / `launcher.rs`; running distros only; mocked probes). Per-login Bun proxy, setup-token, and MCP bridge WSL (`upstream.rs` `wsl_distro: None`) are still absent | Partial | Per-login Bun proxy; setup-token (`R-5`); MCP bridge WSL |
 
 ### Gaps (Claude)
 
@@ -79,7 +79,7 @@ Every other gap below maps to an existing plan item.
 - Model list and scoped quota windows — **M**, **R-5**
 - macOS Keychain credential path — **M**, **R-5**
 - Setup-token sign-in and accounts — **S**, **R-5**
-- WSL fallback + per-login proxy wiring for Claude Code — **M**, **R-6** (new to the plan in this audit)
+- WSL fallback for Claude Code sign-in and short CLI (refresh, `auth status`, `/usage`, warm-up) landed in this slice (`wslrun.rs` / `launcher.rs`; running distros only). Remaining **R-6**: per-login Bun proxy, opened-URL env, and MCP bridge WSL (`upstream.rs` `wsl_distro: None`) — **M**
 
 ---
 
@@ -237,7 +237,7 @@ Structured-output prose for Chat, Responses, and Messages shipped in R-13b (`str
 | a1 | sign-in: WorkOS device | Plugin WorkOS device + production `CLIENT_ID` (`factory/index.mjs:12-16`) | `SignInFlowKind::Device`; the reference production client is used on device start, polling, and refresh (`lib.rs`, `sign_in.rs`, `tokens.rs`; `a2b_12`, `a2b_13`) | Done | Recorded HTTP only |
 | a2 | sign-in: API key `fk-` | `factoryCreds.Key` (`factory.go:68-71`); plugin whoami | `import_api_key` keeps the key, region, and prem host, without an OAuth org header or refresh (`sign_in.rs`; `a2b_18`) | Done | — |
 | a3 | browser OAuth loopback | N/A (device) | N/A | N/A | — |
-| b | import | Mover reads built-in accounts | API key + device completes to store | Partial | Built-in account migration remains absent |
+| b | import | Mover reads built-in accounts | `discover.rs` lists and `import_accounts` stores mover OAuth and API shapes plus built-in `factoryCreds` in `logins.json` without live whoami (`r52d_*`) | Done | — |
 | c | token storage | JSON creds with org/region/prem (`factory.go:49-72`) | Secret blob stores org, region, and whoami's `premBaseHostV2`; refresh reconciliation preserves and updates it (`sign_in.rs`, `tokens.rs`) | Done | — |
 | d | refresh | WorkOS refresh; API key no refresh; two-minute request lead, three-minute host lead, request-time unexpired-token grace, and strict explicit transient failures (`refresh.test.mjs`) | Two-minute request lead, lease serialization, request-time-only unexpired-token grace, explicit transient-failure propagation, non-429 4xx lapse, and whoami reconciliation (`tokens.rs`; `a2b_13`, `a2b_17`, `r52_transient_*`) | Partial | The host API has no separate three-minute `refreshLead` setting |
 | e | upstream wire | Per-model `/api/llm/{a,o,g}/v1`; prem host override (`factory/index.mjs:33-39`, `factory.go:65-67`) | `wire_target` plus canonical HTTPS prem-host routing; invalid hosts fail before HTTP (`upstream.rs`; `r52_prem_*`) | Done | Recorded HTTP only |
@@ -264,7 +264,7 @@ Structured-output prose for Chat, Responses, and Messages shipped in R-13b (`str
 
 ### Remaining gaps (Factory)
 
-- Built-in account migration, the host-level three-minute refresh setting, specialized Anthropic tool wrapping/streamed unwrap, and `standard_only` remain Partial as listed above.
+- The host-level three-minute refresh setting, specialized Anthropic tool wrapping/streamed unwrap, and `standard_only` remain Partial as listed above.
 
 ---
 
@@ -409,14 +409,14 @@ Remaining verification is live-account acceptance; all evidence here is determin
 | k | quota / usage | `retrieveUserQuota` per model windows | `quota.rs` buckets from same RPC; R-49 applies the experiment-driven quota-id mapping | Done | — |
 | l | model list | `retrieveUserQuota` preview signal + `listExperiments` flags choose Gemini CLI 0.61's catalog (`google.go:854-999`, `1180-1236`); `fetchAvailableModels` is Antigravity's path | `models.rs` ports the flag ids, catalog filtering, display names, and image flags; hourly per-instance cache; offline reference cases | Done | — |
 | m | multi-account | Multiple google logins | multiple accounts | Done | — |
-| n | error classification | RetryInfo → retry-after (`codeassist.go`) | `wire` retry_delay in feature-parity doc | Partial | Individual-account refusal persistence (`google.go:330+`) |
+| n | error classification | RetryInfo → retry-after (`codeassist.go`); per-account tier refusal on `fetchAvailableModels` 400 (`google.go:330+`) | `tier_probe.rs` skips refused tiers for 24h, always ends with no tier; `wire` retry_delay in feature-parity doc; `r49_*` paused-clock fixtures | Done | — |
 | o | daily check-in / warmup | N/A | N/A | N/A | — |
 | p | agent sign-in | read gemini home only in reference docs | `AgentSignIn` declares `.gemini`; `discover.rs` lists/imports the active Google account and project read-only, rejects another OAuth client, and never persists the access token; `r49d_*` fixtures | Done | — |
 | q | extras | Code Assist Standard/Enterprise project onboarding; `SetGoogleProject` names or clears an account's stored Cloud project; model-name mapping from the reference catalog | `project.rs` loadCodeAssist/onboardUser and leased account updates; `hofund accounts project gemini <email> <gcp-project-id>` trims, stores, and clears the project used by execute and quota; `models.rs` maps listed, outgoing, and quota ids from the same experiments; offline tests only | Done | — |
 
 **Gaps**
 
-- Individual-account refusal persistence and live-account verification remain.
+- Live-account verification remains.
 - All R-49d import, discovery, tool, image, and signature evidence is deterministic and offline.
 
 ---
