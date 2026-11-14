@@ -13,8 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   usage debt across tool steps, maps a named session to a stable Run
   conversation id, and surfaces earlier-step totals in `Usage.extensions` as
   `deferred_usage` so this step’s `input_tokens` are not doubled. Recorded
-  loopback tests `r9k_*` cover the extension mapping and a step that owes
-  nothing; the reference two-execute deferred split remains a row k follow-up.
+  loopback tests `r9k_*` cover the extension mapping, a step that owes nothing,
+  cross-step own versus deferred usage, and same-millisecond event billing;
+  credit-event paths remain row k follow-ups.
   Refs R-9.
 
 - R-9i: the Cursor subscription plugin coalesces in-flight `cursor-agent status`

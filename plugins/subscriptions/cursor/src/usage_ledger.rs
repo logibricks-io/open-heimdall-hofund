@@ -137,7 +137,7 @@ impl UsageLedger {
     }
 
     fn owe(&self, debt_key: &str, patch: OwePatch, limits: Limits) {
-        let now = tokens::unix_ms(std::time::SystemTime::now());
+        let now = patch.since;
         let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
         expire_debts(&mut inner, now, limits);
         if patch.n == 0 && patch.carry.is_none() {
@@ -165,12 +165,12 @@ impl UsageLedger {
         }
     }
 
-    fn can_read(&self, token_fingerprint: &str, limits: Limits) -> bool {
+    fn can_read(&self, token_fingerprint: &str, limits: Limits, now_ms: i64) -> bool {
         let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
         let Some(marked) = inner.unreadable.get(token_fingerprint).copied() else {
             return true;
         };
-        let now = tokens::unix_ms(std::time::SystemTime::now());
+        let now = now_ms;
         if now.saturating_sub(marked) < millis(limits.usage_owed_for) {
             return false;
         }
@@ -178,12 +178,11 @@ impl UsageLedger {
         true
     }
 
-    fn mark_unreadable(&self, token_fingerprint: &str) {
+    fn mark_unreadable(&self, token_fingerprint: &str, now_ms: i64) {
         let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
-        inner.unreadable.insert(
-            token_fingerprint.to_owned(),
-            tokens::unix_ms(std::time::SystemTime::now()),
-        );
+        inner
+            .unreadable
+            .insert(token_fingerprint.to_owned(), now_ms);
     }
 
     async fn usage_events(
@@ -212,7 +211,10 @@ impl UsageLedger {
             let reply = match one_dashboard_fetch(args, budget).await {
                 Ok(body) => body,
                 Err(EventsError::Unreadable) => {
-                    self.mark_unreadable(args.token_fingerprint);
+                    self.mark_unreadable(
+                        args.token_fingerprint,
+                        tokens::unix_ms(args.host.clock().now()),
+                    );
                     return FetchedEvents {
                         refused: true,
                         ..FetchedEvents::default()
@@ -220,10 +222,11 @@ impl UsageLedger {
                 }
                 Err(EventsError::Transport) => break,
             };
+            let now_ms = tokens::unix_ms(args.host.clock().now());
             let mut pending: Vec<TimedUsage> = Vec::new();
             {
                 let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
-                purge_stale_claims(&mut inner, args.limits);
+                purge_stale_claims(&mut inner, args.limits, now_ms);
                 for event in usage::events_of(&reply) {
                     if usage::conversation_of(event) != Some(args.conversation_id) {
                         continue;
@@ -253,15 +256,17 @@ impl UsageLedger {
                 }
                 {
                     let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
-                    inner.claimed.insert(
-                        Self::claim_key(&debt_key, event.at),
-                        tokens::unix_ms(std::time::SystemTime::now()),
-                    );
+                    inner
+                        .claimed
+                        .insert(Self::claim_key(&debt_key, event.at), now_ms);
                 }
                 events.push(event);
                 got += 1;
             }
             if got >= want {
+                break;
+            }
+            if args.limits.usage_interval.is_zero() {
                 break;
             }
             if !polling
@@ -317,13 +322,14 @@ impl UsageLedger {
             limits: args.limits,
         };
         let mut fetched = FetchedEvents::default();
-        if want > 0 && self.can_read(args.token_fingerprint, limits) {
+        let now_ms = tokens::unix_ms(args.host.clock().now());
+        if want > 0 && self.can_read(args.token_fingerprint, limits, now_ms) {
             fetched = self
                 .usage_events(&floor_args, want, polling, first_wait, before_ms)
                 .await;
         }
         let short = want.saturating_sub(fetched.got) > 0 && !fetched.refused;
-        if short && self.can_read(args.token_fingerprint, limits) {
+        if short && self.can_read(args.token_fingerprint, limits, now_ms) {
             self.owe(
                 &debt_key,
                 OwePatch {
@@ -468,7 +474,11 @@ impl UsageBook {
                 None => StepOwn::Owed,
             };
         }
-        if !self.ledger.can_read(&self.token_fingerprint, limits) {
+        let now_ms = tokens::unix_ms(host.clock().now());
+        if !self
+            .ledger
+            .can_read(&self.token_fingerprint, limits, now_ms)
+        {
             return StepOwn::Owed;
         }
         let args = self.poll_args(host, endpoints, token, team_id, limits);
@@ -603,8 +613,8 @@ fn millis(duration: Duration) -> i64 {
     i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
 }
 
-fn purge_stale_claims(inner: &mut LedgerInner, limits: Limits) {
-    let now = tokens::unix_ms(std::time::SystemTime::now());
+fn purge_stale_claims(inner: &mut LedgerInner, limits: Limits, now_ms: i64) {
+    let now = now_ms;
     let ceiling = millis(limits.usage_owed_for).saturating_mul(2);
     inner
         .claimed
