@@ -121,10 +121,11 @@ impl SubscriptionFactory for WorkBuddyFactory {
     fn build(
         &self,
         _cfg: &Self::Config,
-        _host: &HostContext,
+        host: &HostContext,
     ) -> Result<Arc<dyn Subscription>, BuildError> {
         Ok(Arc::new(WorkBuddy {
             endpoints: Arc::clone(&self.endpoints),
+            host: host.clone(),
             flow: SignInFlow::TokenFile,
             pending: Mutex::new(HashMap::new()),
             after_tools: Arc::new(Mutex::new(HashSet::new())),
@@ -135,6 +136,7 @@ impl SubscriptionFactory for WorkBuddyFactory {
 
 struct WorkBuddy {
     endpoints: Arc<Endpoints>,
+    host: HostContext,
     flow: SignInFlow,
     pending: Mutex<HashMap<String, sign_in::Pending>>,
     after_tools: Arc<Mutex<HashSet<String>>>,
@@ -341,7 +343,7 @@ impl Subscription for WorkBuddy {
         &self,
         home: &Path,
     ) -> Result<Vec<hofund_plugin_api::DiscoveredAgentAccount>, PluginError> {
-        discover::list(home)
+        discover::list(home, self.host.clock().now())
     }
 
     async fn import_agent_sign_in(

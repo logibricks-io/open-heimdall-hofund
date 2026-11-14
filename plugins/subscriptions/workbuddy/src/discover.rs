@@ -11,7 +11,10 @@ use crate::site::Site;
 pub(crate) const REFERENCE_CN: &str = "desktop-auth-cn";
 pub(crate) const REFERENCE_AI: &str = "desktop-auth-ai";
 
-pub(crate) fn list(home: &Path) -> Result<Vec<DiscoveredAgentAccount>, PluginError> {
+pub(crate) fn list(
+    home: &Path,
+    now: std::time::SystemTime,
+) -> Result<Vec<DiscoveredAgentAccount>, PluginError> {
     let mut out = Vec::new();
     for (site, reference) in [
         (Site::China, REFERENCE_CN),
@@ -21,7 +24,7 @@ pub(crate) fn list(home: &Path) -> Result<Vec<DiscoveredAgentAccount>, PluginErr
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
         };
-        let now_ms = std::time::SystemTime::now()
+        let now_ms = now
             .duration_since(std::time::UNIX_EPOCH)
             .map(|duration| duration.as_millis() as i64)
             .unwrap_or(0);
