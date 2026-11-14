@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `logins.json` side-login rows, and official mover OAuth envelopes without
   calling live whoami. Lapsed or unreadable rows are skipped without dropping
   siblings. Recorded fixtures only (`r56b_*`). Refs R-56.
+- R-54: the shared Qoder daily check-in helper sets `CheckinResult::recheck_at`
+  to the earlier of 30 minutes, the next Beijing calendar midnight (UTC+8), and
+  the minimum end time of active campaigns, matching the reference recheck
+  schedule for international, CN, and VPC accounts that share `run_qoder`.
+  Recorded fixtures in `hofund-plugin-sdk` (`r54_recheck_*`, `r54_not_offered_yet_*`).
+  Refs R-54.
 - R-12d: the Devin subscription plugin persists non-default Windsurf API
   server hosts from CLI credentials and PKCE exchange responses, honors
   `WINDSURF_API_SERVER_URL` with trailing-slash trim on every Connect RPC
