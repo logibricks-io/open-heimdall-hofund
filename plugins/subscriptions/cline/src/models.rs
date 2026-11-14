@@ -110,7 +110,7 @@ fn merge_feed_model(models: &mut Vec<FeedModel>, model: FeedModel) {
 }
 
 fn valid_model_id(id: &str) -> bool {
-    regex_lite(id, MODEL_ID)
+    regex_lite(&id.to_ascii_lowercase(), MODEL_ID)
 }
 
 fn regex_lite(text: &str, _pattern: &str) -> bool {
@@ -286,14 +286,7 @@ pub(crate) async fn list(
         "{}/ai/cline/recommended-models",
         endpoints.api.trim_end_matches('/')
     );
-    let rec_body = api::get(
-        host,
-        endpoints,
-        "/ai/cline/recommended-models",
-        Some(&bearer.token),
-        false,
-    )
-    .await?;
+    let rec_body = api::get(host, endpoints, "/ai/cline/recommended-models", None, false).await?;
     let cloud = api::get(
         host,
         endpoints,
