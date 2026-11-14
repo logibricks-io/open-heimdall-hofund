@@ -1678,3 +1678,233 @@ fn cli_model_list_uses_isolated_credentials_and_removes_them() {
     let temp = cwd.lock().expect("cwd").clone().expect("spawn cwd");
     assert!(!temp.exists(), "the whole CLI temp root must be removed");
 }
+
+fn prompt_cache(prompt: &[hofund_plugin_sdk::protobuf::Field]) -> Option<Vec<u8>> {
+    prompt
+        .iter()
+        .find(|field| field.number == 8)
+        .and_then(|field| field.as_bytes())
+        .map(<[u8]>::to_vec)
+}
+
+#[test]
+fn messages_blocks_keep_their_boundaries_and_only_marks_encode_field_eight() {
+    let request: Request = hofund_plugin_sdk::json::from_value(hofund_plugin_sdk::json::json!({
+        "model": "claude-haiku-5-5",
+        "stream": true,
+        "messages": [
+            {"role": "system", "content": [
+                {"type": "text", "text": "x-anthropic-billing-header: cc_version=2.1.316.e5f; cc_entrypoint=cli; cch=8a1f2;\n"},
+                {"type": "text", "text": "You are a security monitor.", "extensions": {"cache_control": {"type": "ephemeral"}}}
+            ]},
+            {"role": "user", "content": [
+                {"type": "text", "text": "<transcript>"},
+                {"type": "text", "text": "history", "extensions": {"cache_control": {"type": "ephemeral"}}},
+                {"type": "text", "text": "Current action: rm -rf build/"},
+                {"type": "text", "text": "</transcript>\nClassify."}
+            ]}
+        ]
+    }))
+    .expect("marked Messages history");
+    for (message, part) in [(0, 1), (1, 1)] {
+        let ContentPart::Text(part) = &request.messages[message].content[part] else {
+            panic!("marked text part");
+        };
+        assert!(
+            part.extensions
+                .get("cache_control")
+                .is_some_and(hofund_plugin_sdk::json::Value::is_object)
+        );
+    }
+    let body = encoded_request_for(request, ProtocolId::ANTHROPIC_MESSAGES);
+    let prompts = decoded_chat_prompts(&body);
+    let actual: Vec<_> = prompts
+        .iter()
+        .map(|prompt| {
+            (
+                prompt_role(prompt),
+                prompt_value(prompt, 3),
+                prompt_cache(prompt),
+            )
+        })
+        .collect();
+    assert_eq!(
+        actual,
+        [
+            (
+                Some(1),
+                Some("You are a security monitor.".into()),
+                Some(vec![8, 1])
+            ),
+            (Some(1), Some("<transcript>".into()), None),
+            (Some(1), Some("history".into()), Some(vec![8, 1])),
+            (Some(1), Some("Current action: rm -rf build/".into()), None),
+            (Some(1), Some("</transcript>\nClassify.".into()), None),
+        ]
+    );
+    assert!(prompts.iter().all(|prompt| {
+        prompt_value(prompt, 3).is_none_or(|text| !text.contains("x-anthropic-billing-header"))
+    }));
+}
+
+#[test]
+fn moving_a_messages_mark_keeps_the_old_prompt_prefix_unchanged() {
+    let first: Request = hofund_plugin_sdk::json::from_value(hofund_plugin_sdk::json::json!({
+        "model": "claude-haiku-5-5", "stream": true,
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": "<transcript>"},
+            {"type": "text", "text": "history A", "extensions": {"cache_control": {"type": "ephemeral"}}},
+            {"type": "text", "text": "Current action: one"}
+        ]}]
+    }))
+    .expect("first history");
+    let second: Request = hofund_plugin_sdk::json::from_value(hofund_plugin_sdk::json::json!({
+        "model": "claude-haiku-5-5", "stream": true,
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": "<transcript>"},
+            {"type": "text", "text": "history A"},
+            {"type": "text", "text": "history B", "extensions": {"cache_control": {"type": "ephemeral"}}},
+            {"type": "text", "text": "Current action: two"}
+        ]}]
+    }))
+    .expect("grown history");
+    let first = decoded_chat_prompts(&encoded_request_for(first, ProtocolId::ANTHROPIC_MESSAGES));
+    let second = decoded_chat_prompts(&encoded_request_for(second, ProtocolId::ANTHROPIC_MESSAGES));
+    assert_eq!(prompt_value(&second[0], 3), prompt_value(&first[0], 3));
+    assert_eq!(prompt_value(&second[1], 3), prompt_value(&first[1], 3));
+    assert_eq!(prompt_cache(&second[1]), None);
+    assert_eq!(prompt_cache(&first[1]), Some(vec![8, 1]));
+    assert_eq!(prompt_value(&second[2], 3).as_deref(), Some("history B"));
+    assert_eq!(prompt_cache(&second[2]), Some(vec![8, 1]));
+}
+
+#[test]
+fn messages_system_notices_follow_real_results_without_losing_marks() {
+    let request: Request = hofund_plugin_sdk::json::from_value(hofund_plugin_sdk::json::json!({
+        "model": "claude-opus-5-5", "stream": true,
+        "messages": [
+            {"role": "user", "content": [{"type": "text", "text": "Read both files."}]},
+            {"role": "assistant", "content": [
+                {"type": "tool_call", "id": "c1", "name": "read_file", "arguments": {"form": "raw", "text": "{}"}},
+                {"type": "tool_call", "id": "c2", "name": "read_file", "arguments": {"form": "raw", "text": "{}"}}
+            ]},
+            {"role": "system", "content": [{"type": "text", "text": "Stop after this read."}]},
+            {"role": "system", "content": [{"type": "text", "text": "Report both results.", "extensions": {"cache_control": {"type": "ephemeral"}}}]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "id": "c1", "content": [{"type": "text", "text": "first"}]},
+                {"type": "tool_result", "id": "c2", "content": [{"type": "text", "text": "second"}]}
+            ]}
+        ]
+    }))
+    .expect("system notices");
+    let body = encoded_request_for(request, ProtocolId::ANTHROPIC_MESSAGES);
+    let prompts = decoded_chat_prompts(&body);
+    let actual: Vec<_> = prompts
+        .iter()
+        .map(|prompt| {
+            (
+                prompt_role(prompt),
+                prompt_value(prompt, 3),
+                prompt_cache(prompt),
+            )
+        })
+        .collect();
+    assert_eq!(
+        actual,
+        [
+            (Some(1), Some("Read both files.".into()), None),
+            (Some(2), None, None),
+            (Some(4), Some("first".into()), None),
+            (Some(4), Some("second".into()), None),
+            (Some(1), Some("Stop after this read.".into()), None),
+            (
+                Some(1),
+                Some("Report both results.".into()),
+                Some(vec![8, 1])
+            ),
+        ]
+    );
+    let calls = prompts[1].iter().filter(|field| field.number == 6).count();
+    assert_eq!(calls, 2);
+}
+
+#[test]
+fn empty_messages_notices_do_not_add_prompts_or_split_tool_calls() {
+    for content in [
+        hofund_plugin_sdk::json::json!([]),
+        hofund_plugin_sdk::json::json!([{"type": "text", "text": ""}]),
+    ] {
+        let request: Request = hofund_plugin_sdk::json::from_value(hofund_plugin_sdk::json::json!({
+            "model": "claude-opus-5-5", "stream": true,
+            "messages": [
+                {"role": "user", "content": [{"type": "text", "text": "Read both."}]},
+                {"role": "assistant", "content": [{"type": "tool_call", "id": "c1", "name": "read", "arguments": {"form": "raw", "text": "{}"}}]},
+                {"role": "system", "content": content},
+                {"role": "assistant", "content": [{"type": "tool_call", "id": "c2", "name": "read", "arguments": {"form": "raw", "text": "{}"}}]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "id": "c1", "content": [{"type": "text", "text": "first"}]},
+                    {"type": "tool_result", "id": "c2", "content": [{"type": "text", "text": "second"}]}
+                ]}
+            ]
+        }))
+        .expect("empty system notice");
+        let body = encoded_request_for(request, ProtocolId::ANTHROPIC_MESSAGES);
+        let prompts = decoded_chat_prompts(&body);
+        assert_eq!(prompts.len(), 4);
+        assert_eq!(prompt_role(&prompts[1]), Some(2));
+        assert_eq!(
+            prompts[1].iter().filter(|field| field.number == 6).count(),
+            2
+        );
+        assert_eq!(prompt_role(&prompts[2]), Some(4));
+        assert_eq!(prompt_role(&prompts[3]), Some(4));
+    }
+}
+
+#[test]
+fn messages_tool_results_keep_error_text_images_and_cache_marks() {
+    let request: Request = hofund_plugin_sdk::json::from_value(hofund_plugin_sdk::json::json!({
+        "model": "claude-opus-5-5", "stream": true,
+        "messages": [
+            {"role": "user", "content": [{"type": "text", "text": "Read /etc/motd."}]},
+            {"role": "assistant", "content": [{"type": "tool_call", "id": "toolu_01", "name": "read", "arguments": {"form": "raw", "text": "{}"}}]},
+            {"role": "user", "content": [{
+                "type": "tool_result", "id": "toolu_01", "is_error": true,
+                "content": [
+                    {"type": "text", "text": "exit status 1"},
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}, "extensions": {"cache_control": {"type": "ephemeral"}}}
+                ]
+            }]}
+        ]
+    }))
+    .expect("failed marked result");
+    let body = encoded_request_for(request, ProtocolId::ANTHROPIC_MESSAGES);
+    let prompts = decoded_chat_prompts(&body);
+    let result = prompts
+        .iter()
+        .find(|prompt| prompt_role(prompt) == Some(4))
+        .expect("tool result");
+    assert_eq!(
+        prompt_value(result, 3).as_deref(),
+        Some("Error: exit status 1")
+    );
+    assert_eq!(prompt_cache(result), Some(vec![8, 1]));
+    assert_eq!(prompt_images(result), [("AAAA".into(), "image/png".into())]);
+}
+
+#[test]
+fn chat_history_still_joins_text_without_cache_marks() {
+    let request: Request = hofund_plugin_sdk::json::from_value(hofund_plugin_sdk::json::json!({
+        "model": "swe-2", "stream": true,
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": "a"},
+            {"type": "text", "text": "b", "extensions": {"cache_control": {"type": "ephemeral"}}}
+        ]}]
+    }))
+    .expect("chat history");
+    let body = encoded_tool_request(request);
+    let prompts = decoded_chat_prompts(&body);
+    assert_eq!(prompts.len(), 1);
+    assert_eq!(prompt_value(&prompts[0], 3).as_deref(), Some("a\n\nb"));
+    assert_eq!(prompt_cache(&prompts[0]), None);
+}

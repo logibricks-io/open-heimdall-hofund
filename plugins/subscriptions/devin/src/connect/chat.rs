@@ -46,6 +46,7 @@ pub(crate) struct Prompt<'a> {
     pub(crate) text: &'a str,
     pub(crate) calls: Vec<PromptCall<'a>>,
     pub(crate) answer: Option<&'a str>,
+    pub(crate) cache: bool,
     pub(crate) images: Vec<PromptImage<'a>>,
     pub(crate) thinking: Option<PromptThinking<'a>>,
 }
@@ -58,6 +59,7 @@ impl<'a> Prompt<'a> {
             text,
             calls: Vec::new(),
             answer: None,
+            cache: false,
             images: Vec::new(),
             thinking: None,
         }
@@ -156,6 +158,9 @@ fn encode_prompt(prompt: &Prompt<'_>) -> Vec<u8> {
     }
     if let Some(answer) = prompt.answer {
         encoded = encoded.string(7, answer);
+    }
+    if prompt.cache {
+        encoded = encoded.bytes(8, &ProtoBuf::new().varint(1, 1).finish());
     }
     for image in &prompt.images {
         let image = ProtoBuf::new()
@@ -638,6 +643,25 @@ mod tests {
         assert_eq!(sampling[3].value, WireValue::Fixed64(1.0_f64.to_bits()));
         assert_eq!(sampling[5].value, WireValue::Fixed64(0.95_f64.to_bits()));
         assert!(!outer.iter().any(|field| field.number == 10));
+    }
+
+    #[test]
+    fn cache_prompt_encodes_ephemeral_options() {
+        let mut prompt = Prompt::text("id", PromptRole::User, "hello");
+        prompt.cache = true;
+        let encoded = encode_request(&request(&[prompt])).expect("encode");
+        let outer = fields(&deframe(&encoded.body).expect("frame").payload);
+        let prompt = outer
+            .iter()
+            .find(|field| field.number == 3)
+            .and_then(|field| field.as_bytes())
+            .expect("prompt");
+        let cache = fields(prompt)
+            .into_iter()
+            .find(|field| field.number == 8)
+            .and_then(|field| field.as_bytes().map(<[u8]>::to_vec))
+            .expect("cache options");
+        assert_eq!(cache, [8, 1]);
     }
 
     #[test]
