@@ -145,7 +145,7 @@ pub(crate) fn windows(body: &[u8], now: SystemTime) -> Result<Vec<QuotaWindow>, 
             let carried = used >= limit
                 && bonuses
                     .iter()
-                    .any(|window| window.used() < PERCENT && window.blocking() == false);
+                    .any(|window| window.used() < PERCENT && !window.blocking());
             out.push(credit_window(
                 name,
                 used,
@@ -216,7 +216,7 @@ fn go_g(value: f64) -> String {
         return "0".to_owned();
     }
     let exp = value.log10().floor() as i32;
-    if exp < -4 || exp >= 6 {
+    if !(-4..6).contains(&exp) {
         let exponential = format!("{value:e}");
         let (mantissa, exponent) = exponential.split_once('e').unwrap_or(("0", "0"));
         let sign = if exponent.starts_with('-') { "-" } else { "+" };

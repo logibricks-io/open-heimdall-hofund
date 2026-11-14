@@ -16,7 +16,7 @@ Legend: **Done** = matches the reference at checklist granularity; **Partial** =
 | Cursor (`cursor`) | 8 | 11 | 0 | 2 | 0 |
 | Devin (`devin`) | 12 | 6 | 0 | 1 | 0 |
 | Zed (`zed`) | 0 | 6 | 1 | 3 | 0 |
-| Kiro (`kiro`) | 8 | 9 | 0 | 2 | 0 |
+| Kiro (`kiro`) | 9 | 8 | 0 | 2 | 0 |
 | Factory / Droid (`factory`) | 13 | 3 | 0 | 3 | 0 |
 | Cline / ClinePass (`cline`) | 12 | 4 | 0 | 3 | 0 |
 | ChatGPT / Codex (`codex` backend) and ChatGPT API (`chatgpt-api`) | 10 | 10 | 1 | 0 | 0 |
@@ -211,7 +211,7 @@ Structured-output prose for Chat, Responses, and Messages shipped in R-13b (`str
 | h | tool calls | Plugin tool tests (`tool-names.test.mjs`) | `kiro_body.rs` maps declarations, normalized ids/names, split calls, and matched/missing results; replies restore caller names | Partial | Mock/loopback verification only (**R-51**) |
 | i | images | `image-size.test.mjs` | Inline user/tool-result images keep the latest-image rule. Over-5-MiB Base64 images follow the reference's same-format/lossy, quality, and edge sequence with a four-entry cache; failures use its exact note (`r51c_*`, deterministic fixtures) | Done | — |
 | j | reasoning / effort | `effort.test.mjs` | Enabled/adaptive thinking uses native `additionalModelRequestFields` when the listed schema allows the requested effort (`output_config`, then `reasoning`), otherwise the reference budget tags. `reasoningContentEvent` text and signatures fold into unary blocks and stream as reasoning/signature deltas; structured output stays in instructions (`r51c_*`) | Done | — |
-| k | quota / usage | `Get-Usage-Limits` (`kiro.go` comments; plugin `usage.test.mjs`) | `quota.rs` maps free trial, monthly credits, and bonus windows with aside non-blocking when carried; API keys POST `GetUsageLimits` without profile (`r51d_k_*`, fixtures) | Done | — |
+| k | quota / usage | `Get-Usage-Limits` (`kiro.go` comments; plugin `usage.test.mjs`) | `quota.rs` maps free trial, monthly credits, and bonus windows with aside non-blocking when carried; API keys POST `GetUsageLimits` without profile (`r51d_k_*`, fixtures) | Partial | `Subscription::quota` cannot surface plan title, bonus lapse deadlines, credit units, or the reference month span |
 | l | model list | Plugin lists from API | `models.rs` fetches the profile-scoped list, pages the API-key control-plane list, and keeps default order, limits, image flags, effort lists, and native schemas per account/model | Partial | Recorded model-list verification only (**R-51**) |
 | m | multi-account | uid by login provider (`kiro/index.mjs:53-65`) | Browser ids include label/provider; imported ids remain agent-scoped | Partial | Stable ids (#607) (**R-24**) |
 | n | error classification | Plugin `errors.test.mjs`; refresh 400 → lapsed | Generic auth on 401/403 (`upstream.rs:60-63`) | Partial | **R-24** |
@@ -221,7 +221,7 @@ Structured-output prose for Chat, Responses, and Messages shipped in R-13b (`str
 
 ### Status (Kiro)
 
-**10 Done / 7 Partial / 0 Missing / 2 N/A** (rows a–q; a1–a3 count as three sign-in rows).
+**9 Done / 8 Partial / 0 Missing / 2 N/A** (rows a–q; a1–a3 count as three sign-in rows). Row k stays Partial: plan title, bonus lapse, units, and month span are not representable on `QuotaWindow`.
 
 ### Gaps (Kiro)
 
