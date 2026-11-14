@@ -1417,7 +1417,7 @@ pub enum SignInProof {
         code: SecretString,
         /// The `state` value the helper checked.
         state: String,
-        /// OAuth client id returned with the code (Sign in with ChatGPT).
+        /// OAuth client id returned with the code (Sign in with `ChatGPT`).
         issued_client_id: Option<String>,
     },
     /// A native-app callback carrying an encrypted access token.
