@@ -91,7 +91,7 @@ Account discovery is implemented for subscriptions that declare an agent home an
 
 | subscription | agent home | credential files read |
 |---|---|---|
-| claude | `CLAUDE_CONFIG_DIR` or `~/.claude` | `.credentials.json`, `.claude.json` |
+| claude | `CLAUDE_CONFIG_DIR` or `~/.claude` | macOS Keychain (`keychain.rs`; `r5_42`–`r5_47`) with `.credentials.json` and `.claude.json` fallback |
 | codex | `CODEX_HOME` or `~/.codex` | `auth.json` (file mode) |
 | devin | `XDG_DATA_HOME` or `~/.local/share/devin` | `credentials.toml` |
 | kiro | `KIRO_IDE_CACHE` or `~/.aws/sso/cache` | `kiro-auth-token.json` |
