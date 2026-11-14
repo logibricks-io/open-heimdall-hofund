@@ -25,6 +25,7 @@ mod quota;
 mod sign_in;
 mod tokens;
 mod upstream;
+mod version;
 
 pub(crate) const SCOPES: &str = "https://www.googleapis.com/auth/cloud-platform \
      https://www.googleapis.com/auth/userinfo.email \
@@ -56,6 +57,7 @@ pub struct Endpoints {
     pub userinfo: String,
     pub load_code_assist: String,
     pub code_assist: String,
+    pub version_manifest: String,
     pub onboard_poll: Duration,
 }
 
@@ -67,6 +69,7 @@ impl Default for Endpoints {
             userinfo: "https://www.googleapis.com/oauth2/v2/userinfo?alt=json".to_owned(),
             load_code_assist: "https://cloudcode-pa.googleapis.com".to_owned(),
             code_assist: "https://daily-cloudcode-pa.googleapis.com".to_owned(),
+            version_manifest: "https://antigravity-hub-auto-updater-974169037036.us-central1.run.app/manifest/latest-arm64-mac.yml".to_owned(),
             onboard_poll: Duration::from_secs(2),
         }
     }
@@ -455,7 +458,18 @@ fn needs_sign_in(reason: &str) -> AccountStatus {
     }
 }
 
+/// Clears the process-wide Antigravity hub-version cache.
+///
+/// Hidden because only recording tests need to start a cold fetch. Production
+/// keeps a six-hour process cache, matching the reference auto-updater.
+#[doc(hidden)]
+pub fn reset_version_cache() {
+    version::reset_cache();
+}
+
 #[cfg(test)]
 mod r49d_tests;
+#[cfg(test)]
+mod r49e_tests;
 #[cfg(test)]
 mod tests;
