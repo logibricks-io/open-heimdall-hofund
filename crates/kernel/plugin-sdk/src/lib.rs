@@ -58,6 +58,7 @@ pub mod daily_warmup;
 pub mod digest;
 pub mod enc_v1;
 pub mod futures;
+pub mod image;
 pub mod inflate;
 pub mod jwt;
 pub mod oauth;

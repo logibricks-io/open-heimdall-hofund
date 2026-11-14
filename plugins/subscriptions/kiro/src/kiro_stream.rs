@@ -5,7 +5,8 @@ use std::collections::{HashMap, VecDeque};
 use hofund_plugin_api::{
     BlockStart, BodyStream, Completion, ContentBlockStart, ContentBlockStop, ContentPart,
     Extensions, Message, MessageDelta, MessageStart, MessageStop, PluginError, Response, Role,
-    Stop, StopReason, StreamEvent, TextDelta, ToolArguments, ToolArgumentsDelta, ToolCallPart,
+    SignatureDelta, Stop, StopReason, StreamEvent, TextDelta, ThinkingDelta, ThinkingPart,
+    ToolArguments, ToolArgumentsDelta, ToolCallPart,
 };
 use hofund_plugin_sdk::futures;
 use hofund_plugin_sdk::json::{self, Value};
@@ -15,6 +16,8 @@ const MAX_FRAME: usize = 16 * 1024 * 1024;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Event {
     Text(String),
+    Thinking(String),
+    Signature(String),
     ToolStart { id: String, name: String },
     ToolArguments(String),
     Stop(StopReason),
@@ -132,6 +135,19 @@ fn decode_frame(frame: &[u8], decoder: &mut Decoder) -> Result<(), PluginError> 
                 && !text.is_empty()
             {
                 decoder.events.push_back(Event::Text(text.to_owned()));
+            }
+        }
+        "reasoningContentEvent" => {
+            if let Some(text) = value.get("text").and_then(Value::as_str)
+                && !text.is_empty()
+            {
+                decoder.events.push_back(Event::Thinking(text.to_owned()));
+            } else if let Some(signature) = value.get("signature").and_then(Value::as_str)
+                && !signature.is_empty()
+            {
+                decoder
+                    .events
+                    .push_back(Event::Signature(signature.to_owned()));
             }
         }
         "toolUseEvent" => {
@@ -269,6 +285,31 @@ pub(crate) fn unary(
                     message.content.push(ContentPart::text(text));
                 }
             }
+            Event::Thinking(text) => {
+                if let Some(ContentPart::Thinking(previous)) = message.content.last_mut()
+                    && !previous.redacted
+                {
+                    previous.text.push_str(&text);
+                } else {
+                    message.content.push(ContentPart::Thinking(ThinkingPart {
+                        text,
+                        signature: Some(String::new()),
+                        redacted: false,
+                        data: None,
+                        extensions: Extensions::new(),
+                    }));
+                }
+            }
+            Event::Signature(signature) => {
+                if let Some(ContentPart::Thinking(previous)) = message.content.last_mut()
+                    && !previous.redacted
+                {
+                    previous
+                        .signature
+                        .get_or_insert_with(String::new)
+                        .push_str(&signature);
+                }
+            }
             Event::ToolStart { id, name } => {
                 message.content.push(ContentPart::ToolCall(ToolCallPart {
                     id,
@@ -387,6 +428,7 @@ impl Reader {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum OpenBlock {
     Text,
+    Thinking,
     Tool,
 }
 
@@ -420,6 +462,31 @@ impl StreamState {
                     text,
                     extensions: Extensions::new(),
                 }));
+            }
+            Event::Thinking(text) => {
+                let index = self.open_block(
+                    OpenBlock::Thinking,
+                    BlockStart::Thinking {
+                        redacted: false,
+                        data: None,
+                    },
+                );
+                self.pending
+                    .push_back(StreamEvent::ThinkingDelta(ThinkingDelta {
+                        index,
+                        text,
+                        extensions: Extensions::new(),
+                    }));
+            }
+            Event::Signature(signature) => {
+                if let Some((OpenBlock::Thinking, index)) = self.open {
+                    self.pending
+                        .push_back(StreamEvent::SignatureDelta(SignatureDelta {
+                            index,
+                            signature,
+                            extensions: Extensions::new(),
+                        }));
+                }
             }
             Event::ToolStart { id, name } => {
                 let name = self.names.get(&name).cloned().unwrap_or(name);
