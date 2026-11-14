@@ -398,3 +398,35 @@ fn r51c_inline_image_is_fitted_and_later_history_keeps_it() {
             .is_none()
     );
 }
+
+#[test]
+fn r51c_oversized_gif_is_fitted_to_png_without_losing_message_text() {
+    let mut gif = b"GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff\x2c\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02\x44\x01\x00\x3b".to_vec();
+    gif.resize(4_000_035, 0);
+    let data = base64(&gif);
+    assert!(data.len() > IMAGE_LIMIT);
+    let request = Request::new("claude-opus-5.5").with_messages(vec![message(
+        Role::User,
+        vec![
+            ContentPart::text("before the image"),
+            ContentPart::Image(ImagePart {
+                source: ImageSource::Base64 {
+                    media_type: "image/gif".to_owned(),
+                    data,
+                },
+                detail: None,
+                extensions: Extensions::new(),
+            }),
+            ContentPart::text("after the image"),
+        ],
+    )]);
+
+    let body = encoded(&request);
+    let user = &body["conversationState"]["currentMessage"]["userInputMessage"];
+    assert_eq!(user["content"], "before the image\n\nafter the image");
+    let fitted = &user["images"][0];
+    assert_eq!(fitted["format"], "png");
+    let bytes = fitted["source"]["bytes"].as_str().expect("fitted bytes");
+    assert!(bytes.len() <= IMAGE_LIMIT);
+    assert_eq!(dimensions(bytes), (1, 1));
+}

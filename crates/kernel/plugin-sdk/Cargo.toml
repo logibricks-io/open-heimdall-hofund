@@ -24,7 +24,7 @@ futures-util = "0.3.32"
 http = "1.5.0"
 httpdate = "1.0.3"
 iana-time-zone = "0.1.65"
-image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp"] }
+image = { version = "0.25.10", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
 regex = "1.13.1"
 ring = "0.17.14"
 rsa = { version = "0.10.0", features = ["pkcs1v15"] }
