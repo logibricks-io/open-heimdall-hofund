@@ -1,4 +1,4 @@
-//! Job-token refresh against the Qoder openapi host.
+//! Job-token and CN device-token refresh on the account's own hosts.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -8,8 +8,8 @@ use hofund_plugin_sdk::Call;
 use hofund_plugin_sdk::json::Value;
 use hofund_plugin_sdk::oauth::{SecretObject, same_secret, secret_text};
 
-use crate::Endpoints;
 use crate::creds::{self, Stored};
+use crate::{Endpoints, sign_in};
 
 const LEASE_WAIT: Duration = Duration::from_secs(30);
 
@@ -35,14 +35,80 @@ pub(crate) async fn run(
     Ok(())
 }
 
-/// Renews the job token even when the access token is not near expiry (401 retry).
 pub(crate) async fn force(
     host: &HostContext,
     endpoints: Arc<Endpoints>,
     account: &AccountId,
-) -> Result<(), PluginError> {
+) -> Result<Stored, PluginError> {
     let stored = Stored::load(host, account).await?;
-    refresh_stale(host, endpoints, account, &stored).await
+    refresh_stale(host, endpoints, account, &stored).await?;
+    Stored::load(host, account).await
+}
+
+pub(crate) async fn force_device(
+    host: &HostContext,
+    endpoints: Arc<Endpoints>,
+    account: &AccountId,
+) -> Result<Stored, PluginError> {
+    let stored = Stored::load(host, account).await?;
+    if secret_text(&stored.credential.device_refresh_token).is_empty() {
+        return Err(PluginError::auth(
+            "Qoder account-page sign-in has expired; sign in again to see usage",
+        ));
+    }
+    let site = endpoints.resolve(&stored.credential)?;
+    let lease = host.accounts().lease(account, LEASE_WAIT).await?;
+    let blob = SecretObject::parse(lease.secret())?;
+    let current = blob
+        .secret("device_refresh_token")
+        .ok_or_else(|| PluginError::auth("the stored Qoder sign-in has no device refresh token"))?;
+    if !same_secret(&current, &stored.credential.device_refresh_token) {
+        return Stored::load(host, account).await;
+    }
+    let body = hofund_plugin_sdk::json::json!({
+        "refresh_token": secret_text(&stored.credential.device_refresh_token),
+    })
+    .to_string();
+    let reply = Call::post(format!(
+        "{}/api/v1/deviceToken/refresh",
+        site.openapi.trim_end_matches('/')
+    ))
+    .header("Accept", "application/json")
+    .header("Content-Type", "application/json")
+    .bytes(body)
+    .fetch(host.http())
+    .await?;
+    if reply.status() == 401 || reply.status() == 403 {
+        return Err(PluginError::status_error(
+            reply.status(),
+            "Qoder refused the account-page sign-in; chat is unchanged",
+        ));
+    }
+    if reply.status() != 200 {
+        return Err(PluginError::status_error(
+            reply.status(),
+            "Qoder did not refresh the device token",
+        ));
+    }
+    let root: Value = hofund_plugin_sdk::json::from_slice(reply.body())
+        .map_err(|_| PluginError::decode("Qoder device refresh returned invalid JSON"))?;
+    let access = sign_in::refresh_token(&root)?;
+    let refresh = sign_in::refresh_secret(&root)?;
+    let mut credential = stored.credential.clone();
+    credential.device_token = access.clone();
+    credential.device_refresh_token = refresh.clone();
+    if credential.device_chat {
+        credential.token = access;
+        credential.refresh_token = refresh;
+        credential.expires_at = sign_in::device_expiry(host, &root);
+    }
+    lease
+        .commit(
+            Some(creds::label(&credential)),
+            creds::secret_blob(&credential).to_secret(),
+        )
+        .await?;
+    Stored::load(host, account).await
 }
 
 async fn refresh_stale(
@@ -53,9 +119,10 @@ async fn refresh_stale(
 ) -> Result<(), PluginError> {
     if secret_text(&stored.credential.refresh_token).is_empty() {
         return Err(PluginError::auth(
-            "Qoder sign-in has expired; import credentials again",
+            "Qoder sign-in has expired; sign in again",
         ));
     }
+    let site = endpoints.resolve(&stored.credential)?;
     let lease = host.accounts().lease(account, LEASE_WAIT).await?;
     let blob = SecretObject::parse(lease.secret())?;
     let current_refresh = blob
@@ -64,18 +131,19 @@ async fn refresh_stale(
     if !same_secret(&current_refresh, &stored.credential.refresh_token) {
         return Ok(());
     }
-    let url = format!(
-        "{}/api/v1/jobToken/refresh",
-        endpoints.openapi_for(stored.credential.site)
-    );
+    let path = if stored.credential.device_chat {
+        "/api/v1/deviceToken/refresh"
+    } else {
+        "/api/v1/jobToken/refresh"
+    };
     let body = hofund_plugin_sdk::json::json!({
         "refresh_token": secret_text(&stored.credential.refresh_token),
     })
     .to_string();
-    let reply = Call::post(url)
+    let reply = Call::post(format!("{}{path}", site.openapi.trim_end_matches('/')))
         .header("Accept", "application/json")
         .header("Content-Type", "application/json")
-        .bytes(body.into_bytes())
+        .bytes(body)
         .fetch(host.http())
         .await?;
     match reply.status() {
@@ -90,30 +158,35 @@ async fn refresh_stale(
         status => {
             return Err(PluginError::status_error(
                 status,
-                "Qoder did not refresh the job token",
+                "Qoder did not refresh the sign-in token",
             ));
         }
     }
     let root: Value = hofund_plugin_sdk::json::from_slice(reply.body())
         .map_err(|_| PluginError::decode("Qoder refresh returned invalid JSON"))?;
-    let access = root
-        .get("token")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| PluginError::auth("Qoder refresh sent back no access token"))?;
-    let refresh = root
-        .get("refresh_token")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| PluginError::auth("Qoder refresh sent back no refresh token"))?;
-    let expires = root
-        .get("expires_at")
-        .and_then(|value| value.as_i64().or_else(|| value.as_f64().map(|n| n as i64)))
-        .unwrap_or_else(|| default_expires_at(host));
+    let access = if stored.credential.device_chat {
+        sign_in::refresh_token(&root)?
+    } else {
+        root.get("token")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(|value| SecretString::from(value.to_owned()))
+            .ok_or_else(|| PluginError::auth("Qoder refresh sent back no access token"))?
+    };
+    let refresh = sign_in::refresh_secret(&root)?;
+    let expires_at = if stored.credential.device_chat {
+        sign_in::device_expiry(host, &root)
+    } else {
+        sign_in::job_expiry(host, &root)
+    };
     let mut credential = stored.credential.clone();
-    credential.token = SecretString::from(access.to_owned());
-    credential.refresh_token = SecretString::from(refresh.to_owned());
-    credential.expires_at = expires;
+    credential.token = access.clone();
+    credential.refresh_token = refresh.clone();
+    credential.expires_at = expires_at;
+    if credential.device_chat {
+        credential.device_token = access;
+        credential.device_refresh_token = refresh;
+    }
     lease
         .commit(
             Some(creds::label(&credential)),
@@ -121,11 +194,4 @@ async fn refresh_stale(
         )
         .await?;
     Ok(())
-}
-
-fn default_expires_at(host: &HostContext) -> i64 {
-    let Ok(now) = host.clock().now().duration_since(std::time::UNIX_EPOCH) else {
-        return 0;
-    };
-    now.as_millis() as i64 + 3_600_000
 }

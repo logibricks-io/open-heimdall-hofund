@@ -19,16 +19,18 @@ use crate::quota;
 use crate::{Endpoints, Qoder, factory_with_endpoints};
 
 const OPENAPI: &str = "https://qoder.test";
-const CHAT: &str = "https://qoder-chat.test/v1";
+const CHAT: &str = "https://qoder-chat.test";
 const TOKEN: &str = "qoder-access-test-token";
 const REFRESH: &str = "qoder-refresh-test-token";
 
 fn endpoints() -> Endpoints {
     Endpoints {
+        web_global: "https://qoder.test".to_owned(),
+        web_cn: "https://qoder-cn.test".to_owned(),
         openapi_global: OPENAPI.to_owned(),
         openapi_cn: "https://qoder-cn.test".to_owned(),
         chat_global: CHAT.to_owned(),
-        chat_cn: "https://qoder-cn-chat.test/v1".to_owned(),
+        chat_cn: "https://qoder-cn-chat.test".to_owned(),
     }
 }
 
@@ -60,9 +62,14 @@ fn subscription_with_devices(_host: &TestHost, devices: Arc<Devices>) -> Arc<dyn
     Arc::new(Qoder {
         endpoints: Arc::new(endpoints()),
         devices,
-        flow: SignInFlow::Bridge {
-            command: hofund_plugin_api::BinaryName::new("qodercli"),
-        },
+        catalog: Arc::new(models::Catalog::default()),
+        renewals: Arc::new(Mutex::new(HashMap::new())),
+        flow: SignInFlow::Device(
+            hofund_plugin_api::DeviceFlow::new("qoder.test")
+                .expect("device host")
+                .with_path("/device/selectAccounts")
+                .expect("device path"),
+        ),
         pending: Mutex::new(HashMap::new()),
     })
 }
@@ -83,6 +90,17 @@ fn native_script(environment: &'static str) -> PipedScript {
             assert_eq!(spawn.arg_strings(), [environment]);
             Vec::new()
         })
+}
+
+fn native_models() -> &'static [u8] {
+    include_bytes!("fixtures/models.json")
+}
+
+fn native_chat(text: &str) -> Vec<u8> {
+    let chunk = json::json!({"choices": [{"index": 0, "delta": {"content": text}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 3, "completion_tokens": 1}});
+    let envelope = json::json!({"statusCodeValue": 200, "body": chunk.to_string()});
+    let done = json::json!({"statusCodeValue": 200, "body": "[DONE]"});
+    format!("data: {envelope}\n\ndata: {done}\n\n").into_bytes()
 }
 
 macro_rules! header {
@@ -125,6 +143,10 @@ fn seed_site_with_expiry(host: &TestHost, expires_at: i64, site: Site) -> Accoun
         expires_at,
         machine_id: "machine".to_owned(),
         site,
+        vpc: String::new(),
+        device_chat: false,
+        device_token: SecretString::from(String::new()),
+        device_refresh_token: SecretString::from(String::new()),
     };
     let id = creds::account_id(&credential);
     block_on(async {
@@ -211,35 +233,37 @@ fn a2c_4b_upstream_401_forces_refresh_on_fresh_token() {
         .to_string()
         .into_bytes(),
     );
-    host.http().enqueue(
-        br#"{"id":"chatcmpl-1","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"ok"}}]}"#,
-    );
+    host.http().enqueue(native_models());
+    host.http().enqueue(native_chat("ok"));
     let upstream = subscription(&host)
         .upstream(&id, host.context())
         .expect("upstream");
     let query = ProbeQuery::new(ProtocolId::OPENAI_CHAT, "qfmodel").expect("query");
     block_on(upstream.probe(&query)).expect("probe after refresh");
     let calls = host.http().calls();
-    assert_eq!(calls.len(), 3);
-    assert!(calls[0].uri().contains("/chat/completions"));
+    assert_eq!(calls.len(), 4);
+    assert!(calls[0].uri().contains("/algo/api/v2/model/list"));
     assert!(calls[1].uri().contains("/jobToken/refresh"));
-    assert!(calls[2].uri().contains("/chat/completions"));
+    assert!(calls[2].uri().contains("/algo/api/v2/model/list"));
+    assert!(calls[3].uri().contains("agent_chat_generation"));
 }
 
 #[test]
 fn a2c_5_model_list_parsing() {
     let list = models::parse_list(include_bytes!("fixtures/models.json")).expect("parse");
-    assert!(list.models().iter().any(|model| model.id() == "qfmodel"));
+    assert!(list.iter().any(|model| model.key == "qfmodel"));
+    assert!(list.iter().any(|model| model.key == "dfmodel"));
 }
 
 #[test]
-fn a2c_5b_model_list_401_is_auth() {
+fn a2c_5b_model_list_401_keeps_http_status_without_lapsing() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
     let id = seed_with_expiry(&host, 4_000_000_000_000);
     host.http().enqueue_response(401, &[], Vec::new());
     let err = block_on(subscription(&host).list_models(&id, host.context())).expect_err("401");
-    assert_eq!(err.kind(), PluginErrorKind::Auth);
+    assert_eq!(err.kind(), PluginErrorKind::Status);
+    assert_eq!(err.status(), Some(401));
 }
 
 #[test]
@@ -247,22 +271,25 @@ fn a2c_6_upstream_round_trip() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
     let id = seed_with_expiry(&host, 4_000_000_000_000);
-    host.http().enqueue(
-        br#"{"id":"chatcmpl-1","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"ok"}}]}"#,
-    );
+    host.http().enqueue(native_models());
+    host.http().enqueue(native_chat("ok"));
     let upstream = subscription(&host)
         .upstream(&id, host.context())
         .expect("upstream");
     let query = ProbeQuery::new(ProtocolId::OPENAI_CHAT, "qfmodel").expect("query");
     block_on(upstream.probe(&query)).expect("probe");
     let calls = host.http().calls();
-    assert_eq!(calls.len(), 1);
-    assert!(calls[0].uri().contains("/chat/completions"));
+    assert_eq!(calls.len(), 2);
+    assert!(calls[0].uri().contains("/algo/api/v2/model/list"));
+    assert!(calls[1].uri().contains("agent_chat_generation"));
 }
 
 #[test]
 fn a2c_7_quota_windows() {
-    let windows = quota::windows(br#"{"quota":{"total":100,"used":25}}"#).expect("windows");
+    let windows = quota::windows(
+        br#"{"displayMode":"qoder","qoderUsage":{"userQuota":{"total":100,"used":25}}}"#,
+    )
+    .expect("windows");
     assert_eq!(windows.len(), 1);
     assert_eq!(windows[0].name(), "Credits");
 }
@@ -282,6 +309,10 @@ fn a2c_8_secrets_not_in_error_strings() {
         expires_at: 0,
         machine_id: String::new(),
         site: Site::Global,
+        vpc: String::new(),
+        device_chat: false,
+        device_token: SecretString::from(String::new()),
+        device_refresh_token: SecretString::from(String::new()),
     };
     let debug = format!("{credential:?}");
     assert!(!debug.contains(key));
@@ -387,7 +418,8 @@ fn a2c_13_checkin_refreshes_expired_token() {
 
 #[test]
 fn a2c_11_quota_without_usage_fields_is_empty() {
-    let windows = quota::windows(br#"{"quota":{"name":"plan"}}"#).expect("windows");
+    let windows = quota::windows(br#"{"displayMode":"qoder","qoderUsage":{"userType":"plan"}}"#)
+        .expect("windows");
     assert!(windows.is_empty());
 }
 
@@ -406,7 +438,9 @@ fn a2c_account_id_uses_uid() {
 
 #[test]
 fn a2c_11b_quota_without_total_is_empty() {
-    let windows = quota::windows(br#"{"quota":{"used":25}}"#).expect("windows");
+    let windows =
+        quota::windows(br#"{"displayMode":"qoder","qoderUsage":{"userQuota":{"used":25}}}"#)
+            .expect("windows");
     assert!(windows.is_empty());
 }
 
@@ -416,10 +450,9 @@ fn r54_chat_uses_cached_native_identity_and_hostname() {
     let host = host(&dir);
     let id = seed_with_expiry(&host, 4_000_000_000_000);
     host.process().script_piped(native_script("3"));
+    host.http().enqueue(native_models());
     for _ in 0..2 {
-        host.http().enqueue(
-            br#"{"id":"chatcmpl-1","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"ok"}}]}"#,
-        );
+        host.http().enqueue(native_chat("ok"));
     }
     let devices = test_devices(&dir);
     let sub = subscription_with_devices(&host, Arc::clone(&devices));
@@ -441,8 +474,8 @@ fn r54_chat_uses_cached_native_identity_and_hostname() {
     assert_eq!(host.process().piped_spawns().len(), 1);
 
     let calls = host.http().calls();
-    assert_eq!(calls.len(), 2);
-    for (index, call) in calls.iter().enumerate() {
+    assert_eq!(calls.len(), 3);
+    for (index, call) in calls.iter().skip(1).enumerate() {
         for name in ["cosy-machinehostname", "cosy-machineid", "cache-control"] {
             assert!(sensitive!(call, name), "missing {name}");
         }
@@ -598,10 +631,11 @@ fn r54_quota_uses_reference_client_headers() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
     let id = seed_with_expiry(&host, 4_000_000_000_000);
-    host.http().enqueue(br#"{"quota":{"total":100,"used":25}}"#);
+    host.http()
+        .enqueue(br#"{"displayMode":"qoder","qoderUsage":{"userQuota":{"total":100,"used":25}}}"#);
     block_on(subscription(&host).quota(&id, host.context())).expect("quota");
     let calls = host.http().calls();
-    assert_eq!(calls.len(), 1);
+    assert_eq!(calls.len(), 2);
     assert_eq!(header!(&calls[0], "cosy-clienttype"), Some("10"));
     assert_eq!(header!(&calls[0], "user-agent"), Some("Qoder"));
     assert_eq!(header!(&calls[0], "cosy-machinetoken"), None);
