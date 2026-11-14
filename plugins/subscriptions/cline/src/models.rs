@@ -199,7 +199,7 @@ fn cloud_model(entry: &Value) -> Option<FeedModel> {
 fn tokens(value: Option<&Value>) -> Option<u64> {
     let number = match value? {
         Value::Number(number) => number.as_f64(),
-        Value::String(text) => text.parse::<f64>().ok(),
+        Value::String(text) => text.trim().parse::<f64>().ok(),
         _ => None,
     }?;
     (number.is_finite() && number > 0.0).then_some(number.floor() as u64)
