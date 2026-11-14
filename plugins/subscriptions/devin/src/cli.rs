@@ -617,7 +617,7 @@ mod tests {
         let path_bin = dir.path().join("path-bin");
         let home = dir.path().join("home");
         let system = dir.path().join("system");
-        let path_program = path_bin.join("devin");
+        let path_program = path_bin.join(if cfg!(windows) { "devin.exe" } else { "devin" });
         let home_program = home.join(".local").join("bin").join("devin");
         let system_program = system.join("devin");
         for program in [&path_program, &home_program, &system_program] {
@@ -652,7 +652,7 @@ mod tests {
                 .exits(move |spawn| {
                     assert!(spawn.program.is_absolute());
                     assert_eq!(
-                        spawn.program.file_name().and_then(|name| name.to_str()),
+                        spawn.program.file_stem().and_then(|name| name.to_str()),
                         Some("bash")
                     );
                     assert_eq!(spawn.args, ["-c", INSTALL_SH]);
@@ -686,7 +686,12 @@ mod tests {
             .expect_err("no installed CLI");
         let text = error.to_string();
         assert!(text.contains("Error: Failed to download"), "{text}");
-        assert!(text.contains(INSTALL_SH), "{text}");
+        let manual = if cfg!(windows) {
+            INSTALL_PS
+        } else {
+            INSTALL_SH
+        };
+        assert!(text.contains(manual), "{text}");
         assert!(!text.contains('\u{1b}'));
     }
 
