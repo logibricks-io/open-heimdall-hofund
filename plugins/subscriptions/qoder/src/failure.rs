@@ -67,10 +67,7 @@ pub(crate) fn classify(status: u16, body: &str) -> Classified {
     let mut queue = None;
 
     if let Ok(mut value) = hofund_plugin_sdk::json::from_str::<Value>(raw) {
-        let outer_code = value
-            .get("code")
-            .map(string_code)
-            .unwrap_or_default();
+        let outer_code = value.get("code").map(string_code).unwrap_or_default();
         if matches!(outer_code.as_str(), "" | "401" | "403")
             && let Some(inner_text) = value.get("message").and_then(Value::as_str)
             && let Ok(inner) = hofund_plugin_sdk::json::from_str::<Value>(inner_text.trim())
@@ -79,10 +76,7 @@ pub(crate) fn classify(status: u16, body: &str) -> Classified {
         {
             value = inner;
         }
-        code = value
-            .get("code")
-            .map(string_code)
-            .unwrap_or_default();
+        code = value.get("code").map(string_code).unwrap_or_default();
         if let Some(text) = value.get("message").and_then(Value::as_str) {
             message = text.to_owned();
         }
