@@ -106,16 +106,9 @@ const INSTALL_PS: &str = "irm https://static.devin.ai/cli/setup.ps1 | iex";
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const INSTALL_TAIL: Duration = Duration::from_secs(5);
 
+#[cfg(not(test))]
 pub(crate) async fn ensure_installed(host: &HostContext) -> Result<(), PluginError> {
-    #[cfg(test)]
-    {
-        let _ = host;
-        Ok(())
-    }
-    #[cfg(not(test))]
-    {
-        install_with_finder(host, cfg!(windows), cli_path).await
-    }
+    install_with_finder(host, cfg!(windows), cli_path).await
 }
 
 async fn install_with_finder(
@@ -245,7 +238,7 @@ fn install_cwd() -> PathBuf {
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())
         .or_else(|| std::env::current_dir().ok())
-        .unwrap_or_else(std::env::temp_dir)
+        .expect("the current directory must be absolute")
 }
 
 async fn read_last(child: &PipedChild, last: &Arc<Mutex<String>>) -> Result<i32, PluginError> {
@@ -592,12 +585,19 @@ fn toml_string(value: &str) -> String {
 }
 
 #[cfg(test)]
+pub(crate) async fn ensure_installed(_host: &HostContext) -> Result<(), PluginError> {
+    Ok(())
+}
+
+#[cfg(test)]
 mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use hofund_kit_subscription::{PipedScript, TestHost, advance_time, block_on, block_on_paused};
+    use hofund_kit_subscription::{
+        PipedScript, TestHost, advance_time, block_on, block_on_paused, yield_times,
+    };
     use hofund_plugin_api::{PluginId, PluginKind};
     use hofund_plugin_sdk::{Race, race};
 
@@ -713,6 +713,7 @@ mod tests {
                 advance_time(std::time::Duration::from_secs(1)).await;
                 advance_time(std::time::Duration::from_secs(5)).await;
                 advance_time(std::time::Duration::from_millis(1)).await;
+                yield_times(4).await;
             };
             let result = race(install, control).await;
             let Race::Left(result) = result else {
