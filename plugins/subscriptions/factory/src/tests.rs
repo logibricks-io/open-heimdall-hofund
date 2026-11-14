@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use hofund_kit_subscription::{TestHost, block_on};
 use hofund_plugin_api::{
-    AccountId, PluginErrorKind, PluginId, PluginKind, ProbeQuery, ProtocolId, RawTable,
-    SecretString, SignInChallenge, SignInCtx, SignInProof, Subscription, SubscriptionFactory,
+    AccountId, Completion, PluginErrorKind, PluginId, PluginKind, ProbeQuery, ProtocolId, RawTable,
+    SecretString, SignInChallenge, SignInCtx, SignInProof, Subscription, SubscriptionFactory, Tool,
 };
 use hofund_plugin_sdk::json::json;
 use hofund_plugin_sdk::oauth::SecretObject;
@@ -660,4 +660,119 @@ fn r52_rate_limit_keeps_retry_after_and_cools() {
         Some(std::time::Duration::from_secs(17))
     );
     assert!(error.cools());
+}
+
+#[test]
+fn r52e_anthropic_wraps_root_composed_tool_schema_on_the_wire() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_oauth(&host);
+    host.http()
+        .enqueue(br#"{"id":"msg_1","type":"message","content":[]}"#.to_vec());
+    let sub = subscription(&host);
+    let upstream = sub.upstream(&id, host.context()).expect("upstream");
+    let query = ProbeQuery::new(ProtocolId::ANTHROPIC_MESSAGES, "claude-opus-5-5").expect("query");
+    let mut request = query.minimal_request();
+    request.tools = vec![Tool {
+        name: "task".to_owned(),
+        description: None,
+        input_schema: json!({
+            "anyOf": [
+                { "type": "object", "properties": { "mode": { "const": "view" } }, "additionalProperties": false }
+            ]
+        }),
+        extensions: Default::default(),
+    }];
+    block_on(upstream.execute(request, ProtocolId::ANTHROPIC_MESSAGES)).expect("execute");
+    let calls = host.http().calls();
+    let call = calls.last().expect("call");
+    let body: hofund_plugin_sdk::json::Value =
+        hofund_plugin_sdk::json::from_slice(call.body()).expect("body");
+    let schema = &body["tools"][0]["input_schema"];
+    assert_eq!(schema["type"], "object");
+    assert!(schema["properties"].get("arguments").is_some());
+    assert_eq!(schema["required"], json!(["arguments"]));
+}
+
+#[test]
+fn r52e_anthropic_unwraps_unary_tool_calls() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_oauth(&host);
+    let reply = br#"{"id":"msg_1","type":"message","content":[{"type":"tool_use","id":"call_1","name":"task","input":{"arguments":{"mode":"view","id":"task_1"}}}],"stop_reason":"tool_use"}"#;
+    host.http()
+        .enqueue_response(200, &[("content-type", "application/json")], reply.to_vec());
+    let sub = subscription(&host);
+    let upstream = sub.upstream(&id, host.context()).expect("upstream");
+    let query = ProbeQuery::new(ProtocolId::ANTHROPIC_MESSAGES, "claude-opus-5-5").expect("query");
+    let mut request = query.minimal_request();
+    request.tools = vec![Tool {
+        name: "task".to_owned(),
+        description: None,
+        input_schema: json!({ "anyOf": [{ "type": "object" }] }),
+        extensions: Default::default(),
+    }];
+    let completion =
+        block_on(upstream.execute(request, ProtocolId::ANTHROPIC_MESSAGES)).expect("execute");
+    let Completion::Raw(mut body) = completion else {
+        panic!("raw completion");
+    };
+    let mut bytes = Vec::new();
+    while let Some(chunk) = block_on(body.next_chunk()) {
+        bytes.extend_from_slice(&chunk.expect("chunk"));
+    }
+    let value: hofund_plugin_sdk::json::Value =
+        hofund_plugin_sdk::json::from_slice(&bytes).expect("json");
+    assert_eq!(
+        value["content"][0]["input"],
+        json!({ "mode": "view", "id": "task_1" })
+    );
+}
+
+#[test]
+fn r52e_anthropic_unwraps_streamed_tool_arguments() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_oauth(&host);
+    let stream = concat!(
+        "event: content_block_start\n",
+        "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call_1\",\"name\":\"task\",\"input\":{}}}\n\n",
+        "event: content_block_delta\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"arguments\\\":{\\\"mode\\\":\\\"view\\\"}}\"}}\n\n",
+        "event: content_block_stop\n",
+        "data: {\"type\":\"content_block_stop\",\"index\":1}\n\n",
+        "event: message_stop\n",
+        "data: {\"type\":\"message_stop\"}\n\n"
+    );
+    host.http().enqueue_response(
+        200,
+        &[("content-type", "text/event-stream")],
+        stream.as_bytes().to_vec(),
+    );
+    let sub = subscription(&host);
+    let upstream = sub.upstream(&id, host.context()).expect("upstream");
+    let query = ProbeQuery::new(ProtocolId::ANTHROPIC_MESSAGES, "claude-opus-5-5").expect("query");
+    let mut request = query.minimal_request();
+    request.stream = true;
+    request.tools = vec![Tool {
+        name: "task".to_owned(),
+        description: None,
+        input_schema: json!({ "anyOf": [{ "type": "object" }] }),
+        extensions: Default::default(),
+    }];
+    let completion =
+        block_on(upstream.execute(request, ProtocolId::ANTHROPIC_MESSAGES)).expect("execute");
+    let Completion::Raw(mut body) = completion else {
+        panic!("raw completion");
+    };
+    let mut out = Vec::new();
+    while let Some(chunk) = block_on(body.next_chunk()) {
+        out.extend_from_slice(&chunk.expect("chunk"));
+    }
+    let text = String::from_utf8(out).expect("utf8");
+    assert!(
+        text.contains(r#""partial_json":"{\"mode\":\"view\"}"#)
+            || text.contains(r#""mode":"view""#)
+    );
+    assert!(!text.contains("arguments"));
 }

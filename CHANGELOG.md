@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- R-52e: the Factory subscription plugin wraps Anthropic tool schemas that use
+  root `anyOf` / `oneOf` / `allOf` under `arguments`, rebases in-schema `#`
+  refs, unwraps unary `tool_use` replies, and rewrites streamed
+  `input_json_delta` events before they reach the caller. Recorded HTTP and
+  `r52e_*` fixtures cover wrap, unwrap, and stream paths. Refs R-52.
+
 - R-13: the Devin subscription plugin re-reads CLI `credentials.toml` on
   `refresh` and `list_models` through `Stored::live` without persisting rotated
   keys, applies `WINDSURF_API_SERVER_URL` when present, and advertises

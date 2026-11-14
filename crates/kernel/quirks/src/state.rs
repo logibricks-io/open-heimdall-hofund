@@ -143,11 +143,22 @@ pub fn fold_object_roots(
     state: &RequestState,
     body: &[u8],
 ) -> (Vec<u8>, bool) {
+    if protocol == "anthropic-messages" && factory_host(base_url) {
+        return (body.to_vec(), false);
+    }
     if host(base_url) != "api.x.ai" && protocol != "anthropic-messages" && !state.folds_root(model)
     {
         return (body.to_vec(), false);
     }
     fold_encoded(protocol, body)
+}
+
+fn factory_host(base_url: &str) -> bool {
+    let host = host(base_url);
+    host == "factory.ai"
+        || host == "factory.test"
+        || host.ends_with(".factory.ai")
+        || host.ends_with(".factory.test")
 }
 
 /// Folds every eligible function schema in a Chat or Responses body.
