@@ -152,6 +152,7 @@ impl Subscription for Devin {
         ctx: &SignInCtx,
         host: &HostContext,
     ) -> Result<SignInChallenge, PluginError> {
+        cli::ensure_installed(host).await?;
         drop(self.take_pending(ctx.session()));
         host.loopback().release(ctx);
         let (pkce, state) = sign_in::generate()?;

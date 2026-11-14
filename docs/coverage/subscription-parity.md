@@ -14,7 +14,7 @@ Legend: **Done** = matches the reference at checklist granularity; **Partial** =
 |---|---|---|---|---|---|
 | Claude Pro/Max (`claude`) | 1 | 17 | 3 | 2 | 0 |
 | Cursor (`cursor`) | 1 | 15 | 3 | 2 | 0 |
-| Devin (`devin`) | 11 | 7 | 0 | 1 | 0 |
+| Devin (`devin`) | 12 | 6 | 0 | 1 | 0 |
 | Zed (`zed`) | 0 | 6 | 1 | 3 | 0 |
 | Kiro (`kiro`) | 6 | 11 | 0 | 2 | 0 |
 | Factory / Droid (`factory`) | 12 | 4 | 0 | 3 | 0 |
@@ -146,12 +146,11 @@ Every other gap below maps to an existing plan item.
 | m | multi-account | EU host `eu.codeium.com` (plugin) | unverified in hofund | Partial | Region selection (**R-12**) |
 | n | error classification | Plugin `errors.test.mjs` | `errors.rs` section 6 HTTP/Connect mapping, exact empty-reply and broken-stream errors | Done | Tool/image-specific cases (**R-13**) |
 | o | keepalive | `keepalive.test.mjs` | R-13c adds opt-in 285 s / six-ping keepalive with byte-stable `continue` requests, send-time scheduling, session/subagent and growing-first-message keys, and all stop rules; paused-clock recorded-HTTP tests | Partial | Separate ping usage reporting needs a host usage hook |
-| p | agent sign-in | Core installs CLI (`devin.go:8-12`) | `agent_sign_in.rs` write TOML | Partial | CLI install helper like core (`DevinExecutable`) |
+| p | agent sign-in | Core installs CLI (`devin.go:8-12`) | `agent_sign_in.rs` writes TOML; R-13c discovers PATH/home/system binaries, runs the reference installer, rechecks discovery, refreshes registry PATH, and applies the Windows setup tail with scripted-process tests | Done | — |
 | q | extras | gzip request, identity headers, CLI version pin (`devin/index.mjs:33-36`) | `connect/` message tables + SDK `protobuf`; 8083/8333 gzip tests; HTTP encoding header, metadata, and sensitive Basic auth | Done | — |
 
 ### Gaps (Devin)
 
-- CLI install/bootstrap — **S**, **R-12** (new to the plan in this audit)
 - Keepalive usage reporting — host usage hook (deferred by design)
 
 Structured-output prose for Chat, Responses, and Messages shipped in R-13b (`structured-output.test.mjs` behavior; `structured_text` in `upstream.rs`).
