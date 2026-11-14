@@ -57,6 +57,10 @@ pub(crate) struct Credential {
     pub expires_at: i64,
     pub machine_id: String,
     pub site: Site,
+    pub vpc: String,
+    pub device_chat: bool,
+    pub device_token: SecretString,
+    pub device_refresh_token: SecretString,
 }
 
 #[derive(Clone, Debug)]
@@ -123,6 +127,14 @@ pub(crate) fn parse_secret(secret: &SecretString) -> Result<Stored, PluginError>
             expires_at: blob.number("expires_at").unwrap_or(0) as i64,
             machine_id: blob.text("machine_id").unwrap_or("").to_owned(),
             site,
+            vpc: blob.text("vpc").unwrap_or("").to_owned(),
+            device_chat: blob.flag("device_chat"),
+            device_token: blob
+                .secret("device_token")
+                .unwrap_or_else(|| SecretString::from(String::new())),
+            device_refresh_token: blob
+                .secret("device_refresh_token")
+                .unwrap_or_else(|| SecretString::from(String::new())),
         },
     })
 }
@@ -138,19 +150,32 @@ pub(crate) fn secret_blob(credential: &Credential) -> SecretObject {
         .with_number("expires_at", credential.expires_at.max(0) as u64)
         .with_text("machine_id", &credential.machine_id)
         .with_text("site", credential.site.as_str())
+        .with_text("vpc", &credential.vpc)
+        .with_flag("device_chat", credential.device_chat)
+        .with_secret("device_token", &credential.device_token)
+        .with_secret("device_refresh_token", &credential.device_refresh_token)
 }
 
 pub(crate) fn account_id(credential: &Credential) -> AccountId {
-    account_id_from(&[credential.site.plugin_id(), &credential.uid])
+    let mut parts = vec![credential.site.plugin_id(), credential.uid.as_str()];
+    if !credential.vpc.is_empty() {
+        parts.push(credential.vpc.as_str());
+    }
+    account_id_from(&parts)
 }
 
 pub(crate) fn label(credential: &Credential) -> String {
-    if !credential.email.is_empty() {
+    let label = if !credential.email.is_empty() {
         credential.email.clone()
     } else if !credential.name.is_empty() {
         credential.name.clone()
     } else {
         credential.uid.clone()
+    };
+    if credential.vpc.is_empty() {
+        label
+    } else {
+        format!("{label} ({})", credential.vpc)
     }
 }
 
@@ -181,6 +206,13 @@ pub(crate) fn parse_json(text: &str) -> Result<Credential, PluginError> {
         expires_at: map.get("expires_at").and_then(json_number_i64).unwrap_or(0),
         machine_id: optional_str(map, "machine_id"),
         site,
+        vpc: optional_str(map, "vpc"),
+        device_chat: map
+            .get("device_chat")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        device_token: SecretString::from(optional_str(map, "device_token")),
+        device_refresh_token: SecretString::from(optional_str(map, "device_refresh_token")),
     })
 }
 

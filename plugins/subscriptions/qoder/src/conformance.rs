@@ -15,13 +15,13 @@ fn host(dir: &tempfile::TempDir) -> TestHost {
 }
 
 #[test]
-fn a2c_1_contributes_one_bridge_subscription_with_checkin() {
+fn a2c_1_contributes_one_device_subscription_with_checkin() {
     let contribution = crate::contribute();
     let [factory] = contribution.subscriptions() else {
         panic!("one subscription factory");
     };
     assert_eq!(factory.spec().plugin().as_str(), "qoder");
-    assert_eq!(factory.spec().flow(), SignInFlowKind::Bridge);
+    assert_eq!(factory.spec().flow(), SignInFlowKind::Device);
     assert!(factory.spec().daily_checkin());
 
     let dir = tempfile::tempdir().expect("dir");
