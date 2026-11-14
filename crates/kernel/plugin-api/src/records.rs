@@ -1417,6 +1417,8 @@ pub enum SignInProof {
         code: SecretString,
         /// The `state` value the helper checked.
         state: String,
+        /// OAuth client id returned with the code (Sign in with ChatGPT).
+        issued_client_id: Option<String>,
     },
     /// A native-app callback carrying an encrypted access token.
     QueryToken {
@@ -1444,6 +1446,7 @@ impl SignInProof {
         Self::Callback {
             code: code.into(),
             state: state.into(),
+            issued_client_id: None,
         }
     }
 
@@ -1474,10 +1477,15 @@ impl SignInProof {
 impl std::fmt::Debug for SignInProof {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Callback { state, .. } => formatter
+            Self::Callback {
+                state,
+                issued_client_id,
+                ..
+            } => formatter
                 .debug_struct("Callback")
                 .field("code", &"<redacted>")
                 .field("state", state)
+                .field("issued_client_id", issued_client_id)
                 .finish(),
             Self::QueryToken { user_id, .. } => formatter
                 .debug_struct("QueryToken")

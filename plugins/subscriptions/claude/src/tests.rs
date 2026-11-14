@@ -404,6 +404,7 @@ fn a_callback_proof_is_refused() {
         SignInProof::Callback {
             code: SecretString::from("c".to_owned()),
             state: "s".to_owned(),
+            issued_client_id: None,
         },
         host.context(),
     ))

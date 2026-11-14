@@ -15,7 +15,7 @@ use futures_util::{Stream, StreamExt};
 use hofund_plugin_api::kernel::LoopbackBackend;
 use hofund_plugin_api::{
     BindBlocked, LOOPBACK_CANCEL_PATH, LoopbackBinding, LoopbackSpec, PluginError, PluginKey,
-    RedirectHost, SignInProof,
+    RedirectHost, SecretString, SignInProof,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
@@ -512,7 +512,15 @@ fn route_oauth(
     }
     match params.code {
         Some(code) if !code.is_empty() => {
-            if shared.finish(Ok(SignInProof::callback(code, state.to_owned()))) {
+            let proof = SignInProof::Callback {
+                code: SecretString::from(code),
+                state: state.to_owned(),
+                issued_client_id: params
+                    .client_id
+                    .filter(|id| !id.is_empty())
+                    .map(|id| id.to_owned()),
+            };
+            if shared.finish(Ok(proof)) {
                 (
                     200,
                     "Signed in",
@@ -549,6 +557,7 @@ fn refused(error: &str) -> PluginError {
 struct CallbackParams {
     state: Option<String>,
     code: Option<String>,
+    client_id: Option<String>,
     error: Option<String>,
     user_id: Option<String>,
     access_token: Option<String>,
@@ -561,6 +570,7 @@ impl CallbackParams {
             let slot = match key.as_ref() {
                 "state" => &mut params.state,
                 "code" => &mut params.code,
+                "client_id" => &mut params.client_id,
                 "error" => &mut params.error,
                 "user_id" => &mut params.user_id,
                 "access_token" => &mut params.access_token,
@@ -673,7 +683,14 @@ pub fn parse_pasted_callback(
         return Err(refused(&error));
     }
     match params.code {
-        Some(code) if !code.is_empty() => Ok(SignInProof::callback(code, state.to_owned())),
+        Some(code) if !code.is_empty() => Ok(SignInProof::Callback {
+            code: SecretString::from(code),
+            state: state.to_owned(),
+            issued_client_id: params
+                .client_id
+                .filter(|id| !id.is_empty())
+                .map(|id| id.to_owned()),
+        }),
         _ => Err(PluginError::config(
             "the pasted address has no authorization code",
         )),
@@ -762,7 +779,7 @@ mod tests {
 
     fn code(proof: &SignInProof) -> String {
         match proof {
-            SignInProof::Callback { code, state } => {
+            SignInProof::Callback { code, state, .. } => {
                 assert_eq!(state, STATE);
                 code.expose_secret().to_owned()
             }
