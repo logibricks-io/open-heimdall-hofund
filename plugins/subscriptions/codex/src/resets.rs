@@ -1,13 +1,28 @@
 //! Credit-funded rate-limit window resets from `/wham/rate-limit-reset-credits`.
 
+use std::collections::HashMap;
+use std::sync::Mutex;
+
 use hofund_plugin_api::{
-    HostContext, PluginError, QuotaResetCard, QuotaResetCredits, QuotaResetOutcome,
+    AccountId, HostContext, PluginError, PluginErrorKind, QuotaResetCard, QuotaResetCredits,
+    QuotaResetOutcome,
 };
 use hofund_plugin_sdk::json::{self, Value};
 
 use crate::tokens::Access;
 use crate::upstream::{account_call, account_post};
 use crate::{Endpoints, usage};
+
+/// Pending `redeem_request_id` values for in-flight explicit consumes.
+pub(crate) type RedeemLedger = Mutex<HashMap<(AccountId, String), String>>;
+
+fn lock_ledger(
+    ledger: &RedeemLedger,
+) -> std::sync::MutexGuard<'_, HashMap<(AccountId, String), String>> {
+    ledger
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 /// Reads reset credits for the account: count from `/wham/usage`, details
 /// from `/wham/rate-limit-reset-credits` when the count is positive.
@@ -47,13 +62,35 @@ pub(crate) async fn read(
     Ok(Some(out))
 }
 
+fn redeem_for(
+    ledger: &RedeemLedger,
+    account: &AccountId,
+    credit: &str,
+) -> Result<String, PluginError> {
+    let key = (account.clone(), credit.to_owned());
+    let mut guard = lock_ledger(ledger);
+    if let Some(redeem) = guard.get(&key) {
+        return Ok(redeem.clone());
+    }
+    let redeem =
+        hofund_plugin_sdk::uuid::v4().map_err(|_| PluginError::internal("reset redeem id"))?;
+    guard.insert(key, redeem.clone());
+    Ok(redeem)
+}
+
+fn finish_redeem(ledger: &RedeemLedger, account: &AccountId, credit: &str) {
+    lock_ledger(ledger).remove(&(account.clone(), credit.to_owned()));
+}
+
 /// Spends one reset credit. `credit_id` names the credit; empty spends the
 /// one that runs out first. Only call this from an explicit user action.
 pub(crate) async fn consume(
     host: &HostContext,
+    account: &AccountId,
     endpoints: &Endpoints,
     access: &Access,
     credit_id: Option<&str>,
+    ledger: &RedeemLedger,
 ) -> Result<QuotaResetOutcome, PluginError> {
     let mut credit = credit_id.unwrap_or_default().trim().to_owned();
     if credit.is_empty() {
@@ -88,25 +125,38 @@ pub(crate) async fn consume(
             ));
         }
     }
-    let redeem =
-        hofund_plugin_sdk::uuid::v4().map_err(|_| PluginError::internal("reset redeem id"))?;
+    let redeem = redeem_for(ledger, account, &credit)?;
     let body = json::to_vec(&json::json!({
         "credit_id": credit,
         "redeem_request_id": redeem,
     }))
     .map_err(|_| PluginError::internal("reset consume body"))?;
-    let reply = account_post(consume_url(endpoints), access)
-        .header("content-type", "application/json")
-        .bytes(body)
-        .fetch(host.http())
-        .await?;
+    let post = || {
+        account_post(consume_url(endpoints), access)
+            .header("content-type", "application/json")
+            .bytes(body.clone())
+    };
+    let reply = match post().fetch(host.http()).await {
+        Ok(reply) => reply,
+        Err(error)
+            if matches!(
+                error.kind(),
+                PluginErrorKind::Transport | PluginErrorKind::Connect
+            ) =>
+        {
+            post().fetch(host.http()).await?
+        }
+        Err(error) => return Err(error),
+    };
     if !(200..300).contains(&reply.status()) {
         return Err(PluginError::status_error(
             reply.status(),
             "ChatGPT did not accept the reset",
         ));
     }
-    parse_consume_outcome(reply.body())
+    let outcome = parse_consume_outcome(reply.body())?;
+    finish_redeem(ledger, account, &credit);
+    Ok(outcome)
 }
 
 /// Reads `available_count` from a usage page body. Only an explicit zero
@@ -223,6 +273,21 @@ fn parse_consume_outcome(body: &[u8]) -> Result<QuotaResetOutcome, PluginError> 
 mod tests {
     use super::*;
 
+    fn vendor_refusal(code: &str) -> bool {
+        matches!(
+            code,
+            "nothing_to_reset"
+                | "no_credit"
+                | "already_redeemed"
+                | "already_used"
+                | "already_reset"
+        )
+    }
+
+    fn vendor_spent(code: &str) -> bool {
+        code == "reset"
+    }
+
     #[test]
     fn r47a_k2_usage_count_explicit_zero_is_none() {
         assert_eq!(
@@ -285,5 +350,36 @@ mod tests {
         assert_eq!(wire.each.len(), 2);
         assert!(wire.held("soon"));
         assert!(!wire.held("spent"));
+    }
+
+    #[test]
+    fn r47n_vendor_refusal_codes() {
+        for code in [
+            "nothing_to_reset",
+            "no_credit",
+            "already_redeemed",
+            "already_used",
+            "already_reset",
+        ] {
+            assert!(vendor_refusal(code), "{code}");
+        }
+        assert!(!vendor_refusal("reset"));
+        assert!(vendor_spent("reset"));
+        assert!(!vendor_spent("nothing_to_reset"));
+    }
+
+    #[test]
+    fn r47n_parse_consume_refusals_on_200() {
+        for (code, windows) in [
+            ("nothing_to_reset", 0),
+            ("already_redeemed", 0),
+            ("already_used", 0),
+            ("reset", 2),
+        ] {
+            let body = format!(r#"{{"code":"{code}","windows_reset":{windows}}}"#);
+            let outcome = parse_consume_outcome(body.as_bytes()).expect(code);
+            assert_eq!(outcome.code(), code);
+            assert_eq!(outcome.windows(), windows);
+        }
     }
 }
