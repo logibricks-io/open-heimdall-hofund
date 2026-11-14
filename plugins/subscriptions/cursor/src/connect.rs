@@ -29,6 +29,36 @@ pub(crate) async fn unary_opts(
     read_timeout: Option<Duration>,
 ) -> Result<Value, PluginError> {
     let url = endpoints.dashboard(path);
+    unary_url(host, endpoints, url, token, body, team_id, read_timeout).await
+}
+
+pub(crate) async fn available_models(
+    host: &HostContext,
+    endpoints: &Endpoints,
+    token: &SecretString,
+) -> Result<Value, PluginError> {
+    let team_id = crate::team::header_value(token);
+    unary_url(
+        host,
+        endpoints,
+        endpoints.available_models(),
+        token,
+        r#"{"useModelParameters":true,"doNotUseMarkdown":true}"#,
+        team_id.as_deref(),
+        Some(Duration::from_secs(30)),
+    )
+    .await
+}
+
+async fn unary_url(
+    host: &HostContext,
+    endpoints: &Endpoints,
+    url: String,
+    token: &SecretString,
+    body: &str,
+    team_id: Option<&str>,
+    read_timeout: Option<Duration>,
+) -> Result<Value, PluginError> {
     let mut request = Call::post(url)
         .header("content-type", "application/json")
         .header("connect-protocol-version", "1")

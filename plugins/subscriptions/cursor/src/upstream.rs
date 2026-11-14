@@ -67,6 +67,7 @@ impl CursorUpstream {
     fn mapped_request(
         &self,
         request: &Request,
+        choice: &crate::picker::ModelChoice,
         max_mode: bool,
         conversation_id: Option<&str>,
     ) -> Result<request::MappedRequest, PluginError> {
@@ -80,7 +81,7 @@ impl CursorUpstream {
                 conversation_id
             }
         };
-        let mapped = request::map_with_mode(request, conversation_id, max_mode)?;
+        let mapped = request::map_with_choice(request, conversation_id, max_mode, choice)?;
         #[cfg(test)]
         self.mapped_max_mode
             .lock()
@@ -123,12 +124,15 @@ impl UpstreamProvider for CursorUpstream {
             .map(|id| format!("msg_{id}"))
             .map_err(|error| PluginError::io(format!("cannot create a response id: {error}")))?;
         let team_id = team::header_value(&token);
-        let mut max_mode = crate::max_only::contains(&model);
+        let choice = crate::picker::choose(&self.host, &self.endpoints, &token, &request).await;
+        let mut max_mode = choice.max_mode
+            || crate::max_only::contains(&model)
+            || crate::max_only::contains(&choice.id);
         let mut conversation_id_hold: Option<String> = None;
         let mut retried_max = false;
         'max: loop {
             let mapped =
-                self.mapped_request(&request, max_mode, conversation_id_hold.as_deref())?;
+                self.mapped_request(&request, &choice, max_mode, conversation_id_hold.as_deref())?;
             let tools = mapped.tools.clone();
             let conversation_id = mapped.conversation_id.clone();
             conversation_id_hold = Some(conversation_id.clone());
@@ -2567,5 +2571,126 @@ mod tests {
             assert!(!crate::max_only::contains("gpt-5.6-luna-high"));
         });
         crate::max_only::clear();
+    }
+
+    #[test]
+    fn picker_effort_service_tier_and_context_reach_the_run_request() {
+        let _guard = crate::http2_memory::test_lock();
+        crate::http2_memory::reset_for_tests();
+        block_on(async {
+            let h2 = Http2Server::start(vec![
+                Http2Response::new(200).data(text_frame("ok")).hold_open(),
+            ])
+            .await;
+            let picker = json!({"models": [{
+                "name": "grok-4.7",
+                "contextTokenLimit": 256000,
+                "supportsNonMaxMode": true,
+                "parameterDefinitions": [
+                    {"id": "context", "parameterType": {"enumParameter": {"values": [{"value": "256k"}]}}},
+                    {"id": "reasoning_effort", "parameterType": {"enumParameter": {"values": [{"value": "low"}, {"value": "high"}]}}},
+                    {"id": "fast", "parameterType": {"booleanParameter": {"values": [{"value": "false"}, {"value": "true"}]}}},
+                ],
+                "variants": [
+                    {"legacySlug": "grok-4.7-high-fast", "isDefaultNonMaxConfig": true, "parameterValues": [
+                        {"id": "context", "value": "256k"},
+                        {"id": "reasoning_effort", "value": "high"},
+                        {"id": "fast", "value": "true"},
+                    ]},
+                    {"legacySlug": "grok-4.7-low-fast", "isMaxMode": true, "parameterValues": [
+                        {"id": "context", "value": "256k"},
+                        {"id": "reasoning_effort", "value": "low"},
+                        {"id": "fast", "value": "true"},
+                    ]},
+                ],
+            }]});
+            let h1 = Http1Server::start(vec![
+                Http1Response::new(200).body(picker.to_string().into_bytes()),
+                config_reply(h2.base_url()),
+            ])
+            .await;
+            let host = pooled_host();
+            let account = store_account(&host).await;
+            let upstream = upstream(&host, &h1, h2.base_url(), account);
+            let mut request: Request = from_value(json!({
+                "model": "grok-4.7@256k",
+                "params": {"effort": "low"},
+                "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+            }))
+            .expect("effort request");
+            request.extensions.insert("service_tier", json!("priority"));
+            let Completion::Stream(mut stream) = upstream
+                .execute(request, ProtocolId::OPENAI_CHAT)
+                .await
+                .expect("picker execute")
+            else {
+                panic!("stream");
+            };
+            for _ in 0..3 {
+                stream.next().await.expect("event").expect("stream event");
+            }
+
+            let h1_requests = h1.requests();
+            assert_eq!(
+                h1_requests[0].path(),
+                "/aiserver.v1.AiService/AvailableModels"
+            );
+            let list_body: hofund_plugin_sdk::json::Value =
+                hofund_plugin_sdk::json::from_slice(h1_requests[0].body())
+                    .expect("AvailableModels body");
+            assert_eq!(list_body["useModelParameters"], true);
+            assert_eq!(list_body["doNotUseMarkdown"], true);
+
+            let payloads = client_payloads(&h2, 1).await;
+            let client = proto::fields(&payloads[0]);
+            let run = proto::fields(client[0].as_bytes().expect("AgentRunRequest"));
+            let details = run
+                .iter()
+                .find(|field| field.number == 3)
+                .and_then(proto::Field::as_message)
+                .expect("model details");
+            assert_eq!(
+                details
+                    .iter()
+                    .find(|field| field.number == 7)
+                    .and_then(proto::Field::as_varint),
+                Some(1)
+            );
+            let requested = run
+                .iter()
+                .find(|field| field.number == 9)
+                .and_then(proto::Field::as_message)
+                .expect("requested model");
+            assert_eq!(
+                requested[0].as_string().as_deref(),
+                Some("grok-4.7-low-fast")
+            );
+            assert_eq!(
+                requested
+                    .iter()
+                    .find(|field| field.number == 2)
+                    .and_then(proto::Field::as_varint),
+                Some(1)
+            );
+            let parameters = requested
+                .iter()
+                .filter(|field| field.number == 3)
+                .map(|field| {
+                    let parameter = field.as_message().expect("parameter");
+                    (
+                        parameter[0].as_string().expect("id"),
+                        parameter[1].as_string().expect("value"),
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                parameters,
+                [
+                    ("context".to_owned(), "256k".to_owned()),
+                    ("reasoning_effort".to_owned(), "low".to_owned()),
+                    ("fast".to_owned(), "true".to_owned()),
+                ]
+            );
+        });
     }
 }
