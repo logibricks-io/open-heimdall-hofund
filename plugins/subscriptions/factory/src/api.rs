@@ -21,8 +21,10 @@ fn apply_headers(
     org_id: Option<&str>,
     whoami_extended: bool,
 ) -> Result<Call, PluginError> {
-    for (name, value) in client::headers() {
-        call = call.header(name, value);
+    if !whoami_extended {
+        for (name, value) in client::headers() {
+            call = call.header(name, value);
+        }
     }
     if whoami_extended {
         call = call.header("x-factory-whoami-extended", "true");

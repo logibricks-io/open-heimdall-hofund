@@ -487,12 +487,14 @@ MemberSummary #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Se
 MemberSummary.id
 MemberSummary.ready
 MemberSummary.resting_models
-ModelEntry #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+ModelEntry #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Serialize, Deserialize)
 ModelEntry.context
 ModelEntry.display_name
 ModelEntry.id
 ModelEntry.max_output
-ModelListResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+ModelEntry.rate
+ModelEntry.rate_was
+ModelListResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Serialize, Deserialize)
 ModelListResponse.added
 ModelListResponse.delisted
 ModelListResponse.fetched_at_ms

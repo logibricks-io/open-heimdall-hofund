@@ -2219,8 +2219,17 @@ fn merge_model(left: &ModelSpec, right: &ModelSpec) -> ModelSpec {
         .with_decides(left.decides() || right.decides())
         .with_efforts(first_slice(left.efforts(), right.efforts()))
         .with_service_tiers(first_slice(left.service_tiers(), right.service_tiers()));
-    match left.web_search().or_else(|| right.web_search()) {
+    let model = match left.web_search().or_else(|| right.web_search()) {
         Some(search) => model.with_web_search(search),
+        None => model,
+    };
+    let (rate, rate_was) = if left.rate().is_some() {
+        left.rate_parts()
+    } else {
+        right.rate_parts()
+    };
+    match rate {
+        Some(rate) => model.with_rate(rate, rate_was),
         None => model,
     }
 }
