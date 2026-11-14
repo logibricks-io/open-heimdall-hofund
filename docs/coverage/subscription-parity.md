@@ -105,7 +105,7 @@ Every other gap below maps to an existing plan item.
 | h | tool calls | MCP `CallDynamicTool` (`cursor/index.mjs:21-26`, `51`) | Selected MCP execs emit caller tool blocks; unknown and Cursor-owned execs (shell, file, and every non-MCP kind) stay refused on the stateless Run path; server-completed calls are not emitted; counts, checkpoints, and the 60-second count wait seal steps; R-9h loopback tests cover refusal without native session | Partial | Cursor-owned tool execution remains deferred without native session retention |
 | i | images | unverified in core; plugin native session handles blobs | R-9e maps data-URL and base64 images to hex `Uint8Array` parts, URL images to placeholders, non-image files to named placeholders, and sets request field 19 only for sent inline images | Done | — |
 | j | reasoning | Plugin tests `reasoning.test.mjs`; native picker effort parameters | R-9b emits and replays separate thinking blocks; R-9f resolves `GenerationParams::effort` through the picker and sends the selected variant's native parameters and Max Mode | Done | — |
-| k | quota / usage | Connect `GetCurrentPeriodUsage`, team header (`cursor/index.mjs:171-176`, `connect.rs` parity) | `quota()` via Connect unary with R-8d team header; R-9c maps field-14 and tool-step dashboard usage | Partial | Cross-step deferred usage and credit events (`cursor/deferred-usage.test.mjs`) |
+| k | quota / usage | Connect `GetCurrentPeriodUsage`, team header (`cursor/index.mjs:171-176`, `connect.rs` parity) | `quota()` via Connect unary with R-8d team header; R-9c maps field-14 and tool-step dashboard usage; R-9k adds conversation-scoped dashboard ledger, `deferred_usage` on `Usage.extensions`, stable `Request.conversation` ids, and `r9k_*` loopback tests for cross-step deferral, same-ms billing, and no-deferred when nothing is owed | Partial | Credit events from the reference usage suite are not ported in this slice |
 | l | model list | Plugin catalog + agent list; core `cursor_models.go` contexts | R-9g merges picker, `GetUsableModels`, and scope-3 `AvailableModels` with `fromCatalog` / `modelsOf`, caches by SHA-256(token) for ten minutes, coalesces in-flight listing, and serves stale-while-revalidate / `LIST_RETRY` on the request path (`listing.rs`, `catalog_tests.rs`; recorded HTTP only) | Done | — |
 | m | multi-account | Team id per token (`activeTeamId`) | Multiple accounts; R-8d sends the matching `x-cursor-team-id` on chat, dashboard usage, quota, and picker calls | Partial | — |
 | n | error classification | Plugin maps budget/refusal (`errors.test.mjs`) | `failure.rs` implements the text-only section 6 table: regional/permission 403, status-style 401, quota vs rate 429, context overflow and invalid input 400, unavailable 503, other Connect codes 502, and unchanged bare HTTP statuses. R-9d retries once on a `maxRequired` refusal when the first attempt was not Max Mode | Partial | — |
@@ -115,7 +115,7 @@ Every other gap below maps to an existing plan item.
 
 ### Gaps (Cursor)
 
-- Cross-step deferred usage and credit events remain in row k; Cursor-owned tool execution without native session retention remains in row h.
+- Row k still needs any honestly confirmed credit-event path from the reference usage suite; R-9k loopback fixtures cover cross-step deferral, same-millisecond billing, and the owed-nothing case. Cursor-owned tool execution without native session retention remains in row h.
 
 ---
 
