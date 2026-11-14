@@ -48,7 +48,7 @@ impl GeminiUpstream {
         .method_root(ROOT)
         .headers(headers(&shown_model))
         .rewrite(Arc::new(move |body| {
-            hofund_plugin_sdk::plain_code_assist_tools(body);
+            hofund_plugin_sdk::code_assist::shape_code_assist(body, &envelope_model, false);
             envelope(body, &envelope_model, &envelope_project, &prompt);
             Vec::new()
         }))

@@ -1097,7 +1097,7 @@ fn envelope_adds_project_and_prompt_id() {
 }
 
 #[test]
-fn v1_code_assist_flattens_function_declaration_schemas() {
+fn v1_code_assist_keeps_function_declaration_json_schemas() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
     let (sub, id) = ready(&host, Some("proj-9"));
@@ -1124,12 +1124,10 @@ fn v1_code_assist_flattens_function_declaration_schemas() {
     let call = &host.http().calls()[2];
     let sent: hofund_plugin_sdk::json::Value =
         hofund_plugin_sdk::json::from_slice(call.body()).expect("json body");
-    let parameters = &sent["request"]["tools"][0]["functionDeclarations"][0]["parameters"];
-    assert_eq!(
-        parameters["properties"]["rows"]["items"],
-        hofund_plugin_sdk::json::json!({})
-    );
-    assert!(parameters.get("additionalProperties").is_none());
+    let parameters =
+        &sent["request"]["tools"][0]["functionDeclarations"][0]["parametersJsonSchema"];
+    assert_eq!(parameters["properties"]["rows"]["items"], true);
+    assert_eq!(parameters["additionalProperties"], false);
     assert_eq!(
         parameters["properties"]["mode"]["enum"],
         hofund_plugin_sdk::json::json!(["fast", "slow"])

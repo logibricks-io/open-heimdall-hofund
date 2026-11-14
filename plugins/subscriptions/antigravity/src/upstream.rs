@@ -61,6 +61,7 @@ impl AntigravityUpstream {
         .method_root(ROOT)
         .headers(vec![("user-agent".to_owned(), project::user_agent())])
         .rewrite(Arc::new(move |body| {
+            hofund_plugin_sdk::code_assist::shape_code_assist(body, &model, true);
             hofund_plugin_sdk::plain_code_assist_tools(body);
             envelope(body, &model, &envelope_project, &request_id, &session);
             Vec::new()

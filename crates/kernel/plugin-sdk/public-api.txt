@@ -36,6 +36,7 @@ classify::ModelTags::const fn decides (self) -> bool
 classify::ModelTags::const fn draws (self) -> bool
 classify::ModelTags::const fn films (self) -> bool
 classify::fn classify_model (id : & str , kind : & str) -> Option < ModelTags >
+code_assist::fn shape_code_assist (body : & mut Map < String , Value > , model : & str , antigravity : bool)
 codex_tool_names::fn codex_names_bad (body : & [u8]) -> bool
 codex_tool_names::fn codex_tool_name (name : & str) -> String
 codex_tool_names::fn codex_tool_names_back (declared : & [String]) -> BTreeMap < String , String >
@@ -114,6 +115,7 @@ jwt::RsaSigner::fn sign (& self , header : & Value , claims : & Value) -> Result
 mod bedrock
 mod checkin
 mod classify
+mod code_assist
 mod codex_tool_names
 mod codex_zstd
 mod cosy
