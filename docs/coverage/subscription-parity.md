@@ -12,7 +12,7 @@ Legend: **Done** = matches the reference at checklist granularity; **Partial** =
 
 | Vendor section | Done | Partial | Missing | N/A | Unverified |
 |---|---|---|---|---|---|
-| Claude Pro/Max (`claude`) | 1 | 17 | 3 | 2 | 0 |
+| Claude Pro/Max (`claude`) | 4 | 14 | 3 | 2 | 0 |
 | Cursor (`cursor`) | 8 | 11 | 0 | 2 | 0 |
 | Devin (`devin`) | 12 | 6 | 0 | 1 | 0 |
 | Zed (`zed`) | 0 | 6 | 1 | 3 | 0 |
@@ -53,10 +53,10 @@ Every other gap below maps to an existing plan item.
 | a3 | sign-in: device code (standalone) | N/A — always mediated by Claude Code OAuth | N/A | N/A | — |
 | a4 | sign-in: API key | N/A for subscription OAuth | N/A | N/A | — |
 | a5 | sign-in: setup-token paste | `AddClaudeSetupToken` / `claude_setup_token.go:90+` accepts `sk-ant-oat…` into reference-owned dir | unverified — no `setup-token` path in `plugins/subscriptions/claude` | Missing | Port setup-token accounts (`claude_setup_token.go`) |
-| a6 | sign-in: reuse desktop/CLI login | Reads live agent home when switching; discovery imports `.credentials.json` | `discover.rs`, `agent_sign_in.rs` with locks (`docs/coverage/subscriptions.md:105-120`) | Partial | macOS Keychain read/write for Claude Code credentials (`claude_dirs.go:42-58`) |
+| a6 | sign-in: reuse desktop/CLI login | Reads live agent home when switching; discovery imports `.credentials.json` | `discover.rs`, `agent_sign_in.rs`, `keychain.rs` (Keychain via `SpawnRequest` + host spawn, file fallback, `HOFUND_NO_ACCOUNTS` skips probes); locks (`docs/coverage/subscriptions.md:105-120`) | Done | — |
 | b1 | import: agent files | Swap export + per-account dirs (`login_import` patterns; `import.rs` fixture shape) | `import.rs` parse swap export v1 (`import.rs:19-55`) | Partial | Additional reference import formats if any beyond swap v1 (unverified) |
-| b2 | import: keychain / other tools | Keychain item `claudeDirService` (`claude_dirs.go:42-58`) | File-only `.credentials.json` in agent home | Partial | Keychain import path |
-| c | token storage and encryption | Per-account config dir + optional macOS Keychain; the reference `logins.json` holds metadata (`claude_dirs.go`) | Encrypted account lease via daemon secret store; copies creds to account dir on use (`account.rs`, `creds.rs`) | Partial | Keychain parity; encryption model differs (hofund central store) — acceptable if behaviour matches |
+| b2 | import: keychain / other tools | Keychain item `claudeDirService` (`claude_dirs.go:42-58`) | `keychain.rs` + `discover.rs` import/discovery (`r5_42`–`r5_47` fixtures) | Done | — |
+| c | token storage and encryption | Per-account config dir + optional macOS Keychain; the reference `logins.json` holds metadata (`claude_dirs.go`) | Encrypted account lease via daemon secret store; agent switch and discovery read/write Keychain or `.credentials.json` (`keychain.rs`, `agent_sign_in.rs`, `account.rs`) | Partial | Central encrypted store remains the authority; live Keychain sync on read/write matches the reference for agent paths |
 | d | refresh | Claude Code refreshes; `invalid_grant` → Refused, not rested (`claude_auth.go:1-12`, `25-41`) | `account::refresh` via `claude auth status --json` (`lib.rs:403-404`, `account.rs`) | Partial | Map refusal strings to `NeedsSignIn` / Refused like `ClaudeSignInRequired` (`claude_auth.go:25-41`) |
 | e | upstream request wire | No direct Anthropic HTTP; subprocess + MCP bridge (`claude_subscription.go:3-29`, `claudebridge/mcp.go:54-59`) | `upstream()` serves text, tools, images, and resume through Claude Code (`upstream.rs`, `bridge/`; PRs #753–#761 and R-6g). Tests use a fake runner. | Partial | Real Claude Code process and account (#304); WSL/proxy paths still unverified |
 | f | inbound API shapes | Gateway `serveClaudeSubscription` for Anthropic Messages and translated Chat/Responses paths (`gateway.go:4995`, `claude_subscription.go:6041+`) | Gateway codecs already translate Chat/Responses/Messages to IR; the plugin serves those turns through the bridge | Partial | Real-account protocol smoke (#304) |
@@ -77,7 +77,6 @@ Every other gap below maps to an existing plan item.
 - MCP subscription bridge and multi-protocol gateway translation — implemented on the R-6 stack (PRs #753–#761 and R-6g), not merged; real-account smoke remains **#304**
 - Quota from `/usage` + stream header limits — **L**, **R-5**
 - Model list and scoped quota windows — **M**, **R-5**
-- macOS Keychain credential path — **M**, **R-5**
 - Setup-token sign-in and accounts — **S**, **R-5**
 - WSL fallback for Claude Code sign-in and short CLI (refresh, `auth status`, `/usage`, warm-up) landed in this slice (`wslrun.rs` / `launcher.rs`; running distros only). Remaining **R-6**: per-login Bun proxy, opened-URL env, and MCP bridge WSL (`upstream.rs` `wsl_distro: None`) — **M**
 
