@@ -26,8 +26,8 @@
 use std::time::Duration;
 
 use hofund_plugin_api::{
-    Body, BodyStream, GatewayHandle, InboundSurface, Method, PluginError, RouteSpec, SurfaceHost,
-    SurfaceId,
+    Body, BodyStream, CallerScope, GatewayHandle, InboundSurface, Method, PluginError, RouteSpec,
+    SurfaceHost, SurfaceId,
 };
 use hofund_plugin_sdk::json::{self, Value, json};
 use hofund_plugin_sdk::{Contribution, HttpRequest, HttpResponse, async_trait, text_response};
@@ -48,6 +48,8 @@ mod backend;
 mod input;
 
 mod account_refusal;
+
+mod compact_hold;
 
 /// The header that says how many models were left out to fit [`MOST`].
 pub const LEFT_OUT_HEADER: &str = "x-hofund-left-out";
@@ -138,6 +140,11 @@ trait Kernel: Send + Sync {
     /// Routed model ids to try after a ChatGPT sign-in Codex backend relay
     /// refusal, from the configured provider's `fallback` list.
     fn codex_relay_fallbacks(&self) -> &[String];
+
+    /// The gateway key scope for this request when served on a surface.
+    fn caller_scope(&self) -> CallerScope {
+        CallerScope::default()
+    }
 }
 
 /// The kernel as the surface host gives it.
@@ -171,6 +178,10 @@ impl Kernel for Host<'_> {
 
     fn codex_relay_fallbacks(&self) -> &[String] {
         self.0.codex_relay_fallbacks()
+    }
+
+    fn caller_scope(&self) -> CallerScope {
+        self.0.caller_scope().clone()
     }
 }
 

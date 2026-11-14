@@ -16,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   catalog entries. Recorded fixtures and loopback tests only. Refs R-13. Refs
   R-12.
 
+- R-47a3: native `/backend-api/codex/responses/compact` refuses ChatGPT sign-in
+  compactions on gateway keys with account holds unless the signed-in account is
+  allowed, and allows compaction when Codex's own `auth.json` uses
+  `auth_mode: apikey`. Refs R-47.
 - R-47n: the Codex subscription plugin classifies vendor reset outcomes on HTTP
   200 (`reset`, `nothing_to_reset`, `already_redeemed`, and related refusal
   codes) and keeps an in-flight `redeem_request_id` across explicit
