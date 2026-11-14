@@ -141,6 +141,8 @@ impl KeychainCache {
     }
 
     fn store_denial(&mut self, now: Duration) {
+        self.read_at = None;
+        self.token.clear();
         self.denied_until = Some(now + KEYCHAIN_DENIED);
         self.flight = None;
     }
