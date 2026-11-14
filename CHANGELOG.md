@@ -140,6 +140,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Cursor HTTP/1 sixteen-KV pipeline test: drive the Run session with
+  `drive_until_http1_request` and `drive_to_completion` instead of racing a
+  yield budget against a paused clock, and bind loopback response scripts at
+  TCP accept so macOS CI no longer hits synthetic `deadline_exceeded` append
+  trailers while sixteen KV replies stay header-parked.
 - Control client: one-shot `hofundd` spawns clear `CARGO_MAKEFLAGS` and
   `MAKEFLAGS`, and take a cross-process advisory lock until the HTTP handshake
   finishes, so Ubuntu `cargo test --workspace` no longer oversubscribes large
