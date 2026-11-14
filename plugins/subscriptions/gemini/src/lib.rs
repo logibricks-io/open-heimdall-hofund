@@ -8,18 +8,21 @@
 //! usage limits and models come from its `retrieveUserQuota`.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use hofund_plugin_api::{
-    AccountId, AccountStatus, BuildError, ConfigError, HostContext, LoopbackSpec, ModelList,
-    PluginError, PluginId, QuotaWindow, RawTable, RawValue, RedirectHost, Schema, SecretString,
-    SignInChallenge, SignInCtx, SignInFlow, SignInFlowKind, SignInProof, Subscription,
-    SubscriptionFactory, SubscriptionSpec, UpstreamProvider, ValidConfig,
+    AccountId, AccountStatus, AgentSignIn, BuildError, ConfigError, HostContext, LoopbackSpec,
+    ModelList, PluginError, PluginId, QuotaWindow, RawTable, RawValue, RedirectHost, Schema,
+    SecretString, SignInChallenge, SignInCtx, SignInFlow, SignInFlowKind, SignInProof,
+    Subscription, SubscriptionFactory, SubscriptionSpec, UpstreamProvider, ValidConfig,
 };
 use hofund_plugin_sdk::Contribution;
 use hofund_plugin_sdk::oauth::{Pkce, SecretObject, TokenCache, constant_time_eq, new_state};
 
+mod discover;
+mod import;
 mod models;
 mod project;
 mod quota;
@@ -50,7 +53,8 @@ static SPEC: SubscriptionSpec = SubscriptionSpec::from_static(
     PluginId::from_static("gemini"),
     "Gemini CLI (Code Assist)",
     SignInFlowKind::Pkce,
-);
+)
+.with_agent_sign_in(AgentSignIn::new(&["gemini"], "GEMINI_CLI_HOME", ".gemini"));
 
 /// Registers the Gemini CLI subscription.
 #[must_use]
@@ -402,6 +406,38 @@ impl Subscription for Gemini {
             project: self.project.clone(),
         }))
     }
+
+    async fn import_accounts(
+        &self,
+        text: &str,
+        host: &HostContext,
+    ) -> Result<Vec<AccountId>, PluginError> {
+        let imported = import::store(host, &self.endpoints, text, self.project.as_deref()).await?;
+        for id in &imported {
+            self.tokens.remove(id);
+            self.experiments.forget(id);
+        }
+        Ok(imported)
+    }
+
+    async fn discover_agent_sign_in(
+        &self,
+        home: &Path,
+    ) -> Result<Vec<hofund_plugin_api::DiscoveredAgentAccount>, PluginError> {
+        discover::list(home)
+    }
+
+    async fn import_agent_sign_in(
+        &self,
+        home: &Path,
+        reference: &str,
+        host: &HostContext,
+    ) -> Result<AccountId, PluginError> {
+        let id = discover::import(home, reference, host).await?;
+        self.tokens.remove(&id);
+        self.experiments.forget(&id);
+        Ok(id)
+    }
 }
 
 fn needs_sign_in(reason: &str) -> AccountStatus {
@@ -412,5 +448,7 @@ fn needs_sign_in(reason: &str) -> AccountStatus {
 
 #[cfg(test)]
 mod conformance;
+#[cfg(test)]
+mod r49d_tests;
 #[cfg(test)]
 mod tests;

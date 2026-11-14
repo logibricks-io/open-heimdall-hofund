@@ -690,10 +690,11 @@ must be a JSON object. A missing object becomes `{}`. Any other JSON type is
 
 `functionResponse.response` is a JSON object. Decode stores that object as
 compact JSON text on the tool-result part. Encode uses a single text part
-when it parses as a JSON object, and wraps other text as `{"result": text}`.
-The function name lives on the tool-result bag (`name`). `is_error` has no
-wire field and comes back `false`. Non-text tool-result content is
-`CodecError::Unsupported`.
+when it parses as a JSON object, and wraps other text as `{"output": text}`,
+or `{"error": text}` for a failed result. `is_error` round-trips through the
+presence of `error`. Nested `functionResponse.parts` decode as attachments on
+the tool-result content and encode beside the response as `inlineData` or
+`fileData`. The function name lives on the tool-result bag (`name`).
 
 `inlineData` is `ImageSource::Base64`. `fileData.fileUri` is
 `ImageSource::Url`, and `mimeType` stays on the image bag so encode can put

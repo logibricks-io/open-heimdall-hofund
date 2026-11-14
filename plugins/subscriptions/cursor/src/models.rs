@@ -137,7 +137,7 @@ pub(crate) fn collapse(raw: Vec<RawModel>) -> Vec<RawModel> {
     without_capacity(out)
 }
 
-fn split_id(id: &str) -> (String, String) {
+pub(crate) fn split_id(id: &str) -> (String, String) {
     let mut s = id.to_string();
     let mut fast = false;
     let mut thinking = false;

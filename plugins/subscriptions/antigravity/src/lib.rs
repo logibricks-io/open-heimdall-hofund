@@ -18,6 +18,7 @@ use hofund_plugin_sdk::Contribution;
 use hofund_plugin_sdk::oauth::{Pkce, SecretObject, TokenCache, constant_time_eq, new_state};
 
 mod client;
+mod import;
 mod models;
 mod project;
 mod quota;
@@ -415,6 +416,26 @@ impl Subscription for Antigravity {
             project: self.project.clone(),
         }))
     }
+
+    async fn import_accounts(
+        &self,
+        text: &str,
+        host: &HostContext,
+    ) -> Result<Vec<AccountId>, PluginError> {
+        let imported = import::store(
+            host,
+            &self.endpoints,
+            &self.oauth,
+            text,
+            self.project.as_deref(),
+        )
+        .await?;
+        for id in &imported {
+            self.tokens.remove(id);
+            self.catalog.forget(id);
+        }
+        Ok(imported)
+    }
 }
 
 fn optional_string(raw: &RawTable, key: &str) -> Result<Option<String>, ConfigError> {
@@ -434,5 +455,7 @@ fn needs_sign_in(reason: &str) -> AccountStatus {
     }
 }
 
+#[cfg(test)]
+mod r49d_tests;
 #[cfg(test)]
 mod tests;
