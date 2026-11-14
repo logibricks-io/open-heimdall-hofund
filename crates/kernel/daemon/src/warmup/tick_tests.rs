@@ -395,7 +395,12 @@ struct RecordingRunner {
 
 #[hofund_plugin_sdk::async_trait]
 impl WarmupRunner for RecordingRunner {
-    async fn run(&self, _state: &SubscriptionState, account: &AccountId) -> Result<(), String> {
+    async fn run(
+        &self,
+        _subscription: &str,
+        _state: &SubscriptionState,
+        account: &AccountId,
+    ) -> Result<(), String> {
         let id = account.as_str().to_owned();
         self.seen.lock().await.push(id.clone());
         if id == self.fail_id && self.fail_a.load(std::sync::atomic::Ordering::SeqCst) {

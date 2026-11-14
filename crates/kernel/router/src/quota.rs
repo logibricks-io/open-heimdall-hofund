@@ -387,6 +387,23 @@ impl QuotaStore {
             .insert(quota_key(&quota), ReadIssue::Failed { quota, transient });
     }
 
+    /// Clears the cached read timestamp so the next poll treats the card as stale.
+    pub fn stale_allowance(&self, quota: &Quota) {
+        let key = quota_key(quota);
+        let mut state = self.state.lock().expect("quota store");
+        if let Some(record) = state
+            .records
+            .iter_mut()
+            .find(|record| quota_key(&record.quota) == key)
+        {
+            record.quota.read_at = None;
+            record.quota.as_of = None;
+        }
+        if let Some(root) = &self.root {
+            save_state(root, &state);
+        }
+    }
+
     /// Marks keys of one provider that read the same account-wide balance.
     pub fn share_provider_balances(&self, provider: &str) {
         let mut state = self.state.lock().expect("quota store");

@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A-3a: the daemon coordinates Claude daily warm-up and model connectivity
+  tests through one Claude Code `-p` send (`warmup/claude.rs`,
+  `Subscription::warmup_probe`, `account::ask` with
+  `disableDeepLinkRegistration` settings). Successful warms stale-mark quota
+  reads for routing. Tests `a3a_28` through `a3a_30`. Refs A-3.
+
 - R-54: the shared Qoder daily check-in helper sets `CheckinResult::recheck_at`
   to the earlier of 30 minutes, the next Beijing calendar midnight (UTC+8), and
   the minimum end time of active campaigns, matching the reference recheck

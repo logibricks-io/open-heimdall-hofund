@@ -12,7 +12,7 @@ Legend: **Done** = matches the reference at checklist granularity; **Partial** =
 
 | Vendor section | Done | Partial | Missing | N/A | Unverified |
 |---|---|---|---|---|---|
-| Claude Pro/Max (`claude`) | 3 | 15 | 3 | 2 | 0 |
+| Claude Pro/Max (`claude`) | 4 | 14 | 3 | 2 | 0 |
 | Cursor (`cursor`) | 11 | 8 | 0 | 2 | 0 |
 | Devin (`devin`) | 13 | 5 | 0 | 1 | 0 |
 | Zed (`zed`) | 0 | 6 | 1 | 3 | 0 |
@@ -68,7 +68,7 @@ Every other gap below maps to an existing plan item.
 | l | model list | From Claude Code / catalog in gateway context (unverified detail); usage scopes per model in limits | `list_models()` unsupported (`lib.rs:417-424`) | Missing | Model list + scoped week windows (`R-5`) |
 | m | multi-account | Multiple saved logins, routing, agent switch (`claude_routed_signin_test.go` etc.) | Daemon multi-account + agent switch with locks | Partial | Quota-aware routing needs row k |
 | n | error classification | `ClaudeSignInRequired`, refusal vs retry (`claude_auth.go`); subscription refusals move account (`gateway/refusal_accounts_test.go`) | `bridge/failure.rs` maps sign-in, extra-usage, too-long, quota, 429, and crash text; room-full 503 sets vendor-neutral `skip_failover_same_plugin` (R-6g). Sign-in lapses are pinned to the login version captured at run start | Partial | Real-account classification (#304); image/timeout live wrapping still thin |
-| o | daily warmup | `KeepClaudeWindowsWarm` / `claude_warmup.go:77-79` | `daily_warmup` on spec + `account::warmup` (`lib.rs:54-63`, `454-459`) | Partial | Gateway-coordinated warm request path (probe) vs CLI-only warm-up |
+| o | daily warmup | `warmClaude` / `askClaude` in gateway; `ProbeClaudeVia`; `WarmClaudeVia`; `claudeWarmedNow` (`claude_warmup.go`, `claude_probe.go`, `warm_now.go`) | `hofund-daemon` `warmup/claude.rs` coordinates `Subscription::warmup_probe`; plugin `account::ask` with official argv including `disableDeepLinkRegistration`; `UpstreamProvider::probe` for model tests; `QuotaStore::stale_allowance` after warm | Done | Week/all reset loop (`KeepClaudeWindowsWarm`) remains A-3b |
 | p | agent sign-in switching | Switch with locks, CAS on refresh token (`logins.go` patterns; docs in subscriptions.md) | `write_agent_sign_in`, discover/import (`lib.rs:437-475`) | Partial | Full lock parity documented in subscriptions.md gaps (overage quota) |
 | q | vendor extras | WSL Claude, per-login proxy (`claude_signin.go:139-145`), setup-token inference-only | Sign-in, refresh, `auth status`, `/usage`, and warm-up go through `wsl.exe` when Windows has no native `claude` (`wslrun.rs` / `launcher.rs`; running distros only; mocked probes). Per-login Bun proxy, setup-token, and MCP bridge WSL (`upstream.rs` `wsl_distro: None`) are still absent | Partial | Per-login Bun proxy; setup-token (`R-5`); MCP bridge WSL |
 

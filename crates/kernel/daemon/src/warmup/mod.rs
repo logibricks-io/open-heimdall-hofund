@@ -1,7 +1,10 @@
 //! Daily warm-up orchestration for subscription accounts.
 
+mod claude;
 mod daily;
 
+#[cfg(test)]
+mod claude_tests;
 #[cfg(test)]
 mod tick_tests;
 
@@ -226,13 +229,23 @@ struct ProductionRunner;
 
 #[async_trait]
 pub(crate) trait WarmupRunner: Send + Sync {
-    async fn run(&self, state: &SubscriptionState, account: &AccountId) -> Result<(), String>;
+    async fn run(
+        &self,
+        subscription: &str,
+        state: &SubscriptionState,
+        account: &AccountId,
+    ) -> Result<(), String>;
 }
 
 #[async_trait]
 impl WarmupRunner for ProductionRunner {
-    async fn run(&self, state: &SubscriptionState, account: &AccountId) -> Result<(), String> {
-        run_warmup(state, account).await
+    async fn run(
+        &self,
+        subscription: &str,
+        state: &SubscriptionState,
+        account: &AccountId,
+    ) -> Result<(), String> {
+        run_warmup(subscription, state, account).await
     }
 }
 
@@ -327,10 +340,23 @@ pub(crate) async fn tick_with_runner(
             continue;
         }
         let result = runner
-            .run(&candidate.state, &candidate.member.account)
+            .run(
+                &candidate.subscription,
+                &candidate.state,
+                &candidate.member.account,
+            )
             .await;
         match result {
             Ok(()) => {
+                if claude::is_claude_subscription(&candidate.subscription) {
+                    claude::warmed_now(
+                        runtime,
+                        &candidate.member.id,
+                        &candidate.state,
+                        &candidate.member.account,
+                    )
+                    .await;
+                }
                 store.clear_failed_retry(&member_id);
                 store.set_daily_key(&member_id, &key);
                 let mut row = WarmupAccountStatus::new(
@@ -361,7 +387,14 @@ async fn account_ready(state: &SubscriptionState, account: &AccountId) -> bool {
     )
 }
 
-async fn run_warmup(state: &SubscriptionState, account: &AccountId) -> Result<(), String> {
+async fn run_warmup(
+    subscription: &str,
+    state: &SubscriptionState,
+    account: &AccountId,
+) -> Result<(), String> {
+    if claude::is_claude_subscription(subscription) {
+        return claude::warm(state, account).await;
+    }
     let run = state.instance().daily_warmup(account, state.host());
     match tokio::time::timeout(RUN_TIMEOUT, run).await {
         Ok(Ok(())) => Ok(()),
@@ -456,8 +489,17 @@ pub(crate) async fn run_now(
     if !account_ready(state, &account_id).await {
         return Err("account is not signed in".to_owned());
     }
-    match run_warmup(state, &account_id).await {
+    match run_warmup(subscription, state, &account_id).await {
         Ok(()) => {
+            if claude::is_claude_subscription(subscription) {
+                if let Some(member) = state
+                    .members()
+                    .iter()
+                    .find(|member| member.account == account_id)
+                {
+                    claude::warmed_now(runtime, &member.id, state, &account_id).await;
+                }
+            }
             let record = WarmupRecord::new(now, WarmupOutcome::Ok, "");
             let mut row = WarmupAccountStatus::new(subscription.to_owned(), account_id.clone());
             row.set_last(record.clone());

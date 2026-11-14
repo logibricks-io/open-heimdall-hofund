@@ -159,19 +159,27 @@ async fn read_back_credentials(host: &HostContext, dir: &Path) -> Option<creds::
         .map(|(credentials, _)| credentials)
 }
 
-const WARM_ARGS: [&str; 11] = [
-    "-p",
-    "--output-format",
-    "json",
-    "--model",
-    "haiku",
-    "--tools",
-    "",
-    "--strict-mcp-config",
-    "--setting-sources",
-    "",
-    "--no-session-persistence",
-];
+/// Keeps headless Claude Code from registering the `claude-cli://` handler.
+const DISABLE_DEEP_LINK_SETTINGS: &str = r#"{"disableDeepLinkRegistration":"disable"}"#;
+
+/// Argument values for one warm-up or model probe at `model`, matching the reference gateway send.
+pub(crate) fn warm_arg_values(model: &str) -> Vec<String> {
+    vec![
+        "-p".to_owned(),
+        "--output-format".to_owned(),
+        "json".to_owned(),
+        "--model".to_owned(),
+        model.to_owned(),
+        "--tools".to_owned(),
+        String::new(),
+        "--strict-mcp-config".to_owned(),
+        "--setting-sources".to_owned(),
+        String::new(),
+        "--settings".to_owned(),
+        DISABLE_DEEP_LINK_SETTINGS.to_owned(),
+        "--no-session-persistence".to_owned(),
+    ]
+}
 
 /// Removes the landed credentials file even when the usage read is cancelled.
 struct CredentialFileCleanup<'a>(&'a Path);
@@ -194,11 +202,12 @@ impl Drop for WarmupCleanup<'_> {
     }
 }
 
-/// Sends one "hi" through Claude Code for `account`.
-pub(crate) async fn warmup(
+/// Sends one "hi" through Claude Code for `account` at `model`.
+pub(crate) async fn ask(
     host: &HostContext,
     configured: Option<&PathBuf>,
     account: &AccountId,
+    model: &str,
 ) -> Result<(), PluginError> {
     let lease = host.accounts().lease(account, LEASE_WAIT).await?;
     let _run = crate::run_lock::mark(account, host)?;
@@ -235,7 +244,7 @@ pub(crate) async fn warmup(
     creds::private_dir(&work)?;
 
     let mut last = String::new();
-    let run_result = run_warmup_command(host, &command, &dir, &work, &mut last).await;
+    let run_result = run_warmup_command(host, &command, &dir, &work, model, &mut last).await;
 
     let read_back = read_back_credentials(host, &dir).await;
     if let Some(rotated) = read_back.filter(|rotated| rotated.text != stored) {
@@ -247,14 +256,26 @@ pub(crate) async fn warmup(
     finish_warmup_output(&last)
 }
 
+/// Sends one "hi" at Haiku, as the scheduled warm-up does.
+pub(crate) async fn warmup(
+    host: &HostContext,
+    configured: Option<&PathBuf>,
+    account: &AccountId,
+) -> Result<(), PluginError> {
+    ask(host, configured, account, "haiku").await
+}
+
 async fn run_warmup_command(
     host: &HostContext,
     command: &crate::launcher::ClaudeCommand,
     dir: &Path,
     work: &Path,
+    model: &str,
     last: &mut String,
 ) -> Result<(), PluginError> {
-    let request = command.spawn_request_in(&WARM_ARGS, dir, work, &[])?;
+    let arg_values = warm_arg_values(model);
+    let args: Vec<&str> = arg_values.iter().map(String::as_str).collect();
+    let request = command.spawn_request_in(&args, dir, work, &[])?;
     let child = host.spawn_process().spawn_piped(&request).await?;
     child.write_stdin(b"hi\n".to_vec().into()).await?;
     let mut stdout = child.stdout()?;
@@ -373,6 +394,27 @@ mod warmup_tests {
     fn a3a_20_claude_warmup_empty_output_fails() {
         assert!(finish_warmup_output("").is_err());
         assert!(finish_warmup_output("   \n").is_err());
+    }
+
+    #[test]
+    fn a3a_28_warm_arg_values_match_reference_gateway_send() {
+        use super::{DISABLE_DEEP_LINK_SETTINGS, warm_arg_values};
+        let args = warm_arg_values("haiku");
+        assert_eq!(args[0], "-p");
+        assert_eq!(args[3], "--model");
+        assert_eq!(args[4], "haiku");
+        assert!(args.contains(&"--settings".to_owned()));
+        assert!(args.contains(&DISABLE_DEEP_LINK_SETTINGS.to_owned()));
+        assert!(args.contains(&"--no-session-persistence".to_owned()));
+        assert!(args.contains(&"--strict-mcp-config".to_owned()));
+        assert_eq!(
+            args.iter()
+                .filter(|arg| *arg == "--setting-sources")
+                .count(),
+            1
+        );
+        let args = warm_arg_values("claude-sonnet-4-5");
+        assert_eq!(args[4], "claude-sonnet-4-5");
     }
 }
 
