@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- R-47j: the Codex subscription plugin trims individually unreadable sealed
+  input items from the posted OpenAI Responses JSON after a 400/404 refusal
+  and retries the turn (at most three attempts), matching the reference's
+  `/responses` behaviour. Recorded HTTP fixtures cover named-item removal,
+  foreign-encrypted seal stripping, unrelated refusals, retry budget, and
+  unchanged 401 token refresh. Refs R-47.
+
 - R-47a5: `hofund-plugin-subscription-chatgpt-api` — Sign in with ChatGPT
   (dynamic OAuth client, per-account client id, stable host id), refresh and
   revoke, `/v1/models`, and `api.openai.com/v1/responses` upstream with agent
