@@ -80,6 +80,9 @@ pub(crate) async fn run(
         if !transport.refused.load(Ordering::Relaxed) || attempt == 1 {
             return Ok(result);
         }
+        if stored.credential.pat_auth {
+            return Ok(result);
+        }
         stored = refresh::force_device(host, Arc::clone(&endpoints), account).await?;
     }
     Err(PluginError::internal(

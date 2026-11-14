@@ -9,6 +9,7 @@ use hofund_plugin_sdk::json::Value;
 use hofund_plugin_sdk::oauth::{SecretObject, same_secret, secret_text};
 
 use crate::creds::{self, Stored};
+use crate::pat;
 use crate::{Endpoints, sign_in};
 
 const LEASE_WAIT: Duration = Duration::from_secs(30);
@@ -149,6 +150,36 @@ async fn refresh_stale(
     match reply.status() {
         200..=299 => {}
         401 | 403 => {
+            if stored.credential.pat_auth {
+                let pat_text = secret_text(&stored.credential.pat).trim();
+                if pat_text.is_empty() {
+                    return Err(PluginError::auth(
+                        "Qoder sign-in has expired; sign in again",
+                    ));
+                }
+                let renewed = pat::re_exchange(host, &stored.credential, &site.openapi).await;
+                return match renewed {
+                    Ok(mut credential) => {
+                        credential.pat_auth = true;
+                        credential.pat = SecretString::from(pat_text.to_owned());
+                        lease
+                            .commit(
+                                Some(creds::label(&credential)),
+                                creds::secret_blob(&credential).to_secret(),
+                            )
+                            .await?;
+                        Ok(())
+                    }
+                    Err(error) if error.to_string() == pat::re_exchange_refused_message() => {
+                        let blob = SecretObject::parse(lease.secret())?;
+                        lease
+                            .commit(None, blob.with_flag(creds::LAPSED, true).to_secret())
+                            .await?;
+                        Err(PluginError::auth(pat::re_exchange_refused_message()))
+                    }
+                    Err(error) => Err(error),
+                };
+            }
             let blob = SecretObject::parse(lease.secret())?;
             lease
                 .commit(None, blob.with_flag(creds::LAPSED, true).to_secret())
