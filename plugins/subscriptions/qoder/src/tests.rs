@@ -219,7 +219,7 @@ fn a2c_4_refresh_on_expiry() {
 }
 
 #[test]
-fn a2c_4b_upstream_401_forces_refresh_on_fresh_token() {
+fn a2c_61_upstream_401_forces_refresh_on_fresh_token() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
     let id = seed_with_expiry(&host, 4_000_000_000_000);
@@ -256,7 +256,7 @@ fn a2c_5_model_list_parsing() {
 }
 
 #[test]
-fn a2c_5b_model_list_401_keeps_http_status_without_lapsing() {
+fn a2c_62_model_list_401_keeps_http_status_without_lapsing() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
     let id = seed_with_expiry(&host, 4_000_000_000_000);
@@ -342,6 +342,13 @@ fn a2c_9_daily_checkin_uses_bearer() {
         assert!(sensitive!(&call, "cosy-machinetype"));
         assert_eq!(header!(&call, "cosy-clienttype"), Some("10"));
         assert_eq!(header!(&call, "user-agent"), Some("Qoder"));
+        assert_eq!(
+            call.headers()
+                .iter()
+                .filter(|(name, _)| name.eq_ignore_ascii_case("user-agent"))
+                .count(),
+            1
+        );
     }
 }
 
@@ -440,7 +447,7 @@ fn a2c_11_quota_without_usage_fields_is_empty() {
 }
 
 #[test]
-fn a2c_account_id_uses_uid() {
+fn a2c_63_account_id_uses_uid() {
     let text = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/src/fixtures/credential.json"
@@ -453,7 +460,7 @@ fn a2c_account_id_uses_uid() {
 }
 
 #[test]
-fn a2c_11b_quota_without_total_is_empty() {
+fn a2c_64_quota_without_total_is_empty() {
     let windows =
         quota::windows(br#"{"displayMode":"qoder","qoderUsage":{"userQuota":{"used":25}}}"#)
             .expect("windows");

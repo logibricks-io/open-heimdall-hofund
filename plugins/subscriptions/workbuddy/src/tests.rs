@@ -135,7 +135,7 @@ fn a2c_22_discover_import_desktop_auth() {
     std::fs::create_dir_all(&user_home).expect("dir");
     let agent_home = daemon_agent_home(&user_home);
     install_desktop_auth_fixture(&agent_home);
-    let rows = discover::list(&agent_home).expect("list");
+    let rows = discover::list(&agent_home, SystemTime::UNIX_EPOCH).expect("list");
     assert_eq!(rows.len(), 1);
     let host = host(&dir);
     let id = block_on(discover::import(&agent_home, REFERENCE_CN, host.context())).expect("import");
@@ -158,7 +158,8 @@ fn a2c_38_discover_resolves_daemon_agent_home() {
     let user_home = dir.path().join("injected-home");
     std::fs::create_dir_all(&user_home).expect("dir");
     install_desktop_auth_fixture(&daemon_agent_home(&user_home));
-    let rows = discover::list(&daemon_agent_home(&user_home)).expect("list");
+    let rows =
+        discover::list(&daemon_agent_home(&user_home), SystemTime::UNIX_EPOCH).expect("list");
     assert_eq!(rows.len(), 1);
     assert_eq!(
         contribute().subscriptions()[0]
@@ -171,7 +172,7 @@ fn a2c_38_discover_resolves_daemon_agent_home() {
 }
 
 #[test]
-fn a2c_22b_desktop_expired_reports_needs_sign_in() {
+fn a2c_65_desktop_expired_reports_needs_sign_in() {
     let dir = tempfile::tempdir().expect("dir");
     let data = dir.path().join("extension-data");
     let auth_dir = data.join("Public").join("auth");
@@ -455,6 +456,15 @@ fn a2c_27_daily_checkin_cn_only() {
     let result =
         block_on(subscription(&host, None).daily_checkin(&id, host.context())).expect("run");
     assert_eq!(result.outcome(), hofund_plugin_api::CheckinOutcome::Claimed);
+    for call in host.http().calls() {
+        assert_eq!(
+            call.headers()
+                .iter()
+                .filter(|(name, _)| name.eq_ignore_ascii_case("user-agent"))
+                .count(),
+            1
+        );
+    }
 }
 
 #[test]
@@ -486,7 +496,7 @@ fn a2c_39_checkin_refreshes_expired_token() {
 }
 
 #[test]
-fn a2c_22c_agent_home_dir_is_codebuddy_extension_data() {
+fn a2c_66_agent_home_dir_is_codebuddy_extension_data() {
     let expected = if cfg!(target_os = "macos") {
         "Library/Application Support/CodeBuddyExtension/Data"
     } else if cfg!(target_os = "windows") {
@@ -495,6 +505,22 @@ fn a2c_22c_agent_home_dir_is_codebuddy_extension_data() {
         ".local/share/CodeBuddyExtension/Data"
     };
     assert_eq!(crate::auth_store::AGENT_HOME_DIR, expected);
+}
+
+#[test]
+fn r24b_agent_account_switch_fails_cleanly_without_a_store_writer() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, 4_000_000_000_000);
+    let sub = subscription(&host, None);
+    let agent_home = dir.path().join("agent-home");
+
+    let error = block_on(sub.write_agent_sign_in(&id, &agent_home, host.context()))
+        .expect_err("unsupported switch");
+
+    assert_eq!(error.kind(), PluginErrorKind::Unsupported);
+    assert!(!agent_home.exists());
+    assert!(host.http().calls().is_empty());
 }
 
 #[test]

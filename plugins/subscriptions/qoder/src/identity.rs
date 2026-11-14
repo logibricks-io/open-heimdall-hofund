@@ -505,6 +505,7 @@ impl RuntimeEnv {
             .filter_map(|name| std::env::var_os(name).map(|value| (OsString::from(name), value)))
             .collect();
         let home = std::env::var_os("HOME")
+            .filter(|value| !value.is_empty())
             .or_else(|| std::env::var_os("USERPROFILE"))
             .filter(|value| !value.is_empty())
             .map(PathBuf::from);
@@ -591,8 +592,18 @@ impl TestEnv {
     fn into_runtime(self, hostname: &str) -> RuntimeEnv {
         let home = self
             .home
-            .or_else(|| self.vars.get(OsStr::new("HOME")).map(PathBuf::from))
-            .or_else(|| self.vars.get(OsStr::new("USERPROFILE")).map(PathBuf::from));
+            .or_else(|| {
+                self.vars
+                    .get(OsStr::new("HOME"))
+                    .filter(|value| !value.is_empty())
+                    .map(PathBuf::from)
+            })
+            .or_else(|| {
+                self.vars
+                    .get(OsStr::new("USERPROFILE"))
+                    .filter(|value| !value.is_empty())
+                    .map(PathBuf::from)
+            });
         RuntimeEnv {
             vars: self.vars,
             platform: self.platform,
@@ -904,6 +915,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("temp dir");
         let home = temp.path().join("profile");
         let env = TestEnv::new(temp.path())
+            .var("HOME", "")
             .var("USERPROFILE", home.as_os_str())
             .into_runtime("fixture-host");
         assert_eq!(

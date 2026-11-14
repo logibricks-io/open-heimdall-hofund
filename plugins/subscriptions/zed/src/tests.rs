@@ -389,7 +389,7 @@ fn a2c_16_model_list_parsing() {
 }
 
 #[test]
-fn a2c_16b_model_list_display_name() {
+fn a2c_67_model_list_display_name() {
     let body = br#"{"models":[{"id":"m1","display_name":"Pretty","provider":"anthropic"}]}"#;
     let list = models::parse_list(body).expect("parse");
     assert_eq!(list.models()[0].display_name(), Some("Pretty"));
@@ -456,14 +456,14 @@ fn a2c_19_body_rewrites_developer_role() {
 }
 
 #[test]
-fn a2c_19b_body_keeps_string_input() {
+fn a2c_68_body_keeps_string_input() {
     let body = br#"{"input":"plain prompt","model":"m"}"#;
     let out = body::transform(body);
     assert_eq!(out, body);
 }
 
 #[test]
-fn a2c_19c_body_flattens_namespace_tools() {
+fn a2c_69_body_flattens_namespace_tools() {
     let body = br#"{"input":[],"tools":[{"type":"namespace","name":"nico","tools":[{"type":"function","name":"ping","parameters":{"type":"object"}}]}]}"#;
     let out = body::transform(body);
     let text = std::str::from_utf8(&out).expect("utf8");
@@ -912,7 +912,7 @@ fn a2c_35_thinking_enabled_when_catalog_allows() {
 }
 
 #[test]
-fn a2c_35b_thinking_stripped_when_catalog_disallows() {
+fn a2c_70_thinking_stripped_when_catalog_disallows() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
     let models_json =
