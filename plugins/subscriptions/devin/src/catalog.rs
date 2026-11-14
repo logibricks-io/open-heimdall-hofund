@@ -60,12 +60,7 @@ pub fn clear_catalog_cache_for_tests() {
 }
 
 pub(crate) fn origin(stored: &Stored) -> String {
-    std::env::var("WINDSURF_API_SERVER_URL")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| stored.credential.api_server.clone())
-        .trim_end_matches('/')
-        .to_owned()
+    crate::creds::effective_api_server(&stored.credential.api_server)
 }
 
 pub(crate) fn os_name() -> &'static str {

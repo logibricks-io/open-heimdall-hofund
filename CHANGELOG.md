@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- R-12d: the Devin subscription plugin persists non-default Windsurf API
+  server hosts from CLI credentials and PKCE exchange responses, honors
+  `WINDSURF_API_SERVER_URL` with trailing-slash trim on every Connect RPC
+  including GetUserStatus, and writes `api_server_url` on agent-home
+  credentials. Recorded HTTP tests only (`r12d_*`). Refs R-12.
+
 - R-5: the Claude Code subscription plugin reads and writes macOS Keychain
   credentials through `security(1)` spawned via `HostContext` (no
   `std::process` in the plugin): `Claude Code-credentials` and per-directory

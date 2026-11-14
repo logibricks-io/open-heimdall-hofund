@@ -39,6 +39,7 @@ fn seed_account(host: &TestHost, key: &str, label: &str) -> AccountId {
     let credential = Credential {
         key: SecretString::from(key.to_owned()),
         api_server: "https://server.test".to_owned(),
+        devin_webapp: creds::DEFAULT_DEVIN_WEBAPP.to_owned(),
         devin_api: "https://api.devin.test".to_owned(),
         label: label.to_owned(),
         plan: String::new(),
@@ -262,6 +263,7 @@ fn a2b_7_secrets_not_in_debug_or_errors() {
     let credential = Credential {
         key: SecretString::from(key.to_owned()),
         api_server: "https://server.test".to_owned(),
+        devin_webapp: creds::DEFAULT_DEVIN_WEBAPP.to_owned(),
         devin_api: "https://api.devin.test".to_owned(),
         label: "dev@example.test".to_owned(),
         plan: String::new(),

@@ -529,9 +529,10 @@ impl TempDir {
         let directory = self.path.join("devin");
         private_dir(&directory)?;
         let body = format!(
-            "windsurf_api_key = {}\napi_server_url = {}\ndevin_webapp_host = \"app.devin.ai\"\ndevin_api_url = {}\n",
+            "windsurf_api_key = {}\napi_server_url = {}\ndevin_webapp_host = {}\ndevin_api_url = {}\n",
             toml_string(secret_text(&credential.key)),
             toml_string(&credential.api_server),
+            toml_string(&credential.devin_webapp),
             toml_string(&credential.devin_api),
         );
         let path = directory.join("credentials.toml");

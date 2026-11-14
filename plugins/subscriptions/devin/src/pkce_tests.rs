@@ -191,7 +191,8 @@ fn exchange_posts_json_then_persists_only_server_and_status_identity() {
         .expect("stored");
     let blob = SecretObject::parse(&secret).expect("blob");
     assert_eq!(blob.text("api_server"), Some(sign_in::SERVER));
-    assert_eq!(blob.text("devin_api"), Some("https://api.devin.ai"));
+    assert_eq!(blob.text("devin_api"), Some("https://ignored-api.example"));
+    assert_eq!(blob.text("devin_webapp"), Some("ignored-web.example"));
     assert_eq!(blob.text("label"), Some("browser@example.test"));
     assert_eq!(blob.text("plan"), Some("Devin Pro"));
     assert_eq!(blob.text("cli"), None);

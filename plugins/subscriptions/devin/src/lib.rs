@@ -224,11 +224,20 @@ impl Subscription for Devin {
                 "the sign-in callback does not belong to this sign-in",
             ));
         }
-        let key = sign_in::exchange(host, &code, &pending).await?;
+        let exchanged = sign_in::exchange(host, &code, &pending).await?;
+        let devin_api = exchanged
+            .devin_api
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| creds::DEFAULT_DEVIN_API.to_owned());
+        let devin_webapp = exchanged
+            .devin_webapp
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| creds::DEFAULT_DEVIN_WEBAPP.to_owned());
         let credential = creds::Credential {
-            key,
-            api_server: sign_in::SERVER.to_owned(),
-            devin_api: "https://api.devin.ai".to_owned(),
+            key: exchanged.key,
+            api_server: creds::api_server_at_sign_in(),
+            devin_webapp,
+            devin_api,
             label: "Devin".to_owned(),
             plan: String::new(),
             org_id: String::new(),
@@ -331,5 +340,7 @@ mod identity_tests;
 mod live_tests;
 #[cfg(test)]
 mod pkce_tests;
+#[cfg(test)]
+mod r12d_region_tests;
 #[cfg(test)]
 mod tests;
