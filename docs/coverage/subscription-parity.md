@@ -333,7 +333,7 @@ Remaining verification is live-account acceptance; all evidence here is determin
 | k | quota / usage | Headers + `codex.rate_limits` event; `/wham/usage`; credit resets (`codex_resets.go:180+`) | `limits.rs`, `usage.rs` headers, event, `/wham/usage`; `resets.rs` + `Subscription::quota_reset_credits` / `consume_quota_reset` on `/wham/rate-limit-reset-credits` (consume only on explicit calls); tests `r47a_k_*` | Partial | UI cards and daemon CLI for reset consume (R-47 later slice) |
 | l | model list | `codex_models.go` backend list + instructions | `models.rs` `/codex/models`, cached prompts | Done | — |
 | m | multi-account | Multiple logins; routing in provider | Multiple accounts via daemon subscription members | Done | — |
-| n | error classification | Expired → refresh; spent windows; credits (`codex_credits.go`) | `tokens.rs` lapsed; `limits.rs` observe blocking vs credits | Partial | Remote reset / autoreset behaviours in the reference not ported |
+| n | error classification | Expired → refresh; spent windows; credits (`codex_credits.go`); gateway remote reset and week/expiring autoreset (`codex_autoreset.go`, `codex_expiring.go`, `codex_resets_used.go`) | `tokens.rs` lapsed; `limits.rs` observe blocking vs credits; `resets.rs` vendor refusal outcomes on HTTP 200 and in-flight `redeem_request_id` reuse for explicit `consume_quota_reset` only (`r47n_*`) | Partial | Automatic consume on 429 or expiring windows, `CodexAutoReset` settings, reset-lead tuning, remote-gateway `POST /v1/.../codex-reset`, and resets-used history cards remain unported by policy |
 | o | daily warmup | `warmup_daily.go` + provider warmup | `lib.rs:372-377` `daily_warmup` → `warmup.rs` | Done | — |
 | p | agent sign-in switch | Writes Codex auth (`codex_switch.go`, store) | `write_agent_sign_in` → `agent_sign_in.rs` | Partial | Keychain mode + lock interaction with live Codex unverified |
 | q | extras | `chatgpt-account-id`, Codex version headers, plan in ID token | `upstream.rs:172+` headers, `CODEX_VERSION`, `sign_in.rs:13` auth claim; zstd on Codex turns (row **e**) | Done | — |
@@ -343,6 +343,8 @@ Remaining verification is live-account acceptance; all evidence here is determin
 - Finish `chatgpt-api` parity: model-list union with Codex catalog when a ChatGPT plan account shares models, and live-account verification — **M**, **R-47** follow-up.
 - Codex Keychain + two-writer auth.json sync — **M**, **R-47**.
 - Credit reset consume surfaced in CLI/control UI cards — **M**, **R-47** (plugin API and Codex `/wham/rate-limit-reset-credits` read/consume are in place; automatic consume is forbidden).
+- Codex week/expiring autoreset, auto-reset settings, remote-gateway reset route, and reset-use history — **L**, out of scope for the subscription plugin (R-47n documents the honest remainder; explicit consume only).
+
 
 ---
 

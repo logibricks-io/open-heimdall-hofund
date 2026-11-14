@@ -2286,6 +2286,56 @@ fn r47a_k3_consume_unknown_credit_is_quota_and_posts_nothing() {
 }
 
 #[test]
+fn r47n_consume_vendor_refusal_on_200_returns_outcome() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let id = seed(&host, &access_token("first", 10_000));
+    enqueue_json(&host, 200, RESET_CREDITS_ONE);
+    enqueue_json(
+        &host,
+        200,
+        br#"{"code":"nothing_to_reset","windows_reset":0}"#,
+    );
+    let outcome = block_on(sub.consume_quota_reset(&id, Some("c-1"), host.context()))
+        .expect("refusal outcome");
+    assert_eq!(outcome.code(), "nothing_to_reset");
+    assert_eq!(outcome.windows(), 0);
+}
+
+#[test]
+fn r47n_consume_reuses_redeem_after_connect_failure() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let id = seed(&host, &access_token("first", 10_000));
+    enqueue_json(&host, 200, RESET_CREDITS_ONE);
+    host.http().enqueue_connect("reset");
+    host.http().enqueue_connect("reset");
+    let error = block_on(sub.consume_quota_reset(&id, Some("c-1"), host.context()))
+        .expect_err("both posts failed");
+    assert_eq!(error.kind(), PluginErrorKind::Connect);
+    enqueue_json(&host, 200, RESET_CREDITS_ONE);
+    enqueue_json(&host, 200, br#"{"code":"reset","windows_reset":2}"#);
+    let outcome = block_on(sub.consume_quota_reset(&id, Some("c-1"), host.context()))
+        .expect("retry after failure");
+    assert_eq!(outcome.code(), "reset");
+    let calls = host.http().calls();
+    let posts: Vec<_> = calls
+        .iter()
+        .filter(|call| call.method() == "POST")
+        .collect();
+    assert_eq!(posts.len(), 3, "two failed attempts plus one success");
+    let first: Value = json::from_slice(posts[0].body()).expect("json");
+    let last: Value = json::from_slice(posts[2].body()).expect("json");
+    assert_eq!(
+        first.get("redeem_request_id"),
+        last.get("redeem_request_id"),
+        "explicit retry must reuse redeem_request_id"
+    );
+}
+
+#[test]
 fn r47a_k3_consume_rejected_is_status_error_on_wham_url() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
