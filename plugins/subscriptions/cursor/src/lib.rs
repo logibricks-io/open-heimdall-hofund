@@ -26,9 +26,11 @@ mod failure;
 mod frame;
 mod http2_memory;
 mod import;
+mod listing;
 mod max_only;
 mod models;
 mod picker;
+mod picker_model;
 mod proto;
 mod quota;
 mod refresh;
@@ -424,27 +426,8 @@ impl Subscription for Cursor {
             self.keychain_enabled,
         )
         .await?;
-        let program = self.program()?;
-        let models_dir = models_temp_dir(account)?;
-        auth::write_auth_file(
-            &models_dir.path,
-            hofund_plugin_sdk::oauth::secret_text(&token),
-        )?;
-        let request = cli::request(&program, &["models"], &models_dir.path)?;
-        let child = host.spawn_process().spawn_piped(&request).await?;
-        let mut stdout = child.stdout()?;
-        let text =
-            match hofund_plugin_sdk::timeout(cli::MODELS_WAIT, cli::collect(&mut stdout, 8 << 20))
-                .await
-            {
-                Some(Some(text)) if !text.trim().is_empty() => text,
-                _ => {
-                    return Err(PluginError::config(
-                        "cursor-agent did not return a model list",
-                    ));
-                }
-            };
-        models::model_list(&text)
+        let entries = listing::usable(host, &self.endpoints, &token).await?;
+        listing::model_list(&entries)
     }
 
     fn upstream(
@@ -488,30 +471,8 @@ impl Subscription for Cursor {
     }
 }
 
-/// Isolated `cursor-agent models` config dir. Removed on drop, including errors.
-struct ModelsTempDir {
-    path: PathBuf,
-}
-
-impl Drop for ModelsTempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.path);
-    }
-}
-
-fn models_temp_dir(account: &AccountId) -> Result<ModelsTempDir, PluginError> {
-    let digest = hofund_plugin_sdk::digest::sha256(account.to_string().as_bytes());
-    let mut name = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        use std::fmt::Write as _;
-        write!(name, "{byte:02x}").expect("write to a string");
-    }
-    let path = std::env::temp_dir().join(name);
-    std::fs::create_dir_all(&path)
-        .map_err(|_| PluginError::io("cannot create the Cursor models directory"))?;
-    Ok(ModelsTempDir { path })
-}
-
+#[cfg(test)]
+mod catalog_tests;
 #[cfg(test)]
 mod conformance;
 #[cfg(test)]

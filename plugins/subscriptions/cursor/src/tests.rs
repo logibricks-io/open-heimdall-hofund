@@ -12,7 +12,7 @@ use hofund_plugin_api::{
 };
 use hofund_plugin_sdk::oauth::{SecretObject, account_id_from};
 
-use crate::{Endpoints, auth, factory_with_endpoints, tokens};
+use crate::{Endpoints, factory_with_endpoints, tokens};
 
 const SESSION: &str = "0123456789abcdef0123456789abcdef";
 #[cfg(not(windows))]
@@ -66,16 +66,6 @@ fn subscription_factory(
     factory.build(&cfg, host.context()).expect("build")
 }
 
-fn models_hash_name(id: &hofund_plugin_api::AccountId) -> String {
-    let digest = hofund_plugin_sdk::digest::sha256(id.to_string().as_bytes());
-    let mut name = String::new();
-    for byte in digest {
-        use std::fmt::Write as _;
-        write!(name, "{byte:02x}").expect("hex");
-    }
-    name
-}
-
 fn enqueue_period(host: &TestHost) {
     host.http().enqueue_response(
         200,
@@ -83,6 +73,21 @@ fn enqueue_period(host: &TestHost) {
         br#"{"billingCycleEnd":"1792833042000","planUsage":{"autoPercentUsed":1,"apiPercentUsed":2,"totalPercentUsed":3}}"#,
     );
 }
+
+fn enqueue_model_listing(host: &TestHost) {
+    host.http()
+        .enqueue_response(200, &[("content-type", "application/json")], USABLE_BODY);
+    host.http()
+        .enqueue_response(200, &[("content-type", "application/json")], PICKER_BODY);
+    host.http()
+        .enqueue_response(200, &[("content-type", "application/json")], PICKER_BODY);
+}
+
+const USABLE_BODY: &[u8] =
+    br#"{"models":[{"modelId":"composer-2.5","displayModelId":"composer-2.5","displayName":"Composer 2.5"}]}"#;
+const PICKER_BODY: &[u8] = br#"{"models":[
+  {"name":"composer-2.5","clientDisplayName":"Composer 2.5","contextTokenLimit":200000,"supportsNonMaxMode":true,"variants":[{"parameterValues":[],"isDefaultNonMaxConfig":true,"legacySlug":"composer-2.5"}]}
+]}"#;
 
 fn ctx() -> SignInCtx {
     SignInCtx::new(plugin())
@@ -533,18 +538,9 @@ fn a2a_41_agent_quota_spawns_status_when_token_near_expiry() {
 #[test]
 fn a2a_42_list_models_spawn_uses_isolated_models_dir() {
     let dir = tempfile::tempdir().expect("dir");
-    let override_home = dir.path().join("daemon-cursor-home");
-    auth::set_test_config_dir(Some(override_home.clone()));
-    struct Restore;
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            auth::set_test_config_dir(None);
-        }
-    }
-    let _restore = Restore;
-
     let host = host(&dir);
     let sub = subscription(&host);
+    crate::listing::clear_listing_cache_for_tests();
     let token = jwt("models@example.test", 4_000_000_000);
     let id = account_id_from(&["cursor", "models@example.test"]);
     let blob = tokens::blob_oauth(
@@ -560,39 +556,25 @@ fn a2a_42_list_models_spawn_uses_isolated_models_dir() {
         .account(id.clone(), "models@example.test")
         .expect("account");
     block_on(host.context().accounts().upsert(account, blob.to_secret())).expect("upsert");
-    host.process().script_piped(
-        PipedScript::new()
-            .line("auto - Auto (default)")
-            .exits(|_| vec![]),
-    );
+    enqueue_model_listing(&host);
     let list = block_on(sub.list_models(&id, host.context())).expect("models");
     assert!(!list.models().is_empty());
-    let spawn = host
-        .process()
-        .piped_spawns()
-        .into_iter()
-        .next()
-        .expect("models spawn");
-    let expected_dir = PathBuf::from(spawn.env_var("CURSOR_CONFIG_DIR").expect("config dir"));
-    assert_eq!(
-        expected_dir
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned()),
-        Some(models_hash_name(&id))
+    assert!(
+        host.process().piped_spawns().is_empty(),
+        "list_models must use HTTP listing, not cursor-agent models"
     );
-    assert_eq!(spawn.cwd, expected_dir);
-    assert_ne!(
-        spawn.env_var("CURSOR_CONFIG_DIR"),
-        Some(override_home.as_os_str())
+    let calls = host.http().calls();
+    assert!(
+        calls
+            .iter()
+            .any(|call| call.uri().contains("AvailableModels")),
+        "picker AvailableModels must be requested"
     );
     assert!(
-        !expected_dir.exists(),
-        "models temp dir must be removed after success"
-    );
-    let state = host.context().dirs().state_dir().expect("state");
-    assert!(
-        !state.join("cursor-models").exists(),
-        "state dir must not keep cursor-models"
+        calls
+            .iter()
+            .any(|call| call.uri().contains("GetUsableModels")),
+        "usable models must be requested"
     );
 }
 
@@ -601,6 +583,7 @@ fn r8b_list_models_removes_temp_dir_when_the_cli_fails() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
     let sub = subscription(&host);
+    crate::listing::clear_listing_cache_for_tests();
     let token = jwt("models-fail@example.test", 4_000_000_000);
     let id = account_id_from(&["cursor", "models-fail@example.test"]);
     let blob = tokens::blob_oauth(
@@ -616,31 +599,14 @@ fn r8b_list_models_removes_temp_dir_when_the_cli_fails() {
         .account(id.clone(), "models-fail@example.test")
         .expect("account");
     block_on(host.context().accounts().upsert(account, blob.to_secret())).expect("upsert");
-    host.process()
-        .script_piped(PipedScript::new().exits(|_| vec![]));
-    let error = block_on(sub.list_models(&id, host.context())).expect_err("empty models");
-    assert!(error.to_string().contains("model list"));
-    let spawn = host
-        .process()
-        .piped_spawns()
-        .into_iter()
-        .next()
-        .expect("models spawn");
-    let expected_dir = PathBuf::from(spawn.env_var("CURSOR_CONFIG_DIR").expect("config dir"));
-    assert_eq!(
-        expected_dir
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned()),
-        Some(models_hash_name(&id))
-    );
+    for _ in 0..3 {
+        host.http().enqueue_response(503, &[], b"down");
+    }
+    let error = block_on(sub.list_models(&id, host.context())).expect_err("picker failure");
+    assert!(error.to_string().to_ascii_lowercase().contains("cursor"));
     assert!(
-        !expected_dir.exists(),
-        "models temp dir must be removed after a failing CLI"
-    );
-    let state = host.context().dirs().state_dir().expect("state");
-    assert!(
-        !state.join("cursor-models").exists(),
-        "state dir must not keep cursor-models after a failing CLI"
+        host.process().piped_spawns().is_empty(),
+        "a failed picker must not fall back to cursor-agent models"
     );
 }
 

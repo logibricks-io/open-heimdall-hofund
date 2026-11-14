@@ -70,4 +70,11 @@ impl Endpoints {
             self.api.trim_end_matches('/')
         )
     }
+
+    pub(crate) fn usable_models(&self) -> String {
+        format!(
+            "{}/agent.v1.AgentService/GetUsableModels",
+            self.api.trim_end_matches('/')
+        )
+    }
 }
