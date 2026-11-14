@@ -13,7 +13,7 @@ Legend: **Done** = matches the reference at checklist granularity; **Partial** =
 | Vendor section | Done | Partial | Missing | N/A | Unverified |
 |---|---|---|---|---|---|
 | Claude Pro/Max (`claude`) | 1 | 17 | 3 | 2 | 0 |
-| Cursor (`cursor`) | 4 | 15 | 0 | 2 | 0 |
+| Cursor (`cursor`) | 5 | 14 | 0 | 2 | 0 |
 | Devin (`devin`) | 12 | 6 | 0 | 1 | 0 |
 | Zed (`zed`) | 0 | 6 | 1 | 3 | 0 |
 | Kiro (`kiro`) | 8 | 9 | 0 | 2 | 0 |
@@ -99,14 +99,14 @@ Every other gap below maps to an existing plan item.
 | b | import sources | Agent home `.cursor` auth + keychain | `AgentSignIn` + discover (`lib.rs:37-41`); R-8d reads the matching team id from cli-config for billing | Partial | Team/active org metadata beyond the billing header |
 | c | token storage | Plugin session store; core mover side logins | Daemon secret blob + optional agent read-only | Partial | Persist team/active org metadata if needed for quota |
 | d | refresh | `cursor-agent status` / token TTL (`cursor/index.mjs:182-194`, CLI_MARK) | `refresh.rs` + `session.rs` spawn status; API-key accounts re-exchange through R-8c | Partial | Serialize refresh like plugin |
-| e | upstream wire | Connect bidi `AgentService/Run` + HTTP/1 RunSSE + BidiAppend (`cursor/index.mjs:13-17`, `44-46`) | `run.rs` incrementally reads either transport, answers KV/exec and selected field-36 tool lists, sends heartbeats, and enforces monotonic idle/quiet/tool-count limits; `upstream.rs` opens one stateless Run per execute, retries regional and Max Mode failures as documented; R-9e maps images and R-9f sends picker-selected effort, fast, and context parameters | Partial | Native retention and the full server-side catalog remain deferred |
+| e | upstream wire | Connect bidi `AgentService/Run` + HTTP/1 RunSSE + BidiAppend (`cursor/index.mjs:13-17`, `44-46`) | `run.rs` incrementally reads either transport, answers KV/exec and selected field-36 tool lists, sends heartbeats, and enforces monotonic idle/quiet/tool-count limits; `upstream.rs` opens one stateless Run per execute, retries regional and Max Mode failures as documented; R-9e maps images and R-9f sends picker-selected effort, fast, and context parameters through the same cached list as R-9g `list_models` | Partial | Native session retention remains deferred |
 | f | inbound shapes | OpenAI-compatible chat to plugin fetch (`cursor/index.mjs:29-30`) | Canonical IR text, tool history, images, effort, and service tier map through `request.rs` and `picker.rs` to transcript blobs, the protobuf user turn, and native requested-model parameters; gateway codecs supply the IR | Partial | Real-account protocol verification is outside this audit |
 | g | streaming | Connect stream / RunSSE (`cursor/index.mjs:13-17`) | `Completion::Stream` emits text, separate thinking, full-argument caller tools, clean endings, and field-14 or dashboard tool-step usage; R-9b reasoning replay and R-9c usage mapping are landed | Partial | Streaming argument deltas remain deferred in row h |
 | h | tool calls | MCP `CallDynamicTool` (`cursor/index.mjs:21-26`, `51`) | Selected MCP execs emit caller tool blocks; unknown/Cursor-owned execs stay refused; server-completed calls are not emitted; counts, checkpoints, and the 60-second count wait seal steps | Partial | Streaming argument deltas and Cursor-owned tools are deferred |
 | i | images | unverified in core; plugin native session handles blobs | R-9e maps data-URL and base64 images to hex `Uint8Array` parts, URL images to placeholders, non-image files to named placeholders, and sets request field 19 only for sent inline images | Done | — |
 | j | reasoning | Plugin tests `reasoning.test.mjs`; native picker effort parameters | R-9b emits and replays separate thinking blocks; R-9f resolves `GenerationParams::effort` through the picker and sends the selected variant's native parameters and Max Mode | Done | — |
 | k | quota / usage | Connect `GetCurrentPeriodUsage`, team header (`cursor/index.mjs:171-176`, `connect.rs` parity) | `quota()` via Connect unary with R-8d team header; R-9c maps field-14 and tool-step dashboard usage | Partial | Cross-step deferred usage and credit events (`cursor/deferred-usage.test.mjs`) |
-| l | model list | Plugin catalog + agent list; core `cursor_models.go` contexts | `cursor-agent models` parse + family fold remains the advertised list; R-9f fetches `AvailableModels` only for request-time picker inputs | Partial | Server-side catalog merge like plugin (`catalog.test.mjs`) |
+| l | model list | Plugin catalog + agent list; core `cursor_models.go` contexts | R-9g merges picker, `GetUsableModels`, and scope-3 `AvailableModels` with `fromCatalog` / `modelsOf`, caches by SHA-256(token) for ten minutes, coalesces in-flight listing, and serves stale-while-revalidate / `LIST_RETRY` on the request path (`listing.rs`, `catalog_tests.rs`; recorded HTTP only) | Done | — |
 | m | multi-account | Team id per token (`activeTeamId`) | Multiple accounts; R-8d sends the matching `x-cursor-team-id` on chat, dashboard usage, quota, and picker calls | Partial | — |
 | n | error classification | Plugin maps budget/refusal (`errors.test.mjs`) | `failure.rs` implements the text-only section 6 table: regional/permission 403, status-style 401, quota vs rate 429, context overflow and invalid input 400, unavailable 503, other Connect codes 502, and unchanged bare HTTP statuses. R-9d retries once on a `maxRequired` refusal when the first attempt was not Max Mode | Partial | — |
 | o | warmup / keepalive | none found (no keepalive in the Cursor core or its auth plugin) | None | N/A | — |
@@ -115,7 +115,6 @@ Every other gap below maps to an existing plan item.
 
 ### Gaps (Cursor)
 
-- Full server-side catalog merge and shared picker list cache remain in row l.
 - Cross-step deferred usage and credit events remain in row k; streaming argument deltas and Cursor-owned tools remain in row h.
 
 ---

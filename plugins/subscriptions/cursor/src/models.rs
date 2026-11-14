@@ -1,10 +1,13 @@
 //! Parsing `cursor-agent models` and folding families.
 
+#[cfg(test)]
 use hofund_plugin_api::{ModelList, ModelSpec, PluginError};
 
+#[cfg(test)]
 const DEFAULT_CONTEXT: u64 = 200_000;
 
 /// One parsed row before families are folded.
+#[cfg(test)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RawModel {
     id: String,
@@ -13,6 +16,7 @@ pub(crate) struct RawModel {
 }
 
 /// Parses cursor-agent model list text.
+#[cfg(test)]
 pub(crate) fn parse_list(text: &str) -> Vec<RawModel> {
     let mut out = Vec::new();
     for line in strip_ansi(text).lines() {
@@ -25,6 +29,7 @@ pub(crate) fn parse_list(text: &str) -> Vec<RawModel> {
     out
 }
 
+#[cfg(test)]
 fn parse_line(line: &str) -> Option<(String, String)> {
     let (id, rest) = line.split_once(" - ")?;
     let id = id.trim();
@@ -51,6 +56,7 @@ fn parse_line(line: &str) -> Option<(String, String)> {
     Some((id.to_owned(), name))
 }
 
+#[cfg(test)]
 fn cursor_context(id: &str, name: &str) -> u64 {
     if let Some(m) = million_in_name(name) {
         return m;
@@ -69,6 +75,7 @@ fn cursor_context(id: &str, name: &str) -> u64 {
     DEFAULT_CONTEXT
 }
 
+#[cfg(test)]
 fn million_in_name(name: &str) -> Option<u64> {
     for word in name.split_whitespace() {
         let digits = word.trim_matches(|ch: char| !ch.is_ascii_digit());
@@ -81,6 +88,7 @@ fn million_in_name(name: &str) -> Option<u64> {
     None
 }
 
+#[cfg(test)]
 fn strip_variant_suffix(id: &str) -> &str {
     for suffix in [
         "-fast",
@@ -102,6 +110,7 @@ fn strip_variant_suffix(id: &str) -> &str {
     id
 }
 
+#[cfg(test)]
 struct Family {
     id: String,
     variants: Vec<RawModel>,
@@ -109,6 +118,7 @@ struct Family {
 }
 
 /// Folds variant ids into one model per family.
+#[cfg(test)]
 pub(crate) fn collapse(raw: Vec<RawModel>) -> Vec<RawModel> {
     let mut families: Vec<Family> = Vec::new();
     let mut index = std::collections::HashMap::new();
@@ -189,6 +199,7 @@ pub(crate) fn split_id(id: &str) -> (String, String) {
     (s, effort)
 }
 
+#[cfg(test)]
 impl Family {
     fn by_effort(&self) -> std::collections::HashMap<String, String> {
         let mut out = std::collections::HashMap::new();
@@ -241,6 +252,7 @@ impl Family {
     }
 }
 
+#[cfg(test)]
 fn effort_label(level: &str) -> &str {
     match level {
         "xhigh" => "Extra High",
@@ -254,6 +266,7 @@ fn effort_label(level: &str) -> &str {
     }
 }
 
+#[cfg(test)]
 fn name_contains(name: &str, words: &str) -> bool {
     words.is_empty()
         || name
@@ -261,6 +274,7 @@ fn name_contains(name: &str, words: &str) -> bool {
             .contains(&words.to_ascii_lowercase())
 }
 
+#[cfg(test)]
 fn remove_words(name: &str, words: &str) -> String {
     if words.is_empty() {
         return name.to_owned();
@@ -280,6 +294,7 @@ fn remove_words(name: &str, words: &str) -> String {
     name.to_owned()
 }
 
+#[cfg(test)]
 fn without_capacity(models: Vec<RawModel>) -> Vec<RawModel> {
     let strip = |name: &str| -> String {
         name.split_whitespace()
@@ -315,6 +330,7 @@ fn without_capacity(models: Vec<RawModel>) -> Vec<RawModel> {
 }
 
 /// Builds the API model list from CLI text.
+#[cfg(test)]
 pub(crate) fn model_list(text: &str) -> Result<ModelList, PluginError> {
     let collapsed = collapse(parse_list(text));
     let specs = collapsed
@@ -326,6 +342,7 @@ pub(crate) fn model_list(text: &str) -> Result<ModelList, PluginError> {
     Ok(ModelList::new(specs, None))
 }
 
+#[cfg(test)]
 fn strip_ansi(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();

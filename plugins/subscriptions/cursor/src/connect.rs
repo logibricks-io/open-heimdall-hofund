@@ -32,7 +32,7 @@ pub(crate) async fn unary_opts(
     unary_url(host, endpoints, url, token, body, team_id, read_timeout).await
 }
 
-pub(crate) async fn available_models(
+pub(crate) async fn picker_models(
     host: &HostContext,
     endpoints: &Endpoints,
     token: &SecretString,
@@ -46,6 +46,42 @@ pub(crate) async fn available_models(
         r#"{"useModelParameters":true,"doNotUseMarkdown":true}"#,
         team_id.as_deref(),
         Some(Duration::from_secs(30)),
+    )
+    .await
+}
+
+pub(crate) async fn catalog_models(
+    host: &HostContext,
+    endpoints: &Endpoints,
+    token: &SecretString,
+) -> Result<Value, PluginError> {
+    let team_id = crate::team::header_value(token);
+    unary_url(
+        host,
+        endpoints,
+        endpoints.available_models(),
+        token,
+        r#"{"useModelParameters":true,"doNotUseMarkdown":true,"scope":3}"#,
+        team_id.as_deref(),
+        Some(Duration::from_secs(8)),
+    )
+    .await
+}
+
+pub(crate) async fn usable_models(
+    host: &HostContext,
+    endpoints: &Endpoints,
+    token: &SecretString,
+) -> Result<Value, PluginError> {
+    let team_id = crate::team::header_value(token);
+    unary_url(
+        host,
+        endpoints,
+        endpoints.usable_models(),
+        token,
+        "{}",
+        team_id.as_deref(),
+        Some(Duration::from_secs(8)),
     )
     .await
 }

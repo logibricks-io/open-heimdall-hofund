@@ -2577,6 +2577,7 @@ mod tests {
     fn picker_effort_service_tier_and_context_reach_the_run_request() {
         let _guard = crate::http2_memory::test_lock();
         crate::http2_memory::reset_for_tests();
+        crate::listing::clear_listing_cache_for_tests();
         block_on(async {
             let h2 = Http2Server::start(vec![
                 Http2Response::new(200).data(text_frame("ok")).hold_open(),
@@ -2604,8 +2605,16 @@ mod tests {
                     ]},
                 ],
             }]});
+            let usable = json!({"models": [
+                {"modelId": "grok-4.7-high-fast", "displayName": "Grok 4.7 High Fast"},
+                {"modelId": "grok-4.7-low-fast", "displayName": "Grok 4.7 Low Fast"},
+            ]});
+            let picker_bytes = picker.to_string().into_bytes();
+            let usable_bytes = usable.to_string().into_bytes();
             let h1 = Http1Server::start(vec![
-                Http1Response::new(200).body(picker.to_string().into_bytes()),
+                Http1Response::new(200).body(usable_bytes),
+                Http1Response::new(200).body(picker_bytes.clone()),
+                Http1Response::new(200).body(picker_bytes),
                 config_reply(h2.base_url()),
             ])
             .await;
@@ -2631,12 +2640,19 @@ mod tests {
             }
 
             let h1_requests = h1.requests();
-            assert_eq!(
-                h1_requests[0].path(),
-                "/aiserver.v1.AiService/AvailableModels"
-            );
+            let picker_call = h1_requests
+                .iter()
+                .find(|call| {
+                    call.path() == "/aiserver.v1.AiService/AvailableModels"
+                        && hofund_plugin_sdk::json::from_slice::<hofund_plugin_sdk::json::Value>(
+                            call.body(),
+                        )
+                        .map(|body| body.get("scope").is_none())
+                        .unwrap_or(false)
+                })
+                .expect("picker AvailableModels");
             let list_body: hofund_plugin_sdk::json::Value =
-                hofund_plugin_sdk::json::from_slice(h1_requests[0].body())
+                hofund_plugin_sdk::json::from_slice(picker_call.body())
                     .expect("AvailableModels body");
             assert_eq!(list_body["useModelParameters"], true);
             assert_eq!(list_body["doNotUseMarkdown"], true);
@@ -2683,12 +2699,14 @@ mod tests {
                     )
                 })
                 .collect::<Vec<_>>();
+            let mut parameters = parameters;
+            parameters.sort();
             assert_eq!(
                 parameters,
                 [
                     ("context".to_owned(), "256k".to_owned()),
-                    ("reasoning_effort".to_owned(), "low".to_owned()),
                     ("fast".to_owned(), "true".to_owned()),
+                    ("reasoning_effort".to_owned(), "low".to_owned()),
                 ]
             );
         });
