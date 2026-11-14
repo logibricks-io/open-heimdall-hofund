@@ -912,6 +912,141 @@ mod tests {
     }
 
     #[test]
+    fn r9h_caller_tool_emits_exactly_one_full_argument_delta() {
+        let _guard = crate::http2_memory::test_lock();
+        crate::http2_memory::reset_for_tests();
+        block_on(async {
+            let h2 = Http2Server::start(vec![
+                Http2Response::new(200)
+                    .data(mcp_frame(9, "lookup", "call-delta"))
+                    .hold_open(),
+            ])
+            .await;
+            let h1 = Http1Server::start(vec![config_reply(h2.base_url())]).await;
+            let host = pooled_host();
+            let account = store_account(&host).await;
+            let upstream = upstream(&host, &h1, h2.base_url(), account);
+            let Completion::Stream(mut stream) = upstream
+                .execute(tool_request(), ProtocolId::OPENAI_CHAT)
+                .await
+                .expect("tool execute")
+            else {
+                panic!("stream");
+            };
+            for _ in 0..3 {
+                let event = stream
+                    .next()
+                    .await
+                    .expect("tool event")
+                    .expect("tool event");
+                if let StreamEvent::ToolArgumentsDelta(ToolArgumentsDelta {
+                    partial_json, ..
+                }) = event
+                {
+                    assert_eq!(
+                        partial_json, "{\"query\":\"weather\"}",
+                        "the stateless Run path carries the full JSON once per exec"
+                    );
+                    drop(stream);
+                    return;
+                }
+            }
+            panic!("expected a single full-argument delta before idle stall");
+        });
+    }
+
+    #[test]
+    fn r9h_partial_tool_marker_does_not_emit_argument_deltas_before_exec() {
+        let _guard = crate::http2_memory::test_lock();
+        crate::http2_memory::reset_for_tests();
+        block_on(async {
+            let body = [
+                tool_update_frame(7, "call-partial"),
+                mcp_frame(9, "lookup", "call-partial"),
+                tool_count_frame(1),
+            ]
+            .concat();
+            let h2 = Http2Server::start(vec![Http2Response::new(200).data(body).hold_open()]).await;
+            let h1 = Http1Server::start(vec![config_reply(h2.base_url())]).await;
+            let host = pooled_host();
+            let account = store_account(&host).await;
+            let upstream = upstream(&host, &h1, h2.base_url(), account);
+            let Completion::Stream(mut stream) = upstream
+                .execute(tool_request(), ProtocolId::OPENAI_CHAT)
+                .await
+                .expect("tool execute")
+            else {
+                panic!("stream");
+            };
+            let mut saw_tool_block = false;
+            while let Some(event) = stream.next().await {
+                let event = event.expect("tool stream");
+                match event {
+                    StreamEvent::ContentBlockStart(ContentBlockStart {
+                        block: BlockStart::ToolCall { .. },
+                        ..
+                    }) => {
+                        assert!(
+                            !saw_tool_block,
+                            "partial update 7 must not publish a caller tool block"
+                        );
+                        saw_tool_block = true;
+                    }
+                    StreamEvent::ToolArgumentsDelta(_) => {
+                        assert!(
+                            saw_tool_block,
+                            "argument deltas appear only after the MCP exec, not from update 7"
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            assert!(saw_tool_block, "expected one caller tool from the exec");
+        });
+    }
+
+    #[test]
+    fn r9h_cursor_owned_exec_is_refused_without_emitting_caller_tools() {
+        let _guard = crate::http2_memory::test_lock();
+        crate::http2_memory::reset_for_tests();
+        block_on(async {
+            let body = [
+                exec_frame(12, "shell-exec", 12, Pb::new()),
+                text_frame("continued"),
+                turn_end_frame(),
+            ]
+            .concat();
+            let h2 = Http2Server::start(vec![Http2Response::new(200).data(body)]).await;
+            let h1 = Http1Server::start(vec![config_reply(h2.base_url())]).await;
+            let host = pooled_host();
+            let account = store_account(&host).await;
+            let upstream = upstream(&host, &h1, h2.base_url(), account);
+            let Completion::Stream(mut stream) = upstream
+                .execute(tool_request(), ProtocolId::OPENAI_CHAT)
+                .await
+                .expect("text after refusal")
+            else {
+                panic!("stream");
+            };
+            let mut events = Vec::new();
+            while let Some(event) = stream.next().await {
+                events.push(event.expect("stream"));
+            }
+            assert!(events.iter().all(|event| !matches!(
+                event,
+                StreamEvent::ContentBlockStart(ContentBlockStart {
+                    block: BlockStart::ToolCall { .. },
+                    ..
+                }) | StreamEvent::ToolArgumentsDelta(_)
+            )));
+            assert!(events.iter().any(|event| matches!(
+                event,
+                StreamEvent::TextDelta(TextDelta { text, .. }) if text == "continued"
+            )));
+        });
+    }
+
+    #[test]
     fn unknown_mcp_exec_is_refused_without_a_caller_tool_or_result_write() {
         let _guard = crate::http2_memory::test_lock();
         crate::http2_memory::reset_for_tests();
