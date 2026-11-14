@@ -45,6 +45,11 @@ fn subscription(host: &TestHost) -> Arc<dyn Subscription> {
     ClaudeFactory.build(&cfg, host.context()).expect("build")
 }
 
+fn subscription_default(host: &TestHost) -> Arc<dyn Subscription> {
+    let cfg = ClaudeFactory.validate(&RawTable::new()).expect("config");
+    ClaudeFactory.build(&cfg, host.context()).expect("build")
+}
+
 fn ctx() -> SignInCtx {
     SignInCtx::new(plugin())
         .with_session(SESSION)
@@ -160,6 +165,95 @@ fn login_spawned_without_shell_with_scrubbed_env() {
     assert!(signin.is_dir());
     #[cfg(unix)]
     assert_eq!(mode(&signin), 0o700);
+}
+
+fn wsl_discovery_script(kind: &str) -> PipedScript {
+    let wsl = crate::wslrun::wsl_exe();
+    let kind = kind.to_owned();
+    PipedScript::new().exits(move |spawn| {
+        if spawn.program != wsl {
+            return Vec::new();
+        }
+        match (kind.as_str(), spawn.arg_strings().join(" ").as_str()) {
+            ("running", "-l --running -q") => vec!["Ubuntu\r\n".to_owned()],
+            ("all", "-l -q") => vec!["Ubuntu\r\n".to_owned()],
+            ("ubuntu", _)
+                if spawn.args.get(1).map(|a| a.to_string_lossy()) == Some("Ubuntu".into())
+                    && spawn.args.get(2).map(|a| a.to_string_lossy()) == Some("-e".into()) =>
+            {
+                vec!["bin:/home/me/.local/bin/claude\nlpath:/home/me/.local/bin\nmount:/mnt/c/\nnet:mirrored\n".to_owned()]
+            }
+            _ => Vec::new(),
+        }
+    })
+}
+
+#[test]
+fn r6_wsl_sign_in_probes_through_spawn_request() {
+    let _guard = crate::wslrun::test_guard();
+    crate::launcher::set_skip_native_find(true);
+    crate::wslrun::set_test_on(true);
+    crate::wslrun::forget();
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription_default(&host);
+    let wsl = crate::wslrun::wsl_exe();
+    host.process().script_piped(wsl_discovery_script("running"));
+    host.process().script_piped(wsl_discovery_script("all"));
+    host.process().script_piped(wsl_discovery_script("ubuntu"));
+    host.process().script_piped(login_script(true));
+    start(&host, &sub);
+    let spawns = host.process().piped_spawns();
+    assert_eq!(spawns.len(), 4);
+    assert!(spawns[..3].iter().all(|spawn| spawn.program == wsl));
+    let login = &spawns[3];
+    assert_eq!(login.program, wsl);
+    crate::wslrun::set_test_on(false);
+    crate::launcher::set_skip_native_find(false);
+    crate::wslrun::forget();
+}
+
+#[test]
+fn r6_wsl_sign_in_spawns_through_wsl_exe() {
+    let _guard = crate::wslrun::test_guard();
+    crate::launcher::set_skip_native_find(true);
+    crate::wslrun::set_test_on(true);
+    crate::wslrun::forget();
+    crate::wslrun::set_run(Some(Box::new(
+        |_timeout: std::time::Duration, args: &[&str]| {
+            match args.join(" ") {
+            args if args == "-l --running -q" => {
+                Ok(b"Ubuntu\r\n".to_vec())
+            }
+            args if args == "-l -q" => Ok(b"Ubuntu\r\n".to_vec()),
+            _ if args.get(1) == Some(&"Ubuntu") => Ok(
+                b"bin:/home/me/.local/bin/claude\nlpath:/home/me/.local/bin\nmount:/mnt/c/\nnet:mirrored\n"
+                    .to_vec(),
+            ),
+            _ => Err(()),
+        }
+        },
+    )));
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription_default(&host);
+    host.process().script_piped(login_script(true));
+    start(&host, &sub);
+    let [spawn] = host.process().piped_spawns().try_into().expect("one spawn");
+    assert_eq!(spawn.program, crate::wslrun::wsl_exe());
+    let args = spawn.arg_strings();
+    assert_eq!(args[0], "-d");
+    assert_eq!(args[1], "Ubuntu");
+    assert_eq!(args[2], "--exec");
+    assert_eq!(args.last().map(String::as_str), Some("--claudeai"));
+    assert!(
+        spawn.env.iter().any(|(key, _)| key == "WSLENV"),
+        "WSL sign-in should cross CLAUDE_CONFIG_DIR: {spawn:?}"
+    );
+    crate::wslrun::set_run(None);
+    crate::wslrun::set_test_on(false);
+    crate::launcher::set_skip_native_find(false);
+    crate::wslrun::forget();
 }
 
 #[test]
