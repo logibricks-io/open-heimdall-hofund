@@ -322,7 +322,7 @@ pub(crate) fn argv(tool: &Tool, args: &[&str]) -> Vec<OsString> {
 pub(crate) fn wsl_exe() -> std::path::PathBuf {
     #[cfg(windows)]
     {
-        return std::path::PathBuf::from(r"C:\Windows\System32\wsl.exe");
+        std::path::PathBuf::from(r"C:\Windows\System32\wsl.exe")
     }
     #[cfg(not(windows))]
     {
