@@ -33,22 +33,48 @@ fn cli_config_dir() -> PathBuf {
     home_dir().join(".cursor")
 }
 
-fn auth_file_dir() -> PathBuf {
-    if let Some(dir) = configured_dir() {
+/// Platform `auth.json` directory (not `CURSOR_CONFIG_DIR`).
+pub(crate) fn auth_file_dir() -> PathBuf {
+    #[cfg(test)]
+    if let Some(dir) = test_platform_auth_dir() {
         return dir;
     }
-    match std::env::consts::OS {
+    auth_file_dir_from(
+        std::env::consts::OS,
+        std::env::var("APPDATA")
+            .ok()
+            .map(PathBuf::from)
+            .filter(|path| !path.as_os_str().is_empty())
+            .as_deref(),
+        &home_dir(),
+        std::env::var("XDG_CONFIG_HOME")
+            .ok()
+            .map(PathBuf::from)
+            .filter(|path| !path.as_os_str().is_empty())
+            .as_deref(),
+    )
+}
+
+fn auth_file_dir_from(
+    goos: &str,
+    appdata: Option<&Path>,
+    home: &Path,
+    xdg_config_home: Option<&Path>,
+) -> PathBuf {
+    match goos {
         "windows" => {
-            let base = std::env::var("APPDATA")
-                .map(PathBuf::from)
-                .unwrap_or_else(|_| home_dir().join("AppData").join("Roaming"));
+            let base = appdata
+                .filter(|path| !path.as_os_str().is_empty())
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| home.join("AppData").join("Roaming"));
             base.join("Cursor")
         }
-        "macos" => home_dir().join(".cursor"),
+        "macos" => home.to_path_buf().join(".cursor"),
         _ => {
-            let base = std::env::var("XDG_CONFIG_HOME")
-                .map(PathBuf::from)
-                .unwrap_or_else(|_| home_dir().join(".config"));
+            let base = xdg_config_home
+                .filter(|path| !path.as_os_str().is_empty())
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| home.to_path_buf().join(".config"));
             base.join("cursor")
         }
     }
@@ -74,6 +100,7 @@ pub(crate) fn configured_dir() -> Option<PathBuf> {
 #[cfg(test)]
 thread_local! {
     static TEST_CONFIG_DIR: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+    static TEST_PLATFORM_AUTH_DIR: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
 }
 
 #[cfg(test)]
@@ -85,6 +112,17 @@ fn test_config_dir() -> Option<PathBuf> {
 #[cfg(test)]
 pub(crate) fn set_test_config_dir(dir: Option<PathBuf>) {
     TEST_CONFIG_DIR.with(|cell| *cell.borrow_mut() = dir);
+}
+
+/// Redirects platform `auth.json` reads in tests.
+#[cfg(test)]
+pub(crate) fn set_test_platform_auth_dir(dir: Option<PathBuf>) {
+    TEST_PLATFORM_AUTH_DIR.with(|cell| *cell.borrow_mut() = dir);
+}
+
+#[cfg(test)]
+fn test_platform_auth_dir() -> Option<PathBuf> {
+    TEST_PLATFORM_AUTH_DIR.with(|cell| cell.borrow().clone())
 }
 
 #[cfg(not(test))]
@@ -165,6 +203,16 @@ fn write_private_file(path: &Path, body: &[u8]) -> Result<(), PluginError> {
 }
 
 #[cfg(test)]
+pub(crate) fn auth_file_dir_for_tests(
+    goos: &str,
+    appdata: Option<&Path>,
+    home: &Path,
+    xdg_config_home: Option<&Path>,
+) -> PathBuf {
+    auth_file_dir_from(goos, appdata, home, xdg_config_home)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -178,5 +226,70 @@ mod tests {
                 dir.display()
             );
         }
+    }
+
+    #[test]
+    fn windows_auth_dir_follows_appdata() {
+        let home = PathBuf::from(r"C:\Users\test");
+        let appdata = PathBuf::from(r"C:\Users\test\AppData\Roaming");
+        assert_eq!(
+            auth_file_dir_for_tests("windows", Some(&appdata), &home, None),
+            appdata.join("Cursor")
+        );
+        assert_eq!(
+            auth_file_dir_for_tests("windows", None, &home, None),
+            home.join("AppData").join("Roaming").join("Cursor")
+        );
+    }
+
+    #[test]
+    fn auth_file_ignores_cursor_config_dir() {
+        let temp = tempfile::tempdir().expect("dir");
+        let token = "platform-auth-token";
+        let platform_dir = temp.path().join("platform-auth");
+        std::fs::create_dir_all(&platform_dir).expect("platform");
+        std::fs::write(
+            platform_dir.join("auth.json"),
+            format!(r#"{{"accessToken":"{token}"}}"#),
+        )
+        .expect("write");
+        set_test_config_dir(Some(temp.path().join("isolated-config")));
+        set_test_platform_auth_dir(Some(platform_dir));
+        let agent_home = temp.path().join("empty-agent");
+        std::fs::create_dir_all(&agent_home).expect("agent");
+        assert_eq!(
+            read_agent_access(&agent_home).as_deref(),
+            Some(token),
+            "auth.json must follow platform authFile, not CURSOR_CONFIG_DIR"
+        );
+        set_test_platform_auth_dir(None);
+        set_test_config_dir(None);
+    }
+
+    #[test]
+    fn windows_auth_path_reads_platform_override() {
+        let temp = tempfile::tempdir().expect("dir");
+        let token = "appdata-live-token";
+        let roaming = temp.path().join("roaming").join("Cursor");
+        std::fs::create_dir_all(&roaming).expect("cursor");
+        std::fs::write(
+            roaming.join("auth.json"),
+            format!(r#"{{"accessToken":"{token}"}}"#),
+        )
+        .expect("write");
+        assert_eq!(
+            auth_file_dir_for_tests(
+                "windows",
+                Some(temp.path().join("roaming").as_path()),
+                &PathBuf::from(r"C:\home"),
+                None
+            ),
+            roaming
+        );
+        set_test_platform_auth_dir(Some(roaming));
+        let agent_home = temp.path().join("agent-home");
+        std::fs::create_dir_all(&agent_home).expect("agent");
+        assert_eq!(read_agent_access(&agent_home).as_deref(), Some(token));
+        set_test_platform_auth_dir(None);
     }
 }
