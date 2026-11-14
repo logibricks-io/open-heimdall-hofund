@@ -17,7 +17,7 @@ Legend: **Done** = matches the reference at checklist granularity; **Partial** =
 | Devin (`devin`) | 12 | 6 | 0 | 1 | 0 |
 | Zed (`zed`) | 0 | 6 | 1 | 3 | 0 |
 | Kiro (`kiro`) | 8 | 9 | 0 | 2 | 0 |
-| Factory / Droid (`factory`) | 12 | 4 | 0 | 3 | 0 |
+| Factory / Droid (`factory`) | 13 | 3 | 0 | 3 | 0 |
 | Cline / ClinePass (`cline`) | 12 | 4 | 0 | 3 | 0 |
 | ChatGPT / Codex (`codex` backend) and ChatGPT API (`chatgpt-api`) | 10 | 10 | 1 | 0 | 0 |
 | GitHub Copilot (github.com and GHE) | 15 | 2 | 0 | 5 | 0 |
@@ -236,7 +236,7 @@ Structured-output prose for Chat, Responses, and Messages shipped in R-13b (`str
 | a1 | sign-in: WorkOS device | Plugin WorkOS device + production `CLIENT_ID` (`factory/index.mjs:12-16`) | `SignInFlowKind::Device`; the reference production client is used on device start, polling, and refresh (`lib.rs`, `sign_in.rs`, `tokens.rs`; `a2b_12`, `a2b_13`) | Done | Recorded HTTP only |
 | a2 | sign-in: API key `fk-` | `factoryCreds.Key` (`factory.go:68-71`); plugin whoami | `import_api_key` keeps the key, region, and prem host, without an OAuth org header or refresh (`sign_in.rs`; `a2b_18`) | Done | — |
 | a3 | browser OAuth loopback | N/A (device) | N/A | N/A | — |
-| b | import | Mover reads built-in accounts | API key + device completes to store | Partial | Built-in account migration remains absent |
+| b | import | Mover reads built-in accounts | `discover.rs` lists and `import_accounts` stores mover OAuth and API shapes plus built-in `factoryCreds` in `logins.json` without live whoami (`r52d_*`) | Done | — |
 | c | token storage | JSON creds with org/region/prem (`factory.go:49-72`) | Secret blob stores org, region, and whoami's `premBaseHostV2`; refresh reconciliation preserves and updates it (`sign_in.rs`, `tokens.rs`) | Done | — |
 | d | refresh | WorkOS refresh; API key no refresh; two-minute request lead, three-minute host lead, request-time unexpired-token grace, and strict explicit transient failures (`refresh.test.mjs`) | Two-minute request lead, lease serialization, request-time-only unexpired-token grace, explicit transient-failure propagation, non-429 4xx lapse, and whoami reconciliation (`tokens.rs`; `a2b_13`, `a2b_17`, `r52_transient_*`) | Partial | The host API has no separate three-minute `refreshLead` setting |
 | e | upstream wire | Per-model `/api/llm/{a,o,g}/v1`; prem host override (`factory/index.mjs:33-39`, `factory.go:65-67`) | `wire_target` plus canonical HTTPS prem-host routing; invalid hosts fail before HTTP (`upstream.rs`; `r52_prem_*`) | Done | Recorded HTTP only |
@@ -263,7 +263,7 @@ Structured-output prose for Chat, Responses, and Messages shipped in R-13b (`str
 
 ### Remaining gaps (Factory)
 
-- Built-in account migration, the host-level three-minute refresh setting, specialized Anthropic tool wrapping/streamed unwrap, and `standard_only` remain Partial as listed above.
+- The host-level three-minute refresh setting, specialized Anthropic tool wrapping/streamed unwrap, and `standard_only` remain Partial as listed above.
 
 ---
 
