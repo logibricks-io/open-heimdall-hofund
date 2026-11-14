@@ -223,15 +223,17 @@ async fn serve_http1(
     scripts: Arc<Mutex<VecDeque<Http1Response>>>,
     mut stopped: watch::Receiver<bool>,
 ) {
-    let Some(request) = read_http1_request(&mut stream).await else {
-        return;
-    };
-    requests.lock().expect("request records").push(request);
+    // Pop the scripted response when this connection is accepted so parallel
+    // reads cannot reorder 200/RunSSE slots on slower hosts.
     let response = scripts
         .lock()
         .expect("response scripts")
         .pop_front()
         .unwrap_or_else(|| Http1Response::new(200));
+    let Some(request) = read_http1_request(&mut stream).await else {
+        return;
+    };
+    requests.lock().expect("request records").push(request);
     if let Some(mut gate) = response.header_gate {
         loop {
             if *gate.borrow() {
