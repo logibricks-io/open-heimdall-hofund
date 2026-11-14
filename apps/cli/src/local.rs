@@ -4,6 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use hofund_config::{ListenSource, addr_env, effective_listen, load_path};
+use sha2::{Digest, Sha256};
 
 /// The exact label for a config check that could not run `hofundd`.
 pub(crate) const STRUCTURAL_ONLY: &str = "structural check only; hofundd is unavailable, so provider construction and preflight did not run";
@@ -77,6 +78,19 @@ pub(crate) fn listen_env() -> Option<String> {
     addr_env()
 }
 
+/// SHA-256 content hash of the on-disk config, matching the daemon revision.
+///
+/// # Errors
+///
+/// Returns a message when the config file cannot be read.
+pub(crate) fn disk_revision(config: &Path) -> Result<String, String> {
+    let bytes = std::fs::read(config).map_err(|error| format!("{}: {error}", config.display()))?;
+    Ok(Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
 /// The source label the status report prints.
 pub(crate) fn source_label(source: ListenSource) -> &'static str {
     match source {
@@ -129,5 +143,23 @@ mod tests {
     fn sources_have_stable_labels() {
         assert_eq!(source_label(ListenSource::Environment), "environment");
         assert_eq!(source_label(ListenSource::Config), "config");
+    }
+
+    #[test]
+    fn disk_revision_is_the_sha256_of_on_disk_bytes() {
+        use super::disk_revision;
+        use sha2::{Digest, Sha256};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = dir.path().join("hofund.toml");
+        let text = "listen = \"127.0.0.1:0\"\ntoken_file = \"token\"\n";
+        std::fs::write(&config, text).expect("write");
+        let revision = disk_revision(&config).expect("revision");
+        let expected: String = Sha256::digest(text.as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        assert_eq!(revision, expected);
+        assert_eq!(revision.len(), 64);
     }
 }
