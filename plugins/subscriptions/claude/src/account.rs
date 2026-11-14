@@ -10,6 +10,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use hofund_plugin_api::{AccountId, HostContext, PluginError, SpawnRequest};
+
+use crate::COMMAND;
+use crate::launcher;
 use hofund_plugin_sdk::oauth::SecretObject;
 
 use crate::creds::{self, Profile};
@@ -55,7 +58,7 @@ pub(crate) fn run_env(blob: &SecretObject) -> Vec<(OsString, OsString)> {
 /// when they are due, and keeps what it wrote.
 pub(crate) async fn refresh(
     host: &HostContext,
-    program: impl FnOnce() -> Result<PathBuf, PluginError>,
+    configured: Option<&PathBuf>,
     account: &AccountId,
 ) -> Result<(), PluginError> {
     let lease = host.accounts().lease(account, LEASE_WAIT).await?;
@@ -74,11 +77,11 @@ pub(crate) async fn refresh(
     };
     let stored = stored.to_owned();
     let profile = Profile::parse(blob.text(creds::PROFILE).unwrap_or_default());
-    let program = program()?;
+    let command = launcher::ClaudeCommand::resolve(host, configured, COMMAND).await?;
     let dir = account_dir(host, account)?;
     creds::private_dir(&dir)?;
     let file = dir.join(creds::CREDENTIALS_FILE);
-    let ran = run(host, &program, &dir, &file, &stored, &profile, &blob).await;
+    let ran = run_command(host, &command, &dir, &file, &stored, &profile, &blob).await;
     let read_back = creds::read_credentials(&dir);
     let _ = std::fs::remove_file(&file);
     let status = ran?;
@@ -105,7 +108,7 @@ pub(crate) async fn refresh(
 /// [`refresh`].
 pub(crate) async fn read_usage(
     host: &HostContext,
-    program: impl FnOnce() -> Result<PathBuf, PluginError>,
+    configured: Option<&PathBuf>,
     account: &AccountId,
 ) -> Result<Vec<hofund_plugin_api::QuotaWindow>, PluginError> {
     let lease = host.accounts().lease(account, LEASE_WAIT).await?;
@@ -124,7 +127,7 @@ pub(crate) async fn read_usage(
     };
     let stored = stored.to_owned();
     let profile = Profile::parse(blob.text(creds::PROFILE).unwrap_or_default());
-    let program = program()?;
+    let command = launcher::ClaudeCommand::resolve(host, configured, COMMAND).await?;
     let dir = account_dir(host, account)?;
     creds::private_dir(&dir)?;
     let file = dir.join(creds::CREDENTIALS_FILE);
@@ -136,7 +139,7 @@ pub(crate) async fn read_usage(
         if !settings.exists() {
             creds::write_private(&settings, &profile.settings_text())?;
         }
-        let text = crate::usage::run_usage_cli(host, &program, &dir, &run_env(&blob)).await?;
+        let text = crate::usage::run_usage_command(host, &command, &dir, &run_env(&blob)).await?;
         crate::usage::parse(&text, now)
     }
     .await;
@@ -187,7 +190,7 @@ impl Drop for WarmupCleanup<'_> {
 /// Sends one "hi" through Claude Code for `account`.
 pub(crate) async fn warmup(
     host: &HostContext,
-    program: impl FnOnce() -> Result<PathBuf, PluginError>,
+    configured: Option<&PathBuf>,
     account: &AccountId,
 ) -> Result<(), PluginError> {
     let lease = host.accounts().lease(account, LEASE_WAIT).await?;
@@ -206,7 +209,7 @@ pub(crate) async fn warmup(
     };
     let stored = stored.to_owned();
     let profile = Profile::parse(blob.text(creds::PROFILE).unwrap_or_default());
-    let program = program()?;
+    let command = launcher::ClaudeCommand::resolve(host, configured, COMMAND).await?;
     let dir = account_dir(host, account)?;
     creds::private_dir(&dir)?;
     let file = dir.join(creds::CREDENTIALS_FILE);
@@ -225,7 +228,7 @@ pub(crate) async fn warmup(
     creds::private_dir(&work)?;
 
     let mut last = String::new();
-    let run_result = run_warmup_process(host, &program, &dir, &work, &mut last).await;
+    let run_result = run_warmup_command(host, &command, &dir, &work, &mut last).await;
 
     let read_back = creds::read_credentials(&dir);
     if let Some(rotated) = read_back.filter(|rotated| rotated.text != stored) {
@@ -237,22 +240,14 @@ pub(crate) async fn warmup(
     finish_warmup_output(&last)
 }
 
-async fn run_warmup_process(
+async fn run_warmup_command(
     host: &HostContext,
-    program: &Path,
+    command: &crate::launcher::ClaudeCommand,
     dir: &Path,
     work: &Path,
     last: &mut String,
 ) -> Result<(), PluginError> {
-    let request = SpawnRequest::new(
-        program,
-        WARM_ARGS.iter().map(OsString::from).collect(),
-        vec![(
-            OsString::from(crate::cli::CONFIG_DIR_VAR),
-            dir.as_os_str().to_owned(),
-        )],
-        work,
-    )?;
+    let request = command.spawn_request_in(&WARM_ARGS, dir, work, &[])?;
     let child = host.spawn_process().spawn_piped(&request).await?;
     child.write_stdin(b"hi\n".to_vec().into()).await?;
     let mut stdout = child.stdout()?;
@@ -298,9 +293,9 @@ fn warmup_result(text: &str) -> Option<hofund_plugin_sdk::json::Value> {
         .find(|value| value.get("type").and_then(|v| v.as_str()) == Some("result"))
 }
 
-async fn run(
+async fn run_command(
     host: &HostContext,
-    program: &Path,
+    command: &crate::launcher::ClaudeCommand,
     dir: &Path,
     file: &Path,
     stored: &str,
@@ -316,9 +311,22 @@ async fn run(
             creds::write_private(&settings, &profile.settings_text())?;
         }
     }
-    Ok(status(host, program, dir, blob).await)
+    Ok(status_command(host, command, dir, blob).await)
 }
 
+pub(crate) async fn status_command(
+    host: &HostContext,
+    command: &crate::launcher::ClaudeCommand,
+    dir: &Path,
+    blob: &SecretObject,
+) -> Option<hofund_plugin_sdk::json::Value> {
+    let request = command
+        .spawn_request(&crate::cli::STATUS_ARGS, dir, &run_env(blob))
+        .ok()?;
+    spawn_status(host, request).await
+}
+
+#[allow(dead_code)]
 pub(crate) async fn status(
     host: &HostContext,
     program: &Path,
@@ -328,6 +336,13 @@ pub(crate) async fn status(
     let request =
         crate::cli::request_with_extra(program, &crate::cli::STATUS_ARGS, dir, &run_env(blob))
             .ok()?;
+    spawn_status(host, request).await
+}
+
+async fn spawn_status(
+    host: &HostContext,
+    request: SpawnRequest,
+) -> Option<hofund_plugin_sdk::json::Value> {
     let child = host.spawn_process().spawn_piped(&request).await.ok()?;
     let mut stdout = child.stdout().ok()?;
     let text =

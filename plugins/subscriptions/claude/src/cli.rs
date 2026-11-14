@@ -57,6 +57,7 @@ const STATUS_CAP: usize = 64 * 1024;
 
 /// A spawn of `program` with `args`, run in `dir` and keeping its state
 /// there. The kernel clears the rest of the environment.
+#[allow(dead_code)]
 pub(crate) fn request(
     program: &Path,
     args: &[&str],
@@ -66,6 +67,7 @@ pub(crate) fn request(
 }
 
 /// Like [`request`], with extra environment pairs copied into the spawn.
+#[allow(dead_code)]
 pub(crate) fn request_with_extra(
     program: &Path,
     args: &[&str],
@@ -107,6 +109,17 @@ pub(crate) async fn drain(stdout: &mut BodyStream, last: &mut String) {
     while let Some(line) = next_line(stdout).await {
         remember(last, &line);
     }
+}
+
+/// Raw standard output until the program exits.
+pub(crate) async fn collect_bytes(stdout: &mut BodyStream) -> Vec<u8> {
+    let mut out = Vec::new();
+    while let Some(chunk) = stdout.next_chunk().await {
+        if let Ok(chunk) = chunk {
+            out.extend_from_slice(&chunk);
+        }
+    }
+    out
 }
 
 /// Everything printed until exit, capped.
