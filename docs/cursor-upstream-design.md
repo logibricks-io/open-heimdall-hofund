@@ -561,8 +561,8 @@ Depends on R-8's Run.
 - The full model catalog: `GetUsableModels`, catalog scope 3, the 10-minute list shared by in-flight requests (`listFor`, `index.mjs:1324-1344`), usable-only families, and a server-backed `list_models`. R-9f covers only request-time `AvailableModels` selection when picker inputs are present; calls without them still send the requested id and literal `auto`.
 - Historical MCP namespace alias on read (`bareName`, `index.mjs:1751-1753`). Outbound stays `tools` only until a branding-safe approach exists.
 - Wire trace (`native-session.mjs` `WireTrace`).
-- Web search and every Cursor-owned tool (refused execs; section 1.6).
-- Streaming tool-argument deltas (full arguments in one exec).
+- Web search and every Cursor-owned tool (refused execs on the stateless path; section 1.6). Shell and file execs need native session retention and stay out of scope.
+- Streaming tool-argument token deltas: the reference publishes one full JSON string per MCP exec on the stateless Run path; interaction update 15 is not forwarded to callers. Hofund matches that with one `ToolArgumentsDelta` per exec (R-9h fixtures).
 - A second plugin retry after the client has seen a stream delta (section 4.2).
 - Free credit beyond included usage: plan bonus (`GetCurrentPeriodUsage` `planUsage.bonusSpend`, `remainingBonus`, `index.mjs:549-553`) and active cli grants (`GetUsageLimitStatusAndActiveGrants`, `clientType` `cli`, `index.mjs:556-578`), plus the rule that usable credit keeps serving after included usage is spent (`index.mjs:585-592`). Until a follow-up item implements both RPCs, the existing subscription `GetCurrentPeriodUsage` quota path stays as today; an account may still be quota-rested while bonus or a cli grant remains.
 - Enterprise `usage-summary` and included-only routing. Quota already has a separate path.
