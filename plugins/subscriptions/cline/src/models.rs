@@ -181,7 +181,7 @@ fn cloud_model(entry: &Value) -> Option<FeedModel> {
         .map(str::to_owned);
     let last = id.split('/').next_back().unwrap_or(id);
     let name = given
-        .filter(|name| name != &id && name != last)
+        .filter(|name| name != id && name != last)
         .unwrap_or_else(|| prettify(id));
     let context = tokens(entry.get("context_length"))
         .or_else(|| tokens(entry.get("top_provider")?.get("context_length")))
