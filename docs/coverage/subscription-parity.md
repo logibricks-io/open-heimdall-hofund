@@ -15,7 +15,7 @@ Legend: **Done** = matches the reference at checklist granularity; **Partial** =
 | Claude Pro/Max (`claude`) | 3 | 15 | 3 | 2 | 0 |
 | Cursor (`cursor`) | 8 | 11 | 0 | 2 | 0 |
 | Devin (`devin`) | 12 | 6 | 0 | 1 | 0 |
-| Zed (`zed`) | 0 | 6 | 1 | 3 | 0 |
+| Zed (`zed`) | 13 | 3 | 0 | 3 | 0 |
 | Kiro (`kiro`) | 8 | 9 | 0 | 2 | 0 |
 | Factory / Droid (`factory`) | 14 | 2 | 0 | 3 | 0 |
 | Cline / ClinePass (`cline`) | 12 | 4 | 0 | 3 | 0 |
@@ -163,9 +163,9 @@ Structured-output prose for Chat, Responses, and Messages shipped in R-13b (`str
 | # | capability | reference v0.1.3005 behaviour | hofund 08035c9 | status | gap to close |
 |---|------------|------------------------------|----------------|--------|--------------|
 | a1 | sign-in: native app RSA loopback | Plugin opens `zed.dev/native_app_signin` (`zed/index.mjs:8-13`) | `sign_in.rs` + kernel query-token loopback; RSA-2048, OAEP-SHA256 + v1.5 fallback, 10-minute driver deadline; `r56_*` tests with loopback and mock `/client/users/me` | Done | Mocks only; no real-account smoke |
-| a2 | sign-in: import saved creds | Core `zedCreds` mover (`zed.go:14-34`) | `import.rs` remains alongside `Pkce` loopback flow | Partial | — |
+| a2 | sign-in: import saved creds | Core `zedCreds` mover (`zed.go:14-34`) | `import.rs` + `creds.rs`: single `zedCreds` JSON, mover OAuth (`type`, `access`, JSON `refresh` metadata), and built-in `logins.json` rows (`r56b_*`, offline fixtures only) | Done | Mocks only; no real-account smoke |
 | a3 | API key / device | N/A | N/A | N/A | — |
-| b | import | Built-in side logins | `hofund subscription import` | Partial | — |
+| b | import | Built-in side logins | `hofund subscription import` | Done | Lapsed or unreadable rows are skipped without dropping siblings |
 | c | token storage | Plugin holds user id + access + system id | `creds.rs` stored secret | Partial | — |
 | d | refresh | POST `/client/llm_tokens` on 401 (`zed/index.mjs:14-16`) | `refresh.rs`, `tokens.rs`, stale headers on `/models` and `/completions` | Done | — |
 | e | upstream wire | POST `/completions` NDJSON envelope (`zed/index.mjs:17-20`) | `upstream.rs` POST `/completions` | Done | — |
