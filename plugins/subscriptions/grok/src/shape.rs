@@ -28,7 +28,13 @@ pub(crate) fn body(body: &mut Map<String, Value>, x_search: bool) {
         .get("tools")
         .and_then(Value::as_array)
         .is_some_and(|tools| !tools.is_empty());
-    let search = x_search && auto_choice && (body.get("tools").is_none() || has_tools);
+    let valid_tools = body
+        .get("tools")
+        .is_none_or(|tools| tools.is_null() || tools.is_array());
+    let search = x_search
+        && auto_choice
+        && valid_tools
+        && (body.get("tool_choice").and_then(Value::as_str) == Some("auto") || has_tools);
     if let Some(Value::Array(tools)) = body.get_mut("tools") {
         let incoming = std::mem::take(tools);
         for mut tool in incoming {
@@ -80,9 +86,11 @@ pub(crate) fn body(body: &mut Map<String, Value>, x_search: bool) {
             .and_then(Value::as_array)
             .is_none_or(|tools| !tools.iter().any(|tool| tool_matches_type(tool, "x_search")))
     {
-        body.entry("tools".to_owned())
-            .or_insert_with(|| Value::Array(Vec::new()))
-            .as_array_mut()
+        if !body.get("tools").is_some_and(Value::is_array) {
+            body.insert("tools".to_owned(), Value::Array(Vec::new()));
+        }
+        body.get_mut("tools")
+            .and_then(Value::as_array_mut)
             .expect("tools array")
             .push(Value::Object(Map::from_iter([(
                 "type".to_owned(),

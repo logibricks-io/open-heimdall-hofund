@@ -1,12 +1,9 @@
 //! Running the Grok Build CLI and reading what it prints.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
-use hofund_plugin_api::{BinaryName, BodyStream, PluginError, SpawnRequest};
-
-/// The CLI command hofund runs.
-pub(crate) const COMMAND: BinaryName = BinaryName::new("grok");
+use hofund_plugin_api::{BodyStream, PluginError, SpawnRequest};
 
 /// Device sign-in through the CLI.
 pub(crate) const LOGIN_ARGS: [&str; 2] = ["login", "--device-auth"];
@@ -19,16 +16,92 @@ pub(crate) const HOME_VAR: &str = "GROK_HOME";
 
 const LINE_CAP: usize = 200;
 
-/// Resolves the `grok` program: an absolute `command` path or lookup on PATH.
+/// Resolves the `grok` program: an absolute `command` path or the CLI's install locations.
 pub(crate) fn program(command: Option<&PathBuf>) -> Result<PathBuf, PluginError> {
     if let Some(command) = command {
         return Ok(command.clone());
     }
-    hofund_plugin_sdk::process::find_program(COMMAND).ok_or_else(|| {
-        PluginError::config(
-            "Grok Build is not installed: `grok` is not on PATH; install it or set `command`",
-        )
+    let user_home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from);
+    let cli_home = std::env::var_os(HOME_VAR).map_or_else(
+        || {
+            user_home
+                .as_ref()
+                .map_or_else(|| PathBuf::from(".grok"), |home| home.join(".grok"))
+        },
+        PathBuf::from,
+    );
+    discover(
+        std::env::var_os("GROK_BIN_DIR").as_deref(),
+        &cli_home,
+        user_home.as_deref(),
+        std::env::var_os("PATH").as_deref(),
+    )
+    .ok_or_else(|| PluginError::config(no_cli()))
+}
+
+pub(crate) fn no_cli() -> String {
+    let install = if cfg!(windows) {
+        "irm https://x.ai/cli/install.ps1 | iex"
+    } else {
+        "curl -fsSL https://x.ai/cli/install.sh | bash"
+    };
+    format!(
+        "install Grok Build first: {install}; or set GROK_BIN_DIR to the folder holding its grok binary"
+    )
+}
+
+fn discover(
+    bin_dir: Option<&OsStr>,
+    cli_home: &Path,
+    user_home: Option<&Path>,
+    path: Option<&OsStr>,
+) -> Option<PathBuf> {
+    let name = if cfg!(windows) { "grok.exe" } else { "grok" };
+    let mut paths: Vec<(String, PathBuf, bool)> = Vec::new();
+    let mut add_path = |dir: &Path, own| {
+        if !dir.is_absolute() {
+            return;
+        }
+        let candidate = dir.join(name);
+        let key = if cfg!(windows) {
+            candidate.to_string_lossy().to_lowercase()
+        } else {
+            candidate.to_string_lossy().into_owned()
+        };
+        if !paths
+            .iter()
+            .any(|(seen, _, _): &(String, PathBuf, bool)| *seen == key)
+        {
+            paths.push((key, candidate, own));
+        }
+    };
+    if let Some(dir) = bin_dir {
+        add_path(Path::new(dir), true);
+    }
+    add_path(&cli_home.join("bin"), true);
+    if let Some(home) = user_home {
+        add_path(&home.join(".grok").join("bin"), true);
+    }
+    for dir in path.into_iter().flat_map(std::env::split_paths) {
+        let text = dir.as_os_str().to_string_lossy();
+        add_path(Path::new(text.trim()), false);
+    }
+    if let Some(home) = user_home {
+        add_path(&home.join(".local").join("bin"), false);
+    }
+    paths.into_iter().find_map(|(_, candidate, own)| {
+        (candidate.is_file() && (own || is_grok_build(&candidate))).then_some(candidate)
     })
+}
+
+fn is_grok_build(path: &Path) -> bool {
+    let real = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    real.to_string_lossy()
+        .replace('\\', "/")
+        .to_lowercase()
+        .contains("/.grok/")
 }
 
 /// A spawn of `program` with `args`, run with `home` as GROK_HOME.
@@ -155,13 +228,90 @@ fn strip_ansi(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::strip_ansi;
+    use std::path::{Path, PathBuf};
+
+    use super::{discover, no_cli, strip_ansi};
+
+    fn binary(dir: &Path) -> PathBuf {
+        std::fs::create_dir_all(dir).expect("bin dir");
+        let path = dir.join(if cfg!(windows) { "grok.exe" } else { "grok" });
+        std::fs::write(&path, b"fixture").expect("binary");
+        path
+    }
 
     #[test]
     fn strips_ansi_colour_codes() {
         assert_eq!(
             strip_ansi("\u{1b}[4mhttps://example.test/x\u{1b}[24m"),
             "https://example.test/x"
+        );
+    }
+
+    #[test]
+    fn r50_cli_discovery_uses_install_locations_before_path() {
+        let dir = tempfile::tempdir().expect("dir");
+        let root = dir.path();
+        let bin = root.join("chosen-bin");
+        let cli_home = root.join("chosen-home");
+        let user_home = root.join("user");
+        let path_home = user_home.join(".grok").join("path-bin");
+        let wanted = binary(&bin);
+        let cli_wanted = binary(&cli_home.join("bin"));
+        let default_wanted = binary(&user_home.join(".grok").join("bin"));
+        let path_wanted = binary(&path_home);
+        let path = std::env::join_paths([path_home]).expect("path");
+
+        assert_eq!(
+            discover(
+                Some(bin.as_os_str()),
+                &cli_home,
+                Some(&user_home),
+                Some(&path),
+            ),
+            Some(wanted.clone())
+        );
+        std::fs::remove_file(wanted).expect("remove first");
+        assert_eq!(
+            discover(None, &cli_home, Some(&user_home), Some(&path)),
+            Some(cli_wanted.clone())
+        );
+        std::fs::remove_file(cli_wanted).expect("remove second");
+        assert_eq!(
+            discover(None, &cli_home, Some(&user_home), Some(&path)),
+            Some(default_wanted.clone())
+        );
+        std::fs::remove_file(default_wanted).expect("remove third");
+        assert_eq!(
+            discover(None, &cli_home, Some(&user_home), Some(&path)),
+            Some(path_wanted)
+        );
+    }
+
+    #[test]
+    fn r50_path_does_not_accept_an_unrelated_grok_binary() {
+        let dir = tempfile::tempdir().expect("dir");
+        let other = dir.path().join("other");
+        binary(&other);
+        let path = std::env::join_paths([other]).expect("path");
+        assert_eq!(discover(None, dir.path(), None, Some(&path)), None);
+        assert!(
+            no_cli().contains("curl -fsSL https://x.ai/cli/install.sh | bash") || cfg!(windows)
+        );
+        assert!(no_cli().contains("GROK_BIN_DIR to the folder holding its grok binary"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn r50_local_bin_follows_a_cli_symlink() {
+        let dir = tempfile::tempdir().expect("dir");
+        let user_home = dir.path().join("user");
+        let target = binary(&user_home.join(".grok").join("downloads"));
+        let local = user_home.join(".local").join("bin");
+        std::fs::create_dir_all(&local).expect("local bin");
+        std::os::unix::fs::symlink(target, local.join("grok")).expect("symlink");
+        assert_eq!(
+            discover(None, dir.path(), Some(&user_home), None),
+            Some(local.join("grok"))
         );
     }
 }

@@ -280,6 +280,50 @@ fn a2a_9_shape_rewrites_agent_message_and_tools() {
 }
 
 #[test]
+fn r50_tool_allowlist_and_null_tools_search_match_the_reference() {
+    let allowed = [
+        "function",
+        "web_search",
+        "x_search",
+        "image_generation",
+        "collections_search",
+        "file_search",
+        "code_execution",
+        "code_interpreter",
+        "mcp",
+        "shell",
+        "tool_search",
+    ];
+    let mut tools = allowed
+        .into_iter()
+        .map(|ty| json!({"type": ty}))
+        .collect::<Vec<_>>();
+    tools.push(json!({"type": "custom", "name": "drop-me"}));
+    let mut body = json!({"tools": tools, "tool_choice": {"type": "allowed_tools"}})
+        .as_object()
+        .expect("object")
+        .clone();
+    shape::body(&mut body, false);
+    let kept = body
+        .get("tools")
+        .and_then(Value::as_array)
+        .expect("tools")
+        .iter()
+        .filter_map(|tool| tool.get("type").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    assert_eq!(kept, allowed);
+    assert!(!body.contains_key("tool_choice"));
+
+    let mut body = json!({"tools": null, "tool_choice": "auto"})
+        .as_object()
+        .expect("object")
+        .clone();
+    shape::body(&mut body, true);
+    assert_eq!(body.get("tools"), Some(&json!([{"type": "x_search"}])));
+    assert_eq!(body.get("tool_choice"), Some(&json!("auto")));
+}
+
+#[test]
 fn a2a_10_near_margin_account_stays_ready() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
