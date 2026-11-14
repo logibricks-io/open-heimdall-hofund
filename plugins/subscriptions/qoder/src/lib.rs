@@ -229,6 +229,14 @@ impl Subscription for Qoder {
         account: &AccountId,
         host: &HostContext,
     ) -> Result<AccountStatus, PluginError> {
+        if let Some(secret) = host.accounts().secret(account).await?
+            && hofund_plugin_sdk::oauth::SecretObject::parse(&secret)
+                .is_ok_and(|blob| blob.flag(creds::LAPSED))
+        {
+            return Ok(AccountStatus::NeedsSignIn {
+                reason: creds::LAPSED_REASON.to_owned(),
+            });
+        }
         match creds::Stored::load(host, account).await {
             Ok(stored) if stored.ready_at(host.clock().now()) => Ok(AccountStatus::Ready),
             Ok(stored)

@@ -346,6 +346,22 @@ fn a2c_9_daily_checkin_uses_bearer() {
 }
 
 #[test]
+fn a2c_10_account_status_needs_sign_in_when_lapsed_flag_set() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host_at(&dir, after_expiry());
+    let id = seed_with_expiry(&host, 1);
+    host.http().enqueue_response(401, &[], Vec::new());
+    block_on(subscription(&host).refresh(&id, host.context())).expect_err("refused");
+    let status = block_on(subscription(&host).account_status(&id, host.context())).expect("status");
+    assert_eq!(
+        status,
+        AccountStatus::NeedsSignIn {
+            reason: creds::LAPSED_REASON.to_owned()
+        }
+    );
+}
+
+#[test]
 fn a2c_10_account_status_ready_with_refresh_when_access_expired() {
     let dir = tempfile::tempdir().expect("dir");
     // The default TestHost clock is the Unix epoch, so expires_at=1 is still
