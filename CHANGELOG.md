@@ -15,6 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `input_json_delta` events before they reach the caller. Recorded HTTP and
   `r52e_*` fixtures cover wrap, unwrap, and stream paths. Refs R-52.
 
+- R-49: the Gemini CLI subscription plugin remembers per-account, per-project
+  tier refusals from `fetchAvailableModels` HTTP 400 responses for 24 hours,
+  asks entitlements in reference order, and always ends with a no-tier list
+  before quota and model reads. Offline tests use injected clocks (`r49_*`).
+  Refs R-49.
+
 - R-9i: the Cursor subscription plugin coalesces in-flight `cursor-agent status`
   renewals across concurrent agent-token refreshes and reads platform `auth.json`
   on Windows (`%APPDATA%\\Cursor`) and other non-macOS hosts without touching

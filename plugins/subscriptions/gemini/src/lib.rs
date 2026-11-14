@@ -27,6 +27,7 @@ mod models;
 mod project;
 mod quota;
 mod sign_in;
+mod tier_probe;
 mod tokens;
 mod upstream;
 
@@ -160,6 +161,7 @@ impl SubscriptionFactory for GeminiFactory {
             pending: Mutex::new(HashMap::new()),
             tokens: Arc::new(TokenCache::new(tokens::REFRESH_MARGIN)),
             experiments: Arc::new(models::Experiments::default()),
+            tier_probe: Arc::new(tier_probe::TierProbe::default()),
         }))
     }
 }
@@ -182,6 +184,8 @@ struct Gemini {
     tokens: Arc<TokenCache<SecretString>>,
     /// Experiment readings shared by model lists, quota, and upstreams.
     experiments: Arc<models::Experiments>,
+    /// Tier fallback and refusal memory for `fetchAvailableModels`.
+    tier_probe: Arc<tier_probe::TierProbe>,
 }
 
 impl Gemini {
@@ -215,6 +219,9 @@ impl Gemini {
             self.project.as_deref(),
         )
         .await?;
+        self.tier_probe
+            .probe(host, &self.endpoints, account, &token, &project)
+            .await?;
         let body = hofund_plugin_sdk::json::json!({ "project": project });
         let reply =
             project::call(host, &self.endpoints, &token, "retrieveUserQuota", &body).await?;
@@ -311,6 +318,7 @@ impl Subscription for Gemini {
         // Cached state from an earlier sign-in of this account is dropped.
         self.tokens.remove(&signed_in.id);
         self.experiments.forget(&signed_in.id);
+        self.tier_probe.forget(&signed_in.id);
         Ok(signed_in.id)
     }
 
@@ -379,6 +387,7 @@ impl Subscription for Gemini {
     ) -> Result<(), PluginError> {
         let account = project::set(host, email, project_id).await?;
         self.experiments.forget(&account);
+        self.tier_probe.forget_project(&account);
         Ok(())
     }
 
@@ -416,6 +425,7 @@ impl Subscription for Gemini {
         for id in &imported {
             self.tokens.remove(id);
             self.experiments.forget(id);
+            self.tier_probe.forget(id);
         }
         Ok(imported)
     }
@@ -436,6 +446,7 @@ impl Subscription for Gemini {
         let id = discover::import(home, reference, host).await?;
         self.tokens.remove(&id);
         self.experiments.forget(&id);
+        self.tier_probe.forget(&id);
         Ok(id)
     }
 }
