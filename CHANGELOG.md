@@ -14,6 +14,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with a six-hour cache, `2.9.1` cold fallback, and offline `r49e_*` fixtures.
   Refs R-49.
 
+- R-9k: the Cursor subscription plugin tracks conversation-scoped dashboard
+  usage debt across tool steps, maps a named session to a stable Run
+  conversation id, and surfaces earlier-step totals in `Usage.extensions` as
+  `deferred_usage` so this step’s `input_tokens` are not doubled. Recorded
+  loopback tests `r9k_*` cover the extension mapping, a step that owes nothing,
+  cross-step own versus deferred usage, and same-millisecond event billing;
+  credit-event paths remain row k follow-ups.
+  Refs R-9.
+
 - R-52e: the Factory subscription plugin wraps Anthropic tool schemas that use
   root `anyOf` / `oneOf` / `allOf` under `arguments`, rebases in-schema `#`
   refs, unwraps unary `tool_use` replies, and rewrites streamed
