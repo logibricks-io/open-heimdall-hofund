@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- R-47a3: native `/backend-api/codex/responses/compact` refuses ChatGPT sign-in
+  compactions on gateway keys with account holds unless the signed-in account is
+  allowed, and allows compaction when Codex's own `auth.json` uses
+  `auth_mode: apikey`. Refs R-47.
+
 - R-47j: the Codex subscription plugin trims individually unreadable sealed
   input items from the posted OpenAI Responses JSON after a 400/404 refusal
   and retries the turn (at most three attempts), matching the reference's
