@@ -35,6 +35,7 @@ const PLUGIN_EXTRA_DEPS: &[(&str, &[&str])] = &[
             "ring",
             "serde",
             "serde_json",
+            "unicode-normalization",
         ],
     ),
     ("hofund-plugin-subscription-kiro", &["rusqlite", "tokio"]),
