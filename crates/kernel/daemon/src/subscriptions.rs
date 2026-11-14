@@ -169,6 +169,14 @@ impl SubscriptionState {
         &self.host
     }
 
+    /// The directory that holds the config file and legacy sibling imports.
+    pub(crate) fn config_dir(&self) -> PathBuf {
+        self.root
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."))
+    }
+
     /// The current members, in route order.
     pub(crate) fn members(&self) -> Vec<SubscriptionMember> {
         self.members.lock().expect("subscription members").clone()
@@ -177,6 +185,27 @@ impl SubscriptionState {
     /// Rereads the accounts and rebuilds the member list. Returns whether
     /// the ordered list of account ids changed.
     pub(crate) async fn resolve(&self, cooldowns: &Arc<Cooldowns>) -> bool {
+        let config_dir = self
+            .root
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        if let Err(error) = self
+            .instance
+            .prepare_accounts(&config_dir, &self.host)
+            .await
+        {
+            tracing::warn!(
+                subscription = %self.config.id,
+                %error,
+                "prepare accounts failed; treating this subscription as having no accounts"
+            );
+            let changed = !self.members().is_empty();
+            if changed {
+                *self.members.lock().expect("subscription members") = Vec::new();
+            }
+            return changed;
+        }
         let accounts = match self.host.accounts().list().await {
             Ok(accounts) => accounts,
             Err(error) => {

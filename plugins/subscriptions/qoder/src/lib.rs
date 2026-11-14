@@ -16,6 +16,7 @@ mod cosy;
 mod creds;
 mod identity;
 mod import;
+mod legacy_migrate;
 mod models;
 mod quota;
 mod refresh;
@@ -313,11 +314,21 @@ impl Subscription for Qoder {
     ) -> Result<Vec<AccountId>, PluginError> {
         import::import_accounts(host, text).await
     }
+
+    async fn prepare_accounts(
+        &self,
+        config_dir: &std::path::Path,
+        host: &HostContext,
+    ) -> Result<(), PluginError> {
+        legacy_migrate::run(config_dir, host).await
+    }
 }
 
 #[cfg(test)]
 mod conformance;
 #[cfg(test)]
 mod r54b_tests;
+#[cfg(test)]
+mod r54d_tests;
 #[cfg(test)]
 mod tests;

@@ -14,7 +14,7 @@
 
 use std::future::Future;
 use std::io::{BufRead, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -166,6 +166,7 @@ pub(crate) struct Opened {
     name: String,
     pub(crate) instance: Arc<dyn Subscription>,
     pub(crate) host: HostContext,
+    pub(crate) config_dir: PathBuf,
 }
 
 /// Builds every configured subscription with a loopback-capable host.
@@ -175,6 +176,10 @@ fn open(
     loopback: &Arc<LoopbackRegistry>,
 ) -> Result<Vec<Opened>, DaemonError> {
     let config = load_path(path).map_err(show)?;
+    let config_dir = path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
     let built = subscriptions::build(&config, path, None, registry, None)?;
     let mut opened = Vec::with_capacity(built.len());
     for (id, state) in built {
@@ -191,6 +196,7 @@ fn open(
             name,
             instance: Arc::clone(state.instance()),
             host,
+            config_dir: config_dir.clone(),
         });
     }
     Ok(opened)
@@ -212,11 +218,13 @@ pub(crate) fn open_built(
             .host()
             .clone()
             .with_loopback(Arc::clone(loopback) as _);
+        let config_dir = state.config_dir();
         opened.push(Opened {
             id,
             name,
             instance: Arc::clone(state.instance()),
             host,
+            config_dir,
         });
     }
     opened
@@ -422,6 +430,18 @@ pub(crate) async fn list_in(opened: &[Opened]) -> Result<Vec<SubscriptionListing
 pub(crate) async fn sorted_accounts(
     entry: &Opened,
 ) -> Result<Vec<(AccountId, String)>, DaemonError> {
+    if let Err(error) = entry
+        .instance
+        .prepare_accounts(&entry.config_dir, &entry.host)
+        .await
+    {
+        tracing::warn!(
+            subscription = %entry.id,
+            %error,
+            "prepare accounts failed; listing no accounts for this subscription"
+        );
+        return Ok(Vec::new());
+    }
     let mut accounts: Vec<(AccountId, String)> = entry
         .host
         .accounts()
@@ -1331,6 +1351,7 @@ mod tests {
                 name: "Fake Subscription".to_owned(),
                 instance: Arc::clone(&self.fake) as Arc<dyn Subscription>,
                 host: self.test.context().clone(),
+                config_dir: PathBuf::from("."),
             }]
         }
 
@@ -1877,6 +1898,7 @@ mod tests {
                         calls: Arc::clone(&calls),
                     }),
                     host: host.context().clone(),
+                    config_dir: dir.path().to_path_buf(),
                 }
             })
             .collect();
@@ -1931,6 +1953,7 @@ mod tests {
                         calls: Arc::clone(&calls),
                     }),
                     host: host.context().clone(),
+                    config_dir: _dir.path().to_path_buf(),
                 },
             );
             let ids = super::accounts_import(&opened, text).await.expect("import");
