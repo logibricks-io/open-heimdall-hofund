@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- R-12d: the Devin subscription plugin persists non-default Windsurf API
+  server hosts from CLI credentials and PKCE exchange responses, honors
+  `WINDSURF_API_SERVER_URL` with trailing-slash trim on every Connect RPC
+  including GetUserStatus, and writes `api_server_url` on agent-home
+  credentials. Recorded HTTP tests only (`r12d_*`). Refs R-12.
 - R-49e: the Antigravity subscription plugin refreshes hub `ide_version` and
   `User-Agent` from the reference auto-updater manifest through `host.http()`,
   with a six-hour cache, `2.9.1` cold fallback, and offline `r49e_*` fixtures.
