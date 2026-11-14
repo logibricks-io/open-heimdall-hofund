@@ -44,6 +44,16 @@ pub(crate) fn parse_feed(value: &Value) -> Vec<FeedModel> {
             }
         }
     }
+    for model in &mut models {
+        let suffix = if model.free {
+            " (free)"
+        } else if model.pass {
+            " (ClinePass)"
+        } else {
+            ""
+        };
+        model.name.push_str(suffix);
+    }
     models
 }
 
@@ -77,16 +87,9 @@ fn entry_model(entry: &Value, group: &str) -> Option<FeedModel> {
     let last = id.split('/').next_back().unwrap_or(&id);
     let name = given_name.filter(|name| name != &id && name != last);
     let name = name.unwrap_or_else(|| prettify(&id));
-    let suffix = if free {
-        " (free)"
-    } else if pass {
-        " (ClinePass)"
-    } else {
-        ""
-    };
     Some(FeedModel {
-        id: id.clone(),
-        name: format!("{name}{suffix}"),
+        id,
+        name,
         free,
         pass,
         context: None,
@@ -97,12 +100,10 @@ fn entry_model(entry: &Value, group: &str) -> Option<FeedModel> {
 fn merge_feed_model(models: &mut Vec<FeedModel>, model: FeedModel) {
     if let Some(was) = models.iter_mut().find(|was| was.id == model.id) {
         if model.free && !was.free {
-            was.free = true;
             was.name = model.name;
         }
-        if model.pass {
-            was.pass = true;
-        }
+        was.free |= model.free;
+        was.pass |= model.pass;
         return;
     }
     models.push(model);
@@ -348,6 +349,18 @@ mod tests {
         assert_eq!(models[1].name, "Space Bunny Alpha (free)");
         assert!(models[1].free);
         assert!(models[2].pass);
+    }
+
+    #[test]
+    fn parse_feed_marks_a_recommended_duplicate_as_cline_pass() {
+        let models = parse_feed(&json!({
+            "recommended": [{"id": "anthropic/claude-sonnet-5.5"}],
+            "clinePass": [{"id": "anthropic/claude-sonnet-5.5"}]
+        }));
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].name, "Claude Sonnet 5.5 (ClinePass)");
+        assert!(models[0].pass);
+        assert!(!models[0].free);
     }
 
     #[test]

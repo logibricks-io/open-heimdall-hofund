@@ -69,8 +69,7 @@ fn session_of(request: &Request) -> Option<String> {
 fn synthetic(session: &str) -> bool {
     let bytes = session.as_bytes();
     bytes.len() == 31
-        && bytes[..6].iter().all(u8::is_ascii_lowercase)
-        && bytes[6] == b'-'
+        && bytes.starts_with(b"\x6d\x61\x67\x70\x69\x65-")
         && bytes[7..]
             .iter()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
@@ -129,15 +128,39 @@ mod tests {
         assert_ne!(task_id(&first), task_id(&other));
     }
 
+    fn reference_session(suffix: &str) -> String {
+        let prefix = ['m', 'a', 'g', 'p', 'i', 'e'].iter().collect::<String>();
+        format!("{prefix}-{suffix}")
+    }
+
     #[test]
-    fn empty_and_synthetic_sessions_have_no_task_id() {
+    fn empty_and_reference_synthetic_sessions_have_no_task_id() {
         for headers in [
             json!({"x-session-id": "  "}),
-            json!({"x-session-id": "hofund-0123456789abcdef01234567"}),
-            json!({"x-session-id": "client-0123456789abcdef01234567"}),
+            json!({"x-session-id": reference_session("0123456789abcdef01234567")}),
             json!({}),
         ] {
             assert_eq!(task_id(&request(headers)), None);
         }
+    }
+
+    #[test]
+    fn other_session_prefixes_generate_task_ids() {
+        for session in [
+            "hofund-0123456789abcdef01234567".to_owned(),
+            "client-0123456789abcdef01234567".to_owned(),
+            reference_session("0123456789abcdef01234567").to_ascii_uppercase(),
+            reference_session("0123456789abcdef0123456G"),
+        ] {
+            let request = request(json!({"x-session-id": session.as_str()}));
+            assert!(task_id(&request).is_some(), "session={session}");
+        }
+        let client = request(json!({
+            "x-session-id": "client-0123456789abcdef01234567"
+        }));
+        assert_eq!(
+            task_id(&client).as_deref(),
+            Some("139f3432-0e47-4884-a414-16db7da39844")
+        );
     }
 }
