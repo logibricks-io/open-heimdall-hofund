@@ -13,7 +13,7 @@ Legend: **Done** = matches the reference at checklist granularity; **Partial** =
 | Vendor section | Done | Partial | Missing | N/A | Unverified |
 |---|---|---|---|---|---|
 | Claude Pro/Max (`claude`) | 3 | 15 | 3 | 2 | 0 |
-| Cursor (`cursor`) | 8 | 11 | 0 | 2 | 0 |
+| Cursor (`cursor`) | 11 | 8 | 0 | 2 | 0 |
 | Devin (`devin`) | 13 | 5 | 0 | 1 | 0 |
 | Zed (`zed`) | 0 | 6 | 1 | 3 | 0 |
 | Kiro (`kiro`) | 8 | 9 | 0 | 2 | 0 |
@@ -24,7 +24,7 @@ Legend: **Done** = matches the reference at checklist granularity; **Partial** =
 | Gemini CLI (Code Assist) | 13 | 3 | 0 | 2 | 0 |
 | Google Antigravity | 12 | 3 | 1 | 1 | 0 |
 | SuperGrok (`grok`) | 14 | 2 | 0 | 2 | 0 |
-| Qoder (international + Qoder CN) | 15 | 3 | 0 | 2 | 0 |
+| Qoder (international + Qoder CN) | 16 | 2 | 0 | 2 | 0 |
 | CodeBuddy / WorkBuddy (CN + international) | 18 | 1 | 0 | 0 | 0 |
 | Z Code (`zcode`) | 16 | 3 | 0 | 0 | 0 |
 
@@ -95,8 +95,8 @@ Every other gap below maps to an existing plan item.
 | a3 | sign-in: API key → token | `CURSOR_API_KEY` → `/auth/exchange_user_api_key` (`cursor/index.mjs:347-360`) | R-8c `exchange.rs` exchanges the environment or pasted key, stores only the key, caches the derived token near expiry, and refreshes it without persisting the access token | Done | — |
 | a4 | sign-in: device code | N/A | N/A | N/A | — |
 | a5 | import paste | Core mover reads cli-config (`cursor.go:65-80`) | `import_accounts` JSON blob | Partial | — |
-| b | import sources | Agent home `.cursor` auth + keychain | `AgentSignIn` + discover (`lib.rs:37-41`); R-8d reads the matching team id from cli-config for billing | Partial | Team/active org metadata beyond the billing header |
-| c | token storage | Plugin session store; core mover side logins | Daemon secret blob + optional agent read-only | Partial | Persist team/active org metadata if needed for quota |
+| b | import sources | Agent home `.cursor` auth + keychain | `AgentSignIn` + discover (`lib.rs:37-41`); R-8d/R-9 read `authInfo.authId` and `activeTeamId` from `cli-config.json` (10s cache) for `x-cursor-team-id` and dashboard `teamId` (`team.rs`, `usage.rs`, `usage_ledger.rs`; `team.rs` unit tests, `r8d_*` / upstream loopback) | Done | — |
+| c | token storage | Plugin session store; core mover side logins | Daemon secret blob + optional agent read-only; billing team id is not persisted (live `cli-config.json` read, same as the reference) | Done | — |
 | d | refresh | `cursor-agent status` / token TTL (`cursor/index.mjs:182-194`, CLI_MARK); one in-flight `status` (`cliRefresh`) | `refresh.rs` coalesced `StatusCoalescer` with per-account lease; API-key accounts re-exchange through R-8c; `status_coalesce_tests` | Done | — |
 | e | upstream wire | Connect bidi `AgentService/Run` + HTTP/1 RunSSE + BidiAppend (`cursor/index.mjs:13-17`, `44-46`) | `run.rs` incrementally reads either transport, answers KV/exec and selected field-36 tool lists, sends heartbeats, and enforces monotonic idle/quiet/tool-count limits; `upstream.rs` opens one stateless Run per execute, retries regional and Max Mode failures as documented; R-9e maps images and R-9f sends picker-selected effort, fast, and context parameters through the same cached list as R-9g `list_models` | Partial | Native session retention remains deferred |
 | f | inbound shapes | OpenAI-compatible chat to plugin fetch (`cursor/index.mjs:29-30`) | Canonical IR text, tool history, images, effort, and service tier map through `request.rs` and `picker.rs` to transcript blobs, the protobuf user turn, and native requested-model parameters; gateway codecs supply the IR | Partial | Real-account protocol verification is outside this audit |
@@ -104,7 +104,7 @@ Every other gap below maps to an existing plan item.
 | h | tool calls | MCP `CallDynamicTool` (`cursor/index.mjs:21-26`, `51`) | Selected MCP execs emit caller tool blocks; unknown and Cursor-owned execs (shell, file, and every non-MCP kind) stay refused on the stateless Run path; server-completed calls are not emitted; counts, checkpoints, and the 60-second count wait seal steps; R-9h loopback tests cover refusal without native session | Partial | Cursor-owned tool execution remains deferred without native session retention |
 | i | images | unverified in core; plugin native session handles blobs | R-9e maps data-URL and base64 images to hex `Uint8Array` parts, URL images to placeholders, non-image files to named placeholders, and sets request field 19 only for sent inline images | Done | — |
 | j | reasoning | Plugin tests `reasoning.test.mjs`; native picker effort parameters | R-9b emits and replays separate thinking blocks; R-9f resolves `GenerationParams::effort` through the picker and sends the selected variant's native parameters and Max Mode | Done | — |
-| k | quota / usage | Connect `GetCurrentPeriodUsage`, team header (`cursor/index.mjs:171-176`, `connect.rs` parity) | `quota()` via Connect unary with R-8d team header; R-9c maps field-14 and tool-step dashboard usage; R-9k adds conversation-scoped dashboard ledger, `deferred_usage` on `Usage.extensions`, stable `Request.conversation` ids, and `r9k_*` loopback tests for cross-step deferral, same-ms billing, and no-deferred when nothing is owed | Partial | Credit events from the reference usage suite are not ported in this slice |
+| k | quota / usage | Connect `GetCurrentPeriodUsage`, team header (`cursor/index.mjs:171-176`, `connect.rs` parity) | `quota()` via Connect unary with R-8d team header; R-9c maps field-14 and tool-step dashboard usage; R-9k adds conversation-scoped dashboard ledger, `deferred_usage` on `Usage.extensions`, stable `Request.conversation` ids, and `r9k_*` loopback tests matching the reference `deferred-usage.test.mjs` suite (cross-step deferral, same-ms billing, owed-nothing) | Done | Free-credit grants (`GetUsageLimitStatusAndActiveGrants`) stay explicitly deferred in `docs/cursor-upstream-design.md` §8; native-session ledger paths stay out of scope |
 | l | model list | Plugin catalog + agent list; core `cursor_models.go` contexts | R-9g merges picker, `GetUsableModels`, and scope-3 `AvailableModels` with `fromCatalog` / `modelsOf`, caches by SHA-256(token) for ten minutes, coalesces in-flight listing, and serves stale-while-revalidate / `LIST_RETRY` on the request path (`listing.rs`, `catalog_tests.rs`; recorded HTTP only) | Done | — |
 | m | multi-account | Team id per token (`activeTeamId`) | Multiple accounts; R-8d sends the matching `x-cursor-team-id` on chat, dashboard usage, quota, and picker calls | Partial | — |
 | n | error classification | Plugin maps budget/refusal (`errors.test.mjs`) | `failure.rs` implements the text-only section 6 table: regional/permission 403, status-style 401, quota vs rate 429, context overflow and invalid input 400, unavailable 503, other Connect codes 502, and unchanged bare HTTP statuses. R-9d retries once on a `maxRequired` refusal when the first attempt was not Max Mode | Partial | — |
@@ -114,7 +114,7 @@ Every other gap below maps to an existing plan item.
 
 ### Gaps (Cursor)
 
-- Row k still needs any honestly confirmed credit-event path from the reference usage suite; R-9k loopback fixtures cover cross-step deferral, same-millisecond billing, and the owed-nothing case. Cursor-owned tool execution without native session retention remains in row h.
+- Rows b/c/k: the reference carries no team or org metadata beyond `cli-config.json` `authInfo` (`authId`, `activeTeamId`) on the header and dashboard `teamId` body; R-8d/R-9 match that without secret-blob persistence. Row k’s stateless `GetFilteredUsageEvents` ledger and `deferred_usage` paths match `deferred-usage.test.mjs` via R-9k; bonus or grant “credit” quota RPCs remain the §8 free-credit follow-up, not row k. Cursor-owned tool execution without native session retention remains in row h.
 
 ---
 
@@ -524,7 +524,7 @@ Remaining verification is live-account acceptance; all evidence here is determin
 | l | model list | `/algo/api/v2/model/list` with COSY device headers | `models.rs`: native signed list, app/chat scenes, windows, images, efforts and free flags; `upstream.rs`: selected listing display name replaces upstream `auto` in every answer and stream chunk | Done | — |
 | m | multi-account | separate subscriptions `qoder` and `qoder-cn` (`qoder.go:28-31`) | one plugin, `Site` plus VPC in creds; VPC account ids are distinct | Partial | Unified plugin id documented; separate routing labels remain |
 | n | error classification | lapsed / NeedsSignIn only on refused refresh; queue and request codes | refused refresh lapses; chat 401/403 renews once with relogin gap; quota/queue statuses | Partial | Full queue wait and remaining request-code nuances remain; no #612 claim |
-| o | daily check-in | `qoder_checkin.go` + plugin campaigns with native identity and device rotation | `checkin.rs`: device token, native identity, VPC rebasing, one device rotation | Partial | 30-minute recheck scheduling remains |
+| o | daily check-in | `qoder_checkin.go` + plugin campaigns with native identity and device rotation; 30-minute and Beijing-day recheck with campaign `ValidUntil` | `hofund-plugin-sdk` `checkin/qoder.rs` and `plugins/subscriptions/qoder/src/checkin.rs`: device token, native identity, VPC rebasing, `CheckinResult::recheck_at` at the sooner of 30 minutes, Beijing midnight, and the active campaign end | Done | Recorded mocks only |
 | p | agent sign-in / device identity | device PKCE sign-in and native runtime identity | native PKCE plus cached global/CN runtime identity and sanitized hostname | Done | — |
 | q | extras | Qoder CN VPC instance hosts (`index.mjs:29-36`); COSY_VERSION desktop | `site.rs`: strict instance parsing and fail-closed web/openapi/gateway hosts on sign-in, refresh, models, chat, usage and check-in | Done | — |
 
@@ -532,7 +532,7 @@ Remaining verification is live-account acceptance; all evidence here is determin
 
 - R-54b landed native COSY SSE, request shaping and tool/image/reasoning handling, desktop PKCE, device/job refresh and rotation, native models and usage, and fail-closed CN VPC hosts. No agent credential discovery is planned from the reference's native runtime helper.
 - The site-qualified single plugin remains: separate `qoder` / `qoder-cn` routing labels remain, while account ids distinguish public and VPC deployments.
-- Queue waiting and the remaining request-code nuances, 30-minute check-in recheck scheduling, and live-account verification remain. No #612 claim is made.
+- Queue waiting and the remaining request-code nuances and live-account verification remain. No #612 claim is made.
 
 ---
 

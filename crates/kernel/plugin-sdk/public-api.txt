@@ -26,6 +26,8 @@ checkin::CheckinTransport::fn send (& self , call : Call ,) -> impl std :: futur
 checkin::MiniMaxSite
 checkin::QoderSite
 checkin::WorkBuddySite
+checkin::beijing_day_key
+checkin::qoder_recheck_at
 checkin::run_minimax
 checkin::run_qoder
 checkin::run_trae

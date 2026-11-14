@@ -14,6 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rules) and the Claude subscription bridge applies it on `-p` stream-json
   image blocks (`r698_*` fixtures; issue #698). Refs R-6.
 
+- R-54: the shared Qoder daily check-in helper sets `CheckinResult::recheck_at`
+  to the earlier of 30 minutes, the next Beijing calendar midnight (UTC+8), and
+  the minimum end time of active campaigns, matching the reference recheck
+  schedule for international, CN, and VPC accounts that share `run_qoder`.
+  Recorded fixtures in `hofund-plugin-sdk` (`r54_recheck_*`, `r54_not_offered_yet_*`).
+  Refs R-54.
 - R-12d: the Devin subscription plugin persists non-default Windsurf API
   server hosts from CLI credentials and PKCE exchange responses, honors
   `WINDSURF_API_SERVER_URL` with trailing-slash trim on every Connect RPC
@@ -46,9 +52,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   conversation id, and surfaces earlier-step totals in `Usage.extensions` as
   `deferred_usage` so this step’s `input_tokens` are not doubled. Recorded
   loopback tests `r9k_*` cover the extension mapping, a step that owes nothing,
-  cross-step own versus deferred usage, and same-millisecond event billing;
-  credit-event paths remain row k follow-ups.
+  cross-step own versus deferred usage, and same-millisecond event billing.
   Refs R-9.
+
+- R-9: re-audited Cursor subscription-parity rows b, c, and k against the
+  frozen reference: team billing uses only live `cli-config.json`
+  `authInfo.authId` and `activeTeamId` (header and dashboard `teamId`, no
+  secret-blob fields); row k’s stateless deferred-usage suite matches R-9k.
+  Free-credit grant quota RPCs remain the §8 follow-up. Refs R-9.
 
 - R-52e: the Factory subscription plugin wraps Anthropic tool schemas that use
   root `anyOf` / `oneOf` / `allOf` under `arguments`, rebases in-schema `#`
