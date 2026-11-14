@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- R-54d: the Qoder subscription plugin migrates the legacy sibling `qoder.json`
+  beside the config file once before accounts are listed: `HOFUND_NO_ACCOUNTS`
+  skips the move, a global account with the same uid takes precedence, failed
+  store writes leave the file intact, and unreadable legacy files fail closed on
+  list (`r54d_*` temp-dir fixtures). Refs R-54.
+
 - R-9h: the Cursor subscription plugin documents and tests the stateless Run
   tool-argument path against the frozen reference — one full JSON
   `ToolArgumentsDelta` per selected MCP exec, partial-tool wire markers that do
