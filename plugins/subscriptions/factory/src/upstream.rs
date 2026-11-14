@@ -1,5 +1,6 @@
 //! Factory chat upstream routed per model wire.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use hofund_plugin_api::{
@@ -12,6 +13,7 @@ use hofund_plugin_sdk::url::Url;
 use hofund_plugin_sdk::wire::{self, StatusClassify, Target};
 
 use crate::Endpoints;
+use crate::anthropic_tools;
 use crate::client;
 use crate::models;
 use crate::tokens::{self, Bearer};
@@ -38,7 +40,7 @@ impl FactoryUpstream {
     async fn send(
         &self,
         bearer: &Bearer,
-        request: Request,
+        mut request: Request,
         inbound: ProtocolId,
     ) -> Result<Completion, PluginError> {
         let (wire, path) = models::wire_target(&request.model);
@@ -61,20 +63,32 @@ impl FactoryUpstream {
         if let Some(org) = &bearer.active_org {
             headers.push(("x-factory-org-id".to_owned(), org.clone()));
         }
+        let wrapped_names = if wire == ProtocolId::ANTHROPIC_MESSAGES {
+            let (names, prepared) = anthropic_tools::prepare_request(request)?;
+            request = prepared;
+            names
+        } else {
+            HashSet::new()
+        };
         let target = Target::new(wire, format!("{api_base}{path}"))
             .credential(CredentialStyle::Bearer)
             .headers(headers)
             .generate_in_body(wire == ProtocolId::GENERATIVE_LANGUAGE)
             .rewrite(models::request_rewrite(wire, &request.model))
             .classify_status(classify_status());
-        wire::execute(
+        let streaming = request.stream;
+        let completion = wire::execute(
             self.host.http(),
             &target,
             Some(&bearer.token),
             request,
             inbound,
         )
-        .await
+        .await?;
+        if wire != ProtocolId::ANTHROPIC_MESSAGES {
+            return Ok(completion);
+        }
+        anthropic_tools::adapt_completion(completion, &wrapped_names, streaming).await
     }
 }
 
