@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- R-52d: the Factory subscription plugin discovers and imports built-in accounts
+  from mover OAuth and API-key shapes and from reference `factoryCreds` rows in
+  `logins.json`, without calling live whoami. Recorded fixtures only (`r52d_*`).
+  Refs R-52.
+
 - R-47a3: native `/backend-api/codex/responses/compact` refuses ChatGPT sign-in
   compactions on gateway keys with account holds unless the signed-in account is
   allowed, and allows compaction when Codex's own `auth.json` uses
