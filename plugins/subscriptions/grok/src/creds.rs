@@ -1,6 +1,8 @@
 //! Reading the CLI's auth.json and building account secrets.
 
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use hofund_plugin_api::{AccountId, HostContext, PluginError, SecretString};
@@ -120,6 +122,39 @@ fn account_key(credential: &Credential) -> String {
 
 fn path_text(home: &Path) -> String {
     home.to_string_lossy().into_owned()
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct Cache {
+    last_good: Arc<Mutex<HashMap<PathBuf, Credential>>>,
+}
+
+impl Cache {
+    fn finish(
+        &self,
+        home: &Path,
+        result: Result<Credential, ReadError>,
+    ) -> Result<Credential, ReadError> {
+        let mut last_good = self
+            .last_good
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match result {
+            Ok(credential) => {
+                last_good.insert(home.to_path_buf(), credential.clone());
+                Ok(credential)
+            }
+            Err(ReadError::Torn(reason)) => {
+                last_good.get(home).cloned().ok_or(ReadError::Torn(reason))
+            }
+            Err(error) => Err(error),
+        }
+    }
+}
+
+pub(crate) fn read_cached(home: &Path, cache: &Cache) -> Result<Credential, ReadError> {
+    let result = read_sync(home);
+    cache.finish(home, result)
 }
 
 /// Reads the first credential with a token from `home/auth.json`.
@@ -304,4 +339,33 @@ fn parse_rfc3339_ms(text: &str) -> Option<u64> {
 fn token_subject(token: &str) -> Option<String> {
     let claims = unverified_claims(&SecretString::from(token.to_owned())).ok()?;
     claims.get("sub").and_then(Value::as_str).map(str::to_owned)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use hofund_plugin_api::SecretString;
+    use hofund_plugin_sdk::oauth::secret_text;
+
+    use super::{Cache, Credential, ReadError};
+
+    #[test]
+    fn r50_torn_read_uses_only_a_previous_whole_credential() {
+        let cache = Cache::default();
+        let home = Path::new("/account");
+        let credential = Credential {
+            key: SecretString::from("fixture-token".to_owned()),
+            email: "user@example.test".to_owned(),
+            who: "user@example.test".to_owned(),
+            expires_ms: 4_000_000_000_000,
+        };
+        cache
+            .finish(home, Ok(credential))
+            .expect("remember whole credential");
+        let torn = || Err(ReadError::Torn("auth.json is empty".to_owned()));
+        let kept = cache.finish(home, torn()).expect("last good");
+        assert_eq!(secret_text(&kept.key), "fixture-token");
+        assert!(cache.finish(Path::new("/other"), torn()).is_err());
+    }
 }

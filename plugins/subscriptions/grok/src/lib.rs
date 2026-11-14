@@ -153,6 +153,7 @@ impl SubscriptionFactory for GrokFactory {
             x_search: cfg.x_search,
             flow: SignInFlow::Bridge { command: COMMAND },
             pending: Mutex::new(HashMap::new()),
+            credentials: creds::Cache::default(),
         }))
     }
 }
@@ -181,6 +182,7 @@ struct Grok {
     x_search: bool,
     flow: SignInFlow,
     pending: Mutex<HashMap<String, Pending>>,
+    credentials: creds::Cache,
 }
 
 impl Grok {
@@ -595,7 +597,7 @@ impl Subscription for Grok {
     }
 
     async fn refresh(&self, account: &AccountId, host: &HostContext) -> Result<(), PluginError> {
-        refresh::run(host, || self.program(), account).await
+        refresh::run(host, &self.credentials, || self.program(), account).await
     }
 
     async fn quota(
@@ -603,8 +605,34 @@ impl Subscription for Grok {
         account: &AccountId,
         host: &HostContext,
     ) -> Result<Vec<QuotaWindow>, PluginError> {
-        let stored = refresh::ensure_fresh(host, account, || self.program(), false).await?;
+        let stored =
+            refresh::ensure_fresh(host, account, &self.credentials, || self.program(), false)
+                .await?;
         let url = format!("{}/billing?format=credits", self.endpoints.base);
+        let reply = hofund_plugin_sdk::Call::get(&url)
+            .sensitive_header(
+                "authorization",
+                format!(
+                    "Bearer {}",
+                    hofund_plugin_sdk::oauth::secret_text(&stored.credential.key)
+                ),
+            )
+            .header("accept", "application/json")
+            .fetch(host.http())
+            .await?;
+        match reply.status() {
+            200..=299 => return quota::windows(reply.body()),
+            401 => {}
+            status => {
+                return Err(PluginError::status_error(
+                    status,
+                    "the CLI backend did not return billing",
+                ));
+            }
+        }
+        let stored =
+            refresh::ensure_fresh(host, account, &self.credentials, || self.program(), true)
+                .await?;
         let reply = hofund_plugin_sdk::Call::get(url)
             .sensitive_header(
                 "authorization",
@@ -618,9 +646,7 @@ impl Subscription for Grok {
             .await?;
         match reply.status() {
             200..=299 => quota::windows(reply.body()),
-            401 => Err(PluginError::auth(
-                "the CLI backend refused the sign-in while reading billing",
-            )),
+            401 => Err(PluginError::status_error(401, "Unauthorized")),
             status => Err(PluginError::status_error(
                 status,
                 "the CLI backend did not return billing",
@@ -633,7 +659,10 @@ impl Subscription for Grok {
         account: &AccountId,
         host: &HostContext,
     ) -> Result<ModelList, PluginError> {
-        models::list(host, &self.endpoints, account, || self.program()).await
+        models::list(host, &self.endpoints, account, &self.credentials, || {
+            self.program()
+        })
+        .await
     }
 
     fn upstream(
@@ -646,6 +675,7 @@ impl Subscription for Grok {
             host.clone(),
             Arc::clone(&self.endpoints),
             self.x_search,
+            self.credentials.clone(),
             self.program_fn(),
         )))
     }

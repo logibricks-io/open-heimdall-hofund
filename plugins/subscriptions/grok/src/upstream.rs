@@ -19,6 +19,7 @@ pub(crate) struct GrokUpstream {
     host: HostContext,
     endpoints: Arc<Endpoints>,
     x_search: bool,
+    cache: crate::creds::Cache,
     program: Arc<dyn Fn() -> Result<std::path::PathBuf, PluginError> + Send + Sync>,
 }
 
@@ -28,6 +29,7 @@ impl GrokUpstream {
         host: HostContext,
         endpoints: Arc<Endpoints>,
         x_search: bool,
+        cache: crate::creds::Cache,
         program: Arc<dyn Fn() -> Result<std::path::PathBuf, PluginError> + Send + Sync>,
     ) -> Self {
         Self {
@@ -35,13 +37,21 @@ impl GrokUpstream {
             host,
             endpoints,
             x_search,
+            cache,
             program,
         }
     }
 
     async fn stored(&self, force: bool) -> Result<Stored, PluginError> {
         let program = Arc::clone(&self.program);
-        refresh::ensure_fresh(&self.host, &self.account, move || program(), force).await
+        refresh::ensure_fresh(
+            &self.host,
+            &self.account,
+            &self.cache,
+            move || program(),
+            force,
+        )
+        .await
     }
 
     async fn send(

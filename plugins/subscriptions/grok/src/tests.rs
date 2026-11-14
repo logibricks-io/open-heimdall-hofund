@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use hofund_kit_subscription::{PipedScript, TestHost, block_on};
+use hofund_kit_subscription::{PipedScript, TestHost, block_on, join_all};
 use hofund_plugin_api::{
     AccountStatus, PluginId, PluginKind, ProbeQuery, ProtocolId, RawTable, RawValue, SecretString,
     SignInCtx, SignInProof, Subscription, SubscriptionFactory,
@@ -132,16 +132,21 @@ fn a2a_4_refresh_on_expiry_runs_grok_models_with_home() {
     let sub = subscription(&host);
     let home = dir.path().join("account-home");
     let id = seed(&host, &home, "token-old", "1970-01-01T00:01:00.000000000Z");
-    write_auth(
-        &home,
-        "token-new",
-        "user@example.test",
-        "2099-01-01T00:00:00.000000000Z",
-    );
+    let scripted_home = home.clone();
+    host.process()
+        .script_piped(PipedScript::new().exits(move |_| {
+            write_auth(
+                &scripted_home,
+                "token-new",
+                "user@example.test",
+                "2099-01-01T00:00:00.000000000Z",
+            );
+            vec![]
+        }));
     block_on(sub.refresh(&id, host.context())).expect("refresh again");
-    let spawns = host.process().programs();
+    let spawns = host.process().piped_spawns();
     assert_eq!(spawns.len(), 1, "refresh runs grok models");
-    assert_eq!(spawns[0].to_string_lossy(), PROGRAM);
+    assert_eq!(spawns[0].program.to_string_lossy(), PROGRAM);
     let request = crate::cli::request(
         std::path::Path::new(PROGRAM),
         &crate::cli::MODELS_ARGS,
@@ -489,4 +494,227 @@ fn a2a_14_commit_rejects_mismatched_cli_home() {
             .map(|token| hofund_plugin_sdk::oauth::secret_text(&token).to_owned()),
         Some("token-old".to_owned())
     );
+}
+
+#[test]
+fn r50_hook_and_request_share_one_cli_renewal() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let home = dir.path().join("account-home");
+    let id = seed(&host, &home, "token-old", "1970-01-01T00:01:00.000000000Z");
+    let upstream = sub.upstream(&id, host.context()).expect("upstream");
+    let scripted_home = home.clone();
+    host.process()
+        .script_piped(PipedScript::new().exits(move |_| {
+            write_auth(
+                &scripted_home,
+                "token-new",
+                "user@example.test",
+                "2099-01-01T00:00:00.000000000Z",
+            );
+            vec![]
+        }));
+    host.http().enqueue(
+        b"event: response.completed\ndata: {\"type\":\"response.completed\"}\n\n".to_vec(),
+    );
+    let mut request = ProbeQuery::new(ProtocolId::OPENAI_RESPONSES, "grok-4.7")
+        .expect("query")
+        .minimal_request();
+    request.stream = false;
+    block_on(join_all(vec![
+        Box::pin(async {
+            sub.refresh(&id, host.context()).await.expect("hook");
+        }),
+        Box::pin(async {
+            upstream
+                .execute(request, ProtocolId::OPENAI_RESPONSES)
+                .await
+                .expect("request");
+        }),
+    ]));
+    assert_eq!(host.process().piped_spawns().len(), 1);
+    assert_eq!(host.http().calls().len(), 1);
+    let stored = block_on(Stored::load(host.context(), &id)).expect("stored");
+    assert_eq!(
+        hofund_plugin_sdk::oauth::secret_text(&stored.credential.key),
+        "token-new"
+    );
+}
+
+#[test]
+fn r50_rejected_token_left_unchanged_is_unrenewed_not_an_expiry() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let home = dir.path().join("account-home");
+    let id = seed(&host, &home, TOKEN, "2099-01-01T00:00:00.000000000Z");
+    let upstream = sub.upstream(&id, host.context()).expect("upstream");
+    host.http().enqueue_response(
+        401,
+        &[("content-type", "application/json")],
+        br#"{"error":"Invalid or expired credentials"}"#.to_vec(),
+    );
+    host.process()
+        .script_piped(PipedScript::new().exits(|_| vec![]));
+    let request = ProbeQuery::new(ProtocolId::OPENAI_RESPONSES, "grok-4.7")
+        .expect("query")
+        .minimal_request();
+    let error = match block_on(upstream.execute(request, ProtocolId::OPENAI_RESPONSES)) {
+        Err(error) => error,
+        Ok(_) => panic!("an unchanged rejected token must fail"),
+    };
+    assert_eq!(error.status(), Some(401));
+    assert_eq!(error.kind(), hofund_plugin_api::PluginErrorKind::Status);
+    assert!(error.to_string().contains(
+        "Grok Build couldn't renew the sign-in (grok models ran and left the same token)"
+    ));
+    assert!(
+        error
+            .to_string()
+            .contains("add the account in hofund again")
+    );
+    assert!(!error.to_string().contains("sign-in has expired"));
+    assert!(!error.to_string().contains("grok login"));
+    assert_eq!(host.http().calls().len(), 1);
+    assert_eq!(host.process().piped_spawns().len(), 1);
+}
+
+#[test]
+fn r50_model_list_renews_once_after_a_401() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let home = dir.path().join("account-home");
+    let id = seed(&host, &home, TOKEN, "2099-01-01T00:00:00.000000000Z");
+    host.http().enqueue_response(401, &[], Vec::new());
+    host.http().enqueue_response(
+        200,
+        &[("content-type", "application/json")],
+        br#"{"data":[{"id":"grok-4.7","api_backend":"responses","context_window":256000}]}"#
+            .to_vec(),
+    );
+    let scripted_home = home.clone();
+    host.process()
+        .script_piped(PipedScript::new().exits(move |_| {
+            write_auth(
+                &scripted_home,
+                "token-new",
+                "user@example.test",
+                "2099-01-01T00:00:00.000000000Z",
+            );
+            vec![]
+        }));
+    let models = block_on(sub.list_models(&id, host.context())).expect("models");
+    assert_eq!(models.models()[0].id(), "grok-4.7");
+    assert_eq!(host.http().calls().len(), 2);
+    assert_eq!(host.process().piped_spawns().len(), 1);
+}
+
+#[test]
+fn r50_quota_renews_once_after_a_401() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let home = dir.path().join("account-home");
+    let id = seed(&host, &home, TOKEN, "2099-01-01T00:00:00.000000000Z");
+    host.http().enqueue_response(401, &[], Vec::new());
+    host.http().enqueue_response(
+        200,
+        &[("content-type", "application/json")],
+        br#"{"config":{"creditUsagePercent":42.5}}"#.to_vec(),
+    );
+    let scripted_home = home.clone();
+    host.process()
+        .script_piped(PipedScript::new().exits(move |_| {
+            write_auth(
+                &scripted_home,
+                "token-new",
+                "user@example.test",
+                "2099-01-01T00:00:00.000000000Z",
+            );
+            vec![]
+        }));
+    let windows = block_on(sub.quota(&id, host.context())).expect("quota");
+    assert_eq!(windows[0].used(), 43);
+    assert_eq!(host.http().calls().len(), 2);
+    assert_eq!(host.process().piped_spawns().len(), 1);
+}
+
+#[test]
+fn r50_fresh_cli_credential_is_used_without_another_cli_run() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let home = dir.path().join("account-home");
+    let id = seed(&host, &home, TOKEN, "2099-01-01T00:00:00.000000000Z");
+    write_auth(
+        &home,
+        "token-new",
+        "user@example.test",
+        "2099-06-01T00:00:00.000000000Z",
+    );
+    host.http().enqueue_response(
+        200,
+        &[("content-type", "application/json")],
+        br#"{"config":{"creditUsagePercent":7}}"#.to_vec(),
+    );
+    let windows = block_on(sub.quota(&id, host.context())).expect("quota");
+    assert_eq!(windows[0].used(), 7);
+    assert!(host.process().piped_spawns().is_empty());
+    assert_eq!(host.http().calls().len(), 1);
+    let stored = block_on(Stored::load(host.context(), &id)).expect("stored");
+    assert_eq!(
+        hofund_plugin_sdk::oauth::secret_text(&stored.credential.key),
+        "token-new"
+    );
+}
+
+#[test]
+fn r50_missing_cli_and_missing_home_errors_match_the_reference() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let home = dir.path().join("account-home");
+    let id = seed(&host, &home, TOKEN, "1970-01-01T00:00:00.000000000Z");
+    let cache = creds::Cache::default();
+    let error = block_on(crate::refresh::ensure_fresh(
+        host.context(),
+        &id,
+        &cache,
+        || Err(hofund_plugin_api::PluginError::config("missing")),
+        true,
+    ))
+    .expect_err("no CLI");
+    assert!(
+        error
+            .to_string()
+            .contains("there is no Grok Build here to renew it")
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("curl -fsSL https://x.ai/cli/install.sh | bash")
+            || cfg!(windows)
+    );
+    assert!(error.to_string().contains("GROK_BIN_DIR"));
+    block_on(crate::refresh::run(
+        host.context(),
+        &cache,
+        || Err(hofund_plugin_api::PluginError::config("missing")),
+        &id,
+    ))
+    .expect("the hook leaves a missing CLI for a later attempt");
+    std::fs::remove_file(home.join("auth.json")).expect("remove auth");
+    let error = block_on(crate::refresh::ensure_fresh(
+        host.context(),
+        &id,
+        &cache,
+        || Err(hofund_plugin_api::PluginError::config("missing")),
+        false,
+    ))
+    .expect_err("missing home");
+    assert_eq!(error.kind(), hofund_plugin_api::PluginErrorKind::Auth);
+    assert!(error.to_string().contains(
+        "Grok is not signed in for this account any more; add the account in hofund again"
+    ));
 }
