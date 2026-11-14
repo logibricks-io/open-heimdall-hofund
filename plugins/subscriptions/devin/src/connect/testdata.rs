@@ -1,4 +1,5 @@
 //! Checked-in Connect/protobuf goldens as lexable Rust byte slices.
+#![allow(dead_code)]
 //!
 //! `check-plugins` reads every dep-info path under `src/` as UTF-8 and lexes it.
 //! Binary `include_bytes!` goldens fail that gate, so the bytes live here.

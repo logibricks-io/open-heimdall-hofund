@@ -69,10 +69,10 @@ hofund-plugin-subscription-cline = { workspace = true, optional = true }
 hofund-plugin-subscription-codex = { workspace = true, optional = true }
 hofund-plugin-subscription-copilot = { workspace = true, optional = true }
 hofund-plugin-subscription-cursor = { workspace = true, optional = true }
-hofund-plugin-subscription-devin = { workspace = true, optional = true }
+hofund-plugin-subscription-devin = { workspace = true, optional = true, features = ["test-fixtures"] }
 hofund-plugin-subscription-factory = { workspace = true, optional = true }
 hofund-plugin-subscription-gemini = { workspace = true, optional = true }
-hofund-plugin-subscription-grok = { workspace = true, optional = true }
+hofund-plugin-subscription-grok = { workspace = true, optional = true, features = ["test-fixtures"] }
 hofund-plugin-subscription-kiro = { workspace = true, optional = true }
 hofund-plugin-subscription-qoder = { workspace = true, optional = true }
 hofund-plugin-subscription-workbuddy = { workspace = true, optional = true }
@@ -89,6 +89,7 @@ toml = "1.1.8"
 [dev-dependencies]
 hofund-agent = { workspace = true }
 hofund-kit-agent = { workspace = true }
+hofund-kit-subscription = { workspace = true }
 hofund-kit-upstream = { workspace = true }
 hofund-plugin-registry = { path = ".", features = ["test-fixtures"] }
 serde = { version = "1.0.229", features = ["derive"] }

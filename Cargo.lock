@@ -2774,6 +2774,7 @@ dependencies = [
  "futures-util",
  "hofund-agent",
  "hofund-kit-agent",
+ "hofund-kit-subscription",
  "hofund-kit-upstream",
  "hofund-plugin-agent-claude",
  "hofund-plugin-agent-codex",

@@ -41,7 +41,8 @@ mod tokens;
 mod upstream;
 mod usage;
 
-pub(crate) use endpoints::Endpoints;
+#[doc(hidden)]
+pub use endpoints::Endpoints;
 
 static SPEC: SubscriptionSpec = SubscriptionSpec::from_static(
     PluginId::from_static("cursor"),
@@ -63,7 +64,7 @@ pub fn contribute() -> Contribution {
 /// Builds the factory against `endpoints`.
 #[doc(hidden)]
 #[must_use]
-pub(crate) fn factory_with_endpoints(endpoints: Endpoints) -> CursorFactory {
+pub fn factory_with_endpoints(endpoints: Endpoints) -> CursorFactory {
     CursorFactory {
         endpoints: Arc::new(endpoints),
         test_agent_home: None,

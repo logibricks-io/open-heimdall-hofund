@@ -49,6 +49,16 @@ fn cache() -> &'static Mutex<HashMap<String, CacheEntry>> {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Clears the in-process model-catalog cache for offline matrix tests.
+#[cfg(any(test, feature = "test-fixtures"))]
+#[doc(hidden)]
+pub fn clear_catalog_cache_for_tests() {
+    cache()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clear();
+}
+
 pub(crate) fn origin(stored: &Stored) -> String {
     std::env::var("WINDSURF_API_SERVER_URL")
         .ok()

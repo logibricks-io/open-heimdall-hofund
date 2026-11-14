@@ -371,6 +371,7 @@ fn expected_dev_deps(package: &str) -> Option<&'static [&'static str]> {
         "hofund-plugin-registry" => &[
             "hofund-agent",
             "hofund-kit-agent",
+            "hofund-kit-subscription",
             "hofund-kit-upstream",
             "hofund-plugin-registry",
         ],
