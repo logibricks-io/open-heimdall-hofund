@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `input_json_delta` events before they reach the caller. Recorded HTTP and
   `r52e_*` fixtures cover wrap, unwrap, and stream paths. Refs R-52.
 
+- R-52d: the Factory subscription plugin discovers and imports built-in accounts
+  from mover OAuth and API-key shapes and from reference `factoryCreds` rows in
+  `logins.json`, without calling live whoami. Recorded fixtures only (`r52d_*`).
+  Refs R-52.
+
 - R-6: when Windows has no local `claude` on PATH (and no configured `command`),
   Claude Code sign-in and short CLI calls (`auth status`, `/usage`, warm-up)
   resolve the binary in a **running** WSL distro via mocked `wsl.exe` in tests,

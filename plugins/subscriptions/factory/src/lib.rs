@@ -20,6 +20,7 @@ use hofund_plugin_sdk::oauth::SecretObject;
 mod anthropic_tools;
 mod api;
 mod client;
+mod discover;
 mod models;
 mod quota;
 mod sign_in;
@@ -303,6 +304,14 @@ impl Subscription for Factory {
             host.clone(),
             Arc::clone(&self.endpoints),
         )))
+    }
+
+    async fn import_accounts(
+        &self,
+        text: &str,
+        host: &HostContext,
+    ) -> Result<Vec<AccountId>, PluginError> {
+        discover::import_accounts(host, text).await
     }
 }
 
