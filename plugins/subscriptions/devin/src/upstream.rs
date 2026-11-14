@@ -18,7 +18,7 @@ use crate::connect::chat::{
 use crate::creds::{self, Stored};
 use crate::errors;
 use crate::keepalive::Keepalive;
-use crate::models::{effort_of, variant_for};
+use crate::models::{effort_of, is_claude, variant_for};
 use crate::stream;
 
 pub(crate) const CHAT_PATH: &str = "/exa.api_server_pb.ApiServerService/GetChatMessage";
@@ -951,10 +951,6 @@ fn messages_prompts(message: &JoinedMessage<'_>, claude: bool) -> Vec<OwnedPromp
         last.thinking = thought;
     }
     own
-}
-
-fn is_claude(uid: &str) -> bool {
-    uid.to_ascii_lowercase().contains("claude")
 }
 
 fn answer_pending(turns: &mut Vec<OwnedPrompt>, pending: &mut Vec<String>) {
