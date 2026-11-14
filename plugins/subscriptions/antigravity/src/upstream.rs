@@ -11,7 +11,7 @@ use hofund_plugin_sdk::json::{Map, Value};
 use hofund_plugin_sdk::oauth::{TokenCache, new_state};
 use hofund_plugin_sdk::wire::{self, Target};
 
-use crate::{Endpoints, client, models, project, tokens};
+use crate::{Endpoints, client, models, project, tokens, version};
 
 const ROOT: &str = "v1internal";
 const ZERO_WIDTH: &str = "\u{200b}";
@@ -53,13 +53,15 @@ impl AntigravityUpstream {
         let mut request = cloak_request(request);
         request.model = model.clone();
         let envelope_project = project_id.to_owned();
+        let hub_version = version::resolve(&self.host, &self.endpoints.version_manifest).await;
+        let user_agent = version::user_agent_for(&hub_version);
         let target = Target::new(
             ProtocolId::GENERATIVE_LANGUAGE,
             self.endpoints.code_assist.clone(),
         )
         .credential(CredentialStyle::Bearer)
         .method_root(ROOT)
-        .headers(vec![("user-agent".to_owned(), project::user_agent())])
+        .headers(vec![("user-agent".to_owned(), user_agent)])
         .rewrite(Arc::new(move |body| {
             hofund_plugin_sdk::code_assist::shape_code_assist(body, &model, true);
             hofund_plugin_sdk::plain_code_assist_tools(body);

@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   over same-named `/usage` windows, `with_unstarted` for the 5-hour row, and
   heard windows for setup-token accounts. Tests `r5_48`–`r5_58` use recorded
   fixtures and a fake runner only. Refs R-5.
+- R-49e: the Antigravity subscription plugin refreshes hub `ide_version` and
+  `User-Agent` from the reference auto-updater manifest through `host.http()`,
+  with a six-hour cache, `2.9.1` cold fallback, and offline `r49e_*` fixtures.
+  Cross-vendor conformance now scripts that cold-cache GET so the recorded
+  unary/stream completion is not consumed as a manifest body. Refs R-49.
 
 - R-5: the Claude Code subscription plugin reads and writes macOS Keychain
   credentials through `security(1)` spawned via `HostContext` (no
