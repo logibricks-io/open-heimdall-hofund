@@ -14,7 +14,7 @@ Legend: **Done** = matches the reference at checklist granularity; **Partial** =
 |---|---|---|---|---|---|
 | Claude Pro/Max (`claude`) | 3 | 15 | 3 | 2 | 0 |
 | Cursor (`cursor`) | 8 | 11 | 0 | 2 | 0 |
-| Devin (`devin`) | 12 | 6 | 0 | 1 | 0 |
+| Devin (`devin`) | 13 | 5 | 0 | 1 | 0 |
 | Zed (`zed`) | 0 | 6 | 1 | 3 | 0 |
 | Kiro (`kiro`) | 8 | 9 | 0 | 2 | 0 |
 | Factory / Droid (`factory`) | 14 | 2 | 0 | 3 | 0 |
@@ -140,7 +140,7 @@ Every other gap below maps to an existing plan item.
 | j | reasoning / thinking | `thinking-signature.test.mjs`, effort variants | R-13b replays unsigned reasoning on non-Claude uids, signed Claude thinking on fields 11/12/18, and fragmented Claude signatures from fields 10/21 with a 512-entry type map | Done | — |
 | k | quota / usage | Plugin `usage.test.mjs` | R-13a `quota.rs` reads daily/weekly and informational ACU windows; free ids survive as model exclusions; field 7 becomes finish usage with cache counters and output estimation | Partial | Plan/balance presentation and organization metadata are not represented by `Subscription::quota` |
 | l | model list | CLI JSON + `GetCliModelConfigs` (`devin/index.mjs:44-134`) | Live raw-protobuf RPC, isolated CLI fallback, embedded snapshot, per-account freshness/retry cache, tier-4 free flags, and matching-variant list prices | Done | — |
-| m | multi-account | EU host `eu.codeium.com` (plugin) | unverified in hofund | Partial | Region selection (**R-12**) |
+| m | multi-account | EU host `eu.codeium.com` (plugin) | `creds.rs` + `catalog::origin` + PKCE exchange hosts; `r12d_*` fixtures | Done | — |
 | n | error classification | Plugin `errors.test.mjs` | `errors.rs` section 6 HTTP/Connect mapping, exact empty-reply and broken-stream errors | Done | Tool/image-specific cases (**R-13**) |
 | o | keepalive | `keepalive.test.mjs` | R-13c adds opt-in 285 s / six-ping keepalive with byte-stable `continue` requests, send-time scheduling, session/subagent and growing-first-message keys, and all stop rules; paused-clock recorded-HTTP tests | Partial | Separate ping usage reporting needs a host usage hook |
 | p | agent sign-in | Core installs CLI (`devin.go:8-12`) | `agent_sign_in.rs` writes TOML; R-13c discovers PATH/home/system binaries, runs the reference installer, rechecks discovery, refreshes registry PATH, and applies the Windows setup tail with scripted-process tests | Done | — |
