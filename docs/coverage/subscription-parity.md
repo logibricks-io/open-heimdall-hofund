@@ -70,7 +70,7 @@ Every other gap below maps to an existing plan item.
 | n | error classification | `ClaudeSignInRequired`, refusal vs retry (`claude_auth.go`); subscription refusals move account (`gateway/refusal_accounts_test.go`) | `bridge/failure.rs` maps sign-in, extra-usage, too-long, quota, 429, and crash text; room-full 503 sets vendor-neutral `skip_failover_same_plugin` (R-6g). Sign-in lapses are pinned to the login version captured at run start | Partial | Real-account classification (#304); image/timeout live wrapping still thin |
 | o | daily warmup | `KeepClaudeWindowsWarm` / `claude_warmup.go:77-79` | `daily_warmup` on spec + `account::warmup` (`lib.rs:54-63`, `454-459`) | Partial | Gateway-coordinated warm request path (probe) vs CLI-only warm-up |
 | p | agent sign-in switching | Switch with locks, CAS on refresh token (`logins.go` patterns; docs in subscriptions.md) | `write_agent_sign_in`, discover/import (`lib.rs:437-475`) | Partial | Full lock parity documented in subscriptions.md gaps (overage quota) |
-| q | vendor extras | WSL Claude, per-login proxy (`claude_signin.go:139-145`), setup-token inference-only | Proxy/WSL/setup-token absent | Partial | Proxy env for sign-in and runs; setup-token (`R-5`, `R-6`) |
+| q | vendor extras | WSL Claude, per-login proxy (`claude_signin.go:139-145`), setup-token inference-only | Sign-in, refresh, `auth status`, `/usage`, and warm-up go through `wsl.exe` when Windows has no native `claude` (`wslrun.rs` / `launcher.rs`; running distros only; mocked probes). Per-login Bun proxy, setup-token, and MCP bridge WSL (`upstream.rs` `wsl_distro: None`) are still absent | Partial | Per-login Bun proxy; setup-token (`R-5`); MCP bridge WSL |
 
 ### Gaps (Claude)
 
@@ -79,7 +79,7 @@ Every other gap below maps to an existing plan item.
 - Model list and scoped quota windows — **M**, **R-5**
 - macOS Keychain credential path — **M**, **R-5**
 - Setup-token sign-in and accounts — **S**, **R-5**
-- WSL fallback + per-login proxy wiring for Claude Code — **M**, **R-6** (new to the plan in this audit)
+- WSL fallback for Claude Code sign-in and short CLI (refresh, `auth status`, `/usage`, warm-up) landed in this slice (`wslrun.rs` / `launcher.rs`; running distros only). Remaining **R-6**: per-login Bun proxy, opened-URL env, and MCP bridge WSL (`upstream.rs` `wsl_distro: None`) — **M**
 
 ---
 
