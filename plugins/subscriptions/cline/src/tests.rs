@@ -171,13 +171,14 @@ fn a2a_18_refresh_rotates_tokens() {
 #[test]
 fn a2a_19_model_feed_parse_and_list() {
     let feed = json!({
+        "recommended": [{"id": "anthropic/claude-sonnet-5.5"}],
         "free": [{"id": "cline-free/deepseek-v4.1-flash"}],
-        "clinePass": [{"id": "cline-pass/mimo-v2.6-flash"}],
+        "clinePass": [{"id": "cline-pass/deepseek-v4.1-flash"}],
     });
     let models = parse_feed(&feed);
-    assert_eq!(models.len(), 2);
-    assert!(models[0].free);
-    assert!(models[1].pass);
+    assert_eq!(models.len(), 3);
+    assert!(models[1].free);
+    assert!(models[2].pass);
 
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
@@ -187,9 +188,109 @@ fn a2a_19_model_feed_parse_and_list() {
             .to_string()
             .into_bytes(),
     );
+    host.http().enqueue(
+        json!({"success": true, "data": [
+            {
+                "id": "deepseek/deepseek-v4.1-flash",
+                "architecture": {"input_modalities": ["text", "image"]},
+                "context_length": 262144
+            },
+            {"id": "local-model", "display_name": "Local Model"}
+        ]})
+        .to_string()
+        .into_bytes(),
+    );
     let sub = subscription(&host);
     let list = block_on(sub.list_models(&id, host.context())).expect("models");
-    assert_eq!(list.models().len(), 2);
+    assert_eq!(list.models().len(), 5);
+    assert_eq!(list.models()[4].id(), "local-model");
+    let pass = list
+        .models()
+        .iter()
+        .find(|model| model.id() == "cline-pass/deepseek-v4.1-flash")
+        .expect("pass model");
+    assert_eq!(pass.context(), 0);
+    assert_eq!(pass.image_input(), Some(true));
+    assert_eq!(pass.input_modalities(), ["text", "image"]);
+    assert!(pass.efforts().is_empty());
+    for call in host.http().calls() {
+        assert_eq!(call.header("x-client-type"), Some("cline-cli"));
+        assert_eq!(call.header("x-client-version"), Some("3.0.68"));
+        assert_eq!(call.header("x-platform"), Some("cli"));
+        assert_eq!(call.header("x-platform-version"), Some("3.0.68"));
+        assert_eq!(call.header("x-core-version"), Some("0.0.90"));
+        assert_eq!(call.header("user-agent"), Some("Cline/3.0.68"));
+    }
+}
+
+#[test]
+fn r53_a_failed_cloud_catalog_keeps_the_required_feed() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_oauth(&host);
+    host.http().enqueue(
+        json!({"success": true, "data": {
+            "recommended": [{"id": "anthropic/claude-sonnet-5.5"}]
+        }})
+        .to_string()
+        .into_bytes(),
+    );
+    host.http()
+        .enqueue_response(503, &[], br#"{"error":"unavailable"}"#.to_vec());
+    let sub = subscription(&host);
+    let list = block_on(sub.list_models(&id, host.context())).expect("recommended models");
+    assert_eq!(list.models().len(), 1);
+    assert_eq!(list.models()[0].id(), "anthropic/claude-sonnet-5.5");
+    assert_eq!(list.models()[0].image_input(), None);
+}
+
+#[test]
+fn r53_chat_encodes_inline_images_as_openai_image_parts() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_oauth(&host);
+    host.http().enqueue(
+        json!({
+            "success": true,
+            "data": {
+                "id": "chat-1",
+                "object": "chat.completion",
+                "choices": [{"message": {"role": "assistant", "content": "ok"}}]
+            }
+        })
+        .to_string()
+        .into_bytes(),
+    );
+    let sub = subscription(&host);
+    let upstream = sub.upstream(&id, host.context()).expect("upstream");
+    let mut user = hofund_plugin_api::Message::new(hofund_plugin_api::Role::User);
+    user.content = vec![
+        hofund_plugin_api::ContentPart::text("see this"),
+        hofund_plugin_api::ContentPart::Image(hofund_plugin_api::ImagePart {
+            source: hofund_plugin_api::ImageSource::Base64 {
+                media_type: "image/png".to_owned(),
+                data: "AA==".to_owned(),
+            },
+            detail: None,
+            extensions: Default::default(),
+        }),
+    ];
+    let request = Request::new("cline-pass/deepseek-v4.1-flash").with_messages(vec![user]);
+    block_on(upstream.execute(request, ProtocolId::OPENAI_CHAT)).expect("chat");
+    let calls = host.http().calls();
+    let chat = calls
+        .iter()
+        .find(|call| call.uri().contains("chat/completions"))
+        .expect("chat call");
+    let sent: hofund_plugin_sdk::json::Value =
+        hofund_plugin_sdk::json::from_slice(chat.body()).expect("request json");
+    assert_eq!(
+        sent["messages"][0]["content"][1],
+        json!({
+            "type": "image_url",
+            "image_url": {"url": "data:image/png;base64,AA=="}
+        })
+    );
 }
 
 #[test]
