@@ -147,6 +147,8 @@ fn seed_site_with_expiry(host: &TestHost, expires_at: i64, site: Site) -> Accoun
         device_chat: false,
         device_token: SecretString::from(String::new()),
         device_refresh_token: SecretString::from(String::new()),
+        pat_auth: false,
+        pat: SecretString::from(String::new()),
     };
     let id = creds::account_id(&credential);
     block_on(async {
@@ -313,6 +315,8 @@ fn a2c_8_secrets_not_in_error_strings() {
         device_chat: false,
         device_token: SecretString::from(String::new()),
         device_refresh_token: SecretString::from(String::new()),
+        pat_auth: false,
+        pat: SecretString::from(String::new()),
     };
     let debug = format!("{credential:?}");
     assert!(!debug.contains(key));
