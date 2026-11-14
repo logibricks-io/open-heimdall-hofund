@@ -606,7 +606,7 @@ impl Subscription for Grok {
         host: &HostContext,
     ) -> Result<Vec<QuotaWindow>, PluginError> {
         let stored =
-            refresh::ensure_fresh(host, account, &self.credentials, || self.program(), false)
+            refresh::ensure_fresh(host, account, &self.credentials, || self.program(), None)
                 .await?;
         let url = format!("{}/billing?format=credits", self.endpoints.base);
         let reply = hofund_plugin_sdk::Call::get(&url)
@@ -630,9 +630,14 @@ impl Subscription for Grok {
                 ));
             }
         }
-        let stored =
-            refresh::ensure_fresh(host, account, &self.credentials, || self.program(), true)
-                .await?;
+        let stored = refresh::ensure_fresh(
+            host,
+            account,
+            &self.credentials,
+            || self.program(),
+            Some(&stored.credential.key),
+        )
+        .await?;
         let reply = hofund_plugin_sdk::Call::get(url)
             .sensitive_header(
                 "authorization",

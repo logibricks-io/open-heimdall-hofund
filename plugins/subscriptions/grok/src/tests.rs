@@ -682,7 +682,7 @@ fn r50_missing_cli_and_missing_home_errors_match_the_reference() {
         &id,
         &cache,
         || Err(hofund_plugin_api::PluginError::config("missing")),
-        true,
+        Some(&creds::read_sync(&home).expect("credential").key),
     ))
     .expect_err("no CLI");
     assert!(
@@ -710,11 +710,53 @@ fn r50_missing_cli_and_missing_home_errors_match_the_reference() {
         &id,
         &cache,
         || Err(hofund_plugin_api::PluginError::config("missing")),
-        false,
+        None,
     ))
     .expect_err("missing home");
     assert_eq!(error.kind(), hofund_plugin_api::PluginErrorKind::Auth);
     assert!(error.to_string().contains(
         "Grok is not signed in for this account any more; add the account in hofund again"
     ));
+}
+
+#[test]
+fn r50_concurrent_401_reuses_credential_renewed_before_forced_follow_up() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let home = dir.path().join("account-home");
+    let id = seed(&host, &home, TOKEN, "2099-01-01T00:00:00.000000000Z");
+    let rejected = creds::read_sync(&home).expect("rejected credential").key;
+
+    write_auth(
+        &home,
+        "token-renewed",
+        "user@example.test",
+        "2099-06-01T00:00:00.000000000Z",
+    );
+    let renewed = creds::read_sync(&home).expect("renewed credential");
+    let secret = creds::secret_blob(&home, &renewed).to_secret();
+    block_on(async {
+        let lease = host
+            .context()
+            .accounts()
+            .lease(&id, std::time::Duration::from_secs(1))
+            .await
+            .expect("lease");
+        lease.commit(None, secret).await.expect("commit renewal");
+    });
+
+    let cache = creds::Cache::default();
+    let followed = block_on(crate::refresh::ensure_fresh(
+        host.context(),
+        &id,
+        &cache,
+        || panic!("a concurrent caller must not rerun the CLI"),
+        Some(&rejected),
+    ))
+    .expect("reuse renewed credential");
+    assert!(hofund_plugin_sdk::oauth::same_secret(
+        &followed.credential.key,
+        &renewed.key
+    ));
+    assert!(host.process().piped_spawns().is_empty());
 }

@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use hofund_plugin_api::{AccountId, AccountLease, HostContext, PluginError};
+use hofund_plugin_api::{AccountId, AccountLease, HostContext, PluginError, SecretString};
 use hofund_plugin_sdk::oauth::same_secret;
 use hofund_plugin_sdk::timeout;
 
@@ -28,7 +28,7 @@ pub(crate) async fn run(
     if live.fresh_at(host.clock().now()) && same_credential(&stored.credential, &live.credential) {
         return Ok(());
     }
-    renew(host, cache, program, account, stored, false, true)
+    renew(host, cache, program, account, None, true)
         .await
         .map(|_| ())
 }
@@ -39,10 +39,10 @@ pub(crate) async fn ensure_fresh(
     account: &AccountId,
     cache: &creds::Cache,
     program: impl FnOnce() -> Result<PathBuf, PluginError>,
-    force: bool,
+    rejected: Option<&SecretString>,
 ) -> Result<Stored, PluginError> {
     let stored = Stored::load(host, account).await?;
-    if !force {
+    if rejected.is_none() {
         let live = Stored {
             home: stored.home.clone(),
             credential: read_live(Path::new(&stored.home), cache)?,
@@ -53,7 +53,7 @@ pub(crate) async fn ensure_fresh(
             return Ok(live);
         }
     }
-    renew(host, cache, program, account, stored, force, false).await
+    renew(host, cache, program, account, rejected, false).await
 }
 
 async fn renew(
@@ -61,8 +61,7 @@ async fn renew(
     cache: &creds::Cache,
     program: impl FnOnce() -> Result<PathBuf, PluginError>,
     account: &AccountId,
-    initial: Stored,
-    force: bool,
+    rejected: Option<&SecretString>,
     hook: bool,
 ) -> Result<Stored, PluginError> {
     let lease = host.accounts().lease(account, LEASE_WAIT).await?;
@@ -73,17 +72,17 @@ async fn renew(
         home: current.home.clone(),
         credential: read_live(&home, cache)?,
     };
-    if !force && live.fresh_at(now) {
+    if rejected.is_none() && live.fresh_at(now) {
         return commit(lease, account, &current, live.credential).await;
     }
-    let changed = !same_secret(&live.credential.key, &initial.credential.key);
-    if force && changed && live.ready_at(now) {
+    let changed = rejected.is_some_and(|key| !same_secret(&live.credential.key, key));
+    if changed && live.ready_at(now) {
         return commit(lease, account, &current, live.credential).await;
     }
 
     let program = match program() {
         Ok(program) => program,
-        Err(_) if hook || (!force && live.ready_at(now)) => {
+        Err(_) if hook || (rejected.is_none() && live.ready_at(now)) => {
             return commit(lease, account, &current, live.credential).await;
         }
         Err(_) => {
@@ -99,7 +98,7 @@ async fn renew(
     let was = live.credential.key.clone();
     let outcome = run_cli(host, &program, &home).await?;
     let credential = read_live(&home, cache)?;
-    if force && same_secret(&credential.key, &was) {
+    if rejected.is_some() && same_secret(&credential.key, &was) {
         return Err(unrenewed(&home, &outcome));
     }
     if !(Stored {

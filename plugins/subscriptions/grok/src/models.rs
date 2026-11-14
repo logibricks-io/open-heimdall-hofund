@@ -15,7 +15,7 @@ pub(crate) async fn list(
     cache: &crate::creds::Cache,
     program: impl Fn() -> Result<std::path::PathBuf, PluginError>,
 ) -> Result<ModelList, PluginError> {
-    let stored = refresh::ensure_fresh(host, account, cache, &program, false).await?;
+    let stored = refresh::ensure_fresh(host, account, cache, &program, None).await?;
     let url = format!("{}/models", endpoints.base);
     let reply = signed_get(&url, &stored.credential.key)
         .fetch(host.http())
@@ -33,7 +33,8 @@ pub(crate) async fn list(
             ));
         }
     }
-    let stored = refresh::ensure_fresh(host, account, cache, program, true).await?;
+    let stored =
+        refresh::ensure_fresh(host, account, cache, program, Some(&stored.credential.key)).await?;
     let reply = signed_get(&url, &stored.credential.key)
         .fetch(host.http())
         .await?;

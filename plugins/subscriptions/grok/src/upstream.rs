@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use hofund_plugin_api::{
     AccountId, Completion, CredentialStyle, HostContext, PluginError, ProbeQuery, ProbeReport,
-    ProtocolId, Request, UpstreamProvider,
+    ProtocolId, Request, SecretString, UpstreamProvider,
 };
 use hofund_plugin_sdk::json::Value;
 use hofund_plugin_sdk::wire::{self, Target};
@@ -42,14 +42,14 @@ impl GrokUpstream {
         }
     }
 
-    async fn stored(&self, force: bool) -> Result<Stored, PluginError> {
+    async fn stored(&self, rejected: Option<&SecretString>) -> Result<Stored, PluginError> {
         let program = Arc::clone(&self.program);
         refresh::ensure_fresh(
             &self.host,
             &self.account,
             &self.cache,
             move || program(),
-            force,
+            rejected,
         )
         .await
     }
@@ -115,10 +115,10 @@ impl UpstreamProvider for GrokUpstream {
         request: Request,
         inbound: ProtocolId,
     ) -> Result<Completion, PluginError> {
-        let stored = self.stored(false).await?;
+        let stored = self.stored(None).await?;
         match self.send(&stored, request.clone(), inbound).await {
             Err(error) if error.status() == Some(401) => {
-                let renewed = self.stored(true).await?;
+                let renewed = self.stored(Some(&stored.credential.key)).await?;
                 self.send(&renewed, request, inbound).await
             }
             other => other,
