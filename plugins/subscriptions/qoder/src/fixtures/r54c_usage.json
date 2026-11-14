@@ -1,0 +1,12 @@
+{
+  "displayMode": "qoder",
+  "qoderUsage": {
+    "userType": "pro",
+    "userQuota": {
+      "name": "Credits",
+      "total": 100,
+      "used": 10,
+      "unit": "credits"
+    }
+  }
+}

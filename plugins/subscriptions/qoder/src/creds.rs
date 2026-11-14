@@ -61,6 +61,8 @@ pub(crate) struct Credential {
     pub device_chat: bool,
     pub device_token: SecretString,
     pub device_refresh_token: SecretString,
+    pub pat_auth: bool,
+    pub pat: SecretString,
 }
 
 #[derive(Clone, Debug)]
@@ -135,6 +137,10 @@ pub(crate) fn parse_secret(secret: &SecretString) -> Result<Stored, PluginError>
             device_refresh_token: blob
                 .secret("device_refresh_token")
                 .unwrap_or_else(|| SecretString::from(String::new())),
+            pat_auth: blob.flag("pat_auth"),
+            pat: blob
+                .secret("pat")
+                .unwrap_or_else(|| SecretString::from(String::new())),
         },
     })
 }
@@ -154,6 +160,8 @@ pub(crate) fn secret_blob(credential: &Credential) -> SecretObject {
         .with_flag("device_chat", credential.device_chat)
         .with_secret("device_token", &credential.device_token)
         .with_secret("device_refresh_token", &credential.device_refresh_token)
+        .with_flag("pat_auth", credential.pat_auth)
+        .with_secret("pat", &credential.pat)
 }
 
 pub(crate) fn account_id(credential: &Credential) -> AccountId {
@@ -213,6 +221,17 @@ pub(crate) fn parse_json(text: &str) -> Result<Credential, PluginError> {
             .unwrap_or(false),
         device_token: SecretString::from(optional_str(map, "device_token")),
         device_refresh_token: SecretString::from(optional_str(map, "device_refresh_token")),
+        pat_auth: map
+            .get("patAuth")
+            .or_else(|| map.get("pat_auth"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        pat: SecretString::from(
+            map.get("pat")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned(),
+        ),
     })
 }
 

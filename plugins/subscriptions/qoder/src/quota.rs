@@ -52,7 +52,7 @@ pub(crate) async fn read(
                 }
                 return Ok(windows);
             }
-            401 | 403 if attempt == 0 => {
+            401 | 403 if attempt == 0 && !stored.credential.pat_auth => {
                 stored = refresh::force_device(host, Arc::clone(&endpoints), account).await?;
             }
             401 | 403 => {
