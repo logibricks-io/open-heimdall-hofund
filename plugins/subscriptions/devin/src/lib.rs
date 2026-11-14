@@ -264,7 +264,7 @@ impl Subscription for Devin {
     }
 
     async fn refresh(&self, account: &AccountId, host: &HostContext) -> Result<(), PluginError> {
-        creds::Stored::load(host, account).await?;
+        creds::Stored::live(host, account).await?;
         Ok(())
     }
 
@@ -281,7 +281,7 @@ impl Subscription for Devin {
         account: &AccountId,
         host: &HostContext,
     ) -> Result<ModelList, PluginError> {
-        let stored = creds::Stored::load(host, account).await?;
+        let stored = creds::Stored::live(host, account).await?;
         catalog::list_models(host, account, &stored).await
     }
 

@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- R-13: the Devin subscription plugin re-reads CLI `credentials.toml` on
+  `refresh` and `list_models` through `Stored::live` without persisting rotated
+  keys, applies `WINDSURF_API_SERVER_URL` when present, and advertises
+  `/v1/messages` for Claude model ids and `/v1/chat/completions` for all other
+  catalog entries. Recorded fixtures and loopback tests only. Refs R-13. Refs
+  R-12.
+
 - R-47a3: native `/backend-api/codex/responses/compact` refuses ChatGPT sign-in
   compactions on gateway keys with account holds unless the signed-in account is
   allowed, and allows compaction when Codex's own `auth.json` uses

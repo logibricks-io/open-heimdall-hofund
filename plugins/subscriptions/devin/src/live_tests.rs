@@ -105,6 +105,39 @@ fn chat_key(body: &[u8]) -> String {
 }
 
 #[test]
+fn refresh_rereads_cli_credentials_without_persisting_or_calling_upstream() {
+    let dir = tempfile::tempdir().expect("dir");
+    let path = dir.path().join("devin").join("credentials.toml");
+    std::fs::create_dir_all(path.parent().expect("parent")).expect("dir");
+    std::fs::write(
+        &path,
+        "windsurf_api_key = \"rotated-key\"\napi_server_url = \"https://rotated.test/\"\n",
+    )
+    .expect("credentials");
+    let host = host(&dir);
+    let original = credential("saved-key", "https://saved.test", "cli@example.test");
+    let id = seed(&host, &original, Some(&path));
+    let cfg = DevinFactory.validate(&RawTable::new()).expect("config");
+    let subscription = DevinFactory.build(&cfg, host.context()).expect("build");
+    block_on(subscription.refresh(&id, host.context())).expect("refresh");
+    assert!(
+        host.http().calls().is_empty(),
+        "refresh must not call upstream"
+    );
+    let secret = block_on(host.context().accounts().secret(&id))
+        .expect("secret")
+        .expect("stored");
+    let blob = SecretObject::parse(&secret).expect("blob");
+    assert_eq!(
+        blob.secret("api_key").as_ref().map(secret_text),
+        Some("saved-key")
+    );
+    let live = block_on(creds::Stored::live(host.context(), &id)).expect("live");
+    assert_eq!(secret_text(&live.credential.key), "rotated-key");
+    assert_eq!(live.credential.api_server, "https://rotated.test");
+}
+
+#[test]
 fn cli_execute_uses_rotated_key_and_server_without_rewriting_the_store() {
     let dir = tempfile::tempdir().expect("dir");
     let path = dir
