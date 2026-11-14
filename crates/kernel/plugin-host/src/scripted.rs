@@ -15,7 +15,7 @@ use std::task::{Context, Poll, Waker};
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use hofund_plugin_api::kernel::PipedChildBackend;
+use hofund_plugin_api::kernel::{LongLivedChildBackend, PipedChildBackend};
 use hofund_plugin_api::{BodyStream, PluginError};
 use tokio::sync::mpsc;
 
@@ -287,6 +287,38 @@ impl PipedChildBackend for ScriptedChild {
 
     fn stderr_tail(&self) -> Bytes {
         self.stderr.clone()
+    }
+}
+
+#[async_trait]
+impl LongLivedChildBackend for ScriptedChild {
+    fn id(&self) -> u32 {
+        self.id
+    }
+
+    async fn write_stdin(&self, bytes: Bytes) -> Result<(), PluginError> {
+        PipedChildBackend::write_stdin(self, bytes).await
+    }
+
+    async fn close_stdin(&self) -> Result<(), PluginError> {
+        PipedChildBackend::close_stdin(self).await
+    }
+
+    fn take_stdout(&self) -> Option<BodyStream> {
+        PipedChildBackend::take_stdout(self)
+    }
+
+    async fn wait(&self) -> Result<i32, PluginError> {
+        PipedChildBackend::exit_code(self).await
+    }
+
+    fn kill(&self) -> Result<(), PluginError> {
+        self.exit.finish(self.status);
+        Ok(())
+    }
+
+    fn stderr_tail(&self) -> Bytes {
+        PipedChildBackend::stderr_tail(self)
     }
 }
 

@@ -1300,6 +1300,36 @@ impl ProcessBackend for RecordingProcess {
             Arc::clone(&self.piped.shared),
         )))
     }
+
+    async fn spawn_long_lived(
+        &self,
+        program: PathBuf,
+        args: Vec<OsString>,
+        env: Vec<(OsString, OsString)>,
+        cwd: PathBuf,
+        _env_deny: Vec<OsString>,
+    ) -> Result<Box<dyn LongLivedChildBackend>, PluginError> {
+        let Some(script) = self.piped.scripts.lock().expect("process lock").pop_front() else {
+            return Err(PluginError::unsupported("no piped child is scripted"));
+        };
+        let spawn = PipedSpawn {
+            program,
+            args,
+            env,
+            cwd,
+        };
+        self.piped
+            .spawns
+            .lock()
+            .expect("process lock")
+            .push(spawn.clone());
+        Ok(Box::new(scripted::ScriptedChild::start(
+            self.next_id(),
+            spawn,
+            script,
+            Arc::clone(&self.piped.shared),
+        )))
+    }
 }
 
 struct RootDirs {

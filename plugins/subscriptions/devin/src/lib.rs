@@ -46,6 +46,21 @@ pub fn contribute() -> Contribution {
     Contribution::new().subscription(DevinFactory)
 }
 
+/// Returns the recorded model-configuration response used by offline tests.
+#[cfg(any(test, feature = "test-fixtures"))]
+#[doc(hidden)]
+#[must_use]
+pub fn model_configs_for_tests() -> &'static [u8] {
+    connect::testdata::MODEL_CONFIGS
+}
+
+/// Clears the model-catalog cache so each matrix cell performs its own fetch.
+#[cfg(any(test, feature = "test-fixtures"))]
+#[doc(hidden)]
+pub fn clear_catalog_cache_for_tests() {
+    catalog::clear_catalog_cache_for_tests();
+}
+
 /// Builds Devin subscription instances.
 #[derive(Clone, Copy, Debug)]
 pub struct DevinFactory;
