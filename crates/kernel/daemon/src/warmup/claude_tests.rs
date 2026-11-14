@@ -1,7 +1,6 @@
 //! Tests for gateway-coordinated Claude warm-up.
 
 use hofund_control_proto::{Quota, QuotaKind};
-use hofund_plugin_api::AccountId;
 use hofund_router::quota::QuotaStore;
 
 use super::claude;
