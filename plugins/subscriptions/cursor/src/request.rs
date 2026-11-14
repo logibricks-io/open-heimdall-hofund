@@ -23,6 +23,8 @@ pub(crate) struct MappedRequest {
     pub(crate) blobs: HashMap<Vec<u8>, Vec<u8>>,
     pub(crate) tools: Vec<ToolDef>,
     pub(crate) conversation_id: String,
+    /// True when the conversation id is stable across steps of one client session.
+    pub(crate) conversation_kept: bool,
     os: String,
     temp_dir: String,
 }
@@ -50,15 +52,12 @@ pub(crate) fn map_with_choice(
     choice: &crate::picker::ModelChoice,
 ) -> Result<MappedRequest, PluginError> {
     let message_id = new_uuid()?;
-    let conversation_id = match conversation_id {
-        Some(id) => id.to_owned(),
-        None => new_uuid()?,
-    };
+    let (conversation_id, conversation_kept) = resolve_conversation_id(request, conversation_id)?;
     let temp_dir = std::env::temp_dir()
         .join(format!("cursor-{message_id}"))
         .to_string_lossy()
         .into_owned();
-    let mapped = build(
+    let mut mapped = build(
         request,
         &conversation_id,
         &message_id,
@@ -67,7 +66,55 @@ pub(crate) fn map_with_choice(
         max_mode,
         choice,
     )?;
+    mapped.conversation_kept = conversation_kept;
     Ok(mapped)
+}
+
+/// Chooses the Run conversation id and whether later steps can collect debt.
+pub(crate) fn resolve_conversation_id(
+    request: &Request,
+    override_id: Option<&str>,
+) -> Result<(String, bool), PluginError> {
+    if let Some(id) = override_id {
+        return Ok((id.to_owned(), true));
+    }
+    let session = request
+        .conversation
+        .as_ref()
+        .map(|conversation| conversation.session.trim())
+        .unwrap_or("");
+    if session.is_empty() {
+        return Ok((new_uuid()?, false));
+    }
+    let first_user = request
+        .messages
+        .iter()
+        .find(|message| message.role == Role::User)
+        .or_else(|| request.messages.first());
+    let first_json = match first_user {
+        Some(message) => hofund_plugin_sdk::json::to_string(message).map_err(|error| {
+            PluginError::io(format!("cannot encode the first user turn: {error}"))
+        })?,
+        None => String::new(),
+    };
+    let payload = format!("cursor conversation\0{session}\0{first_json}");
+    let digest = sha256(payload.as_bytes());
+    Ok((uuid_from_digest(&digest), true))
+}
+
+fn uuid_from_digest(digest: &[u8; 32]) -> String {
+    let mut bytes = *digest;
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let hex = proto::to_hex(&bytes);
+    format!(
+        "{}-{}-{}-{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32]
+    )
 }
 
 /// Maps a request with a fresh conversation, message, and per-execute temp path.
@@ -203,6 +250,7 @@ fn build(
         blobs,
         tools,
         conversation_id: conversation_id.to_owned(),
+        conversation_kept: false,
         os: os.to_owned(),
         temp_dir: temp_dir.to_owned(),
     })

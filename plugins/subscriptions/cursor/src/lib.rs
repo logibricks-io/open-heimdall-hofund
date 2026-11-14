@@ -42,6 +42,7 @@ mod team;
 mod tokens;
 mod upstream;
 mod usage;
+mod usage_ledger;
 
 #[doc(hidden)]
 pub use endpoints::Endpoints;
@@ -151,6 +152,7 @@ impl SubscriptionFactory for CursorFactory {
                 .clone()
                 .unwrap_or_else(auth::default_agent_home),
             keychain_enabled: self.keychain_enabled(),
+            usage_ledger: Arc::new(usage_ledger::UsageLedger::default()),
         }))
     }
 }
@@ -173,6 +175,7 @@ struct Cursor {
     agent_status: Arc<refresh::StatusCoalescer>,
     agent_home: PathBuf,
     keychain_enabled: bool,
+    usage_ledger: Arc<usage_ledger::UsageLedger>,
 }
 
 impl Cursor {
@@ -449,6 +452,7 @@ impl Subscription for Cursor {
             Arc::clone(&self.keychain),
             self.keychain_enabled,
             Arc::clone(&self.agent_status),
+            Arc::clone(&self.usage_ledger),
         )))
     }
 

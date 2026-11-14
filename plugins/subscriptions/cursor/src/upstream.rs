@@ -18,7 +18,7 @@ use crate::endpoints::Endpoints;
 use crate::failure::{self, EMPTY_REPLY};
 use crate::proto::{ExecRequest, ServerEvent, ToolDef};
 use crate::run::{Limits, RunEvent, RunStream, run_stream};
-use crate::{request, session, team, usage};
+use crate::{request, session, team, usage, usage_ledger};
 
 /// Account and process facilities needed by one stateless Cursor Run.
 pub(crate) struct CursorUpstream {
@@ -32,6 +32,7 @@ pub(crate) struct CursorUpstream {
     agent_status: Arc<crate::refresh::StatusCoalescer>,
     agent_host: AgentHost,
     limits: Limits,
+    usage_ledger: Arc<usage_ledger::UsageLedger>,
     #[cfg(test)]
     test_conversation_id: Option<String>,
     #[cfg(test)]
@@ -52,6 +53,7 @@ impl CursorUpstream {
         keychain: Arc<Mutex<KeychainCache>>,
         keychain_enabled: bool,
         agent_status: Arc<crate::refresh::StatusCoalescer>,
+        usage_ledger: Arc<usage_ledger::UsageLedger>,
     ) -> Self {
         Self {
             account,
@@ -64,6 +66,7 @@ impl CursorUpstream {
             agent_status,
             agent_host: AgentHost::default(),
             limits: Limits::default(),
+            usage_ledger,
             #[cfg(test)]
             test_conversation_id: None,
             #[cfg(test)]
@@ -143,6 +146,16 @@ impl UpstreamProvider for CursorUpstream {
                 self.mapped_request(&request, &choice, max_mode, conversation_id_hold.as_deref())?;
             let tools = mapped.tools.clone();
             let conversation_id = mapped.conversation_id.clone();
+            let conversation_kept = mapped.conversation_kept || {
+                #[cfg(test)]
+                {
+                    self.test_conversation_id.is_some()
+                }
+                #[cfg(not(test))]
+                {
+                    false
+                }
+            };
             conversation_id_hold = Some(conversation_id.clone());
             let mut args = mapped.into_args(team_id.clone());
             args.limits = self.limits;
@@ -173,6 +186,7 @@ impl UpstreamProvider for CursorUpstream {
                                     self,
                                     token.clone(),
                                     conversation_id,
+                                    conversation_kept,
                                     inbound,
                                     team_id.clone(),
                                     since_ms,
@@ -190,6 +204,7 @@ impl UpstreamProvider for CursorUpstream {
                                     self,
                                     token.clone(),
                                     conversation_id,
+                                    conversation_kept,
                                     inbound,
                                     team_id.clone(),
                                     since_ms,
@@ -209,6 +224,7 @@ impl UpstreamProvider for CursorUpstream {
                                     self,
                                     token.clone(),
                                     conversation_id,
+                                    conversation_kept,
                                     inbound,
                                     team_id.clone(),
                                     since_ms,
@@ -277,6 +293,7 @@ struct CursorStreamState {
     team_id: Option<String>,
     limits: Limits,
     since_ms: i64,
+    usage_book: Option<usage_ledger::UsageBook>,
 }
 
 struct StreamContext {
@@ -284,16 +301,19 @@ struct StreamContext {
     endpoints: Endpoints,
     token: SecretString,
     conversation_id: String,
+    conversation_kept: bool,
     inbound: ProtocolId,
     team_id: Option<String>,
     limits: Limits,
     since_ms: i64,
+    usage_ledger: Arc<usage_ledger::UsageLedger>,
 }
 
 fn stream_context(
     upstream: &CursorUpstream,
     token: SecretString,
     conversation_id: String,
+    conversation_kept: bool,
     inbound: ProtocolId,
     team_id: Option<String>,
     since_ms: i64,
@@ -303,10 +323,12 @@ fn stream_context(
         endpoints: (*upstream.endpoints).clone(),
         token,
         conversation_id,
+        conversation_kept,
         inbound,
         team_id,
         limits: upstream.limits,
         since_ms,
+        usage_ledger: Arc::clone(&upstream.usage_ledger),
     }
 }
 
@@ -348,12 +370,18 @@ fn completion_stream(
         finished: false,
         host: context.host,
         endpoints: context.endpoints,
-        token: context.token,
-        conversation_id: context.conversation_id,
+        token: context.token.clone(),
+        conversation_id: context.conversation_id.clone(),
         inbound: context.inbound,
         team_id: context.team_id,
         limits: context.limits,
         since_ms: context.since_ms,
+        usage_book: Some(context.usage_ledger.book(
+            &context.token,
+            &context.conversation_id,
+            context.since_ms,
+            context.conversation_kept,
+        )),
     };
     match first {
         FirstOutput::Text(text) => state.emit_text(text),
@@ -363,9 +391,17 @@ fn completion_stream(
     Completion::Stream(Box::pin(futures::unfold(state, |mut state| async move {
         match next_completion_event(&mut state).await {
             Ok(Some(event)) => Some((Ok(event), state)),
-            Ok(None) => None,
+            Ok(None) => {
+                if let Some(book) = state.usage_book.as_mut() {
+                    book.done(state.limits);
+                }
+                None
+            }
             Err(error) => {
                 state.finished = true;
+                if let Some(book) = state.usage_book.as_mut() {
+                    book.done(state.limits);
+                }
                 Some((Err(error), state))
             }
         }
@@ -523,10 +559,9 @@ async fn next_completion_event(
             }
             Some(Ok(RunEvent::Server(ServerEvent::TurnEnd(turn)))) => {
                 if state.emitted_calls == 0 {
-                    state.finish(
-                        StopReason::EndTurn,
-                        Some(usage::from_turn(&turn, state.inbound)),
-                    );
+                    let mut usage = usage::from_turn(&turn, state.inbound);
+                    apply_deferred_usage(state, &mut usage, true).await;
+                    state.finish(StopReason::EndTurn, Some(usage));
                 }
             }
             Some(Ok(RunEvent::Server(_))) => {}
@@ -555,6 +590,20 @@ async fn next_completion_event(
 }
 
 async fn poll_step_usage(state: &mut CursorStreamState) -> Option<Usage> {
+    if let Some(book) = state.usage_book.as_mut() {
+        let own = book
+            .own(
+                &state.host,
+                &state.endpoints,
+                &state.token,
+                state.team_id.as_deref(),
+                state.limits,
+            )
+            .await;
+        let mut usage = usage_ledger::step_usage_from_own(own, state.inbound);
+        apply_deferred_usage(state, &mut usage, false).await;
+        return Some(usage);
+    }
     usage::poll_dashboard(usage::PollArgs {
         host: &state.host,
         endpoints: &state.endpoints,
@@ -567,6 +616,24 @@ async fn poll_step_usage(state: &mut CursorStreamState) -> Option<Usage> {
     })
     .await
     .or_else(|| Some(usage::zeros()))
+}
+
+async fn apply_deferred_usage(state: &mut CursorStreamState, usage: &mut Usage, final_step: bool) {
+    let Some(book) = state.usage_book.as_mut() else {
+        return;
+    };
+    book.settle_deferred(
+        &state.host,
+        &state.endpoints,
+        &state.token,
+        state.team_id.as_deref(),
+        state.limits,
+        final_step,
+    )
+    .await;
+    if let Some(deferred) = book.take_deferred() {
+        usage_ledger::attach_deferred(usage, deferred, state.inbound);
+    }
 }
 
 fn empty_reply() -> PluginError {
@@ -691,6 +758,7 @@ mod tests {
             Arc::new(Mutex::new(KeychainCache::default())),
             true,
             Arc::new(crate::refresh::StatusCoalescer::default()),
+            Arc::new(crate::usage_ledger::UsageLedger::default()),
         );
         // Existing tool tests must not wait on the production 1.5s/6s poll window.
         upstream.limits.usage_first_wait = Duration::ZERO;
@@ -2853,6 +2921,72 @@ mod tests {
                     ("reasoning_effort".to_owned(), "low".to_owned()),
                 ]
             );
+        });
+    }
+
+    const E1_INPUT: u64 = 2;
+    const E1_OUTPUT: u64 = 1913;
+    const E1_CR: u64 = 177_533;
+    const E1_CW: u64 = 3735;
+
+    fn deferred_usage(usage: &Usage) -> Option<&hofund_plugin_sdk::json::Value> {
+        usage.extensions.get("deferred_usage")
+    }
+
+    async fn run_tool_step(
+        upstream: &CursorUpstream,
+        h2: &Http2Server,
+        h1: &Http1Server,
+        poll_goal: usize,
+        request: Request,
+    ) -> Vec<StreamEvent> {
+        let attempt = async {
+            let completion = upstream.execute(request, ProtocolId::OPENAI_CHAT).await?;
+            collect(completion).await
+        };
+        let mut attempt = std::pin::pin!(attempt);
+        drive_until_http2_opening(attempt.as_mut(), h2, 1).await;
+        match race(attempt.as_mut(), advance_until_usage_polls(h1, poll_goal)).await {
+            Race::Left(result) => result.expect("stream"),
+            Race::Right(()) => drive_to_completion(attempt).await.expect("stream"),
+        }
+    }
+
+    #[test]
+    fn r9k_step_without_owed_usage_has_no_deferred_object() {
+        let _guard = crate::http2_memory::test_lock();
+        crate::http2_memory::reset_for_tests();
+        block_on_paused(async {
+            let host = pooled_host();
+            let since = crate::tokens::unix_ms(host.context().clock().now());
+            let hit = usage_events_body(
+                TEST_CONVERSATION,
+                since + 2_000,
+                E1_INPUT,
+                E1_OUTPUT,
+                E1_CR,
+                E1_CW,
+                0,
+            );
+            let h2 = Http2Server::start(vec![
+                Http2Response::new(200).data(tool_step_body()).hold_open(),
+            ])
+            .await;
+            let h1 = Http1Server::start(vec![
+                config_reply(h2.base_url()),
+                Http1Response::new(200).body(hit),
+            ])
+            .await;
+            let account = store_account(&host).await;
+            let mut upstream = upstream(&host, &h1, h2.base_url(), account);
+            restore_production_usage_limits(&mut upstream);
+            upstream.limits.usage_first_wait = Duration::from_millis(10);
+            upstream.limits.usage_give_up = Duration::from_millis(200);
+            upstream.test_conversation_id = Some(TEST_CONVERSATION.to_owned());
+            let events = run_tool_step(&upstream, &h2, &h1, 1, tool_request()).await;
+            let usage = last_message_usage(&events).expect("usage");
+            assert!(deferred_usage(usage).is_none());
+            assert_ne!(usage.input_tokens, Some(0));
         });
     }
 }
