@@ -4,7 +4,7 @@ use hofund_plugin_sdk::protobuf::ProtoBuf;
 
 pub(crate) mod chat;
 pub(crate) mod configs;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-fixtures"))]
 pub(crate) mod testdata;
 
 pub(crate) const CLI_VERSION: &str = "3000.11.3";
