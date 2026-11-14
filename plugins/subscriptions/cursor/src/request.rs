@@ -42,11 +42,12 @@ impl MappedRequest {
     }
 }
 
-/// Maps a request, optionally reusing a conversation id and setting Max Mode bits.
-pub(crate) fn map_with_mode(
+/// Maps a request with a selected model and its native parameters.
+pub(crate) fn map_with_choice(
     request: &Request,
     conversation_id: Option<&str>,
     max_mode: bool,
+    choice: &crate::picker::ModelChoice,
 ) -> Result<MappedRequest, PluginError> {
     let message_id = new_uuid()?;
     let conversation_id = match conversation_id {
@@ -64,6 +65,7 @@ pub(crate) fn map_with_mode(
         std::env::consts::OS,
         &temp_dir,
         max_mode,
+        choice,
     )?;
     Ok(mapped)
 }
@@ -71,7 +73,12 @@ pub(crate) fn map_with_mode(
 /// Maps a request with a fresh conversation, message, and per-execute temp path.
 #[cfg(test)]
 pub(crate) fn map(request: &Request) -> Result<MappedRequest, PluginError> {
-    map_with_mode(request, None, false)
+    map_with_choice(
+        request,
+        None,
+        false,
+        &crate::picker::ModelChoice::passthrough(&request.model),
+    )
 }
 
 fn new_uuid() -> Result<String, PluginError> {
@@ -86,6 +93,7 @@ fn build(
     os: &str,
     temp_dir: &str,
     max_mode: bool,
+    choice: &crate::picker::ModelChoice,
 ) -> Result<MappedRequest, PluginError> {
     let tools = tools_of(request);
 
@@ -180,7 +188,7 @@ fn build(
 
     let opening = proto::client_run(&proto::encode_agent_run_request(&AgentRunParams {
         conversation_id,
-        model_id: &request.model,
+        model_id: &choice.id,
         transcript_blob_ids: &transcript_blob_ids,
         user_turn_blob_id: &user_turn_blob_id,
         os,
@@ -188,6 +196,7 @@ fn build(
         tools: &tools,
         inline_images,
         max_mode,
+        parameters: &choice.parameters,
     }));
     Ok(MappedRequest {
         opening,
@@ -640,6 +649,7 @@ fn map_with(request: &Request, options: MapOptions<'_>) -> Result<MappedRequest,
         options.os,
         options.temp_dir,
         options.max_mode,
+        &crate::picker::ModelChoice::passthrough(&request.model),
     )
 }
 
