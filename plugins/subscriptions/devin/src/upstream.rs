@@ -17,20 +17,26 @@ use crate::connect::chat::{
 };
 use crate::creds::{self, Stored};
 use crate::errors;
+use crate::keepalive::Keepalive;
 use crate::models::{effort_of, variant_for};
 use crate::stream;
 
-const CHAT_PATH: &str = "/exa.api_server_pb.ApiServerService/GetChatMessage";
+pub(crate) const CHAT_PATH: &str = "/exa.api_server_pb.ApiServerService/GetChatMessage";
 const ERROR_BODY_CAP: usize = 1024 * 1024;
 
 pub(crate) struct DevinUpstream {
     account: AccountId,
     host: HostContext,
+    keepalive: Keepalive,
 }
 
 impl DevinUpstream {
-    pub(crate) fn new(account: AccountId, host: HostContext) -> Self {
-        Self { account, host }
+    pub(crate) fn new(account: AccountId, host: HostContext, keepalive: Keepalive) -> Self {
+        Self {
+            account,
+            host,
+            keepalive,
+        }
     }
 
     async fn execute_inner(
@@ -39,6 +45,7 @@ impl DevinUpstream {
         request: Request,
         inbound: ProtocolId,
     ) -> Result<Completion, PluginError> {
+        let keepalive_id = self.keepalive.begin(&request, inbound);
         let requested_model = request.model.clone();
         let effort = effort_for(&request, inbound);
         let catalog = catalog::families_for(&self.host, &self.account, &stored).await;
@@ -106,6 +113,18 @@ impl DevinUpstream {
         if encoded.gzipped {
             call = call.header("Connect-Content-Encoding", "gzip");
         }
+        let on_finish: Option<stream::FinishCallback> = keepalive_id.and_then(|id| {
+            encoded.ping.clone().map(|ping| {
+                let keepalive = self.keepalive.clone();
+                let stored = stored.clone();
+                let sent_at = self.host.clock().monotonic();
+                Box::new(move |usage: chat::ChatUsage| {
+                    if usage.cache_read != 0 || usage.cache_write != 0 {
+                        keepalive.schedule(id, &stored, &ping, sent_at);
+                    }
+                }) as stream::FinishCallback
+            })
+        });
         let response = call.open_raw(self.host.http(), 1).await?;
         let status = response.status().as_u16();
         if !(200..300).contains(&status) {
@@ -119,12 +138,13 @@ impl DevinUpstream {
             inbound,
             request.stream,
             inbound == ProtocolId::ANTHROPIC_MESSAGES && is_claude(&model_uid),
+            on_finish,
         )
         .await
     }
 }
 
-async fn read_capped(
+pub(crate) async fn read_capped(
     mut body: hofund_plugin_api::BodyStream,
     cap: usize,
 ) -> Result<Vec<u8>, PluginError> {
@@ -759,7 +779,7 @@ fn part_cache_marked(part: &ContentPart) -> bool {
     }
 }
 
-fn strip_billing_header(text: &str) -> &str {
+pub(crate) fn strip_billing_header(text: &str) -> &str {
     const PREFIX: &str = "x-anthropic-billing-header:";
     let Some(rest) = text.strip_prefix(PREFIX) else {
         return text;

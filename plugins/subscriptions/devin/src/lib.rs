@@ -7,9 +7,9 @@ use std::sync::{Arc, Mutex};
 
 use hofund_plugin_api::{
     AccountId, AccountStatus, AgentSignIn, BuildError, ConfigError, HostContext, LoopbackSpec,
-    ModelList, PluginError, PluginId, QuotaWindow, RawTable, RedirectHost, Schema, SignInChallenge,
-    SignInCtx, SignInFlow, SignInFlowKind, SignInProof, Subscription, SubscriptionFactory,
-    SubscriptionSpec, UpstreamProvider, ValidConfig,
+    ModelList, PluginError, PluginId, QuotaWindow, RawTable, RawValue, RedirectHost, Schema,
+    SignInChallenge, SignInCtx, SignInFlow, SignInFlowKind, SignInProof, Subscription,
+    SubscriptionFactory, SubscriptionSpec, UpstreamProvider, ValidConfig,
 };
 use hofund_plugin_sdk::Contribution;
 use hofund_plugin_sdk::oauth::{constant_time_eq, secret_text};
@@ -21,6 +21,7 @@ mod connect;
 mod creds;
 mod discover;
 mod errors;
+mod keepalive;
 mod models;
 mod quota;
 mod sign_in;
@@ -49,9 +50,11 @@ pub fn contribute() -> Contribution {
 #[derive(Clone, Copy, Debug)]
 pub struct DevinFactory;
 
-/// Validated config: no options yet.
-#[derive(Clone, Copy, Debug)]
-pub struct DevinConfig;
+/// Validated plugin config.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DevinConfig {
+    keepalive: keepalive::Settings,
+}
 
 impl ValidConfig for DevinConfig {}
 
@@ -63,32 +66,66 @@ impl SubscriptionFactory for DevinFactory {
     }
 
     fn config_schema(&self) -> Schema {
-        Schema::object(Vec::new(), &[]).expect("empty schema is valid")
+        Schema::object(
+            vec![
+                ("cache_keepalive".to_owned(), Schema::boolean()),
+                ("cache_keepalive_interval".to_owned(), Schema::integer()),
+                ("cache_keepalive_max_pings".to_owned(), Schema::integer()),
+            ],
+            &[],
+        )
+        .expect("cache keepalive schema is valid")
     }
 
     fn validate(&self, raw: &RawTable) -> Result<Self::Config, ConfigError> {
-        if !raw.is_empty() {
-            let key = raw.keys().next().expect("non-empty");
-            return Err(ConfigError::new("unknown key").with_path(key));
+        for key in raw.keys() {
+            if !matches!(
+                key,
+                "cache_keepalive" | "cache_keepalive_interval" | "cache_keepalive_max_pings"
+            ) {
+                return Err(ConfigError::new("unknown key").with_path(key));
+            }
         }
-        Ok(DevinConfig)
+        let enabled = match raw.get("cache_keepalive") {
+            None => false,
+            Some(RawValue::Boolean(value)) => *value,
+            Some(_) => {
+                return Err(ConfigError::new("cache_keepalive must be a boolean")
+                    .with_path("cache_keepalive"));
+            }
+        };
+        let interval = optional_integer(raw, "cache_keepalive_interval")?.unwrap_or(285);
+        let max_pings = optional_integer(raw, "cache_keepalive_max_pings")?.unwrap_or(6);
+        Ok(DevinConfig {
+            keepalive: keepalive::Settings::new(enabled, interval, max_pings),
+        })
     }
 
     fn build(
         &self,
-        _cfg: &Self::Config,
-        _host: &HostContext,
+        cfg: &Self::Config,
+        host: &HostContext,
     ) -> Result<Arc<dyn Subscription>, BuildError> {
         Ok(Arc::new(Devin {
             flow: SignInFlow::Pkce,
             pending: Mutex::new(HashMap::new()),
+            keepalive: keepalive::Keepalive::new(host, cfg.keepalive),
         }))
+    }
+}
+
+fn optional_integer(raw: &RawTable, key: &str) -> Result<Option<i64>, ConfigError> {
+    match raw.get(key) {
+        None => Ok(None),
+        Some(RawValue::Integer(value)) => Ok(Some(*value)),
+        Some(_) => Err(ConfigError::new(format!("{key} must be an integer")).with_path(key)),
     }
 }
 
 struct Devin {
     flow: SignInFlow,
     pending: Mutex<HashMap<String, sign_in::Pending>>,
+    keepalive: keepalive::Keepalive,
 }
 
 impl Devin {
@@ -240,6 +277,7 @@ impl Subscription for Devin {
         Ok(Arc::new(upstream::DevinUpstream::new(
             account.clone(),
             host.clone(),
+            self.keepalive.clone(),
         )))
     }
 

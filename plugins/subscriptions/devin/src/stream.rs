@@ -69,12 +69,15 @@ fn remember_sig_type(signature: &str, kind: &str) {
         .remember(signature, kind);
 }
 
+pub(crate) type FinishCallback = Box<dyn FnOnce(ChatUsage) + Send>;
+
 pub(crate) async fn open(
     body: BodyStream,
     requested_model: String,
     inbound: ProtocolId,
     client_stream: bool,
     emit_signatures: bool,
+    on_finish: Option<FinishCallback>,
 ) -> Result<Completion, PluginError> {
     let mut reader = Reader::new(body);
     let mut saw_tool_call = false;
@@ -134,6 +137,7 @@ pub(crate) async fn open(
         emit_signatures,
         signature,
         signature_type,
+        on_finish,
         finished: false,
     };
     let rest = BodyStream::unfold(state, |mut state| async move {
@@ -180,6 +184,9 @@ pub(crate) async fn open(
                     return Some((Err(errors::connect(&error)), state));
                 }
                 Some(ChatEvent::End(None)) | None => {
+                    if let Some(on_finish) = state.on_finish.take() {
+                        on_finish(state.usage);
+                    }
                     if state.emit_signatures {
                         remember_sig_type(&state.signature, &state.signature_type);
                     }
@@ -258,6 +265,7 @@ struct StreamState {
     emit_signatures: bool,
     signature: String,
     signature_type: String,
+    on_finish: Option<FinishCallback>,
     finished: bool,
 }
 

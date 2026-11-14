@@ -1987,6 +1987,17 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
             return coded(codec.as_ref(), StatusCode::BAD_REQUEST, &error.to_string());
         }
     };
+    let subagent = identity_headers
+        .iter()
+        .find(|(name, _)| *name == SUBAGENT_HEADER)
+        .map(|(_, value)| value.trim())
+        .unwrap_or_default();
+    if !routing_session.is_empty() || !subagent.is_empty() {
+        model_request.conversation = Some(hofund_ir::Conversation::new(
+            routing_session.clone(),
+            subagent,
+        ));
+    }
     let client_headers = client_request_headers(&headers);
     if !client_headers.is_empty() {
         model_request.extensions.insert(

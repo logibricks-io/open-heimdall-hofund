@@ -11,11 +11,11 @@ use axum::http::{Request, StatusCode};
 use futures_util::StreamExt;
 use hofund_codec::{
     Codec, ECHO_SESSION_HEADER, OpenAiChat, OpenAiResponses, SESSION_HEADERS,
-    STREAM_CLIENT_PREFIXES, session_of,
+    STREAM_CLIENT_PREFIXES, SUBAGENT_HEADER, session_of,
 };
 use hofund_gateway::Gateway;
 use hofund_gateway::session_headers::gateway_session_header_names;
-use hofund_ir::Request as ModelRequest;
+use hofund_ir::{Conversation, Request as ModelRequest};
 use hofund_plugin_api::{
     AgentDescription, AgentRoute, BodyStream, MemberId, MemberKey, PluginError, PluginId, PresetId,
     Visible,
@@ -201,6 +201,70 @@ async fn r33_raw_http_responses_echo_named_session() {
     let response = post(app, "/v1/chat/completions", CHAT_UNARY_REQUEST, None, false).await;
     assert_eq!(response.status(), StatusCode::OK);
     assert!(!response.headers().contains_key(ECHO_SESSION_HEADER));
+}
+
+struct ConversationMember {
+    member_id: MemberId,
+    seen: Arc<std::sync::Mutex<Option<Conversation>>>,
+}
+
+#[async_trait]
+impl Member for ConversationMember {
+    fn id(&self) -> &MemberId {
+        &self.member_id
+    }
+
+    fn route_id(&self) -> &str {
+        "primary"
+    }
+
+    fn protocol(&self) -> &str {
+        "test"
+    }
+
+    async fn execute(
+        &self,
+        request: ModelRequest,
+        _inbound: &str,
+    ) -> Result<Completion, PluginError> {
+        *self.seen.lock().expect("conversation") = request.conversation;
+        Ok(Completion::Raw(BodyStream::from_bytes(
+            RAW_CHAT_UNARY.as_bytes().to_vec(),
+        )))
+    }
+}
+
+#[tokio::test]
+async fn r33_native_session_and_subagent_reach_routed_request() {
+    let seen = Arc::new(std::sync::Mutex::new(None));
+    let member = ConversationMember {
+        member_id: MemberId::from_preset(
+            PresetId::try_from("primary").expect("preset"),
+            MemberKey::from_static("row"),
+        ),
+        seen: Arc::clone(&seen),
+    };
+    let routes = BTreeMap::from([("demo".to_owned(), vec![Arc::new(member) as Arc<dyn Member>])]);
+    let (app, _dir) = gateway_with_router(Router::new(routes, FailoverPolicy::default()));
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("authorization", "Bearer secret")
+                .header("x-session-id", "session-1")
+                .header(SUBAGENT_HEADER, "agent-1")
+                .body(Body::from(CHAT_UNARY_REQUEST))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let conversation = seen.lock().expect("conversation").clone();
+    assert_eq!(
+        conversation,
+        Some(Conversation::new("session-1", "agent-1"))
+    );
 }
 
 #[tokio::test]
