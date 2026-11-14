@@ -104,6 +104,8 @@ pub(crate) async fn complete(
         device_chat,
         device_token: device.token,
         device_refresh_token: device.refresh,
+        pat_auth: false,
+        pat: SecretString::from(String::new()),
     };
     import::store(&credential, host).await
 }
@@ -238,7 +240,7 @@ async fn user_info(host: &HostContext, pending: &Pending, token: &str) -> Value 
         .unwrap_or_else(|| hofund_plugin_sdk::json::json!({}))
 }
 
-fn required_token(value: &Value, context: &str) -> Result<SecretString, PluginError> {
+pub(crate) fn required_token(value: &Value, context: &str) -> Result<SecretString, PluginError> {
     value
         .get("token")
         .or_else(|| value.get("device_token"))
