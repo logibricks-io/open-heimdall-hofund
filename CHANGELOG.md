@@ -69,6 +69,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Control client: one-shot `hofundd` spawns clear `CARGO_MAKEFLAGS` and
+  `MAKEFLAGS`, and take a cross-process advisory lock until the HTTP handshake
+  finishes, so Ubuntu `cargo test --workspace` no longer oversubscribes large
+  one-shot children past the existing five-second hang bound.
 - R-9g: Cursor `list_models` and request-time picker selection share one
   server-side catalog list built from `AvailableModels`, `GetUsableModels`,
   and scope-3 `AvailableModels`, with a ten-minute per-token cache,

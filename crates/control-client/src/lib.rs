@@ -41,6 +41,7 @@ use tokio::net::TcpStream;
 
 mod discovery;
 mod model_health;
+mod one_shot_spawn;
 
 pub use discovery::{
     DiscoveryOptions, DiscoveryRuntime, HeldLock, held_daemon_locks, resolve_config_id,
@@ -1507,72 +1508,78 @@ impl Client {
         body: Option<Vec<u8>>,
         last_event_id: Option<&str>,
     ) -> Result<http::Response<Incoming>, ClientError> {
-        let mut child = tokio::process::Command::new(exe)
-            .arg("one-shot")
-            .arg("--config")
-            .arg(config)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|error| transport(&format!("cannot start {}", exe.display()), error))?;
-        let (Some(stdin), Some(stdout), Some(stderr)) =
-            (child.stdin.take(), child.stdout.take(), child.stderr.take())
-        else {
-            return Err(ClientError::Transport(
-                "one-shot hofundd has no standard streams".to_owned(),
-            ));
-        };
-        let diagnostics = OneShotStderr::start(stderr);
-        let io = tokio::io::join(stdout, stdin);
-        let host = LOCAL_IPC_HOST.to_owned();
-        match tokio::time::timeout(
-            ONE_SHOT_HANDSHAKE_WAIT,
-            self.open_over(io, method, path, body, last_event_id, host),
-        )
+        use one_shot_spawn::{CommandClearJobEnv, with_one_shot_spawn_guard};
+
+        with_one_shot_spawn_guard(|| async {
+            let mut child = tokio::process::Command::new(exe)
+                .arg("one-shot")
+                .arg("--config")
+                .arg(config)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .clear_cargo_jobserver_env()
+                .spawn()
+                .map_err(|error| transport(&format!("cannot start {}", exe.display()), error))?;
+            let (Some(stdin), Some(stdout), Some(stderr)) =
+                (child.stdin.take(), child.stdout.take(), child.stderr.take())
+            else {
+                return Err(ClientError::Transport(
+                    "one-shot hofundd has no standard streams".to_owned(),
+                ));
+            };
+            let diagnostics = OneShotStderr::start(stderr);
+            let io = tokio::io::join(stdout, stdin);
+            let host = LOCAL_IPC_HOST.to_owned();
+            match tokio::time::timeout(
+                ONE_SHOT_HANDSHAKE_WAIT,
+                self.open_over(io, method, path, body, last_event_id, host),
+            )
+            .await
+            {
+                Ok(Ok(response)) => {
+                    // Pass the child's diagnostics through from here on. It
+                    // exits once the response is read and the connection
+                    // drops; reap it in the background.
+                    diagnostics.forward();
+                    tokio::spawn(async move {
+                        let _ = child.wait().await;
+                    });
+                    Ok(response)
+                }
+                Ok(Err(error)) => {
+                    let status = wait_or_kill_one_shot(&mut child).await;
+                    // A child that exits before answering explains why on
+                    // standard error; that beats the transport error.
+                    let reason = diagnostics
+                        .finish()
+                        .await
+                        .unwrap_or_else(|| error.to_string());
+                    Err(ClientError::Transport(format!(
+                        "one-shot hofundd failed ({status}): {reason}"
+                    )))
+                }
+                Err(_elapsed) => {
+                    // The child is still running and will not exit on its own.
+                    let _ = child.kill().await;
+                    let status = wait_or_kill_one_shot(&mut child).await;
+                    let reason = diagnostics.finish().await.unwrap_or_default();
+                    let message = if reason.is_empty() {
+                        format!(
+                            "one-shot hofundd handshake timed out after {}s ({status})",
+                            ONE_SHOT_HANDSHAKE_WAIT.as_secs()
+                        )
+                    } else {
+                        format!(
+                            "one-shot hofundd handshake timed out after {}s ({status}): {reason}",
+                            ONE_SHOT_HANDSHAKE_WAIT.as_secs()
+                        )
+                    };
+                    Err(ClientError::Transport(message))
+                }
+            }
+        })
         .await
-        {
-            Ok(Ok(response)) => {
-                // Pass the child's diagnostics through from here on. It
-                // exits once the response is read and the connection
-                // drops; reap it in the background.
-                diagnostics.forward();
-                tokio::spawn(async move {
-                    let _ = child.wait().await;
-                });
-                Ok(response)
-            }
-            Ok(Err(error)) => {
-                let status = wait_or_kill_one_shot(&mut child).await;
-                // A child that exits before answering explains why on
-                // standard error; that beats the transport error.
-                let reason = diagnostics
-                    .finish()
-                    .await
-                    .unwrap_or_else(|| error.to_string());
-                Err(ClientError::Transport(format!(
-                    "one-shot hofundd failed ({status}): {reason}"
-                )))
-            }
-            Err(_elapsed) => {
-                // The child is still running and will not exit on its own.
-                let _ = child.kill().await;
-                let status = wait_or_kill_one_shot(&mut child).await;
-                let reason = diagnostics.finish().await.unwrap_or_default();
-                let message = if reason.is_empty() {
-                    format!(
-                        "one-shot hofundd handshake timed out after {}s ({status})",
-                        ONE_SHOT_HANDSHAKE_WAIT.as_secs()
-                    )
-                } else {
-                    format!(
-                        "one-shot hofundd handshake timed out after {}s ({status}): {reason}",
-                        ONE_SHOT_HANDSHAKE_WAIT.as_secs()
-                    )
-                };
-                Err(ClientError::Transport(message))
-            }
-        }
     }
 
     async fn open_over<S>(
