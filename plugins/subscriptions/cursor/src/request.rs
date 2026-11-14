@@ -42,21 +42,7 @@ impl MappedRequest {
     }
 }
 
-/// Maps a request, optionally reusing a conversation id and setting Max Mode bits.
-#[cfg(test)]
-pub(crate) fn map_with_mode(
-    request: &Request,
-    conversation_id: Option<&str>,
-    max_mode: bool,
-) -> Result<MappedRequest, PluginError> {
-    map_with_choice(
-        request,
-        conversation_id,
-        max_mode,
-        &crate::picker::ModelChoice::passthrough(&request.model),
-    )
-}
-
+/// Maps a request with a selected model and its native parameters.
 pub(crate) fn map_with_choice(
     request: &Request,
     conversation_id: Option<&str>,
@@ -87,7 +73,12 @@ pub(crate) fn map_with_choice(
 /// Maps a request with a fresh conversation, message, and per-execute temp path.
 #[cfg(test)]
 pub(crate) fn map(request: &Request) -> Result<MappedRequest, PluginError> {
-    map_with_mode(request, None, false)
+    map_with_choice(
+        request,
+        None,
+        false,
+        &crate::picker::ModelChoice::passthrough(&request.model),
+    )
 }
 
 fn new_uuid() -> Result<String, PluginError> {
