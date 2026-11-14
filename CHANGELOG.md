@@ -14,6 +14,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   calling live whoami. Lapsed or unreadable rows are skipped without dropping
   siblings. Recorded fixtures only (`r56b_*`). Refs R-56.
 
+- R-5: the Claude Code subscription plugin reads and writes macOS Keychain
+  credentials through `security(1)` spawned via `HostContext` (no
+  `std::process` in the plugin): `Claude Code-credentials` and per-directory
+  `claudeDirService` items, hex `-w` output acceptance, file fallback, discovery
+  import/switch paths, and `HOFUND_NO_ACCOUNTS=1` skipping Keychain probes.
+  Tests `r5_42`–`r5_47` use scripted spawns only. Refs R-5.
+
+- R-5: Keychain `security` reads use the account config directory as the spawn
+  cwd, matching write and clear, instead of the process temp dir. Refs R-5.
+
 - R-54d: the Qoder subscription plugin migrates the legacy sibling `qoder.json`
   beside the config file once before accounts are listed: `HOFUND_NO_ACCOUNTS`
   skips the move, a global account with the same uid takes precedence, failed
@@ -139,6 +149,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Cursor HTTP/1 sixteen-KV pipeline test: drive the Run session with
+  `drive_until_http1_request` and `drive_to_completion` instead of racing a
+  yield budget against a paused clock, and bind loopback response scripts at
+  TCP accept so macOS CI no longer hits synthetic `deadline_exceeded` append
+  trailers while sixteen KV replies stay header-parked.
 - Control client: one-shot `hofundd` spawns clear `CARGO_MAKEFLAGS` and
   `MAKEFLAGS`, and take a cross-process advisory lock until the HTTP handshake
   finishes, so Ubuntu `cargo test --workspace` no longer oversubscribes large

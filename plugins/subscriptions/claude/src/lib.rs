@@ -29,6 +29,7 @@ mod cli;
 mod creds;
 mod discover;
 mod import;
+mod keychain;
 mod launcher;
 mod lock;
 mod models;
@@ -164,6 +165,7 @@ impl SubscriptionFactory for ClaudeFactory {
         Ok(Arc::new(Claude {
             command: cfg.command.clone(),
             flow: SignInFlow::Bridge { command: COMMAND },
+            spawn_host: _host.clone(),
             pending: Mutex::new(HashMap::new()),
             bridge: bridge::Bridge::with_room(bridge::room::Room::from_config(cfg.runs_most)),
         }))
@@ -194,6 +196,8 @@ struct Pending {
 struct Claude {
     command: Option<PathBuf>,
     flow: SignInFlow,
+    /// Host used for Keychain spawns during discovery on this instance.
+    spawn_host: HostContext,
     /// Sign-ins in progress, by session id.
     pending: Mutex<HashMap<String, Pending>>,
     /// Bridge run table, shared across `upstream()` providers for this instance.
@@ -338,7 +342,9 @@ async fn finish_login(
             "Claude Code did not finish signing in in time",
         ));
     }
-    let Some(credentials) = creds::read_credentials(&pending.dir) else {
+    let Some((credentials, _loc)) =
+        keychain::read_sign_in(host, &pending.dir, keychain::ReadContext::ConfigDir, false).await
+    else {
         return Err(PluginError::auth(format!(
             "Claude Code did not sign in; {}",
             cli::said(&pending.last)
@@ -574,7 +580,7 @@ impl Subscription for Claude {
         &self,
         home: &Path,
     ) -> Result<Vec<hofund_plugin_api::DiscoveredAgentAccount>, PluginError> {
-        discover::list(home)
+        discover::list(home, &self.spawn_host).await
     }
 
     async fn import_agent_sign_in(
