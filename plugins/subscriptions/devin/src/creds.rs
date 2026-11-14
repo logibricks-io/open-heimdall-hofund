@@ -1,5 +1,7 @@
 //! Devin CLI credentials.toml and stored account secrets.
 
+#[cfg(test)]
+use std::cell::RefCell;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -9,11 +11,16 @@ use hofund_plugin_sdk::oauth::{SecretObject, account_id_from, secret_text};
 
 const FILE_CAP: u64 = 64 * 1024;
 
+pub(crate) const DEFAULT_API_SERVER: &str = "https://server.codeium.com";
+pub(crate) const DEFAULT_DEVIN_API: &str = "https://api.devin.ai";
+pub(crate) const DEFAULT_DEVIN_WEBAPP: &str = "app.devin.ai";
+
 /// Parsed sign-in from credentials.toml.
 #[derive(Clone, Debug)]
 pub(crate) struct Credential {
     pub key: SecretString,
     pub api_server: String,
+    pub devin_webapp: String,
     pub devin_api: String,
     pub label: String,
     pub plan: String,
@@ -76,12 +83,17 @@ pub(crate) fn parse_secret(secret: &SecretString) -> Result<Stored, PluginError>
     let api_server = blob
         .text("api_server")
         .filter(|value| !value.is_empty())
-        .unwrap_or("https://server.codeium.com")
+        .unwrap_or(DEFAULT_API_SERVER)
+        .to_owned();
+    let devin_webapp = blob
+        .text("devin_webapp")
+        .filter(|value| !value.is_empty())
+        .unwrap_or(DEFAULT_DEVIN_WEBAPP)
         .to_owned();
     let devin_api = blob
         .text("devin_api")
         .filter(|value| !value.is_empty())
-        .unwrap_or("https://api.devin.ai")
+        .unwrap_or(DEFAULT_DEVIN_API)
         .to_owned();
     let label = blob
         .text("label")
@@ -99,6 +111,7 @@ pub(crate) fn parse_secret(secret: &SecretString) -> Result<Stored, PluginError>
         credential: Credential {
             key,
             api_server,
+            devin_webapp,
             devin_api,
             label,
             plan: blob.text("plan").unwrap_or_default().to_owned(),
@@ -129,6 +142,7 @@ pub(crate) fn secret_blob(credential: &Credential) -> SecretObject {
         .with_number("v", 1)
         .with_secret("api_key", &credential.key)
         .with_text("api_server", &credential.api_server)
+        .with_text("devin_webapp", &credential.devin_webapp)
         .with_text("devin_api", &credential.devin_api)
         .with_text("label", &credential.label);
     for (key, value) in [
@@ -183,18 +197,61 @@ fn default_label(key: &SecretString) -> String {
     format!("Devin {}", &stable_key(key)[..8])
 }
 
-fn live_api_server(file_server: &str) -> String {
-    std::env::var("WINDSURF_API_SERVER_URL")
-        .ok()
+pub(crate) fn trim_server_url(url: &str) -> String {
+    url.trim().trim_end_matches('/').to_owned()
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_WINDSURF: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn test_windsurf_override() -> Option<String> {
+    TEST_WINDSURF.with(|slot| slot.borrow().clone())
+}
+
+#[cfg(test)]
+pub(crate) fn set_windsurf_override_for_tests(url: Option<&str>) {
+    TEST_WINDSURF.with(|slot| *slot.borrow_mut() = url.map(str::to_owned));
+}
+
+fn windsurf_env_override() -> Option<String> {
+    #[cfg(test)]
+    if let Some(url) = test_windsurf_override() {
+        return Some(url);
+    }
+    std::env::var("WINDSURF_API_SERVER_URL").ok()
+}
+
+/// Stored host plus `WINDSURF_API_SERVER_URL`, with trailing slashes removed.
+pub(crate) fn effective_api_server(stored: &str) -> String {
+    windsurf_env_override()
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| file_server.to_owned())
-        .trim_end_matches('/')
-        .to_owned()
+        .map(|value| trim_server_url(&value))
+        .unwrap_or_else(|| {
+            let trimmed = trim_server_url(stored);
+            if trimmed.is_empty() {
+                DEFAULT_API_SERVER.to_owned()
+            } else {
+                trimmed
+            }
+        })
+}
+
+fn live_api_server(file_server: &str) -> String {
+    effective_api_server(file_server)
+}
+
+/// API server persisted on browser sign-in (env override or default).
+pub(crate) fn api_server_at_sign_in() -> String {
+    effective_api_server(DEFAULT_API_SERVER)
 }
 
 pub(crate) fn parse_credentials_toml(text: &str) -> Result<Credential, PluginError> {
     let mut windsurf_api_key = None;
     let mut api_server_url = None;
+    let mut devin_webapp_host = None;
     let mut devin_api_url = None;
     for line in text.lines() {
         let line = line.split('#').next().unwrap_or("").trim();
@@ -209,6 +266,7 @@ pub(crate) fn parse_credentials_toml(text: &str) -> Result<Credential, PluginErr
         match key {
             "windsurf_api_key" => windsurf_api_key = Some(value),
             "api_server_url" => api_server_url = Some(value),
+            "devin_webapp_host" => devin_webapp_host = Some(value),
             "devin_api_url" => devin_api_url = Some(value),
             _ => {}
         }
@@ -218,15 +276,20 @@ pub(crate) fn parse_credentials_toml(text: &str) -> Result<Credential, PluginErr
         .ok_or_else(|| PluginError::auth("Devin credentials file has no windsurf_api_key"))?;
     let api_server = api_server_url
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "https://server.codeium.com".to_owned());
+        .map(|value| trim_server_url(&value))
+        .unwrap_or_else(|| DEFAULT_API_SERVER.to_owned());
+    let devin_webapp = devin_webapp_host
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_DEVIN_WEBAPP.to_owned());
     let devin_api = devin_api_url
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "https://api.devin.ai".to_owned());
+        .unwrap_or_else(|| DEFAULT_DEVIN_API.to_owned());
     let key = SecretString::from(key.to_owned());
     Ok(Credential {
         label: default_label(&key),
         key,
         api_server,
+        devin_webapp,
         devin_api,
         plan: String::new(),
         org_id: String::new(),
@@ -315,9 +378,10 @@ pub(crate) fn write_credentials(path: &Path, credential: &Credential) -> Result<
         private_dir(parent)?;
     }
     let body = format!(
-        "windsurf_api_key = {}\napi_server_url = {}\ndevin_api_url = {}\n",
+        "windsurf_api_key = {}\napi_server_url = {}\ndevin_webapp_host = {}\ndevin_api_url = {}\n",
         toml_string(secret_text(&credential.key)),
         toml_string(&credential.api_server),
+        toml_string(&credential.devin_webapp),
         toml_string(&credential.devin_api),
     );
     write_atomic(path, body.as_bytes())
