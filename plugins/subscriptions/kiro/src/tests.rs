@@ -811,7 +811,7 @@ fn r51_3_images_in_results_and_latest_image_rule_are_encoded() {
 }
 
 #[test]
-fn r51_4_image_limit_is_exact_and_oversize_is_refused() {
+fn r51_4_image_limit_is_exact_and_unreadable_oversize_becomes_a_note() {
     let at_limit = "a".repeat(crate::kiro_body::IMAGE_LIMIT);
     let request = Request::new("claude-sonnet-4.5").with_messages(vec![message(
         Role::User,
@@ -830,9 +830,15 @@ fn r51_4_image_limit_is_exact_and_oversize_is_refused() {
         Role::User,
         vec![image("image/png", &format!("{at_limit}bbbb"))],
     )]);
-    let error = crate::kiro_body::encode(&oversized, &test_credential()).expect_err("too large");
-    assert!(error.message().contains("5242880"));
-    assert!(error.message().contains("cannot resize"));
+    let body = encoded(&oversized);
+    let user = &body["conversationState"]["currentMessage"]["userInputMessage"];
+    assert!(user.get("images").is_none());
+    assert!(
+        user["content"]
+            .as_str()
+            .expect("note")
+            .contains("it couldn't be read as an image")
+    );
 }
 
 #[test]
@@ -1080,6 +1086,10 @@ fn r51_8_decoder_handles_every_byte_boundary_and_rejects_partial_tail() {
         while let Some(event) = decoder.next_event() {
             match event {
                 crate::kiro_stream::Event::Text(text) => texts.push_str(&text),
+                crate::kiro_stream::Event::Thinking(_)
+                | crate::kiro_stream::Event::Signature(_) => {
+                    panic!("unexpected reasoning")
+                }
                 crate::kiro_stream::Event::ToolStart { .. } => tools += 1,
                 crate::kiro_stream::Event::ToolArguments(part) => arguments.push_str(&part),
                 crate::kiro_stream::Event::Stop(_) => panic!("early stop"),
@@ -1099,4 +1109,172 @@ fn r51_8_decoder_handles_every_byte_boundary_and_rejects_partial_tail() {
     let mut partial = crate::kiro_stream::Decoder::default();
     partial.push(&body[..body.len() - 1]).expect("partial");
     assert!(partial.finish().is_err());
+}
+
+#[test]
+fn r51c_native_effort_fields_follow_the_recorded_model_schema() {
+    let schema = json!({"properties": {
+        "thinking": {"properties": {"type": {"enum": ["adaptive", "disabled"]}}},
+        "output_config": {"properties": {"effort": {"enum": ["low", "medium", "high", "xhigh", "max"]}}}
+    }});
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let id = seed(
+        &host,
+        &dir.path().join("seed-home"),
+        "kiro-access-effort",
+        "kiro-refresh",
+        "2099-01-01T00:00:00Z",
+        "k@example.test",
+    );
+    host.http().enqueue(
+        json::to_vec(&json!({
+            "defaultModel": {"modelId": "claude-opus-5.5"},
+            "models": [
+                {"modelId": "claude-sonnet-4.5", "modelName": "Claude Sonnet", "additionalModelRequestFieldsSchema": null},
+                {"modelId": "claude-opus-5.5", "modelName": "Claude Opus", "tokenLimits": {"maxInputTokens": 200000, "maxOutputTokens": 64000}, "additionalModelRequestFieldsSchema": schema}
+            ]
+        }))
+        .expect("models JSON"),
+    );
+    let list = block_on(sub.list_models(&id, host.context())).expect("model list");
+    assert_eq!(list.models()[0].id(), "claude-opus-5.5");
+    assert_eq!(
+        list.models()[0].efforts(),
+        ["low", "medium", "high", "xhigh", "max"]
+    );
+    let upstream = sub.upstream(&id, host.context()).expect("upstream");
+    let request = |model: &str, effort: &str, thinking: Option<Value>| {
+        let mut request = Request::new(model).with_messages(vec![message(
+            Role::User,
+            vec![ContentPart::text("question")],
+        )]);
+        if let Some(thinking) = thinking {
+            request.extensions.insert("thinking", thinking);
+        }
+        request
+            .extensions
+            .insert("output_config", json!({"effort": effort}));
+        request
+    };
+    for effort in ["xhigh", "max"] {
+        host.http().enqueue(br#"{"content":"ok"}"#.to_vec());
+        block_on(upstream.execute(
+            request("claude-opus-5.5", effort, Some(json!({"type": "adaptive"}))),
+            ProtocolId::ANTHROPIC_MESSAGES,
+        ))
+        .expect("native effort request");
+        let calls = host.http().calls();
+        let body: Value = json::from_slice(calls.last().expect("request").body()).expect("JSON");
+        assert_eq!(
+            body["additionalModelRequestFields"],
+            json!({"thinking": {"type": "adaptive"}, "output_config": {"effort": effort}})
+        );
+        assert!(!body.to_string().contains("max_thinking_length"));
+    }
+    for (model, effort, thinking, budget) in [
+        (
+            "claude-opus-5.5",
+            "ultra",
+            Some(json!({"type": "adaptive"})),
+            20000,
+        ),
+        (
+            "claude-sonnet-4.5",
+            "xhigh",
+            Some(json!({"type": "enabled"})),
+            50000,
+        ),
+    ] {
+        host.http().enqueue(br#"{"content":"ok"}"#.to_vec());
+        block_on(upstream.execute(
+            request(model, effort, thinking),
+            ProtocolId::ANTHROPIC_MESSAGES,
+        ))
+        .expect("budget request");
+        let calls = host.http().calls();
+        let body: Value = json::from_slice(calls.last().expect("request").body()).expect("JSON");
+        assert!(body.get("additionalModelRequestFields").is_none());
+        assert!(body.to_string().contains(&format!(
+            "<max_thinking_length>{budget}</max_thinking_length>"
+        )));
+    }
+    host.http().enqueue(br#"{"content":"ok"}"#.to_vec());
+    block_on(upstream.execute(
+        request("claude-opus-5.5", "high", None),
+        ProtocolId::ANTHROPIC_MESSAGES,
+    ))
+    .expect("thinking-off request");
+    let calls = host.http().calls();
+    let body: Value = json::from_slice(calls.last().expect("request").body()).expect("JSON");
+    assert!(body.get("additionalModelRequestFields").is_none());
+    assert!(!body.to_string().contains("thinking_mode"));
+}
+
+#[test]
+fn r51c_reasoning_events_fold_and_stream_with_signatures() {
+    let mut body = frame("reasoningContentEvent", json!({"text": "consider"}));
+    body.extend_from_slice(&frame("reasoningContentEvent", json!({"text": "ing"})));
+    body.extend_from_slice(&frame(
+        "reasoningContentEvent",
+        json!({"signature": "sig-"}),
+    ));
+    body.extend_from_slice(&frame("reasoningContentEvent", json!({"signature": "one"})));
+    body.extend_from_slice(&frame(
+        "assistantResponseEvent",
+        json!({"content": "answer"}),
+    ));
+    let response = kiro_stream::unary(&body, "claude-opus-5.5", &std::collections::HashMap::new())
+        .expect("unary reasoning");
+    assert_eq!(response.message.content.len(), 2);
+    let ContentPart::Thinking(thinking) = &response.message.content[0] else {
+        panic!("expected reasoning first");
+    };
+    assert_eq!(thinking.text, "considering");
+    assert_eq!(thinking.signature.as_deref(), Some("sig-one"));
+    assert_eq!(response.message.content[1], ContentPart::text("answer"));
+
+    let Completion::Stream(mut stream) = kiro_stream::stream(
+        hofund_plugin_api::BodyStream::from_bytes(body),
+        "claude-opus-5.5".to_owned(),
+        std::collections::HashMap::new(),
+    ) else {
+        panic!("expected stream");
+    };
+    let events = block_on(async {
+        let mut events = Vec::new();
+        while let Some(event) =
+            std::future::poll_fn(|context| stream.as_mut().poll_next(context)).await
+        {
+            events.push(event.expect("event"));
+        }
+        events
+    });
+    assert!(events.iter().any(|event| matches!(
+        event,
+        StreamEvent::ContentBlockStart(start)
+            if start.index == 0 && matches!(start.block, hofund_plugin_api::BlockStart::Thinking { redacted: false, .. })
+    )));
+    let reasoning: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            StreamEvent::ThinkingDelta(delta) => Some((delta.index, delta.text.as_str())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reasoning, [(0, "consider"), (0, "ing")]);
+    let signatures: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            StreamEvent::SignatureDelta(delta) => Some((delta.index, delta.signature.as_str())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(signatures, [(0, "sig-"), (0, "one")]);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        StreamEvent::TextDelta(delta) if delta.index == 1 && delta.text == "answer"
+    )));
+    assert!(matches!(events.last(), Some(StreamEvent::MessageStop(_))));
 }
