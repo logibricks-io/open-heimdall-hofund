@@ -17,6 +17,7 @@ use hofund_plugin_api::{
 use hofund_plugin_sdk::Contribution;
 use hofund_plugin_sdk::oauth::SecretObject;
 
+mod anthropic_tools;
 mod api;
 mod client;
 mod discover;
