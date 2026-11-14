@@ -18,7 +18,7 @@ Legend: **Done** = matches the reference at checklist granularity; **Partial** =
 | Zed (`zed`) | 0 | 6 | 1 | 3 | 0 |
 | Kiro (`kiro`) | 6 | 11 | 0 | 2 | 0 |
 | Factory / Droid (`factory`) | 12 | 4 | 0 | 3 | 0 |
-| Cline / ClinePass (`cline`) | 2 | 12 | 1 | 3 | 1 |
+| Cline / ClinePass (`cline`) | 12 | 4 | 0 | 3 | 0 |
 | ChatGPT / Codex (`codex` backend) and ChatGPT API (`chatgpt-api`) | 8 | 11 | 2 | 0 | 0 |
 | GitHub Copilot (github.com and GHE) | 15 | 2 | 0 | 5 | 0 |
 | Gemini CLI (Code Assist) | 8 | 6 | 2 | 2 | 0 |
@@ -278,35 +278,37 @@ Structured-output prose for Chat, Responses, and Messages shipped in R-13b (`str
 
 **Hofund path:** `plugins/subscriptions/cline/src/`.
 
-| # | capability | reference v0.1.3005 behaviour | hofund 08035c9 | status | gap to close |
-|---|------------|------------------------------|----------------|--------|--------------|
-| a1 | sign-in: WorkOS device | Plugin device + register (`cline/index.mjs:3-19`) | `DeviceFlow` + same `WORKOS_CLIENT_ID` (`cline/lib.rs:28-35`) | Partial | Cline register endpoint vs raw WorkOS (unverified) |
+| # | capability | reference v0.1.3005 behaviour | hofund R-53 | status | gap to close |
+|---|------------|------------------------------|-------------|--------|--------------|
+| a1 | sign-in: WorkOS device | Plugin device + register (`cline/index.mjs:3-19`) | `DeviceFlow` + same `WORKOS_CLIENT_ID`, then `/auth/register` (`sign_in.rs`, `a2a_17`) | Done | — |
 | a2 | sign-in: API key | Plugin key auth | `SignInProof` API key path in `sign_in.rs` | Done | — |
 | a3 | browser loopback | N/A | N/A | N/A | — |
 | b | import | Preset/key plan in core | OAuth/API key via sign-in only | Partial | — |
-| c | token storage | Plugin session; core uses key | Secret blob + `workos:` prefix handling in tokens | Partial | Retryable grace window (`cline/index.mjs:27-30`) |
-| d | refresh | WorkOS refresh + grace (`cline/index.mjs:25-30`) | `tokens::refresh_account` on 401 | Partial | Renew serialization (**R-24**, **R-53**) |
-| e | upstream wire | OpenAI chat to `api.cline.bot` (`cline.go:43-49`; plugin) | `upstream.rs` OPENAI_CHAT + envelope unwrap | Partial | — |
-| f | inbound shapes | Chat completions + desktop headers (`cline.go:15-31`) | Same headers `client.rs:4-18` (desktop 3.5.54) | Partial | Plugin uses **cline-cli** 3.0.68 identity (`cline/index.mjs:38-74`) — intentional mismatch to audit |
+| c | token storage | Plugin session; core uses key | Secret blob + `workos:` prefix handling; 30-second request-time retryable grace in `tokens.rs` | Done | — |
+| d | refresh | WorkOS refresh + grace (`cline/index.mjs:25-30`, `883-895`) | Ten-minute hook lead, five-minute request lead, request-only transient grace, and lease-serialized single-use rotation (`tokens.rs`, `r53_*`) | Done | — |
+| e | upstream wire | OpenAI chat to `api.cline.bot` (`cline.go:43-49`; plugin) | `upstream.rs` OPENAI_CHAT + envelope unwrap | Partial | Recorded mocks only |
+| f | inbound shapes | Chat completions + pinned CLI headers (`cline/index.mjs:38-74`) | `client.rs`: `cline-cli` 3.0.68, platform `cli`, core 0.0.90 on every API call | Done | — |
 | g | streaming | Plugin stream chat | `wire::execute` | Partial | unverified parity |
 | h | tool calls | Through chat API | wire layer | Partial | — |
-| i | images | Catalog `input.image` per model and image-part handling (`packages/cline/index.mjs:356-357`, `482-518`) | no image handling found in `plugins/subscriptions/cline/src` | Missing | Image input per model catalog (**R-53**) |
-| j | reasoning | unverified | unverified | unverified | Confirm in **R-53** |
-| k | quota / usage | GET `/users/me/plan/usage-limits` + credits (`cline_usage.go:39-67`) | `quota.rs` | Partial | 404 without ClinePass handling |
-| l | model list | `recommended-models` clinePass + free (`cline.go:56-61`) | `models.rs` filters clinePass/free | Partial | cloud-models feed if any (unverified) |
+| i | images | Catalog `input.image` per model and image-part handling (`packages/cline/index.mjs:356-357`, `482-518`) | `models.rs` carries exact/alias-agreed input modalities and image flags; OpenAI Chat encodes inline images (`r53_*`) | Done | — |
+| j | reasoning | Model records set `reasoning: false` | Empty effort lists; no reasoning events or budgets invented | Done | — |
+| k | quota / usage | GET `/users/me/plan/usage-limits` + credits (`cline_usage.go:39-67`) | `quota.rs`, including credits-only fallback only on a limits 404 | Done | — |
+| l | model list | Required `recommended-models` groups plus optional additive `/ai/cline/models` | `models.rs` merges all three groups with cloud context and input capabilities; cloud failure keeps the required feed | Done | — |
 | m | multi-account | Multiple keys/accounts | Daemon multi-account | Done | — |
-| n | error classification | NeedsSignIn on hard expire (`cline/index.mjs:27-30`) | 401 refresh path | Partial | **R-53** |
+| n | error classification | NeedsSignIn on hard expire (`cline/index.mjs:27-30`) | Refused refresh sets lapsed / NeedsSignIn; transient errors do not | Done | — |
 | o | check-in | N/A | N/A | N/A | — |
 | p | agent sign-in discovery | N/A (agent uses provider JSON) | No discover (`subscriptions.md:100`) | N/A | — |
-| q | extras | Task id header (`cline/index.mjs:62-75`) | Optional `X-Task-ID` in `client.rs:20-22` | Partial | Session→task id hook (**R-53**) |
+| q | extras | Task id header (`cline/index.mjs:62-75`) | `client.rs` derives the reference SHA-256/UUID-layout id from host sessions and omits empty/synthetic sessions | Done | — |
 
-### Gaps (Cline)
+### R-53 completed (Cline)
 
-- Client identity parity (desktop vs CLI headers/version) — **M**, **R-53**
-- Task/session headers on chat — **S**, **R-53**
-- Retryable token grace + NeedsSignIn mapping — **S**, **R-24**, **R-53**
-- OAuth register path parity with Cline app — **M**, **R-53**
-- Image input per model catalog — **S**, **R-53**
+- Pinned CLI client identity on every API request, including platform and core headers.
+- Host-session task ids, with no header for empty or synthetic sessions.
+- Required recommended plus optional additive cloud catalogs, image capabilities, and OpenAI image parts.
+- Ten-minute hook renewal, five-minute request refresh, single-use leased rotation, and request-only transient grace.
+- Confirmed `reasoning: false`; no events, efforts, or budgets were added.
+
+Remaining verification is live-account acceptance; all evidence here is deterministic fixtures or recorded HTTP.
 
 ---
 
