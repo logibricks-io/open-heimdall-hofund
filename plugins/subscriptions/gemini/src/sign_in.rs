@@ -91,7 +91,11 @@ pub(crate) async fn exchange(
 }
 
 /// The email of the Google account `access` belongs to.
-async fn who(host: &HostContext, url: &str, access: &SecretString) -> Result<String, PluginError> {
+pub(crate) async fn who(
+    host: &HostContext,
+    url: &str,
+    access: &SecretString,
+) -> Result<String, PluginError> {
     let reply = Call::get(url).bearer(access)?.fetch(host.http()).await?;
     if reply.status() != 200 {
         return Err(PluginError::auth(format!(

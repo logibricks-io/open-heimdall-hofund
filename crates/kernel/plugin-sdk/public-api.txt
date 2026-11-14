@@ -144,6 +144,7 @@ oauth::AccessToken
 oauth::AccessToken::const fn expires_in (& self) -> Duration
 oauth::AccessToken::fn expose_secret (& self) -> & str
 oauth::Clock
+oauth::GoogleImport
 oauth::IamAccessToken
 oauth::IamAccessToken::const fn access_token (& self) -> & AccessToken
 oauth::IamAccessToken::fn expire_time (& self) -> Option < & str >
@@ -167,6 +168,7 @@ oauth::fn refresh_form (client_id : & str , client_secret : & str , refresh_toke
 oauth::fn refresh_secret_form (client_id : & str , client_secret : & str , refresh_token : & SecretString ,) -> String
 oauth::new_state
 oauth::new_state_with_random_bytes
+oauth::parse_google_import
 oauth::parse_token_set
 oauth::same_secret
 oauth::secret_text

@@ -24,6 +24,7 @@ mod cache;
 mod clock;
 mod detached;
 pub mod device;
+mod google_import;
 mod object;
 mod pkce;
 mod token;
@@ -32,6 +33,7 @@ pub use account::account_id_from;
 pub use cache::{NEGATIVE_TTL, TokenCache};
 pub use clock::Clock;
 pub use detached::detached;
+pub use google_import::{GoogleImport, parse_google_import};
 pub use object::{SecretObject, constant_time_eq, same_secret, secret_text};
 pub use pkce::{
     Pkce, authorize_url, client_code_exchange_form, code_exchange_form, new_state,
