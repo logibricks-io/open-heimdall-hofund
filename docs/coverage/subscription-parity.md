@@ -26,7 +26,7 @@ Legend: **Done** = matches the reference at checklist granularity; **Partial** =
 | SuperGrok (`grok`) | 14 | 2 | 0 | 2 | 0 |
 | Qoder (international + Qoder CN) | 13 | 5 | 0 | 2 | 0 |
 | CodeBuddy / WorkBuddy (CN + international) | 18 | 1 | 0 | 0 | 0 |
-| Z Code (`zcode`) | 15 | 4 | 0 | 0 | 0 |
+| Z Code (`zcode`) | 16 | 3 | 0 | 0 | 0 |
 
 Gaps that had no plan item before this audit (the supervisor's v0.2.0 plan and backlog now carry them under the item named):
 
@@ -593,11 +593,11 @@ Remaining verification is live-account acceptance; all evidence here is determin
 
 ## Z Code (`zcode`)
 
-**Reference files read:** `zcode.go`, `zcode_device.go`, `zcode_team.go`, `migrate_zcode.go`, `plugin_checkin.go`, `workbuddy.go`, `internal/agent/zcode.go`, and `internal/appdir/zcode.go`. The earlier audit incorrectly said the plugin package was absent. The frozen community package is present at `packages/zcode` under community commit 1ad712d and was read for R-57b: `index.mjs`, `prompt.mjs`, the sign-in, Start Plan, model, gift, team, usage, and check-in tests, and the recorded marketing fixture. Wire details below now come from that package as well as the Go sources.
+**Reference files read:** `zcode.go`, `zcode_device.go`, `zcode_team.go`, `migrate_zcode.go`, `plugin_checkin.go`, `workbuddy.go`, `internal/agent/zcode.go`, and `internal/appdir/zcode.go`. The earlier audit incorrectly said the plugin package was absent. The frozen community package is present at `packages/zcode` under community commit 1ad712d and was read for R-57b: `index.mjs`, `prompt.mjs`, the sign-in, Start Plan, model, gift, team, usage, and check-in tests, and the recorded marketing fixture. R-57c also read `dual.test.mjs`, `toolsearch.test.mjs`, and `concurrency.test.mjs`. Wire details below now come from that package as well as the Go sources.
 
-**hofund path:** `plugins/subscriptions/zcode/`; R-57 and R-57b use deterministic recorded HTTP and fixture tests only.
+**hofund path:** `plugins/subscriptions/zcode/`; R-57, R-57b, and R-57c use deterministic recorded HTTP and fixture tests only.
 
-| # | capability | reference v0.1.3005 | hofund 08035c9 + R-57 + R-57b | status | gap to close |
+| # | capability | reference v0.1.3005 | hofund 08035c9 + R-57 + R-57b + R-57c | status | gap to close |
 |---|------------|----------------------|--------------------------------|--------|--------------|
 | a1 | sign-in: device / portal OAuth | `authorize()` posts `/api/v1/oauth/cli/init`, validates an HTTPS page, sets the site-specific redirect, and polls `/api/v1/oauth/cli/poll/{flow_id}` | `sign_in.rs` pending sessions implement both sites, business-token exchange, own/team plan resolution, and Start Plan fallback only for a live or pending plan | Done | Recorded mocks only; no live account |
 | a2 | API key import | Plugin supports Z.ai and BigModel key plans | Agent-store import plus `SignInProof::Token` API-key accounts | Done | — |
@@ -605,10 +605,10 @@ Remaining verification is live-account acceptance; all evidence here is determin
 | b | import sources | encrypted `~/.zcode/v2/credentials.json` (`zcode.go:14-18`) | `creds.rs` decrypt + `discover.rs`, including JWT-only Start Plan stores | Done | — |
 | c | token storage | logins.json for reference-added; encrypted agent store read | SecretObject + per-account device id (`creds.rs`) | Done | — |
 | d | refresh | The frozen plugin says the JWT cannot be refreshed; app-backed accounts reread the app's renewed session | `refresh.rs` re-imports through the account lease and fails closed on an expired browser-only JWT; no renewal endpoint is invented | Partial | Recorded mocks only; browser-only JWTs require sign-in again |
-| e | upstream wire | Plan bases and `START_BASE`; 3.17.2 headers and prompt texts, body dressing, device/session metadata, gift aliases | `upstream.rs` + `start.rs` + `gift.rs` implement JWT-only and trial routing, exact prompt hashes, disabled/enabled reasoning, live-bucket balance checks, and Start quota. Team keys skip personal-plan detection, and expired JWTs leave key-backed plan requests usable | Partial | Dual-account automatic free-first, ToolSearch rewriting, busy retries, and edge-firewall holds are not ported |
+| e | upstream wire | Plan bases and `START_BASE`; 3.17.2 headers and prompt texts, body dressing, device/session metadata, gift aliases, default-on free-first, ToolSearch aliases, busy retries, and edge-firewall holds | `upstream.rs`, `routing.rs`, `tool_search.rs`, `start.rs`, and `gift.rs` implement JWT-only, trial, and dual-account free-first routing with plan replay, exact prompt hashes, reasoning, live-bucket checks, ToolSearch request/reply renaming, six fixed busy waits, and a shared three-minute edge hold. Team keys skip personal-plan detection, and expired JWTs leave key-backed plan requests usable | Done | Deterministic recorded HTTP and fixtures only; no live account |
 | f | inbound shapes | Messages only upstream | `upstream.rs` rejects non-Messages | Done | — |
 | g | streaming | Anthropic SSE | wire streaming | Done | — |
-| h | tool calls | Anthropic tools | standard Messages wire | Partial | unverified |
+| h | tool calls | Anthropic tools, including ToolSearch renamed to `ToolSearchTool` and restored on replies | Standard Messages wire plus request undefer/placeholder removal and unary/streamed call-name restoration in `tool_search.rs` | Partial | Deterministic fixtures cover ToolSearch; other tool behavior remains unverified |
 | i | images | Per-model `supportsImage` in provider rules (`index.mjs:1690`) | `provider_config.rs` maps the flag to `ModelSpec::image_input` and input modalities | Done | Recorded config fixture only |
 | j | reasoning | Per-model levels and thinking budgets (`index.mjs:1691`, `1753-1765`) | Provider levels map to `ModelSpec::efforts`; `start.rs` maps `none` to disabled thinking and other levels to the reference budgets | Done | Recorded config and wire fixtures only |
 | k | quota / usage | Monitor quota plus Start Plan balance buckets; a live sibling supersedes a spent bucket for the same model | `quota.rs` monitor endpoints and `gift.rs` live/pending windows; spent siblings are non-blocking and recorded quota and trial-routing fixtures cover live-plan selection | Done | — |
@@ -629,10 +629,15 @@ Remaining verification is live-account acceptance; all evidence here is determin
 - Used the present frozen plugin package to add 3.17.2 identity and exact 3.17.2 Start Plan prompts, native Z.ai/BigModel sign-in, Start Plan and gift-balance routing, provider-config image/reasoning metadata, missing team-key creation, and daily marketing claims.
 - Added a plugin API recheck deadline and daemon persistence so inactive, ineligible, and failed Z Code results rerun after 30 minutes without sleeps or wall-clock test dependencies.
 
-**Remaining gaps after R-57b**
+**R-57c completed**
 
-- Agent credential switching remains fail-closed; the references do not specify a safe encrypted-store switch writer.
-- Automatic free-first routing for dual accounts, ToolSearch rewriting, busy retries, and edge-firewall holds remain outside this slice.
-- All new behavior is verified with recorded HTTP and fixtures only; no live-account claim is made.
+- Added default-on free-first routing for dual accounts, with `freeFirst: false` as the opt-out, per-model spent/refusal rests, and same-request coding-plan replay for gift failures and quota envelopes.
+- Added ToolSearch request/history/tool-choice rewriting, undefer and placeholder removal, and unary/streamed response restoration through the existing SDK wire hooks.
+- Added 3008/3009 and wording-based busy classification, six fixed host-runtime waits, and a shared three-minute edge-firewall hold with the network hint and no account cooldown. Paused clocks drive all wait and expiry tests.
+
+**Remaining gaps after R-57c**
+
+- Agent credential switching remains fail-closed; the reference does not specify a safe encrypted-store switch writer.
+- General tool behavior and refresh remain Partial as listed above. All new behavior is verified with recorded HTTP, fixtures, and paused clocks only; no live-account claim is made.
 
 ---

@@ -2,10 +2,12 @@
 
 use std::path::PathBuf;
 
-use hofund_kit_subscription::{TestHost, block_on};
+use hofund_kit_subscription::{TestHost, advance_time, block_on, block_on_paused};
 use hofund_plugin_api::{
-    AccountId, AccountStatus, PluginErrorKind, PluginId, PluginKind, ProbeQuery, ProtocolId,
-    RawTable, SecretString, SignInChallenge, SignInCtx, SignInProof, SubscriptionFactory,
+    AccountId, AccountStatus, Completion, ContentPart, Extensions, Message, PluginErrorKind,
+    PluginId, PluginKind, ProbeQuery, ProtocolId, RawTable, RawValue, Request, Role, SecretString,
+    SignInChallenge, SignInCtx, SignInProof, SubscriptionFactory, Tool, ToolArguments,
+    ToolCallPart, ToolChoice,
 };
 use hofund_plugin_sdk::json::json;
 use hofund_plugin_sdk::oauth::{SecretObject, secret_text};
@@ -29,8 +31,23 @@ fn host(dir: &tempfile::TempDir) -> TestHost {
 }
 
 fn subscription(host: &TestHost) -> std::sync::Arc<dyn hofund_plugin_api::Subscription> {
+    configured_subscription(host, RawTable::new())
+}
+
+fn subscription_without_free_first(
+    host: &TestHost,
+) -> std::sync::Arc<dyn hofund_plugin_api::Subscription> {
+    let mut raw = RawTable::new();
+    raw.insert("freeFirst", RawValue::Boolean(false));
+    configured_subscription(host, raw)
+}
+
+fn configured_subscription(
+    host: &TestHost,
+    raw: RawTable,
+) -> std::sync::Arc<dyn hofund_plugin_api::Subscription> {
     let factory = factory_with_endpoints(endpoints());
-    let cfg = factory.validate(&RawTable::new()).expect("config");
+    let cfg = factory.validate(&raw).expect("config");
     factory.build(&cfg, host.context()).expect("build")
 }
 
@@ -1395,10 +1412,15 @@ fn r57b_team_key_and_jwt_ignore_an_empty_personal_plan_list() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
     let id = seed_team_key_and_jwt(&host, jwt_with_exp(4_102_444_800));
-    let upstream = subscription(&host)
+    let upstream = subscription_without_free_first(&host)
         .upstream(&id, host.context())
         .expect("upstream");
 
+    host.http().enqueue(
+        json!({"code": 0, "data": {"plans": [], "balances": []}})
+            .to_string()
+            .into_bytes(),
+    );
     host.http().enqueue(message_ok());
     let ordinary = ProbeQuery::new(ProtocolId::ANTHROPIC_MESSAGES, "GLM-5.3").expect("query");
     block_on(upstream.probe(&ordinary)).expect("team request");
@@ -1423,11 +1445,12 @@ fn r57b_team_key_and_jwt_ignore_an_empty_personal_plan_list() {
     block_on(upstream.probe(&trial)).expect("gift request");
 
     let calls = host.http().calls();
-    assert_eq!(calls.len(), 3);
-    assert!(calls[0].uri().starts_with(ZAI_ANTHROPIC_BASE));
-    assert!(calls[1].uri().contains("/billing/balance"));
+    assert_eq!(calls.len(), 4);
+    assert!(calls[0].uri().contains("/billing/balance"));
+    assert!(calls[1].uri().starts_with(ZAI_ANTHROPIC_BASE));
+    assert!(calls[2].uri().contains("/billing/balance"));
     assert!(
-        calls[2]
+        calls[3]
             .uri()
             .starts_with("https://zcode.test/api/v1/zcode-plan/anthropic")
     );
@@ -1648,4 +1671,791 @@ fn r57b_live_sibling_bucket_controls_quota_and_trial_routing() {
             .uri()
             .starts_with("https://zcode.test/api/v1/zcode-plan/anthropic")
     );
+}
+
+fn seed_dual(host: &TestHost) -> AccountId {
+    seed_auth(
+        host,
+        &PlanAuth {
+            api_key: Some(SecretString::from("dual.plan.key".to_owned())),
+            jwt: Some(jwt_with_exp(4_102_444_800)),
+            team_token: None,
+            org: String::new(),
+            project: String::new(),
+            base: ZAI_ANTHROPIC_BASE.to_owned(),
+            site: Site::Zai,
+            uid: "u-dual".to_owned(),
+            label: "dual@zcode.test".to_owned(),
+            follow_agent: false,
+            agent_credentials: None,
+        },
+    )
+}
+
+fn enqueue_dual_discovery(host: &TestHost, remaining: u64) {
+    host.http().enqueue(
+        json!({"code": 200, "data": [{"status": "VALID", "productName": "GLM Coding Pro"}]})
+            .to_string()
+            .into_bytes(),
+    );
+    host.http().enqueue(
+        json!({"code": 0, "data": {
+            "server_time": 4_102_444_800_i64,
+            "plans": [{"plan_id": "start", "name": "Start Plan", "status": "active", "ends_at": 4_102_500_000_i64}],
+            "balances": [{
+                "plan_id": "start",
+                "capabilities": ["model:glm-5.3-flash"],
+                "total_units": 1000,
+                "used_units": 1000 - remaining,
+                "remaining_units": remaining,
+                "expires_at": 4_102_448_400_i64
+            }]
+        }})
+        .to_string()
+        .into_bytes(),
+    );
+}
+
+fn probe_model(upstream: &dyn hofund_plugin_api::UpstreamProvider, model: &str) {
+    let query = ProbeQuery::new(ProtocolId::ANTHROPIC_MESSAGES, model).expect("query");
+    block_on(upstream.probe(&query)).expect("probe");
+}
+
+#[test]
+fn r57c_free_first_is_default_and_reuses_the_route_read() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_dual(&host);
+    let upstream = subscription(&host)
+        .upstream(&id, host.context())
+        .expect("upstream");
+    enqueue_dual_discovery(&host, 750);
+    host.http().enqueue(message_ok());
+    probe_model(upstream.as_ref(), "GLM-5.3-Flash");
+
+    host.http().enqueue(message_ok());
+    probe_model(upstream.as_ref(), "glm-5.3-flash");
+    let calls = host.http().calls();
+    assert_eq!(calls.len(), 4);
+    assert!(
+        calls[2]
+            .uri()
+            .starts_with("https://zcode.test/api/v1/zcode-plan/anthropic")
+    );
+    assert!(
+        calls[3]
+            .uri()
+            .starts_with("https://zcode.test/api/v1/zcode-plan/anthropic")
+    );
+    for call in &calls[2..4] {
+        let body: hofund_plugin_sdk::json::Value =
+            hofund_plugin_sdk::json::from_slice(call.body()).expect("body");
+        assert_eq!(body["model"], "GLM-5.3-Flash");
+    }
+}
+
+#[test]
+fn r57c_free_first_false_keeps_plain_models_on_the_coding_plan() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_dual(&host);
+    let upstream = subscription_without_free_first(&host)
+        .upstream(&id, host.context())
+        .expect("upstream");
+    enqueue_dual_discovery(&host, 750);
+    host.http().enqueue(message_ok());
+    probe_model(upstream.as_ref(), "GLM-5.3-Flash");
+    let calls = host.http().calls();
+    assert_eq!(calls.len(), 3);
+    assert!(calls[2].uri().starts_with(ZAI_ANTHROPIC_BASE));
+}
+
+#[test]
+fn r57c_spent_balance_skips_the_gift_without_a_message_to_it() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_dual(&host);
+    let upstream = subscription(&host)
+        .upstream(&id, host.context())
+        .expect("upstream");
+    enqueue_dual_discovery(&host, 0);
+    host.http().enqueue(message_ok());
+    probe_model(upstream.as_ref(), "GLM-5.3-Flash");
+    let calls = host.http().calls();
+    assert_eq!(calls.len(), 3);
+    assert!(calls[2].uri().starts_with(ZAI_ANTHROPIC_BASE));
+    assert!(
+        !calls
+            .iter()
+            .any(|call| call.uri().contains("/zcode-plan/anthropic/v1/messages"))
+    );
+}
+
+#[test]
+fn r57c_spent_gift_answer_replays_and_rests_only_that_model() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_dual(&host);
+    let upstream = subscription(&host)
+        .upstream(&id, host.context())
+        .expect("upstream");
+    enqueue_dual_discovery(&host, 750);
+    host.http().enqueue_response(
+        429,
+        &[],
+        json!({"error": {"code": "1113", "message": "Insufficient balance or no resource package"}})
+            .to_string(),
+    );
+    host.http().enqueue(message_ok());
+    probe_model(upstream.as_ref(), "GLM-5.3-Flash");
+
+    enqueue_dual_discovery(&host, 750);
+    host.http().enqueue(message_ok());
+    probe_model(upstream.as_ref(), "GLM-5.3-Flash");
+    let calls = host.http().calls();
+    assert_eq!(calls.len(), 7);
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| call.uri().contains("/zcode-plan/anthropic/v1/messages"))
+            .count(),
+        1
+    );
+    assert!(calls[3].uri().starts_with(ZAI_ANTHROPIC_BASE));
+    assert!(calls[6].uri().starts_with(ZAI_ANTHROPIC_BASE));
+}
+
+#[test]
+fn r57c_free_first_200_quota_envelope_replays_on_the_plan() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_dual(&host);
+    let upstream = subscription(&host)
+        .upstream(&id, host.context())
+        .expect("upstream");
+    enqueue_dual_discovery(&host, 750);
+    host.http().enqueue_response(
+        200,
+        &[("content-type", "application/json")],
+        json!({"code": 1005, "msg": "exceed quota limit"}).to_string(),
+    );
+    host.http().enqueue(message_ok());
+    probe_model(upstream.as_ref(), "GLM-5.3-Flash");
+    let calls = host.http().calls();
+    assert_eq!(calls.len(), 4);
+    assert!(calls[3].uri().starts_with(ZAI_ANTHROPIC_BASE));
+}
+
+#[test]
+fn r57c_free_first_refusal_does_not_block_an_explicit_trial_pick() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_dual(&host);
+    let upstream = subscription(&host)
+        .upstream(&id, host.context())
+        .expect("upstream");
+    enqueue_dual_discovery(&host, 750);
+    host.http().enqueue_response(
+        405,
+        &[],
+        json!({"error": {"code": "3012", "message": "request has been blocked due to unusual activity"}})
+            .to_string(),
+    );
+    host.http().enqueue(message_ok());
+    probe_model(upstream.as_ref(), "GLM-5.3-Flash");
+
+    enqueue_dual_discovery(&host, 750);
+    host.http().enqueue(message_ok());
+    probe_model(upstream.as_ref(), "GLM-5.3-Flash-Trial");
+    let calls = host.http().calls();
+    assert_eq!(calls.len(), 7);
+    assert!(
+        calls[6]
+            .uri()
+            .starts_with("https://zcode.test/api/v1/zcode-plan/anthropic")
+    );
+}
+
+#[test]
+fn r57c_free_first_option_must_be_a_boolean() {
+    let factory = factory_with_endpoints(endpoints());
+    let mut raw = RawTable::new();
+    raw.insert("freeFirst", RawValue::String("no".to_owned()));
+    let error = factory.validate(&raw).expect_err("invalid option");
+    assert!(error.to_string().contains("freeFirst must be a boolean"));
+}
+
+fn tool_fixture(name: &str, deferred: bool) -> Tool {
+    let extensions = if deferred {
+        Extensions::from_map(
+            json!({"defer_loading": true})
+                .as_object()
+                .expect("object")
+                .clone(),
+        )
+    } else {
+        Extensions::new()
+    };
+    Tool {
+        name: name.to_owned(),
+        description: Some(format!("{name} description")),
+        input_schema: json!({"type": "object", "properties": {"query": {"type": "string"}}}),
+        extensions,
+    }
+}
+
+fn tool_search_request(stream: bool) -> Request {
+    let mut user = Message::new(Role::User);
+    user.content.push(ContentPart::text("Find Bash"));
+    let mut assistant = Message::new(Role::Assistant);
+    assistant.content.push(ContentPart::ToolCall(ToolCallPart {
+        id: "toolu_s".to_owned(),
+        name: "ToolSearch".to_owned(),
+        arguments: ToolArguments::from_text(r#"{"query":"select:Bash"}"#),
+        extensions: Extensions::new(),
+    }));
+    Request::new("GLM-5.3")
+        .with_messages(vec![user, assistant])
+        .with_tools(vec![
+            tool_fixture("Bash", true),
+            tool_fixture("ToolSearch", false),
+            tool_fixture("DeferredToolPlaceholder", true),
+        ])
+        .with_tool_choice(Some(ToolChoice::named("ToolSearch")))
+        .with_stream(stream)
+}
+
+fn execute_raw(
+    upstream: &dyn hofund_plugin_api::UpstreamProvider,
+    request: Request,
+) -> Result<Vec<u8>, hofund_plugin_api::PluginError> {
+    block_on(async {
+        let completion = upstream
+            .execute(request, ProtocolId::ANTHROPIC_MESSAGES)
+            .await?;
+        let Completion::Raw(mut body) = completion else {
+            panic!("same-protocol Messages replies stay raw");
+        };
+        let mut bytes = Vec::new();
+        while let Some(chunk) = body.next_chunk().await {
+            bytes.extend_from_slice(&chunk?);
+        }
+        Ok(bytes)
+    })
+}
+
+fn seed_start(host: &TestHost) -> AccountId {
+    seed_auth(
+        host,
+        &PlanAuth {
+            api_key: None,
+            jwt: Some(jwt_with_exp(4_102_444_800)),
+            team_token: None,
+            org: String::new(),
+            project: String::new(),
+            base: ZAI_ANTHROPIC_BASE.to_owned(),
+            site: Site::Zai,
+            uid: "u-start".to_owned(),
+            label: "start@zcode.test".to_owned(),
+            follow_agent: false,
+            agent_credentials: None,
+        },
+    )
+}
+
+#[test]
+fn r57c_tool_search_plan_wire_and_unary_reply_round_trip() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_plan_key(&host, "tool.plan.key", "tools@zcode.test");
+    let upstream = subscription(&host)
+        .upstream(&id, host.context())
+        .expect("upstream");
+    host.http().enqueue(
+        json!({
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "ToolSearchTool"},
+                {"type": "tool_use", "id": "toolu_1", "name": "ToolSearchTool", "input": {"query": "select:Bash"}}
+            ]
+        })
+        .to_string()
+        .into_bytes(),
+    );
+    let response = execute_raw(upstream.as_ref(), tool_search_request(false)).expect("response");
+    let calls = host.http().calls();
+    assert_eq!(calls.len(), 1);
+    let sent: hofund_plugin_sdk::json::Value =
+        hofund_plugin_sdk::json::from_slice(calls[0].body()).expect("request");
+    assert_eq!(sent["tools"].as_array().map(Vec::len), Some(2));
+    assert_eq!(sent["tools"][0]["name"], "Bash");
+    assert_eq!(sent["tools"][1]["name"], "ToolSearchTool");
+    assert!(sent["tools"][0].get("defer_loading").is_none());
+    assert_eq!(sent["messages"][1]["content"][0]["name"], "ToolSearchTool");
+    assert_eq!(sent["tool_choice"]["name"], "ToolSearchTool");
+
+    let response: hofund_plugin_sdk::json::Value =
+        hofund_plugin_sdk::json::from_slice(&response).expect("response json");
+    assert_eq!(response["content"][0]["text"], "ToolSearchTool");
+    assert_eq!(response["content"][1]["name"], "ToolSearch");
+}
+
+#[test]
+fn r57c_tool_search_start_stream_restores_only_the_tool_call() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_start(&host);
+    let upstream = subscription(&host)
+        .upstream(&id, host.context())
+        .expect("upstream");
+    host.http().enqueue(
+        concat!(
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ToolSearchTool\"}}\n\n",
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"ToolSearchTool\",\"input\":{}}}\n\n"
+        )
+        .as_bytes()
+        .to_vec(),
+    );
+    let response = execute_raw(upstream.as_ref(), tool_search_request(true)).expect("response");
+    let response = String::from_utf8(response).expect("utf8");
+    assert!(response.contains(r#""text":"ToolSearchTool""#));
+    assert!(response.contains(r#""name":"ToolSearch""#));
+    assert!(!response.contains(r#""name":"ToolSearchTool""#));
+
+    let calls = host.http().calls();
+    assert_eq!(calls.len(), 1);
+    assert!(
+        calls[0]
+            .uri()
+            .starts_with("https://zcode.test/api/v1/zcode-plan/anthropic")
+    );
+    let sent: hofund_plugin_sdk::json::Value =
+        hofund_plugin_sdk::json::from_slice(calls[0].body()).expect("request");
+    assert_eq!(sent["tools"][1]["name"], "ToolSearchTool");
+    assert!(sent["tools"].as_array().expect("tools").iter().all(|tool| {
+        tool.get("defer_loading").is_none() && tool["name"] != "DeferredToolPlaceholder"
+    }));
+}
+
+fn paused_host(dir: &tempfile::TempDir) -> TestHost {
+    TestHost::open_for_with_tokio_monotonic(
+        PluginKind::Subscription,
+        PluginId::from_static("zcode"),
+        dir.path(),
+    )
+}
+
+fn minimal_request(model: &str) -> Request {
+    ProbeQuery::new(ProtocolId::ANTHROPIC_MESSAGES, model)
+        .expect("query")
+        .minimal_request()
+}
+
+#[test]
+fn r57c_busy_retry_uses_the_first_fixed_host_wait_and_identical_bytes() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = paused_host(&dir);
+    let id = seed_plan_key(&host, "busy.plan.key", "busy@zcode.test");
+    let upstream = subscription(&host)
+        .upstream(&id, host.context())
+        .expect("upstream");
+    host.http().enqueue_response(
+        429,
+        &[],
+        json!({"code": 3008, "msg": "user concurrency limit exceeded"}).to_string(),
+    );
+    host.http().enqueue(message_ok());
+    block_on_paused(async {
+        let before = host.context().clock().monotonic();
+        upstream
+            .execute(minimal_request("GLM-5.3"), ProtocolId::ANTHROPIC_MESSAGES)
+            .await
+            .expect("second attempt");
+        assert_eq!(
+            host.context().clock().monotonic() - before,
+            std::time::Duration::from_millis(251)
+        );
+    });
+    let calls = host.http().calls();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].body(), calls[1].body());
+    assert_eq!(calls[0].uri(), calls[1].uri());
+}
+
+#[test]
+fn r57c_busy_budget_is_six_waits_then_a_plain_429_with_the_hint() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = paused_host(&dir);
+    let id = seed_plan_key(&host, "busy.plan.key", "busy@zcode.test");
+    let upstream = subscription(&host)
+        .upstream(&id, host.context())
+        .expect("upstream");
+    for _ in 0..7 {
+        host.http().enqueue_response(
+            429,
+            &[],
+            json!({"error": {"code": "3009", "message": "model concurrency limit exceeded"}})
+                .to_string(),
+        );
+    }
+    block_on_paused(async {
+        let before = host.context().clock().monotonic();
+        let error = upstream
+            .execute(minimal_request("GLM-5.3"), ProtocolId::ANTHROPIC_MESSAGES)
+            .await
+            .err()
+            .expect("saturated");
+        assert_eq!(error.status(), Some(429));
+        assert!(error.message().contains("Z Code serves one account"));
+        assert_eq!(
+            host.context().clock().monotonic() - before,
+            std::time::Duration::from_millis(10_056)
+        );
+    });
+    assert_eq!(host.http().calls().len(), 7);
+}
+
+#[test]
+fn r57c_nonbusy_rate_limit_is_not_retried_or_relabelled() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_plan_key(&host, "rate.plan.key", "rate@zcode.test");
+    let upstream = subscription(&host)
+        .upstream(&id, host.context())
+        .expect("upstream");
+    host.http().enqueue_response(
+        429,
+        &[],
+        json!({"code": 1302, "msg": "rate limit reached"}).to_string(),
+    );
+    let error =
+        block_on(upstream.execute(minimal_request("GLM-5.3"), ProtocolId::ANTHROPIC_MESSAGES))
+            .err()
+            .expect("rate limit");
+    assert_eq!(error.status(), Some(429));
+    assert!(!error.message().contains("Z Code serves one account"));
+    assert_eq!(host.http().calls().len(), 1);
+}
+
+#[test]
+fn r57c_exhausted_free_gift_busy_budget_replays_on_the_plan() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = paused_host(&dir);
+    let id = seed_dual(&host);
+    let upstream = subscription(&host)
+        .upstream(&id, host.context())
+        .expect("upstream");
+    enqueue_dual_discovery(&host, 750);
+    for _ in 0..7 {
+        host.http().enqueue_response(
+            429,
+            &[],
+            json!({"code": 3008, "msg": "user concurrency limit exceeded"}).to_string(),
+        );
+    }
+    host.http().enqueue(message_ok());
+    block_on_paused(async {
+        let before = host.context().clock().monotonic();
+        upstream
+            .execute(
+                minimal_request("GLM-5.3-Flash"),
+                ProtocolId::ANTHROPIC_MESSAGES,
+            )
+            .await
+            .expect("plan replay");
+        assert_eq!(
+            host.context().clock().monotonic() - before,
+            std::time::Duration::from_millis(10_056)
+        );
+    });
+    let calls = host.http().calls();
+    assert_eq!(calls.len(), 10);
+    assert!(calls[9].uri().starts_with(ZAI_ANTHROPIC_BASE));
+}
+
+#[test]
+fn r57c_edge_hold_is_shared_and_expires_on_the_host_clock() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = paused_host(&dir);
+    let dual = seed_dual(&host);
+    let start = seed_start(&host);
+    let sub = subscription(&host);
+    let free = sub.upstream(&dual, host.context()).expect("free");
+    let explicit = sub.upstream(&start, host.context()).expect("start");
+    enqueue_dual_discovery(&host, 750);
+    host.http().enqueue_response(
+        405,
+        &[("content-type", "text/html")],
+        "<html>request has been blocked due to unusual activity; errors.aliyun.com</html>",
+    );
+    host.http().enqueue(message_ok());
+    block_on_paused(async {
+        free.execute(
+            minimal_request("GLM-5.3-Flash"),
+            ProtocolId::ANTHROPIC_MESSAGES,
+        )
+        .await
+        .expect("plan replay");
+        assert_eq!(host.http().calls().len(), 4);
+
+        let error = explicit
+            .execute(minimal_request("GLM-5.3"), ProtocolId::ANTHROPIC_MESSAGES)
+            .await
+            .err()
+            .expect("edge hold");
+        assert_eq!(error.status(), Some(405));
+        assert!(
+            error
+                .message()
+                .contains("network firewall blocked requests")
+        );
+        assert!(!error.cools());
+        assert_eq!(host.http().calls().len(), 4);
+
+        advance_time(std::time::Duration::from_secs(180)).await;
+        host.http().enqueue(message_ok());
+        explicit
+            .execute(minimal_request("GLM-5.3"), ProtocolId::ANTHROPIC_MESSAGES)
+            .await
+            .expect("hold expired");
+        assert_eq!(host.http().calls().len(), 5);
+    });
+}
+
+#[test]
+fn r57c_non_json_and_incidental_busy_lookalikes_are_not_retried() {
+    for body in [
+        "concurrency limit exceeded".to_owned(),
+        json!({"msg": "an unrelated request mentions 3008 and 3009"}).to_string(),
+        json!({"detail": "concurrency limit exceeded"}).to_string(),
+    ] {
+        let dir = tempfile::tempdir().expect("dir");
+        let host = paused_host(&dir);
+        let id = seed_plan_key(&host, "negative.busy.key", "negative@zcode.test");
+        let upstream = subscription(&host)
+            .upstream(&id, host.context())
+            .expect("upstream");
+        host.http()
+            .enqueue_response(429, &[("content-type", "text/plain")], body);
+        let error = block_on_paused(async {
+            upstream
+                .execute(minimal_request("GLM-5.3"), ProtocolId::ANTHROPIC_MESSAGES)
+                .await
+                .err()
+                .expect("refusal")
+        });
+        assert_eq!(error.status(), Some(429));
+        assert!(!error.message().contains("Z Code serves one account"));
+        assert_eq!(host.http().calls().len(), 1);
+    }
+}
+
+#[test]
+fn r57c_start_only_refusal_invalidates_the_cached_route() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_dual(&host);
+    let upstream = subscription_without_free_first(&host)
+        .upstream(&id, host.context())
+        .expect("upstream");
+    host.http()
+        .enqueue(json!({"code": 200, "data": []}).to_string().into_bytes());
+    host.http().enqueue_response(405, &[], "");
+    let error = block_on(upstream.execute(
+        minimal_request("GLM-5.3-Flash"),
+        ProtocolId::ANTHROPIC_MESSAGES,
+    ))
+    .err()
+    .expect("Start refusal");
+    assert_eq!(error.status(), Some(405));
+
+    enqueue_dual_discovery(&host, 750);
+    host.http().enqueue(message_ok());
+    probe_model(upstream.as_ref(), "GLM-5.3-Flash");
+    let calls = host.http().calls();
+    assert_eq!(calls.len(), 5);
+    assert!(calls[2].uri().contains("/api/biz/subscription/list"));
+    assert!(calls[3].uri().contains("/billing/balance"));
+    assert!(calls[4].uri().starts_with(ZAI_ANTHROPIC_BASE));
+}
+
+#[test]
+fn r57c_stream_request_json_quota_envelope_replays_on_the_plan() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_dual(&host);
+    let upstream = subscription(&host)
+        .upstream(&id, host.context())
+        .expect("upstream");
+    enqueue_dual_discovery(&host, 750);
+    host.http().enqueue_response(
+        200,
+        &[("content-type", "application/json")],
+        json!({"code": 1005, "msg": "exceed quota limit"}).to_string(),
+    );
+    host.http()
+        .enqueue_response(200, &[("content-type", "application/json")], message_ok());
+    execute_raw(
+        upstream.as_ref(),
+        minimal_request("GLM-5.3-Flash").with_stream(true),
+    )
+    .expect("plan replay");
+    let calls = host.http().calls();
+    assert_eq!(calls.len(), 4);
+    assert!(calls[3].uri().starts_with(ZAI_ANTHROPIC_BASE));
+}
+
+#[test]
+fn r57c_stream_request_json_quota_envelope_becomes_a_trial_429() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_dual(&host);
+    let upstream = subscription(&host)
+        .upstream(&id, host.context())
+        .expect("upstream");
+    enqueue_dual_discovery(&host, 750);
+    host.http().enqueue_response(
+        200,
+        &[("content-type", "application/json")],
+        json!({"code": 1005, "msg": "exceed quota limit"}).to_string(),
+    );
+    let error = block_on(upstream.execute(
+        minimal_request("GLM-5.3-Flash-Trial").with_stream(true),
+        ProtocolId::ANTHROPIC_MESSAGES,
+    ))
+    .err()
+    .expect("spent trial");
+    assert_eq!(error.status(), Some(429));
+    assert!(error.message().contains("1005"));
+    assert_eq!(host.http().calls().len(), 3);
+}
+
+#[test]
+fn r57c_trial_event_stream_is_not_read_as_a_unary_quota_envelope() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_dual(&host);
+    let upstream = subscription(&host)
+        .upstream(&id, host.context())
+        .expect("upstream");
+    enqueue_dual_discovery(&host, 750);
+    let events = concat!(
+        "event: content_block_start\n",
+        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+        "event: content_block_delta\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n"
+    );
+    host.http()
+        .enqueue_response(200, &[("content-type", "text/event-stream")], events);
+    let response = execute_raw(
+        upstream.as_ref(),
+        minimal_request("GLM-5.3-Flash-Trial").with_stream(true),
+    )
+    .expect("event stream");
+    assert_eq!(String::from_utf8(response).expect("utf8"), events);
+    assert_eq!(host.http().calls().len(), 3);
+}
+
+fn enqueue_expiring_dual_discovery(host: &TestHost, plan_expires_in: i64, bucket_expires_in: i64) {
+    host.http().enqueue(
+        json!({"code": 200, "data": [{"status": "VALID", "productName": "GLM Coding Pro"}]})
+            .to_string()
+            .into_bytes(),
+    );
+    host.http().enqueue(
+        json!({"code": 0, "data": {
+            "server_time": 4_102_444_800_i64,
+            "plans": [{
+                "plan_id": "start",
+                "name": "Start Plan",
+                "status": "active",
+                "ends_at": 4_102_444_800_i64 + plan_expires_in
+            }],
+            "balances": [{
+                "plan_id": "start",
+                "capabilities": ["model:glm-5.3-flash"],
+                "total_units": 1000,
+                "used_units": 250,
+                "remaining_units": 750,
+                "expires_at": 4_102_444_800_i64 + bucket_expires_in
+            }]
+        }})
+        .to_string()
+        .into_bytes(),
+    );
+}
+
+#[test]
+fn r57c_cached_gift_route_expires_with_the_balance() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = paused_host(&dir);
+    let id = seed_dual(&host);
+    let upstream = subscription(&host)
+        .upstream(&id, host.context())
+        .expect("upstream");
+    enqueue_expiring_dual_discovery(&host, 600, 120);
+    host.http().enqueue(message_ok());
+    enqueue_expiring_dual_discovery(&host, -1, -1);
+    host.http().enqueue(message_ok());
+    block_on_paused(async {
+        upstream
+            .execute(
+                minimal_request("GLM-5.3-Flash"),
+                ProtocolId::ANTHROPIC_MESSAGES,
+            )
+            .await
+            .expect("live gift");
+        advance_time(std::time::Duration::from_secs(121)).await;
+        upstream
+            .execute(
+                minimal_request("GLM-5.3-Flash"),
+                ProtocolId::ANTHROPIC_MESSAGES,
+            )
+            .await
+            .expect("expired gift");
+    });
+    let calls = host.http().calls();
+    assert_eq!(calls.len(), 6);
+    assert!(calls[2].uri().contains("/zcode-plan/anthropic/v1/messages"));
+    assert!(calls[3].uri().contains("/api/biz/subscription/list"));
+    assert!(calls[4].uri().contains("/billing/balance"));
+    assert!(calls[5].uri().starts_with(ZAI_ANTHROPIC_BASE));
+}
+
+#[test]
+fn r57c_direct_start_edge_page_with_3012_keeps_network_classification() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_start(&host);
+    let upstream = subscription(&host)
+        .upstream(&id, host.context())
+        .expect("upstream");
+    host.http().enqueue_response(
+        405,
+        &[("content-type", "text/html")],
+        "<html>request blocked; code 3012; errors.aliyun.com</html>",
+    );
+    let error =
+        block_on(upstream.execute(minimal_request("GLM-5.3"), ProtocolId::ANTHROPIC_MESSAGES))
+            .err()
+            .expect("edge page");
+    assert_eq!(error.status(), Some(405));
+    assert!(
+        error
+            .message()
+            .contains("network firewall blocked requests")
+    );
+    assert!(
+        !error
+            .message()
+            .contains("risk control blocked this account")
+    );
+    assert_eq!(error.retry_after(), None);
+    assert!(!error.cools());
+    assert_eq!(host.http().calls().len(), 1);
 }

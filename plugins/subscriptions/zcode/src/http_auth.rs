@@ -1,12 +1,91 @@
 //! Map vendor HTTP and envelope refusals to auth errors.
 
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use hofund_plugin_api::PluginError;
 use hofund_plugin_sdk::json::Value;
 
 pub(crate) const RESTRICTED_HINT: &str = "Z Code risk control blocked this account for unusual activity (code 3012); it rests for two hours while other providers can serve the request. If the Z Code app fails on this account too, only Z Code support can lift the block";
+pub(crate) const EDGE_HINT: &str = "the provider's network firewall blocked requests from this IP; wait a while, or switch to another network or proxy";
 const RESTRICTED_COOLDOWN: Duration = Duration::from_secs(2 * 60 * 60);
+
+pub(crate) fn edge_page(error: &PluginError) -> bool {
+    if error.status().is_none_or(|status| status < 400) {
+        return false;
+    }
+    let text = error.message().to_ascii_lowercase();
+    text.contains("errors.aliyun.com") || text.contains("<html")
+}
+
+pub(crate) fn edge_blocked(error: PluginError) -> PluginError {
+    if error.message().contains(EDGE_HINT) {
+        return error;
+    }
+    let message = format!("{} — {EDGE_HINT}", error.message());
+    error.with_message(message).without_cooldown()
+}
+
+pub(crate) fn edge_held(until: SystemTime) -> PluginError {
+    let until = hofund_plugin_sdk::chrono::DateTime::<hofund_plugin_sdk::chrono::Utc>::from(until)
+        .format("%H:%M:%S");
+    PluginError::status_error(
+        405,
+        format!(
+            "405 Method Not Allowed — {EDGE_HINT} (the Z Code Start Plan is not asked again from here until {until})"
+        ),
+    )
+    .without_cooldown()
+}
+
+pub(crate) fn busy_error(error: &PluginError) -> bool {
+    error.status() == Some(429) && busy_body(error.message())
+}
+
+pub(crate) fn busy_status(status: u16, body: &[u8], error: PluginError) -> PluginError {
+    let Ok(text) = std::str::from_utf8(body) else {
+        return error;
+    };
+    if status == 429 && busy_body(text) {
+        error.with_message(text.to_owned())
+    } else {
+        error
+    }
+}
+
+fn busy_body(text: &str) -> bool {
+    let Ok(body) = hofund_plugin_sdk::json::from_str::<Value>(text) else {
+        return false;
+    };
+    let nested = body.get("error").and_then(Value::as_object);
+    let code = scalar_text(body.get("code"))
+        .filter(|code| !code.is_empty())
+        .or_else(|| nested.and_then(|error| scalar_text(error.get("code"))));
+    if code.is_some_and(|code| matches!(code.as_str(), "3008" | "3009")) {
+        return true;
+    }
+    [
+        body.get("msg"),
+        body.get("message"),
+        nested.and_then(|error| error.get("message")),
+        body.get("error").filter(|error| !error.is_object()),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(|value| scalar_text(Some(value)))
+    .collect::<Vec<_>>()
+    .join(" ")
+    .to_ascii_lowercase()
+    .contains("concurrency limit exceeded")
+}
+
+fn scalar_text(value: Option<&Value>) -> Option<String> {
+    match value? {
+        Value::String(text) => Some(text.clone()),
+        Value::Number(number) => Some(number.to_string()),
+        Value::Bool(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
 
 pub(crate) fn classify_upstream_error(error: PluginError) -> PluginError {
     if error.status() != Some(405)
