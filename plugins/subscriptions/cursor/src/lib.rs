@@ -145,6 +145,7 @@ impl SubscriptionFactory for CursorFactory {
             flow: SignInFlow::Pkce,
             pending: Mutex::new(HashMap::new()),
             keychain: Arc::new(Mutex::new(cli::KeychainCache::default())),
+            agent_status: Arc::new(refresh::StatusCoalescer::default()),
             agent_home: self
                 .test_agent_home
                 .clone()
@@ -169,6 +170,7 @@ struct Cursor {
     flow: SignInFlow,
     pending: Mutex<HashMap<String, sign_in::PendingSignIn>>,
     keychain: Arc<Mutex<cli::KeychainCache>>,
+    agent_status: Arc<refresh::StatusCoalescer>,
     agent_home: PathBuf,
     keychain_enabled: bool,
 }
@@ -370,6 +372,7 @@ impl Subscription for Cursor {
                 self.agent_home(),
                 &self.keychain,
                 self.keychain_enabled,
+                &self.agent_status,
             )
             .await
             .map(|_| ())
@@ -395,6 +398,7 @@ impl Subscription for Cursor {
             self.program().ok(),
             &self.keychain,
             self.keychain_enabled,
+            &self.agent_status,
         )
         .await?;
         let team_id = team::header_value(&token);
@@ -424,6 +428,7 @@ impl Subscription for Cursor {
             self.program().ok(),
             &self.keychain,
             self.keychain_enabled,
+            &self.agent_status,
         )
         .await?;
         let entries = listing::usable(host, &self.endpoints, &token).await?;
@@ -443,6 +448,7 @@ impl Subscription for Cursor {
             self.program().ok(),
             Arc::clone(&self.keychain),
             self.keychain_enabled,
+            Arc::clone(&self.agent_status),
         )))
     }
 
