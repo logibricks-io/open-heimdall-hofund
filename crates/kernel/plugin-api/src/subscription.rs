@@ -305,6 +305,20 @@ pub trait Subscription: Send + Sync + 'static {
         ))
     }
 
+    /// Runs one-shot import work beside the config directory before accounts are listed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when prepared imports fail. The default does nothing.
+    async fn prepare_accounts(
+        &self,
+        config_dir: &std::path::Path,
+        host: &HostContext,
+    ) -> Result<(), PluginError> {
+        let _ = (config_dir, host);
+        Ok(())
+    }
+
     /// Sends the smallest vendor request that starts a rolling allowance window.
     ///
     /// The daemon calls this only when daily warm-up is configured and due.
