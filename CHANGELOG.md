@@ -19,6 +19,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - R-5: Keychain `security` reads use the account config directory as the spawn
   cwd, matching write and clear, instead of the process temp dir. Refs R-5.
 
+- R-54d: the Qoder subscription plugin migrates the legacy sibling `qoder.json`
+  beside the config file once before accounts are listed: `HOFUND_NO_ACCOUNTS`
+  skips the move, a global account with the same uid takes precedence, failed
+  store writes leave the file intact, and unreadable legacy files fail closed on
+  list (`r54d_*` temp-dir fixtures). Refs R-54.
+
 - R-9k: the Cursor subscription plugin tracks conversation-scoped dashboard
   usage debt across tool steps, maps a named session to a stable Run
   conversation id, and surfaces earlier-step totals in `Usage.extensions` as
