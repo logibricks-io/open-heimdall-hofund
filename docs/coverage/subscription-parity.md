@@ -17,7 +17,7 @@ Legend: **Done** = matches the reference at checklist granularity; **Partial** =
 | Devin (`devin`) | 12 | 6 | 0 | 1 | 0 |
 | Zed (`zed`) | 0 | 6 | 1 | 3 | 0 |
 | Kiro (`kiro`) | 9 | 8 | 0 | 2 | 0 |
-| Factory / Droid (`factory`) | 13 | 3 | 0 | 3 | 0 |
+| Factory / Droid (`factory`) | 14 | 2 | 0 | 3 | 0 |
 | Cline / ClinePass (`cline`) | 12 | 4 | 0 | 3 | 0 |
 | ChatGPT / Codex (`codex` backend) and ChatGPT API (`chatgpt-api`) | 10 | 10 | 1 | 0 | 0 |
 | GitHub Copilot (github.com and GHE) | 15 | 2 | 0 | 5 | 0 |
@@ -248,7 +248,7 @@ Structured-output prose for Chat, Responses, and Messages shipped in R-13b (`str
 | e | upstream wire | Per-model `/api/llm/{a,o,g}/v1`; prem host override (`factory/index.mjs:33-39`, `factory.go:65-67`) | `wire_target` plus canonical HTTPS prem-host routing; invalid hosts fail before HTTP (`upstream.rs`; `r52_prem_*`) | Done | Recorded HTTP only |
 | f | inbound shapes | Anthropic, Responses, Chat, Gemini; `fastBody` and multipart `droidChat` (`factory/index.mjs:128-158`, `:583-606`) | Four wires, six reference Fast Mode models, base-model speed/priority rewriting, fast beta, joined all-text Chat system content, and a separate Droid opening for mixed content (`models.rs`, `upstream.rs`; `r52_fast_*`, `r52_chat_system_*`) | Done | Recorded HTTP only |
 | g | streaming | Via AI SDK wire helpers; Gemini `/generate` | SDK streaming plus Gemini `/generate`, with model in the body (`wire.rs`, `upstream.rs`; `r52_gemini_stream_*`) | Done | Recorded HTTP only |
-| h | tool calls | `anthropic-tools.mjs` wraps root-composed schemas and unwraps unary/streamed calls | Through wire adapters | Partial | Specialized Anthropic schema wrapping and streamed tool unwrap remain |
+| h | tool calls | `anthropic-tools.mjs` wraps root-composed schemas and unwraps unary/streamed calls | `anthropic_tools.rs` prepares wrapped schemas before encode and unwraps unary and streamed Anthropic replies through wire adapters (`upstream.rs`; `r52e_*`) | Done | Recorded HTTP and deterministic fixtures only |
 | i | images | Model table `images` flag (`factory/index.mjs:59-116`) | Every catalog entry carries image and modality flags (`models.rs`) | Done | Recorded fixtures only |
 | j | reasoning | Effort variants and Gemini `thinkingConfig` (`effort.test.mjs`, `gemini.test.mjs`) | Reference effort lists and preserved Gemini `thinkingConfig` (`models.rs`; `r52_gemini_*`) | Done | Recorded fixtures only |
 | k | quota / usage | GET `/api/billing/limits`; Standard/Core scopes, extra balance, and optional `standard_only` (`usage.test.mjs`) | Standard excludes Core, Core has its model list, and extra usage is non-blocking display text (`quota.rs`, plugin API/router propagation; `r52_core_*`, `a2b_38`) | Partial | The `standard_only` switch and its alternate routing mode remain |
@@ -265,11 +265,12 @@ Structured-output prose for Chat, Responses, and Messages shipped in R-13b (`str
 - Whoami's `premBaseHostV2` is stored on sign-in and refresh; model calls normalize and use it, while invalid or non-HTTPS hosts fail closed. Quota remains on the regional API.
 - The model table includes the reference's current entries and Fast Mode entries last; active promotions set both `rate` and `rateWas` with start-inclusive/end-exclusive windows.
 - Device sign-in and refresh use the reference's production WorkOS client. Gemini streams use `/generate`; content-policy and rate-limit handling have recorded-request coverage.
+- Anthropic tool schemas with root unions ride under `arguments`, rebase in-schema `#` refs, hide the envelope in unary replies and streamed `input_json_delta` events, and keep wrapped history on the wire (`anthropic_tools.rs`; `r52e_*`).
 - All added tests use deterministic fixtures or recorded HTTP. No live-account verification was performed.
 
 ### Remaining gaps (Factory)
 
-- The host-level three-minute refresh setting, specialized Anthropic tool wrapping/streamed unwrap, and `standard_only` remain Partial as listed above.
+- The host-level three-minute refresh setting and `standard_only` remain Partial as listed above.
 
 ---
 
