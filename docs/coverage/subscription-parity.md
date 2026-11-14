@@ -21,7 +21,7 @@ Legend: **Done** = matches the reference at checklist granularity; **Partial** =
 | Cline / ClinePass (`cline`) | 12 | 4 | 0 | 3 | 0 |
 | ChatGPT / Codex (`codex` backend) and ChatGPT API (`chatgpt-api`) | 10 | 10 | 1 | 0 | 0 |
 | GitHub Copilot (github.com and GHE) | 15 | 2 | 0 | 5 | 0 |
-| Gemini CLI (Code Assist) | 10 | 6 | 0 | 2 | 0 |
+| Gemini CLI (Code Assist) | 13 | 3 | 0 | 2 | 0 |
 | Google Antigravity | 11 | 4 | 1 | 1 | 0 |
 | SuperGrok (`grok`) | 14 | 2 | 0 | 2 | 0 |
 | Qoder (international + Qoder CN) | 13 | 5 | 0 | 2 | 0 |
@@ -409,14 +409,14 @@ Remaining verification is live-account acceptance; all evidence here is determin
 | k | quota / usage | `retrieveUserQuota` per model windows | `quota.rs` buckets from same RPC; R-49 applies the experiment-driven quota-id mapping | Done | — |
 | l | model list | `retrieveUserQuota` preview signal + `listExperiments` flags choose Gemini CLI 0.61's catalog (`google.go:854-999`, `1180-1236`); `fetchAvailableModels` is Antigravity's path | `models.rs` ports the flag ids, catalog filtering, display names, and image flags; hourly per-instance cache; offline reference cases | Done | — |
 | m | multi-account | Multiple google logins | multiple accounts | Done | — |
-| n | error classification | RetryInfo → retry-after (`codeassist.go`) | `wire` retry_delay in feature-parity doc | Partial | Individual-account refusal persistence (`google.go:330+`) |
+| n | error classification | RetryInfo → retry-after (`codeassist.go`); per-account tier refusal on `fetchAvailableModels` 400 (`google.go:330+`) | `tier_probe.rs` skips refused tiers for 24h, always ends with no tier; `wire` retry_delay in feature-parity doc; `r49_*` paused-clock fixtures | Done | — |
 | o | daily check-in / warmup | N/A | N/A | N/A | — |
 | p | agent sign-in | read gemini home only in reference docs | `AgentSignIn` declares `.gemini`; `discover.rs` lists/imports the active Google account and project read-only, rejects another OAuth client, and never persists the access token; `r49d_*` fixtures | Done | — |
 | q | extras | Code Assist Standard/Enterprise project onboarding; `SetGoogleProject` names or clears an account's stored Cloud project; model-name mapping from the reference catalog | `project.rs` loadCodeAssist/onboardUser and leased account updates; `hofund accounts project gemini <email> <gcp-project-id>` trims, stores, and clears the project used by execute and quota; `models.rs` maps listed, outgoing, and quota ids from the same experiments; offline tests only | Done | — |
 
 **Gaps**
 
-- Individual-account refusal persistence and live-account verification remain.
+- Live-account verification remains.
 - All R-49d import, discovery, tool, image, and signature evidence is deterministic and offline.
 
 ---
