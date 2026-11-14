@@ -29,6 +29,7 @@ pub(crate) struct CursorUpstream {
     program: Option<PathBuf>,
     keychain: Arc<Mutex<KeychainCache>>,
     keychain_enabled: bool,
+    agent_status: Arc<crate::refresh::StatusCoalescer>,
     agent_host: AgentHost,
     limits: Limits,
     #[cfg(test)]
@@ -38,6 +39,10 @@ pub(crate) struct CursorUpstream {
 }
 
 impl CursorUpstream {
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "upstream holds the same agent renewal handles as Subscription"
+    )]
     pub(crate) fn new(
         account: AccountId,
         host: HostContext,
@@ -46,6 +51,7 @@ impl CursorUpstream {
         program: Option<PathBuf>,
         keychain: Arc<Mutex<KeychainCache>>,
         keychain_enabled: bool,
+        agent_status: Arc<crate::refresh::StatusCoalescer>,
     ) -> Self {
         Self {
             account,
@@ -55,6 +61,7 @@ impl CursorUpstream {
             program,
             keychain,
             keychain_enabled,
+            agent_status,
             agent_host: AgentHost::default(),
             limits: Limits::default(),
             #[cfg(test)]
@@ -118,6 +125,7 @@ impl UpstreamProvider for CursorUpstream {
             self.program.clone(),
             &self.keychain,
             self.keychain_enabled,
+            &self.agent_status,
         )
         .await?;
         let response_id = hofund_plugin_sdk::uuid::v4()
@@ -682,6 +690,7 @@ mod tests {
             None,
             Arc::new(Mutex::new(KeychainCache::default())),
             true,
+            Arc::new(crate::refresh::StatusCoalescer::default()),
         );
         // Existing tool tests must not wait on the production 1.5s/6s poll window.
         upstream.limits.usage_first_wait = Duration::ZERO;
