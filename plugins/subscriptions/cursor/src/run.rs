@@ -1146,8 +1146,8 @@ mod tests {
 
     use hofund_kit_subscription::{
         Http1Response, Http1Server, Http2Response, Http2Server, TestHost, advance_time, block_on,
-        block_on_paused, drive_until_http2_opening, drive_until_http2_request, header_park,
-        yield_times,
+        block_on_paused, drive_to_completion, drive_until_http1_request, drive_until_http2_opening,
+        drive_until_http2_request, header_park, yield_times,
     };
     use hofund_plugin_api::{PluginId, PluginKind, SecretString};
     use hofund_plugin_sdk::{Race, futures::StreamExt, race};
@@ -2120,31 +2120,20 @@ mod tests {
             let resolver = AgentHost::default();
             let token = token();
             let session = run(host.context(), &endpoints, &resolver, &token, args);
-            let control = async {
-                for _ in 0..200 {
-                    if h1.requests().len() >= 18 {
-                        break;
-                    }
-                    yield_times(2).await;
-                }
-                assert_eq!(h1.requests().len(), 18);
-                for request in &h1.requests()[2..] {
-                    let fields = proto::fields(request.body());
-                    assert!(
-                        fields[0]
-                            .as_string()
-                            .is_some_and(|hex| hex.starts_with("1a"))
-                    );
-                }
-                yield_times(20).await;
-                assert_eq!(h1.requests().len(), 18, "a 17th KV must wait");
-                release.release();
-                std::future::pending::<()>().await;
-            };
-            let output = match race(session, control).await {
-                Race::Left(output) => output.expect("run"),
-                Race::Right(()) => panic!("control finished before the session"),
-            };
+            let mut session = std::pin::pin!(session);
+            drive_until_http1_request(session.as_mut(), &h1, 18).await;
+            assert_eq!(h1.requests().len(), 18);
+            for request in &h1.requests()[2..] {
+                let fields = proto::fields(request.body());
+                assert!(
+                    fields[0]
+                        .as_string()
+                        .is_some_and(|hex| hex.starts_with("1a"))
+                );
+            }
+            assert_eq!(h1.requests().len(), 18, "a 17th KV must wait");
+            release.release();
+            let output = drive_to_completion(session).await.expect("run");
             assert_eq!(output.events.len(), 18);
             assert!(
                 output.trailers.is_empty(),
