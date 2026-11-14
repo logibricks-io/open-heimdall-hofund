@@ -1,11 +1,10 @@
 //! Devin CLI credentials.toml and stored account secrets.
 
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use hofund_plugin_api::{AccountId, HostContext, PluginError, SecretString};
+use hofund_plugin_sdk::digest;
 use hofund_plugin_sdk::oauth::{SecretObject, account_id_from, secret_text};
 
 const FILE_CAP: u64 = 64 * 1024;
@@ -173,9 +172,10 @@ fn stable_key(key: &SecretString) -> String {
 }
 
 fn hash_hex(data: &[u8]) -> String {
-    let mut hasher = DefaultHasher::new();
-    data.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
+    digest::sha256(data)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn default_label(key: &SecretString) -> String {
