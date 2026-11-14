@@ -330,10 +330,22 @@ fn is_untyped_google_import(text: &str) -> bool {
                 {
                     return accounts.iter().any(has_untyped_entry);
                 }
-                !object
+                let has_type = object
                     .get("type")
                     .and_then(serde_json::Value::as_str)
-                    .is_some_and(|kind| !kind.trim().is_empty())
+                    .is_some_and(|kind| !kind.trim().is_empty());
+                let has_nested_refresh = object
+                    .get("token")
+                    .and_then(serde_json::Value::as_object)
+                    .is_some_and(|token| {
+                        ["refresh_token", "refreshToken"].iter().any(|key| {
+                            token
+                                .get(*key)
+                                .and_then(serde_json::Value::as_str)
+                                .is_some_and(|value| !value.trim().is_empty())
+                        })
+                    });
+                !has_type && (has_refresh || has_nested_refresh)
             }
             _ => false,
         }
@@ -1821,6 +1833,43 @@ mod tests {
             assert_eq!(
                 calls.imports.lock().expect("imports").as_slice(),
                 [intended]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn r49d_accounts_import_dispatches_non_google_exports_with_google_pair() {
+        for text in [
+            r#"{"accessToken":"synthetic"}"#,
+            r#"{"claudeAiOauth":{"accessToken":"synthetic","refreshToken":"synthetic"}}"#,
+            r#"{"swapVersion":"0.29.0-test","accounts":[{"credentials":{"claudeAiOauth":{"accessToken":"synthetic","refreshToken":"synthetic"}}}]}"#,
+        ] {
+            let (_dir, mut opened, calls) = google_import_rig();
+            let plugin = PluginId::from_static("cursor");
+            let host = TestHost::open_for(
+                PluginKind::Subscription,
+                plugin.clone(),
+                _dir.path().join("cursor"),
+            );
+            opened.insert(
+                0,
+                Opened {
+                    id: "cursor".to_owned(),
+                    name: "cursor".to_owned(),
+                    instance: Arc::new(Fake {
+                        id: plugin,
+                        mode: Mode::Device,
+                        flow: SignInFlow::Pkce,
+                        calls: Arc::clone(&calls),
+                    }),
+                    host: host.context().clone(),
+                },
+            );
+            let ids = super::accounts_import(&opened, text).await.expect("import");
+            assert_eq!(ids, ["imported"]);
+            assert_eq!(
+                calls.imports.lock().expect("imports").as_slice(),
+                ["cursor"]
             );
         }
     }
