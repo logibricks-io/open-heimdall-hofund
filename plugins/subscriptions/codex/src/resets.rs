@@ -276,7 +276,10 @@ mod tests {
     fn vendor_refusal(code: &str) -> bool {
         matches!(
             code,
-            "nothing_to_reset" | "no_credit" | "already_redeemed" | "already_used"
+            "nothing_to_reset"
+                | "no_credit"
+                | "already_redeemed"
+                | "already_used"
                 | "already_reset"
         )
     }
