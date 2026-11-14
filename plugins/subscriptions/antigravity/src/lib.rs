@@ -260,7 +260,7 @@ impl Subscription for Antigravity {
                 "no Antigravity sign-in is in progress for this session",
             ));
         };
-        let SignInProof::Callback { code, state } = proof else {
+        let SignInProof::Callback { code, state, .. } = proof else {
             return Err(PluginError::config(
                 "Antigravity sign-in completes from the browser callback",
             ));

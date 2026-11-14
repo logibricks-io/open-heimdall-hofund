@@ -61,6 +61,7 @@ fn complete(
         SignInProof::Callback {
             code: SecretString::from(code.to_owned()),
             state: state.to_owned(),
+            issued_client_id: None,
         },
         host.context(),
     ))

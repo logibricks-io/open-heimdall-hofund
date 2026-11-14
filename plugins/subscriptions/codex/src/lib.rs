@@ -277,7 +277,7 @@ impl Subscription for Codex {
                 redirect_uri,
             } => {
                 host.loopback().release(ctx);
-                let SignInProof::Callback { code, state } = proof else {
+                let SignInProof::Callback { code, state, .. } = proof else {
                     return Err(PluginError::config(
                         "ChatGPT sign-in completes from the browser callback",
                     ));

@@ -1,0 +1,27 @@
+{
+  "models": [
+    {
+      "slug": "gpt-4.1",
+      "display_name": "GPT-4.1",
+      "visibility": "list",
+      "context_window": 128000,
+      "max_context_window": 128000,
+      "input_modalities": ["text"],
+      "supported_reasoning_levels": [{ "effort": "medium" }]
+    },
+    {
+      "slug": "gpt-4.1-mini",
+      "display_name": "GPT-4.1 mini",
+      "visibility": "list",
+      "context_window": 128000,
+      "input_modalities": ["text", "image"],
+      "supported_reasoning_levels": []
+    },
+    {
+      "slug": "internal-only",
+      "display_name": "Hidden",
+      "visibility": "hidden",
+      "context_window": 1000
+    }
+  ]
+}

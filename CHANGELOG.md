@@ -23,6 +23,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   foreign-encrypted seal stripping, unrelated refusals, retry budget, and
   unchanged 401 token refresh. Refs R-47.
 
+- R-47a5: `hofund-plugin-subscription-chatgpt-api` — Sign in with ChatGPT
+  (dynamic OAuth client, per-account client id, stable host id), refresh and
+  revoke, `/v1/models`, and `api.openai.com/v1/responses` upstream with agent
+  instructions. Registry feature `chatgpt-api` is on by default. Verified with
+  mocks only.
 - v0.2.0 release checklist and runbook (Must #12): preflight of remaining
   must-list work, dry-run including the Windows `hofund.exe serve` check
   (#357), version-bump and tag steps that this tree has not performed,
