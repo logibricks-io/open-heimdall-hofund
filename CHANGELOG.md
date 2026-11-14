@@ -20,6 +20,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the workspace invariant allow-map stay closed. The ChatGPT/Codex vendor
   summary in `docs/coverage/subscription-parity.md` is corrected to 12/9/0/0
   to match the letter-row recount. Refs R-48.
+- R-51d: the Kiro subscription plugin accepts pasted `ksk_` API keys through
+  `SignInProof::Token`, maps `Get-Usage-Limits` into free-trial, monthly, and
+  bonus quota windows (including aside non-blocking semantics), and reads API-key
+  usage through the control-plane `GetUsageLimits` POST. Recorded HTTP and
+  loopback tests only (`r51d_*`). Refs R-51.
 - R-54: the shared Qoder daily check-in helper sets `CheckinResult::recheck_at`
   to the earlier of 30 minutes, the next Beijing calendar midnight (UTC+8), and
   the minimum end time of active campaigns, matching the reference recheck
@@ -58,9 +63,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   conversation id, and surfaces earlier-step totals in `Usage.extensions` as
   `deferred_usage` so this step’s `input_tokens` are not doubled. Recorded
   loopback tests `r9k_*` cover the extension mapping, a step that owes nothing,
-  cross-step own versus deferred usage, and same-millisecond event billing;
-  credit-event paths remain row k follow-ups.
+  cross-step own versus deferred usage, and same-millisecond event billing.
   Refs R-9.
+
+- R-9: re-audited Cursor subscription-parity rows b, c, and k against the
+  frozen reference: team billing uses only live `cli-config.json`
+  `authInfo.authId` and `activeTeamId` (header and dashboard `teamId`, no
+  secret-blob fields); row k’s stateless deferred-usage suite matches R-9k.
+  Free-credit grant quota RPCs remain the §8 follow-up. Refs R-9.
 
 - R-52e: the Factory subscription plugin wraps Anthropic tool schemas that use
   root `anyOf` / `oneOf` / `allOf` under `arguments`, rebases in-schema `#`
