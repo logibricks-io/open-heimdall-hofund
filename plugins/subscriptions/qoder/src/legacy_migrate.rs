@@ -148,6 +148,8 @@ fn parse_legacy_relaxed(bytes: &[u8]) -> Result<Credential, PluginError> {
             .unwrap_or(false),
         device_token: SecretString::from(optional_text(map, "device_token")),
         device_refresh_token: SecretString::from(optional_text(map, "device_refresh")),
+        pat_auth: false,
+        pat: SecretString::from(String::new()),
     })
 }
 

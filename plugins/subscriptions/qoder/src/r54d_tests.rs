@@ -89,6 +89,8 @@ fn r54d_3_same_uid_skips_store_and_still_removes_file() {
         device_chat: false,
         device_token: SecretString::from(String::new()),
         device_refresh_token: SecretString::from(String::new()),
+        pat_auth: false,
+        pat: SecretString::from(String::new()),
     };
     block_on(import::store(&credential, host.context())).expect("seed");
     let legacy = legacy_migrate::legacy_path(&config_dir);
