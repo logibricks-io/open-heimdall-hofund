@@ -111,6 +111,17 @@ pub(crate) async fn drain(stdout: &mut BodyStream, last: &mut String) {
     }
 }
 
+/// Raw standard output until the program exits.
+pub(crate) async fn collect_bytes(stdout: &mut BodyStream) -> Vec<u8> {
+    let mut out = Vec::new();
+    while let Some(chunk) = stdout.next_chunk().await {
+        if let Ok(chunk) = chunk {
+            out.extend_from_slice(&chunk);
+        }
+    }
+    out
+}
+
 /// Everything printed until exit, capped.
 pub(crate) async fn collect(stdout: &mut BodyStream) -> String {
     let mut text = String::new();

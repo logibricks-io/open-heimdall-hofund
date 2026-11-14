@@ -4,7 +4,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use hofund_plugin_api::{BinaryName, PluginError, SpawnRequest};
+use hofund_plugin_api::{BinaryName, HostContext, PluginError, SpawnRequest};
 
 use crate::cli::CONFIG_DIR_VAR;
 use crate::wslrun::{self, Tool};
@@ -28,7 +28,8 @@ pub(crate) enum ClaudeCommand {
 
 impl ClaudeCommand {
     /// Prefers configured `command`, then `PATH`, then WSL on Windows.
-    pub(crate) fn resolve(
+    pub(crate) async fn resolve(
+        host: &HostContext,
         command: Option<&PathBuf>,
         name: BinaryName,
     ) -> Result<Self, PluginError> {
@@ -39,7 +40,7 @@ impl ClaudeCommand {
         if !skip_native && let Some(path) = hofund_plugin_sdk::process::find_program(name) {
             return Ok(Self::Native(path));
         }
-        if let Some(tool) = wslrun::find(name.as_str()) {
+        if let Some(tool) = wslrun::find(host, name.as_str()).await {
             return Ok(Self::Wsl(tool));
         }
         Err(PluginError::config(

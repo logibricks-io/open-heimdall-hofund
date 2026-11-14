@@ -250,8 +250,8 @@ impl Claude {
         true
     }
 
-    fn launcher(&self) -> Result<launcher::ClaudeCommand, PluginError> {
-        launcher::ClaudeCommand::resolve(self.command.as_ref(), COMMAND)
+    async fn launcher(&self, host: &HostContext) -> Result<launcher::ClaudeCommand, PluginError> {
+        launcher::ClaudeCommand::resolve(host, self.command.as_ref(), COMMAND).await
     }
 }
 
@@ -384,7 +384,7 @@ impl Subscription for Claude {
         host: &HostContext,
     ) -> Result<SignInChallenge, PluginError> {
         self.expire_idle(host);
-        let command = self.launcher()?;
+        let command = self.launcher(host).await?;
         let dir = sign_in_dir(host, ctx)?;
         // A sign-in that restarts with the same session starts clean.
         drop(self.take_pending(ctx.session()));
@@ -495,7 +495,7 @@ impl Subscription for Claude {
     }
 
     async fn refresh(&self, account: &AccountId, host: &HostContext) -> Result<(), PluginError> {
-        account::refresh(host, || self.launcher(), account).await
+        account::refresh(host, self.command.as_ref(), account).await
     }
 
     async fn quota(
@@ -512,7 +512,7 @@ impl Subscription for Claude {
         if setup_token::is_setup_token(&blob) {
             return Err(PluginError::unsupported(usage::SETUP_TOKEN_QUOTA));
         }
-        account::read_usage(host, || self.launcher(), account).await
+        account::read_usage(host, self.command.as_ref(), account).await
     }
 
     async fn list_models(
@@ -567,7 +567,7 @@ impl Subscription for Claude {
         account: &AccountId,
         host: &HostContext,
     ) -> Result<(), PluginError> {
-        account::warmup(host, || self.launcher(), account).await
+        account::warmup(host, self.command.as_ref(), account).await
     }
 
     async fn discover_agent_sign_in(

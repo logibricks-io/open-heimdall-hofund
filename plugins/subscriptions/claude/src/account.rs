@@ -10,6 +10,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use hofund_plugin_api::{AccountId, HostContext, PluginError, SpawnRequest};
+
+use crate::COMMAND;
+use crate::launcher;
 use hofund_plugin_sdk::oauth::SecretObject;
 
 use crate::creds::{self, Profile};
@@ -55,7 +58,7 @@ pub(crate) fn run_env(blob: &SecretObject) -> Vec<(OsString, OsString)> {
 /// when they are due, and keeps what it wrote.
 pub(crate) async fn refresh(
     host: &HostContext,
-    command: impl FnOnce() -> Result<crate::launcher::ClaudeCommand, PluginError>,
+    configured: Option<&PathBuf>,
     account: &AccountId,
 ) -> Result<(), PluginError> {
     let lease = host.accounts().lease(account, LEASE_WAIT).await?;
@@ -74,7 +77,7 @@ pub(crate) async fn refresh(
     };
     let stored = stored.to_owned();
     let profile = Profile::parse(blob.text(creds::PROFILE).unwrap_or_default());
-    let command = command()?;
+    let command = launcher::ClaudeCommand::resolve(host, configured, COMMAND).await?;
     let dir = account_dir(host, account)?;
     creds::private_dir(&dir)?;
     let file = dir.join(creds::CREDENTIALS_FILE);
@@ -105,7 +108,7 @@ pub(crate) async fn refresh(
 /// [`refresh`].
 pub(crate) async fn read_usage(
     host: &HostContext,
-    command: impl FnOnce() -> Result<crate::launcher::ClaudeCommand, PluginError>,
+    configured: Option<&PathBuf>,
     account: &AccountId,
 ) -> Result<Vec<hofund_plugin_api::QuotaWindow>, PluginError> {
     let lease = host.accounts().lease(account, LEASE_WAIT).await?;
@@ -124,7 +127,7 @@ pub(crate) async fn read_usage(
     };
     let stored = stored.to_owned();
     let profile = Profile::parse(blob.text(creds::PROFILE).unwrap_or_default());
-    let command = command()?;
+    let command = launcher::ClaudeCommand::resolve(host, configured, COMMAND).await?;
     let dir = account_dir(host, account)?;
     creds::private_dir(&dir)?;
     let file = dir.join(creds::CREDENTIALS_FILE);
@@ -187,7 +190,7 @@ impl Drop for WarmupCleanup<'_> {
 /// Sends one "hi" through Claude Code for `account`.
 pub(crate) async fn warmup(
     host: &HostContext,
-    command: impl FnOnce() -> Result<crate::launcher::ClaudeCommand, PluginError>,
+    configured: Option<&PathBuf>,
     account: &AccountId,
 ) -> Result<(), PluginError> {
     let lease = host.accounts().lease(account, LEASE_WAIT).await?;
@@ -206,7 +209,7 @@ pub(crate) async fn warmup(
     };
     let stored = stored.to_owned();
     let profile = Profile::parse(blob.text(creds::PROFILE).unwrap_or_default());
-    let command = command()?;
+    let command = launcher::ClaudeCommand::resolve(host, configured, COMMAND).await?;
     let dir = account_dir(host, account)?;
     creds::private_dir(&dir)?;
     let file = dir.join(creds::CREDENTIALS_FILE);

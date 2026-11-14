@@ -8,6 +8,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use hofund_plugin_api::{HostContext, SpawnRequest};
+
+use crate::cli;
+
 /// Marker env var for distro-side stop (bridge runs use the same name).
 pub(crate) const RUN_VAR: &str = "HOFUND_WSL_RUN";
 
@@ -37,6 +41,17 @@ pub fn active() -> bool {
 
 static TEST_ON: AtomicBool = AtomicBool::new(false);
 
+#[cfg(test)]
+static WSL_TEST_GUARD: Mutex<()> = Mutex::new(());
+
+/// Serializes WSL discovery tests that share [`set_run`] / [`set_test_on`] state.
+#[cfg(test)]
+pub(crate) fn test_guard() -> std::sync::MutexGuard<'static, ()> {
+    WSL_TEST_GUARD
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// Test hook: pretend this host has WSL to probe.
 #[cfg(test)]
 pub(crate) fn set_test_on(value: bool) {
@@ -59,30 +74,42 @@ pub(crate) fn set_run(hook: Option<Box<RunFn>>) {
         .unwrap_or_else(std::sync::PoisonError::into_inner) = hook;
 }
 
-fn invoke(_timeout: Duration, args: &[&str]) -> Result<Vec<u8>, ()> {
+async fn invoke(host: &HostContext, timeout: Duration, args: &[&str]) -> Result<Vec<u8>, ()> {
     if let Some(hook) = run_slot()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .as_ref()
     {
-        return hook(_timeout, args);
+        return hook(timeout, args);
     }
-    #[cfg(windows)]
-    {
-        use std::process::Command;
-        let mut cmd = Command::new("wsl.exe");
-        cmd.args(args).env("WSL_UTF8", "1");
-        let output = cmd.output().map_err(|_| ())?;
-        if output.status.success() {
-            Ok(output.stdout)
-        } else {
-            Err(())
+    if !active() {
+        return Err(());
+    }
+    let cwd = host.dirs().state_dir().map_err(|_| ())?;
+    let request = SpawnRequest::new(
+        wsl_exe(),
+        args.iter().map(|arg| OsString::from(*arg)).collect(),
+        vec![(OsString::from("WSL_UTF8"), OsString::from("1"))],
+        cwd,
+    )
+    .map_err(|_| ())?;
+    let run = async {
+        let child = host
+            .spawn_process()
+            .spawn_piped(&request)
+            .await
+            .map_err(|_| ())?;
+        let mut stdout = child.stdout().map_err(|_| ())?;
+        let bytes = hofund_plugin_sdk::timeout(timeout, cli::collect_bytes(&mut stdout))
+            .await
+            .ok_or(())?;
+        let code = child.exit_code().await.map_err(|_| ())?;
+        if code != 0 {
+            return Err(());
         }
-    }
-    #[cfg(not(windows))]
-    {
-        Err(())
-    }
+        Ok(bytes)
+    };
+    run.await
 }
 
 struct FindCache {
@@ -145,40 +172,33 @@ pub(crate) fn known(name: &str) -> Option<Tool> {
 }
 
 /// Finds `name` in a running distro, default distro first.
-#[must_use]
-pub(crate) fn find(name: &str) -> Option<Tool> {
+pub(crate) async fn find(host: &HostContext, name: &str) -> Option<Tool> {
     if !active() {
         return None;
     }
-    let mut cache_guard = FIND
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if cache_guard.is_none() {
-        *cache_guard = Some(FindCache {
-            at: HashMap::new(),
-            tools: HashMap::new(),
-        });
+    if let Some(tool) = find_cached(host, name).await {
+        return Some(tool);
     }
-    let cache = cache_guard.as_mut().expect("cache");
-    if let Some(at) = cache.at.get(name)
-        && at.elapsed() < FIND_AGE
     {
-        match cache.tools.get(name) {
-            None | Some(None) => return None,
-            Some(Some(tool)) if up(&tool.distro) => return Some(tool.clone()),
-            Some(Some(_)) => {
-                cache.tools.insert(name.to_owned(), None);
-            }
+        let mut cache_guard = FIND
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if cache_guard.is_none() {
+            *cache_guard = Some(FindCache {
+                at: HashMap::new(),
+                tools: HashMap::new(),
+            });
         }
+        let cache = cache_guard.as_mut().expect("cache");
+        cache.at.insert(name.to_owned(), Instant::now());
+        cache.tools.insert(name.to_owned(), None);
     }
-    cache.at.insert(name.to_owned(), Instant::now());
-    cache.tools.insert(name.to_owned(), None);
-    let (mut names, listed) = running();
+    let (mut names, listed) = running(host).await;
     if !listed {
         return None;
     }
     let mut default = String::new();
-    if let Ok(list) = invoke(Duration::from_secs(10), &["-l", "-q"]) {
+    if let Ok(list) = invoke(host, Duration::from_secs(10), &["-l", "-q"]).await {
         let all = distros(&list);
         if let Some(first) = all.first() {
             default.clone_from(first);
@@ -193,35 +213,74 @@ pub(crate) fn find(name: &str) -> Option<Tool> {
     for distro in names {
         let script = probe_script(name);
         let args = ["-d", &distro, "-e", "sh", "-lc", &script];
-        let Ok(out) = invoke(Duration::from_secs(30), &args) else {
+        let Ok(out) = invoke(host, Duration::from_secs(30), &args).await else {
             continue;
         };
         let text = String::from_utf8_lossy(&out);
         if let Some(tool) = parse_probe(&distro, &text) {
-            cache.tools.insert(name.to_owned(), Some(tool.clone()));
+            let mut cache_guard = FIND
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(cache) = cache_guard.as_mut() {
+                cache.tools.insert(name.to_owned(), Some(tool.clone()));
+            }
             return Some(tool);
         }
     }
     None
 }
 
+async fn find_cached(host: &HostContext, name: &str) -> Option<Tool> {
+    let snapshot = FIND
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .and_then(|cache| {
+            let at = cache.at.get(name)?;
+            (at.elapsed() < FIND_AGE)
+                .then_some(())
+                .and_then(|()| match cache.tools.get(name) {
+                    None | Some(None) => None,
+                    Some(Some(tool)) => Some(tool.clone()),
+                })
+        });
+    let tool = snapshot?;
+    if up(host, &tool.distro).await {
+        Some(tool)
+    } else {
+        let mut guard = FIND
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(cache) = guard.as_mut() {
+            cache.tools.insert(name.to_owned(), None);
+        }
+        None
+    }
+}
+
 /// Whether `distro` is running now (does not start it).
-#[must_use]
-pub(crate) fn up(distro: &str) -> bool {
+pub(crate) async fn up(host: &HostContext, distro: &str) -> bool {
     if !active() {
         return false;
     }
-    let (names, _) = running();
+    let (names, _) = running(host).await;
     names.iter().any(|name| name == distro)
 }
 
-fn running() -> (Vec<String>, bool) {
-    let mut guard = up_cache()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let age = if guard.ok { UP_AGE } else { UP_FAILED_AGE };
-    if guard.at.elapsed() > age {
-        match invoke(Duration::from_secs(10), &["-l", "--running", "-q"]) {
+async fn running(host: &HostContext) -> (Vec<String>, bool) {
+    let stale = {
+        let guard = up_cache()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let age = if guard.ok { UP_AGE } else { UP_FAILED_AGE };
+        guard.at.elapsed() > age
+    };
+    if stale {
+        let probe = invoke(host, Duration::from_secs(10), &["-l", "--running", "-q"]).await;
+        let mut guard = up_cache()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match probe {
             Ok(bytes) => {
                 guard.names = distros(&bytes);
                 guard.ok = true;
@@ -233,17 +292,16 @@ fn running() -> (Vec<String>, bool) {
         }
         guard.at = Instant::now();
     }
+    let guard = up_cache()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     (guard.names.clone(), guard.ok)
 }
 
 /// `wsl.exe` arguments to run this tool with `args` inside the distro.
 #[must_use]
 pub(crate) fn argv(tool: &Tool, args: &[&str]) -> Vec<OsString> {
-    let mark = format!(
-        "{}-{}",
-        std::process::id(),
-        RUN_SEQ.fetch_add(1, Ordering::Relaxed) + 1
-    );
+    let mark = format!("{}", RUN_SEQ.fetch_add(1, Ordering::Relaxed) + 1);
     let mut out = vec![
         OsString::from("-d"),
         OsString::from(&tool.distro),
@@ -538,12 +596,22 @@ fn decode_wsl_list(bytes: &[u8]) -> String {
 mod tests {
     use super::{
         RUN_VAR, Tool, argv, cross_env, decode_wsl_list, distros, find, forget, host_loopback,
-        parse_probe, probe_script, set_run, set_test_on, up,
+        parse_probe, probe_script, set_run, set_test_on, up, wsl_exe,
     };
+    use hofund_kit_subscription::{TestHost, block_on};
+    use hofund_plugin_api::PluginKind;
     use std::collections::HashMap;
     use std::ffi::OsString;
     use std::sync::Mutex;
     use std::time::Duration;
+
+    fn probe_host(dir: &tempfile::TempDir) -> TestHost {
+        TestHost::open_for(
+            PluginKind::Subscription,
+            hofund_plugin_api::PluginId::from_static("claude"),
+            dir.path(),
+        )
+    }
 
     static PROBED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
@@ -646,6 +714,9 @@ route:default via 10.0.0.1 dev eth0\nnet:mirrored\n";
 
     #[test]
     fn find_prefers_default_running_distro_and_caches() {
+        let _guard = super::test_guard();
+        let dir = tempfile::tempdir().expect("dir");
+        let host = probe_host(&dir);
         set_test_on(true);
         forget();
         PROBED.lock().unwrap().clear();
@@ -668,14 +739,14 @@ route:default via 10.0.0.1 dev eth0\nnet:mirrored\n";
                 }
             },
         )));
-        let tool = find("claude").expect("found");
+        let tool = block_on(find(host.context(), "claude")).expect("found");
         assert_eq!(tool.distro, "Fedora");
         assert_eq!(
             *PROBED.lock().unwrap(),
             vec!["Ubuntu".to_owned(), "Fedora".to_owned()]
         );
         PROBED.lock().unwrap().clear();
-        let again = find("claude").expect("cached");
+        let again = block_on(find(host.context(), "claude")).expect("cached");
         assert_eq!(again.distro, "Fedora");
         assert!(PROBED.lock().unwrap().is_empty());
         set_run(None);
@@ -685,6 +756,9 @@ route:default via 10.0.0.1 dev eth0\nnet:mirrored\n";
 
     #[test]
     fn find_ignores_stopped_distro_after_refresh() {
+        let _guard = super::test_guard();
+        let dir = tempfile::tempdir().expect("dir");
+        let host = probe_host(&dir);
         set_test_on(true);
         forget();
         let run_list = std::sync::Arc::new(std::sync::Mutex::new(utf16le("Fedora\r\nUbuntu\r\n")));
@@ -703,15 +777,63 @@ route:default via 10.0.0.1 dev eth0\nnet:mirrored\n";
                 }
             },
         )));
-        assert!(find("claude").is_some());
+        assert!(block_on(find(host.context(), "claude")).is_some());
         *run_list.lock().expect("run list") = utf16le("Ubuntu\r\n");
         super::expire_running_cache();
-        assert!(find("claude").is_none());
-        assert!(!up("Fedora"));
-        assert!(up("Ubuntu"));
+        assert!(block_on(find(host.context(), "claude")).is_none());
+        assert!(!block_on(up(host.context(), "Fedora")));
+        assert!(block_on(up(host.context(), "Ubuntu")));
         set_run(None);
         set_test_on(false);
         forget();
+    }
+
+    #[test]
+    fn find_probes_through_host_spawn_when_hook_absent() {
+        let _guard = super::test_guard();
+        let dir = tempfile::tempdir().expect("dir");
+        let host = probe_host(&dir);
+        set_test_on(true);
+        forget();
+        let wsl = wsl_exe();
+        host.process()
+            .script_piped(wsl_probe_script(&wsl, "running"));
+        host.process().script_piped(wsl_probe_script(&wsl, "all"));
+        host.process()
+            .script_piped(wsl_probe_script(&wsl, "ubuntu"));
+        let tool = block_on(find(host.context(), "claude")).expect("found");
+        assert_eq!(tool.distro, "Ubuntu");
+        assert_eq!(tool.path, "/home/me/.local/bin/claude");
+        let spawns = host.process().piped_spawns();
+        assert_eq!(spawns.len(), 3);
+        assert!(spawns.iter().all(|spawn| spawn.program == wsl));
+        set_test_on(false);
+        forget();
+    }
+
+    fn wsl_probe_script(
+        program: &std::path::Path,
+        kind: &str,
+    ) -> hofund_kit_subscription::PipedScript {
+        use hofund_kit_subscription::PipedScript;
+        let kind = kind.to_owned();
+        let program = program.to_path_buf();
+        PipedScript::new().exits(move |spawn| {
+            if spawn.program != program {
+                return Vec::new();
+            }
+            match (kind.as_str(), spawn.arg_strings().join(" ").as_str()) {
+                ("running", "-l --running -q") => vec!["Ubuntu\r\n".to_owned()],
+                ("all", "-l -q") => vec!["Ubuntu\r\n".to_owned()],
+                ("ubuntu", _)
+                    if spawn.args.get(1).map(|a| a.to_string_lossy()) == Some("Ubuntu".into())
+                        && spawn.args.get(2).map(|a| a.to_string_lossy()) == Some("-e".into()) =>
+                {
+                    vec!["bin:/home/me/.local/bin/claude\nlpath:/home/me/.local/bin\nmount:/mnt/c/\nnet:mirrored\n".to_owned()]
+                }
+                _ => Vec::new(),
+            }
+        })
     }
 
     #[test]
