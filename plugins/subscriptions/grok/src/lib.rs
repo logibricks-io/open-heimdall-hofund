@@ -161,7 +161,6 @@ impl SubscriptionFactory for GrokFactory {
 enum Pending {
     Login {
         home: PathBuf,
-        #[allow(dead_code)]
         child: PipedChild,
         pump: Arc<Mutex<LoginPump>>,
         cancelled: Arc<std::sync::atomic::AtomicBool>,
@@ -325,10 +324,14 @@ impl Drop for LoginStdoutGuard {
 fn abort_login(grok: &Grok, session: &str, host: &HostContext) {
     use std::sync::atomic::Ordering;
     if let Some(Pending::Login {
-        home, cancelled, ..
+        home,
+        child,
+        cancelled,
+        ..
     }) = grok.take_pending(session)
     {
         cancelled.store(true, Ordering::Relaxed);
+        drop(child);
         if let Ok(state) = host.dirs().state_dir() {
             remove_dir_if_under(&home, &state.join("grok-homes"));
         }

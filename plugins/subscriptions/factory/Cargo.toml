@@ -1,6 +1,6 @@
 [package]
 name = "hofund-plugin-subscription-factory"
-description = "Factory subscription: WorkOS device sign-in or API key, token refresh, models, quota, and OpenAI chat upstream."
+description = "Factory subscription: WorkOS device sign-in or API key, token refresh, models, quota, and OpenAI, Anthropic, or Gemini chat upstreams."
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
