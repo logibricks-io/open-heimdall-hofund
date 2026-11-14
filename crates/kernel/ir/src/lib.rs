@@ -37,7 +37,7 @@ pub use extensions::Extensions;
 pub use message::{Message, Role};
 pub use object_root::fold_object_root;
 pub use params::GenerationParams;
-pub use request::Request;
+pub use request::{Conversation, Request};
 pub use response::{Response, Stop, StopReason};
 pub use stream::{
     BlockStart, ContentBlockStart, ContentBlockStop, MessageDelta, MessageStart, MessageStop, Ping,
@@ -68,6 +68,23 @@ mod tests {
         assert_eq!(
             decoded.extensions.get("cache_control"),
             Some(&json!({"type": "ephemeral"}))
+        );
+    }
+
+    #[test]
+    fn request_conversation_round_trips_without_using_extensions() {
+        let mut request = super::Request::new("demo")
+            .with_conversation(Some(super::Conversation::new("session-1", "agent-1")));
+        let bytes = serde_json::to_vec(&request).expect("serialize");
+        let decoded: super::Request = serde_json::from_slice(&bytes).expect("deserialize");
+        assert_eq!(decoded, request);
+        assert!(decoded.extensions.is_empty());
+        request.conversation = None;
+        let bytes = serde_json::to_vec(&request).expect("serialize");
+        assert!(
+            !String::from_utf8(bytes)
+                .expect("JSON")
+                .contains("conversation")
         );
     }
 

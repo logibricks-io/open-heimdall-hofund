@@ -2,11 +2,13 @@
 
 use std::sync::Arc;
 
-use hofund_kit_subscription::{PipedScript, TestHost, block_on};
+use hofund_kit_subscription::{
+    PipedScript, TestHost, advance_time, block_on, block_on_paused, yield_times,
+};
 use hofund_plugin_api::{
     AccountId, BodyStream, Completion, ContentPart, PluginError, PluginErrorKind, PluginId,
-    PluginKind, ProbeQuery, ProtocolId, RawTable, Request, SecretString, StreamEvent, Subscription,
-    SubscriptionFactory, UpstreamProvider,
+    PluginKind, ProbeQuery, ProtocolId, RawTable, RawValue, Request, SecretString, StreamEvent,
+    Subscription, SubscriptionFactory, UpstreamProvider,
 };
 use hofund_plugin_sdk::oauth::{SecretObject, secret_text};
 use hofund_plugin_sdk::protobuf::{FLAG_END, ProtoBuf, deframe, fields, frame};
@@ -16,7 +18,7 @@ use crate::{DevinFactory, discover};
 
 const MODELS_FIXTURE: &str = include_str!("fixtures/models.json");
 
-fn host(dir: &tempfile::TempDir) -> TestHost {
+pub(crate) fn host(dir: &tempfile::TempDir) -> TestHost {
     TestHost::open_for(
         PluginKind::Subscription,
         PluginId::from_static("devin"),
@@ -25,7 +27,11 @@ fn host(dir: &tempfile::TempDir) -> TestHost {
 }
 
 fn subscription(host: &TestHost) -> Arc<dyn Subscription> {
-    let cfg = DevinFactory.validate(&RawTable::new()).expect("config");
+    configured_subscription(host, RawTable::new())
+}
+
+fn configured_subscription(host: &TestHost, raw: RawTable) -> Arc<dyn Subscription> {
+    let cfg = DevinFactory.validate(&raw).expect("config");
     DevinFactory.build(&cfg, host.context()).expect("build")
 }
 
@@ -92,18 +98,19 @@ fn execute(
 }
 
 fn collect_events(completion: Completion) -> Result<Vec<StreamEvent>, PluginError> {
+    block_on(collect_events_async(completion))
+}
+
+async fn collect_events_async(completion: Completion) -> Result<Vec<StreamEvent>, PluginError> {
     let Completion::Stream(mut stream) = completion else {
         panic!("expected an event stream");
     };
-    block_on(async move {
-        let mut events = Vec::new();
-        while let Some(event) =
-            std::future::poll_fn(|context| stream.as_mut().poll_next(context)).await
-        {
-            events.push(event?);
-        }
-        Ok(events)
-    })
+    let mut events = Vec::new();
+    while let Some(event) = std::future::poll_fn(|context| stream.as_mut().poll_next(context)).await
+    {
+        events.push(event?);
+    }
+    Ok(events)
 }
 
 fn execute_events(host: &TestHost, id: &AccountId, request: Request) -> Vec<StreamEvent> {
@@ -828,6 +835,7 @@ fn body_failures_after_success_are_broken_reply_502s() {
             ProtocolId::OPENAI_CHAT,
             true,
             false,
+            None,
         ));
         let error = if opened {
             collect_events(completion.expect("stream opens on text")).expect_err("body error")
@@ -1677,4 +1685,514 @@ fn cli_model_list_uses_isolated_credentials_and_removes_them() {
     assert_eq!(families[0].uid, "swe-2");
     let temp = cwd.lock().expect("cwd").clone().expect("spawn cwd");
     assert!(!temp.exists(), "the whole CLI temp root must be removed");
+}
+
+fn prompt_cache(prompt: &[hofund_plugin_sdk::protobuf::Field]) -> Option<Vec<u8>> {
+    prompt
+        .iter()
+        .find(|field| field.number == 8)
+        .and_then(|field| field.as_bytes())
+        .map(<[u8]>::to_vec)
+}
+
+#[test]
+fn messages_blocks_keep_their_boundaries_and_only_marks_encode_field_eight() {
+    let request: Request = hofund_plugin_sdk::json::from_value(hofund_plugin_sdk::json::json!({
+        "model": "claude-haiku-5-5",
+        "stream": true,
+        "messages": [
+            {"role": "system", "content": [
+                {"type": "text", "text": "x-anthropic-billing-header: cc_version=2.1.316.e5f; cc_entrypoint=cli; cch=8a1f2;\n"},
+                {"type": "text", "text": "You are a security monitor.", "extensions": {"cache_control": {"type": "ephemeral"}}}
+            ]},
+            {"role": "user", "content": [
+                {"type": "text", "text": "<transcript>"},
+                {"type": "text", "text": "history", "extensions": {"cache_control": {"type": "ephemeral"}}},
+                {"type": "text", "text": "Current action: rm -rf build/"},
+                {"type": "text", "text": "</transcript>\nClassify."}
+            ]}
+        ]
+    }))
+    .expect("marked Messages history");
+    for (message, part) in [(0, 1), (1, 1)] {
+        let ContentPart::Text(part) = &request.messages[message].content[part] else {
+            panic!("marked text part");
+        };
+        assert!(
+            part.extensions
+                .get("cache_control")
+                .is_some_and(hofund_plugin_sdk::json::Value::is_object)
+        );
+    }
+    let body = encoded_request_for(request, ProtocolId::ANTHROPIC_MESSAGES);
+    let prompts = decoded_chat_prompts(&body);
+    let actual: Vec<_> = prompts
+        .iter()
+        .map(|prompt| {
+            (
+                prompt_role(prompt),
+                prompt_value(prompt, 3),
+                prompt_cache(prompt),
+            )
+        })
+        .collect();
+    assert_eq!(
+        actual,
+        [
+            (
+                Some(1),
+                Some("You are a security monitor.".into()),
+                Some(vec![8, 1])
+            ),
+            (Some(1), Some("<transcript>".into()), None),
+            (Some(1), Some("history".into()), Some(vec![8, 1])),
+            (Some(1), Some("Current action: rm -rf build/".into()), None),
+            (Some(1), Some("</transcript>\nClassify.".into()), None),
+        ]
+    );
+    assert!(prompts.iter().all(|prompt| {
+        prompt_value(prompt, 3).is_none_or(|text| !text.contains("x-anthropic-billing-header"))
+    }));
+}
+
+#[test]
+fn moving_a_messages_mark_keeps_the_old_prompt_prefix_unchanged() {
+    let first: Request = hofund_plugin_sdk::json::from_value(hofund_plugin_sdk::json::json!({
+        "model": "claude-haiku-5-5", "stream": true,
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": "<transcript>"},
+            {"type": "text", "text": "history A", "extensions": {"cache_control": {"type": "ephemeral"}}},
+            {"type": "text", "text": "Current action: one"}
+        ]}]
+    }))
+    .expect("first history");
+    let second: Request = hofund_plugin_sdk::json::from_value(hofund_plugin_sdk::json::json!({
+        "model": "claude-haiku-5-5", "stream": true,
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": "<transcript>"},
+            {"type": "text", "text": "history A"},
+            {"type": "text", "text": "history B", "extensions": {"cache_control": {"type": "ephemeral"}}},
+            {"type": "text", "text": "Current action: two"}
+        ]}]
+    }))
+    .expect("grown history");
+    let first = decoded_chat_prompts(&encoded_request_for(first, ProtocolId::ANTHROPIC_MESSAGES));
+    let second = decoded_chat_prompts(&encoded_request_for(second, ProtocolId::ANTHROPIC_MESSAGES));
+    assert_eq!(prompt_value(&second[0], 3), prompt_value(&first[0], 3));
+    assert_eq!(prompt_value(&second[1], 3), prompt_value(&first[1], 3));
+    assert_eq!(prompt_cache(&second[1]), None);
+    assert_eq!(prompt_cache(&first[1]), Some(vec![8, 1]));
+    assert_eq!(prompt_value(&second[2], 3).as_deref(), Some("history B"));
+    assert_eq!(prompt_cache(&second[2]), Some(vec![8, 1]));
+}
+
+#[test]
+fn messages_system_notices_follow_real_results_without_losing_marks() {
+    let request: Request = hofund_plugin_sdk::json::from_value(hofund_plugin_sdk::json::json!({
+        "model": "claude-opus-5-5", "stream": true,
+        "messages": [
+            {"role": "user", "content": [{"type": "text", "text": "Read both files."}]},
+            {"role": "assistant", "content": [
+                {"type": "tool_call", "id": "c1", "name": "read_file", "arguments": {"form": "raw", "text": "{}"}},
+                {"type": "tool_call", "id": "c2", "name": "read_file", "arguments": {"form": "raw", "text": "{}"}}
+            ]},
+            {"role": "system", "content": [{"type": "text", "text": "Stop after this read."}]},
+            {"role": "system", "content": [{"type": "text", "text": "Report both results.", "extensions": {"cache_control": {"type": "ephemeral"}}}]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "id": "c1", "content": [{"type": "text", "text": "first"}]},
+                {"type": "tool_result", "id": "c2", "content": [{"type": "text", "text": "second"}]}
+            ]}
+        ]
+    }))
+    .expect("system notices");
+    let body = encoded_request_for(request, ProtocolId::ANTHROPIC_MESSAGES);
+    let prompts = decoded_chat_prompts(&body);
+    let actual: Vec<_> = prompts
+        .iter()
+        .map(|prompt| {
+            (
+                prompt_role(prompt),
+                prompt_value(prompt, 3),
+                prompt_cache(prompt),
+            )
+        })
+        .collect();
+    assert_eq!(
+        actual,
+        [
+            (Some(1), Some("Read both files.".into()), None),
+            (Some(2), None, None),
+            (Some(4), Some("first".into()), None),
+            (Some(4), Some("second".into()), None),
+            (Some(1), Some("Stop after this read.".into()), None),
+            (
+                Some(1),
+                Some("Report both results.".into()),
+                Some(vec![8, 1])
+            ),
+        ]
+    );
+    let calls = prompts[1].iter().filter(|field| field.number == 6).count();
+    assert_eq!(calls, 2);
+}
+
+#[test]
+fn empty_messages_notices_do_not_add_prompts_or_split_tool_calls() {
+    for content in [
+        hofund_plugin_sdk::json::json!([]),
+        hofund_plugin_sdk::json::json!([{"type": "text", "text": ""}]),
+    ] {
+        let request: Request = hofund_plugin_sdk::json::from_value(hofund_plugin_sdk::json::json!({
+            "model": "claude-opus-5-5", "stream": true,
+            "messages": [
+                {"role": "user", "content": [{"type": "text", "text": "Read both."}]},
+                {"role": "assistant", "content": [{"type": "tool_call", "id": "c1", "name": "read", "arguments": {"form": "raw", "text": "{}"}}]},
+                {"role": "system", "content": content},
+                {"role": "assistant", "content": [{"type": "tool_call", "id": "c2", "name": "read", "arguments": {"form": "raw", "text": "{}"}}]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "id": "c1", "content": [{"type": "text", "text": "first"}]},
+                    {"type": "tool_result", "id": "c2", "content": [{"type": "text", "text": "second"}]}
+                ]}
+            ]
+        }))
+        .expect("empty system notice");
+        let body = encoded_request_for(request, ProtocolId::ANTHROPIC_MESSAGES);
+        let prompts = decoded_chat_prompts(&body);
+        assert_eq!(prompts.len(), 4);
+        assert_eq!(prompt_role(&prompts[1]), Some(2));
+        assert_eq!(
+            prompts[1].iter().filter(|field| field.number == 6).count(),
+            2
+        );
+        assert_eq!(prompt_role(&prompts[2]), Some(4));
+        assert_eq!(prompt_role(&prompts[3]), Some(4));
+    }
+}
+
+#[test]
+fn messages_tool_results_keep_error_text_images_and_cache_marks() {
+    let request: Request = hofund_plugin_sdk::json::from_value(hofund_plugin_sdk::json::json!({
+        "model": "claude-opus-5-5", "stream": true,
+        "messages": [
+            {"role": "user", "content": [{"type": "text", "text": "Read /etc/motd."}]},
+            {"role": "assistant", "content": [{"type": "tool_call", "id": "toolu_01", "name": "read", "arguments": {"form": "raw", "text": "{}"}}]},
+            {"role": "user", "content": [{
+                "type": "tool_result", "id": "toolu_01", "is_error": true,
+                "content": [
+                    {"type": "text", "text": "exit status 1"},
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}, "extensions": {"cache_control": {"type": "ephemeral"}}}
+                ]
+            }]}
+        ]
+    }))
+    .expect("failed marked result");
+    let body = encoded_request_for(request, ProtocolId::ANTHROPIC_MESSAGES);
+    let prompts = decoded_chat_prompts(&body);
+    let result = prompts
+        .iter()
+        .find(|prompt| prompt_role(prompt) == Some(4))
+        .expect("tool result");
+    assert_eq!(
+        prompt_value(result, 3).as_deref(),
+        Some("Error: exit status 1")
+    );
+    assert_eq!(prompt_cache(result), Some(vec![8, 1]));
+    assert_eq!(prompt_images(result), [("AAAA".into(), "image/png".into())]);
+}
+
+#[test]
+fn chat_history_still_joins_text_without_cache_marks() {
+    let request: Request = hofund_plugin_sdk::json::from_value(hofund_plugin_sdk::json::json!({
+        "model": "swe-2", "stream": true,
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": "a"},
+            {"type": "text", "text": "b", "extensions": {"cache_control": {"type": "ephemeral"}}}
+        ]}]
+    }))
+    .expect("chat history");
+    let body = encoded_tool_request(request);
+    let prompts = decoded_chat_prompts(&body);
+    assert_eq!(prompts.len(), 1);
+    assert_eq!(prompt_value(&prompts[0], 3).as_deref(), Some("a\n\nb"));
+    assert_eq!(prompt_cache(&prompts[0]), None);
+}
+
+fn keepalive_config(interval: i64, max_pings: i64) -> RawTable {
+    let mut raw = RawTable::new();
+    raw.insert("cache_keepalive", RawValue::Boolean(true));
+    raw.insert("cache_keepalive_interval", RawValue::Integer(interval));
+    raw.insert("cache_keepalive_max_pings", RawValue::Integer(max_pings));
+    raw
+}
+
+#[test]
+fn keepalive_factory_validates_interval_and_count() {
+    let config = DevinFactory
+        .validate(&keepalive_config(30, 2))
+        .expect("config");
+    assert!(config.keepalive.enabled);
+    assert_eq!(
+        config.keepalive.interval,
+        std::time::Duration::from_secs(30)
+    );
+    assert_eq!(config.keepalive.max_pings, 2);
+}
+
+fn cached_chat_body(input: u64, cache_write: u64, cache_read: u64) -> Vec<u8> {
+    let usage = ProtoBuf::new()
+        .varint(2, input)
+        .varint(3, 1)
+        .varint(4, cache_write)
+        .varint(5, cache_read)
+        .finish();
+    let message = ProtoBuf::new()
+        .string(3, "ok")
+        .varint(5, 1)
+        .bytes(7, &usage)
+        .finish();
+    [
+        frame(0, &message).expect("content"),
+        frame(FLAG_END, b"{}").expect("end"),
+    ]
+    .concat()
+}
+
+async fn execute_with_subscription(
+    host: &TestHost,
+    subscription: &Arc<dyn Subscription>,
+    id: &AccountId,
+) -> Vec<StreamEvent> {
+    let upstream = subscription.upstream(id, host.context()).expect("upstream");
+    let completion = upstream
+        .execute(request("swe-2"), ProtocolId::OPENAI_CHAT)
+        .await
+        .expect("execute");
+    collect_events_async(completion).await.expect("events")
+}
+
+async fn advance_keepalive(seconds: u64) {
+    advance_time(std::time::Duration::from_secs(seconds)).await;
+    advance_time(std::time::Duration::from_millis(1)).await;
+    yield_times(4).await;
+}
+
+fn request_max_tokens(body: &[u8]) -> Option<u64> {
+    fields(&deframe(body).expect("request frame").payload)
+        .iter()
+        .find(|field| field.number == 8)
+        .and_then(|field| field.as_bytes())
+        .and_then(|sampling| {
+            fields(sampling)
+                .iter()
+                .find(|field| field.number == 2)
+                .and_then(|field| field.as_varint())
+        })
+}
+
+#[test]
+fn keepalive_repeats_the_request_with_continue_and_max_tokens_one() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = TestHost::open_for_with_tokio_monotonic(
+        PluginKind::Subscription,
+        PluginId::from_static("devin"),
+        dir.path(),
+    );
+    let subscription = configured_subscription(&host, keepalive_config(30, 2));
+    let id = seed_account(&host, "devin-keepalive-key", "keepalive@example.test");
+    enqueue_configs(&host);
+    host.http().enqueue(cached_chat_body(10, 200, 9000));
+    host.http().enqueue(cached_chat_body(3, 0, 9200));
+    host.http().enqueue(cached_chat_body(3, 0, 9200));
+    block_on_paused(async {
+        let events = execute_with_subscription(&host, &subscription, &id).await;
+        assert!(events.iter().any(|event| matches!(
+            event,
+            StreamEvent::MessageDelta(delta)
+                if delta.usage.as_ref().is_some_and(|usage| {
+                    usage.cache_read_tokens == Some(9000) && usage.cache_write_tokens == Some(200)
+                })
+        )));
+        assert_eq!(host.scheduler().running_once().len(), 1);
+        let original = host.http().calls()[1].body().to_vec();
+        advance_keepalive(30).await;
+        assert_eq!(host.http().calls().len(), 3);
+        advance_keepalive(30).await;
+        assert_eq!(host.http().calls().len(), 4);
+        assert!(host.scheduler().running_once().is_empty());
+
+        let first = decoded_chat_prompts(&original);
+        for call in &host.http().calls()[2..] {
+            assert_eq!(request_max_tokens(call.body()), Some(1));
+            let prompts = decoded_chat_prompts(call.body());
+            assert_eq!(prompts.len(), first.len() + 1);
+            assert_eq!(prompts[..first.len()], first[..]);
+            assert_eq!(prompt_role(prompts.last().expect("continue")), Some(1));
+            assert_eq!(
+                prompt_value(prompts.last().expect("continue"), 3).as_deref(),
+                Some("continue")
+            );
+            assert_eq!(prompt_cache(prompts.last().expect("continue")), None);
+        }
+    });
+}
+
+#[test]
+fn keepalive_is_off_by_default_and_requires_cache_usage() {
+    for (configured, usage) in [(false, (10, 200, 9000)), (true, (500, 0, 0))] {
+        let dir = tempfile::tempdir().expect("dir");
+        let host = TestHost::open_for_with_tokio_monotonic(
+            PluginKind::Subscription,
+            PluginId::from_static("devin"),
+            dir.path(),
+        );
+        let subscription = if configured {
+            configured_subscription(&host, keepalive_config(30, 2))
+        } else {
+            subscription(&host)
+        };
+        let id = seed_account(
+            &host,
+            &format!("devin-keepalive-off-key-{configured}"),
+            &format!("off-{configured}@example.test"),
+        );
+        enqueue_configs(&host);
+        host.http()
+            .enqueue(cached_chat_body(usage.0, usage.1, usage.2));
+        block_on_paused(async {
+            execute_with_subscription(&host, &subscription, &id).await;
+            assert!(host.scheduler().running_once().is_empty());
+            advance_keepalive(30).await;
+            assert_eq!(host.http().calls().len(), 2);
+        });
+    }
+}
+
+#[test]
+fn a_new_turn_replaces_only_its_own_keepalive() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = TestHost::open_for_with_tokio_monotonic(
+        PluginKind::Subscription,
+        PluginId::from_static("devin"),
+        dir.path(),
+    );
+    let subscription = configured_subscription(&host, keepalive_config(30, 2));
+    let id = seed_account(&host, "devin-keepalive-turn-key", "turn@example.test");
+    enqueue_configs(&host);
+    host.http().enqueue(cached_chat_body(10, 200, 9000));
+    host.http().enqueue(cached_chat_body(10, 300, 9000));
+    host.http().enqueue(cached_chat_body(3, 0, 9200));
+    block_on_paused(async {
+        execute_with_subscription(&host, &subscription, &id).await;
+        execute_with_subscription(&host, &subscription, &id).await;
+        assert_eq!(host.scheduler().running_once().len(), 1);
+        let current = host.http().calls()[2].body().to_vec();
+        advance_keepalive(30).await;
+        assert_eq!(host.http().calls().len(), 4);
+        let expected = decoded_chat_prompts(&current);
+        let ping = decoded_chat_prompts(host.http().calls()[3].body());
+        assert_eq!(ping[..expected.len()], expected[..]);
+    });
+}
+
+#[test]
+fn keepalive_stops_on_refusal_statuses() {
+    for (status, body) in [
+        (
+            401,
+            br#"{"code":"unauthenticated","message":"bad key"}"#.as_slice(),
+        ),
+        (402, b"".as_slice()),
+        (
+            429,
+            br#"{"code":"resource_exhausted","message":"rate limit"}"#.as_slice(),
+        ),
+    ] {
+        let dir = tempfile::tempdir().expect("dir");
+        let host = TestHost::open_for_with_tokio_monotonic(
+            PluginKind::Subscription,
+            PluginId::from_static("devin"),
+            dir.path(),
+        );
+        let subscription = configured_subscription(&host, keepalive_config(30, 6));
+        let id = seed_account(
+            &host,
+            &format!("devin-keepalive-refusal-key-{status}"),
+            &format!("refusal-{status}@example.test"),
+        );
+        enqueue_configs(&host);
+        host.http().enqueue(cached_chat_body(10, 200, 9000));
+        host.http().enqueue_response(status, &[], body);
+        block_on_paused(async {
+            execute_with_subscription(&host, &subscription, &id).await;
+            advance_keepalive(30).await;
+            assert_eq!(host.http().calls().len(), 3);
+            assert!(host.scheduler().running_once().is_empty());
+            advance_keepalive(60).await;
+            assert_eq!(host.http().calls().len(), 3);
+        });
+    }
+}
+
+#[test]
+fn keepalive_stops_after_two_consecutive_cache_misses() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = TestHost::open_for_with_tokio_monotonic(
+        PluginKind::Subscription,
+        PluginId::from_static("devin"),
+        dir.path(),
+    );
+    let subscription = configured_subscription(&host, keepalive_config(30, 6));
+    let id = seed_account(&host, "devin-keepalive-miss-key", "miss@example.test");
+    enqueue_configs(&host);
+    host.http().enqueue(cached_chat_body(10, 200, 9000));
+    host.http().enqueue(cached_chat_body(9000, 9000, 200));
+    host.http().enqueue(cached_chat_body(3, 0, 9200));
+    host.http().enqueue(cached_chat_body(9000, 9000, 200));
+    host.http().enqueue(cached_chat_body(9000, 9000, 200));
+    block_on_paused(async {
+        execute_with_subscription(&host, &subscription, &id).await;
+        for expected in 3..=5 {
+            advance_keepalive(30).await;
+            assert_eq!(host.http().calls().len(), expected);
+        }
+        assert_eq!(host.scheduler().running_once().len(), 1);
+        advance_keepalive(30).await;
+        assert_eq!(host.http().calls().len(), 6);
+        assert!(host.scheduler().running_once().is_empty());
+        advance_keepalive(60).await;
+        assert_eq!(host.http().calls().len(), 6);
+    });
+}
+
+#[test]
+fn keepalive_interval_starts_when_the_request_was_sent() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = TestHost::open_for_with_tokio_monotonic(
+        PluginKind::Subscription,
+        PluginId::from_static("devin"),
+        dir.path(),
+    );
+    let subscription = configured_subscription(&host, keepalive_config(285, 1));
+    let id = seed_account(&host, "devin-keepalive-clock-key", "clock@example.test");
+    enqueue_configs(&host);
+    host.http().enqueue(cached_chat_body(10, 200, 9000));
+    host.http().enqueue(cached_chat_body(3, 0, 9200));
+    block_on_paused(async {
+        let upstream = subscription
+            .upstream(&id, host.context())
+            .expect("upstream");
+        let completion = upstream
+            .execute(request("swe-2"), ProtocolId::OPENAI_CHAT)
+            .await
+            .expect("execute");
+        advance_time(std::time::Duration::from_millis(46_800)).await;
+        collect_events_async(completion).await.expect("events");
+        advance_keepalive(60).await;
+        assert_eq!(host.http().calls().len(), 2);
+        advance_keepalive(178).await;
+        assert_eq!(host.http().calls().len(), 2);
+        advance_keepalive(1).await;
+        assert_eq!(host.http().calls().len(), 3);
+        assert!(host.scheduler().running_once().is_empty());
+    });
 }

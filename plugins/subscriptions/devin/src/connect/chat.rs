@@ -6,6 +6,7 @@ use hofund_plugin_api::PluginError;
 use hofund_plugin_sdk::inflate::compress;
 use hofund_plugin_sdk::json::{Value, json};
 use hofund_plugin_sdk::protobuf::{FLAG_GZIP, MAX_FRAME_PAYLOAD, ProtoBuf, fields, frame, frames};
+use hofund_plugin_sdk::uuid;
 
 use super::metadata;
 
@@ -46,6 +47,7 @@ pub(crate) struct Prompt<'a> {
     pub(crate) text: &'a str,
     pub(crate) calls: Vec<PromptCall<'a>>,
     pub(crate) answer: Option<&'a str>,
+    pub(crate) cache: bool,
     pub(crate) images: Vec<PromptImage<'a>>,
     pub(crate) thinking: Option<PromptThinking<'a>>,
 }
@@ -58,6 +60,7 @@ impl<'a> Prompt<'a> {
             text,
             calls: Vec::new(),
             answer: None,
+            cache: false,
             images: Vec::new(),
             thinking: None,
         }
@@ -87,16 +90,16 @@ pub(crate) struct ChatRequest<'a> {
 pub(crate) struct EncodedChatRequest {
     pub(crate) body: Vec<u8>,
     pub(crate) gzipped: bool,
+    pub(crate) ping: Option<Box<EncodedChatRequest>>,
 }
 
 pub(crate) fn encode_request(request: &ChatRequest<'_>) -> Result<EncodedChatRequest, PluginError> {
-    let mut message = ProtoBuf::new().bytes(1, &metadata(request.session_token, request.os));
+    let mut base = ProtoBuf::new().bytes(1, &metadata(request.session_token, request.os));
     for prompt in request.prompts {
-        message = message.bytes(3, &encode_prompt(prompt));
+        base = base.bytes(3, &encode_prompt(prompt));
     }
-    let sampling = sampling(request);
-    message = message.varint(7, 5).bytes(8, &sampling);
     let mut offered = HashSet::new();
+    let mut tool_parts = Vec::new();
     for tool in request.tools {
         let description = tool.description.filter(|text| !text.is_empty()).map(|_| {
             format!(
@@ -104,22 +107,37 @@ pub(crate) fn encode_request(request: &ChatRequest<'_>) -> Result<EncodedChatReq
                 tool.name
             )
         });
-        message = message.bytes(
-            10,
-            &encode_tool(
-                tool.name,
-                description.as_deref().unwrap_or_default(),
-                Some(tool.schema),
-            ),
-        );
+        tool_parts.push(encode_tool(
+            tool.name,
+            description.as_deref().unwrap_or_default(),
+            Some(tool.schema),
+        ));
         offered.insert(tool.name);
     }
     for call in request.prompts.iter().flat_map(|prompt| &prompt.calls) {
         if offered.insert(call.name) {
-            message = message.bytes(10, &encode_tool(call.name, "Tool", None));
+            tool_parts.push(encode_tool(call.name, "Tool", None));
         }
     }
-    frame_request(&message.string(21, request.model_uid).finish())
+
+    let continue_id = uuid::v4().map_err(|error| PluginError::io(error.to_string()))?;
+    let continue_prompt = encode_prompt(&Prompt::text(&continue_id, PromptRole::User, "continue"));
+    let mut message = base.clone().varint(7, 5).bytes(8, &sampling(request));
+    let mut ping = base
+        .bytes(3, &continue_prompt)
+        .varint(7, 5)
+        .bytes(8, &sampling_with_max(request, 1));
+    for part in &tool_parts {
+        message = message.bytes(10, part);
+        ping = ping.bytes(10, part);
+    }
+    let encoded = frame_request(&message.string(21, request.model_uid).finish())?;
+    let ping = frame_request(&ping.string(21, request.model_uid).finish())?;
+    Ok(EncodedChatRequest {
+        body: encoded.body,
+        gzipped: encoded.gzipped,
+        ping: Some(Box::new(ping)),
+    })
 }
 
 fn encode_tool(name: &str, description: &str, schema: Option<&Value>) -> Vec<u8> {
@@ -157,6 +175,9 @@ fn encode_prompt(prompt: &Prompt<'_>) -> Vec<u8> {
     if let Some(answer) = prompt.answer {
         encoded = encoded.string(7, answer);
     }
+    if prompt.cache {
+        encoded = encoded.bytes(8, &ProtoBuf::new().varint(1, 1).finish());
+    }
     for image in &prompt.images {
         let image = ProtoBuf::new()
             .string(1, image.data)
@@ -179,9 +200,13 @@ fn encode_prompt(prompt: &Prompt<'_>) -> Vec<u8> {
 }
 
 fn sampling(request: &ChatRequest<'_>) -> Vec<u8> {
+    sampling_with_max(request, request.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS))
+}
+
+fn sampling_with_max(request: &ChatRequest<'_>, max_tokens: u64) -> Vec<u8> {
     ProtoBuf::new()
         .varint(1, 1)
-        .varint(2, request.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS))
+        .varint(2, max_tokens)
         .varint(3, 400)
         .double(5, above_zero(request.temperature.unwrap_or(1.0)))
         .varint(7, 40)
@@ -198,11 +223,13 @@ fn frame_request(message: &[u8]) -> Result<EncodedChatRequest, PluginError> {
         return Ok(EncodedChatRequest {
             body: frame(FLAG_GZIP, &compress(message)?)?,
             gzipped: true,
+            ping: None,
         });
     }
     Ok(EncodedChatRequest {
         body: frame(0, message)?,
         gzipped: false,
+        ping: None,
     })
 }
 
@@ -638,6 +665,25 @@ mod tests {
         assert_eq!(sampling[3].value, WireValue::Fixed64(1.0_f64.to_bits()));
         assert_eq!(sampling[5].value, WireValue::Fixed64(0.95_f64.to_bits()));
         assert!(!outer.iter().any(|field| field.number == 10));
+    }
+
+    #[test]
+    fn cache_prompt_encodes_ephemeral_options() {
+        let mut prompt = Prompt::text("id", PromptRole::User, "hello");
+        prompt.cache = true;
+        let encoded = encode_request(&request(&[prompt])).expect("encode");
+        let outer = fields(&deframe(&encoded.body).expect("frame").payload);
+        let prompt = outer
+            .iter()
+            .find(|field| field.number == 3)
+            .and_then(|field| field.as_bytes())
+            .expect("prompt");
+        let cache = fields(prompt)
+            .into_iter()
+            .find(|field| field.number == 8)
+            .and_then(|field| field.as_bytes().map(<[u8]>::to_vec))
+            .expect("cache options");
+        assert_eq!(cache, [8, 1]);
     }
 
     #[test]

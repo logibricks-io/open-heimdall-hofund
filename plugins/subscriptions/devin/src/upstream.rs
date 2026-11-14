@@ -17,20 +17,26 @@ use crate::connect::chat::{
 };
 use crate::creds::{self, Stored};
 use crate::errors;
+use crate::keepalive::Keepalive;
 use crate::models::{effort_of, variant_for};
 use crate::stream;
 
-const CHAT_PATH: &str = "/exa.api_server_pb.ApiServerService/GetChatMessage";
+pub(crate) const CHAT_PATH: &str = "/exa.api_server_pb.ApiServerService/GetChatMessage";
 const ERROR_BODY_CAP: usize = 1024 * 1024;
 
 pub(crate) struct DevinUpstream {
     account: AccountId,
     host: HostContext,
+    keepalive: Keepalive,
 }
 
 impl DevinUpstream {
-    pub(crate) fn new(account: AccountId, host: HostContext) -> Self {
-        Self { account, host }
+    pub(crate) fn new(account: AccountId, host: HostContext, keepalive: Keepalive) -> Self {
+        Self {
+            account,
+            host,
+            keepalive,
+        }
     }
 
     async fn execute_inner(
@@ -39,6 +45,7 @@ impl DevinUpstream {
         request: Request,
         inbound: ProtocolId,
     ) -> Result<Completion, PluginError> {
+        let keepalive_id = self.keepalive.begin(&request, inbound);
         let requested_model = request.model.clone();
         let effort = effort_for(&request, inbound);
         let catalog = catalog::families_for(&self.host, &self.account, &stored).await;
@@ -59,6 +66,7 @@ impl DevinUpstream {
                     })
                     .collect();
                 encoded.answer = prompt.answer.as_deref();
+                encoded.cache = prompt.cache;
                 encoded.images = prompt
                     .images
                     .iter()
@@ -105,6 +113,18 @@ impl DevinUpstream {
         if encoded.gzipped {
             call = call.header("Connect-Content-Encoding", "gzip");
         }
+        let on_finish: Option<stream::FinishCallback> = keepalive_id.and_then(|id| {
+            encoded.ping.clone().map(|ping| {
+                let keepalive = self.keepalive.clone();
+                let stored = stored.clone();
+                let sent_at = self.host.clock().monotonic();
+                Box::new(move |usage: chat::ChatUsage| {
+                    if usage.cache_read != 0 || usage.cache_write != 0 {
+                        keepalive.schedule(id, &stored, &ping, sent_at);
+                    }
+                }) as stream::FinishCallback
+            })
+        });
         let response = call.open_raw(self.host.http(), 1).await?;
         let status = response.status().as_u16();
         if !(200..300).contains(&status) {
@@ -118,12 +138,13 @@ impl DevinUpstream {
             inbound,
             request.stream,
             inbound == ProtocolId::ANTHROPIC_MESSAGES && is_claude(&model_uid),
+            on_finish,
         )
         .await
     }
 }
 
-async fn read_capped(
+pub(crate) async fn read_capped(
     mut body: hofund_plugin_api::BodyStream,
     cap: usize,
 ) -> Result<Vec<u8>, PluginError> {
@@ -149,6 +170,7 @@ struct OwnedPrompt {
     text: String,
     calls: Vec<OwnedCall>,
     answer: Option<String>,
+    cache: bool,
     images: Vec<OwnedImage>,
     thinking: Option<OwnedThinking>,
 }
@@ -194,6 +216,9 @@ fn prompts_for(
     inbound: ProtocolId,
     model_uid: &str,
 ) -> Result<Vec<OwnedPrompt>, PluginError> {
+    if inbound == ProtocolId::ANTHROPIC_MESSAGES {
+        return messages_request_prompts(request, tools, model_uid);
+    }
     let mut instructions = Vec::new();
     let mut turns = Vec::new();
     let mut pending = Vec::new();
@@ -258,6 +283,7 @@ fn prompts_for(
                             text,
                             calls: Vec::new(),
                             answer: Some(pending.remove(index)),
+                            cache: false,
                             images,
                             thinking: None,
                         });
@@ -307,6 +333,7 @@ fn prompts_for(
                             text: texts.join("\n\n"),
                             calls: Vec::new(),
                             answer: None,
+                            cache: false,
                             images,
                             thinking: None,
                         });
@@ -336,6 +363,7 @@ fn prompts_for(
             text: "Please proceed with the task.".to_owned(),
             calls: Vec::new(),
             answer: None,
+            cache: false,
             images: Vec::new(),
             thinking: None,
         });
@@ -359,6 +387,7 @@ fn prompts_for(
                     text: joined,
                     calls: Vec::new(),
                     answer: None,
+                    cache: false,
                     images: Vec::new(),
                     thinking: None,
                 },
@@ -372,6 +401,411 @@ fn prompts_for(
             Ok(prompt)
         })
         .collect()
+}
+
+struct MessagesTurn<'a> {
+    role: Role,
+    parts: Vec<&'a ContentPart>,
+}
+
+fn messages_request_prompts(
+    request: &Request,
+    tools: &[&Tool],
+    model_uid: &str,
+) -> Result<Vec<OwnedPrompt>, PluginError> {
+    let has_preamble = request
+        .messages
+        .first()
+        .is_some_and(|message| message.role == Role::System);
+    let history = &request.messages[usize::from(has_preamble)..];
+    let mut preamble_prompts: Vec<OwnedPrompt> = Vec::new();
+    if has_preamble {
+        for part in &request.messages[0].content {
+            let ContentPart::Text(text) = part else {
+                continue;
+            };
+            let stripped = strip_billing_header(&text.text);
+            if stripped.trim().is_empty() {
+                if cache_marked(&text.extensions)
+                    && let Some(previous) = preamble_prompts.last_mut()
+                {
+                    previous.cache = true;
+                }
+                continue;
+            }
+            preamble_prompts.push(user_prompt(
+                stripped.to_owned(),
+                cache_marked(&text.extensions),
+            ));
+        }
+    }
+    let format = structured_text(request);
+    if !format.is_empty() {
+        preamble_prompts.push(user_prompt(format, false));
+    }
+    let descriptions = tool_descriptions(tools);
+    if !descriptions.is_empty() {
+        preamble_prompts.insert(0, user_prompt(descriptions, false));
+    }
+
+    let mut turns = Vec::new();
+    let mut notices = Vec::new();
+    let mut pending = Vec::new();
+    for turn in messages_turns(history) {
+        match turn.role {
+            Role::Assistant => {
+                let (own, calls) = assistant_messages_prompts(&turn.parts, is_claude(model_uid));
+                if own.is_empty() {
+                    continue;
+                }
+                answer_messages(&mut turns, &mut notices, &mut pending);
+                pending = calls.iter().map(|call| call.id.clone()).collect();
+                turns.extend(own);
+            }
+            Role::System | Role::User => {
+                let mut held = Vec::new();
+                let mut words = None;
+                for part in turn.parts {
+                    match part {
+                        ContentPart::ToolResult(result) => {
+                            let id = chat::in_id(&result.id);
+                            let Some(index) = pending.iter().position(|pending| pending == &id)
+                            else {
+                                continue;
+                            };
+                            let text = result
+                                .content
+                                .iter()
+                                .filter_map(|part| match part {
+                                    ContentPart::Text(text) if !text.text.is_empty() => {
+                                        Some(text.text.as_str())
+                                    }
+                                    _ => None,
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n\n");
+                            let text = if text.is_empty() {
+                                "(no output)".to_owned()
+                            } else {
+                                text
+                            };
+                            let text = if result.is_error {
+                                format!("Error: {text}")
+                            } else {
+                                text
+                            };
+                            let cache = cache_marked(&result.extensions)
+                                || result.content.last().is_some_and(part_cache_marked);
+                            turns.push(OwnedPrompt {
+                                id: String::new(),
+                                role: PromptRole::Tool,
+                                text,
+                                calls: Vec::new(),
+                                answer: Some(pending.remove(index)),
+                                cache,
+                                images: result
+                                    .content
+                                    .iter()
+                                    .filter_map(|part| match part {
+                                        ContentPart::Image(image) => inline_image(image),
+                                        _ => None,
+                                    })
+                                    .collect(),
+                                thinking: None,
+                            });
+                            if pending.is_empty() {
+                                answer_messages(&mut turns, &mut notices, &mut pending);
+                            }
+                            words = None;
+                        }
+                        ContentPart::Text(text) => {
+                            if text.text.is_empty() {
+                                if cache_marked(&text.extensions)
+                                    && let Some(prompt) =
+                                        words_prompt(&mut turns, &mut notices, words)
+                                {
+                                    prompt.cache = true;
+                                }
+                                continue;
+                            }
+                            if turn.role != Role::System {
+                                answer_messages(&mut turns, &mut notices, &mut pending);
+                            }
+                            let prompt = OwnedPrompt {
+                                id: String::new(),
+                                role: PromptRole::User,
+                                text: text.text.clone(),
+                                calls: Vec::new(),
+                                answer: None,
+                                cache: cache_marked(&text.extensions),
+                                images: std::mem::take(&mut held),
+                                thinking: None,
+                            };
+                            let notice = turn.role == Role::System && !pending.is_empty();
+                            words = Some(if notice {
+                                let index = notices.len();
+                                notices.push(prompt);
+                                (index, true)
+                            } else {
+                                let index = turns.len();
+                                turns.push(prompt);
+                                (index, false)
+                            });
+                        }
+                        ContentPart::Image(part) => {
+                            let marked = cache_marked(&part.extensions);
+                            let Some(image) = inline_image(part) else {
+                                continue;
+                            };
+                            if let Some(prompt) = words_prompt(&mut turns, &mut notices, words) {
+                                prompt.images.push(image);
+                                prompt.cache |= marked;
+                            } else {
+                                held.push(image);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if !held.is_empty() {
+                    answer_messages(&mut turns, &mut notices, &mut pending);
+                    turns.push(OwnedPrompt {
+                        id: String::new(),
+                        role: PromptRole::User,
+                        text: String::new(),
+                        calls: Vec::new(),
+                        answer: None,
+                        cache: false,
+                        images: held,
+                        thinking: None,
+                    });
+                }
+            }
+            Role::Developer | Role::Tool => {}
+        }
+    }
+    answer_messages(&mut turns, &mut notices, &mut pending);
+    if turns
+        .last()
+        .is_none_or(|prompt| prompt.role == PromptRole::Assistant && prompt.calls.is_empty())
+    {
+        turns.push(user_prompt(
+            "Please proceed with the task.".to_owned(),
+            false,
+        ));
+    }
+    if !preamble_prompts.is_empty() {
+        let at = turns
+            .iter()
+            .position(|prompt| prompt.role == PromptRole::User)
+            .unwrap_or(0);
+        turns.splice(at..at, preamble_prompts);
+    }
+    turns
+        .into_iter()
+        .map(|mut prompt| {
+            prompt.id = uuid::v4().map_err(|error| PluginError::io(error.to_string()))?;
+            Ok(prompt)
+        })
+        .collect()
+}
+
+fn messages_turns(messages: &[hofund_plugin_api::Message]) -> Vec<MessagesTurn<'_>> {
+    let mut turns: Vec<MessagesTurn<'_>> = Vec::new();
+    for message in messages {
+        if !matches!(message.role, Role::System | Role::User | Role::Assistant) {
+            continue;
+        }
+        if message.role == Role::System
+            && !message
+                .content
+                .iter()
+                .any(|part| matches!(part, ContentPart::Text(text) if !text.text.is_empty()))
+        {
+            continue;
+        }
+        if let Some(last) = turns.last_mut()
+            && last.role == message.role
+        {
+            last.parts.extend(&message.content);
+        } else {
+            turns.push(MessagesTurn {
+                role: message.role,
+                parts: message.content.iter().collect(),
+            });
+        }
+    }
+    turns
+}
+
+fn assistant_messages_prompts(
+    parts: &[&ContentPart],
+    claude: bool,
+) -> (Vec<OwnedPrompt>, Vec<OwnedCall>) {
+    let mut own = Vec::new();
+    let mut calls = Vec::new();
+    let mut calls_marked = false;
+    let mut thought = None;
+    for part in parts {
+        match part {
+            ContentPart::Text(text) => {
+                if !text.text.is_empty() {
+                    let mut prompt =
+                        assistant_prompt(text.text.clone(), Vec::new(), thought.take());
+                    prompt.cache = cache_marked(&text.extensions);
+                    own.push(prompt);
+                } else if cache_marked(&text.extensions)
+                    && let Some(previous) = own.last_mut()
+                {
+                    previous.cache = true;
+                }
+            }
+            ContentPart::ToolCall(call) => {
+                calls.push(OwnedCall {
+                    id: chat::in_id(&call.id),
+                    name: call.name.clone(),
+                    arguments: args_of(&call.arguments),
+                });
+                calls_marked |= cache_marked(&call.extensions);
+            }
+            ContentPart::Thinking(thinking) if !thinking.redacted => {
+                let next = if claude {
+                    thinking
+                        .signature
+                        .as_ref()
+                        .filter(|signature| !signature.is_empty())
+                        .map(|signature| OwnedThinking {
+                            text: thinking.text.clone(),
+                            signature: Some(signature.clone()),
+                            signature_type: Some(stream::sig_type_of(signature)),
+                        })
+                } else if !thinking.text.is_empty() {
+                    Some(OwnedThinking {
+                        text: thinking.text.clone(),
+                        signature: None,
+                        signature_type: None,
+                    })
+                } else {
+                    None
+                };
+                if let Some(next) = next {
+                    if thought.is_some() {
+                        own.push(assistant_prompt(String::new(), Vec::new(), thought.take()));
+                    }
+                    thought = Some(next);
+                }
+            }
+            _ => {}
+        }
+    }
+    if !calls.is_empty() {
+        if own.last().is_none_or(|prompt| prompt.thinking.is_some()) {
+            own.push(assistant_prompt(String::new(), Vec::new(), None));
+        }
+        let last = own.last_mut().expect("a calls prompt exists");
+        if last.thinking.is_none() {
+            last.thinking = thought.take();
+        }
+        last.calls = calls.clone();
+        last.cache |= calls_marked;
+    } else if let Some(last) = own.last_mut()
+        && last.thinking.is_none()
+    {
+        last.thinking = thought;
+    }
+    (own, calls)
+}
+
+fn answer_messages(
+    turns: &mut Vec<OwnedPrompt>,
+    notices: &mut Vec<OwnedPrompt>,
+    pending: &mut Vec<String>,
+) {
+    for id in pending.drain(..) {
+        turns.push(OwnedPrompt {
+            id: String::new(),
+            role: PromptRole::Tool,
+            text: NO_RESULT.to_owned(),
+            calls: Vec::new(),
+            answer: Some(id),
+            cache: false,
+            images: Vec::new(),
+            thinking: None,
+        });
+    }
+    turns.append(notices);
+}
+
+fn words_prompt<'a>(
+    turns: &'a mut [OwnedPrompt],
+    notices: &'a mut [OwnedPrompt],
+    words: Option<(usize, bool)>,
+) -> Option<&'a mut OwnedPrompt> {
+    let (index, notice) = words?;
+    if notice {
+        notices.get_mut(index)
+    } else {
+        turns.get_mut(index)
+    }
+}
+
+fn user_prompt(text: String, cache: bool) -> OwnedPrompt {
+    OwnedPrompt {
+        id: String::new(),
+        role: PromptRole::User,
+        text,
+        calls: Vec::new(),
+        answer: None,
+        cache,
+        images: Vec::new(),
+        thinking: None,
+    }
+}
+
+fn cache_marked(extensions: &hofund_plugin_api::Extensions) -> bool {
+    extensions
+        .get("cache_control")
+        .is_some_and(Value::is_object)
+}
+
+fn part_cache_marked(part: &ContentPart) -> bool {
+    match part {
+        ContentPart::Text(part) => cache_marked(&part.extensions),
+        ContentPart::Image(part) => cache_marked(&part.extensions),
+        ContentPart::ToolCall(part) => cache_marked(&part.extensions),
+        ContentPart::ToolResult(part) => cache_marked(&part.extensions),
+        ContentPart::Thinking(part) => cache_marked(&part.extensions),
+        ContentPart::Unknown(part) => cache_marked(&part.extensions),
+    }
+}
+
+pub(crate) fn strip_billing_header(text: &str) -> &str {
+    const PREFIX: &str = "x-anthropic-billing-header:";
+    let Some(rest) = text.strip_prefix(PREFIX) else {
+        return text;
+    };
+    let line_end = rest.find('\n').unwrap_or(rest.len());
+    let valid = rest[..line_end].split(';').all(|assignment| {
+        let assignment = assignment.trim();
+        if assignment.is_empty() {
+            return true;
+        }
+        let Some((key, value)) = assignment.split_once('=') else {
+            return false;
+        };
+        !key.is_empty()
+            && key
+                .bytes()
+                .all(|byte| byte.is_ascii_alphabetic() || byte == b'_')
+            && !value
+                .bytes()
+                .any(|byte| byte == b';' || byte.is_ascii_whitespace())
+    });
+    if !valid {
+        return text;
+    }
+    let tail = &rest[line_end..];
+    tail.strip_prefix('\n').unwrap_or(tail)
 }
 
 fn join_split_calls(request: &Request, join: bool) -> Vec<JoinedMessage<'_>> {
@@ -454,6 +888,7 @@ fn assistant_prompt(
         text,
         calls,
         answer: None,
+        cache: false,
         images: Vec::new(),
         thinking,
     }
@@ -530,6 +965,7 @@ fn answer_pending(turns: &mut Vec<OwnedPrompt>, pending: &mut Vec<String>) {
             text: NO_RESULT.to_owned(),
             calls: Vec::new(),
             answer: Some(id),
+            cache: false,
             images: Vec::new(),
             thinking: None,
         });

@@ -14,7 +14,7 @@ Legend: **Done** = matches the reference at checklist granularity; **Partial** =
 |---|---|---|---|---|---|
 | Claude Pro/Max (`claude`) | 1 | 17 | 3 | 2 | 0 |
 | Cursor (`cursor`) | 1 | 15 | 3 | 2 | 0 |
-| Devin (`devin`) | 11 | 6 | 1 | 1 | 0 |
+| Devin (`devin`) | 12 | 6 | 0 | 1 | 0 |
 | Zed (`zed`) | 0 | 6 | 1 | 3 | 0 |
 | Kiro (`kiro`) | 8 | 9 | 0 | 2 | 0 |
 | Factory / Droid (`factory`) | 12 | 4 | 0 | 3 | 0 |
@@ -136,7 +136,7 @@ Every other gap below maps to an existing plan item.
 | c | token storage | Plugin + TOML on disk | Daemon secret; atomic agent write on switch | Partial | — |
 | d | refresh | Plugin renews tokens (unverified); core reads CLI | `refresh` loads stored only (`lib.rs:174-176`) | Partial | OAuth refresh if CLI tokens expire (**R-12**) |
 | e | upstream wire | Protobuf Connect `GetChatMessage` on `server.codeium.com` (`devin/index.mjs:28-32`) | `upstream.rs` unary POST with literal Basic auth, 300 s read budget, origin override, and tool field 10 | Done | — |
-| f | inbound shapes | Chat completions + Anthropic for Claude models (`devin/index.mjs:19-26`) | Chat, Responses, and Messages IR execute; catalog advertises Chat endpoint only | Partial | Per-model inbound routing (**R-13**) |
+| f | inbound shapes | Chat completions + Anthropic for Claude models (`devin/index.mjs:19-26`) | Chat, Responses, and Messages IR execute; R-13c preserves Messages block boundaries and field-8 cache marks with ordered system notices; catalog advertises Chat endpoint only | Partial | Per-model inbound routing (**R-13**) |
 | g | streaming | Connect stream from GetChatMessage | Incremental text, reasoning, tool-start, and argument-delta IR events; content-or-tool-gated success | Done | — |
 | h | tool calls | Plugin `tool-ids.test.mjs`, split calls | R-13b encodes field-6 calls and field-7 results, joins split calls, fills interrupted results, sanitizes ids, offers history-only tools, and streams tool-only replies with usage | Done | — |
 | i | images | Plugin `images.test.mjs`, `devin_images.go` in core catalog | R-13b encodes inline field-10 images, omits URL-only images, and keeps direct or `FROM`/`NOTE`-associated tool-result images on their tool prompts | Done | — |
@@ -145,15 +145,13 @@ Every other gap below maps to an existing plan item.
 | l | model list | CLI JSON + `GetCliModelConfigs` (`devin/index.mjs:44-134`) | Live raw-protobuf RPC, isolated CLI fallback, embedded snapshot, per-account freshness/retry cache, tier-4 free flags, and matching-variant list prices | Done | — |
 | m | multi-account | EU host `eu.codeium.com` (plugin) | unverified in hofund | Partial | Region selection (**R-12**) |
 | n | error classification | Plugin `errors.test.mjs` | `errors.rs` section 6 HTTP/Connect mapping, exact empty-reply and broken-stream errors | Done | Tool/image-specific cases (**R-13**) |
-| o | keepalive | `keepalive.test.mjs` | None | Missing | **R-13** (new to the plan in this audit) |
-| p | agent sign-in | Core installs CLI (`devin.go:8-12`) | `agent_sign_in.rs` write TOML | Partial | CLI install helper like core (`DevinExecutable`) |
+| o | keepalive | `keepalive.test.mjs` | R-13c adds opt-in 285 s / six-ping keepalive with byte-stable `continue` requests, send-time scheduling, session/subagent and growing-first-message keys, and all stop rules; paused-clock recorded-HTTP tests | Partial | Separate ping usage reporting needs a host usage hook |
+| p | agent sign-in | Core installs CLI (`devin.go:8-12`) | `agent_sign_in.rs` writes TOML; R-13c discovers PATH/home/system binaries, runs the reference installer, rechecks discovery, refreshes registry PATH, and applies the Windows setup tail with scripted-process tests | Done | — |
 | q | extras | gzip request, identity headers, CLI version pin (`devin/index.mjs:33-36`) | `connect/` message tables + SDK `protobuf`; 8083/8333 gzip tests; HTTP encoding header, metadata, and sensitive Basic auth | Done | — |
 
 ### Gaps (Devin)
 
-- Messages cache marks — **L**, **R-13**
-- CLI install/bootstrap — **S**, **R-12** (new to the plan in this audit)
-- Keepalive (`keepalive.test.mjs`) — **S**, **R-13** (new to the plan in this audit)
+- Keepalive usage reporting — host usage hook (deferred by design)
 
 Structured-output prose for Chat, Responses, and Messages shipped in R-13b (`structured-output.test.mjs` behavior; `structured_text` in `upstream.rs`).
 

@@ -7,6 +7,28 @@ use crate::message::Message;
 use crate::params::GenerationParams;
 use crate::tools::{Tool, ToolChoice};
 
+/// Host-supplied identity for one client conversation.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Conversation {
+    /// Client-named session, or an empty string when none was named.
+    #[serde(default)]
+    pub session: String,
+    /// Subagent within that session, or an empty string for the lead.
+    #[serde(default)]
+    pub subagent: String,
+}
+
+impl Conversation {
+    /// Creates conversation identity from the gateway's session headers.
+    #[must_use]
+    pub fn new(session: impl Into<String>, subagent: impl Into<String>) -> Self {
+        Self {
+            session: session.into(),
+            subagent: subagent.into(),
+        }
+    }
+}
+
 /// One chat-style request.
 ///
 /// This type performs no I/O. Codecs translate protocol payloads into it and
@@ -34,6 +56,9 @@ pub struct Request {
     /// Whether the caller asked for a stream of events.
     #[serde(default, skip_serializing_if = "is_false")]
     pub stream: bool,
+    /// Host identity for affinity and background work on this conversation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation: Option<Conversation>,
     /// Top-level fields this version does not model.
     #[serde(default, skip_serializing_if = "Extensions::is_empty")]
     pub extensions: Extensions,
@@ -61,6 +86,7 @@ impl Request {
             tool_choice: None,
             params: GenerationParams::default(),
             stream: false,
+            conversation: None,
             extensions: Extensions::new(),
         }
     }
@@ -97,6 +123,13 @@ impl Request {
     #[must_use]
     pub fn with_stream(mut self, stream: bool) -> Self {
         self.stream = stream;
+        self
+    }
+
+    /// Replaces the host conversation identity.
+    #[must_use]
+    pub fn with_conversation(mut self, conversation: Option<Conversation>) -> Self {
+        self.conversation = conversation;
         self
     }
 
