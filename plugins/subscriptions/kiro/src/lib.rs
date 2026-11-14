@@ -159,6 +159,7 @@ impl SubscriptionFactory for KiroFactory {
                 command: BinaryName::new("kiro-cli"),
             },
             pending: Mutex::new(HashMap::new()),
+            models: Arc::new(models::NativeModels::default()),
         }))
     }
 }
@@ -174,6 +175,7 @@ struct Kiro {
     cli_command: Option<PathBuf>,
     flow: SignInFlow,
     pending: Mutex<HashMap<String, Pending>>,
+    models: Arc<models::NativeModels>,
 }
 
 impl Kiro {
@@ -360,10 +362,17 @@ impl Subscription for Kiro {
 
     async fn list_models(
         &self,
-        _account: &AccountId,
-        _host: &HostContext,
+        account: &AccountId,
+        host: &HostContext,
     ) -> Result<ModelList, PluginError> {
-        models::catalog()
+        models::list_account(
+            host,
+            Arc::clone(&self.endpoints),
+            account,
+            self.cli_command.as_deref(),
+            &self.models,
+        )
+        .await
     }
 
     fn upstream(
@@ -376,6 +385,7 @@ impl Subscription for Kiro {
             host.clone(),
             Arc::clone(&self.endpoints),
             self.cli_command.clone(),
+            Arc::clone(&self.models),
         )))
     }
 
@@ -411,5 +421,7 @@ mod conformance;
 mod portal_tests;
 #[cfg(test)]
 mod r51b_tests;
+#[cfg(test)]
+mod r51c_tests;
 #[cfg(test)]
 mod tests;

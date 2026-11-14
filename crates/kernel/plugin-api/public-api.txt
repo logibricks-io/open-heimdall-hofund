@@ -1168,6 +1168,7 @@ SignInProof::fn callback (code : impl Into < SecretString > , state : impl Into 
 SignInProof::fn device (user_code : impl Into < SecretString >) -> Self
 SignInProof::fn query_token (user_id : impl Into < String > , access_token : impl Into < SecretString >) -> Self
 SignInProof::fn token (token : impl Into < SecretString >) -> Self
+SignatureDelta
 Slot
 Slot #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 Slot::Append
@@ -1264,6 +1265,7 @@ SurfaceId::from_static
 TextDelta
 TextPart
 ThinkingDelta
+ThinkingPart
 TierId
 TierId #[non_exhaustive] derives(Clone, Debug)
 TierId::const fn from_static (value : & 'static str) -> Self

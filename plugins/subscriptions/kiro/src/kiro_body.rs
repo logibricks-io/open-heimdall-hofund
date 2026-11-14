@@ -1,6 +1,6 @@
 //! Request bodies for Kiro `generateAssistantResponse`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use hofund_plugin_api::{
     ContentPart, ImageSource, Message, PluginError, Request, Role, ToolArguments,
@@ -25,6 +25,8 @@ struct Body {
     agent_mode: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     profile_arn: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    additional_model_request_fields: Option<Value>,
 }
 
 #[derive(Serialize)]
@@ -187,6 +189,59 @@ struct ImageBytes {
     bytes: String,
 }
 
+#[derive(Clone)]
+enum CachedImage {
+    Image { format: &'static str, bytes: String },
+    Note(&'static str),
+}
+
+#[derive(Default)]
+pub(crate) struct FittedCache {
+    results: HashMap<[u8; 32], CachedImage>,
+    newest: VecDeque<[u8; 32]>,
+}
+
+impl FittedCache {
+    fn fit(&mut self, bytes: &str) -> CachedImage {
+        let key = digest::sha256(bytes.as_bytes());
+        let result = if let Some(result) = self.results.remove(&key) {
+            self.newest.retain(|cached| *cached != key);
+            result
+        } else {
+            match hofund_plugin_sdk::image::fit_base64(bytes, IMAGE_LIMIT) {
+                Ok(image) => CachedImage::Image {
+                    format: image.format,
+                    bytes: image.base64,
+                },
+                Err(error) => CachedImage::Note(match error {
+                    hofund_plugin_sdk::image::FitError::InputTooLarge => {
+                        "it is too large to resize"
+                    }
+                    hofund_plugin_sdk::image::FitError::TooManyPixels => {
+                        "it has too many pixels to resize"
+                    }
+                    hofund_plugin_sdk::image::FitError::Unreadable => {
+                        "it couldn't be read as an image"
+                    }
+                    hofund_plugin_sdk::image::FitError::ResizeFailed => "it couldn't be resized",
+                    hofund_plugin_sdk::image::FitError::StillTooLarge => {
+                        "it couldn't be made small enough"
+                    }
+                    hofund_plugin_sdk::image::FitError::Deadline => "resizing it took too long",
+                }),
+            }
+        };
+        self.newest.push_back(key);
+        self.results.insert(key, result.clone());
+        while self.results.len() > 4 {
+            if let Some(oldest) = self.newest.pop_front() {
+                self.results.remove(&oldest);
+            }
+        }
+        result
+    }
+}
+
 pub(crate) fn reject_unsupported(_request: &Request) -> Result<(), PluginError> {
     Ok(())
 }
@@ -212,7 +267,27 @@ pub(crate) fn tool_names(request: &Request) -> HashMap<String, String> {
     names
 }
 
+#[cfg(test)]
 pub(crate) fn encode(request: &Request, credential: &Credential) -> Result<Vec<u8>, PluginError> {
+    encode_with_cache(request, credential, &mut FittedCache::default())
+}
+
+#[cfg(test)]
+pub(crate) fn encode_with_cache(
+    request: &Request,
+    credential: &Credential,
+    fitted: &mut FittedCache,
+) -> Result<Vec<u8>, PluginError> {
+    encode_with(request, credential, None, fitted)
+}
+
+pub(crate) fn encode_with(
+    request: &Request,
+    credential: &Credential,
+    native: Option<&crate::models::NativeEffort>,
+    fitted: &mut FittedCache,
+) -> Result<Vec<u8>, PluginError> {
+    let native = native_fields(request, native);
     let profile_arn = crate::creds::effective_profile_arn(credential);
     let mut entries = Vec::new();
     let mut system = String::new();
@@ -237,9 +312,11 @@ pub(crate) fn encode(request: &Request, credential: &Credential) -> Result<Vec<u
         });
     }
     pair_tool_results(&mut entries);
-    keep_latest_images(&mut entries)?;
+    keep_latest_images(&mut entries);
 
-    if let Some(budget) = thinking_budget(request) {
+    if native.is_none()
+        && let Some(budget) = thinking_budget(request)
+    {
         let prefix = format!(
             "<thinking_mode>enabled</thinking_mode><max_thinking_length>{budget}</max_thinking_length>"
         );
@@ -259,6 +336,7 @@ pub(crate) fn encode(request: &Request, credential: &Credential) -> Result<Vec<u
     }
 
     add_tools(request, &mut entries);
+    fit_images(&mut entries, fitted);
     let current_message = entries.pop().expect("a current user message was added");
     let conversation_id = uuid::v4().map_err(|error| PluginError::io(error.to_string()))?;
     let body = Body {
@@ -271,6 +349,7 @@ pub(crate) fn encode(request: &Request, credential: &Credential) -> Result<Vec<u
         },
         agent_mode: "vibe",
         profile_arn: (!profile_arn.is_empty()).then(|| profile_arn.to_owned()),
+        additional_model_request_fields: native,
     };
     json::to_vec(&body).map_err(|_| PluginError::decode("Kiro request body could not be encoded"))
 }
@@ -506,27 +585,49 @@ fn pair_tool_results(entries: &mut [Entry]) {
     }
 }
 
-fn keep_latest_images(entries: &mut [Entry]) -> Result<(), PluginError> {
+fn keep_latest_images(entries: &mut [Entry]) {
     let latest = entries
         .iter()
         .rposition(|entry| entry.user().is_some_and(|user| !user.images.is_empty()));
     for (index, entry) in entries.iter_mut().enumerate() {
-        if let Some(user) = entry.user_mut() {
-            if Some(index) != latest || user.images.is_empty() {
-                user.images.clear();
-                continue;
-            }
-            for image in &user.images {
-                if image.source.bytes.len() > IMAGE_LIMIT {
-                    return Err(PluginError::config(format!(
-                        "Kiro image Base64 data is {} bytes; the limit is {IMAGE_LIMIT} bytes per image and this build cannot resize it",
-                        image.source.bytes.len()
-                    )));
-                }
-            }
+        if let Some(user) = entry.user_mut()
+            && (Some(index) != latest || user.images.is_empty())
+        {
+            user.images.clear();
         }
     }
-    Ok(())
+}
+
+fn fit_images(entries: &mut [Entry], fitted: &mut FittedCache) {
+    for user in entries.iter_mut().filter_map(Entry::user_mut) {
+        if user.images.is_empty() {
+            continue;
+        }
+        let mut kept = Vec::new();
+        let mut notes = Vec::new();
+        for image in user.images.drain(..) {
+            let bytes = &image.source.bytes;
+            if bytes.len() <= IMAGE_LIMIT {
+                kept.push(image);
+                continue;
+            }
+            match fitted.fit(bytes) {
+                CachedImage::Image { format, bytes } => kept.push(Image {
+                    format: format.to_owned(),
+                    source: ImageBytes { bytes },
+                }),
+                CachedImage::Note(note) => notes.push(format!(
+                    "[An image ({}, {:.1} MB as Base64) was left out of this message: Kiro takes at most 5.0 MB per image, and {note}.]",
+                    image.format,
+                    bytes.len() as f64 / (1024.0 * 1024.0),
+                )),
+            }
+        }
+        user.images = kept;
+        if !notes.is_empty() {
+            user.content = join_non_empty(user.content.clone(), notes.join("\n"));
+        }
+    }
 }
 
 fn add_tools(request: &Request, entries: &mut [Entry]) {
@@ -689,6 +790,23 @@ fn base64url(bytes: &[u8]) -> String {
         }
     }
     out
+}
+
+fn native_fields(request: &Request, native: Option<&crate::models::NativeEffort>) -> Option<Value> {
+    let native = native?;
+    let effort = request
+        .extensions
+        .get("output_config")
+        .and_then(Value::as_object)
+        .and_then(|config| config.get("effort"))
+        .and_then(Value::as_str)?;
+    if !native.levels.iter().any(|level| level == effort) || thinking_budget(request).is_none() {
+        return None;
+    }
+    let mut fields = Map::new();
+    fields.insert("thinking".to_owned(), json::json!({"type": "adaptive"}));
+    fields.insert(native.path.to_owned(), json::json!({"effort": effort}));
+    Some(Value::Object(fields))
 }
 
 fn thinking_budget(request: &Request) -> Option<u64> {

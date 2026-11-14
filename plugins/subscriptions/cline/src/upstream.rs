@@ -49,9 +49,10 @@ impl ClineUpstream {
         request: Request,
         inbound: ProtocolId,
     ) -> Result<Completion, PluginError> {
+        let task_id = client::task_id(&request);
         let target = Target::new(ProtocolId::OPENAI_CHAT, self.endpoints.api.clone())
             .credential(CredentialStyle::Bearer)
-            .headers(client::headers(None))
+            .headers(client::headers(task_id.as_deref()))
             .unwrap(Arc::new(unwrap_envelope));
         wire::execute(
             self.host.http(),
@@ -75,7 +76,7 @@ impl UpstreamProvider for ClineUpstream {
         let kind = self.auth_kind().await?;
         match self.send(&bearer, request.clone(), inbound).await {
             Err(error) if error.status() == Some(401) && kind == AuthKind::Oauth => {
-                tokens::refresh_account(&self.host, &self.endpoints, &self.account).await?;
+                tokens::refresh_account_now(&self.host, &self.endpoints, &self.account).await?;
                 let renewed = self.bearer().await?;
                 self.send(&renewed, request, inbound).await
             }

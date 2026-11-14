@@ -11,8 +11,11 @@ use hofund_plugin_sdk::time::parse_rfc3339;
 use crate::Endpoints;
 use crate::api::{self, bearer_oauth};
 
-/// How long before expiry an OAuth access token is refreshed.
+/// How long before expiry an OAuth access token is refreshed before a request.
 pub(crate) const REFRESH_MARGIN: Duration = Duration::from_secs(5 * 60);
+
+/// How long before expiry the explicit subscription hook renews a token.
+pub(crate) const RENEW_MARGIN: Duration = Duration::from_secs(10 * 60);
 
 /// After a transient refresh failure, an unexpired token may still be used.
 pub(crate) const RETRYABLE_GRACE: Duration = Duration::from_secs(30);
@@ -115,7 +118,7 @@ fn ms_to_system(ms: u64) -> Result<SystemTime, ()> {
     UNIX_EPOCH.checked_add(Duration::from_millis(ms)).ok_or(())
 }
 
-fn needs_refresh(blob: &SecretObject, now: SystemTime) -> bool {
+fn needs_refresh(blob: &SecretObject, now: SystemTime, margin: Duration) -> bool {
     let ms = expires_ms(blob);
     if ms == 0 {
         return true;
@@ -123,7 +126,7 @@ fn needs_refresh(blob: &SecretObject, now: SystemTime) -> bool {
     let Ok(at) = ms_to_system(ms) else {
         return true;
     };
-    at <= now + REFRESH_MARGIN
+    at <= now + margin
 }
 
 /// Returns a bearer ready to send, refreshing OAuth tokens when near expiry.
@@ -143,7 +146,7 @@ pub(crate) async fn bearer(
             token: bearer_of(&blob)?,
         });
     }
-    if !needs_refresh(&blob, host.clock().now()) {
+    if !needs_refresh(&blob, host.clock().now(), REFRESH_MARGIN) {
         return Ok(Bearer {
             token: bearer_of(&blob)?,
         });
@@ -151,12 +154,47 @@ pub(crate) async fn bearer(
     let access = blob
         .secret("access_token")
         .ok_or_else(|| PluginError::auth("the stored Cline sign-in has no access token"))?;
-    let job = refresh_oauth(host.clone(), endpoints.clone(), account.clone(), access);
+    let job = refresh_oauth(
+        host.clone(),
+        endpoints.clone(),
+        account.clone(),
+        access,
+        true,
+    );
     detached(host.scheduler(), "cline-refresh", job).await
 }
 
 /// Explicit refresh for the subscription `refresh` hook.
 pub(crate) async fn refresh_account(
+    host: &HostContext,
+    endpoints: &Endpoints,
+    account: &AccountId,
+) -> Result<(), PluginError> {
+    let secret = host
+        .accounts()
+        .secret(account)
+        .await?
+        .ok_or_else(|| PluginError::auth("no Cline sign-in is stored for this account"))?;
+    let blob = stored(&secret)?;
+    if kind(&blob) == AuthKind::Api || !needs_refresh(&blob, host.clock().now(), RENEW_MARGIN) {
+        return Ok(());
+    }
+    let access = blob
+        .secret("access_token")
+        .ok_or_else(|| PluginError::auth("the stored Cline sign-in has no access token"))?;
+    refresh_oauth(
+        host.clone(),
+        endpoints.clone(),
+        account.clone(),
+        access,
+        false,
+    )
+    .await
+    .map(|_| ())
+}
+
+/// Forces renewal after the upstream refuses the current OAuth token.
+pub(crate) async fn refresh_account_now(
     host: &HostContext,
     endpoints: &Endpoints,
     account: &AccountId,
@@ -173,9 +211,15 @@ pub(crate) async fn refresh_account(
     let access = blob
         .secret("access_token")
         .ok_or_else(|| PluginError::auth("the stored Cline sign-in has no access token"))?;
-    refresh_oauth(host.clone(), endpoints.clone(), account.clone(), access)
-        .await
-        .map(|_| ())
+    refresh_oauth(
+        host.clone(),
+        endpoints.clone(),
+        account.clone(),
+        access,
+        true,
+    )
+    .await
+    .map(|_| ())
 }
 
 async fn refresh_oauth(
@@ -183,6 +227,7 @@ async fn refresh_oauth(
     endpoints: Endpoints,
     account: AccountId,
     stale: SecretString,
+    retryable_grace: bool,
 ) -> Result<Bearer, PluginError> {
     let lease = host.accounts().lease(&account, LEASE_WAIT).await?;
     let blob = stored(lease.secret())?;
@@ -215,7 +260,8 @@ async fn refresh_oauth(
             return Err(error);
         }
         Err(_error)
-            if !expired(&blob, host.clock().now())
+            if retryable_grace
+                && !expired(&blob, host.clock().now())
                 && ms_remaining(&blob, host.clock().now()) > RETRYABLE_GRACE =>
         {
             return Ok(Bearer {
@@ -346,5 +392,5 @@ pub(crate) async fn refresh_for_test(
     account: AccountId,
     stale: SecretString,
 ) -> Result<Bearer, PluginError> {
-    refresh_oauth(host, endpoints, account, stale).await
+    refresh_oauth(host, endpoints, account, stale, true).await
 }
