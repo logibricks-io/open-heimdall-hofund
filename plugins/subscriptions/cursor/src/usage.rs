@@ -205,7 +205,7 @@ pub(crate) fn claim_rows(
     (claimed > 0).then_some(totals)
 }
 
-fn events_of(body: &Value) -> &[Value] {
+pub(crate) fn events_of(body: &Value) -> &[Value] {
     body.as_array()
         .map(|items| items.as_slice())
         .or_else(|| {
@@ -221,14 +221,14 @@ fn events_of(body: &Value) -> &[Value] {
         .unwrap_or(&[])
 }
 
-fn conversation_of(event: &Value) -> Option<&str> {
+pub(crate) fn conversation_of(event: &Value) -> Option<&str> {
     event
         .get("conversationId")
         .or_else(|| event.get("conversation_id"))
         .and_then(Value::as_str)
 }
 
-fn timestamp_of(event: &Value) -> Option<i64> {
+pub(crate) fn timestamp_of(event: &Value) -> Option<i64> {
     let value = event.get("timestamp").or_else(|| event.get("time"))?;
     if let Some(number) = value.as_i64() {
         return Some(number);
@@ -239,7 +239,7 @@ fn timestamp_of(event: &Value) -> Option<i64> {
     value.as_str()?.trim().parse().ok()
 }
 
-fn number_of(event: &Value, keys: &[&str]) -> u64 {
+pub(crate) fn number_of(event: &Value, keys: &[&str]) -> u64 {
     keys.iter()
         .find_map(|key| {
             let value = event.get(*key)?;
