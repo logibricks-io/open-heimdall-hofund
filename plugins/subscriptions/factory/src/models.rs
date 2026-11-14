@@ -664,14 +664,22 @@ pub(crate) fn outbound_llm_headers(model: &str) -> Vec<(String, String)> {
 #[must_use]
 pub(crate) fn request_rewrite(wire: ProtocolId, model: &str) -> Rewrite {
     let model = model.to_owned();
-    Arc::new(move |body| {
-        let added = fast_body(body, wire);
-        client_body(body, wire);
-        if wire == ProtocolId::GENERATIVE_LANGUAGE {
-            body.insert("model".to_owned(), Value::String(model.clone()));
-        }
-        added
-    })
+    Arc::new(move |body| rewrite_request_body(body, wire, &model))
+}
+
+/// Applies fast mode, Droid client shaping, and optional model injection.
+#[must_use]
+pub(crate) fn rewrite_request_body(
+    body: &mut Map<String, Value>,
+    wire: ProtocolId,
+    model: &str,
+) -> Vec<(String, String)> {
+    let added = fast_body(body, wire);
+    client_body(body, wire);
+    if wire == ProtocolId::GENERATIVE_LANGUAGE {
+        body.insert("model".to_owned(), Value::String(model.to_owned()));
+    }
+    added
 }
 
 fn fast_body(body: &mut Map<String, Value>, wire: ProtocolId) -> Vec<(String, String)> {
