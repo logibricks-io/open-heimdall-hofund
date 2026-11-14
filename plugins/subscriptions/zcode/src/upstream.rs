@@ -41,6 +41,11 @@ enum SelectionKind {
     FreeGift,
 }
 
+struct UpstreamReply {
+    completion: Completion,
+    json: bool,
+}
+
 const BUSY_WAITS: &[Duration] = &[
     Duration::from_millis(250),
     Duration::from_millis(500),
@@ -122,7 +127,9 @@ impl ZcodeUpstream {
             None
         } else {
             match gift::read(&self.host, &self.endpoints, stored, &self.device_file).await {
-                Ok(balance) if balance.has_plan => Some(GiftRoute::new(balance.usable_models)),
+                Ok(balance) if balance.has_plan => {
+                    Some(GiftRoute::new(balance.usable_models, balance.expires_in))
+                }
                 Ok(_) => None,
                 Err(_) => {
                     certain = false;
@@ -143,12 +150,12 @@ impl ZcodeUpstream {
         let now = self.host.clock().monotonic();
         let mut model = request.model.clone();
         let kind = if let Some(raw) = trial {
-            let gift = match route.gift {
+            let gift = match route.gift.clone() {
                 Some(gift) => gift,
                 None => {
                     let balance =
                         gift::read(&self.host, &self.endpoints, stored, &self.device_file).await?;
-                    GiftRoute::new(balance.usable_models)
+                    GiftRoute::new(balance.usable_models, balance.expires_in)
                 }
             };
             if !gift.serves(&raw) || self.routing.gift_rested(&self.account, &raw, now) {
@@ -159,7 +166,7 @@ impl ZcodeUpstream {
                     ),
                 ));
             }
-            model = gift::canonical_model(&raw);
+            model = gift.wire_model(&raw).unwrap_or(model);
             SelectionKind::ForcedGift
         } else if route.start {
             SelectionKind::StartOnly
@@ -182,6 +189,13 @@ impl ZcodeUpstream {
         } else {
             SelectionKind::Plan
         };
+        if kind == SelectionKind::FreeGift {
+            model = route
+                .gift
+                .as_ref()
+                .and_then(|gift| gift.wire_model(&request.model))
+                .unwrap_or(model);
+        }
         if kind == SelectionKind::Plan {
             let (target, credential) = self.plan_target(stored, rename_search);
             return Ok(Selection {
@@ -229,7 +243,10 @@ impl ZcodeUpstream {
         let target = Target::new(ProtocolId::ANTHROPIC_MESSAGES, self.endpoints.start_base())
             .credential(CredentialStyle::Bearer)
             .headers(headers)
-            .rewrite(rewrite);
+            .rewrite(rewrite)
+            .classify_status(Arc::new(|status, _, body, error| {
+                http_auth::busy_status(status, body, error)
+            }));
         let target = if rename_search {
             target.unwrap(Arc::new(tool_search::response))
         } else {
@@ -261,7 +278,10 @@ impl ZcodeUpstream {
             ("user-agent".to_owned(), format!("ZCode/{APP_VERSION}")),
             ("x-session-id".to_owned(), start::session_id(&stored.device)),
         ])
-        .rewrite(rewrite);
+        .rewrite(rewrite)
+        .classify_status(Arc::new(|status, _, body, error| {
+            http_auth::busy_status(status, body, error)
+        }));
         let target = if rename_search {
             target.unwrap(Arc::new(tool_search::response))
         } else {
@@ -303,10 +323,10 @@ impl ZcodeUpstream {
         credential: &SecretString,
         request: Request,
         inbound: ProtocolId,
-    ) -> Result<Completion, PluginError> {
+    ) -> Result<UpstreamReply, PluginError> {
         let mut waits = BUSY_WAITS.iter();
         loop {
-            match wire::execute(
+            match wire::send(
                 self.host.http(),
                 target,
                 Some(credential),
@@ -326,7 +346,18 @@ impl ZcodeUpstream {
                     };
                     hofund_plugin_sdk::sleep(*wait).await;
                 }
-                result => return result,
+                result => {
+                    let sent = result?;
+                    let json = sent
+                        .headers()
+                        .get("content-type")
+                        .and_then(|value| value.to_str().ok())
+                        .is_some_and(|value| value.contains("application/json"));
+                    return sent
+                        .complete()
+                        .await
+                        .map(|completion| UpstreamReply { completion, json });
+                }
             }
         }
     }
@@ -336,7 +367,7 @@ impl ZcodeUpstream {
         stored: &Stored,
         request: Request,
         inbound: ProtocolId,
-    ) -> Result<Completion, PluginError> {
+    ) -> Result<UpstreamReply, PluginError> {
         let rename_search = tool_search::needed(&request);
         let (target, credential) = self.plan_target(stored, rename_search);
         self.send(&target, &credential, request, inbound).await
@@ -412,7 +443,6 @@ impl UpstreamProvider for ZcodeUpstream {
         let original = request.clone();
         let selection = self.target(&stored, &request).await?;
         request.model = selection.model;
-        let streaming = request.stream;
         let now = self.host.clock().monotonic();
         let edge_hold = if selection.kind == SelectionKind::Plan {
             None
@@ -425,10 +455,12 @@ impl UpstreamProvider for ZcodeUpstream {
             self.send(&selection.target, &selection.credential, request, inbound)
                 .await
         };
+        let mut edge_classified = false;
         if selection.kind != SelectionKind::Plan {
             result = match result {
                 Err(error) if start_refused(&error) && http_auth::edge_page(&error) => {
                     self.routing.hold_edge(now, self.host.clock().now());
+                    edge_classified = true;
                     Err(http_auth::edge_blocked(error))
                 }
                 other => other,
@@ -451,16 +483,19 @@ impl UpstreamProvider for ZcodeUpstream {
                         result = Err(error);
                         replay = true;
                     }
-                    Ok(completion) if !streaming => {
-                        let (completion, spent) = unary_spent(completion).await?;
-                        result = Ok(completion);
+                    Ok(reply) if reply.json => {
+                        let (completion, spent) = unary_spent(reply.completion).await?;
+                        result = Ok(UpstreamReply {
+                            completion,
+                            json: true,
+                        });
                         if spent {
                             self.routing
                                 .rest_gift(&self.account, &original.model, now, true);
                             replay = true;
                         }
                     }
-                    Ok(completion) => result = Ok(completion),
+                    Ok(reply) => result = Ok(reply),
                 }
                 if replay {
                     result = self.replay_on_plan(&stored, original, inbound).await;
@@ -474,8 +509,8 @@ impl UpstreamProvider for ZcodeUpstream {
                     }
                     result = Err(error);
                 }
-                Ok(completion) if !streaming => {
-                    let (completion, spent) = unary_spent(completion).await?;
+                Ok(reply) if reply.json => {
+                    let (completion, spent) = unary_spent(reply.completion).await?;
                     result = if spent {
                         self.routing
                             .rest_gift(&self.account, &original.model, now, true);
@@ -492,14 +527,30 @@ impl UpstreamProvider for ZcodeUpstream {
                             String::from_utf8_lossy(&bytes).into_owned(),
                         ))
                     } else {
-                        Ok(completion)
+                        Ok(UpstreamReply {
+                            completion,
+                            json: true,
+                        })
                     };
                 }
-                Ok(completion) => result = Ok(completion),
+                Ok(reply) => result = Ok(reply),
             },
-            SelectionKind::Plan | SelectionKind::StartOnly => {}
+            SelectionKind::StartOnly => {
+                if let Err(error) = &result
+                    && start_refused(error)
+                    && stored.auth.api_key.is_some()
+                {
+                    self.routing.invalidate(&self.account);
+                }
+            }
+            SelectionKind::Plan => {}
         }
-        let result = result.map_err(crate::http_auth::classify_upstream_error);
+        let result = if edge_classified {
+            result
+        } else {
+            result.map_err(crate::http_auth::classify_upstream_error)
+        };
+        let result = result.map(|reply| reply.completion);
         if let Err(error) = &result
             && matches!(error.kind(), hofund_plugin_api::PluginErrorKind::Auth)
             && stored.auth.team()

@@ -41,22 +41,50 @@ pub(crate) fn busy_error(error: &PluginError) -> bool {
     error.status() == Some(429) && busy_body(error.message())
 }
 
-fn busy_body(text: &str) -> bool {
-    if let Ok(body) = hofund_plugin_sdk::json::from_str::<Value>(text) {
-        let root_code = parse_envelope_code(body.get("code"));
-        let nested_code = body
-            .get("error")
-            .and_then(Value::as_object)
-            .and_then(|error| parse_envelope_code(error.get("code")));
-        if matches!(root_code, Some(3008 | 3009)) || matches!(nested_code, Some(3008 | 3009)) {
-            return true;
-        }
+pub(crate) fn busy_status(status: u16, body: &[u8], error: PluginError) -> PluginError {
+    let Ok(text) = std::str::from_utf8(body) else {
+        return error;
+    };
+    if status == 429 && busy_body(text) {
+        error.with_message(text.to_owned())
+    } else {
+        error
     }
-    text.to_ascii_lowercase()
-        .contains("concurrency limit exceeded")
-        || text
-            .split(|character: char| !character.is_ascii_digit())
-            .any(|digits| matches!(digits, "3008" | "3009"))
+}
+
+fn busy_body(text: &str) -> bool {
+    let Ok(body) = hofund_plugin_sdk::json::from_str::<Value>(text) else {
+        return false;
+    };
+    let nested = body.get("error").and_then(Value::as_object);
+    let code = scalar_text(body.get("code"))
+        .filter(|code| !code.is_empty())
+        .or_else(|| nested.and_then(|error| scalar_text(error.get("code"))));
+    if code.is_some_and(|code| matches!(code.as_str(), "3008" | "3009")) {
+        return true;
+    }
+    [
+        body.get("msg"),
+        body.get("message"),
+        nested.and_then(|error| error.get("message")),
+        body.get("error").filter(|error| !error.is_object()),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(|value| scalar_text(Some(value)))
+    .collect::<Vec<_>>()
+    .join(" ")
+    .to_ascii_lowercase()
+    .contains("concurrency limit exceeded")
+}
+
+fn scalar_text(value: Option<&Value>) -> Option<String> {
+    match value? {
+        Value::String(text) => Some(text.clone()),
+        Value::Number(number) => Some(number.to_string()),
+        Value::Bool(value) => Some(value.to_string()),
+        _ => None,
+    }
 }
 
 pub(crate) fn classify_upstream_error(error: PluginError) -> PluginError {

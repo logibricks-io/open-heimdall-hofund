@@ -30,17 +30,28 @@ pub(crate) struct EdgeHold {
 #[derive(Clone)]
 pub(crate) struct GiftRoute {
     usable_models: Vec<String>,
+    expires_in: Option<Duration>,
 }
 
 impl GiftRoute {
-    pub(crate) fn new(usable_models: Vec<String>) -> Self {
-        Self { usable_models }
+    pub(crate) fn new(usable_models: Vec<String>, expires_in: Option<Duration>) -> Self {
+        Self {
+            usable_models,
+            expires_in,
+        }
     }
 
     pub(crate) fn serves(&self, model: &str) -> bool {
         self.usable_models
             .iter()
             .any(|served| served.eq_ignore_ascii_case(model))
+    }
+
+    pub(crate) fn wire_model(&self, model: &str) -> Option<String> {
+        self.usable_models
+            .iter()
+            .find(|served| served.eq_ignore_ascii_case(model))
+            .map(|served| crate::gift::canonical_model(served))
     }
 }
 
@@ -83,6 +94,16 @@ impl Routing {
         route: Route,
         certain: bool,
     ) {
+        let ttl = if certain {
+            ROUTE_TTL
+        } else {
+            UNCERTAIN_ROUTE_TTL
+        };
+        let ttl = route
+            .gift
+            .as_ref()
+            .and_then(|gift| gift.expires_in)
+            .map_or(ttl, |expires_in| ttl.min(expires_in));
         self.routes
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -92,11 +113,7 @@ impl Routing {
                     route,
                     credential: credential_fingerprint(stored),
                     read_at: now,
-                    ttl: if certain {
-                        ROUTE_TTL
-                    } else {
-                        UNCERTAIN_ROUTE_TTL
-                    },
+                    ttl,
                 },
             );
     }

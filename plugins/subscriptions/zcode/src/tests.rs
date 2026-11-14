@@ -1747,9 +1747,11 @@ fn r57c_free_first_is_default_and_reuses_the_route_read() {
             .uri()
             .starts_with("https://zcode.test/api/v1/zcode-plan/anthropic")
     );
-    let body: hofund_plugin_sdk::json::Value =
-        hofund_plugin_sdk::json::from_slice(calls[2].body()).expect("body");
-    assert_eq!(body["model"], "GLM-5.3-Flash");
+    for call in &calls[2..4] {
+        let body: hofund_plugin_sdk::json::Value =
+            hofund_plugin_sdk::json::from_slice(call.body()).expect("body");
+        assert_eq!(body["model"], "GLM-5.3-Flash");
+    }
 }
 
 #[test]
@@ -1832,10 +1834,10 @@ fn r57c_free_first_200_quota_envelope_replays_on_the_plan() {
         .upstream(&id, host.context())
         .expect("upstream");
     enqueue_dual_discovery(&host, 750);
-    host.http().enqueue(
-        json!({"code": 1005, "msg": "exceed quota limit"})
-            .to_string()
-            .into_bytes(),
+    host.http().enqueue_response(
+        200,
+        &[("content-type", "application/json")],
+        json!({"code": 1005, "msg": "exceed quota limit"}).to_string(),
     );
     host.http().enqueue(message_ok());
     probe_model(upstream.as_ref(), "GLM-5.3-Flash");
@@ -2223,4 +2225,237 @@ fn r57c_edge_hold_is_shared_and_expires_on_the_host_clock() {
             .expect("hold expired");
         assert_eq!(host.http().calls().len(), 5);
     });
+}
+
+#[test]
+fn r57c_non_json_and_incidental_busy_lookalikes_are_not_retried() {
+    for body in [
+        "concurrency limit exceeded".to_owned(),
+        json!({"msg": "an unrelated request mentions 3008 and 3009"}).to_string(),
+        json!({"detail": "concurrency limit exceeded"}).to_string(),
+    ] {
+        let dir = tempfile::tempdir().expect("dir");
+        let host = paused_host(&dir);
+        let id = seed_plan_key(&host, "negative.busy.key", "negative@zcode.test");
+        let upstream = subscription(&host)
+            .upstream(&id, host.context())
+            .expect("upstream");
+        host.http()
+            .enqueue_response(429, &[("content-type", "text/plain")], body);
+        let error = block_on_paused(async {
+            upstream
+                .execute(minimal_request("GLM-5.3"), ProtocolId::ANTHROPIC_MESSAGES)
+                .await
+                .err()
+                .expect("refusal")
+        });
+        assert_eq!(error.status(), Some(429));
+        assert!(!error.message().contains("Z Code serves one account"));
+        assert_eq!(host.http().calls().len(), 1);
+    }
+}
+
+#[test]
+fn r57c_start_only_refusal_invalidates_the_cached_route() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_dual(&host);
+    let upstream = subscription_without_free_first(&host)
+        .upstream(&id, host.context())
+        .expect("upstream");
+    host.http()
+        .enqueue(json!({"code": 200, "data": []}).to_string().into_bytes());
+    host.http().enqueue_response(405, &[], "");
+    let error = block_on(upstream.execute(
+        minimal_request("GLM-5.3-Flash"),
+        ProtocolId::ANTHROPIC_MESSAGES,
+    ))
+    .err()
+    .expect("Start refusal");
+    assert_eq!(error.status(), Some(405));
+
+    enqueue_dual_discovery(&host, 750);
+    host.http().enqueue(message_ok());
+    probe_model(upstream.as_ref(), "GLM-5.3-Flash");
+    let calls = host.http().calls();
+    assert_eq!(calls.len(), 5);
+    assert!(calls[2].uri().contains("/api/biz/subscription/list"));
+    assert!(calls[3].uri().contains("/billing/balance"));
+    assert!(calls[4].uri().starts_with(ZAI_ANTHROPIC_BASE));
+}
+
+#[test]
+fn r57c_stream_request_json_quota_envelope_replays_on_the_plan() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_dual(&host);
+    let upstream = subscription(&host)
+        .upstream(&id, host.context())
+        .expect("upstream");
+    enqueue_dual_discovery(&host, 750);
+    host.http().enqueue_response(
+        200,
+        &[("content-type", "application/json")],
+        json!({"code": 1005, "msg": "exceed quota limit"}).to_string(),
+    );
+    host.http()
+        .enqueue_response(200, &[("content-type", "application/json")], message_ok());
+    execute_raw(
+        upstream.as_ref(),
+        minimal_request("GLM-5.3-Flash").with_stream(true),
+    )
+    .expect("plan replay");
+    let calls = host.http().calls();
+    assert_eq!(calls.len(), 4);
+    assert!(calls[3].uri().starts_with(ZAI_ANTHROPIC_BASE));
+}
+
+#[test]
+fn r57c_stream_request_json_quota_envelope_becomes_a_trial_429() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_dual(&host);
+    let upstream = subscription(&host)
+        .upstream(&id, host.context())
+        .expect("upstream");
+    enqueue_dual_discovery(&host, 750);
+    host.http().enqueue_response(
+        200,
+        &[("content-type", "application/json")],
+        json!({"code": 1005, "msg": "exceed quota limit"}).to_string(),
+    );
+    let error = block_on(upstream.execute(
+        minimal_request("GLM-5.3-Flash-Trial").with_stream(true),
+        ProtocolId::ANTHROPIC_MESSAGES,
+    ))
+    .err()
+    .expect("spent trial");
+    assert_eq!(error.status(), Some(429));
+    assert!(error.message().contains("1005"));
+    assert_eq!(host.http().calls().len(), 3);
+}
+
+#[test]
+fn r57c_trial_event_stream_is_not_read_as_a_unary_quota_envelope() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_dual(&host);
+    let upstream = subscription(&host)
+        .upstream(&id, host.context())
+        .expect("upstream");
+    enqueue_dual_discovery(&host, 750);
+    let events = concat!(
+        "event: content_block_start\n",
+        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+        "event: content_block_delta\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n"
+    );
+    host.http()
+        .enqueue_response(200, &[("content-type", "text/event-stream")], events);
+    let response = execute_raw(
+        upstream.as_ref(),
+        minimal_request("GLM-5.3-Flash-Trial").with_stream(true),
+    )
+    .expect("event stream");
+    assert_eq!(String::from_utf8(response).expect("utf8"), events);
+    assert_eq!(host.http().calls().len(), 3);
+}
+
+fn enqueue_expiring_dual_discovery(host: &TestHost, plan_expires_in: i64, bucket_expires_in: i64) {
+    host.http().enqueue(
+        json!({"code": 200, "data": [{"status": "VALID", "productName": "GLM Coding Pro"}]})
+            .to_string()
+            .into_bytes(),
+    );
+    host.http().enqueue(
+        json!({"code": 0, "data": {
+            "server_time": 4_102_444_800_i64,
+            "plans": [{
+                "plan_id": "start",
+                "name": "Start Plan",
+                "status": "active",
+                "ends_at": 4_102_444_800_i64 + plan_expires_in
+            }],
+            "balances": [{
+                "plan_id": "start",
+                "capabilities": ["model:glm-5.3-flash"],
+                "total_units": 1000,
+                "used_units": 250,
+                "remaining_units": 750,
+                "expires_at": 4_102_444_800_i64 + bucket_expires_in
+            }]
+        }})
+        .to_string()
+        .into_bytes(),
+    );
+}
+
+#[test]
+fn r57c_cached_gift_route_expires_with_the_balance() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = paused_host(&dir);
+    let id = seed_dual(&host);
+    let upstream = subscription(&host)
+        .upstream(&id, host.context())
+        .expect("upstream");
+    enqueue_expiring_dual_discovery(&host, 600, 120);
+    host.http().enqueue(message_ok());
+    enqueue_expiring_dual_discovery(&host, -1, -1);
+    host.http().enqueue(message_ok());
+    block_on_paused(async {
+        upstream
+            .execute(
+                minimal_request("GLM-5.3-Flash"),
+                ProtocolId::ANTHROPIC_MESSAGES,
+            )
+            .await
+            .expect("live gift");
+        advance_time(std::time::Duration::from_secs(121)).await;
+        upstream
+            .execute(
+                minimal_request("GLM-5.3-Flash"),
+                ProtocolId::ANTHROPIC_MESSAGES,
+            )
+            .await
+            .expect("expired gift");
+    });
+    let calls = host.http().calls();
+    assert_eq!(calls.len(), 6);
+    assert!(calls[2].uri().contains("/zcode-plan/anthropic/v1/messages"));
+    assert!(calls[3].uri().contains("/api/biz/subscription/list"));
+    assert!(calls[4].uri().contains("/billing/balance"));
+    assert!(calls[5].uri().starts_with(ZAI_ANTHROPIC_BASE));
+}
+
+#[test]
+fn r57c_direct_start_edge_page_with_3012_keeps_network_classification() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_start(&host);
+    let upstream = subscription(&host)
+        .upstream(&id, host.context())
+        .expect("upstream");
+    host.http().enqueue_response(
+        405,
+        &[("content-type", "text/html")],
+        "<html>request blocked; code 3012; errors.aliyun.com</html>",
+    );
+    let error =
+        block_on(upstream.execute(minimal_request("GLM-5.3"), ProtocolId::ANTHROPIC_MESSAGES))
+            .err()
+            .expect("edge page");
+    assert_eq!(error.status(), Some(405));
+    assert!(
+        error
+            .message()
+            .contains("network firewall blocked requests")
+    );
+    assert!(
+        !error
+            .message()
+            .contains("risk control blocked this account")
+    );
+    assert_eq!(error.retry_after(), None);
+    assert!(!error.cools());
+    assert_eq!(host.http().calls().len(), 1);
 }
