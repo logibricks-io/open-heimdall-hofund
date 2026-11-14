@@ -65,6 +65,7 @@ pub(crate) fn list(text: &str) -> Result<Vec<DiscoveredBuiltin>, PluginError> {
 }
 
 /// Reads `home/logins.json` when present and lists Factory rows only.
+#[allow(dead_code)]
 pub(crate) fn list_in_home(home: &Path) -> Result<Vec<DiscoveredBuiltin>, PluginError> {
     let path = home.join("logins.json");
     let body = match std::fs::read_to_string(&path) {
@@ -106,14 +107,14 @@ pub(crate) async fn import_accounts(
 }
 
 /// Stores one row from [`list`] or [`list_in_home`].
+#[allow(dead_code)]
 pub(crate) async fn import_reference(
     host: &HostContext,
     text: &str,
     reference: &str,
 ) -> Result<AccountId, PluginError> {
-    let prefix = format!("{BUILTIN_REF_PREFIX}");
     let Some(index) = reference
-        .strip_prefix(&prefix)
+        .strip_prefix(BUILTIN_REF_PREFIX)
         .and_then(|tail| tail.parse::<usize>().ok())
     else {
         return Err(PluginError::config(format!(
@@ -413,18 +414,53 @@ async fn store(host: &HostContext, entry: &BuiltinEntry) -> Result<AccountId, Pl
             region,
             active_org,
             prem_base_host,
-        } => store_oauth(
-            host,
-            access,
-            refresh,
-            *expires_ms,
-            email,
-            uid,
-            region,
-            active_org,
-            prem_base_host,
-            &entry.user,
-        ),
+        } => {
+            let account_key = first_non_empty(&[
+                email.as_deref().unwrap_or(""),
+                uid.as_deref().unwrap_or(""),
+                entry.user.as_str(),
+            ]);
+            let label = if let Some(addr) = email {
+                addr.clone()
+            } else if let Some(user) = uid {
+                user.clone()
+            } else if entry.user.is_empty() {
+                "Factory".to_owned()
+            } else {
+                entry.user.clone()
+            };
+            let id = account_id_from(&["factory", &account_key.to_ascii_lowercase()]);
+            let access_secret = SecretString::from(access.to_owned());
+            let refresh_secret = SecretString::from(refresh.to_owned());
+            let expires = if *expires_ms > 0 {
+                *expires_ms
+            } else {
+                tokens::expires_ms_from_access(&access_secret, host.clock().now())
+            };
+            let mut blob = SecretObject::new()
+                .with_number("v", 1)
+                .with_text("auth_type", AuthKind::Oauth.as_str())
+                .with_secret("access_token", &access_secret)
+                .with_secret("refresh_token", &refresh_secret)
+                .with_number("expires_ms", expires)
+                .with_text("account_id", account_key);
+            if let Some(addr) = email {
+                blob = blob.with_text("email", addr);
+            }
+            if let Some(user) = uid {
+                blob = blob.with_text("uid", user);
+            }
+            if let Some(reg) = region {
+                blob = blob.with_text("region", reg);
+            }
+            if let Some(host_name) = prem_base_host {
+                blob = blob.with_text("prem_base_host", host_name);
+            }
+            if let Some(org) = active_org {
+                blob = blob.with_text("active_organization_id", org);
+            }
+            Ok((id, label, blob))
+        }
     }?;
     let mut blob = secret;
     if entry.lapsed {
@@ -474,65 +510,6 @@ fn store_api(
     }
     if let Some(host) = prem_base_host {
         blob = blob.with_text("prem_base_host", host);
-    }
-    Ok((id, label, blob))
-}
-
-fn store_oauth(
-    host: &HostContext,
-    access: &str,
-    refresh: &str,
-    expires_ms: u64,
-    email: &Option<String>,
-    uid: &Option<String>,
-    region: &Option<String>,
-    active_org: &Option<String>,
-    prem_base_host: &Option<String>,
-    fallback_user: &str,
-) -> Result<(AccountId, String, SecretObject), PluginError> {
-    let account_key = first_non_empty(&[
-        email.as_deref().unwrap_or(""),
-        uid.as_deref().unwrap_or(""),
-        fallback_user,
-    ]);
-    let label = if let Some(addr) = email {
-        addr.clone()
-    } else if let Some(user) = uid {
-        user.clone()
-    } else if fallback_user.is_empty() {
-        "Factory".to_owned()
-    } else {
-        fallback_user.to_owned()
-    };
-    let id = account_id_from(&["factory", &account_key.to_ascii_lowercase()]);
-    let access_secret = SecretString::from(access.to_owned());
-    let refresh_secret = SecretString::from(refresh.to_owned());
-    let expires = if expires_ms > 0 {
-        expires_ms
-    } else {
-        tokens::expires_ms_from_access(&access_secret, host.clock().now())
-    };
-    let mut blob = SecretObject::new()
-        .with_number("v", 1)
-        .with_text("auth_type", AuthKind::Oauth.as_str())
-        .with_secret("access_token", &access_secret)
-        .with_secret("refresh_token", &refresh_secret)
-        .with_number("expires_ms", expires)
-        .with_text("account_id", account_key);
-    if let Some(addr) = email {
-        blob = blob.with_text("email", addr);
-    }
-    if let Some(user) = uid {
-        blob = blob.with_text("uid", user);
-    }
-    if let Some(reg) = region {
-        blob = blob.with_text("region", reg);
-    }
-    if let Some(host_name) = prem_base_host {
-        blob = blob.with_text("prem_base_host", host_name);
-    }
-    if let Some(org) = active_org {
-        blob = blob.with_text("active_organization_id", org);
     }
     Ok((id, label, blob))
 }
