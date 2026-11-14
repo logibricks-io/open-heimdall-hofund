@@ -7,6 +7,7 @@ use hofund_plugin_sdk::oauth::SecretObject;
 
 use crate::account;
 use crate::creds::{self, Profile};
+use crate::keychain::{self, CredentialLocation, ReadContext};
 use crate::lock::{self};
 use crate::run_lock;
 
@@ -19,8 +20,11 @@ pub(crate) async fn write(
     run_lock::wait(account, host).await?;
     creds::private_dir(home)?;
     let _refresh = lock::refresh_locks(home).await?;
-    let live_refresh = creds::read_credentials(home).and_then(|c| creds::refresh_token(&c.text));
-    sync_live_sign_in(home, host, live_refresh.as_deref()).await?;
+    let live = keychain::read_sign_in(host, home, ReadContext::AgentHome, false).await;
+    let live_refresh = live
+        .as_ref()
+        .and_then(|(credentials, _)| creds::refresh_token(&credentials.text));
+    sync_live_sign_in(home, host, live.as_ref().map(|(c, _)| c)).await?;
 
     let Some(secret) = host.accounts().secret(account).await? else {
         return Err(PluginError::auth(
@@ -40,22 +44,36 @@ pub(crate) async fn write(
         ));
     };
     let profile = Profile::parse(blob.text(creds::PROFILE).unwrap_or_default());
-    creds::write_credentials_cas(
-        &home.join(creds::CREDENTIALS_FILE),
-        stored,
-        live_refresh.as_deref(),
-    )?;
+    let write_loc = live
+        .map(|(_, loc)| loc)
+        .unwrap_or_else(|| keychain::default_write_location(home, ReadContext::AgentHome));
+    write_outgoing(host, home, stored, live_refresh.as_deref(), &write_loc).await?;
     let _config = lock::config_lock(&home.join(creds::PROFILE_FILE)).await?;
     creds::write_private(&home.join(creds::PROFILE_FILE), &profile.settings_text())?;
     Ok(())
 }
 
+async fn write_outgoing(
+    host: &HostContext,
+    dir: &Path,
+    stored: &str,
+    live_refresh: Option<&str>,
+    loc: &CredentialLocation,
+) -> Result<(), PluginError> {
+    match loc {
+        CredentialLocation::File(path) => creds::write_credentials_cas(path, stored, live_refresh),
+        CredentialLocation::Keychain { .. } => {
+            keychain::write_sign_in(host, dir, stored, loc).await
+        }
+    }
+}
+
 async fn sync_live_sign_in(
     home: &Path,
     host: &HostContext,
-    _live_refresh: Option<&str>,
+    live: Option<&creds::Credentials>,
 ) -> Result<(), PluginError> {
-    let Some(credentials) = creds::read_credentials(home) else {
+    let Some(credentials) = live else {
         return Ok(());
     };
     let profile = Profile::read(home);
@@ -80,10 +98,17 @@ async fn sync_live_sign_in(
 }
 
 /// Writes the sign-in read from `home` into the account store. Used by discovery import.
-pub(crate) async fn import_live(home: &Path, host: &HostContext) -> Result<AccountId, PluginError> {
+pub(crate) async fn import_live(
+    home: &Path,
+    host: &HostContext,
+    ctx: ReadContext,
+    honor_discovery_off: bool,
+) -> Result<AccountId, PluginError> {
     creds::private_dir(home)?;
     let _refresh = lock::refresh_locks(home).await?;
-    let Some(credentials) = creds::read_credentials(home) else {
+    let Some((credentials, _loc)) =
+        keychain::read_sign_in(host, home, ctx, honor_discovery_off).await
+    else {
         return Err(PluginError::auth(
             "Claude Code has no readable sign-in in that directory",
         ));
@@ -142,13 +167,18 @@ pub(crate) async fn import_blocked(
         kept_refresh = creds::refresh_token(text).is_some();
     }
     if let Ok(dir) = account::account_dir(host, id)
-        && let Some(dir_creds) = creds::read_credentials(&dir)
+        && let Some(dir_creds) =
+            crate::keychain::read_sign_in(host, &dir, ReadContext::ConfigDir, false)
+                .await
+                .map(|(c, _)| c)
     {
         kept_at = kept_at.max(creds::expires_at(&dir_creds.text).unwrap_or(0));
         kept_refresh |= creds::refresh_token(&dir_creds.text).is_some();
     }
     if let Some(live_dir) = crate::cli::configured_dir()
-        && let Some(live) = creds::read_credentials(&live_dir)
+        && let Some(live) = keychain::read_sign_in(host, &live_dir, ReadContext::AgentHome, false)
+            .await
+            .map(|(c, _)| c)
     {
         let live_profile = Profile::read(&live_dir);
         if live_profile.account_id().ok().as_ref() == Some(id) {

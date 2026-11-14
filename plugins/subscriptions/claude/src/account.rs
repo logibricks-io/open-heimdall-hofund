@@ -16,6 +16,7 @@ use crate::launcher;
 use hofund_plugin_sdk::oauth::SecretObject;
 
 use crate::creds::{self, Profile};
+use crate::keychain::{self, ReadContext};
 
 /// How long a refresh waits for another holder of the account lease.
 const LEASE_WAIT: Duration = Duration::from_secs(30);
@@ -82,7 +83,7 @@ pub(crate) async fn refresh(
     creds::private_dir(&dir)?;
     let file = dir.join(creds::CREDENTIALS_FILE);
     let ran = run_command(host, &command, &dir, &file, &stored, &profile, &blob).await;
-    let read_back = creds::read_credentials(&dir);
+    let read_back = read_back_credentials(host, &dir).await;
     let _ = std::fs::remove_file(&file);
     let status = ran?;
     if crate::creds::logged_in_says_no(status.as_ref()) {
@@ -143,13 +144,19 @@ pub(crate) async fn read_usage(
         crate::usage::parse(&text, now)
     }
     .await;
-    let read_back = creds::read_credentials(&dir);
+    let read_back = read_back_credentials(host, &dir).await;
     let _ = std::fs::remove_file(&file);
     if let Some(rotated) = read_back.filter(|rotated| rotated.text != stored) {
         let updated = blob.with_text(creds::CREDENTIALS, &rotated.text);
         lease.commit(None, updated.to_secret()).await?;
     }
     parsed
+}
+
+async fn read_back_credentials(host: &HostContext, dir: &Path) -> Option<creds::Credentials> {
+    keychain::read_sign_in(host, dir, ReadContext::ConfigDir, false)
+        .await
+        .map(|(credentials, _)| credentials)
 }
 
 const WARM_ARGS: [&str; 11] = [
@@ -230,7 +237,7 @@ pub(crate) async fn warmup(
     let mut last = String::new();
     let run_result = run_warmup_command(host, &command, &dir, &work, &mut last).await;
 
-    let read_back = creds::read_credentials(&dir);
+    let read_back = read_back_credentials(host, &dir).await;
     if let Some(rotated) = read_back.filter(|rotated| rotated.text != stored) {
         let updated = blob.with_text(creds::CREDENTIALS, &rotated.text);
         lease.commit(None, updated.to_secret()).await?;

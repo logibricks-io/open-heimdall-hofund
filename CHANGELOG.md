@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- R-5: the Claude Code subscription plugin reads and writes macOS Keychain
+  credentials through `security(1)` spawned via `HostContext` (no
+  `std::process` in the plugin): `Claude Code-credentials` and per-directory
+  `claudeDirService` items, hex `-w` output acceptance, file fallback, discovery
+  import/switch paths, and `HOFUND_NO_ACCOUNTS=1` skipping Keychain probes.
+  Tests `r5_42`–`r5_47` use scripted spawns only. Refs R-5.
+
+- R-5: Keychain `security` reads use the account config directory as the spawn
+  cwd, matching write and clear, instead of the process temp dir. Refs R-5.
+
 - R-54d: the Qoder subscription plugin migrates the legacy sibling `qoder.json`
   beside the config file once before accounts are listed: `HOFUND_NO_ACCOUNTS`
   skips the move, a global account with the same uid takes precedence, failed

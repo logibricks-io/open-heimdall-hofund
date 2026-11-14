@@ -4,14 +4,24 @@ use std::path::Path;
 
 use hofund_plugin_api::{AccountId, DiscoveredAgentAccount, HostContext, PluginError};
 
-use crate::creds::{self, Profile};
+use crate::creds::Profile;
+
+#[cfg(test)]
+use crate::creds;
+use crate::keychain::{self, ReadContext};
 
 /// Opaque import handle for the one sign-in Claude Code keeps in its home.
 pub(crate) const REFERENCE: &str = "agent-sign-in";
 
 /// Lists the account named in `home`, when credentials are present.
-pub(crate) fn list(home: &Path) -> Result<Vec<DiscoveredAgentAccount>, PluginError> {
-    if creds::read_credentials(home).is_none() {
+pub(crate) async fn list(
+    home: &Path,
+    host: &HostContext,
+) -> Result<Vec<DiscoveredAgentAccount>, PluginError> {
+    if keychain::read_sign_in(host, home, ReadContext::AgentHome, true)
+        .await
+        .is_none()
+    {
         return Ok(Vec::new());
     }
     let profile = Profile::read(home);
@@ -35,7 +45,7 @@ pub(crate) async fn import(
             "unknown agent sign-in reference `{reference}`"
         )));
     }
-    crate::agent_sign_in::import_live(home, host).await
+    crate::agent_sign_in::import_live(home, host, ReadContext::AgentHome, true).await
 }
 
 #[cfg(test)]
@@ -112,8 +122,13 @@ mod tests {
             .account(id.clone(), "stored")
             .expect("account");
         block_on(host.context().accounts().upsert(account, stored)).expect("upsert");
-        let error =
-            block_on(crate::agent_sign_in::import_live(&home, host.context())).expect_err("older");
+        let error = block_on(crate::agent_sign_in::import_live(
+            &home,
+            host.context(),
+            ReadContext::AgentHome,
+            false,
+        ))
+        .expect_err("older");
         assert!(
             error
                 .to_string()
@@ -145,8 +160,13 @@ mod tests {
             .account(id.clone(), "stored")
             .expect("account");
         block_on(host.context().accounts().upsert(account, stored)).expect("upsert");
-        let error =
-            block_on(crate::agent_sign_in::import_live(&home, host.context())).expect_err("older");
+        let error = block_on(crate::agent_sign_in::import_live(
+            &home,
+            host.context(),
+            ReadContext::AgentHome,
+            false,
+        ))
+        .expect_err("older");
         assert!(
             error
                 .to_string()
@@ -159,7 +179,12 @@ mod tests {
         let dir = scratch("empty");
         let home = dir.path().join("claude-home");
         fs::create_dir_all(&home).expect("home");
-        let rows = list(&home).expect("list");
+        let host = TestHost::open_for(
+            PluginKind::Subscription,
+            PluginId::from_static("claude"),
+            dir.path(),
+        );
+        let rows = block_on(list(&home, host.context())).expect("list");
         assert!(rows.is_empty());
     }
 
@@ -222,7 +247,12 @@ mod tests {
         let dir = scratch("list");
         let home = dir.path().join("claude-home");
         write_sign_in(&home);
-        let rows = list(&home).expect("list");
+        let host = TestHost::open_for(
+            PluginKind::Subscription,
+            PluginId::from_static("claude"),
+            dir.path(),
+        );
+        let rows = block_on(list(&home, host.context())).expect("list");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].label(), "user@example.test");
     }
@@ -277,7 +307,12 @@ mod tests {
             .expect("meta")
             .modified()
             .expect("time");
-        let _rows = list(&home).expect("list");
+        let host = TestHost::open_for(
+            PluginKind::Subscription,
+            PluginId::from_static("claude"),
+            dir.path(),
+        );
+        let _rows = block_on(list(&home, host.context())).expect("list");
         assert_eq!(
             fs::metadata(&creds)
                 .expect("meta")
@@ -292,7 +327,12 @@ mod tests {
         let dir = scratch("redact");
         let home = dir.path().join("claude-home");
         write_sign_in(&home);
-        let rows = list(&home).expect("list");
+        let host = TestHost::open_for(
+            PluginKind::Subscription,
+            PluginId::from_static("claude"),
+            dir.path(),
+        );
+        let rows = block_on(list(&home, host.context())).expect("list");
         let text = format!("{rows:?}");
         assert!(!text.contains("access-example"));
         assert!(!text.contains("refresh-example"));
