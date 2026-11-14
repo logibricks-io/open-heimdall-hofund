@@ -18,7 +18,7 @@ Legend: **Done** = matches the reference at checklist granularity; **Partial** =
 | Zed (`zed`) | 0 | 6 | 1 | 3 | 0 |
 | Kiro (`kiro`) | 8 | 9 | 0 | 2 | 0 |
 | Factory / Droid (`factory`) | 14 | 2 | 0 | 3 | 0 |
-| Cline / ClinePass (`cline`) | 12 | 4 | 0 | 3 | 0 |
+| Cline / ClinePass (`cline`) | 13 | 3 | 0 | 3 | 0 |
 | ChatGPT / Codex (`codex` backend) and ChatGPT API (`chatgpt-api`) | 10 | 10 | 1 | 0 | 0 |
 | GitHub Copilot (github.com and GHE) | 15 | 2 | 0 | 5 | 0 |
 | Gemini CLI (Code Assist) | 13 | 3 | 0 | 2 | 0 |
@@ -279,7 +279,7 @@ Structured-output prose for Chat, Responses, and Messages shipped in R-13b (`str
 | a1 | sign-in: WorkOS device | Plugin device + register (`cline/index.mjs:3-19`) | `DeviceFlow` + same `WORKOS_CLIENT_ID`, then `/auth/register` (`sign_in.rs`, `a2a_17`) | Done | — |
 | a2 | sign-in: API key | Plugin key auth | `SignInProof` API key path in `sign_in.rs` | Done | — |
 | a3 | browser loopback | N/A | N/A | N/A | — |
-| b | import | Preset/key plan in core | OAuth/API key via sign-in only | Partial | — |
+| b | import | Preset `clinepass` key plan in core (`presets.go`); plugin OAuth or API key sign-in only; generic OpenCode `auth.json` maps `cline-pass` → `clinepass` (`import_opencode.go`), not plugin home-file import | Key-plan credentials via API-key `SignInProof` (row a2); OAuth tokens via device sign-in (row a1); no agent discover; the reference has no official Cline home/file import for this subscription plugin | Done | — |
 | c | token storage | Plugin session; core uses key | Secret blob + `workos:` prefix handling; 30-second request-time retryable grace in `tokens.rs` | Done | — |
 | d | refresh | WorkOS refresh + grace (`cline/index.mjs:25-30`, `883-895`) | Ten-minute hook lead, five-minute request lead, request-only transient grace, and lease-serialized single-use rotation (`tokens.rs`, `r53_*`) | Done | — |
 | e | upstream wire | OpenAI chat to `api.cline.bot` (`cline.go:43-49`; plugin) | `upstream.rs` OPENAI_CHAT + envelope unwrap | Partial | Recorded mocks only |
@@ -298,6 +298,7 @@ Structured-output prose for Chat, Responses, and Messages shipped in R-13b (`str
 
 ### R-53 completed (Cline)
 
+- Row b: audited the reference (`cline.go`, `migrate*.go`, `import*.go`, frozen `packages/cline/`); key-plan and subscription credentials enter only through sign-in (rows a1–a2), with no plugin-scoped credential-file import to port.
 - Pinned CLI client identity on every API request, including platform and core headers.
 - Host-session task ids, with no header for empty or synthetic sessions.
 - Required recommended plus optional additive cloud catalogs, image capabilities, and OpenAI image parts.

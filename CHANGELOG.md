@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- R-53b: audited the frozen reference for Cline subscription import (row b);
+  key-plan and plugin credentials enter only through API-key or device sign-in,
+  with no official home credential-file import to port. Subscription parity row
+  b is Done; vendor letter tally is 13 Done / 3 Partial / 0 Missing / 3 N/A.
+  Refs R-53.
+
 - R-5: the Claude Code subscription plugin reads and writes macOS Keychain
   credentials through `security(1)` spawned via `HostContext` (no
   `std::process` in the plugin): `Claude Code-credentials` and per-directory
