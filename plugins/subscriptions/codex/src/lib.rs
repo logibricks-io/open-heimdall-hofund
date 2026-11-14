@@ -148,6 +148,7 @@ impl SubscriptionFactory for CodexFactory {
             endpoints: Arc::clone(&self.endpoints),
             flow: SignInFlow::Pkce,
             pending: Mutex::new(HashMap::new()),
+            reset_redeems: Mutex::new(HashMap::new()),
             prompts: Arc::default(),
         }))
     }
@@ -168,6 +169,8 @@ struct Codex {
     flow: SignInFlow,
     /// Sign-ins in progress, by session id.
     pending: Mutex<HashMap<String, Pending>>,
+    /// In-flight `redeem_request_id` values for explicit reset consumes.
+    reset_redeems: resets::RedeemLedger,
     /// The instructions each model is sent with.
     prompts: Arc<models::Prompts>,
 }
@@ -358,7 +361,15 @@ impl Subscription for Codex {
     ) -> Result<QuotaResetOutcome, PluginError> {
         let access =
             tokens::access(host, &self.endpoints, account, tokens::Need::IfExpiring).await?;
-        resets::consume(host, &self.endpoints, &access, credit_id).await
+        resets::consume(
+            host,
+            account,
+            &self.endpoints,
+            &access,
+            credit_id,
+            &self.reset_redeems,
+        )
+        .await
     }
 
     async fn list_models(
