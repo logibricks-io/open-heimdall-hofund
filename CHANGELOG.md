@@ -15,6 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `input_json_delta` events before they reach the caller. Recorded HTTP and
   `r52e_*` fixtures cover wrap, unwrap, and stream paths. Refs R-52.
 
+- R-9i: the Cursor subscription plugin coalesces in-flight `cursor-agent status`
+  renewals across concurrent agent-token refreshes and reads platform `auth.json`
+  on Windows (`%APPDATA%\\Cursor`) and other non-macOS hosts without touching
+  `CURSOR_CONFIG_DIR` or spawning Keychain reads off macOS. Tests `r9i_*` and
+  `auth.rs` fixtures only. Refs R-9.
+
 - R-9h: the Cursor subscription plugin documents and tests the stateless Run
   tool-argument path against the frozen reference — one full JSON
   `ToolArgumentsDelta` per selected MCP exec, partial-tool wire markers that do

@@ -4,10 +4,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use crate::cli::KeychainCache;
+use crate::refresh::StatusCoalescer;
 use crate::tokens::{self, is_agent};
 use hofund_plugin_api::{AccountId, HostContext, PluginError, SecretString};
 
 /// Returns a bearer token for API calls.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "callers pass agent home, CLI program, keychain, and status coalescer explicitly"
+)]
 pub(crate) async fn access_token(
     host: &HostContext,
     endpoints: &crate::endpoints::Endpoints,
@@ -16,6 +21,7 @@ pub(crate) async fn access_token(
     program: Option<PathBuf>,
     keychain: &Mutex<KeychainCache>,
     keychain_enabled: bool,
+    status: &StatusCoalescer,
 ) -> Result<SecretString, PluginError> {
     let secret = host
         .accounts()
@@ -34,6 +40,7 @@ pub(crate) async fn access_token(
             agent_home,
             keychain,
             keychain_enabled,
+            status,
         )
         .await;
     }
