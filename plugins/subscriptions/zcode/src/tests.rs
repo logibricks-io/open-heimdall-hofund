@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use hofund_kit_subscription::{TestHost, block_on};
 use hofund_plugin_api::{
     AccountId, AccountStatus, PluginErrorKind, PluginId, PluginKind, ProbeQuery, ProtocolId,
-    RawTable, SecretString, SignInChallenge, SignInCtx, SignInProof, SubscriptionFactory,
+    RawTable, RawValue, SecretString, SignInChallenge, SignInCtx, SignInProof, SubscriptionFactory,
 };
 use hofund_plugin_sdk::json::json;
 use hofund_plugin_sdk::oauth::{SecretObject, secret_text};
@@ -29,8 +29,23 @@ fn host(dir: &tempfile::TempDir) -> TestHost {
 }
 
 fn subscription(host: &TestHost) -> std::sync::Arc<dyn hofund_plugin_api::Subscription> {
+    configured_subscription(host, RawTable::new())
+}
+
+fn subscription_without_free_first(
+    host: &TestHost,
+) -> std::sync::Arc<dyn hofund_plugin_api::Subscription> {
+    let mut raw = RawTable::new();
+    raw.insert("freeFirst", RawValue::Boolean(false));
+    configured_subscription(host, raw)
+}
+
+fn configured_subscription(
+    host: &TestHost,
+    raw: RawTable,
+) -> std::sync::Arc<dyn hofund_plugin_api::Subscription> {
     let factory = factory_with_endpoints(endpoints());
-    let cfg = factory.validate(&RawTable::new()).expect("config");
+    let cfg = factory.validate(&raw).expect("config");
     factory.build(&cfg, host.context()).expect("build")
 }
 
@@ -1395,10 +1410,15 @@ fn r57b_team_key_and_jwt_ignore_an_empty_personal_plan_list() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
     let id = seed_team_key_and_jwt(&host, jwt_with_exp(4_102_444_800));
-    let upstream = subscription(&host)
+    let upstream = subscription_without_free_first(&host)
         .upstream(&id, host.context())
         .expect("upstream");
 
+    host.http().enqueue(
+        json!({"code": 0, "data": {"plans": [], "balances": []}})
+            .to_string()
+            .into_bytes(),
+    );
     host.http().enqueue(message_ok());
     let ordinary = ProbeQuery::new(ProtocolId::ANTHROPIC_MESSAGES, "GLM-5.3").expect("query");
     block_on(upstream.probe(&ordinary)).expect("team request");
@@ -1423,11 +1443,12 @@ fn r57b_team_key_and_jwt_ignore_an_empty_personal_plan_list() {
     block_on(upstream.probe(&trial)).expect("gift request");
 
     let calls = host.http().calls();
-    assert_eq!(calls.len(), 3);
-    assert!(calls[0].uri().starts_with(ZAI_ANTHROPIC_BASE));
-    assert!(calls[1].uri().contains("/billing/balance"));
+    assert_eq!(calls.len(), 4);
+    assert!(calls[0].uri().contains("/billing/balance"));
+    assert!(calls[1].uri().starts_with(ZAI_ANTHROPIC_BASE));
+    assert!(calls[2].uri().contains("/billing/balance"));
     assert!(
-        calls[2]
+        calls[3]
             .uri()
             .starts_with("https://zcode.test/api/v1/zcode-plan/anthropic")
     );
@@ -1648,4 +1669,214 @@ fn r57b_live_sibling_bucket_controls_quota_and_trial_routing() {
             .uri()
             .starts_with("https://zcode.test/api/v1/zcode-plan/anthropic")
     );
+}
+
+fn seed_dual(host: &TestHost) -> AccountId {
+    seed_auth(
+        host,
+        &PlanAuth {
+            api_key: Some(SecretString::from("dual.plan.key".to_owned())),
+            jwt: Some(jwt_with_exp(4_102_444_800)),
+            team_token: None,
+            org: String::new(),
+            project: String::new(),
+            base: ZAI_ANTHROPIC_BASE.to_owned(),
+            site: Site::Zai,
+            uid: "u-dual".to_owned(),
+            label: "dual@zcode.test".to_owned(),
+            follow_agent: false,
+            agent_credentials: None,
+        },
+    )
+}
+
+fn enqueue_dual_discovery(host: &TestHost, remaining: u64) {
+    host.http().enqueue(
+        json!({"code": 200, "data": [{"status": "VALID", "productName": "GLM Coding Pro"}]})
+            .to_string()
+            .into_bytes(),
+    );
+    host.http().enqueue(
+        json!({"code": 0, "data": {
+            "server_time": 4_102_444_800_i64,
+            "plans": [{"plan_id": "start", "name": "Start Plan", "status": "active", "ends_at": 4_102_500_000_i64}],
+            "balances": [{
+                "plan_id": "start",
+                "capabilities": ["model:glm-5.3-flash"],
+                "total_units": 1000,
+                "used_units": 1000 - remaining,
+                "remaining_units": remaining,
+                "expires_at": 4_102_448_400_i64
+            }]
+        }})
+        .to_string()
+        .into_bytes(),
+    );
+}
+
+fn probe_model(upstream: &dyn hofund_plugin_api::UpstreamProvider, model: &str) {
+    let query = ProbeQuery::new(ProtocolId::ANTHROPIC_MESSAGES, model).expect("query");
+    block_on(upstream.probe(&query)).expect("probe");
+}
+
+#[test]
+fn r57c_free_first_is_default_and_reuses_the_route_read() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_dual(&host);
+    let upstream = subscription(&host)
+        .upstream(&id, host.context())
+        .expect("upstream");
+    enqueue_dual_discovery(&host, 750);
+    host.http().enqueue(message_ok());
+    probe_model(upstream.as_ref(), "GLM-5.3-Flash");
+
+    host.http().enqueue(message_ok());
+    probe_model(upstream.as_ref(), "glm-5.3-flash");
+    let calls = host.http().calls();
+    assert_eq!(calls.len(), 4);
+    assert!(
+        calls[2]
+            .uri()
+            .starts_with("https://zcode.test/api/v1/zcode-plan/anthropic")
+    );
+    assert!(
+        calls[3]
+            .uri()
+            .starts_with("https://zcode.test/api/v1/zcode-plan/anthropic")
+    );
+    let body: hofund_plugin_sdk::json::Value =
+        hofund_plugin_sdk::json::from_slice(calls[2].body()).expect("body");
+    assert_eq!(body["model"], "GLM-5.3-Flash");
+}
+
+#[test]
+fn r57c_free_first_false_keeps_plain_models_on_the_coding_plan() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_dual(&host);
+    let upstream = subscription_without_free_first(&host)
+        .upstream(&id, host.context())
+        .expect("upstream");
+    enqueue_dual_discovery(&host, 750);
+    host.http().enqueue(message_ok());
+    probe_model(upstream.as_ref(), "GLM-5.3-Flash");
+    let calls = host.http().calls();
+    assert_eq!(calls.len(), 3);
+    assert!(calls[2].uri().starts_with(ZAI_ANTHROPIC_BASE));
+}
+
+#[test]
+fn r57c_spent_balance_skips_the_gift_without_a_message_to_it() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_dual(&host);
+    let upstream = subscription(&host)
+        .upstream(&id, host.context())
+        .expect("upstream");
+    enqueue_dual_discovery(&host, 0);
+    host.http().enqueue(message_ok());
+    probe_model(upstream.as_ref(), "GLM-5.3-Flash");
+    let calls = host.http().calls();
+    assert_eq!(calls.len(), 3);
+    assert!(calls[2].uri().starts_with(ZAI_ANTHROPIC_BASE));
+    assert!(
+        !calls
+            .iter()
+            .any(|call| call.uri().contains("/zcode-plan/anthropic/v1/messages"))
+    );
+}
+
+#[test]
+fn r57c_spent_gift_answer_replays_and_rests_only_that_model() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_dual(&host);
+    let upstream = subscription(&host)
+        .upstream(&id, host.context())
+        .expect("upstream");
+    enqueue_dual_discovery(&host, 750);
+    host.http().enqueue_response(
+        429,
+        &[],
+        json!({"error": {"code": "1113", "message": "Insufficient balance or no resource package"}})
+            .to_string(),
+    );
+    host.http().enqueue(message_ok());
+    probe_model(upstream.as_ref(), "GLM-5.3-Flash");
+
+    enqueue_dual_discovery(&host, 750);
+    host.http().enqueue(message_ok());
+    probe_model(upstream.as_ref(), "GLM-5.3-Flash");
+    let calls = host.http().calls();
+    assert_eq!(calls.len(), 7);
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| call.uri().contains("/zcode-plan/anthropic/v1/messages"))
+            .count(),
+        1
+    );
+    assert!(calls[3].uri().starts_with(ZAI_ANTHROPIC_BASE));
+    assert!(calls[6].uri().starts_with(ZAI_ANTHROPIC_BASE));
+}
+
+#[test]
+fn r57c_free_first_200_quota_envelope_replays_on_the_plan() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_dual(&host);
+    let upstream = subscription(&host)
+        .upstream(&id, host.context())
+        .expect("upstream");
+    enqueue_dual_discovery(&host, 750);
+    host.http().enqueue(
+        json!({"code": 1005, "msg": "exceed quota limit"})
+            .to_string()
+            .into_bytes(),
+    );
+    host.http().enqueue(message_ok());
+    probe_model(upstream.as_ref(), "GLM-5.3-Flash");
+    let calls = host.http().calls();
+    assert_eq!(calls.len(), 4);
+    assert!(calls[3].uri().starts_with(ZAI_ANTHROPIC_BASE));
+}
+
+#[test]
+fn r57c_free_first_refusal_does_not_block_an_explicit_trial_pick() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_dual(&host);
+    let upstream = subscription(&host)
+        .upstream(&id, host.context())
+        .expect("upstream");
+    enqueue_dual_discovery(&host, 750);
+    host.http().enqueue_response(
+        405,
+        &[],
+        json!({"error": {"code": "3012", "message": "request has been blocked due to unusual activity"}})
+            .to_string(),
+    );
+    host.http().enqueue(message_ok());
+    probe_model(upstream.as_ref(), "GLM-5.3-Flash");
+
+    enqueue_dual_discovery(&host, 750);
+    host.http().enqueue(message_ok());
+    probe_model(upstream.as_ref(), "GLM-5.3-Flash-Trial");
+    let calls = host.http().calls();
+    assert_eq!(calls.len(), 7);
+    assert!(
+        calls[6]
+            .uri()
+            .starts_with("https://zcode.test/api/v1/zcode-plan/anthropic")
+    );
+}
+
+#[test]
+fn r57c_free_first_option_must_be_a_boolean() {
+    let factory = factory_with_endpoints(endpoints());
+    let mut raw = RawTable::new();
+    raw.insert("freeFirst", RawValue::String("no".to_owned()));
+    let error = factory.validate(&raw).expect_err("invalid option");
+    assert!(error.to_string().contains("freeFirst must be a boolean"));
 }

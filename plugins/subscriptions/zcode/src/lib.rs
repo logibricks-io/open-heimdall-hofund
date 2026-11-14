@@ -11,9 +11,9 @@ use std::sync::{Arc, Mutex};
 
 use hofund_plugin_api::{
     AccountId, AccountStatus, AgentSignIn, BuildError, ConfigError, HeaderName, HostContext,
-    ModelList, PluginError, PluginId, QuotaWindow, RawTable, Schema, SecretString, SignInChallenge,
-    SignInCtx, SignInFlow, SignInFlowKind, SignInProof, Subscription, SubscriptionFactory,
-    SubscriptionSpec, UpstreamProvider, ValidConfig,
+    ModelList, PluginError, PluginId, QuotaWindow, RawTable, RawValue, Schema, SecretString,
+    SignInChallenge, SignInCtx, SignInFlow, SignInFlowKind, SignInProof, Subscription,
+    SubscriptionFactory, SubscriptionSpec, UpstreamProvider, ValidConfig,
 };
 use hofund_plugin_sdk::Contribution;
 use hofund_plugin_sdk::oauth::TokenCache;
@@ -31,6 +31,7 @@ mod models;
 mod provider_config;
 mod quota;
 mod refresh;
+mod routing;
 mod session;
 mod sign_in;
 mod start;
@@ -123,10 +124,12 @@ pub struct ZcodeFactory {
     endpoints: Arc<Endpoints>,
 }
 
-/// Validated config: no options yet.
+/// Validated Z Code options.
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug)]
-pub struct ZcodeConfig;
+pub struct ZcodeConfig {
+    free_first: bool,
+}
 
 impl ValidConfig for ZcodeConfig {}
 
@@ -138,20 +141,29 @@ impl SubscriptionFactory for ZcodeFactory {
     }
 
     fn config_schema(&self) -> Schema {
-        Schema::object(Vec::new(), &[]).expect("empty object schema is valid")
+        Schema::object(vec![("freeFirst".to_owned(), Schema::boolean())], &[])
+            .expect("the freeFirst schema is valid")
     }
 
     fn validate(&self, raw: &RawTable) -> Result<Self::Config, ConfigError> {
-        if !raw.is_empty() {
-            let key = raw.keys().next().expect("non-empty");
-            return Err(ConfigError::new("unknown key").with_path(key));
+        for key in raw.keys() {
+            if key != "freeFirst" {
+                return Err(ConfigError::new("unknown key").with_path(key));
+            }
         }
-        Ok(ZcodeConfig)
+        let free_first = match raw.get("freeFirst") {
+            None => true,
+            Some(RawValue::Boolean(value)) => *value,
+            Some(_) => {
+                return Err(ConfigError::new("freeFirst must be a boolean").with_path("freeFirst"));
+            }
+        };
+        Ok(ZcodeConfig { free_first })
     }
 
     fn build(
         &self,
-        _cfg: &Self::Config,
+        cfg: &Self::Config,
         host: &HostContext,
     ) -> Result<Arc<dyn Subscription>, BuildError> {
         let device_file =
@@ -163,6 +175,8 @@ impl SubscriptionFactory for ZcodeFactory {
             team_keys: Arc::new(TokenCache::new(Duration::ZERO)),
             pending: Mutex::new(HashMap::new()),
             touch_seq: AtomicU64::new(0),
+            free_first: cfg.free_first,
+            routing: Arc::new(routing::Routing::default()),
         }))
     }
 }
@@ -174,6 +188,8 @@ struct Zcode {
     team_keys: Arc<TokenCache<SecretString>>,
     pending: Mutex<HashMap<String, sign_in::Pending>>,
     touch_seq: AtomicU64,
+    free_first: bool,
+    routing: Arc<routing::Routing>,
 }
 
 #[hofund_plugin_sdk::async_trait]
@@ -290,6 +306,7 @@ impl Subscription for Zcode {
         let result = refresh::run(host, &self.endpoints, account, &self.device_file).await;
         if result.is_ok() {
             self.team_keys.remove(account);
+            self.routing.invalidate(account);
         }
         result
     }
@@ -369,6 +386,8 @@ impl Subscription for Zcode {
             Arc::clone(&self.endpoints),
             self.device_file.clone(),
             Arc::clone(&self.team_keys),
+            self.free_first,
+            Arc::clone(&self.routing),
         )))
     }
 
