@@ -19,7 +19,7 @@ Legend: **Done** = matches the reference at checklist granularity; **Partial** =
 | Kiro (`kiro`) | 8 | 9 | 0 | 2 | 0 |
 | Factory / Droid (`factory`) | 12 | 4 | 0 | 3 | 0 |
 | Cline / ClinePass (`cline`) | 12 | 4 | 0 | 3 | 0 |
-| ChatGPT / Codex (`codex` backend) and ChatGPT API (`chatgpt-api`) | 8 | 11 | 2 | 0 | 0 |
+| ChatGPT / Codex (`codex` backend) and ChatGPT API (`chatgpt-api`) | 9 | 10 | 2 | 0 | 0 |
 | GitHub Copilot (github.com and GHE) | 15 | 2 | 0 | 5 | 0 |
 | Gemini CLI (Code Assist) | 8 | 6 | 2 | 2 | 0 |
 | Google Antigravity | 10 | 4 | 2 | 1 | 0 |
@@ -321,7 +321,7 @@ Remaining verification is live-account acceptance; all evidence here is determin
 | a1 | sign-in: browser / loopback OAuth (Codex CLI PKCE) | `signin.go:38-45` codex authorize URL, fixed `127.0.0.1:1455`, scopes; loopback callback | `codex/src/lib.rs:191-241`, `sign_in.rs:16-37` same client, port 1455, PKCE + loopback | Done | — |
 | a2 | sign-in: device code | `codex_device_signin.go` (device auth APIs) | `device_sign_in.rs:27-30`, `lib.rs:196-206` `--device-auth` flow | Done | — |
 | a3 | sign-in: API key (detect only) | Codex `auth.json` with `auth_mode: apikey` is not an account: discovery and agent switch drop it (`logins.go:767` `codexLoginIn`, `account.go:1044` `codexAccount`); `CodexAPIKeySignedIn` (`logins.go:571`) also lets `/responses/compact` pass a key's account holds (`gateway/codex_backend.go:693` `compactSigninHeld`) | `discover.rs:73-80` drops `auth_mode: apikey` on read/list/import; `agent_sign_in.rs:47` writes `auth_mode: chatgpt`; tests `r47a_a3_*` | Partial | Gateway `/responses/compact` compaction allowance for API-key-held requests has no hofund mirror on the subscription path (**R-47**, later) |
-| a4 | sign-in: paste callback | `signin.go:69` PasteCallback on sign-in state | loopback failure falls back to pasted callback (`lib.rs:217-218` comment only) | Partial | Explicit paste-callback UX not verified in plugin API |
+| a4 | sign-in: paste callback | `signin.go:69` PasteCallback on sign-in state; the pasted browser-final address goes through the same checked code exchange | `lib.rs` pending browser state + existing `SignInProof::Callback`; daemon prompt and loopback parser accept the pasted address, with wrong host/port/path/state refused; `r47c_codex_sign_in_completes_from_pasted_callback` proves the real plugin exchanges the code and stores the account | Done | — |
 | a5 | sign-in: ChatGPT API (Sign in with ChatGPT / dynamic client) | `chatgpt_api.go:42-66` `dynamic_agent_client`, per-account client id, `siwcAuthorize` | no `chatgpt-api` plugin (`docs/coverage/subscriptions.md:25`) | Missing | Full SIWC plugin (R-47) |
 | b | import sources | `codex_store.go:517+` read/write Codex `auth.json` and macOS Keychain; `import_codex.go` config.toml providers | `discover.rs:19-54` read `auth.json` only; `agent_sign_in.rs:9-71` write `auth.json` (file mode) | Partial | Keychain read/write, config.toml provider import (R-47) |
 | c | token storage / encryption | `logins.json` + optional Codex home/keychain (`codex_store.go`) | daemon `secret_ref` encrypted store via `host.accounts()` (`crates/kernel/daemon/src/subscriptions.rs` pattern) | Partial | Bidirectional Codex store sync with Keychain (R-47) |
@@ -331,7 +331,7 @@ Remaining verification is live-account acceptance; all evidence here is determin
 | g | streaming | SSE stream; fold for unary (`codex_request.go` patterns) | `upstream.rs:96-120` forces stream, fold when unary | Done | — |
 | h | tool calls | Codex tool name mapping in gateway/provider | `upstream.rs:82-94` `codex_tool_names` restore | Done | — |
 | i | images | via Responses content parts (gateway codex) | `tests.rs` `r47a_i_*`: Responses `input_image` in upstream POST body | Done | — |
-| j | reasoning / thinking | Codex model instructions / reasoning items in gateway | `shape.rs` (referenced by upstream) drops unsupported fields | Partial | Parity with the reference reasoning compaction paths unverified |
+| j | reasoning / thinking | Codex model instructions / reasoning items in gateway; native compaction items and triggers pass through; content-bearing or unsealed reasoning is dropped before replay | `shape.rs` keeps only sealed reasoning without content parts, restores codec-carried native compaction items, and preserves triggers; recorded fixtures `r47c_reasoning_and_native_compaction_follow_reference_fixtures` and `r47c_compaction_trigger_reaches_recorded_upstream_body` | Partial | Refusal-driven removal of an individually unreadable sealed item and its retry are not ported; no new compaction policy is invented |
 | k | quota / usage | Headers + `codex.rate_limits` event; `/wham/usage`; credit resets (`codex_resets.go:180+`) | `limits.rs`, `usage.rs` headers, event, `/wham/usage`; `resets.rs` + `Subscription::quota_reset_credits` / `consume_quota_reset` on `/wham/rate-limit-reset-credits` (consume only on explicit calls); tests `r47a_k_*` | Partial | UI cards and daemon CLI for reset consume (R-47 later slice) |
 | l | model list | `codex_models.go` backend list + instructions | `models.rs` `/codex/models`, cached prompts | Done | — |
 | m | multi-account | Multiple logins; routing in provider | Multiple accounts via daemon subscription members | Done | — |

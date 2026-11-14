@@ -84,6 +84,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   zstd-compressed POST bodies and HTTP/1.1 on the ChatGPT Codex backend wire; Responses image
   parts on the upstream body; `/wham/rate-limit-reset-credits` read and explicit consume on
   `Subscription` (`quota_reset_credits`, `consume_quota_reset`).
+- Codex subscription parity slice **R-47c**: verify explicit pasted-callback sign-in through the
+  real plugin and daemon; filter replayed reasoning and restore native compaction items.
 - Usage reports (R-10, feature-parity rows 9.4 and 9.9): `hofund usage` period
   presets, rolling `--days` / `--last`, `--since`, grouped `--group-by` (with
   `--by` alias), `--csv`, `--json`, `--account`, and `--model`; control
