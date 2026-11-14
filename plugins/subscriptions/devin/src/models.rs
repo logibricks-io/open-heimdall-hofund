@@ -348,7 +348,7 @@ fn push_listed(
         return Ok(());
     }
     let mut model = ModelSpec::new(id, Some(name.to_owned()))?
-        .with_endpoints(vec!["/v1/chat/completions".to_owned()])
+        .with_endpoints(endpoints_for(id))
         .with_context(context)
         .with_max_output(output)
         .with_efforts(efforts)
@@ -360,6 +360,19 @@ fn push_listed(
     }
     out.push(model);
     Ok(())
+}
+
+/// Whether Devin routes the model on Anthropic Messages instead of chat completions.
+pub(crate) fn is_claude(id: &str) -> bool {
+    id.to_ascii_lowercase().contains("claude")
+}
+
+fn endpoints_for(id: &str) -> Vec<String> {
+    if is_claude(id) {
+        vec!["/v1/messages".to_owned()]
+    } else {
+        vec!["/v1/chat/completions".to_owned()]
+    }
 }
 
 fn family_images(family: &Family, images: &HashMap<String, bool>) -> Option<bool> {
@@ -595,6 +608,21 @@ mod tests {
         let snapshot = listed(snapshot_families(), snapshot_images()).expect("snapshot");
         assert!(snapshot.iter().any(|model| model.id() == "glm-5-2-1m"));
         assert!(!snapshot.iter().any(|model| model.id() == "adaptive"));
+    }
+
+    #[test]
+    fn claude_models_advertise_messages_and_others_advertise_chat() {
+        let snapshot = listed(snapshot_families(), snapshot_images()).expect("snapshot");
+        let swe = snapshot
+            .iter()
+            .find(|model| model.id() == "swe-2")
+            .expect("swe-2");
+        assert_eq!(swe.endpoints(), ["/v1/chat/completions"]);
+        let claude = snapshot
+            .iter()
+            .find(|model| super::is_claude(model.id()))
+            .expect("a Claude family entry");
+        assert_eq!(claude.endpoints(), ["/v1/messages"]);
     }
 
     #[test]
