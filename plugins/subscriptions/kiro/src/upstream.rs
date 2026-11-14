@@ -1,6 +1,6 @@
 //! Kiro chat upstream on `generateAssistantResponse`.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use hofund_plugin_api::{
     AccountId, BodyStream, Completion, ContentPart, HostContext, PluginError, ProbeQuery,
@@ -21,6 +21,8 @@ pub(crate) struct KiroUpstream {
     host: HostContext,
     endpoints: Arc<Endpoints>,
     cli_command: Option<std::path::PathBuf>,
+    models: Arc<crate::models::NativeModels>,
+    fitted: Mutex<kiro_body::FittedCache>,
 }
 
 impl KiroUpstream {
@@ -29,12 +31,15 @@ impl KiroUpstream {
         host: HostContext,
         endpoints: Arc<Endpoints>,
         cli_command: Option<std::path::PathBuf>,
+        models: Arc<crate::models::NativeModels>,
     ) -> Self {
         Self {
             account,
             host,
             endpoints,
             cli_command,
+            models,
+            fitted: Mutex::new(kiro_body::FittedCache::default()),
         }
     }
 
@@ -53,7 +58,16 @@ impl KiroUpstream {
         let base = self.endpoints.chat_base(profile, &stored.credential.region);
         let url = format!("{base}/generateAssistantResponse");
         let names = kiro_body::tool_names(&request);
-        let body = kiro_body::encode(&request, &stored.credential)?;
+        let native = self.models.native(&self.account, &request.model);
+        let body = kiro_body::encode_with(
+            &request,
+            &stored.credential,
+            native.as_ref(),
+            &mut self
+                .fitted
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )?;
         let mut call = Call::post(url)
             .header("content-type", "application/json")
             .header("accept", "application/vnd.amazon.eventstream")

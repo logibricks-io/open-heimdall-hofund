@@ -1,10 +1,11 @@
-//! Children with piped standard input and output.
+//! Children with piped standard input, output, and error.
 //!
 //! A plugin that drives a local agent over stdio (Claude Code) spawns it here.
 //! The child sees an allowlist of the host environment plus the explicit
-//! pairs in the request. Standard error is discarded. Standard output is read
-//! on a thread and handed out as one chunk per line, capped at [`MAX_LINE`].
-//! Dropping the child kills it and reaps it on a background thread.
+//! pairs in the request. Standard error is retained up to 1 MiB (the tail).
+//! Standard output is read on a thread and handed out as one chunk per line,
+//! capped at [`MAX_LINE`]. Dropping the child kills it and reaps it on a
+//! background thread.
 
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -76,13 +77,13 @@ fn write_exit_store(
     *slot = Some(code);
 }
 
-/// Spawns `request` with piped stdin and stdout. Blocking.
+/// Spawns `request` with piped stdin, stdout, and stderr. Blocking.
 pub(crate) fn spawn(request: &SpawnRequest) -> Result<StdPipedChild, PluginError> {
     let mut command = command(request);
     command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+        .stderr(Stdio::piped());
     let mut child = command
         .spawn()
         .map_err(|error| PluginError::io(error.to_string()))?;
@@ -91,8 +92,29 @@ pub(crate) fn spawn(request: &SpawnRequest) -> Result<StdPipedChild, PluginError
         reap(child);
         return Err(PluginError::internal("child has no standard output pipe"));
     };
+    let stderr = child.stderr.take();
     let id = child.id();
     let child = Arc::new(Mutex::new(Some(child)));
+    let stderr_store = Arc::new(Mutex::new(Vec::new()));
+    let stderr_reader = if let Some(stderr) = stderr {
+        let store = Arc::clone(&stderr_store);
+        let started = std::thread::Builder::new()
+            .name("hofund-piped-stderr".into())
+            .spawn(move || crate::long_lived::retain_stderr(stderr, &store));
+        match started {
+            Ok(reader) => Some(reader),
+            Err(error) => {
+                if let Ok(mut guard) = child.lock()
+                    && let Some(child) = guard.take()
+                {
+                    reap(child);
+                }
+                return Err(PluginError::io(error.to_string()));
+            }
+        }
+    } else {
+        None
+    };
     let (sender, receiver) = mpsc::channel(LINE_BUFFER);
     let exit = Arc::new(Mutex::new(None::<Result<i32, String>>));
     let exit_store = Arc::clone(&exit);
@@ -114,6 +136,10 @@ pub(crate) fn spawn(request: &SpawnRequest) -> Result<StdPipedChild, PluginError
                     .ok_or_else(|| "child exited without an exit code".to_owned()),
                 Err(error) => Err(error.to_string()),
             };
+            drop(guard);
+            if let Some(stderr_reader) = stderr_reader {
+                let _ = stderr_reader.join();
+            }
             write_exit_store(&exit_store, code);
         });
     if let Err(error) = reader {
@@ -132,6 +158,7 @@ pub(crate) fn spawn(request: &SpawnRequest) -> Result<StdPipedChild, PluginError
         child,
         stdin: Arc::new(Mutex::new(stdin)),
         stdout: Mutex::new(Some(BodyStream::from_stream(stream))),
+        stderr: stderr_store,
         exit,
     })
 }
@@ -185,6 +212,7 @@ pub(crate) struct StdPipedChild {
     child: Arc<Mutex<Option<Child>>>,
     stdin: Arc<Mutex<Option<ChildStdin>>>,
     stdout: Mutex<Option<BodyStream>>,
+    stderr: Arc<Mutex<Vec<u8>>>,
     exit: Arc<Mutex<Option<Result<i32, String>>>>,
 }
 
@@ -269,6 +297,14 @@ impl PipedChildBackend for StdPipedChild {
         })
         .await
     }
+
+    fn stderr_tail(&self) -> Bytes {
+        let guard = match self.stderr.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        Bytes::copy_from_slice(&guard)
+    }
 }
 
 #[cfg(test)]
@@ -299,6 +335,7 @@ mod tests {
             child: Arc::new(Mutex::new(None)),
             stdin: Arc::new(Mutex::new(None)),
             stdout: Mutex::new(None),
+            stderr: Arc::new(Mutex::new(Vec::new())),
             exit: slot,
         };
         assert_eq!(child.exit_code().await.expect("exit code"), 44);
@@ -450,6 +487,22 @@ mod tests {
             while stdout.next_chunk().await.is_some() {}
             assert_eq!(child.exit_code().await.expect("exit code"), 44);
             assert_eq!(child.exit_code().await.expect("second read"), 44);
+        }
+
+        #[tokio::test]
+        async fn exit_waits_for_stderr_after_more_than_a_buffer_of_stdout() {
+            let child = spawn(
+                "/bin/sh",
+                &[
+                    "-c",
+                    "i=0; while [ $i -lt 32 ]; do echo line-$i; i=$((i + 1)); done; printf 'last diagnostic\\n' >&2; exit 1",
+                ],
+            )
+            .await;
+            let lines = collect(child.as_ref()).await;
+            assert_eq!(lines.len(), 32);
+            assert_eq!(child.exit_code().await.expect("exit code"), 1);
+            assert_eq!(&child.stderr_tail()[..], b"last diagnostic\n");
         }
 
         #[tokio::test]

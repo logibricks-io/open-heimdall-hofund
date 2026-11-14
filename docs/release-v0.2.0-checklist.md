@@ -49,7 +49,7 @@ Most subscription and routing work is verified with mocks only.
 | Claude Code request serving (H8) | Merged (#762 tip, including R-6g). Mocks only; real-binary smoke is still #304. |
 | Cursor agent-API request serving (R-8/R-9) | Merged (#775 tip). Mocks only; documented deviations stay in `docs/feature-parity.md`. |
 | Devin chat (R-12/R-13) | Merged (#786 tip). Mocks only. |
-| Kiro | Unary or streaming Messages with tools and inline images (R-51, mocks/loopback only). Portal/browser sign-in, kiro-cli SQLite import, delegated refresh and compare-and-swap write-back, and external-idp refresh are included. Images over the 5 MiB Base64 limit are refused. Live-account verification, deterministic image shrinking, native effort/reasoning, and the other documented gaps remain open. |
+| Kiro | Unary or streaming Messages with tools and inline images (R-51, mocks/loopback only). Portal/browser sign-in, kiro-cli SQLite import, delegated refresh and compare-and-swap write-back, and external-idp refresh are included. R-51c adds deterministic fitting or exact notes for images over the 5 MiB Base64 limit, model-listed native effort fields, and reasoning reply events. Live-account verification and the other documented gaps remain open. |
 | Antigravity (row 3.4) | Plugin is on `main` (R-49). Mocks only. |
 | P1-8 uninstall / purge | Merged (#748) |
 | 10.5 LAN allow-IPs / trusted proxy | Merged (#749) |
@@ -109,11 +109,12 @@ the to-be-tagged commit, with **0.2.0**:
    `[0.2.0] - YYYY-MM-DD`. Be honest about what is on that commit: Cursor
    R-8/R-9, Claude H8, and Devin R-12/R-13 request serving are already on
    `f320d119` (mocks only). If R-51 has landed, describe unary or streaming
-   Messages with tools and images, the 5 MiB Base64 refusal, portal/browser
-   sign-in, kiro-cli SQLite import, delegated refresh and compare-and-swap
-   write-back, and external-idp refresh. Live-account verification,
-   deterministic image shrinking, native effort/reasoning, and the other
-   documented Kiro gaps remain open. Do not list Library writes or true
+   Messages with tools and images, deterministic fitting or exact notes over
+   the 5 MiB Base64 limit, model-listed native effort fields, reasoning reply
+   events, portal/browser sign-in, kiro-cli SQLite import, delegated refresh
+   and compare-and-swap write-back, and external-idp refresh. Live-account
+   verification and the other documented Kiro gaps remain open. Do not list
+   Library writes or true
    4.2–4.4 recording/MCP execution as released.
 4. Commit those files. The tag is created from that commit, not from a
    dirty tree.
