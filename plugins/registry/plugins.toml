@@ -27,6 +27,13 @@ package = "hofund-plugin-bedrock-mantle"
 feature = "bedrock-mantle"
 
 [[plugin]]
+id = "chatgpt-api"
+kind = "subscription"
+path = "plugins/subscriptions/chatgpt-api"
+package = "hofund-plugin-subscription-chatgpt-api"
+feature = "chatgpt-api"
+
+[[plugin]]
 id = "claude"
 kind = "subscription"
 path = "plugins/subscriptions/claude"

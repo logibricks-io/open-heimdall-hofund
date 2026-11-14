@@ -211,7 +211,7 @@ impl Subscription for Devin {
                 "no Devin sign-in is in progress for this session",
             ));
         };
-        let SignInProof::Callback { code, state } = proof else {
+        let SignInProof::Callback { code, state, .. } = proof else {
             return Err(PluginError::config(
                 "Devin sign-in completes from the browser callback",
             ));

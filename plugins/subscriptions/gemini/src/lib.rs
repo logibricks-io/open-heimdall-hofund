@@ -285,7 +285,7 @@ impl Subscription for Gemini {
                 "no Gemini CLI sign-in is in progress for this session",
             ));
         };
-        let SignInProof::Callback { code, state } = proof else {
+        let SignInProof::Callback { code, state, .. } = proof else {
             return Err(PluginError::config(
                 "Gemini CLI sign-in completes from the browser callback",
             ));

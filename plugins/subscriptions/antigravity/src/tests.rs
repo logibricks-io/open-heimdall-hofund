@@ -189,6 +189,7 @@ fn complete(host: &TestHost, sub: &Arc<dyn Subscription>, state: &str) -> Accoun
         SignInProof::Callback {
             code: secret("code-1"),
             state: state.to_owned(),
+            issued_client_id: None,
         },
         host.context(),
     ))

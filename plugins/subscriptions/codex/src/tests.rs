@@ -240,6 +240,7 @@ fn start_binds_loopback_and_opens_the_authorize_page() {
         SignInProof::Callback {
             code: secret("code"),
             state: "x".to_owned(),
+            issued_client_id: None,
         },
         host.context(),
     ))
@@ -269,6 +270,7 @@ fn complete(
         SignInProof::Callback {
             code: secret("code-1"),
             state: state.to_owned(),
+            issued_client_id: None,
         },
         host.context(),
     ))
@@ -1950,6 +1952,7 @@ fn d58_5_device_sign_in_rejects_a_callback_proof() {
         SignInProof::Callback {
             code: secret("x"),
             state: "y".to_owned(),
+            issued_client_id: None,
         },
         host.context(),
     ))

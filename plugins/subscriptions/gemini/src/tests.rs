@@ -185,6 +185,7 @@ fn complete(
         SignInProof::Callback {
             code: secret("code-1"),
             state: state.to_owned(),
+            issued_client_id: None,
         },
         host.context(),
     ))
