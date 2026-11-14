@@ -458,6 +458,15 @@ fn needs_sign_in(reason: &str) -> AccountStatus {
     }
 }
 
+/// Clears the process-wide Antigravity hub-version cache.
+///
+/// Hidden because only recording tests need to start a cold fetch. Production
+/// keeps a six-hour process cache, matching the reference auto-updater.
+#[doc(hidden)]
+pub fn reset_version_cache() {
+    version::reset_cache();
+}
+
 #[cfg(test)]
 mod r49d_tests;
 #[cfg(test)]

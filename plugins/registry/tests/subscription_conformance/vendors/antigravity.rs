@@ -2,7 +2,9 @@ use std::time::Duration;
 
 use hofund_plugin_api::{RawTable, RawValue};
 use hofund_plugin_sdk::oauth::SecretObject;
-use hofund_plugin_subscription_antigravity::{Endpoints, factory_with_endpoints};
+use hofund_plugin_subscription_antigravity::{
+    Endpoints, factory_with_endpoints, reset_version_cache,
+};
 
 use crate::harness::{code_assist_response, execute_async, host, secret, seed, subscription};
 use crate::matrix::Cell;
@@ -21,9 +23,15 @@ pub async fn run(cell: Cell) -> Result<(), String> {
             .with_text("paid_tier", ""),
     )
     .await;
+    // A cold process cache GETs the updater manifest before generateContent.
+    // Reset and script that call so the FIFO host does not hand the
+    // completion body to the manifest parser.
+    reset_version_cache();
     host.http().enqueue(
         br#"{"access_token":"matrix-access","token_type":"Bearer","expires_in":3600}"#.to_vec(),
     );
+    host.http()
+        .enqueue(b"version: 2.9.1\npath: bundle.zip\n".to_vec());
     host.http().enqueue_response(
         200,
         &[(

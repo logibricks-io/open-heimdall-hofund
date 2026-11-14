@@ -12,7 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - R-49e: the Antigravity subscription plugin refreshes hub `ide_version` and
   `User-Agent` from the reference auto-updater manifest through `host.http()`,
   with a six-hour cache, `2.9.1` cold fallback, and offline `r49e_*` fixtures.
-  Refs R-49.
+  Cross-vendor conformance now scripts that cold-cache GET so the recorded
+  unary/stream completion is not consumed as a manifest body. Refs R-49.
 
 - R-9k: the Cursor subscription plugin tracks conversation-scoped dashboard
   usage debt across tool steps, maps a named session to a stable Run

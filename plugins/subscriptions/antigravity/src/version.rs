@@ -126,13 +126,22 @@ pub(crate) fn user_agent_for(version: &str) -> String {
     )
 }
 
-#[cfg(test)]
-pub(crate) fn reset_cache_for_test() {
-    TLS_CACHE.with(|slot| *slot.borrow_mut() = None);
+/// Clears the process-wide hub-version cache.
+///
+/// Recording tests in other crates compile this plugin without `cfg(test)`,
+/// so they cannot use the crate-private test helpers. A cold cache is required
+/// for each scripted execute that includes the updater-manifest GET.
+pub fn reset_cache() {
     with_cache_mut(|cache| {
         cache.version.clear();
         cache.fetched_at = None;
     });
+}
+
+#[cfg(test)]
+pub(crate) fn reset_cache_for_test() {
+    TLS_CACHE.with(|slot| *slot.borrow_mut() = None);
+    reset_cache();
 }
 
 #[cfg(test)]
