@@ -45,6 +45,35 @@ static SPEC: SubscriptionSpec = SubscriptionSpec::from_static(
 )
 .with_agent_sign_in(AgentSignIn::new(&["grok"], "GROK_HOME", ".grok"));
 
+/// Writes a CLI auth.json and returns the account secret for matrix tests.
+#[cfg(any(test, feature = "test-fixtures"))]
+#[doc(hidden)]
+pub fn matrix_sign_in(
+    home: &Path,
+    token: &str,
+) -> Result<(AccountId, hofund_plugin_sdk::oauth::SecretObject), PluginError> {
+    std::fs::create_dir_all(home)
+        .map_err(|error| PluginError::io(format!("cannot create the Grok CLI home ({error})")))?;
+    let text = format!(
+        r#"{{
+  "https://auth.x.ai::b1a00492-073a-47ea-816f-4c329264a828": {{
+    "key": "{token}",
+    "email": "matrix@example.test",
+    "expires_at": "2099-01-01T00:00:00.000000000Z"
+  }}
+}}"#
+    );
+    std::fs::write(home.join("auth.json"), text)
+        .map_err(|error| PluginError::io(format!("cannot write Grok auth.json ({error})")))?;
+    let credential = creds::read_sync(home).map_err(|error| {
+        PluginError::auth(format!("Grok auth.json is not readable ({error:?})"))
+    })?;
+    Ok((
+        creds::account_id(&credential),
+        creds::secret_blob(home, &credential),
+    ))
+}
+
 /// Registers the Grok Build subscription.
 #[must_use]
 pub fn contribute() -> Contribution {
