@@ -491,14 +491,13 @@ pub(crate) async fn run_now(
     }
     match run_warmup(subscription, state, &account_id).await {
         Ok(()) => {
-            if claude::is_claude_subscription(subscription) {
-                if let Some(member) = state
+            if claude::is_claude_subscription(subscription)
+                && let Some(member) = state
                     .members()
                     .iter()
                     .find(|member| member.account == account_id)
-                {
-                    claude::warmed_now(runtime, &member.id, state, &account_id).await;
-                }
+            {
+                claude::warmed_now(runtime, &member.id, state, &account_id).await;
             }
             let record = WarmupRecord::new(now, WarmupOutcome::Ok, "");
             let mut row = WarmupAccountStatus::new(subscription.to_owned(), account_id.clone());
