@@ -21,7 +21,11 @@ pub(crate) fn list(home: &Path) -> Result<Vec<DiscoveredAgentAccount>, PluginErr
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
         };
-        let Ok(credential) = creds::parse_desktop_info(&text, site, &path) else {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_millis() as i64)
+            .unwrap_or(0);
+        let Ok(credential) = creds::parse_desktop_info(&text, site, &path, now_ms) else {
             continue;
         };
         let id = creds::account_id(&credential);
@@ -49,7 +53,13 @@ pub(crate) async fn import(
     let text = std::fs::read_to_string(&path).map_err(|error| {
         PluginError::auth(format!("{} can't be read ({error})", path.display()))
     })?;
-    let credential = creds::parse_desktop_info(&text, site, &path)?;
+    let now_ms = host
+        .clock()
+        .now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or(0);
+    let credential = creds::parse_desktop_info(&text, site, &path, now_ms)?;
     store(&credential, host).await
 }
 

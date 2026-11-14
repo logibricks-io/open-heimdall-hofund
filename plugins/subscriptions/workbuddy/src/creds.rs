@@ -40,7 +40,7 @@ impl Stored {
         };
         let mut stored = parse_secret(&secret)?;
         if stored.credential.desktop {
-            stored.credential = hydrate_desktop(&stored.credential)?;
+            stored.credential = hydrate_desktop(host, &stored.credential)?;
         }
         Ok(stored)
     }
@@ -56,7 +56,7 @@ impl Stored {
     }
 }
 
-fn hydrate_desktop(stored: &Credential) -> Result<Credential, PluginError> {
+fn hydrate_desktop(host: &HostContext, stored: &Credential) -> Result<Credential, PluginError> {
     if stored.auth_path.is_empty() {
         return Err(PluginError::auth(
             "the stored WorkBuddy desktop sign-in has no auth file path",
@@ -69,7 +69,13 @@ fn hydrate_desktop(stored: &Credential) -> Result<Credential, PluginError> {
             path.display()
         ))
     })?;
-    let mut fresh = parse_desktop_info(&text, stored.site, path)?;
+    let now_ms = host
+        .clock()
+        .now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or(0);
+    let mut fresh = parse_desktop_info(&text, stored.site, path, now_ms)?;
     if fresh.uid != stored.uid {
         return Err(PluginError::auth(
             "WorkBuddy desktop is signed in to a different account than the one stored here",
@@ -151,6 +157,7 @@ pub(crate) fn parse_desktop_info(
     text: &str,
     site: Site,
     auth_path: &Path,
+    now_ms: i64,
 ) -> Result<Credential, PluginError> {
     let root: Value = json::from_str(text.trim())
         .map_err(|_| PluginError::auth("WorkBuddy auth file is invalid JSON"))?;
@@ -179,10 +186,6 @@ pub(crate) fn parse_desktop_info(
         .and_then(|map| map.get("refreshToken"))
         .and_then(string_value)
         .unwrap_or_default();
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0);
     let mut expires_at = auth
         .and_then(|map| map.get("expiresAt"))
         .and_then(json_i64)
@@ -211,6 +214,11 @@ pub(crate) fn parse_desktop_info(
     let label = account
         .and_then(|map| map.get("nickname"))
         .and_then(string_value)
+        .or_else(|| {
+            account
+                .and_then(|map| map.get("phoneNumber"))
+                .and_then(string_value)
+        })
         .unwrap_or_else(|| uid.to_owned());
     Ok(Credential {
         uid: uid.to_owned(),
@@ -375,6 +383,7 @@ mod tests {
     use super::{
         Credential, Site, chat_headers, hydrate_desktop, parse_desktop_info, signed_headers,
     };
+    use hofund_kit_subscription::TestHost;
     use hofund_plugin_api::SecretString;
     use std::path::Path;
 
@@ -412,7 +421,12 @@ mod tests {
         stored.uid = "other-uid".to_owned();
         stored.desktop = true;
         stored.auth_path = path.display().to_string();
-        assert!(hydrate_desktop(&stored).is_err());
+        let host = TestHost::open_for(
+            hofund_plugin_api::PluginKind::Subscription,
+            hofund_plugin_api::PluginId::from_static("workbuddy"),
+            dir.path(),
+        );
+        assert!(hydrate_desktop(host.context(), &stored).is_err());
     }
 
     #[test]
@@ -428,9 +442,10 @@ mod tests {
             &std::fs::read_to_string(&path).expect("read"),
             Site::China,
             Path::new(&path),
+            1_700_000_000_000,
         )
         .expect("parse");
-        assert!(cred.expires_at > 0);
+        assert_eq!(cred.expires_at, 1_700_000_000_000 + 3_600_000);
     }
 
     #[test]
@@ -440,7 +455,7 @@ mod tests {
             r#"{"accessToken":"plain","refreshToken":{"$wbEncrypted":1,"envelope":"secret-envelope"}}"#,
         ] {
             let text = format!(r#"{{"account":{{"uid":"u1"}},"auth":{auth}}}"#);
-            let error = parse_desktop_info(&text, Site::China, Path::new("auth.info"))
+            let error = parse_desktop_info(&text, Site::China, Path::new("auth.info"), 0)
                 .expect_err("encrypted desktop token");
             assert!(
                 error
