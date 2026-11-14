@@ -36,6 +36,7 @@ mod session;
 mod sign_in;
 mod start;
 mod team;
+mod tool_search;
 mod upstream;
 
 /// Anthropic-compatible API for Z.ai individual plans.

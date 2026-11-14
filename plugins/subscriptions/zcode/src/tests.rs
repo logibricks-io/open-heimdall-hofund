@@ -4,8 +4,10 @@ use std::path::PathBuf;
 
 use hofund_kit_subscription::{TestHost, block_on};
 use hofund_plugin_api::{
-    AccountId, AccountStatus, PluginErrorKind, PluginId, PluginKind, ProbeQuery, ProtocolId,
-    RawTable, RawValue, SecretString, SignInChallenge, SignInCtx, SignInProof, SubscriptionFactory,
+    AccountId, AccountStatus, Completion, ContentPart, Extensions, Message, PluginErrorKind,
+    PluginId, PluginKind, ProbeQuery, ProtocolId, RawTable, RawValue, Request, Role, SecretString,
+    SignInChallenge, SignInCtx, SignInProof, SubscriptionFactory, Tool, ToolArguments,
+    ToolCallPart, ToolChoice,
 };
 use hofund_plugin_sdk::json::json;
 use hofund_plugin_sdk::oauth::{SecretObject, secret_text};
@@ -1879,4 +1881,161 @@ fn r57c_free_first_option_must_be_a_boolean() {
     raw.insert("freeFirst", RawValue::String("no".to_owned()));
     let error = factory.validate(&raw).expect_err("invalid option");
     assert!(error.to_string().contains("freeFirst must be a boolean"));
+}
+
+fn tool_fixture(name: &str, deferred: bool) -> Tool {
+    let extensions = if deferred {
+        Extensions::from_map(
+            json!({"defer_loading": true})
+                .as_object()
+                .expect("object")
+                .clone(),
+        )
+    } else {
+        Extensions::new()
+    };
+    Tool {
+        name: name.to_owned(),
+        description: Some(format!("{name} description")),
+        input_schema: json!({"type": "object", "properties": {"query": {"type": "string"}}}),
+        extensions,
+    }
+}
+
+fn tool_search_request(stream: bool) -> Request {
+    let mut user = Message::new(Role::User);
+    user.content.push(ContentPart::text("Find Bash"));
+    let mut assistant = Message::new(Role::Assistant);
+    assistant.content.push(ContentPart::ToolCall(ToolCallPart {
+        id: "toolu_s".to_owned(),
+        name: "ToolSearch".to_owned(),
+        arguments: ToolArguments::from_text(r#"{"query":"select:Bash"}"#),
+        extensions: Extensions::new(),
+    }));
+    Request::new("GLM-5.3")
+        .with_messages(vec![user, assistant])
+        .with_tools(vec![
+            tool_fixture("Bash", true),
+            tool_fixture("ToolSearch", false),
+            tool_fixture("DeferredToolPlaceholder", true),
+        ])
+        .with_tool_choice(Some(ToolChoice::named("ToolSearch")))
+        .with_stream(stream)
+}
+
+fn execute_raw(
+    upstream: &dyn hofund_plugin_api::UpstreamProvider,
+    request: Request,
+) -> Result<Vec<u8>, hofund_plugin_api::PluginError> {
+    block_on(async {
+        let completion = upstream
+            .execute(request, ProtocolId::ANTHROPIC_MESSAGES)
+            .await?;
+        let Completion::Raw(mut body) = completion else {
+            panic!("same-protocol Messages replies stay raw");
+        };
+        let mut bytes = Vec::new();
+        while let Some(chunk) = body.next_chunk().await {
+            bytes.extend_from_slice(&chunk?);
+        }
+        Ok(bytes)
+    })
+}
+
+fn seed_start(host: &TestHost) -> AccountId {
+    seed_auth(
+        host,
+        &PlanAuth {
+            api_key: None,
+            jwt: Some(jwt_with_exp(4_102_444_800)),
+            team_token: None,
+            org: String::new(),
+            project: String::new(),
+            base: ZAI_ANTHROPIC_BASE.to_owned(),
+            site: Site::Zai,
+            uid: "u-start".to_owned(),
+            label: "start@zcode.test".to_owned(),
+            follow_agent: false,
+            agent_credentials: None,
+        },
+    )
+}
+
+#[test]
+fn r57c_tool_search_plan_wire_and_unary_reply_round_trip() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_plan_key(&host, "tool.plan.key", "tools@zcode.test");
+    let upstream = subscription(&host)
+        .upstream(&id, host.context())
+        .expect("upstream");
+    host.http().enqueue(
+        json!({
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "ToolSearchTool"},
+                {"type": "tool_use", "id": "toolu_1", "name": "ToolSearchTool", "input": {"query": "select:Bash"}}
+            ]
+        })
+        .to_string()
+        .into_bytes(),
+    );
+    let response = execute_raw(upstream.as_ref(), tool_search_request(false)).expect("response");
+    let calls = host.http().calls();
+    assert_eq!(calls.len(), 1);
+    let sent: hofund_plugin_sdk::json::Value =
+        hofund_plugin_sdk::json::from_slice(calls[0].body()).expect("request");
+    assert_eq!(sent["tools"].as_array().map(Vec::len), Some(2));
+    assert_eq!(sent["tools"][0]["name"], "Bash");
+    assert_eq!(sent["tools"][1]["name"], "ToolSearchTool");
+    assert!(sent["tools"][0].get("defer_loading").is_none());
+    assert_eq!(sent["messages"][1]["content"][0]["name"], "ToolSearchTool");
+    assert_eq!(sent["tool_choice"]["name"], "ToolSearchTool");
+
+    let response: hofund_plugin_sdk::json::Value =
+        hofund_plugin_sdk::json::from_slice(&response).expect("response json");
+    assert_eq!(response["content"][0]["text"], "ToolSearchTool");
+    assert_eq!(response["content"][1]["name"], "ToolSearch");
+}
+
+#[test]
+fn r57c_tool_search_start_stream_restores_only_the_tool_call() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_start(&host);
+    let upstream = subscription(&host)
+        .upstream(&id, host.context())
+        .expect("upstream");
+    host.http().enqueue(
+        concat!(
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ToolSearchTool\"}}\n\n",
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"ToolSearchTool\",\"input\":{}}}\n\n"
+        )
+        .as_bytes()
+        .to_vec(),
+    );
+    let response = execute_raw(upstream.as_ref(), tool_search_request(true)).expect("response");
+    let response = String::from_utf8(response).expect("utf8");
+    assert!(response.contains(r#""text":"ToolSearchTool""#));
+    assert!(response.contains(r#""name":"ToolSearch""#));
+    assert!(!response.contains(r#""name":"ToolSearchTool""#));
+
+    let calls = host.http().calls();
+    assert_eq!(calls.len(), 1);
+    assert!(
+        calls[0]
+            .uri()
+            .starts_with("https://zcode.test/api/v1/zcode-plan/anthropic")
+    );
+    let sent: hofund_plugin_sdk::json::Value =
+        hofund_plugin_sdk::json::from_slice(calls[0].body()).expect("request");
+    assert_eq!(sent["tools"][1]["name"], "ToolSearchTool");
+    assert!(sent["tools"].as_array().expect("tools").iter().all(|tool| {
+        tool.get("defer_loading").is_none() && tool["name"] != "DeferredToolPlaceholder"
+    }));
 }

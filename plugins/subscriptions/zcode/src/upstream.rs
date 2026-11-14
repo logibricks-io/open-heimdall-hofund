@@ -13,7 +13,7 @@ use hofund_plugin_sdk::wire::{self, Target};
 
 use crate::routing::{GiftRoute, Route, Routing};
 use crate::session::{self, Stored};
-use crate::{APP_VERSION, Endpoints, api, gift, http_auth, plan_auth_style, start};
+use crate::{APP_VERSION, Endpoints, api, gift, http_auth, plan_auth_style, start, tool_search};
 
 pub(crate) struct ZcodeUpstream {
     account: AccountId,
@@ -126,6 +126,7 @@ impl ZcodeUpstream {
     }
 
     async fn target(&self, stored: &Stored, request: &Request) -> Result<Selection, PluginError> {
+        let rename_search = tool_search::needed(request);
         let trial = gift::model_for_trial(&request.model);
         let route = self.route(stored).await?;
         let now = self.host.clock().monotonic();
@@ -170,7 +171,7 @@ impl ZcodeUpstream {
             SelectionKind::Plan
         };
         if kind == SelectionKind::Plan {
-            let (target, credential) = self.plan_target(stored);
+            let (target, credential) = self.plan_target(stored, rename_search);
             return Ok(Selection {
                 target,
                 credential,
@@ -178,7 +179,7 @@ impl ZcodeUpstream {
                 kind,
             });
         }
-        let (target, credential) = self.start_target(stored)?;
+        let (target, credential) = self.start_target(stored, rename_search)?;
         Ok(Selection {
             target,
             credential,
@@ -187,7 +188,11 @@ impl ZcodeUpstream {
         })
     }
 
-    fn start_target(&self, stored: &Stored) -> Result<(Target, SecretString), PluginError> {
+    fn start_target(
+        &self,
+        stored: &Stored,
+        rename_search: bool,
+    ) -> Result<(Target, SecretString), PluginError> {
         let jwt = stored.auth.jwt.as_ref().ok_or_else(|| {
             PluginError::config("Z Code gift models require a Z Code browser sign-in")
         })?;
@@ -201,6 +206,7 @@ impl ZcodeUpstream {
                 String,
                 hofund_plugin_sdk::json::Value,
             >| {
+                tool_search::request(root);
                 start::reasoning(root);
                 start::dress(root, site, &device, &session, now);
                 Vec::new()
@@ -212,10 +218,15 @@ impl ZcodeUpstream {
             .credential(CredentialStyle::Bearer)
             .headers(headers)
             .rewrite(rewrite);
+        let target = if rename_search {
+            target.unwrap(Arc::new(tool_search::response))
+        } else {
+            target
+        };
         Ok((target, jwt.clone()))
     }
 
-    fn plan_target(&self, stored: &Stored) -> (Target, SecretString) {
+    fn plan_target(&self, stored: &Stored, rename_search: bool) -> (Target, SecretString) {
         let device = stored.device.clone();
         let session = start::session_id(&stored.device);
         let rewrite = Arc::new(
@@ -223,6 +234,7 @@ impl ZcodeUpstream {
                 String,
                 hofund_plugin_sdk::json::Value,
             >| {
+                tool_search::request(root);
                 start::reasoning(root);
                 start::mark_plan(root, &device, &session);
                 Vec::new()
@@ -238,6 +250,11 @@ impl ZcodeUpstream {
             ("x-session-id".to_owned(), start::session_id(&stored.device)),
         ])
         .rewrite(rewrite);
+        let target = if rename_search {
+            target.unwrap(Arc::new(tool_search::response))
+        } else {
+            target
+        };
         (target, stored.api_key.clone())
     }
 
@@ -284,7 +301,8 @@ impl ZcodeUpstream {
         request: Request,
         inbound: ProtocolId,
     ) -> Result<Completion, PluginError> {
-        let (target, credential) = self.plan_target(stored);
+        let rename_search = tool_search::needed(&request);
+        let (target, credential) = self.plan_target(stored, rename_search);
         self.send(&target, &credential, request, inbound).await
     }
 }
