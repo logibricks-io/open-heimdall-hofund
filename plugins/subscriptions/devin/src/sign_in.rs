@@ -11,7 +11,7 @@ use hofund_plugin_sdk::oauth::{Pkce, authorize_url, secret_text};
 use crate::creds::Credential;
 use crate::{cli, errors, quota};
 
-pub(crate) const SERVER: &str = "https://server.codeium.com";
+pub(crate) const SERVER: &str = crate::creds::DEFAULT_API_SERVER;
 pub(crate) const AUTHORIZE: &str = "https://app.devin.ai/auth/cli/continue";
 const EXCHANGE_PATH: &str =
     "/exa.seat_management_pb.SeatManagementService/ExchangeDevinCLIPKCECode";
@@ -47,11 +47,18 @@ pub(crate) fn authorize(
     )
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct ExchangeOutcome {
+    pub(crate) key: SecretString,
+    pub(crate) devin_webapp: Option<String>,
+    pub(crate) devin_api: Option<String>,
+}
+
 pub(crate) async fn exchange(
     host: &HostContext,
     code: &SecretString,
     pending: &Pending,
-) -> Result<SecretString, PluginError> {
+) -> Result<ExchangeOutcome, PluginError> {
     let body = json!({
         "code": secret_text(code),
         "code_verifier": secret_text(&pending.verifier),
@@ -90,7 +97,19 @@ pub(crate) async fn exchange(
         .or_else(|| value.get("session_token").and_then(Value::as_str))
         .filter(|token| !token.is_empty())
         .ok_or_else(|| PluginError::auth("Devin's exchange returned no session token"))?;
-    Ok(SecretString::from(token.to_owned()))
+    let devin_api = value
+        .get("devinApiUrl")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let devin_webapp = value
+        .get("devinWebappHost")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    Ok(ExchangeOutcome {
+        key: SecretString::from(token.to_owned()),
+        devin_webapp,
+        devin_api,
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -110,7 +129,13 @@ pub(crate) enum Lookup {
 }
 
 pub(crate) async fn who_by_key(host: &HostContext, credential: &Credential) -> Lookup {
-    let Ok(reply) = quota::request(host, &credential.key, &credential.api_server).await else {
+    let Ok(reply) = quota::request(
+        host,
+        &credential.key,
+        &crate::creds::effective_api_server(&credential.api_server),
+    )
+    .await
+    else {
         return Lookup::Unknown;
     };
     if reply.status == 401

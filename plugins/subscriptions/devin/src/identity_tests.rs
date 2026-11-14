@@ -22,7 +22,8 @@ fn credential(key: &str) -> Credential {
     Credential {
         key: SecretString::from(key.to_owned()),
         api_server: sign_in::SERVER.to_owned(),
-        devin_api: "https://api.devin.ai".to_owned(),
+        devin_webapp: crate::creds::DEFAULT_DEVIN_WEBAPP.to_owned(),
+        devin_api: crate::creds::DEFAULT_DEVIN_API.to_owned(),
         label: "old file label".to_owned(),
         plan: String::new(),
         org_id: String::new(),

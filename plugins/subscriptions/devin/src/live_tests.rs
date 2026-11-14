@@ -24,7 +24,8 @@ fn credential(key: &str, server: &str, label: &str) -> Credential {
     Credential {
         key: SecretString::from(key.to_owned()),
         api_server: server.to_owned(),
-        devin_api: "https://api.devin.ai".to_owned(),
+        devin_webapp: creds::DEFAULT_DEVIN_WEBAPP.to_owned(),
+        devin_api: creds::DEFAULT_DEVIN_API.to_owned(),
         label: label.to_owned(),
         plan: "Pro".to_owned(),
         org_id: "org-1".to_owned(),
