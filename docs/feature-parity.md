@@ -101,8 +101,10 @@ serving is not uniform; the Matrix rows are authoritative:
 - **Z Code:** native Z.ai and BigModel browser sign-in, encrypted-store import,
   team seats, 3.17.2 Start Plan and gift-balance serving, provider-config model
   capabilities, and daily gift claims with persisted 30-minute rechecks (R-57b,
-  mocks only). Agent credential switching stays fail-closed; dual-account
-  automatic free-first and the other upstream gaps remain in the inventory.
+  mocks only). R-57c adds default-on dual-account free-first with plan replay,
+  ToolSearch rewriting, fixed busy retries, and shared edge-firewall holds.
+  Agent credential switching stays fail-closed; the remaining documented vendor
+  gaps stay in the inventory.
 - **Grok, Cline, Factory, Codex, Copilot, Gemini
   Code Assist, and Antigravity:** these plugins serve the upstreams documented
   in rows 3.1–3.5 (mocks only), with the gaps listed there.
