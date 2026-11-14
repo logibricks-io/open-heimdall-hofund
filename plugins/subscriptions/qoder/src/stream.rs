@@ -9,6 +9,8 @@ use hofund_plugin_sdk::json::{Value, json};
 use hofund_plugin_sdk::transport::HttpResponse;
 use hofund_plugin_sdk::uuid;
 
+use crate::failure::{self, Classified};
+
 const CALL_OPEN: &str = "<tool_call>";
 const CALL_CLOSE: &str = "</tool_call>";
 
@@ -360,37 +362,68 @@ fn openai_chunk(source: &Value, delta: Value, finish: Option<&str>) -> Value {
 }
 
 pub(crate) fn failure(status: u16, body: &str) -> PluginError {
-    let value = hofund_plugin_sdk::json::from_str::<Value>(body).ok();
-    let code = value
-        .as_ref()
-        .and_then(|value| value.get("code"))
-        .map(|code| {
-            code.as_str()
-                .map(str::to_owned)
-                .unwrap_or_else(|| code.to_string())
-        })
-        .unwrap_or_default();
-    let message = value
-        .as_ref()
-        .and_then(|value| value.get("message"))
-        .and_then(Value::as_str)
-        .filter(|message| !message.is_empty())
-        .unwrap_or("Qoder request failed");
-    if matches!(
-        code.as_str(),
-        "110" | "112" | "113" | "114" | "115" | "116" | "117" | "118" | "119" | "122"
-    ) || status == 429
-    {
-        return PluginError::quota_status(429, format!("usage limit reached: {message}"));
+    failure::classify(status, body).into_error()
+}
+
+/// Reads the first COSY SSE refusal, if any, without consuming the rest of the body.
+pub(crate) async fn opening_classified(
+    response: HttpResponse,
+) -> Result<Result<HttpResponse, Classified>, PluginError> {
+    let (parts, body) = response.into_parts();
+    let mut prefix = Vec::new();
+    let mut stream = body;
+    loop {
+        match stream.next_chunk().await {
+            Some(Ok(chunk)) => {
+                prefix.extend_from_slice(&chunk);
+                if let Some(classified) = classify_sse_prefix(&prefix) {
+                    return Ok(Err(classified));
+                }
+                if prefix.windows(2).any(|window| window == b"\n\n") {
+                    break;
+                }
+                if prefix.len() > 1 << 16 {
+                    break;
+                }
+            }
+            Some(Err(error)) => return Err(error),
+            None => break,
+        }
     }
-    if code == "10605" {
-        return PluginError::status_error(
-            503,
-            format!("Qoder queued the request; try again later: {message}"),
-        )
-        .with_retry_after(std::time::Duration::from_secs(30));
+    let body = BodyStream::from_stream(unfold(
+        (prefix, stream, 0usize),
+        |(prefix, mut stream, mut offset)| async move {
+            if offset < prefix.len() {
+                let end = (offset + 8192).min(prefix.len());
+                let chunk = Bytes::copy_from_slice(&prefix[offset..end]);
+                offset = end;
+                return Some((Ok(chunk), (prefix, stream, offset)));
+            }
+            stream
+                .next_chunk()
+                .await
+                .map(|chunk| (chunk, (prefix, stream, offset)))
+        },
+    ));
+    Ok(Ok(HttpResponse::from_parts(parts, body)))
+}
+
+fn classify_sse_prefix(prefix: &[u8]) -> Option<Classified> {
+    let text = std::str::from_utf8(prefix).ok()?;
+    for line in text.lines() {
+        let payload = line.trim().strip_prefix("data:")?.trim();
+        let envelope = hofund_plugin_sdk::json::from_str::<Value>(payload).ok()?;
+        let inner = envelope
+            .get("body")
+            .and_then(Value::as_str)
+            .unwrap_or(payload);
+        if let Some(status) = envelope.get("statusCodeValue").and_then(Value::as_u64)
+            && status != 200
+        {
+            return Some(failure::classify(status as u16, inner));
+        }
     }
-    PluginError::status_error(status.clamp(400, 599), message)
+    None
 }
 
 #[derive(Clone, Debug)]

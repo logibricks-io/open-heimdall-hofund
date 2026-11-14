@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- R-54e: the Qoder subscription plugin classifies native queue code 10605,
+  quota, and request refusal codes like the reference (`failure.rs`), waits on
+  `/algo/api/v2/service/ask/queue/status` and resends within budget (`queue.rs`,
+  `upstream.rs`), and records busy/queue fixtures (`r54e_*`,
+  `fixtures/queued-10605.json`). Refs R-54.
 - R-54: the shared Qoder daily check-in helper sets `CheckinResult::recheck_at`
   to the earlier of 30 minutes, the next Beijing calendar midnight (UTC+8), and
   the minimum end time of active campaigns, matching the reference recheck
