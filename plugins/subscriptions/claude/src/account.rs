@@ -256,15 +256,6 @@ pub(crate) async fn ask(
     finish_warmup_output(&last)
 }
 
-/// Sends one "hi" at Haiku, as the scheduled warm-up does.
-pub(crate) async fn warmup(
-    host: &HostContext,
-    configured: Option<&PathBuf>,
-    account: &AccountId,
-) -> Result<(), PluginError> {
-    ask(host, configured, account, "haiku").await
-}
-
 async fn run_warmup_command(
     host: &HostContext,
     command: &crate::launcher::ClaudeCommand,
