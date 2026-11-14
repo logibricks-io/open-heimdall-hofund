@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use hofund_kit_subscription::{TestHost, block_on};
 use hofund_plugin_api::{
@@ -7,12 +7,13 @@ use hofund_plugin_api::{
 };
 use hofund_plugin_sdk::oauth::{SecretObject, account_id_from};
 
-use crate::{Endpoints, client, factory_with_endpoints, project};
+use crate::{Endpoints, client, factory_with_endpoints, project, version};
 
 const TOKEN_URL: &str = "https://oauth.test/token";
 const USERINFO_URL: &str = "https://oauth.test/userinfo";
 const LOAD: &str = "https://code-assist-prod.test";
 const DAILY: &str = "https://code-assist-daily.test";
+const MANIFEST: &str = "https://antigravity-version.test/manifest/latest-arm64-mac.yml";
 const TEST_CLIENT_ID: &str = "hofund-test-antigravity-client";
 const TEST_CLIENT_SECRET: &str = "hofund-test-antigravity-secret";
 
@@ -23,11 +24,13 @@ fn endpoints() -> Endpoints {
         userinfo: USERINFO_URL.to_owned(),
         load_code_assist: LOAD.to_owned(),
         code_assist: DAILY.to_owned(),
+        version_manifest: MANIFEST.to_owned(),
         onboard_poll: Duration::from_millis(1),
     }
 }
 
 fn host(dir: &tempfile::TempDir) -> TestHost {
+    version::warm_cache_for_test(version::FALLBACK_VERSION, SystemTime::UNIX_EPOCH);
     TestHost::open_for(
         PluginKind::Subscription,
         PluginId::from_static("antigravity"),

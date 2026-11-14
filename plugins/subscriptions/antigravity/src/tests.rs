@@ -1,7 +1,7 @@
 //! Offline tests against the recording subscription host.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use hofund_kit_subscription::{TestHost, block_on};
 use hofund_plugin_api::{
@@ -13,13 +13,14 @@ use hofund_plugin_sdk::json::{Value, json};
 use hofund_plugin_sdk::oauth::{SecretObject, TokenCache, account_id_from};
 
 use crate::project;
-use crate::{Endpoints, SIGN_IN_WARNING, client, factory_with_endpoints, tokens};
+use crate::{Endpoints, SIGN_IN_WARNING, client, factory_with_endpoints, tokens, version};
 
 const SESSION: &str = "0123456789abcdef0123456789abcdef";
 const TOKEN_URL: &str = "https://oauth.test/token";
 const USERINFO_URL: &str = "https://oauth.test/userinfo";
 const LOAD: &str = "https://code-assist-prod.test";
 const DAILY: &str = "https://code-assist-daily.test";
+const MANIFEST: &str = "https://antigravity-version.test/manifest/latest-arm64-mac.yml";
 
 fn endpoints() -> Endpoints {
     Endpoints {
@@ -28,6 +29,7 @@ fn endpoints() -> Endpoints {
         userinfo: USERINFO_URL.to_owned(),
         load_code_assist: LOAD.to_owned(),
         code_assist: DAILY.to_owned(),
+        version_manifest: MANIFEST.to_owned(),
         onboard_poll: Duration::from_millis(1),
     }
 }
@@ -52,6 +54,7 @@ fn plugin() -> PluginId {
 }
 
 fn host(dir: &tempfile::TempDir) -> TestHost {
+    version::warm_cache_for_test(version::FALLBACK_VERSION, SystemTime::UNIX_EPOCH);
     TestHost::open_for(PluginKind::Subscription, plugin(), dir.path())
 }
 
