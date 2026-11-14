@@ -72,18 +72,18 @@ fn error_code(body: &[u8]) -> Option<(String, String)> {
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_owned();
-    if code.is_empty() {
-        if let Some(Value::String(detail)) = value.get("detail") {
-            for prefix in ["subscription_sharing_", "chatpass_v2_"] {
-                if let Some(index) = detail.find(prefix) {
-                    let tail = &detail[index..];
-                    let end = tail
-                        .char_indices()
-                        .find(|(_, ch)| !(ch.is_ascii_alphanumeric() || *ch == '_'))
-                        .map_or(tail.len(), |(i, _)| i);
-                    code = tail[..end].to_owned();
-                    break;
-                }
+    if code.is_empty()
+        && let Some(Value::String(detail)) = value.get("detail")
+    {
+        for prefix in ["subscription_sharing_", "chatpass_v2_"] {
+            if let Some(index) = detail.find(prefix) {
+                let tail = &detail[index..];
+                let end = tail
+                    .char_indices()
+                    .find(|(_, ch)| !(ch.is_ascii_alphanumeric() || *ch == '_'))
+                    .map_or(tail.len(), |(i, _)| i);
+                code = tail[..end].to_owned();
+                break;
             }
         }
     }

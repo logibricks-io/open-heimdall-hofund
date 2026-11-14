@@ -51,7 +51,7 @@ fn write_private(path: &std::path::Path, text: String) -> Result<(), PluginError
             .map_err(|error| PluginError::io("cannot write host id").with_source(error))?;
         file.write_all(text.as_bytes())
             .map_err(|error| PluginError::io("cannot write host id").with_source(error))?;
-        return Ok(());
+        Ok(())
     }
     #[cfg(not(unix))]
     {

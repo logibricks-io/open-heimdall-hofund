@@ -3,7 +3,7 @@
 use hofund_kit_subscription::{TestHost, block_on};
 use hofund_plugin_api::{
     AccountId, AccountStatus, PluginErrorKind, PluginId, PluginKind, ProbeQuery, ProtocolId,
-    RawTable, SignInFlowKind, SubscriptionFactory,
+    RawTable, SignInFlowKind,
 };
 
 fn host(dir: &tempfile::TempDir) -> TestHost {

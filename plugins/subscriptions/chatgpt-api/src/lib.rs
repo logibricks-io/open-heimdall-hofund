@@ -73,11 +73,15 @@ pub fn factory_with_endpoints(endpoints: Endpoints) -> ChatgptApiFactory {
     }
 }
 
+/// Builds ChatGPT API subscription instances.
+#[doc(hidden)]
 #[derive(Clone, Debug)]
 pub struct ChatgptApiFactory {
     endpoints: Arc<Endpoints>,
 }
 
+/// The validated config: the subscription takes no options yet.
+#[doc(hidden)]
 #[derive(Clone, Copy, Debug)]
 pub struct ChatgptApiConfig;
 
@@ -95,7 +99,7 @@ impl SubscriptionFactory for ChatgptApiFactory {
     }
 
     fn validate(&self, raw: &RawTable) -> Result<Self::Config, ConfigError> {
-        for key in raw.keys() {
+        if let Some(key) = raw.keys().next() {
             return Err(ConfigError::new("unknown key").with_path(key));
         }
         Ok(ChatgptApiConfig)
@@ -228,13 +232,15 @@ impl Subscription for ChatgptApi {
         let client_id = issued_client_id.unwrap_or_default();
         let signed_in = sign_in::exchange(
             host,
-            &self.endpoints.token,
-            &client_id,
-            &code,
-            &pending.verifier,
-            &pending.redirect_uri,
-            &pending.nonce,
-            &pending.host_id,
+            &sign_in::Exchange {
+                token_url: &self.endpoints.token,
+                client_id: &client_id,
+                code: &code,
+                verifier: &pending.verifier,
+                redirect_uri: &pending.redirect_uri,
+                nonce: &pending.nonce,
+                host_id: &pending.host_id,
+            },
         )
         .await?;
         let stored_secret = signed_in.secret.clone();
@@ -317,7 +323,6 @@ impl Subscription for ChatgptApi {
             account.clone(),
             host.clone(),
             Arc::clone(&self.endpoints),
-            Arc::clone(&self.models),
         )))
     }
 

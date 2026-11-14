@@ -52,10 +52,10 @@ pub(crate) fn body(body: &mut Map<String, Value>) -> Vec<(String, String)> {
                 if obj.get("role").and_then(Value::as_str) == Some("system") {
                     obj.insert("role".to_owned(), Value::String("developer".to_owned()));
                 }
-                if obj.get("type").and_then(Value::as_str) == Some("additional_tools") {
-                    if let Some(Value::Array(tools)) = obj.get_mut("tools") {
-                        *tools = own_tools(std::mem::take(tools));
-                    }
+                if obj.get("type").and_then(Value::as_str) == Some("additional_tools")
+                    && let Some(Value::Array(tools)) = obj.get_mut("tools")
+                {
+                    *tools = own_tools(std::mem::take(tools));
                 }
             }
         }
@@ -70,10 +70,10 @@ pub(crate) fn body(body: &mut Map<String, Value>) -> Vec<(String, String)> {
             .get("instructions")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        if let Some(Value::Array(input)) = body.get("input") {
-            if let Some(key) = conversation_key(instructions, input) {
-                body.insert("prompt_cache_key".to_owned(), Value::String(key));
-            }
+        if let Some(Value::Array(input)) = body.get("input")
+            && let Some(key) = conversation_key(instructions, input)
+        {
+            body.insert("prompt_cache_key".to_owned(), Value::String(key));
         }
     }
     if let Some(Value::Array(tools)) = body.get_mut("tools") {

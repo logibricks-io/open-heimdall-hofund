@@ -10,7 +10,6 @@ use hofund_plugin_sdk::wire::{self, Target};
 
 use crate::Endpoints;
 use crate::errors;
-use crate::models::Cache;
 use crate::shape;
 use crate::tokens::{self, Need};
 
@@ -18,7 +17,6 @@ pub(crate) struct ChatgptApiUpstream {
     account: AccountId,
     host: HostContext,
     endpoints: Arc<Endpoints>,
-    models: Arc<Cache>,
 }
 
 impl ChatgptApiUpstream {
@@ -26,13 +24,11 @@ impl ChatgptApiUpstream {
         account: AccountId,
         host: HostContext,
         endpoints: Arc<Endpoints>,
-        models: Arc<Cache>,
     ) -> Self {
         Self {
             account,
             host,
             endpoints,
-            models,
         }
     }
 
@@ -44,7 +40,7 @@ impl ChatgptApiUpstream {
     ) -> Result<Completion, PluginError> {
         let target = Target::new(ProtocolId::OPENAI_RESPONSES, self.endpoints.api.clone())
             .credential(CredentialStyle::Bearer)
-            .rewrite(Arc::new(|body| shape::body(body)))
+            .rewrite(Arc::new(shape::body))
             .classify_status(Arc::new(|status, _headers, body, error| {
                 errors::classify(status, body, error)
             }));

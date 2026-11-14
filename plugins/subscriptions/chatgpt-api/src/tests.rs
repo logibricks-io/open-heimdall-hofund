@@ -138,6 +138,15 @@ fn host_id_is_stable() {
 }
 
 #[test]
+fn host_id_load_for_test_seeds_state() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let seeded = "urn:uuid:00000000-0000-4000-8000-000000000001";
+    host_id::load_for_test(host.context(), seeded).expect("seed");
+    assert_eq!(host_id::load(host.context()).expect("load"), seeded);
+}
+
+#[test]
 fn sign_in_stores_per_account_client_id() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);

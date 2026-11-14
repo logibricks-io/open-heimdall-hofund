@@ -24,8 +24,18 @@ const ISSUER: &str = "https://auth.openai.com";
 pub(crate) struct SignedIn {
     pub(crate) id: AccountId,
     pub(crate) label: String,
-    pub(crate) plan: String,
     pub(crate) secret: SecretString,
+}
+
+/// Authorization-code token request after the browser callback.
+pub(crate) struct Exchange<'a> {
+    pub(crate) token_url: &'a str,
+    pub(crate) client_id: &'a str,
+    pub(crate) code: &'a SecretString,
+    pub(crate) verifier: &'a SecretString,
+    pub(crate) redirect_uri: &'a str,
+    pub(crate) nonce: &'a str,
+    pub(crate) host_id: &'a str,
 }
 
 pub(crate) fn authorize(
@@ -60,31 +70,25 @@ pub(crate) fn new_nonce() -> Result<String, PluginError> {
 
 pub(crate) async fn exchange(
     host: &HostContext,
-    token_url: &str,
-    client_id: &str,
-    code: &SecretString,
-    verifier: &SecretString,
-    redirect_uri: &str,
-    nonce: &str,
-    host_id: &str,
+    form: &Exchange<'_>,
 ) -> Result<SignedIn, PluginError> {
-    if client_id.is_empty() {
+    if form.client_id.is_empty() {
         return Err(PluginError::auth(
             "ChatGPT sign-in: OpenAI did not finish registering hofund (no client id came back); start it again",
         ));
     }
-    let form = form_body(&[
+    let body = form_body(&[
         ("grant_type", "authorization_code"),
-        ("client_id", client_id),
-        ("code", secret_text(code)),
-        ("code_verifier", secret_text(verifier)),
-        ("redirect_uri", redirect_uri),
+        ("client_id", form.client_id),
+        ("code", secret_text(form.code)),
+        ("code_verifier", secret_text(form.verifier)),
+        ("redirect_uri", form.redirect_uri),
         ("resource", RESOURCE),
     ]);
-    let reply = Call::post(token_url)
+    let reply = Call::post(form.token_url)
         .header("content-type", "application/x-www-form-urlencoded")
         .header("accept", "application/json")
-        .bytes(form)
+        .bytes(body)
         .fetch(host.http())
         .await?;
     if !(200..300).contains(&reply.status()) {
@@ -99,16 +103,13 @@ pub(crate) async fn exchange(
         ));
     };
     verify_scope(reply.body())?;
-    check_id(id_token, client_id, nonce)?;
+    check_id(id_token, form.client_id, form.nonce)?;
     let identity = identity(id_token)?;
-    let expires = set
-        .expires_at()
-        .map(|time| tokens::unix_seconds(time))
-        .unwrap_or(0);
+    let expires = set.expires_at().map(tokens::unix_seconds).unwrap_or(0);
     let secret = SecretObject::new()
         .with_number("v", 1)
-        .with_text("client_id", client_id)
-        .with_text("host_id", host_id)
+        .with_text("client_id", form.client_id)
+        .with_text("host_id", form.host_id)
         .with_secret("id_token", id_token)
         .with_secret("access_token", set.access())
         .with_secret(
@@ -122,7 +123,6 @@ pub(crate) async fn exchange(
     Ok(SignedIn {
         id: identity.id,
         label: identity.label,
-        plan: identity.plan,
         secret: secret.to_secret(),
     })
 }
