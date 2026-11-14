@@ -408,6 +408,35 @@ fn offline_config_reload_is_reported_noop() {
 }
 
 #[test]
+fn offline_status_disk_revision_without_hofundd() {
+    let scratch = Scratch::new("127.0.0.1:0", ROUTED);
+    let solo = scratch.root.join("solo");
+    fs::create_dir_all(&solo).expect("mkdir");
+    let cli = solo.join("hofund");
+    fs::copy(hofund(), &cli).expect("copy hofund");
+    let out = scratch.hofund_with(&cli, &["status"]);
+    let report = out.ok();
+    assert_eq!(lines(report)[0], "daemon not running", "{report}");
+    let revision = lines(report)[3]
+        .strip_prefix("disk revision: ")
+        .expect(report);
+    assert_eq!(
+        revision.len(),
+        64,
+        "offline status must hash the config on disk: {report}"
+    );
+    assert!(
+        !revision.contains("unknown"),
+        "offline status must not spawn one-shot hofundd for revision: {report}"
+    );
+    scratch.assert_no_daemon_state();
+}
+
+fn lines(report: &str) -> Vec<&str> {
+    report.lines().collect()
+}
+
+#[test]
 fn offline_status_local_report() {
     let scratch = Scratch::new("0.0.0.0:4100", ROUTED);
     let out = scratch.hofund(&["status"]);
@@ -733,11 +762,25 @@ fn hofund_addr_overrides_listen_for_daemon_and_healthcheck() {
     let scratch =
         Scratch::new(&configured_addr.to_string(), ROUTED).with_env("HOFUND_ADDR", "127.0.0.1:0");
     let mut daemon_command = scratch.command(hofundd(), &[]);
-    daemon_command.stdout(Stdio::null()).stderr(Stdio::null());
+    daemon_command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut daemon = Daemon(Some(spawn(&mut daemon_command)));
 
     let started = Instant::now();
     let effective = loop {
+        if let Some(code) = daemon.0.as_mut().and_then(|child| {
+            child
+                .try_wait()
+                .expect("try_wait")
+                .map(|status| status.code())
+        }) {
+            let child = daemon.0.take().expect("daemon");
+            let exited = finish(child, DEADLINE);
+            panic!(
+                "daemon exited before discovery (code {code:?}): stdout={:?} stderr={:?}; last status poll pending",
+                String::from_utf8_lossy(&exited.stdout),
+                String::from_utf8_lossy(&exited.stderr),
+            );
+        }
         let out = scratch.hofund(&["status"]);
         if out.code == Some(0)
             && out.stdout.starts_with("daemon running")

@@ -188,6 +188,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Offline `hofund status` no longer spawns one-shot `hofundd` to read the disk
+  revision; it hashes the on-disk config locally so status polls during daemon
+  startup cannot race or oversubscribe the runner (`hofund_addr_overrides_listen_for_daemon_and_healthcheck`).
 - Z Code subscription (R-57): refresh re-imports hold the account lease and keep
   a team seat lapsed when its refused business token is unchanged, while a
   rotated token recovers it; malformed relative agent credential paths fail
