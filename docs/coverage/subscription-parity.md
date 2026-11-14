@@ -23,7 +23,7 @@ Legend: **Done** = matches the reference at checklist granularity; **Partial** =
 | GitHub Copilot (github.com and GHE) | 15 | 2 | 0 | 5 | 0 |
 | Gemini CLI (Code Assist) | 8 | 6 | 2 | 2 | 0 |
 | Google Antigravity | 10 | 4 | 2 | 1 | 0 |
-| SuperGrok (`grok`) | 10 | 6 | 0 | 2 | 0 |
+| SuperGrok (`grok`) | 14 | 2 | 0 | 2 | 0 |
 | Qoder (international + Qoder CN) | 13 | 5 | 0 | 2 | 0 |
 | CodeBuddy / WorkBuddy (CN + international) | 18 | 1 | 0 | 0 | 0 |
 | Z Code (`zcode`) | 15 | 4 | 0 | 0 | 0 |
@@ -468,32 +468,38 @@ Remaining verification is live-account acceptance; all evidence here is determin
 
 **hofund path:** `plugins/subscriptions/grok/`.
 
-| # | capability | reference v0.1.3005 | hofund 08035c9 | status | gap to close |
-|---|------------|----------------------|----------------|--------|--------------|
+| # | capability | reference v0.1.3005 | hofund R-50 | status | gap to close |
+|---|------------|----------------------|-------------|--------|--------------|
 | a1 | sign-in: CLI device (`grok login`) | `grok.go:13-17`, plugin `index.mjs:1-9` | `lib.rs:3-7`, bridge flow runs `grok login --device-auth` | Done | — |
 | a2 | browser / API key / paste | device via CLI only | N/A | N/A | — |
 | b | import sources | Read CLI `auth.json`; reference-owned homes (`index.mjs:48-56`) | `discover.rs`, `creds.rs` import paths | Done | — |
 | c | token storage | CLI home + plugin store | account secret + CLI home path in blob | Done | — |
-| d | refresh | CLI `grok models` renew (`index.mjs:6-7`, `refresh.test.mjs`) | `refresh.rs:16-29` same | Partial | Serialized renew vs concurrent callers (R-24 / R-50) |
+| d | refresh | CLI `grok models` renew, one joined run per home, torn-read last-good fallback (`index.mjs`, `refresh.test.mjs`, `renew.test.mjs`) | `refresh.rs` holds the account lease across the CLI run, re-reads after waiting, joins completed renewal, and uses the explicit `creds::Cache`; request and hook leads stay at five minutes | Done | Deterministic lease/scripted-child coverage only |
 | e | upstream wire | `https://cli-chat-proxy.grok.com/v1` OpenAI Responses + signed headers | `lib.rs:64-66`, `upstream.rs:73-80` | Done | — |
 | f | inbound shapes | Responses upstream; body rewrite in plugin | `ProtocolId::OPENAI_RESPONSES`, `shape.rs` | Done | — |
 | g | streaming | SSE | wire streaming | Done | — |
-| h | tool calls | Allowed tool types set (`index.mjs:33-35`) | `shape.rs` tool filtering | Partial | Full tool type set parity (R-50) |
+| h | tool calls | Allowed tool types set and opt-in `x_search` (`index.mjs:33-35`, `tool-choice.test.mjs`, `x-search.test.mjs`) | `shape.rs` keeps exactly the eleven types and handles automatic/null tool lists without injecting over explicit choices | Done | — |
 | i | images | `input_image` in shape tests | `shape.rs:147-149` | Done | — |
 | j | reasoning | reasoning items in Responses | `shape.rs:106+` | Partial | unverified vs xAI backend |
-| k | quota / usage | plugin usage hooks; legacy `grok_usage.go` | `quota.rs` allowance windows | Partial | Deferred usage / step billing if in plugin (R-50) |
-| l | model list | CLI/backend model API | `models.rs` | Done | — |
+| k | quota / usage | plugin usage hooks; legacy `grok_usage.go` | `quota.rs` allowance and non-blocking on-demand windows; quota renews once on 401 | Partial | Fractional percentages, explicit span, and recent-429 display window are not represented by `QuotaWindow`; the reference shows no deferred/step-billing fields to add |
+| l | model list | CLI/backend model API | `models.rs`, including one 401 renewal | Done | — |
 | m | multi-account | reference-owned homes per extra account | multiple accounts | Done | — |
-| n | error classification | auth errors → NeedsSignIn | unverified | Partial | R-50 |
+| n | error classification | missing sign-in is NeedsSignIn; an unrenewed token stays a plain failure with home-specific guidance | `refresh.rs` maps a missing home to Auth and unrenewed/expired-after-renew to non-Auth 401 with the corresponding guidance | Done | — |
 | o | check-in / warmup | N/A | N/A | N/A | — |
 | p | agent sign-in | read `GROK_HOME` | `lib.rs:46` AgentSignIn, discover/import | Done | — |
-| q | extras | CLI install helper (`grok_install.go`, `index.mjs:26-31`) | `cli.rs:29` error if missing only | Partial | Install guidance / GROK_BIN_DIR parity (R-50) |
+| q | extras | CLI discovery and install guidance (`grok_install.go`, `index.mjs:26-31`, `76-92`) | `cli.rs` checks `GROK_BIN_DIR`, `GROK_HOME/bin`, `~/.grok/bin`, PATH, and `~/.local/bin` in order, accepts PATH/local only for the CLI's own install, and prints the reference command and `GROK_BIN_DIR` guidance | Done | No installer added |
 
-**Gaps**
+**R-50 completed**
 
-- CLI install discovery helper like the reference — **S**, **R-50**.
-- Renew serialization under concurrent refresh — **S**, **R-24**, **R-50**.
-- Tool-type allowlist and x_search config parity — **M**, **R-50**.
+- Added the reference binary lookup order and missing-CLI install guidance without inventing an installer.
+- Serialized hook and request renewal through the account lease, with post-lease rechecks, last-good torn-file fallback, and one 401 renewal for requests, models, and quota.
+- Completed the tool-type/search fixtures and the missing-sign-in versus unrenewed error wording.
+- All added tests use deterministic fixtures, recording hosts, or scripted children; no live-account verification was performed.
+
+**Remaining gaps**
+
+- Reasoning remains unverified against the backend.
+- `QuotaWindow` rounds fractional percentages and has no explicit span or recent-429 display window. The reference's allowance and on-demand values are otherwise retained; no deferred or step-billing fields appear in the frozen source, so none are invented.
 
 ---
 

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use hofund_plugin_api::{
     AccountId, Completion, CredentialStyle, HostContext, PluginError, ProbeQuery, ProbeReport,
-    ProtocolId, Request, UpstreamProvider,
+    ProtocolId, Request, SecretString, UpstreamProvider,
 };
 use hofund_plugin_sdk::json::Value;
 use hofund_plugin_sdk::wire::{self, Target};
@@ -19,6 +19,7 @@ pub(crate) struct GrokUpstream {
     host: HostContext,
     endpoints: Arc<Endpoints>,
     x_search: bool,
+    cache: crate::creds::Cache,
     program: Arc<dyn Fn() -> Result<std::path::PathBuf, PluginError> + Send + Sync>,
 }
 
@@ -28,6 +29,7 @@ impl GrokUpstream {
         host: HostContext,
         endpoints: Arc<Endpoints>,
         x_search: bool,
+        cache: crate::creds::Cache,
         program: Arc<dyn Fn() -> Result<std::path::PathBuf, PluginError> + Send + Sync>,
     ) -> Self {
         Self {
@@ -35,13 +37,21 @@ impl GrokUpstream {
             host,
             endpoints,
             x_search,
+            cache,
             program,
         }
     }
 
-    async fn stored(&self, force: bool) -> Result<Stored, PluginError> {
+    async fn stored(&self, rejected: Option<&SecretString>) -> Result<Stored, PluginError> {
         let program = Arc::clone(&self.program);
-        refresh::ensure_fresh(&self.host, &self.account, move || program(), force).await
+        refresh::ensure_fresh(
+            &self.host,
+            &self.account,
+            &self.cache,
+            move || program(),
+            rejected,
+        )
+        .await
     }
 
     async fn send(
@@ -105,10 +115,10 @@ impl UpstreamProvider for GrokUpstream {
         request: Request,
         inbound: ProtocolId,
     ) -> Result<Completion, PluginError> {
-        let stored = self.stored(false).await?;
+        let stored = self.stored(None).await?;
         match self.send(&stored, request.clone(), inbound).await {
             Err(error) if error.status() == Some(401) => {
-                let renewed = self.stored(true).await?;
+                let renewed = self.stored(Some(&stored.credential.key)).await?;
                 self.send(&renewed, request, inbound).await
             }
             other => other,

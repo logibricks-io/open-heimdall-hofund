@@ -12,10 +12,29 @@ pub(crate) async fn list(
     host: &HostContext,
     endpoints: &Endpoints,
     account: &AccountId,
-    program: impl FnOnce() -> Result<std::path::PathBuf, PluginError>,
+    cache: &crate::creds::Cache,
+    program: impl Fn() -> Result<std::path::PathBuf, PluginError>,
 ) -> Result<ModelList, PluginError> {
-    let stored = refresh::ensure_fresh(host, account, program, false).await?;
+    let stored = refresh::ensure_fresh(host, account, cache, &program, None).await?;
     let url = format!("{}/models", endpoints.base);
+    let reply = signed_get(&url, &stored.credential.key)
+        .fetch(host.http())
+        .await?;
+    match reply.status() {
+        200..=299 => {
+            let models = parse_list(reply.body())?;
+            return Ok(ModelList::new(models, None).with_source_url(url));
+        }
+        401 => {}
+        status => {
+            return Err(PluginError::status_error(
+                status,
+                "the CLI backend did not return a model list",
+            ));
+        }
+    }
+    let stored =
+        refresh::ensure_fresh(host, account, cache, program, Some(&stored.credential.key)).await?;
     let reply = signed_get(&url, &stored.credential.key)
         .fetch(host.http())
         .await?;
@@ -24,9 +43,7 @@ pub(crate) async fn list(
             let models = parse_list(reply.body())?;
             Ok(ModelList::new(models, None).with_source_url(url))
         }
-        401 => Err(PluginError::auth(
-            "the CLI backend refused the sign-in while listing models",
-        )),
+        401 => Err(refresh::dead(std::path::Path::new(&stored.home))),
         status => Err(PluginError::status_error(
             status,
             "the CLI backend did not return a model list",
