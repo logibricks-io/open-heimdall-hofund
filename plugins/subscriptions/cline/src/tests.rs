@@ -100,6 +100,40 @@ fn seed_oauth(host: &TestHost) -> AccountId {
     id
 }
 
+fn expire_in(host: &TestHost, id: &AccountId, remaining: std::time::Duration) {
+    let expires_ms = (host.context().clock().now() + remaining)
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("epoch")
+        .as_millis() as u64;
+    block_on(async {
+        let accounts = host.context().accounts();
+        let current = accounts.secret(id).await.expect("read").expect("stored");
+        let blob = SecretObject::parse(&current)
+            .expect("blob")
+            .with_number("expires_ms", expires_ms);
+        let account = accounts
+            .account(id.clone(), "user@cline.test")
+            .expect("account");
+        accounts
+            .upsert(account, blob.to_secret())
+            .await
+            .expect("upsert");
+    });
+}
+
+fn refresh_reply() -> Vec<u8> {
+    json!({
+        "success": true,
+        "data": {
+            "accessToken": "cline-access-2",
+            "refreshToken": "cline-refresh-2",
+            "expiresAt": "2031-01-01T00:00:00Z"
+        }
+    })
+    .to_string()
+    .into_bytes()
+}
+
 #[test]
 fn a2a_17_device_sign_in_polls_workos_then_registers() {
     let dir = tempfile::tempdir().expect("dir");
@@ -526,5 +560,69 @@ fn r53_chat_sends_the_task_id_derived_from_the_host_session() {
             chat.sensitive_headers().contains(&name.to_owned()),
             "{name}"
         );
+    }
+}
+
+#[test]
+fn r53_refresh_hook_uses_the_ten_minute_renew_lead() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_oauth(&host);
+    let sub = subscription(&host);
+    expire_in(&host, &id, std::time::Duration::from_secs(11 * 60));
+    block_on(sub.refresh(&id, host.context())).expect("fresh token");
+    assert!(host.http().calls().is_empty());
+
+    expire_in(&host, &id, std::time::Duration::from_secs(9 * 60));
+    host.http().enqueue(refresh_reply());
+    block_on(sub.refresh(&id, host.context())).expect("renew");
+    assert_eq!(host.http().calls().len(), 1);
+}
+
+#[test]
+fn r53_request_refresh_keeps_the_five_minute_lead() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_oauth(&host);
+    expire_in(&host, &id, std::time::Duration::from_secs(6 * 60));
+    block_on(tokens::bearer(host.context(), &endpoints(), &id)).expect("fresh bearer");
+    assert!(host.http().calls().is_empty());
+
+    expire_in(&host, &id, std::time::Duration::from_secs(4 * 60));
+    host.http().enqueue(refresh_reply());
+    block_on(tokens::bearer(host.context(), &endpoints(), &id)).expect("renewed bearer");
+    assert_eq!(host.http().calls().len(), 1);
+}
+
+#[test]
+fn r53_hook_and_request_refresh_spend_the_refresh_token_once() {
+    for hook_first in [true, false] {
+        let dir = tempfile::tempdir().expect("dir");
+        let host = host(&dir);
+        let id = seed_oauth(&host);
+        let sub = subscription(&host);
+        expire_in(&host, &id, std::time::Duration::from_secs(4 * 60));
+        host.http().enqueue(refresh_reply());
+        let hook = async { sub.refresh(&id, host.context()).await };
+        let request = async {
+            tokens::bearer(host.context(), &endpoints(), &id)
+                .await
+                .map(|_| ())
+        };
+        let results = if hook_first {
+            block_on(hofund_kit_subscription::join_all(vec![
+                Box::pin(hook),
+                Box::pin(request),
+            ]))
+        } else {
+            block_on(hofund_kit_subscription::join_all(vec![
+                Box::pin(request),
+                Box::pin(hook),
+            ]))
+        };
+        for result in results {
+            result.expect("refresh");
+        }
+        assert_eq!(host.http().calls().len(), 1, "hook_first={hook_first}");
     }
 }
