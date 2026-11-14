@@ -626,3 +626,24 @@ fn r53_hook_and_request_refresh_spend_the_refresh_token_once() {
         assert_eq!(host.http().calls().len(), 1, "hook_first={hook_first}");
     }
 }
+
+#[test]
+fn r53_transient_hook_failure_stays_retryable_without_request_grace() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_oauth(&host);
+    let sub = subscription(&host);
+    expire_in(&host, &id, std::time::Duration::from_secs(4 * 60));
+    host.http()
+        .enqueue_response(503, &[], br#"{"error":"unavailable"}"#.to_vec());
+    let error = block_on(sub.refresh(&id, host.context())).expect_err("transient failure");
+    assert_ne!(error.kind(), PluginErrorKind::Auth);
+    let stored = block_on(host.context().accounts().secret(&id))
+        .expect("read")
+        .expect("stored");
+    assert!(
+        !SecretObject::parse(&stored)
+            .expect("blob")
+            .flag(tokens::LAPSED)
+    );
+}
