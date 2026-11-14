@@ -21,7 +21,7 @@ Legend: **Done** = matches the reference at checklist granularity; **Partial** =
 | Cline / ClinePass (`cline`) | 12 | 4 | 0 | 3 | 0 |
 | ChatGPT / Codex (`codex` backend) and ChatGPT API (`chatgpt-api`) | 10 | 10 | 1 | 0 | 0 |
 | GitHub Copilot (github.com and GHE) | 15 | 2 | 0 | 5 | 0 |
-| Gemini CLI (Code Assist) | 10 | 6 | 0 | 2 | 0 |
+| Gemini CLI (Code Assist) | 13 | 3 | 0 | 2 | 0 |
 | Google Antigravity | 11 | 4 | 1 | 1 | 0 |
 | SuperGrok (`grok`) | 14 | 2 | 0 | 2 | 0 |
 | Qoder (international + Qoder CN) | 13 | 5 | 0 | 2 | 0 |
