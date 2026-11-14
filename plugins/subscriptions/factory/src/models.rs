@@ -747,17 +747,19 @@ fn client_body(body: &mut Map<String, Value>, wire: ProtocolId) {
                             let Value::Array(parts) = content else {
                                 unreachable!();
                             };
-                            let all_text = parts.iter().all(|part| {
+                            let opened = parts.first().is_some_and(|part| {
                                 part.get("type").and_then(Value::as_str) == Some("text")
-                                    && part.get("text").and_then(Value::as_str).is_some()
-                            });
-                            if all_text {
-                                let opened = parts.first().is_some_and(|part| {
-                                    part.get("text")
+                                    && part
+                                        .get("text")
                                         .and_then(Value::as_str)
                                         .is_some_and(|text| text.starts_with(DROID_LINE))
+                            });
+                            if !opened {
+                                let all_text = parts.iter().all(|part| {
+                                    part.get("type").and_then(Value::as_str) == Some("text")
+                                        && part.get("text").and_then(Value::as_str).is_some()
                                 });
-                                if !opened {
+                                if all_text {
                                     let texts = std::iter::once(DROID_LINE).chain(
                                         parts.iter().map(|part| {
                                             part.get("text")
@@ -766,9 +768,9 @@ fn client_body(body: &mut Map<String, Value>, wire: ProtocolId) {
                                         }),
                                     );
                                     *content = Value::String(texts.collect::<Vec<_>>().join("\n"));
+                                } else {
+                                    parts.insert(0, json!({"type": "text", "text": DROID_LINE}));
                                 }
-                            } else {
-                                parts.insert(0, json!({"type": "text", "text": DROID_LINE}));
                             }
                         }
                         _ => {}
@@ -1059,6 +1061,25 @@ mod tests {
                 image
             ])
         );
+    }
+
+    #[test]
+    fn r52_open_chat_system_mixed_parts_are_unchanged() {
+        let mut body = json!({
+            "messages": [{
+                "role": "system",
+                "content": [
+                    {"type": "text", "text": format!("{DROID_LINE}\nDescribe the image.")},
+                    {"type": "image_url", "image_url": {"url": "https://factory.test/image"}}
+                ]
+            }]
+        })
+        .as_object()
+        .expect("object")
+        .clone();
+        let expected = body.clone();
+        client_body(&mut body, ProtocolId::OPENAI_CHAT);
+        assert_eq!(body, expected);
     }
 
     #[test]
