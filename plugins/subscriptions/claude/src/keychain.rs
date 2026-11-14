@@ -169,7 +169,7 @@ pub(crate) async fn read_sign_in(
         service: service.clone(),
         account: account.clone(),
     };
-    let mine = read_keychain_item(host, &service, &account).await;
+    let mine = read_keychain_item(host, dir, &service, &account).await;
     if matches!(mine, Some(KeychainItem::Present)) {
         return None;
     }
@@ -194,7 +194,7 @@ pub(crate) async fn read_sign_in(
         return Some((credentials, loc()));
     }
     if let Some(KeychainItem::Active(credentials, was_hex)) =
-        read_keychain_item(host, &service, "").await
+        read_keychain_item(host, dir, &service, "").await
     {
         if was_hex {
             let _ = write_sign_in(host, dir, &credentials.text, &loc()).await;
@@ -300,6 +300,7 @@ pub(crate) fn default_write_location(dir: &Path, ctx: ReadContext) -> Credential
 
 async fn read_keychain_item(
     host: &HostContext,
+    dir: &Path,
     service: &str,
     account: &str,
 ) -> Option<KeychainItem> {
@@ -308,9 +309,7 @@ async fn read_keychain_item(
         args.push("-a");
         args.push(account);
     }
-    let output = run_security(host, &args, std::env::temp_dir().as_path())
-        .await
-        .ok()?;
+    let output = run_security(host, &args, dir).await.ok()?;
     let (text, was_hex) = decode_keychain_output(output.trim());
     if let Some(credentials) = creds::parse_credentials(&text) {
         return Some(KeychainItem::Active(credentials, was_hex));
@@ -462,7 +461,7 @@ mod tests {
 
     #[test]
     fn r5_42_dir_service_matches_nfc_sha256_prefix() {
-        let path = Path::new("/tmp/claude-config");
+        let path = Path::new("/Users/example/.claude");
         let service = dir_service(path);
         assert!(service.starts_with("Claude Code-credentials-"));
         assert_eq!(service.len(), "Claude Code-credentials-".len() + 8);

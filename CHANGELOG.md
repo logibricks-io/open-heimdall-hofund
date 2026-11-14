@@ -16,6 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   import/switch paths, and `HOFUND_NO_ACCOUNTS=1` skipping Keychain probes.
   Tests `r5_42`–`r5_47` use scripted spawns only. Refs R-5.
 
+- R-5: Keychain `security` reads use the account config directory as the spawn
+  cwd, matching write and clear, instead of the process temp dir. Refs R-5.
+
 - R-9k: the Cursor subscription plugin tracks conversation-scoped dashboard
   usage debt across tool steps, maps a named session to a stable Run
   conversation id, and surfaces earlier-step totals in `Usage.extensions` as
