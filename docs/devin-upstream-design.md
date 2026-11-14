@@ -346,7 +346,7 @@ Outbound thinking signatures: stream signature deltas on Claude uids only (`comp
 
 Token shape: `devin-session-token$…` (`README.md` lines 9-10). Authorization is **Basic**, not Bearer (`README.md` line 42; `rpcHeaders`).
 
-No scheduled refresh on the chat path (`README.md` lines 32-36). `Subscription::refresh` remains a no-op load unless a future CLI expiry appears. On 401, surface `status_error(401, …)` and mark the account needs sign-in; **do not delete the secret** on a single failed chat (the reference keeps the account via a sign-in-kept response header; `errorResponse`, `index.mjs:1796-1799`).
+No scheduled refresh on the chat path (`README.md` lines 32-36). `Subscription::refresh` does not call OAuth refresh-token grants—the reference stores `refresh: ""` and `expires: 0` (`index.mjs:2519-2523`). For CLI-sourced accounts it re-reads `credentials.toml` through `Stored::live`, same as execute and `list_models` (`index.mjs:3075-3088`). On 401, surface `status_error(401, …)` and mark the account needs sign-in; **do not delete the secret** on a single failed chat (the reference keeps the account via a sign-in-kept response header; `errorResponse`, `index.mjs:1796-1799`).
 
 ### 5.2 Identity for account labels
 

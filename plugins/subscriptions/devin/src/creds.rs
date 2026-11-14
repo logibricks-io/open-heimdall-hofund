@@ -59,6 +59,7 @@ impl Stored {
         latest.plan = stored.credential.plan;
         latest.org_id = stored.credential.org_id;
         latest.team_id = stored.credential.team_id;
+        latest.api_server = live_api_server(&latest.api_server);
         Ok(Stored {
             credential: latest,
             cli_path: Some(path),
@@ -180,6 +181,15 @@ fn hash_hex(data: &[u8]) -> String {
 
 fn default_label(key: &SecretString) -> String {
     format!("Devin {}", &stable_key(key)[..8])
+}
+
+fn live_api_server(file_server: &str) -> String {
+    std::env::var("WINDSURF_API_SERVER_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| file_server.to_owned())
+        .trim_end_matches('/')
+        .to_owned()
 }
 
 pub(crate) fn parse_credentials_toml(text: &str) -> Result<Credential, PluginError> {
