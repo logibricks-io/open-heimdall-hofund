@@ -595,6 +595,7 @@ mod tests {
         let credential = crate::creds::Credential {
             key: hofund_plugin_api::SecretString::from("key".to_owned()),
             api_server: "https://server.test".to_owned(),
+            devin_webapp: crate::creds::DEFAULT_DEVIN_WEBAPP.to_owned(),
             devin_api: "https://api.devin.test".to_owned(),
             label: "account@example.test".to_owned(),
             plan: String::new(),
