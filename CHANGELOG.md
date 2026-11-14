@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- R-54: the shared Qoder daily check-in helper sets `CheckinResult::recheck_at`
+  to the earlier of 30 minutes, the next Beijing calendar midnight (UTC+8), and
+  the minimum end time of active campaigns, matching the reference recheck
+  schedule for international, CN, and VPC accounts that share `run_qoder`.
+  Recorded fixtures in `hofund-plugin-sdk` (`r54_recheck_*`, `r54_not_offered_yet_*`).
+  Refs R-54.
+
 - R-5: the Claude Code subscription plugin reads and writes macOS Keychain
   credentials through `security(1)` spawned via `HostContext` (no
   `std::process` in the plugin): `Claude Code-credentials` and per-directory
