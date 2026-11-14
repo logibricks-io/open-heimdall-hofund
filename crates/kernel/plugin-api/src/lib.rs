@@ -87,8 +87,8 @@ pub use hofund_ir::{
 pub use host::{
     AccountLease, AccountsHandle, AuthResult, BRIDGE_CALLBACK_PATH_PREFIX, BindBlocked,
     BridgeCallbackGuard, BridgeCallbackHandle, BridgeCallbackHandler, BridgeCallbackReply,
-    ClockHandle, DirHandle, GatewayHandle, HostContext, HttpHandle, Job, JobId, JobSpec,
-    LOOPBACK_CANCEL_PATH, LongLivedChild, LoopbackBinding, LoopbackHandle, LoopbackSpec,
+    CallerScope, ClockHandle, DirHandle, GatewayHandle, HostContext, HttpHandle, Job, JobId,
+    JobSpec, LOOPBACK_CANCEL_PATH, LongLivedChild, LoopbackBinding, LoopbackHandle, LoopbackSpec,
     ObserveHandle, PipedChild, ProcessHandle, RedirectHost, SchedulerHandle, SecretsHandle,
     SpawnRequest, Spawned, SurfaceHost,
 };

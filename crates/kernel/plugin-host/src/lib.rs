@@ -42,8 +42,9 @@ use hofund_plugin_api::kernel::{
     SchedulerBackend, SecretsBackend,
 };
 use hofund_plugin_api::{
-    AuthResult, Body, BodyStream, HostContext, MemberId, PluginError, PluginId, PluginKey,
-    PluginKind, ProtocolId, QuotaObservation, SecretString, SignInCtx, SpawnRequest, SurfaceHost,
+    AuthResult, Body, BodyStream, CallerScope, HostContext, MemberId, PluginError, PluginId,
+    PluginKey, PluginKind, ProtocolId, QuotaObservation, SecretString, SignInCtx, SpawnRequest,
+    SurfaceHost,
 };
 
 pub use account_secrets::{MemoryAccountSecretsGuard, memory_account_secrets};
@@ -154,6 +155,7 @@ pub fn surface_host(
         members,
         protocols,
         AuthResult::new(accepted),
+        CallerScope::default(),
         None,
         None,
         Arc::from([]),
@@ -168,11 +170,13 @@ pub fn surface_host_with_gateway(
     accepted: bool,
     gateway: Arc<dyn GatewayBackend>,
     codex_relay_fallbacks: Arc<[String]>,
+    caller: CallerScope,
 ) -> SurfaceHost {
     SurfaceHost::from_parts(
         members,
         protocols,
         AuthResult::new(accepted),
+        caller,
         Some(gateway),
         None,
         codex_relay_fallbacks,
@@ -189,11 +193,13 @@ pub fn surface_host_with_http(
     gateway: Arc<dyn GatewayBackend>,
     http: Arc<dyn HttpBackend>,
     codex_relay_fallbacks: Arc<[String]>,
+    caller: CallerScope,
 ) -> SurfaceHost {
     SurfaceHost::from_parts(
         members,
         protocols,
         AuthResult::new(accepted),
+        caller,
         Some(gateway),
         Some(http),
         codex_relay_fallbacks,
@@ -1666,6 +1672,7 @@ mod tests {
             true,
             std::sync::Arc::clone(&gateway),
             std::sync::Arc::from([]),
+            super::CallerScope::default(),
         );
         assert!(joined.http().is_none());
         let recording = std::sync::Arc::new(super::RecordingHttp::default());
@@ -1677,6 +1684,7 @@ mod tests {
             gateway,
             std::sync::Arc::clone(&recording) as std::sync::Arc<dyn super::HttpBackend>,
             std::sync::Arc::from([]),
+            super::CallerScope::default(),
         );
         assert!(!host.auth().accepted());
         assert!(host.gateway().is_available());
@@ -1690,6 +1698,7 @@ mod tests {
             std::sync::Arc::new(NoGateway),
             std::sync::Arc::new(super::RecordingHttp::default()),
             std::sync::Arc::from([]),
+            super::CallerScope::default(),
         );
         assert_ne!(handle, other.http().expect("other"));
         let request = super::HttpRequest::builder()

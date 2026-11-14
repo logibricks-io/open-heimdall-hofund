@@ -1570,6 +1570,8 @@ async fn dispatch_surface(State(app): State<Arc<Inner>>, request: Request) -> Re
     let body_bytes = bytes.len();
     let inbound =
         axum::http::Request::from_parts(parts, hofund_plugin_api::Body::from_bytes(bytes));
+    let caller =
+        hofund_plugin_api::CallerScope::new(identity.key_name.clone(), identity.accounts.clone());
     let gateway = Arc::new(InProcess {
         app: Arc::downgrade(&app),
         identity,
@@ -1586,6 +1588,7 @@ async fn dispatch_surface(State(app): State<Arc<Inner>>, request: Request) -> Re
             gateway,
             Arc::clone(http),
             codex_relay_fallbacks,
+            caller,
         ),
         None => hofund_plugin_host::surface_host_with_gateway(
             members,
@@ -1593,6 +1596,7 @@ async fn dispatch_surface(State(app): State<Arc<Inner>>, request: Request) -> Re
             true,
             gateway,
             codex_relay_fallbacks,
+            caller,
         ),
     };
     let plugin_id = surface.id().as_str().to_owned();
