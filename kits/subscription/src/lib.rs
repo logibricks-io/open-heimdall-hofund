@@ -127,6 +127,42 @@ pub async fn wait_for_http2_request(server: &Http2Server, count: usize) {
     }
 }
 
+/// Waits until the `count`th HTTP/1.1 request is recorded.
+///
+/// Like [`wait_for_http2_request`], the wait always leaves a yield queued so a
+/// paused runtime cannot jump to a client's heartbeat or append read deadline
+/// while loopback accept and request I/O is still pending.
+///
+/// # Panics
+///
+/// Panics if `count` is zero.
+pub async fn wait_for_http1_request(server: &Http1Server, count: usize) {
+    assert!(count > 0, "HTTP/1.1 request counts start at one");
+    while server.requests().len() < count {
+        tokio::task::yield_now().await;
+    }
+}
+
+/// Drives `future` until the `count`th HTTP/1.1 request is recorded.
+///
+/// # Panics
+///
+/// Panics if `count` is zero or `future` completes first.
+pub async fn drive_until_http1_request<F, T>(
+    future: Pin<&mut F>,
+    server: &Http1Server,
+    count: usize,
+) where
+    F: Future<Output = T> + ?Sized,
+{
+    if drive_until_output(future, wait_for_http1_request(server, count))
+        .await
+        .is_some()
+    {
+        panic!("future finished early");
+    }
+}
+
 /// Drives `future` until the `count`th HTTP/2 request is recorded.
 ///
 /// # Panics
