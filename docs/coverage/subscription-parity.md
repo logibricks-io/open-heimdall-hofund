@@ -24,7 +24,7 @@ Legend: **Done** = matches the reference at checklist granularity; **Partial** =
 | Gemini CLI (Code Assist) | 13 | 3 | 0 | 2 | 0 |
 | Google Antigravity | 12 | 3 | 1 | 1 | 0 |
 | SuperGrok (`grok`) | 14 | 2 | 0 | 2 | 0 |
-| Qoder (international + Qoder CN) | 15 | 3 | 0 | 2 | 0 |
+| Qoder (international + Qoder CN) | 16 | 2 | 0 | 2 | 0 |
 | CodeBuddy / WorkBuddy (CN + international) | 18 | 1 | 0 | 0 | 0 |
 | Z Code (`zcode`) | 16 | 3 | 0 | 0 | 0 |
 
@@ -524,7 +524,7 @@ Remaining verification is live-account acceptance; all evidence here is determin
 | l | model list | `/algo/api/v2/model/list` with COSY device headers | `models.rs`: native signed list, app/chat scenes, windows, images, efforts and free flags; `upstream.rs`: selected listing display name replaces upstream `auto` in every answer and stream chunk | Done | — |
 | m | multi-account | separate subscriptions `qoder` and `qoder-cn` (`qoder.go:28-31`) | one plugin, `Site` plus VPC in creds; VPC account ids are distinct | Partial | Unified plugin id documented; separate routing labels remain |
 | n | error classification | lapsed / NeedsSignIn only on refused refresh; queue and request codes | refused refresh lapses; chat 401/403 renews once with relogin gap; quota/queue statuses | Partial | Full queue wait and remaining request-code nuances remain; no #612 claim |
-| o | daily check-in | `qoder_checkin.go` + plugin campaigns with native identity and device rotation | `checkin.rs`: device token, native identity, VPC rebasing, one device rotation | Partial | 30-minute recheck scheduling remains |
+| o | daily check-in | `qoder_checkin.go` + plugin campaigns with native identity and device rotation; 30-minute and Beijing-day recheck with campaign `ValidUntil` | `hofund-plugin-sdk` `checkin/qoder.rs` and `plugins/subscriptions/qoder/src/checkin.rs`: device token, native identity, VPC rebasing, `CheckinResult::recheck_at` at the sooner of 30 minutes, Beijing midnight, and the active campaign end | Done | Recorded mocks only |
 | p | agent sign-in / device identity | device PKCE sign-in and native runtime identity | native PKCE plus cached global/CN runtime identity and sanitized hostname | Done | — |
 | q | extras | Qoder CN VPC instance hosts (`index.mjs:29-36`); COSY_VERSION desktop | `site.rs`: strict instance parsing and fail-closed web/openapi/gateway hosts on sign-in, refresh, models, chat, usage and check-in | Done | — |
 
@@ -532,7 +532,7 @@ Remaining verification is live-account acceptance; all evidence here is determin
 
 - R-54b landed native COSY SSE, request shaping and tool/image/reasoning handling, desktop PKCE, device/job refresh and rotation, native models and usage, and fail-closed CN VPC hosts. No agent credential discovery is planned from the reference's native runtime helper.
 - The site-qualified single plugin remains: separate `qoder` / `qoder-cn` routing labels remain, while account ids distinguish public and VPC deployments.
-- Queue waiting and the remaining request-code nuances, 30-minute check-in recheck scheduling, and live-account verification remain. No #612 claim is made.
+- Queue waiting and the remaining request-code nuances and live-account verification remain. No #612 claim is made.
 
 ---
 
