@@ -14,6 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `logins.json`, without calling live whoami. Recorded fixtures only (`r52d_*`).
   Refs R-52.
 
+- R-9h: the Cursor subscription plugin documents and tests the stateless Run
+  tool-argument path against the frozen reference — one full JSON
+  `ToolArgumentsDelta` per selected MCP exec, partial-tool wire markers that do
+  not stream arguments early, and continued refusal of Cursor-owned execs without
+  native session retention (`r9h_*` loopback tests). Refs R-9.
+
 - R-13: the Devin subscription plugin re-reads CLI `credentials.toml` on
   `refresh` and `list_models` through `Stored::live` without persisting rotated
   keys, applies `WINDSURF_API_SERVER_URL` when present, and advertises
