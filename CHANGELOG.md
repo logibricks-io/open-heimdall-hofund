@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- R-48j: the GitHub Copilot subscription plugin records execute fixtures that
+  send Chat `reasoning_effort` and Responses `reasoning.effort` from
+  `params.effort`, decode Chat `reasoning_content` and Responses `reasoning`
+  items into thinking parts, and leave models without catalog effort levels
+  unchanged on the outbound wire when no effort is requested (`r48j_*`, mocks
+  only). Refs R-48.
+
 - R-54d: the Qoder subscription plugin migrates the legacy sibling `qoder.json`
   beside the config file once before accounts are listed: `HOFUND_NO_ACCOUNTS`
   skips the move, a global account with the same uid takes precedence, failed
