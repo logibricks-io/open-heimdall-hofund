@@ -12,7 +12,7 @@ Legend: **Done** = matches the reference at checklist granularity; **Partial** =
 
 | Vendor section | Done | Partial | Missing | N/A | Unverified |
 |---|---|---|---|---|---|
-| Claude Pro/Max (`claude`) | 4 | 14 | 3 | 2 | 0 |
+| Claude Pro/Max (`claude`) | 3 | 15 | 3 | 2 | 0 |
 | Cursor (`cursor`) | 8 | 11 | 0 | 2 | 0 |
 | Devin (`devin`) | 12 | 6 | 0 | 1 | 0 |
 | Zed (`zed`) | 0 | 6 | 1 | 3 | 0 |
