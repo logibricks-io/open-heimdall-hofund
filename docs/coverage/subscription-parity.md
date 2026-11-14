@@ -16,7 +16,7 @@ Legend: **Done** = matches the reference at checklist granularity; **Partial** =
 | Cursor (`cursor`) | 1 | 15 | 3 | 2 | 0 |
 | Devin (`devin`) | 11 | 6 | 1 | 1 | 0 |
 | Zed (`zed`) | 0 | 6 | 1 | 3 | 0 |
-| Kiro (`kiro`) | 6 | 11 | 0 | 2 | 0 |
+| Kiro (`kiro`) | 8 | 9 | 0 | 2 | 0 |
 | Factory / Droid (`factory`) | 1 | 15 | 0 | 3 | 0 |
 | Cline / ClinePass (`cline`) | 2 | 12 | 1 | 3 | 1 |
 | ChatGPT / Codex (`codex` backend) and ChatGPT API (`chatgpt-api`) | 8 | 11 | 2 | 0 | 0 |
@@ -201,8 +201,8 @@ Structured-output prose for Chat, Responses, and Messages shipped in R-13b (`str
 
 **Hofund path:** `plugins/subscriptions/kiro/src/`.
 
-| # | capability | reference v0.1.3005 behaviour | hofund R-51 | status | gap to close |
-|---|------------|------------------------------|-------------|--------|--------------|
+| # | capability | reference v0.1.3005 behaviour | hofund R-51c | status | gap to close |
+|---|------------|------------------------------|--------------|--------|--------------|
 | a1 | sign-in: remote portal (Google/GitHub/Builder ID/IDC) | Plugin loopback ports + AWS OIDC (`kiro/index.mjs:3-8`, `37-38`) | `portal.rs` binds the documented ports, exchanges social codes, and runs register/authorize/token for Builder ID and enterprise; pasted callbacks forward through the daemon | Done | — |
 | a2 | sign-in: reuse kiro-cli / IDE | `readCLI` / `readIDE` (`kiro/index.mjs:117-181`); core `kiro.go:19-22` | `site=current` reads the CLI DB first, then the IDE token file | Done | — |
 | a3 | sign-in: API key `ksk_` | Plugin + core treat as API key | unverified — method `apikey` in upstream headers (`upstream.rs:54-55`) | Partial | Explicit API key sign-in UX |
@@ -211,12 +211,12 @@ Structured-output prose for Chat, Responses, and Messages shipped in R-13b (`str
 | d | refresh | CLI first, else OIDC/refreshToken (`kiro.go:301-374`; plugin `refresh.test.mjs`) | `refresh.rs` delegates `debug refresh-auth-token`, re-reads the CLI DB, and supports social, IDC, and external-idp form refresh | Partial | Refresh 400 lapsed mapping (**R-24**) |
 | e | upstream wire | Event-stream `generateAssistantResponse` (`kiro/index.mjs:16-18`; `upstream.rs:44-48`) | Same endpoint and headers; `open_raw` feeds unary and streaming decoders | Partial | Mock/loopback verification only (**R-51**) |
 | f | inbound shapes | Anthropic Messages only (`kiro/index.mjs:14-18`) | Messages only; Chat/Responses are not invented | N/A | — |
-| g | streaming | AWS event stream to Messages SSE | `kiro_stream.rs` incrementally emits IR text, tool starts, argument deltas, block stops, and finish events | Partial | Mock/loopback verification only (**R-51**) |
+| g | streaming | AWS event stream to Messages SSE | `kiro_stream.rs` incrementally emits IR text, reasoning and signature deltas, tool starts, argument deltas, block stops, and finish events | Partial | Mock/loopback verification only (**R-51**) |
 | h | tool calls | Plugin tool tests (`tool-names.test.mjs`) | `kiro_body.rs` maps declarations, normalized ids/names, split calls, and matched/missing results; replies restore caller names | Partial | Mock/loopback verification only (**R-51**) |
-| i | images | `image-size.test.mjs` | Inline user/tool-result images use format + `source.bytes`; only the latest image group is resent | Partial | Over-5-MiB Base64 images are refused; deterministic shrink/note behavior is not implemented (**R-51**) |
-| j | reasoning / effort | `effort.test.mjs` | Enabled/adaptive thinking maps to the reference budget tags; structured output is added to instructions | Partial | Model-listed native effort fields and reasoning reply events (**R-51**) |
+| i | images | `image-size.test.mjs` | Inline user/tool-result images keep the latest-image rule. Over-5-MiB Base64 images follow the reference's same-format/lossy, quality, and edge sequence with a four-entry cache; failures use its exact note (`r51c_*`, deterministic fixtures) | Done | — |
+| j | reasoning / effort | `effort.test.mjs` | Enabled/adaptive thinking uses native `additionalModelRequestFields` when the listed schema allows the requested effort (`output_config`, then `reasoning`), otherwise the reference budget tags. `reasoningContentEvent` text and signatures fold into unary blocks and stream as reasoning/signature deltas; structured output stays in instructions (`r51c_*`) | Done | — |
 | k | quota / usage | `Get-Usage-Limits` (`kiro.go` comments; plugin `usage.test.mjs`) | `quota.rs` with profile ARN and Builder ID default | Partial | Full allowance/bonus window parity |
-| l | model list | Plugin lists from API | `models.rs` | Partial | Profile-scoped list refresh |
+| l | model list | Plugin lists from API | `models.rs` fetches the profile-scoped list, pages the API-key control-plane list, and keeps default order, limits, image flags, effort lists, and native schemas per account/model | Partial | Recorded model-list verification only (**R-51**) |
 | m | multi-account | uid by login provider (`kiro/index.mjs:53-65`) | Browser ids include label/provider; imported ids remain agent-scoped | Partial | Stable ids (#607) (**R-24**) |
 | n | error classification | Plugin `errors.test.mjs`; refresh 400 → lapsed | Generic auth on 401/403 (`upstream.rs:60-63`) | Partial | **R-24** |
 | o | check-in / warmup | N/A | N/A | N/A | — |
@@ -225,7 +225,7 @@ Structured-output prose for Chat, Responses, and Messages shipped in R-13b (`str
 
 ### Gaps (Kiro)
 
-- Live-account verification, oversized-image resizing, and native effort/reasoning fields — **M**, **R-51**
+- Live-account verification — **M**, **R-51**
 - Refresh 400 lapsed + stable account ids — **S**, **R-24**
 
 ---
