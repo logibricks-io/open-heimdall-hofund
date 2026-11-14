@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- R-51d: the Kiro subscription plugin accepts pasted `ksk_` API keys through
+  `SignInProof::Token`, maps `Get-Usage-Limits` into free-trial, monthly, and
+  bonus quota windows (including aside non-blocking semantics), and reads API-key
+  usage through the control-plane `GetUsageLimits` POST. Recorded HTTP and
+  loopback tests only (`r51d_*`). Refs R-51.
+
 - R-54c: the Qoder subscription plugin exchanges pasted Personal Access Tokens
   at each site's `/api/v1/jobToken/exchange`, stores the PAT for lapsed
   job-token refresh, and re-exchanges on refused refresh when a PAT is still
