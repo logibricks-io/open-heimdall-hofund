@@ -63,4 +63,11 @@ impl Endpoints {
             self.api.trim_end_matches('/')
         )
     }
+
+    pub(crate) fn available_models(&self) -> String {
+        format!(
+            "{}/aiserver.v1.AiService/AvailableModels",
+            self.api.trim_end_matches('/')
+        )
+    }
 }

@@ -388,6 +388,15 @@ pub(crate) struct ToolDef {
     pub schema: Value,
 }
 
+/// One native parameter on the requested-model message.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ModelParameter {
+    /// Parameter id (inner field 1).
+    pub id: String,
+    /// Parameter value (inner field 2).
+    pub value: String,
+}
+
 /// Inputs for [`encode_agent_run_request`].
 #[derive(Clone, Debug)]
 #[allow(dead_code)]
@@ -410,10 +419,12 @@ pub(crate) struct AgentRunParams<'a> {
     pub inline_images: bool,
     /// When true, set model-details field 7 and requested-model field 2 to 1.
     pub max_mode: bool,
+    /// Native picker parameters (requested-model repeated field 3).
+    pub parameters: &'a [ModelParameter],
 }
 
 /// Builds an `AgentRunRequest`. Max Mode bits are set when `max_mode` is true;
-/// effort parameters remain deferred with the picker.
+/// native picker parameters are repeated on requested-model field 3.
 ///
 /// Field 4 (the MCP wrapper) is always present; when `tools` is empty it is an
 /// empty message, not omitted. Field 19 is written only when `inline_images`.
@@ -444,6 +455,14 @@ pub(crate) fn encode_agent_run_request(params: &AgentRunParams<'_>) -> Vec<u8> {
     let mut requested = Pb::new().string(1, params.model_id);
     if params.max_mode {
         requested = requested.varint(2, 1);
+    }
+    for parameter in params.parameters {
+        requested = requested.message(
+            3,
+            Pb::new()
+                .string(1, &parameter.id)
+                .string(2, &parameter.value),
+        );
     }
     let mut wrapper = Pb::new();
     for tool in params.tools {
@@ -1149,6 +1168,7 @@ mod tests {
             tools: &[],
             inline_images: false,
             max_mode: false,
+            parameters: &[],
         });
         let top = fields(&encoded);
         let action = top
@@ -1208,6 +1228,7 @@ mod tests {
             tools: &[],
             inline_images: false,
             max_mode: false,
+            parameters: &[],
         };
         let off = fields(&encode_agent_run_request(&params));
         let details = off
@@ -1257,6 +1278,67 @@ mod tests {
                 .as_deref(),
             Some("composer-2")
         );
+    }
+
+    #[test]
+    fn agent_run_request_repeats_native_parameters_only_when_supplied() {
+        let blob = [0x11_u8; 32];
+        let user = [0x22_u8; 32];
+        let parameters = [
+            super::ModelParameter {
+                id: "reasoning_effort".to_owned(),
+                value: "high".to_owned(),
+            },
+            super::ModelParameter {
+                id: "context".to_owned(),
+                value: "300k".to_owned(),
+            },
+        ];
+        let mut params = AgentRunParams {
+            conversation_id: "conv-1",
+            model_id: "claude-haiku-5-5-thinking-high",
+            transcript_blob_ids: &[blob],
+            user_turn_blob_id: &user,
+            os: "linux",
+            temp_dir: "/tmp/r9f",
+            tools: &[],
+            inline_images: false,
+            max_mode: false,
+            parameters: &parameters,
+        };
+        let encoded = fields(&encode_agent_run_request(&params));
+        let requested = encoded
+            .iter()
+            .find(|field| field.number == 9)
+            .and_then(Field::as_message)
+            .expect("requested model");
+        let actual = requested
+            .iter()
+            .filter(|field| field.number == 3)
+            .map(|field| {
+                let parameter = field.as_message().expect("parameter message");
+                (
+                    parameter[0].as_string().expect("parameter id"),
+                    parameter[1].as_string().expect("parameter value"),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actual,
+            [
+                ("reasoning_effort".to_owned(), "high".to_owned()),
+                ("context".to_owned(), "300k".to_owned()),
+            ]
+        );
+
+        params.parameters = &[];
+        let encoded = fields(&encode_agent_run_request(&params));
+        let requested = encoded
+            .iter()
+            .find(|field| field.number == 9)
+            .and_then(Field::as_message)
+            .expect("requested model");
+        assert!(requested.iter().all(|field| field.number != 3));
     }
 
     #[test]

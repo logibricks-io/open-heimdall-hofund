@@ -28,6 +28,7 @@ mod http2_memory;
 mod import;
 mod max_only;
 mod models;
+mod picker;
 mod proto;
 mod quota;
 mod refresh;
