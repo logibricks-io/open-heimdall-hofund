@@ -12,6 +12,10 @@ use crate::{Endpoints, GEMINI_CLI_VERSION};
 
 /// The stored project key.
 pub(crate) const PROJECT: &str = "project";
+/// The stored current tier id from the last setup read.
+pub(crate) const TIER: &str = "tier";
+/// The stored paid tier id from the last setup read.
+pub(crate) const PAID: &str = "paid";
 /// The stored plan name, when Code Assist gave one.
 pub(crate) const PLAN: &str = "plan";
 /// Set when Code Assist needs a project named for this account.
@@ -204,8 +208,20 @@ pub(crate) async fn set(
     Ok(id)
 }
 
+/// The account's current and paid tier ids from a `loadCodeAssist` reply.
+pub(crate) fn tier_ids(load: &Value) -> (String, String) {
+    (
+        load.get("currentTier")
+            .map(Tier::read)
+            .map_or(String::new(), |tier| tier.id),
+        load.get("paidTier")
+            .map(Tier::read)
+            .map_or(String::new(), |tier| tier.id),
+    )
+}
+
 /// What Code Assist is told about the client, as Gemini CLI sends it.
-fn metadata(wanted: Option<&str>) -> Value {
+pub(crate) fn client_metadata(wanted: Option<&str>) -> Value {
     let mut meta = json!({
         "ideType": "IDE_UNSPECIFIED",
         "platform": "PLATFORM_UNSPECIFIED",
@@ -225,7 +241,7 @@ pub(crate) async fn setup(
     access: &SecretString,
     wanted: Option<&str>,
 ) -> Result<Setup, PluginError> {
-    let meta = metadata(wanted);
+    let meta = client_metadata(wanted);
     let mut body = json!({ "metadata": meta.clone() });
     if let Some(want) = wanted {
         body["cloudaicompanionProject"] = json!(want);
