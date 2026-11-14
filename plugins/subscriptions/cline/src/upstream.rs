@@ -49,9 +49,10 @@ impl ClineUpstream {
         request: Request,
         inbound: ProtocolId,
     ) -> Result<Completion, PluginError> {
+        let task_id = client::task_id(&request);
         let target = Target::new(ProtocolId::OPENAI_CHAT, self.endpoints.api.clone())
             .credential(CredentialStyle::Bearer)
-            .headers(client::headers(None))
+            .headers(client::headers(task_id.as_deref()))
             .unwrap(Arc::new(unwrap_envelope));
         wire::execute(
             self.host.http(),

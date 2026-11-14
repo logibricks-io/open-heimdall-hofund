@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use hofund_kit_subscription::{TestHost, block_on};
 use hofund_plugin_api::{
-    AccountId, PluginErrorKind, PluginId, PluginKind, ProbeQuery, ProtocolId, RawTable,
+    AccountId, PluginErrorKind, PluginId, PluginKind, ProbeQuery, ProtocolId, RawTable, Request,
     SecretString, SignInChallenge, SignInCtx, SignInProof, Subscription, SubscriptionFactory,
 };
 use hofund_plugin_sdk::json::json;
@@ -360,7 +360,7 @@ fn prettify_names_models() {
 }
 
 #[test]
-fn a2a_44_client_headers_identify_as_cline_desktop() {
+fn r53_client_headers_identify_as_the_reference_cli() {
     let headers = crate::client::headers(Some("task-1"));
     let get = |name: &str| {
         headers
@@ -368,11 +368,62 @@ fn a2a_44_client_headers_identify_as_cline_desktop() {
             .find(|(key, _)| key == name)
             .map(|(_, value)| value.as_str())
     };
-    assert_eq!(get("X-CLIENT-TYPE"), Some("cline-desktop"));
+    assert_eq!(get("X-CLIENT-TYPE"), Some("cline-cli"));
+    assert_eq!(get("X-CLIENT-VERSION"), Some("3.0.68"));
+    assert_eq!(get("X-PLATFORM"), Some("cli"));
+    assert_eq!(get("X-PLATFORM-VERSION"), Some("3.0.68"));
+    assert_eq!(get("X-CORE-VERSION"), Some("0.0.90"));
+    assert_eq!(get("User-Agent"), Some("Cline/3.0.68"));
     assert_eq!(get("X-Task-ID"), Some("task-1"));
     assert!(
         crate::client::headers(Some(""))
             .iter()
             .all(|(key, _)| key != "X-Task-ID")
     );
+}
+
+#[test]
+fn r53_chat_sends_the_task_id_derived_from_the_host_session() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_oauth(&host);
+    host.http().enqueue(
+        json!({
+            "success": true,
+            "data": {
+                "id": "chat-1",
+                "object": "chat.completion",
+                "choices": [{"message": {"role": "assistant", "content": "ok"}}]
+            }
+        })
+        .to_string()
+        .into_bytes(),
+    );
+    let sub = subscription(&host);
+    let upstream = sub.upstream(&id, host.context()).expect("upstream");
+    let mut request = Request::new("anthropic/claude-sonnet-5.5");
+    request.extensions.insert(
+        "hofund_client_request_headers",
+        json!({"x-session-id": "session-one"}),
+    );
+    block_on(upstream.execute(request, ProtocolId::OPENAI_CHAT)).expect("chat");
+    let calls = host.http().calls();
+    let chat = calls
+        .iter()
+        .find(|call| call.uri().contains("chat/completions"))
+        .expect("chat call");
+    for name in [
+        "x-task-id",
+        "x-client-type",
+        "x-client-version",
+        "x-platform",
+        "x-platform-version",
+        "x-core-version",
+        "user-agent",
+    ] {
+        assert!(
+            chat.sensitive_headers().contains(&name.to_owned()),
+            "{name}"
+        );
+    }
 }
