@@ -1198,6 +1198,33 @@ impl PartialEq for GatewayHandle {
 
 impl Eq for GatewayHandle {}
 
+/// Gateway-key account scope for an authenticated inbound surface request.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CallerScope {
+    /// Named gateway key, for refusal messages.
+    pub key_name: String,
+    /// Allowed accounts or provider-key fingerprints. Empty allows every account.
+    pub accounts: Vec<String>,
+}
+
+impl CallerScope {
+    /// Builds scope for the authenticated gateway key.
+    #[must_use]
+    pub fn new(key_name: impl Into<String>, accounts: Vec<String>) -> Self {
+        Self {
+            key_name: key_name.into(),
+            accounts,
+        }
+    }
+
+    /// Whether the key limits which accounts a relay may spend.
+    #[must_use]
+    pub fn holds_accounts(&self) -> bool {
+        !self.accounts.is_empty()
+    }
+}
+
 /// What an inbound surface may ask the kernel. Constructed in `hofund-plugin-host`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -1205,6 +1232,7 @@ pub struct SurfaceHost {
     members: Vec<MemberId>,
     protocols: Vec<ProtocolId>,
     auth: AuthResult,
+    caller: CallerScope,
     gateway: GatewayHandle,
     http: Option<HttpHandle>,
     codex_relay_fallbacks: Arc<[String]>,
@@ -1219,6 +1247,7 @@ impl SurfaceHost {
         members: Vec<MemberId>,
         protocols: Vec<ProtocolId>,
         auth: AuthResult,
+        caller: CallerScope,
         gateway: Option<Arc<dyn GatewayBackend>>,
         http: Option<Arc<dyn HttpBackend>>,
         codex_relay_fallbacks: Arc<[String]>,
@@ -1227,6 +1256,7 @@ impl SurfaceHost {
             members,
             protocols,
             auth,
+            caller,
             gateway: GatewayHandle { inner: gateway },
             http: http.map(|inner| HttpHandle { inner }),
             codex_relay_fallbacks,
@@ -1249,6 +1279,12 @@ impl SurfaceHost {
     #[must_use]
     pub const fn auth(&self) -> AuthResult {
         self.auth
+    }
+
+    /// The authenticated gateway key's account scope.
+    #[must_use]
+    pub fn caller_scope(&self) -> &CallerScope {
+        &self.caller
     }
 
     /// The gateway's codec routes, run in process.
