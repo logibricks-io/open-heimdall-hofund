@@ -1,6 +1,6 @@
 //! The ChatGPT Codex backend as an OpenAI Responses upstream.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use hofund_plugin_api::{
     AccountId, Completion, CredentialStyle, HostContext, PluginError, ProbeQuery, ProbeReport,
@@ -11,7 +11,10 @@ use hofund_plugin_sdk::codex_tool_names;
 use hofund_plugin_sdk::oauth::secret_text;
 use hofund_plugin_sdk::wire::{self, Target};
 
+use hofund_plugin_sdk::json::{self, Value};
+
 use crate::models::{self, Prompts};
+use crate::refusal;
 use crate::tokens::{self, Access, Need};
 use crate::{CODEX_VERSION, Endpoints, limits, shape};
 
@@ -81,29 +84,59 @@ impl CodexUpstream {
         let codex = self.instructions(access, &request.model).await;
         let declared: Vec<String> = request.tools.iter().map(|tool| tool.name.clone()).collect();
         let back = codex_tool_names::codex_tool_names_back(&declared);
-        let mut target = Target::new(ProtocolId::OPENAI_RESPONSES, self.endpoints.base.clone())
-            .credential(CredentialStyle::Bearer)
-            .chatgpt_codex_zstd(true)
-            .headers(headers(access.account.as_deref()))
-            .rewrite(Arc::new(move |body| shape::body(body, codex.as_deref())));
-        if !back.is_empty() {
-            let restore = Arc::new(back);
-            let unwrap = Arc::clone(&restore);
-            target = target.unwrap(Arc::new(move |mut value| {
-                codex_tool_names::restore_tool_names(&mut value, &unwrap);
-                value
-            }));
-        }
         let unary = !request.stream;
         request.stream = true;
-        let sent = wire::send(
-            self.host.http(),
-            &target,
-            Some(&access.token),
-            request,
-            inbound,
-        )
-        .await?;
+        let posted = Arc::new(Mutex::new(None::<Vec<u8>>));
+        let trimmed = Arc::new(Mutex::new(None::<Vec<u8>>));
+        let mut tries = 0_u8;
+        let sent = loop {
+            let target = self.target(
+                access,
+                codex.as_deref(),
+                Arc::clone(&posted),
+                Arc::clone(&trimmed),
+                &back,
+            );
+            match wire::send(
+                self.host.http(),
+                &target,
+                Some(&access.token),
+                request.clone(),
+                inbound,
+            )
+            .await
+            {
+                Ok(sent) => break sent,
+                Err(error) if unreadable_refusal(error.status()) => {
+                    if refusal::unreadable_retry_exhausted(tries) {
+                        return Err(error);
+                    }
+                    let body = trimmed
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone()
+                        .or_else(|| {
+                            posted
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .clone()
+                        });
+                    let Some(posted_body) = body else {
+                        return Err(error);
+                    };
+                    let Some(next) =
+                        refusal::without_unreadable(&posted_body, error.message().as_bytes())
+                    else {
+                        return Err(error);
+                    };
+                    *trimmed
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(next);
+                    tries += 1;
+                }
+                Err(error) => return Err(error),
+            }
+        };
         let credits = limits::header_credits(sent.headers());
         limits::observe(
             &self.host,
@@ -121,6 +154,55 @@ impl CodexUpstream {
             sent.complete().await
         }
     }
+
+    fn target(
+        &self,
+        access: &Access,
+        codex: Option<&str>,
+        posted: Arc<Mutex<Option<Vec<u8>>>>,
+        trimmed: Arc<Mutex<Option<Vec<u8>>>>,
+        back: &std::collections::BTreeMap<String, String>,
+    ) -> Target {
+        let posted_capture = Arc::clone(&posted);
+        let trimmed_body = Arc::clone(&trimmed);
+        let codex = codex.map(str::to_owned);
+        let mut target = Target::new(ProtocolId::OPENAI_RESPONSES, self.endpoints.base.clone())
+            .credential(CredentialStyle::Bearer)
+            .chatgpt_codex_zstd(true)
+            .headers(headers(access.account.as_deref()))
+            .rewrite(Arc::new(move |body| {
+                if let Some(raw) = trimmed_body
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone()
+                {
+                    if let Ok(Value::Object(replacement)) = json::from_slice::<Value>(&raw) {
+                        body.clear();
+                        body.extend(replacement);
+                    }
+                    return shape::session_headers(body);
+                }
+                let headers = shape::body(body, codex.as_deref());
+                let bytes = Value::Object(body.clone()).to_string().into_bytes();
+                *posted_capture
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(bytes);
+                headers
+            }));
+        if !back.is_empty() {
+            let restore = Arc::new(back.clone());
+            let unwrap = Arc::clone(&restore);
+            target = target.unwrap(Arc::new(move |mut value| {
+                codex_tool_names::restore_tool_names(&mut value, &unwrap);
+                value
+            }));
+        }
+        target
+    }
+}
+
+fn unreadable_refusal(status: Option<u16>) -> bool {
+    matches!(status, Some(400) | Some(404))
 }
 
 #[hofund_plugin_sdk::async_trait]

@@ -25,6 +25,7 @@ mod device_sign_in;
 mod discover;
 mod limits;
 mod models;
+mod refusal;
 mod resets;
 mod shape;
 mod sign_in;

@@ -19,7 +19,7 @@ Legend: **Done** = matches the reference at checklist granularity; **Partial** =
 | Kiro (`kiro`) | 8 | 9 | 0 | 2 | 0 |
 | Factory / Droid (`factory`) | 12 | 4 | 0 | 3 | 0 |
 | Cline / ClinePass (`cline`) | 12 | 4 | 0 | 3 | 0 |
-| ChatGPT / Codex (`codex` backend) and ChatGPT API (`chatgpt-api`) | 9 | 10 | 2 | 0 | 0 |
+| ChatGPT / Codex (`codex` backend) and ChatGPT API (`chatgpt-api`) | 10 | 9 | 2 | 0 | 0 |
 | GitHub Copilot (github.com and GHE) | 15 | 2 | 0 | 5 | 0 |
 | Gemini CLI (Code Assist) | 10 | 6 | 0 | 2 | 0 |
 | Google Antigravity | 11 | 4 | 1 | 1 | 0 |
@@ -329,7 +329,7 @@ Remaining verification is live-account acceptance; all evidence here is determin
 | g | streaming | SSE stream; fold for unary (`codex_request.go` patterns) | `upstream.rs:96-120` forces stream, fold when unary | Done | — |
 | h | tool calls | Codex tool name mapping in gateway/provider | `upstream.rs:82-94` `codex_tool_names` restore | Done | — |
 | i | images | via Responses content parts (gateway codex) | `tests.rs` `r47a_i_*`: Responses `input_image` in upstream POST body | Done | — |
-| j | reasoning / thinking | Codex model instructions / reasoning items in gateway; native compaction items and triggers pass through; content-bearing or unsealed reasoning is dropped before replay | `shape.rs` keeps only sealed reasoning without content parts, restores codec-carried native compaction items, and preserves triggers; recorded fixtures `r47c_reasoning_and_native_compaction_follow_reference_fixtures` and `r47c_compaction_trigger_reaches_recorded_upstream_body` | Partial | Refusal-driven removal of an individually unreadable sealed item and its retry are not ported; no new compaction policy is invented |
+| j | reasoning / thinking | Codex model instructions / reasoning items in gateway; native compaction items and triggers pass through; content-bearing or unsealed reasoning is dropped before replay; unreadable sealed items removed and the turn retried on 400/404 | `shape.rs` keeps only sealed reasoning without content parts (with ids on sealed replay), restores codec-carried native compaction items, and preserves triggers; `refusal.rs` and `upstream.rs` trim the posted Responses JSON after unreadable-item refusals up to three tries; recorded fixtures `r47c_*` and `r47j_*` | Done | — |
 | k | quota / usage | Headers + `codex.rate_limits` event; `/wham/usage`; credit resets (`codex_resets.go:180+`) | `limits.rs`, `usage.rs` headers, event, `/wham/usage`; `resets.rs` + `Subscription::quota_reset_credits` / `consume_quota_reset` on `/wham/rate-limit-reset-credits` (consume only on explicit calls); tests `r47a_k_*` | Partial | UI cards and daemon CLI for reset consume (R-47 later slice) |
 | l | model list | `codex_models.go` backend list + instructions | `models.rs` `/codex/models`, cached prompts | Done | — |
 | m | multi-account | Multiple logins; routing in provider | Multiple accounts via daemon subscription members | Done | — |
