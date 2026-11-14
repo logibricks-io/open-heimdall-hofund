@@ -46,25 +46,26 @@ pub enum FitError {
 /// PNG uses maximum compression. JPEG and WebP start at quality 85, followed by
 /// quality 80 and then quality 75 at successively smaller dimensions. PNG and
 /// other input formats use lossy WebP after the first attempt; JPEG stays JPEG.
+///
+/// # Errors
+///
+/// Returns [`FitError`] when the input exceeds a safety limit, cannot be
+/// decoded or encoded, exceeds the deadline, or remains over `limit`.
 pub fn fit_base64(encoded: &str, limit: usize) -> Result<Fitted, FitError> {
     if encoded.len() > MAX_INPUT {
         return Err(FitError::InputTooLarge);
     }
-    let raw = match STANDARD.decode(encoded) {
-        Ok(raw) => raw,
-        Err(_) => return Err(FitError::Unreadable),
+    let Ok(raw) = STANDARD.decode(encoded) else {
+        return Err(FitError::Unreadable);
     };
-    let reader = match ImageReader::new(Cursor::new(raw.as_slice())).with_guessed_format() {
-        Ok(reader) => reader,
-        Err(_) => return Err(FitError::Unreadable),
+    let Ok(reader) = ImageReader::new(Cursor::new(raw.as_slice())).with_guessed_format() else {
+        return Err(FitError::Unreadable);
     };
-    let format = match reader.format() {
-        Some(format) => format,
-        None => return Err(FitError::Unreadable),
+    let Some(format) = reader.format() else {
+        return Err(FitError::Unreadable);
     };
-    let (width, height) = match reader.into_dimensions() {
-        Ok(dimensions) => dimensions,
-        Err(_) => return Err(FitError::Unreadable),
+    let Ok((width, height)) = reader.into_dimensions() else {
+        return Err(FitError::Unreadable);
     };
     if width == 0 || height == 0 {
         return Err(FitError::Unreadable);
@@ -92,21 +93,25 @@ pub fn fit_base64(encoded: &str, limit: usize) -> Result<Fitted, FitError> {
         }
     };
     let mut tries = vec![(edge, own), (edge, lossy(80))];
-    let mut next = f64::from(edge) * 0.7;
-    while next >= f64::from(MIN_EDGE) {
-        tries.push((next.round() as u32, lossy(75)));
-        next *= 0.7;
+    let mut numerator = u64::from(edge) * 7;
+    let mut denominator = 10_u64;
+    while numerator >= u64::from(MIN_EDGE) * denominator {
+        let Ok(rounded) = u32::try_from((numerator + denominator / 2) / denominator) else {
+            return Err(FitError::ResizeFailed);
+        };
+        tries.push((rounded, lossy(75)));
+        numerator *= 7;
+        denominator *= 10;
     }
     for (edge, output) in tries {
         if started.elapsed() > DEADLINE {
             return Err(FitError::Deadline);
         }
-        let decoded = match image::load_from_memory(&raw) {
-            Ok(decoded) => decoded,
-            Err(_) => return Err(FitError::ResizeFailed),
+        let Ok(decoded) = image::load_from_memory(&raw) else {
+            return Err(FitError::ResizeFailed);
         };
         let decoded = if edge < long {
-            decoded.resize(edge, edge, image::imageops::FilterType::Triangle)
+            decoded.resize(edge, edge, image::imageops::FilterType::Lanczos3)
         } else {
             decoded
         };
@@ -152,7 +157,7 @@ fn encode(image: &DynamicImage, output: Output) -> Option<Vec<u8>> {
                     image.height(),
                     image.color().into(),
                 )
-                .ok()?
+                .ok()?;
         }
         Output::Jpeg(quality) => JpegEncoder::new_with_quality(&mut bytes, quality)
             .encode_image(image)
