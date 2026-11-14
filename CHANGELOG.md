@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- R-49: the Gemini CLI subscription plugin remembers per-account, per-project
+  tier refusals from `fetchAvailableModels` HTTP 400 responses for 24 hours,
+  asks entitlements in reference order, and always ends with a no-tier list
+  before quota and model reads. Offline tests use injected clocks (`r49_*`).
+  Refs R-49.
+
 - R-47a3: native `/backend-api/codex/responses/compact` refuses ChatGPT sign-in
   compactions on gateway keys with account holds unless the signed-in account is
   allowed, and allows compaction when Codex's own `auth.json` uses
