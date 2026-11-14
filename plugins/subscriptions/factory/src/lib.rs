@@ -26,7 +26,7 @@ mod tokens;
 mod upstream;
 
 /// WorkOS client id Factory's apps use in production.
-pub(crate) const WORKOS_CLIENT_ID: &str = "client_01K3A541FN8TA3EPPHTD2325AR";
+pub(crate) const WORKOS_CLIENT_ID: &str = "client_01HNM792M5G5G1A2THWPXKFMXB";
 
 static SPEC: SubscriptionSpec = SubscriptionSpec::from_static(
     PluginId::from_static("factory"),
@@ -289,7 +289,7 @@ impl Subscription for Factory {
         host: &HostContext,
     ) -> Result<ModelList, PluginError> {
         let _ = tokens::bearer(host, &self.endpoints, account).await?;
-        models::catalog()
+        models::catalog_at(host.clock().now())
     }
 
     fn upstream(

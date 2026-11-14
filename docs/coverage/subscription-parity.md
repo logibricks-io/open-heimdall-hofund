@@ -17,14 +17,14 @@ Legend: **Done** = matches the reference at checklist granularity; **Partial** =
 | Devin (`devin`) | 11 | 6 | 1 | 1 | 0 |
 | Zed (`zed`) | 0 | 6 | 1 | 3 | 0 |
 | Kiro (`kiro`) | 6 | 11 | 0 | 2 | 0 |
-| Factory / Droid (`factory`) | 1 | 15 | 0 | 3 | 0 |
+| Factory / Droid (`factory`) | 12 | 4 | 0 | 3 | 0 |
 | Cline / ClinePass (`cline`) | 12 | 4 | 0 | 3 | 0 |
 | ChatGPT / Codex (`codex` backend) and ChatGPT API (`chatgpt-api`) | 8 | 11 | 2 | 0 | 0 |
 | GitHub Copilot (github.com and GHE) | 15 | 2 | 0 | 5 | 0 |
 | Gemini CLI (Code Assist) | 8 | 6 | 2 | 2 | 0 |
 | Google Antigravity | 10 | 4 | 2 | 1 | 0 |
 | SuperGrok (`grok`) | 10 | 6 | 0 | 2 | 0 |
-| Qoder (international + Qoder CN) | 1 | 11 | 7 | 1 | 0 |
+| Qoder (international + Qoder CN) | 13 | 5 | 0 | 2 | 0 |
 | CodeBuddy / WorkBuddy (CN + international) | 18 | 1 | 0 | 0 | 0 |
 | Z Code (`zcode`) | 15 | 4 | 0 | 0 | 0 |
 
@@ -236,34 +236,39 @@ Structured-output prose for Chat, Responses, and Messages shipped in R-13b (`str
 
 **Hofund path:** `plugins/subscriptions/factory/src/`.
 
-| # | capability | reference v0.1.3005 behaviour | hofund 08035c9 | status | gap to close |
-|---|------------|------------------------------|----------------|--------|--------------|
-| a1 | sign-in: WorkOS device | Plugin WorkOS device + `CLIENT_ID` (`factory/index.mjs:12-16`) | `SignInFlowKind::Device` + `WORKOS_CLIENT_ID` (`lib.rs:28-35`) | Partial | Port the droid production WorkOS client from the plugin (`factory/index.mjs:15-16`); hofund `lib.rs:29` carries the Cline WorkOS client (`cline/index.mjs:16`) instead |
-| a2 | sign-in: API key `fk-` | `factoryCreds.Key` (`factory.go:68-71`); plugin whoami | `import_api_key` (`sign_in.rs:138+`) | Done | — |
+| # | capability | reference v0.1.3005 behaviour | hofund R-52 | status | gap to close |
+|---|------------|------------------------------|-------------|--------|--------------|
+| a1 | sign-in: WorkOS device | Plugin WorkOS device + production `CLIENT_ID` (`factory/index.mjs:12-16`) | `SignInFlowKind::Device`; the reference production client is used on device start, polling, and refresh (`lib.rs`, `sign_in.rs`, `tokens.rs`; `a2b_12`, `a2b_13`) | Done | Recorded HTTP only |
+| a2 | sign-in: API key `fk-` | `factoryCreds.Key` (`factory.go:68-71`); plugin whoami | `import_api_key` keeps the key, region, and prem host, without an OAuth org header or refresh (`sign_in.rs`; `a2b_18`) | Done | — |
 | a3 | browser OAuth loopback | N/A (device) | N/A | N/A | — |
-| b | import | Mover reads built-in accounts | API key + device completes to store | Partial | — |
-| c | token storage | JSON creds with org/region/prem (`factory.go:49-72`) | Secret blob via `tokens.rs` | Partial | `premBaseHost` routing |
-| d | refresh | WorkOS refresh; API key no refresh (`factory/index.mjs:24-29`) | `tokens::refresh_account` | Partial | Lead times / grace (**R-52**) |
-| e | upstream wire | Per-model `/api/llm/{a,o,g}/v1` (`factory/index.mjs:33-39`) | `upstream.rs` via `wire_target` (`factory/upstream.rs:41-57`) | Partial | `prem` host override (`factory.go:65-67`) |
-| f | inbound shapes | Anthropic, Responses, Chat, Gemini (`factory/index.mjs:33-39`) | Same four wires (`models.rs:360-385`) | Partial | Fast mode / priority mapping (`fastBody`, `factory/index.mjs:128-158`) |
-| g | streaming | Via AI SDK wire helpers | `wire::execute` (streaming depends on wire) | Partial | Verify Gemini stream path |
-| h | tool calls | `anthropic-tools.mjs` | Through wire adapters | Partial | Anthropic tool unwrap tests |
-| i | images | Model table `images` flag (`factory/index.mjs:59-116`) | Catalog flags | Partial | — |
-| j | reasoning | Effort variants (`effort.test.mjs`) | Model efforts in catalog | Partial | Gemini thinkingConfig |
-| k | quota / usage | GET `/api/billing/limits` (`factory_usage.go`; plugin `usage.test.mjs`) | `quota.rs` | Partial | Droid Core vs extra balance display |
-| l | model list | Static MODELS + promotions (`factory/index.mjs:59-190`) | `models.rs` catalog | Partial | Promotion rateWas (**R-52**) |
-| m | multi-account | Org active id header (`factory.go:57-60`) | `x-factory-org-id` (`upstream.rs:45-47`) | Partial | EU region base (`factory.go:75-79`) |
-| n | error classification | `lapsed.test.mjs` | 401 → refresh retry (`upstream.rs:71-75`) | Partial | Content policy / rate rests |
+| b | import | Mover reads built-in accounts | API key + device completes to store | Partial | Built-in account migration remains absent |
+| c | token storage | JSON creds with org/region/prem (`factory.go:49-72`) | Secret blob stores org, region, and whoami's `premBaseHostV2`; refresh reconciliation preserves and updates it (`sign_in.rs`, `tokens.rs`) | Done | — |
+| d | refresh | WorkOS refresh; API key no refresh; two-minute request lead, three-minute host lead, request-time unexpired-token grace, and strict explicit transient failures (`refresh.test.mjs`) | Two-minute request lead, lease serialization, request-time-only unexpired-token grace, explicit transient-failure propagation, non-429 4xx lapse, and whoami reconciliation (`tokens.rs`; `a2b_13`, `a2b_17`, `r52_transient_*`) | Partial | The host API has no separate three-minute `refreshLead` setting |
+| e | upstream wire | Per-model `/api/llm/{a,o,g}/v1`; prem host override (`factory/index.mjs:33-39`, `factory.go:65-67`) | `wire_target` plus canonical HTTPS prem-host routing; invalid hosts fail before HTTP (`upstream.rs`; `r52_prem_*`) | Done | Recorded HTTP only |
+| f | inbound shapes | Anthropic, Responses, Chat, Gemini; `fastBody` and multipart `droidChat` (`factory/index.mjs:128-158`, `:583-606`) | Four wires, six reference Fast Mode models, base-model speed/priority rewriting, fast beta, joined all-text Chat system content, and a separate Droid opening for mixed content (`models.rs`, `upstream.rs`; `r52_fast_*`, `r52_chat_system_*`) | Done | Recorded HTTP only |
+| g | streaming | Via AI SDK wire helpers; Gemini `/generate` | SDK streaming plus Gemini `/generate`, with model in the body (`wire.rs`, `upstream.rs`; `r52_gemini_stream_*`) | Done | Recorded HTTP only |
+| h | tool calls | `anthropic-tools.mjs` wraps root-composed schemas and unwraps unary/streamed calls | Through wire adapters | Partial | Specialized Anthropic schema wrapping and streamed tool unwrap remain |
+| i | images | Model table `images` flag (`factory/index.mjs:59-116`) | Every catalog entry carries image and modality flags (`models.rs`) | Done | Recorded fixtures only |
+| j | reasoning | Effort variants and Gemini `thinkingConfig` (`effort.test.mjs`, `gemini.test.mjs`) | Reference effort lists and preserved Gemini `thinkingConfig` (`models.rs`; `r52_gemini_*`) | Done | Recorded fixtures only |
+| k | quota / usage | GET `/api/billing/limits`; Standard/Core scopes, extra balance, and optional `standard_only` (`usage.test.mjs`) | Standard excludes Core, Core has its model list, and extra usage is non-blocking display text (`quota.rs`, plugin API/router propagation; `r52_core_*`, `a2b_38`) | Partial | The `standard_only` switch and its alternate routing mode remain |
+| l | model list | Static MODELS + promotions and `rateWas` (`rate.test.mjs`) | Full ordered table, fixed-window promotion rates, and pre-promotion multipliers exposed through model state and control responses (`models.rs`, `models_state.rs`, `control.rs`; `r52_promotion_*`) | Done | Recorded fixtures only |
+| m | multi-account | Org active id header and EU region base (`factory.go:57-79`) | Org header plus `api.eu.factory.ai` for EU accounts (`upstream.rs`; `a2b_40`, `a2b_42`) | Done | Recorded HTTP only |
+| n | error classification | Lapsed refresh, content policy, and rate rests (`lapsed.test.mjs`, `content-policy.test.mjs`) | OAuth-only 401 renewal; non-429 4xx refresh lapse; policy 403 becomes non-cooling 400 without the upstream-error header; 429 keeps retry delay (`tokens.rs`, `upstream.rs`; `r52_content_policy_*`, `r52_rate_limit_*`) | Done | Recorded HTTP only |
 | o | warmup | N/A | N/A | N/A | — |
 | p | agent sign-in | N/A | N/A | N/A | — |
-| q | extras | `X-Client-Version` pin (`factory/index.mjs:17-23`) | `client::chat_headers` | Partial | Version bump parity (**R-52**) |
+| q | extras | `X-Client-Version` 0.242.0 (`factory/index.mjs:17-23`) | `client.rs` pins 0.242.0 and `cli` / `factory-cli` identities on API and model calls (`r52_prem_*`) | Done | Recorded HTTP only |
 
-### Gaps (Factory)
+### R-52 completed
 
-- Fast mode / service_tier / anthropic speed mapping — **M**, **R-52**
-- Prem/custom host per org — **M**, **R-52**
-- Promotions on model rates — **S**, **R-52**
-- Use the droid production WorkOS client (hofund uses the Cline one) — **S**, **R-52**
+- Fast Mode uses the six reference ids, rewrites base-model Anthropic `speed: fast` and Responses `service_tier: priority`, and adds the fast beta on Anthropic.
+- Whoami's `premBaseHostV2` is stored on sign-in and refresh; model calls normalize and use it, while invalid or non-HTTPS hosts fail closed. Quota remains on the regional API.
+- The model table includes the reference's current entries and Fast Mode entries last; active promotions set both `rate` and `rateWas` with start-inclusive/end-exclusive windows.
+- Device sign-in and refresh use the reference's production WorkOS client. Gemini streams use `/generate`; content-policy and rate-limit handling have recorded-request coverage.
+- All added tests use deterministic fixtures or recorded HTTP. No live-account verification was performed.
+
+### Remaining gaps (Factory)
+
+- Built-in account migration, the host-level three-minute refresh setting, specialized Anthropic tool wrapping/streamed unwrap, and `standard_only` remain Partial as listed above.
 
 ---
 
@@ -500,33 +505,33 @@ Remaining verification is live-account acceptance; all evidence here is determin
 
 | # | capability | reference v0.1.3005 | hofund 08035c9 | status | gap to close |
 |---|------------|----------------------|----------------|--------|--------------|
-| a1 | sign-in: device / PKCE | plugin `index.mjs:6-10` desktop PKCE device flow | `lib.rs:145-157` import-only; unsupported native sign-in | Missing | Device PKCE sign-in (R-54) |
-| a2 | browser OAuth | qoder.com page in plugin | none | Missing | R-54 |
-| a3 | API key / paste | import credential JSON | `import.rs:7-17` user paste import | Partial | — |
+| a1 | sign-in: device / PKCE | plugin `index.mjs:6-10` desktop PKCE device flow | `sign_in.rs`: S256 challenge, nonce and machine id, device poll, job exchange, user info; CN device-token fallback | Done | — |
+| a2 | browser OAuth | the sign-in page is the device flow in a1, not a second OAuth grant | same device page; no invented second grant | N/A | — |
+| a3 | API key / paste | import credential JSON | `import.rs:7-17` user paste import | Partial | PAT exchange remains |
 | a4 | agent credential discovery | no agent credential export; native runtime helper only | none; no invented credential path | N/A | — |
-| b | import sources | legacy `qoder.json` migrate (`qoder.go:47-74`) | JSON import only | Partial | Legacy file migrate (R-54) |
-| c | token storage | plugin-owned; job + refresh tokens | `creds.rs` SecretObject | Done | — |
-| d | refresh | job token refresh; single-use refresh token (`index.mjs:9-10`) | `refresh.rs:16-46` lease + forced renew on 401 | Partial | `RELOGIN_GAP` / renew serialization (R-54) |
-| e | upstream wire | SSE `agent_chat_generation` + COSY envelope (`index.mjs:45-54`) | OpenAI Chat `.../chat/completions` plus cached native identity, hostname, and client headers (`identity.rs`, `upstream.rs`) | Missing | COSY SSE wire (R-54) |
-| f | inbound shapes | OpenAI chat in IR → Qoder codec in plugin | Chat completions passthrough | Missing | R-54 |
-| g | streaming | COSY SSE `agent_chat_generation` (`packages/qoder/index.mjs:13-18`, `CHAT_PATH` line 45) | OpenAI Chat to `{base}/chat/completions` (`upstream.rs:43-54`) | Missing | COSY SSE stream (**R-54**) |
-| h | tool calls | XML-in-text lifted in plugin | unverified on hofund path | Missing | R-54 |
-| i | images | plugin tests | unverified | Partial | R-54 |
-| j | reasoning | model config in plugin | unverified | Partial | R-54 |
-| k | quota / usage | openapi account-context; plugin usage | `quota.rs` via openapi URL with reference client headers | Partial | No silent fallback vs plugin |
-| l | model list | `/algo/api/v2/model/list` with device headers in plugin | `/api/v1/models` openapi with reference device headers (`identity.rs`, `models.rs`) | Partial | COSY envelope and native model-list endpoint (R-54) |
-| m | multi-account | separate subscriptions `qoder` and `qoder-cn` (`qoder.go:28-31`) | one plugin, `Site` in creds (`creds.rs:10-38`) | Partial | Split config ids or document unified id (R-54) |
-| n | error classification | lapsed / NeedsSignIn in plugin | 401 → refresh (`upstream.rs:68-71`) | Partial | NeedsSignIn on 400 refresh (R-25 #612) |
-| o | daily check-in | `qoder_checkin.go` + plugin campaigns with native identity | `checkin.rs` + `with_daily_checkin` + cached native identity/client headers | Partial | 30-minute recheck for `qoder`, Qoder CN and `zcode` (`plugin_checkin.go:274` `pluginRechecks`; interval `wbCheckinEvery` `workbuddy_checkin.go:55`, used in `checkin.go:110-117`) (R-54) |
-| p | agent sign-in / device identity | device PKCE sign-in and native runtime identity | import-only sign-in; native runtime identity and separate global/CN homes in `identity.rs` | Partial | Device PKCE sign-in (R-54) |
-| q | extras | Qoder CN VPC instance hosts (`index.mjs:29-36`); COSY_VERSION desktop | CN/global endpoints only (`lib.rs:37-71`) | Missing | VPC enterprise sign-in (R-54) |
+| b | import sources | legacy `qoder.json` migrate (`qoder.go:47-74`) | JSON import only | Partial | Legacy file migrate remains |
+| c | token storage | plugin-owned; job + refresh tokens | `creds.rs` SecretObject, with separate device pair, CN device-chat marker, and VPC | Done | — |
+| d | refresh | single-use job/device refresh tokens, renew serialization, and relogin gap | `refresh.rs`: account lease, immediate pair commit, device rotation; `upstream.rs`: forced renew and five-minute relogin gap | Done | — |
+| e | upstream wire | SSE `agent_chat_generation` + COSY envelope (`index.mjs:45-54`) | `upstream.rs`, `cosy.rs`, `shape.rs`: exact path/query, shuffled body codec, RSA/AES/MD5 envelope, native identity and model headers | Done | — |
+| f | inbound shapes | OpenAI chat in IR → Qoder codec in plugin | SDK codecs into `shape.rs`: system, messages, tools, images, reasoning, cache marks, context and efforts | Done | — |
+| g | streaming | COSY SSE `agent_chat_generation` | `stream.rs`: incremental envelope/chunk decoding, reasoning, native arguments, trailing usage and terminal frames; `r54b_selected_display_name_replaces_upstream_auto_in_unary_and_streaming_replies` proves selected-name identity in unary and streaming replies | Done | — |
+| h | tool calls | JSON and XML-in-text lifted in plugin | `stream.rs`: wrapped JSON/Qwen XML plus bare and namespaced Anthropic XML, with byte-for-byte passthrough unless a declared valid call is lifted; `shape.rs`: following explicit result ids reserved before unknown-id pairing; native indexes and nameless retry; deterministic `r54b_unknown_result_id_does_not_take_an_explicitly_named_call` and `r54b_xml_that_is_not_a_declared_call_passes_through_byte_for_byte` | Done | — |
+| i | images | image blocks in requests, including tool results | `shape.rs` text/image blocks and tool-result image carry-forward; fixture coverage | Done | — |
+| j | reasoning | model config, efforts, streaming and prior assistant reasoning | `models.rs`, `shape.rs`, `stream.rs`; default/nearest efforts and `reasoning_content` round trip | Done | — |
+| k | quota / usage | account-page usage on the device token, with rotation and free-model exclusions | `quota.rs`: `/sash/api/v2/me/usage`, pool windows, device retry and free exclusions | Done | — |
+| l | model list | `/algo/api/v2/model/list` with COSY device headers | `models.rs`: native signed list, app/chat scenes, windows, images, efforts and free flags; `upstream.rs`: selected listing display name replaces upstream `auto` in every answer and stream chunk | Done | — |
+| m | multi-account | separate subscriptions `qoder` and `qoder-cn` (`qoder.go:28-31`) | one plugin, `Site` plus VPC in creds; VPC account ids are distinct | Partial | Unified plugin id documented; separate routing labels remain |
+| n | error classification | lapsed / NeedsSignIn only on refused refresh; queue and request codes | refused refresh lapses; chat 401/403 renews once with relogin gap; quota/queue statuses | Partial | Full queue wait and remaining request-code nuances remain; no #612 claim |
+| o | daily check-in | `qoder_checkin.go` + plugin campaigns with native identity and device rotation | `checkin.rs`: device token, native identity, VPC rebasing, one device rotation | Partial | 30-minute recheck scheduling remains |
+| p | agent sign-in / device identity | device PKCE sign-in and native runtime identity | native PKCE plus cached global/CN runtime identity and sanitized hostname | Done | — |
+| q | extras | Qoder CN VPC instance hosts (`index.mjs:29-36`); COSY_VERSION desktop | `site.rs`: strict instance parsing and fail-closed web/openapi/gateway hosts on sign-in, refresh, models, chat, usage and check-in | Done | — |
 
 **Gaps**
 
-- Replace Chat Completions stub with COSY SSE upstream — **L**, **R-54**.
-- Native device PKCE sign-in — **L**, **R-54**. No agent credential discovery is planned from the reference's native runtime helper.
-- Qoder CN VPC instance URLs — **M**, **R-54**.
-- Refresh renew serialization (**R-54**) + NeedsSignIn mapping (**R-25** `#612`) — **S**.
+- R-54b landed native COSY SSE, request shaping and tool/image/reasoning handling, desktop PKCE, device/job refresh and rotation, native models and usage, and fail-closed CN VPC hosts. No agent credential discovery is planned from the reference's native runtime helper.
+- PAT exchange and legacy `qoder.json` migration remain.
+- The site-qualified single plugin remains: separate `qoder` / `qoder-cn` routing labels remain, while account ids distinguish public and VPC deployments.
+- Queue waiting and the remaining request-code nuances, 30-minute check-in recheck scheduling, and live-account verification remain. No #612 claim is made.
 
 ---
 

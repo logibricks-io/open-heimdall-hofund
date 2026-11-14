@@ -371,11 +371,16 @@ pub(super) struct ModelRow {
     output_price: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     cache_read_price: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rate: Option<u64>,
+    #[serde(default)]
+    rate_was: u64,
 }
 
 impl From<&ModelSpec> for ModelRow {
     fn from(model: &ModelSpec) -> Self {
         let (input_price, output_price, cache_read_price) = model.prices();
+        let (rate, rate_was) = model.rate_parts();
         Self {
             id: model.id().to_owned(),
             display_name: model.display_name().map(str::to_owned),
@@ -395,6 +400,8 @@ impl From<&ModelSpec> for ModelRow {
             input_price,
             output_price,
             cache_read_price,
+            rate,
+            rate_was,
         }
     }
 }
@@ -422,6 +429,10 @@ impl ModelRow {
         };
         let model = match self.free {
             Some(free) => model.with_free(free),
+            None => model,
+        };
+        let model = match self.rate {
+            Some(rate) => model.with_rate(rate, self.rate_was),
             None => model,
         };
         Some(match &self.web_search {

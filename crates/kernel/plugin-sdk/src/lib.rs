@@ -23,6 +23,7 @@
 )]
 
 pub use async_trait::async_trait;
+pub use bytes;
 pub use chrono;
 pub use hofund_codec::plain_code_assist_tools;
 pub use hofund_quirks::apply as apply_quirks;
@@ -51,6 +52,7 @@ pub mod checkin;
 pub mod classify;
 pub mod codex_tool_names;
 pub mod codex_zstd;
+pub mod cosy;
 pub mod daily_checkin;
 pub mod daily_warmup;
 pub mod digest;

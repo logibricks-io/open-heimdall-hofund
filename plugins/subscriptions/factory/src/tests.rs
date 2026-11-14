@@ -104,7 +104,7 @@ fn a2b_12_device_sign_in_polls_workos_then_registers() {
             .to_vec(),
     );
     host.http().enqueue(
-        json!({"email": "user@factory.test", "userId": "uid-1", "orgId": "org-1", "region": "eu"})
+        json!({"email": "user@factory.test", "userId": "uid-1", "orgId": "org-1", "region": "eu", "premBaseHostV2": "prem.factory.test/"})
             .to_string()
             .into_bytes(),
     );
@@ -118,11 +118,18 @@ fn a2b_12_device_sign_in_polls_workos_then_registers() {
     assert!(parsed.secret("refresh_token").is_some());
     assert_eq!(parsed.text("region"), Some("eu"));
     assert_eq!(parsed.text("active_organization_id"), Some("org-1"));
+    assert_eq!(parsed.text("prem_base_host"), Some("prem.factory.test/"));
     let calls = host.http().calls();
     assert!(
         calls
             .iter()
             .any(|call| call.uri().contains("/api/cli/whoami"))
+    );
+    assert!(
+        calls
+            .iter()
+            .take(2)
+            .all(|call| { String::from_utf8_lossy(call.body()).contains(crate::WORKOS_CLIENT_ID) })
     );
 }
 
@@ -134,6 +141,11 @@ fn a2b_13_refresh_rotates_tokens_via_workos() {
     host.http().enqueue(
         br#"{"access_token":"factory-access-2","refresh_token":"factory-refresh-2","expires_in":3600,"token_type":"Bearer"}"#
             .to_vec(),
+    );
+    host.http().enqueue(
+        json!({"orgId": "org-next", "region": "eu", "premBaseHostV2": "prem-next.factory.test"})
+            .to_string()
+            .into_bytes(),
     );
     block_on(tokens::refresh_for_test(
         host.context().clone(),
@@ -154,18 +166,71 @@ fn a2b_13_refresh_rotates_tokens_via_workos() {
         parsed.secret("refresh_token").as_ref().map(secret_text),
         Some("factory-refresh-2")
     );
-    assert!(
-        host.http()
-            .calls()
-            .last()
-            .is_some_and(|call| { call.uri().contains("workos.test/authenticate") })
+    assert_eq!(parsed.text("active_organization_id"), Some("org-next"));
+    assert_eq!(parsed.text("region"), Some("eu"));
+    assert_eq!(
+        parsed.text("prem_base_host"),
+        Some("prem-next.factory.test")
     );
+    let calls = host.http().calls();
+    assert!(calls.iter().any(|call| {
+        call.uri().contains("workos.test/authenticate")
+            && String::from_utf8_lossy(call.body()).contains(crate::WORKOS_CLIENT_ID)
+    }));
+    assert!(
+        calls
+            .last()
+            .is_some_and(|call| call.uri().contains("factory.test/api/cli/whoami"))
+    );
+}
+
+fn check_transient_refresh(status: Option<u16>) {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = TestHost::open_for_at(
+        PluginKind::Subscription,
+        plugin(),
+        dir.path(),
+        std::time::UNIX_EPOCH + std::time::Duration::from_millis(4_000_000_000_000 - 60_000),
+    );
+    let id = seed_oauth(&host);
+    match status {
+        Some(status) => {
+            host.http()
+                .enqueue_response(status, &[], b"temporarily unavailable".to_vec())
+        }
+        None => host.http().enqueue_connect("offline"),
+    }
+    let bearer = block_on(tokens::bearer(host.context(), &endpoints(), &id))
+        .expect("request-time refresh keeps an unexpired bearer");
+    assert_eq!(secret_text(&bearer.token), "factory-access-1");
+
+    match status {
+        Some(status) => {
+            host.http()
+                .enqueue_response(status, &[], b"temporarily unavailable".to_vec())
+        }
+        None => host.http().enqueue_connect("offline"),
+    }
+    let error = block_on(tokens::refresh_account(host.context(), &endpoints(), &id))
+        .expect_err("explicit refresh reports transient failure");
+    if let Some(status) = status {
+        assert_eq!(error.status(), Some(status));
+    } else {
+        assert_eq!(error.kind(), PluginErrorKind::Connect);
+    }
+}
+
+#[test]
+fn r52_transient_refresh_grace_is_request_time_only() {
+    for status in [Some(429), Some(503), None] {
+        check_transient_refresh(status);
+    }
 }
 
 #[test]
 fn a2b_14_model_catalog_lists_factory_models() {
-    let list = models::catalog().expect("catalog");
-    assert_eq!(list.models().len(), 39);
+    let list = models::catalog_at(std::time::SystemTime::now()).expect("catalog");
+    assert_eq!(list.models().len(), 47);
     assert!(
         list.models()
             .iter()
@@ -255,7 +320,7 @@ fn a2b_18_api_key_sign_in_stores_api_auth() {
     let host = host(&dir);
     let sub = subscription(&host);
     host.http().enqueue(
-        json!({"email": "api@factory.test", "userId": "u-9"})
+        json!({"email": "api@factory.test", "userId": "u-9", "orgId": "org-not-sent", "premBaseHostV2": "prem-key.factory.test"})
             .to_string()
             .into_bytes(),
     );
@@ -270,6 +335,8 @@ fn a2b_18_api_key_sign_in_stores_api_auth() {
         .expect("stored");
     let parsed = SecretObject::parse(&blob).expect("blob");
     assert_eq!(parsed.text("auth_type"), Some("api"));
+    assert_eq!(parsed.text("prem_base_host"), Some("prem-key.factory.test"));
+    assert_eq!(parsed.text("active_organization_id"), None);
     assert_eq!(
         parsed.secret("api_key").as_ref().map(secret_text),
         Some("fk-test-key-12345678")
@@ -385,4 +452,209 @@ fn a2b_42_eu_account_upstream_uses_eu_api_host() {
     assert!(host.http().calls().last().is_some_and(|call| {
         call.uri().contains("factory-eu.test") && call.uri().contains("/api/llm/o/v1")
     }));
+}
+
+fn set_prem(host: &TestHost, id: &AccountId, value: &str) {
+    block_on(async {
+        let accounts = host.context().accounts();
+        let stored = accounts.secret(id).await.expect("read").expect("secret");
+        let blob = SecretObject::parse(&stored)
+            .expect("blob")
+            .with_text("prem_base_host", value);
+        let account = accounts
+            .account(id.clone(), "user@factory.test")
+            .expect("account");
+        accounts
+            .upsert(account, blob.to_secret())
+            .await
+            .expect("update");
+    });
+}
+
+#[test]
+fn r52_prem_host_routes_models_and_invalid_host_sends_nothing() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_oauth(&host);
+    set_prem(&host, &id, "prem.factory.test///");
+    host.http().enqueue(br#"{"id":"chat-prem"}"#.to_vec());
+    let sub = subscription(&host);
+    let upstream = sub.upstream(&id, host.context()).expect("upstream");
+    let query = ProbeQuery::new(ProtocolId::OPENAI_CHAT, "glm-5.3").expect("query");
+    block_on(upstream.probe(&query)).expect("probe");
+    let calls = host.http().calls();
+    let call = calls.last().expect("model call");
+    assert_eq!(
+        call.uri(),
+        "https://prem.factory.test/api/llm/o/v1/chat/completions"
+    );
+    for name in [
+        "x-client-version",
+        "x-factory-client",
+        "x-provider-routing-source",
+    ] {
+        assert!(call.sensitive_headers().iter().any(|header| header == name));
+    }
+
+    set_prem(&host, &id, "http://prem.factory.test");
+    let error = block_on(upstream.probe(&query)).expect_err("invalid host");
+    assert_eq!(error.kind(), PluginErrorKind::Config);
+    assert_eq!(host.http().calls().len(), 1);
+}
+
+#[test]
+fn r52_fast_anthropic_base_model_uses_fast_id_speed_and_beta() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_oauth(&host);
+    host.http().enqueue(br#"{"id":"message-fast"}"#.to_vec());
+    let sub = subscription(&host);
+    let upstream = sub.upstream(&id, host.context()).expect("upstream");
+    let query = ProbeQuery::new(ProtocolId::ANTHROPIC_MESSAGES, "claude-opus-5-5").expect("query");
+    let mut request = query.minimal_request();
+    request.extensions.insert("speed", json!("fast"));
+    block_on(upstream.execute(request, ProtocolId::ANTHROPIC_MESSAGES)).expect("fast");
+    let calls = host.http().calls();
+    let call = calls.last().expect("model call");
+    let body: hofund_plugin_sdk::json::Value =
+        hofund_plugin_sdk::json::from_slice(call.body()).expect("body");
+    assert_eq!(body["model"], "claude-opus-5-5-fast");
+    assert_eq!(body["speed"], "fast");
+    assert!(
+        call.sensitive_headers()
+            .iter()
+            .any(|name| name == "anthropic-beta")
+    );
+    assert!(call.uri().ends_with("/api/llm/a/v1/messages"));
+}
+
+#[test]
+fn r52_fast_responses_base_model_uses_fast_id_and_priority() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_oauth(&host);
+    host.http().enqueue(br#"{"id":"response-fast"}"#.to_vec());
+    let sub = subscription(&host);
+    let upstream = sub.upstream(&id, host.context()).expect("upstream");
+    let query = ProbeQuery::new(ProtocolId::OPENAI_RESPONSES, "gpt-5.5").expect("query");
+    let mut request = query.minimal_request();
+    request.extensions.insert("service_tier", json!("priority"));
+    block_on(upstream.execute(request, ProtocolId::OPENAI_RESPONSES)).expect("fast");
+    let calls = host.http().calls();
+    let call = calls.last().expect("model call");
+    let body: hofund_plugin_sdk::json::Value =
+        hofund_plugin_sdk::json::from_slice(call.body()).expect("body");
+    assert_eq!(body["model"], "gpt-5.5-fast");
+    assert_eq!(body["service_tier"], "priority");
+    assert_eq!(call.uri(), "https://factory.test/api/llm/o/v1/responses");
+}
+
+#[test]
+fn r52_gemini_stream_uses_generate_with_model_and_thinking_config() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_oauth(&host);
+    host.http().enqueue_response(
+        200,
+        &[("content-type", "text/event-stream")],
+        b"data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"ok\"}]}}]}\n\n".to_vec(),
+    );
+    let sub = subscription(&host);
+    let upstream = sub.upstream(&id, host.context()).expect("upstream");
+    let query = ProbeQuery::new(ProtocolId::GENERATIVE_LANGUAGE, "gemini-4-argon").expect("query");
+    let mut request = query.minimal_request();
+    request.stream = true;
+    request.extensions.insert(
+        "generationConfig",
+        json!({"thinkingConfig": {"includeThoughts": true, "thinkingLevel": "high"}}),
+    );
+    block_on(upstream.execute(request, ProtocolId::GENERATIVE_LANGUAGE)).expect("stream");
+    let calls = host.http().calls();
+    let call = calls.last().expect("model call");
+    assert_eq!(call.uri(), "https://factory.test/api/llm/g/v1/generate");
+    let body: hofund_plugin_sdk::json::Value =
+        hofund_plugin_sdk::json::from_slice(call.body()).expect("body");
+    assert_eq!(body["model"], "gemini-4-argon");
+    assert_eq!(
+        body["generationConfig"]["thinkingConfig"]["thinkingLevel"],
+        "high"
+    );
+    assert!(
+        body["systemInstruction"]["parts"][0]["text"]
+            .as_str()
+            .is_some_and(|text| text.starts_with("You are Droid,"))
+    );
+    assert!(body.get("stream").is_none());
+    assert!(
+        call.sensitive_headers()
+            .iter()
+            .any(|name| name == "x-api-provider")
+    );
+}
+
+#[test]
+fn r52_content_policy_is_a_non_cooling_request_refusal_without_a_retry() {
+    for (body, upstream_error) in [
+        (
+            r#"{"code":"content_policy_rejected","detail":"blocked"}"#,
+            false,
+        ),
+        (
+            r#"{"error":{"code":"content_policy_rejected","message":"blocked"}}"#,
+            false,
+        ),
+        (
+            r#"{"code":"content_policy_rejected","detail":"blocked"}"#,
+            true,
+        ),
+    ] {
+        let dir = tempfile::tempdir().expect("dir");
+        let host = host(&dir);
+        let id = seed_oauth(&host);
+        let headers: &[(&str, &str)] = if upstream_error {
+            &[("x-factory-upstream-error", "1")]
+        } else {
+            &[]
+        };
+        host.http()
+            .enqueue_response(403, headers, body.as_bytes().to_vec());
+        let sub = subscription(&host);
+        let upstream = sub.upstream(&id, host.context()).expect("upstream");
+        let query = ProbeQuery::new(ProtocolId::OPENAI_CHAT, "glm-5.3").expect("query");
+        let error = block_on(upstream.execute(query.minimal_request(), ProtocolId::OPENAI_CHAT))
+            .err()
+            .expect("refused");
+        assert_eq!(host.http().calls().len(), 1);
+        if upstream_error {
+            assert_eq!(error.status(), Some(403));
+            assert!(error.cools());
+        } else {
+            assert_eq!(error.status(), Some(400));
+            assert!(!error.cools());
+            assert!(error.skips_failover_same_plugin());
+            assert!(error.message().contains("reads the whole conversation"));
+            assert!(error.message().contains("content_policy_rejected"));
+        }
+    }
+}
+
+#[test]
+fn r52_rate_limit_keeps_retry_after_and_cools() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_oauth(&host);
+    host.http()
+        .enqueue_response(429, &[("retry-after", "17")], b"slow down".to_vec());
+    let sub = subscription(&host);
+    let upstream = sub.upstream(&id, host.context()).expect("upstream");
+    let query = ProbeQuery::new(ProtocolId::OPENAI_CHAT, "glm-5.3").expect("query");
+    let error = block_on(upstream.execute(query.minimal_request(), ProtocolId::OPENAI_CHAT))
+        .err()
+        .expect("rate limit");
+    assert_eq!(error.status(), Some(429));
+    assert_eq!(
+        error.retry_after(),
+        Some(std::time::Duration::from_secs(17))
+    );
+    assert!(error.cools());
 }

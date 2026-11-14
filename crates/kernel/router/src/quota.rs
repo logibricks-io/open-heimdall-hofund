@@ -53,6 +53,9 @@ pub struct WindowInfo {
     /// The one model this window covers, or all models.
     #[serde(default)]
     pub scope_model: Option<String>,
+    /// The models this window covers, or all models when empty.
+    #[serde(default)]
+    pub models: Vec<String>,
     /// Models exempt from an account-wide window.
     #[serde(default)]
     pub excluded_models: Vec<String>,
@@ -72,6 +75,7 @@ impl WindowInfo {
             span,
             blocking: true,
             scope_model: None,
+            models: Vec::new(),
             excluded_models: Vec::new(),
             window_span: None,
             reset_after: None,
@@ -121,6 +125,8 @@ impl WindowInfo {
             used,
             remaining: (100.0 - used).max(0.0),
             resets_at: window.resets_at().map(quota_time),
+            display: window.display().to_owned(),
+            text: !window.display().is_empty(),
             amount: window.used() as f64,
             limit: window.limit().unwrap_or(0) as f64,
             unlimited: window.limit().is_none(),
@@ -130,6 +136,7 @@ impl WindowInfo {
             span,
             blocking: window.blocking(),
             scope_model: window.scope_model().map(str::to_owned),
+            models: window.models().to_vec(),
             excluded_models: window.excluded_models().to_vec(),
             window_span: None,
             reset_after: None,
@@ -546,6 +553,7 @@ impl QuotaStore {
                             unit: info.span.unit.clone(),
                             blocking: info.blocking,
                             scope_model: info.scope_model.clone(),
+                            models: info.models.clone(),
                             excluded_models: info.excluded_models.clone(),
                             window_span: window_span(info),
                             runs_out_at: info.span.runs_out_at.as_ref().and_then(parse_quota_time),
@@ -820,6 +828,8 @@ pub struct AllowanceWindow {
     pub blocking: bool,
     /// The model this window covers, or all models.
     pub scope_model: Option<String>,
+    /// The models this window covers, or all models when empty.
+    pub models: Vec<String>,
     /// Models exempt from an account-wide window.
     pub excluded_models: Vec<String>,
     /// Window length, when known.
@@ -837,6 +847,11 @@ impl AllowanceWindow {
         self.scope_model
             .as_deref()
             .is_none_or(|scope| scope.eq_ignore_ascii_case(model))
+            && (self.models.is_empty()
+                || self
+                    .models
+                    .iter()
+                    .any(|included| included.eq_ignore_ascii_case(model)))
             && !self
                 .excluded_models
                 .iter()
@@ -2334,6 +2349,7 @@ mod tests {
                     unit: String::new(),
                     blocking: true,
                     scope_model: None,
+                    models: Vec::new(),
                     excluded_models: Vec::new(),
                     window_span: None,
                     runs_out_at: None,
@@ -2350,6 +2366,7 @@ mod tests {
                     unit: String::new(),
                     blocking: true,
                     scope_model: None,
+                    models: Vec::new(),
                     excluded_models: Vec::new(),
                     window_span: None,
                     runs_out_at: None,

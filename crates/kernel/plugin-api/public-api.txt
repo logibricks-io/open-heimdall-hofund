@@ -646,12 +646,14 @@ ModelSpec::const fn free (& self) -> Option < bool >
 ModelSpec::const fn image_input (& self) -> Option < bool >
 ModelSpec::const fn max_output (& self) -> u64
 ModelSpec::const fn prices (& self) -> (Option < u64 > , Option < u64 > , Option < u64 >)
+ModelSpec::const fn rate_parts (& self) -> (Option < u64 > , u64)
 ModelSpec::const fn with_decides (mut self , decides : bool) -> Self
 ModelSpec::const fn with_draws (mut self , draws : bool) -> Self
 ModelSpec::const fn with_films (mut self , films : bool) -> Self
 ModelSpec::const fn with_free (mut self , free : bool) -> Self
 ModelSpec::const fn with_image_input (mut self , image_input : Option < bool >) -> Self
 ModelSpec::const fn with_prices (mut self , input : u64 , output : u64 , cache_read : u64) -> Self
+ModelSpec::const fn with_rate (mut self , rate : u64 , rate_was : u64) -> Self
 ModelSpec::fn display_name (& self) -> Option < & str >
 ModelSpec::fn efforts (& self) -> & [String]
 ModelSpec::fn endpoints (& self) -> & [String]
@@ -659,6 +661,8 @@ ModelSpec::fn id (& self) -> & str
 ModelSpec::fn input_modalities (& self) -> & [String]
 ModelSpec::fn new (id : impl Into < String > , display_name : Option < String >) -> Result < Self , PluginError >
 ModelSpec::fn output_modalities (& self) -> & [String]
+ModelSpec::fn rate (& self) -> Option < f64 >
+ModelSpec::fn rate_was (& self) -> f64
 ModelSpec::fn service_tiers (& self) -> & [String]
 ModelSpec::fn web_search (& self) -> Option < & str >
 ModelSpec::fn with_context (mut self , context : u64) -> Self
@@ -922,11 +926,15 @@ QuotaWindow::const fn limit (& self) -> Option < u64 >
 QuotaWindow::const fn resets_at (& self) -> Option < SystemTime >
 QuotaWindow::const fn used (& self) -> u64
 QuotaWindow::const fn with_blocking (mut self , blocking : bool) -> Self
+QuotaWindow::fn display (& self) -> & str
 QuotaWindow::fn excluded_models (& self) -> & [String]
+QuotaWindow::fn models (& self) -> & [String]
 QuotaWindow::fn name (& self) -> & str
 QuotaWindow::fn new (name : impl Into < String > , used : u64 , limit : Option < u64 > , resets_at : Option < SystemTime > ,) -> Result < Self , PluginError >
 QuotaWindow::fn scope_model (& self) -> Option < & str >
+QuotaWindow::fn with_display (mut self , display : impl Into < String >) -> Self
 QuotaWindow::fn with_excluded_models (mut self , models : Vec < String >) -> Self
+QuotaWindow::fn with_models (mut self , models : Vec < String >) -> Self
 QuotaWindow::fn with_scope_model (mut self , model : impl Into < String >) -> Self
 RawAnswer
 RawAnswer #[non_exhaustive] derives(Debug)

@@ -323,6 +323,8 @@ mod tests {
                     resets_in_secs: Some(60),
                     blocking: true,
                     scope_model: Some("m".to_owned()),
+                    models: Vec::new(),
+                    display: String::new(),
                 }]),
             },
             QuotaListing {
