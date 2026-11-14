@@ -19,7 +19,7 @@ Legend: **Done** = matches the reference at checklist granularity; **Partial** =
 | Kiro (`kiro`) | 8 | 9 | 0 | 2 | 0 |
 | Factory / Droid (`factory`) | 12 | 4 | 0 | 3 | 0 |
 | Cline / ClinePass (`cline`) | 12 | 4 | 0 | 3 | 0 |
-| ChatGPT / Codex (`codex` backend) and ChatGPT API (`chatgpt-api`) | 9 | 10 | 2 | 0 | 0 |
+| ChatGPT / Codex (`codex` backend) and ChatGPT API (`chatgpt-api`) | 9 | 11 | 1 | 0 | 0 |
 | GitHub Copilot (github.com and GHE) | 15 | 2 | 0 | 5 | 0 |
 | Gemini CLI (Code Assist) | 10 | 6 | 0 | 2 | 0 |
 | Google Antigravity | 11 | 4 | 1 | 1 | 0 |
@@ -313,7 +313,7 @@ Remaining verification is live-account acceptance; all evidence here is determin
 
 **Reference files read:** `internal/provider/signin.go`, `codex_store.go`, `import_codex.go`, `codex_request.go`, `codex_models.go`, `codex_limits.go`, `codex_credits.go`, `codex_resets.go`, `codex_zstd.go`, `codex_http1.go`, `codex_device_signin.go`, `codex_switch.go`, `warmup_daily.go`, `chatgpt_api.go`, `internal/gateway/codex_backend.go`.
 
-**hofund path:** `plugins/subscriptions/codex/` (`lib.rs`, `sign_in.rs`, `device_sign_in.rs`, `tokens.rs`, `discover.rs`, `agent_sign_in.rs`, `upstream.rs`, `limits.rs`, `usage.rs`, `resets.rs`, `models.rs`, `warmup.rs`, `shape.rs`). **ChatGPT API:** no plugin; `docs/coverage/subscriptions.md` row `chatgpt-api` → missing.
+**hofund path:** `plugins/subscriptions/codex/` (`lib.rs`, `sign_in.rs`, `device_sign_in.rs`, `tokens.rs`, `discover.rs`, `agent_sign_in.rs`, `upstream.rs`, `limits.rs`, `usage.rs`, `resets.rs`, `models.rs`, `warmup.rs`, `shape.rs`). **ChatGPT API:** `plugins/subscriptions/chatgpt-api/` (`lib.rs`, `sign_in.rs`, `host_id.rs`, `tokens.rs`, `revoke.rs`, `models.rs`, `shape.rs`, `errors.rs`, `upstream.rs`, `quota.rs`).
 
 | # | capability | reference v0.1.3005 | hofund 08035c9 | status | gap to close |
 |---|------------|----------------------|----------------|--------|--------------|
@@ -321,7 +321,7 @@ Remaining verification is live-account acceptance; all evidence here is determin
 | a2 | sign-in: device code | `codex_device_signin.go` (device auth APIs) | `device_sign_in.rs:27-30`, `lib.rs:196-206` `--device-auth` flow | Done | — |
 | a3 | sign-in: API key (detect only) | Codex `auth.json` with `auth_mode: apikey` is not an account: discovery and agent switch drop it (`logins.go:767` `codexLoginIn`, `account.go:1044` `codexAccount`); `CodexAPIKeySignedIn` (`logins.go:571`) also lets `/responses/compact` pass a key's account holds (`gateway/codex_backend.go:693` `compactSigninHeld`) | `discover.rs:73-80` drops `auth_mode: apikey` on read/list/import; `agent_sign_in.rs:47` writes `auth_mode: chatgpt`; tests `r47a_a3_*` | Partial | Gateway `/responses/compact` compaction allowance for API-key-held requests has no hofund mirror on the subscription path (**R-47**, later) |
 | a4 | sign-in: paste callback | `signin.go:69` PasteCallback on sign-in state; the pasted browser-final address goes through the same checked code exchange | `lib.rs` pending browser state + existing `SignInProof::Callback`; daemon prompt and loopback parser accept the pasted address, with wrong host/port/path/state refused; `r47c_codex_sign_in_completes_from_pasted_callback` proves the real plugin exchanges the code and stores the account | Done | — |
-| a5 | sign-in: ChatGPT API (Sign in with ChatGPT / dynamic client) | `chatgpt_api.go:42-66` `dynamic_agent_client`, per-account client id, `siwcAuthorize` | no `chatgpt-api` plugin (`docs/coverage/subscriptions.md:25`) | Missing | Full SIWC plugin (R-47) |
+| a5 | sign-in: ChatGPT API (Sign in with ChatGPT / dynamic client) | `chatgpt_api.go:42-66` `dynamic_agent_client`, per-account client id, `siwcAuthorize` | `chatgpt-api/src/sign_in.rs`, `host_id.rs`, loopback `127.0.0.1:1455` + IPv4 redirect; `SignInProof::Callback::issued_client_id`; tests with recorded token exchange | Partial | Live OpenAI registration semantics; no Codex-catalog model union (`siwcWithCodex`) |
 | b | import sources | `codex_store.go:517+` read/write Codex `auth.json` and macOS Keychain; `import_codex.go` config.toml providers | `discover.rs:19-54` read `auth.json` only; `agent_sign_in.rs:9-71` write `auth.json` (file mode) | Partial | Keychain read/write, config.toml provider import (R-47) |
 | c | token storage / encryption | `logins.json` + optional Codex home/keychain (`codex_store.go`) | daemon `secret_ref` encrypted store via `host.accounts()` (`crates/kernel/daemon/src/subscriptions.rs` pattern) | Partial | Bidirectional Codex store sync with Keychain (R-47) |
 | d | refresh | OAuth refresh with rotation; Codex/keychain writers (`codex_store.go` write) | `tokens.rs:78-176` lease, `LAPSED` on refused refresh, 5 min margin | Partial | Persist refresh back to Codex Keychain when Codex rotates alone (R-47) |
@@ -341,7 +341,7 @@ Remaining verification is live-account acceptance; all evidence here is determin
 
 **Gaps**
 
-- Implement `chatgpt-api` subscription (dynamic OAuth, `api.openai.com/v1/responses`, agent instructions) — **L**, **R-47**.
+- Finish `chatgpt-api` parity: model-list union with Codex catalog when a ChatGPT plan account shares models, and live-account verification — **M**, **R-47** follow-up.
 - Codex Keychain + two-writer auth.json sync — **M**, **R-47**.
 - Credit reset consume surfaced in CLI/control UI cards — **M**, **R-47** (plugin API and Codex `/wham/rate-limit-reset-credits` read/consume are in place; automatic consume is forbidden).
 - Gateway `/responses/compact` compaction allowance when the held sign-in is API-key mode — **S**, **R-47** (subscription plugin already drops `auth_mode: apikey` accounts in discovery and agent switch).
