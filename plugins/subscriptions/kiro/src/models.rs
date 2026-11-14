@@ -144,7 +144,7 @@ async fn fetch_key_pages(
     Ok(Value::Object(root))
 }
 
-fn auth_call(call: Call, stored: &Stored) -> Call {
+pub(crate) fn auth_call(call: Call, stored: &Stored) -> Call {
     let call = call.sensitive_header(
         "authorization",
         format!("Bearer {}", secret_text(&stored.credential.access)),

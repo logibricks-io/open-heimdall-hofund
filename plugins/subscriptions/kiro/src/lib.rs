@@ -15,6 +15,7 @@ use hofund_plugin_sdk::Contribution;
 use hofund_plugin_sdk::oauth::secret_text;
 
 mod agent_sign_in;
+mod apikey;
 mod cli_db;
 mod creds;
 mod discover;
@@ -244,9 +245,12 @@ impl Subscription for Kiro {
         proof: SignInProof,
         host: &HostContext,
     ) -> Result<AccountId, PluginError> {
+        if let SignInProof::Token(key) = proof {
+            return apikey::sign_in_with_key(host, key).await;
+        }
         let SignInProof::Await = proof else {
             return Err(PluginError::config(
-                "Kiro sign-in completes from its browser callback or an existing sign-in",
+                "Kiro sign-in completes from its browser callback, an API key, or an existing sign-in",
             ));
         };
         let Some(pending) = self.take_pending(ctx.session()) else {
@@ -326,38 +330,20 @@ impl Subscription for Kiro {
         account: &AccountId,
         host: &HostContext,
     ) -> Result<Vec<QuotaWindow>, PluginError> {
-        let stored = refresh::ensure_fresh(
-            host,
-            account,
-            Arc::clone(&self.endpoints),
-            self.cli_command.as_deref(),
-        )
-        .await?;
-        let url = self.endpoints.usage_url(
-            creds::effective_profile_arn(&stored.credential),
-            &stored.credential.region,
-        );
-        let reply = hofund_plugin_sdk::Call::get(url)
-            .sensitive_header(
-                "authorization",
-                format!(
-                    "Bearer {}",
-                    hofund_plugin_sdk::oauth::secret_text(&stored.credential.access)
-                ),
+        let stored = creds::Stored::load(host, account).await?;
+        let stored = if stored.credential.method == "apikey" {
+            stored
+        } else {
+            refresh::ensure_fresh(
+                host,
+                account,
+                Arc::clone(&self.endpoints),
+                self.cli_command.as_deref(),
             )
-            .header("accept", "application/json")
-            .fetch(host.http())
-            .await?;
-        match reply.status() {
-            200..=299 => quota::windows(reply.body()),
-            401 | 403 => Err(PluginError::auth(
-                "Kiro refused to show usage limits for this sign-in",
-            )),
-            status => Err(PluginError::status_error(
-                status,
-                "Kiro did not return usage limits",
-            )),
-        }
+            .await?
+        };
+        let body = quota::fetch_usage_body(host, &self.endpoints, &stored).await?;
+        quota::windows(&body, host.clock().now())
     }
 
     async fn list_models(
@@ -423,5 +409,7 @@ mod portal_tests;
 mod r51b_tests;
 #[cfg(test)]
 mod r51c_tests;
+#[cfg(test)]
+mod r51d_tests;
 #[cfg(test)]
 mod tests;

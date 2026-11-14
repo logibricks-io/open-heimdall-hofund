@@ -16,7 +16,7 @@ Legend: **Done** = matches the reference at checklist granularity; **Partial** =
 | Cursor (`cursor`) | 8 | 11 | 0 | 2 | 0 |
 | Devin (`devin`) | 12 | 6 | 0 | 1 | 0 |
 | Zed (`zed`) | 0 | 6 | 1 | 3 | 0 |
-| Kiro (`kiro`) | 8 | 9 | 0 | 2 | 0 |
+| Kiro (`kiro`) | 9 | 8 | 0 | 2 | 0 |
 | Factory / Droid (`factory`) | 14 | 2 | 0 | 3 | 0 |
 | Cline / ClinePass (`cline`) | 12 | 4 | 0 | 3 | 0 |
 | ChatGPT / Codex (`codex` backend) and ChatGPT API (`chatgpt-api`) | 10 | 10 | 1 | 0 | 0 |
@@ -200,7 +200,7 @@ Structured-output prose for Chat, Responses, and Messages shipped in R-13b (`str
 |---|------------|------------------------------|--------------|--------|--------------|
 | a1 | sign-in: remote portal (Google/GitHub/Builder ID/IDC) | Plugin loopback ports + AWS OIDC (`kiro/index.mjs:3-8`, `37-38`) | `portal.rs` binds the documented ports, exchanges social codes, and runs register/authorize/token for Builder ID and enterprise; pasted callbacks forward through the daemon | Done | — |
 | a2 | sign-in: reuse kiro-cli / IDE | `readCLI` / `readIDE` (`kiro/index.mjs:117-181`); core `kiro.go:19-22` | `site=current` reads the CLI DB first, then the IDE token file | Done | — |
-| a3 | sign-in: API key `ksk_` | Plugin + core treat as API key | unverified — method `apikey` in upstream headers (`upstream.rs:54-55`) | Partial | Explicit API key sign-in UX |
+| a3 | sign-in: API key `ksk_` | Plugin + core treat as API key | `SignInProof::Token` with `ksk_` validation stores `method: apikey` in `us-east-1` (`apikey.rs`, `r51d_a3_*`) | Done | — |
 | b | import | IDE cache file; CLI DB | `cli_db.rs` reads `auth_kv` social, odic, and external-idp rows; `discover.rs` keeps IDE import | Done | — |
 | c | token storage | Write-back to CLI DB or IDE file on refresh (`kiro/index.mjs:183-200`) | Source metadata selects compare-and-swap SQLite or IDE JSON write-back after refresh | Done | — |
 | d | refresh | CLI first, else OIDC/refreshToken (`kiro.go:301-374`; plugin `refresh.test.mjs`) | `refresh.rs` delegates `debug refresh-auth-token`, re-reads the CLI DB, and supports social, IDC, and external-idp form refresh | Partial | Refresh 400 lapsed mapping (**R-24**) |
@@ -210,7 +210,7 @@ Structured-output prose for Chat, Responses, and Messages shipped in R-13b (`str
 | h | tool calls | Plugin tool tests (`tool-names.test.mjs`) | `kiro_body.rs` maps declarations, normalized ids/names, split calls, and matched/missing results; replies restore caller names | Partial | Mock/loopback verification only (**R-51**) |
 | i | images | `image-size.test.mjs` | Inline user/tool-result images keep the latest-image rule. Over-5-MiB Base64 images follow the reference's same-format/lossy, quality, and edge sequence with a four-entry cache; failures use its exact note (`r51c_*`, deterministic fixtures) | Done | — |
 | j | reasoning / effort | `effort.test.mjs` | Enabled/adaptive thinking uses native `additionalModelRequestFields` when the listed schema allows the requested effort (`output_config`, then `reasoning`), otherwise the reference budget tags. `reasoningContentEvent` text and signatures fold into unary blocks and stream as reasoning/signature deltas; structured output stays in instructions (`r51c_*`) | Done | — |
-| k | quota / usage | `Get-Usage-Limits` (`kiro.go` comments; plugin `usage.test.mjs`) | `quota.rs` with profile ARN and Builder ID default | Partial | Full allowance/bonus window parity |
+| k | quota / usage | `Get-Usage-Limits` (`kiro.go` comments; plugin `usage.test.mjs`) | `quota.rs` maps free trial, monthly credits, and bonus windows with aside non-blocking when carried; API keys POST `GetUsageLimits` without profile (`r51d_k_*`, fixtures) | Partial | `Subscription::quota` cannot surface plan title, bonus lapse deadlines, credit units, or the reference month span |
 | l | model list | Plugin lists from API | `models.rs` fetches the profile-scoped list, pages the API-key control-plane list, and keeps default order, limits, image flags, effort lists, and native schemas per account/model | Partial | Recorded model-list verification only (**R-51**) |
 | m | multi-account | uid by login provider (`kiro/index.mjs:53-65`) | Browser ids include label/provider; imported ids remain agent-scoped | Partial | Stable ids (#607) (**R-24**) |
 | n | error classification | Plugin `errors.test.mjs`; refresh 400 → lapsed | Generic auth on 401/403 (`upstream.rs:60-63`) | Partial | **R-24** |
@@ -218,10 +218,15 @@ Structured-output prose for Chat, Responses, and Messages shipped in R-13b (`str
 | p | agent sign-in | IDE cache and CLI DB discover | `discover.rs` prefers CLI DB, then IDE; `agent_sign_in.rs` keeps IDE switching | Done | — |
 | q | extras | Builder ID profile ARN constant (`kiro/index.mjs:50-51`) | `BUILDER_ID_PROFILE` applies to imported and browser Builder ID sign-ins | Done | — |
 
+### Status (Kiro)
+
+**9 Done / 8 Partial / 0 Missing / 2 N/A** (rows a–q; a1–a3 count as three sign-in rows). Row k stays Partial: plan title, bonus lapse, units, and month span are not representable on `QuotaWindow`.
+
 ### Gaps (Kiro)
 
 - Live-account verification — **M**, **R-51**
 - Refresh 400 lapsed + stable account ids — **S**, **R-24**
+- `Subscription::quota` does not surface plan title, bonus lapse deadlines, credit units, or the reference month span; windows use percent used, `with_display` vendor text, reset times, and non-blocking bonus or carried-month semantics instead (`r51d_k_*`).
 
 ---
 
