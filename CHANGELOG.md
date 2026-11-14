@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- R-5: the Claude Code subscription plugin keeps per-account allowance from
+  stream-json `rate_limit_event` envelopes (`limits.rs`): `unifiedWindows` and
+  the active `rateLimitType`, one-hour stand-in when `/usage` is away, merge
+  over same-named `/usage` windows, `with_unstarted` for the 5-hour row, and
+  heard windows for setup-token accounts. Tests `r5_48`–`r5_58` use recorded
+  fixtures and a fake runner only. Refs R-5.
+
 - R-5: the Claude Code subscription plugin reads and writes macOS Keychain
   credentials through `security(1)` spawned via `HostContext` (no
   `std::process` in the plugin): `Claude Code-credentials` and per-directory
