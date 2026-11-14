@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use hofund_kit_subscription::{TestHost, block_on};
+use hofund_kit_subscription::{TestHost, advance_time, block_on, block_on_paused};
 use hofund_plugin_api::{
     AccountId, AccountStatus, Completion, ContentPart, Extensions, Message, PluginErrorKind,
     PluginId, PluginKind, ProbeQuery, ProtocolId, RawTable, RawValue, Request, Role, SecretString,
@@ -2038,4 +2038,189 @@ fn r57c_tool_search_start_stream_restores_only_the_tool_call() {
     assert!(sent["tools"].as_array().expect("tools").iter().all(|tool| {
         tool.get("defer_loading").is_none() && tool["name"] != "DeferredToolPlaceholder"
     }));
+}
+
+fn paused_host(dir: &tempfile::TempDir) -> TestHost {
+    TestHost::open_for_with_tokio_monotonic(
+        PluginKind::Subscription,
+        PluginId::from_static("zcode"),
+        dir.path(),
+    )
+}
+
+fn minimal_request(model: &str) -> Request {
+    ProbeQuery::new(ProtocolId::ANTHROPIC_MESSAGES, model)
+        .expect("query")
+        .minimal_request()
+}
+
+#[test]
+fn r57c_busy_retry_uses_the_first_fixed_host_wait_and_identical_bytes() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = paused_host(&dir);
+    let id = seed_plan_key(&host, "busy.plan.key", "busy@zcode.test");
+    let upstream = subscription(&host)
+        .upstream(&id, host.context())
+        .expect("upstream");
+    host.http().enqueue_response(
+        429,
+        &[],
+        json!({"code": 3008, "msg": "user concurrency limit exceeded"}).to_string(),
+    );
+    host.http().enqueue(message_ok());
+    block_on_paused(async {
+        let before = host.context().clock().monotonic();
+        upstream
+            .execute(minimal_request("GLM-5.3"), ProtocolId::ANTHROPIC_MESSAGES)
+            .await
+            .expect("second attempt");
+        assert_eq!(
+            host.context().clock().monotonic() - before,
+            std::time::Duration::from_millis(251)
+        );
+    });
+    let calls = host.http().calls();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].body(), calls[1].body());
+    assert_eq!(calls[0].uri(), calls[1].uri());
+}
+
+#[test]
+fn r57c_busy_budget_is_six_waits_then_a_plain_429_with_the_hint() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = paused_host(&dir);
+    let id = seed_plan_key(&host, "busy.plan.key", "busy@zcode.test");
+    let upstream = subscription(&host)
+        .upstream(&id, host.context())
+        .expect("upstream");
+    for _ in 0..7 {
+        host.http().enqueue_response(
+            429,
+            &[],
+            json!({"error": {"code": "3009", "message": "model concurrency limit exceeded"}})
+                .to_string(),
+        );
+    }
+    block_on_paused(async {
+        let before = host.context().clock().monotonic();
+        let error = upstream
+            .execute(minimal_request("GLM-5.3"), ProtocolId::ANTHROPIC_MESSAGES)
+            .await
+            .err()
+            .expect("saturated");
+        assert_eq!(error.status(), Some(429));
+        assert!(error.message().contains("Z Code serves one account"));
+        assert_eq!(
+            host.context().clock().monotonic() - before,
+            std::time::Duration::from_millis(10_056)
+        );
+    });
+    assert_eq!(host.http().calls().len(), 7);
+}
+
+#[test]
+fn r57c_nonbusy_rate_limit_is_not_retried_or_relabelled() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_plan_key(&host, "rate.plan.key", "rate@zcode.test");
+    let upstream = subscription(&host)
+        .upstream(&id, host.context())
+        .expect("upstream");
+    host.http().enqueue_response(
+        429,
+        &[],
+        json!({"code": 1302, "msg": "rate limit reached"}).to_string(),
+    );
+    let error =
+        block_on(upstream.execute(minimal_request("GLM-5.3"), ProtocolId::ANTHROPIC_MESSAGES))
+            .err()
+            .expect("rate limit");
+    assert_eq!(error.status(), Some(429));
+    assert!(!error.message().contains("Z Code serves one account"));
+    assert_eq!(host.http().calls().len(), 1);
+}
+
+#[test]
+fn r57c_exhausted_free_gift_busy_budget_replays_on_the_plan() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = paused_host(&dir);
+    let id = seed_dual(&host);
+    let upstream = subscription(&host)
+        .upstream(&id, host.context())
+        .expect("upstream");
+    enqueue_dual_discovery(&host, 750);
+    for _ in 0..7 {
+        host.http().enqueue_response(
+            429,
+            &[],
+            json!({"code": 3008, "msg": "user concurrency limit exceeded"}).to_string(),
+        );
+    }
+    host.http().enqueue(message_ok());
+    block_on_paused(async {
+        let before = host.context().clock().monotonic();
+        upstream
+            .execute(
+                minimal_request("GLM-5.3-Flash"),
+                ProtocolId::ANTHROPIC_MESSAGES,
+            )
+            .await
+            .expect("plan replay");
+        assert_eq!(
+            host.context().clock().monotonic() - before,
+            std::time::Duration::from_millis(10_056)
+        );
+    });
+    let calls = host.http().calls();
+    assert_eq!(calls.len(), 10);
+    assert!(calls[9].uri().starts_with(ZAI_ANTHROPIC_BASE));
+}
+
+#[test]
+fn r57c_edge_hold_is_shared_and_expires_on_the_host_clock() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = paused_host(&dir);
+    let dual = seed_dual(&host);
+    let start = seed_start(&host);
+    let sub = subscription(&host);
+    let free = sub.upstream(&dual, host.context()).expect("free");
+    let explicit = sub.upstream(&start, host.context()).expect("start");
+    enqueue_dual_discovery(&host, 750);
+    host.http().enqueue_response(
+        405,
+        &[("content-type", "text/html")],
+        "<html>request has been blocked due to unusual activity; errors.aliyun.com</html>",
+    );
+    host.http().enqueue(message_ok());
+    block_on_paused(async {
+        free.execute(
+            minimal_request("GLM-5.3-Flash"),
+            ProtocolId::ANTHROPIC_MESSAGES,
+        )
+        .await
+        .expect("plan replay");
+        assert_eq!(host.http().calls().len(), 4);
+
+        let error = explicit
+            .execute(minimal_request("GLM-5.3"), ProtocolId::ANTHROPIC_MESSAGES)
+            .await
+            .err()
+            .expect("edge hold");
+        assert_eq!(error.status(), Some(405));
+        assert!(
+            error
+                .message()
+                .contains("network firewall blocked requests")
+        );
+        assert!(!error.cools());
+        assert_eq!(host.http().calls().len(), 4);
+
+        advance_time(std::time::Duration::from_secs(180)).await;
+        host.http().enqueue(message_ok());
+        explicit
+            .execute(minimal_request("GLM-5.3"), ProtocolId::ANTHROPIC_MESSAGES)
+            .await
+            .expect("hold expired");
+        assert_eq!(host.http().calls().len(), 5);
+    });
 }

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use hofund_plugin_api::AccountId;
 use hofund_plugin_sdk::digest::sha256;
@@ -11,12 +11,20 @@ use crate::session::Stored;
 const ROUTE_TTL: Duration = Duration::from_secs(10 * 60);
 const UNCERTAIN_ROUTE_TTL: Duration = Duration::from_secs(60);
 const MODEL_REST: Duration = Duration::from_secs(60);
+const EDGE_HOLD: Duration = Duration::from_secs(3 * 60);
 
 #[derive(Default)]
 pub(crate) struct Routing {
     routes: Mutex<HashMap<AccountId, CachedRoute>>,
     blocked: Mutex<HashMap<(AccountId, String), Duration>>,
     sidelined: Mutex<HashMap<(AccountId, String), Duration>>,
+    edge: Mutex<Option<EdgeHold>>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct EdgeHold {
+    pub(crate) monotonic_until: Duration,
+    pub(crate) wall_until: SystemTime,
 }
 
 #[derive(Clone)]
@@ -132,6 +140,32 @@ impl Routing {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(rest_key(account, model), now.saturating_add(MODEL_REST));
         self.invalidate(account);
+    }
+
+    pub(crate) fn hold_edge(&self, now: Duration, wall_now: SystemTime) {
+        let hold = EdgeHold {
+            monotonic_until: now.saturating_add(EDGE_HOLD),
+            wall_until: wall_now + EDGE_HOLD,
+        };
+        let mut edge = self
+            .edge
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if edge.is_none_or(|current| current.monotonic_until < hold.monotonic_until) {
+            *edge = Some(hold);
+        }
+    }
+
+    pub(crate) fn edge_held(&self, now: Duration) -> Option<EdgeHold> {
+        let mut edge = self
+            .edge
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if edge.is_some_and(|held| now < held.monotonic_until) {
+            return *edge;
+        }
+        *edge = None;
+        None
     }
 }
 

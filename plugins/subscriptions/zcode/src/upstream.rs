@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use hofund_plugin_api::{
     AccountId, BodyStream, Completion, CredentialStyle, HostContext, PluginError, ProbeQuery,
@@ -39,6 +40,16 @@ enum SelectionKind {
     ForcedGift,
     FreeGift,
 }
+
+const BUSY_WAITS: &[Duration] = &[
+    Duration::from_millis(250),
+    Duration::from_millis(500),
+    Duration::from_millis(900),
+    Duration::from_millis(1600),
+    Duration::from_millis(2800),
+    Duration::from_millis(4000),
+];
+const BUSY_HINT: &str = "Z Code serves one account a few requests at a time, and every agent and session on this computer shares that account; this request came behind the others, and the same request a moment later can be served";
 
 impl ZcodeUpstream {
     pub(crate) fn new(
@@ -153,6 +164,7 @@ impl ZcodeUpstream {
         } else if route.start {
             SelectionKind::StartOnly
         } else if self.free_first
+            && self.routing.edge_held(now).is_none()
             && route.gift.as_ref().is_some_and(|gift| {
                 gift.serves(&request.model)
                     && !self.routing.gift_rested(&self.account, &request.model, now)
@@ -292,7 +304,31 @@ impl ZcodeUpstream {
         request: Request,
         inbound: ProtocolId,
     ) -> Result<Completion, PluginError> {
-        wire::execute(self.host.http(), target, Some(credential), request, inbound).await
+        let mut waits = BUSY_WAITS.iter();
+        loop {
+            match wire::execute(
+                self.host.http(),
+                target,
+                Some(credential),
+                request.clone(),
+                inbound,
+            )
+            .await
+            {
+                Err(error) if http_auth::busy_error(&error) => {
+                    let Some(wait) = waits.next() else {
+                        let message = if error.message().contains(BUSY_HINT) {
+                            error.message().to_owned()
+                        } else {
+                            format!("{} — {BUSY_HINT}", error.message())
+                        };
+                        return Err(error.with_message(message));
+                    };
+                    hofund_plugin_sdk::sleep(*wait).await;
+                }
+                result => return result,
+            }
+        }
     }
 
     async fn replay_on_plan(
@@ -377,10 +413,27 @@ impl UpstreamProvider for ZcodeUpstream {
         let selection = self.target(&stored, &request).await?;
         request.model = selection.model;
         let streaming = request.stream;
-        let mut result = self
-            .send(&selection.target, &selection.credential, request, inbound)
-            .await;
         let now = self.host.clock().monotonic();
+        let edge_hold = if selection.kind == SelectionKind::Plan {
+            None
+        } else {
+            self.routing.edge_held(now)
+        };
+        let mut result = if let Some(hold) = edge_hold {
+            Err(http_auth::edge_held(hold.wall_until))
+        } else {
+            self.send(&selection.target, &selection.credential, request, inbound)
+                .await
+        };
+        if selection.kind != SelectionKind::Plan {
+            result = match result {
+                Err(error) if start_refused(&error) && http_auth::edge_page(&error) => {
+                    self.routing.hold_edge(now, self.host.clock().now());
+                    Err(http_auth::edge_blocked(error))
+                }
+                other => other,
+            };
+        }
         match selection.kind {
             SelectionKind::FreeGift => {
                 let mut replay = false;
