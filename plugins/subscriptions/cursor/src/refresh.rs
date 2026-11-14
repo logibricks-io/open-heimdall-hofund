@@ -1,7 +1,10 @@
 //! Refreshing sign-ins: cursor-agent status and stored OAuth checks.
 
+use std::future::Future;
 use std::path::Path;
-use std::sync::Mutex;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 use hofund_plugin_api::{AccountId, HostContext, PluginError, SecretString};
@@ -18,8 +21,126 @@ use crate::tokens::{self, REFRESH};
 /// How long a renew waits for the per-account lease.
 const LEASE_WAIT: Duration = Duration::from_secs(30);
 
+/// One in-flight `cursor-agent status` per subscription, like the reference `cliRefresh`.
+#[derive(Default)]
+pub(crate) struct StatusCoalescer {
+    flight: Mutex<Option<Arc<StatusFlight>>>,
+}
+
+enum StatusOutcome {
+    Ok,
+    Err(Arc<PluginError>),
+}
+
+struct StatusFlight {
+    inner: Mutex<StatusFlightInner>,
+}
+
+enum StatusFlightInner {
+    Pending(Vec<Waker>),
+    Done(StatusOutcome),
+}
+
+struct StatusFlightWait {
+    flight: Arc<StatusFlight>,
+}
+
+impl StatusFlight {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            inner: Mutex::new(StatusFlightInner::Pending(Vec::new())),
+        })
+    }
+
+    fn finish(&self, outcome: StatusOutcome) {
+        let mut inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        let previous = std::mem::replace(&mut *inner, StatusFlightInner::Done(outcome));
+        if let StatusFlightInner::Pending(wakers) = previous {
+            for waker in wakers {
+                waker.wake();
+            }
+        }
+    }
+}
+
+impl Future for StatusFlightWait {
+    type Output = StatusOutcome;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut inner = self
+            .flight
+            .inner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        match &mut *inner {
+            StatusFlightInner::Done(outcome) => Poll::Ready(match outcome {
+                StatusOutcome::Ok => StatusOutcome::Ok,
+                StatusOutcome::Err(error) => StatusOutcome::Err(Arc::clone(error)),
+            }),
+            StatusFlightInner::Pending(wakers) => {
+                if !wakers.iter().any(|waker| waker.will_wake(cx.waker())) {
+                    wakers.push(cx.waker().clone());
+                }
+                Poll::Pending
+            }
+        }
+    }
+}
+
+impl StatusCoalescer {
+    /// Runs `cursor-agent status` once while concurrent callers share the same run.
+    pub(crate) async fn agent_status(
+        &self,
+        host: &HostContext,
+        program: &Path,
+        dir: &Path,
+    ) -> Result<(), PluginError> {
+        self.coalesce(|| run_agent_status(host, program, dir)).await
+    }
+
+    async fn coalesce<F, Fut>(&self, run: F) -> Result<(), PluginError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<(), PluginError>>,
+    {
+        enum Start {
+            Wait(Arc<StatusFlight>),
+            Lead(Arc<StatusFlight>),
+        }
+        let start = {
+            let mut guard = self.flight.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(flight) = guard.as_ref() {
+                Start::Wait(Arc::clone(flight))
+            } else {
+                let flight = StatusFlight::new();
+                *guard = Some(Arc::clone(&flight));
+                Start::Lead(flight)
+            }
+        };
+        match start {
+            Start::Wait(flight) => match (StatusFlightWait { flight }).await {
+                StatusOutcome::Ok => Ok(()),
+                StatusOutcome::Err(error) => Err(plugin_error_from_shared(&error)),
+            },
+            Start::Lead(flight) => {
+                let outcome = run().await;
+                let shared = match &outcome {
+                    Ok(()) => StatusOutcome::Ok,
+                    Err(error) => StatusOutcome::Err(shared_status_error(error)),
+                };
+                flight.finish(shared);
+                {
+                    let mut guard = self.flight.lock().unwrap_or_else(PoisonError::into_inner);
+                    *guard = None;
+                }
+                outcome
+            }
+        }
+    }
+}
+
 /// Runs `cursor-agent status` so the CLI refreshes an almost-expired token.
-pub(crate) async fn agent_status(
+async fn run_agent_status(
     host: &HostContext,
     program: &Path,
     dir: &Path,
@@ -46,6 +167,7 @@ pub(crate) async fn renew_agent(
     agent_home: &Path,
     keychain: &Mutex<KeychainCache>,
     keychain_enabled: bool,
+    status: &StatusCoalescer,
 ) -> Result<SecretString, PluginError> {
     let _lease = host.accounts().lease(account, LEASE_WAIT).await?;
     let now = host.clock().now();
@@ -58,7 +180,7 @@ pub(crate) async fn renew_agent(
                 "cursor-agent is not installed: it is not on PATH; install it or set `command`",
             )
         })?;
-        agent_status(host, program, agent_home).await?;
+        status.agent_status(host, program, agent_home).await?;
         token = cli::live_access(host, agent_home, true, keychain, keychain_enabled)
             .await?
             .unwrap_or_default();
@@ -150,4 +272,103 @@ pub(crate) async fn oauth_check(
 
 fn escape_json(text: &str) -> String {
     text.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn shared_status_error(error: &PluginError) -> Arc<PluginError> {
+    Arc::new(PluginError::auth(error.to_string()))
+}
+
+fn plugin_error_from_shared(error: &Arc<PluginError>) -> PluginError {
+    PluginError::auth(error.to_string())
+}
+
+#[cfg(test)]
+mod status_coalesce_tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use hofund_kit_subscription::{block_on_paused, join_all, yield_times};
+
+    use super::StatusCoalescer;
+    use hofund_plugin_api::PluginError;
+
+    #[test]
+    fn concurrent_callers_share_one_run() {
+        let coalescer = StatusCoalescer::default();
+        let runs = Arc::new(AtomicUsize::new(0));
+        block_on_paused(async {
+            let left = {
+                let coalescer = &coalescer;
+                let runs = Arc::clone(&runs);
+                Box::pin(async move {
+                    coalescer
+                        .coalesce(|| async {
+                            runs.fetch_add(1, Ordering::SeqCst);
+                            yield_times(2).await;
+                            Ok(())
+                        })
+                        .await
+                        .expect("first");
+                })
+            };
+            let right = {
+                let coalescer = &coalescer;
+                let runs = Arc::clone(&runs);
+                Box::pin(async move {
+                    coalescer
+                        .coalesce(|| async {
+                            runs.fetch_add(1, Ordering::SeqCst);
+                            yield_times(1).await;
+                            Ok(())
+                        })
+                        .await
+                        .expect("second");
+                })
+            };
+            join_all(vec![left, right]).await;
+        });
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            1,
+            "concurrent status coalescing must run the leader only once"
+        );
+    }
+
+    #[test]
+    fn leader_failure_is_shared() {
+        let coalescer = StatusCoalescer::default();
+        let runs = Arc::new(AtomicUsize::new(0));
+        block_on_paused(async {
+            let left = {
+                let coalescer = &coalescer;
+                let runs = Arc::clone(&runs);
+                Box::pin(async move {
+                    let err = coalescer
+                        .coalesce(|| async {
+                            runs.fetch_add(1, Ordering::SeqCst);
+                            yield_times(1).await;
+                            Err(PluginError::auth("status failed"))
+                        })
+                        .await
+                        .expect_err("failed");
+                    assert!(err.to_string().contains("status failed"));
+                })
+            };
+            let right = {
+                let coalescer = &coalescer;
+                Box::pin(async move {
+                    let err = coalescer
+                        .coalesce(|| async {
+                            yield_times(0).await;
+                            Ok(())
+                        })
+                        .await
+                        .expect_err("waiter sees failure");
+                    assert!(err.to_string().contains("status failed"));
+                })
+            };
+            join_all(vec![left, right]).await;
+        });
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+    }
 }
