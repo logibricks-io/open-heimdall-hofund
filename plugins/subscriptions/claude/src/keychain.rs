@@ -42,14 +42,17 @@ static DISCOVERY_BLOCKED: AtomicBool = AtomicBool::new(false);
 pub(crate) fn keychain_enabled() -> bool {
     #[cfg(test)]
     {
+        // Existing file-path tests must not spawn `security` on macOS CI.
+        // Keychain fixtures opt in with `set_test_force_keychain(true)`.
         if SKIP_KEYCHAIN.load(std::sync::atomic::Ordering::Relaxed) {
             return false;
         }
-        if FORCE_KEYCHAIN.load(std::sync::atomic::Ordering::Relaxed) {
-            return true;
-        }
+        FORCE_KEYCHAIN.load(std::sync::atomic::Ordering::Relaxed)
     }
-    cfg!(target_os = "macos")
+    #[cfg(not(test))]
+    {
+        cfg!(target_os = "macos")
+    }
 }
 
 #[cfg(test)]
