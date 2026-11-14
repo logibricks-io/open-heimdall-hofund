@@ -2797,6 +2797,7 @@ dependencies = [
  "hofund-plugin-retrieval",
  "hofund-plugin-sdk",
  "hofund-plugin-subscription-antigravity",
+ "hofund-plugin-subscription-chatgpt-api",
  "hofund-plugin-subscription-claude",
  "hofund-plugin-subscription-cline",
  "hofund-plugin-subscription-codex",
@@ -2890,6 +2891,16 @@ dependencies = [
 
 [[package]]
 name = "hofund-plugin-subscription-antigravity"
+version = "0.1.0"
+dependencies = [
+ "hofund-kit-subscription",
+ "hofund-plugin-api",
+ "hofund-plugin-sdk",
+ "tempfile",
+]
+
+[[package]]
+name = "hofund-plugin-subscription-chatgpt-api"
 version = "0.1.0"
 dependencies = [
  "hofund-kit-subscription",
