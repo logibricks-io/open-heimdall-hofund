@@ -229,6 +229,141 @@ pub(crate) fn find<'a>(opened: &'a [Opened], id: &str) -> Result<&'a Opened, Dae
         .ok_or_else(|| DaemonError::new(format!("no subscription `{id}` in the config")))
 }
 
+/// Imports accounts from `text`, routing typed Google exports to their declared app.
+pub async fn accounts_import(opened: &[Opened], text: &str) -> Result<Vec<String>, DaemonError> {
+    use hofund_plugin_api::PluginErrorKind;
+
+    let has_gemini = opened.iter().any(|entry| entry.id == "gemini");
+    let has_antigravity = opened.iter().any(|entry| entry.id == "antigravity");
+    let google_pair = has_gemini && has_antigravity;
+    if google_pair && is_untyped_google_import(text) {
+        return Err(DaemonError::new(
+            "untyped Google account exports are ambiguous when Gemini and Antigravity are both configured; use an export whose `type` names the app",
+        ));
+    }
+    let intended = google_pair
+        .then(|| typed_google_import(text))
+        .flatten()
+        .and_then(|id| opened.iter().find(|entry| entry.id == id));
+    let candidates: Vec<&Opened> =
+        intended.map_or_else(|| opened.iter().collect(), |entry| vec![entry]);
+    for entry in candidates {
+        match entry.instance.import_accounts(text, &entry.host).await {
+            Ok(ids) => {
+                return Ok(ids.into_iter().map(|id| id.to_string()).collect());
+            }
+            Err(error) if error.kind() == PluginErrorKind::Unsupported => {}
+            Err(error) => return Err(show(error)),
+        }
+    }
+    Err(DaemonError::new(
+        "no configured subscription read that account export".to_owned(),
+    ))
+}
+
+fn typed_google_import(text: &str) -> Option<String> {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text).trim();
+    if !text.starts_with(['[', '{']) {
+        return None;
+    }
+    let value = serde_json::from_str(text).ok()?;
+    let mut types = Vec::new();
+    collect_google_import_types(&value, &mut types);
+    let first = types.first()?.to_ascii_lowercase();
+    if !matches!(first.as_str(), "gemini" | "antigravity")
+        || types.iter().any(|kind| !kind.eq_ignore_ascii_case(&first))
+    {
+        return None;
+    }
+    Some(first)
+}
+
+fn collect_google_import_types<'a>(value: &'a serde_json::Value, types: &mut Vec<&'a str>) {
+    match value {
+        serde_json::Value::Array(entries) => {
+            for entry in entries {
+                collect_google_import_types(entry, types);
+            }
+        }
+        serde_json::Value::Object(object) => {
+            let has_refresh = ["refresh_token", "refreshToken"].iter().any(|key| {
+                object
+                    .get(*key)
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|token| !token.trim().is_empty())
+            });
+            if let Some(accounts) = object.get("accounts").and_then(serde_json::Value::as_array)
+                && !has_refresh
+            {
+                for account in accounts {
+                    collect_google_import_types(account, types);
+                }
+                return;
+            }
+            if let Some(kind) = object
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|kind| !kind.is_empty())
+            {
+                types.push(kind);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_untyped_google_import(text: &str) -> bool {
+    fn has_untyped_entry(value: &serde_json::Value) -> bool {
+        match value {
+            serde_json::Value::String(_) => true,
+            serde_json::Value::Array(entries) => entries.iter().any(has_untyped_entry),
+            serde_json::Value::Object(object) => {
+                let has_refresh = ["refresh_token", "refreshToken"].iter().any(|key| {
+                    object
+                        .get(*key)
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|token| !token.trim().is_empty())
+                });
+                if let Some(accounts) = object.get("accounts").and_then(serde_json::Value::as_array)
+                    && !has_refresh
+                {
+                    return accounts.iter().any(has_untyped_entry);
+                }
+                let has_type = object
+                    .get("type")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|kind| !kind.trim().is_empty());
+                let has_nested_refresh = object
+                    .get("token")
+                    .and_then(serde_json::Value::as_object)
+                    .is_some_and(|token| {
+                        ["refresh_token", "refreshToken"].iter().any(|key| {
+                            token
+                                .get(*key)
+                                .and_then(serde_json::Value::as_str)
+                                .is_some_and(|value| !value.trim().is_empty())
+                        })
+                    });
+                !has_type && (has_refresh || has_nested_refresh)
+            }
+            _ => false,
+        }
+    }
+
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text).trim();
+    if !text.starts_with(['[', '{']) {
+        return text.lines().any(|line| {
+            let line = line.trim();
+            !line.is_empty() && !line.starts_with('#')
+        });
+    }
+    let Ok(value) = serde_json::from_str(text) else {
+        return false;
+    };
+    has_untyped_entry(&value)
+}
+
 fn runtime() -> Result<tokio::runtime::Runtime, DaemonError> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -998,6 +1133,7 @@ mod tests {
         proofs: Mutex<Vec<String>>,
         refreshes: Mutex<Vec<String>>,
         removes: Mutex<Vec<String>>,
+        imports: Mutex<Vec<String>>,
         redirect: Mutex<Option<String>>,
     }
 
@@ -1137,6 +1273,19 @@ mod tests {
                 .expect("removes")
                 .push(account.to_string());
             Ok(())
+        }
+
+        async fn import_accounts(
+            &self,
+            _text: &str,
+            _host: &HostContext,
+        ) -> Result<Vec<AccountId>, PluginError> {
+            self.calls
+                .imports
+                .lock()
+                .expect("imports")
+                .push(self.id.to_string());
+            Ok(vec![AccountId::from_static("imported")])
         }
     }
 
@@ -1636,6 +1785,113 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&quota_json(&listings)).expect("json");
         assert_eq!(value[0]["windows"][0]["limit"], 10);
         assert!(quota_in(&rig.opened(), Some("missing")).await.is_err());
+    }
+
+    fn google_import_rig() -> (tempfile::TempDir, Vec<Opened>, Arc<Calls>) {
+        let dir = tempfile::tempdir().expect("dir");
+        let calls = Arc::new(Calls::default());
+        let opened = ["antigravity", "gemini"]
+            .into_iter()
+            .map(|id| {
+                let plugin = PluginId::from_static(id);
+                let host = TestHost::open_for(
+                    PluginKind::Subscription,
+                    plugin.clone(),
+                    dir.path().join(id),
+                );
+                Opened {
+                    id: id.to_owned(),
+                    name: id.to_owned(),
+                    instance: Arc::new(Fake {
+                        id: plugin,
+                        mode: Mode::Device,
+                        flow: SignInFlow::Pkce,
+                        calls: Arc::clone(&calls),
+                    }),
+                    host: host.context().clone(),
+                }
+            })
+            .collect();
+        (dir, opened, calls)
+    }
+
+    #[tokio::test]
+    async fn r49d_accounts_import_routes_typed_google_exports() {
+        for (text, intended) in [
+            (
+                r#"{"type":"gemini","refresh_token":"synthetic","email":"u@example.test"}"#,
+                "gemini",
+            ),
+            (
+                r#"{"type":"antigravity","refresh_token":"synthetic","email":"u@example.test"}"#,
+                "antigravity",
+            ),
+        ] {
+            let (_dir, opened, calls) = google_import_rig();
+            let ids = super::accounts_import(&opened, text).await.expect("import");
+            assert_eq!(ids, ["imported"]);
+            assert_eq!(
+                calls.imports.lock().expect("imports").as_slice(),
+                [intended]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn r49d_accounts_import_dispatches_non_google_exports_with_google_pair() {
+        for text in [
+            r#"{"accessToken":"synthetic"}"#,
+            r#"{"claudeAiOauth":{"accessToken":"synthetic","refreshToken":"synthetic"}}"#,
+            r#"{"swapVersion":"0.29.0-test","accounts":[{"credentials":{"claudeAiOauth":{"accessToken":"synthetic","refreshToken":"synthetic"}}}]}"#,
+        ] {
+            let (_dir, mut opened, calls) = google_import_rig();
+            let plugin = PluginId::from_static("cursor");
+            let host = TestHost::open_for(
+                PluginKind::Subscription,
+                plugin.clone(),
+                _dir.path().join("cursor"),
+            );
+            opened.insert(
+                0,
+                Opened {
+                    id: "cursor".to_owned(),
+                    name: "cursor".to_owned(),
+                    instance: Arc::new(Fake {
+                        id: plugin,
+                        mode: Mode::Device,
+                        flow: SignInFlow::Pkce,
+                        calls: Arc::clone(&calls),
+                    }),
+                    host: host.context().clone(),
+                },
+            );
+            let ids = super::accounts_import(&opened, text).await.expect("import");
+            assert_eq!(ids, ["imported"]);
+            assert_eq!(
+                calls.imports.lock().expect("imports").as_slice(),
+                ["cursor"]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn r49d_accounts_import_rejects_ambiguous_untyped_google_exports() {
+        for text in [
+            "synthetic-refresh-token",
+            r#"["synthetic-refresh-token"]"#,
+            r#"{"refresh_token":"synthetic"}"#,
+            r#"{"accounts":[{"email":"u@example.test","token":{"refresh_token":"synthetic"}}]}"#,
+        ] {
+            let (_dir, opened, calls) = google_import_rig();
+            let error = super::accounts_import(&opened, text)
+                .await
+                .expect_err("ambiguous untyped export");
+            assert_eq!(
+                error.to_string(),
+                "untyped Google account exports are ambiguous when Gemini and Antigravity are both configured; use an export whose `type` names the app"
+            );
+            assert!(calls.imports.lock().expect("imports").is_empty());
+        }
     }
 
     #[tokio::test]

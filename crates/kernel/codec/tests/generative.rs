@@ -233,11 +233,37 @@ fn a_tool_role_comes_back_as_user() {
     assert_eq!(decoded.messages[0].role, Role::User);
     match &decoded.messages[0].content[0] {
         ContentPart::ToolResult(part) => {
-            assert!(!part.is_error);
+            assert!(part.is_error);
             assert_eq!(part.extensions.get("name"), Some(&json!("get_weather")));
         }
         other => panic!("expected a function response, got {other:?}"),
     }
+}
+
+#[test]
+fn r49d_function_response_attachments_round_trip_beside_the_result() {
+    let body = br#"{"contents":[{"role":"user","parts":[{"functionResponse":{"id":"call_1","name":"read","response":{"output":"read it"},"parts":[{"inlineData":{"mimeType":"image/png","data":"QUFB"}},{"fileData":{"mimeType":"image/png","fileUri":"https://example.test/b.png"}}]}}]}]}"#;
+    let decoded = GenerativeLanguage.decode_request(body).expect("decode");
+    let ContentPart::ToolResult(result) = &decoded.messages[0].content[0] else {
+        panic!("function response");
+    };
+    assert_eq!(result.content.len(), 3, "{result:?}");
+    assert!(matches!(result.content[1], ContentPart::Image(_)));
+    assert!(matches!(result.content[2], ContentPart::Image(_)));
+
+    let encoded = GenerativeLanguage.encode_request(&decoded).expect("encode");
+    let value: serde_json::Value = serde_json::from_slice(&encoded).expect("json");
+    let parts = value["contents"][0]["parts"].as_array().expect("parts");
+    assert_eq!(parts.len(), 3);
+    assert_eq!(
+        parts[0]["functionResponse"]["response"]["output"],
+        "read it"
+    );
+    assert_eq!(parts[1]["inlineData"]["data"], "QUFB");
+    assert_eq!(
+        parts[2]["fileData"]["fileUri"],
+        "https://example.test/b.png"
+    );
 }
 
 #[test]

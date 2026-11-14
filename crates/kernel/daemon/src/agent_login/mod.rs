@@ -8,6 +8,7 @@ mod state;
 
 mod cli;
 
+pub use crate::sign_in::accounts_import;
 pub use cli::{accounts_import_in, accounts_project_in, accounts_switch_in};
 pub use logic::{
     LoginPolicy, LoginQuota, LoginRow, account_by_name, next_in_order, next_login, next_on_forget,
@@ -423,23 +424,6 @@ pub async fn accounts_project(
         .set_project(email, project, &entry.host)
         .await
         .map_err(show)
-}
-
-/// Imports accounts from `text` through the first subscription that reads it.
-pub async fn accounts_import(opened: &[Opened], text: &str) -> Result<Vec<String>, DaemonError> {
-    use hofund_plugin_api::PluginErrorKind;
-    for entry in opened {
-        match entry.instance.import_accounts(text, &entry.host).await {
-            Ok(ids) => {
-                return Ok(ids.into_iter().map(|id| id.to_string()).collect());
-            }
-            Err(error) if error.kind() == PluginErrorKind::Unsupported => {}
-            Err(error) => return Err(show(error)),
-        }
-    }
-    Err(DaemonError::new(
-        "no configured subscription read that account export".to_owned(),
-    ))
 }
 
 #[cfg(test)]

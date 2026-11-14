@@ -445,7 +445,15 @@ fn decode_function_response(mut response: Object, part: Object) -> Result<Conten
         Some(body) => Value::Object(body),
         None => Value::Object(Object::new()),
     };
+    let is_error = body.get("error").is_some();
     let text = serde_json::to_string(&body)?;
+    let attachments = match response.remove("parts") {
+        Some(parts) => decode_parts(parts)?
+            .into_iter()
+            .filter(|part| !matches!(part, ContentPart::Text(_)))
+            .collect(),
+        None => Vec::new(),
+    };
     let mut extensions = Extensions::from_map(part);
     if let Some(name) = name {
         extensions.insert("name", Value::String(name));
@@ -453,10 +461,12 @@ fn decode_function_response(mut response: Object, part: Object) -> Result<Conten
     if !response.is_empty() {
         extensions.insert("functionFields", Value::Object(response));
     }
+    let mut content = vec![ContentPart::text(text)];
+    content.extend(attachments);
     Ok(ContentPart::ToolResult(ToolResultPart {
         id,
-        is_error: false,
-        content: vec![ContentPart::text(text)],
+        is_error,
+        content,
         extensions,
     }))
 }
@@ -489,7 +499,18 @@ fn decode_file(mut file: Object, part: Object) -> Result<ContentPart, CodecError
 }
 
 fn encode_parts(parts: &[ContentPart]) -> Result<Vec<Value>, CodecError> {
-    parts.iter().map(encode_part).collect()
+    let mut encoded = Vec::new();
+    for part in parts {
+        encoded.push(encode_part(part)?);
+        if let ContentPart::ToolResult(result) = part {
+            for attachment in &result.content {
+                if !matches!(attachment, ContentPart::Text(_)) {
+                    encoded.push(encode_part(attachment)?);
+                }
+            }
+        }
+    }
+    Ok(encoded)
 }
 
 fn encode_part(part: &ContentPart) -> Result<Value, CodecError> {
@@ -595,17 +616,15 @@ fn tool_response_body(part: &ToolResultPart) -> Result<Value, CodecError> {
     }
     let mut text = String::new();
     for content in &part.content {
-        match content {
-            ContentPart::Text(text_part) => text.push_str(&text_part.text),
-            _ => {
-                return Err(unsupported("a function response can only carry text"));
-            }
+        if let ContentPart::Text(text_part) = content {
+            text.push_str(&text_part.text);
         }
     }
     if let Ok(Value::Object(object)) = serde_json::from_str::<Value>(&text) {
         return Ok(Value::Object(object));
     }
-    Ok(serde_json::json!({"result": text}))
+    let key = if part.is_error { "error" } else { "output" };
+    Ok(serde_json::json!({(key): text}))
 }
 
 fn encode_image(part: &ImagePart) -> Object {

@@ -36,6 +36,7 @@ classify::ModelTags::const fn decides (self) -> bool
 classify::ModelTags::const fn draws (self) -> bool
 classify::ModelTags::const fn films (self) -> bool
 classify::fn classify_model (id : & str , kind : & str) -> Option < ModelTags >
+code_assist::fn shape_code_assist (body : & mut Map < String , Value > , model : & str , antigravity : bool)
 codex_tool_names::fn codex_names_bad (body : & [u8]) -> bool
 codex_tool_names::fn codex_tool_name (name : & str) -> String
 codex_tool_names::fn codex_tool_names_back (declared : & [String]) -> BTreeMap < String , String >
@@ -114,6 +115,7 @@ jwt::RsaSigner::fn sign (& self , header : & Value , claims : & Value) -> Result
 mod bedrock
 mod checkin
 mod classify
+mod code_assist
 mod codex_tool_names
 mod codex_zstd
 mod cosy
@@ -144,6 +146,7 @@ oauth::AccessToken
 oauth::AccessToken::const fn expires_in (& self) -> Duration
 oauth::AccessToken::fn expose_secret (& self) -> & str
 oauth::Clock
+oauth::GoogleImport
 oauth::IamAccessToken
 oauth::IamAccessToken::const fn access_token (& self) -> & AccessToken
 oauth::IamAccessToken::fn expire_time (& self) -> Option < & str >
@@ -167,6 +170,7 @@ oauth::fn refresh_form (client_id : & str , client_secret : & str , refresh_toke
 oauth::fn refresh_secret_form (client_id : & str , client_secret : & str , refresh_token : & SecretString ,) -> String
 oauth::new_state
 oauth::new_state_with_random_bytes
+oauth::parse_google_import
 oauth::parse_token_set
 oauth::same_secret
 oauth::secret_text

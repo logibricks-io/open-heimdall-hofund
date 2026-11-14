@@ -21,8 +21,8 @@ Legend: **Done** = matches the reference at checklist granularity; **Partial** =
 | Cline / ClinePass (`cline`) | 12 | 4 | 0 | 3 | 0 |
 | ChatGPT / Codex (`codex` backend) and ChatGPT API (`chatgpt-api`) | 8 | 11 | 2 | 0 | 0 |
 | GitHub Copilot (github.com and GHE) | 15 | 2 | 0 | 5 | 0 |
-| Gemini CLI (Code Assist) | 8 | 6 | 2 | 2 | 0 |
-| Google Antigravity | 10 | 4 | 2 | 1 | 0 |
+| Gemini CLI (Code Assist) | 10 | 6 | 0 | 2 | 0 |
+| Google Antigravity | 11 | 4 | 1 | 1 | 0 |
 | SuperGrok (`grok`) | 14 | 2 | 0 | 2 | 0 |
 | Qoder (international + Qoder CN) | 13 | 5 | 0 | 2 | 0 |
 | CodeBuddy / WorkBuddy (CN + international) | 18 | 1 | 0 | 0 | 0 |
@@ -393,31 +393,31 @@ Remaining verification is live-account acceptance; all evidence here is determin
 
 **hofund path:** `plugins/subscriptions/gemini/`.
 
-| # | capability | reference v0.1.3005 | hofund 08035c9 | status | gap to close |
+| # | capability | reference v0.1.3005 | hofund R-49d | status | gap to close |
 |---|------------|----------------------|----------------|--------|--------------|
 | a1 | sign-in: loopback OAuth (Gemini CLI client) | `google.go:71-80` client id, `/oauth2callback` | `gemini/src/sign_in.rs`, `lib.rs:48-52` same client/secret | Done | — |
 | a2 | device / API key / paste | N/A for Gemini CLI built-in | N/A | N/A | — |
-| b | import sources | `google_import.go:178+` Cockpit/Manager/CLIProxyAPI exports; read `~/.gemini/oauth_creds.json` never write | no import in gemini plugin | Missing | Import paths + read-only gemini home (R-49) |
+| b | import sources | `google_import.go:178+` Cockpit/Manager/CLIProxyAPI exports; read `~/.gemini/oauth_creds.json` never write | `import.rs` reads all export shapes, nested Manager tokens, bare token lines, and project ids with app/dedup validation; `discover.rs` reads OAuth credentials, the active account, and `.env` project without writing; `r49d_*` fixtures | Done | — |
 | c | token storage | `logins.json`; refresh in memory only | `tokens.rs:1-4` in-memory refresh, stored refresh unchanged | Done | — |
 | d | refresh | `google.go` in-memory refresh at oauth2.googleapis.com | `tokens.rs:33-52` TokenCache + lapsed flag | Done | — |
 | e | upstream wire | `cloudcode-pa.googleapis.com` `v1internal:{generateContent,streamGenerateContent?alt=sse}` envelope | `upstream.rs:17-54` same pattern, `method_root` | Done | — |
 | f | inbound shapes | Gateway maps Chat/Responses/Messages/Gemini → envelope (`codeassist.go`) | Upstream `GENERATIVE_LANGUAGE`; gateway codec to IR | Done | — |
 | g | streaming | SSE `streamGenerateContent` | `wire::execute` streaming | Done | — |
-| h | tool calls | Gateway plain schema / function declarations (`codeassist.go`) | `plain_code_assist_tools` in upstream rewrite (`upstream.rs:48-49`) | Partial | Full tool parity vs gateway tests unverified |
-| i | images | Generative Language parts | via IR content parts | Partial | unverified |
-| j | reasoning / thinking | Thought signatures, skip validator (`codeassist.go:29-31`) | unverified in gemini plugin | Partial | Thought signature parity (R-49) |
+| h | tool calls | Gateway plain schema / function declarations (`codeassist.go`) | `code_assist.rs` keeps `parametersJsonSchema`, drops duplicate results, pairs interrupted calls, and separates response/text turns; `r49d_recorded_*` request fixtures | Partial | Remaining cross-client and live acceptance verification |
+| i | images | Generative Language parts | Codec and Code Assist rewrite carry inline and URL images in user and tool-result parts; `r49d_*` codec and recorded-request fixtures | Partial | Live acceptance verification |
+| j | reasoning / thinking | Thought signatures, skip validator (`codeassist.go:29-31`) | `code_assist.rs` preserves native text/call signatures, skips unsigned turns, drops reasoning replay, and has `r49d_*` fixtures | Partial | Cross-client signature transport and live verification |
 | k | quota / usage | `retrieveUserQuota` per model windows | `quota.rs` buckets from same RPC; R-49 applies the experiment-driven quota-id mapping | Done | — |
 | l | model list | `retrieveUserQuota` preview signal + `listExperiments` flags choose Gemini CLI 0.61's catalog (`google.go:854-999`, `1180-1236`); `fetchAvailableModels` is Antigravity's path | `models.rs` ports the flag ids, catalog filtering, display names, and image flags; hourly per-instance cache; offline reference cases | Done | — |
 | m | multi-account | Multiple google logins | multiple accounts | Done | — |
 | n | error classification | RetryInfo → retry-after (`codeassist.go`) | `wire` retry_delay in feature-parity doc | Partial | Individual-account refusal persistence (`google.go:330+`) |
 | o | daily check-in / warmup | N/A | N/A | N/A | — |
-| p | agent sign-in | read gemini home only in reference docs | no `AgentSignIn` on gemini spec | Missing | Optional discover of `~/.gemini/oauth_creds.json` (R-49) |
+| p | agent sign-in | read gemini home only in reference docs | `AgentSignIn` declares `.gemini`; `discover.rs` lists/imports the active Google account and project read-only, rejects another OAuth client, and never persists the access token; `r49d_*` fixtures | Done | — |
 | q | extras | Code Assist Standard/Enterprise project onboarding; `SetGoogleProject` names or clears an account's stored Cloud project; model-name mapping from the reference catalog | `project.rs` loadCodeAssist/onboardUser and leased account updates; `hofund accounts project gemini <email> <gcp-project-id>` trims, stores, and clears the project used by execute and quota; `models.rs` maps listed, outgoing, and quota ids from the same experiments; offline tests only | Done | — |
 
 **Gaps**
 
-- Google account import formats — **M**, **R-49**.
-- Gateway-grade tool/thought-signature edge cases — **M**, **R-49**.
+- Individual-account refusal persistence and live-account verification remain.
+- All R-49d import, discovery, tool, image, and signature evidence is deterministic and offline.
 
 ---
 
@@ -429,31 +429,30 @@ Remaining verification is live-account acceptance; all evidence here is determin
 
 **hofund path:** `plugins/subscriptions/antigravity/src/`; the existing desktop adapter remains separate under `plugins/agents/antigravity/`.
 
-| # | capability | reference v0.1.3005 | hofund R-49c | status | gap to close |
+| # | capability | reference v0.1.3005 | hofund R-49d | status | gap to close |
 |---|------------|----------------------|--------------|--------|--------------|
 | a1 | sign-in: loopback OAuth (Antigravity client) | `google.go:82-90` embeds Antigravity's installed-app client, `/oauth-callback`, `localhost` | `sign_in.rs` and `lib.rs`: same scopes, PKCE, localhost path; client from plugin `client_id`/`client_secret` or `HOFUND_ANTIGRAVITY_CLIENT_*` env (hofund does not ship the 3005 literals). Offline tests use a fake client (`r49c_oauth_*`) | Done | Operator must supply the installed-app client; 3005 embeds it |
-| b | import sources | `google_import.go` refresh token imports | none | Missing | Antigravity Cockpit/Manager/CLIProxyAPI export import (R-49 follow-up) |
+| b | import sources | `google_import.go` refresh token imports | `import.rs` accepts Cockpit/Manager/CLIProxyAPI exports and bare tokens, uses the configured Antigravity OAuth client, keeps file email/project fallbacks, and skips an existing refresh token; `r49d_*` recorded imports | Done | — |
 | c | token storage | logins.json + in-memory refresh | Account store keeps the refresh token; `tokens.rs` keeps access tokens in memory | Done | — |
 | d | refresh | same as Google subscriptions | `tokens.rs`: oauth2.googleapis.com, two-minute margin, lapsed grants; offline refresh/refusal tests | Done | — |
 | e | upstream wire | `daily-cloudcode-pa.googleapis.com` + prod load base (`google.go:98-100`) | `Endpoints`, `project.rs`, and `upstream.rs` use those bases and the Antigravity Code Assist envelope | Done | — |
 | f | inbound shapes | Same Code Assist envelope; effort variant IDs (`antigravity_models.go`) | SDK codecs translate inbound wires; `models.rs` folds families and `upstream.rs` picks effort variants; offline unary test | Done | — |
 | g | streaming | SSE envelope | `upstream.rs` lifts each `response` frame on `streamGenerateContent?alt=sse`; offline stream test | Done | — |
-| h | tools | tool declarations and thought signatures (`internal/gateway/codeassist.go`) | Standard IR tools plus `plain_code_assist_tools`; no Antigravity-specific full gateway equivalence run | Partial | Thought-signature and tool-history edge cases remain unverified |
-| i | images | inline image parts on the Code Assist wire (`internal/gateway/codeassist.go`) | Standard IR image parts and model image flags | Partial | Offline image-request fixture remains |
-| j | reasoning | thought signatures / thinking config, cloak and turned-away detection (`codeassist.go`, `packages/antigravity-cloak`) | Effort ids/levels, reference prompt cloak, and non-cooling 400 mapping are tested offline; thought-signature edges are not | Partial | Thought-signature parity and live verification remain |
+| h | tools | tool declarations and thought signatures (`internal/gateway/codeassist.go`) | `plain_code_assist_tools` plus `code_assist.rs` sanitize ids, pair/dedup calls, select `VALIDATED` for Claude, and apply signature rules; `r49d_recorded_*` fixtures | Partial | Remaining cross-client and live acceptance verification |
+| i | images | inline image parts on the Code Assist wire (`internal/gateway/codeassist.go`) | Codec and Code Assist rewrite carry inline and URL tool-result images; Claude responses lead, followed by labelled images; `r49d_*` fixtures | Partial | Live acceptance verification |
+| j | reasoning | thought signatures / thinking config, cloak and turned-away detection (`codeassist.go`, `packages/antigravity-cloak`) | Effort/cloak/refusal tests plus `code_assist.rs` skip-signature handling and `r49d_*` recorded fixtures | Partial | Cross-client signature transport and live verification remain |
 | k | quota / usage | `fetchAvailableModels` model quota plus `retrieveUserQuotaSummary` shared windows | `quota.rs` reads both, including reset times and omitted-fraction exhaustion; offline test | Done | — |
 | l | model list | `antigravity_pool.go:15-49` union across accounts; effort folding (`antigravity_models.go`) | `models.rs` parses picker order, filters hidden/disabled ids, falls back through tiers, folds families, and merges account unions; offline tests | Done | — |
 | m | multi-account | Pool catalog union | One Google email has distinct Gemini and Antigravity account ids; all stored Antigravity accounts join the union in account order | Done | — |
 | n | error classification | 429 “turned away” prompts (`codeassist.go:51-66`) | `upstream.rs` distinguishes prompt refusal from real quota and returns a non-cooling 400 with the reference hint | Done | — |
 | o | check-in / warmup | N/A | N/A | N/A | — |
-| p | agent sign-in | Antigravity desktop agent separate | Desktop `agent.toml` only; no subscription sign-in switch | Missing | Agent sign-in switching is not in R-49c |
+| p | agent sign-in | Antigravity desktop agent separate | Desktop `agent.toml` only; no subscription sign-in switch | Missing | No safe reference writer; switching remains out of scope |
 | q | extras | Ban-risk warning in UI; version manifest URL (`google.go:68`) | Full account-suspension warning prints before CLI sign-in and remains in docs; request version is the fixed reference fallback | Partial | Dynamic version-manifest refresh remains |
 
 **Gaps**
 
-- Refresh-token export import and agent sign-in switching — **M**, R-49 follow-up.
-- Full tool/image/thought-signature gateway fixtures and dynamic app-version refresh — **M**, R-49 follow-up.
-- Real-account verification is not performed in this slice.
+- Agent sign-in switching and dynamic app-version refresh remain.
+- R-49d adds deterministic refresh-token imports and tool/image/signature fixtures; real-account verification is not performed.
 
 ---
 
