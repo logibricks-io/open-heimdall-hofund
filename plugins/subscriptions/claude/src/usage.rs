@@ -69,13 +69,13 @@ fn overages_line() -> &'static Regex {
 }
 
 /// Runs `claude -p /usage` in `dir` and returns stdout text.
-pub(crate) async fn run_usage_cli(
+pub(crate) async fn run_usage_command(
     host: &hofund_plugin_api::HostContext,
-    program: &std::path::Path,
+    command: &crate::launcher::ClaudeCommand,
     dir: &std::path::Path,
     extra_env: &[(std::ffi::OsString, std::ffi::OsString)],
 ) -> Result<String, PluginError> {
-    let request = cli::request_with_extra(program, &cli::USAGE_ARGS, dir, extra_env)?;
+    let request = command.spawn_request(&cli::USAGE_ARGS, dir, extra_env)?;
     let child = host.spawn_process().spawn_piped(&request).await?;
     let mut stdout = child.stdout()?;
     let text = hofund_plugin_sdk::timeout(cli::USAGE_WAIT, cli::collect(&mut stdout)).await;

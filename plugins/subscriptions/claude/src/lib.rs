@@ -29,6 +29,7 @@ mod cli;
 mod creds;
 mod discover;
 mod import;
+mod launcher;
 mod lock;
 mod models;
 mod run_lock;
@@ -36,6 +37,7 @@ mod setup_token;
 mod upstream;
 mod usage;
 mod usage_reset;
+mod wslrun;
 
 use account::{account_dir, remove_tree};
 use creds::{Credentials, Profile};
@@ -181,7 +183,7 @@ fn pending_idle() -> Duration {
 
 /// A `claude auth login` waiting for its code.
 struct Pending {
-    program: PathBuf,
+    command: launcher::ClaudeCommand,
     dir: PathBuf,
     child: PipedChild,
     stdout: BodyStream,
@@ -248,16 +250,8 @@ impl Claude {
         true
     }
 
-    /// The `claude` program to run.
-    fn program(&self) -> Result<PathBuf, PluginError> {
-        if let Some(command) = &self.command {
-            return Ok(command.clone());
-        }
-        hofund_plugin_sdk::process::find_program(COMMAND).ok_or_else(|| {
-            PluginError::config(
-                "Claude Code is not installed: `claude` is not on PATH; install it or set `command`",
-            )
-        })
+    async fn launcher(&self, host: &HostContext) -> Result<launcher::ClaudeCommand, PluginError> {
+        launcher::ClaudeCommand::resolve(host, self.command.as_ref(), COMMAND).await
     }
 }
 
@@ -273,10 +267,10 @@ fn remove_dir(dir: &Path) {
 /// Starts `claude auth login` in `dir` and reads up to its link.
 async fn start_login(
     host: &HostContext,
-    program: PathBuf,
+    command: launcher::ClaudeCommand,
     dir: PathBuf,
 ) -> Result<(Pending, String), PluginError> {
-    let request = cli::request(&program, &cli::LOGIN_ARGS, &dir)?;
+    let request = command.spawn_request(&cli::LOGIN_ARGS, &dir, &[])?;
     let child = host.spawn_process().spawn_piped(&request).await?;
     let mut stdout = child.stdout()?;
     let mut last = String::new();
@@ -289,7 +283,7 @@ async fn start_login(
     };
     Ok((
         Pending {
-            program,
+            command,
             dir,
             child,
             stdout,
@@ -353,7 +347,8 @@ async fn finish_login(
     let mut profile = Profile::read(&pending.dir);
     if profile.email().is_none()
         && let Some(status) =
-            account::status(host, &pending.program, &pending.dir, &SecretObject::new()).await
+            account::status_command(host, &pending.command, &pending.dir, &SecretObject::new())
+                .await
     {
         profile.add_status(&status);
     }
@@ -389,13 +384,13 @@ impl Subscription for Claude {
         host: &HostContext,
     ) -> Result<SignInChallenge, PluginError> {
         self.expire_idle(host);
-        let program = self.program()?;
+        let command = self.launcher(host).await?;
         let dir = sign_in_dir(host, ctx)?;
         // A sign-in that restarts with the same session starts clean.
         drop(self.take_pending(ctx.session()));
         remove_dir(&dir);
         creds::private_dir(&dir)?;
-        let (pending, link) = match start_login(host, program, dir.clone()).await {
+        let (pending, link) = match start_login(host, command, dir.clone()).await {
             Ok(started) => started,
             Err(error) => {
                 remove_dir(&dir);
@@ -500,7 +495,7 @@ impl Subscription for Claude {
     }
 
     async fn refresh(&self, account: &AccountId, host: &HostContext) -> Result<(), PluginError> {
-        account::refresh(host, || self.program(), account).await
+        account::refresh(host, self.command.as_ref(), account).await
     }
 
     async fn quota(
@@ -517,7 +512,7 @@ impl Subscription for Claude {
         if setup_token::is_setup_token(&blob) {
             return Err(PluginError::unsupported(usage::SETUP_TOKEN_QUOTA));
         }
-        account::read_usage(host, || self.program(), account).await
+        account::read_usage(host, self.command.as_ref(), account).await
     }
 
     async fn list_models(
@@ -572,7 +567,7 @@ impl Subscription for Claude {
         account: &AccountId,
         host: &HostContext,
     ) -> Result<(), PluginError> {
-        account::warmup(host, || self.program(), account).await
+        account::warmup(host, self.command.as_ref(), account).await
     }
 
     async fn discover_agent_sign_in(
