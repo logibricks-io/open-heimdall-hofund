@@ -107,7 +107,9 @@ pub struct QuotaWindow {
     resets_at: Option<SystemTime>,
     blocking: bool,
     scope_model: Option<String>,
+    models: Vec<String>,
     excluded_models: Vec<String>,
+    display: String,
 }
 
 impl QuotaWindow {
@@ -139,7 +141,9 @@ impl QuotaWindow {
             resets_at,
             blocking: true,
             scope_model: None,
+            models: Vec::new(),
             excluded_models: Vec::new(),
+            display: String::new(),
         })
     }
 
@@ -160,10 +164,24 @@ impl QuotaWindow {
         self
     }
 
+    /// Limits the window to the listed models. An empty list covers every model.
+    #[must_use]
+    pub fn with_models(mut self, models: Vec<String>) -> Self {
+        self.models = models;
+        self
+    }
+
     /// Excludes models from an otherwise account-wide window.
     #[must_use]
     pub fn with_excluded_models(mut self, models: Vec<String>) -> Self {
         self.excluded_models = models;
+        self
+    }
+
+    /// Sets provider display text that is not a percentage or amount.
+    #[must_use]
+    pub fn with_display(mut self, display: impl Into<String>) -> Self {
+        self.display = display.into();
         self
     }
 
@@ -179,10 +197,22 @@ impl QuotaWindow {
         self.scope_model.as_deref()
     }
 
+    /// Models this window covers, or an empty list when it is not restricted to a list.
+    #[must_use]
+    pub fn models(&self) -> &[String] {
+        &self.models
+    }
+
     /// Models exempt from this account-wide window.
     #[must_use]
     pub fn excluded_models(&self) -> &[String] {
         &self.excluded_models
+    }
+
+    /// Provider display text, empty when the ordinary units should be shown.
+    #[must_use]
+    pub fn display(&self) -> &str {
+        &self.display
     }
 
     /// Window name.
@@ -372,6 +402,8 @@ pub struct ModelSpec {
     input_price: Option<u64>,
     output_price: Option<u64>,
     cache_read_price: Option<u64>,
+    rate: Option<u64>,
+    rate_was: u64,
 }
 
 impl ModelSpec {
@@ -404,6 +436,8 @@ impl ModelSpec {
             input_price: None,
             output_price: None,
             cache_read_price: None,
+            rate: None,
+            rate_was: 0,
         })
     }
 
@@ -435,6 +469,15 @@ impl ModelSpec {
         self.input_price = Some(input);
         self.output_price = Some(output);
         self.cache_read_price = Some(cache_read);
+        self
+    }
+
+    /// Sets the current and pre-promotion token multipliers in ten-thousandths.
+    /// Zero `rate_was` means no promotion is active.
+    #[must_use]
+    pub const fn with_rate(mut self, rate: u64, rate_was: u64) -> Self {
+        self.rate = Some(rate);
+        self.rate_was = rate_was;
         self
     }
 
@@ -605,6 +648,24 @@ impl ModelSpec {
         (self.input_price, self.output_price, self.cache_read_price)
     }
 
+    /// Current token multiplier, when the subscription reports one.
+    #[must_use]
+    pub fn rate(&self) -> Option<f64> {
+        self.rate.map(decimal_rate)
+    }
+
+    /// Pre-promotion token multiplier, or zero when no promotion is active.
+    #[must_use]
+    pub fn rate_was(&self) -> f64 {
+        decimal_rate(self.rate_was)
+    }
+
+    /// Current and pre-promotion multipliers in ten-thousandths, for lossless storage.
+    #[must_use]
+    pub const fn rate_parts(&self) -> (Option<u64>, u64) {
+        (self.rate, self.rate_was)
+    }
+
     /// Whether a catalog free flag or a known all-zero price makes the model
     /// free. A false flag does not hide an all-zero price, as in the
     /// reference.
@@ -618,6 +679,10 @@ impl ModelSpec {
             (Some(0), Some(0), Some(0))
         )
     }
+}
+
+fn decimal_rate(rate: u64) -> f64 {
+    f64::from(u32::try_from(rate).unwrap_or(u32::MAX)) / 10_000.0
 }
 
 /// A page of models and the facts a host learned while obtaining it.
@@ -3334,14 +3399,20 @@ mod tests {
         let window = QuotaWindow::new("weekly", 1, Some(10), None).expect("window");
         assert!(window.blocking());
         assert_eq!(window.scope_model(), None);
+        assert_eq!(window.models(), &[] as &[String]);
         assert_eq!(window.excluded_models(), &[] as &[String]);
+        assert_eq!(window.display(), "");
         let window = window
             .with_blocking(false)
             .with_scope_model("model-a")
-            .with_excluded_models(vec!["model-b".to_owned()]);
+            .with_models(vec!["model-a".to_owned()])
+            .with_excluded_models(vec!["model-b".to_owned()])
+            .with_display("$1.25");
         assert!(!window.blocking());
         assert_eq!(window.scope_model(), Some("model-a"));
+        assert_eq!(window.models(), ["model-a"]);
         assert_eq!(window.excluded_models(), ["model-b"]);
+        assert_eq!(window.display(), "$1.25");
     }
 
     #[test]

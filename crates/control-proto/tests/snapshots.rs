@@ -294,6 +294,8 @@ fn json_snapshots_round_trip() {
         display_name: Some("Example Model A".to_owned()),
         context: Some(8192),
         max_output: Some(1024),
+        rate: Some(0.8),
+        rate_was: 1.6,
     ));
     models.fetched_at_ms = Some(1_700_000_001_000);
     models.added = vec!["model-b".to_owned()];

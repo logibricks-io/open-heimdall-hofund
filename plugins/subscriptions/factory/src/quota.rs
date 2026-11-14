@@ -45,9 +45,14 @@ fn pool_windows(
         } else {
             format!("{prefix}{}", spec.name)
         };
-        let blocking = !core && !extra_funded;
-        let window = QuotaWindow::new(name, used.min(100), Some(100), resets)?;
-        out.push(window.with_blocking(blocking));
+        let window =
+            QuotaWindow::new(name, used.min(100), Some(100), resets)?.with_blocking(!extra_funded);
+        let window = if core {
+            window.with_models(crate::models::core_models())
+        } else {
+            window.with_excluded_models(crate::models::core_models())
+        };
+        out.push(window);
     }
     Ok(())
 }
@@ -99,12 +104,11 @@ pub(crate) fn windows_from_limits(value: &Value) -> Result<Vec<QuotaWindow>, Plu
         .filter(|cents| *cents > 0.0)
     {
         let display = format!("${:.2}", extra / 100.0);
-        out.push(QuotaWindow::new(
-            format!("Extra usage: {display}"),
-            0,
-            None,
-            None,
-        )?);
+        out.push(
+            QuotaWindow::new("Extra usage", 0, None, None)?
+                .with_blocking(false)
+                .with_display(display),
+        );
     }
     Ok(out)
 }
@@ -135,7 +139,7 @@ mod tests {
     }
 
     #[test]
-    fn a2b_37_core_windows_do_not_block() {
+    fn r52_core_windows_block_only_core_models() {
         let limits = json!({
             "limits": {
                 "core": {
@@ -145,7 +149,8 @@ mod tests {
         });
         let windows = windows_from_limits(&limits).expect("windows");
         assert_eq!(windows.len(), 1);
-        assert!(!windows[0].blocking());
+        assert!(windows[0].blocking());
+        assert_eq!(windows[0].models(), crate::models::core_models());
     }
 
     #[test]
@@ -162,5 +167,9 @@ mod tests {
         let windows = windows_from_limits(&limits).expect("windows");
         assert_eq!(windows.len(), 2);
         assert!(!windows[0].blocking());
+        assert_eq!(windows[0].excluded_models(), crate::models::core_models());
+        assert_eq!(windows[1].name(), "Extra usage");
+        assert_eq!(windows[1].display(), "$5.00");
+        assert!(!windows[1].blocking());
     }
 }

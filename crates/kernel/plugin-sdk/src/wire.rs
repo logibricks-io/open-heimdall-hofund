@@ -91,6 +91,11 @@ pub type Rewrite = Arc<
 /// A body or line that is not JSON is passed on as it is.
 pub type Unwrap = Arc<dyn Fn(serde_json::Value) -> serde_json::Value + Send + Sync>;
 
+/// A target-specific classification of a non-2xx reply, after the SDK has
+/// read its body and constructed the ordinary error.
+pub type StatusClassify =
+    Arc<dyn Fn(u16, &http::HeaderMap, &[u8], PluginError) -> PluginError + Send + Sync>;
+
 /// A look at the payload of each `data:` line of a 2xx stream, set by
 /// [`Sent::watch`]. The bytes pass on unchanged. Returning `true` stops the
 /// look; the rest of the stream is not shown to it.
@@ -128,7 +133,9 @@ pub struct Target {
     signer: Option<AwsSigner>,
     rewrite: Option<Rewrite>,
     method_root: Option<&'static str>,
+    generate_in_body: Option<&'static str>,
     unwrap: Option<Unwrap>,
+    classify: Option<StatusClassify>,
     state: Arc<hofund_quirks::RequestState>,
     allocation_quota_rate: bool,
     chatgpt_codex_zstd: bool,
@@ -151,7 +158,9 @@ impl Target {
             signer: None,
             rewrite: None,
             method_root: None,
+            generate_in_body: None,
             unwrap: None,
+            classify: None,
             state: Arc::new(hofund_quirks::RequestState::default()),
             allocation_quota_rate: false,
             chatgpt_codex_zstd: false,
@@ -247,11 +256,26 @@ impl Target {
         self
     }
 
+    /// Posts Generative Language calls to `{base}/generate`, with the model in
+    /// the JSON body rather than a model/method path. Other protocols ignore it.
+    #[must_use]
+    pub const fn generate_in_body(mut self, enabled: bool) -> Self {
+        self.generate_in_body = if enabled { Some("generate") } else { None };
+        self
+    }
+
     /// The rewrite [`Sent::complete`] applies to each JSON value of a 2xx
     /// response, such as lifting the reply out of an envelope.
     #[must_use]
     pub fn unwrap(mut self, unwrap: Unwrap) -> Self {
         self.unwrap = Some(unwrap);
+        self
+    }
+
+    /// Classifies a non-2xx reply after the SDK's ordinary status handling.
+    #[must_use]
+    pub fn classify_status(mut self, classify: StatusClassify) -> Self {
+        self.classify = Some(classify);
         self
     }
 }
@@ -271,7 +295,9 @@ impl fmt::Debug for Target {
             .field("signer", &self.signer)
             .field("rewrite", &self.rewrite.is_some())
             .field("method_root", &self.method_root)
+            .field("generate_in_body", &self.generate_in_body)
             .field("unwrap", &self.unwrap.is_some())
+            .field("classify", &self.classify.is_some())
             .field("state", &self.state)
             .field("allocation_quota_rate", &self.allocation_quota_rate)
             .field("chatgpt_codex_zstd", &self.chatgpt_codex_zstd)
@@ -565,15 +591,20 @@ pub async fn send(
         let body = prepare_body(target, codec, request, prepare, inbound)?;
         converse_call(target, &model, streaming, body)?.1
     } else {
-        let url = match target.method_root {
-            Some(root) if path == Path::Model => method_url(&target.base_url, root, method),
-            _ => url_for(
-                &target.base_url,
-                target.model_root,
-                path,
-                &request.model,
-                method,
-            )?,
+        let url = if let Some(root) = target.generate_in_body.filter(|_| path == Path::Model) {
+            let _ = model_segment(&request.model)?;
+            format!("{}/{root}", target.base_url.trim_end_matches('/'))
+        } else {
+            match target.method_root {
+                Some(root) if path == Path::Model => method_url(&target.base_url, root, method),
+                _ => url_for(
+                    &target.base_url,
+                    target.model_root,
+                    path,
+                    &request.model,
+                    method,
+                )?,
+            }
         };
         let body = prepare_body(target, codec, request, prepare, inbound)?;
         let (body, added) = rewritten(target.rewrite.as_ref(), body);
@@ -598,7 +629,12 @@ pub async fn send(
     };
     let response = call.open_raw(http, ATTEMPTS).await?;
     if !response.status().is_success() {
-        return Err(status_error(response, target.allocation_quota_rate).await);
+        return Err(status_error(
+            response,
+            target.allocation_quota_rate,
+            target.classify.as_ref(),
+        )
+        .await);
     }
     Ok(Sent {
         response,
@@ -647,7 +683,12 @@ pub async fn forward(
         .bytes(body.bytes());
     let response = call.open_raw(http, ATTEMPTS).await?;
     if !response.status().is_success() {
-        return Err(status_error(response, target.allocation_quota_rate).await);
+        return Err(status_error(
+            response,
+            target.allocation_quota_rate,
+            target.classify.as_ref(),
+        )
+        .await);
     }
     let status = response.status().as_u16();
     let content_type = response
@@ -1106,18 +1147,27 @@ fn endpoint_unsupported(bytes: &[u8]) -> bool {
         || message.contains("do not support")
 }
 
-async fn status_error(response: HttpResponse, allocation_quota_rate: bool) -> PluginError {
+async fn status_error(
+    response: HttpResponse,
+    allocation_quota_rate: bool,
+    classify: Option<&StatusClassify>,
+) -> PluginError {
+    let headers = response.headers().clone();
     let (status, retry_after, reset_after, body) = match read_body(response).await {
         Ok(read) => read,
         Err(error) => return error,
     };
-    status_failure_with_reset(
+    let error = status_failure_with_reset(
         status,
         retry_after,
         reset_after,
         &body,
         allocation_quota_rate,
-    )
+    );
+    match classify {
+        Some(classify) => classify(status, &headers, &body, error),
+        None => error,
+    }
 }
 
 fn status_failure(

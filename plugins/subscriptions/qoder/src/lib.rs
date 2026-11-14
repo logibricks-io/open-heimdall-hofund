@@ -12,18 +12,23 @@ use hofund_plugin_api::{
 use hofund_plugin_sdk::Contribution;
 
 mod checkin;
+mod cosy;
 mod creds;
 mod identity;
 mod import;
 mod models;
 mod quota;
 mod refresh;
+mod shape;
+mod sign_in;
+mod site;
+mod stream;
 mod upstream;
 
 static SPEC: SubscriptionSpec = SubscriptionSpec::from_static(
     PluginId::from_static("qoder"),
     "Qoder",
-    SignInFlowKind::Bridge,
+    SignInFlowKind::Device,
 )
 .with_daily_checkin(true);
 
@@ -36,17 +41,28 @@ pub fn contribute() -> Contribution {
 /// HTTP endpoints for openapi, refresh, chat, and usage.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Endpoints {
+    /// Global sign-in page host (`https://qoder.com`).
+    pub web_global: String,
+    /// China sign-in page host (`https://qoder.cn`).
+    pub web_cn: String,
     /// Global openapi host (`https://openapi.qoder.sh`).
     pub openapi_global: String,
     /// China openapi host (`https://openapi.qoder.com.cn`).
     pub openapi_cn: String,
-    /// Global chat API base (`https://api3.qoder.sh/v1`).
+    /// Global native API host (`https://api3.qoder.sh`).
     pub chat_global: String,
-    /// China chat API base (`https://gateway.qoder.com.cn/v1`).
+    /// China native API host (`https://gateway.qoder.com.cn`).
     pub chat_cn: String,
 }
 
 impl Endpoints {
+    pub(crate) fn web_for(&self, site: creds::Site) -> &str {
+        match site {
+            creds::Site::Global => self.web_global.as_str(),
+            creds::Site::China => self.web_cn.as_str(),
+        }
+    }
+
     pub(crate) fn openapi_for(&self, site: creds::Site) -> &str {
         match site {
             creds::Site::Global => self.openapi_global.as_str(),
@@ -65,10 +81,12 @@ impl Endpoints {
 impl Default for Endpoints {
     fn default() -> Self {
         Self {
+            web_global: "https://qoder.com".to_owned(),
+            web_cn: "https://qoder.cn".to_owned(),
             openapi_global: "https://openapi.qoder.sh".to_owned(),
             openapi_cn: "https://openapi.qoder.com.cn".to_owned(),
-            chat_global: "https://api3.qoder.sh/v1".to_owned(),
-            chat_cn: "https://gateway.qoder.com.cn/v1".to_owned(),
+            chat_global: "https://api3.qoder.sh".to_owned(),
+            chat_cn: "https://gateway.qoder.com.cn".to_owned(),
         }
     }
 }
@@ -120,9 +138,14 @@ impl SubscriptionFactory for QoderFactory {
         Ok(Arc::new(Qoder {
             endpoints: Arc::clone(&self.endpoints),
             devices: Arc::new(identity::Devices::new()),
-            flow: SignInFlow::Bridge {
-                command: hofund_plugin_api::BinaryName::new("qodercli"),
-            },
+            catalog: Arc::new(models::Catalog::default()),
+            renewals: Arc::new(Mutex::new(HashMap::new())),
+            flow: SignInFlow::Device(
+                hofund_plugin_api::DeviceFlow::new("qoder.com")
+                    .expect("static device host")
+                    .with_path("/device/selectAccounts")
+                    .expect("static device path"),
+            ),
             pending: Mutex::new(HashMap::new()),
         }))
     }
@@ -131,8 +154,10 @@ impl SubscriptionFactory for QoderFactory {
 struct Qoder {
     endpoints: Arc<Endpoints>,
     devices: Arc<identity::Devices>,
+    catalog: Arc<models::Catalog>,
+    renewals: Arc<Mutex<HashMap<String, std::time::SystemTime>>>,
     flow: SignInFlow,
-    pending: Mutex<HashMap<String, ()>>,
+    pending: Mutex<HashMap<String, sign_in::Pending>>,
 }
 
 #[hofund_plugin_sdk::async_trait]
@@ -148,26 +173,42 @@ impl Subscription for Qoder {
     async fn start_sign_in(
         &self,
         ctx: &SignInCtx,
-        _host: &HostContext,
+        host: &HostContext,
     ) -> Result<SignInChallenge, PluginError> {
+        let (pending, challenge) = sign_in::start(ctx, host, &self.endpoints)?;
         self.pending
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(ctx.session());
-        Err(PluginError::unsupported(
-            "import a Qoder credential export with `hofund subscription import`",
-        ))
+            .insert(ctx.session().to_owned(), pending);
+        Ok(challenge)
     }
 
     async fn complete_sign_in(
         &self,
-        _ctx: &SignInCtx,
-        _proof: SignInProof,
-        _host: &HostContext,
+        ctx: &SignInCtx,
+        proof: SignInProof,
+        host: &HostContext,
     ) -> Result<AccountId, PluginError> {
-        Err(PluginError::unsupported(
-            "import a Qoder credential export with `hofund subscription import`",
-        ))
+        let SignInProof::Await = proof else {
+            return Err(PluginError::config(
+                "Qoder sign-in completes after the device page is approved",
+            ));
+        };
+        let pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(ctx.session())
+            .cloned()
+            .ok_or_else(|| {
+                PluginError::config("no Qoder sign-in is in progress for this session")
+            })?;
+        let result = sign_in::complete(host, pending).await;
+        self.pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(ctx.session());
+        result
     }
 
     async fn cancel_sign_in(
@@ -217,32 +258,7 @@ impl Subscription for Qoder {
         account: &AccountId,
         host: &HostContext,
     ) -> Result<Vec<QuotaWindow>, PluginError> {
-        let stored = refresh::ensure_fresh(host, Arc::clone(&self.endpoints), account).await?;
-        let url = format!(
-            "{}/api/v1/adapter/user/account-context?include=user,plan,quota",
-            self.endpoints.openapi_for(stored.credential.site)
-        );
-        let reply = identity::apply_quota(hofund_plugin_sdk::Call::get(url))
-            .sensitive_header(
-                "authorization",
-                format!(
-                    "Bearer {}",
-                    hofund_plugin_sdk::oauth::secret_text(&stored.credential.token)
-                ),
-            )
-            .header("Accept", "application/json")
-            .fetch(host.http())
-            .await?;
-        match reply.status() {
-            200..=299 => quota::windows(reply.body()),
-            401 => Err(PluginError::auth(
-                "Qoder refused the sign-in while reading usage",
-            )),
-            status => Err(PluginError::status_error(
-                status,
-                "Qoder did not return usage",
-            )),
-        }
+        quota::read(host, Arc::clone(&self.endpoints), account).await
     }
 
     async fn list_models(
@@ -263,6 +279,8 @@ impl Subscription for Qoder {
             host.clone(),
             Arc::clone(&self.endpoints),
             Arc::clone(&self.devices),
+            Arc::clone(&self.catalog),
+            Arc::clone(&self.renewals),
         )))
     }
 
@@ -291,5 +309,7 @@ impl Subscription for Qoder {
 
 #[cfg(test)]
 mod conformance;
+#[cfg(test)]
+mod r54b_tests;
 #[cfg(test)]
 mod tests;
