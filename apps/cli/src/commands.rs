@@ -202,10 +202,7 @@ async fn offline_status(config: &Path) -> Result<String, String> {
     let id = resolve_config_id(config).map_err(|error| error.to_string())?;
     let env = local::listen_env();
     let (listen, source) = local::model_listen(config, env.as_deref())?;
-    let revision = match one_shot_client(config) {
-        Ok(client) => client.config().await.map_err(failure)?.disk_revision,
-        Err(_) => "unknown (hofundd is unavailable)".to_owned(),
-    };
+    let revision = local::disk_revision(config)?;
     let network = local::network_settings(config)?;
     let mut out = format!(
         "daemon not running\nconfig: {}\nconfig id: {id}\ndisk revision: {revision}\nmodel address: {listen} ({})",
