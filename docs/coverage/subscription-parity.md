@@ -20,7 +20,7 @@ Legend: **Done** = matches the reference at checklist granularity; **Partial** =
 | Factory / Droid (`factory`) | 14 | 2 | 0 | 3 | 0 |
 | Cline / ClinePass (`cline`) | 12 | 4 | 0 | 3 | 0 |
 | ChatGPT / Codex (`codex` backend) and ChatGPT API (`chatgpt-api`) | 10 | 10 | 1 | 0 | 0 |
-| GitHub Copilot (github.com and GHE) | 15 | 2 | 0 | 5 | 0 |
+| GitHub Copilot (github.com and GHE) | 16 | 1 | 0 | 5 | 0 |
 | Gemini CLI (Code Assist) | 13 | 3 | 0 | 2 | 0 |
 | Google Antigravity | 11 | 4 | 1 | 1 | 0 |
 | SuperGrok (`grok`) | 14 | 2 | 0 | 2 | 0 |
@@ -372,7 +372,7 @@ Remaining verification is live-account acceptance; all evidence here is determin
 | g | streaming | Supported on chat/responses | `wire::execute` stream path | Done | — |
 | h | tool calls | Copilot tool schemas | standard IR tools on wire | Partial | unverified against GHE tenant |
 | i | images | Vision header when images present | `upstream.rs:137-139` `Copilot-Vision-Request` | Done | — |
-| j | reasoning | model-dependent | unverified | Partial | — |
+| j | reasoning | Model-dependent via catalog `reasoning_effort` and generic gateway wire (`wire_effort.go`) | Catalog effort lists on `ModelSpec`; `wire::execute` writes Chat `reasoning_effort` and Responses `reasoning.effort` from `params.effort` and decodes Chat `reasoning_content` and Responses `reasoning` items (`r48j_*` recorded execute fixtures) | Done | — |
 | k | quota / usage | `copilot_internal/user` plan, premium requests | `quota.rs` plan/SKU labels on cards; guarded entitlement persistence and missing-field retention in `session.rs` and `lib.rs` | Done | — |
 | l | model list | From session + internal APIs | `models.rs` list + terms acceptance | Done | — |
 | m | multi-account | Editor account + reference device accounts (`copilot_accounts.go`) | device/editor/CLI coexistence; host-qualified ids and labels; legacy bare GHE label migration; two-host offline quota fixtures | Done | — |
