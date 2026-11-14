@@ -1117,6 +1117,7 @@ fn say<W: Write>(out: &mut W, text: &str) -> Result<(), SignInError> {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
