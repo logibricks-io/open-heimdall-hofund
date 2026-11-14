@@ -300,14 +300,17 @@ impl Subscription for Cline {
         };
         let usage = quota::assemble(me.as_ref(), balance.as_ref(), limits_value.as_ref());
         let mut windows = usage.windows;
+        if let Some(balance) = usage.balance
+            && !windows
+                .iter()
+                .any(|window| window.name().starts_with("Balance:"))
+        {
+            windows.push(quota::balance_window(&balance)?);
+        }
         if windows.is_empty() {
-            if let Some(balance) = usage.balance {
-                windows.push(quota::balance_window(&balance)?);
-            } else {
-                return Err(PluginError::config(
-                    "Cline reported neither plan limits nor a balance",
-                ));
-            }
+            return Err(PluginError::config(
+                "Cline reported neither plan limits nor a balance",
+            ));
         }
         Ok(windows)
     }

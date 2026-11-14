@@ -168,6 +168,9 @@ fn decode_envelope<D: for<'de> serde::Deserialize<'de>>(reply: &Reply) -> Result
     if !(200..300).contains(&status) {
         return Err(format!("HTTP {status}"));
     }
+    if env.data.is_none() && (200..300).contains(&status) {
+        return Err("inactive".to_owned());
+    }
     env.data.ok_or_else(|| "empty data".to_owned())
 }
 
@@ -196,6 +199,9 @@ async fn handle_status_error<T: CheckinTransport>(
     site: WorkBuddySite,
     error: String,
 ) -> CheckinResult {
+    if error == "inactive" {
+        return CheckinResult::new(CheckinOutcome::Inactive, "");
+    }
     if let Some(mapped) = map_vendor_code_error(&error) {
         return mapped;
     }
@@ -215,6 +221,9 @@ async fn handle_status_error<T: CheckinTransport>(
 }
 
 fn map_claim_error(error: String) -> CheckinResult {
+    if error == "inactive" {
+        return CheckinResult::new(CheckinOutcome::Inactive, "");
+    }
     if let Some(mapped) = map_vendor_code_error(&error) {
         return mapped;
     }
@@ -267,6 +276,17 @@ mod tests {
                 .cloned()
                 .unwrap_or_else(|| Reply::from_parts(500, b"missing mock response")))
         }
+    }
+
+    #[tokio::test]
+    async fn r24_workbuddy_checkin_2xx_without_data_is_inactive() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let transport = Mock {
+            seen: Arc::clone(&seen),
+            responses: vec![Reply::from_parts(200, br#"{"code":0,"msg":"ok"}"#)],
+        };
+        let result = run(&transport, WorkBuddySite::China).await.expect("run");
+        assert_eq!(result.outcome(), CheckinOutcome::Inactive);
     }
 
     #[tokio::test]

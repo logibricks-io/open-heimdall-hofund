@@ -328,6 +328,26 @@ fn r53_chat_encodes_inline_images_as_openai_image_parts() {
 }
 
 #[test]
+fn r24_quota_keeps_dollar_balance_when_plan_limits_exist() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_oauth(&host);
+    host.http()
+        .enqueue(json!({"limits": [{"type": "five_hour", "percentUsed": 10.0}]}).to_string());
+    host.http()
+        .enqueue(json!({"clineUserId": "user-1"}).to_string());
+    host.http()
+        .enqueue(json!({"balance": 2_500_000}).to_string());
+    let windows = block_on(subscription(&host).quota(&id, host.context())).expect("quota");
+    assert!(windows.iter().any(|window| window.name() == "5 hours"));
+    assert!(
+        windows
+            .iter()
+            .any(|window| window.name() == "Balance: $2.50")
+    );
+}
+
+#[test]
 fn a2a_20_usage_parse_limits_and_balance() {
     let limits = json!({"limits": [{"type": "five_hour", "percentUsed": 25.0}]});
     let windows = limit_windows(Some(&limits));

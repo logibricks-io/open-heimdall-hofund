@@ -265,9 +265,13 @@ fn a2b_16_chat_upstream_round_trip() {
     let id = seed_oauth(&host);
     host.http().enqueue(
         json!({
-            "id": "chat-1",
-            "object": "chat.completion",
-            "choices": [{"message": {"role": "assistant", "content": "ok"}}]
+            "content": [{"type": "text", "text": "ok"}],
+            "id": "msg-1",
+            "model": "claude-sonnet-5-5",
+            "role": "assistant",
+            "stop_reason": "end_turn",
+            "type": "message",
+            "usage": {"input_tokens": 1, "output_tokens": 1}
         })
         .to_string()
         .into_bytes(),
@@ -400,8 +404,7 @@ fn a2b_39_glm_uses_open_wire_and_x_api_provider() {
     assert!(
         call.sensitive_headers()
             .iter()
-            .any(|name| name.eq_ignore_ascii_case("x-api-provider")),
-        "expected x-api-provider on the upstream HTTP request"
+            .any(|name| name.eq_ignore_ascii_case("x-api-provider"))
     );
 }
 
