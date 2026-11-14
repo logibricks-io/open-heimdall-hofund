@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   store writes leave the file intact, and unreadable legacy files fail closed on
   list (`r54d_*` temp-dir fixtures). Refs R-54.
 
+- R-54c: the Qoder subscription plugin exchanges pasted Personal Access Tokens
+  at each site's `/api/v1/jobToken/exchange`, stores the PAT for lapsed
+  job-token refresh, and re-exchanges on refused refresh when a PAT is still
+  stored. Recorded fixtures and loopback tests only (`r54c_*`). Refs R-54.
+
 - R-52d: the Factory subscription plugin discovers and imports built-in accounts
   from mover OAuth and API-key shapes and from reference `factoryCreds` rows in
   `logins.json`, without calling live whoami. Recorded fixtures only (`r52d_*`).

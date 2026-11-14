@@ -18,6 +18,7 @@ mod identity;
 mod import;
 mod legacy_migrate;
 mod models;
+mod pat;
 mod quota;
 mod refresh;
 mod shape;
@@ -190,9 +191,12 @@ impl Subscription for Qoder {
         proof: SignInProof,
         host: &HostContext,
     ) -> Result<AccountId, PluginError> {
+        if let SignInProof::Token(pat) = proof {
+            return pat::sign_in_with_pat(host, &self.endpoints, ctx, pat).await;
+        }
         let SignInProof::Await = proof else {
             return Err(PluginError::config(
-                "Qoder sign-in completes after the device page is approved",
+                "Qoder sign-in completes after the device page is approved or with a PAT",
             ));
         };
         let pending = self
@@ -328,6 +332,8 @@ impl Subscription for Qoder {
 mod conformance;
 #[cfg(test)]
 mod r54b_tests;
+#[cfg(test)]
+mod r54c_tests;
 #[cfg(test)]
 mod r54d_tests;
 #[cfg(test)]

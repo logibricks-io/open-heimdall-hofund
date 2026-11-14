@@ -211,6 +211,8 @@ fn seed(host: &TestHost, site: Site, vpc: &str) -> AccountId {
         device_chat: false,
         device_token: SecretString::from("device-token".to_owned()),
         device_refresh_token: SecretString::from("device-refresh".to_owned()),
+        pat_auth: false,
+        pat: SecretString::from(String::new()),
     };
     let id = creds::account_id(&credential);
     block_on(async {
