@@ -13,7 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (2000 px per side, five mebibytes of base64, triangle resize, JPEG/PNG
   rules) and the Claude subscription bridge applies it on `-p` stream-json
   image blocks (`r698_*` fixtures; issue #698). Refs R-6.
-
+- R-51d: the Kiro subscription plugin accepts pasted `ksk_` API keys through
+  `SignInProof::Token`, maps `Get-Usage-Limits` into free-trial, monthly, and
+  bonus quota windows (including aside non-blocking semantics), and reads API-key
+  usage through the control-plane `GetUsageLimits` POST. Recorded HTTP and
+  loopback tests only (`r51d_*`). Refs R-51.
 - R-54: the shared Qoder daily check-in helper sets `CheckinResult::recheck_at`
   to the earlier of 30 minutes, the next Beijing calendar midnight (UTC+8), and
   the minimum end time of active campaigns, matching the reference recheck
