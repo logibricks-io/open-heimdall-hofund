@@ -25,7 +25,7 @@ Legend: **Done** = matches the reference at checklist granularity; **Partial** =
 | Google Antigravity | 10 | 4 | 2 | 1 | 0 |
 | SuperGrok (`grok`) | 10 | 6 | 0 | 2 | 0 |
 | Qoder (international + Qoder CN) | 13 | 5 | 0 | 2 | 0 |
-| CodeBuddy / WorkBuddy (CN + international) | 15 | 1 | 0 | 0 | 3 |
+| CodeBuddy / WorkBuddy (CN + international) | 18 | 1 | 0 | 0 | 0 |
 | Z Code (`zcode`) | 15 | 4 | 0 | 0 | 0 |
 
 Gaps that had no plan item before this audit (the supervisor's v0.2.0 plan and backlog now carry them under the item named):
@@ -536,7 +536,7 @@ Structured-output prose for Chat, Responses, and Messages shipped in R-13b (`str
 
 **hofund path:** `plugins/subscriptions/workbuddy/`.
 
-| # | capability | reference v0.1.3005 | hofund R-55b | status | gap to close |
+| # | capability | reference v0.1.3005 | hofund R-55c | status | gap to close |
 |---|------------|----------------------|--------------|--------|--------------|
 | a1 | sign-in: browser (Tencent page poll) | plugin `index.mjs:5-7`, state/token/account polling | `sign_in.rs` starts the returned HTTPS page, then polls token and account state for either `--site` (`r55_browser_sign_in_works_for_both_sites`, mocks only) | Done | — |
 | a2 | sign-in: API key | API-key accounts (`packages/workbuddy/index.mjs:404-418` `keyAccount`, `apikey.test.mjs`) | `sign_in.rs::import_api_key` stores a key account with the anonymous suffix; chat sends bearer plus `X-API-Key`, never `X-Domain`; key quota and check-in make no calls (`r55_api_key_sign_in_works_for_both_sites_without_exposing_key`) | Done | — |
@@ -547,12 +547,12 @@ Structured-output prose for Chat, Responses, and Messages shipped in R-13b (`str
 | e | upstream wire | `{endpoint}/v2` streamed chat, gzipped body with `Content-Encoding: gzip` (`index.mjs:7-9`, `1502-1519`) | `upstream.rs` targets `{endpoint}/v2/chat/completions` and enables the SDK's opt-in request gzip, using `inflate::compress`; `a2c_24_upstream_sends_workbuddy_user_agent` inflates the recorded body and checks the exact URL and encoding | Done | — |
 | f | inbound shapes | OpenAI chat + WorkBuddy headers | OpenAI chat + `creds::signed_headers` and `chat_headers` | Done | — |
 | g | streaming | stream only in plugin | wire streaming | Done | — |
-| h | tools | `fitTools`, `tools.test.mjs`, `aftertools.test.mjs` | unverified | unverified | Confirm in a follow-up |
-| i | images | `/v2/images/*`, `images.test.mjs`, `declared-images.test.mjs` | unverified | unverified | Confirm in a follow-up |
-| j | reasoning | effort lists, `reasoning.test.mjs`, `efforts.test.mjs` | unverified | unverified | Confirm in a follow-up |
+| h | tools | `fitTools`, `tools.test.mjs`, `aftertools.test.mjs` | `tools.rs` fits schemas and names, restores streamed and unary caller names, and inserts the empty assistant reply after tool results; `upstream.rs` learns the 11153 retry per site/model (`r55c_tool_*`, `r55c_after_tools_*`, recorded HTTP) | Done | — |
+| i | images | `/v2/images/*`, `images.test.mjs`, `declared-images.test.mjs`; `draw_workbuddy.go` sends edit images as data-URL arrays | `models.rs` handles live and declared image flags, international GLM text-only models, drawing tags, and edit companions; `upstream.rs` forwards generation/edit JSON without gzip, normalizes one data-URL string to a one-element edit array, and unwraps the envelope; retrieval serves `/v1/images/generations` and `/v1/images/edits` (`r55c_image_*`, `r55c_model_images_*`, both sites, recorded HTTP) | Done | — |
+| j | reasoning | effort lists, `reasoning.test.mjs`, `efforts.test.mjs`, `default-effort.test.mjs` | `tools.rs` replays `reasoning_content` and `reasoning_details` as `reasoning`; `models.rs` preserves effort lists and validates `defaultEffort`, else `effort`, against each model's levels; `upstream.rs` applies a configured default when no effort is named, preserves explicit efforts including `none`, and suppresses only the default for positive token budgets up to 1024 (`r55c_reasoning_*`, `r55c_default_effort_*`, `r55c_explicit_effort_*`, `r55c_small_budgets_*`, `r55c_effort_lists_match_the_frozen_config`) | Done | — |
 | k | quota / usage | `usageOf`, `kindsOf`, `listedExtra`, `packagesOf`, and `enterpriseUsageOf` read the summary, paid/free package, and enterprise meters for the profile usage page | `quota.rs` splits plan and extra windows from groups or reference codes, retains truthful prepaid remainders without totals, adds unlisted extras, applies UTC+8 plan/enterprise resets, and tolerates detail-meter refusals; key accounts return no windows without calling billing (`r55b_*`, recorded HTTP only) | Done | Fields that `QuotaWindow` cannot represent are documented below |
-| l | model list | `/v3/config` in plugin | `models.rs` config fetch with the signed client headers | Done | — |
-| m | multi-account | `workbuddy` vs `workbuddy-ai` provider ids | single plugin, `site::Site` CN vs International (`lib.rs:31-35`) | Partial | Separate subscription ids if needed for routing labels |
+| l | model list | `/v3/config` in plugin | `models.rs` reads live config with signed client headers and keeps declared per-site catalogs as fallback, with context/output, image, drawing, and effort metadata | Done | — |
+| m | multi-account | `workbuddy` vs `workbuddy-ai` provider ids | one plugin keeps `site::Site` in every credential and derives account ids from `workbuddy` or `workbuddy-ai` plus uid; the labels select distinct endpoints, auth files, headers, and agent sign-ins | Partial | Not split: the frozen reference requires the two routing labels, which the site-qualified accounts retain, but shows no behavior that requires two hofund subscription ids |
 | n | error classification | `WBRestricted` code 11140 (`workbuddy.go:267-299`) | `errors.rs` accepts top-level, `data`, or `error` numeric/string codes and appends the exact hint; the router applies a generic 403 account rest (`r55_restriction_*`, upstream test) | Done | — |
 | o | daily check-in | `workbuddy_checkin.go` + plugin; CN only | `checkin.rs`, `with_daily_checkin`; international and key accounts are inactive | Done | — |
 | p | agent sign-in | desktop auth paths | `AgentSignIn` workbuddy + workbuddy-ai (`lib.rs:31-35`) | Done | — |
@@ -569,10 +569,16 @@ Structured-output prose for Chat, Responses, and Messages shipped in R-13b (`str
 - Code 11140 produces the reference hint; the router applies a generic 403 account rest.
 - Encrypted desktop tokens remain unreadable by design and direct the user to browser sign-in without rendering the encrypted envelope.
 
+**R-55c completed**
+
+- Tool schemas and names are fitted and restored, with the learned 11153 empty-assistant retry for tool-result turns.
+- Image generation and edits use the reference's `/v2/images/*` routes as plain JSON; a single data-URL edit string becomes a one-element array, and live and declared catalogs carry image and edit capabilities.
+- Assistant reasoning history uses the reference field, live and declared model lists expose the reference effort levels, and chats without an explicit effort use a valid configured default unless a positive token budget is 1024 or less.
+- All new behavior is covered by deterministic recorded HTTP or fixtures; no live-account tests were added.
+
 **Remaining gaps**
 
-- Tool, image, and reasoning parity is still unverified.
-- Separate subscription ids remain as listed above.
+- Separate subscription ids remain Partial as listed in row m; the two reference routing labels are preserved without a split.
 
 ---
 
