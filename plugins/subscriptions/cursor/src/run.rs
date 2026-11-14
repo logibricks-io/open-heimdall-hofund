@@ -50,6 +50,14 @@ pub(crate) struct Limits {
     pub usage_give_up: Duration,
     /// Per-request read timeout for one dashboard usage poll.
     pub usage_request: Duration,
+    /// Background collection delay after a tool step closes.
+    pub usage_owed_at: Duration,
+    /// How long conversation usage debt may remain collectable.
+    pub usage_owed_for: Duration,
+    /// Consecutive owed tool steps before polls stop waiting.
+    pub usage_skip_after: u32,
+    /// Poll again for owed usage every N skipped steps.
+    pub usage_retry_every: u32,
 }
 
 impl Default for Limits {
@@ -66,6 +74,10 @@ impl Default for Limits {
             usage_interval: Duration::from_millis(500),
             usage_give_up: Duration::from_secs(6),
             usage_request: Duration::from_secs(5),
+            usage_owed_at: Duration::from_secs(5),
+            usage_owed_for: Duration::from_secs(600),
+            usage_skip_after: 3,
+            usage_retry_every: 10,
         }
     }
 }
