@@ -423,6 +423,25 @@ fn r24_kiro_refresh_400_reports_auth() {
 }
 
 #[test]
+fn r24_kiro_ide_stale_refresh_write_back_leaves_file_unchanged() {
+    let dir = tempfile::tempdir().expect("dir");
+    let path = dir.path().join(TOKEN_FILE);
+    let original = br#"{"accessToken":"ide-access","refreshToken":"rotated-refresh","expiresAt":"2099-01-01T00:00:00Z","custom":"kept"}"#;
+    std::fs::write(&path, original).expect("fixture");
+
+    creds::write_token_refresh_fields(
+        &path,
+        &SecretString::from("new-access".to_owned()),
+        &SecretString::from("new-refresh".to_owned()),
+        Some(UNIX_EPOCH + Duration::from_secs(4_000_000_000)),
+        &SecretString::from("stale-refresh".to_owned()),
+    )
+    .expect("stale write is a no-op");
+
+    assert_eq!(std::fs::read(&path).expect("read"), original);
+}
+
+#[test]
 fn r24_kiro_refresh_adopts_profile_arn_without_network() {
     let dir = tempfile::tempdir().expect("dir");
     let cache = dir.path().join("cache");
