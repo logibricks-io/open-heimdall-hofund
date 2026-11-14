@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- R-6: when Windows has no local `claude` on PATH (and no configured `command`),
+  Claude Code sign-in and short CLI calls (`auth status`, `/usage`, warm-up)
+  resolve the binary in a **running** WSL distro via mocked `wsl.exe` in tests,
+  with one-minute find cache, default-distro-first probes, `WSLENV` for
+  `CLAUDE_CONFIG_DIR`, and `HOFUND_WSL_RUN` argv wrapping. MCP bridge model
+  turns still require a native path or explicit `command`. Per-login sign-in
+  proxy remains unported. Refs R-6.
+
 - R-47a3: native `/backend-api/codex/responses/compact` refuses ChatGPT sign-in
   compactions on gateway keys with account holds unless the signed-in account is
   allowed, and allows compaction when Codex's own `auth.json` uses

@@ -48,7 +48,7 @@ Every other gap below maps to an existing plan item.
 
 | # | capability | reference v0.1.3005 behaviour | hofund 08035c9 | status | gap to close |
 |---|------------|------------------------------|----------------|--------|--------------|
-| a1 | sign-in: browser / loopback via Claude Code | `startClaudeSignIn` runs `claude auth login --claudeai` in a temp dir, relays URL via `TookOpenedURL` / `openedURLEnv` (`claude_signin.go:147-198`) | `lib.rs` + `cli.rs`: same command in private dir, link relay + optional browser wait (`lib.rs:3-8`, `36-45`) | Partial | WSL fallback when Windows has no local `claude` (`claude_signin.go:85-111`) not ported |
+| a1 | sign-in: browser / loopback via Claude Code | `startClaudeSignIn` runs `claude auth login --claudeai` in a temp dir, relays URL via `TookOpenedURL` / `openedURLEnv` (`claude_signin.go:147-198`) | `lib.rs` + `cli.rs` + `wslrun.rs` + `launcher.rs`: same command in private dir, link relay + optional browser wait; WSL fallback when Windows has no local `claude` (running distros only, mocked probes) | Partial | Per-login Bun proxy on sign-in (`netproxy.EnvForBunWith`) still Partial; `TookOpenedURL` / opened-URL env not ported; MCP bridge runs still native-only (`upstream.rs` `wsl_distro: None`) |
 | a2 | sign-in: pasted device/browser code | Reads code from sign-in flow stdin when link shows a code (`claude_signin.go:147-151` comment) | `SignInProof::Paste` writes code to child stdin (`lib.rs:342+`, tests in `tests.rs`) | Done | — |
 | a3 | sign-in: device code (standalone) | N/A — always mediated by Claude Code OAuth | N/A | N/A | — |
 | a4 | sign-in: API key | N/A for subscription OAuth | N/A | N/A | — |

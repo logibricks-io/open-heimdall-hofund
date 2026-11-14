@@ -57,6 +57,7 @@ const STATUS_CAP: usize = 64 * 1024;
 
 /// A spawn of `program` with `args`, run in `dir` and keeping its state
 /// there. The kernel clears the rest of the environment.
+#[allow(dead_code)]
 pub(crate) fn request(
     program: &Path,
     args: &[&str],
@@ -66,6 +67,7 @@ pub(crate) fn request(
 }
 
 /// Like [`request`], with extra environment pairs copied into the spawn.
+#[allow(dead_code)]
 pub(crate) fn request_with_extra(
     program: &Path,
     args: &[&str],
