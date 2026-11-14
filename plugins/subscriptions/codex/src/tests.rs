@@ -12,7 +12,7 @@ use hofund_plugin_api::{
     AccountId, AccountStatus, Completion, ContentPart, Extensions, ImagePart, ImageSource, Message,
     PluginErrorKind, PluginId, PluginKind, ProbeQuery, ProtocolId, RawTable, Request, Role,
     SecretString, SignInChallenge, SignInCtx, SignInProof, Subscription, SubscriptionFactory,
-    TextPart, UpstreamProvider,
+    TextPart, ThinkingPart, UpstreamProvider,
 };
 use hofund_plugin_sdk::codex_zstd::codex_zstd_for_tests;
 use hofund_plugin_sdk::oauth::{Pkce, SecretObject, account_id_from, same_secret};
@@ -687,6 +687,153 @@ fn other_401_is_not_retried() {
     assert_eq!(host.http().calls().len(), 1);
 }
 
+fn reasoning_part(id: &str, seal: &str) -> ContentPart {
+    let mut fields = json::Map::new();
+    fields.insert(
+        "sealed_item".to_owned(),
+        json::json!({
+            "type": "reasoning",
+            "id": id,
+            "encrypted_content": seal
+        }),
+    );
+    ContentPart::Thinking(ThinkingPart {
+        text: String::new(),
+        signature: None,
+        redacted: false,
+        data: None,
+        extensions: Extensions::from_map(fields),
+    })
+}
+
+fn reasoning_request(id: &str, seal: &str) -> Request {
+    let mut request = streaming_request();
+    request.messages.push(Message {
+        role: Role::User,
+        content: vec![ContentPart::text("continue"), reasoning_part(id, seal)],
+        extensions: Extensions::new(),
+    });
+    request
+}
+
+const UNREADABLE_JSON: &[(&str, &str)] = &[("content-type", "application/json")];
+
+#[test]
+fn r47j_unreadable_item_refusal_retries_with_trimmed_body() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, &access_token("first", 10_000));
+    host.http().enqueue_response(
+        404,
+        UNREADABLE_JSON,
+        br#"{"error":{"message":"Item with id 'rs_bad' not found"}}"#.to_vec(),
+    );
+    host.http()
+        .enqueue(b"event: response.completed\ndata: {}\n\n".to_vec());
+    block_on(upstream_for(&host, &id).execute(
+        reasoning_request("rs_bad", "sealed"),
+        ProtocolId::OPENAI_RESPONSES,
+    ))
+    .expect("retried");
+    assert_eq!(host.http().calls().len(), 2);
+    let first: Value = json::from_slice(host.http().calls()[0].body()).expect("first body");
+    let second: Value = json::from_slice(host.http().calls()[1].body()).expect("second body");
+    assert!(first["input"].as_array().is_some_and(|items| {
+        items
+            .iter()
+            .any(|item| item.get("id") == Some(&json::json!("rs_bad")))
+    }));
+    assert!(second["input"].as_array().is_some_and(|items| {
+        !items
+            .iter()
+            .any(|item| item.get("id") == Some(&json::json!("rs_bad")))
+    }));
+}
+
+#[test]
+fn r47j_foreign_encrypted_refusal_strips_seals_and_retries() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, &access_token("first", 10_000));
+    host.http().enqueue_response(
+        400,
+        UNREADABLE_JSON,
+        br#"{"error":{"message":"invalid_encrypted_content"}}"#.to_vec(),
+    );
+    host.http()
+        .enqueue(b"event: response.completed\ndata: {}\n\n".to_vec());
+    block_on(upstream_for(&host, &id).execute(
+        reasoning_request("rs_keep", "sealed"),
+        ProtocolId::OPENAI_RESPONSES,
+    ))
+    .expect("retried");
+    let first: Value = json::from_slice(host.http().calls()[0].body()).expect("first body");
+    let second: Value = json::from_slice(host.http().calls()[1].body()).expect("second body");
+    assert!(first["input"].as_array().is_some_and(|items| {
+        items
+            .iter()
+            .any(|item| item.get("type") == Some(&json::json!("reasoning")))
+    }));
+    assert!(second["input"].as_array().is_some_and(|items| {
+        !items
+            .iter()
+            .any(|item| item.get("type") == Some(&json::json!("reasoning")))
+    }));
+}
+
+#[test]
+fn r47j_unrelated_400_is_not_retried() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, &access_token("first", 10_000));
+    host.http().enqueue_response(
+        400,
+        UNREADABLE_JSON,
+        br#"{"error":{"message":"model is not available"}}"#.to_vec(),
+    );
+    let error = block_on(
+        upstream_for(&host, &id).execute(streaming_request(), ProtocolId::OPENAI_RESPONSES),
+    )
+    .err()
+    .expect("refusal");
+    assert_eq!(error.status(), Some(400));
+    assert_eq!(host.http().calls().len(), 1);
+}
+
+fn multi_reasoning_request(ids: &[&str]) -> Request {
+    let mut request = streaming_request();
+    let mut content = vec![ContentPart::text("continue")];
+    for id in ids {
+        content.push(reasoning_part(id, "sealed"));
+    }
+    request.messages.push(Message {
+        role: Role::User,
+        content,
+        extensions: Extensions::new(),
+    });
+    request
+}
+
+#[test]
+fn r47j_unreadable_retry_budget_stops_after_reference_limit() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, &access_token("first", 10_000));
+    for item in ["rs_1", "rs_2", "rs_3", "rs_4"] {
+        let body = format!(r#"{{"error":{{"message":"Item with id '{item}' not found"}}}}"#);
+        host.http()
+            .enqueue_response(404, UNREADABLE_JSON, body.into_bytes());
+    }
+    let error = block_on(upstream_for(&host, &id).execute(
+        multi_reasoning_request(&["rs_1", "rs_2", "rs_3", "rs_4"]),
+        ProtocolId::OPENAI_RESPONSES,
+    ))
+    .err()
+    .expect("stops");
+    assert_eq!(error.status(), Some(404));
+    assert_eq!(host.http().calls().len(), 4);
+}
+
 #[test]
 fn expired_words_match_like_codex() {
     assert!(upstream::token_expired("code: token_expired"));
@@ -956,9 +1103,9 @@ fn r47c_reasoning_and_native_compaction_follow_reference_fixtures() {
         out["input"],
         json!([
             {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "continue"}]},
-            {"type": "reasoning", "content": [], "encrypted_content": "openai-own"},
-            {"type": "reasoning", "encrypted_content": "openai-own-without-content"},
-            {"type": "reasoning", "content": null, "encrypted_content": "openai-own-null-content"},
+            {"type": "reasoning", "id": "rs_empty", "content": [], "encrypted_content": "openai-own"},
+            {"type": "reasoning", "id": "rs_absent", "encrypted_content": "openai-own-without-content"},
+            {"type": "reasoning", "id": "rs_null", "content": null, "encrypted_content": "openai-own-null-content"},
             {"type": "compaction", "encrypted_content": "openai-compaction"},
             {"type": "compaction_trigger"},
             {"type": "function_call", "call_id": "call_1", "name": "shell", "arguments": "{}"},
