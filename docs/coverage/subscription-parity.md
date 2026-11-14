@@ -19,7 +19,7 @@ Legend: **Done** = matches the reference at checklist granularity; **Partial** =
 | Kiro (`kiro`) | 8 | 9 | 0 | 2 | 0 |
 | Factory / Droid (`factory`) | 14 | 2 | 0 | 3 | 0 |
 | Cline / ClinePass (`cline`) | 12 | 4 | 0 | 3 | 0 |
-| ChatGPT / Codex (`codex` backend) and ChatGPT API (`chatgpt-api`) | 10 | 10 | 1 | 0 | 0 |
+| ChatGPT / Codex (`codex` backend) and ChatGPT API (`chatgpt-api`) | 12 | 9 | 0 | 0 | 0 |
 | GitHub Copilot (github.com and GHE) | 16 | 1 | 0 | 5 | 0 |
 | Gemini CLI (Code Assist) | 13 | 3 | 0 | 2 | 0 |
 | Google Antigravity | 12 | 3 | 1 | 1 | 0 |

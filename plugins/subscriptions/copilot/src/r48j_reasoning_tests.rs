@@ -2,11 +2,10 @@
 
 use std::sync::Arc;
 
-use hofund_ir::Effort;
 use hofund_kit_subscription::{TestHost, block_on};
 use hofund_plugin_api::{
-    AccountId, Completion, ContentPart, PluginId, PluginKind, ProbeQuery, ProtocolId, Request,
-    UpstreamProvider,
+    AccountId, Completion, ContentPart, Effort, PluginId, PluginKind, ProbeQuery, ProtocolId,
+    Request, UpstreamProvider,
 };
 use hofund_plugin_sdk::json::{self, json};
 use hofund_plugin_sdk::oauth::{SecretObject, TokenCache};

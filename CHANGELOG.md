@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   items into thinking parts, and leave models without catalog effort levels
   unchanged on the outbound wire when no effort is requested (`r48j_*`, mocks
   only). Refs R-48.
+- R-48j: Copilot execute tests take `Effort` from `hofund-plugin-api` (re-exported
+  from the IR) and drop the plugin `hofund-ir` dev-dependency so `check-plugins`
+  and the workspace invariant allow-map stay closed. The ChatGPT/Codex vendor
+  summary in `docs/coverage/subscription-parity.md` is corrected to 12/9/0/0
+  to match the letter-row recount. Refs R-48.
 - R-49e: the Antigravity subscription plugin refreshes hub `ide_version` and
   `User-Agent` from the reference auto-updater manifest through `host.http()`,
   with a six-hour cache, `2.9.1` cold fallback, and offline `r49e_*` fixtures.

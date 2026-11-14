@@ -15,7 +15,6 @@ hofund-plugin-api = { workspace = true }
 hofund-plugin-sdk = { workspace = true }
 
 [dev-dependencies]
-hofund-ir = { workspace = true }
 hofund-kit-subscription = { workspace = true }
 tempfile = { workspace = true }
 
