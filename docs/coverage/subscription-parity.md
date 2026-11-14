@@ -24,7 +24,7 @@ Legend: **Done** = matches the reference at checklist granularity; **Partial** =
 | Gemini CLI (Code Assist) | 13 | 3 | 0 | 2 | 0 |
 | Google Antigravity | 11 | 4 | 1 | 1 | 0 |
 | SuperGrok (`grok`) | 14 | 2 | 0 | 2 | 0 |
-| Qoder (international + Qoder CN) | 14 | 4 | 0 | 2 | 0 |
+| Qoder (international + Qoder CN) | 15 | 3 | 0 | 2 | 0 |
 | CodeBuddy / WorkBuddy (CN + international) | 18 | 1 | 0 | 0 | 0 |
 | Z Code (`zcode`) | 16 | 3 | 0 | 0 | 0 |
 
@@ -512,7 +512,7 @@ Remaining verification is live-account acceptance; all evidence here is determin
 | a2 | browser OAuth | the sign-in page is the device flow in a1, not a second OAuth grant | same device page; no invented second grant | N/A | — |
 | a3 | API key / paste | PAT exchange at `/api/v1/jobToken/exchange` (`index.mjs` `patSignIn`); credential JSON import | `pat.rs`: `pt-` validation, `SignInProof::Token`, site openapi hosts, stored PAT and lapsed re-exchange in `refresh.rs`; `r54c_*` recorded fixtures | Done | — |
 | a4 | agent credential discovery | no agent credential export; native runtime helper only | none; no invented credential path | N/A | — |
-| b | import sources | legacy `qoder.json` migrate (`qoder.go:47-74`) | JSON import only | Partial | Legacy file migrate remains |
+| b | import sources | legacy `qoder.json` migrate (`qoder.go:47-74`) | one-shot sibling `qoder.json` migrate via `prepare_accounts`; user paste in `import.rs` | Done | — |
 | c | token storage | plugin-owned; job + refresh tokens | `creds.rs` SecretObject, with separate device pair, CN device-chat marker, and VPC | Done | — |
 | d | refresh | single-use job/device refresh tokens, renew serialization, and relogin gap | `refresh.rs`: account lease, immediate pair commit, device rotation; `upstream.rs`: forced renew and five-minute relogin gap | Done | — |
 | e | upstream wire | SSE `agent_chat_generation` + COSY envelope (`index.mjs:45-54`) | `upstream.rs`, `cosy.rs`, `shape.rs`: exact path/query, shuffled body codec, RSA/AES/MD5 envelope, native identity and model headers | Done | — |
@@ -532,7 +532,6 @@ Remaining verification is live-account acceptance; all evidence here is determin
 **Gaps**
 
 - R-54b landed native COSY SSE, request shaping and tool/image/reasoning handling, desktop PKCE, device/job refresh and rotation, native models and usage, and fail-closed CN VPC hosts. No agent credential discovery is planned from the reference's native runtime helper.
-- Legacy `qoder.json` migration remains.
 - The site-qualified single plugin remains: separate `qoder` / `qoder-cn` routing labels remain, while account ids distinguish public and VPC deployments.
 - Queue waiting and the remaining request-code nuances, 30-minute check-in recheck scheduling, and live-account verification remain. No #612 claim is made.
 
