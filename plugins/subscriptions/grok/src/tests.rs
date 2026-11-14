@@ -326,6 +326,18 @@ fn r50_tool_allowlist_and_null_tools_search_match_the_reference() {
     shape::body(&mut body, true);
     assert_eq!(body.get("tools"), Some(&json!([{"type": "x_search"}])));
     assert_eq!(body.get("tool_choice"), Some(&json!("auto")));
+
+    let function = json!({"type": "function", "name": "read_file"});
+    let mut body = json!({"tools": [function.clone()], "tool_choice": null})
+        .as_object()
+        .expect("object")
+        .clone();
+    shape::body(&mut body, true);
+    assert_eq!(
+        body.get("tools"),
+        Some(&json!([function, {"type": "x_search"}]))
+    );
+    assert_eq!(body.get("tool_choice"), Some(&Value::Null));
 }
 
 #[test]
@@ -555,8 +567,13 @@ fn r50_rejected_token_left_unchanged_is_unrenewed_not_an_expiry() {
         &[("content-type", "application/json")],
         br#"{"error":"Invalid or expired credentials"}"#.to_vec(),
     );
-    host.process()
-        .script_piped(PipedScript::new().exits(|_| vec![]));
+    let mut script = PipedScript::new()
+        .stderr("silent refresh outcome=Failed(SelfHealing)")
+        .status(1);
+    for index in 0..20 {
+        script = script.line(format!("CLI output {index}"));
+    }
+    host.process().script_piped(script.exits(|_| vec![]));
     let request = ProbeQuery::new(ProtocolId::OPENAI_RESPONSES, "grok-4.7")
         .expect("query")
         .minimal_request();
@@ -567,7 +584,7 @@ fn r50_rejected_token_left_unchanged_is_unrenewed_not_an_expiry() {
     assert_eq!(error.status(), Some(401));
     assert_eq!(error.kind(), hofund_plugin_api::PluginErrorKind::Status);
     assert!(error.to_string().contains(
-        "Grok Build couldn't renew the sign-in (grok models ran and left the same token)"
+        "Grok Build couldn't renew the sign-in (grok models exited 1: silent refresh outcome=Failed(SelfHealing))"
     ));
     assert!(
         error

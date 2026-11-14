@@ -23,7 +23,7 @@ const TOOLS: [&str; 11] = [
 pub(crate) fn body(body: &mut Map<String, Value>, x_search: bool) {
     let auto_choice = body
         .get("tool_choice")
-        .is_none_or(|value| value.as_str() == Some("auto"));
+        .is_none_or(|value| value.is_null() || value.as_str() == Some("auto"));
     let has_tools = body
         .get("tools")
         .and_then(Value::as_array)

@@ -296,7 +296,7 @@ pub trait ProcessBackend: Send + Sync {
     }
 }
 
-/// A child with piped standard input and output.
+/// A child with piped standard input, output, and error.
 ///
 /// Dropping it kills and reaps the child.
 #[async_trait]
@@ -324,7 +324,7 @@ pub trait PipedChildBackend: Send + Sync {
     /// Returns `None` after the first call.
     fn take_stdout(&self) -> Option<BodyStream>;
 
-    /// The exit status after standard output reaches end of file.
+    /// The exit status after standard output and error reach end of file.
     ///
     /// The default refuses.
     async fn exit_code(&self) -> Result<i32, PluginError> {
@@ -332,6 +332,9 @@ pub trait PipedChildBackend: Send + Sync {
             "this piped child backend has no exit status",
         ))
     }
+
+    /// The most recent 1 MiB of standard error.
+    fn stderr_tail(&self) -> Bytes;
 }
 
 /// A long-lived piped child.

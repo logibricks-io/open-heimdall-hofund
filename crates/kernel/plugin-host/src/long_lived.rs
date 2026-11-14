@@ -198,7 +198,7 @@ pub(crate) fn read_lines_capped(
     }
 }
 
-fn retain_stderr(reader: impl Read, store: &Arc<Mutex<Vec<u8>>>) {
+pub(crate) fn retain_stderr(reader: impl Read, store: &Arc<Mutex<Vec<u8>>>) {
     let mut reader = reader;
     let mut buffer = [0_u8; 8192];
     loop {

@@ -498,7 +498,7 @@ impl Spawned {
     }
 }
 
-/// A child process with piped standard input and output.
+/// A child process with piped standard input, output, and error.
 ///
 /// Dropping it kills and reaps the child.
 #[non_exhaustive]
@@ -553,7 +553,7 @@ impl PipedChild {
             .ok_or_else(|| PluginError::config("standard output was already taken"))
     }
 
-    /// The process exit code after standard output reaches end of file.
+    /// The process exit code after standard output and error reach end of file.
     ///
     /// Waits until the child exits. Dropping the handle without calling this still
     /// kills a child the caller abandoned.
@@ -563,6 +563,12 @@ impl PipedChild {
     /// Returns [`PluginError`] when the wait fails.
     pub async fn exit_code(&self) -> Result<i32, PluginError> {
         self.inner.exit_code().await
+    }
+
+    /// The most recent 1 MiB of standard error.
+    #[must_use]
+    pub fn stderr_tail(&self) -> Bytes {
+        self.inner.stderr_tail()
     }
 }
 
@@ -701,12 +707,13 @@ impl ProcessHandle {
         Ok(Spawned::new(id))
     }
 
-    /// Spawns `request` with piped standard input and output.
+    /// Spawns `request` with piped standard input, output, and error.
     ///
     /// The child sees only an allowlist of the host environment (`PATH`,
     /// `HOME` or `USERPROFILE`, locale, and proxy variables), then the pairs
-    /// in `request`. Standard error is discarded. Output lines are capped at
-    /// 1 MiB. Dropping the [`PipedChild`] kills and reaps the child.
+    /// in `request`. Standard error is retained up to 1 MiB (the tail). Output
+    /// lines are capped at 1 MiB. Dropping the [`PipedChild`] kills and reaps
+    /// the child.
     ///
     /// # Errors
     ///
@@ -1704,6 +1711,7 @@ mod tests {
         written: Arc<Mutex<Vec<u8>>>,
         closed: Arc<Mutex<bool>>,
         stdout: Mutex<Option<BodyStream>>,
+        stderr: Bytes,
     }
 
     #[async_trait]
@@ -1732,6 +1740,10 @@ mod tests {
         async fn exit_code(&self) -> Result<i32, PluginError> {
             Ok(0)
         }
+
+        fn stderr_tail(&self) -> Bytes {
+            self.stderr.clone()
+        }
     }
 
     #[tokio::test]
@@ -1759,6 +1771,7 @@ mod tests {
     async fn piped_child_delegates_and_hands_out_stdout_once() {
         let pipe = FakePipe {
             stdout: Mutex::new(Some(BodyStream::from_bytes("line\n"))),
+            stderr: Bytes::from_static(b"error\n"),
             ..FakePipe::default()
         };
         let written = Arc::clone(&pipe.written);
@@ -1778,6 +1791,7 @@ mod tests {
         let mut stdout = child.stdout().expect("first stdout");
         let chunk = stdout.next_chunk().await.expect("a chunk").expect("ok");
         assert_eq!(&chunk[..], b"line\n");
+        assert_eq!(&child.stderr_tail()[..], b"error\n");
         let error = child.stdout().expect_err("second stdout");
         assert_eq!(error.kind(), PluginErrorKind::Config);
     }

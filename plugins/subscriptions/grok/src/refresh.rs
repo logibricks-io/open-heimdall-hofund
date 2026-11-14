@@ -121,17 +121,27 @@ struct CliRun {
 async fn run_cli(host: &HostContext, program: &Path, home: &Path) -> Result<CliRun, PluginError> {
     let request = cli::request(program, &cli::MODELS_ARGS, home)?;
     let child = host.spawn_process().spawn_piped(&request).await?;
-    let finished = timeout(MODELS_WAIT, async move { child.exit_code().await }).await;
+    let mut stdout = child.stdout()?;
+    let mut last = String::new();
+    let finished = timeout(MODELS_WAIT, async {
+        cli::drain(&mut stdout, &mut last).await;
+        child.exit_code().await
+    })
+    .await;
+    let stderr = child.stderr_tail();
+    if !stderr.is_empty() {
+        last = cli::last_output(&String::from_utf8_lossy(&stderr));
+    }
     match finished {
         Some(Ok(code)) => Ok(CliRun {
             code,
-            last: String::new(),
+            last,
             timed_out: false,
         }),
         Some(Err(error)) => Err(error),
         None => Ok(CliRun {
             code: -1,
-            last: String::new(),
+            last,
             timed_out: true,
         }),
     }

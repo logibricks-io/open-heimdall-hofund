@@ -705,6 +705,7 @@ PipedChild::async fn close_stdin (& self) -> Result < () , PluginError >
 PipedChild::async fn exit_code (& self) -> Result < i32 , PluginError >
 PipedChild::async fn write_stdin (& self , bytes : Bytes) -> Result < () , PluginError >
 PipedChild::fn id (& self) -> u32
+PipedChild::fn stderr_tail (& self) -> Bytes
 PipedChild::fn stdout (& self) -> Result < BodyStream , PluginError >
 Plan
 Plan #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
@@ -1394,6 +1395,7 @@ kernel::PipedChildBackend::async fn close_stdin (& self) -> Result < () , Plugin
 kernel::PipedChildBackend::async fn exit_code (& self) -> Result < i32 , PluginError >
 kernel::PipedChildBackend::async fn write_stdin (& self , bytes : Bytes) -> Result < () , PluginError >
 kernel::PipedChildBackend::fn id (& self) -> u32
+kernel::PipedChildBackend::fn stderr_tail (& self) -> Bytes
 kernel::PipedChildBackend::fn take_stdout (& self) -> Option < BodyStream >
 kernel::ProcessBackend
 kernel::ProcessBackend::async fn spawn (& self , program : PathBuf , args : Vec < std :: ffi :: OsString > , env : Vec < (std :: ffi :: OsString , std :: ffi :: OsString) > , cwd : PathBuf ,) -> Result < u32 , PluginError >

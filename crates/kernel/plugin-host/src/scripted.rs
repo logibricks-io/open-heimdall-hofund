@@ -66,6 +66,7 @@ enum Ending {
 /// What the next piped child does.
 pub struct PipedScript {
     lines: Vec<String>,
+    stderr: Bytes,
     ending: Ending,
     status: i32,
 }
@@ -82,6 +83,7 @@ impl PipedScript {
     pub fn new() -> Self {
         Self {
             lines: Vec::new(),
+            stderr: Bytes::new(),
             ending: Ending::Hang,
             status: 0,
         }
@@ -91,6 +93,13 @@ impl PipedScript {
     #[must_use]
     pub fn line(mut self, line: impl Into<String>) -> Self {
         self.lines.push(line.into());
+        self
+    }
+
+    /// Writes `text` to standard error.
+    #[must_use]
+    pub fn stderr(mut self, text: impl Into<Bytes>) -> Self {
+        self.stderr = text.into();
         self
     }
 
@@ -184,6 +193,7 @@ pub(crate) struct ScriptedChild {
     spawn: PipedSpawn,
     tx: Mutex<Option<mpsc::UnboundedSender<Line>>>,
     stdout: Mutex<Option<BodyStream>>,
+    stderr: Bytes,
     on_stdin: Mutex<Option<OnStdin>>,
     shared: Arc<Shared>,
     exit: Arc<ExitCell>,
@@ -217,6 +227,7 @@ impl ScriptedChild {
             spawn,
             tx: Mutex::new(tx),
             stdout: Mutex::new(Some(stdout)),
+            stderr: script.stderr,
             on_stdin: Mutex::new(on_stdin),
             shared,
             exit,
@@ -273,6 +284,10 @@ impl PipedChildBackend for ScriptedChild {
         }
         .await)
     }
+
+    fn stderr_tail(&self) -> Bytes {
+        self.stderr.clone()
+    }
 }
 
 impl Drop for ScriptedChild {
@@ -299,7 +314,12 @@ mod tests {
     #[tokio::test]
     async fn scripted_child_reports_a_nonzero_exit_status() {
         let process = RecordingProcess::default();
-        process.script_piped(PipedScript::new().exits(|_| Vec::new()).status(44));
+        process.script_piped(
+            PipedScript::new()
+                .stderr("diagnostic")
+                .exits(|_| Vec::new())
+                .status(44),
+        );
         let child = process
             .spawn_piped(
                 PathBuf::from("/usr/bin/security"),
@@ -310,5 +330,35 @@ mod tests {
             .await
             .expect("spawn");
         assert_eq!(child.exit_code().await.expect("exit"), 44);
+        assert_eq!(&child.stderr_tail()[..], b"diagnostic");
+        let mut stdout = child.take_stdout().expect("stdout");
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), stdout.next_chunk())
+                .await
+                .expect("stdout EOF")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn scripted_exit_without_output_closes_stdout() {
+        let process = RecordingProcess::default();
+        process.script_piped(PipedScript::new().exits(|_| Vec::new()));
+        let child = process
+            .spawn_piped(
+                PathBuf::from("/usr/bin/security"),
+                Vec::new(),
+                Vec::new(),
+                PathBuf::from("/tmp"),
+            )
+            .await
+            .expect("spawn");
+        let mut stdout = child.take_stdout().expect("stdout");
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), stdout.next_chunk())
+                .await
+                .expect("stdout EOF")
+                .is_none()
+        );
     }
 }
