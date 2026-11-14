@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use hofund_plugin_api::{Body, BodyStream, PluginError};
+use hofund_plugin_api::{Body, BodyStream, CallerScope, PluginError};
 use hofund_plugin_sdk::json::{self, Value, json};
 use hofund_plugin_sdk::{
     HttpRequest, HttpResponse, async_trait, refused_passthrough, text_response, without_passthrough,
@@ -87,6 +87,7 @@ struct Stub {
     called: Mutex<Vec<Seen>>,
     sent: Mutex<Vec<Seen>>,
     relay_fallbacks: Vec<String>,
+    caller_scope: CallerScope,
 }
 
 impl Stub {
@@ -111,6 +112,13 @@ impl Stub {
     fn relay_fallbacks(self, models: &[&str]) -> Self {
         Self {
             relay_fallbacks: models.iter().map(|model| (*model).to_owned()).collect(),
+            ..self
+        }
+    }
+
+    fn caller_scope(self, caller_scope: CallerScope) -> Self {
+        Self {
+            caller_scope,
             ..self
         }
     }
@@ -150,6 +158,10 @@ impl Kernel for Stub {
 
     fn codex_relay_fallbacks(&self) -> &[String] {
         &self.relay_fallbacks
+    }
+
+    fn caller_scope(&self) -> CallerScope {
+        self.caller_scope.clone()
     }
 }
 
@@ -1404,6 +1416,95 @@ fn codexs_own_model_with_a_codex_route_compacts_in_process() {
     assert_eq!(called.len(), 2);
     let value: Value = json::from_slice(&called[1].body).expect("json");
     assert_eq!(value["model"], "codex/gpt-5");
+}
+
+#[test]
+fn r47a_a3_backend_compact_refuses_held_chatgpt_sign_in_before_relay() {
+    use std::fs;
+
+    use hofund_plugin_sdk::oauth::account_id_from;
+
+    let dir = tempfile::Builder::new()
+        .prefix("hofund-r47a3-backend-held-")
+        .tempdir()
+        .expect("scratch");
+    let home = dir.path().to_path_buf();
+    fs::create_dir_all(&home).expect("home");
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let claims = r#"{"email":"u@example.test","sub":"sub-b","https://api.openai.com/auth":{"chatgpt_account_id":"acct-b","chatgpt_plan_type":"plus"}}"#;
+    let mut out = String::new();
+    for chunk in claims.as_bytes().chunks(3) {
+        let n = chunk
+            .iter()
+            .enumerate()
+            .fold(0_u32, |acc, (i, b)| acc | (u32::from(*b) << (16 - 8 * i)));
+        let count = chunk.len() + 1;
+        for i in 0..count {
+            out.push(char::from(ALPHABET[((n >> (18 - 6 * i)) & 63) as usize]));
+        }
+    }
+    let token = format!("e30.{out}.sig");
+    fs::write(
+        home.join("auth.json"),
+        format!(
+            r#"{{"auth_mode":"chatgpt","tokens":{{"access_token":"access-example","refresh_token":"refresh-example","id_token":"{token}"}}}}"#
+        ),
+    )
+    .expect("auth");
+    super::official::set_test_codex_home(Some(home));
+    let only = account_id_from(&["sub-only", "acct-only"]).to_string();
+    let stub =
+        Stub::default().caller_scope(CallerScope::new("narrow", vec![format!("codex/{only}")]));
+    let (status, _, body) = ask(
+        &stub,
+        request(
+            "POST",
+            "/backend-api/codex/responses/compact",
+            &[],
+            r#"{"model":"gpt-5"}"#,
+        ),
+    );
+    super::official::set_test_codex_home(None);
+    assert_eq!(status, 403, "{body}");
+    assert!(message(&body).contains("Native compaction for gpt-5"));
+    assert!(stub.sent().is_empty());
+    assert!(message(&body).contains(&format!("codex/{only}")));
+}
+
+#[test]
+fn r47a_a3_backend_compact_allows_apikey_sign_in_under_account_holds() {
+    use std::fs;
+
+    let dir = tempfile::Builder::new()
+        .prefix("hofund-r47a3-backend-apikey-")
+        .tempdir()
+        .expect("scratch");
+    let home = dir.path().to_path_buf();
+    fs::create_dir_all(&home).expect("home");
+    fs::write(
+        home.join("auth.json"),
+        r#"{"auth_mode":"apikey","tokens":{"access_token":"sk-example","refresh_token":"refresh-example","id_token":"e30.eyJ9.sig"}}"#,
+    )
+    .expect("auth");
+    super::official::set_test_codex_home(Some(home));
+    let stub = Stub::default()
+        .caller_scope(CallerScope::new(
+            "narrow",
+            vec!["codex/some-account".to_owned()],
+        ))
+        .sending(answer(200, "compacted"));
+    let (status, _, text) = ask(
+        &stub,
+        request(
+            "POST",
+            "/backend-api/codex/responses/compact",
+            &[],
+            r#"{"model":"gpt-5"}"#,
+        ),
+    );
+    super::official::set_test_codex_home(None);
+    assert_eq!((status, text.as_str()), (200, "compacted"));
+    assert_eq!(stub.sent().len(), 1);
 }
 
 #[test]

@@ -228,6 +228,11 @@ impl CacheFile {
     }
 }
 
+/// Codex's config home (`CODEX_HOME`, or `~/.codex` when unset).
+pub(crate) fn codex_home_dir() -> Option<PathBuf> {
+    codex_home()
+}
+
 fn codex_home() -> Option<PathBuf> {
     // Tests never read the real Codex home of the machine they run on.
     if cfg!(test) {

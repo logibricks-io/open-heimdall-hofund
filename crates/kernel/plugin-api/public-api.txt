@@ -270,6 +270,12 @@ BuildError
 BuildError #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Error)
 BuildError::fn message (& self) -> & str
 BuildError::fn new (message : impl Into < String >) -> Self
+CallerScope
+CallerScope #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq)
+CallerScope.accounts
+CallerScope.key_name
+CallerScope::fn holds_accounts (& self) -> bool
+CallerScope::fn new (key_name : impl Into < String > , accounts : Vec < String >) -> Self
 CheckinAccountStatus
 CheckinAccountStatus #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 CheckinAccountStatus::fn account (& self) -> & AccountId
@@ -1256,8 +1262,9 @@ SurfaceHost #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 SurfaceHost::const fn auth (& self) -> AuthResult
 SurfaceHost::const fn gateway (& self) -> & GatewayHandle
 SurfaceHost::const fn http (& self) -> Option < & HttpHandle >
+SurfaceHost::fn caller_scope (& self) -> & CallerScope
 SurfaceHost::fn codex_relay_fallbacks (& self) -> & [String]
-SurfaceHost::fn from_parts (members : Vec < MemberId > , protocols : Vec < ProtocolId > , auth : AuthResult , gateway : Option < Arc < dyn GatewayBackend > > , http : Option < Arc < dyn HttpBackend > > , codex_relay_fallbacks : Arc < [String] > ,) -> Self
+SurfaceHost::fn from_parts (members : Vec < MemberId > , protocols : Vec < ProtocolId > , auth : AuthResult , caller : CallerScope , gateway : Option < Arc < dyn GatewayBackend > > , http : Option < Arc < dyn HttpBackend > > , codex_relay_fallbacks : Arc < [String] > ,) -> Self
 SurfaceHost::fn members (& self) -> & [MemberId]
 SurfaceHost::fn protocols (& self) -> & [ProtocolId]
 SurfaceId
