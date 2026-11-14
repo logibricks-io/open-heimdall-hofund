@@ -129,6 +129,7 @@ pub(crate) fn read_agent_access(home: &Path) -> Option<String> {
 }
 
 /// Writes auth.json for agent sign-in export.
+#[expect(dead_code, reason = "documented cursor-agent subprocess auth staging")]
 pub(crate) fn write_auth_file(config: &Path, access: &str) -> Result<(), PluginError> {
     std::fs::create_dir_all(config)
         .map_err(|_| PluginError::io("cannot create the Cursor config directory"))?;

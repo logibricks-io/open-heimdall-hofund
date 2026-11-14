@@ -4,18 +4,17 @@ use hofund_plugin_api::{HostContext, Request, SecretString};
 use hofund_plugin_sdk::json::Value;
 
 use crate::endpoints::Endpoints;
+use crate::listing;
+#[cfg(test)]
+use crate::models;
+#[cfg(test)]
+use crate::picker_model::{ParameterDefinition, PickerModel, Variant, parse_all};
 use crate::proto::ModelParameter;
-use crate::{connect, models};
 
+#[cfg(test)]
 const LEVEL_RANK: &[&str] = &["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+#[cfg(test)]
 const EFFORT_PARAMS: &[&str] = &["effort", "reasoning_effort", "reasoning"];
-const PICKER_SKIP: &[&str] = &[
-    "claude-4.5-haiku",
-    "claude-4.5-haiku-thinking",
-    "gemini-2.5-pro",
-    "gemini-2.5-flash",
-    "claude-haiku-4-5",
-];
 
 /// The requested-model id, its native parameters, and the variant's mode.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -50,15 +49,12 @@ pub(crate) async fn choose(
         .effort
         .map(|effort| effort.openai_label())
         .unwrap_or_default();
-    let fast = fast_of(request);
-    let Ok(body) = connect::available_models(host, endpoints, token).await else {
-        return ModelChoice::passthrough(&request.model);
-    };
-    let models = parse_models(&body);
-    if models.is_empty() {
+    let fast = fast_of(request) == Some(true);
+    let raw = listing::list_for(host, endpoints, token).await;
+    if raw.is_empty() {
         return ModelChoice::passthrough(&request.model);
     }
-    request_model(&models, &request.model, effort, fast)
+    listing::request(&raw, &request.model, effort, fast)
 }
 
 fn needs_picker(request: &Request) -> bool {
@@ -75,154 +71,12 @@ fn fast_of(request: &Request) -> Option<bool> {
         .map(|tier| matches!(tier, "priority" | "fast"))
 }
 
-#[derive(Clone, Debug)]
-struct PickerModel {
-    name: String,
-    legacy_slugs: Vec<String>,
-    id_aliases: Vec<String>,
-    context_token_limit: u64,
-    supports_non_max_mode: Option<bool>,
-    definitions: Vec<ParameterDefinition>,
-    variants: Vec<Variant>,
-}
-
-#[derive(Clone, Debug)]
-struct ParameterDefinition {
-    id: String,
-    values: Vec<String>,
-}
-
-#[derive(Clone, Debug, Default)]
-struct Variant {
-    legacy_slug: Option<String>,
-    values: Vec<ModelParameter>,
-    is_default_non_max: bool,
-    is_default_max: bool,
-    is_max: bool,
-}
-
+#[cfg(test)]
 fn parse_models(body: &Value) -> Vec<PickerModel> {
-    body.get("models")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(parse_model)
-        .collect()
+    parse_all(body)
 }
 
-fn parse_model(value: &Value) -> Option<PickerModel> {
-    let name = value.get("name")?.as_str()?.to_owned();
-    if name.is_empty()
-        || PICKER_SKIP.contains(&name.as_str())
-        || value.get("isHidden").and_then(Value::as_bool) == Some(true)
-        || value.get("isChatOnly").and_then(Value::as_bool) == Some(true)
-        || value.get("onlySupportsCmdK").and_then(Value::as_bool) == Some(true)
-        || value.get("supportsAgent").and_then(Value::as_bool) == Some(false)
-    {
-        return None;
-    }
-    Some(PickerModel {
-        name,
-        legacy_slugs: strings(value.get("legacySlugs")),
-        id_aliases: strings(value.get("idAliases")),
-        context_token_limit: value
-            .get("contextTokenLimit")
-            .and_then(Value::as_u64)
-            .unwrap_or(0),
-        supports_non_max_mode: value.get("supportsNonMaxMode").and_then(Value::as_bool),
-        definitions: value
-            .get("parameterDefinitions")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(parse_definition)
-            .collect(),
-        variants: value
-            .get("variants")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(parse_variant)
-            .collect(),
-    })
-}
-
-fn strings(value: Option<&Value>) -> Vec<String> {
-    value
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-        .collect()
-}
-
-fn scalar_string(value: &Value) -> Option<String> {
-    match value {
-        Value::String(value) => Some(value.clone()),
-        Value::Number(value) => Some(value.to_string()),
-        Value::Bool(value) => Some(value.to_string()),
-        _ => None,
-    }
-}
-
-fn parse_definition(value: &Value) -> Option<ParameterDefinition> {
-    let id = value.get("id")?.as_str()?.to_owned();
-    if id.is_empty() {
-        return None;
-    }
-    let kind = value.get("parameterType")?;
-    let values = kind
-        .get("enumParameter")
-        .or_else(|| kind.get("booleanParameter"))
-        .and_then(|parameter| parameter.get("values"))
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|value| value.get("value"))
-        .filter_map(scalar_string)
-        .collect();
-    Some(ParameterDefinition { id, values })
-}
-
-fn parse_variant(value: &Value) -> Option<Variant> {
-    if !value.is_object() {
-        return None;
-    }
-    Some(Variant {
-        legacy_slug: value
-            .get("legacySlug")
-            .and_then(Value::as_str)
-            .filter(|slug| !slug.is_empty())
-            .map(str::to_owned),
-        values: value
-            .get("parameterValues")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(|parameter| {
-                Some(ModelParameter {
-                    id: parameter.get("id")?.as_str()?.to_owned(),
-                    value: scalar_string(parameter.get("value")?)?,
-                })
-            })
-            .collect(),
-        is_default_non_max: value
-            .get("isDefaultNonMaxConfig")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        is_default_max: value
-            .get("isDefaultMaxConfig")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        is_max: value
-            .get("isMaxMode")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-    })
-}
-
+#[cfg(test)]
 fn request_model(
     models: &[PickerModel],
     requested: &str,
@@ -343,12 +197,14 @@ fn split_context(model: &str) -> (&str, Option<&str>) {
     (base, Some(size))
 }
 
+#[cfg(test)]
 fn family_of(id: &str) -> (String, String, bool) {
     let (family, effort) = models::split_id(id);
     let fast = family.len() > "-fast".len() && family.ends_with("-fast");
     (family, effort, fast)
 }
 
+#[cfg(test)]
 fn loose_family(id: &str) -> String {
     let (family, _, _) = family_of(id);
     family
@@ -357,6 +213,7 @@ fn loose_family(id: &str) -> String {
         .to_owned()
 }
 
+#[cfg(test)]
 fn default_variant(model: &PickerModel) -> Option<&Variant> {
     model
         .variants
@@ -366,6 +223,7 @@ fn default_variant(model: &PickerModel) -> Option<&Variant> {
         .or_else(|| model.variants.first())
 }
 
+#[cfg(test)]
 fn entry_size(model: &PickerModel, explicit: Option<&str>, seed: Option<&Variant>) -> String {
     let contexts = definition(model, "context")
         .map(|definition| definition.values.as_slice())
@@ -395,6 +253,7 @@ fn entry_size(model: &PickerModel, explicit: Option<&str>, seed: Option<&Variant
     contexts.first().cloned().unwrap_or_default()
 }
 
+#[cfg(test)]
 fn tokens_of(value: &str) -> u64 {
     let split = value
         .find(|character: char| !character.is_ascii_digit() && character != '.')
@@ -413,6 +272,7 @@ fn tokens_of(value: &str) -> u64 {
         .unwrap_or(0)
 }
 
+#[cfg(test)]
 fn definition<'a>(model: &'a PickerModel, id: &str) -> Option<&'a ParameterDefinition> {
     model
         .definitions
@@ -420,6 +280,7 @@ fn definition<'a>(model: &'a PickerModel, id: &str) -> Option<&'a ParameterDefin
         .find(|definition| definition.id == id && !definition.values.is_empty())
 }
 
+#[cfg(test)]
 fn parameter<'a>(values: &'a [ModelParameter], id: &str) -> Option<&'a str> {
     values
         .iter()
@@ -427,6 +288,7 @@ fn parameter<'a>(values: &'a [ModelParameter], id: &str) -> Option<&'a str> {
         .map(|parameter| parameter.value.as_str())
 }
 
+#[cfg(test)]
 fn set_parameter(values: &mut Vec<ModelParameter>, id: &str, value: &str) {
     if let Some(parameter) = values.iter_mut().find(|parameter| parameter.id == id) {
         parameter.value = value.to_owned();
@@ -438,6 +300,7 @@ fn set_parameter(values: &mut Vec<ModelParameter>, id: &str, value: &str) {
     }
 }
 
+#[cfg(test)]
 fn efforts_of(model: &PickerModel) -> (Option<&str>, Vec<(String, String)>) {
     let effort = EFFORT_PARAMS
         .iter()
@@ -474,6 +337,7 @@ fn efforts_of(model: &PickerModel) -> (Option<&str>, Vec<(String, String)>) {
     (Some(id), levels)
 }
 
+#[cfg(test)]
 fn fit_effort(want: &str, levels: &[(String, String)]) -> String {
     let want = if want == "off" {
         "none"
@@ -506,6 +370,7 @@ fn fit_effort(want: &str, levels: &[(String, String)]) -> String {
     best.to_owned()
 }
 
+#[cfg(test)]
 fn same_variant(variant: &Variant, want: &[ModelParameter]) -> bool {
     want.iter().all(|wanted| {
         parameter(&variant.values, &wanted.id).is_none_or(|value| value == wanted.value)
@@ -515,6 +380,7 @@ fn same_variant(variant: &Variant, want: &[ModelParameter]) -> bool {
         .all(|held| parameter(want, &held.id).is_none_or(|value| value == held.value))
 }
 
+#[cfg(test)]
 fn nearest_variant<'a>(variants: &[&'a Variant], want: &[ModelParameter]) -> Option<&'a Variant> {
     let mut best = None;
     let mut most = -1_i32;
@@ -534,6 +400,7 @@ fn nearest_variant<'a>(variants: &[&'a Variant], want: &[ModelParameter]) -> Opt
     best
 }
 
+#[cfg(test)]
 fn normalized_level(value: &str) -> &str {
     if value == "extra-high" {
         "xhigh"
@@ -542,6 +409,7 @@ fn normalized_level(value: &str) -> &str {
     }
 }
 
+#[cfg(test)]
 fn branch<'a>(model: &'a PickerModel, want: &[ModelParameter], pid: &str) -> Option<&'a Variant> {
     if pid == "thinking" {
         return None;
@@ -591,6 +459,7 @@ fn branch<'a>(model: &'a PickerModel, want: &[ModelParameter], pid: &str) -> Opt
         .find(|variant| parameter(&variant.values, pid).map(normalized_level) == Some(at.as_str()))
 }
 
+#[cfg(test)]
 fn pick(
     model: &PickerModel,
     size: &str,
@@ -669,6 +538,7 @@ fn pick(
     }
 }
 
+#[cfg(test)]
 fn needs_max(model: &PickerModel, variant: &Variant) -> bool {
     model.supports_non_max_mode == Some(false) || variant.is_max
 }
@@ -679,9 +549,10 @@ mod tests {
     use hofund_plugin_sdk::json::{Value, json};
 
     use super::{ModelChoice, needs_picker, parse_models, request_model};
+    use crate::picker_model::PickerModel;
     use crate::proto::ModelParameter;
 
-    fn models() -> Vec<super::PickerModel> {
+    fn models() -> Vec<PickerModel> {
         let enum_values = |values: &[&str]| json!({"enumParameter": {"values": values.iter().map(|value| json!({"value": value})).collect::<Vec<_>>()}});
         let boolean =
             json!({"booleanParameter": {"values": [{"value": "false"}, {"value": "true"}]}});

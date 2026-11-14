@@ -20,6 +20,10 @@ pub(crate) const COMMAND: &str = "cursor-agent";
 pub(crate) const STATUS_WAIT: Duration = Duration::from_secs(30);
 
 /// How long `cursor-agent models` may run.
+#[expect(
+    dead_code,
+    reason = "cursor-agent models subprocess timeout for CLI fallback fixtures"
+)]
 pub(crate) const MODELS_WAIT: Duration = Duration::from_secs(30);
 
 /// How long a keychain read is reused.

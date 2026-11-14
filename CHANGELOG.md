@@ -58,6 +58,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- R-9g: Cursor `list_models` and request-time picker selection share one
+  server-side catalog list built from `AvailableModels`, `GetUsableModels`,
+  and scope-3 `AvailableModels`, with a ten-minute per-token cache,
+  in-flight coalescing, stale-while-revalidate, and post-failure `LIST_RETRY`;
+  offline fixtures cover the reference catalog merge cases.
 - R-10 round 1: non-streamed gateway replies no longer store TTFT; tokens/s uses
   the reference `DecodeOf` and `flow_ms` burst rules; `--csv` matches the
   reference ledger column order with empty cells where hofund does not record a field.
