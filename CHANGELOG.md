@@ -18,6 +18,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   credit-event paths remain row k follow-ups.
   Refs R-9.
 
+- R-52e: the Factory subscription plugin wraps Anthropic tool schemas that use
+  root `anyOf` / `oneOf` / `allOf` under `arguments`, rebases in-schema `#`
+  refs, unwraps unary `tool_use` replies, and rewrites streamed
+  `input_json_delta` events before they reach the caller. Recorded HTTP and
+  `r52e_*` fixtures cover wrap, unwrap, and stream paths. Refs R-52.
+
 - R-54c: the Qoder subscription plugin exchanges pasted Personal Access Tokens
   at each site's `/api/v1/jobToken/exchange`, stores the PAT for lapsed
   job-token refresh, and re-exchanges on refused refresh when a PAT is still

@@ -180,3 +180,19 @@ fn v4_responses_namespace_tools_folded() {
     assert_eq!(parameters["type"], "object");
     assert!(parameters.get("anyOf").is_none());
 }
+
+#[test]
+fn r52e_factory_anthropic_tool_schema_root_unions_stay_unfolded() {
+    let state = RequestState::default();
+    let body = br#"{"model":"claude-opus-5-5","tools":[{"name":"task","input_schema":{"anyOf":[{"type":"object","properties":{"mode":{"const":"view"}}}]}}]}"#;
+    let (folded, changed) = fold_object_roots(
+        "https://factory.test/api/llm/a",
+        "anthropic-messages",
+        "claude-opus-5-5",
+        &state,
+        body,
+    );
+    assert!(!changed);
+    let value: Value = serde_json::from_slice(&folded).expect("json");
+    assert!(value["tools"][0]["input_schema"].get("anyOf").is_some());
+}
