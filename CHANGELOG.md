@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- R-9h: the Cursor subscription plugin documents and tests the stateless Run
+  tool-argument path against the frozen reference — one full JSON
+  `ToolArgumentsDelta` per selected MCP exec, partial-tool wire markers that do
+  not stream arguments early, and continued refusal of Cursor-owned execs without
+  native session retention (`r9h_*` loopback tests). Refs R-9.
+
 - R-47n: the Codex subscription plugin classifies vendor reset outcomes on HTTP
   200 (`reset`, `nothing_to_reset`, `already_redeemed`, and related refusal
   codes) and keeps an in-flight `redeem_request_id` across explicit
