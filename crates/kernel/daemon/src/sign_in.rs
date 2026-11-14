@@ -1104,15 +1104,18 @@ mod tests {
     use futures_util::{Stream, stream};
     use hofund_plugin_api::{
         AccountId, AccountStatus, HostContext, LoopbackSpec, ModelList, PluginError, PluginId,
-        PluginKind, QuotaWindow, SecretString, SignInChallenge, SignInCtx, SignInFlow, SignInProof,
-        Subscription, UpstreamProvider,
+        PluginKind, QuotaWindow, RawTable, SecretString, SignInChallenge, SignInCtx, SignInFlow,
+        SignInProof, Subscription, UpstreamProvider,
     };
     use hofund_plugin_host::TestHost;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    use crate::registry::DaemonRegistry;
+
     use super::{
         INTERRUPTED_EXIT, Opened, SIGN_IN_DEADLINE, SignInError, SignInOptions, drive_sign_in,
-        list_in, quota_in, quota_json, refresh_in, sign_in_ctx, sign_out_in, subscriptions_json,
+        drive_sign_in_with_challenge, list_in, quota_in, quota_json, refresh_in, sign_in_ctx,
+        sign_out_in, subscriptions_json,
     };
 
     const PLUGIN: &str = "fake-sub";
@@ -1475,6 +1478,71 @@ mod tests {
             vec!["callback right"]
         );
         assert_eq!(rig.calls.cancels.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn r47c_codex_sign_in_completes_from_pasted_callback() {
+        let dir = tempfile::tempdir().expect("dir");
+        let plugin = PluginId::from_static("codex");
+        let test = TestHost::open_for(PluginKind::Subscription, plugin.clone(), dir.path());
+        let factory = crate::RegistryAdapter
+            .subscription("codex")
+            .expect("Codex subscription");
+        let subscription = factory
+            .validate_and_build(&RawTable::new(), test.context())
+            .expect("build Codex subscription");
+        test.http().enqueue(
+            br#"{"access_token":"synthetic-access","token_type":"Bearer","refresh_token":"synthetic-refresh","id_token":"e30.eyJlbWFpbCI6InVAZXhhbXBsZS50ZXN0Iiwic3ViIjoic3ViLTEiLCJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdC0xIiwiY2hhdGdwdF9wbGFuX3R5cGUiOiJwbHVzIn19.sig"}"#
+                .to_vec(),
+        );
+        let (sender, paste) = paste_channel();
+        let (challenge_sender, mut challenges) = tokio::sync::mpsc::unbounded_channel();
+        let user = async {
+            let Some(SignInChallenge::OpenUrl { url }) = challenges.recv().await else {
+                panic!("expected an address to open");
+            };
+            let page = url::Url::parse(&url).expect("authorize URL");
+            let parameter = |name: &str| {
+                page.query_pairs()
+                    .find(|(key, _)| key == name)
+                    .map(|(_, value)| value.into_owned())
+                    .expect("authorize parameter")
+            };
+            let redirect = parameter("redirect_uri");
+            let state = parameter("state");
+            sender
+                .send(format!("{redirect}?code=pasted-code&state={state}"))
+                .expect("paste callback");
+        };
+        let mut out = Vec::new();
+        let (result, ()) = tokio::join!(
+            drive_sign_in_with_challenge(
+                subscription.as_ref(),
+                test.context(),
+                test.loopback(),
+                sign_in_ctx(&plugin, &SignInOptions::default()).expect("ctx"),
+                paste,
+                std::future::pending::<()>(),
+                Duration::from_secs(10),
+                &mut out,
+                &challenge_sender,
+            ),
+            user,
+        );
+        result.expect("pasted callback finishes Codex sign-in");
+        let accounts = test.context().accounts().list().await.expect("accounts");
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].label(), "u@example.test");
+        let calls = test.http().calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].uri(), "https://auth.openai.com/oauth/token");
+        let form = String::from_utf8(calls[0].body().to_vec()).expect("form");
+        assert!(form.contains("code=pasted-code"), "{form}");
+        assert!(form.contains("code_verifier="), "{form}");
+        assert!(form.contains("redirect_uri="), "{form}");
+        let printed = String::from_utf8(out).expect("utf8");
+        assert!(printed.contains("paste the address the browser ended on"));
+        assert!(!printed.contains("pasted-code"));
     }
 
     #[tokio::test]

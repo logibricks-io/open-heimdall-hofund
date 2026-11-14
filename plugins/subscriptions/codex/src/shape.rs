@@ -181,6 +181,47 @@ fn item_type(item: &Map<String, Value>) -> &str {
     item.get("type").and_then(Value::as_str).unwrap_or("")
 }
 
+/// The backend accepts a replayed reasoning item only without content parts
+/// and with its own seal. An unsealed id cannot be looked up with `store`
+/// false, and a seal from another upstream cannot be decrypted here.
+fn replayable_reasoning(item: &Map<String, Value>) -> bool {
+    let has_content = match item.get("content") {
+        None | Some(Value::Null) => false,
+        Some(Value::Array(parts)) => !parts.is_empty(),
+        Some(_) => true,
+    };
+    if has_content {
+        return false;
+    }
+    let seal = item
+        .get("encrypted_content")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    !seal.is_empty() && !seal.starts_with("\x6d\x61\x67\x70\x69\x65-claude1:")
+}
+
+/// A native compaction item, including one the codec carried as a message's
+/// only otherwise-unknown content part.
+fn compaction_item(item: &Map<String, Value>) -> Option<Map<String, Value>> {
+    let native = |kind: &str| {
+        matches!(
+            kind,
+            "compaction" | "compaction_summary" | "compaction_trigger"
+        )
+    };
+    if native(item_type(item)) {
+        return Some(item.clone());
+    }
+    if item_type(item) != "message" {
+        return None;
+    }
+    let parts = item.get("content")?.as_array()?;
+    let [Value::Object(part)] = parts.as_slice() else {
+        return None;
+    };
+    native(item_type(part)).then(|| part.clone())
+}
+
 /// Input items fit for a request that keeps nothing: no references to
 /// stored items, no ids (nor a message's status, which goes with its id),
 /// a tool output without its call told as a note, and no system role.
@@ -223,7 +264,12 @@ pub(crate) fn items(mut input: Vec<Value>) -> Vec<Value> {
             continue;
         };
         let kind = item_type(item);
-        if kind == "item_reference" {
+        if kind == "item_reference" || (kind == "reasoning" && !replayable_reasoning(item)) {
+            continue;
+        }
+        if let Some(mut compaction) = compaction_item(item) {
+            compaction.remove("id");
+            out.push(Value::Object(compaction));
             continue;
         }
         let call_id = item.get("call_id");

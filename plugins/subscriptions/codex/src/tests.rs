@@ -928,11 +928,82 @@ fn system_role_becomes_developer() {
         json!([
             {"role": "developer", "content": "rules"},
             {"type": "message", "role": "developer", "content": "more"},
-            {"type": "reasoning", "summary": []},
             {"type": "function_call", "call_id": "c", "name": "f", "arguments": "{}", "status": "completed"},
             "loose",
         ])
     );
+}
+
+#[test]
+fn r47c_reasoning_and_native_compaction_follow_reference_fixtures() {
+    let (out, _) = shaped(
+        json!({"input": [
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "continue"}]},
+            {"type": "reasoning", "content": [{"type": "reasoning_text", "text": "foreign thought"}], "encrypted_content": "foreign-token"},
+            {"type": "reasoning", "id": "rs_empty", "content": [], "encrypted_content": "openai-own"},
+            {"type": "reasoning", "id": "rs_absent", "encrypted_content": "openai-own-without-content"},
+            {"type": "reasoning", "id": "rs_null", "content": null, "encrypted_content": "openai-own-null-content"},
+            {"type": "reasoning", "id": "rs_unsealed", "summary": [{"type": "summary_text", "text": "foreign thought"}], "encrypted_content": null},
+            {"type": "reasoning", "id": "rs_messages", "summary": [], "encrypted_content": "\x6d\x61\x67\x70\x69\x65-claude1:c2VhbGVk"},
+            {"type": "compaction", "id": "cmp_own", "encrypted_content": "openai-compaction"},
+            {"type": "compaction_trigger"},
+            {"type": "function_call", "call_id": "call_1", "name": "shell", "arguments": "{}"},
+            {"type": "function_call_output", "call_id": "call_1", "output": "result"}
+        ]}),
+        None,
+    );
+    assert_eq!(
+        out["input"],
+        json!([
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "continue"}]},
+            {"type": "reasoning", "content": [], "encrypted_content": "openai-own"},
+            {"type": "reasoning", "encrypted_content": "openai-own-without-content"},
+            {"type": "reasoning", "content": null, "encrypted_content": "openai-own-null-content"},
+            {"type": "compaction", "encrypted_content": "openai-compaction"},
+            {"type": "compaction_trigger"},
+            {"type": "function_call", "call_id": "call_1", "name": "shell", "arguments": "{}"},
+            {"type": "function_call_output", "call_id": "call_1", "output": "result"}
+        ])
+    );
+    let encoded = out.to_string();
+    for dropped in [
+        "foreign-token",
+        "foreign thought",
+        "rs_unsealed",
+        "\x6d\x61\x67\x70\x69\x65-claude1:",
+    ] {
+        assert!(
+            !encoded.contains(dropped),
+            "unexpected {dropped}: {encoded}"
+        );
+    }
+}
+
+#[test]
+fn r47c_compaction_trigger_reaches_recorded_upstream_body() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, &access_token("first", 10_000));
+    let mut request = streaming_request();
+    request.messages = vec![Message {
+        role: Role::User,
+        content: vec![
+            json::from_value(json!({
+                "type": "unknown",
+                "kind": "compaction_trigger"
+            }))
+            .expect("compaction trigger content part"),
+        ],
+        extensions: Extensions::new(),
+    }];
+    host.http()
+        .enqueue(b"event: response.completed\ndata: {}\n\n".to_vec());
+    block_on(upstream_for(&host, &id).execute(request, ProtocolId::OPENAI_RESPONSES))
+        .expect("native compaction request");
+    let body: Value = json::from_slice(host.http().calls()[0].body()).expect("recorded JSON");
+    assert_eq!(body["input"], json!([{"type": "compaction_trigger"}]));
+    assert_eq!(body["store"], json!(false));
+    assert_eq!(body["stream"], json!(true));
 }
 
 #[test]
