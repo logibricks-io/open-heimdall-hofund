@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- R-9i: the Cursor subscription plugin coalesces in-flight `cursor-agent status`
+  renewals across concurrent agent-token refreshes and reads platform `auth.json`
+  on Windows (`%APPDATA%\\Cursor`) and other non-macOS hosts without touching
+  `CURSOR_CONFIG_DIR` or spawning Keychain reads off macOS. Tests `r9i_*` and
+  `auth.rs` fixtures only. Refs R-9.
+
 - R-47n: the Codex subscription plugin classifies vendor reset outcomes on HTTP
   200 (`reset`, `nothing_to_reset`, `already_redeemed`, and related refusal
   codes) and keeps an in-flight `redeem_request_id` across explicit

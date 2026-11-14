@@ -13,7 +13,7 @@ Legend: **Done** = matches the reference at checklist granularity; **Partial** =
 | Vendor section | Done | Partial | Missing | N/A | Unverified |
 |---|---|---|---|---|---|
 | Claude Pro/Max (`claude`) | 1 | 17 | 3 | 2 | 0 |
-| Cursor (`cursor`) | 5 | 14 | 0 | 2 | 0 |
+| Cursor (`cursor`) | 7 | 12 | 0 | 2 | 0 |
 | Devin (`devin`) | 12 | 6 | 0 | 1 | 0 |
 | Zed (`zed`) | 0 | 6 | 1 | 3 | 0 |
 | Kiro (`kiro`) | 8 | 9 | 0 | 2 | 0 |
@@ -92,13 +92,13 @@ Every other gap below maps to an existing plan item.
 | # | capability | reference v0.1.3005 behaviour | hofund 08035c9 | status | gap to close |
 |---|------------|------------------------------|----------------|--------|--------------|
 | a1 | sign-in: browser PKCE | Plugin: `loginDeepControl` + poll (`cursor/index.mjs:6-8`, `386+`) | `sign_in.rs` + `SignInFlowKind::Pkce` (`lib.rs:32-35`, `170+`) | Partial | Parity with plugin poll/error mapping (unverified edge cases) |
-| a2 | sign-in: cursor-agent reuse | Read keychain / `auth.json`, never write (`cursor/index.mjs:8-11`, `112-118`) | `cli.rs` keychain + `auth.json`; import/discover (`discover.rs`, `import.rs`) | Partial | Windows auth path parity (`authFile()` in plugin) |
+| a2 | sign-in: cursor-agent reuse | Read keychain / `auth.json`, never write (`cursor/index.mjs:8-11`, `112-118`) | `cli.rs` keychain on macOS only + platform `authFile()` reads (`auth.rs`); import/discover (`discover.rs`, `import.rs`); tests `r9i_*` / `auth.rs` | Done | — |
 | a3 | sign-in: API key → token | `CURSOR_API_KEY` → `/auth/exchange_user_api_key` (`cursor/index.mjs:347-360`) | R-8c `exchange.rs` exchanges the environment or pasted key, stores only the key, caches the derived token near expiry, and refreshes it without persisting the access token | Done | — |
 | a4 | sign-in: device code | N/A | N/A | N/A | — |
 | a5 | import paste | Core mover reads cli-config (`cursor.go:65-80`) | `import_accounts` JSON blob | Partial | — |
 | b | import sources | Agent home `.cursor` auth + keychain | `AgentSignIn` + discover (`lib.rs:37-41`); R-8d reads the matching team id from cli-config for billing | Partial | Team/active org metadata beyond the billing header |
 | c | token storage | Plugin session store; core mover side logins | Daemon secret blob + optional agent read-only | Partial | Persist team/active org metadata if needed for quota |
-| d | refresh | `cursor-agent status` / token TTL (`cursor/index.mjs:182-194`, CLI_MARK) | `refresh.rs` + `session.rs` spawn status; API-key accounts re-exchange through R-8c | Partial | Serialize refresh like plugin |
+| d | refresh | `cursor-agent status` / token TTL (`cursor/index.mjs:182-194`, CLI_MARK); one in-flight `status` (`cliRefresh`) | `refresh.rs` coalesced `StatusCoalescer` with per-account lease; API-key accounts re-exchange through R-8c; `status_coalesce_tests` | Done | — |
 | e | upstream wire | Connect bidi `AgentService/Run` + HTTP/1 RunSSE + BidiAppend (`cursor/index.mjs:13-17`, `44-46`) | `run.rs` incrementally reads either transport, answers KV/exec and selected field-36 tool lists, sends heartbeats, and enforces monotonic idle/quiet/tool-count limits; `upstream.rs` opens one stateless Run per execute, retries regional and Max Mode failures as documented; R-9e maps images and R-9f sends picker-selected effort, fast, and context parameters through the same cached list as R-9g `list_models` | Partial | Native session retention remains deferred |
 | f | inbound shapes | OpenAI-compatible chat to plugin fetch (`cursor/index.mjs:29-30`) | Canonical IR text, tool history, images, effort, and service tier map through `request.rs` and `picker.rs` to transcript blobs, the protobuf user turn, and native requested-model parameters; gateway codecs supply the IR | Partial | Real-account protocol verification is outside this audit |
 | g | streaming | Connect stream / RunSSE (`cursor/index.mjs:13-17`) | `Completion::Stream` emits text, separate thinking, full-argument caller tools, clean endings, and field-14 or dashboard tool-step usage; R-9b reasoning replay and R-9c usage mapping are landed | Partial | Streaming argument deltas remain deferred in row h |
