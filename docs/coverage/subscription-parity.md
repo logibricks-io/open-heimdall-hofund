@@ -13,7 +13,7 @@ Legend: **Done** = matches the reference at checklist granularity; **Partial** =
 | Vendor section | Done | Partial | Missing | N/A | Unverified |
 |---|---|---|---|---|---|
 | Claude Pro/Max (`claude`) | 1 | 17 | 3 | 2 | 0 |
-| Cursor (`cursor`) | 5 | 14 | 0 | 2 | 0 |
+| Cursor (`cursor`) | 6 | 13 | 0 | 2 | 0 |
 | Devin (`devin`) | 12 | 6 | 0 | 1 | 0 |
 | Zed (`zed`) | 0 | 6 | 1 | 3 | 0 |
 | Kiro (`kiro`) | 8 | 9 | 0 | 2 | 0 |
@@ -101,8 +101,8 @@ Every other gap below maps to an existing plan item.
 | d | refresh | `cursor-agent status` / token TTL (`cursor/index.mjs:182-194`, CLI_MARK) | `refresh.rs` + `session.rs` spawn status; API-key accounts re-exchange through R-8c | Partial | Serialize refresh like plugin |
 | e | upstream wire | Connect bidi `AgentService/Run` + HTTP/1 RunSSE + BidiAppend (`cursor/index.mjs:13-17`, `44-46`) | `run.rs` incrementally reads either transport, answers KV/exec and selected field-36 tool lists, sends heartbeats, and enforces monotonic idle/quiet/tool-count limits; `upstream.rs` opens one stateless Run per execute, retries regional and Max Mode failures as documented; R-9e maps images and R-9f sends picker-selected effort, fast, and context parameters through the same cached list as R-9g `list_models` | Partial | Native session retention remains deferred |
 | f | inbound shapes | OpenAI-compatible chat to plugin fetch (`cursor/index.mjs:29-30`) | Canonical IR text, tool history, images, effort, and service tier map through `request.rs` and `picker.rs` to transcript blobs, the protobuf user turn, and native requested-model parameters; gateway codecs supply the IR | Partial | Real-account protocol verification is outside this audit |
-| g | streaming | Connect stream / RunSSE (`cursor/index.mjs:13-17`) | `Completion::Stream` emits text, separate thinking, full-argument caller tools, clean endings, and field-14 or dashboard tool-step usage; R-9b reasoning replay and R-9c usage mapping are landed | Partial | Streaming argument deltas remain deferred in row h |
-| h | tool calls | MCP `CallDynamicTool` (`cursor/index.mjs:21-26`, `51`) | Selected MCP execs emit caller tool blocks; unknown/Cursor-owned execs stay refused; server-completed calls are not emitted; counts, checkpoints, and the 60-second count wait seal steps | Partial | Streaming argument deltas and Cursor-owned tools are deferred |
+| g | streaming | Connect stream / RunSSE (`cursor/index.mjs:13-17`) | `Completion::Stream` emits text, separate thinking, one full-argument `ToolArgumentsDelta` per selected MCP exec (the wire delivers arguments in one exec, not token deltas), clean endings, and field-14 or dashboard tool-step usage; R-9b reasoning replay and R-9c usage mapping are landed; R-9h fixture tests lock the single-shot argument shape | Done | — |
+| h | tool calls | MCP `CallDynamicTool` (`cursor/index.mjs:21-26`, `51`) | Selected MCP execs emit caller tool blocks; unknown and Cursor-owned execs (shell, file, and every non-MCP kind) stay refused on the stateless Run path; server-completed calls are not emitted; counts, checkpoints, and the 60-second count wait seal steps; R-9h loopback tests cover refusal without native session | Partial | Cursor-owned tool execution remains deferred without native session retention |
 | i | images | unverified in core; plugin native session handles blobs | R-9e maps data-URL and base64 images to hex `Uint8Array` parts, URL images to placeholders, non-image files to named placeholders, and sets request field 19 only for sent inline images | Done | — |
 | j | reasoning | Plugin tests `reasoning.test.mjs`; native picker effort parameters | R-9b emits and replays separate thinking blocks; R-9f resolves `GenerationParams::effort` through the picker and sends the selected variant's native parameters and Max Mode | Done | — |
 | k | quota / usage | Connect `GetCurrentPeriodUsage`, team header (`cursor/index.mjs:171-176`, `connect.rs` parity) | `quota()` via Connect unary with R-8d team header; R-9c maps field-14 and tool-step dashboard usage | Partial | Cross-step deferred usage and credit events (`cursor/deferred-usage.test.mjs`) |
@@ -115,7 +115,7 @@ Every other gap below maps to an existing plan item.
 
 ### Gaps (Cursor)
 
-- Cross-step deferred usage and credit events remain in row k; streaming argument deltas and Cursor-owned tools remain in row h.
+- Cross-step deferred usage and credit events remain in row k; Cursor-owned tool execution without native session retention remains in row h.
 
 ---
 
