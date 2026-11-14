@@ -89,6 +89,9 @@ futures::unfold
 gemini_models
 gemini_models_with_dropped
 gzip
+image::ClaudeImage derives(Clone, Debug, PartialEq, Eq)
+image::ClaudeImage.data
+image::ClaudeImage.media_type
 image::FitError derives(Clone, Copy, Debug, PartialEq, Eq)
 image::FitError::Deadline
 image::FitError::InputTooLarge
@@ -100,6 +103,7 @@ image::Fitted derives(Clone, Debug, PartialEq, Eq)
 image::Fitted.base64
 image::Fitted.format
 image::fn fit_base64 (encoded : & str , limit : usize) -> Result < Fitted , FitError >
+image::fn fit_claude (media_type : & str , encoded : & str) -> ClaudeImage
 inflate::fn compress (input : & [u8]) -> Result < Vec < u8 > , PluginError >
 inflate::fn gzip (input : & [u8]) -> Result < Vec < u8 > , PluginError >
 json

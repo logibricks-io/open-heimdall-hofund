@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- R-6: `hofund_plugin_sdk::image::fit_claude` scales Claude Code inline images
+  (2000 px per side, five mebibytes of base64, triangle resize, JPEG/PNG
+  rules) and the Claude subscription bridge applies it on `-p` stream-json
+  image blocks (`r698_*` fixtures; issue #698). Refs R-6.
+
 - R-12d: the Devin subscription plugin persists non-default Windsurf API
   server hosts from CLI credentials and PKCE exchange responses, honors
   `WINDSURF_API_SERVER_URL` with trailing-slash trim on every Connect RPC
