@@ -231,11 +231,7 @@ fn request_model(
 ) -> ModelChoice {
     let (bare, explicit_size) = split_context(requested);
     let bare = if bare == "auto" { "default" } else { bare };
-
-    if let Some(model) = models.iter().find(|model| model.name == bare) {
-        let size = entry_size(model, explicit_size, None);
-        return pick(model, &size, effort, fast, None);
-    }
+    let explicit_tokens = explicit_size.map(tokens_of);
 
     for model in models {
         if let Some(seed) = model
@@ -251,6 +247,7 @@ fn request_model(
                 effort,
                 Some(fast.unwrap_or(false) || seed_fast),
                 Some(seed),
+                explicit_tokens,
             );
         }
     }
@@ -285,16 +282,52 @@ fn request_model(
             effort,
             Some(fast.unwrap_or(false) || id_fast || seed_fast),
             seed,
+            explicit_tokens,
         );
     }
 
     for model in models {
-        if model.legacy_slugs.iter().any(|slug| slug == bare)
+        if model.name == bare
+            || model.legacy_slugs.iter().any(|slug| slug == bare)
             || model.id_aliases.iter().any(|alias| alias == bare)
         {
             let size = entry_size(model, explicit_size, None);
-            return pick(model, &size, effort, fast, None);
+            return pick(model, &size, effort, fast, None, explicit_tokens);
         }
+    }
+
+    let loose = loose_family(bare);
+    for model in models {
+        let candidates = model
+            .variants
+            .iter()
+            .filter(|variant| {
+                variant
+                    .legacy_slug
+                    .as_deref()
+                    .is_some_and(|slug| loose_family(slug) == loose)
+            })
+            .collect::<Vec<_>>();
+        if candidates.is_empty() {
+            continue;
+        }
+        let default = default_variant(model);
+        let seed = nearest_variant(&candidates, default.map_or(&[][..], |v| &v.values));
+        let size = entry_size(model, explicit_size, seed);
+        let effort = if effort.is_empty() {
+            &id_effort
+        } else {
+            effort
+        };
+        let seed_fast = seed.is_some_and(|seed| parameter(&seed.values, "fast") == Some("true"));
+        return pick(
+            model,
+            &size,
+            effort,
+            Some(fast.unwrap_or(false) || id_fast || seed_fast),
+            seed,
+            explicit_tokens,
+        );
     }
 
     ModelChoice::passthrough(requested)
@@ -311,12 +344,17 @@ fn split_context(model: &str) -> (&str, Option<&str>) {
 }
 
 fn family_of(id: &str) -> (String, String, bool) {
-    let (mut family, effort) = models::split_id(id);
+    let (family, effort) = models::split_id(id);
     let fast = family.len() > "-fast".len() && family.ends_with("-fast");
-    if fast {
-        family.truncate(family.len() - "-fast".len());
-    }
     (family, effort, fast)
+}
+
+fn loose_family(id: &str) -> String {
+    let (family, _, _) = family_of(id);
+    family
+        .strip_suffix("-thinking")
+        .unwrap_or(&family)
+        .to_owned()
 }
 
 fn default_variant(model: &PickerModel) -> Option<&Variant> {
@@ -559,6 +597,7 @@ fn pick(
     effort: &str,
     fast: Option<bool>,
     seed: Option<&Variant>,
+    explicit_tokens: Option<u64>,
 ) -> ModelChoice {
     let default = default_variant(model);
     let mut want = seed
@@ -607,14 +646,18 @@ fn pick(
             set_parameter(&mut want, &value.id, &value.value);
         }
     }
-    let max_mode = selected.map_or_else(
-        || {
-            model.supports_non_max_mode == Some(false)
-                || default.is_some_and(|default| needs_max(model, default))
-                || tokens_of(size) > model.context_token_limit && model.context_token_limit > 0
-        },
-        |selected| needs_max(model, selected),
-    );
+    let explicit_max = definition(model, "context").is_none()
+        && model.context_token_limit > 0
+        && explicit_tokens.is_some_and(|tokens| tokens > model.context_token_limit);
+    let max_mode = explicit_max
+        || selected.map_or_else(
+            || {
+                model.supports_non_max_mode == Some(false)
+                    || default.is_some_and(|default| needs_max(model, default))
+                    || tokens_of(size) > model.context_token_limit && model.context_token_limit > 0
+            },
+            |selected| needs_max(model, selected),
+        );
     let id = selected
         .and_then(|selected| selected.legacy_slug.clone())
         .or_else(|| default.and_then(|default| default.legacy_slug.clone()))
@@ -663,6 +706,9 @@ mod tests {
                 ],
                 "variants": [
                     variant("claude-opus-5-5-medium", &[("context", "300k"), ("effort", "medium"), ("fast", "false")], true, false),
+                    variant("claude-opus-5-5-high", &[("context", "300k"), ("effort", "high"), ("fast", "false")], false, false),
+                    variant("claude-opus-5-5-medium-fast", &[("context", "300k"), ("effort", "medium"), ("fast", "true")], false, true),
+                    variant("claude-opus-5-5-high-fast", &[("context", "300k"), ("effort", "high"), ("fast", "true")], false, true),
                     variant("claude-opus-5-5-extra-high-fast", &[("context", "300k"), ("effort", "extra-high"), ("fast", "true")], false, true),
                 ],
             },
@@ -675,8 +721,35 @@ mod tests {
                 ],
                 "variants": [
                     variant("claude-haiku-5-5-thinking-high", &[("thinking", "true"), ("reasoning_effort", "high")], true, false),
+                    variant("claude-haiku-5-5-thinking-low", &[("thinking", "true"), ("reasoning_effort", "low")], false, false),
                     variant("claude-haiku-5-5-high", &[("thinking", "false"), ("reasoning_effort", "high")], false, false),
                     variant("claude-haiku-5-5-low", &[("thinking", "false"), ("reasoning_effort", "low")], false, false),
+                ],
+            },
+            {
+                "name": "grok-4.7",
+                "contextTokenLimit": 256000,
+                "supportsNonMaxMode": true,
+                "parameterDefinitions": [
+                    definition("context", enum_values(&["256k"])),
+                    definition("reasoning_effort", enum_values(&["low", "high"])),
+                    definition("fast", boolean.clone()),
+                ],
+                "variants": [
+                    variant("grok-4.7-high-fast", &[("context", "256k"), ("reasoning_effort", "high"), ("fast", "true")], true, false),
+                    variant("grok-4.7-low-fast", &[("context", "256k"), ("reasoning_effort", "low"), ("fast", "true")], false, false),
+                    variant("grok-4.7-high", &[("context", "256k"), ("reasoning_effort", "high"), ("fast", "false")], false, false),
+                    variant("grok-4.7-low", &[("context", "256k"), ("reasoning_effort", "low"), ("fast", "false")], false, false),
+                ],
+            },
+            {
+                "name": "grok-4.6",
+                "contextTokenLimit": 256000,
+                "supportsNonMaxMode": true,
+                "parameterDefinitions": [definition("effort", enum_values(&["low", "high"]))],
+                "variants": [
+                    variant("cursor-grok-4.6-high", &[("effort", "high")], true, false),
+                    variant("cursor-grok-4.6-low", &[("effort", "low")], false, false),
                 ],
             },
             {
@@ -779,6 +852,83 @@ mod tests {
         assert_eq!(parameters(&thinking), [("thinking", "true")]);
         let no_thinking = request_model(&models, "thinking-only", "none", None);
         assert_eq!(parameters(&no_thinking), [("thinking", "false")]);
+    }
+
+    #[test]
+    fn bare_families_select_the_matching_thinking_branch() {
+        let models = models();
+        let low = request_model(&models, "claude-haiku-5-5", "low", None);
+        assert_eq!(low.id, "claude-haiku-5-5-low");
+        assert_eq!(
+            parameters(&low),
+            [("thinking", "false"), ("reasoning_effort", "low")]
+        );
+
+        let thinking = request_model(&models, "claude-haiku-5-5-thinking", "low", None);
+        assert_eq!(thinking.id, "claude-haiku-5-5-thinking-low");
+        assert_eq!(
+            parameters(&thinking),
+            [("thinking", "true"), ("reasoning_effort", "low")]
+        );
+    }
+
+    #[test]
+    fn loose_family_fallback_matches_thinking_only_variants() {
+        let mut haiku = models()
+            .into_iter()
+            .find(|model| model.name == "claude-haiku-5-5")
+            .expect("Haiku fixture");
+        haiku.variants.retain(|variant| {
+            variant
+                .legacy_slug
+                .as_deref()
+                .is_some_and(|slug| slug.contains("-thinking-"))
+        });
+        let choice = request_model(&[haiku], "claude-haiku-5-5-low", "", None);
+        assert_eq!(choice.id, "claude-haiku-5-5-thinking-low");
+        assert_eq!(
+            parameters(&choice),
+            [("thinking", "true"), ("reasoning_effort", "low")]
+        );
+    }
+
+    #[test]
+    fn fast_families_and_service_tier_select_fast_variants() {
+        let models = models();
+        let opus = request_model(&models, "claude-opus-5-5-fast", "", None);
+        assert_eq!(opus.id, "claude-opus-5-5-medium-fast");
+        assert!(opus.max_mode);
+        let opus_high = request_model(&models, "claude-opus-5-5-fast", "high", None);
+        assert_eq!(opus_high.id, "claude-opus-5-5-high-fast");
+        assert!(opus_high.max_mode);
+
+        let grok = request_model(&models, "grok-4.7-fast", "low", None);
+        assert_eq!(grok.id, "grok-4.7-low-fast");
+        assert_eq!(
+            parameters(&grok),
+            [
+                ("context", "256k"),
+                ("reasoning_effort", "low"),
+                ("fast", "true"),
+            ]
+        );
+        let tier = request_model(&models, "grok-4.7", "low", Some(true));
+        assert_eq!(tier.id, "grok-4.7-low-fast");
+        assert_eq!(parameters(&tier), parameters(&grok));
+    }
+
+    #[test]
+    fn explicit_oversize_uses_max_mode_without_a_context_parameter() {
+        let models = models();
+        let within = request_model(&models, "grok-4.6@256k", "", None);
+        assert_eq!(within.id, "cursor-grok-4.6-high");
+        assert!(!within.max_mode);
+        assert_eq!(parameters(&within), [("effort", "high")]);
+
+        let oversized = request_model(&models, "grok-4.6@1m", "", None);
+        assert_eq!(oversized.id, "cursor-grok-4.6-high");
+        assert!(oversized.max_mode);
+        assert_eq!(parameters(&oversized), [("effort", "high")]);
     }
 
     #[test]
