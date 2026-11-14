@@ -153,7 +153,7 @@ fn reasoning(body: &mut Map<String, Value>) {
 
 /// The session-id and thread-id headers naming the body's conversation,
 /// none when it has no `prompt_cache_key`.
-fn session_headers(body: &Map<String, Value>) -> Vec<(String, String)> {
+pub(crate) fn session_headers(body: &Map<String, Value>) -> Vec<(String, String)> {
     let key = body
         .get("prompt_cache_key")
         .and_then(Value::as_str)
@@ -281,7 +281,14 @@ pub(crate) fn items(mut input: Vec<Value>) -> Vec<Value> {
             continue;
         }
         let mut item = item.clone();
-        item.remove("id");
+        let keep_id = kind == "reasoning"
+            && item
+                .get("encrypted_content")
+                .and_then(Value::as_str)
+                .is_some_and(|seal| !seal.is_empty());
+        if !keep_id {
+            item.remove("id");
+        }
         if matches!(kind, "" | "message" | "reasoning") {
             item.remove("status");
         }
