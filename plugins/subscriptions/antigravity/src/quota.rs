@@ -32,6 +32,7 @@ pub(crate) async fn summary_windows(
 ) -> Vec<QuotaWindow> {
     let Ok(reply) = project::call(
         host,
+        endpoints,
         &endpoints.code_assist,
         access,
         "retrieveUserQuotaSummary",

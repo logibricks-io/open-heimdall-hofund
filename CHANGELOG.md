@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- R-49e: the Antigravity subscription plugin refreshes hub `ide_version` and
+  `User-Agent` from the reference auto-updater manifest through `host.http()`,
+  with a six-hour cache, `2.9.1` cold fallback, and offline `r49e_*` fixtures.
+  Refs R-49.
+
 - R-54c: the Qoder subscription plugin exchanges pasted Personal Access Tokens
   at each site's `/api/v1/jobToken/exchange`, stores the PAT for lapsed
   job-token refresh, and re-exchanges on refused refresh when a PAT is still

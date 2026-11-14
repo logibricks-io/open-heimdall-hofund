@@ -42,6 +42,8 @@ pub async fn run(cell: Cell) -> Result<(), String> {
         userinfo: "https://oauth.test/userinfo".to_owned(),
         load_code_assist: "https://code-assist-prod.test".to_owned(),
         code_assist: "https://code-assist-daily.test".to_owned(),
+        version_manifest: "https://antigravity-version.test/manifest/latest-arm64-mac.yml"
+            .to_owned(),
         onboard_poll: Duration::from_millis(1),
     };
     let mut raw = RawTable::new();

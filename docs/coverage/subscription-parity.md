@@ -22,7 +22,7 @@ Legend: **Done** = matches the reference at checklist granularity; **Partial** =
 | ChatGPT / Codex (`codex` backend) and ChatGPT API (`chatgpt-api`) | 10 | 10 | 1 | 0 | 0 |
 | GitHub Copilot (github.com and GHE) | 15 | 2 | 0 | 5 | 0 |
 | Gemini CLI (Code Assist) | 13 | 3 | 0 | 2 | 0 |
-| Google Antigravity | 11 | 4 | 1 | 1 | 0 |
+| Google Antigravity | 12 | 3 | 1 | 1 | 0 |
 | SuperGrok (`grok`) | 14 | 2 | 0 | 2 | 0 |
 | Qoder (international + Qoder CN) | 14 | 4 | 0 | 2 | 0 |
 | CodeBuddy / WorkBuddy (CN + international) | 18 | 1 | 0 | 0 | 0 |
@@ -447,11 +447,11 @@ Remaining verification is live-account acceptance; all evidence here is determin
 | n | error classification | 429 “turned away” prompts (`codeassist.go:51-66`) | `upstream.rs` distinguishes prompt refusal from real quota and returns a non-cooling 400 with the reference hint | Done | — |
 | o | check-in / warmup | N/A | N/A | N/A | — |
 | p | agent sign-in | Antigravity desktop agent separate | Desktop `agent.toml` only; no subscription sign-in switch | Missing | No safe reference writer; switching remains out of scope |
-| q | extras | Ban-risk warning in UI; version manifest URL (`google.go:68`) | Full account-suspension warning prints before CLI sign-in and remains in docs; request version is the fixed reference fallback | Partial | Dynamic version-manifest refresh remains |
+| q | extras | Ban-risk warning in UI; version manifest URL (`google.go:68`) | Full account-suspension warning prints before CLI sign-in; `version.rs` fetches the manifest through `host.http()` with a six-hour cache, `2.9.1` cold fallback, and `r49e_*` offline fixtures | Done | — |
 
 **Gaps**
 
-- Agent sign-in switching and dynamic app-version refresh remain.
+- Agent sign-in switching remains.
 - R-49d adds deterministic refresh-token imports and tool/image/signature fixtures; real-account verification is not performed.
 
 ---

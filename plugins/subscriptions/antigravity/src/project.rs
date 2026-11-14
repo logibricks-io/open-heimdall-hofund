@@ -7,7 +7,7 @@ use hofund_plugin_sdk::Call;
 use hofund_plugin_sdk::json::{self, Value, json};
 use hofund_plugin_sdk::oauth::SecretObject;
 
-use crate::Endpoints;
+use crate::{Endpoints, version};
 
 pub(crate) const PROJECT: &str = "project";
 pub(crate) const PLAN: &str = "plan";
@@ -15,7 +15,6 @@ pub(crate) const TIER: &str = "tier";
 pub(crate) const PAID: &str = "paid";
 pub(crate) const PENDING_REASON: &str =
     "Antigravity has not set this account up yet; refresh the account to try again";
-const VERSION: &str = "2.9.1";
 const ONBOARD_ASKS: usize = 5;
 const LEASE_WAIT: Duration = Duration::from_secs(30);
 
@@ -144,6 +143,7 @@ pub(crate) async fn setup(
 ) -> Result<Setup, PluginError> {
     let load = call(
         host,
+        endpoints,
         &endpoints.load_code_assist,
         access,
         "loadCodeAssist",
@@ -173,18 +173,22 @@ pub(crate) async fn setup(
     if tier.id.is_empty() || tier.id == "legacy-tier" {
         tier.id = "free-tier".to_owned();
     }
+    let hub_version = version::resolve(host, &endpoints.version_manifest).await;
     let request = json!({
         "tier_id": tier.id,
         "metadata": {
             "ide_type": "ANTIGRAVITY",
-            "ide_version": VERSION,
+            "ide_version": hub_version,
             "ide_name": "antigravity",
         }
     });
     let headers = [
         (
             "user-agent".to_owned(),
-            format!("{} google-api-nodejs-client/10.3.0", user_agent()),
+            format!(
+                "{} google-api-nodejs-client/10.3.0",
+                version::user_agent_for(&hub_version)
+            ),
         ),
         ("x-goog-api-client".to_owned(), "gl-node/22.21.1".to_owned()),
     ];
@@ -310,6 +314,7 @@ async fn onboard(
         }
         let reply = call(
             host,
+            endpoints,
             &endpoints.code_assist,
             access,
             "onboardUser",
@@ -333,15 +338,17 @@ async fn onboard(
 
 pub(crate) async fn call(
     host: &HostContext,
+    endpoints: &Endpoints,
     base: &str,
     access: &SecretString,
     method: &str,
     body: &Value,
     headers: &[(String, String)],
 ) -> Result<Value, PluginError> {
+    let hub_version = version::resolve(host, &endpoints.version_manifest).await;
     let mut call = Call::post(format!("{base}/v1internal:{method}"))
         .bearer(access)?
-        .header("user-agent", user_agent())
+        .header("user-agent", version::user_agent_for(&hub_version))
         .json(body.to_string());
     for (name, value) in headers {
         call = call.header(name, value);
@@ -358,12 +365,4 @@ pub(crate) async fn call(
     }
     json::from_slice(reply.body())
         .map_err(|_| PluginError::decode(format!("Code Assist {method} sent back unreadable JSON")))
-}
-
-pub(crate) fn user_agent() -> String {
-    format!(
-        "antigravity/hub/{VERSION} {}/{}",
-        std::env::consts::OS,
-        std::env::consts::ARCH
-    )
 }
