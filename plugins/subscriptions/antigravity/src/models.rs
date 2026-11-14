@@ -223,6 +223,7 @@ impl Catalog {
             }
             match project::call(
                 host,
+                endpoints,
                 &endpoints.code_assist,
                 &access,
                 "fetchAvailableModels",
@@ -301,6 +302,7 @@ impl Catalog {
 
         let loaded = project::call(
             host,
+            endpoints,
             &endpoints.load_code_assist,
             access,
             "loadCodeAssist",
