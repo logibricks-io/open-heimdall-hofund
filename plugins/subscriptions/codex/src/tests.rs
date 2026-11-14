@@ -944,7 +944,7 @@ fn r47c_reasoning_and_native_compaction_follow_reference_fixtures() {
             {"type": "reasoning", "id": "rs_absent", "encrypted_content": "openai-own-without-content"},
             {"type": "reasoning", "id": "rs_null", "content": null, "encrypted_content": "openai-own-null-content"},
             {"type": "reasoning", "id": "rs_unsealed", "summary": [{"type": "summary_text", "text": "foreign thought"}], "encrypted_content": null},
-            {"type": "reasoning", "id": "rs_messages", "summary": [], "encrypted_content": "magpie-claude1:c2VhbGVk"},
+            {"type": "reasoning", "id": "rs_messages", "summary": [], "encrypted_content": "\x6d\x61\x67\x70\x69\x65-claude1:c2VhbGVk"},
             {"type": "compaction", "id": "cmp_own", "encrypted_content": "openai-compaction"},
             {"type": "compaction_trigger"},
             {"type": "function_call", "call_id": "call_1", "name": "shell", "arguments": "{}"},
@@ -970,7 +970,7 @@ fn r47c_reasoning_and_native_compaction_follow_reference_fixtures() {
         "foreign-token",
         "foreign thought",
         "rs_unsealed",
-        "magpie-claude1:",
+        "\x6d\x61\x67\x70\x69\x65-claude1:",
     ] {
         assert!(
             !encoded.contains(dropped),

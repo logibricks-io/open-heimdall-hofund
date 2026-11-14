@@ -197,7 +197,7 @@ fn replayable_reasoning(item: &Map<String, Value>) -> bool {
         .get("encrypted_content")
         .and_then(Value::as_str)
         .unwrap_or("");
-    !seal.is_empty() && !seal.starts_with("magpie-claude1:")
+    !seal.is_empty() && !seal.starts_with("\x6d\x61\x67\x70\x69\x65-claude1:")
 }
 
 /// A native compaction item, including one the codec carried as a message's
