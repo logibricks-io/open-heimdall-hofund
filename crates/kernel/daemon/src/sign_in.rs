@@ -236,9 +236,9 @@ pub async fn accounts_import(opened: &[Opened], text: &str) -> Result<Vec<String
     let has_gemini = opened.iter().any(|entry| entry.id == "gemini");
     let has_antigravity = opened.iter().any(|entry| entry.id == "antigravity");
     let google_pair = has_gemini && has_antigravity;
-    if google_pair && is_bare_google_import(text) {
+    if google_pair && is_untyped_google_import(text) {
         return Err(DaemonError::new(
-            "bare refresh tokens are ambiguous when Gemini and Antigravity are both configured; use an export whose `type` names the app",
+            "untyped Google account exports are ambiguous when Gemini and Antigravity are both configured; use an export whose `type` names the app",
         ));
     }
     let intended = google_pair
@@ -313,15 +313,27 @@ fn collect_google_import_types<'a>(value: &'a serde_json::Value, types: &mut Vec
     }
 }
 
-fn is_bare_google_import(text: &str) -> bool {
-    fn only_tokens(value: &serde_json::Value, found: &mut bool) -> bool {
+fn is_untyped_google_import(text: &str) -> bool {
+    fn has_untyped_entry(value: &serde_json::Value) -> bool {
         match value {
-            serde_json::Value::String(_) => {
-                *found = true;
-                true
-            }
-            serde_json::Value::Array(entries) => {
-                entries.iter().all(|entry| only_tokens(entry, found))
+            serde_json::Value::String(_) => true,
+            serde_json::Value::Array(entries) => entries.iter().any(has_untyped_entry),
+            serde_json::Value::Object(object) => {
+                let has_refresh = ["refresh_token", "refreshToken"].iter().any(|key| {
+                    object
+                        .get(*key)
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|token| !token.trim().is_empty())
+                });
+                if let Some(accounts) = object.get("accounts").and_then(serde_json::Value::as_array)
+                    && !has_refresh
+                {
+                    return accounts.iter().any(has_untyped_entry);
+                }
+                !object
+                    .get("type")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|kind| !kind.trim().is_empty())
             }
             _ => false,
         }
@@ -337,8 +349,7 @@ fn is_bare_google_import(text: &str) -> bool {
     let Ok(value) = serde_json::from_str(text) else {
         return false;
     };
-    let mut found = false;
-    only_tokens(&value, &mut found) && found
+    has_untyped_entry(&value)
 }
 
 fn runtime() -> Result<tokio::runtime::Runtime, DaemonError> {
@@ -1815,15 +1826,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn r49d_accounts_import_rejects_ambiguous_bare_google_tokens() {
-        for text in ["synthetic-refresh-token", r#"["synthetic-refresh-token"]"#] {
+    async fn r49d_accounts_import_rejects_ambiguous_untyped_google_exports() {
+        for text in [
+            "synthetic-refresh-token",
+            r#"["synthetic-refresh-token"]"#,
+            r#"{"refresh_token":"synthetic"}"#,
+            r#"{"accounts":[{"email":"u@example.test","token":{"refresh_token":"synthetic"}}]}"#,
+        ] {
             let (_dir, opened, calls) = google_import_rig();
             let error = super::accounts_import(&opened, text)
                 .await
-                .expect_err("ambiguous bare token");
+                .expect_err("ambiguous untyped export");
             assert_eq!(
                 error.to_string(),
-                "bare refresh tokens are ambiguous when Gemini and Antigravity are both configured; use an export whose `type` names the app"
+                "untyped Google account exports are ambiguous when Gemini and Antigravity are both configured; use an export whose `type` names the app"
             );
             assert!(calls.imports.lock().expect("imports").is_empty());
         }
