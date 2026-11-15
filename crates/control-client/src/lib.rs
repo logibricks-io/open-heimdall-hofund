@@ -13,16 +13,17 @@ use hofund_control_proto::{
     CatalogDisabledListResponse, CatalogModelRequest, CatalogSyncRequest, CatalogSyncResponse,
     CheckinListResponse, CheckinRunRequest, CheckinRunResponse, ConfigApplyRequest, ConfigResponse,
     ConfigValidateRequest, ConfigValidationResponse, ControlError, ErrorEnvelope, EventEnvelope,
-    GatewayKeyRequest, GatewayKeyResponse, GatewayKeyRestoreRequest, GroupCreateRequest,
-    GroupDeleteRequest, GroupDeleteResponse, GroupListResponse, GroupMemberCandidatesResponse,
-    GroupPatchRequest, GroupRestoreRequest, GroupWriteResponse, HealthResponse, LibraryResponse,
-    MAX_RESPONSE_BODY_BYTES, ModelListResponse, PicksResponse, PicksSetRequest, PresetListResponse,
-    ProfileDetailResponse, ProfileListResponse, ProfileRenameRequest, ProfileSaveRequest,
-    ProfileSwitchRequest, ProfileSwitchResponse, ProviderCreateRequest, ProviderDeleteRequest,
-    ProviderDeleteResponse, ProviderKeyRequest, ProviderKeysResponse, ProviderListResponse,
-    ProviderPatchRequest, ProviderRenameRequest, ProviderRenameResponse, ProviderSpendCapRequest,
-    ProviderSpendCapsResponse, ProviderTestRequest, ProviderTestResponse, ProviderWriteResponse,
-    QuotaAlertsResponse, QuotaAlertsSetRequest, QuotaAlertsSetResponse, QuotaCreditsModesResponse,
+    GatewayKeyRequest, GatewayKeyResponse, GatewayKeyRestoreRequest, GroupCopyRequest,
+    GroupCreateRequest, GroupDeleteRequest, GroupDeleteResponse, GroupListResponse,
+    GroupMemberCandidatesResponse, GroupPatchRequest, GroupRestoreRequest, GroupWriteResponse,
+    HealthResponse, LibraryResponse, MAX_RESPONSE_BODY_BYTES, ModelListResponse, PicksResponse,
+    PicksSetRequest, PresetListResponse, ProfileDetailResponse, ProfileListResponse,
+    ProfileRenameRequest, ProfileSaveRequest, ProfileSwitchRequest, ProfileSwitchResponse,
+    ProviderCreateRequest, ProviderDeleteRequest, ProviderDeleteResponse, ProviderKeyRequest,
+    ProviderKeysResponse, ProviderListResponse, ProviderPatchRequest, ProviderRenameRequest,
+    ProviderRenameResponse, ProviderSpendCapRequest, ProviderSpendCapsResponse,
+    ProviderTestRequest, ProviderTestResponse, ProviderWriteResponse, QuotaAlertsResponse,
+    QuotaAlertsSetRequest, QuotaAlertsSetResponse, QuotaCreditsModesResponse,
     QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryQuery, QuotaHistoryResponse,
     QuotaQuery, QuotaResponse, ReloadRequest, RouteListResponse, RouteModelListResponse,
     RouteQuery, SessionDetailResponse, SessionListQuery, SessionListResponse, SessionManageQuery,
@@ -758,6 +759,20 @@ impl Client {
         self.request(
             http::Method::POST,
             &format!("/v1/hofund/groups/{}/restore", encode_segment(id)),
+            Some(json_body(request)?),
+        )
+        .await
+    }
+
+    /// Duplicates one routing group.
+    pub async fn copy_group(
+        &self,
+        id: &str,
+        request: &GroupCopyRequest,
+    ) -> Result<GroupWriteResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            &format!("/v1/hofund/groups/{}/copy", encode_segment(id)),
             Some(json_body(request)?),
         )
         .await

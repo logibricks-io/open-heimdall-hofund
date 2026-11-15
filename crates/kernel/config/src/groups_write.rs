@@ -307,6 +307,93 @@ pub fn edit_group_delete(text: &str, group_id: &str) -> Result<String, ConfigErr
     Ok(document.to_string())
 }
 
+/// Duplicates a non-hidden routing group, listed immediately after the source.
+pub fn edit_group_copy(
+    text: &str,
+    group_id: &str,
+    name: Option<&str>,
+) -> Result<(String, String), ConfigError> {
+    let config = load(text)?;
+    let model = format!("group/{group_id}");
+    let source = config
+        .routes
+        .iter()
+        .find(|route| route.model == model)
+        .ok_or_else(|| ConfigError::Invalid(format!("no group `{group_id}`")))?;
+    if source.hidden {
+        return Err(ConfigError::Invalid(format!("no group `{group_id}`")));
+    }
+    let display = name.map(str::trim).filter(|value| !value.is_empty());
+    let default_name = format!("{} copy", source.name.as_deref().unwrap_or(group_id).trim());
+    let chosen_name = display.unwrap_or(default_name.as_str());
+    let (new_name, new_id) = free_group_identity(&config, chosen_name);
+    let mut document = text
+        .parse::<DocumentMut>()
+        .map_err(|error| ConfigError::Syntax(error.to_string()))?;
+    let routes = document
+        .get_mut("routes")
+        .and_then(Item::as_array_of_tables_mut)
+        .ok_or_else(|| ConfigError::Invalid(format!("no group `{group_id}`")))?;
+    let index = routes
+        .iter()
+        .position(|table| table.get("model").and_then(Item::as_str) == Some(model.as_str()))
+        .ok_or_else(|| ConfigError::Invalid(format!("no group `{group_id}`")))?;
+    let mut copied = routes
+        .get(index)
+        .cloned()
+        .ok_or_else(|| ConfigError::Invalid(format!("no group `{group_id}`")))?;
+    copied.insert("model", value(format!("group/{new_id}")));
+    copied.insert("name", value(new_name.as_str()));
+    copied.remove("hidden");
+    routes.insert(index + 1, copied);
+    let new_model = format!("group/{new_id}");
+    load(&document.to_string()).and_then(|after| {
+        after
+            .routes
+            .iter()
+            .find(|route| route.model == new_model)
+            .ok_or_else(|| ConfigError::Invalid("group copy did not persist".to_owned()))?;
+        Ok(())
+    })?;
+    Ok((document.to_string(), new_id))
+}
+
+fn free_group_identity(config: &crate::Config, name: &str) -> (String, String) {
+    use std::collections::BTreeSet;
+    let mut names = BTreeSet::new();
+    let mut ids = BTreeSet::new();
+    for route in &config.routes {
+        if let Some(id) = route.model.strip_prefix("group/") {
+            ids.insert(id.to_owned());
+            if !route.hidden
+                && let Some(display) = &route.name
+            {
+                names.insert(display.trim().to_ascii_lowercase());
+            }
+        }
+    }
+    let base = name.trim().to_owned();
+    let mut chosen = base.clone();
+    let mut serial = 2_u32;
+    while names.contains(&chosen.to_ascii_lowercase()) {
+        chosen = format!("{base} {serial}");
+        serial += 1;
+    }
+    let slug = group_id_from_name(&chosen);
+    let slug = if slug.is_empty() {
+        "group".to_owned()
+    } else {
+        slug
+    };
+    let mut id = slug.clone();
+    serial = 2;
+    while ids.contains(&id) {
+        id = format!("{slug}-{serial}");
+        serial += 1;
+    }
+    (chosen, id)
+}
+
 /// Clears `hidden` on a found group route.
 pub fn edit_group_restore(text: &str, group_id: &str) -> Result<String, ConfigError> {
     let config = load(text)?;
@@ -625,7 +712,7 @@ fn member_value(
 
 #[cfg(test)]
 mod tests {
-    use super::{edit_group_create, edit_group_patch};
+    use super::{edit_group_copy, edit_group_create, edit_group_patch};
     use crate::{UpstreamTarget, load};
 
     const BASE: &str = "\
@@ -1021,5 +1108,64 @@ listen = \"127.0.0.1:0\"\n\
                 && !trimmed.contains(['*', '?'])
                 && trimmed.eq_ignore_ascii_case(route)
         })
+    }
+
+    #[test]
+    fn d1_group_copy_lists_after_source_and_clears_hidden() {
+        let (text, id) = edit_group_create(BASE, "Fast", "chat/m").expect("create");
+        let (copied, new_id) = edit_group_copy(&text, &id, None).expect("copy");
+        let config = load(&copied).expect("load");
+        let copy = config
+            .routes
+            .iter()
+            .find(|route| route.model == format!("group/{new_id}"))
+            .expect("copy");
+        assert_eq!(copy.name.as_deref(), Some("Fast copy"));
+        assert!(!copy.hidden);
+        assert_eq!(copy.routing, "smart");
+        let order: Vec<_> = config
+            .routes
+            .iter()
+            .filter(|route| route.model.starts_with("group/"))
+            .map(|route| route.model.as_str())
+            .collect();
+        let src_model = format!("group/{id}");
+        let src_at = order
+            .iter()
+            .position(|model| *model == src_model.as_str())
+            .expect("source");
+        let new_model = format!("group/{new_id}");
+        assert_eq!(
+            *order.get(src_at + 1).expect("after source"),
+            new_model.as_str()
+        );
+    }
+
+    #[test]
+    fn d1_group_copy_rejects_hidden_and_missing() {
+        let (text, _) = edit_group_create(BASE, "Fast", "chat/m").expect("create");
+        let hidden = format!(
+            "{text}[[routes]]\nmodel = \"group/ghost\"\nname = \"Ghost\"\nhidden = true\nupstreams = [\"chat\"]\n"
+        );
+        let error = edit_group_copy(&hidden, "ghost", None).expect_err("hidden");
+        assert!(error.to_string().contains("no group `ghost`"), "{error}");
+        let error = edit_group_copy(&text, "missing", None).expect_err("missing");
+        assert!(error.to_string().contains("no group `missing`"), "{error}");
+    }
+
+    #[test]
+    fn d1_group_copy_numbers_past_name_and_id() {
+        let (text, id) = edit_group_create(BASE, "Team", "chat/m").expect("create");
+        let (first, first_id) = edit_group_copy(&text, &id, Some("Team B")).expect("first copy");
+        let (second, second_id) =
+            edit_group_copy(&first, &first_id, Some("Team B")).expect("second copy");
+        let config = load(&second).expect("load");
+        let second = config
+            .routes
+            .iter()
+            .find(|route| route.model == format!("group/{second_id}"))
+            .expect("second copy");
+        assert_eq!(second.name.as_deref(), Some("Team B 2"));
+        assert_ne!(first_id, second_id);
     }
 }

@@ -13,11 +13,11 @@ use hofund_agent::Session;
 #[cfg(unix)]
 use hofund_control_proto::AgentConnectRequest;
 use hofund_control_proto::{
-    API_VERSION, ConfigResponse, ControlErrorKind, GroupCreateRequest, GroupListResponse,
-    GroupMemberCandidatesResponse, GroupPatchRequest, GroupRestoreRequest, GroupWriteResponse,
-    PresetListResponse, ProfileRenameRequest, ProfileSaveRequest, ProviderCreateRequest,
-    ProviderDeleteRequest, ProviderDeleteResponse, ProviderListResponse, ProviderPatchRequest,
-    ProviderWriteResponse, RouteModelListResponse, ServeRole, StatusResponse,
+    API_VERSION, ConfigResponse, ControlErrorKind, GroupCopyRequest, GroupCreateRequest,
+    GroupListResponse, GroupMemberCandidatesResponse, GroupPatchRequest, GroupRestoreRequest,
+    GroupWriteResponse, PresetListResponse, ProfileRenameRequest, ProfileSaveRequest,
+    ProviderCreateRequest, ProviderDeleteRequest, ProviderDeleteResponse, ProviderListResponse,
+    ProviderPatchRequest, ProviderWriteResponse, RouteModelListResponse, ServeRole, StatusResponse,
     decode_error_envelope, decode_response,
 };
 use hofund_daemon::{ControlRuntime, Running, StartOptions, start_with_options};
@@ -227,6 +227,10 @@ fn group_patch(value: serde_json::Value) -> GroupPatchRequest {
 
 fn group_restore(value: serde_json::Value) -> GroupRestoreRequest {
     serde_json::from_value(value).expect("group restore request")
+}
+
+fn group_copy(value: serde_json::Value) -> GroupCopyRequest {
+    serde_json::from_value(value).expect("group copy request")
 }
 
 fn profile_save(name: &str) -> ProfileSaveRequest {
@@ -1575,6 +1579,46 @@ async fn r7a_reseat_sidecar_restore_failure_rolls_back_config_and_scrubs_secrets
     assert!(
         !text.contains(&client.token),
         "response must not contain gateway bearer token"
+    );
+    support::shutdown(running).await;
+}
+
+#[tokio::test]
+async fn d1_control_group_copy_lists_after_source() {
+    let scratch = Scratch::new("control-r7a-group-copy");
+    let text = config("");
+    let running = support::within("start daemon", support::REQUEST, start(&scratch, &text)).await;
+    let client = Client::new(&running, &scratch);
+    let revision = client.groups().await.disk_revision;
+    let create = group_create(json!({
+        "version": API_VERSION,
+        "expected_revision": revision,
+        "name": "Fast",
+        "first_member": "chat/m",
+    }));
+    let (status, body) = client.post("/v1/hofund/groups", &create).await;
+    assert_eq!(status, reqwest::StatusCode::OK);
+    let created: GroupWriteResponse = decode_response(API_VERSION, &body).expect("create");
+    let copy = group_copy(json!({
+        "version": API_VERSION,
+        "expected_revision": created.disk_revision,
+        "name": "",
+    }));
+    let (status, body) = client.post("/v1/hofund/groups/fast/copy", &copy).await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+    let copied: GroupWriteResponse = decode_response(API_VERSION, &body).expect("copy");
+    assert_eq!(copied.group.name, "Fast copy");
+    let list = client.groups().await;
+    let order: Vec<_> = list.groups.iter().map(|group| group.id.as_str()).collect();
+    let fast_at = order.iter().position(|id| *id == "fast").expect("fast");
+    assert_eq!(
+        *order.get(fast_at + 1).expect("copy after fast"),
+        copied.group.id.as_str()
     );
     support::shutdown(running).await;
 }

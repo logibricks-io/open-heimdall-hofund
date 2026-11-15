@@ -409,6 +409,12 @@ GroupPatchRequest.rules
 GroupPatchRequest.stays
 GroupPatchRequest.version
 GroupPatchRequest::fn validate (& self) -> Result < () , ControlError >
+GroupCopyRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
+GroupCopyRequest.expected_revision
+GroupCopyRequest.name
+GroupCopyRequest.version
+GroupCopyRequest::fn new (expected_revision : String , name : String) -> Self
+GroupCopyRequest::fn validate (& self) -> Result < () , ControlError >
 GroupRestoreRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
 GroupRestoreRequest.expected_revision
 GroupRestoreRequest.version
