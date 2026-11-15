@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `d1_group_copy_*`, `d1_control_group_copy_lists_after_source`, and
   `d5_nested_group_patience`. Copy identity numbering considers live routes
   only; hard-deleted group slugs may be reused. Refs 4.3.
+- R-6: `hofund_plugin_sdk::image::fit_claude` scales Claude Code inline images
+  (2000 px per side, five mebibytes of base64, triangle resize, JPEG/PNG
+  rules) and the Claude subscription bridge applies it on `-p` stream-json
+  image blocks (`r698_*` fixtures; issue #698). Refs R-6.
 - A-3a: the daemon coordinates Claude daily warm-up and model connectivity
   tests through one Claude Code `-p` send (`warmup/claude.rs`,
   `Subscription::warmup_probe`, `account::ask` with
@@ -202,6 +206,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- D-71: provider `d71_injected_client_keeps_marker_after_idle_close` reads the
+  full `Content-Length` request and drains response bodies before the next call,
+  removing a macOS CI race where the accept loop replied after headers only.
+  Refs D-71.
 - C-1a: `GET /v1beta/models` lists catalog `displayName` when known, a
   `{displayName} via hofund` description, and `countTokens` with the generate and
   stream methods; feature-parity row 1.6 is Done. Refs C-1a.
