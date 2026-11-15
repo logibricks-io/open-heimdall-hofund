@@ -72,8 +72,9 @@ pub fn run() -> Result<(), String> {
                 let handle = app.handle().clone();
                 Arc::new(move || {
                     let handle = handle.clone();
+                    let usage = handle.clone();
                     let _ = handle.run_on_main_thread(move || {
-                        focus_usage_window(&handle);
+                        focus_usage_window(&usage);
                     });
                 })
             };

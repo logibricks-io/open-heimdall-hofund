@@ -6,6 +6,7 @@
 //! already present on a typical desktop (`notify-send`, `swift`, or
 //! Windows Runtime via PowerShell) and stays within the current crates.
 
+#[cfg(target_os = "macos")]
 use std::io::Write;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
