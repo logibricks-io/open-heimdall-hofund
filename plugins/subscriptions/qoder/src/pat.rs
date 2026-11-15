@@ -159,10 +159,7 @@ async fn user_info(host: &HostContext, openapi_base: &str, token: &str) -> Value
 }
 
 fn site_from_ctx(ctx: &SignInCtx) -> Site {
-    match ctx.option("site") {
-        Some("qoder-cn" | "cn" | "china") => Site::China,
-        _ => Site::Global,
-    }
+    crate::routing::sign_in_site(ctx)
 }
 
 fn first_string(value: &Value, keys: &[&str]) -> Option<String> {

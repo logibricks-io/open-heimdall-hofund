@@ -442,15 +442,26 @@ pub(crate) async fn sorted_accounts(
         );
         return Ok(Vec::new());
     }
-    let mut accounts: Vec<(AccountId, String)> = entry
-        .host
-        .accounts()
-        .list()
-        .await
-        .map_err(show)?
-        .into_iter()
-        .map(|account| (account.id().clone(), account.label().to_owned()))
-        .collect();
+    let mut accounts: Vec<(AccountId, String)> = Vec::new();
+    let listed = entry.host.accounts().list().await.map_err(show)?;
+    for account in listed {
+        match entry
+            .instance
+            .serves_routing_label(&entry.id, account.id(), &entry.host)
+            .await
+        {
+            Ok(true) => accounts.push((account.id().clone(), account.label().to_owned())),
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(
+                    subscription = %entry.id,
+                    account = %account.id(),
+                    %error,
+                    "routing label check failed; leaving the account out of the listing"
+                );
+            }
+        }
+    }
     accounts.sort_by(|left, right| {
         (left.1.as_str(), left.0.as_str()).cmp(&(right.1.as_str(), right.0.as_str()))
     });
@@ -694,7 +705,7 @@ pub fn subscription_sign_in(
     let loopback = Arc::new(LoopbackRegistry::new());
     let opened = open(path, &registry, &loopback)?;
     let entry = find(&opened, id)?;
-    let ctx = sign_in_ctx(entry.instance.id(), options)?;
+    let ctx = sign_in_ctx(&entry.id, options)?;
     let runtime = runtime()?;
     runtime.block_on(async {
         let paste = Box::pin(stdin_lines());
@@ -720,11 +731,16 @@ pub fn subscription_sign_in(
 }
 
 pub(crate) fn sign_in_ctx(
-    plugin: &PluginId,
+    routing_id: &str,
     options: &SignInOptions,
 ) -> Result<SignInCtx, SignInError> {
     let failed = |error: hofund_plugin_api::PluginError| SignInError::failed(error.to_string());
-    let mut ctx = hofund_plugin_host::sign_in_ctx(plugin.clone()).map_err(failed)?;
+    let plugin = PluginId::try_from(routing_id).map_err(|error| {
+        SignInError::failed(format!(
+            "subscription id `{routing_id}` is invalid: {error}"
+        ))
+    })?;
+    let mut ctx = hofund_plugin_host::sign_in_ctx(plugin).map_err(failed)?;
     if let Some(host) = &options.host {
         ctx = ctx.with_option("host", host.as_str()).map_err(failed)?;
     }
@@ -1357,7 +1373,7 @@ mod tests {
         }
 
         fn ctx(&self) -> SignInCtx {
-            sign_in_ctx(&PluginId::from_static(PLUGIN), &SignInOptions::default()).expect("ctx")
+            sign_in_ctx(PLUGIN, &SignInOptions::default()).expect("ctx")
         }
 
         async fn add_account(&self, id: &str, label: &str) {
@@ -1420,7 +1436,7 @@ mod tests {
             label: Some("work".to_owned()),
             site: None,
         };
-        let ctx = sign_in_ctx(&PluginId::from_static(PLUGIN), &options).expect("ctx");
+        let ctx = sign_in_ctx(PLUGIN, &options).expect("ctx");
         assert_eq!(ctx.option("host"), Some("corp.example.test"));
         assert_eq!(ctx.option("label"), Some("work"));
         assert_eq!(ctx.session().len(), 32);
@@ -1542,7 +1558,7 @@ mod tests {
                 subscription.as_ref(),
                 test.context(),
                 test.loopback(),
-                sign_in_ctx(&plugin, &SignInOptions::default()).expect("ctx"),
+                sign_in_ctx(plugin.as_str(), &SignInOptions::default()).expect("ctx"),
                 paste,
                 std::future::pending::<()>(),
                 Duration::from_secs(10),

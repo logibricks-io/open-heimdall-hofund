@@ -63,6 +63,8 @@ path = "tests/control_group_rename_keys.rs"
 required-features = ["test-util"]
 
 [dev-dependencies]
+hofund-kit-subscription = { workspace = true }
+hofund-plugin-subscription-qoder = { workspace = true }
 hofund-agent = { workspace = true, features = ["test-fixtures"] }
 hofund-control-client = { workspace = true }
 hofund-daemon = { path = ".", features = ["test-util"] }

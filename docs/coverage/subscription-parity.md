@@ -24,7 +24,7 @@ Legend: **Done** = matches the reference at checklist granularity; **Partial** =
 | Gemini CLI (Code Assist) | 13 | 3 | 0 | 2 | 0 |
 | Google Antigravity | 12 | 3 | 1 | 1 | 0 |
 | SuperGrok (`grok`) | 14 | 2 | 0 | 2 | 0 |
-| Qoder (international + Qoder CN) | 17 | 1 | 0 | 2 | 0 |
+| Qoder (international + Qoder CN) | 18 | 0 | 0 | 2 | 0 |
 | CodeBuddy / WorkBuddy (CN + international) | 18 | 1 | 0 | 0 | 0 |
 | Z Code (`zcode`) | 16 | 3 | 0 | 0 | 0 |
 
@@ -525,8 +525,8 @@ Remaining verification is live-account acceptance; all evidence here is determin
 | j | reasoning | model config, efforts, streaming and prior assistant reasoning | `models.rs`, `shape.rs`, `stream.rs`; default/nearest efforts and `reasoning_content` round trip | Done | — |
 | k | quota / usage | account-page usage on the device token, with rotation and free-model exclusions | `quota.rs`: `/sash/api/v2/me/usage`, pool windows, device retry and free exclusions | Done | — |
 | l | model list | `/algo/api/v2/model/list` with COSY device headers | `models.rs`: native signed list, app/chat scenes, windows, images, efforts and free flags; `upstream.rs`: selected listing display name replaces upstream `auto` in every answer and stream chunk | Done | — |
-| m | multi-account | separate subscriptions `qoder` and `qoder-cn` (`qoder.go:28-31`) | one plugin, `Site` plus VPC in creds; VPC account ids are distinct | Partial | Unified plugin id documented; separate routing labels remain |
-| n | error classification | lapsed / NeedsSignIn only on refused refresh; queue and request codes | `failure.rs`: code 10605, `serviceAvailable`, and `isQueued` become 503 with `retry_after` (ceil of `retryAfterSeconds`, default 30s), plan-aware busy/queued text, wrapper envelopes, and BOM-safe SSE; quota and request codes stay 429/400; only 105 or empty 403 lapses; `queue.rs` polls `/queue/status` and resends within budget; `upstream.rs` skips the wait when the router sets `hofund_another_routing_candidate` (host extension, not on the Qoder wire); recorded poll/resend, budget-exceeded, and short-circuit tests (`r54e_*`, `r54e_queue_*`, `fixtures/queued-10605.json`) | Done | Live-account verification; separate `qoder` / `qoder-cn` routing labels remain on row m; no #612 claim |
+| m | multi-account | separate subscriptions `qoder` and `qoder-cn` (`qoder.go:28-31`) | one plugin id `qoder` in the store; config labels `qoder` and `qoder-cn` share that store, filter by `Site` plus VPC in creds, and sign in on the matching site by default (`routing.rs`, `hofund-plugin-registry` `storage_id`, daemon `serves_routing_label`, `r54f_*`) | Done | Live-account verification only |
+| n | error classification | lapsed / NeedsSignIn only on refused refresh; queue and request codes | `failure.rs`: code 10605, `serviceAvailable`, and `isQueued` become 503 with `retry_after` (ceil of `retryAfterSeconds`, default 30s), plan-aware busy/queued text, wrapper envelopes, and BOM-safe SSE; quota and request codes stay 429/400; only 105 or empty 403 lapses; `queue.rs` polls `/queue/status` and resends within budget; `upstream.rs` skips the wait when the router sets `hofund_another_routing_candidate` (host extension, not on the Qoder wire); recorded poll/resend, budget-exceeded, and short-circuit tests (`r54e_*`, `r54e_queue_*`, `fixtures/queued-10605.json`) | Done | Live-account verification; no #612 claim |
 | o | daily check-in | `qoder_checkin.go` + plugin campaigns with native identity and device rotation; 30-minute and Beijing-day recheck with campaign `ValidUntil` | `hofund-plugin-sdk` `checkin/qoder.rs` and `plugins/subscriptions/qoder/src/checkin.rs`: device token, native identity, VPC rebasing, `CheckinResult::recheck_at` at the sooner of 30 minutes, Beijing midnight, and the active campaign end | Done | Recorded mocks only |
 | p | agent sign-in / device identity | device PKCE sign-in and native runtime identity | native PKCE plus cached global/CN runtime identity and sanitized hostname | Done | — |
 | q | extras | Qoder CN VPC instance hosts (`index.mjs:29-36`); COSY_VERSION desktop | `site.rs`: strict instance parsing and fail-closed web/openapi/gateway hosts on sign-in, refresh, models, chat, usage and check-in | Done | — |
@@ -534,8 +534,8 @@ Remaining verification is live-account acceptance; all evidence here is determin
 **Gaps**
 
 - R-54b landed native COSY SSE, request shaping and tool/image/reasoning handling, desktop PKCE, device/job refresh and rotation, native models and usage, and fail-closed CN VPC hosts. No agent credential discovery is planned from the reference's native runtime helper.
-- The site-qualified single plugin remains: separate `qoder` / `qoder-cn` routing labels remain, while account ids distinguish public and VPC deployments.
-- Queue classification, in-budget `/queue/status` resend, and the router-driven fallback short-circuit (skip polling when another routing candidate follows) are landed with recorded tests. Separate `qoder` / `qoder-cn` routing labels and live-account verification remain. No #612 claim is made.
+- The site-qualified single plugin keeps one secret store (`qoder`). Configure `[[subscriptions]] id = "qoder-cn"` when China (and VPC) accounts should route; a `qoder` hop alone does not include CN accounts.
+- Queue classification, in-budget `/queue/status` resend, and the router-driven fallback short-circuit (skip polling when another routing candidate follows) are landed with recorded tests. Live-account verification remains. No #612 claim is made.
 
 ---
 

@@ -16,6 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `{peer}/{provider}` ids and `{name} · {peer}` labels into control quota views
   and `hofund quota`. Loopback tests only (`q5f_*`, `d38r_*`, `qs1_*`, `qs2_*`).
   Refs 3.8.
+- R-54f (leftover): Qoder keeps one account store under plugin id `qoder` while
+  config and CLI labels `qoder` and `qoder-cn` route and sign in on the matching
+  site, expand hops by `Site`, and key members with the label the operator named
+  (`routing.rs`, `hofund-plugin-registry` `storage_id`, `Subscription::serves_routing_label`,
+  `r54f_*`). Refs R-54.
 - R-5 (leftover): the Claude subscription plugin honors the reference
   background `/usage` cadence on the active Claude Code account—random 5–15
   minute wait after each run, 30-second ask floor, `projects/` session
@@ -400,6 +405,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Desktop menu-bar OS notifications for masked quota alerts while the embedded
   gateway runs, via platform helpers (`notify-send`, `osascript`, or Windows
   Runtime toast) so the crate graph stays deny-clean (D-310). Refs D-310.
+- Quota-alert notification activation focuses the existing Usage window through
+  the same path as the tray Usage item, including the Linux freedesktop click
+  category and `default` action (D-310 follow-through). Refs D-310.
 
 - Relayed native Responses replies mark namespaced `function_call` items with
   empty `encrypted_function_args` when the upstream omitted the field, so Codex
