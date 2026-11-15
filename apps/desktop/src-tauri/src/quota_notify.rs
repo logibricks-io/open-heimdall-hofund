@@ -48,7 +48,9 @@ pub(crate) trait QuotaAlertSurface: Send {
     }
 }
 
-/// Forwards one control `quota_alert` event to a surface.
+/// Forwards one control `quota_alert` event to a surface. Tests only;
+/// production goes through [`present_alert_with_focus`].
+#[cfg(test)]
 pub(crate) fn present_alert<S: QuotaAlertSurface>(
     surface: &mut S,
     alert: &QuotaAlertEvent,
