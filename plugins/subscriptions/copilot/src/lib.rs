@@ -332,6 +332,8 @@ mod conformance;
 #[cfg(test)]
 mod entitlement_tests;
 #[cfg(test)]
+mod r48j_reasoning_tests;
+#[cfg(test)]
 mod side_login_tests;
 #[cfg(test)]
 mod tests;
