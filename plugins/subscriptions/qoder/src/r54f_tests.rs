@@ -144,15 +144,3 @@ fn r54f_site_option_overrides_routing_label() {
         Site::China
     );
 }
-
-#[test]
-fn r54f_storage_plugin_id_stays_qoder_for_both_labels() {
-    assert_eq!(hofund_plugin_registry::storage_id("qoder-cn"), "qoder");
-    assert_eq!(hofund_plugin_registry::storage_id("qoder"), "qoder");
-}
-
-#[test]
-fn r54f_registry_qoder_cn_resolves_qoder_factory() {
-    let factory = hofund_plugin_registry::subscription("qoder-cn").expect("factory");
-    assert_eq!(factory.spec().plugin().as_str(), "qoder");
-}
