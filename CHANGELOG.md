@@ -398,6 +398,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Desktop menu-bar OS notifications for masked quota alerts while the embedded
   gateway runs, via platform helpers (`notify-send`, `osascript`, or Windows
   Runtime toast) so the crate graph stays deny-clean (D-310). Refs D-310.
+- Quota-alert notification activation focuses the existing Usage window through
+  the same path as the tray Usage item, including the Linux freedesktop click
+  category and `default` action (D-310 follow-through). Refs D-310.
 
 - Relayed native Responses replies mark namespaced `function_call` items with
   empty `encrypted_function_args` when the upstream omitted the field, so Codex
