@@ -9,6 +9,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use hofund_codec::{AnthropicMessages, Codec, GenerativeLanguage, OpenAiChat, OpenAiResponses};
 use hofund_config::{
@@ -1196,6 +1197,7 @@ fn expand_route(
                     weight: upstream.weight.unwrap_or(1),
                     sink: false,
                     fallback,
+                    group_patience: None,
                 });
                 out.push(membership::PlannedHop {
                     provider: String::new(),
@@ -1237,6 +1239,23 @@ fn expand_route(
     out
 }
 
+fn explicit_group_patience(
+    route: &hofund_config::Route,
+) -> Option<hofund_router::PoolMemberPatience> {
+    if !route.patience_explicit {
+        return None;
+    }
+    Some(match route.patience {
+        hofund_config::Patience::Off => hofund_router::PoolMemberPatience::Off,
+        hofund_config::Patience::Default => {
+            hofund_router::PoolMemberPatience::Wait(Duration::from_secs(60))
+        }
+        hofund_config::Patience::Wait(duration) => {
+            hofund_router::PoolMemberPatience::Wait(duration)
+        }
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn expand_group(
     id: &str,
@@ -1260,6 +1279,7 @@ fn expand_group(
         weight,
         sink: group.sink,
         fallback,
+        group_patience: explicit_group_patience(group),
     });
     out.extend(expand_route(
         group, root, bare, parents, false, fallback, context, seen,
@@ -1304,6 +1324,7 @@ fn push_provider(
         weight,
         sink: false,
         fallback,
+        group_patience: None,
     });
     let mut keys = context
         .built

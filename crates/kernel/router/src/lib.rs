@@ -48,7 +48,7 @@ pub use decision::{region_agent_note, with_region_agent_note};
 pub use hofund_plugin_api::{Completion, MemberId, PluginError, Request};
 pub use member::{Member, ModelListAnswer};
 pub use overflow_memory::OverflowMemory;
-pub use patience::WaitHook;
+pub use patience::{PoolMemberPatience, WaitHook};
 pub use scope::{RouteScope, model_allowed};
 pub use snapshot::Snapshot;
 pub use view::{
@@ -130,6 +130,8 @@ pub struct Unit {
     pub sink: bool,
     /// Whether this unit was reached through a provider fallback list.
     pub fallback: bool,
+    /// Explicit patience on a `group/` unit; absent means inherit.
+    pub group_patience: Option<PoolMemberPatience>,
 }
 
 /// One member a route may call, and the model name that member expects.
@@ -166,6 +168,17 @@ pub struct Hop {
 }
 
 impl Hop {
+    /// Patience budget for this hop when the request names a route pool.
+    pub fn pool_member_patience(&self) -> PoolMemberPatience {
+        for unit in self.units.iter().rev() {
+            if unit.pool.starts_with("group/")
+                && let Some(patience) = unit.group_patience
+            {
+                return patience;
+            }
+        }
+        PoolMemberPatience::Inherited
+    }
     /// A hop with no model overrides, weight one, and no free-model marking.
     #[must_use]
     pub fn new(member: Arc<dyn Member>) -> Self {
@@ -1773,11 +1786,13 @@ impl DispatchState {
             let last_spent =
                 self.resolved.pool_asked && !busy.is_empty() && ending == Ending::Spent;
             if (ending == Ending::Busy || last_spent)
-                && let Some(budget) = self.resolved.patience
+                && patience::any_member_may_replan(&busy, self.resolved.patience)
                 && let Some(hook) = self.wait_hook.clone()
             {
                 let from = *wait_from.get_or_insert(now);
-                if let Some((next, wait)) = patience::replan(&mut busy, round, from, budget, now) {
+                if let Some((next, wait)) =
+                    patience::replan(&mut busy, round, from, self.resolved.patience, now)
+                {
                     hook.waiting();
                     hook.wait(wait).await;
                     round = round.saturating_add(1);
@@ -2107,7 +2122,14 @@ impl DispatchState {
                             error: budget,
                         });
                     }
-                    if let Some(failure) = patience::busy(&error, index, self.now()) {
+                    let member_patience = if self.resolved.pool_asked {
+                        hop.pool_member_patience()
+                    } else {
+                        PoolMemberPatience::Inherited
+                    };
+                    if let Some(failure) =
+                        patience::busy(&error, index, member_patience, self.now())
+                    {
                         // Each member is asked once a round, so noted once.
                         busy.push(failure);
                         *ending = Ending::Busy;

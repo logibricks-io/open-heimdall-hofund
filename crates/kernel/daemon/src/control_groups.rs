@@ -4,12 +4,12 @@ use std::sync::Arc;
 
 use hofund_agent::{GatewayTarget, SidecarCheckpoint, catalog};
 use hofund_config::{
-    Stays, edit_group_create, edit_group_delete, edit_group_patch, edit_group_restore, load,
-    validate_group_rules,
+    Stays, edit_group_copy, edit_group_create, edit_group_delete, edit_group_patch,
+    edit_group_restore, load, validate_group_rules,
 };
 use hofund_control_proto::{
-    ControlError, ControlErrorKind, FieldIssue, Group, GroupCreateRequest, GroupDeleteRequest,
-    GroupDeleteResponse, GroupListResponse, GroupMember, GroupMemberCandidate,
+    ControlError, ControlErrorKind, FieldIssue, Group, GroupCopyRequest, GroupCreateRequest,
+    GroupDeleteRequest, GroupDeleteResponse, GroupListResponse, GroupMember, GroupMemberCandidate,
     GroupMemberCandidatesResponse, GroupPatchRequest, GroupRestoreRequest, GroupRule,
     GroupWriteResponse,
 };
@@ -165,6 +165,36 @@ pub(crate) async fn patch_group(
         .iter()
         .find(|route| route.model == model)
         .ok_or_else(|| not_found(&effective_id))?;
+    Ok(group_write_response(route, &config, &applied))
+}
+
+pub(crate) async fn copy_group(
+    ops: &Arc<ConfigOps>,
+    group_id: &str,
+    request: GroupCopyRequest,
+) -> Result<GroupWriteResponse, ControlFailure> {
+    request.validate().map_err(ControlFailure::from)?;
+    let current = ops.get().await?;
+    let name = request.name.trim();
+    let (edited, effective_id) = edit_group_copy(
+        &current.text,
+        group_id,
+        if name.is_empty() { None } else { Some(name) },
+    )
+    .map_err(|error| match error {
+        hofund_config::ConfigError::Invalid(message) if message.contains("no group") => {
+            not_found(group_id)
+        }
+        other => config_failure(other),
+    })?;
+    let applied = ops.apply(&request.expected_revision, edited).await?;
+    let config = load(&applied.text).map_err(config_failure)?;
+    let model = format!("group/{effective_id}");
+    let route = config
+        .routes
+        .iter()
+        .find(|route| route.model == model)
+        .ok_or_else(|| internal("group copy did not persist".to_owned()))?;
     Ok(group_write_response(route, &config, &applied))
 }
 

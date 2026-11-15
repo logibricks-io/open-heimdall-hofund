@@ -274,6 +274,37 @@ impl GroupDeleteRequest {
     }
 }
 
+/// Duplicates one routing group.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+#[serde(deny_unknown_fields)]
+pub struct GroupCopyRequest {
+    /// Body wire version.
+    pub version: u32,
+    /// Expected SHA-256 host-state content revision.
+    pub expected_revision: String,
+    /// Display name for the copy; empty copies as \"<source> copy\".
+    #[serde(default)]
+    pub name: String,
+}
+
+impl GroupCopyRequest {
+    /// Constructs a group copy body.
+    #[must_use]
+    pub fn new(expected_revision: String, name: String) -> Self {
+        Self {
+            version: API_VERSION,
+            expected_revision,
+            name,
+        }
+    }
+
+    /// Validates the copy request.
+    pub fn validate(&self) -> Result<(), ControlError> {
+        validate_revision("expected_revision", &self.expected_revision)
+    }
+}
+
 /// Restores a hidden found group.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]

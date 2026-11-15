@@ -13,15 +13,15 @@ use hofund_control_proto::{
     CatalogDisabledListResponse, CatalogModelRequest, CatalogSyncRequest, CatalogSyncResponse,
     CheckinAccountRow, CheckinListResponse, CheckinRunRequest, CheckinRunResponse, ControlError,
     ControlErrorKind, FieldIssue, GatewayKey, GatewayKeyAction, GatewayKeyLimit, GatewayKeyRequest,
-    GatewayKeyResponse, GatewayKeyRestoreRequest, GroupCreateRequest, GroupDeleteRequest,
-    GroupDeleteResponse, GroupListResponse, GroupMemberCandidatesResponse, GroupPatchRequest,
-    GroupRestoreRequest, GroupWriteResponse, HealthResponse, LibraryResponse, ModelEntry,
-    ModelListResponse, PicksResponse, PicksSetRequest, PresetListResponse, ProfileDeleteRequest,
-    ProfileDetailResponse, ProfileListResponse, ProfileRenameRequest, ProfileSaveRequest,
-    ProfileSwitchRequest, ProfileSwitchResponse, ProviderCreateRequest, ProviderDeleteRequest,
-    ProviderDeleteResponse, ProviderKeyRequest, ProviderKeysResponse, ProviderListResponse,
-    ProviderPatchRequest, ProviderRenameRequest, ProviderRenameResponse, ProviderSpendCap,
-    ProviderSpendCapPeriod, ProviderSpendCapRequest, ProviderSpendCapsResponse,
+    GatewayKeyResponse, GatewayKeyRestoreRequest, GroupCopyRequest, GroupCreateRequest,
+    GroupDeleteRequest, GroupDeleteResponse, GroupListResponse, GroupMemberCandidatesResponse,
+    GroupPatchRequest, GroupRestoreRequest, GroupWriteResponse, HealthResponse, LibraryResponse,
+    ModelEntry, ModelListResponse, PicksResponse, PicksSetRequest, PresetListResponse,
+    ProfileDeleteRequest, ProfileDetailResponse, ProfileListResponse, ProfileRenameRequest,
+    ProfileSaveRequest, ProfileSwitchRequest, ProfileSwitchResponse, ProviderCreateRequest,
+    ProviderDeleteRequest, ProviderDeleteResponse, ProviderKeyRequest, ProviderKeysResponse,
+    ProviderListResponse, ProviderPatchRequest, ProviderRenameRequest, ProviderRenameResponse,
+    ProviderSpendCap, ProviderSpendCapPeriod, ProviderSpendCapRequest, ProviderSpendCapsResponse,
     ProviderTestRequest, ProviderTestResponse, ProviderTestResult, ProviderWriteResponse,
     QuotaAlertsResponse, QuotaAlertsSetRequest, QuotaAlertsSetResponse, QuotaCreditsModesResponse,
     QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryQuery, QuotaHistoryResponse,
@@ -1197,6 +1197,14 @@ impl ControlState for DaemonControl {
         request: GroupRestoreRequest,
     ) -> ControlFuture<'_, GroupWriteResponse> {
         Box::pin(async move { super::control_groups::restore_group(&self.ops, &id, request).await })
+    }
+
+    fn copy_group(
+        &self,
+        id: String,
+        request: GroupCopyRequest,
+    ) -> ControlFuture<'_, GroupWriteResponse> {
+        Box::pin(async move { super::control_groups::copy_group(&self.ops, &id, request).await })
     }
 
     fn group_member_candidates(&self) -> ControlFuture<'_, GroupMemberCandidatesResponse> {
