@@ -373,6 +373,172 @@ fn a2c_14_import_fixture_credentials() {
 }
 
 #[test]
+fn r56b_1_import_mover_oauth_envelope() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let refresh = json!({
+        "userId": "88001",
+        "systemId": "sys-mover",
+        "org": "org-mover",
+        "plan": "zed_pro",
+        "login": "mover-login",
+        "name": "Mover User",
+        "models": [{"id":"claude-sonnet-4","name":"Claude Sonnet","is_disabled":false}]
+    });
+    let auth = json!({
+        "type": "oauth",
+        "access": "mover-access-token",
+        "refresh": refresh.to_string(),
+        "expires": 0,
+        "accountId": "mover-login"
+    });
+    let ids = block_on(subscription(&host).import_accounts(&auth.to_string(), host.context()))
+        .expect("import");
+    assert_eq!(ids.len(), 1);
+    let blob = SecretObject::parse(
+        &block_on(host.context().accounts().secret(&ids[0]))
+            .expect("read")
+            .expect("stored"),
+    )
+    .expect("blob");
+    assert_eq!(blob.text("user_id"), Some("88001"));
+    assert_eq!(blob.text("system_id"), Some("sys-mover"));
+    assert_eq!(blob.text("org"), Some("org-mover"));
+    assert_eq!(blob.text("plan"), Some("zed_pro"));
+    assert_eq!(blob.text("login"), Some("mover-login"));
+    assert_eq!(
+        blob.secret("access_token").as_ref().map(secret_text),
+        Some("mover-access-token")
+    );
+    assert!(host.http().calls().is_empty());
+}
+
+#[test]
+fn r56b_2_import_built_in_side_logins() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let logins = json!([
+        {
+            "agent": "codex",
+            "user": "other"
+        },
+        {
+            "agent": "zed",
+            "user": "alpha",
+            "auth": {
+                "userId": "zed-user-a",
+                "accessToken": "access-a",
+                "systemId": "system-a",
+                "organizationId": "org-a",
+                "login": "alpha",
+                "plan": "zed_pro"
+            }
+        },
+        {
+            "agent": "zed",
+            "user": "beta",
+            "auth": {
+                "userId": "zed-user-b",
+                "accessToken": "access-b",
+                "systemId": "system-b",
+                "organizationId": "org-b",
+                "login": "beta"
+            }
+        }
+    ]);
+    let ids = block_on(subscription(&host).import_accounts(&logins.to_string(), host.context()))
+        .expect("import");
+    assert_eq!(ids.len(), 2);
+    assert_ne!(ids[0], ids[1]);
+    let first = SecretObject::parse(
+        &block_on(host.context().accounts().secret(&ids[0]))
+            .expect("read")
+            .expect("stored"),
+    )
+    .expect("blob");
+    let second = SecretObject::parse(
+        &block_on(host.context().accounts().secret(&ids[1]))
+            .expect("read")
+            .expect("stored"),
+    )
+    .expect("blob");
+    let users: Vec<_> = [first.text("user_id"), second.text("user_id")]
+        .into_iter()
+        .flatten()
+        .collect();
+    assert_eq!(users.len(), 2);
+    assert!(users.contains(&"zed-user-a"));
+    assert!(users.contains(&"zed-user-b"));
+}
+
+#[test]
+fn r56b_3_skip_lapsed_and_unreadable_without_dropping_siblings() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let logins = json!([
+        {
+            "agent": "zed",
+            "user": "good",
+            "auth": {
+                "userId": "zed-good",
+                "accessToken": "good-access",
+                "systemId": "system-good"
+            }
+        },
+        {
+            "agent": "zed",
+            "user": "lapsed",
+            "lapsed": "Sign-in expired",
+            "auth": {
+                "userId": "zed-lapsed",
+                "accessToken": "lapsed-access",
+                "systemId": "system-lapsed"
+            }
+        },
+        {
+            "agent": "zed",
+            "user": "broken",
+            "auth": "not-an-object"
+        }
+    ]);
+    let ids = block_on(subscription(&host).import_accounts(&logins.to_string(), host.context()))
+        .expect("import");
+    assert_eq!(ids.len(), 1);
+    let blob = SecretObject::parse(
+        &block_on(host.context().accounts().secret(&ids[0]))
+            .expect("read")
+            .expect("stored"),
+    )
+    .expect("blob");
+    assert_eq!(blob.text("user_id"), Some("zed-good"));
+}
+
+#[test]
+fn r56b_4_mover_refresh_accepts_numeric_user_id() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let auth = json!({
+        "type": "oauth",
+        "access": "numeric-access",
+        "refresh": {
+            "userId": 424242,
+            "systemId": "sys-numeric",
+            "org": "org-numeric"
+        },
+        "expires": 0
+    });
+    let ids = block_on(subscription(&host).import_accounts(&auth.to_string(), host.context()))
+        .expect("import");
+    let blob = SecretObject::parse(
+        &block_on(host.context().accounts().secret(&ids[0]))
+            .expect("read")
+            .expect("stored"),
+    )
+    .expect("blob");
+    assert_eq!(blob.text("user_id"), Some("424242"));
+}
+
+#[test]
 fn a2c_15_refresh_mints_llm_token() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
