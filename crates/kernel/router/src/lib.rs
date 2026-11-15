@@ -1626,6 +1626,38 @@ fn region_key(provider: &str, model: &str) -> String {
 }
 
 impl DispatchState {
+    /// Whether failover may ask a later member on this request.
+    fn another_candidate_follows(&self, index: usize) -> bool {
+        for hop in self.resolved.hops.iter().skip(index + 1) {
+            let upstream_model = hop.wire_model.as_deref().unwrap_or(&self.resolved.bare);
+            let plugin_id = hop.member.plugin_id();
+            if self.refused_providers.contains(hop.member.route_id()) {
+                continue;
+            }
+            if !plugin_id.is_empty() && self.skipped_plugins.contains(plugin_id) {
+                continue;
+            }
+            if self.region_closed_for(hop) {
+                continue;
+            }
+            if self
+                .outgrown
+                .iter()
+                .any(|(route, model)| route == hop.member.route_id() && *model == upstream_model)
+            {
+                continue;
+            }
+            if self.needs_room.is_some_and(|tokens| {
+                hop.context_window
+                    .is_some_and(|window| window > 0 && tokens >= window)
+            }) {
+                continue;
+            }
+            return true;
+        }
+        false
+    }
+
     fn region_closed_for(&self, hop: &Hop) -> bool {
         let model = hop.wire_model.as_deref().unwrap_or(&self.resolved.bare);
         let key = region_key(hop.member.scope_provider(), model);
@@ -1864,6 +1896,12 @@ impl DispatchState {
                     );
                 }
                 continue;
+            }
+            if self.another_candidate_follows(index) {
+                attempt.extensions.insert(
+                    hofund_plugin_api::ANOTHER_ROUTING_CANDIDATE,
+                    serde_json::json!(true),
+                );
             }
             let info = Attempt {
                 member: hop.member.attempt(),

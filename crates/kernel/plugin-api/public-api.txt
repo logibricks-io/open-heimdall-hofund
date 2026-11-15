@@ -18,6 +18,7 @@ AccountStatus
 AccountStatus #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq)
 AccountStatus::NeedsSignIn
 AccountStatus::Ready
+ANOTHER_ROUTING_CANDIDATE
 AccountsHandle
 AccountsHandle #[non_exhaustive] derives(Clone)
 AccountsHandle::async fn lease (& self , id : & AccountId , wait : Duration) -> Result < AccountLease , PluginError >
