@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- R-51e: `QuotaWindow` and `QuotaPoll` carry vendor credit units, bonus lapse,
+  and window span; the daemon fills quota card `plan` and `user` from
+  `Subscription::quota_poll`. The Kiro subscription plugin maps `usageOf` plan
+  title, email, floats, bonus `runsOut`, and the 30-day month span (`r51e_k_*`,
+  recorded fixtures). Refs R-51.
 - R-48j: the GitHub Copilot subscription plugin records execute fixtures that
   send Chat `reasoning_effort` and Responses `reasoning.effort` from
   `params.effort`, decode Chat `reasoning_content` and Responses `reasoning`

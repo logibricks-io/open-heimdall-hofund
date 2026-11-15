@@ -120,6 +120,14 @@ impl WindowInfo {
                 window.used() as f64 * 100.0 / limit as f64
             }
         });
+        let (amount, limit, unit) = match (window.provider_amount(), window.provider_limit()) {
+            (Some(amount), Some(limit)) => (amount, limit, window.unit().to_owned()),
+            _ => (
+                window.used() as f64,
+                window.limit().unwrap_or(0) as f64,
+                String::new(),
+            ),
+        };
         let span = QuotaSpan {
             name: window.name().to_owned(),
             used,
@@ -127,9 +135,12 @@ impl WindowInfo {
             resets_at: window.resets_at().map(quota_time),
             display: window.display().to_owned(),
             text: !window.display().is_empty(),
-            amount: window.used() as f64,
-            limit: window.limit().unwrap_or(0) as f64,
-            unlimited: window.limit().is_none(),
+            amount,
+            limit,
+            unit,
+            runs_out_at: window.runs_out_at().map(quota_time),
+            runs_out: window.runs_out().unwrap_or(0.0),
+            unlimited: window.limit().is_none() && window.provider_limit().is_none(),
             ..QuotaSpan::default()
         };
         Self {
@@ -138,7 +149,7 @@ impl WindowInfo {
             scope_model: window.scope_model().map(str::to_owned),
             models: window.models().to_vec(),
             excluded_models: window.excluded_models().to_vec(),
-            window_span: None,
+            window_span: window.window_span(),
             reset_after: None,
         }
     }
@@ -1695,6 +1706,22 @@ mod tests {
             Some("model-a")
         );
         assert!(!allowance[0].windows[0].blocking);
+    }
+
+    #[test]
+    fn q1d2_plugin_windows_keep_vendor_counts_lapse_and_span() {
+        let plugin = PluginWindow::new("credits", 50, Some(100), Some(at(2_000_000_000)))
+            .expect("plugin window")
+            .with_provider_count(48.97, 984.0, "credits")
+            .with_window_span(Duration::from_secs(30 * 24 * 3600))
+            .with_runs_out(Some(at(4_100_000_000)), Some(379.5));
+        let info = WindowInfo::from_plugin(&plugin);
+        assert_eq!(info.span.amount, 48.97);
+        assert_eq!(info.span.limit, 984.0);
+        assert_eq!(info.span.unit, "credits");
+        assert_eq!(info.window_span, Some(Duration::from_secs(30 * 24 * 3600)));
+        assert_eq!(info.span.runs_out, 379.5);
+        assert!(info.span.runs_out_at.is_some());
     }
 
     #[test]

@@ -308,9 +308,12 @@ impl SubscriptionState {
         })
     }
 
-    async fn quota(&self, account: &AccountId) -> Result<Vec<QuotaWindow>, PluginError> {
+    async fn quota_poll(
+        &self,
+        account: &AccountId,
+    ) -> Result<hofund_plugin_api::QuotaPoll, PluginError> {
         self.instance
-            .quota(account, &self.host)
+            .quota_poll(account, &self.host)
             .await
             .map_err(|error| {
                 if error.kind() != PluginErrorKind::Unsupported {
@@ -501,10 +504,18 @@ impl QuotaPolls {
                 self.round = self.round.wrapping_add(1);
                 let delay = jittered(QUOTA_POLL, &member.id, self.round, &self.hasher);
                 self.next.insert(member.id.clone(), now + delay);
-                match state.quota(&member.account).await {
-                    Ok(windows) => {
+                match state.quota_poll(&member.account).await {
+                    Ok(poll) => {
+                        let windows: Vec<QuotaWindow> = poll.windows().to_vec();
                         if apply_windows(cooldowns, &member.id, &state.plugin, &windows) {
                             cooled.push(member.id.clone());
+                        }
+                        let mut card = card;
+                        if !poll.plan().is_empty() {
+                            card.plan = poll.plan().to_owned();
+                        }
+                        if !poll.user().is_empty() {
+                            card.user = poll.user().to_owned();
                         }
                         quotas.record_success(
                             card,
