@@ -81,9 +81,9 @@ pub fn run() -> Result<(), String> {
             tauri::async_runtime::spawn(async move {
                 let mut surface = quota_notify::OsQuotaAlertSurface::new();
                 while let Some(alert) = quota_alert_events.recv().await {
-                    let _ = surface.present_with_focus(
-                        &alert.title,
-                        &alert.body,
+                    let _ = quota_notify::present_alert_with_focus(
+                        &mut surface,
+                        &alert,
                         Arc::clone(&focus_usage),
                     );
                 }

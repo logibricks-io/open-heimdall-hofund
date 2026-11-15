@@ -36,6 +36,16 @@ pub(crate) enum PresentOutcome {
 pub(crate) trait QuotaAlertSurface: Send {
     /// Delivers `title` and `body` when allowed.
     fn present(&mut self, title: &str, body: &str) -> PresentOutcome;
+
+    /// Delivers the alert and, when the user activates it, runs `focus_usage`.
+    fn present_with_focus(
+        &mut self,
+        title: &str,
+        body: &str,
+        _focus_usage: Arc<dyn Fn() + Send + Sync + 'static>,
+    ) -> PresentOutcome {
+        self.present(title, body)
+    }
 }
 
 /// Forwards one control `quota_alert` event to a surface.
@@ -44,6 +54,15 @@ pub(crate) fn present_alert<S: QuotaAlertSurface>(
     alert: &QuotaAlertEvent,
 ) -> PresentOutcome {
     surface.present(&alert.title, &alert.body)
+}
+
+/// Forwards one control `quota_alert` event and focuses Usage on activation.
+pub(crate) fn present_alert_with_focus<S: QuotaAlertSurface>(
+    surface: &mut S,
+    alert: &QuotaAlertEvent,
+    focus_usage: Arc<dyn Fn() + Send + Sync + 'static>,
+) -> PresentOutcome {
+    surface.present_with_focus(&alert.title, &alert.body, focus_usage)
 }
 
 /// Whether activating a quota-alert notification should focus Usage.
@@ -142,9 +161,14 @@ impl OsQuotaAlertSurface {
     pub(crate) fn new() -> Self {
         Self { refused: false }
     }
+}
 
-    /// Shows a quota alert and focuses Usage when the user activates it.
-    pub(crate) fn present_with_focus(
+impl QuotaAlertSurface for OsQuotaAlertSurface {
+    fn present(&mut self, title: &str, body: &str) -> PresentOutcome {
+        self.present_with_focus(title, body, Arc::new(|| {}))
+    }
+
+    fn present_with_focus(
         &mut self,
         title: &str,
         body: &str,
@@ -159,12 +183,6 @@ impl OsQuotaAlertSurface {
         };
         spawn_notify_wait(command, focus_usage);
         PresentOutcome::Shown
-    }
-}
-
-impl QuotaAlertSurface for OsQuotaAlertSurface {
-    fn present(&mut self, title: &str, body: &str) -> PresentOutcome {
-        self.present_with_focus(title, body, Arc::new(|| {}))
     }
 }
 
