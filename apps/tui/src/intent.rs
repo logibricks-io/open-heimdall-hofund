@@ -329,6 +329,15 @@ pub enum ControlIntent {
         /// Read generation.
         generation: u64,
     },
+    /// `GET /logs` log tail (G-7).
+    TailLogs {
+        /// Read generation.
+        generation: u64,
+        /// Byte offset to resume from.
+        after: u64,
+        /// Tail request token.
+        token: u64,
+    },
     /// `POST /subscriptions/{id}/sign-in`.
     StartSignIn {
         /// Subscription id.
@@ -646,6 +655,16 @@ impl fmt::Debug for ControlIntent {
                 .debug_struct("LoadAccounts")
                 .field("generation", generation)
                 .finish(),
+            Self::TailLogs {
+                generation,
+                after,
+                token,
+            } => formatter
+                .debug_struct("TailLogs")
+                .field("generation", generation)
+                .field("after", after)
+                .field("token", token)
+                .finish(),
             Self::StartSignIn { id, generation } => formatter
                 .debug_struct("StartSignIn")
                 .field("id", id)
@@ -756,6 +775,7 @@ impl ControlIntent {
             | Self::LoadProfiles { .. }
             | Self::LoadKeys { .. }
             | Self::LoadAccounts { .. }
+            | Self::TailLogs { .. }
             | Self::PollSignIn { .. }
             | Self::DiscoverAccounts { .. } => Duration::from_secs(15),
             _ => Duration::from_secs(30),
@@ -783,6 +803,7 @@ impl ControlIntent {
                 | Self::LoadProfiles { .. }
                 | Self::LoadKeys { .. }
                 | Self::LoadAccounts { .. }
+                | Self::TailLogs { .. }
                 | Self::PollSignIn { .. }
                 | Self::DiscoverAccounts { .. }
         )
@@ -801,6 +822,7 @@ impl ControlIntent {
             | Self::LoadRouteModels { generation, .. }
             | Self::LoadAgentModels { generation, .. }
             | Self::LoadAccounts { generation }
+            | Self::TailLogs { generation, .. }
             | Self::StartSignIn { generation, .. }
             | Self::SubmitSignInProof { generation, .. }
             | Self::CancelSignIn { generation, .. }

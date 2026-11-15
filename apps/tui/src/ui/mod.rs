@@ -1,5 +1,6 @@
 //! Layout, header, status, and footer rendering.
 
+mod help;
 mod layout;
 
 pub use layout::list_window;
@@ -28,7 +29,7 @@ pub fn draw(app: &App, area: Rect, buf: &mut Buffer, theme: &Theme) {
 
     draw_header(app, chunks[0], buf, theme);
     if app.mode == Mode::Help {
-        draw_help(chunks[1], buf, theme);
+        draw_help(app, chunks[1], buf, theme);
     } else {
         draw_body(app, chunks[1], buf, theme);
     }
@@ -65,6 +66,10 @@ fn draw_body(app: &App, area: Rect, buf: &mut Buffer, theme: &Theme) {
         app.pages.usage().draw_body(area, buf, theme);
         return;
     }
+    if app.page == crate::state::PageId::Logs {
+        app.pages.logs().draw_body(area, buf, theme);
+        return;
+    }
     app.pages.page(app.page).draw_body(area, buf, theme);
 }
 
@@ -86,7 +91,7 @@ fn draw_header(app: &App, area: Rect, buf: &mut Buffer, theme: &Theme) {
     spans.push(Span::raw("  "));
     for page in crate::state::PageId::CYCLE
         .into_iter()
-        .chain([crate::state::PageId::Accounts])
+        .chain([crate::state::PageId::Accounts, crate::state::PageId::Logs])
     {
         let label = page.pill_label();
         if page == app.page {
@@ -99,26 +104,8 @@ fn draw_header(app: &App, area: Rect, buf: &mut Buffer, theme: &Theme) {
     Paragraph::new(Line::from(spans)).render(area, buf);
 }
 
-fn draw_help(area: Rect, buf: &mut Buffer, theme: &Theme) {
-    let lines = vec![
-        Line::from(Span::styled(
-            format!("{PAD}Help (placeholder — R-18)"),
-            theme.title_style(),
-        )),
-        Line::from(""),
-        Line::from(Span::styled(
-            format!("{PAD}Keys for this page will appear here."),
-            theme.muted_style(),
-        )),
-        Line::from(Span::styled(
-            format!("{PAD}7 Accounts: sign in, switch, import, discover, refresh, and remove."),
-            theme.muted_style(),
-        )),
-        Line::from(Span::styled(
-            format!("{PAD}Press esc to return."),
-            theme.muted_style(),
-        )),
-    ];
+fn draw_help(app: &App, area: Rect, buf: &mut Buffer, theme: &Theme) {
+    let lines = help::lines(app.page, theme.title_style(), theme.muted_style());
     Paragraph::new(lines).render(area, buf);
 }
 
@@ -186,6 +173,9 @@ fn draw_footer(app: &App, area: Rect, buf: &mut Buffer, theme: &Theme) {
             }
             crate::state::PageId::Library => "↑↓  item  1–6  pages  r  reload  ?  help  q  quit",
             crate::state::PageId::Accounts => "7 accounts  r  reload  ?  help  q  quit",
+            crate::state::PageId::Logs => {
+                "↑↓ scroll  f follow  e requests  c clear  9 logs  r reload  ? help  q quit"
+            }
         }
     };
     Paragraph::new(Line::from(Span::styled(
