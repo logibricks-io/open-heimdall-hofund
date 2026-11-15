@@ -10,10 +10,12 @@ mod quota_notify;
 
 use control::{Control, MenuEntry, Snapshot};
 use hofund_daemon::user_config_path;
+use std::sync::Arc;
 use tauri::Emitter;
 use tauri::Manager;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
+
 use tokio::sync::Mutex;
 
 struct AppState {
@@ -66,10 +68,23 @@ pub fn run() -> Result<(), String> {
                     dispatch(&handle, &id).await;
                 });
             });
+            let focus_usage: Arc<dyn Fn() + Send + Sync> = {
+                let handle = app.handle().clone();
+                Arc::new(move || {
+                    let handle = handle.clone();
+                    let _ = handle.run_on_main_thread(move |_| {
+                        focus_usage_window(&handle);
+                    });
+                })
+            };
             tauri::async_runtime::spawn(async move {
                 let mut surface = quota_notify::OsQuotaAlertSurface::new();
                 while let Some(alert) = quota_alert_events.recv().await {
-                    let _ = quota_notify::present_alert(&mut surface, &alert);
+                    let _ = surface.present_with_focus(
+                        &alert.title,
+                        &alert.body,
+                        Arc::clone(&focus_usage),
+                    );
                 }
             });
             let handle = app.handle().clone();
