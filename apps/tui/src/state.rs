@@ -69,13 +69,11 @@ impl PageId {
         let digit = match self {
             Self::Accounts => 7,
             Self::Logs => 9,
-            _ => {
-            Self::CYCLE
+            _ => Self::CYCLE
                 .iter()
                 .position(|page| *page == self)
                 .map(|i| i + 1)
-                .unwrap_or(1)
-            }
+                .unwrap_or(1),
         };
         format!("{digit} {}", self.slug())
     }

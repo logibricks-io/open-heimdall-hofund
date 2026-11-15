@@ -2,8 +2,8 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use hofund_control_client::hofund_control_proto::{
-    EventPayload, LogTailResponse, RequestFinishedEvent, RequestStartedEvent, StatusClass,
-    MAX_LOG_TAIL_BYTES,
+    EventPayload, LogTailResponse, MAX_LOG_TAIL_BYTES, RequestFinishedEvent, RequestStartedEvent,
+    StatusClass,
 };
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -95,11 +95,7 @@ impl LogsPage {
     }
 
     /// Applies one G-7 response when the token still matches.
-    pub fn apply_tail(
-        &mut self,
-        token: u64,
-        response: LogTailResponse,
-    ) -> Option<ControlIntent> {
+    pub fn apply_tail(&mut self, token: u64, response: LogTailResponse) -> Option<ControlIntent> {
         if token != self.tail_token {
             return None;
         }
@@ -185,8 +181,7 @@ impl LogsPage {
             return;
         }
         self.follow = false;
-        self.scroll = (self.scroll as i32 + delta)
-            .clamp(0, len.saturating_sub(1) as i32) as usize;
+        self.scroll = (self.scroll as i32 + delta).clamp(0, len.saturating_sub(1) as i32) as usize;
     }
 
     fn toggle_follow(&mut self) {

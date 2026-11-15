@@ -10,8 +10,8 @@ use hofund_tui::intent::ControlIntent;
 use hofund_tui::pages::Page;
 use hofund_tui::session::SessionOutcome;
 use hofund_tui::state::{Mode, PageId};
-use hofund_tui::ui::{buffer_text, draw};
 use hofund_tui::theme::Theme;
+use hofund_tui::ui::{buffer_text, draw};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
@@ -33,10 +33,11 @@ fn key_nine_opens_logs_and_queues_tail() {
     let mut app = App::for_test(PageId::Agents);
     app.handle_key(key(KeyCode::Char('9')));
     assert_eq!(app.page, PageId::Logs);
-    assert!(app
-        .take_intents()
-        .iter()
-        .any(|intent| matches!(intent, ControlIntent::TailLogs { .. })));
+    assert!(
+        app.take_intents()
+            .iter()
+            .any(|intent| matches!(intent, ControlIntent::TailLogs { .. }))
+    );
 }
 
 #[test]
@@ -67,9 +68,7 @@ fn tail_response_appends_lines() {
     let intent = app.take_intents().pop().expect("tail intent");
     let (generation, token) = match intent {
         ControlIntent::TailLogs {
-            generation,
-            token,
-            ..
+            generation, token, ..
         } => (generation, token),
         other => panic!("unexpected intent: {other:?}"),
     };

@@ -111,13 +111,17 @@ pub fn entries(page: PageId) -> Vec<&'static str> {
 
 /// Renders help lines with muted body text.
 #[must_use]
-pub fn lines(page: PageId, title_style: ratatui::style::Style, muted: ratatui::style::Style) -> Vec<Line<'static>> {
-    let mut out = vec![Line::from(Span::styled(title(page), title_style)), Line::from("")];
+pub fn lines(
+    page: PageId,
+    title_style: ratatui::style::Style,
+    muted: ratatui::style::Style,
+) -> Vec<Line<'static>> {
+    let mut out = vec![
+        Line::from(Span::styled(title(page), title_style)),
+        Line::from(""),
+    ];
     for entry in entries(page) {
-        out.push(Line::from(Span::styled(
-            format!("{PAD}{entry}"),
-            muted,
-        )));
+        out.push(Line::from(Span::styled(format!("{PAD}{entry}"), muted)));
     }
     out.push(Line::from(""));
     out.push(Line::from(Span::styled(

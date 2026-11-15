@@ -8,14 +8,14 @@ use hofund_control_client::hofund_control_proto::{
     AgentPickedOnlyRequest, AgentPlanRequest, AgentStatusEntry, AgentSummary, CatalogSyncRequest,
     CheckinRunRequest, DiscoveredAccount, GroupDeleteRequest, GroupDeleteResponse,
     GroupListResponse, GroupMemberCandidatesResponse, GroupRestoreRequest, GroupWriteResponse,
-    ModelEntry, PicksResponse, PicksSetRequest, PresetEntry, ProfileRenameRequest, ProfileSummary,
-    ProviderCreateRequest, ProviderDeleteRequest, ProviderKey, ProviderKeyAction,
+    LogTailResponse, ModelEntry, PicksResponse, PicksSetRequest, PresetEntry, ProfileRenameRequest,
+    ProfileSummary, ProviderCreateRequest, ProviderDeleteRequest, ProviderKey, ProviderKeyAction,
     ProviderKeyRequest, ProviderPatchRequest, ProviderSummary, ProviderTestRequest,
     QuotaAlertsResponse, QuotaAlertsSetRequest, QuotaAlertsSetResponse, QuotaKind, QuotaQuery,
     QuotaResponse, RouteListResponse, RouteQuery, SessionRouteResponse, SettingsPatchRequest,
     SettingsResponse, SignInProofRequest, SignInStartRequest, SignInStartResponse,
     SignInStatusResponse, SubscriptionEntry, SubscriptionRefreshRequest, UnroutedListResponse,
-    UsageQuery, UsageResponse, LogTailResponse,
+    UsageQuery, UsageResponse,
 };
 use hofund_control_client::{Client, ClientError};
 
