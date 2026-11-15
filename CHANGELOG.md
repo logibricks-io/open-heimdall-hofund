@@ -191,6 +191,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- C-1a: `GET /v1beta/models` lists catalog `displayName` when known, a
+  `{displayName} via hofund` description, and `countTokens` with the generate and
+  stream methods; feature-parity row 1.6 is Done. Refs C-1a.
 - Cursor HTTP/1 sixteen-KV pipeline test: drive the Run session with
   `drive_until_http1_request` and `drive_to_completion` instead of racing a
   yield budget against a paused clock, and bind loopback response scripts at
