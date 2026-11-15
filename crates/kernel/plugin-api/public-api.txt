@@ -1,3 +1,4 @@
+ANOTHER_ROUTING_CANDIDATE
 Account
 Account #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 Account::const fn key (& self) -> & PluginKey
@@ -18,7 +19,6 @@ AccountStatus
 AccountStatus #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq)
 AccountStatus::NeedsSignIn
 AccountStatus::Ready
-ANOTHER_ROUTING_CANDIDATE
 AccountsHandle
 AccountsHandle #[non_exhaustive] derives(Clone)
 AccountsHandle::async fn lease (& self , id : & AccountId , wait : Duration) -> Result < AccountLease , PluginError >
@@ -1344,6 +1344,7 @@ WriteCtx
 WriteCtx #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 WriteCtx::fn home (& self) -> & Path
 WriteCtx::fn new (home : impl Into < PathBuf >) -> Self
+const ANOTHER_ROUTING_CANDIDATE
 const API
 const BRIDGE_CALLBACK_PATH_PREFIX
 const LOOPBACK_CANCEL_PATH

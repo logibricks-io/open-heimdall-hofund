@@ -216,9 +216,9 @@ fn r54e_queue_budget_exceeded_returns_queue_error_without_resend() {
             .upstream(&id, host.context())
             .expect("upstream");
         let error = execute_advancing(upstream, request_for("dfmodel"), Duration::from_secs(30))
-        .await
-        .err()
-        .expect("budget ends the wait");
+            .await
+            .err()
+            .expect("budget ends the wait");
         assert_eq!(error.status(), Some(503));
         assert_eq!(error.retry_after(), Some(Duration::from_secs(30)));
         assert!(
