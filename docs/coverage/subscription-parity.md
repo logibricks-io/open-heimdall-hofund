@@ -12,7 +12,7 @@ Legend: **Done** = matches the reference at checklist granularity; **Partial** =
 
 | Vendor section | Done | Partial | Missing | N/A | Unverified |
 |---|---|---|---|---|---|
-| Claude Pro/Max (`claude`) | 4 | 14 | 3 | 2 | 0 |
+| Claude Pro/Max (`claude`) | 5 | 16 | 0 | 2 | 0 |
 | Cursor (`cursor`) | 11 | 8 | 0 | 2 | 0 |
 | Devin (`devin`) | 13 | 5 | 0 | 1 | 0 |
 | Zed (`zed`) | 13 | 3 | 0 | 3 | 0 |
@@ -44,7 +44,7 @@ Every other gap below maps to an existing plan item.
 
 **Reference files read:** `internal/provider/claude_signin.go`, `claude_auth.go`, `claude_dirs.go`, `claude_setup_token.go`, `claude_limits.go`, `claude_usage_cli.go`, `claude_warmup.go`, `claude_warmup.go`, `claude_probe.go`; `internal/gateway/claude_subscription.go`; `internal/claudebridge/mcp.go`.
 
-**Hofund path:** `plugins/subscriptions/claude/src/` (`lib.rs`, `cli.rs`, `creds.rs`, `account.rs`, `agent_sign_in.rs`, `discover.rs`, `import.rs`, `lock.rs`, `upstream.rs`, `bridge/`).
+**Hofund path:** `plugins/subscriptions/claude/src/` (`lib.rs`, `cli.rs`, `creds.rs`, `account.rs`, `usage.rs`, `limits.rs`, `models.rs`, `setup_token.rs`, `agent_sign_in.rs`, `discover.rs`, `import.rs`, `lock.rs`, `upstream.rs`, `bridge/`).
 
 | # | capability | reference v0.1.3005 behaviour | hofund 08035c9 | status | gap to close |
 |---|------------|------------------------------|----------------|--------|--------------|
@@ -52,7 +52,7 @@ Every other gap below maps to an existing plan item.
 | a2 | sign-in: pasted device/browser code | Reads code from sign-in flow stdin when link shows a code (`claude_signin.go:147-151` comment) | `SignInProof::Paste` writes code to child stdin (`lib.rs:342+`, tests in `tests.rs`) | Done | — |
 | a3 | sign-in: device code (standalone) | N/A — always mediated by Claude Code OAuth | N/A | N/A | — |
 | a4 | sign-in: API key | N/A for subscription OAuth | N/A | N/A | — |
-| a5 | sign-in: setup-token paste | `AddClaudeSetupToken` / `claude_setup_token.go:90+` accepts `sk-ant-oat…` into reference-owned dir | unverified — no `setup-token` path in `plugins/subscriptions/claude` | Missing | Port setup-token accounts (`claude_setup_token.go`) |
+| a5 | sign-in: setup-token paste | `AddClaudeSetupToken` / `claude_setup_token.go:90+` accepts `sk-ant-oat…` into reference-owned dir | `setup_token.rs` + `SignInProof::Token` in `lib.rs` (`r5_5`–`r5_6`, `r5_21`–`r5_25`) | Done | — |
 | a6 | sign-in: reuse desktop/CLI login | Reads live agent home when switching; discovery imports `.credentials.json` | `discover.rs`, `agent_sign_in.rs`, `keychain.rs` (Keychain via `SpawnRequest` + host spawn, file fallback, `HOFUND_NO_ACCOUNTS` skips probes); locks (`docs/coverage/subscriptions.md:105-120`) | Done | — |
 | b1 | import: agent files | Swap export + per-account dirs (`login_import` patterns; `import.rs` fixture shape) | `import.rs` parse swap export v1 (`import.rs:19-55`) | Partial | Additional reference import formats if any beyond swap v1 (unverified) |
 | b2 | import: keychain / other tools | Keychain item `claudeDirService` (`claude_dirs.go:42-58`) | `keychain.rs` + `discover.rs` import/discovery (`r5_42`–`r5_47` fixtures) | Done | — |
@@ -64,20 +64,19 @@ Every other gap below maps to an existing plan item.
 | h | tool calls | MCP `tools/call` blocks; results on next HTTP request (`claude_subscription.go:9-13`, `mcp.go:36-48`) | Tool parking plus MCP callback via `bridge-mcp-stdio` (`bridge/park.rs`, PRs #753, #756, #759) | Partial | Live helper + callback against a real Claude Code process (#304) |
 | i | images | Gateway image tests pass through bridge (`claude_images_test.go` cited in tree) | Image blocks on the `-p` stream-json prompt (`bridge/images.rs`, PR #761) with official 2000 px / 5 MiB refit via `hofund_plugin_sdk::image::fit_claude` (`r698_*` tests). URL sources are not fetched | Partial | TUI URL fetch |
 | j | reasoning / thinking | Effort / think-off **staged** in gateway (`6158-6161`, `6072-6076`, `anthropic.go:281-291`) | Gateway A–B extensions plus plugin CLI flags and `setEffort` (`bridge/flags.rs`, PR #761). Neutral **`X-Hofund-Cache-Marks`** instead of the reference vendor-prefixed cache opt-in header (`claude_cache.go:36-38`) | Partial | Real-account effort/`setEffort` (#304) |
-| k | quota / usage | `claude -p /usage` parse (`claude_usage_cli.go:50-57`); plus `NoteClaudeLimits` from stream headers (`claude_limits.go:69-71`) | `quota()` unsupported (`lib.rs:407-414`) | Missing | `/usage` CLI + header-derived windows (`R-5`) |
-| l | model list | From Claude Code / catalog in gateway context (unverified detail); usage scopes per model in limits | `list_models()` unsupported (`lib.rs:417-424`) | Missing | Model list + scoped week windows (`R-5`) |
-| m | multi-account | Multiple saved logins, routing, agent switch (`claude_routed_signin_test.go` etc.) | Daemon multi-account + agent switch with locks | Partial | Quota-aware routing needs row k |
+| k | quota / usage | `claude -p /usage` parse (`claude_usage_cli.go:50-57`); plus `NoteClaudeLimits` from stream headers (`claude_limits.go:69-71`) | `usage.rs` + `limits.rs`: `/usage` poll, `rate_limit_event` → per-account store with 1h `/usage` stand-in, merge, `with_unstarted`, setup-token heard windows; tests `r5_1`–`r5_4`, `r5_48`–`r5_58` | Partial | Live-account smoke (#304); background `/usage` cadence from `subscription_usage.go` not ported |
+| l | model list | From Claude Code / catalog in gateway context (unverified detail); usage scopes per model in limits | `models.rs` + `list_models()` (`r5_7`–`r5_8`, `r5_27`, `r5_39`); scoped week windows via `usage`/`limits` | Partial | Live catalog smoke (#304) |
+| m | multi-account | Multiple saved logins, routing, agent switch (`claude_routed_signin_test.go` etc.) | Daemon multi-account + agent switch with locks | Partial | Quota-aware routing with heard windows unverified live (#304) |
 | n | error classification | `ClaudeSignInRequired`, refusal vs retry (`claude_auth.go`); subscription refusals move account (`gateway/refusal_accounts_test.go`) | `bridge/failure.rs` maps sign-in, extra-usage, too-long, quota, 429, and crash text; room-full 503 sets vendor-neutral `skip_failover_same_plugin` (R-6g). Sign-in lapses are pinned to the login version captured at run start | Partial | Real-account classification (#304); image/timeout live wrapping still thin |
 | o | daily warmup | `warmClaude` / `askClaude` in gateway; `ProbeClaudeVia`; `WarmClaudeVia`; `claudeWarmedNow` (`claude_warmup.go`, `claude_probe.go`, `warm_now.go`) | `hofund-daemon` `warmup/claude.rs` coordinates `Subscription::warmup_probe`; plugin `account::ask` with official argv including `disableDeepLinkRegistration`; `UpstreamProvider::probe` for model tests; `QuotaStore::stale_allowance` after warm | Done | Week/all reset loop (`KeepClaudeWindowsWarm`) remains A-3b |
 | p | agent sign-in switching | Switch with locks, CAS on refresh token (`logins.go` patterns; docs in subscriptions.md) | `write_agent_sign_in`, discover/import (`lib.rs:437-475`) | Partial | Full lock parity documented in subscriptions.md gaps (overage quota) |
-| q | vendor extras | WSL Claude, per-login proxy (`claude_signin.go:139-145`), setup-token inference-only | Sign-in, refresh, `auth status`, `/usage`, and warm-up go through `wsl.exe` when Windows has no native `claude` (`wslrun.rs` / `launcher.rs`; running distros only; mocked probes). Per-login Bun proxy, setup-token, and MCP bridge WSL (`upstream.rs` `wsl_distro: None`) are still absent | Partial | Per-login Bun proxy; setup-token (`R-5`); MCP bridge WSL |
+| q | vendor extras | WSL Claude, per-login proxy (`claude_signin.go:139-145`), setup-token inference-only | Sign-in, refresh, `auth status`, `/usage`, and warm-up go through `wsl.exe` when Windows has no native `claude` (`wslrun.rs` / `launcher.rs`; running distros only; mocked probes). Setup-token accounts and heard limits landed in R-5. Per-login Bun proxy and MCP bridge WSL (`upstream.rs` `wsl_distro: None`) are still absent | Partial | Per-login Bun proxy; MCP bridge WSL |
 
 ### Gaps (Claude)
 
-- MCP subscription bridge and multi-protocol gateway translation — implemented on the R-6 stack (PRs #753–#761 and R-6g), not merged; real-account smoke remains **#304**
-- Quota from `/usage` + stream header limits — **L**, **R-5**
-- Model list and scoped quota windows — **M**, **R-5**
-- Setup-token sign-in and accounts — **S**, **R-5**
+- Live-account quota, catalog, and bridge smoke — **#304**
+- Background `/usage` refresh cadence from `subscription_usage.go` — not ported
+- Per-login Bun proxy and MCP bridge WSL — open
 - WSL fallback for Claude Code sign-in and short CLI (refresh, `auth status`, `/usage`, warm-up) landed in this slice (`wslrun.rs` / `launcher.rs`; running distros only). Remaining **R-6**: per-login Bun proxy, opened-URL env, and MCP bridge WSL (`upstream.rs` `wsl_distro: None`) — **M**
 
 ---

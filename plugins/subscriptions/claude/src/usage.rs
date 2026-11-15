@@ -28,6 +28,11 @@ fn usage_line() -> &'static Regex {
     })
 }
 
+/// Whether a `/usage` error line is an account refusal, not a quota stand-in.
+pub(crate) fn line_denies_account(message: &str) -> bool {
+    usage_sign_in_denied().is_match(message) || usage_limit_denied().is_match(message)
+}
+
 fn usage_sign_in_denied() -> &'static RegexSet {
     static RE: OnceLock<RegexSet> = OnceLock::new();
     RE.get_or_init(|| {
