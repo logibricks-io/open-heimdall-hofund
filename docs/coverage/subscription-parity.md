@@ -12,7 +12,7 @@ Legend: **Done** = matches the reference at checklist granularity; **Partial** =
 
 | Vendor section | Done | Partial | Missing | N/A | Unverified |
 |---|---|---|---|---|---|
-| Claude Pro/Max (`claude`) | 5 | 16 | 0 | 2 | 0 |
+| Claude Pro/Max (`claude`) | 6 | 15 | 0 | 2 | 0 |
 | Cursor (`cursor`) | 11 | 8 | 0 | 2 | 0 |
 | Devin (`devin`) | 13 | 5 | 0 | 1 | 0 |
 | Zed (`zed`) | 13 | 3 | 0 | 3 | 0 |
@@ -48,7 +48,7 @@ Every other gap below maps to an existing plan item.
 
 | # | capability | reference v0.1.3005 behaviour | hofund 08035c9 | status | gap to close |
 |---|------------|------------------------------|----------------|--------|--------------|
-| a1 | sign-in: browser / loopback via Claude Code | `startClaudeSignIn` runs `claude auth login --claudeai` in a temp dir, relays URL via `TookOpenedURL` / `openedURLEnv` (`claude_signin.go:147-198`) | `lib.rs` + `cli.rs` + `wslrun.rs` + `launcher.rs`: same command in private dir, link relay + optional browser wait; WSL fallback when Windows has no local `claude` (running distros only, mocked probes) | Partial | Per-login Bun proxy on sign-in (`netproxy.EnvForBunWith`) still Partial; `TookOpenedURL` / opened-URL env not ported; MCP bridge runs still native-only (`upstream.rs` `wsl_distro: None`) |
+| a1 | sign-in: browser / loopback via Claude Code | `startClaudeSignIn` runs `claude auth login --claudeai` in a temp dir, relays URL via `TookOpenedURL` / `openedURLEnv` (`claude_signin.go:147-198`) | `lib.rs` + `launcher.rs` + `proxy.rs` + `hofund_plugin_sdk::opened_url` (`HOFUND_OPENED_URL`, `BROWSER` → hofund CLI): polls opened-url file and stdout; per-login `env_for_bun_with` from sign-in `proxy` option; WSL when no native `claude` (`wslrun.rs`); tests `r5_59`, `r5_60` (scripted spawns only) | Done | — |
 | a2 | sign-in: pasted device/browser code | Reads code from sign-in flow stdin when link shows a code (`claude_signin.go:147-151` comment) | `SignInProof::Paste` writes code to child stdin (`lib.rs:342+`, tests in `tests.rs`) | Done | — |
 | a3 | sign-in: device code (standalone) | N/A — always mediated by Claude Code OAuth | N/A | N/A | — |
 | a4 | sign-in: API key | N/A for subscription OAuth | N/A | N/A | — |
@@ -70,14 +70,15 @@ Every other gap below maps to an existing plan item.
 | n | error classification | `ClaudeSignInRequired`, refusal vs retry (`claude_auth.go`); subscription refusals move account (`gateway/refusal_accounts_test.go`) | `bridge/failure.rs` maps sign-in, extra-usage, too-long, quota, 429, and crash text; room-full 503 sets vendor-neutral `skip_failover_same_plugin` (R-6g). Sign-in lapses are pinned to the login version captured at run start | Partial | Real-account classification (#304); image/timeout live wrapping still thin |
 | o | daily warmup | `warmClaude` / `askClaude` in gateway; `ProbeClaudeVia`; `WarmClaudeVia`; `claudeWarmedNow` (`claude_warmup.go`, `claude_probe.go`, `warm_now.go`) | `hofund-daemon` `warmup/claude.rs` coordinates `Subscription::warmup_probe`; plugin `account::ask` with official argv including `disableDeepLinkRegistration`; `UpstreamProvider::probe` for model tests; `QuotaStore::stale_allowance` after warm | Done | Week/all reset loop (`KeepClaudeWindowsWarm`) remains A-3b |
 | p | agent sign-in switching | Switch with locks, CAS on refresh token (`logins.go` patterns; docs in subscriptions.md) | `write_agent_sign_in`, discover/import (`lib.rs:437-475`) | Partial | Full lock parity documented in subscriptions.md gaps (overage quota) |
-| q | vendor extras | WSL Claude, per-login proxy (`claude_signin.go:139-145`), setup-token inference-only | Sign-in, refresh, `auth status`, `/usage`, and warm-up go through `wsl.exe` when Windows has no native `claude` (`wslrun.rs` / `launcher.rs`; running distros only; mocked probes). Setup-token accounts and heard limits landed in R-5. Per-login Bun proxy and MCP bridge WSL (`upstream.rs` `wsl_distro: None`) are still absent | Partial | Per-login Bun proxy; MCP bridge WSL |
+| q | vendor extras | WSL Claude, per-login proxy (`claude_signin.go:139-145`), setup-token inference-only | WSL for sign-in and short CLI (`wslrun.rs` / `launcher.rs`); setup-token landed R-5; `hofund_plugin_sdk::netproxy` (`env_for_bun_with`, loopback SOCKS→HTTP bridge) on sign-in, refresh, `/usage`, warm-up, and bridge `StartSpec`; upstream sets `wsl_distro` from `ClaudeCommand::resolve` when Windows has no native `claude` | Partial | WSL proxy `cross_env` on long-lived bridge spawns and live MCP bridge smoke (#304) |
 
 ### Gaps (Claude)
 
 - Live-account quota, catalog, and bridge smoke — **#304**
 - Background `/usage` refresh cadence from `subscription_usage.go` — not ported
-- Per-login Bun proxy and MCP bridge WSL — open
-- WSL fallback for Claude Code sign-in and short CLI (refresh, `auth status`, `/usage`, warm-up) landed in this slice (`wslrun.rs` / `launcher.rs`; running distros only). Remaining **R-6**: per-login Bun proxy, opened-URL env, and MCP bridge WSL (`upstream.rs` `wsl_distro: None`) — **M**
+- Live-account quota, catalog, and bridge smoke — **#304**
+- WSL `cross_env` for long-lived bridge spawns — open
+- WSL fallback for sign-in and short CLI landed earlier (`wslrun.rs` / `launcher.rs`). Per-login Bun proxy, opened-URL relay, and bridge `wsl_distro` resolution landed in this slice — **R-5** / **R-6**
 
 ---
 

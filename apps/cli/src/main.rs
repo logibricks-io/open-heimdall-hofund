@@ -51,6 +51,9 @@ use subscription::{SubscriptionCommand, SubscriptionFlags};
 
 fn main() -> ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
+    if hofund_plugin_sdk::opened_url::took_opened_url(&arguments) {
+        return ExitCode::SUCCESS;
+    }
     if arguments.first().map(String::as_str) == Some(hofund_bridge_mcp::SUBCOMMAND) {
         return match hofund_bridge_mcp::run_stdio(
             &arguments[1..]

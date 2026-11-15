@@ -105,4 +105,13 @@ impl ClaudeCommand {
             Self::Wsl(tool) => Some(&tool.distro),
         }
     }
+
+    /// Appends Bun-safe proxy variables for `choice` to `extra`.
+    pub(crate) fn proxied_extra(
+        &self,
+        choice: Option<&str>,
+        extra: &[(OsString, OsString)],
+    ) -> Result<Vec<(OsString, OsString)>, PluginError> {
+        crate::proxy::bun_proxy_env(choice, self, extra)
+    }
 }

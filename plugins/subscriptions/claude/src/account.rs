@@ -140,7 +140,9 @@ pub(crate) async fn read_usage(
         if !settings.exists() {
             creds::write_private(&settings, &profile.settings_text())?;
         }
-        let text = crate::usage::run_usage_command(host, &command, &dir, &run_env(&blob)).await?;
+        let proxy = blob.text(crate::proxy::PROXY_KEY);
+        let extra = command.proxied_extra(proxy, &run_env(&blob))?;
+        let text = crate::usage::run_usage_command(host, &command, &dir, &extra).await?;
         crate::usage::parse(&text, now)
     }
     .await;
@@ -244,7 +246,17 @@ pub(crate) async fn ask(
     creds::private_dir(&work)?;
 
     let mut last = String::new();
-    let run_result = run_warmup_command(host, &command, &dir, &work, model, &mut last).await;
+    let proxy = blob.text(crate::proxy::PROXY_KEY);
+    let run_result = run_warmup_command(
+        host,
+        &command,
+        &dir,
+        &work,
+        model,
+        proxy,
+        &mut last,
+    )
+    .await;
 
     let read_back = read_back_credentials(host, &dir).await;
     if let Some(rotated) = read_back.filter(|rotated| rotated.text != stored) {
@@ -262,11 +274,13 @@ async fn run_warmup_command(
     dir: &Path,
     work: &Path,
     model: &str,
+    proxy: Option<&str>,
     last: &mut String,
 ) -> Result<(), PluginError> {
     let arg_values = warm_arg_values(model);
     let args: Vec<&str> = arg_values.iter().map(String::as_str).collect();
-    let request = command.spawn_request_in(&args, dir, work, &[])?;
+    let extra = command.proxied_extra(proxy, &[])?;
+    let request = command.spawn_request_in(&args, dir, work, &extra)?;
     let child = host.spawn_process().spawn_piped(&request).await?;
     child.write_stdin(b"hi\n".to_vec().into()).await?;
     let mut stdout = child.stdout()?;
@@ -339,8 +353,12 @@ pub(crate) async fn status_command(
     dir: &Path,
     blob: &SecretObject,
 ) -> Option<hofund_plugin_sdk::json::Value> {
+    let proxy = blob.text(crate::proxy::PROXY_KEY);
+    let extra = command
+        .proxied_extra(proxy, &run_env(blob))
+        .ok()?;
     let request = command
-        .spawn_request(&crate::cli::STATUS_ARGS, dir, &run_env(blob))
+        .spawn_request(&crate::cli::STATUS_ARGS, dir, &extra)
         .ok()?;
     spawn_status(host, request).await
 }

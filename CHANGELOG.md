@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- R-5: Claude Code sign-in relays the auth page through `HOFUND_OPENED_URL`
+  and the hofund CLI as `BROWSER`; `hofund_plugin_sdk::netproxy::env_for_bun_with`
+  injects per-login HTTP/SOCKS proxies (loopback SOCKS bridge) on sign-in,
+  refresh, `/usage`, warm-up, and bridge runs; upstream resolves WSL when
+  Windows has no native `claude`. Recorded tests `r5_59`, `r5_60`, and
+  `netproxy` unit tests only. Refs R-5.
 - R-5: the Claude Code subscription plugin keeps per-account allowance from
   stream-json `rate_limit_event` envelopes (`limits.rs`): `unifiedWindows` and
   the active `rateLimitType`, one-hour stand-in when `/usage` is away, merge
