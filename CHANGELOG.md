@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- R-51e: `QuotaWindow` and `QuotaPoll` carry vendor credit units, bonus lapse,
+  and window span; the daemon fills quota card `plan` and `user` from
+  `Subscription::quota_poll`. The Kiro subscription plugin maps `usageOf` plan
+  title, email, floats, bonus `runsOut`, and the 30-day month span (`r51e_k_*`,
+  recorded fixtures). Refs R-51.
 - R-5: the Claude Code subscription plugin keeps per-account allowance from
   stream-json `rate_limit_event` envelopes (`limits.rs`): `unifiedWindows` and
   the active `rateLimitType`, one-hour stand-in when `/usage` is away, merge
