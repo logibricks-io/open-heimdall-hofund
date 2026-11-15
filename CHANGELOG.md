@@ -200,6 +200,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- D-71: provider `d71_injected_client_keeps_marker_after_idle_close` reads the
+  full `Content-Length` request and drains response bodies before the next call,
+  removing a macOS CI race where the accept loop replied after headers only.
+  Refs D-71.
 - C-1a: `GET /v1beta/models` lists catalog `displayName` when known, a
   `{displayName} via hofund` description, and `countTokens` with the generate and
   stream methods; feature-parity row 1.6 is Done. Refs C-1a.
