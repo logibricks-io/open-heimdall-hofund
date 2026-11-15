@@ -11,8 +11,8 @@ use crate::host::HostContext;
 use crate::id::{AccountId, PluginId};
 use crate::quota_reset::{QuotaResetCredits, QuotaResetOutcome};
 use crate::records::{
-    AccountStatus, ModelList, QuotaWindow, SignInChallenge, SignInCtx, SignInFlow, SignInProof,
-    SubscriptionSpec,
+    AccountStatus, ModelList, QuotaPoll, QuotaWindow, SignInChallenge, SignInCtx, SignInFlow,
+    SignInProof, SubscriptionSpec,
 };
 use crate::upstream::UpstreamProvider;
 
@@ -176,6 +176,21 @@ pub trait Subscription: Send + Sync + 'static {
         account: &AccountId,
         host: &HostContext,
     ) -> Result<Vec<QuotaWindow>, PluginError>;
+
+    /// Polls quota windows and optional plan or user labels for one account.
+    ///
+    /// The default wraps [`Self::quota`] with empty labels.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when the poll fails.
+    async fn quota_poll(
+        &self,
+        account: &AccountId,
+        host: &HostContext,
+    ) -> Result<QuotaPoll, PluginError> {
+        Ok(QuotaPoll::from_windows(self.quota(account, host).await?))
+    }
 
     /// Reads credit-funded window resets for one account, when the vendor exposes them.
     ///
