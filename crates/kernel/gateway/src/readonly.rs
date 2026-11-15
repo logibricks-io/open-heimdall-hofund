@@ -18,6 +18,7 @@ const READ_ONLY_PATHS: &[&str] = &[
     "/v1/hofund/me",
     "/v1/hofund/quotas",
     "/v1/hofund/quotas/history",
+    "/v1/hofund/quotas/cards",
 ];
 
 pub(super) struct RouteSet {
@@ -77,7 +78,7 @@ fn refusal() -> Response {
         StatusCode::FORBIDDEN,
         serde_json::to_vec(&serde_json::json!({
             "error": {
-                "message": "this gateway key is read-only: it may read hofund's quotas and its own usage and limits (GET /v1/hofund/quotas, /v1/hofund/quotas/history, /v1/hofund/limit, /v1/hofund/me) and use no model or write. Use a key with full access for that (hofund gateway-key access <id> full)",
+                "message": "this gateway key is read-only: it may read hofund's quotas and its own usage and limits (GET /v1/hofund/quotas, /v1/hofund/quotas/history, /v1/hofund/quotas/cards, /v1/hofund/limit, /v1/hofund/me) and use no model or write. Use a key with full access for that (hofund gateway-key access <id> full)",
                 "type": "permission_error",
                 "code": READ_ONLY_CODE,
             }
@@ -260,6 +261,7 @@ mod tests {
         "POST /v1/hofund/keys",
         "POST /v1/hofund/keys/oidc",
         "DELETE /v1/hofund/keys/{id}",
+        "POST /v1/hofund/quotas/refresh",
         "POST /v1/chat/completions",
         "POST /v1/messages",
         "POST /v1/messages/count_tokens",

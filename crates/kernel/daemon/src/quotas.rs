@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures_util::future::BoxFuture;
 use hofund_control_proto::{
-    QuotaHistory, QuotaHistoryQuery, QuotaHistoryResponse, QuotaQuery, QuotaRefreshRequest,
+    Quota, QuotaHistory, QuotaHistoryQuery, QuotaHistoryResponse, QuotaQuery, QuotaRefreshRequest,
     QuotaRefreshResponse, QuotaResponse,
 };
 use hofund_gateway::QuotaSource;
@@ -20,25 +20,69 @@ use crate::runtime::Runtime;
 pub(crate) struct DaemonQuotas {
     runtime: Arc<Runtime>,
     usage: Arc<Ledger>,
+    http: reqwest::Client,
 }
 
 impl DaemonQuotas {
     pub(crate) fn new(runtime: Arc<Runtime>, usage: Arc<Ledger>) -> Self {
-        Self { runtime, usage }
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(8))
+            .build()
+            .expect("remote quota client");
+        Self {
+            runtime,
+            usage,
+            http,
+        }
+    }
+
+    async fn decorate(mut data: Vec<Quota>, usage: Arc<Ledger>, runtime: &Runtime) -> Vec<Quota> {
+        let now = runtime.quota_now();
+        let served = served_since(usage, now).await;
+        apply_last_served(&mut data, &served, now);
+        crate::credits_modes::decorate_quotas(&mut data, runtime.credits_modes());
+        if let Some(config) = runtime.config_snapshot() {
+            runtime
+                .remote_quotas()
+                .merge(&config, runtime.remote_http(), &mut data)
+                .await;
+        }
+        data
     }
 
     /// The report with standings; a kept query never asks a vendor.
     pub(crate) async fn response(&self, query: &QuotaQuery) -> QuotaResponse {
         let (mut data, standings) = self.runtime.quota_report(query.kept).await;
-        let now = self.runtime.quota_now();
-        let served = served_since(Arc::clone(&self.usage), now).await;
-        apply_last_served(&mut data, &served, now);
-        crate::credits_modes::decorate_quotas(&mut data, self.runtime.credits_modes());
+        data = Self::decorate(data, Arc::clone(&self.usage), &self.runtime).await;
         QuotaResponse {
             data,
             standings,
             ..QuotaResponse::default()
         }
+    }
+
+    /// Kept local cards for export to remote peers (no remote merge).
+    pub(crate) async fn kept_cards(&self) -> Vec<Quota> {
+        let (mut data, _) = self.runtime.quota_report(true).await;
+        data.retain(|card| !card.provider.contains('/'));
+        let now = self.runtime.quota_now();
+        let served = served_since(Arc::clone(&self.usage), now).await;
+        apply_last_served(&mut data, &served, now);
+        crate::credits_modes::decorate_quotas(&mut data, self.runtime.credits_modes());
+        data
+    }
+
+    /// Re-reads cards, honoring the refresh gap, then returns kept cards.
+    async fn refresh_exported_cards(&self, provider: Option<String>, user: String) -> Vec<Quota> {
+        match provider.as_deref() {
+            Some(provider) if !provider.is_empty() => {
+                let _ = self.runtime.quota_refresh_cards(provider, &user).await;
+            }
+            _ => {
+                self.runtime.quota_refresh_all().await;
+            }
+        }
+        self.kept_cards().await
     }
 
     /// Sampled history for the query.
@@ -63,14 +107,26 @@ impl DaemonQuotas {
         &self,
         request: &QuotaRefreshRequest,
     ) -> QuotaRefreshResponse {
-        let (mut data, standings, throttled, last_asked_secs) = self
+        if let Some(config) = self.runtime.config_snapshot()
+            && let Some((remote_id, card)) =
+                crate::remote_quotas::split_remote_card(&config, &request.provider)
+        {
+            let _ = self
+                .runtime
+                .remote_quotas()
+                .refresh(&self.http, &config, &remote_id, &card, &request.user)
+                .await;
+            let data = Self::decorate(Vec::new(), Arc::clone(&self.usage), &self.runtime).await;
+            return QuotaRefreshResponse {
+                data,
+                ..QuotaRefreshResponse::default()
+            };
+        }
+        let (data, standings, throttled, last_asked_secs) = self
             .runtime
             .quota_refresh_cards(&request.provider, &request.user)
             .await;
-        let now = self.runtime.quota_now();
-        let served = served_since(Arc::clone(&self.usage), now).await;
-        apply_last_served(&mut data, &served, now);
-        crate::credits_modes::decorate_quotas(&mut data, self.runtime.credits_modes());
+        let data = Self::decorate(data, Arc::clone(&self.usage), &self.runtime).await;
         QuotaRefreshResponse {
             data,
             standings,
@@ -88,6 +144,18 @@ impl QuotaSource for DaemonQuotas {
 
     fn history(&self, query: QuotaHistoryQuery) -> Vec<QuotaHistory> {
         self.lines(&query)
+    }
+
+    fn kept_cards(&self) -> BoxFuture<'_, Vec<Quota>> {
+        Box::pin(async move { self.kept_cards().await })
+    }
+
+    fn refresh_kept_cards(
+        &self,
+        provider: Option<String>,
+        user: String,
+    ) -> BoxFuture<'_, Vec<Quota>> {
+        Box::pin(async move { self.refresh_exported_cards(provider, user).await })
     }
 }
 

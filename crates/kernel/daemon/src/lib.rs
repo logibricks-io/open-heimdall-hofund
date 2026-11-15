@@ -70,8 +70,10 @@ mod provider_keys;
 mod provider_rename;
 mod quota_alerts;
 mod quota_refresh;
+mod quota_scope;
 mod quotas;
 mod registry;
+mod remote_quotas;
 mod rests;
 mod runtime;
 mod sign_in;
@@ -587,6 +589,11 @@ async fn start_inner(
         Arc::clone(&usage),
     ));
     gateway = gateway.with_quotas(Arc::clone(&quotas) as Arc<dyn hofund_gateway::QuotaSource>);
+    let runtime_for_scope = Arc::clone(&runtime);
+    gateway = gateway.with_quota_scope(Arc::new(move |caller| {
+        let catalog = runtime_for_scope.quota_catalog();
+        crate::quota_scope::quota_access(caller.identity(), &catalog)
+    }));
     gateway = gateway.with_model_catalog(Arc::clone(&model_catalog));
     let session_pricing = Arc::new(pricing::effective_pricer(
         config.usage.clone(),
