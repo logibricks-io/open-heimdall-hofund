@@ -9,6 +9,7 @@ use hofund_plugin_api::{AccountId, HostContext, PluginError, PluginErrorKind, Qu
 
 use crate::bridge::decode::RateLimitInfo;
 use crate::usage;
+use crate::usage_cadence::{self, QuotaIntent, ReadDecision};
 
 /// How long stream-derived windows stand in for a failed `/usage` read.
 pub(crate) const HEARD_TTL: Duration = Duration::from_secs(60 * 60);
@@ -65,6 +66,9 @@ struct Entry {
     #[allow(dead_code)]
     whole: bool,
     last_err: Option<String>,
+    tried: Option<SystemTime>,
+    wait: Duration,
+    asked: u64,
 }
 
 /// In-memory store keyed by account id (lowercase).
@@ -139,6 +143,53 @@ impl Store {
         entry.last_err = None;
     }
 
+    /// Decides whether Claude Code's `/usage` should run for `account`.
+    #[must_use]
+    pub(crate) fn usage_read_decision(
+        &self,
+        account: &AccountId,
+        now: SystemTime,
+        active: bool,
+        card_refresh: bool,
+        intent: QuotaIntent,
+    ) -> ReadDecision {
+        let key = Self::key(account);
+        let guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (tried, heard_at, wait, asked) = guard
+            .get(&key)
+            .map_or((None, None, Duration::ZERO, 0), |entry| {
+                (entry.tried, entry.heard_at, entry.wait, entry.asked)
+            });
+        usage_cadence::decide_read(
+            tried,
+            heard_at,
+            wait,
+            asked,
+            now,
+            active,
+            card_refresh,
+            intent,
+        )
+    }
+
+    /// Records that a `/usage` run is starting and draws the next wait.
+    pub(crate) fn mark_usage_tried(&self, account: &AccountId, now: SystemTime) {
+        let key = Self::key(account);
+        let wait = usage_cadence::usage_wait();
+        let asked = usage_cadence::current_ask_generation();
+        let mut guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entry = guard.entry(key).or_default();
+        entry.tried = Some(now);
+        entry.wait = wait;
+        entry.asked = asked;
+    }
+
     /// Keeps a successful `/usage` parse (`whole` reading).
     pub(crate) fn record_usage(
         &self,
@@ -151,16 +202,21 @@ impl Store {
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let heard = guard.get(&key).and_then(|e| e.heard_at);
+        let prior = guard.get(&key);
+        let heard = prior.and_then(|e| e.heard_at);
+        let (tried, wait, asked) =
+            prior.map_or((None, Duration::ZERO, 0), |e| (e.tried, e.wait, e.asked));
         let mut entry = Entry {
             windows: with_unstarted(windows),
             heard_at: heard,
             whole: true,
             last_err: None,
+            tried: Some(tried.unwrap_or(now)),
+            wait,
+            asked,
         };
         sort_windows(&mut entry.windows);
         guard.insert(key, entry);
-        let _ = now;
     }
 
     /// Remembers a failed `/usage` read while keeping prior windows.

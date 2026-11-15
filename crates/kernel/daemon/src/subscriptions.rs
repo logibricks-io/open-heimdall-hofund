@@ -593,7 +593,11 @@ impl QuotaPolls {
                 continue;
             }
             self.next.insert(member.id.clone(), now + QUOTA_POLL);
-            match state.quota_poll(&member.account).await {
+            let host = state
+                .host
+                .clone()
+                .with_quota_card_refresh(Some(member.account.clone()));
+            match state.instance.quota_poll(&member.account, &host).await {
                 Ok(poll) => {
                     let windows: Vec<QuotaWindow> = poll.windows().to_vec();
                     let _ = apply_windows(cooldowns, &member.id, &state.plugin, &windows);

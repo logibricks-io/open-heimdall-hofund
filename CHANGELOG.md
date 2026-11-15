@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- R-5 (leftover): the Claude subscription plugin honors the reference
+  background `/usage` cadence on the active Claude Code account—random 5–15
+  minute wait after each run, 30-second ask floor, `projects/` session
+  activity or a heard stream window before an unasked read, and no unasked
+  `/usage` for saved accounts (card refresh only). Recorded tests
+  `r5_cadence_*` use a fake runner only. Refs R-5. Live smoke remains Refs
+  #304.
 - Quota card refresh: `hofund quota refresh <provider> [<account>] [--json]` and
   `POST /v1/hofund/quotas/refresh` re-read one local subscription, plan, or
   balance card through the daemon, keep a 30-second per-card gap, and return the
