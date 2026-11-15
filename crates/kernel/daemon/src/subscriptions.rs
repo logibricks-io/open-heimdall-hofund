@@ -562,6 +562,79 @@ impl QuotaPolls {
     pub(crate) fn wake(&mut self, member: &MemberId) {
         self.next.remove(member);
     }
+
+    /// Reads quota for one subscription, optionally one account, and ignores schedule.
+    pub(crate) async fn poll_subscription(
+        &mut self,
+        subscriptions: &Subscriptions,
+        cooldowns: &Cooldowns,
+        quotas: &QuotaStore,
+        subscription_id: &str,
+        user: Option<&str>,
+        now: Instant,
+    ) {
+        let Some(state) = subscriptions
+            .iter()
+            .find(|(id, _)| id.eq_ignore_ascii_case(subscription_id))
+            .map(|(_, state)| Arc::clone(state))
+        else {
+            return;
+        };
+        for member in state.members() {
+            if let Some(want) = user.filter(|value| !value.is_empty())
+                && !member.account.as_str().eq_ignore_ascii_case(want)
+            {
+                continue;
+            }
+            let card = state.quota_card(&member.account);
+            quotas.register(card.clone());
+            if self.unsupported.contains(&member.id) {
+                quotas.record_deferred(card);
+                continue;
+            }
+            self.next.insert(member.id.clone(), now + QUOTA_POLL);
+            match state.quota_poll(&member.account).await {
+                Ok(poll) => {
+                    let windows: Vec<QuotaWindow> = poll.windows().to_vec();
+                    let _ = apply_windows(cooldowns, &member.id, &state.plugin, &windows);
+                    let mut card = card;
+                    if !poll.plan().is_empty() {
+                        card.plan = poll.plan().to_owned();
+                    }
+                    if !poll.user().is_empty() {
+                        card.user = poll.user().to_owned();
+                    }
+                    quotas.record_success(
+                        card,
+                        windows.iter().map(WindowInfo::from_plugin).collect(),
+                        quotas.now(),
+                    );
+                }
+                Err(error) if error.kind() == PluginErrorKind::Unsupported => {
+                    self.unsupported.insert(member.id.clone());
+                    self.next.remove(&member.id);
+                    quotas.record_deferred(card);
+                }
+                Err(error) => {
+                    let transient = matches!(
+                        error.kind(),
+                        PluginErrorKind::Connect
+                            | PluginErrorKind::Timeout
+                            | PluginErrorKind::Transport
+                            | PluginErrorKind::Interrupted
+                            | PluginErrorKind::Io
+                            | PluginErrorKind::Internal
+                            | PluginErrorKind::Quota
+                    ) || error
+                        .status()
+                        .is_some_and(|status| status == 429 || status >= 500);
+                    let mut failed = card;
+                    failed.error = error.to_string();
+                    quotas.record_failure(failed, transient);
+                }
+            }
+        }
+    }
 }
 
 /// How long after startup a signed-in account's list is first refreshed.

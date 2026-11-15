@@ -23,12 +23,12 @@ use crate::{
     ProviderSpendCapRequest, ProviderSpendCapsResponse, ProviderTestRequest, ProviderTestResponse,
     ProviderWriteResponse, QuotaAlertsResponse, QuotaAlertsSetRequest, QuotaAlertsSetResponse,
     QuotaCreditsModesResponse, QuotaCreditsSetRequest, QuotaCreditsSetResponse,
-    QuotaHistoryResponse, QuotaResponse, ReloadRequest, RouteListResponse, RouteModelListResponse,
-    SessionCarryRequest, SessionCarryResponse, SessionDetailResponse, SessionListResponse,
-    SessionManageResponse, SessionOverviewResponse, SessionProgressResponse,
-    SessionReadsPatchRequest, SessionReadsResponse, SessionRouteResponse, SessionSearchResponse,
-    SessionStatsResponse, SessionTranscriptResponse, SettingsPatchRequest, SettingsResponse,
-    ShutdownRequest, ShutdownResponse, SignInCancelRequest, SignInCancelResponse,
+    QuotaHistoryResponse, QuotaRefreshRequest, QuotaRefreshResponse, QuotaResponse, ReloadRequest,
+    RouteListResponse, RouteModelListResponse, SessionCarryRequest, SessionCarryResponse,
+    SessionDetailResponse, SessionListResponse, SessionManageResponse, SessionOverviewResponse,
+    SessionProgressResponse, SessionReadsPatchRequest, SessionReadsResponse, SessionRouteResponse,
+    SessionSearchResponse, SessionStatsResponse, SessionTranscriptResponse, SettingsPatchRequest,
+    SettingsResponse, ShutdownRequest, ShutdownResponse, SignInCancelRequest, SignInCancelResponse,
     SignInProofRequest, SignInStartRequest, SignInStartResponse, SignInStatusResponse,
     StatusResponse, SubscriptionListResponse, SubscriptionRefreshRequest,
     SubscriptionRefreshResponse, TokenRotateRequest, TokenRotateResponse, UnroutedListResponse,
@@ -253,6 +253,7 @@ request!(TokenRotateRequest);
 request!(WarmupRunRequest, validate);
 request!(CheckinRunRequest, validate);
 request!(QuotaCreditsSetRequest, validate);
+request!(QuotaRefreshRequest, validate);
 request!(QuotaAlertsSetRequest, validate);
 request!(ShutdownRequest);
 request!(GatewayKeyRequest);
@@ -371,6 +372,7 @@ response!(
     AgentChangeResponse,
     AgentModelsResponse,
     QuotaResponse,
+    QuotaRefreshResponse,
     QuotaHistoryResponse,
     UsageResponse,
     TokenRotateResponse,

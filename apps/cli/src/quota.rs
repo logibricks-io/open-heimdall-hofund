@@ -13,7 +13,7 @@ use chrono::{DateTime, Local, TimeDelta, TimeZone, Utc};
 use hofund_control_client::hofund_control_proto::{
     Quota, QuotaAlertsSetRequest, QuotaCreditsModeEntry, QuotaCreditsSetRequest,
     QuotaCreditsSetResponse, QuotaHistory, QuotaHistoryQuery, QuotaKind, QuotaPoint, QuotaQuery,
-    QuotaSpan, QuotaStanding, QuotaTime,
+    QuotaRefreshRequest, QuotaSpan, QuotaStanding, QuotaTime,
 };
 
 use crate::commands::{client, failure};
@@ -22,6 +22,8 @@ use crate::commands::{client, failure};
 const WAIT_MIN: Duration = Duration::from_secs(60);
 /// The longest wait between two reads of `quota wait`.
 const WAIT_MAX: Duration = Duration::from_secs(600);
+/// How soon `quota refresh` asks the same card's vendor again.
+const REFRESH_GAP: Duration = Duration::from_secs(30);
 /// How long after the soonest reset `quota wait` reads again.
 const WAIT_MARGIN: Duration = Duration::from_secs(30);
 /// How many readings of each window `quota history` prints.
@@ -43,6 +45,7 @@ usage: hofund quota [<provider|name|kind|alias>...] [--json] [--config PATH]
        hofund quota credits [--json]
        hofund quota credits <subscription>/<account> [--json]
        hofund quota credits <subscription>/<account> on|first|last|off [--json]
+       hofund quota refresh <provider> [<account>] [--json]
        hofund quota alert [<percent>|off] [--balance <amount>|off]
 
 `quota` prints what is left of every subscription hofund reads, asked of the
@@ -67,6 +70,13 @@ days, a reading only when it changed: the latest readings of each window, or
 with --json every one since --days days ago, as
 GET /v1/hofund/quotas/history?days=&provider=&user= answers. A provider, an
 account, or <provider>/<account> narrows it.
+
+`quota refresh codex` reads that card again, as the Usage refresh control does:
+only that provider's subscription, plan, or balance card is asked; another run
+within 30 seconds shows what was already read and does not call the vendor
+again. An account, or <provider>/<account>, narrows to one card. --json prints
+the card envelope for scripts; POST /v1/hofund/quotas/refresh on the control
+listener does the same.
 
 `quota credits` lists every subscription account whose credits spending mode
 is not the default `on`, or shows or sets one account. Modes are `on`
@@ -107,6 +117,12 @@ pub(crate) enum QuotaCommand {
     Credits(CreditsCommand),
     /// `quota alert` settings.
     Alert(AlertCommand),
+    /// `quota refresh <provider> [<account>] [--json]`.
+    Refresh {
+        provider: String,
+        user: String,
+        json: bool,
+    },
     /// A command line that fails with this exit code and message.
     Invalid { code: u8, message: String },
     /// `help` anywhere in the words.
@@ -166,11 +182,52 @@ pub(crate) fn parse(args: &[&str]) -> QuotaCommand {
             Ok(command) => QuotaCommand::Alert(command),
             Err(other) => other,
         },
-        [verb @ ("reset" | "auto-reset" | "refresh"), ..] => QuotaCommand::Invalid {
+        [verb @ ("reset" | "auto-reset"), ..] => QuotaCommand::Invalid {
             code: 2,
             message: format!("hofund quota {verb} is not supported yet"),
         },
+        ["refresh", rest @ ..] => parse_refresh(rest),
         rest => parse_list(rest),
+    }
+}
+
+fn parse_refresh(args: &[&str]) -> QuotaCommand {
+    let mut json = false;
+    let mut names = Vec::new();
+    for arg in args {
+        match *arg {
+            "--json" | "-j" => json = true,
+            "help" | "-h" | "--help" => return QuotaCommand::Help,
+            other => names.push(other.to_lowercase()),
+        }
+    }
+    let (provider, user) = match names.len() {
+        0 => {
+            return QuotaCommand::Invalid {
+                code: 2,
+                message: "usage: hofund quota refresh <provider> [<account>] [--json]".to_owned(),
+            };
+        }
+        1 => {
+            let only = names[0].clone();
+            if let Some((provider, account)) = only.split_once('/') {
+                (provider.to_owned(), account.to_owned())
+            } else {
+                (only, String::new())
+            }
+        }
+        2 => (names[0].clone(), names[1].clone()),
+        _ => {
+            return QuotaCommand::Invalid {
+                code: 2,
+                message: "usage: hofund quota refresh <provider> [<account>] [--json]".to_owned(),
+            };
+        }
+    };
+    QuotaCommand::Refresh {
+        provider,
+        user,
+        json,
     }
 }
 
@@ -463,7 +520,66 @@ pub(crate) fn run(config: &Path, command: QuotaCommand) -> ExitCode {
         } => ExitCode::from(runtime.block_on(wait(config, &target, timeout, quiet))),
         QuotaCommand::Credits(command) => printed(runtime.block_on(run_credits(config, command))),
         QuotaCommand::Alert(command) => printed(runtime.block_on(run_alert(config, command))),
+        QuotaCommand::Refresh {
+            provider,
+            user,
+            json,
+        } => printed(runtime.block_on(run_refresh(config, &provider, &user, json))),
     }
+}
+
+async fn run_refresh(
+    config: &Path,
+    provider: &str,
+    user: &str,
+    json: bool,
+) -> Result<String, String> {
+    let client = client(config).await?;
+    let response = client
+        .refresh_quotas(QuotaRefreshRequest::new(provider, user))
+        .await
+        .map_err(failure)?;
+    if response.throttled {
+        let ago = response
+            .last_asked_secs
+            .map(Duration::from_secs)
+            .unwrap_or_default();
+        eprintln!(
+            "read {} ago: not asked again before {} have passed, shown as it was read",
+            format_duration(ago),
+            format_duration(REFRESH_GAP)
+        );
+    }
+    if response.data.is_empty() {
+        if !user.is_empty() {
+            return Err(format!(
+                "no card of {provider} · {user} · hofund quota {provider} lists its accounts"
+            ));
+        }
+        return Err(format!(
+            "no subscription, plan or key balance of {provider} · hofund quota lists them"
+        ));
+    }
+    let filters = if user.is_empty() {
+        vec![provider.to_lowercase()]
+    } else {
+        vec![provider.to_lowercase(), user.to_lowercase()]
+    };
+    render_list(
+        response.data,
+        &filters,
+        json,
+        &known_ids(config),
+        &Local::now(),
+    )
+}
+
+fn format_duration(duration: Duration) -> String {
+    let secs = duration.as_secs();
+    if secs < 60 {
+        return format!("{secs}s");
+    }
+    format!("{}m{}s", secs / 60, secs % 60)
 }
 
 fn split_credits_target(target: &str) -> Result<(String, String), String> {
@@ -2099,8 +2215,32 @@ mod tests {
             parse(&["history", "--week"]),
             QuotaCommand::Invalid { code: 1, message } if message.starts_with("unknown flag --week\n")
         ));
-        assert!(matches!(
+        assert_eq!(
             parse(&["refresh", "codex"]),
+            QuotaCommand::Refresh {
+                provider: "codex".to_owned(),
+                user: String::new(),
+                json: false,
+            }
+        );
+        assert_eq!(
+            parse(&["refresh", "relay", "two", "--json"]),
+            QuotaCommand::Refresh {
+                provider: "relay".to_owned(),
+                user: "two".to_owned(),
+                json: true,
+            }
+        );
+        assert_eq!(
+            parse(&["refresh", "codex/a@x.io"]),
+            QuotaCommand::Refresh {
+                provider: "codex".to_owned(),
+                user: "a@x.io".to_owned(),
+                json: false,
+            }
+        );
+        assert!(matches!(
+            parse(&["refresh"]),
             QuotaCommand::Invalid { code: 2, .. }
         ));
 
