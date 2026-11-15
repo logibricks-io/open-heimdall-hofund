@@ -14,6 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`9`) scrolls, follows at one second, toggles request lines from events, and
   clears the view without deleting the file. `?` opens a per-page help overlay.
   Refs R-18.
+- R-5: the Claude Code subscription plugin keeps per-account allowance from
+  stream-json `rate_limit_event` envelopes (`limits.rs`): `unifiedWindows` and
+  the active `rateLimitType`, one-hour stand-in when `/usage` is away, merge
+  over same-named `/usage` windows, `with_unstarted` for the 5-hour row, and
+  heard windows for setup-token accounts. Tests `r5_48`–`r5_58` use recorded
+  fixtures and a fake runner only. Refs R-5.
 - R-54e: the Qoder subscription plugin classifies native queue code 10605,
   quota, and request refusal codes like the reference (`failure.rs`), waits on
   `/algo/api/v2/service/ask/queue/status` and resends within budget (`queue.rs`,

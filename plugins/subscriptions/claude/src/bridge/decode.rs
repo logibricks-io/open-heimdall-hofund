@@ -3,6 +3,8 @@
 //! A text-only turn feeds Claude Code stdout into this decoder and returns
 //! an upstream provider. Tool parking and error mapping stay in later slices.
 
+use std::collections::BTreeMap;
+
 use hofund_plugin_api::{Stop, StopReason, StreamEvent};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -12,7 +14,7 @@ const MESSAGE_DELTA: &str = include_str!("fixtures/stream/message_delta.jsonl");
 #[cfg(test)]
 const TOOL_USE: &str = include_str!("fixtures/stream/tool_use.jsonl");
 #[cfg(test)]
-const RATE_LIMIT: &str = include_str!("fixtures/stream/rate_limit_event.jsonl");
+pub(crate) const RATE_LIMIT: &str = include_str!("fixtures/stream/rate_limit_event.jsonl");
 #[cfg(test)]
 const RESULT_ERROR: &str = include_str!("fixtures/stream/result_error.jsonl");
 
@@ -31,6 +33,15 @@ pub enum Step {
     Completed,
 }
 
+/// One row inside `rate_limit_info.unifiedWindows`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct UnifiedWindow {
+    /// Share used in `[0, 1]`.
+    pub utilization: f64,
+    /// Unix seconds when the window renews.
+    pub resets_at: Option<u64>,
+}
+
 /// Allowance windows from a `rate_limit_event`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RateLimitInfo {
@@ -42,6 +53,8 @@ pub struct RateLimitInfo {
     pub utilization: Option<f64>,
     /// `resetsAt` unix timestamp when present.
     pub resets_at: Option<u64>,
+    /// Named windows Claude Code attached to the event.
+    pub unified: BTreeMap<String, UnifiedWindow>,
 }
 
 impl RateLimitInfo {
@@ -247,7 +260,36 @@ fn rate_limit_info(envelope: &Envelope) -> RateLimitInfo {
         }),
         utilization: info.and_then(|v| v.get("utilization").and_then(|s| s.as_f64())),
         resets_at: info.and_then(|v| v.get("resetsAt").and_then(|s| s.as_u64())),
+        unified: info.map(unified_windows).unwrap_or_default(),
     }
+}
+
+fn unified_windows(value: &Value) -> BTreeMap<String, UnifiedWindow> {
+    let Some(raw) = value.get("unifiedWindows") else {
+        return BTreeMap::new();
+    };
+    let Some(map) = raw.as_object() else {
+        return BTreeMap::new();
+    };
+    let mut out = BTreeMap::new();
+    for (kind, window) in map {
+        let Some(obj) = window.as_object() else {
+            continue;
+        };
+        let utilization = obj
+            .get("utilization")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0);
+        let resets_at = obj.get("resetsAt").and_then(Value::as_u64);
+        out.insert(
+            kind.clone(),
+            UnifiedWindow {
+                utilization,
+                resets_at,
+            },
+        );
+    }
+    out
 }
 
 fn result_message(envelope: &Envelope) -> String {
