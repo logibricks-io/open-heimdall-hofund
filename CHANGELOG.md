@@ -14,6 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Subscription::warmup_probe`, `account::ask` with
   `disableDeepLinkRegistration` settings). Successful warms stale-mark quota
   reads for routing. Tests `a3a_28` through `a3a_30`. Refs A-3.
+- R-53b: audited the frozen reference for Cline subscription import (row b);
+  key-plan and plugin credentials enter only through API-key or device sign-in,
+  with no official home credential-file import to port. Subscription parity row
+  b is Done; vendor letter tally is 13 Done / 3 Partial / 0 Missing / 3 N/A.
+  Refs R-53.
 - R-56b: the Zed subscription plugin imports single `zedCreds` JSON, built-in
   `logins.json` side-login rows, and official mover OAuth envelopes without
   calling live whoami. Lapsed or unreadable rows are skipped without dropping
