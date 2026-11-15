@@ -1,13 +1,12 @@
-//! Image blocks on a `-p` stream-json stdin (R-6f).
+//! Image blocks on a `-p` stream-json stdin (R-6f / R-6 pixel fitting).
 //!
 //! URL images are emitted as URL source blocks (TUI fetch stays out of
-//! this slice). Inline base64 is passed through as a base64 source. An
-//! image that cannot be resized is sent as it came, matching the
-//! reference `claudeImage` pass-through for unread or already-fitting
-//! images. Pixel fitting (2000 px / 5 MiB) is applied when the `image`
-//! crate is available later; this slice does not add that dependency.
+//! this slice). Inline base64 is scaled and re-encoded like Claude Code
+//! (2000 px per side, five mebibytes of base64) via [`hofund_plugin_sdk::image::fit_claude`];
+//! unreadable or already-fitting images go unchanged.
 
 use hofund_plugin_api::{ContentPart, ImageSource, Message, Role};
+use hofund_plugin_sdk::image::fit_claude;
 use serde_json::{Value, json};
 
 /// Stream-json content blocks for one message, including image sources.
@@ -53,14 +52,17 @@ fn flush_text(blocks: &mut Vec<Value>, text: &mut String) {
 
 fn image_block(source: &ImageSource) -> Option<Value> {
     match source {
-        ImageSource::Base64 { media_type, data } if !data.is_empty() => Some(json!({
-            "type": "image",
-            "source": {
-                "type": "base64",
-                "media_type": media_type,
-                "data": data,
-            }
-        })),
+        ImageSource::Base64 { media_type, data } if !data.is_empty() => {
+            let fitted = fit_claude(media_type, data);
+            Some(json!({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": fitted.media_type,
+                    "data": fitted.data,
+                }
+            }))
+        }
         ImageSource::Url { url } if !url.is_empty() => Some(json!({
             "type": "image",
             "source": {
@@ -115,5 +117,26 @@ mod tests {
         assert_eq!(blocks[0]["source"]["type"], "url");
         assert_eq!(blocks[0]["source"]["url"], "https://example.com/a.png");
         assert!(is_prompt_message(&message));
+    }
+
+    #[test]
+    fn r698_stream_json_fits_a_tall_inline_jpeg() {
+        use hofund_plugin_sdk::image::fit_claude;
+
+        let b64 = include_str!("fixtures/r698_tall_400x8192.b64").trim();
+        let reference = fit_claude("image/jpeg", b64);
+        assert_ne!(reference.data, b64, "a 8192 px tall image must be refit");
+        let mut message = Message::new(Role::User);
+        message.content = vec![ContentPart::Image(ImagePart {
+            source: ImageSource::Base64 {
+                media_type: "image/jpeg".into(),
+                data: b64.into(),
+            },
+            detail: None,
+            extensions: Default::default(),
+        })];
+        let blocks = content_blocks(&message);
+        assert_eq!(blocks[0]["source"]["data"], reference.data);
+        assert_eq!(blocks[0]["source"]["media_type"], "image/jpeg");
     }
 }

@@ -405,9 +405,20 @@ async fn generative_routes_inject_the_model_and_list_models() {
     let bytes = axum::body::to_bytes(listed.into_body(), usize::MAX)
         .await
         .expect("body");
-    let text = String::from_utf8_lossy(&bytes);
-    assert!(text.contains("models/demo"), "{text}");
-    assert!(text.contains("streamGenerateContent"), "{text}");
+    let json: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    let model = json["models"]
+        .as_array()
+        .and_then(|rows| rows.first())
+        .expect("one model");
+    assert_eq!(model["name"], "models/demo");
+    assert_eq!(model["displayName"], "demo");
+    assert_eq!(model["description"], "demo via hofund");
+    let methods = model["supportedGenerationMethods"]
+        .as_array()
+        .expect("methods");
+    assert!(methods.contains(&serde_json::json!("generateContent")));
+    assert!(methods.contains(&serde_json::json!("streamGenerateContent")));
+    assert!(methods.contains(&serde_json::json!("countTokens")));
 }
 
 #[tokio::test]
