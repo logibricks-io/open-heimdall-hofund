@@ -367,7 +367,14 @@ Additive on `StatusResponse`: `serves` (`tui`, `serve`, `desktop`, or empty) and
 
 ### G-11 Usage period summary
 
-Gap for the Usage page sparkline and by-model table. `GET /usage` **`rows_truncated`** still describes only the row list cap (`USAGE_ROW_LIMIT`). Add a period-scoped summary (shape TBD) with a daily **series** and **by-model** totals covering the **whole period**, independent of row truncation. The Usage page agents table uses **`by=agent` only**.
+Additive on every `GET /v1/hofund/usage` response, independent of `by` and of the row cap. **`rows_truncated`** still describes only the newest `USAGE_ROW_LIMIT` rows in `rows`.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `series` | `[UsageDayPoint]` | Whole-period daily buckets for the sparkline. Calendar `period` values fill every local day in the window (today, seven days, or thirty days) with zero-valued gaps. Rolling `--days`, `--last`, or `--since` windows, and `period=all` without a calendar window, return only days that have rows, sorted ascending by `date`. |
+| `by_model` | `[UsageBreakdownGroup]` | Whole-period per-model totals for the model table. Same shape as `breakdown` groups (id, label, requests, token sums, cost, unpriced, optional speed fields). |
+
+`UsageDayPoint` fields: `date` (`YYYY-MM-DD` local), `requests`, `input_tokens`, `output_tokens`, `cost` (response currency). The Usage page agents table still uses **`by=agent` only**; sparkline and model cells read `series` and `by_model`, not capped `rows`.
 
 ### G-12 Model exposure flags
 
