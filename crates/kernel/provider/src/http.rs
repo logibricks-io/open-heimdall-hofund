@@ -1137,11 +1137,7 @@ mod tests {
                 accepts_server.fetch_add(1, Ordering::SeqCst);
                 let mut request = Vec::new();
                 let mut chunk = [0_u8; 2048];
-                loop {
-                    let read = match socket.read(&mut chunk).await {
-                        Ok(read) => read,
-                        Err(_) => break,
-                    };
+                while let Ok(read) = socket.read(&mut chunk).await {
                     if read == 0 {
                         break;
                     }
