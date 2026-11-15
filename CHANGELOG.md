@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   metadata on each account secret, including `planName` typography and string
   `userId`, beside top-level `user_id`, access, `system_id`, org, plan, login,
   name, and `models_json`. Recorded fixtures only (`r56c_*`). Refs R-56.
+- R-6: `hofund_plugin_sdk::image::fit_claude` scales Claude Code inline images
+  (2000 px per side, five mebibytes of base64, triangle resize, JPEG/PNG
+  rules) and the Claude subscription bridge applies it on `-p` stream-json
+  image blocks (`r698_*` fixtures; issue #698). Refs R-6.
 - A-3a: the daemon coordinates Claude daily warm-up and model connectivity
   tests through one Claude Code `-p` send (`warmup/claude.rs`,
   `Subscription::warmup_probe`, `account::ask` with
@@ -200,6 +204,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- C-1a: `GET /v1beta/models` lists catalog `displayName` when known, a
+  `{displayName} via hofund` description, and `countTokens` with the generate and
+  stream methods; feature-parity row 1.6 is Done. Refs C-1a.
 - Cursor HTTP/1 sixteen-KV pipeline test: drive the Run session with
   `drive_until_http1_request` and `drive_to_completion` instead of racing a
   yield budget against a paused clock, and bind loopback response scripts at
