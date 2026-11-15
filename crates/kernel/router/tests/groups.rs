@@ -80,6 +80,7 @@ fn unit(key: &str, routing: &str, weight: u64, sink: bool) -> Unit {
         weight,
         sink,
         fallback: false,
+        group_patience: None,
     }
 }
 

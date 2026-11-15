@@ -12,6 +12,7 @@ mod gateway_key;
 mod gateway_key_issue;
 mod gateway_key_limit;
 mod gateway_key_oidc;
+mod group;
 mod local;
 mod models;
 mod profile;
@@ -179,6 +180,7 @@ fn run_control(config: &Path, command: Command) -> Result<String, String> {
                 provider::spend_cap_off(config, &id, &key_id).await
             }
             Command::ProviderRemove { id } => provider_edit::remove(config, &id).await,
+            Command::GroupCopy { id, name } => group::copy(config, &id, name.as_deref()).await,
             Command::ProviderAtOnce { id, value } => {
                 provider_edit::at_once(config, &id, value.as_deref()).await
             }
@@ -357,6 +359,10 @@ enum Command {
     /// `provider rm`, `remove`, and `delete`.
     ProviderRemove {
         id: String,
+    },
+    GroupCopy {
+        id: String,
+        name: Option<String>,
     },
     ProviderAtOnce {
         id: String,
@@ -663,6 +669,22 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
             Some(parsed) => Command::Accounts(parsed?),
             None => return Err(accounts::ACCOUNTS_HELP.to_owned()),
         },
+        ["group", "copy" | "duplicate" | "dup" | "clone", id] => Command::GroupCopy {
+            id: (*id).to_owned(),
+            name: None,
+        },
+        [
+            "group",
+            "copy" | "duplicate" | "dup" | "clone",
+            id,
+            name @ ..,
+        ] if !name.is_empty() => Command::GroupCopy {
+            id: (*id).to_owned(),
+            name: Some(name.join(" ")),
+        },
+        ["group", "copy" | "duplicate" | "dup" | "clone"] => {
+            return Err("usage: hofund group copy <id> [name]".to_owned());
+        }
         ["provider", "list"] => Command::ProviderList,
         ["provider", "show", id] => Command::ProviderShow {
             id: (*id).to_owned(),
