@@ -350,6 +350,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   them yet.
 - Quota and usage alerts: `hofund quota alert`, daemon `quota_alert` control
   events, and `GET/POST /v1/hofund/quotas/alerts(/settings)` (AL-1).
+- Desktop menu-bar OS notifications for masked quota alerts while the embedded
+  gateway runs; a click focuses the Usage window (D-310). Refs #310.
 
 - Relayed native Responses replies mark namespaced `function_call` items with
   empty `encrypted_function_args` when the upstream omitted the field, so Codex

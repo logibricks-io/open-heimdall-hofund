@@ -6,6 +6,7 @@
 
 mod control;
 mod open;
+mod quota_notify;
 
 use control::{Control, MenuEntry, Snapshot};
 use hofund_daemon::user_config_path;
@@ -13,6 +14,7 @@ use tauri::Emitter;
 use tauri::Manager;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
+use tauri_plugin_notification::NotificationExt;
 use tokio::sync::Mutex;
 
 struct AppState {
@@ -25,10 +27,12 @@ struct AppState {
 ///
 /// Returns an error when the tray or the window cannot be created.
 pub fn run() -> Result<(), String> {
+    let (quota_alerts, mut quota_alert_events) = tokio::sync::mpsc::unbounded_channel();
     let state = AppState {
-        control: Mutex::new(Control::open(user_config_path())),
+        control: Mutex::new(Control::open(user_config_path(), quota_alerts)),
     };
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .manage(state)
         .invoke_handler(tauri::generate_handler![
             snapshot,
@@ -63,6 +67,22 @@ pub fn run() -> Result<(), String> {
                 tauri::async_runtime::spawn(async move {
                     dispatch(&handle, &id).await;
                 });
+            });
+            let alert_handle = app.handle().clone();
+            let _ = alert_handle.notification().on_action(move |action| {
+                if action.action_id() == "tap" {
+                    let handle = alert_handle.clone();
+                    tauri::async_runtime::spawn(async move {
+                        focus_usage_window(&handle);
+                    });
+                }
+            });
+            let notify_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let mut surface = quota_notify::OsQuotaAlertSurface::new(notify_handle);
+                while let Some(alert) = quota_alert_events.recv().await {
+                    let _ = quota_notify::present_alert(&mut surface, &alert);
+                }
             });
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -157,10 +177,7 @@ async fn dispatch(app: &tauri::AppHandle, id: &str) {
             let _ = control.stop().await;
         }
         "usage" => {
-            if let Some(window) = app.get_webview_window("usage") {
-                let _ = window.show();
-                let _ = window.set_focus();
-            }
+            focus_usage_window(app);
         }
         "open-config" => {
             let _ = control.open_config();
@@ -262,4 +279,11 @@ async fn usage_summary(state: tauri::State<'_, AppState>) -> Result<String, Stri
 async fn open_config(state: tauri::State<'_, AppState>) -> Result<(), String> {
     let mut control = state.control.lock().await;
     control.open_config()
+}
+
+fn focus_usage_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("usage") {
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
 }

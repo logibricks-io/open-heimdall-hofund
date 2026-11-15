@@ -89,6 +89,7 @@ pub use account_discovery::{
 #[doc(hidden)]
 pub use agent_login::set_test_agent_home;
 pub use agent_login::{accounts_import_in, accounts_project_in, accounts_switch_in};
+pub use hofund_control_proto::QuotaAlertEvent;
 pub use models::{
     Cached, ModelLimits, ModelsHost, Picks, ProbeOutcome, ProviderModels, RefreshTiming,
 };
@@ -105,6 +106,29 @@ pub use terminate::{
     serve_until_signals,
 };
 pub use tray::{TrayStatus, tray_status};
+
+/// In-process control bus for embedded clients while local control is enabled.
+#[derive(Clone)]
+pub struct ControlEventBus(Arc<events::EventBus>);
+
+impl ControlEventBus {
+    /// Watches live `quota_alert` events without opening the HTTP event stream.
+    #[must_use]
+    pub fn spawn_quota_alert_watch(
+        &self,
+    ) -> (
+        tokio::task::JoinHandle<()>,
+        tokio::sync::mpsc::UnboundedReceiver<hofund_control_proto::QuotaAlertEvent>,
+    ) {
+        events::spawn_quota_alert_watch(Arc::clone(&self.0))
+    }
+}
+
+/// Returns the control event bus while the embedded gateway has local control.
+#[must_use]
+pub fn control_event_bus(running: &Running) -> Option<ControlEventBus> {
+    running.resource::<ControlEventBus>().cloned()
+}
 
 /// A configuration, credential, or startup failure.
 #[derive(Debug)]
@@ -718,6 +742,7 @@ async fn start_inner(
                 socket_path,
             )
             .map_err(DaemonError::new)?;
+        running = running.with_resource(ControlEventBus(Arc::clone(&events)));
     }
     if let Some(session) = control_session {
         running = running.with_resource(session);
