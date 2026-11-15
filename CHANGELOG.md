@@ -14,6 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   table stay complete when `rows_truncated` is true; calendar periods fill
   zero days. The Usage page draws both fields, keeps the agents table on
   `by=agent`, and may reload usage after `request_finished`. Refs G-11.
+- Quota card refresh: `hofund quota refresh <provider> [<account>] [--json]` and
+  `POST /v1/hofund/quotas/refresh` re-read one local subscription, plan, or
+  balance card through the daemon, keep a 30-second per-card gap, and return the
+  kept card without a second vendor read when asked sooner. Tests: `d38_*`,
+  `d38_1` through `d38_3` in `crates/kernel/daemon/tests/quota_refresh.rs`.
+  Refs 3.8.
 - R-5: Claude Code sign-in relays the auth page through `HOFUND_OPENED_URL`
   and the hofund CLI as `BROWSER`; `hofund_plugin_sdk::netproxy::env_for_bun_with`
   injects per-login HTTP/SOCKS proxies (loopback SOCKS bridge) on sign-in,
@@ -371,6 +377,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   them yet.
 - Quota and usage alerts: `hofund quota alert`, daemon `quota_alert` control
   events, and `GET/POST /v1/hofund/quotas/alerts(/settings)` (AL-1).
+- Desktop menu-bar OS notifications for masked quota alerts while the embedded
+  gateway runs, via platform helpers (`notify-send`, `osascript`, or Windows
+  Runtime toast) so the crate graph stays deny-clean (D-310). Refs D-310.
 
 - Relayed native Responses replies mark namespaced `function_call` items with
   empty `encrypted_function_args` when the upstream omitted the field, so Codex

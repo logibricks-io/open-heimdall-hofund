@@ -159,6 +159,11 @@ impl EventBus {
             .collect()
     }
 
+    /// Live control-topic frames for in-process clients such as the menu-bar app.
+    pub(crate) fn subscribe_control(&self) -> broadcast::Receiver<Arc<Frame>> {
+        self.control.sender.subscribe()
+    }
+
     fn bus(&self, topic: Topic) -> &TopicBus {
         match topic {
             Topic::Requests => &self.requests,
@@ -526,6 +531,40 @@ fn status_class(status: u16) -> StatusClass {
         500..=599 => StatusClass::ServerError,
         _ => StatusClass::Unknown,
     }
+}
+
+/// Forwards `quota_alert` frames to `rx` until `bus` closes or the task is aborted.
+pub(crate) fn spawn_quota_alert_watch(
+    bus: Arc<EventBus>,
+) -> (
+    tokio::task::JoinHandle<()>,
+    tokio::sync::mpsc::UnboundedReceiver<hofund_control_proto::QuotaAlertEvent>,
+) {
+    use hofund_control_proto::{EventEnvelope, EventPayload, decode_response};
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut receiver = bus.subscribe_control();
+    let handle = tokio::spawn(async move {
+        loop {
+            match receiver.recv().await {
+                Ok(frame) if frame.event == "quota_alert" => {
+                    let Ok(envelope) = decode_response::<EventEnvelope>(
+                        hofund_control_proto::API_VERSION,
+                        frame.json.as_bytes(),
+                    ) else {
+                        continue;
+                    };
+                    if let EventPayload::QuotaAlert(alert) = envelope.payload {
+                        let _ = tx.send(alert);
+                    }
+                }
+                Ok(_) => {}
+                Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+    (handle, rx)
 }
 
 #[cfg(test)]
@@ -1071,5 +1110,35 @@ mod tests {
             requests.iter().map(|frame| frame.event).collect::<Vec<_>>(),
             ["request_started", "request_finished"]
         );
+    }
+
+    #[tokio::test]
+    async fn d310_quota_alert_watch_forwards_title_and_body_once() {
+        use hofund_control_proto::QuotaAlertEvent;
+
+        let bus = bus();
+        let (task, mut rx) = super::spawn_quota_alert_watch(Arc::clone(&bus));
+        let mut alert = QuotaAlertEvent::default();
+        alert.title = "Work limit".to_owned();
+        alert.body = "80% used".to_owned();
+        bus.emit(EventPayload::QuotaAlert(alert));
+
+        let first = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .expect("alert")
+            .expect("payload");
+        assert_eq!(first.title, "Work limit");
+        assert_eq!(first.body, "80% used");
+
+        let mut other = QuotaAlertEvent::default();
+        other.title = "Other".to_owned();
+        bus.emit(EventPayload::QuotaAlert(other));
+        let second = tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await;
+        assert!(
+            second.is_ok(),
+            "second alert should arrive on the same watch"
+        );
+
+        task.abort();
     }
 }

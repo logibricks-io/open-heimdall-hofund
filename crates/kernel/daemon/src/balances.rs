@@ -34,6 +34,93 @@ struct Job {
     support: BalanceSupport,
 }
 
+/// Reads supported balances for one provider and records the results.
+pub(crate) async fn poll_provider(
+    config: &Config,
+    path: &Path,
+    max_idle_per_host: Option<usize>,
+    registry: &Arc<dyn DaemonRegistry>,
+    quotas: &Arc<QuotaStore>,
+    provider_id: &str,
+    user: Option<&str>,
+) {
+    let Some(provider) = config
+        .providers
+        .iter()
+        .find(|entry| entry.id.eq_ignore_ascii_case(provider_id))
+    else {
+        return;
+    };
+    let plugin = registry.balance_quota();
+    let root = beside(path, ".hofund");
+    let limits = crate::http_limits(config, max_idle_per_host);
+    let Ok(keys) = provider_keys::resolve(provider) else {
+        return;
+    };
+    let enabled = keys
+        .into_iter()
+        .filter(|key| key.entry.on)
+        .collect::<Vec<_>>();
+    let several = enabled.len() > 1;
+    let mut jobs = Vec::new();
+    for key in enabled {
+        if !crate::quota_refresh::key_matches(&key.id, &key.entry.name, user) {
+            continue;
+        }
+        match job(provider, &key, several, registry, limits) {
+            Ok(Some(job)) => jobs.push(job),
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(provider.id = provider.id, %error, "balance query could not be built");
+            }
+        }
+    }
+    let mut readings =
+        futures_util::stream::iter(jobs.into_iter().enumerate().map(|(index, job)| {
+            let plugin = plugin.clone();
+            let root = root.clone();
+            async move {
+                let result = match &job.kind {
+                    JobKind::Plugin(query) => {
+                        let Some(reader) = &plugin else {
+                            return (
+                                index,
+                                job,
+                                Err(PluginError::internal("balance reader missing")),
+                            );
+                        };
+                        let host = match balance_host(&root, limits, query) {
+                            Ok(host) => host,
+                            Err(error) => return (index, job, Err(error)),
+                        };
+                        reader.read(query, &host).await
+                    }
+                    JobKind::Custom { endpoint, options } => {
+                        let endpoint = endpoint.clone();
+                        let options = options.clone();
+                        match BalanceReader::new(endpoint, options) {
+                            Ok(reader) => match reader.read().await {
+                                Ok(Some(report)) => Ok(Some(report_to_card(report))),
+                                Ok(None) => Ok(None),
+                                Err(error) => Err(PluginError::internal(error.message)),
+                            },
+                            Err(error) => Err(PluginError::internal(error.message)),
+                        }
+                    }
+                };
+                (index, job, result)
+            }
+        }))
+        .buffer_unordered(READS_AT_ONCE)
+        .collect::<Vec<_>>()
+        .await;
+    readings.sort_by_key(|(index, _, _)| *index);
+    for (_, job, result) in readings {
+        record(quotas, job, result);
+    }
+    quotas.share_provider_balances(&provider.id);
+}
+
 /// Reads every supported balance in `config` and records the results.
 pub(crate) async fn poll(
     config: &Config,

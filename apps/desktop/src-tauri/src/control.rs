@@ -9,8 +9,9 @@ use std::path::PathBuf;
 
 use hofund_agent::{GatewayTarget, Session, catalog};
 use hofund_daemon::{
-    Running, agent_descriptions, configured_listen, ensure_config_file, local_gateway,
-    route_models, usage_report,
+    QuotaAlertEvent, Running, StartOptions, agent_descriptions, configured_listen,
+    control_event_bus, ensure_config_file, local_gateway, route_models, start_with_options,
+    usage_report,
 };
 use serde::Serialize;
 
@@ -174,17 +175,26 @@ pub(crate) struct Control {
     bound: Option<String>,
     message: String,
     tray: hofund_daemon::TrayStatus,
+    quota_alerts: tokio::sync::mpsc::UnboundedSender<QuotaAlertEvent>,
+    quota_watch: Option<tokio::task::JoinHandle<()>>,
+    quota_relay: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Control {
     /// Actions against `config_path`. The file is created on start and on open.
-    pub(crate) fn open(config_path: impl Into<PathBuf>) -> Self {
+    pub(crate) fn open(
+        config_path: impl Into<PathBuf>,
+        quota_alerts: tokio::sync::mpsc::UnboundedSender<QuotaAlertEvent>,
+    ) -> Self {
         Self {
             config_path: config_path.into(),
             server: None,
             bound: None,
             message: String::new(),
             tray: hofund_daemon::TrayStatus::default(),
+            quota_alerts,
+            quota_watch: None,
+            quota_relay: None,
         }
     }
 
@@ -198,9 +208,26 @@ impl Control {
         if let Err(error) = ensure_config_file(&self.config_path) {
             return self.fail(error.to_string());
         }
-        match hofund_daemon::start(&self.config_path).await {
+        let options = StartOptions {
+            control_enabled: true,
+            hofund_serves: Some("desktop".to_owned()),
+            hofund_owner_pid: Some(std::process::id()),
+            ..StartOptions::default()
+        };
+        match start_with_options(&self.config_path, options).await {
             Ok(running) => {
                 self.bound = Some(running.local_addr.to_string());
+                if let Some(bus) = control_event_bus(&running) {
+                    let (watch, mut events) = bus.spawn_quota_alert_watch();
+                    let forward = self.quota_alerts.clone();
+                    let relay = tokio::spawn(async move {
+                        while let Some(alert) = events.recv().await {
+                            let _ = forward.send(alert);
+                        }
+                    });
+                    self.quota_watch = Some(watch);
+                    self.quota_relay = Some(relay);
+                }
                 self.server = Some(running);
                 self.message.clear();
                 self.refresh_tray().await;
@@ -212,6 +239,12 @@ impl Control {
 
     /// Stops the gateway. Stopping when it is already stopped does nothing.
     pub(crate) async fn stop(&mut self) -> Result<(), String> {
+        if let Some(task) = self.quota_relay.take() {
+            task.abort();
+        }
+        if let Some(task) = self.quota_watch.take() {
+            task.abort();
+        }
         if let Some(server) = self.server.take() {
             server.shutdown().await;
         }
@@ -388,12 +421,17 @@ mod tests {
         tempfile::tempdir().expect("temp dir")
     }
 
+    fn open(path: &std::path::Path) -> Control {
+        let (sender, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        Control::open(path, sender)
+    }
+
     #[tokio::test]
     async fn start_and_stop_report_the_bound_address() {
         let dir = scratch();
         let path = dir.path().join("hofund.toml");
         fs::write(&path, "listen = \"127.0.0.1:0\"\n").expect("config");
-        let mut control = Control::open(&path);
+        let mut control = open(&path);
         let session = Session::new(dir.path());
         control.start().await.expect("start");
         control.refresh_tray().await;
@@ -420,7 +458,7 @@ mod tests {
         let dir = scratch();
         let path = dir.path().join("hofund.toml");
         fs::write(&path, "listen = \"127.0.0.1:9\"\n").expect("config");
-        let mut control = Control::open(&path);
+        let mut control = open(&path);
         let snapshot = control.snapshot(&Session::new(dir.path()));
         let entries = menu_entries(&snapshot);
         assert!(
@@ -524,7 +562,7 @@ mod tests {
         fs::create_dir_all(&home).expect("home");
         let path = dir.path().join("hofund.toml");
         fs::write(&path, "listen = \"127.0.0.1:3425\"\n").expect("config");
-        let mut control = Control::open(&path);
+        let mut control = open(&path);
         let session = Session::new(&home);
         let catalog = agent_catalog();
         let id = catalog.adapters()[0].id();

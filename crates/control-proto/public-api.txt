@@ -848,6 +848,18 @@ QuotaQuery::fn encode (& self) -> String
 QuotaQuery::fn fresh () -> Self
 QuotaQuery::fn kept () -> Self
 QuotaQuery::fn parse (query : Option < & str >) -> Self
+QuotaRefreshRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
+QuotaRefreshRequest.provider
+QuotaRefreshRequest.user
+QuotaRefreshRequest.version
+QuotaRefreshRequest::fn new (provider : impl Into < String > , user : impl Into < String >) -> Self
+QuotaRefreshRequest::fn parse_query (query : Option < & str >) -> Option < Self >
+QuotaRefreshResponse derives(Clone, Debug, PartialEq, Serialize, Deserialize) # [serde (rename_all = "camelCase")]
+QuotaRefreshResponse.data
+QuotaRefreshResponse.last_asked_secs
+QuotaRefreshResponse.standings
+QuotaRefreshResponse.throttled
+QuotaRefreshResponse.version
 QuotaResponse derives(Clone, Debug, PartialEq, Serialize, Deserialize)
 QuotaResponse.data
 QuotaResponse.standings

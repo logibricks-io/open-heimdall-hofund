@@ -973,6 +973,17 @@ impl Running {
         None
     }
 
+    /// Returns a resource stored with [`Self::with_resource`].
+    #[must_use]
+    pub fn resource<T: std::any::Any + Send>(&self) -> Option<&T> {
+        for resource in &self.resources {
+            if let Some(value) = resource.downcast_ref::<T>() {
+                return Some(value);
+            }
+        }
+        None
+    }
+
     /// Links a control listener to this server's lifetime.
     #[doc(hidden)]
     #[must_use]
