@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- R-5 (leftover): the Claude Code subscription bridge runs
+  `wslrun::cross_env` on long-lived WSL `start_plan` spawns so `WSLENV`
+  forwards `CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_OAUTH_TOKEN`, and proxy pairs
+  and loopback proxies rewrite to the distro host (`bridge/run.rs`,
+  `upstream.rs`; recorded tests only). Refs R-5. Live MCP bridge smoke
+  remains Refs #304.
 - R-5: Claude Code sign-in relays the auth page through `HOFUND_OPENED_URL`
   and the hofund CLI as `BROWSER`; `hofund_plugin_sdk::netproxy::env_for_bun_with`
   injects per-login HTTP/SOCKS proxies (loopback SOCKS bridge) on sign-in,
