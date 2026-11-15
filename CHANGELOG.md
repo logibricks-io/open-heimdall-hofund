@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   under that flag and records poll/resend, budget-exceeded, and short-circuit
   queue tests (`r54e_queue_*`, `crates/kernel/plugin-api/src/dispatch.rs`).
   Refs R-54.
+- R-56c: the Zed subscription plugin persists the official mover OAuth refresh
+  metadata on each account secret, including `planName` typography and string
+  `userId`, beside top-level `user_id`, access, `system_id`, org, plan, login,
+  name, and `models_json`. Recorded fixtures only (`r56c_*`). Refs R-56.
 - R-51e: `QuotaWindow` and `QuotaPoll` carry vendor credit units, bonus lapse,
   and window span; the daemon fills quota card `plan` and `user` from
   `Subscription::quota_poll`. The Kiro subscription plugin maps `usageOf` plan
