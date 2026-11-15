@@ -140,6 +140,19 @@ impl App {
         }
     }
 
+    /// Whether the Logs page is in follow mode.
+    #[must_use]
+    pub fn logs_follow_active(&self) -> bool {
+        self.page == PageId::Logs && self.pages.logs().follow()
+    }
+
+    /// Queues a follow poll when the Logs page is tailing.
+    pub fn poll_logs_follow(&mut self) {
+        if let Some(intent) = self.pages.logs_mut().next_follow_tail() {
+            self.queue(intent);
+        }
+    }
+
     /// Removes the token reread flag.
     pub fn request_token_reread(&mut self) {
         self.token_reread = true;
@@ -182,6 +195,7 @@ impl App {
             PageId::Accounts => self.pages.accounts_mut().reload(read_gen),
             PageId::Routing => self.pages.routing_mut().reload(read_gen),
             PageId::Usage => self.pages.usage_mut().reload(read_gen),
+            PageId::Logs => self.pages.logs_mut().reload(read_gen),
             page => self.pages.mut_page(page).reload(read_gen),
         }
         self.queue_page_load(read_gen);
@@ -211,6 +225,10 @@ impl App {
                 });
                 self.queue(ControlIntent::LoadUsageSettings { generation });
                 self.queue(ControlIntent::LoadQuotaAlerts { generation });
+            }
+            PageId::Logs => {
+                let intent = self.pages.logs_mut().queue_initial_tail();
+                self.queue(intent);
             }
             _ => {}
         }
@@ -326,6 +344,10 @@ impl App {
                 self.go_to(PageId::Accounts);
                 return AppAction::None;
             }
+            KeyCode::Char('9') => {
+                self.go_to(PageId::Logs);
+                return AppAction::None;
+            }
             KeyCode::Char(']') => {
                 let next = next_page(self.page, 1);
                 self.go_to(next);
@@ -376,6 +398,10 @@ impl App {
             let outcome = self.pages.usage_mut().on_key(key);
             return self.apply_usage_outcome(outcome);
         }
+        if self.page == PageId::Logs {
+            let outcome = self.pages.logs_mut().on_key(key);
+            return self.apply_logs_outcome(outcome);
+        }
         if self.page == PageId::Providers && (self.providers.active() || self.providers.captures())
         {
             let effect = self.providers.on_key(key);
@@ -389,6 +415,19 @@ impl App {
         }
         let _ = self.pages.mut_page(self.page).on_key(key);
         AppAction::None
+    }
+
+    fn apply_logs_outcome(&mut self, outcome: PageKeyOutcome) -> AppAction {
+        match outcome {
+            PageKeyOutcome::None | PageKeyOutcome::CursorUp | PageKeyOutcome::CursorDown => {
+                AppAction::None
+            }
+            PageKeyOutcome::Reload => {
+                let _ = self.reload_open_page();
+                AppAction::Reload
+            }
+            _ => AppAction::None,
+        }
     }
 
     fn apply_sessions_outcome(&mut self, outcome: PageKeyOutcome) -> AppAction {
@@ -645,6 +684,21 @@ impl App {
             SessionOutcome::Finished(finished) => self.apply_finished(finished),
             SessionOutcome::Catalog(result) => self.apply_catalog(result),
             SessionOutcome::Accounts(outcome) => self.apply_accounts(outcome),
+            SessionOutcome::Logs {
+                generation,
+                token,
+                result,
+                ..
+            } => {
+                self.apply_read_result(generation, |app| match result {
+                    Ok(response) => {
+                        if let Some(intent) = app.pages.logs_mut().apply_tail(token, response) {
+                            app.queue(intent);
+                        }
+                    }
+                    Err(message) => app.pages.logs_mut().apply_tail_error(token, message),
+                });
+            }
         }
     }
 

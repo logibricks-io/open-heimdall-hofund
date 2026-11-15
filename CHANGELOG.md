@@ -14,6 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   under that flag and records poll/resend, budget-exceeded, and short-circuit
   queue tests (`r54e_queue_*`, `crates/kernel/plugin-api/src/dispatch.rs`).
   Refs R-54.
+- R-18: G-7 `GET /v1/hofund/logs` tails the daemon log through the control
+  listener (`log_tail.rs`, `control_routes` and daemon route tests). The TUI Logs page
+  (`9`) scrolls, follows at one second, toggles request lines from events, and
+  clears the view without deleting the file. `?` opens a per-page help overlay.
+  Refs R-18.
 - R-56c: the Zed subscription plugin persists the official mover OAuth refresh
   metadata on each account secret, including `planName` typography and string
   `userId`, beside top-level `user_id`, access, `system_id`, org, plan, login,
