@@ -14,6 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Subscription::quota_poll`. The Kiro subscription plugin maps `usageOf` plan
   title, email, floats, bonus `runsOut`, and the 30-day month span (`r51e_k_*`,
   recorded fixtures). Refs R-51.
+- R-54e: the Qoder subscription plugin classifies native queue code 10605,
+  quota, and request refusal codes like the reference (`failure.rs`), waits on
+  `/algo/api/v2/service/ask/queue/status` and resends within budget (`queue.rs`,
+  `upstream.rs`), and records busy/queue fixtures (`r54e_*`,
+  `fixtures/queued-10605.json`). Official fallback short-circuit when another
+  routing candidate follows, and recorded poll/resend tests, remain. Refs R-54.
 - R-6: `hofund_plugin_sdk::image::fit_claude` scales Claude Code inline images
   (2000 px per side, five mebibytes of base64, triangle resize, JPEG/PNG
   rules) and the Claude subscription bridge applies it on `-p` stream-json
@@ -205,6 +211,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- D-71: provider `d71_injected_client_keeps_marker_after_idle_close` reads the
+  full `Content-Length` request and drains response bodies before the next call,
+  removing a macOS CI race where the accept loop replied after headers only.
+  Refs D-71.
 - C-1a: `GET /v1beta/models` lists catalog `displayName` when known, a
   `{displayName} via hofund` description, and `countTokens` with the generate and
   stream methods; feature-parity row 1.6 is Done. Refs C-1a.

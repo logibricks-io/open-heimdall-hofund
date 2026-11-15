@@ -97,6 +97,14 @@ impl Tasks {
     }
 }
 
+pub(crate) fn rotate_request_id(body: &mut Value) -> Result<(), PluginError> {
+    let request =
+        uuid::v4().map_err(|_| PluginError::internal("the system random source failed"))?;
+    body["request_id"] = Value::String(request.clone());
+    body["chat_record_id"] = Value::String(request);
+    Ok(())
+}
+
 fn build(
     chat: &Value,
     model: &ModelInfo,
