@@ -191,6 +191,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- D-71: provider `d71_injected_client_keeps_marker_after_idle_close` reads the
+  full `Content-Length` request and drains response bodies before the next call,
+  removing a macOS CI race where the accept loop replied after headers only.
+  Refs D-71.
 - Cursor HTTP/1 sixteen-KV pipeline test: drive the Run session with
   `drive_until_http1_request` and `drive_to_completion` instead of racing a
   yield budget against a paused clock, and bind loopback response scripts at

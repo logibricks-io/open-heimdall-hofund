@@ -1137,12 +1137,16 @@ mod tests {
                 accepts_server.fetch_add(1, Ordering::SeqCst);
                 let mut request = Vec::new();
                 let mut chunk = [0_u8; 2048];
-                while let Ok(read) = socket.read(&mut chunk).await {
+                loop {
+                    let read = match socket.read(&mut chunk).await {
+                        Ok(read) => read,
+                        Err(_) => break,
+                    };
                     if read == 0 {
                         break;
                     }
                     request.extend_from_slice(&chunk[..read]);
-                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    if complete_request(&request) {
                         break;
                     }
                 }
@@ -1166,14 +1170,16 @@ mod tests {
             .expect("upstream");
         let url = format!("http://{address}/v1/chat/completions");
         for _ in 0..2 {
-            super::post_json(&upstream, &url, br#"{"model":"demo"}"#.to_vec())
+            let response = super::post_json(&upstream, &url, br#"{"model":"demo"}"#.to_vec())
                 .await
                 .expect("request");
+            let _ = response.bytes().await;
         }
         upstream.close_idle_connections();
-        super::post_json(&upstream, &url, br#"{"model":"demo"}"#.to_vec())
+        let response = super::post_json(&upstream, &url, br#"{"model":"demo"}"#.to_vec())
             .await
             .expect("after close");
+        let _ = response.bytes().await;
         assert_eq!(marked.load(Ordering::SeqCst), 3);
         assert!(generation.load(Ordering::SeqCst) >= 1);
     }
