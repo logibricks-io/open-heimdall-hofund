@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (2000 px per side, five mebibytes of base64, triangle resize, JPEG/PNG
   rules) and the Claude subscription bridge applies it on `-p` stream-json
   image blocks (`r698_*` fixtures; issue #698). Refs R-6.
+- R-53b: audited the frozen reference for Cline subscription import (row b);
+  key-plan and plugin credentials enter only through API-key or device sign-in,
+  with no official home credential-file import to port. Subscription parity row
+  b is Done; vendor letter tally is 13 Done / 3 Partial / 0 Missing / 3 N/A.
+  Refs R-53.
 - R-56b: the Zed subscription plugin imports single `zedCreds` JSON, built-in
   `logins.json` side-login rows, and official mover OAuth envelopes without
   calling live whoami. Lapsed or unreadable rows are skipped without dropping
