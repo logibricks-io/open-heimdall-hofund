@@ -330,6 +330,14 @@ impl Subscription for Kiro {
         account: &AccountId,
         host: &HostContext,
     ) -> Result<Vec<QuotaWindow>, PluginError> {
+        Ok(self.quota_poll(account, host).await?.windows().to_vec())
+    }
+
+    async fn quota_poll(
+        &self,
+        account: &AccountId,
+        host: &HostContext,
+    ) -> Result<hofund_plugin_api::QuotaPoll, PluginError> {
         let stored = creds::Stored::load(host, account).await?;
         let stored = if stored.credential.method == "apikey" {
             stored
@@ -343,7 +351,7 @@ impl Subscription for Kiro {
             .await?
         };
         let body = quota::fetch_usage_body(host, &self.endpoints, &stored).await?;
-        quota::windows(&body, host.clock().now())
+        quota::usage_of(&body, host.clock().now())
     }
 
     async fn list_models(
