@@ -17,6 +17,7 @@ hofund-plugin-sdk = { workspace = true }
 [dev-dependencies]
 hofund-kit-subscription = { workspace = true }
 tempfile = { workspace = true }
+tokio = { version = "1.54.1", features = ["macros", "rt", "time"] }
 
 [lints]
 workspace = true
