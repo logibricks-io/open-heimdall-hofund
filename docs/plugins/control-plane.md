@@ -200,6 +200,7 @@ All routes except `GET /health` require authentication. DTO names below are sket
 | `PATCH /v1/hofund/groups/{id}` | `GroupPatchRequest` with expected disk revision | `GroupWriteResponse` | TUI group edits (R-7a) |
 | `DELETE /v1/hofund/groups/{id}` | `GroupDeleteRequest` with expected disk revision | `GroupDeleteResponse` | TUI delete group (R-7a) |
 | `POST /v1/hofund/groups/{id}/restore` | `GroupRestoreRequest` with expected disk revision | `GroupWriteResponse` | TUI restore hidden found group (R-7a) |
+| `POST /v1/hofund/groups/{id}/copy` | `GroupCopyRequest` with expected disk revision and optional name | `GroupWriteResponse` | CLI and TUI group copy (4.3) |
 | `GET /v1/hofund/groups/member-candidates` | `EmptyRequest` | `GroupMemberCandidatesResponse` | TUI member picker (R-7a) |
 | `POST /v1/hofund/profiles/rename` | `ProfileRenameRequest` | `ProfileListResponse` | TUI profile rename (R-7a G-9) |
 | `POST /v1/hofund/providers/{id}/test` | `ProviderTestRequest` with optional model ids | `ProviderTestResponse` | CLI `provider test`, preserving the #28 operation through L |

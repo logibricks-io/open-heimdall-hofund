@@ -11,18 +11,18 @@ use hofund_control_proto::{
     API_VERSION, AgentAction, AgentChangeResponse, AgentConnectRequest, AgentDisconnectRequest,
     AgentListResponse, AgentModelRequest, AgentPlanRequest, AgentPlanResponse, AgentStatusResponse,
     CheckinListResponse, CheckinRunRequest, CheckinRunResponse, ControlError, ControlErrorKind,
-    ErrorEnvelope, GroupCreateRequest, GroupDeleteRequest, GroupDeleteResponse, GroupListResponse,
-    GroupMemberCandidatesResponse, GroupPatchRequest, GroupRestoreRequest, GroupWriteResponse,
-    HealthResponse, LogTailQuery, LogTailResponse, MAX_REQUEST_BODY_BYTES, ModelListResponse,
-    PicksResponse, PicksSetRequest, PresetListResponse, ProfileListResponse, ProfileRenameRequest,
-    ProviderCreateRequest, ProviderDeleteRequest, ProviderDeleteResponse, ProviderListResponse,
-    ProviderPatchRequest, ProviderTestRequest, ProviderTestResponse, ProviderWriteResponse,
-    QuotaAlertsResponse, QuotaAlertsSetRequest, QuotaAlertsSetResponse, QuotaCreditsModesResponse,
-    QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryQuery, QuotaHistoryResponse,
-    QuotaQuery, QuotaResponse, RouteModelListResponse, SessionListQuery, SessionOverviewQuery,
-    SessionStatsQuery, ShutdownRequest, ShutdownResponse, StatusResponse, TokenRotateRequest,
-    TokenRotateResponse, UsageQuery, UsageResponse, WarmupListResponse, WarmupRunRequest,
-    WarmupRunResponse, decode_error_envelope,
+    ErrorEnvelope, GroupCopyRequest, GroupCreateRequest, GroupDeleteRequest, GroupDeleteResponse,
+    GroupListResponse, GroupMemberCandidatesResponse, GroupPatchRequest, GroupRestoreRequest,
+    GroupWriteResponse, HealthResponse, LogTailQuery, LogTailResponse, MAX_REQUEST_BODY_BYTES,
+    ModelListResponse, PicksResponse, PicksSetRequest, PresetListResponse, ProfileListResponse,
+    ProfileRenameRequest, ProviderCreateRequest, ProviderDeleteRequest, ProviderDeleteResponse,
+    ProviderListResponse, ProviderPatchRequest, ProviderTestRequest, ProviderTestResponse,
+    ProviderWriteResponse, QuotaAlertsResponse, QuotaAlertsSetRequest, QuotaAlertsSetResponse,
+    QuotaCreditsModesResponse, QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryQuery,
+    QuotaHistoryResponse, QuotaQuery, QuotaResponse, RouteModelListResponse, SessionListQuery,
+    SessionOverviewQuery, SessionStatsQuery, ShutdownRequest, ShutdownResponse, StatusResponse,
+    TokenRotateRequest, TokenRotateResponse, UsageQuery, UsageResponse, WarmupListResponse,
+    WarmupRunRequest, WarmupRunResponse, decode_error_envelope,
 };
 use hofund_control_proto::{
     ConfigApplyRequest, ConfigResponse, ConfigValidateRequest, ConfigValidationResponse,
@@ -421,6 +421,14 @@ impl ControlState for FakeControlState {
         self.reply(format!("restore_group:{id}"))
     }
 
+    fn copy_group(
+        &self,
+        id: String,
+        _request: GroupCopyRequest,
+    ) -> ControlFuture<'_, GroupWriteResponse> {
+        self.reply(format!("copy_group:{id}"))
+    }
+
     fn group_member_candidates(&self) -> ControlFuture<'_, GroupMemberCandidatesResponse> {
         self.reply("group_member_candidates")
     }
@@ -514,6 +522,11 @@ fn operation_routes() -> Vec<(Method, &'static str, Vec<u8>)> {
             Method::POST,
             "/v1/hofund/groups/group/restore",
             restore_group,
+        ),
+        (
+            Method::POST,
+            "/v1/hofund/groups/group/copy",
+            json!(&GroupCopyRequest::new(String::new(), String::new())),
         ),
         (
             Method::GET,
@@ -757,6 +770,7 @@ async fn control_routes_success_and_error_envelopes_against_fake_state() {
             "patch_group:group",
             "delete_group:group",
             "restore_group:group",
+            "copy_group:group",
             "group_member_candidates",
             "rename_profile",
             "provider_models:provider",

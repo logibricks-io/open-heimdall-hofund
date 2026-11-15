@@ -11,7 +11,7 @@ use crate::{
     CatalogSyncRequest, CatalogSyncResponse, CheckinListResponse, CheckinRunRequest,
     CheckinRunResponse, ConfigApplyRequest, ConfigResponse, ConfigValidateRequest,
     ConfigValidationResponse, ControlError, ControlErrorKind, ErrorEnvelope, EventEnvelope,
-    FieldIssue, GatewayKeyRequest, GatewayKeyResponse, GatewayKeyRestoreRequest,
+    FieldIssue, GatewayKeyRequest, GatewayKeyResponse, GatewayKeyRestoreRequest, GroupCopyRequest,
     GroupCreateRequest, GroupDeleteRequest, GroupDeleteResponse, GroupListResponse,
     GroupMemberCandidatesResponse, GroupPatchRequest, GroupRestoreRequest, GroupWriteResponse,
     HealthResponse, LibraryResponse, LogTailResponse, MAX_REQUEST_BODY_BYTES,
@@ -270,6 +270,7 @@ request!(ProviderDeleteRequest, validate);
 request!(GroupCreateRequest, validate);
 request!(GroupPatchRequest, validate);
 request!(GroupDeleteRequest, validate);
+request!(GroupCopyRequest, validate);
 request!(GroupRestoreRequest, validate);
 request!(SessionReadsPatchRequest, validate);
 request!(SettingsPatchRequest, validate);
