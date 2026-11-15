@@ -1154,6 +1154,30 @@ listen = \"127.0.0.1:0\"\n\
     }
 
     #[test]
+    fn d1_group_copy_leaves_source_row_unchanged() {
+        let (text, id) = edit_group_create(BASE, "Team", "chat/m").expect("create");
+        let before = load(&text).expect("load");
+        let source_before = before
+            .routes
+            .iter()
+            .find(|route| route.model == format!("group/{id}"))
+            .expect("source")
+            .clone();
+        let (copied_text, _) = edit_group_copy(&text, &id, None).expect("copy");
+        let after = load(&copied_text).expect("load copied");
+        let source_after = after
+            .routes
+            .iter()
+            .find(|route| route.model == format!("group/{id}"))
+            .expect("source after");
+        assert_eq!(source_before.model, source_after.model);
+        assert_eq!(source_before.name, source_after.name);
+        assert_eq!(source_before.routing, source_after.routing);
+        assert_eq!(source_before.upstreams, source_after.upstreams);
+        assert_eq!(source_before.hidden, source_after.hidden);
+    }
+
+    #[test]
     fn d1_group_copy_numbers_past_name_and_id() {
         let (text, id) = edit_group_create(BASE, "Team", "chat/m").expect("create");
         let (first, first_id) = edit_group_copy(&text, &id, Some("Team B")).expect("first copy");
