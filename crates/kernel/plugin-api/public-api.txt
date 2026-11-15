@@ -432,6 +432,7 @@ DynUpstreamFactory::fn spec (& self) -> & 'static UpstreamSpec
 DynUpstreamFactory::fn validate (& self , raw : & RawTable) -> Result < () , ConfigError >
 DynUpstreamFactory::fn validate_and_build (& self , raw : & RawTable , host : & HostContext ,) -> Result < Arc < dyn UpstreamProvider > , BuildError >
 DynUpstreamFactory::fn validate_and_build_with (& self , raw : & RawTable , host : & HostContext , ctx : & BuildContext ,) -> Result < Arc < dyn UpstreamProvider > , BuildError >
+Effort
 Extensions
 FileChange
 FileChange #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)

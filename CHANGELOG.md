@@ -15,6 +15,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `upstream.rs`), and records busy/queue fixtures (`r54e_*`,
   `fixtures/queued-10605.json`). Official fallback short-circuit when another
   routing candidate follows, and recorded poll/resend tests, remain. Refs R-54.
+- R-48j: the GitHub Copilot subscription plugin records execute fixtures that
+  send Chat `reasoning_effort` and Responses `reasoning.effort` from
+  `params.effort`, decode Chat `reasoning_content` and Responses `reasoning`
+  items into thinking parts, and leave models without catalog effort levels
+  unchanged on the outbound wire when no effort is requested (`r48j_*`, mocks
+  only). Refs R-48.
+- R-48j: Copilot execute tests take `Effort` from `hofund-plugin-api` (re-exported
+  from the IR) and drop the plugin `hofund-ir` dev-dependency so `check-plugins`
+  and the workspace invariant allow-map stay closed. The ChatGPT/Codex vendor
+  summary in `docs/coverage/subscription-parity.md` is corrected to 12/9/0/0
+  to match the letter-row recount. Refs R-48.
 - R-51d: the Kiro subscription plugin accepts pasted `ksk_` API keys through
   `SignInProof::Token`, maps `Get-Usage-Limits` into free-trial, monthly, and
   bonus quota windows (including aside non-blocking semantics), and reads API-key
