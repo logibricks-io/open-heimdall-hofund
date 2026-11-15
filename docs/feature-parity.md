@@ -86,10 +86,11 @@ serving is not uniform; the Matrix rows are authoritative:
   models, plan quota, and POST `/completions` upstream (R-16).
 - **Qoder:** credential import, PAT exchange with lapsed re-exchange, and native
   device PKCE, job/device-token refresh, COSY SSE models and chat with
-  tools/images/reasoning, account-page quota, daily check-in, and CN VPC
-  instances (R-54b, R-54c, deterministic mocks only). R-54 added cached native
-  device identity and separate global/CN runtime homes. Separate subscription ids,
-  legacy migration, and check-in recheck scheduling remain partial.
+  tools/images/reasoning, account-page quota, daily check-in with campaign-aware
+  recheck, queue wait and request-code classification, and CN VPC instances
+  (R-54, R-54b, R-54c, R-54e, deterministic mocks only). R-54 added cached native
+  device identity and separate global/CN runtime homes. Separate subscription ids
+  remain partial.
 - **WorkBuddy:** desktop discovery plus browser and API-key sign-in for both
   sites, full desktop-client request headers, restricted-account cooldowns,
   models, profile-page credit usage, and CN check-in (R-55, mocks only). Chat
