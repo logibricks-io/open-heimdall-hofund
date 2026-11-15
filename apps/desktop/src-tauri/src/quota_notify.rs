@@ -34,12 +34,14 @@ pub(crate) fn present_alert<S: QuotaAlertSurface>(
 }
 
 /// Recording surface for unit tests.
+#[cfg(test)]
 #[derive(Clone, Debug, Default)]
 pub(crate) struct RecordingSurface {
     pub calls: Vec<(String, String)>,
     pub denied: bool,
 }
 
+#[cfg(test)]
 impl QuotaAlertSurface for RecordingSurface {
     fn present(&mut self, title: &str, body: &str) -> PresentOutcome {
         if self.denied {
@@ -52,7 +54,9 @@ impl QuotaAlertSurface for RecordingSurface {
 
 /// Environment keys used so macOS and Windows scripts never interpolate the
 /// title or body into a shell string.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 const TITLE_ENV: &str = "HOFUND_NOTIFY_TITLE";
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 const BODY_ENV: &str = "HOFUND_NOTIFY_BODY";
 
 /// Lazily initialized notifier backed by a platform helper command.
@@ -138,6 +142,7 @@ pub(crate) fn notify_command(title: &str, body: &str) -> Option<Command> {
 }
 
 /// Program name for the current OS notifier, if any.
+#[cfg(test)]
 pub(crate) fn notify_program() -> Option<&'static str> {
     #[cfg(target_os = "linux")]
     {
