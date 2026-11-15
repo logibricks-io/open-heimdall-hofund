@@ -15,7 +15,8 @@ use hofund_plugin_sdk::wire;
 use crate::creds::Stored;
 use crate::identity::Devices;
 use crate::models::{Catalog, ModelInfo};
-use crate::{Endpoints, cosy, refresh, shape, stream};
+use crate::queue::{self, ChatAttempt};
+use crate::{Endpoints, cosy, failure, refresh, shape, stream};
 
 const CHAT_PATH: &str = "/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1";
 const RELOGIN_GAP: Duration = Duration::from_secs(5 * 60);
@@ -90,53 +91,88 @@ impl QoderUpstream {
         let encoded = wire::encode_outbound(ProtocolId::OPENAI_CHAT, inbound, request)?;
         let chat: Value = hofund_plugin_sdk::json::from_slice(&encoded)
             .map_err(|_| PluginError::decode("Qoder request shaping produced invalid JSON"))?;
-        let body = self.tasks.body(&chat, &model, self.host.clock().now())?;
-        let plaintext = body.value.to_string();
-        let wire_body = cosy::encode(&plaintext);
-        let signature = cosy::sign(
-            &url,
-            &stored.credential,
-            &wire_body,
-            self.host.clock().now(),
-        )?;
-        let headers = self
-            .devices
-            .chat_headers(&self.host, &stored.credential)
-            .await;
-        let mut call = Call::post(url);
-        for (name, value) in headers {
-            call = call.sensitive_header(name, value);
-        }
-        call = call
-            .sensitive_header("X-Model-Key", &model.key)
-            .sensitive_header("X-Model-Source", model_source(&model));
-        let response = cosy::signed_call_with_accept(call, signature, "text/event-stream")
-            .bytes(&wire_body)
-            .open_raw(self.host.http(), 1)
-            .await?;
-        if !response.status().is_success() {
-            let status = response.status().as_u16();
-            let mut bytes = Vec::new();
-            let mut response = response;
-            while let Some(chunk) = response.body_mut().next_chunk().await {
-                bytes.extend_from_slice(&chunk?);
-                if bytes.len() > 1 << 20 {
-                    break;
-                }
-            }
-            return Err(stream::failure(status, &String::from_utf8_lossy(&bytes)));
-        }
+        let mut body = self.tasks.body(&chat, &model, self.host.clock().now())?;
         let tools = chat
             .get("tools")
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
-        let response = stream::transform(response, tools, served_name);
-        let completion =
-            wire::decode_upstream_response(response, ProtocolId::OPENAI_CHAT, inbound, streaming)
+        for recoveries in 0..=queue::MAX_RECOVERIES {
+            if recoveries > 0 {
+                shape::rotate_request_id(&mut body.value)?;
+            }
+            let attempt = ChatAttempt::from_body(&body.value, &model.key);
+            let plaintext = body.value.to_string();
+            let wire_body = cosy::encode(&plaintext);
+            let signature = cosy::sign(
+                &url,
+                &stored.credential,
+                &wire_body,
+                self.host.clock().now(),
+            )?;
+            let headers = self
+                .devices
+                .chat_headers(&self.host, &stored.credential)
+                .await;
+            let mut call = Call::post(url.clone());
+            for (name, value) in headers {
+                call = call.sensitive_header(name, value);
+            }
+            call = call
+                .sensitive_header("X-Model-Key", &model.key)
+                .sensitive_header("X-Model-Source", model_source(&model));
+            let response = cosy::signed_call_with_accept(call, signature, "text/event-stream")
+                .bytes(&wire_body)
+                .open_raw(self.host.http(), 1)
                 .await?;
-        self.tasks.answered(&body.task_key);
-        Ok(completion)
+            let classified = if response.status().is_success() {
+                match stream::opening_classified(response).await? {
+                    Ok(response) => {
+                        let completion = wire::decode_upstream_response(
+                            stream::transform(response, tools.clone(), served_name.clone()),
+                            ProtocolId::OPENAI_CHAT,
+                            inbound,
+                            streaming,
+                        )
+                        .await?;
+                        self.tasks.answered(&body.task_key);
+                        return Ok(completion);
+                    }
+                    Err(classified) => classified,
+                }
+            } else {
+                let status = response.status().as_u16();
+                let mut bytes = Vec::new();
+                let mut response = response;
+                while let Some(chunk) = response.body_mut().next_chunk().await {
+                    bytes.extend_from_slice(&chunk?);
+                    if bytes.len() > 1 << 20 {
+                        break;
+                    }
+                }
+                failure::classify(status, &String::from_utf8_lossy(&bytes))
+            };
+            if classified.is_queue()
+                && recoveries < queue::MAX_RECOVERIES
+                && queue::maybe_wait(
+                    &self.host,
+                    &self.endpoints,
+                    self.devices.as_ref(),
+                    stored,
+                    &attempt,
+                    classified.queue.as_ref().unwrap_or(&Default::default()),
+                    true,
+                )
+                .await?
+            {
+                continue;
+            }
+            return Err(classified.into_error());
+        }
+        Err(PluginError::status_error(
+            503,
+            "Qoder kept the request in its queue too many times; try again later",
+        ))
     }
 
     fn recently_renewed(&self, token: &str) -> bool {
@@ -157,6 +193,29 @@ impl QoderUpstream {
                 hofund_plugin_sdk::oauth::secret_text(&stored.credential.token).to_owned(),
                 self.host.clock().now(),
             );
+    }
+}
+
+impl ChatAttempt {
+    fn from_body(body: &Value, model_key: &str) -> Self {
+        Self {
+            request_set_id: body
+                .get("request_set_id")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned(),
+            request_id: body
+                .get("request_id")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned(),
+            session_id: body
+                .get("session_id")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned(),
+            model_key: model_key.to_owned(),
+        }
     }
 }
 

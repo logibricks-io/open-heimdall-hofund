@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- R-54e: the Qoder subscription plugin classifies native queue code 10605,
+  quota, and request refusal codes like the reference (`failure.rs`), waits on
+  `/algo/api/v2/service/ask/queue/status` and resends within budget (`queue.rs`,
+  `upstream.rs`), and records busy/queue fixtures (`r54e_*`,
+  `fixtures/queued-10605.json`). Official fallback short-circuit when another
+  routing candidate follows, and recorded poll/resend tests, remain. Refs R-54.
 - R-6: `hofund_plugin_sdk::image::fit_claude` scales Claude Code inline images
   (2000 px per side, five mebibytes of base64, triangle resize, JPEG/PNG
   rules) and the Claude subscription bridge applies it on `-p` stream-json
