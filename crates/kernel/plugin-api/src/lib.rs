@@ -78,7 +78,7 @@ pub use duplex::{DuplexReader, DuplexRequest, DuplexSession, DuplexWriter, HttpV
 pub use error::{PluginError, PluginErrorKind};
 pub use forward::{Forward, RawAnswer, RawBody};
 pub use hofund_ir::{
-    BlockStart, ContentBlockStart, ContentBlockStop, ContentPart, Conversation, Extensions,
+    BlockStart, ContentBlockStart, ContentBlockStop, ContentPart, Conversation, Effort, Extensions,
     ImagePart, ImageSource, Message, MessageDelta, MessageStart, MessageStop, Request, Response,
     Role, SignatureDelta, StillWorking, Stop, StopReason, StreamEvent, TextDelta, TextPart,
     ThinkingDelta, ThinkingPart, Tool, ToolArguments, ToolArgumentsDelta, ToolCallPart, ToolChoice,
