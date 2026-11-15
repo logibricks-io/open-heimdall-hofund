@@ -16,6 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `/usage` for saved accounts (card refresh only). Recorded tests
   `r5_cadence_*` use a fake runner only. Refs R-5. Live smoke remains Refs
   #304.
+- G-11: `GET /v1/hofund/usage` adds whole-period `series` (daily buckets) and
+  `by_model` totals on `UsageResponse` so the TUI Usage sparkline and model
+  table stay complete when `rows_truncated` is true; calendar periods fill
+  zero days. The Usage page draws both fields, keeps the agents table on
+  `by=agent`, and may reload usage after `request_finished`. Refs G-11.
 - R-5 (leftover): the Claude Code subscription bridge runs
   `wslrun::cross_env` on long-lived WSL `start_plan` spawns so `WSLENV`
   forwards `CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_OAUTH_TOKEN`, and proxy pairs
