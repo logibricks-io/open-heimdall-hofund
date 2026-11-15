@@ -191,13 +191,19 @@ fn a2b_24_upstream_round_trip_with_recording_http() {
 #[test]
 fn a2b_25_usage_parsing() {
     let body = br#"{"usageBreakdownList":[{"displayName":"Credits","currentUsageWithPrecision":40,"usageLimitWithPrecision":100}]}"#;
-    let windows = crate::quota::windows(body, UNIX_EPOCH).expect("windows");
+    let windows = crate::quota::usage_of(body, UNIX_EPOCH)
+        .expect("poll")
+        .windows()
+        .to_vec();
     assert_eq!(windows.len(), 1);
     assert_eq!(windows[0].name(), "Credits");
     assert_eq!(windows[0].used(), 40);
     assert_eq!(windows[0].limit(), Some(100));
     let body2 = br#"{"usageBreakdownList":[{"displayName":"Credits","currentUsageWithPrecision":50,"usageLimitWithPrecision":100}]}"#;
-    let windows2 = crate::quota::windows(body2, UNIX_EPOCH).expect("windows2");
+    let windows2 = crate::quota::usage_of(body2, UNIX_EPOCH)
+        .expect("poll2")
+        .windows()
+        .to_vec();
     assert_eq!(windows2[0].used(), 50);
 }
 

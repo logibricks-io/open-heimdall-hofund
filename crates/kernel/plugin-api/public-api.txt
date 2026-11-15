@@ -902,6 +902,14 @@ QuotaObservation::fn from_stored (plugin : PluginId) -> Self
 QuotaObservation::fn plugin (& self) -> & PluginId
 QuotaObservation::fn window (& self) -> Option < & str >
 QuotaObservation::fn with_window (mut self , window : impl Into < String >) -> Self
+QuotaPoll
+QuotaPoll #[non_exhaustive] derives(Clone, Debug, Default, PartialEq)
+QuotaPoll::fn from_windows (windows : Vec < QuotaWindow >) -> Self
+QuotaPoll::fn plan (& self) -> & str
+QuotaPoll::fn user (& self) -> & str
+QuotaPoll::fn windows (& self) -> & [QuotaWindow]
+QuotaPoll::fn with_plan (mut self , plan : impl Into < String >) -> Self
+QuotaPoll::fn with_user (mut self , user : impl Into < String >) -> Self
 QuotaQuery
 QuotaQuery #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 QuotaQuery::fn account (& self) -> Option < & AccountId >
@@ -930,21 +938,30 @@ QuotaResetOutcome::const fn with_windows (mut self , windows : u32) -> Self
 QuotaResetOutcome::fn code (& self) -> & str
 QuotaResetOutcome::fn new (code : impl Into < String >) -> Self
 QuotaWindow
-QuotaWindow #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
+QuotaWindow #[non_exhaustive] derives(Clone, Debug, PartialEq)
 QuotaWindow::const fn blocking (& self) -> bool
 QuotaWindow::const fn limit (& self) -> Option < u64 >
+QuotaWindow::const fn provider_amount (& self) -> Option < f64 >
+QuotaWindow::const fn provider_limit (& self) -> Option < f64 >
 QuotaWindow::const fn resets_at (& self) -> Option < SystemTime >
+QuotaWindow::const fn runs_out (& self) -> Option < f64 >
+QuotaWindow::const fn runs_out_at (& self) -> Option < SystemTime >
 QuotaWindow::const fn used (& self) -> u64
+QuotaWindow::const fn window_span (& self) -> Option < Duration >
 QuotaWindow::const fn with_blocking (mut self , blocking : bool) -> Self
+QuotaWindow::const fn with_runs_out (mut self , at : Option < SystemTime > , remaining : Option < f64 >) -> Self
+QuotaWindow::const fn with_window_span (mut self , span : Duration) -> Self
 QuotaWindow::fn display (& self) -> & str
 QuotaWindow::fn excluded_models (& self) -> & [String]
 QuotaWindow::fn models (& self) -> & [String]
 QuotaWindow::fn name (& self) -> & str
 QuotaWindow::fn new (name : impl Into < String > , used : u64 , limit : Option < u64 > , resets_at : Option < SystemTime > ,) -> Result < Self , PluginError >
 QuotaWindow::fn scope_model (& self) -> Option < & str >
+QuotaWindow::fn unit (& self) -> & str
 QuotaWindow::fn with_display (mut self , display : impl Into < String >) -> Self
 QuotaWindow::fn with_excluded_models (mut self , models : Vec < String >) -> Self
 QuotaWindow::fn with_models (mut self , models : Vec < String >) -> Self
+QuotaWindow::fn with_provider_count (mut self , amount : f64 , limit : f64 , unit : impl Into < String >) -> Self
 QuotaWindow::fn with_scope_model (mut self , model : impl Into < String >) -> Self
 RawAnswer
 RawAnswer #[non_exhaustive] derives(Debug)
@@ -1230,6 +1247,7 @@ Subscription::async fn import_agent_sign_in (& self , home : & std :: path :: Pa
 Subscription::async fn list_models (& self , account : & AccountId , host : & HostContext ,) -> Result < ModelList , PluginError >
 Subscription::async fn prepare_accounts (& self , config_dir : & std :: path :: Path , host : & HostContext ,) -> Result < () , PluginError >
 Subscription::async fn quota (& self , account : & AccountId , host : & HostContext ,) -> Result < Vec < QuotaWindow > , PluginError >
+Subscription::async fn quota_poll (& self , account : & AccountId , host : & HostContext ,) -> Result < QuotaPoll , PluginError >
 Subscription::async fn quota_reset_credits (& self , account : & AccountId , host : & HostContext ,) -> Result < Option < QuotaResetCredits > , PluginError >
 Subscription::async fn refresh (& self , account : & AccountId , host : & HostContext) -> Result < () , PluginError >
 Subscription::async fn remove_account (& self , account : & AccountId , host : & HostContext ,) -> Result < () , PluginError >
