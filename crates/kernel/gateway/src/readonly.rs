@@ -261,6 +261,7 @@ mod tests {
         "POST /v1/hofund/keys",
         "POST /v1/hofund/keys/oidc",
         "DELETE /v1/hofund/keys/{id}",
+        "POST /v1/hofund/quotas/refresh",
         "POST /v1/chat/completions",
         "POST /v1/messages",
         "POST /v1/messages/count_tokens",
