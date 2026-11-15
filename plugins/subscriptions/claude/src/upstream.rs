@@ -229,6 +229,10 @@ impl UpstreamProvider for ClaudeUpstream {
             sandbox: running_as_root(),
             proxy: proxy_pairs,
             wsl_distro: command.wsl_distro().map(str::to_owned),
+            wsl_tool: match &command {
+                launcher::ClaudeCommand::Wsl(tool) => Some(tool.clone()),
+                launcher::ClaudeCommand::Native(_) => None,
+            },
             mcp_config: None,
             resume_session: unshelved.as_ref().map(|(saved, _)| saved.session.clone()),
         };
@@ -349,6 +353,7 @@ impl ClaudeUpstream {
             sandbox: false,
             proxy: Vec::new(),
             wsl_distro: None,
+            wsl_tool: None,
             mcp_config: None,
             resume_session: None,
         };
@@ -384,6 +389,7 @@ impl ClaudeUpstream {
             sandbox: false,
             proxy: Vec::new(),
             wsl_distro: None,
+            wsl_tool: None,
             mcp_config: None,
             resume_session: None,
         };

@@ -16,6 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `/usage` for saved accounts (card refresh only). Recorded tests
   `r5_cadence_*` use a fake runner only. Refs R-5. Live smoke remains Refs
   #304.
+- R-5 (leftover): the Claude Code subscription bridge runs
+  `wslrun::cross_env` on long-lived WSL `start_plan` spawns so `WSLENV`
+  forwards `CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_OAUTH_TOKEN`, and proxy pairs
+  and loopback proxies rewrite to the distro host (`bridge/run.rs`,
+  `upstream.rs`; recorded tests only). Refs R-5. Live MCP bridge smoke
+  remains Refs #304.
 - Quota card refresh: `hofund quota refresh <provider> [<account>] [--json]` and
   `POST /v1/hofund/quotas/refresh` re-read one local subscription, plan, or
   balance card through the daemon, keep a 30-second per-card gap, and return the
