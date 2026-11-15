@@ -60,9 +60,16 @@ pub fn apply_control_event(app: &mut App, payload: &EventPayload) {
         EventPayload::ResyncRequired(_) => {
             app.request_event_resync();
         }
-        EventPayload::RequestStarted(_) | EventPayload::RequestFinished(_) => {
+        EventPayload::RequestStarted(_) => {
             if app.page == PageId::Logs {
                 app.pages.logs_mut().push_request_event(payload);
+            }
+        }
+        EventPayload::RequestFinished(_) => {
+            if app.page == PageId::Logs {
+                app.pages.logs_mut().push_request_event(payload);
+            } else if app.page == PageId::Usage {
+                app.queue_intent(app.pages.usage().queue_usage_refresh());
             }
         }
         EventPayload::ListenerRelistenFailed(_)
@@ -84,7 +91,8 @@ fn apply_snapshot(app: &mut App, event: &SnapshotEvent) {
 #[cfg(test)]
 mod tests {
     use hofund_control_client::hofund_control_proto::{
-        ConfigRejectedEvent, EventPayload, FieldIssue, QuotaAlertEvent, SnapshotEvent,
+        ConfigRejectedEvent, EventPayload, FieldIssue, QuotaAlertEvent, RequestFinishedEvent,
+        SnapshotEvent,
     };
 
     use crate::app::App;
@@ -123,6 +131,20 @@ mod tests {
             app.take_intents().iter().any(|intent| {
                 matches!(intent, crate::intent::ControlIntent::LoadGroups { .. })
             })
+        );
+    }
+
+    #[test]
+    fn request_finished_on_usage_queues_usage_reload() {
+        let mut app = App::for_test(PageId::Usage);
+        apply_control_event(
+            &mut app,
+            &EventPayload::RequestFinished(RequestFinishedEvent::default()),
+        );
+        assert!(
+            app.take_intents()
+                .iter()
+                .any(|intent| { matches!(intent, crate::intent::ControlIntent::LoadUsage { .. }) })
         );
     }
 

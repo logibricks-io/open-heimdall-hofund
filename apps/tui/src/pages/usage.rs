@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use hofund_control_client::hofund_control_proto::{
     Quota, QuotaAlertsResponse, QuotaResponse, QuotaSpan, SettingsResponse, UsageBreakdownBy,
-    UsageBreakdownGroup, UsagePeriod, UsageQuery, UsageResponse, UsageTotals,
+    UsageBreakdownGroup, UsageDayPoint, UsagePeriod, UsageQuery, UsageResponse, UsageTotals,
 };
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -180,6 +180,14 @@ impl UsagePage {
         self.usage_loading = false;
         self.usage_error = None;
         self.usage = response;
+    }
+
+    /// Queues a silent usage reload after a gateway request finishes (G-11).
+    pub fn queue_usage_refresh(&self) -> ControlIntent {
+        ControlIntent::LoadUsage {
+            generation: self.read_generation,
+            period: self.period(),
+        }
     }
 
     /// Records a usage read failure.
@@ -580,6 +588,12 @@ fn usage_lines(page: &UsagePage, theme: &Theme) -> Vec<Line<'static>> {
             theme.muted_style(),
         )));
     }
+    if let Some(sparkline) = usage_sparkline(&page.usage.series) {
+        lines.push(Line::from(Span::styled(
+            format!("  {sparkline}"),
+            theme.muted_style(),
+        )));
+    }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled("  agents", theme.muted_style())));
     lines.push(Line::from(Span::styled(
@@ -591,7 +605,46 @@ fn usage_lines(page: &UsagePage, theme: &Theme) -> Vec<Line<'static>> {
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled("  models", theme.muted_style())));
+    if !page.usage.by_model.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  model                  requests  input   output  ttft ms  tokens/s  cost",
+            theme.muted_style(),
+        )));
+        for group in &page.usage.by_model {
+            lines.push(model_row(group, &page.usage.currency, theme));
+        }
+    }
     lines
+}
+
+fn day_tokens(point: &UsageDayPoint) -> u64 {
+    point.input_tokens.saturating_add(point.output_tokens)
+}
+
+fn usage_sparkline(series: &[UsageDayPoint]) -> Option<String> {
+    if series.len() < 2 {
+        return None;
+    }
+    const BLOCKS: &[char] = &[' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    let peak = series.iter().map(day_tokens).max().unwrap_or(0);
+    if peak == 0 {
+        return None;
+    }
+    let mut glyphs = String::new();
+    for point in series {
+        let value = day_tokens(point);
+        let level = if value == 0 {
+            0
+        } else {
+            ((value * 8).saturating_div(peak)).clamp(1, 8) as usize
+        };
+        glyphs.push(BLOCKS[level]);
+    }
+    Some(format!("daily tokens {glyphs}"))
+}
+
+fn model_row(group: &UsageBreakdownGroup, currency: &str, theme: &Theme) -> Line<'static> {
+    agent_row(group, currency, theme)
 }
 
 fn agent_row(group: &UsageBreakdownGroup, currency: &str, theme: &Theme) -> Line<'static> {

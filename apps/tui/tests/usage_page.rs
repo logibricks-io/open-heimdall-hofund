@@ -9,7 +9,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use hofund_control_proto::{
     CheckinAccountRow, CheckinListResponse, CheckinRunResponse, Quota, QuotaAlertsResponse,
     QuotaAlertsSetResponse, QuotaResponse, QuotaSpan, SettingsResponse, UsageBreakdownBy,
-    UsageBreakdownGroup, UsagePeriod, UsageResponse, UsageRow,
+    UsageBreakdownGroup, UsageDayPoint, UsagePeriod, UsageResponse, UsageRow,
 };
 use hofund_tui::app::App;
 use hofund_tui::intent::ControlIntent;
@@ -188,6 +188,8 @@ async fn checkins_settings_alerts_and_rendering_use_control_data() {
     assert!(text.contains("40% used"), "{text}");
     assert!(text.contains("usage 80% used"), "{text}");
     assert!(text.contains("models"), "{text}");
+    assert!(text.contains("daily tokens"), "{text}");
+    assert!(text.contains("demo-model"), "{text}");
     assert!(!text.contains("capped-row-model"), "{text}");
     assert!(!text.contains("incomplete"), "{text}");
 
@@ -329,6 +331,25 @@ fn usage_response() -> UsageResponse {
     group.mean_ttft_ms = Some(125.0);
     group.mean_tokens_per_second = Some(42.5);
     response.breakdown = vec![group];
+    let mut day_a = UsageDayPoint::default();
+    day_a.date = "2026-11-14".to_owned();
+    day_a.requests = 1;
+    day_a.input_tokens = 40;
+    day_a.output_tokens = 10;
+    let mut day_b = UsageDayPoint::default();
+    day_b.date = "2026-11-15".to_owned();
+    day_b.requests = 1;
+    day_b.input_tokens = 60;
+    day_b.output_tokens = 40;
+    response.series = vec![day_a, day_b];
+    let mut model = UsageBreakdownGroup::default();
+    model.id = "demo-model".to_owned();
+    model.label = "demo-model".to_owned();
+    model.requests = 2;
+    model.input_tokens = 100;
+    model.output_tokens = 50;
+    model.cost = 14.0;
+    response.by_model = vec![model];
     response
 }
 
