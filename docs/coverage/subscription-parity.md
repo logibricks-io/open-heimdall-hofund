@@ -529,7 +529,7 @@ Remaining verification is live-account acceptance; all evidence here is determin
 | k | quota / usage | account-page usage on the device token, with rotation and free-model exclusions | `quota.rs`: `/sash/api/v2/me/usage`, pool windows, device retry and free exclusions | Done | — |
 | l | model list | `/algo/api/v2/model/list` with COSY device headers | `models.rs`: native signed list, app/chat scenes, windows, images, efforts and free flags; `upstream.rs`: selected listing display name replaces upstream `auto` in every answer and stream chunk | Done | — |
 | m | multi-account | separate subscriptions `qoder` and `qoder-cn` (`qoder.go:28-31`) | one plugin, `Site` plus VPC in creds; VPC account ids are distinct | Partial | Unified plugin id documented; separate routing labels remain |
-| n | error classification | lapsed / NeedsSignIn only on refused refresh; queue and request codes | refused refresh lapses; chat 401/403 renews once with relogin gap; quota/queue statuses | Partial | Full queue wait and remaining request-code nuances remain; no #612 claim |
+| n | error classification | lapsed / NeedsSignIn only on refused refresh; queue and request codes | `failure.rs`: code 10605, `serviceAvailable`, and `isQueued` become 503 with `retry_after` (ceil of `retryAfterSeconds`, default 30s), plan-aware busy/queued text, wrapper envelopes, and BOM-safe SSE; quota and request codes stay 429/400; only 105 or empty 403 lapses; `queue.rs` and `upstream.rs` poll `/queue/status` and resend within budget (`r54e_*`, `fixtures/queued-10605.json`) | Partial | Official fallback short-circuit that skips queue polling when another routing candidate follows; recorded poll/resend and budget-exceeded tests; no #612 claim |
 | o | daily check-in | `qoder_checkin.go` + plugin campaigns with native identity and device rotation; 30-minute and Beijing-day recheck with campaign `ValidUntil` | `hofund-plugin-sdk` `checkin/qoder.rs` and `plugins/subscriptions/qoder/src/checkin.rs`: device token, native identity, VPC rebasing, `CheckinResult::recheck_at` at the sooner of 30 minutes, Beijing midnight, and the active campaign end | Done | Recorded mocks only |
 | p | agent sign-in / device identity | device PKCE sign-in and native runtime identity | native PKCE plus cached global/CN runtime identity and sanitized hostname | Done | — |
 | q | extras | Qoder CN VPC instance hosts (`index.mjs:29-36`); COSY_VERSION desktop | `site.rs`: strict instance parsing and fail-closed web/openapi/gateway hosts on sign-in, refresh, models, chat, usage and check-in | Done | — |
@@ -538,7 +538,7 @@ Remaining verification is live-account acceptance; all evidence here is determin
 
 - R-54b landed native COSY SSE, request shaping and tool/image/reasoning handling, desktop PKCE, device/job refresh and rotation, native models and usage, and fail-closed CN VPC hosts. No agent credential discovery is planned from the reference's native runtime helper.
 - The site-qualified single plugin remains: separate `qoder` / `qoder-cn` routing labels remain, while account ids distinguish public and VPC deployments.
-- Queue waiting and the remaining request-code nuances and live-account verification remain. No #612 claim is made.
+- Queue classification and in-budget `/queue/status` resend are landed; the official fallback short-circuit (skip polling when another routing candidate follows) and recorded poll/resend plus budget-exceeded tests remain. Separate `qoder` / `qoder-cn` routing labels and live-account verification remain. No #612 claim is made.
 
 ---
 
