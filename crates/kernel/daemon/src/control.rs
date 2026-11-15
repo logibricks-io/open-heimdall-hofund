@@ -25,16 +25,16 @@ use hofund_control_proto::{
     ProviderTestRequest, ProviderTestResponse, ProviderTestResult, ProviderWriteResponse,
     QuotaAlertsResponse, QuotaAlertsSetRequest, QuotaAlertsSetResponse, QuotaCreditsModesResponse,
     QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryQuery, QuotaHistoryResponse,
-    QuotaQuery, QuotaResponse, RouteListResponse, RouteModel, RouteModelListResponse, RouteQuery,
-    RouteReserve, ServeRole, SessionCarryRequest, SessionCarryResponse, SessionDetailResponse,
-    SessionListQuery, SessionListResponse, SessionManageQuery, SessionManageResponse,
-    SessionOverviewQuery, SessionOverviewResponse, SessionProgressResponse,
-    SessionReadsPatchRequest, SessionReadsResponse, SessionRouteResponse, SessionSearchQuery,
-    SessionSearchResponse, SessionStatsQuery, SessionStatsResponse, SessionTranscriptResponse,
-    ShutdownRequest, ShutdownResponse, ShutdownState, StatusResponse, TokenRotateRequest,
-    TokenRotateResponse, UnroutedListResponse, UsageBreakdownBy, UsageBreakdownGroup, UsagePeriod,
-    UsageQuery, UsageResponse, UsageRow, UsageTotals, WarmupAccountRow, WarmupListResponse,
-    WarmupRunRequest, WarmupRunResponse,
+    QuotaQuery, QuotaRefreshRequest, QuotaRefreshResponse, QuotaResponse, RouteListResponse,
+    RouteModel, RouteModelListResponse, RouteQuery, RouteReserve, ServeRole, SessionCarryRequest,
+    SessionCarryResponse, SessionDetailResponse, SessionListQuery, SessionListResponse,
+    SessionManageQuery, SessionManageResponse, SessionOverviewQuery, SessionOverviewResponse,
+    SessionProgressResponse, SessionReadsPatchRequest, SessionReadsResponse, SessionRouteResponse,
+    SessionSearchQuery, SessionSearchResponse, SessionStatsQuery, SessionStatsResponse,
+    SessionTranscriptResponse, ShutdownRequest, ShutdownResponse, ShutdownState, StatusResponse,
+    TokenRotateRequest, TokenRotateResponse, UnroutedListResponse, UsageBreakdownBy,
+    UsageBreakdownGroup, UsagePeriod, UsageQuery, UsageResponse, UsageRow, UsageTotals,
+    WarmupAccountRow, WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
 };
 use hofund_control_proto::{
     ConfigApplyRequest, ConfigResponse, ConfigValidateRequest, ConfigValidationResponse,
@@ -1302,6 +1302,16 @@ impl ControlState for DaemonControl {
         Box::pin(async move {
             let quotas = self.quotas.as_ref().ok_or_else(quotas_unavailable)?;
             Ok::<_, ControlFailure>(quotas.history_response(&query))
+        })
+    }
+
+    fn refresh_quotas(
+        &self,
+        request: QuotaRefreshRequest,
+    ) -> ControlFuture<'_, QuotaRefreshResponse> {
+        Box::pin(async move {
+            let quotas = self.quotas.as_ref().ok_or_else(quotas_unavailable)?;
+            Ok::<_, ControlFailure>(quotas.refresh_response(&request).await)
         })
     }
 
