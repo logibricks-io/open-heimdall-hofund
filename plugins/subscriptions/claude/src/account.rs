@@ -247,16 +247,7 @@ pub(crate) async fn ask(
 
     let mut last = String::new();
     let proxy = blob.text(crate::proxy::PROXY_KEY);
-    let run_result = run_warmup_command(
-        host,
-        &command,
-        &dir,
-        &work,
-        model,
-        proxy,
-        &mut last,
-    )
-    .await;
+    let run_result = run_warmup_command(host, &command, &dir, &work, model, proxy, &mut last).await;
 
     let read_back = read_back_credentials(host, &dir).await;
     if let Some(rotated) = read_back.filter(|rotated| rotated.text != stored) {
@@ -354,9 +345,7 @@ pub(crate) async fn status_command(
     blob: &SecretObject,
 ) -> Option<hofund_plugin_sdk::json::Value> {
     let proxy = blob.text(crate::proxy::PROXY_KEY);
-    let extra = command
-        .proxied_extra(proxy, &run_env(blob))
-        .ok()?;
+    let extra = command.proxied_extra(proxy, &run_env(blob)).ok()?;
     let request = command
         .spawn_request(&crate::cli::STATUS_ARGS, dir, &extra)
         .ok()?;
