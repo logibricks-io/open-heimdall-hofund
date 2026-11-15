@@ -176,6 +176,16 @@ impl ControlState for FakeControlState {
         ))
     }
 
+    fn refresh_quotas(
+        &self,
+        request: hofund_control_proto::QuotaRefreshRequest,
+    ) -> ControlFuture<'_, hofund_control_proto::QuotaRefreshResponse> {
+        self.reply(format!(
+            "refresh_quotas:{}:{}",
+            request.provider, request.user
+        ))
+    }
+
     fn quota_credits_modes(&self) -> ControlFuture<'_, QuotaCreditsModesResponse> {
         self.reply("quota_credits_modes")
     }
@@ -597,6 +607,13 @@ fn operation_routes() -> Vec<(Method, &'static str, Vec<u8>)> {
             "/v1/hofund/quotas/credits/settings",
             json!(&QuotaCreditsSetRequest::new("acct", "a@x.io", "first")),
         ),
+        (
+            Method::POST,
+            "/v1/hofund/quotas/refresh",
+            json!(&hofund_control_proto::QuotaRefreshRequest::new(
+                "relay", "one"
+            )),
+        ),
         (Method::GET, "/v1/hofund/warmups", Vec::new()),
         (
             Method::POST,
@@ -757,6 +774,7 @@ async fn control_routes_success_and_error_envelopes_against_fake_state() {
             "quota_history:Some(\"7\"):Some(\"acct\"):Some(\"Me@x.io\")",
             "quota_credits_modes",
             "set_quota_credits:acct:a@x.io:first",
+            "refresh_quotas:relay:one",
             "warmups",
             "run_warmup:acct:a@x.io",
             "checkins",

@@ -23,6 +23,72 @@ struct Job {
     support: PlanSupport,
 }
 
+/// Reads supported plans for one provider and records the results.
+pub(crate) async fn poll_provider(
+    config: &Config,
+    path: &Path,
+    max_idle_per_host: Option<usize>,
+    registry: &Arc<dyn DaemonRegistry>,
+    quotas: &Arc<QuotaStore>,
+    provider_id: &str,
+    user: Option<&str>,
+) {
+    let Some(provider) = config
+        .providers
+        .iter()
+        .find(|entry| entry.id.eq_ignore_ascii_case(provider_id))
+    else {
+        return;
+    };
+    let Some(reader) = registry.plan_quota() else {
+        return;
+    };
+    let root = beside(path, ".hofund");
+    let limits = crate::http_limits(config, max_idle_per_host);
+    let Ok(keys) = provider_keys::resolve(provider) else {
+        return;
+    };
+    let enabled = keys
+        .into_iter()
+        .filter(|key| key.entry.on)
+        .collect::<Vec<_>>();
+    let several = enabled.len() > 1;
+    let mut jobs = Vec::new();
+    for key in enabled {
+        if !crate::quota_refresh::key_matches(&key.id, &key.entry.name, user) {
+            continue;
+        }
+        match job(provider, &key, several, registry) {
+            Ok(Some(job)) => jobs.push(job),
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(provider.id = provider.id, %error, "plan query could not be built");
+            }
+        }
+    }
+    let reader = reader.clone();
+    let mut readings =
+        futures_util::stream::iter(jobs.into_iter().enumerate().map(|(index, job)| {
+            let reader = reader.clone();
+            let root = root.clone();
+            async move {
+                let host = match host(&root, limits, &job) {
+                    Ok(host) => host,
+                    Err(error) => return (index, job, Err(error)),
+                };
+                let result = reader.read(&job.query, &host).await;
+                (index, job, result)
+            }
+        }))
+        .buffer_unordered(READS_AT_ONCE)
+        .collect::<Vec<_>>()
+        .await;
+    readings.sort_by_key(|(index, _, _)| *index);
+    for (_, job, result) in readings {
+        record(quotas, job, result);
+    }
+}
+
 /// Reads every supported plan in `config` and records the results in provider
 /// and key order. Kept reports never call this module.
 pub(crate) async fn poll(

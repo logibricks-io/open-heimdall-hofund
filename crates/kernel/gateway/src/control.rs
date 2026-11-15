@@ -40,18 +40,19 @@ use hofund_control_proto::{
     ProviderRenameRequest, ProviderRenameResponse, ProviderTestRequest, ProviderTestResponse,
     ProviderWriteResponse, QuotaAlertsResponse, QuotaAlertsSetRequest, QuotaAlertsSetResponse,
     QuotaCreditsModesResponse, QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryQuery,
-    QuotaHistoryResponse, QuotaQuery, QuotaResponse, ReloadRequest, RouteListResponse,
-    RouteModelListResponse, RouteQuery, SessionCarryRequest, SessionCarryResponse,
-    SessionDetailResponse, SessionListQuery, SessionListResponse, SessionManageQuery,
-    SessionManageResponse, SessionOverviewQuery, SessionOverviewResponse, SessionProgressResponse,
-    SessionReadsPatchRequest, SessionReadsResponse, SessionRouteResponse, SessionSearchQuery,
-    SessionSearchResponse, SessionStatsQuery, SessionStatsResponse, SessionTranscriptQuery,
-    SessionTranscriptResponse, SettingsPatchRequest, SettingsResponse, ShutdownRequest,
-    ShutdownResponse, SignInCancelRequest, SignInCancelResponse, SignInProofRequest,
-    SignInStartRequest, SignInStartResponse, SignInStatusResponse, StatusResponse,
-    SubscriptionListResponse, SubscriptionRefreshRequest, SubscriptionRefreshResponse,
-    TokenRotateRequest, TokenRotateResponse, Topic, UnroutedListResponse, UsageQuery,
-    UsageResponse, WarmupListResponse, WarmupRunRequest, WarmupRunResponse, decode_request,
+    QuotaHistoryResponse, QuotaQuery, QuotaRefreshRequest, QuotaRefreshResponse, QuotaResponse,
+    ReloadRequest, Request as ProtoRequest, RouteListResponse, RouteModelListResponse, RouteQuery,
+    SessionCarryRequest, SessionCarryResponse, SessionDetailResponse, SessionListQuery,
+    SessionListResponse, SessionManageQuery, SessionManageResponse, SessionOverviewQuery,
+    SessionOverviewResponse, SessionProgressResponse, SessionReadsPatchRequest,
+    SessionReadsResponse, SessionRouteResponse, SessionSearchQuery, SessionSearchResponse,
+    SessionStatsQuery, SessionStatsResponse, SessionTranscriptQuery, SessionTranscriptResponse,
+    SettingsPatchRequest, SettingsResponse, ShutdownRequest, ShutdownResponse, SignInCancelRequest,
+    SignInCancelResponse, SignInProofRequest, SignInStartRequest, SignInStartResponse,
+    SignInStatusResponse, StatusResponse, SubscriptionListResponse, SubscriptionRefreshRequest,
+    SubscriptionRefreshResponse, TokenRotateRequest, TokenRotateResponse, Topic,
+    UnroutedListResponse, UsageQuery, UsageResponse, WarmupListResponse, WarmupRunRequest,
+    WarmupRunResponse, decode_request,
 };
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
@@ -821,6 +822,20 @@ pub trait ControlState: Send + Sync {
     fn quotas(&self, query: QuotaQuery) -> ControlFuture<'_, QuotaResponse>;
     /// Reports sampled quota history.
     fn quota_history(&self, query: QuotaHistoryQuery) -> ControlFuture<'_, QuotaHistoryResponse>;
+    /// Re-reads one provider's quota card when the refresh gap allows.
+    fn refresh_quotas(
+        &self,
+        _request: QuotaRefreshRequest,
+    ) -> ControlFuture<'_, QuotaRefreshResponse> {
+        Box::pin(async {
+            Err(ControlError::new(
+                ControlErrorKind::BadRequest,
+                "quota refresh is not supported by this control state",
+                "quotas",
+            )
+            .into())
+        })
+    }
     /// Lists subscription accounts whose credits spending mode is not the default.
     fn quota_credits_modes(&self) -> ControlFuture<'_, QuotaCreditsModesResponse> {
         Box::pin(async {
@@ -1317,6 +1332,7 @@ impl Control {
                 get(quota_alerts).head(method_not_allowed),
             )
             .route("/v1/hofund/quotas/alerts/settings", post(set_quota_alerts))
+            .route("/v1/hofund/quotas/refresh", post(refresh_quotas))
             .route("/v1/hofund/warmups", get(warmups).head(method_not_allowed))
             .route("/v1/hofund/warmups/run", post(run_warmup))
             .route(
@@ -2525,6 +2541,30 @@ async fn set_quota_alerts(State(state): State<HttpState>, body: Bytes) -> Respon
         Err(failure) => return failure_response(failure),
     };
     operation_response!(state.control.state.set_quota_alerts(request).await)
+}
+
+async fn refresh_quotas(State(state): State<HttpState>, uri: Uri, body: Bytes) -> Response {
+    let request = if body.is_empty() {
+        match QuotaRefreshRequest::parse_query(uri.query()) {
+            Some(request) => request,
+            None => {
+                return failure_response(ControlFailure::from(ControlError::new(
+                    ControlErrorKind::Unprocessable,
+                    "provider is missing or too long",
+                    "quotas",
+                )));
+            }
+        }
+    } else {
+        match decode_body::<QuotaRefreshRequest>(&body) {
+            Ok(request) => request,
+            Err(failure) => return failure_response(failure),
+        }
+    };
+    if let Err(failure) = ProtoRequest::validate(&request) {
+        return failure_response(ControlFailure::from(failure));
+    }
+    operation_response!(state.control.state.refresh_quotas(request).await)
 }
 
 async fn warmups(State(state): State<HttpState>) -> Response {

@@ -86,6 +86,7 @@ pub(crate) struct Runtime {
     spend_caps: Arc<crate::spend_caps::SpendCapStore>,
     spend_gate: Mutex<Option<Arc<crate::spend_caps::SpendCapGate>>>,
     key_spent: Mutex<Option<Arc<hofund_usage::KeySpent>>>,
+    quota_refresh: Mutex<crate::quota_refresh::RefreshStamps>,
 }
 
 impl Candidate {
@@ -144,6 +145,7 @@ impl Runtime {
             spend_caps: Arc::new(crate::spend_caps::SpendCapStore::new(path)),
             spend_gate: Mutex::new(None),
             key_spent: Mutex::new(None),
+            quota_refresh: Mutex::new(crate::quota_refresh::RefreshStamps::default()),
         })
     }
 
@@ -200,6 +202,7 @@ impl Runtime {
             spend_caps: Arc::new(crate::spend_caps::SpendCapStore::new(path)),
             spend_gate: Mutex::new(None),
             key_spent: Mutex::new(None),
+            quota_refresh: Mutex::new(crate::quota_refresh::RefreshStamps::default()),
         })
     }
 
@@ -632,6 +635,112 @@ impl Runtime {
             .subscriptions
             .clone();
         self.model_polls.lock().await.poll(&current, now).await
+    }
+
+    /// Refreshes one provider's card(s), honoring the per-card refresh gap.
+    pub(crate) async fn quota_refresh_cards(
+        &self,
+        provider: &str,
+        user: &str,
+    ) -> (
+        Vec<hofund_control_proto::Quota>,
+        Vec<hofund_control_proto::QuotaStanding>,
+        bool,
+        Option<u64>,
+    ) {
+        let canonical = self
+            .config
+            .get()
+            .map(|config| {
+                let config = config.subscribe();
+                let config = config.borrow();
+                crate::quota_refresh::resolve_id(config.as_ref(), provider)
+                    .unwrap_or_else(|| provider.to_owned())
+            })
+            .unwrap_or_else(|| provider.to_owned());
+        let now = self.quotas.now();
+        let throttled_ago = {
+            let stamps = self.quota_refresh.lock().expect("refresh stamps");
+            stamps.within_gap(&canonical, user, now)
+        };
+        if let Some(ago) = throttled_ago {
+            return (
+                self.refresh_filtered_report(&canonical, user).await,
+                Vec::new(),
+                true,
+                Some(ago.as_secs()),
+            );
+        }
+        let _ = tokio::time::timeout(
+            QUOTA_READ_TIMEOUT,
+            self.read_refresh_cards(&canonical, user),
+        )
+        .await;
+        self.quota_refresh
+            .lock()
+            .expect("refresh stamps")
+            .note(&canonical, user, now);
+        (
+            self.refresh_filtered_report(&canonical, user).await,
+            Vec::new(),
+            false,
+            None,
+        )
+    }
+
+    async fn read_refresh_cards(&self, provider: &str, user: &str) {
+        let Some(config) = self.config.get() else {
+            return;
+        };
+        let config = config.subscribe().borrow().clone();
+        let user_filter = if user.is_empty() { None } else { Some(user) };
+        let subscriptions = self.plan.lock().expect("plan").subscriptions.clone();
+        let now = tokio::time::Instant::now();
+        self.polls
+            .lock()
+            .await
+            .poll_subscription(
+                &subscriptions,
+                &self.cooldowns,
+                &self.quotas,
+                provider,
+                user_filter,
+                now,
+            )
+            .await;
+        tokio::join!(
+            crate::plans::poll_provider(
+                &config,
+                &self.path,
+                self.max_idle_per_host,
+                &self.registry,
+                &self.quotas,
+                provider,
+                user_filter,
+            ),
+            crate::balances::poll_provider(
+                &config,
+                &self.path,
+                self.max_idle_per_host,
+                &self.registry,
+                &self.quotas,
+                provider,
+                user_filter,
+            ),
+        );
+    }
+
+    async fn refresh_filtered_report(
+        &self,
+        provider: &str,
+        user: &str,
+    ) -> Vec<hofund_control_proto::Quota> {
+        let order = self.quota_order();
+        self.quotas
+            .report(&order)
+            .into_iter()
+            .filter(|card| crate::quota_refresh::card_matches(card, provider, user))
+            .collect()
     }
 
     /// Returns the kept report, or reads every subscription first. A fresh

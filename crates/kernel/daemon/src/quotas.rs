@@ -6,7 +6,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures_util::future::BoxFuture;
 use hofund_control_proto::{
-    QuotaHistory, QuotaHistoryQuery, QuotaHistoryResponse, QuotaQuery, QuotaResponse,
+    QuotaHistory, QuotaHistoryQuery, QuotaHistoryResponse, QuotaQuery, QuotaRefreshRequest,
+    QuotaRefreshResponse, QuotaResponse,
 };
 use hofund_gateway::QuotaSource;
 use hofund_router::quota::{SERVED_RETENTION, ServedRequest, apply_last_served};
@@ -54,6 +55,28 @@ impl DaemonQuotas {
         QuotaHistoryResponse {
             data: self.lines(query),
             ..QuotaHistoryResponse::default()
+        }
+    }
+
+    /// Re-reads one card when allowed, or returns what was already read.
+    pub(crate) async fn refresh_response(
+        &self,
+        request: &QuotaRefreshRequest,
+    ) -> QuotaRefreshResponse {
+        let (mut data, standings, throttled, last_asked_secs) = self
+            .runtime
+            .quota_refresh_cards(&request.provider, &request.user)
+            .await;
+        let now = self.runtime.quota_now();
+        let served = served_since(Arc::clone(&self.usage), now).await;
+        apply_last_served(&mut data, &served, now);
+        crate::credits_modes::decorate_quotas(&mut data, self.runtime.credits_modes());
+        QuotaRefreshResponse {
+            data,
+            standings,
+            throttled,
+            last_asked_secs,
+            ..QuotaRefreshResponse::default()
         }
     }
 }
