@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- R-54f (leftover): Qoder keeps one account store under plugin id `qoder` while
+  config and CLI labels `qoder` and `qoder-cn` route and sign in on the matching
+  site, expand hops by `Site`, and key members with the label the operator named
+  (`routing.rs`, `hofund-plugin-registry` `storage_id`, `Subscription::serves_routing_label`,
+  `r54f_*`). Refs R-54.
 - R-54e (leftover): the router sets `hofund_another_routing_candidate` on
   requests when another member may follow; the Qoder plugin skips queue polling
   under that flag and records poll/resend, budget-exceeded, and short-circuit
