@@ -160,7 +160,7 @@ fn login_spawned_without_shell_with_scrubbed_env() {
         spawn
             .env
             .iter()
-            .any(|(k, v)| k == cli::CONFIG_DIR_VAR && PathBuf::from(v) == signin)
+            .any(|(k, v)| k == cli::CONFIG_DIR_VAR && v == signin.as_os_str())
     );
     assert!(spawn.env.iter().any(|(k, _)| k == "BROWSER"));
     assert!(
