@@ -87,6 +87,8 @@ pub(crate) struct Runtime {
     spend_gate: Mutex<Option<Arc<crate::spend_caps::SpendCapGate>>>,
     key_spent: Mutex<Option<Arc<hofund_usage::KeySpent>>>,
     quota_refresh: Mutex<crate::quota_refresh::RefreshStamps>,
+    remote_quotas: Arc<crate::remote_quotas::RemoteQuotaCache>,
+    remote_http: reqwest::Client,
 }
 
 impl Candidate {
@@ -146,6 +148,11 @@ impl Runtime {
             spend_gate: Mutex::new(None),
             key_spent: Mutex::new(None),
             quota_refresh: Mutex::new(crate::quota_refresh::RefreshStamps::default()),
+            remote_quotas: Arc::new(crate::remote_quotas::RemoteQuotaCache::default()),
+            remote_http: reqwest::Client::builder()
+                .timeout(Duration::from_secs(8))
+                .build()
+                .expect("remote quota client"),
         })
     }
 
@@ -203,7 +210,54 @@ impl Runtime {
             spend_gate: Mutex::new(None),
             key_spent: Mutex::new(None),
             quota_refresh: Mutex::new(crate::quota_refresh::RefreshStamps::default()),
+            remote_quotas: Arc::new(crate::remote_quotas::RemoteQuotaCache::default()),
+            remote_http: reqwest::Client::builder()
+                .timeout(Duration::from_secs(8))
+                .build()
+                .expect("remote quota client"),
         })
+    }
+
+    pub(crate) fn remote_quotas(&self) -> Arc<crate::remote_quotas::RemoteQuotaCache> {
+        Arc::clone(&self.remote_quotas)
+    }
+
+    pub(crate) fn remote_http(&self) -> &reqwest::Client {
+        &self.remote_http
+    }
+
+    pub(crate) fn config_snapshot(&self) -> Option<Config> {
+        self.config.get().map(|sender| {
+            let snapshot = sender.subscribe().borrow().clone();
+            Arc::unwrap_or_clone(snapshot)
+        })
+    }
+
+    pub(crate) fn quota_catalog(&self) -> crate::quota_scope::QuotaCatalog {
+        let Some(config) = self.config_snapshot() else {
+            return crate::quota_scope::QuotaCatalog::default();
+        };
+        let models = self
+            .models
+            .get()
+            .map(|host| {
+                config
+                    .providers
+                    .iter()
+                    .map(|provider| {
+                        (
+                            provider.id.clone(),
+                            host.cached(&provider.id)
+                                .models
+                                .iter()
+                                .map(|model| model.id().to_owned())
+                                .collect(),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        crate::quota_scope::QuotaCatalog::build(&config, &models)
     }
 
     pub(crate) fn spend_caps(&self) -> Arc<crate::spend_caps::SpendCapStore> {
@@ -730,14 +784,22 @@ impl Runtime {
         );
     }
 
+    /// Re-reads every local card when a peer omits `provider`.
+    pub(crate) async fn quota_refresh_all(&self) {
+        let _ = tokio::time::timeout(QUOTA_READ_TIMEOUT, self.quota_report(false)).await;
+    }
+
     async fn refresh_filtered_report(
         &self,
         provider: &str,
         user: &str,
     ) -> Vec<hofund_control_proto::Quota> {
         let order = self.quota_order();
-        self.quotas
-            .report(&order)
+        let cards = self.quotas.report(&order);
+        if provider.is_empty() {
+            return cards;
+        }
+        cards
             .into_iter()
             .filter(|card| crate::quota_refresh::card_matches(card, provider, user))
             .collect()

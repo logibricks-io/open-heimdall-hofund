@@ -199,7 +199,7 @@ async fn q6g_history_route_filters_and_scopes() {
     assert_eq!(seen.provider.as_deref(), Some("acct"));
     assert_eq!(seen.user.as_deref(), Some("A@x.io"));
     let scope: QuotaScopeHook =
-        Arc::new(|_: QuotaCaller<'_>| QuotaAccess::Scoped(Arc::new(OnlyAccount("A@X.IO"))));
+        Arc::new(|_: QuotaCaller<'_>| QuotaAccess::Scoped(Arc::new(OnlyAccount("A@X.IO")))); // identity ignored
     let (scoped, _dir) = app_with(&source, Some(scope));
     let (_, body) = get(&scoped, "/v1/hofund/quotas/history?days=1", bearer()).await;
     let data = body["data"].as_array().expect("data");

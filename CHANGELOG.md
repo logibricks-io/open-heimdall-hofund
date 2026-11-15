@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Remote quota cards (E13 follow-through): the model listener serves kept cards
+  at `GET /v1/hofund/quotas/cards` and re-reads on
+  `POST /v1/hofund/quotas/refresh` with gateway-key scope; a computer with
+  `remote-gateway` providers merges a peer's cards for 30 seconds with
+  `{peer}/{provider}` ids and `{name} · {peer}` labels into control quota views
+  and `hofund quota`. Loopback tests only (`q5f_*`, `d38r_*`, `qs1_*`, `qs2_*`).
+  Refs 3.8.
 - Quota card refresh: `hofund quota refresh <provider> [<account>] [--json]` and
   `POST /v1/hofund/quotas/refresh` re-read one local subscription, plan, or
   balance card through the daemon, keep a 30-second per-card gap, and return the
