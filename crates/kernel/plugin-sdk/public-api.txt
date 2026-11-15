@@ -53,6 +53,7 @@ codex_zstd::fn maybe_compress_turn (method : & str , url : & str , content_encod
 const daily_checkin::ENABLED_KEY
 const daily_warmup::TIMES_KEY
 const inflate::GZIP_OUTPUT_CAP
+const opened_url::OPENED_URL_ENV
 const page::BODY_CAP
 const page::ERROR_RUNES
 const page::LIST_BUDGET
@@ -133,7 +134,9 @@ mod futures
 mod image
 mod inflate
 mod jwt
+mod netproxy
 mod oauth
+mod opened_url
 mod page
 mod probe
 mod process
@@ -146,6 +149,12 @@ mod time::zone
 mod transport
 mod uuid
 mod wire
+netproxy::ProxyError
+netproxy::env_for_bun_with
+netproxy::env_with
+netproxy::for_bun
+netproxy::is_socks
+netproxy::parse_proxy
 next_cursor
 next_ready
 oauth::AccessToken
@@ -182,6 +191,7 @@ oauth::same_secret
 oauth::secret_text
 oauth::token_error
 oauth::unverified_claims
+opened_url::fn took_opened_url (args : & [impl AsRef < str >]) -> bool
 page::PageError derives(Clone, Copy, Debug, PartialEq, Eq)
 page::PageError::const fn kind (& self) -> PageErrorKind
 page::PageErrorKind #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)

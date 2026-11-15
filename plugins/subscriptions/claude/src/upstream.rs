@@ -20,6 +20,8 @@ use crate::bridge::run::{
     reject_non_text, start_plan, stdin_from_said, stdin_from_since, workdir,
 };
 use crate::bridge::session::{TurnStop, has_reply};
+use crate::launcher;
+use crate::proxy;
 use crate::{COMMAND, creds, setup_token};
 
 #[cfg(test)]
@@ -204,7 +206,20 @@ impl UpstreamProvider for ClaudeUpstream {
         }
         let token = token_for_run(&blob)?;
         let config_dir = account_dir(&self.host, &self.account)?;
-        let program = self.program()?;
+        let command =
+            launcher::ClaudeCommand::resolve(&self.host, self.command.as_ref(), COMMAND).await?;
+        let program = match &command {
+            launcher::ClaudeCommand::Native(path) => path.clone(),
+            launcher::ClaudeCommand::Wsl(tool) => std::path::PathBuf::from(&tool.path),
+        };
+        let proxy_pairs = command
+            .proxied_extra(blob.text(proxy::PROXY_KEY), &[])?
+            .into_iter()
+            .filter(|(key, _)| {
+                key.to_str()
+                    .is_some_and(|name| name.to_ascii_uppercase().contains("PROXY"))
+            })
+            .collect();
         let mut spec = StartSpec {
             program,
             cwd: config_dir.clone(),
@@ -212,8 +227,8 @@ impl UpstreamProvider for ClaudeUpstream {
             token,
             config_dir: config_dir.clone(),
             sandbox: running_as_root(),
-            proxy: Vec::new(),
-            wsl_distro: None,
+            proxy: proxy_pairs,
+            wsl_distro: command.wsl_distro().map(str::to_owned),
             mcp_config: None,
             resume_session: unshelved.as_ref().map(|(saved, _)| saved.session.clone()),
         };
