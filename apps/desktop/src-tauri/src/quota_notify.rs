@@ -1,10 +1,14 @@
 //! OS notifications for masked quota alerts from the embedded gateway.
+//!
+//! The Tauri notification plugin pulls extra `zbus` generations that
+//! `cargo deny` rejects, and those versions cannot be unified with the
+//! existing tree. The menu-bar app therefore calls the platform helpers
+//! already present on a typical desktop (`notify-send`, `osascript`, or
+//! Windows Runtime via PowerShell) and stays within the current crates.
 
-use std::sync::OnceLock;
+use std::process::Command;
 
 use hofund_daemon::QuotaAlertEvent;
-use tauri::AppHandle;
-use tauri_plugin_notification::NotificationExt;
 
 /// Result of attempting to show one alert.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -46,20 +50,20 @@ impl QuotaAlertSurface for RecordingSurface {
     }
 }
 
-/// Lazily initialized notifier backed by the Tauri notification plugin.
+/// Environment keys used so macOS and Windows scripts never interpolate the
+/// title or body into a shell string.
+const TITLE_ENV: &str = "HOFUND_NOTIFY_TITLE";
+const BODY_ENV: &str = "HOFUND_NOTIFY_BODY";
+
+/// Lazily initialized notifier backed by a platform helper command.
+#[derive(Default)]
 pub(crate) struct OsQuotaAlertSurface {
-    handle: AppHandle,
-    ready: OnceLock<bool>,
     refused: bool,
 }
 
 impl OsQuotaAlertSurface {
-    pub(crate) fn new(handle: AppHandle) -> Self {
-        Self {
-            handle,
-            ready: OnceLock::new(),
-            refused: false,
-        }
+    pub(crate) fn new() -> Self {
+        Self { refused: false }
     }
 }
 
@@ -68,41 +72,88 @@ impl QuotaAlertSurface for OsQuotaAlertSurface {
         if self.refused {
             return PresentOutcome::Suppressed;
         }
-        if self.ready.get().is_none() {
-            let allowed = self
-                .handle
-                .notification()
-                .permission_state()
-                .ok()
-                .is_some_and(|state| state == tauri_plugin_notification::PermissionState::Granted)
-                || self
-                    .handle
-                    .notification()
-                    .request_permission()
-                    .ok()
-                    .is_some_and(|state| {
-                        state == tauri_plugin_notification::PermissionState::Granted
-                    });
-            let _ = self.ready.set(allowed);
-            if !allowed {
+        match show_os_notification(title, body) {
+            true => PresentOutcome::Shown,
+            false => {
                 self.refused = true;
-                return PresentOutcome::Suppressed;
+                PresentOutcome::Suppressed
             }
         }
-        if !self.ready.get().copied().unwrap_or(false) {
-            return PresentOutcome::Suppressed;
-        }
-        match self
-            .handle
-            .notification()
-            .builder()
-            .title(title)
-            .body(body)
-            .show()
-        {
-            Ok(()) => PresentOutcome::Shown,
-            Err(_) => PresentOutcome::Suppressed,
-        }
+    }
+}
+
+fn show_os_notification(title: &str, body: &str) -> bool {
+    let mut command = match notify_command(title, body) {
+        Some(command) => command,
+        None => return false,
+    };
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+/// Platform helper used to show a notification.
+pub(crate) fn notify_command(title: &str, body: &str) -> Option<Command> {
+    #[cfg(target_os = "linux")]
+    {
+        let mut command = Command::new("notify-send");
+        command.args(["--", title, body]);
+        Some(command)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut command = Command::new("osascript");
+        command
+            .env(TITLE_ENV, title)
+            .env(BODY_ENV, body)
+            .args([
+                "-e",
+                r#"display notification (system attribute "HOFUND_NOTIFY_BODY") with title (system attribute "HOFUND_NOTIFY_TITLE")"#,
+            ]);
+        Some(command)
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let mut command = Command::new("powershell");
+        command
+            .env(TITLE_ENV, title)
+            .env(BODY_ENV, body)
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                r#"$t=$env:HOFUND_NOTIFY_TITLE; $b=$env:HOFUND_NOTIFY_BODY; try { [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null; $xml = New-Object Windows.Data.Xml.Dom.XmlDocument; $xml.LoadXml("<toast><visual><binding template='ToastGeneric'><text>" + [System.Security.SecurityElement]::Escape($t) + "</text><text>" + [System.Security.SecurityElement]::Escape($b) + "</text></binding></visual></toast>"); $toast = [Windows.UI.Notifications.ToastNotification]::new($xml); [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("Hofund").Show($toast) } catch { exit 1 }"#,
+            ]);
+        Some(command)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        let _ = (title, body);
+        None
+    }
+}
+
+/// Program name for the current OS notifier, if any.
+pub(crate) fn notify_program() -> Option<&'static str> {
+    #[cfg(target_os = "linux")]
+    {
+        Some("notify-send")
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Some("osascript")
+    }
+    #[cfg(target_os = "windows")]
+    {
+        Some("powershell")
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        None
     }
 }
 
@@ -110,7 +161,10 @@ impl QuotaAlertSurface for OsQuotaAlertSurface {
 mod tests {
     use hofund_daemon::QuotaAlertEvent;
 
-    use super::{PresentOutcome, QuotaAlertSurface, RecordingSurface, present_alert};
+    use super::{
+        PresentOutcome, QuotaAlertSurface, RecordingSurface, notify_command, notify_program,
+        present_alert,
+    };
 
     #[test]
     fn d310_present_forwards_masked_title_and_body() {
@@ -137,5 +191,49 @@ mod tests {
             PresentOutcome::Suppressed
         );
         assert!(surface.calls.is_empty());
+    }
+
+    #[test]
+    fn d310_notify_command_uses_the_platform_helper_and_keeps_text_out_of_the_shell() {
+        let program = notify_program().expect("desktop CI covers linux/mac/windows");
+        let title = r#"80% "weekly""#;
+        let body = "se****et";
+        let command = notify_command(title, body).expect("command");
+        assert_eq!(command.get_program(), program);
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        let envs: Vec<(String, String)> = command
+            .get_envs()
+            .filter_map(|(k, v)| {
+                Some((
+                    k.to_string_lossy().into_owned(),
+                    v?.to_string_lossy().into_owned(),
+                ))
+            })
+            .collect();
+        #[cfg(target_os = "linux")]
+        {
+            assert_eq!(
+                args,
+                vec!["--".to_owned(), title.to_owned(), body.to_owned()]
+            );
+            assert!(envs.is_empty());
+        }
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            assert!(
+                !args
+                    .iter()
+                    .any(|arg| arg.contains(title) || arg.contains(body)),
+                "title/body must be passed via env, not argv: {args:?}"
+            );
+            assert!(
+                envs.iter()
+                    .any(|(k, v)| k == super::TITLE_ENV && v == title)
+            );
+            assert!(envs.iter().any(|(k, v)| k == super::BODY_ENV && v == body));
+        }
     }
 }

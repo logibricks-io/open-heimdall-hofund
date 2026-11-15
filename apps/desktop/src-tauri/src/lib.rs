@@ -14,7 +14,6 @@ use tauri::Emitter;
 use tauri::Manager;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
-use tauri_plugin_notification::NotificationExt;
 use tokio::sync::Mutex;
 
 struct AppState {
@@ -32,7 +31,6 @@ pub fn run() -> Result<(), String> {
         control: Mutex::new(Control::open(user_config_path(), quota_alerts)),
     };
     tauri::Builder::default()
-        .plugin(tauri_plugin_notification::init())
         .manage(state)
         .invoke_handler(tauri::generate_handler![
             snapshot,
@@ -68,18 +66,8 @@ pub fn run() -> Result<(), String> {
                     dispatch(&handle, &id).await;
                 });
             });
-            let alert_handle = app.handle().clone();
-            let _ = alert_handle.notification().on_action(move |action| {
-                if action.action_id() == "tap" {
-                    let handle = alert_handle.clone();
-                    tauri::async_runtime::spawn(async move {
-                        focus_usage_window(&handle);
-                    });
-                }
-            });
-            let notify_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                let mut surface = quota_notify::OsQuotaAlertSurface::new(notify_handle);
+                let mut surface = quota_notify::OsQuotaAlertSurface::new();
                 while let Some(alert) = quota_alert_events.recv().await {
                     let _ = quota_notify::present_alert(&mut surface, &alert);
                 }
