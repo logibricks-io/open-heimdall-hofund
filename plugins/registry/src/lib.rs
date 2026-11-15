@@ -420,6 +420,12 @@ mod tests {
         assert!(surface_in(&inbound, "shared").is_some());
     }
 
+    #[test]
+    fn qoder_cn_storage_id_maps_to_unified_qoder_store() {
+        assert_eq!(super::storage_id("qoder-cn"), "qoder");
+        assert_eq!(super::storage_id("qoder"), "qoder");
+    }
+
     #[cfg(feature = "qoder")]
     #[test]
     fn qoder_cn_routing_label_resolves_qoder_factory() {
