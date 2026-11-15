@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   kept card without a second vendor read when asked sooner. Tests: `d38_*`,
   `d38_1` through `d38_3` in `crates/kernel/daemon/tests/quota_refresh.rs`.
   Refs 3.8.
+- R-54e (leftover): the router sets `hofund_another_routing_candidate` on
+  requests when another member may follow; the Qoder plugin skips queue polling
+  under that flag and records poll/resend, budget-exceeded, and short-circuit
+  queue tests (`r54e_queue_*`, `crates/kernel/plugin-api/src/dispatch.rs`).
+  Refs R-54.
 - Group copy and innermost nested-group patience (matrix 4.3): `edit_group_copy`,
   `POST /v1/hofund/groups/{id}/copy`, `hofund group copy`, and router replan
   budgets keyed by explicit group `patience` on nested unit boundaries. Tests
@@ -45,8 +50,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   quota, and request refusal codes like the reference (`failure.rs`), waits on
   `/algo/api/v2/service/ask/queue/status` and resends within budget (`queue.rs`,
   `upstream.rs`), and records busy/queue fixtures (`r54e_*`,
-  `fixtures/queued-10605.json`). Official fallback short-circuit when another
-  routing candidate follows, and recorded poll/resend tests, remain. Refs R-54.
+  `fixtures/queued-10605.json`). Refs R-54.
 - R-6: `hofund_plugin_sdk::image::fit_claude` scales Claude Code inline images
   (2000 px per side, five mebibytes of base64, triangle resize, JPEG/PNG
   rules) and the Claude subscription bridge applies it on `-p` stream-json

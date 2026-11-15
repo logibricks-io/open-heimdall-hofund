@@ -60,6 +60,24 @@ pub async fn advance_time(duration: std::time::Duration) {
     tokio::time::advance(duration).await;
 }
 
+/// Polls `future` on the paused clock, advancing by `step` whenever it is still pending.
+///
+/// Plugins should call this instead of depending on tokio themselves.
+pub async fn advance_until<F, T>(future: F, step: std::time::Duration) -> T
+where
+    F: Future<Output = T>,
+{
+    tokio::pin!(future);
+    loop {
+        tokio::select! {
+            result = &mut future => return result,
+            _ = tokio::time::sleep(std::time::Duration::from_millis(5)) => {
+                advance_time(step).await;
+            }
+        }
+    }
+}
+
 /// Drives `future` on a current-thread runtime.
 ///
 /// Timers and sockets work, and one-shot jobs the plugin starts run on this

@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use hofund_plugin_api::{
-    AccountId, Completion, HostContext, PluginError, ProbeQuery, ProbeReport, ProtocolId, Request,
-    UpstreamProvider,
+    ANOTHER_ROUTING_CANDIDATE, AccountId, Completion, HostContext, PluginError, ProbeQuery,
+    ProbeReport, ProtocolId, Request, UpstreamProvider,
 };
 use hofund_plugin_sdk::Call;
 use hofund_plugin_sdk::json::Value;
@@ -88,6 +88,7 @@ impl QoderUpstream {
         let site = self.endpoints.resolve(&stored.credential)?;
         let url = format!("{}{CHAT_PATH}", site.chat.trim_end_matches('/'));
         let streaming = request.stream;
+        let wait_allowed = queue_wait_allowed(&request);
         let encoded = wire::encode_outbound(ProtocolId::OPENAI_CHAT, inbound, request)?;
         let chat: Value = hofund_plugin_sdk::json::from_slice(&encoded)
             .map_err(|_| PluginError::decode("Qoder request shaping produced invalid JSON"))?;
@@ -161,7 +162,7 @@ impl QoderUpstream {
                     stored,
                     &attempt,
                     classified.queue.as_ref().unwrap_or(&Default::default()),
-                    true,
+                    wait_allowed,
                 )
                 .await?
             {
@@ -217,6 +218,14 @@ impl ChatAttempt {
             model_key: model_key.to_owned(),
         }
     }
+}
+
+fn queue_wait_allowed(request: &Request) -> bool {
+    !request
+        .extensions
+        .get(ANOTHER_ROUTING_CANDIDATE)
+        .and_then(hofund_plugin_sdk::json::Value::as_bool)
+        .unwrap_or(false)
 }
 
 fn model_source(model: &ModelInfo) -> &str {
