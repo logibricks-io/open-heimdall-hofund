@@ -14,6 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Subscription::quota_poll`. The Kiro subscription plugin maps `usageOf` plan
   title, email, floats, bonus `runsOut`, and the 30-day month span (`r51e_k_*`,
   recorded fixtures). Refs R-51.
+- A-3a: the daemon coordinates Claude daily warm-up and model connectivity
+  tests through one Claude Code `-p` send (`warmup/claude.rs`,
+  `Subscription::warmup_probe`, `account::ask` with
+  `disableDeepLinkRegistration` settings). Successful warms stale-mark quota
+  reads for routing. Tests `a3a_28` through `a3a_30`. Refs A-3.
 - R-53b: audited the frozen reference for Cline subscription import (row b);
   key-plan and plugin credentials enter only through API-key or device sign-in,
   with no official home credential-file import to port. Subscription parity row

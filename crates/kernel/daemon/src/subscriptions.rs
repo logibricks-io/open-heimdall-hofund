@@ -328,7 +328,7 @@ impl SubscriptionState {
             })
     }
 
-    fn quota_card(&self, account: &AccountId) -> Quota {
+    pub(crate) fn quota_card(&self, account: &AccountId) -> Quota {
         Quota {
             provider: self.config.id.clone(),
             name: self.config.id.clone(),
@@ -556,6 +556,11 @@ impl QuotaPolls {
     #[cfg(test)]
     pub(crate) fn is_unsupported(&self, member: &MemberId) -> bool {
         self.unsupported.contains(member)
+    }
+
+    /// Schedules the next quota poll for `member` on the next subscription tick.
+    pub(crate) fn wake(&mut self, member: &MemberId) {
+        self.next.remove(member);
     }
 }
 
