@@ -741,6 +741,7 @@ async fn control_routes_success_and_error_envelopes_against_fake_state() {
             "patch_group:group",
             "delete_group:group",
             "restore_group:group",
+            "copy_group:group",
             "group_member_candidates",
             "rename_profile",
             "provider_models:provider",
