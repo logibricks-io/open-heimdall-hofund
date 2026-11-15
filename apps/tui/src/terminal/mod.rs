@@ -96,6 +96,8 @@ async fn async_main(config: &Path, no_color: bool) -> Result<QuitAction, String>
     let mut control: Option<ControlEventStream> = None;
     let mut sign_in_ticks = tokio::time::interval(std::time::Duration::from_secs(1));
     sign_in_ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut logs_follow_ticks = tokio::time::interval(std::time::Duration::from_secs(1));
+    logs_follow_ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
         tokio::select! {
@@ -139,6 +141,13 @@ async fn async_main(config: &Path, no_color: bool) -> Result<QuitAction, String>
             _ = sign_in_ticks.tick() => {
                 if app.sign_in_dirty() {
                     app.poll_sign_in();
+                    schedule_intents(&mut app, live.client().as_ref(), &work_tx);
+                    draw(&mut terminal, &app, &theme)?;
+                }
+            }
+            _ = logs_follow_ticks.tick() => {
+                if app.logs_follow_active() {
+                    app.poll_logs_follow();
                     schedule_intents(&mut app, live.client().as_ref(), &work_tx);
                     draw(&mut terminal, &app, &theme)?;
                 }

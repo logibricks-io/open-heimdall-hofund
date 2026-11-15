@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- R-18: G-7 `GET /v1/hofund/logs` tails the daemon log through the control
+  listener (`log_tail.rs`, `control_routes` and daemon route tests). The TUI Logs page
+  (`9`) scrolls, follows at one second, toggles request lines from events, and
+  clears the view without deleting the file. `?` opens a per-page help overlay.
+  Refs R-18.
 - A-3a: the daemon coordinates Claude daily warm-up and model connectivity
   tests through one Claude Code `-p` send (`warmup/claude.rs`,
   `Subscription::warmup_probe`, `account::ask` with

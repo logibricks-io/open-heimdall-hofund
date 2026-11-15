@@ -61,7 +61,9 @@ pub fn apply_control_event(app: &mut App, payload: &EventPayload) {
             app.request_event_resync();
         }
         EventPayload::RequestStarted(_) | EventPayload::RequestFinished(_) => {
-            // No whole-period G-11 summary exists to refetch yet.
+            if app.page == PageId::Logs {
+                app.pages.logs_mut().push_request_event(payload);
+            }
         }
         EventPayload::ListenerRelistenFailed(_)
         | EventPayload::MemberCooled(_)

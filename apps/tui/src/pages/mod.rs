@@ -4,6 +4,7 @@ mod accounts;
 mod agents;
 mod frame;
 mod library;
+mod logs;
 mod probe;
 mod providers;
 pub mod routing;
@@ -15,6 +16,7 @@ pub use accounts::{AccountsAction, AccountsPage};
 pub use agents::AgentPage;
 pub use frame::PageShell;
 pub use library::LibraryPage;
+pub use logs::LogsPage;
 pub use probe::{ProbeOutcome, apply_probe_to_shell, read_path};
 pub use providers::ProviderPage;
 pub use routing::RoutingPage;
@@ -79,6 +81,7 @@ pub struct Pages {
     sessions: SessionsPage,
     library: LibraryPage,
     accounts: AccountsPage,
+    logs: LogsPage,
 }
 
 impl Default for Pages {
@@ -91,6 +94,7 @@ impl Default for Pages {
             sessions: SessionsPage::new(),
             library: LibraryPage::new(),
             accounts: AccountsPage::new(),
+            logs: LogsPage::new(),
         }
     }
 }
@@ -105,7 +109,8 @@ impl Pages {
             | PageId::Sessions
             | PageId::Library
             | PageId::Usage
-            | PageId::Accounts => None,
+            | PageId::Accounts
+            | PageId::Logs => None,
         }
     }
 
@@ -129,6 +134,17 @@ impl Pages {
     #[must_use]
     pub fn library(&self) -> &LibraryPage {
         &self.library
+    }
+
+    /// Mutable logs page.
+    pub fn logs_mut(&mut self) -> &mut LogsPage {
+        &mut self.logs
+    }
+
+    /// Immutable logs page.
+    #[must_use]
+    pub fn logs(&self) -> &LogsPage {
+        &self.logs
     }
 
     /// Mutable accounts page.
@@ -181,6 +197,7 @@ impl Pages {
             PageId::Sessions => &self.sessions,
             PageId::Library => &self.library,
             PageId::Accounts => &self.accounts,
+            PageId::Logs => &self.logs,
         }
     }
 
@@ -194,7 +211,8 @@ impl Pages {
             | PageId::Sessions
             | PageId::Library
             | PageId::Usage
-            | PageId::Accounts => {
+            | PageId::Accounts
+            | PageId::Logs => {
                 panic!("dedicated page is not a PageShell; use page_dyn or its typed accessor")
             }
         }
