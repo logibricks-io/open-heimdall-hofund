@@ -42,7 +42,6 @@ hofund-plugin-agent-raft = { workspace = true }
 hofund-plugin-agent-workbuddy = { workspace = true }
 hofund-plugin-agent-zcode = { workspace = true }
 hofund-plugin-api = { workspace = true }
-hofund-plugin-sdk = { workspace = true }
 hofund-sessions = { workspace = true }
 hofund-usage = { workspace = true }
 hofund-model-catalog = { workspace = true }
