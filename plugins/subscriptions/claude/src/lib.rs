@@ -343,35 +343,70 @@ fn browser_program(host: &HostContext) -> Result<PathBuf, PluginError> {
         .map(|request| request.program().to_path_buf())
 }
 
+/// Reads a `https://` URL from the opened-URL relay file, if one is there.
+fn opened_https(opened: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(opened).ok()?;
+    let text = text.trim();
+    (text.starts_with("https://") && text.len() > "https://".len()).then(|| text.to_owned())
+}
+
 /// Polls the opened-URL file and stdout, like the reference `startClaudeSignIn` loop.
+///
+/// The opened-URL file is preferred when it appears. A link printed on stdout
+/// is kept, and the file is given a short grace period on the same Tokio clock
+/// as [`LINK_WAIT`] (via [`hofund_plugin_sdk::timeout`] / [`hofund_plugin_sdk::sleep`]).
+/// Mixing `std::time::Instant` with those waits used to burn the outer wait
+/// under a paused test clock and drop the printed link.
 async fn read_sign_in_link(
     opened: &Path,
     stdout: &mut BodyStream,
     last: &mut String,
 ) -> Option<String> {
-    let started = std::time::Instant::now();
-    let mut grace = LINK_WAIT;
     let mut printed: Option<String> = None;
-    while started.elapsed() < grace {
-        if let Ok(bytes) = std::fs::read(opened) {
-            let text = String::from_utf8_lossy(&bytes).trim().to_string();
-            if text.starts_with("https://") && text.len() > "https://".len() {
-                return Some(text);
-            }
+    let mut remain = LINK_WAIT;
+    let mut opened_grace: Option<Duration> = None;
+    let mut stdout_open = true;
+    loop {
+        if let Some(link) = opened_https(opened) {
+            return Some(link);
         }
-        match hofund_plugin_sdk::timeout(Duration::from_millis(50), cli::next_line(stdout)).await {
-            Some(Some(line)) => {
-                if let Some(link) = cli::find_link(&line) {
-                    printed = Some(link.to_owned());
-                    grace = started.elapsed() + Duration::from_secs(3);
+        if remain.is_zero() || opened_grace == Some(Duration::ZERO) {
+            return printed;
+        }
+        let mut slice = Duration::from_millis(50).min(remain);
+        if let Some(grace) = opened_grace {
+            slice = slice.min(grace);
+        }
+        if slice.is_zero() {
+            return printed;
+        }
+        let timed_out = if stdout_open {
+            match hofund_plugin_sdk::timeout(slice, cli::next_line(stdout)).await {
+                Some(Some(line)) => {
+                    if let Some(link) = cli::find_link(&line) {
+                        printed = Some(link.to_owned());
+                        opened_grace = Some(Duration::from_secs(3));
+                    }
+                    cli::remember(last, &line);
+                    false
                 }
-                cli::remember(last, &line);
+                Some(None) => {
+                    stdout_open = false;
+                    false
+                }
+                None => true,
             }
-            Some(None) => break,
-            None => {}
+        } else {
+            hofund_plugin_sdk::sleep(slice).await;
+            true
+        };
+        if timed_out {
+            remain = remain.saturating_sub(slice);
+            if let Some(grace) = opened_grace.as_mut() {
+                *grace = grace.saturating_sub(slice);
+            }
         }
     }
-    printed
 }
 
 /// What a pasted code must look like: `code#state`, with no spaces.

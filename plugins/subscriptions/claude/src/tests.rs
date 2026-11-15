@@ -343,7 +343,43 @@ fn email_comes_from_auth_status_when_the_profile_has_none() {
     let spawns = host.process().piped_spawns();
     assert_eq!(spawns.len(), 2);
     assert_eq!(spawns[1].arg_strings(), ["auth", "status", "--json"]);
-    assert_eq!(spawns[1].env, spawns[0].env);
+    let signin = sign_in_dir(&host);
+    assert!(
+        spawns[0]
+            .env
+            .iter()
+            .any(|(k, v)| k == cli::CONFIG_DIR_VAR && v == signin.as_os_str()),
+        "{:?}",
+        spawns[0].env
+    );
+    assert!(
+        spawns[1]
+            .env
+            .iter()
+            .any(|(k, v)| k == cli::CONFIG_DIR_VAR && v == signin.as_os_str()),
+        "{:?}",
+        spawns[1].env
+    );
+    assert!(
+        spawns[0].env.iter().any(|(k, _)| k == "BROWSER"),
+        "login sets BROWSER"
+    );
+    assert!(
+        spawns[0]
+            .env
+            .iter()
+            .any(|(k, _)| k == hofund_plugin_sdk::opened_url::OPENED_URL_ENV),
+        "login sets the opened-URL relay"
+    );
+    // `auth status` must share the sign-in config dir, but must not open a
+    // browser or write the relay file.
+    assert!(!spawns[1].env.iter().any(|(k, _)| k == "BROWSER"));
+    assert!(
+        !spawns[1]
+            .env
+            .iter()
+            .any(|(k, _)| k == hofund_plugin_sdk::opened_url::OPENED_URL_ENV)
+    );
     let blob = stored(&host, &id);
     let profile = creds::Profile::parse(blob.text(creds::PROFILE).expect("profile"));
     assert_eq!(profile.email(), Some(EMAIL));
