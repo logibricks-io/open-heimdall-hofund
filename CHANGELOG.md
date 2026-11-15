@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   metadata on each account secret, including `planName` typography and string
   `userId`, beside top-level `user_id`, access, `system_id`, org, plan, login,
   name, and `models_json`. Recorded fixtures only (`r56c_*`). Refs R-56.
+- R-51e: `QuotaWindow` and `QuotaPoll` carry vendor credit units, bonus lapse,
+  and window span; the daemon fills quota card `plan` and `user` from
+  `Subscription::quota_poll`. The Kiro subscription plugin maps `usageOf` plan
+  title, email, floats, bonus `runsOut`, and the 30-day month span (`r51e_k_*`,
+  recorded fixtures). Refs R-51.
 - R-5: the Claude Code subscription plugin keeps per-account allowance from
   stream-json `rate_limit_event` envelopes (`limits.rs`): `unifiedWindows` and
   the active `rateLimitType`, one-hour stand-in when `/usage` is away, merge

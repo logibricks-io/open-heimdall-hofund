@@ -98,7 +98,7 @@ impl Account {
 }
 
 /// One quota window returned by a poll.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub struct QuotaWindow {
     name: String,
@@ -110,6 +110,64 @@ pub struct QuotaWindow {
     models: Vec<String>,
     excluded_models: Vec<String>,
     display: String,
+    provider_amount: Option<f64>,
+    provider_limit: Option<f64>,
+    unit: String,
+    runs_out_at: Option<SystemTime>,
+    runs_out: Option<f64>,
+    window_span: Option<Duration>,
+}
+
+/// Account-level labels and windows from one quota poll.
+#[derive(Clone, Debug, Default, PartialEq)]
+#[non_exhaustive]
+pub struct QuotaPoll {
+    windows: Vec<QuotaWindow>,
+    plan: String,
+    user: String,
+}
+
+impl QuotaPoll {
+    /// Windows only, with empty plan and user labels.
+    #[must_use]
+    pub fn from_windows(windows: Vec<QuotaWindow>) -> Self {
+        Self {
+            windows,
+            ..Self::default()
+        }
+    }
+
+    /// Quota windows for routing and display.
+    #[must_use]
+    pub fn windows(&self) -> &[QuotaWindow] {
+        &self.windows
+    }
+
+    /// Plan title when the vendor reports one.
+    #[must_use]
+    pub fn plan(&self) -> &str {
+        &self.plan
+    }
+
+    /// Account label, often an email, when the vendor reports one.
+    #[must_use]
+    pub fn user(&self) -> &str {
+        &self.user
+    }
+
+    /// Sets the plan title on the poll result.
+    #[must_use]
+    pub fn with_plan(mut self, plan: impl Into<String>) -> Self {
+        self.plan = plan.into();
+        self
+    }
+
+    /// Sets the account label on the poll result.
+    #[must_use]
+    pub fn with_user(mut self, user: impl Into<String>) -> Self {
+        self.user = user.into();
+        self
+    }
 }
 
 impl QuotaWindow {
@@ -144,6 +202,12 @@ impl QuotaWindow {
             models: Vec::new(),
             excluded_models: Vec::new(),
             display: String::new(),
+            provider_amount: None,
+            provider_limit: None,
+            unit: String::new(),
+            runs_out_at: None,
+            runs_out: None,
+            window_span: None,
         })
     }
 
@@ -183,6 +247,66 @@ impl QuotaWindow {
     pub fn with_display(mut self, display: impl Into<String>) -> Self {
         self.display = display.into();
         self
+    }
+
+    /// Sets the vendor's own amount, cap, and unit for quota cards.
+    #[must_use]
+    pub fn with_provider_count(mut self, amount: f64, limit: f64, unit: impl Into<String>) -> Self {
+        self.provider_amount = Some(amount);
+        self.provider_limit = Some(limit);
+        self.unit = unit.into();
+        self
+    }
+
+    /// Sets when a non-resetting portion lapses and how much is lost then.
+    #[must_use]
+    pub const fn with_runs_out(mut self, at: Option<SystemTime>, remaining: Option<f64>) -> Self {
+        self.runs_out_at = at;
+        self.runs_out = remaining;
+        self
+    }
+
+    /// Sets the known window length for routing and history.
+    #[must_use]
+    pub const fn with_window_span(mut self, span: Duration) -> Self {
+        self.window_span = Some(span);
+        self
+    }
+
+    /// Amount used in the vendor's unit, when reported.
+    #[must_use]
+    pub const fn provider_amount(&self) -> Option<f64> {
+        self.provider_amount
+    }
+
+    /// Cap in the vendor's unit, when reported.
+    #[must_use]
+    pub const fn provider_limit(&self) -> Option<f64> {
+        self.provider_limit
+    }
+
+    /// Unit for [`Self::provider_amount`] and [`Self::provider_limit`].
+    #[must_use]
+    pub fn unit(&self) -> &str {
+        &self.unit
+    }
+
+    /// When a non-resetting portion ends.
+    #[must_use]
+    pub const fn runs_out_at(&self) -> Option<SystemTime> {
+        self.runs_out_at
+    }
+
+    /// How much is lost at [`Self::runs_out_at`].
+    #[must_use]
+    pub const fn runs_out(&self) -> Option<f64> {
+        self.runs_out
+    }
+
+    /// Window length, when the vendor reports one.
+    #[must_use]
+    pub const fn window_span(&self) -> Option<Duration> {
+        self.window_span
     }
 
     /// Whether an exhausted window stops routing to the account.
