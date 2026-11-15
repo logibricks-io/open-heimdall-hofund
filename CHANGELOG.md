@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `upstream.rs`), and records busy/queue fixtures (`r54e_*`,
   `fixtures/queued-10605.json`). Official fallback short-circuit when another
   routing candidate follows, and recorded poll/resend tests, remain. Refs R-54.
+- A-3a: the daemon coordinates Claude daily warm-up and model connectivity
+  tests through one Claude Code `-p` send (`warmup/claude.rs`,
+  `Subscription::warmup_probe`, `account::ask` with
+  `disableDeepLinkRegistration` settings). Successful warms stale-mark quota
+  reads for routing. Tests `a3a_28` through `a3a_30`. Refs A-3.
 - R-53b: audited the frozen reference for Cline subscription import (row b);
   key-plan and plugin credentials enter only through API-key or device sign-in,
   with no official home credential-file import to port. Subscription parity row
