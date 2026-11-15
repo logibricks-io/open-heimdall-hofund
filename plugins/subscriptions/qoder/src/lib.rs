@@ -339,4 +339,6 @@ mod r54c_tests;
 #[cfg(test)]
 mod r54d_tests;
 #[cfg(test)]
+mod r54e_queue_tests;
+#[cfg(test)]
 mod tests;
