@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with no official home credential-file import to port. Subscription parity row
   b is Done; vendor letter tally is 13 Done / 3 Partial / 0 Missing / 3 N/A.
   Refs R-53.
+- R-56b: the Zed subscription plugin imports single `zedCreds` JSON, built-in
+  `logins.json` side-login rows, and official mover OAuth envelopes without
+  calling live whoami. Lapsed or unreadable rows are skipped without dropping
+  siblings. Recorded fixtures only (`r56b_*`). Refs R-56.
 - R-48j: the GitHub Copilot subscription plugin records execute fixtures that
   send Chat `reasoning_effort` and Responses `reasoning.effort` from
   `params.effort`, decode Chat `reasoning_content` and Responses `reasoning`

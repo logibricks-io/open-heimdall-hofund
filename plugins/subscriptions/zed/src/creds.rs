@@ -94,24 +94,58 @@ pub(crate) fn label(credential: &Credential) -> String {
     }
 }
 
-pub(crate) fn parse_json(text: &str) -> Result<Credential, PluginError> {
-    let root: Value =
-        json::from_str(text.trim()).map_err(|_| PluginError::auth("credential JSON is invalid"))?;
-    let map = root
-        .as_object()
-        .ok_or_else(|| PluginError::auth("credential JSON must be an object"))?;
+#[derive(Clone, Debug)]
+pub(crate) struct CredentialParts {
+    pub user_id: String,
+    pub access: String,
+    pub system_id: String,
+    pub org: String,
+    pub login: String,
+    pub name: String,
+    pub plan: String,
+    pub models: Value,
+}
+
+pub(crate) fn assemble(parts: CredentialParts) -> Result<Credential, PluginError> {
+    if parts.user_id.is_empty() {
+        return Err(PluginError::auth("credential JSON has no userId"));
+    }
+    if parts.access.is_empty() {
+        return Err(PluginError::auth("credential JSON has no access token"));
+    }
+    Ok(Credential {
+        user_id: parts.user_id,
+        access: SecretString::from(parts.access),
+        system_id: parts.system_id,
+        org: parts.org,
+        login: parts.login,
+        name: parts.name,
+        plan: parts.plan,
+        models_json: parts.models.to_string(),
+    })
+}
+
+pub(crate) fn credential_from_zed_creds_map(
+    map: &json::Map<String, Value>,
+) -> Result<Credential, PluginError> {
     let user_id = field(map, "userId").or_else(|_| field(map, "user_id"))?;
     let access = field(map, "accessToken").or_else(|_| field(map, "access"))?;
     let models = map.get("models").cloned().unwrap_or(Value::Array(vec![]));
-    Ok(Credential {
+    let org = optional(map, "organizationId");
+    let org = if org.is_empty() {
+        optional(map, "org")
+    } else {
+        org
+    };
+    assemble(CredentialParts {
         user_id,
-        access: SecretString::from(access),
+        access,
         system_id: optional(map, "systemId"),
-        org: optional(map, "organizationId"),
+        org,
         login: optional(map, "login"),
         name: optional(map, "name"),
         plan: optional(map, "plan"),
-        models_json: models.to_string(),
+        models,
     })
 }
 
