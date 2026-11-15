@@ -320,6 +320,24 @@ pub trait Subscription: Send + Sync + 'static {
         ))
     }
 
+    /// Whether `account` belongs on a route or listing named `routing_id`.
+    ///
+    /// Plugins with several routing labels over one store, such as Qoder global
+    /// and China, filter here. The default accepts every stored account.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when the membership check cannot run.
+    async fn serves_routing_label(
+        &self,
+        routing_id: &str,
+        account: &AccountId,
+        host: &HostContext,
+    ) -> Result<bool, PluginError> {
+        let _ = (routing_id, account, host);
+        Ok(true)
+    }
+
     /// Runs one-shot import work beside the config directory before accounts are listed.
     ///
     /// # Errors

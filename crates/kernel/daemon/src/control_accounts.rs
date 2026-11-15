@@ -147,7 +147,7 @@ impl AccountOps {
             label: request.label,
             site: request.site,
         };
-        let ctx = sign_in::sign_in_ctx(entry.instance.id(), &options)
+        let ctx = sign_in::sign_in_ctx(&entry.id, &options)
             .map_err(|_| invalid("sign-in options were rejected"))?;
         let session_id = ctx.session().to_owned();
         let mut sessions = self.sessions.lock().await;

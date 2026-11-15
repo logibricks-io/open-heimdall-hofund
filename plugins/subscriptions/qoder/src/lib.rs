@@ -23,6 +23,7 @@ mod pat;
 mod queue;
 mod quota;
 mod refresh;
+mod routing;
 mod shape;
 mod sign_in;
 mod site;
@@ -231,6 +232,15 @@ impl Subscription for Qoder {
         Ok(())
     }
 
+    async fn serves_routing_label(
+        &self,
+        routing_id: &str,
+        account: &AccountId,
+        host: &HostContext,
+    ) -> Result<bool, PluginError> {
+        routing::serves_routing_label(routing_id, account, host).await
+    }
+
     async fn account_status(
         &self,
         account: &AccountId,
@@ -340,5 +350,7 @@ mod r54c_tests;
 mod r54d_tests;
 #[cfg(test)]
 mod r54e_queue_tests;
+#[cfg(test)]
+mod r54f_tests;
 #[cfg(test)]
 mod tests;
