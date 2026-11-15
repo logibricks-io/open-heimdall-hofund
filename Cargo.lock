@@ -3027,7 +3027,6 @@ version = "0.1.0"
 dependencies = [
  "hofund-kit-subscription",
  "hofund-plugin-api",
- "hofund-plugin-registry",
  "hofund-plugin-sdk",
  "tempfile",
 ]
