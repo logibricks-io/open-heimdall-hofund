@@ -8,6 +8,7 @@
 //! Claude Code are not served yet.
 
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -34,6 +35,7 @@ mod launcher;
 mod limits;
 mod lock;
 mod models;
+mod proxy;
 mod run_lock;
 mod setup_token;
 mod upstream;
@@ -275,14 +277,29 @@ fn remove_dir(dir: &Path) {
 /// Starts `claude auth login` in `dir` and reads up to its link.
 async fn start_login(
     host: &HostContext,
+    ctx: &SignInCtx,
     command: launcher::ClaudeCommand,
     dir: PathBuf,
 ) -> Result<(Pending, String), PluginError> {
-    let request = command.spawn_request(&cli::LOGIN_ARGS, &dir, &[])?;
+    let opened = dir.join(".opened-url");
+    let browser = browser_program(host)?;
+    let mut extra = vec![
+        (OsString::from("BROWSER"), browser.as_os_str().to_owned()),
+        (
+            OsString::from(hofund_plugin_sdk::opened_url::OPENED_URL_ENV),
+            opened.as_os_str().to_owned(),
+        ),
+    ];
+    extra = proxy::bun_proxy_env(proxy::sign_in_choice(ctx), &command, &extra)?;
+    let request = command.spawn_request(&cli::LOGIN_ARGS, &dir, &extra)?;
     let child = host.spawn_process().spawn_piped(&request).await?;
     let mut stdout = child.stdout()?;
     let mut last = String::new();
-    let link = hofund_plugin_sdk::timeout(LINK_WAIT, cli::read_link(&mut stdout, &mut last)).await;
+    let link = hofund_plugin_sdk::timeout(
+        LINK_WAIT,
+        read_sign_in_link(&opened, &mut stdout, &mut last),
+    )
+    .await;
     let Some(Some(link)) = link else {
         return Err(PluginError::auth(format!(
             "Claude Code did not print a sign-in link; {}",
@@ -302,6 +319,96 @@ async fn start_login(
     ))
 }
 
+#[cfg(test)]
+static TEST_BROWSER: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+/// Test hook: use this path as `BROWSER` during sign-in.
+#[cfg(test)]
+pub(crate) fn set_test_browser(path: Option<PathBuf>) {
+    *TEST_BROWSER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = path;
+}
+
+fn browser_program(host: &HostContext) -> Result<PathBuf, PluginError> {
+    #[cfg(test)]
+    if let Some(path) = TEST_BROWSER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+    {
+        return Ok(path);
+    }
+    host.bridge_mcp_helper()
+        .map(|request| request.program().to_path_buf())
+}
+
+/// Reads a `https://` URL from the opened-URL relay file, if one is there.
+fn opened_https(opened: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(opened).ok()?;
+    let text = text.trim();
+    (text.starts_with("https://") && text.len() > "https://".len()).then(|| text.to_owned())
+}
+
+/// Polls the opened-URL file and stdout, like the reference `startClaudeSignIn` loop.
+///
+/// The opened-URL file is preferred when it appears. A link printed on stdout
+/// is kept, and the file is given a short grace period on the same Tokio clock
+/// as [`LINK_WAIT`] (via [`hofund_plugin_sdk::timeout`] / [`hofund_plugin_sdk::sleep`]).
+/// Mixing `std::time::Instant` with those waits used to burn the outer wait
+/// under a paused test clock and drop the printed link.
+async fn read_sign_in_link(
+    opened: &Path,
+    stdout: &mut BodyStream,
+    last: &mut String,
+) -> Option<String> {
+    let mut printed: Option<String> = None;
+    let mut remain = LINK_WAIT;
+    let mut opened_grace: Option<Duration> = None;
+    let mut stdout_open = true;
+    loop {
+        if let Some(link) = opened_https(opened) {
+            return Some(link);
+        }
+        if remain.is_zero() || opened_grace == Some(Duration::ZERO) {
+            return printed;
+        }
+        let mut slice = Duration::from_millis(50).min(remain);
+        if let Some(grace) = opened_grace {
+            slice = slice.min(grace);
+        }
+        if slice.is_zero() {
+            return printed;
+        }
+        let timed_out = if stdout_open {
+            match hofund_plugin_sdk::timeout(slice, cli::next_line(stdout)).await {
+                Some(Some(line)) => {
+                    if let Some(link) = cli::find_link(&line) {
+                        printed = Some(link.to_owned());
+                        opened_grace = Some(Duration::from_secs(3));
+                    }
+                    cli::remember(last, &line);
+                    false
+                }
+                Some(None) => {
+                    stdout_open = false;
+                    false
+                }
+                None => true,
+            }
+        } else {
+            hofund_plugin_sdk::sleep(slice).await;
+            true
+        };
+        if timed_out {
+            remain = remain.saturating_sub(slice);
+            if let Some(grace) = opened_grace.as_mut() {
+                *grace = grace.saturating_sub(slice);
+            }
+        }
+    }
+}
+
 /// What a pasted code must look like: `code#state`, with no spaces.
 fn pasted_code(text: &str) -> Option<&str> {
     let code = text.trim();
@@ -318,6 +425,7 @@ async fn finish_login(
     host: &HostContext,
     pending: &mut Pending,
     proof: SignInProof,
+    ctx: &SignInCtx,
 ) -> Result<(AccountId, String, SecretObject), PluginError> {
     let wait = match &proof {
         SignInProof::Token(code) => {
@@ -367,14 +475,18 @@ async fn finish_login(
         .ok_or_else(|| PluginError::auth("Claude Code signed in but did not say which account"))?
         .to_owned();
     let id = profile.account_id()?;
-    Ok((id, label, signed_in_blob(&credentials, &profile)))
+    Ok((id, label, signed_in_blob(&credentials, &profile, ctx)))
 }
 
-fn signed_in_blob(credentials: &Credentials, profile: &Profile) -> SecretObject {
+fn signed_in_blob(credentials: &Credentials, profile: &Profile, ctx: &SignInCtx) -> SecretObject {
     let blob = creds::blob(credentials, profile);
-    match &credentials.plan {
+    let blob = match &credentials.plan {
         Some(plan) => blob.with_text("plan", plan),
         None => blob,
+    };
+    match proxy::sign_in_choice(ctx) {
+        Some(choice) if !choice.trim().is_empty() => blob.with_text(proxy::PROXY_KEY, choice),
+        _ => blob,
     }
 }
 
@@ -400,7 +512,7 @@ impl Subscription for Claude {
         drop(self.take_pending(ctx.session()));
         remove_dir(&dir);
         creds::private_dir(&dir)?;
-        let (pending, link) = match start_login(host, command, dir.clone()).await {
+        let (pending, link) = match start_login(host, ctx, command, dir.clone()).await {
             Ok(started) => started,
             Err(error) => {
                 remove_dir(&dir);
@@ -450,7 +562,7 @@ impl Subscription for Claude {
                 "no Claude Code sign-in is in progress for this session",
             ));
         };
-        let finished = finish_login(host, &mut pending, proof).await;
+        let finished = finish_login(host, &mut pending, proof, ctx).await;
         let dir = pending.dir.clone();
         drop(pending);
         remove_dir(&dir);

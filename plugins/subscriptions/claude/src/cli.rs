@@ -94,6 +94,7 @@ pub(crate) async fn next_line(stdout: &mut BodyStream) -> Option<String> {
 
 /// Reads until a line has an `https://` link and returns the link. `None`
 /// when the program exited first. `last` keeps the last other line.
+#[allow(dead_code)]
 pub(crate) async fn read_link(stdout: &mut BodyStream, last: &mut String) -> Option<String> {
     while let Some(line) = next_line(stdout).await {
         if let Some(link) = find_link(&line) {
@@ -135,7 +136,7 @@ pub(crate) async fn collect(stdout: &mut BodyStream) -> String {
     text
 }
 
-fn remember(last: &mut String, line: &str) {
+pub(crate) fn remember(last: &mut String, line: &str) {
     if line.is_empty() {
         return;
     }
