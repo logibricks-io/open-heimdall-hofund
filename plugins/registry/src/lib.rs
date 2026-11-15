@@ -20,6 +20,7 @@ mod builtin;
 #[allow(dead_code)]
 mod check;
 mod select;
+mod subscription_routing;
 
 mod generated {
     include!(concat!(env!("OUT_DIR"), "/registry.rs"));
@@ -75,6 +76,7 @@ pub use generated::{
 pub use select::{
     SelectError, Selection, model_plan_of, protocol_for, resolve_region, select, wire_for_protocol,
 };
+pub use subscription_routing::{routing_labels, storage_id};
 
 /// The linked vendor plan reader, when the plan-quota feature is enabled.
 #[cfg(feature = "plan-quota")]
@@ -312,18 +314,34 @@ fn subscription_in(
 }
 
 /// The subscription factory for `id`, when that subscription plugin is linked.
+///
+/// Config ids that only add a routing label, such as `qoder-cn`, resolve to the
+/// same factory as their storage plugin.
 #[must_use]
 pub fn subscription(id: &str) -> Option<Arc<dyn DynSubscriptionFactory>> {
     subscription_in(&contributions(), id)
+        .or_else(|| subscription_in(&contributions(), storage_id(id)))
 }
 
 /// Subscription plugin ids, in contribution order.
+///
+/// Routing labels such as `qoder-cn` follow their storage plugin in the list.
 #[must_use]
 pub fn subscription_ids() -> Vec<&'static str> {
-    contributions()
+    let mut ids: Vec<&'static str> = contributions()
         .into_iter()
         .filter_map(|(kind, name, _)| (kind == PluginKind::Subscription).then_some(name))
-        .collect()
+        .collect();
+    for (label, storage) in routing_labels() {
+        if ids.contains(label) || !ids.contains(storage) {
+            continue;
+        }
+        let Some(position) = ids.iter().position(|id| *id == *storage) else {
+            continue;
+        };
+        ids.insert(position + 1, label);
+    }
+    ids
 }
 
 fn surface_in(
@@ -369,7 +387,8 @@ mod tests {
     use hofund_plugin_api::{CredentialStyle, ListKind, PluginKind, ProtocolId};
 
     use super::{
-        match_route, subscription, subscription_in, surface, surface_in, upstream, upstream_in,
+        match_route, subscription, subscription_ids, subscription_in, surface, surface_in,
+        upstream, upstream_in,
     };
 
     #[test]
@@ -399,6 +418,14 @@ mod tests {
         )];
         assert!(surface_in(&non_inbound, "shared").is_none());
         assert!(surface_in(&inbound, "shared").is_some());
+    }
+
+    #[cfg(feature = "qoder")]
+    #[test]
+    fn qoder_cn_routing_label_resolves_qoder_factory() {
+        let factory = subscription("qoder-cn").expect("qoder-cn factory");
+        assert_eq!(factory.spec().plugin().as_str(), "qoder");
+        assert!(subscription_ids().contains(&"qoder-cn"));
     }
 
     #[test]

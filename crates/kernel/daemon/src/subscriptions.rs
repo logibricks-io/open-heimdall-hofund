@@ -51,7 +51,10 @@ pub(crate) type Subscriptions = BTreeMap<String, Arc<SubscriptionState>>;
 /// One configured subscription and its current members.
 pub(crate) struct SubscriptionState {
     pub(crate) config: hofund_config::Subscription,
+    /// Config routing label on member ids and quota cards.
     plugin: PluginId,
+    /// Plugin id that owns the shared account store.
+    store_plugin: PluginId,
     pub(crate) instance: Arc<dyn Subscription>,
     pub(crate) host: HostContext,
     root: PathBuf,
@@ -115,6 +118,8 @@ pub(crate) fn build(
             ))
         })?;
         let plugin = PluginId::try_from(subscription.id.as_str()).map_err(show)?;
+        let store_id = hofund_plugin_registry::storage_id(&subscription.id);
+        let store_plugin = PluginId::try_from(store_id).map_err(show)?;
         let mut raw = RawTable::new();
         for (key, value) in &subscription.options {
             raw.insert(
@@ -127,7 +132,7 @@ pub(crate) fn build(
         }
         let host = hofund_plugin_host::runtime_host_for(
             PluginKind::Subscription,
-            plugin.clone(),
+            store_plugin.clone(),
             String::new(),
             root.clone(),
             limits,
@@ -145,6 +150,7 @@ pub(crate) fn build(
             Arc::new(SubscriptionState {
                 config: subscription.clone(),
                 plugin,
+                store_plugin,
                 instance,
                 host,
                 root: root.clone(),
@@ -213,12 +219,30 @@ impl SubscriptionState {
                 return false;
             }
         };
+        let routing_id = self.config.id.as_str();
         let mut ready = Vec::new();
         for account in accounts {
             if let Accounts::One(id) = &self.config.accounts
                 && account.id().as_str() != id
             {
                 continue;
+            }
+            match self
+                .instance
+                .serves_routing_label(routing_id, account.id(), &self.host)
+                .await
+            {
+                Ok(false) => continue,
+                Ok(true) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        subscription = %self.config.id,
+                        account = %account.id(),
+                        %error,
+                        "routing label check failed; leaving the account out"
+                    );
+                    continue;
+                }
             }
             match self.instance.account_status(account.id(), &self.host).await {
                 Ok(AccountStatus::Ready) => ready.push(account),
@@ -277,7 +301,7 @@ impl SubscriptionState {
         }
         let host = hofund_plugin_host::runtime_host_with_observe_for(
             PluginKind::Subscription,
-            self.plugin.clone(),
+            self.store_plugin.clone(),
             String::new(),
             self.root.clone(),
             self.limits,
@@ -615,6 +639,10 @@ impl ModelPolls {
         asked
     }
 }
+
+#[cfg(test)]
+#[path = "subscriptions_r54f_qoder_tests.rs"]
+mod r54f_qoder_tests;
 
 #[cfg(test)]
 mod tests {

@@ -35,10 +35,7 @@ pub(crate) fn start(
     host: &HostContext,
     endpoints: &Endpoints,
 ) -> Result<(Pending, SignInChallenge), PluginError> {
-    let site_kind = match ctx.option("site") {
-        Some("qoder-cn" | "cn" | "china") => Site::China,
-        _ => Site::Global,
-    };
+    let site_kind = crate::routing::sign_in_site(ctx);
     let instance = ctx.option("vpc").unwrap_or("");
     let site = endpoints.resolve_for(site_kind, instance)?;
     let pkce = Pkce::generate_with_random_bytes(64)?;

@@ -171,10 +171,13 @@ impl DaemonRegistry for RegistryAdapter {
     }
 
     fn subscription_max_accounts(&self, id: &str) -> u64 {
-        hofund_plugin_registry::declared_max_accounts("subscription", id).unwrap_or_else(|| {
-            hofund_plugin_registry::subscription(id)
-                .map_or(0, |factory| factory.spec().max_accounts())
-        })
+        let storage = hofund_plugin_registry::storage_id(id);
+        hofund_plugin_registry::declared_max_accounts("subscription", storage).unwrap_or_else(
+            || {
+                hofund_plugin_registry::subscription(id)
+                    .map_or(0, |factory| factory.spec().max_accounts())
+            },
+        )
     }
 
     fn subscription_ids(&self) -> Vec<&'static str> {
