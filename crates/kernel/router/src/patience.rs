@@ -290,9 +290,20 @@ mod tests {
             Some(Duration::from_secs(16))
         );
         assert_eq!(pause(&mut [], 0, start, Some(budget), start), None);
+        let mut inherited = [Busy {
+            index: 0,
+            ready: start,
+            member_patience: PoolMemberPatience::Inherited,
+        }];
+        assert_eq!(
+            pause(&mut inherited, 0, start, Some(Duration::ZERO), start),
+            None,
+            "a zero pool fallback stops inherited members"
+        );
         assert_eq!(
             pause(&mut ready, 0, start, Some(Duration::ZERO), start),
-            None
+            Some(Duration::from_secs(2)),
+            "explicit member patience still waits when the pool fallback is zero"
         );
     }
 
