@@ -28,8 +28,8 @@ pub use allow::{
     trust_proxy_env,
 };
 pub use groups_write::{
-    edit_group_create, edit_group_delete, edit_group_patch, edit_group_restore, group_id_from_name,
-    validate_group_rules,
+    edit_group_copy, edit_group_create, edit_group_delete, edit_group_patch, edit_group_restore,
+    group_id_from_name, validate_group_rules,
 };
 pub use provider_rename::{
     GATEWAY_PROVIDER_ID, GROUP_ROUTE_PREFIX, edit_provider_rename, provider_id_valid, renamed_ref,
@@ -891,9 +891,11 @@ pub struct Route {
     /// Providers tried in order, each with an optional upstream model name.
     pub upstreams: Vec<Upstream>,
     /// How long a request to this route waits for busy members to come
-    /// back. Members are judged by the route's patience, not their
-    /// provider's, which applies only to a direct request to that provider.
+    /// back. A nested member uses the innermost group along its unit chain
+    /// that sets `patience`; otherwise the asked route's patience applies.
     pub patience: Patience,
+    /// Whether `patience` was written in config rather than defaulting.
+    pub patience_explicit: bool,
     /// Whether a rate-limited member with quota left moves behind the others.
     pub sink: bool,
 }
@@ -1450,6 +1452,7 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
         let routing = validated_routing(&route)?;
         let stays_explicit = route.stays.is_some();
         let stays = route.stays.unwrap_or_default();
+        let patience_explicit = route.patience.is_some();
         let patience = patience_of("route", &route.model, route.patience.as_ref())?;
         let mut upstreams = Vec::new();
         for upstream in route.upstreams {
@@ -1494,6 +1497,7 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
             stays_explicit,
             upstreams,
             patience,
+            patience_explicit,
             sink: route.sink,
         });
     }

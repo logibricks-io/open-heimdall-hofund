@@ -29,29 +29,30 @@ use hofund_control_proto::{
     CatalogSyncRequest, CatalogSyncResponse, CheckinListResponse, CheckinRunRequest,
     CheckinRunResponse, ConfigApplyRequest, ConfigResponse, ConfigValidateRequest,
     ConfigValidationResponse, ControlError, ControlErrorKind, ErrorEnvelope, GatewayKeyRequest,
-    GatewayKeyResponse, GatewayKeyRestoreRequest, GroupCreateRequest, GroupDeleteRequest,
-    GroupDeleteResponse, GroupListResponse, GroupMemberCandidatesResponse, GroupPatchRequest,
-    GroupRestoreRequest, GroupWriteResponse, HealthResponse, LibraryResponse, LogTailQuery,
-    LogTailResponse, MAX_ID_BYTES, MAX_REQUEST_BODY_BYTES, ModelListResponse, PicksResponse,
-    PicksSetRequest, PresetListResponse, ProfileDeleteRequest, ProfileDetailResponse,
-    ProfileListResponse, ProfileRenameRequest, ProfileSaveRequest, ProfileSwitchRequest,
-    ProfileSwitchResponse, ProviderCreateRequest, ProviderDeleteRequest, ProviderDeleteResponse,
-    ProviderKeyRequest, ProviderKeysResponse, ProviderListResponse, ProviderPatchRequest,
-    ProviderRenameRequest, ProviderRenameResponse, ProviderTestRequest, ProviderTestResponse,
-    ProviderWriteResponse, QuotaAlertsResponse, QuotaAlertsSetRequest, QuotaAlertsSetResponse,
-    QuotaCreditsModesResponse, QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryQuery,
-    QuotaHistoryResponse, QuotaQuery, QuotaResponse, ReloadRequest, RouteListResponse,
-    RouteModelListResponse, RouteQuery, SessionCarryRequest, SessionCarryResponse,
-    SessionDetailResponse, SessionListQuery, SessionListResponse, SessionManageQuery,
-    SessionManageResponse, SessionOverviewQuery, SessionOverviewResponse, SessionProgressResponse,
-    SessionReadsPatchRequest, SessionReadsResponse, SessionRouteResponse, SessionSearchQuery,
-    SessionSearchResponse, SessionStatsQuery, SessionStatsResponse, SessionTranscriptQuery,
-    SessionTranscriptResponse, SettingsPatchRequest, SettingsResponse, ShutdownRequest,
-    ShutdownResponse, SignInCancelRequest, SignInCancelResponse, SignInProofRequest,
-    SignInStartRequest, SignInStartResponse, SignInStatusResponse, StatusResponse,
-    SubscriptionListResponse, SubscriptionRefreshRequest, SubscriptionRefreshResponse,
-    TokenRotateRequest, TokenRotateResponse, Topic, UnroutedListResponse, UsageQuery,
-    UsageResponse, WarmupListResponse, WarmupRunRequest, WarmupRunResponse, decode_request,
+    GatewayKeyResponse, GatewayKeyRestoreRequest, GroupCopyRequest, GroupCreateRequest,
+    GroupDeleteRequest, GroupDeleteResponse, GroupListResponse, GroupMemberCandidatesResponse,
+    GroupPatchRequest, GroupRestoreRequest, GroupWriteResponse, HealthResponse, LibraryResponse,
+    LogTailQuery, LogTailResponse, MAX_ID_BYTES, MAX_REQUEST_BODY_BYTES, ModelListResponse,
+    PicksResponse, PicksSetRequest, PresetListResponse, ProfileDeleteRequest,
+    ProfileDetailResponse, ProfileListResponse, ProfileRenameRequest, ProfileSaveRequest,
+    ProfileSwitchRequest, ProfileSwitchResponse, ProviderCreateRequest, ProviderDeleteRequest,
+    ProviderDeleteResponse, ProviderKeyRequest, ProviderKeysResponse, ProviderListResponse,
+    ProviderPatchRequest, ProviderRenameRequest, ProviderRenameResponse, ProviderTestRequest,
+    ProviderTestResponse, ProviderWriteResponse, QuotaAlertsResponse, QuotaAlertsSetRequest,
+    QuotaAlertsSetResponse, QuotaCreditsModesResponse, QuotaCreditsSetRequest,
+    QuotaCreditsSetResponse, QuotaHistoryQuery, QuotaHistoryResponse, QuotaQuery, QuotaResponse,
+    ReloadRequest, RouteListResponse, RouteModelListResponse, RouteQuery, SessionCarryRequest,
+    SessionCarryResponse, SessionDetailResponse, SessionListQuery, SessionListResponse,
+    SessionManageQuery, SessionManageResponse, SessionOverviewQuery, SessionOverviewResponse,
+    SessionProgressResponse, SessionReadsPatchRequest, SessionReadsResponse, SessionRouteResponse,
+    SessionSearchQuery, SessionSearchResponse, SessionStatsQuery, SessionStatsResponse,
+    SessionTranscriptQuery, SessionTranscriptResponse, SettingsPatchRequest, SettingsResponse,
+    ShutdownRequest, ShutdownResponse, SignInCancelRequest, SignInCancelResponse,
+    SignInProofRequest, SignInStartRequest, SignInStartResponse, SignInStatusResponse,
+    StatusResponse, SubscriptionListResponse, SubscriptionRefreshRequest,
+    SubscriptionRefreshResponse, TokenRotateRequest, TokenRotateResponse, Topic,
+    UnroutedListResponse, UsageQuery, UsageResponse, WarmupListResponse, WarmupRunRequest,
+    WarmupRunResponse, decode_request,
 };
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
@@ -475,6 +476,21 @@ pub trait ControlState: Send + Sync {
         &self,
         _id: String,
         _request: GroupRestoreRequest,
+    ) -> ControlFuture<'_, GroupWriteResponse> {
+        Box::pin(async {
+            Err(ControlError::new(
+                ControlErrorKind::BadRequest,
+                "groups are not supported by this control state",
+                "control",
+            )
+            .into())
+        })
+    }
+    /// Duplicates one routing group.
+    fn copy_group(
+        &self,
+        _id: String,
+        _request: GroupCopyRequest,
     ) -> ControlFuture<'_, GroupWriteResponse> {
         Box::pin(async {
             Err(ControlError::new(
@@ -1159,6 +1175,7 @@ impl Control {
                     .head(method_not_allowed),
             )
             .route("/v1/hofund/groups/{id}/restore", post(restore_group))
+            .route("/v1/hofund/groups/{id}/copy", post(copy_group))
             .route(
                 "/v1/hofund/providers/{id}/keys",
                 get(provider_keys)
@@ -2104,6 +2121,22 @@ async fn restore_group(
         Err(failure) => return failure_response(failure),
     };
     operation_response!(state.control.state.restore_group(id, request).await)
+}
+
+async fn copy_group(
+    State(state): State<HttpState>,
+    id: Result<AxumPath<String>, PathRejection>,
+    body: Bytes,
+) -> Response {
+    let id = match path_id(id) {
+        Ok(id) => id,
+        Err(failure) => return failure_response(failure),
+    };
+    let request = match decode_body::<GroupCopyRequest>(&body) {
+        Ok(request) => request,
+        Err(failure) => return failure_response(failure),
+    };
+    operation_response!(state.control.state.copy_group(id, request).await)
 }
 
 async fn group_member_candidates(State(state): State<HttpState>) -> Response {

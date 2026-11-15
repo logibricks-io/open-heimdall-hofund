@@ -15,6 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   refresh, `/usage`, warm-up, and bridge runs; upstream resolves WSL when
   Windows has no native `claude`. Recorded tests `r5_59`, `r5_60`, and
   `netproxy` unit tests only. Refs R-5.
+- Group copy and innermost nested-group patience (matrix 4.3): `edit_group_copy`,
+  `POST /v1/hofund/groups/{id}/copy`, `hofund group copy`, and router replan
+  budgets keyed by explicit group `patience` on nested unit boundaries. Tests
+  `d1_group_copy_*`, `d1_control_group_copy_lists_after_source`, and
+  `d5_nested_group_patience`. Copy identity numbering considers live routes
+  only; hard-deleted group slugs may be reused. Refs 4.3.
 - R-18: G-7 `GET /v1/hofund/logs` tails the daemon log through the control
   listener (`log_tail.rs`, `control_routes` and daemon route tests). The TUI Logs page
   (`9`) scrolls, follows at one second, toggles request lines from events, and
