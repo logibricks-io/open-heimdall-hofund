@@ -3027,7 +3027,6 @@ dependencies = [
  "hofund-plugin-api",
  "hofund-plugin-sdk",
  "tempfile",
- "tokio",
 ]
 
 [[package]]

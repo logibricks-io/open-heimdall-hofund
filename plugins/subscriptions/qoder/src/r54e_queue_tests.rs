@@ -3,11 +3,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use hofund_kit_subscription::{TestHost, advance_time, block_on, block_on_paused};
+use hofund_kit_subscription::{TestHost, advance_until, block_on, block_on_paused};
 use hofund_plugin_api::{
-    ANOTHER_ROUTING_CANDIDATE, AccountId, Completion, PluginError, PluginId, PluginKind,
-    ProbeQuery, ProtocolId, RawTable, Request, SecretString, Subscription, SubscriptionFactory,
-    UpstreamProvider,
+    ANOTHER_ROUTING_CANDIDATE, AccountId, Completion, PluginId, PluginKind, ProbeQuery, ProtocolId,
+    RawTable, Request, SecretString, Subscription, SubscriptionFactory,
 };
 use hofund_plugin_sdk::json::{self, Value};
 
@@ -113,23 +112,6 @@ fn request_for(model: &str) -> Request {
     request
 }
 
-async fn execute_advancing(
-    upstream: Arc<dyn UpstreamProvider>,
-    request: Request,
-    step: Duration,
-) -> Result<Completion, PluginError> {
-    let execute = upstream.execute(request, ProtocolId::OPENAI_CHAT);
-    tokio::pin!(execute);
-    loop {
-        tokio::select! {
-            result = &mut execute => return result,
-            _ = tokio::time::sleep(Duration::from_millis(5)) => {
-                advance_time(step).await;
-            }
-        }
-    }
-}
-
 fn decode_chat_body(body: &[u8]) -> Value {
     let wire = std::str::from_utf8(body).expect("cosy utf-8");
     let plain = cosy::decode(wire).expect("cosy decode");
@@ -160,10 +142,12 @@ fn r54e_queue_poll_then_resend_succeeds() {
         let upstream = subscription(&host)
             .upstream(&id, host.context())
             .expect("upstream");
-        let completion =
-            execute_advancing(upstream, request_for("dfmodel"), Duration::from_secs(1))
-                .await
-                .expect("through queue");
+        let completion = advance_until(
+            upstream.execute(request_for("dfmodel"), ProtocolId::OPENAI_CHAT),
+            Duration::from_secs(1),
+        )
+        .await
+        .expect("through queue");
         assert!(matches!(completion, Completion::Unary(_)));
 
         let calls = host.http().calls();
@@ -215,10 +199,13 @@ fn r54e_queue_budget_exceeded_returns_queue_error_without_resend() {
         let upstream = subscription(&host)
             .upstream(&id, host.context())
             .expect("upstream");
-        let error = execute_advancing(upstream, request_for("dfmodel"), Duration::from_secs(30))
-            .await
-            .err()
-            .expect("budget ends the wait");
+        let error = advance_until(
+            upstream.execute(request_for("dfmodel"), ProtocolId::OPENAI_CHAT),
+            Duration::from_secs(30),
+        )
+        .await
+        .err()
+        .expect("budget ends the wait");
         assert_eq!(error.status(), Some(503));
         assert_eq!(error.retry_after(), Some(Duration::from_secs(30)));
         assert!(
