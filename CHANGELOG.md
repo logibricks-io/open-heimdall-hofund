@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- G-11: `GET /v1/hofund/usage` adds whole-period `series` (daily buckets) and
+  `by_model` totals on `UsageResponse` so the TUI Usage sparkline and model
+  table stay complete when `rows_truncated` is true; calendar periods fill
+  zero days. The Usage page draws both fields, keeps the agents table on
+  `by=agent`, and may reload usage after `request_finished`. Refs G-11.
 - R-5: Claude Code sign-in relays the auth page through `HOFUND_OPENED_URL`
   and the hofund CLI as `BROWSER`; `hofund_plugin_sdk::netproxy::env_for_bun_with`
   injects per-login HTTP/SOCKS proxies (loopback SOCKS bridge) on sign-in,

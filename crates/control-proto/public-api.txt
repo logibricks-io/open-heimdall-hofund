@@ -1338,6 +1338,12 @@ UsageBreakdownGroup.mean_ttft_ms
 UsageBreakdownGroup.output_tokens
 UsageBreakdownGroup.requests
 UsageBreakdownGroup.unpriced
+UsageDayPoint #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Serialize, Deserialize)
+UsageDayPoint.cost
+UsageDayPoint.date
+UsageDayPoint.input_tokens
+UsageDayPoint.output_tokens
+UsageDayPoint.requests
 UsagePeriod #[non_exhaustive] derives(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize) # [serde (rename_all = "snake_case")]
 UsagePeriod::All
 UsagePeriod::Day
@@ -1362,11 +1368,13 @@ UsageQuery::fn with_breakdown (period : UsagePeriod , by : UsageBreakdownBy) -> 
 UsageResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Serialize, Deserialize)
 UsageResponse.breakdown
 UsageResponse.breakdown_by
+UsageResponse.by_model
 UsageResponse.cny_per_usd
 UsageResponse.currency
 UsageResponse.period
 UsageResponse.rows
 UsageResponse.rows_truncated
+UsageResponse.series
 UsageResponse.totals
 UsageResponse.version
 UsageResponse.window_label

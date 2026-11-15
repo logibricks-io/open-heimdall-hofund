@@ -251,6 +251,51 @@ async fn usage_row_cap_keeps_totals_complete() {
     assert_eq!(all.totals.requests, 10_003);
     assert_eq!(all.totals.input_tokens, 10_003);
     assert_eq!(all.totals.output_tokens, 20_006);
+    assert!(
+        all.series.iter().map(|point| point.requests).sum::<u64>() >= 10_003,
+        "G-11 series must cover the whole period"
+    );
+    assert!(
+        all.by_model.iter().map(|group| group.requests).sum::<u64>() >= 10_003,
+        "G-11 by_model must cover the whole period"
+    );
+    support::shutdown(running).await;
+}
+
+#[tokio::test]
+async fn g11_period_summary_stays_complete_when_rows_are_capped() {
+    let dir = Scratch::new("g11-cap");
+    let now = now_unix();
+    {
+        let ledger = Ledger::open(&dir.0.join("usage.sqlite")).expect("ledger");
+        for index in 0..10_003_i64 {
+            let model = if index % 2 == 0 { "even" } else { "odd" };
+            ledger
+                .record(&row(now - 10_003 + index, model, Some(1), Some(2)))
+                .expect("row");
+        }
+    }
+    let running = start_tcp(&dir.0, CONFIG).await;
+    let body = decoded_usage(usage(&running, &dir.0, "?period=week&by=agent").await).await;
+    assert!(body.rows_truncated);
+    assert_eq!(
+        body.breakdown.iter().map(|g| g.requests).sum::<u64>(),
+        10_003
+    );
+    assert_eq!(body.series.len(), 7, "week view fills seven calendar days");
+    assert_eq!(
+        body.series.iter().map(|point| point.requests).sum::<u64>(),
+        10_003
+    );
+    assert_eq!(body.by_model.len(), 2);
+    assert_eq!(
+        body.by_model
+            .iter()
+            .map(|group| group.requests)
+            .sum::<u64>(),
+        10_003
+    );
+    assert!(!body.by_model.iter().any(|group| group.id == "m0"));
     support::shutdown(running).await;
 }
 

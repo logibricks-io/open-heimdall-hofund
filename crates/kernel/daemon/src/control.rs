@@ -32,9 +32,9 @@ use hofund_control_proto::{
     SessionReadsPatchRequest, SessionReadsResponse, SessionRouteResponse, SessionSearchQuery,
     SessionSearchResponse, SessionStatsQuery, SessionStatsResponse, SessionTranscriptResponse,
     ShutdownRequest, ShutdownResponse, ShutdownState, StatusResponse, TokenRotateRequest,
-    TokenRotateResponse, UnroutedListResponse, UsageBreakdownBy, UsageBreakdownGroup, UsagePeriod,
-    UsageQuery, UsageResponse, UsageRow, UsageTotals, WarmupAccountRow, WarmupListResponse,
-    WarmupRunRequest, WarmupRunResponse,
+    TokenRotateResponse, UnroutedListResponse, UsageBreakdownBy, UsageBreakdownGroup,
+    UsageDayPoint, UsagePeriod, UsageQuery, UsageResponse, UsageRow, UsageTotals, WarmupAccountRow,
+    WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
 };
 use hofund_control_proto::{
     ConfigApplyRequest, ConfigResponse, ConfigValidateRequest, ConfigValidationResponse,
@@ -1556,6 +1556,30 @@ impl ControlState for DaemonControl {
             } else {
                 USAGE_ROW_LIMIT
             };
+            let ledger_for_g11 = Arc::clone(&ledger);
+            let since_for_g11 = since;
+            let model_for_g11 = model_owned.clone();
+            let account_for_g11 = account_owned.clone();
+            let g11 = tokio::task::spawn_blocking(move || {
+                let model_filter = model_for_g11.as_deref();
+                let account_filter = account_for_g11.as_deref();
+                let day = ledger_for_g11.breakdown(
+                    since_for_g11,
+                    hofund_usage::BreakdownDimension::Day,
+                    model_filter,
+                    account_filter,
+                )?;
+                let model = ledger_for_g11.breakdown(
+                    since_for_g11,
+                    hofund_usage::BreakdownDimension::Model,
+                    model_filter,
+                    account_filter,
+                )?;
+                Ok::<_, hofund_usage::UsageError>((day, model))
+            })
+            .await
+            .map_err(|error| internal(format!("usage g11 task failed: {error}")))?
+            .map_err(|error| internal(format!("usage g11 failed: {error}")))?;
             if let Some(by) = query.by {
                 let dimension = breakdown_dimension(by)?;
                 let ledger_for_groups = Arc::clone(&ledger);
@@ -1603,14 +1627,22 @@ impl ControlState for DaemonControl {
                 .await
                 .map_err(|error| internal(format!("usage query task failed: {error}")))?
                 .map_err(|error| internal(format!("usage query failed: {error}")))?;
-                return Ok(usage_breakdown_response(
+                return Ok(attach_g11_period_summary(
+                    usage_breakdown_response(
+                        period,
+                        by,
+                        groups,
+                        summary,
+                        &all_rows,
+                        &config,
+                        window_label.clone(),
+                    ),
                     period,
-                    by,
-                    groups,
-                    summary,
+                    &window_label,
+                    g11.0,
+                    g11.1,
                     &all_rows,
                     &config,
-                    window_label,
                 ));
             }
             let ledger_for_summary = Arc::clone(&ledger);
@@ -1643,12 +1675,14 @@ impl ControlState for DaemonControl {
             .await
             .map_err(|error| internal(format!("usage query task failed: {error}")))?
             .map_err(|error| internal(format!("usage query failed: {error}")))?;
-            Ok::<_, ControlFailure>(usage_response(
+            Ok::<_, ControlFailure>(attach_g11_period_summary(
+                usage_response(period, summary, &all_rows, &config, window_label.clone()),
                 period,
-                summary,
+                &window_label,
+                g11.0,
+                g11.1,
                 &all_rows,
                 &config,
-                window_label,
             ))
         })
     }
@@ -2108,6 +2142,102 @@ fn usage_breakdown_response(
         })
         .collect();
     response
+}
+
+fn attach_g11_period_summary(
+    mut response: UsageResponse,
+    period: UsagePeriod,
+    window_label: &str,
+    day_groups: Vec<hofund_usage::BreakdownGroup>,
+    model_groups: Vec<hofund_usage::BreakdownGroup>,
+    all_rows: &[hofund_usage::Row],
+    config: &hofund_config::Config,
+) -> UsageResponse {
+    let cny_per_usd = config
+        .usage
+        .cny_per_usd
+        .filter(|rate| rate.is_finite() && *rate > 0.0)
+        .unwrap_or(hofund_usage::CnyRate::FALLBACK);
+    let convert = |usd: f64| match config.usage.currency {
+        hofund_config::UsageCurrency::Usd => usd,
+        hofund_config::UsageCurrency::Cny => usd * cny_per_usd,
+    };
+    response.series = usage_series(period, window_label, day_groups, convert);
+    response.by_model = model_groups
+        .into_iter()
+        .map(|group| {
+            let group_rows: Vec<_> = all_rows
+                .iter()
+                .filter(|row| row.model == group.id)
+                .cloned()
+                .collect();
+            let speed = hofund_usage::speed_totals(&group_rows);
+            let mut out = UsageBreakdownGroup::default();
+            out.id = group.id;
+            out.label = group.label;
+            out.requests = group.totals.requests;
+            out.input_tokens = group.totals.input_tokens;
+            out.output_tokens = group.totals.output_tokens;
+            out.cost = convert(group.totals.cost_usd);
+            out.unpriced = group.totals.unpriced;
+            out.mean_ttft_ms = speed.mean_ttft_ms;
+            out.mean_tokens_per_second = speed.mean_tokens_per_second;
+            out
+        })
+        .collect();
+    response
+}
+
+fn usage_series(
+    period: UsagePeriod,
+    window_label: &str,
+    day_groups: Vec<hofund_usage::BreakdownGroup>,
+    convert: impl Fn(f64) -> f64 + Copy,
+) -> Vec<UsageDayPoint> {
+    use chrono::{Days, Local, NaiveDate};
+    use std::collections::HashMap;
+
+    let by_date: HashMap<String, hofund_usage::BreakdownGroup> = day_groups
+        .iter()
+        .map(|group| (group.id.clone(), group.clone()))
+        .collect();
+    let point = |date: &str, group: Option<&hofund_usage::BreakdownGroup>| {
+        let mut out = UsageDayPoint::default();
+        out.date = date.to_owned();
+        if let Some(group) = group {
+            out.requests = group.totals.requests;
+            out.input_tokens = group.totals.input_tokens;
+            out.output_tokens = group.totals.output_tokens;
+            out.cost = convert(group.totals.cost_usd);
+        }
+        out
+    };
+    if window_label.is_empty() {
+        let back = match period {
+            UsagePeriod::Day => Some(0),
+            UsagePeriod::Week => Some(6),
+            UsagePeriod::Month => Some(29),
+            _ => None,
+        };
+        if let Some(back) = back {
+            let today = Local::now().date_naive();
+            let start = today.checked_sub_days(Days::new(back)).unwrap_or(today);
+            let mut out = Vec::new();
+            let mut day: NaiveDate = start;
+            while day <= today {
+                let key = day.to_string();
+                out.push(point(&key, by_date.get(&key)));
+                day = day.succ_opt().unwrap_or(day);
+            }
+            return out;
+        }
+    }
+    let mut dates: Vec<String> = by_date.keys().cloned().collect();
+    dates.sort();
+    dates
+        .iter()
+        .map(|date| point(date, by_date.get(date)))
+        .collect()
 }
 
 fn usage_response(

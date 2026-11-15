@@ -352,6 +352,23 @@ pub struct UsageRow {
     pub cost_usd: Option<f64>,
 }
 
+/// One calendar day's totals in a G-11 usage period summary.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
+#[serde(default)]
+pub struct UsageDayPoint {
+    /// Local calendar day (`YYYY-MM-DD`).
+    pub date: String,
+    /// Request count that day.
+    pub requests: u64,
+    /// Sum of input tokens that day.
+    pub input_tokens: u64,
+    /// Sum of output tokens that day.
+    pub output_tokens: u64,
+    /// Sum of stored costs in the response currency that day.
+    pub cost: f64,
+}
+
 /// Aggregated usage totals.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -414,6 +431,12 @@ pub struct UsageResponse {
     /// Human-readable window label for rolling or custom ranges.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub window_label: String,
+    /// Daily buckets for the whole period (G-11 sparkline).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub series: Vec<UsageDayPoint>,
+    /// Per-model totals for the whole period (G-11 model table).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub by_model: Vec<UsageBreakdownGroup>,
 }
 
 impl Default for UsageResponse {
@@ -429,6 +452,8 @@ impl Default for UsageResponse {
             breakdown_by: None,
             breakdown: Vec::new(),
             window_label: String::new(),
+            series: Vec::new(),
+            by_model: Vec::new(),
         }
     }
 }
