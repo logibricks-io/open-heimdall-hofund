@@ -573,7 +573,16 @@ impl Subscription for Claude {
         account: &AccountId,
         host: &HostContext,
     ) -> Result<(), PluginError> {
-        account::warmup(host, self.command.as_ref(), account).await
+        self.warmup_probe(account, host, "haiku").await
+    }
+
+    async fn warmup_probe(
+        &self,
+        account: &AccountId,
+        host: &HostContext,
+        model: &str,
+    ) -> Result<(), PluginError> {
+        account::ask(host, self.command.as_ref(), account, model).await
     }
 
     async fn discover_agent_sign_in(
