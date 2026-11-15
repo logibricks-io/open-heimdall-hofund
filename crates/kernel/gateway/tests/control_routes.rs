@@ -13,11 +13,11 @@ use hofund_control_proto::{
     CheckinListResponse, CheckinRunRequest, CheckinRunResponse, ControlError, ControlErrorKind,
     ErrorEnvelope, GroupCreateRequest, GroupDeleteRequest, GroupDeleteResponse, GroupListResponse,
     GroupMemberCandidatesResponse, GroupPatchRequest, GroupRestoreRequest, GroupWriteResponse,
-    HealthResponse, MAX_REQUEST_BODY_BYTES, ModelListResponse, PicksResponse, PicksSetRequest,
-    PresetListResponse, ProfileListResponse, ProfileRenameRequest, ProviderCreateRequest,
-    ProviderDeleteRequest, ProviderDeleteResponse, ProviderListResponse, ProviderPatchRequest,
-    ProviderTestRequest, ProviderTestResponse, ProviderWriteResponse, QuotaAlertsResponse,
-    QuotaAlertsSetRequest, QuotaAlertsSetResponse, QuotaCreditsModesResponse,
+    HealthResponse, LogTailQuery, LogTailResponse, MAX_REQUEST_BODY_BYTES, ModelListResponse,
+    PicksResponse, PicksSetRequest, PresetListResponse, ProfileListResponse, ProfileRenameRequest,
+    ProviderCreateRequest, ProviderDeleteRequest, ProviderDeleteResponse, ProviderListResponse,
+    ProviderPatchRequest, ProviderTestRequest, ProviderTestResponse, ProviderWriteResponse,
+    QuotaAlertsResponse, QuotaAlertsSetRequest, QuotaAlertsSetResponse, QuotaCreditsModesResponse,
     QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryQuery, QuotaHistoryResponse,
     QuotaQuery, QuotaResponse, RouteModelListResponse, SessionListQuery, SessionOverviewQuery,
     SessionStatsQuery, ShutdownRequest, ShutdownResponse, StatusResponse, TokenRotateRequest,
@@ -420,6 +420,18 @@ impl ControlState for FakeControlState {
         _request: ProfileRenameRequest,
     ) -> ControlFuture<'_, ProfileListResponse> {
         self.reply("rename_profile")
+    }
+
+    fn logs(&self, query: LogTailQuery) -> ControlFuture<'_, LogTailResponse> {
+        self.calls
+            .lock()
+            .expect("calls")
+            .push(format!("logs:{}", query.after));
+        let mut response = LogTailResponse::default();
+        response.offset = query.after;
+        response.next_offset = query.after.saturating_add(5);
+        response.lines = vec!["daemon".to_owned()];
+        Box::pin(async move { Ok(response) })
     }
 
     /// One frame, then an open stream so heartbeats can be observed.
@@ -1365,4 +1377,34 @@ async fn a3b_11_checkins_control_routes_return_versioned_json() {
             .iter()
             .any(|c| c == "checkins")
     );
+}
+
+#[tokio::test]
+async fn g7_log_tail_route_returns_versioned_json() {
+    let state = Arc::new(FakeControlState::default());
+    let router = app(&state);
+    let (status, _, body) = call(
+        router,
+        Method::GET,
+        "/v1/hofund/logs?after=0&max_bytes=1024",
+        Vec::new(),
+        true,
+        false,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let tail: LogTailResponse = serde_json::from_slice(&body).expect("logs JSON");
+    assert_eq!(tail.version, API_VERSION);
+    assert_eq!(tail.lines, ["daemon"]);
+
+    let (status, _, _) = call(
+        app(&state),
+        Method::GET,
+        "/v1/hofund/logs?after=0&max_bytes=65537",
+        Vec::new(),
+        true,
+        false,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 }

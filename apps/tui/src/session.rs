@@ -8,8 +8,8 @@ use hofund_control_client::hofund_control_proto::{
     AgentPickedOnlyRequest, AgentPlanRequest, AgentStatusEntry, AgentSummary, CatalogSyncRequest,
     CheckinRunRequest, DiscoveredAccount, GroupDeleteRequest, GroupDeleteResponse,
     GroupListResponse, GroupMemberCandidatesResponse, GroupRestoreRequest, GroupWriteResponse,
-    ModelEntry, PicksResponse, PicksSetRequest, PresetEntry, ProfileRenameRequest, ProfileSummary,
-    ProviderCreateRequest, ProviderDeleteRequest, ProviderKey, ProviderKeyAction,
+    LogTailResponse, ModelEntry, PicksResponse, PicksSetRequest, PresetEntry, ProfileRenameRequest,
+    ProfileSummary, ProviderCreateRequest, ProviderDeleteRequest, ProviderKey, ProviderKeyAction,
     ProviderKeyRequest, ProviderPatchRequest, ProviderSummary, ProviderTestRequest,
     QuotaAlertsResponse, QuotaAlertsSetRequest, QuotaAlertsSetResponse, QuotaKind, QuotaQuery,
     QuotaResponse, RouteListResponse, RouteQuery, SessionRouteResponse, SettingsPatchRequest,
@@ -348,6 +348,17 @@ pub enum SessionOutcome {
     Catalog(Result<(), String>),
     /// Accounts read or mutation finished.
     Accounts(AccountsOutcome),
+    /// G-7 daemon log tail.
+    Logs {
+        /// Read generation.
+        generation: u64,
+        /// Tail request token.
+        token: u64,
+        /// Requested byte offset.
+        after: u64,
+        /// Tail body or a redacted error.
+        result: Result<LogTailResponse, String>,
+    },
 }
 
 impl ControlIntent {
@@ -466,6 +477,16 @@ impl ControlIntent {
                 generation: *generation,
                 result: Err(message),
             }),
+            Self::TailLogs {
+                generation,
+                after,
+                token,
+            } => SessionOutcome::Logs {
+                generation: *generation,
+                token: *token,
+                after: *after,
+                result: Err(message),
+            },
             Self::StartSignIn { id, generation } => {
                 SessionOutcome::Accounts(AccountsOutcome::Start {
                     generation: *generation,
@@ -907,6 +928,22 @@ pub async fn execute(client: &Client, intent: ControlIntent) -> SessionOutcome {
                     None,
                 ))),
                 Err(error) => SessionOutcome::Catalog(Err(explain(error, None))),
+            }
+        }
+        ControlIntent::TailLogs {
+            generation,
+            after,
+            token,
+        } => {
+            let result = client
+                .logs(after, None)
+                .await
+                .map_err(|error| explain(error, None));
+            SessionOutcome::Logs {
+                generation,
+                token,
+                after,
+                result,
             }
         }
         ControlIntent::LoadAccounts { generation } => {
