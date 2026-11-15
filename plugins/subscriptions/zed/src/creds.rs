@@ -4,6 +4,8 @@ use hofund_plugin_api::{AccountId, HostContext, PluginError, SecretString};
 use hofund_plugin_sdk::json::{self, Value};
 use hofund_plugin_sdk::oauth::{SecretObject, account_id_from, secret_text};
 
+use crate::org;
+
 #[derive(Clone, Debug)]
 pub(crate) struct Credential {
     pub user_id: String,
@@ -34,7 +36,7 @@ impl Stored {
 
 pub(crate) fn parse_secret(secret: &SecretString) -> Result<Stored, PluginError> {
     let blob = SecretObject::parse(secret)?;
-    let user_id = blob
+    let mut user_id = blob
         .text("user_id")
         .filter(|value| !value.is_empty())
         .ok_or_else(|| PluginError::auth("the stored Zed sign-in has no user id"))?
@@ -42,6 +44,10 @@ pub(crate) fn parse_secret(secret: &SecretString) -> Result<Stored, PluginError>
     let access = blob
         .secret("access_token")
         .ok_or_else(|| PluginError::auth("the stored Zed sign-in has no access token"))?;
+    user_id = user_id_from_refresh(blob.text("refresh_json")).unwrap_or(user_id);
+    if user_id.is_empty() {
+        return Err(PluginError::auth("the stored Zed sign-in has no user id"));
+    }
     Ok(Stored {
         credential: Credential {
             user_id,
@@ -56,17 +62,23 @@ pub(crate) fn parse_secret(secret: &SecretString) -> Result<Stored, PluginError>
     })
 }
 
-pub(crate) fn secret_blob(credential: &Credential) -> SecretObject {
-    let refresh = json::json!({
+/// JSON string stored in the mover OAuth `refresh` field (reference plugin shape).
+#[must_use]
+pub(crate) fn oauth_refresh_json(credential: &Credential) -> String {
+    json::json!({
         "userId": credential.user_id,
         "systemId": credential.system_id,
         "org": credential.org,
         "plan": credential.plan,
+        "planName": org::plan_name(&credential.plan),
         "login": credential.login,
         "name": credential.name,
-        "models": json::from_str::<Value>(&credential.models_json).unwrap_or(Value::Null),
     })
-    .to_string();
+    .to_string()
+}
+
+pub(crate) fn secret_blob(credential: &Credential) -> SecretObject {
+    let refresh = oauth_refresh_json(credential);
     SecretObject::new()
         .with_number("v", 1)
         .with_text("user_id", &credential.user_id)
@@ -163,6 +175,36 @@ fn optional(map: &json::Map<String, Value>, key: &str) -> String {
         .unwrap_or("")
         .to_owned()
 }
+
+fn user_id_from_refresh(refresh_json: Option<&str>) -> Option<String> {
+    let text = refresh_json?.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let root: Value = json::from_str(text).ok()?;
+    let map = root.as_object()?;
+    json_user_id(map.get("userId").or_else(|| map.get("user_id")))
+}
+
+fn json_user_id(value: Option<&Value>) -> Option<String> {
+    let value = value?;
+    match value {
+        Value::String(text) => {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_owned())
+            }
+        }
+        Value::Number(number) => number
+            .as_u64()
+            .map(|n| n.to_string())
+            .or_else(|| number.as_i64().map(|n| n.to_string())),
+        _ => None,
+    }
+}
+
 pub(crate) async fn persist(
     host: &HostContext,
     account: &AccountId,

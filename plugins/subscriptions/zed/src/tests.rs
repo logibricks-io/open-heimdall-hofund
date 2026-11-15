@@ -539,6 +539,173 @@ fn r56b_4_mover_refresh_accepts_numeric_user_id() {
 }
 
 #[test]
+fn r56c_1_oauth_refresh_json_matches_official_fields() {
+    let credential = creds::assemble(creds::CredentialParts {
+        user_id: "r56c-user".to_owned(),
+        access: "r56c-access-fixture".to_owned(),
+        system_id: "r56c-system".to_owned(),
+        org: "org-r56c".to_owned(),
+        login: "r56c-login".to_owned(),
+        name: "R56C User".to_owned(),
+        plan: "zed_pro".to_owned(),
+        models: json!([]),
+    })
+    .expect("assemble");
+    let blob = creds::secret_blob(&credential);
+    let refresh: json::Value =
+        json::from_str(blob.text("refresh_json").expect("refresh_json")).expect("parse refresh");
+    let refresh = refresh.as_object().expect("refresh object");
+    assert_eq!(
+        refresh.get("userId").and_then(|v| v.as_str()),
+        Some("r56c-user")
+    );
+    assert_eq!(
+        refresh.get("systemId").and_then(|v| v.as_str()),
+        Some("r56c-system")
+    );
+    assert_eq!(
+        refresh.get("org").and_then(|v| v.as_str()),
+        Some("org-r56c")
+    );
+    assert_eq!(
+        refresh.get("plan").and_then(|v| v.as_str()),
+        Some("zed_pro")
+    );
+    assert_eq!(
+        refresh.get("planName").and_then(|v| v.as_str()),
+        Some("Pro")
+    );
+    assert_eq!(
+        refresh.get("login").and_then(|v| v.as_str()),
+        Some("r56c-login")
+    );
+    assert_eq!(
+        refresh.get("name").and_then(|v| v.as_str()),
+        Some("R56C User")
+    );
+    assert!(refresh.get("models").is_none());
+    assert_eq!(
+        blob.secret("access_token").as_ref().map(secret_text),
+        Some("r56c-access-fixture")
+    );
+    assert_eq!(blob.text("system_id"), Some("r56c-system"));
+}
+
+#[test]
+fn r56c_2_plan_name_typography_matches_reference() {
+    let cases = [
+        ("zed_pro", "Pro"),
+        ("zed_pro_trial", "Pro Trial"),
+        ("zed_business", "Business"),
+        ("zed_student", "Student"),
+        ("zed_vip", "VIP"),
+        ("zed_free", "Free"),
+        ("", "Free"),
+        ("zed_custom_tier", "custom_tier"),
+    ];
+    for (plan, want) in cases {
+        let credential = creds::assemble(creds::CredentialParts {
+            user_id: "plan-user".to_owned(),
+            access: "plan-access-fixture".to_owned(),
+            system_id: String::new(),
+            org: String::new(),
+            login: String::new(),
+            name: String::new(),
+            plan: plan.to_owned(),
+            models: json!([]),
+        })
+        .expect("assemble");
+        let refresh: json::Value =
+            json::from_str(&creds::oauth_refresh_json(&credential)).expect("parse refresh");
+        assert_eq!(
+            refresh.get("planName").and_then(|v| v.as_str()),
+            Some(want),
+            "plan id {plan}"
+        );
+    }
+}
+
+#[test]
+fn r56c_3_secret_round_trip_after_numeric_user_id_import() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let auth = json!({
+        "type": "oauth",
+        "access": "numeric-round-trip",
+        "refresh": {
+            "userId": 900001,
+            "systemId": "sys-round",
+            "org": "org-round",
+            "plan": "zed_business",
+            "login": "round-login",
+            "name": "Round User"
+        },
+        "expires": 0
+    });
+    let ids = block_on(import::import_accounts(host.context(), &auth.to_string())).expect("import");
+    let secret = block_on(host.context().accounts().secret(&ids[0]))
+        .expect("read")
+        .expect("stored");
+    let stored = creds::parse_secret(&secret).expect("parse");
+    assert_eq!(stored.credential.user_id, "900001");
+    assert_eq!(stored.credential.system_id, "sys-round");
+    assert_eq!(stored.credential.plan, "zed_business");
+    let again = creds::secret_blob(&stored.credential);
+    let refresh: json::Value =
+        json::from_str(again.text("refresh_json").expect("refresh_json")).expect("parse refresh");
+    assert_eq!(
+        refresh.get("userId").and_then(|v| v.as_str()),
+        Some("900001")
+    );
+    assert_eq!(
+        refresh.get("planName").and_then(|v| v.as_str()),
+        Some("Business")
+    );
+    let reparsed = creds::parse_secret(&again.to_secret()).expect("reparse");
+    assert_eq!(reparsed.credential.user_id, "900001");
+    assert_eq!(
+        secret_text(&reparsed.credential.access),
+        secret_text(&stored.credential.access)
+    );
+}
+
+#[test]
+fn r56c_4_mover_import_persists_plan_name_in_refresh_json() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let refresh = json!({
+        "userId": "77001",
+        "systemId": "",
+        "org": "org-import",
+        "plan": "zed_student",
+        "login": "student-login",
+        "name": "Student"
+    });
+    let auth = json!({
+        "type": "oauth",
+        "access": "student-access-fixture",
+        "refresh": refresh.to_string(),
+        "expires": 0,
+        "accountId": "student-login"
+    });
+    let ids = block_on(subscription(&host).import_accounts(&auth.to_string(), host.context()))
+        .expect("import");
+    let blob = SecretObject::parse(
+        &block_on(host.context().accounts().secret(&ids[0]))
+            .expect("read")
+            .expect("stored"),
+    )
+    .expect("blob");
+    let parsed: json::Value =
+        json::from_str(blob.text("refresh_json").expect("refresh_json")).expect("parse refresh");
+    assert_eq!(
+        parsed.get("planName").and_then(|v| v.as_str()),
+        Some("Student")
+    );
+    assert_eq!(parsed.get("userId").and_then(|v| v.as_str()), Some("77001"));
+}
+
+#[test]
 fn a2c_15_refresh_mints_llm_token() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
