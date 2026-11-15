@@ -166,10 +166,7 @@ pub(crate) fn notify_program() -> Option<&'static str> {
 mod tests {
     use hofund_daemon::QuotaAlertEvent;
 
-    use super::{
-        PresentOutcome, QuotaAlertSurface, RecordingSurface, notify_command, notify_program,
-        present_alert,
-    };
+    use super::{PresentOutcome, RecordingSurface, notify_command, notify_program, present_alert};
 
     #[test]
     fn d310_present_forwards_masked_title_and_body() {
