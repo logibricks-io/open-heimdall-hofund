@@ -14,12 +14,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   under that flag and records poll/resend, budget-exceeded, and short-circuit
   queue tests (`r54e_queue_*`, `crates/kernel/plugin-api/src/dispatch.rs`).
   Refs R-54.
+- R-5: the Claude Code subscription plugin keeps per-account allowance from
+  stream-json `rate_limit_event` envelopes (`limits.rs`): `unifiedWindows` and
+  the active `rateLimitType`, one-hour stand-in when `/usage` is away, merge
+  over same-named `/usage` windows, `with_unstarted` for the 5-hour row, and
+  heard windows for setup-token accounts. Tests `r5_48`–`r5_58` use recorded
+  fixtures and a fake runner only. Refs R-5.
 - R-54e: the Qoder subscription plugin classifies native queue code 10605,
   quota, and request refusal codes like the reference (`failure.rs`), waits on
   `/algo/api/v2/service/ask/queue/status` and resends within budget (`queue.rs`,
   `upstream.rs`), and records busy/queue fixtures (`r54e_*`,
-  `fixtures/queued-10605.json`). Official fallback short-circuit when another
-  routing candidate follows, and recorded poll/resend tests, remain. Refs R-54.
+  `fixtures/queued-10605.json`). Refs R-54.
 - R-6: `hofund_plugin_sdk::image::fit_claude` scales Claude Code inline images
   (2000 px per side, five mebibytes of base64, triangle resize, JPEG/PNG
   rules) and the Claude subscription bridge applies it on `-p` stream-json
