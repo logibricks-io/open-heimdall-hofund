@@ -238,6 +238,11 @@ impl App {
         self.intents.push(intent);
     }
 
+    /// Enqueues one control read or write.
+    pub(crate) fn queue_intent(&mut self, intent: ControlIntent) {
+        self.queue(intent);
+    }
+
     /// Control calls queued since the last take.
     pub fn take_intents(&mut self) -> Vec<ControlIntent> {
         std::mem::take(&mut self.intents)
