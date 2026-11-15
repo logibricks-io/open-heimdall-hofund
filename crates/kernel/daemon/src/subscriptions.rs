@@ -118,7 +118,7 @@ pub(crate) fn build(
             ))
         })?;
         let plugin = PluginId::try_from(subscription.id.as_str()).map_err(show)?;
-        let store_id = hofund_plugin_registry::storage_id(&subscription.id);
+        let store_id = crate::registry::storage_id(&subscription.id);
         let store_plugin = PluginId::try_from(store_id).map_err(show)?;
         let mut raw = RawTable::new();
         for (key, value) in &subscription.options {

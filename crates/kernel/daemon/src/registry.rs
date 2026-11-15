@@ -15,7 +15,7 @@ use hofund_plugin_api::{
 
 pub use hofund_plugin_registry::CompiledPreset;
 pub(crate) use hofund_plugin_registry::{
-    model_plan_of, protocol_for, resolve_region, select, wire_for_protocol,
+    model_plan_of, protocol_for, resolve_region, select, storage_id, wire_for_protocol,
 };
 
 /// Registry operations needed to construct and serve the daemon.

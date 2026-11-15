@@ -407,7 +407,7 @@ impl DaemonControl {
             ));
         }
         for subscription in &config.subscriptions {
-            let store_id = hofund_plugin_registry::storage_id(&subscription.id);
+            let store_id = super::registry::storage_id(&subscription.id);
             let plugin = hofund_plugin_api::PluginId::try_from(store_id)
                 .map_err(|error| internal(error.to_string()))?;
             let host = hofund_plugin_host::runtime_host_for(
