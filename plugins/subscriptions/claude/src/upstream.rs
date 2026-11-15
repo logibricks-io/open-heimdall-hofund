@@ -31,6 +31,7 @@ pub(crate) struct ClaudeUpstream {
     host: HostContext,
     command: Option<PathBuf>,
     bridge: Bridge,
+    limits: crate::limits::Store,
     #[cfg(test)]
     runner: Option<TestRunner>,
 }
@@ -43,12 +44,14 @@ impl ClaudeUpstream {
         host: HostContext,
         command: Option<PathBuf>,
         bridge: Bridge,
+        limits: crate::limits::Store,
     ) -> Self {
         Self {
             account,
             host,
             command,
             bridge,
+            limits,
             #[cfg(test)]
             runner: None,
         }
@@ -463,33 +466,16 @@ impl ClaudeUpstream {
     }
 
     fn observe_rate_limits(&self, stdout: &str) {
+        let now = self.host.clock().now();
         let mut decoder = crate::bridge::decode::Decoder::new();
         for line in stdout.lines() {
             let Some(crate::bridge::decode::Step::RateLimit(info)) = decoder.push_line(line) else {
                 continue;
             };
-            if let Some(observation) = rate_limit_observation(&self.host, &info) {
-                let _ = self.host.observe().observe(observation);
-            }
+            self.limits.note(&self.account, &info, now);
+            crate::limits::observe_from_info(&self.host, &info);
         }
     }
-}
-
-fn rate_limit_observation(
-    host: &hofund_plugin_api::HostContext,
-    info: &crate::bridge::decode::RateLimitInfo,
-) -> Option<hofund_plugin_api::QuotaObservation> {
-    let mut observation = host.observe().observation();
-    let mut any = false;
-    if let Some(kind) = &info.rate_limit_type {
-        observation = observation.with_window(kind.clone());
-        any = true;
-    }
-    if let Some(reset) = info.resets_in() {
-        observation = observation.with_window_reset(reset);
-        any = true;
-    }
-    any.then_some(observation)
 }
 
 fn assistant_text(events: &[hofund_plugin_api::StreamEvent]) -> String {
@@ -594,6 +580,7 @@ mod tests {
             host.context().clone(),
             Some(program()),
             bridge.clone(),
+            crate::limits::Store::new(),
         )
         .with_runner(Arc::new(move |_plan| {
             let n = counter.fetch_add(1, Ordering::SeqCst);
@@ -688,6 +675,7 @@ mod tests {
             host.context().clone(),
             Some(program()),
             crate::bridge::Bridge::new(),
+            crate::limits::Store::new(),
         )
         .with_runner(Arc::new(move |plan| {
             runner
@@ -707,6 +695,35 @@ mod tests {
             })
             .collect();
         assert_eq!(text, "Hello world");
+    }
+
+    #[test]
+    fn r5_58_execute_notes_rate_limit_events() {
+        use crate::bridge::decode::RATE_LIMIT;
+        let dir = tempfile::tempdir().expect("dir");
+        let host = TestHost::open_for(
+            PluginKind::Subscription,
+            PluginId::from_static("claude"),
+            dir.path(),
+        );
+        let id = AccountId::from_static("a-00000000000000ab");
+        seed_account(&host, &id);
+        let limits = crate::limits::Store::new();
+        let provider = ClaudeUpstream::new(
+            id.clone(),
+            host.context().clone(),
+            Some(program()),
+            crate::bridge::Bridge::new(),
+            limits.clone(),
+        )
+        .with_runner(Arc::new(move |_plan| Ok(RATE_LIMIT.to_string())));
+        let completion = block_on(provider.execute(text_request(), ProtocolId::AnthropicMessages))
+            .expect("turn");
+        let _ = collect_events(completion);
+        let now = host.context().clock().now();
+        let windows = limits.kept_windows(&id, now).expect("heard");
+        assert_eq!(windows[0].name(), "5 hours");
+        assert_eq!(windows[0].used(), 25);
     }
 
     #[test]
@@ -731,6 +748,7 @@ mod tests {
             host.context().clone(),
             Some(program()),
             bridge.clone(),
+            crate::limits::Store::new(),
         )
         .with_runner(Arc::new(move |plan| {
             counter.fetch_add(1, Ordering::SeqCst);
@@ -806,9 +824,14 @@ mod tests {
         let id = AccountId::from_static("a-00000000000000aa");
         seed_account(&host, &id);
         let bridge = crate::bridge::Bridge::new();
-        let provider =
-            ClaudeUpstream::new(id, host.context().clone(), Some(program()), bridge.clone())
-                .with_runner(Arc::new(move |_plan| Ok(MESSAGE_DELTA.to_string())));
+        let provider = ClaudeUpstream::new(
+            id,
+            host.context().clone(),
+            Some(program()),
+            bridge.clone(),
+            crate::limits::Store::new(),
+        )
+        .with_runner(Arc::new(move |_plan| Ok(MESSAGE_DELTA.to_string())));
         let completion = block_on(provider.execute(text_request(), ProtocolId::AnthropicMessages))
             .expect("one-off");
         let _ = collect_events(completion);
@@ -839,6 +862,7 @@ mod tests {
             host.context().clone(),
             Some(program()),
             crate::bridge::Bridge::new(),
+            crate::limits::Store::new(),
         )
         .with_runner(Arc::new(move |_plan| Ok(SIGN_IN_RESULT.to_string())));
         let error = match block_on(provider.execute(text_request(), ProtocolId::AnthropicMessages))
@@ -868,6 +892,7 @@ mod tests {
             host.context().clone(),
             Some(program()),
             crate::bridge::Bridge::new(),
+            crate::limits::Store::new(),
         )
         .with_runner(Arc::new(move |_plan| {
             let ctx = ctx.clone();

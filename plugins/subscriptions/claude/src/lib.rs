@@ -31,6 +31,7 @@ mod discover;
 mod import;
 mod keychain;
 mod launcher;
+mod limits;
 mod lock;
 mod models;
 mod run_lock;
@@ -168,6 +169,7 @@ impl SubscriptionFactory for ClaudeFactory {
             spawn_host: _host.clone(),
             pending: Mutex::new(HashMap::new()),
             bridge: bridge::Bridge::with_room(bridge::room::Room::from_config(cfg.runs_most)),
+            limits: limits::Store::new(),
         }))
     }
 }
@@ -202,6 +204,8 @@ struct Claude {
     pending: Mutex<HashMap<String, Pending>>,
     /// Bridge run table, shared across `upstream()` providers for this instance.
     bridge: bridge::Bridge,
+    /// Header-derived allowance kept per account.
+    limits: limits::Store,
 }
 
 impl Claude {
@@ -515,10 +519,26 @@ impl Subscription for Claude {
             ));
         };
         let blob = SecretObject::parse(&secret)?;
+        let now = host.clock().now();
         if setup_token::is_setup_token(&blob) {
+            if let Some(windows) = self.limits.kept_windows(account, now) {
+                return Ok(windows);
+            }
             return Err(PluginError::unsupported(usage::SETUP_TOKEN_QUOTA));
         }
-        account::read_usage(host, self.command.as_ref(), account).await
+        match account::read_usage(host, self.command.as_ref(), account).await {
+            Ok(windows) => {
+                self.limits.record_usage(account, windows, now);
+                Ok(self.limits.kept_windows(account, now).unwrap_or_default())
+            }
+            Err(err) => {
+                self.limits.record_usage_failure(account, &err);
+                if let Some(windows) = self.limits.fallback_on_usage_error(account, &err, now) {
+                    return Ok(windows);
+                }
+                Err(err)
+            }
+        }
     }
 
     async fn list_models(
@@ -548,6 +568,7 @@ impl Subscription for Claude {
             host.clone(),
             self.command.clone(),
             self.bridge.clone(),
+            self.limits.clone(),
         )))
     }
 
