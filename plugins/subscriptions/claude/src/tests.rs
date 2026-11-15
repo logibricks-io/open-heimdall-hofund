@@ -1668,3 +1668,122 @@ fn r5_26_oauth_env_absent_for_oauth_account_quota() {
     let spawn = &host.process().piped_spawns()[0];
     assert!(!spawn.env.iter().any(|(k, _)| k == cli::OAUTH_TOKEN_VAR));
 }
+
+mod usage_cadence_poll {
+    use std::time::Duration;
+
+    use super::*;
+    use crate::usage_cadence::test_hooks::{lock, reset_hooks, set_used_since, set_wait_draw};
+
+    const TEST_WAIT: Duration = Duration::from_secs(10 * 60);
+
+    fn wire_active_account(host: &TestHost, agent_home: &std::path::Path, id: &AccountId) {
+        crate::creds::private_dir(agent_home).expect("agent home");
+        std::fs::write(agent_home.join(creds::PROFILE_FILE), profile_json()).expect("profile");
+        crate::cli::test_configured_dir(Some(agent_home.to_path_buf()));
+        store(host, id, &signed_in_blob());
+    }
+
+    #[test]
+    fn r5_cadence_poll_1_unasked_inside_wait_keeps_prior_windows() {
+        let _lock = lock();
+        reset_hooks();
+        set_wait_draw(|| TEST_WAIT);
+        set_used_since(|_, _| false);
+        let dir = tempfile::tempdir().expect("dir");
+        let host = host_tokio_clock(&dir);
+        let sub = subscription(&host);
+        let id = account_id_from(&["claude", UUID]);
+        let agent_home = dir.path().join("agent-claude");
+        wire_active_account(&host, &agent_home, &id);
+        host.process().script_piped(usage_script(None));
+        block_on_paused(async {
+            let seeded = sub.quota(&id, host.context()).await.expect("seed");
+            let runs = host.process().piped_spawns().len();
+            assert_eq!(runs, 1);
+            let kept = sub
+                .quota_poll(&id, host.context())
+                .await
+                .expect("kept")
+                .windows()
+                .to_vec();
+            assert_eq!(kept[0].used(), seeded[0].used());
+            advance_time(Duration::from_secs(60)).await;
+            let _ = sub.quota_poll(&id, host.context()).await.expect("deferred");
+            assert_eq!(host.process().piped_spawns().len(), runs);
+        });
+    }
+
+    #[test]
+    fn r5_cadence_poll_2_wait_due_and_use_runs_usage_once() {
+        let _lock = lock();
+        reset_hooks();
+        set_wait_draw(|| TEST_WAIT);
+        set_used_since(|_, _| true);
+        let dir = tempfile::tempdir().expect("dir");
+        let host = host_tokio_clock(&dir);
+        let sub = subscription(&host);
+        let id = account_id_from(&["claude", UUID]);
+        let agent_home = dir.path().join("agent-claude");
+        wire_active_account(&host, &agent_home, &id);
+        host.process().script_piped(usage_script(None));
+        block_on_paused(async {
+            sub.quota(&id, host.context()).await.expect("seed");
+            let runs = host.process().piped_spawns().len();
+            advance_time(TEST_WAIT).await;
+            host.process().script_piped(usage_script(None));
+            let _ = sub.quota_poll(&id, host.context()).await.expect("redraw");
+            assert_eq!(host.process().piped_spawns().len(), runs + 1);
+        });
+    }
+
+    #[test]
+    fn r5_cadence_poll_3_ask_floor_between_user_quota_calls() {
+        let _lock = lock();
+        reset_hooks();
+        set_wait_draw(|| TEST_WAIT);
+        set_used_since(|_, _| true);
+        let dir = tempfile::tempdir().expect("dir");
+        let host = host_tokio_clock(&dir);
+        let sub = subscription(&host);
+        let id = account_id_from(&["claude", UUID]);
+        let agent_home = dir.path().join("agent-claude");
+        wire_active_account(&host, &agent_home, &id);
+        host.process().script_piped(usage_script(None));
+        block_on_paused(async {
+            sub.quota(&id, host.context()).await.expect("first");
+            let runs = host.process().piped_spawns().len();
+            sub.quota(&id, host.context()).await.expect("kept");
+            assert_eq!(host.process().piped_spawns().len(), runs);
+        });
+    }
+
+    #[test]
+    fn r5_cadence_poll_4_saved_account_unasked_tick_skips_usage() {
+        let _lock = lock();
+        reset_hooks();
+        set_wait_draw(|| TEST_WAIT);
+        set_used_since(|_, _| false);
+        let dir = tempfile::tempdir().expect("dir");
+        let host = host_tokio_clock(&dir);
+        let sub = subscription(&host);
+        let active = account_id_from(&["claude", UUID]);
+        let saved = account_id_from(&["claude", "00000000-1111-2222-3333-444455556666"]);
+        let agent_home = dir.path().join("agent-claude");
+        wire_active_account(&host, &agent_home, &saved);
+        store(&host, &saved, &signed_in_blob());
+        host.process().script_piped(usage_script(None));
+        block_on(sub.quota(&saved, host.context())).expect("seed saved");
+        let runs = host.process().piped_spawns().len();
+        std::fs::write(
+            agent_home.join(creds::PROFILE_FILE),
+            format!(
+                r#"{{"oauthAccount":{{"accountUuid":"{UUID}","emailAddress":"{EMAIL}","organizationName":"Ada's Org"}},"numStartups":1}}"#
+            ),
+        )
+        .expect("switch active profile");
+        store(&host, &active, &signed_in_blob());
+        let _ = block_on(sub.quota_poll(&saved, host.context())).expect("kept");
+        assert_eq!(host.process().piped_spawns().len(), runs);
+    }
+}
