@@ -156,10 +156,18 @@ fn login_spawned_without_shell_with_scrubbed_env() {
     assert_eq!(spawn.program, PathBuf::from(PROGRAM));
     assert_eq!(spawn.arg_strings(), ["auth", "login", "--claudeai"]);
     let signin = sign_in_dir(&host);
-    // Only the config directory is set; the kernel clears everything else.
-    assert_eq!(
-        spawn.env,
-        vec![(cli::CONFIG_DIR_VAR.into(), signin.clone().into_os_string())]
+    assert!(
+        spawn
+            .env
+            .iter()
+            .any(|(k, v)| k == cli::CONFIG_DIR_VAR && v == signin.as_os_str())
+    );
+    assert!(spawn.env.iter().any(|(k, _)| k == "BROWSER"));
+    assert!(
+        spawn
+            .env
+            .iter()
+            .any(|(k, _)| k == hofund_plugin_sdk::opened_url::OPENED_URL_ENV)
     );
     assert_eq!(spawn.cwd, signin);
     assert!(signin.is_dir());
@@ -335,7 +343,43 @@ fn email_comes_from_auth_status_when_the_profile_has_none() {
     let spawns = host.process().piped_spawns();
     assert_eq!(spawns.len(), 2);
     assert_eq!(spawns[1].arg_strings(), ["auth", "status", "--json"]);
-    assert_eq!(spawns[1].env, spawns[0].env);
+    let signin = sign_in_dir(&host);
+    assert!(
+        spawns[0]
+            .env
+            .iter()
+            .any(|(k, v)| k == cli::CONFIG_DIR_VAR && v == signin.as_os_str()),
+        "{:?}",
+        spawns[0].env
+    );
+    assert!(
+        spawns[1]
+            .env
+            .iter()
+            .any(|(k, v)| k == cli::CONFIG_DIR_VAR && v == signin.as_os_str()),
+        "{:?}",
+        spawns[1].env
+    );
+    assert!(
+        spawns[0].env.iter().any(|(k, _)| k == "BROWSER"),
+        "login sets BROWSER"
+    );
+    assert!(
+        spawns[0]
+            .env
+            .iter()
+            .any(|(k, _)| k == hofund_plugin_sdk::opened_url::OPENED_URL_ENV),
+        "login sets the opened-URL relay"
+    );
+    // `auth status` must share the sign-in config dir, but must not open a
+    // browser or write the relay file.
+    assert!(!spawns[1].env.iter().any(|(k, _)| k == "BROWSER"));
+    assert!(
+        !spawns[1]
+            .env
+            .iter()
+            .any(|(k, _)| k == hofund_plugin_sdk::opened_url::OPENED_URL_ENV)
+    );
     let blob = stored(&host, &id);
     let profile = creds::Profile::parse(blob.text(creds::PROFILE).expect("profile"));
     assert_eq!(profile.email(), Some(EMAIL));
@@ -1556,6 +1600,60 @@ fn r5_25_setup_token_run_env_sets_oauth_var() {
     .expect("status json");
     let spawn = &host.process().piped_spawns()[0];
     assert!(spawn.env.iter().any(|(k, _)| k == cli::OAUTH_TOKEN_VAR));
+}
+
+#[test]
+fn r5_59_sign_in_reads_opened_url_from_browser_relay() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let browser = dir.path().join("fake-hofund");
+    std::fs::write(&browser, "#!/bin/sh\n").expect("browser stub");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&browser, std::fs::Permissions::from_mode(0o755)).expect("mode");
+    }
+    crate::set_test_browser(Some(browser.clone()));
+    let opened_link = "https://claude.ai/oauth/relay?state=relay";
+    host.process()
+        .script_piped(PipedScript::new().exits(move |spawn| {
+            let opened = spawn
+                .env
+                .iter()
+                .find(|(k, _)| k == hofund_plugin_sdk::opened_url::OPENED_URL_ENV)
+                .map(|(_, v)| PathBuf::from(v))
+                .expect("opened url env");
+            assert!(
+                spawn.env.iter().any(|(k, _)| k == "BROWSER"),
+                "BROWSER must be set"
+            );
+            // Write the relay file directly: a plugin test must not call
+            // std::process (check-plugins). Same effect as the BROWSER stub.
+            std::fs::write(&opened, opened_link).expect("opened url");
+            vec!["Opening browser…".to_owned()]
+        }));
+    let challenge = start(&host, &sub);
+    let SignInChallenge::Instructions { text } = challenge else {
+        panic!("expected instructions");
+    };
+    assert!(text.contains(opened_link), "{text}");
+}
+
+#[test]
+fn r5_60_sign_in_records_http_proxy_for_bun() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    host.process().script_piped(login_script(true));
+    let ctx = ctx()
+        .with_option("proxy", "http://127.0.0.1:18080")
+        .expect("proxy");
+    block_on(sub.start_sign_in(&ctx, host.context())).expect("start");
+    let spawn = &host.process().piped_spawns()[0];
+    assert!(spawn.env.iter().any(|(k, v)| {
+        k.to_str() == Some("HTTPS_PROXY") && v.to_string_lossy() == "http://127.0.0.1:18080"
+    }));
 }
 
 #[test]

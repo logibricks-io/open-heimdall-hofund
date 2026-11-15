@@ -15,6 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   kept card without a second vendor read when asked sooner. Tests: `d38_*`,
   `d38_1` through `d38_3` in `crates/kernel/daemon/tests/quota_refresh.rs`.
   Refs 3.8.
+- R-5: Claude Code sign-in relays the auth page through `HOFUND_OPENED_URL`
+  and the hofund CLI as `BROWSER`; `hofund_plugin_sdk::netproxy::env_for_bun_with`
+  injects per-login HTTP/SOCKS proxies (loopback SOCKS bridge) on sign-in,
+  refresh, `/usage`, warm-up, and bridge runs; upstream resolves WSL when
+  Windows has no native `claude`. Recorded tests `r5_59`, `r5_60`, and
+  `netproxy` unit tests only. Refs R-5.
 - R-54e (leftover): the router sets `hofund_another_routing_candidate` on
   requests when another member may follow; the Qoder plugin skips queue polling
   under that flag and records poll/resend, budget-exceeded, and short-circuit
