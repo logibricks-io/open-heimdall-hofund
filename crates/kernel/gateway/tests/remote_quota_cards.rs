@@ -39,8 +39,8 @@ impl QuotaSource for CardsSource {
 async fn q5f_cards_route_lists_kept_cards_with_gateway_key() {
     let source = Arc::new(CardsSource {
         cards: Mutex::new(vec![Quota {
-            provider: "codex".to_owned(),
-            name: "Codex".to_owned(),
+            provider: "demo".to_owned(),
+            name: "Demo".to_owned(),
             kind: QuotaKind::Subscription,
             ..Quota::default()
         }]),
@@ -69,7 +69,7 @@ async fn q5f_cards_route_lists_kept_cards_with_gateway_key() {
         .await
         .expect("body");
     let body: Value = serde_json::from_slice(&bytes).expect("json");
-    assert_eq!(body["data"][0]["provider"], "codex");
+    assert_eq!(body["data"][0]["provider"], "demo");
 }
 
 #[test]

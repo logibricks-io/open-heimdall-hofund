@@ -38,8 +38,8 @@ async fn d38r_1_remote_cards_prefix_and_cache() {
         .and(header("authorization", "Bearer sk-office"))
         .respond_with(
             ResponseTemplate::new(200).set_body_json(ListEnvelope::new(vec![Quota {
-                provider: "codex".to_owned(),
-                name: "Codex".to_owned(),
+                provider: "demo".to_owned(),
+                name: "Demo".to_owned(),
                 kind: QuotaKind::Subscription,
                 user: "a@x.com".to_owned(),
                 ..Quota::default()
@@ -60,13 +60,13 @@ async fn d38r_1_remote_cards_prefix_and_cache() {
         .await
         .expect("quotas");
     let first: QuotaResponse = first.json().await.expect("body");
-    let codex = first
+    let card = first
         .data
         .iter()
-        .find(|card| card.provider == "office/codex")
-        .expect("office/codex");
-    assert_eq!(codex.name, "Codex · Office");
-    assert_eq!(codex.user, "a@x.com");
+        .find(|row| row.provider == "office/demo")
+        .expect("office/demo");
+    assert_eq!(card.name, "Demo · Office");
+    assert_eq!(card.user, "a@x.com");
     let _ = support::client()
         .get(format!("{control}/v1/hofund/quotas?kept=1"))
         .bearer_auth(&token)
