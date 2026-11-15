@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use futures_util::stream;
 use hofund_plugin_api::{
-    AccountId, Completion, HostContext, PluginError, ProtocolId, Request, SpawnRequest,
-    UpstreamProvider,
+    AccountId, Completion, HostContext, PluginError, ProbeQuery, ProbeReport, ProtocolId, Request,
+    SpawnRequest, UpstreamProvider,
 };
 use hofund_plugin_sdk::oauth::SecretObject;
 
@@ -260,6 +260,17 @@ impl UpstreamProvider for ClaudeUpstream {
         let _ = callback_guard;
         self.finish_stdout(stdout, run_id, has_tools(&request), &request, login_version)
             .await
+    }
+
+    async fn probe(&self, query: &ProbeQuery) -> Result<ProbeReport, PluginError> {
+        crate::account::ask(
+            &self.host,
+            self.command.as_ref(),
+            &self.account,
+            query.model(),
+        )
+        .await?;
+        Ok(ProbeReport::new("ok"))
     }
 }
 

@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   metadata on each account secret, including `planName` typography and string
   `userId`, beside top-level `user_id`, access, `system_id`, org, plan, login,
   name, and `models_json`. Recorded fixtures only (`r56c_*`). Refs R-56.
+- A-3a: the daemon coordinates Claude daily warm-up and model connectivity
+  tests through one Claude Code `-p` send (`warmup/claude.rs`,
+  `Subscription::warmup_probe`, `account::ask` with
+  `disableDeepLinkRegistration` settings). Successful warms stale-mark quota
+  reads for routing. Tests `a3a_28` through `a3a_30`. Refs A-3.
 - R-53b: audited the frozen reference for Cline subscription import (row b);
   key-plan and plugin credentials enter only through API-key or device sign-in,
   with no official home credential-file import to port. Subscription parity row

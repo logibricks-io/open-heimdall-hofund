@@ -604,6 +604,11 @@ impl Runtime {
         self.poll_quotas_with(now, false).await
     }
 
+    /// Makes `member` eligible for quota polling on the next subscription tick.
+    pub(crate) async fn wake_quota_poll(&self, member: &MemberId) {
+        self.polls.lock().await.wake(member);
+    }
+
     async fn poll_quotas_with(&self, now: tokio::time::Instant, force: bool) -> Vec<MemberId> {
         let current = self
             .plan
