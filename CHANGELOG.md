@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Quota card refresh: `hofund quota refresh <provider> [<account>] [--json]` and
+  `POST /v1/hofund/quotas/refresh` re-read one local subscription, plan, or
+  balance card through the daemon, keep a 30-second per-card gap, and return the
+  kept card without a second vendor read when asked sooner. Tests: `d38_*`,
+  `d38_1` through `d38_3` in `crates/kernel/daemon/tests/quota_refresh.rs`.
+  Refs 3.8.
 - R-5: Claude Code sign-in relays the auth page through `HOFUND_OPENED_URL`
   and the hofund CLI as `BROWSER`; `hofund_plugin_sdk::netproxy::env_for_bun_with`
   injects per-login HTTP/SOCKS proxies (loopback SOCKS bridge) on sign-in,

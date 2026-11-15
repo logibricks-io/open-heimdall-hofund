@@ -639,6 +639,100 @@ impl QuotaAlertsSetRequest {
     }
 }
 
+/// Request for `POST /v1/hofund/quotas/refresh`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+#[serde(deny_unknown_fields)]
+pub struct QuotaRefreshRequest {
+    /// Body wire version.
+    pub version: u32,
+    /// Provider or subscription id.
+    pub provider: String,
+    /// Account on the card; empty for every card of the provider.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub user: String,
+}
+
+impl QuotaRefreshRequest {
+    /// Constructs a version-current refresh request.
+    #[must_use]
+    pub fn new(provider: impl Into<String>, user: impl Into<String>) -> Self {
+        Self {
+            version: API_VERSION,
+            provider: provider.into(),
+            user: user.into(),
+        }
+    }
+
+    /// Parses `provider` and `user` from a query string; empty `user` is absent.
+    #[must_use]
+    pub fn parse_query(query: Option<&str>) -> Option<Self> {
+        let mut provider = None;
+        let mut user = String::new();
+        for (key, value) in query_pairs(query) {
+            if value.is_empty() {
+                continue;
+            }
+            match key.as_str() {
+                "provider" => provider = Some(value),
+                "user" => user = value,
+                _ => {}
+            }
+        }
+        let provider = provider?;
+        Some(Self::new(provider, user))
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), ControlError> {
+        if self.provider.is_empty() || self.provider.len() > MAX_ID_BYTES {
+            return Err(ControlError::new(
+                ControlErrorKind::Unprocessable,
+                "provider is missing or too long",
+                "quotas",
+            ));
+        }
+        if self.user.len() > MAX_ID_BYTES {
+            return Err(ControlError::new(
+                ControlErrorKind::Unprocessable,
+                "user is too long",
+                "quotas",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Response for `POST /v1/hofund/quotas/refresh`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuotaRefreshResponse {
+    /// Body wire version.
+    pub version: u32,
+    /// Cards that were asked for.
+    pub data: Vec<Quota>,
+    /// Each subscription account's standing, for scripts that care.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub standings: Vec<QuotaStanding>,
+    /// The vendor was not asked again; the cards are what was already read.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub throttled: bool,
+    /// Seconds since the last vendor read, when `throttled` is true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_asked_secs: Option<u64>,
+}
+
+impl Default for QuotaRefreshResponse {
+    fn default() -> Self {
+        Self {
+            version: API_VERSION,
+            data: Vec::new(),
+            standings: Vec::new(),
+            throttled: false,
+            last_asked_secs: None,
+        }
+    }
+}
+
 /// Response for `POST /v1/hofund/quotas/alerts/settings`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

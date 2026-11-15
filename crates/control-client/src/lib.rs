@@ -25,13 +25,14 @@ use hofund_control_proto::{
     ProviderTestRequest, ProviderTestResponse, ProviderWriteResponse, QuotaAlertsResponse,
     QuotaAlertsSetRequest, QuotaAlertsSetResponse, QuotaCreditsModesResponse,
     QuotaCreditsSetRequest, QuotaCreditsSetResponse, QuotaHistoryQuery, QuotaHistoryResponse,
-    QuotaQuery, QuotaResponse, ReloadRequest, RouteListResponse, RouteModelListResponse,
-    RouteQuery, SessionDetailResponse, SessionListQuery, SessionListResponse, SessionManageQuery,
-    SessionManageResponse, SessionOverviewQuery, SessionOverviewResponse, SessionProgressResponse,
-    SessionReadsPatchRequest, SessionReadsResponse, SessionRouteResponse, SessionSearchQuery,
-    SessionSearchResponse, SessionStatsQuery, SessionStatsResponse, SessionTranscriptResponse,
-    ShutdownRequest, ShutdownResponse, StatusResponse, TokenRotateRequest, TokenRotateResponse,
-    Topic, UnroutedListResponse, UsageQuery, UsageResponse, WarmupListResponse, WarmupRunRequest,
+    QuotaQuery, QuotaRefreshRequest, QuotaRefreshResponse, QuotaResponse, ReloadRequest,
+    RouteListResponse, RouteModelListResponse, RouteQuery, SessionDetailResponse, SessionListQuery,
+    SessionListResponse, SessionManageQuery, SessionManageResponse, SessionOverviewQuery,
+    SessionOverviewResponse, SessionProgressResponse, SessionReadsPatchRequest,
+    SessionReadsResponse, SessionRouteResponse, SessionSearchQuery, SessionSearchResponse,
+    SessionStatsQuery, SessionStatsResponse, SessionTranscriptResponse, ShutdownRequest,
+    ShutdownResponse, StatusResponse, TokenRotateRequest, TokenRotateResponse, Topic,
+    UnroutedListResponse, UsageQuery, UsageResponse, WarmupListResponse, WarmupRunRequest,
     WarmupRunResponse, decode_error_envelope, decode_response,
 };
 use http::header;
@@ -1036,6 +1037,19 @@ impl Client {
             self.get(&format!("/v1/hofund/quotas/history?{query}"))
                 .await
         }
+    }
+
+    /// Re-reads one provider's quota card when the refresh gap allows.
+    pub async fn refresh_quotas(
+        &self,
+        request: QuotaRefreshRequest,
+    ) -> Result<QuotaRefreshResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            "/v1/hofund/quotas/refresh",
+            Some(json_body(&request)?),
+        )
+        .await
     }
 
     /// Lists subscription accounts whose credits spending mode is not the default.
