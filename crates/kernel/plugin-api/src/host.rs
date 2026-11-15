@@ -867,6 +867,8 @@ pub struct HostContext {
     loopback: LoopbackHandle,
     bridge_callback: BridgeCallbackHandle,
     bridge_mcp_program: Option<PathBuf>,
+    /// When set, one subscription quota poll is a user refresh of that account's card.
+    quota_card_refresh: Option<AccountId>,
 }
 
 impl HostContext {
@@ -952,8 +954,24 @@ impl HostContext {
                 inner: Arc::new(NoBridgeCallback),
             },
             bridge_mcp_program: None,
+            quota_card_refresh: None,
             key,
         }
+    }
+
+    /// Kernel-only. Marks the next quota poll as a user refresh of `account`.
+    #[cfg(feature = "kernel")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_quota_card_refresh(mut self, account: Option<AccountId>) -> Self {
+        self.quota_card_refresh = account;
+        self
+    }
+
+    /// Whether this poll is a user refresh of one subscription card.
+    #[must_use]
+    pub fn quota_card_refresh_for(&self) -> Option<&AccountId> {
+        self.quota_card_refresh.as_ref()
     }
 
     /// Kernel-only. Plugins do not call this.

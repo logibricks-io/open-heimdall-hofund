@@ -485,12 +485,14 @@ HostContext::fn from_backends_for (key : PluginKey , http : Arc < dyn HttpBacken
 HostContext::fn http (& self) -> & HttpHandle
 HostContext::fn loopback (& self) -> & LoopbackHandle
 HostContext::fn observe (& self) -> & ObserveHandle
+HostContext::fn quota_card_refresh_for (& self) -> Option < & AccountId >
 HostContext::fn scheduler (& self) -> & SchedulerHandle
 HostContext::fn secrets (& self) -> & SecretsHandle
 HostContext::fn spawn_process (& self) -> & ProcessHandle
 HostContext::fn with_bridge_callback (mut self , bridge : Arc < dyn BridgeCallbackBackend >) -> Self
 HostContext::fn with_bridge_mcp_program (mut self , program : PathBuf) -> Self
 HostContext::fn with_loopback (mut self , loopback : Arc < dyn LoopbackBackend >) -> Self
+HostContext::fn with_quota_card_refresh (mut self , account : Option < AccountId >) -> Self
 HostReadBudget
 HostReadBudget derives(Clone, Copy, Debug, PartialEq, Eq)
 HttpHandle

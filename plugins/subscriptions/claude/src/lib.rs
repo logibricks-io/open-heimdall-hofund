@@ -40,6 +40,7 @@ mod run_lock;
 mod setup_token;
 mod upstream;
 mod usage;
+mod usage_cadence;
 mod usage_reset;
 mod wslrun;
 
@@ -478,6 +479,68 @@ async fn finish_login(
     Ok((id, label, signed_in_blob(&credentials, &profile, ctx)))
 }
 
+impl Claude {
+    async fn quota_windows(
+        &self,
+        account: &AccountId,
+        host: &HostContext,
+        intent: usage_cadence::QuotaIntent,
+    ) -> Result<Vec<QuotaWindow>, PluginError> {
+        let Some(secret) = host.accounts().secret(account).await? else {
+            return Err(PluginError::auth(
+                "no Claude Code sign-in is stored for this account",
+            ));
+        };
+        let blob = SecretObject::parse(&secret)?;
+        let now = host.clock().now();
+        if setup_token::is_setup_token(&blob) {
+            if let Some(windows) = self.limits.kept_windows(account, now) {
+                return Ok(windows);
+            }
+            return Err(PluginError::unsupported(usage::SETUP_TOKEN_QUOTA));
+        }
+        let active = usage_cadence::is_active_account(account);
+        let card_refresh = host
+            .quota_card_refresh_for()
+            .is_some_and(|id| id == account);
+        let decision = self
+            .limits
+            .usage_read_decision(account, now, active, card_refresh, intent);
+        if !decision.run_usage {
+            if let Some(windows) = self.limits.kept_windows(account, now) {
+                return Ok(windows);
+            }
+            if !active && !card_refresh {
+                return Err(PluginError::unsupported(
+                    "not read yet: refresh this account's card to have Claude Code's /usage read it",
+                ));
+            }
+            if active {
+                return Err(PluginError::unsupported(
+                    "not read yet: hofund reads Claude's usage by running Claude Code's /usage",
+                ));
+            }
+            return Err(PluginError::unsupported(
+                "not read yet: refresh this account's card to have Claude Code's /usage read it",
+            ));
+        }
+        self.limits.mark_usage_tried(account, now);
+        match account::read_usage(host, self.command.as_ref(), account).await {
+            Ok(windows) => {
+                self.limits.record_usage(account, windows, now);
+                Ok(self.limits.kept_windows(account, now).unwrap_or_default())
+            }
+            Err(err) => {
+                self.limits.record_usage_failure(account, &err);
+                if let Some(windows) = self.limits.fallback_on_usage_error(account, &err, now) {
+                    return Ok(windows);
+                }
+                Err(err)
+            }
+        }
+    }
+}
+
 fn signed_in_blob(credentials: &Credentials, profile: &Profile, ctx: &SignInCtx) -> SecretObject {
     let blob = creds::blob(credentials, profile);
     let blob = match &credentials.plan {
@@ -625,32 +688,20 @@ impl Subscription for Claude {
         account: &AccountId,
         host: &HostContext,
     ) -> Result<Vec<QuotaWindow>, PluginError> {
-        let Some(secret) = host.accounts().secret(account).await? else {
-            return Err(PluginError::auth(
-                "no Claude Code sign-in is stored for this account",
-            ));
-        };
-        let blob = SecretObject::parse(&secret)?;
-        let now = host.clock().now();
-        if setup_token::is_setup_token(&blob) {
-            if let Some(windows) = self.limits.kept_windows(account, now) {
-                return Ok(windows);
-            }
-            return Err(PluginError::unsupported(usage::SETUP_TOKEN_QUOTA));
-        }
-        match account::read_usage(host, self.command.as_ref(), account).await {
-            Ok(windows) => {
-                self.limits.record_usage(account, windows, now);
-                Ok(self.limits.kept_windows(account, now).unwrap_or_default())
-            }
-            Err(err) => {
-                self.limits.record_usage_failure(account, &err);
-                if let Some(windows) = self.limits.fallback_on_usage_error(account, &err, now) {
-                    return Ok(windows);
-                }
-                Err(err)
-            }
-        }
+        usage_cadence::mark_usage_asked();
+        self.quota_windows(account, host, usage_cadence::QuotaIntent::Asked)
+            .await
+    }
+
+    async fn quota_poll(
+        &self,
+        account: &AccountId,
+        host: &HostContext,
+    ) -> Result<hofund_plugin_api::QuotaPoll, PluginError> {
+        let windows = self
+            .quota_windows(account, host, usage_cadence::QuotaIntent::UnaskedPoll)
+            .await?;
+        Ok(hofund_plugin_api::QuotaPoll::from_windows(windows))
     }
 
     async fn list_models(
