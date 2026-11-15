@@ -1754,6 +1754,29 @@ fn model_list_entry(
     value
 }
 
+fn generative_list_entry(
+    catalog: &Option<Arc<hofund_model_catalog::ModelCatalog>>,
+    id: &str,
+) -> serde_json::Value {
+    let display_name = catalog
+        .as_ref()
+        .and_then(|catalog| catalog.resolve(id))
+        .map(|entry| entry.display_name.clone())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| id.to_owned());
+    let description = format!("{display_name} via hofund");
+    serde_json::json!({
+        "name": format!("models/{id}"),
+        "displayName": display_name,
+        "description": description,
+        "supportedGenerationMethods": [
+            "generateContent",
+            "streamGenerateContent",
+            "countTokens",
+        ],
+    })
+}
+
 async fn generative_models(State(app): State<Arc<Inner>>, request: Request) -> Response {
     let codec = app
         .codecs
@@ -1774,13 +1797,7 @@ async fn generative_models(State(app): State<Arc<Inner>>, request: Request) -> R
     let models = Gateway::filtered_models(&app, request.headers(), &identity, scoped);
     let models: Vec<_> = models
         .into_iter()
-        .map(|id| {
-            serde_json::json!({
-                "name": format!("models/{id}"),
-                "displayName": id,
-                "supportedGenerationMethods": ["generateContent", "streamGenerateContent"],
-            })
-        })
+        .map(|id| generative_list_entry(&app.model_catalog, &id))
         .collect();
     json_response(
         StatusCode::OK,

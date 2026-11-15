@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A-3a: the daemon coordinates Claude daily warm-up and model connectivity
+  tests through one Claude Code `-p` send (`warmup/claude.rs`,
+  `Subscription::warmup_probe`, `account::ask` with
+  `disableDeepLinkRegistration` settings). Successful warms stale-mark quota
+  reads for routing. Tests `a3a_28` through `a3a_30`. Refs A-3.
 - R-53b: audited the frozen reference for Cline subscription import (row b);
   key-plan and plugin credentials enter only through API-key or device sign-in,
   with no official home credential-file import to port. Subscription parity row
@@ -195,6 +200,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   full `Content-Length` request and drains response bodies before the next call,
   removing a macOS CI race where the accept loop replied after headers only.
   Refs D-71.
+- C-1a: `GET /v1beta/models` lists catalog `displayName` when known, a
+  `{displayName} via hofund` description, and `countTokens` with the generate and
+  stream methods; feature-parity row 1.6 is Done. Refs C-1a.
 - Cursor HTTP/1 sixteen-KV pipeline test: drive the Run session with
   `drive_until_http1_request` and `drive_to_completion` instead of racing a
   yield budget against a paused clock, and bind loopback response scripts at
