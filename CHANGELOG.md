@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- R-56c: the Zed subscription plugin persists the official mover OAuth refresh
+  metadata on each account secret, including `planName` typography and string
+  `userId`, beside top-level `user_id`, access, `system_id`, org, plan, login,
+  name, and `models_json`. Recorded fixtures only (`r56c_*`). Refs R-56.
 - R-56b: the Zed subscription plugin imports single `zedCreds` JSON, built-in
   `logins.json` side-login rows, and official mover OAuth envelopes without
   calling live whoami. Lapsed or unreadable rows are skipped without dropping

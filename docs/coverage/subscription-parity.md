@@ -15,7 +15,7 @@ Legend: **Done** = matches the reference at checklist granularity; **Partial** =
 | Claude Pro/Max (`claude`) | 3 | 15 | 3 | 2 | 0 |
 | Cursor (`cursor`) | 11 | 8 | 0 | 2 | 0 |
 | Devin (`devin`) | 13 | 5 | 0 | 1 | 0 |
-| Zed (`zed`) | 13 | 3 | 0 | 3 | 0 |
+| Zed (`zed`) | 14 | 2 | 0 | 3 | 0 |
 | Kiro (`kiro`) | 9 | 8 | 0 | 2 | 0 |
 | Factory / Droid (`factory`) | 14 | 2 | 0 | 3 | 0 |
 | Cline / ClinePass (`cline`) | 12 | 4 | 0 | 3 | 0 |
@@ -166,7 +166,7 @@ Structured-output prose for Chat, Responses, and Messages shipped in R-13b (`str
 | a2 | sign-in: import saved creds | Core `zedCreds` mover (`zed.go:14-34`) | `import.rs` + `creds.rs`: single `zedCreds` JSON, mover OAuth (`type`, `access`, JSON `refresh` metadata), and built-in `logins.json` rows (`r56b_*`, offline fixtures only) | Done | Mocks only; no real-account smoke |
 | a3 | API key / device | N/A | N/A | N/A | — |
 | b | import | Built-in side logins | `hofund subscription import` | Done | Lapsed or unreadable rows are skipped without dropping siblings |
-| c | token storage | Plugin holds user id + access + system id | `creds.rs` stored secret | Partial | — |
+| c | token storage | Plugin oauth entry: `access` plus JSON `refresh` with `userId`, `systemId`, `org`, `plan`, `planName`, `login`, and `name` (`stateOf`, `withOrg`) | `creds.rs` secret blob and `refresh_json` round-trip (`r56c_*`, offline fixtures only) | Done | — |
 | d | refresh | POST `/client/llm_tokens` on 401 (`zed/index.mjs:14-16`) | `refresh.rs`, `tokens.rs`, stale headers on `/models` and `/completions` | Done | — |
 | e | upstream wire | POST `/completions` NDJSON envelope (`zed/index.mjs:17-20`) | `upstream.rs` POST `/completions` | Done | — |
 | f | inbound shapes | Per-provider SDK body in `provider_request` (`zed/index.mjs:22-25`) | `body.rs` + `wire::encode_outbound` | Done | — |
