@@ -51,6 +51,8 @@ pub(crate) struct StartSpec {
     pub proxy: Vec<(OsString, OsString)>,
     /// Optional WSL distro. When set, the program is wrapped in `wsl.exe`.
     pub wsl_distro: Option<String>,
+    /// WSL probe result when [`wsl_distro`] is set; drives `cross_env` on the plan.
+    pub wsl_tool: Option<crate::wslrun::Tool>,
     /// `--mcp-config` path when the turn offers tools.
     pub mcp_config: Option<PathBuf>,
     /// Session id for `--resume` after unshelve. WSL keeps `--no-session-persistence`.
@@ -139,6 +141,16 @@ pub(crate) fn start_plan(spec: &StartSpec, request: &Request) -> Result<SpawnPla
     }
     for (key, value) in &spec.proxy {
         env.insert(key.clone(), value.clone());
+    }
+
+    if let Some(tool) = &spec.wsl_tool {
+        let pairs: Vec<_> = env.into_iter().collect();
+        let crossed = crate::wslrun::cross_env(
+            tool,
+            &pairs,
+            &["CLAUDE_CONFIG_DIR/p", "CLAUDE_CODE_OAUTH_TOKEN"],
+        );
+        env = crossed.into_iter().collect();
     }
 
     Ok(SpawnPlan {
@@ -359,8 +371,21 @@ mod tests {
                 OsString::from("http://127.0.0.1:8080"),
             )],
             wsl_distro: None,
+            wsl_tool: None,
             mcp_config: None,
             resume_session: None,
+        }
+    }
+
+    fn wsl_tool() -> crate::wslrun::Tool {
+        crate::wslrun::Tool {
+            distro: "Ubuntu".into(),
+            path: "/usr/bin/claude".into(),
+            path_env: "/usr/bin".into(),
+            mount: "/mnt/".into(),
+            host: "172.20.0.1".into(),
+            root: false,
+            home: String::new(),
         }
     }
 
@@ -508,6 +533,53 @@ mod tests {
         assert!(
             !args.iter().any(|a| a == "--no-session-persistence"),
             "{args:?}"
+        );
+    }
+
+    #[test]
+    fn native_start_plan_leaves_proxy_and_env_without_wslenv() {
+        let plan = start_plan(&spec(), &text_request("hi")).expect("plan");
+        assert!(
+            !plan.env.contains_key(&OsString::from("WSLENV")),
+            "{:?}",
+            plan.env
+        );
+        assert_eq!(
+            plan.env.get(&OsString::from("HTTP_PROXY")),
+            Some(&OsString::from("http://127.0.0.1:8080"))
+        );
+    }
+
+    #[test]
+    fn wsl_start_plan_crosses_env_and_rewrites_loopback_proxy() {
+        let mut spec = spec();
+        spec.wsl_distro = Some("Ubuntu".into());
+        spec.wsl_tool = Some(wsl_tool());
+        let plan = start_plan(&spec, &text_request("hi")).expect("plan");
+        let wslenv = plan
+            .env
+            .get(&OsString::from("WSLENV"))
+            .expect("WSLENV")
+            .to_string_lossy();
+        assert!(wslenv.contains("CLAUDE_CONFIG_DIR/p"), "{wslenv}");
+        assert!(wslenv.contains("CLAUDE_CODE_OAUTH_TOKEN"), "{wslenv}");
+        assert!(wslenv.contains("HTTP_PROXY"), "{wslenv}");
+        let config = plan
+            .env
+            .get(&OsString::from("CLAUDE_CONFIG_DIR"))
+            .expect("config dir")
+            .to_string_lossy();
+        assert!(
+            config.contains(r"C:\tmp\acct") || config.contains("/tmp/acct"),
+            "{config}"
+        );
+        assert_eq!(
+            plan.env.get(&OsString::from("HTTP_PROXY")),
+            Some(&OsString::from("http://172.20.0.1:8080"))
+        );
+        assert_eq!(
+            plan.env.get(&OsString::from("CLAUDE_CODE_OAUTH_TOKEN")),
+            Some(&OsString::from("secret-token"))
         );
     }
 

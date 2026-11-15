@@ -70,15 +70,14 @@ Every other gap below maps to an existing plan item.
 | n | error classification | `ClaudeSignInRequired`, refusal vs retry (`claude_auth.go`); subscription refusals move account (`gateway/refusal_accounts_test.go`) | `bridge/failure.rs` maps sign-in, extra-usage, too-long, quota, 429, and crash text; room-full 503 sets vendor-neutral `skip_failover_same_plugin` (R-6g). Sign-in lapses are pinned to the login version captured at run start | Partial | Real-account classification (#304); image/timeout live wrapping still thin |
 | o | daily warmup | `warmClaude` / `askClaude` in gateway; `ProbeClaudeVia`; `WarmClaudeVia`; `claudeWarmedNow` (`claude_warmup.go`, `claude_probe.go`, `warm_now.go`) | `hofund-daemon` `warmup/claude.rs` coordinates `Subscription::warmup_probe`; plugin `account::ask` with official argv including `disableDeepLinkRegistration`; `UpstreamProvider::probe` for model tests; `QuotaStore::stale_allowance` after warm | Done | Week/all reset loop (`KeepClaudeWindowsWarm`) remains A-3b |
 | p | agent sign-in switching | Switch with locks, CAS on refresh token (`logins.go` patterns; docs in subscriptions.md) | `write_agent_sign_in`, discover/import (`lib.rs:437-475`) | Partial | Full lock parity documented in subscriptions.md gaps (overage quota) |
-| q | vendor extras | WSL Claude, per-login proxy (`claude_signin.go:139-145`), setup-token inference-only | WSL for sign-in and short CLI (`wslrun.rs` / `launcher.rs`); setup-token landed R-5; `hofund_plugin_sdk::netproxy` (`env_for_bun_with`, loopback SOCKS→HTTP bridge) on sign-in, refresh, `/usage`, warm-up, and bridge `StartSpec`; upstream sets `wsl_distro` from `ClaudeCommand::resolve` when Windows has no native `claude` | Partial | WSL proxy `cross_env` on long-lived bridge spawns and live MCP bridge smoke (#304) |
+| q | vendor extras | WSL Claude, per-login proxy (`claude_signin.go:139-145`), setup-token inference-only | WSL for sign-in and short CLI (`wslrun.rs` / `launcher.rs`); setup-token landed R-5; `hofund_plugin_sdk::netproxy` (`env_for_bun_with`, loopback SOCKS→HTTP bridge) on sign-in, refresh, `/usage`, warm-up, and bridge `StartSpec`; upstream sets `wsl_distro` and `wsl_tool` from `ClaudeCommand::resolve`; bridge `start_plan` runs `wslrun::cross_env` on long-lived WSL spawns (`bridge/run.rs` tests) | Partial | Live MCP bridge smoke (Refs #304) |
 
 ### Gaps (Claude)
 
 - Live-account quota, catalog, and bridge smoke — **#304**
 - Background `/usage` refresh cadence from `subscription_usage.go` — not ported
 - Live-account quota, catalog, and bridge smoke — **#304**
-- WSL `cross_env` for long-lived bridge spawns — open
-- WSL fallback for sign-in and short CLI landed earlier (`wslrun.rs` / `launcher.rs`). Per-login Bun proxy, opened-URL relay, and bridge `wsl_distro` resolution landed in this slice — **R-5** / **R-6**
+- WSL fallback for sign-in and short CLI landed earlier (`wslrun.rs` / `launcher.rs`). Per-login Bun proxy, opened-URL relay, bridge `wsl_distro` resolution, and long-lived bridge `cross_env` landed in **R-5** / **R-6**; live MCP bridge smoke remains **Refs #304**
 
 ---
 
