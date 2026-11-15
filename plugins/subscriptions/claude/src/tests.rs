@@ -1588,30 +1588,13 @@ fn r5_59_sign_in_reads_opened_url_from_browser_relay() {
                 .find(|(k, _)| k == hofund_plugin_sdk::opened_url::OPENED_URL_ENV)
                 .map(|(_, v)| PathBuf::from(v))
                 .expect("opened url env");
-            let browser = spawn
-                .env
-                .iter()
-                .find(|(k, _)| k == "BROWSER")
-                .map(|(_, v)| v.to_string_lossy().to_string())
-                .expect("browser");
-            std::fs::write(
-                &browser,
-                format!("#!/bin/sh\nprintf '%s' \"$1\" > \"{}\"\n", opened.display()),
-            )
-            .expect("write browser");
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&browser, std::fs::Permissions::from_mode(0o755))
-                    .expect("browser mode");
-            }
-            let _ = std::process::Command::new(&browser)
-                .arg(opened_link)
-                .env(
-                    hofund_plugin_sdk::opened_url::OPENED_URL_ENV,
-                    opened.to_string_lossy().as_ref(),
-                )
-                .status();
+            assert!(
+                spawn.env.iter().any(|(k, _)| k == "BROWSER"),
+                "BROWSER must be set"
+            );
+            // Write the relay file directly: a plugin test must not call
+            // std::process (check-plugins). Same effect as the BROWSER stub.
+            std::fs::write(&opened, opened_link).expect("opened url");
             vec!["Opening browser…".to_owned()]
         }));
     let challenge = start(&host, &sub);
