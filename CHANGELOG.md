@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   metadata on each account secret, including `planName` typography and string
   `userId`, beside top-level `user_id`, access, `system_id`, org, plan, login,
   name, and `models_json`. Recorded fixtures only (`r56c_*`). Refs R-56.
+- R-5: the Claude Code subscription plugin keeps per-account allowance from
+  stream-json `rate_limit_event` envelopes (`limits.rs`): `unifiedWindows` and
+  the active `rateLimitType`, one-hour stand-in when `/usage` is away, merge
+  over same-named `/usage` windows, `with_unstarted` for the 5-hour row, and
+  heard windows for setup-token accounts. Tests `r5_48`–`r5_58` use recorded
+  fixtures and a fake runner only. Refs R-5.
 - R-54e: the Qoder subscription plugin classifies native queue code 10605,
   quota, and request refusal codes like the reference (`failure.rs`), waits on
   `/algo/api/v2/service/ask/queue/status` and resends within budget (`queue.rs`,
