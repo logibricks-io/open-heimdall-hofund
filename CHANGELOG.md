@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`9`) scrolls, follows at one second, toggles request lines from events, and
   clears the view without deleting the file. `?` opens a per-page help overlay.
   Refs R-18.
+- R-6: `hofund_plugin_sdk::image::fit_claude` scales Claude Code inline images
+  (2000 px per side, five mebibytes of base64, triangle resize, JPEG/PNG
+  rules) and the Claude subscription bridge applies it on `-p` stream-json
+  image blocks (`r698_*` fixtures; issue #698). Refs R-6.
 - A-3a: the daemon coordinates Claude daily warm-up and model connectivity
   tests through one Claude Code `-p` send (`warmup/claude.rs`,
   `Subscription::warmup_probe`, `account::ask` with
