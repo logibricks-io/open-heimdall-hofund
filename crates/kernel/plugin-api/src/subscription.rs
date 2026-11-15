@@ -338,6 +338,26 @@ pub trait Subscription: Send + Sync + 'static {
         ))
     }
 
+    /// Sends the smallest Claude Code "hi" at `model` for connectivity tests.
+    ///
+    /// Subscriptions that warm up through Claude Code implement this; the daemon
+    /// coordinator calls it for scheduled warm-up (Haiku) and model probes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when the probe cannot run.
+    async fn warmup_probe(
+        &self,
+        account: &AccountId,
+        host: &HostContext,
+        model: &str,
+    ) -> Result<(), PluginError> {
+        let _ = (account, host, model);
+        Err(PluginError::unsupported(
+            "this subscription does not support warm-up probes",
+        ))
+    }
+
     /// Presses the vendor daily check-in for one signed-in account.
     ///
     /// The daemon calls this when daily check-in is configured and due, or when
