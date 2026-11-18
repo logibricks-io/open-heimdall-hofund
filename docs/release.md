@@ -193,6 +193,10 @@ pin on every pull request and checks `tauri --version`.
 | `ubuntu-latest` | `deb`, `appimage` |
 | `windows-latest` | `nsis`, `msi` |
 
+WiX rejects a non-numeric prerelease identifier, so a tag such as
+`v0.2.0-rc.1` ships the Windows NSIS installer only. Restore `nsis,msi`
+for a final `v0.2.0` tag.
+
 Linux needs WebKitGTK 4.1, Ayatana AppIndicator, librsvg, patchelf, and
 libxdo. The workflow installs them. The job writes `SHA256SUMS` next to the
 bundles and uploads them to the GitHub release for that tag after the CLI

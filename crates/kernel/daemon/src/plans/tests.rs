@@ -40,7 +40,7 @@ fn kimi_config(url: &str, fail: bool) -> Config {
 
 fn kimi_body(used: f64) -> String {
     format!(
-        "{{\"usages\":{{\"limit_5h\":{{\"used_ratio\":{},\"reset_time\":\"2026-11-17T00:00:00Z\"}},\"limit_month_total\":{{\"used_ratio\":0.4,\"reset_time\":\"2026-12-01T00:00:00Z\"}}}}}}",
+        "{{\"usages\":{{\"limit_5h\":{{\"used_ratio\":{},\"reset_time\":\"2099-01-15T00:00:00Z\"}},\"limit_month_total\":{{\"used_ratio\":0.4,\"reset_time\":\"2099-12-01T00:00:00Z\"}}}}}}",
         used / 100.0
     )
 }

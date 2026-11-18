@@ -17,9 +17,11 @@ only; do not treat it as live-verified.
 Held work is not in this cut: true 4.2–4.4 session recording, Library writes,
 and MCP execution (awaiting a second security review); R-47b; R-47 k
 credit-reset / `quota reset` / automatic consume; and the settings UI.
-Desktop bundles (macOS `.dmg`/`.app`, Linux `.deb`/AppImage, Windows NSIS/MSI)
-are produced by the existing tag workflow. Signing and notarization run only
-when repository secrets are set; otherwise the artifacts are unsigned.
+Desktop bundles (macOS `.dmg`/`.app`, Linux `.deb`/AppImage, and a Windows
+NSIS installer) are produced by the existing tag workflow. The Windows MSI is
+omitted from this prerelease because WiX requires a numeric-only prerelease
+identifier. Signing and notarization run only when repository secrets are
+set; otherwise the artifacts are unsigned.
 
 ### Added
 
