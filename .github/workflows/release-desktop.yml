@@ -28,9 +28,8 @@ jobs:
             bundles: deb,appimage
           - os: windows-latest
             # WiX/MSI rejects a non-numeric prerelease identifier such as
-            # "rc" in 0.2.0-rc.1. NSIS accepts that version (the dry-run
-            # already produced Hofund_0.2.0-rc.1_x64-setup.exe). Restore
-            # "nsis,msi" for the final 0.2.0 tag.
+            # "rc" in 0.2.0-rc.1 / 0.2.0-rc.2. NSIS accepts that version.
+            # Restore "nsis,msi" for the final 0.2.0 tag.
             bundles: nsis
     steps:
       - name: Checkout
@@ -55,27 +54,60 @@ jobs:
     needs: bundle
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - name: Download bundles
         uses: actions/download-artifact@v8
         with:
           pattern: hofund-desktop-*
-          merge-multiple: true
+          # Keep per-platform directories so SHA256SUMS files do not overwrite
+          # each other (merge-multiple: true would leave only one checksum file).
+          merge-multiple: false
           path: bundles
       - name: Upload to the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          for _ in $(seq 1 30); do
-            if gh release view "$TAG" >/dev/null 2>&1; then
-              gh release upload "$TAG" bundles/* --clobber
-              exit 0
+          mkdir -p upload
+          : > upload/SHA256SUMS
+          for dir in bundles/*; do
+            [ -d "$dir" ] || continue
+            os="${dir##*/}"
+            os="${os#hofund-desktop-}"
+            if [ -f "$dir/SHA256SUMS" ]; then
+              {
+                echo "# $os"
+                cat "$dir/SHA256SUMS"
+              } >> upload/SHA256SUMS
+              cp "$dir/SHA256SUMS" "upload/SHA256SUMS.$os"
             fi
-            echo "Waiting for the CLI release $TAG"
+            find "$dir" -type f ! -name SHA256SUMS -exec cp -t upload {} +
+          done
+          test -s upload/SHA256SUMS
+          # This job has no checkout, so GH_REPO must be set. Do not hide gh
+          # stderr. Wait for the CLI workflow, then create a prerelease stub
+          # if it did not, so bundles can still be attached.
+          found=0
+          for i in $(seq 1 45); do
+            if gh release view "$TAG"; then
+              found=1
+              break
+            fi
+            echo "Waiting for the CLI release $TAG (attempt $i/45)" >&2
             sleep 20
           done
-          echo "The CLI release $TAG was not created." >&2
-          exit 1
+          if [ "$found" -ne 1 ]; then
+            echo "The CLI release $TAG was not created; creating a prerelease stub so desktop bundles can be attached." >&2
+            notes="$RUNNER_TEMP/desktop-stub-notes.txt"
+            cat > "$notes" <<'EOF'
+Preview prerelease. Real-account smoke tests for subscriptions are still pending (#304, #58, #310). Artifacts are unsigned unless repository secrets are set.
+EOF
+            if ! gh release create "$TAG" --prerelease --target "${GITHUB_SHA}" --title "$TAG" --notes-file "$notes"; then
+              echo "gh release create failed (the CLI workflow may have just created it); retrying view." >&2
+              gh release view "$TAG"
+            fi
+          fi
+          gh release upload "$TAG" upload/* --clobber

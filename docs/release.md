@@ -4,14 +4,11 @@ The general tag, dry-run, desktop, and signing process is in this file.
 The v0.2.0-specific cut — including what is still unmerged and which
 smoke stays with Palmer — is
 [docs/release-v0.2.0-checklist.md](release-v0.2.0-checklist.md). That
-checklist does not bump the version or create a tag. **v0.2.0 is not
-tagged, and no GitHub Release has been published from this tree.** Do not
-treat this document as evidence that a release already shipped. Workspace
-version strings may still say 0.1.0 until that cut.
-
-Version 0.1.0 is prepared in the tree: the workspace version, this process,
-and the changelog. Pushing a tag publishes a GitHub release. Do not push a
-tag until the changelog and the version agree.
+checklist does not bump the version or create a tag. **The final `v0.2.0`
+tag has not been pushed.** Preview prereleases may already exist
+(`v0.2.0-rc.1` does). Do not move or delete a published prerelease tag.
+Pushing a new version tag publishes a GitHub release. Do not push a tag
+until the changelog and the version agree.
 
 The CLI and the menu-bar app are two workflows. Both run on a tag that looks
 like `v0.1.0`. Neither of those publish workflows runs on a pull request.
@@ -139,6 +136,14 @@ these:
 - `universal-macos` on the `host` job `needs` list, and in that job's `if`
 - the `Download the universal archive` step in `host`
 - the `Stage the universal archive` step in `host`
+- the plan job writes a slim manifest (the artifact matrix only) to
+  `GITHUB_OUTPUT`, not the full cargo-dist plan including
+  `announcement_github_body`
+- the host job also writes a slim manifest to `GITHUB_OUTPUT`
+- the `Create GitHub Release` step reads the title, prerelease flag, and
+  notes from `dist-manifest.json` with `jq` into a `--notes-file`; it
+  must not pass the announcement body through an environment variable or
+  process argument (Linux `MAX_ARG_STRLEN` is 128 KiB)
 
 `allow-dirty = ["ci"]` is set because of those edits. cargo-dist 0.32 treats
 a `release.yml` that differs from `dist generate` as an error, and the tag
@@ -194,13 +199,16 @@ pin on every pull request and checks `tauri --version`.
 | `windows-latest` | `nsis`, `msi` |
 
 WiX rejects a non-numeric prerelease identifier, so a tag such as
-`v0.2.0-rc.1` ships the Windows NSIS installer only. Restore `nsis,msi`
-for a final `v0.2.0` tag.
+`v0.2.0-rc.1` or `v0.2.0-rc.2` ships the Windows NSIS installer only.
+Restore `nsis,msi` for a final `v0.2.0` tag.
 
 Linux needs WebKitGTK 4.1, Ayatana AppIndicator, librsvg, patchelf, and
 libxdo. The workflow installs them. The job writes `SHA256SUMS` next to the
-bundles and uploads them to the GitHub release for that tag after the CLI
-workflow has created it.
+bundles and uploads them to the GitHub release for that tag. The attach
+job sets `GH_REPO` (it has no checkout), surfaces `gh` stderr, waits for
+the CLI release, and creates a prerelease stub if that workflow did not,
+then uploads the bundles and a combined `SHA256SUMS` (per-platform
+checksum files are kept so they do not overwrite each other).
 
 The bundle directory comes from `cargo metadata`'s `target_directory`, plus
 `release/bundle` (`.github/scripts/desktop-bundle-dir.sh`). `hofund-desktop`

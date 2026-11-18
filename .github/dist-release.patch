@@ -1,6 +1,21 @@
 --- release.generated.yml
 +++ release.yml
-@@ -138,11 +138,37 @@
+@@ -79,7 +79,13 @@
+           dist ${{ (!github.event.pull_request && format('host --steps=create --tag={0}', github.ref_name)) || 'plan' }} --output-format=json > plan-dist-manifest.json
+           echo "dist ran successfully"
+           cat plan-dist-manifest.json
+-          echo "manifest=$(jq -c "." plan-dist-manifest.json)" >> "$GITHUB_OUTPUT"
++          # hofund: write only the CI matrix to GITHUB_OUTPUT. The full
++          # manifest (including announcement_github_body) is uploaded as
++          # artifacts-plan-dist-manifest. Putting that body in a job
++          # output can exceed Linux MAX_ARG_STRLEN or cause GitHub to skip
++          # output `val` ("may contain secret"), which skipped the artifact
++          # jobs on v0.2.0-rc.1. See docs/release.md.
++          echo "manifest=$(jq -c '{ci:{github:{artifacts_matrix:.ci.github.artifacts_matrix,pr_run_mode:.ci.github.pr_run_mode}}}' plan-dist-manifest.json)" >> "$GITHUB_OUTPUT"
+       - name: "Upload dist-manifest.json"
+         uses: actions/upload-artifact@v7
+         with:
+@@ -138,11 +144,37 @@
        - name: Install dependencies
          run: |
            ${{ matrix.packages_install }}
@@ -39,7 +54,7 @@
        - id: cargo-dist
          name: Post-build
          # We force bash here just because github makes it really hard to get values up
-@@ -210,14 +236,55 @@
+@@ -210,14 +242,55 @@
            path: |
              ${{ steps.cargo-dist.outputs.paths }}
              ${{ env.BUILD_MANIFEST_NAME }}
@@ -97,7 +112,20 @@
      env:
        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
      runs-on: "ubuntu-22.04"
-@@ -265,6 +332,15 @@
+@@ -247,7 +320,11 @@
+           dist host ${{ needs.plan.outputs.tag-flag }} --steps=upload --steps=release --output-format=json > dist-manifest.json
+           echo "artifacts uploaded and released successfully"
+           cat dist-manifest.json
+-          echo "manifest=$(jq -c "." dist-manifest.json)" >> "$GITHUB_OUTPUT"
++          # hofund: do not interpolate the announcement body into a shell
++          # argument or GITHUB_OUTPUT (Linux MAX_ARG_STRLEN). A slim
++          # output is enough if a later step reads job outputs; Create
++          # GitHub Release reads the file with jq instead.
++          echo "manifest=$(jq -c '{announcement_is_prerelease,announcement_title}' dist-manifest.json)" >> "$GITHUB_OUTPUT"
+       - name: "Upload dist-manifest.json"
+         uses: actions/upload-artifact@v7
+         with:
+@@ -265,17 +342,31 @@
          run: |
            # Remove the granular manifests
            rm -f artifacts/*-dist-manifest.json
@@ -112,4 +140,27 @@
 +        run: cp universal-out/* artifacts/
        - name: Create GitHub Release
          env:
-           PRERELEASE_FLAG: "${{ fromJson(steps.host.outputs.manifest).announcement_is_prerelease && '--prerelease' || '' }}"
+-          PRERELEASE_FLAG: "${{ fromJson(steps.host.outputs.manifest).announcement_is_prerelease && '--prerelease' || '' }}"
+-          ANNOUNCEMENT_TITLE: "${{ fromJson(steps.host.outputs.manifest).announcement_title }}"
+-          ANNOUNCEMENT_BODY: "${{ fromJson(steps.host.outputs.manifest).announcement_github_body }}"
+           RELEASE_COMMIT: "${{ github.sha }}"
++          TAG: "${{ needs.plan.outputs.tag }}"
+         run: |
+-          # Write and read notes from a file to avoid quoting breaking things
+-          echo "$ANNOUNCEMENT_BODY" > $RUNNER_TEMP/notes.txt
+-
+-          gh release create "${{ needs.plan.outputs.tag }}" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
++          set -euo pipefail
++          # hofund: read notes from the manifest file with jq. Do not pass
++          # the announcement body through an env var or argv; that hit
++          # Linux MAX_ARG_STRLEN on v0.2.0-rc.1. See docs/release.md.
++          jq -r '.announcement_github_body // empty' dist-manifest.json > "$RUNNER_TEMP/notes.txt"
++          title="$(jq -r '.announcement_title' dist-manifest.json)"
++          prerelease_flag=()
++          if jq -e '.announcement_is_prerelease == true' dist-manifest.json >/dev/null; then
++            prerelease_flag=(--prerelease)
++          fi
++          gh release create "$TAG" --target "$RELEASE_COMMIT" "${prerelease_flag[@]}" --title "$title" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
+ 
+   announce:
+     needs:
