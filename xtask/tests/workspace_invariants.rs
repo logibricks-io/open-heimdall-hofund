@@ -526,15 +526,15 @@ fn dependency_graph_matches_architecture() {
         "pinned toolchain drifted"
     );
     assert!(
-        manifest.contains("version = \"0.1.0\""),
+        manifest.contains("version = \"0.2.0-rc.1\""),
         "workspace package version drifted"
     );
     for line in manifest.lines() {
         let trimmed = strip_comment(line).trim();
         if trimmed.starts_with("hofund-") {
             assert!(
-                trimmed.contains("version = \"0.1.0\""),
-                "workspace dependency must repeat version 0.1.0: {trimmed}"
+                trimmed.contains("version = \"0.2.0-rc.1\""),
+                "workspace dependency must repeat version 0.2.0-rc.1: {trimmed}"
             );
         }
     }
