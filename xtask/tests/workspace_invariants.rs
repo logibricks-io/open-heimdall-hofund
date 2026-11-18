@@ -526,15 +526,15 @@ fn dependency_graph_matches_architecture() {
         "pinned toolchain drifted"
     );
     assert!(
-        manifest.contains("version = \"0.2.0-rc.1\""),
+        manifest.contains("version = \"0.2.0-rc.2\""),
         "workspace package version drifted"
     );
     for line in manifest.lines() {
         let trimmed = strip_comment(line).trim();
         if trimmed.starts_with("hofund-") {
             assert!(
-                trimmed.contains("version = \"0.2.0-rc.1\""),
-                "workspace dependency must repeat version 0.2.0-rc.1: {trimmed}"
+                trimmed.contains("version = \"0.2.0-rc.2\""),
+                "workspace dependency must repeat version 0.2.0-rc.2: {trimmed}"
             );
         }
     }
@@ -1748,7 +1748,12 @@ fn e6_docs_cover_the_backend_socket_and_codex_wiring() {
     let codecs = read("docs/codecs.md");
     assert!(codecs.contains("GET /backend-api/codex/responses"));
     assert!(!codecs.contains("Codex-backend Responses path is not applicable"));
-    assert!(read("CHANGELOG.md").contains("P0-1e"));
+    let changelog = format!(
+        "{}{}",
+        read("CHANGELOG.md"),
+        read("docs/changelog-v0.2.0-rc.1.md")
+    );
+    assert!(changelog.contains("P0-1e"));
     assert!(read("docs/coverage/agents.md").contains("supports_websockets"));
     assert!(read("docs/feature-parity.md").contains("e3_"));
 }
@@ -1767,7 +1772,12 @@ fn k14_gateway_key_docs_and_parity_cover_the_phase_and_remainder() {
     assert!(guide.contains("## Spending limits"));
     assert!(guide.contains("GET /v1/hofund/limit"));
     assert!(guide.contains("## Short-lived keys and issuers"));
-    assert!(read("CHANGELOG.md").contains("Named gateway keys (P0-4a)"));
+    let changelog = format!(
+        "{}{}",
+        read("CHANGELOG.md"),
+        read("docs/changelog-v0.2.0-rc.1.md")
+    );
+    assert!(changelog.contains("Named gateway keys (P0-4a)"));
     let parity = read("docs/feature-parity.md");
     assert!(parity.contains("| 10.4 | Named gateway keys with model and account limits"));
     assert!(parity.contains("backup, and limits are implemented"));
@@ -1799,7 +1809,12 @@ fn s10_docs_cover_short_lived_keys_stats_routes_and_parity() {
     }
     let comparison = read("docs/magpie-comparison.md");
     assert!(comparison.contains("| Short-lived gateway keys |"));
-    assert!(read("CHANGELOG.md").contains("Short-lived gateway keys and issuers (P0-4d)"));
+    let changelog = format!(
+        "{}{}",
+        read("CHANGELOG.md"),
+        read("docs/changelog-v0.2.0-rc.1.md")
+    );
+    assert!(changelog.contains("Short-lived gateway keys and issuers (P0-4d)"));
 }
 
 /// Counts in `docs/feature-parity.md` `## Summary` must match the `## Matrix`
