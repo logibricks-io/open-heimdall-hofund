@@ -1,0 +1,72 @@
+# Build the extra universal macOS archives after both apple targets exist.
+#
+# cargo-dist 0.32 rejects the universal2 triple, so this is not part of
+# `dist build`. The tag-triggered Release workflow already has a
+# `universal-macos` job. Use this workflow when that job was skipped and
+# the two single-arch apple archives are already on a GitHub release.
+# It does not create, retarget, or upload to a release.
+
+name: Universal macOS archives
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag that already has both macOS archives
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: universal-macos-${{ github.ref }}-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  universal-macos:
+    name: universal macOS archives
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Download macOS archives
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$RELEASE_TAG" in
+            v*) ;;
+            *)
+              echo "tag must start with v, got: $RELEASE_TAG" >&2
+              exit 1
+              ;;
+          esac
+          mkdir -p dist-archives
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --dir dist-archives \
+            --pattern 'hofund-cli-aarch64-apple-darwin.tar.gz' \
+            --pattern 'hofund-cli-x86_64-apple-darwin.tar.gz' \
+            --pattern 'hofund-daemon-bin-aarch64-apple-darwin.tar.gz' \
+            --pattern 'hofund-daemon-bin-x86_64-apple-darwin.tar.gz'
+      - name: Build the universal archives
+        shell: bash
+        env:
+          CODESIGN_CERTIFICATE: ${{ secrets.CODESIGN_CERTIFICATE }}
+          CODESIGN_CERTIFICATE_PASSWORD: ${{ secrets.CODESIGN_CERTIFICATE_PASSWORD }}
+          CODESIGN_IDENTITY: ${{ secrets.CODESIGN_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: .github/scripts/universal-macos-cli.sh dist-archives universal-out
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: universal2-apple-darwin
+          path: universal-out
+          if-no-files-found: error
