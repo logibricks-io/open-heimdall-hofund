@@ -1799,7 +1799,11 @@ fn c6_docs_cover_interrupt_disconnect_and_shutdown() {
     ] {
         assert!(docs.contains(expected), "codecs.md lacks {expected}");
     }
-    assert!(include_str!("../../../../../CHANGELOG.md").contains("P0-1c"));
+    let changelog = concat!(
+        include_str!("../../../../../CHANGELOG.md"),
+        include_str!("../../../../../docs/changelog-v0.2.0-rc.1.md"),
+    );
+    assert!(changelog.contains("P0-1c"));
     let parity = include_str!("../../../../../docs/feature-parity.md");
     assert!(parity.contains("c1_"));
     assert!(parity.contains("c5_"));
