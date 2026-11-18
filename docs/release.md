@@ -183,6 +183,19 @@ and Windows.
 `x86_64-unknown-linux-gnu`, `x86_64-pc-windows-msvc`) and the same three
 desktop jobs. Trigger it on the branch you are about to tag.
 
+If the tag-triggered `universal-macos` job was skipped, do not move the
+tag. After both single-arch macOS archives are on the GitHub release,
+dispatch `.github/workflows/universal-macos.yml` with that tag. The job
+runs `lipo` on a macOS runner and uploads
+`hofund-cli-universal2-apple-darwin.tar.gz` and
+`hofund-daemon-bin-universal2-apple-darwin.tar.gz`, plus their `.sha256`
+sidecars, as workflow artifacts. Attach them with `gh release upload`.
+The job does not create or retarget a release.
+
+Rebuild the shell and PowerShell installers with
+`dist build --artifacts=global --tag=vX.Y.Z` so their download URLs use
+that tag, then upload those four installer files the same way.
+
 ## Menu bar
 
 `.github/workflows/release-desktop.yml` builds `hofund-desktop` through
