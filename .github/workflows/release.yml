@@ -85,7 +85,21 @@ jobs:
           # output can exceed Linux MAX_ARG_STRLEN or cause GitHub to skip
           # output `val` ("may contain secret"), which skipped the artifact
           # jobs on v0.2.0-rc.1. See docs/release.md.
-          echo "manifest=$(jq -c '{ci:{github:{artifacts_matrix:.ci.github.artifacts_matrix,pr_run_mode:.ci.github.pr_run_mode}}}' plan-dist-manifest.json)" >> "$GITHUB_OUTPUT"
+          # cargo-dist 0.32.0 still emits runner macos-14 for
+          # aarch64-apple-darwin. GitHub retired macos-14 on 2026-11-02,
+          # which cancelled that job on v0.2.0-rc.2 with
+          # "macos-14-arm64-us-default is not supported". Map retired
+          # labels to current macos-15 runners before the matrix expands.
+          echo "manifest=$(jq -c '
+            def map_retired_macos_runners:
+              if .runner == "macos-14" then
+                if ((.targets // []) | index("x86_64-apple-darwin")) then .runner = "macos-15-intel"
+                else .runner = "macos-15"
+                end
+              else . end;
+            .ci.github.artifacts_matrix.include |= map(map_retired_macos_runners)
+            | {ci:{github:{artifacts_matrix:.ci.github.artifacts_matrix,pr_run_mode:.ci.github.pr_run_mode}}}
+          ' plan-dist-manifest.json)" >> "$GITHUB_OUTPUT"
       - name: "Upload dist-manifest.json"
         uses: actions/upload-artifact@v7
         with:

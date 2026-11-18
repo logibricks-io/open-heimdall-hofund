@@ -57,10 +57,18 @@ jobs:
         run: |
           set -euo pipefail
           dist plan --output-format=json > plan.json
+          # cargo-dist 0.32.0 still emits runner macos-14 for
+          # aarch64-apple-darwin. GitHub retired macos-14 on 2026-11-02.
+          map_runners='def map_retired_macos_runners:
+            if .runner == "macos-14" then
+              if ((.targets // []) | index("x86_64-apple-darwin")) then .runner = "macos-15-intel"
+              else .runner = "macos-15"
+              end
+            else . end;'
           if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
-            include="$(jq -c '.ci.github.artifacts_matrix.include' plan.json)"
+            include="$(jq -c "${map_runners} .ci.github.artifacts_matrix.include | map(map_retired_macos_runners)" plan.json)"
           else
-            include="$(jq -c '[.ci.github.artifacts_matrix.include[] | select(.targets[] == "x86_64-unknown-linux-gnu")]' plan.json)"
+            include="$(jq -c "${map_runners} [.ci.github.artifacts_matrix.include[] | select(.targets[] == "x86_64-unknown-linux-gnu") | map_retired_macos_runners]" plan.json)"
           fi
           if [ "$include" = "[]" ] || [ "$include" = "null" ]; then
             echo "no local dist targets were selected" >&2

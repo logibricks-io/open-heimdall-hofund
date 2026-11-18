@@ -139,6 +139,9 @@ these:
 - the plan job writes a slim manifest (the artifact matrix only) to
   `GITHUB_OUTPUT`, not the full cargo-dist plan including
   `announcement_github_body`
+- the plan job (and the dry-run plan job) rewrites retired `macos-14`
+  runners from cargo-dist 0.32.0 to `macos-15` (arm64) or
+  `macos-15-intel` (x86_64). GitHub retired macos-14 on 2026-11-02.
 - the host job also writes a slim manifest to `GITHUB_OUTPUT`
 - the `Create GitHub Release` step reads the title, prerelease flag, and
   notes from `dist-manifest.json` with `jq` into a `--notes-file`; it
