@@ -17,6 +17,16 @@ version = 2
 yanked = "deny"
 unmaintained = "workspace"
 unsound = "workspace"
+# Palmer, 2026-11-18 16:23 SGT: 30-day waiver so v0.2.0-rc.1 can ship.
+# chrono → jiff migration is deferred to the next version. Do not extend
+# this list; remove both entries once the migration lands, or when they
+# expire on 2026-12-18, whichever is first.
+# cargo-deny 0.20.2 (CI: cargo-deny-action@v2.1.1) accepts only id + reason
+# on ignore entries; dated `expiry` is not supported until 0.21.
+ignore = [
+    { id = "RUSTSEC-2026-0543", reason = "unmaintained, no patched version; chrono→jiff migration planned after v0.2.0; ignore expires 2026-12-18" },
+    { id = "RUSTSEC-2026-0555", reason = "unmaintained, no patched version; chrono→jiff migration planned after v0.2.0; ignore expires 2026-12-18" },
+]
 
 [licenses]
 version = 2
