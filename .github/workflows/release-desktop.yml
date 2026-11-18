@@ -102,9 +102,7 @@ jobs:
           if [ "$found" -ne 1 ]; then
             echo "The CLI release $TAG was not created; creating a prerelease stub so desktop bundles can be attached." >&2
             notes="$RUNNER_TEMP/desktop-stub-notes.txt"
-            cat > "$notes" <<'EOF'
-Preview prerelease. Real-account smoke tests for subscriptions are still pending (#304, #58, #310). Artifacts are unsigned unless repository secrets are set.
-EOF
+            printf '%s\n' 'Preview prerelease. Real-account smoke tests for subscriptions are still pending (#304, #58, #310). Artifacts are unsigned unless repository secrets are set.' > "$notes"
             if ! gh release create "$TAG" --prerelease --target "${GITHUB_SHA}" --title "$TAG" --notes-file "$notes"; then
               echo "gh release create failed (the CLI workflow may have just created it); retrying view." >&2
               gh release view "$TAG"
