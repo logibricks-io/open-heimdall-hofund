@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0-rc.1] - 2026-11-18
+
+This is a preview (prerelease) of v0.2.0. Real-account smoke tests for
+subscriptions are still pending and remain Palmer's work: #304, #58, and
+#310. Request serving on this cut is verified with mocks and loopback tests
+only; do not treat it as live-verified.
+
+Held work is not in this cut: true 4.2–4.4 session recording, Library writes,
+and MCP execution (awaiting a second security review); R-47b; R-47 k
+credit-reset / `quota reset` / automatic consume; and the settings UI.
+Desktop bundles (macOS `.dmg`/`.app`, Linux `.deb`/AppImage, and a Windows
+NSIS installer) are produced by the existing tag workflow. The Windows MSI is
+omitted from this prerelease because WiX requires a numeric-only prerelease
+identifier. Signing and notarization run only when repository secrets are
+set; otherwise the artifacts are unsigned.
+
 ### Added
 
 - Remote quota cards (E13 follow-through): the model listener serves kept cards

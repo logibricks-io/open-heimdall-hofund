@@ -27,7 +27,11 @@ jobs:
           - os: ubuntu-latest
             bundles: deb,appimage
           - os: windows-latest
-            bundles: nsis,msi
+            # WiX/MSI rejects a non-numeric prerelease identifier such as
+            # "rc" in 0.2.0-rc.1. NSIS accepts that version (the dry-run
+            # already produced Hofund_0.2.0-rc.1_x64-setup.exe). Restore
+            # "nsis,msi" for the final 0.2.0 tag.
+            bundles: nsis
     steps:
       - name: Checkout
         uses: actions/checkout@v7
