@@ -52,6 +52,12 @@ impl HttpProfile {
         self
     }
 
+    /// The configured proxy URL. Absent when this profile connects directly.
+    #[must_use]
+    pub fn proxy(&self) -> Option<&str> {
+        self.proxy.as_deref()
+    }
+
     /// Accepts invalid TLS certificates.
     #[must_use]
     pub fn insecure(mut self) -> Self {

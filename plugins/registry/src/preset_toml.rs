@@ -65,6 +65,10 @@ pub struct PresetToml {
     pub anthropic: String,
     #[serde(default)]
     pub generative: String,
+    /// Realtime session declaration. Empty means this preset does not serve one.
+    /// A path replaces the selected base path. An absolute URL is used as given.
+    #[serde(default)]
+    pub realtime: String,
     #[serde(default)]
     pub config: BTreeMap<String, String>,
     #[serde(default, rename = "region")]
@@ -251,6 +255,7 @@ fn validate_preset(source: &str, plugin: &str, preset: &PresetToml) -> Result<()
     ] {
         validate_url(&context, key, url)?;
     }
+    validate_realtime(&context, &preset.realtime)?;
     if let Some(region) = preset.regions.first() {
         for (key, url, region_url) in [
             ("chat", &preset.chat, &region.chat),
@@ -355,6 +360,31 @@ fn validate_id(source: &str, class: &str, id: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_realtime(context: &str, value: &str) -> Result<(), String> {
+    if value.is_empty() {
+        return Ok(());
+    }
+    if value.starts_with('/') {
+        if value.contains(['?', '#', ' '])
+            || value.contains("://")
+            || value.chars().any(char::is_whitespace)
+        {
+            return Err(format!(
+                "{context} has invalid realtime path `{value}`; expected an absolute path"
+            ));
+        }
+        return Ok(());
+    }
+    let scheme = value.split("://").next().unwrap_or("");
+    if matches!(scheme, "http" | "https" | "ws" | "wss") && !value.chars().any(char::is_whitespace)
+    {
+        return Ok(());
+    }
+    Err(format!(
+        "{context} has invalid realtime endpoint `{value}`; expected a path or an http, https, ws, or wss URL"
+    ))
+}
+
 fn validate_url(context: &str, key: &str, url: &str) -> Result<(), String> {
     if url.is_empty() {
         return Ok(());
@@ -434,7 +464,7 @@ pub fn render_preset(preset: &PresetToml, plugin: &str) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!(
-        "CompiledPreset {{ id: {:?}, plugin: {:?}, name: {:?}, kind: {:?}, short: {:?}, note: {:?}, catalog: {:?}, website: {:?}, keys_url: {:?}, site_host: {:?}, key_hint: {:?}, no_key: {}, no_list: {}, options_base: {}, hosts: {}, only: {:?}, models: {}, header_hints: {}, endpoint: {:?}, endpoint_hint: {:?}, endpoint_needed: {:?}, region_label: {:?}, decide: {:?}, chat: {:?}, responses: {:?}, anthropic: {:?}, generative: {:?}, config: &[{}], regions: &[{}] }}",
+        "CompiledPreset {{ id: {:?}, plugin: {:?}, name: {:?}, kind: {:?}, short: {:?}, note: {:?}, catalog: {:?}, website: {:?}, keys_url: {:?}, site_host: {:?}, key_hint: {:?}, no_key: {}, no_list: {}, options_base: {}, hosts: {}, only: {:?}, models: {}, header_hints: {}, endpoint: {:?}, endpoint_hint: {:?}, endpoint_needed: {:?}, region_label: {:?}, decide: {:?}, chat: {:?}, responses: {:?}, anthropic: {:?}, generative: {:?}, realtime: {:?}, config: &[{}], regions: &[{}] }}",
         preset.id,
         plugin,
         preset.name.as_deref().unwrap_or(""),
@@ -462,6 +492,7 @@ pub fn render_preset(preset: &PresetToml, plugin: &str) -> String {
         preset.responses,
         preset.anthropic,
         preset.generative,
+        preset.realtime,
         config,
         regions,
     )

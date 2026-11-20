@@ -267,6 +267,8 @@ mod tests {
         "POST /v1/messages/count_tokens",
         "GET /v1/responses",
         "POST /v1/responses",
+        "GET /v1/realtime",
+        "GET /realtime",
         "GET /responses",
         "POST /responses",
         "GET /v1beta/models",
