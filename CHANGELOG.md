@@ -22,6 +22,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from `client_metadata` once it is a header, and that socket keeps the last
   reply's state for the same turn id. A per-account store for pooled turns is
   not implemented.
+- D-231: ChatGPT model-list asks, the `version` header, the User-Agent, and
+  device sign-in name the newest plain `x.y.z` among a `0.169.1` floor, npm's
+  latest `@openai/codex` release (read at most every six hours on the host
+  monotonic clock), and a newer
+  Codex client already seen on a routed request. A model list asked at an
+  older client version is fetched again. Refs the reference.
 - D-233: Claude bridge plans set `CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS=0` and `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT=0` unless the process environment already sets that name, and a WSL plan lists both on `WSLENV`, so a client tool is waited on instead of being moved to the background or aborted at the idle limit. One-off runs are unchanged.
 
 ## [0.2.0-rc.2] - 2026-11-18
