@@ -1105,20 +1105,20 @@ mod tests {
         let dir = tempfile::tempdir().expect("dir");
         let ledger = Ledger::open(&dir.path().join("usage.sqlite")).expect("ledger");
         let mut answered = row(50, Some(1), Some(1));
-        answered.upstream = "azure".to_owned();
+        answered.upstream = "member-a".to_owned();
         answered.provider_key_id = "abc".to_owned();
         answered.status = "200".to_owned();
         ledger.record(&answered).expect("record");
         let mut refused = row(60, None, None);
-        refused.upstream = "azure".to_owned();
+        refused.upstream = "member-a".to_owned();
         refused.provider_key_id = "bad".to_owned();
         refused.status = "401".to_owned();
         ledger.record(&refused).expect("record");
         let mut old = row(1, Some(1), Some(1));
-        old.upstream = "azure".to_owned();
+        old.upstream = "member-a".to_owned();
         old.provider_key_id = "old".to_owned();
         ledger.record(&old).expect("record");
         let rows = ledger.answered_keys(10).expect("keys");
-        assert_eq!(rows, vec![("azure".to_owned(), "abc".to_owned())]);
+        assert_eq!(rows, vec![("member-a".to_owned(), "abc".to_owned())]);
     }
 }

@@ -5,6 +5,7 @@
 //! names do not belong in this crate. Generative Language paths are matched
 //! in `endpoints`.
 
+mod advisor;
 mod allow;
 mod bridge_effort;
 pub mod control;
@@ -729,6 +730,12 @@ impl Gateway {
         let inner = Arc::get_mut(&mut self.inner).expect("gateway is not shared yet");
         inner.model_catalog = Some(catalog);
         self
+    }
+
+    /// Nested model calls made as the original gateway caller.
+    #[must_use]
+    pub fn ask_backend(&self) -> Arc<dyn hofund_plugin_api::AskBackend> {
+        advisor::backend(Arc::downgrade(&self.inner))
     }
 
     /// Attaches the effective list-price resolver used when recording usage.
@@ -2058,6 +2065,7 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
             subagent,
         ));
     }
+    model_request.caller = Some(advisor::stamp_caller(&identity));
     let client_headers = client_request_headers(&headers);
     if !client_headers.is_empty() {
         model_request.extensions.insert(
@@ -2869,6 +2877,7 @@ async fn success(
     meta.tier_sent = service_tier_sent.to_owned();
     meta.clear_placeholder_served = clear_placeholder_served;
     meta.provider_key_id = provider_key_id.to_owned();
+    meta.advisor_model = advisor::advisor_model_of(request, &app.snapshot.load());
     let member = Some(upstream.to_owned());
     let capture = prev_response::ReplyCapture::new(capture);
     let response = match completion {
@@ -3293,6 +3302,9 @@ struct UsageMeta {
     native_session_id: String,
     endpoint: String,
     kind: String,
+    /// Bare advisor model from the request, when the reply lists advisor calls.
+    advisor_model: String,
+    advisor_calls: Vec<hofund_ir::AdvisorCall>,
     input: Option<i64>,
     output: Option<i64>,
     ttft_ms: Option<i64>,
@@ -3328,6 +3340,8 @@ impl UsageMeta {
             native_session_id: String::new(),
             endpoint: String::new(),
             kind: String::new(),
+            advisor_model: String::new(),
+            advisor_calls: Vec::new(),
             input: None,
             output: None,
             ttft_ms: None,
@@ -3542,6 +3556,10 @@ where
         }
         if extra.saw_reasoning {
             self.meta.saw_reasoning = true;
+        }
+        let calls = self.tap.advisor_calls();
+        if !calls.is_empty() {
+            self.meta.advisor_calls = calls;
         }
         note_served_word(&self.tap.served_tier(), &mut self.meta);
         self.meta.details.reasoning_hidden = reasoning_hidden(
@@ -3875,6 +3893,8 @@ fn record_realtime_usage(
         tier_sent: String::new(),
         tier_served: String::new(),
         clear_placeholder_served: false,
+        advisor_model: String::new(),
+        advisor_calls: Vec::new(),
     };
     write_usage_app(app, &meta, Some((uncached, output)), status);
 }
@@ -3991,6 +4011,7 @@ fn write_usage(
         })
     });
     let _ = usage.record_with_details(&row, ttft_ms, details, pricing);
+    advisor::write_advisor_rows(usage, meta, pricer, provider_free);
 }
 
 fn as_i64(value: Option<u64>) -> Option<i64> {

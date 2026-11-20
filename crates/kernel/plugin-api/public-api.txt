@@ -33,6 +33,7 @@ AccountsHandle::async fn remove (& self , id : & AccountId) -> Result < () , Plu
 AccountsHandle::async fn secret (& self , id : & AccountId) -> Result < Option < SecretString > , PluginError >
 AccountsHandle::async fn upsert (& self , account : Account , secret : SecretString) -> Result < () , PluginError >
 AccountsHandle::fn account (& self , id : AccountId , label : impl Into < String >) -> Result < Account , PluginError >
+AdvisorCall
 AgentActiveProvider
 AgentActiveProvider #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
 AgentActiveProvider::const fn entry (& self) -> & 'static str
@@ -152,6 +153,17 @@ AgentStatusCheck
 AgentStatusCheck #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
 AgentStatusCheck::AdminGateway
 AgentStatusCheck::EnvGatewayUrl
+AskBackend
+AskBackend::async fn ask (& self , caller : & CallerStamp , request : Request) -> Result < Completion , PluginError >
+AskBackend::fn serves (& self , caller : & CallerStamp , model : & str) -> bool
+AskHandle
+AskHandle derives(Clone)
+AskHandle::async fn ask (& self , caller : & CallerStamp , request : Request ,) -> Result < Completion , PluginError >
+AskHandle::fn from_backend (inner : Arc < dyn AskBackend >) -> Self
+AskHandle::fn serves (& self , caller : & CallerStamp , model : & str) -> bool
+AskSlot
+AskSlot::fn install (& self , backend : Arc < dyn AskBackend >)
+AskSlot::fn new () -> Arc < Self >
 AuthChoice
 AuthChoice #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
 AuthChoice::Bearer
@@ -277,12 +289,14 @@ BuildError
 BuildError #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Error)
 BuildError::fn message (& self) -> & str
 BuildError::fn new (message : impl Into < String >) -> Self
+CallerLimit
 CallerScope
 CallerScope #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq)
 CallerScope.accounts
 CallerScope.key_name
 CallerScope::fn holds_accounts (& self) -> bool
 CallerScope::fn new (key_name : impl Into < String > , accounts : Vec < String >) -> Self
+CallerStamp
 CheckinAccountStatus
 CheckinAccountStatus #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 CheckinAccountStatus::fn account (& self) -> & AccountId
@@ -482,6 +496,7 @@ HostContext #[non_exhaustive] derives(Clone)
 HostContext::const fn key (& self) -> & PluginKey
 HostContext::const fn plugin (& self) -> & PluginId
 HostContext::fn accounts (& self) -> & AccountsHandle
+HostContext::fn ask (& self) -> & AskHandle
 HostContext::fn bridge_callback (& self) -> & BridgeCallbackHandle
 HostContext::fn bridge_mcp_helper (& self) -> Result < SpawnRequest , PluginError >
 HostContext::fn clock (& self) -> & ClockHandle
@@ -495,6 +510,7 @@ HostContext::fn quota_card_refresh_for (& self) -> Option < & AccountId >
 HostContext::fn scheduler (& self) -> & SchedulerHandle
 HostContext::fn secrets (& self) -> & SecretsHandle
 HostContext::fn spawn_process (& self) -> & ProcessHandle
+HostContext::fn with_ask (mut self , ask : Arc < dyn AskBackend >) -> Self
 HostContext::fn with_bridge_callback (mut self , bridge : Arc < dyn BridgeCallbackBackend >) -> Self
 HostContext::fn with_bridge_mcp_program (mut self , program : PathBuf) -> Self
 HostContext::fn with_loopback (mut self , loopback : Arc < dyn LoopbackBackend >) -> Self
@@ -1327,6 +1343,7 @@ ToolCallPart
 ToolChoice
 ToolChoiceMode
 ToolResultPart
+UnknownEvent
 UpstreamFactory
 UpstreamFactory::Config
 UpstreamFactory::fn build (& self , cfg : & Self :: Config , host : & HostContext ,) -> Result < Arc < dyn UpstreamProvider > , BuildError >

@@ -16,8 +16,8 @@ use std::time::Duration;
 use bytes::Bytes;
 use futures_util::future::BoxFuture;
 use hofund_plugin_api::{
-    AccountId, BridgeCallbackGuard, BridgeCallbackHandler, BridgeCallbackReply, ContentPart,
-    PluginError, Request, SpawnRequest,
+    AccountId, AskHandle, BridgeCallbackGuard, BridgeCallbackHandler, BridgeCallbackReply,
+    CallerStamp, Completion, ContentPart, PluginError, Request, SpawnRequest, StreamEvent,
 };
 use ring::rand::{SecureRandom, SystemRandom};
 use serde_json::{Value, json};
@@ -42,6 +42,8 @@ struct Inner {
     early: Mutex<HashMap<String, Delivered>>,
     runs: Mutex<HashMap<u64, ParkedRun>>,
     next_id: Mutex<u64>,
+    ask: Mutex<Option<AskHandle>>,
+    searcher: Mutex<Option<Arc<dyn super::advisor::CallerSearch>>>,
 }
 
 impl std::fmt::Debug for Inner {
@@ -63,6 +65,19 @@ struct ParkedRun {
     continuation: Option<String>,
     said_queue: String,
     callback_guard: Option<BridgeCallbackGuard>,
+    caller: Option<CallerStamp>,
+    /// The request this reply is answering. The callback reads this, not the
+    /// request that first parked the run.
+    reply: Option<Request>,
+    advisor: Option<AdvisorRun>,
+}
+
+struct AdvisorRun {
+    model: String,
+    caller: CallerStamp,
+    said: String,
+    uses: u32,
+    outcomes: Vec<super::advisor::AdviceOutcome>,
 }
 
 /// Result delivered to a waiting MCP callback.
@@ -137,9 +152,307 @@ impl Bridge {
                     continuation: None,
                     said_queue: String::new(),
                     callback_guard: None,
+                    caller: None,
+                    reply: None,
+                    advisor: None,
                 },
             );
         id
+    }
+
+    /// The nested-call backend the advisor uses. A later install is visible.
+    pub(crate) fn use_ask(&self, ask: AskHandle) {
+        *self
+            .inner
+            .ask
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ask);
+    }
+
+    /// Remembers the gateway key that started the run.
+    #[cfg(test)]
+    pub(crate) fn set_caller(&self, run_id: u64, caller: Option<CallerStamp>) {
+        if let Some(run) = self
+            .inner
+            .runs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_mut(&run_id)
+        {
+            run.caller = caller;
+        }
+    }
+
+    /// Starts one reply on `run_id`.
+    ///
+    /// Uses, text said so far, and the conversation the advisor sees all
+    /// belong to this reply, including a parked continuation. `advisor_model`
+    /// arms the server tool; `None` leaves a client tool of the same name on
+    /// the ordinary park path.
+    pub(crate) fn begin_reply(
+        &self,
+        run_id: u64,
+        request: &Request,
+        advisor_model: Option<String>,
+    ) {
+        let mut runs = self
+            .inner
+            .runs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(run) = runs.get_mut(&run_id) else {
+            return;
+        };
+        run.caller = request.caller.clone();
+        run.reply = Some(request.clone());
+        match advisor_model {
+            Some(model) => {
+                let caller = request.caller.clone().unwrap_or_default();
+                match run.advisor.as_mut() {
+                    Some(advisor) => {
+                        advisor.model = model;
+                        advisor.caller = caller;
+                        advisor.said.clear();
+                        advisor.uses = 0;
+                        advisor.outcomes.clear();
+                    }
+                    None => {
+                        run.advisor = Some(AdvisorRun {
+                            model,
+                            caller,
+                            said: String::new(),
+                            uses: 0,
+                            outcomes: Vec::new(),
+                        });
+                    }
+                }
+            }
+            None => run.advisor = None,
+        }
+    }
+
+    /// Whether this reply is answering the server advisor tool.
+    pub(crate) fn advisor_armed(&self, run_id: u64) -> bool {
+        self.inner
+            .runs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&run_id)
+            .is_some_and(|run| run.advisor.is_some())
+    }
+
+    /// Run ids currently parked. Tests use this to find the one execute created.
+    #[cfg(test)]
+    pub(crate) fn testing_run_ids(&self) -> Vec<u64> {
+        let mut ids: Vec<u64> = self
+            .inner
+            .runs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .keys()
+            .copied()
+            .collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    /// Parks a spent advisor round on `run_id` so a continuation test can see
+    /// the next reply clear it.
+    #[cfg(test)]
+    pub(crate) fn testing_force_advisor(&self, run_id: u64, uses: u32) {
+        if let Some(run) = self
+            .inner
+            .runs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_mut(&run_id)
+        {
+            run.advisor = Some(AdvisorRun {
+                model: "reviewer".to_owned(),
+                caller: CallerStamp {
+                    key_id: "stale".to_owned(),
+                    ..CallerStamp::default()
+                },
+                said: "stale words".to_owned(),
+                uses,
+                outcomes: Vec::new(),
+            });
+        }
+    }
+
+    /// The request the current reply is answering.
+    fn current_reply(&self, run_id: u64) -> Option<Request> {
+        self.inner
+            .runs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&run_id)
+            .and_then(|run| run.reply.clone())
+    }
+
+    /// Arms `run_id` so an `advisor` callback asks `model` as `caller`.
+    #[cfg(test)]
+    pub(crate) fn arm_advisor(&self, run_id: u64, model: String, caller: Option<CallerStamp>) {
+        if let Some(run) = self
+            .inner
+            .runs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_mut(&run_id)
+        {
+            run.advisor = Some(AdvisorRun {
+                model,
+                caller: caller.unwrap_or_default(),
+                said: String::new(),
+                uses: 0,
+                outcomes: Vec::new(),
+            });
+        }
+    }
+
+    /// Appends text the model wrote before it called the advisor.
+    pub(crate) fn note_said(&self, run_id: u64, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        if let Some(run) = self
+            .inner
+            .runs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_mut(&run_id)
+            && let Some(advisor) = run.advisor.as_mut()
+        {
+            advisor.said.push_str(text);
+        }
+    }
+
+    /// Advisor results recorded for this run, in call order.
+    pub(crate) fn take_outcomes(&self, run_id: u64) -> Vec<super::advisor::AdviceOutcome> {
+        self.inner
+            .runs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_mut(&run_id)
+            .and_then(|run| run.advisor.as_mut())
+            .map(|advisor| std::mem::take(&mut advisor.outcomes))
+            .unwrap_or_default()
+    }
+
+    /// Installs a search made as the original caller. Production leaves it unset.
+    #[cfg(test)]
+    pub(crate) fn set_searcher(&self, searcher: Arc<dyn super::advisor::CallerSearch>) {
+        *self
+            .inner
+            .searcher
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(searcher);
+    }
+
+    fn searcher(&self) -> Option<Arc<dyn super::advisor::CallerSearch>> {
+        self.inner
+            .searcher
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn advisor_caller(&self, run_id: u64) -> CallerStamp {
+        self.inner
+            .runs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&run_id)
+            .map(|run| {
+                run.caller
+                    .clone()
+                    .or_else(|| run.advisor.as_ref().map(|advisor| advisor.caller.clone()))
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default()
+    }
+
+    async fn advise_if_armed(
+        &self,
+        run_id: u64,
+        request: &Request,
+        call_id: &str,
+    ) -> Option<Delivered> {
+        if !self.advisor_armed(run_id) {
+            return None;
+        }
+        Some(self.advise(run_id, request, call_id).await)
+    }
+
+    async fn advise(&self, run_id: u64, request: &Request, _call_id: &str) -> Delivered {
+        let prepared = {
+            let mut runs = self
+                .inner
+                .runs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let Some(advisor) = runs.get_mut(&run_id).and_then(|run| run.advisor.as_mut()) else {
+                return text_delivered(&super::advisor::failure_text("unavailable"), true);
+            };
+            advisor.uses += 1;
+            if advisor.uses > super::advisor::max_uses() {
+                let outcome = super::advisor::AdviceOutcome {
+                    text: super::advisor::failure_text("max_uses_exceeded"),
+                    code: "max_uses_exceeded".to_owned(),
+                };
+                let delivered = text_delivered(&outcome.text, true);
+                advisor.outcomes.push(outcome);
+                return delivered;
+            }
+            (
+                advisor.model.clone(),
+                advisor.caller.clone(),
+                advisor.said.clone(),
+            )
+        };
+        let (model, caller, said) = prepared;
+        let handle = self
+            .inner
+            .ask
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let outcome = match handle {
+            Some(handle) => {
+                let body = super::advisor::advice_request(request, &said, &model);
+                match handle.ask(&caller, body).await {
+                    Ok(completion) => {
+                        let text = completion_text(completion).await;
+                        if text.trim().is_empty() {
+                            failed("unavailable")
+                        } else {
+                            super::advisor::AdviceOutcome {
+                                text,
+                                code: String::new(),
+                            }
+                        }
+                    }
+                    Err(error) => failed(super::advisor::error_code(&error)),
+                }
+            }
+            None => failed("unavailable"),
+        };
+        let delivered = if outcome.code.is_empty() {
+            text_delivered(&outcome.text, false)
+        } else {
+            text_delivered(&super::advisor::failure_text(&outcome.code), true)
+        };
+        if let Some(advisor) = self
+            .inner
+            .runs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_mut(&run_id)
+            .and_then(|run| run.advisor.as_mut())
+        {
+            advisor.outcomes.push(outcome);
+        }
+        delivered
     }
 
     /// Keeps the callback registration alive until the run is aborted or dropped.
@@ -496,7 +809,34 @@ impl RunCallback {
                     .to_string(),
             );
         }
-        if tool_choice_refuses(&name, &self.request) {
+        let request = self
+            .table
+            .current_reply(self.run_id)
+            .unwrap_or_else(|| self.request.clone());
+        if super::advisor::is_advisor_name(&name)
+            && let Some(delivered) = self.table.advise_if_armed(self.run_id, &request, &id).await
+        {
+            return ok_reply(&delivered);
+        }
+        if super::advisor::is_search_name(&name)
+            && let Some(searcher) = self.table.searcher()
+        {
+            let caller = self.table.advisor_caller(self.run_id);
+            let arguments = parsed.get("arguments").cloned().unwrap_or(Value::Null);
+            return match searcher.search(&caller, &arguments) {
+                Ok(text) => ok_reply(&Delivered {
+                    content: json!([{"type":"text","text": text}]),
+                    is_error: false,
+                    tools: None,
+                }),
+                Err(error) => ok_reply(&Delivered {
+                    content: json!([{"type":"text","text": error.message()}]),
+                    is_error: true,
+                    tools: None,
+                }),
+            };
+        }
+        if tool_choice_refuses(&name, &request) {
             return ok_reply(&Delivered {
                 content: json!([{"type":"text","text": format!("tool {name} is not allowed by the client tool_choice")}]),
                 is_error: true,
@@ -517,6 +857,49 @@ impl RunCallback {
                 .to_string(),
         )
     }
+}
+
+fn failed(code: &str) -> super::advisor::AdviceOutcome {
+    super::advisor::AdviceOutcome {
+        text: super::advisor::failure_text(code),
+        code: code.to_owned(),
+    }
+}
+
+fn text_delivered(text: &str, is_error: bool) -> Delivered {
+    Delivered {
+        content: json!([{"type":"text","text": text}]),
+        is_error,
+        tools: None,
+    }
+}
+
+async fn completion_text(completion: Completion) -> String {
+    match completion {
+        Completion::Unary(response) => part_text(&response.message.content),
+        Completion::Stream(mut stream) => {
+            use futures_util::StreamExt;
+            let mut text = String::new();
+            while let Some(Ok(event)) = stream.next().await {
+                if let StreamEvent::TextDelta(delta) = event {
+                    text.push_str(&delta.text);
+                }
+            }
+            text
+        }
+        Completion::Raw(_) => String::new(),
+        _ => String::new(),
+    }
+}
+
+fn part_text(parts: &[ContentPart]) -> String {
+    let mut text = String::new();
+    for part in parts {
+        if let ContentPart::Text(part) = part {
+            text.push_str(&part.text);
+        }
+    }
+    text
 }
 
 fn ok_reply(delivered: &Delivered) -> BridgeCallbackReply {

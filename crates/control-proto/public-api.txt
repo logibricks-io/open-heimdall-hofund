@@ -4,6 +4,7 @@ AccountDiscoverAddRequest.add
 AccountDiscoverAddRequest.version
 AccountDiscoverAddRequest::fn new () -> Self
 AccountDiscoverImportResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+AccountDiscoverImportResponse.found
 AccountDiscoverImportResponse.imported
 AccountDiscoverImportResponse.version
 AccountDiscoverResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
@@ -223,6 +224,7 @@ CooldownReason::const fn as_str (self) -> & 'static str
 DiscoveredAccount #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
 DiscoveredAccount.already_stored
 DiscoveredAccount.label
+DiscoveredAccount.refused
 DiscoveredAccount.subscription
 EmptyRequest #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
 EmptyRequest::const fn new () -> Self

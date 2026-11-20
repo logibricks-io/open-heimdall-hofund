@@ -832,6 +832,20 @@ fn decode_tool(value: Value) -> Result<Tool, CodecError> {
     let mut object = expect_object(value, "tools")?;
     let name = require_string(&mut object, "name")?;
     let description = take_string(&mut object, "description")?;
+    let kind = object
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    if kind.starts_with("advisor_") {
+        object.remove("input_schema");
+        return Ok(Tool {
+            name,
+            description,
+            input_schema: empty_object_schema(),
+            extensions: Extensions::from_map(object),
+        });
+    }
     let input_schema = object
         .remove("input_schema")
         .ok_or(CodecError::MissingField("input_schema"))?;
@@ -843,11 +857,32 @@ fn decode_tool(value: Value) -> Result<Tool, CodecError> {
     })
 }
 
+fn empty_object_schema() -> Value {
+    let mut schema = Object::new();
+    schema.insert("type".to_owned(), Value::String("object".to_owned()));
+    schema.insert("properties".to_owned(), Value::Object(Object::new()));
+    Value::Object(schema)
+}
+
 fn encode_tools(tools: &[Tool]) -> Result<Vec<Value>, CodecError> {
     tools.iter().map(encode_tool).collect()
 }
 
 fn encode_tool(tool: &Tool) -> Result<Value, CodecError> {
+    if let Some(kind) = tool
+        .extensions
+        .get("type")
+        .and_then(Value::as_str)
+        .filter(|kind| kind.starts_with("advisor_"))
+    {
+        let mut object = Object::new();
+        object.insert("type".to_owned(), Value::String(kind.to_owned()));
+        object.insert("name".to_owned(), Value::String(tool.name.clone()));
+        if let Some(model) = tool.extensions.get("model").and_then(Value::as_str) {
+            object.insert("model".to_owned(), Value::String(model.to_owned()));
+        }
+        return Ok(Value::Object(object));
+    }
     let mut object = Object::new();
     object.insert("name".to_owned(), Value::String(tool.name.clone()));
     if let Some(description) = &tool.description {
@@ -937,6 +972,7 @@ fn decode_usage(mut object: Object) -> Result<Usage, CodecError> {
         cache_write_5m_tokens,
         cache_write_1h_tokens,
         reasoning_tokens: None,
+        advisor_calls: crate::advisor::calls_from(&mut object),
         extensions: Extensions::from_map(object),
     })
 }
