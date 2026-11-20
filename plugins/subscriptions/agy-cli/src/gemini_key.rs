@@ -1,8 +1,9 @@
 //! Gemini API key stored by the agy CLI.
 //!
-//! Offered only when `modelProvider` is `gemini`. The key is read from the
-//! caller-supplied environment first. This function does not read the process
-//! environment and does not add a provider row; that offer has no registry yet.
+//! Offered only when `modelProvider` is `gemini`. The key is the
+//! caller-supplied environment value. A `GEMINI_API_KEY` field in the file is
+//! ignored. This function does not read the process environment and does not
+//! add a provider row; that offer has no registry yet.
 
 use std::fmt;
 
@@ -52,8 +53,8 @@ pub enum GeminiKeySkip {
 ///
 /// `None` means there is nothing to offer (not the Gemini provider, or the
 /// file is empty). `Some(Err)` is a skipped Gemini provider. `Some(Ok)` is a
-/// key to import. `env_key` wins over a key in the file. JSON comments and a
-/// leading BOM are ignored.
+/// key to import. Only `env_key` is accepted; a key field in the file is
+/// ignored. JSON comments and a leading BOM are ignored.
 #[must_use]
 pub fn read_gemini_key(
     settings: &str,
@@ -76,16 +77,7 @@ pub fn read_gemini_key(
     if !provider.eq_ignore_ascii_case("gemini") {
         return None;
     }
-    let key = env_key
-        .map(str::trim)
-        .filter(|key| !key.is_empty())
-        .or_else(|| {
-            value
-                .get("GEMINI_API_KEY")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|key| !key.is_empty())
-        });
+    let key = env_key.map(str::trim).filter(|key| !key.is_empty());
     let Some(key) = key else {
         return Some(Err(GeminiKeySkip::NoKey));
     };

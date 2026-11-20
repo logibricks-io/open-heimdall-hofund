@@ -1295,6 +1295,27 @@ fn resource_exhausted_429_maps_retry_after() {
     );
 }
 
+#[test]
+fn d222_capacity_refusal_scopes_the_model() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let (sub, id) = ready(&host, Some("proj-9"));
+    host.http().enqueue_response(
+        429,
+        &[("content-type", "application/json")],
+        br#"{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","message":"You have exhausted your capacity on this model."}}"#.to_vec(),
+    );
+    let upstream = sub.upstream(&id, host.context()).expect("upstream");
+    let error = block_on(upstream.execute(
+        gl_request("gemini-2.5-pro", false),
+        ProtocolId::GENERATIVE_LANGUAGE,
+    ))
+    .err()
+    .expect("capacity");
+    assert!(error.scopes_model());
+    assert_eq!(error.status(), Some(429));
+}
+
 const QUOTA_REPLY: &str = r#"{"buckets":[
     {"modelId":"gemini-2.5-pro","remainingFraction":0.25,"resetTime":"2026-11-01T00:00:00Z","tokenType":"REQUESTS"},
     {"modelId":"gemini-2.5-pro_vertex","remainingFraction":0.5},

@@ -15,21 +15,48 @@ pub(crate) fn classify_output(text: &str) -> Option<PluginError> {
 
 fn classify_line(line: &str) -> Option<PluginError> {
     let value = hofund_plugin_sdk::json::from_str::<Value>(line).ok()?;
-    let kind = value.get("error").and_then(Value::as_str)?;
-    let message = value.get("message").and_then(Value::as_str).unwrap_or(line);
-    let link = value.get("link").and_then(Value::as_str).unwrap_or("");
-    let status = value
-        .get("status")
-        .and_then(Value::as_u64)
-        .and_then(|status| u16::try_from(status).ok());
-    Some(match kind {
-        "quota" => quota_error(message),
-        "verify" => verify_error(message, link),
-        _ => {
-            let status = status.unwrap_or(400);
-            note_google_sign_in(PluginError::status_error(status, message))
+    if let Some(kind) = value.get("error").and_then(Value::as_str) {
+        let message = value.get("message").and_then(Value::as_str).unwrap_or(line);
+        let link = value.get("link").and_then(Value::as_str).unwrap_or("");
+        let status = value
+            .get("status")
+            .and_then(Value::as_u64)
+            .and_then(|status| u16::try_from(status).ok());
+        return Some(match kind {
+            "quota" => quota_error(message),
+            "verify" => verify_error(message, link),
+            _ => {
+                let status = status.unwrap_or(400);
+                note_google_sign_in(PluginError::status_error(status, message))
+            }
+        });
+    }
+    phrase_fields(&value)
+}
+
+/// A pool-quota or verification sentence in a success field is still a rest.
+fn phrase_fields(value: &Value) -> Option<PluginError> {
+    let text = value.get("text").and_then(Value::as_str);
+    let nested = value
+        .get("error")
+        .and_then(|error| error.get("message"))
+        .and_then(Value::as_str);
+    for field in [text, nested].into_iter().flatten() {
+        if let Some(error) = classify_phrase(field) {
+            return Some(error);
         }
-    })
+    }
+    None
+}
+
+fn classify_phrase(text: &str) -> Option<PluginError> {
+    if asks_for_verification(text) {
+        return Some(verify_error(text, first_https(text).unwrap_or("")));
+    }
+    if is_model_pool_quota(text) {
+        return Some(quota_error(text));
+    }
+    None
 }
 
 fn classify_raw(line: &str) -> Option<PluginError> {

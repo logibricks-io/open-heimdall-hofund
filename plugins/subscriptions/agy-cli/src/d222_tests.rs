@@ -2,7 +2,6 @@
 //! Scripted children stand in for `agy`. No network and no real binary.
 
 use std::collections::HashSet;
-use std::os::unix::fs::PermissionsExt;
 
 use hofund_kit_subscription::{PipedScript, TestHost, block_on};
 use hofund_plugin_api::{
@@ -126,12 +125,16 @@ fn d222_import_writes_a_private_home_and_keeps_direct() {
     assert_eq!(object.text("email"), Some("moved@example.test"));
     let home = object.text("home").expect("home");
     let sign_in = std::path::Path::new(home).join("sign-in.json");
-    let mode = std::fs::metadata(&sign_in)
-        .expect("meta")
-        .permissions()
-        .mode()
-        & 0o777;
-    assert_eq!(mode, 0o600);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&sign_in)
+            .expect("meta")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+    }
     let body = std::fs::read_to_string(&sign_in).expect("sign-in");
     assert!(
         body.contains("refresh-moved"),
@@ -327,6 +330,92 @@ fn d222_other_quota_words_do_not_scope_the_model() {
 }
 
 #[test]
+fn d222_success_json_and_stderr_still_rest() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(dir.path());
+    let home = dir.path().join("home");
+    let (id, blob) = crate::matrix_sign_in(&home, "notice@example.test").expect("matrix");
+    block_on(async {
+        let accounts = host.context().accounts();
+        let account = accounts
+            .account(id.clone(), "notice@example.test")
+            .expect("account");
+        accounts
+            .upsert(account, blob.to_secret())
+            .await
+            .expect("seed");
+    });
+    let subscription = AgyCliFactory
+        .build(&factory_config("/opt/agy/agy"), host.context())
+        .expect("build");
+    let upstream = subscription
+        .upstream(&id, host.context())
+        .expect("upstream");
+    let quota_sentence = "Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 1h18m40s.";
+
+    host.process().script_piped(PipedScript::new().on_stdin({
+        let sentence = quota_sentence.to_owned();
+        move |_, _| vec![format!(r#"{{"text":"{sentence}"}}"#)]
+    }));
+    let error = match block_on(upstream.execute(request(false, false), ProtocolId::OPENAI_CHAT)) {
+        Ok(_) => panic!("expected a quota error from success JSON"),
+        Err(error) => error,
+    };
+    assert!(error.scopes_model());
+    assert_eq!(
+        error.reset_after(),
+        Some(std::time::Duration::from_secs(4_720))
+    );
+
+    host.process().script_piped(
+        PipedScript::new().on_stdin(|_, _| vec![r#"{"text":"Verification Required"}"#.to_owned()]),
+    );
+    let error = match block_on(upstream.execute(request(false, false), ProtocolId::OPENAI_CHAT)) {
+        Ok(_) => panic!("expected a verification error from success JSON"),
+        Err(error) => error,
+    };
+    assert!(error.verifies_account());
+    assert_eq!(error.message().matches("needs to be verified").count(), 1);
+
+    host.process().script_piped(
+        PipedScript::new()
+            .stderr(quota_sentence)
+            .status(1)
+            .on_stdin(|_, _| Vec::new()),
+    );
+    let error = match block_on(upstream.execute(request(false, false), ProtocolId::OPENAI_CHAT)) {
+        Ok(_) => panic!("expected a quota error from stderr"),
+        Err(error) => error,
+    };
+    assert!(error.scopes_model());
+    assert_eq!(
+        error.reset_after(),
+        Some(std::time::Duration::from_secs(4_720))
+    );
+    assert!(!error.message().starts_with("agy exited"));
+
+    let nested = crate::notice::classify_output(
+        r#"{"error":{"message":"You have exhausted your capacity on this model."}}"#,
+    )
+    .expect("nested message");
+    assert!(nested.scopes_model());
+}
+
+#[test]
+fn d222_proxy_map_email_lookup_ignores_case() {
+    let plan = crate::move_accounts::parse_plan(
+        r#"{
+        "from_proxy": {"accounts": {"Moved@Example.Test": {"proxy": "http://account.test:9"}}},
+        "accounts": [{"accountId": "moved@example.test", "refresh": "refresh-case"}]
+    }"#,
+    )
+    .expect("plan");
+    assert_eq!(plan.rows.len(), 1);
+    assert_eq!(plan.rows[0].email, "moved@example.test");
+    assert_eq!(plan.rows[0].proxy, "http://account.test:9");
+}
+
+#[test]
 fn d222_gemini_key_is_offered_only_for_the_gemini_provider() {
     let offered = read_gemini_key(
         "{\n  // comment\n  \"modelProvider\": \"Gemini\",\n  \"GOOGLE_GEMINI_BASE_URL\": \"https://generativelanguage.googleapis.com\"\n}\n",
@@ -358,6 +447,15 @@ fn d222_gemini_key_is_offered_only_for_the_gemini_provider() {
     assert!(read_gemini_key("{}", Some("env-key"), None, &[]).is_none());
     assert!(matches!(
         read_gemini_key("{\"modelProvider\":\"gemini\"}", None, None, &[]),
+        Some(Err(GeminiKeySkip::NoKey))
+    ));
+    assert!(matches!(
+        read_gemini_key(
+            "{\"modelProvider\":\"gemini\",\"GEMINI_API_KEY\":\"file-key\"}",
+            None,
+            None,
+            &[],
+        ),
         Some(Err(GeminiKeySkip::NoKey))
     ));
     assert!(matches!(

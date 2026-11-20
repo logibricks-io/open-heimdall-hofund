@@ -803,6 +803,40 @@ fn r49c_real_quota_429_stays_quota() {
 }
 
 #[test]
+fn d222_capacity_refusal_scopes_the_model() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(
+        &host,
+        "a-0000000000000001",
+        "u@example.test",
+        signed_in_blob("proj-1"),
+    );
+    let sub = subscription(&host);
+    host.http().enqueue(token_reply("acc-1", None));
+    host.http().enqueue_response(
+        429,
+        &[("content-type", "application/json")],
+        br#"{"error":{"code":429,"message":"You have exhausted your capacity on this model.","status":"RESOURCE_EXHAUSTED"}}"#
+            .to_vec(),
+    );
+    let request: hofund_plugin_api::Request = hofund_plugin_sdk::json::from_value(json!({
+        "model": "gemini-3-flash",
+        "messages": [{"role":"user","content":[{"type":"text","text":"hello"}]}]
+    }))
+    .expect("request");
+    let error = block_on(
+        sub.upstream(&id, host.context())
+            .expect("upstream")
+            .execute(request, ProtocolId::GENERATIVE_LANGUAGE),
+    )
+    .err()
+    .expect("capacity");
+    assert!(error.scopes_model());
+    assert_eq!(error.kind(), PluginErrorKind::Quota);
+}
+
+#[test]
 fn r49c_a_401_refreshes_once_and_resends() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);

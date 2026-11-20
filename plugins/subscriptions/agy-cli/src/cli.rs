@@ -111,13 +111,13 @@ pub(crate) async fn run(
         text.push_str(&String::from_utf8_lossy(&chunk?));
     }
     let code = child.exit_code().await?;
-    if let Some(error) = classify_output(&text) {
+    let stderr = child.stderr_tail();
+    let stderr_text = String::from_utf8_lossy(&stderr);
+    if let Some(error) = classify_output(&text).or_else(|| classify_output(&stderr_text)) {
         return Err(error);
     }
     if code != 0 {
-        let stderr = child.stderr_tail();
-        let tail = String::from_utf8_lossy(&stderr);
-        let tail = tail.chars().take(200).collect::<String>();
+        let tail = stderr_text.chars().take(200).collect::<String>();
         let tail = if tail.is_empty() {
             format!("agy exited {code}")
         } else {

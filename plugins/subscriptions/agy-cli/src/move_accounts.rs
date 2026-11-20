@@ -219,7 +219,13 @@ fn email_of(account: &Value) -> Option<String> {
 }
 
 fn proxy_for(accounts: &Value, email: &str) -> String {
-    let Some(value) = accounts.get(email) else {
+    let Some(object) = accounts.as_object() else {
+        return String::new();
+    };
+    let Some((_, value)) = object
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(email))
+    else {
         return String::new();
     };
     match value {
