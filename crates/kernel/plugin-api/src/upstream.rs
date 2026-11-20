@@ -12,7 +12,7 @@ use crate::error::PluginError;
 use crate::forward::{RawAnswer, RawBody};
 use crate::host::HostContext;
 use crate::id::{PluginId, ProtocolId};
-use crate::records::{ListQuery, ModelList, ProbeQuery, QuotaQuery, QuotaWindow};
+use crate::records::{ListQuery, ModelList, ModelSpec, ProbeQuery, QuotaQuery, QuotaWindow};
 
 /// Where the SDK places the credential. The header bytes stay the plugin's choice.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -540,6 +540,15 @@ pub trait UpstreamProvider: Send + Sync + 'static {
     #[must_use]
     fn learned_catalog_entry(&self, _model: &str) -> Option<String> {
         None
+    }
+
+    /// Stores preferred APIs, endpoints, and catalog entries from `models`.
+    ///
+    /// The default does nothing. A remote gateway keeps these so every key
+    /// of the provider, including one that did not fetch the list and one
+    /// started again from the saved rows, asks the preferred API.
+    fn remember_listed(&self, models: &[ModelSpec]) {
+        let _ = models;
     }
 }
 

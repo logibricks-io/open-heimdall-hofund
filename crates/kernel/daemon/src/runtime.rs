@@ -575,18 +575,7 @@ impl Runtime {
         *published = plan;
         drop(published);
         if let Some(host) = self.models.get() {
-            host.replace_instances(
-                instances
-                    .values()
-                    .filter(|instance| instance.model_list)
-                    .map(|instance| {
-                        (
-                            instance.provider.id.clone(),
-                            Arc::clone(&instance.upstream),
-                            instance.base_url.clone(),
-                        )
-                    }),
-            );
+            host.install_upstreams(&instances);
         }
         // Retired instances drop here unless a request still holds them.
         *self.instances.lock().expect("provider instances") = instances;

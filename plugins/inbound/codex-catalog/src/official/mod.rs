@@ -80,29 +80,24 @@ fn slug_matches(entry_slug: &str, slug: &str) -> bool {
 /// This computer's catalog row for an id that is `codex/<slug>` or ends in `/codex/<slug>`.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct OwnedCatalog {
-    description: Option<String>,
-    base_instructions: String,
-    model_messages: Option<Value>,
-    context_window: Option<u64>,
+    row: Value,
 }
 
 impl OwnedCatalog {
-    /// Writes this computer's entry onto `entry`. The slug stays the gateway id.
+    /// Replaces `entry` with this computer's cache object.
+    ///
+    /// The slug stays the gateway id. The description stays the cache text.
     pub(crate) fn write(self, entry: &mut Value) {
-        let object = entry.as_object_mut().expect("catalog entry object");
-        object.insert(
-            "base_instructions".to_owned(),
-            Value::String(self.base_instructions),
-        );
-        if let Some(model_messages) = self.model_messages {
-            object.insert("model_messages".to_owned(), model_messages);
-        }
-        if let Some(description) = self.description.filter(|text| !text.trim().is_empty()) {
-            object.insert("description".to_owned(), Value::String(description));
-        }
-        if let Some(window) = self.context_window {
-            object.insert("context_window".to_owned(), Value::Number(window.into()));
-        }
+        let slug = entry
+            .get("slug")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+        let Some(mut object) = self.row.as_object().cloned() else {
+            return;
+        };
+        object.insert("slug".to_owned(), Value::String(slug));
+        *entry = Value::Object(object);
     }
 }
 
@@ -227,8 +222,7 @@ struct CacheRow {
     slug: String,
     base_instructions: String,
     model_messages: Option<Value>,
-    description: Option<String>,
-    context_window: Option<u64>,
+    raw: Value,
 }
 
 impl CacheFile {
@@ -244,10 +238,7 @@ impl CacheFile {
     fn exact(&self, slug: &str) -> Option<OwnedCatalog> {
         let row = self.slugs.iter().find(|row| row.slug == slug)?;
         Some(OwnedCatalog {
-            description: row.description.clone(),
-            base_instructions: row.base_instructions.clone(),
-            model_messages: row.model_messages.clone(),
-            context_window: row.context_window,
+            row: row.raw.clone(),
         })
     }
 }
@@ -278,18 +269,11 @@ impl CacheFile {
                 .get("model_messages")
                 .filter(|value| !value.is_null())
                 .cloned();
-            let description = row
-                .get("description")
-                .and_then(Value::as_str)
-                .filter(|text| !text.is_empty())
-                .map(str::to_owned);
-            let context_window = row.get("context_window").and_then(Value::as_u64);
             slugs.push(CacheRow {
                 slug: slug.to_owned(),
                 base_instructions: base,
                 model_messages,
-                description,
-                context_window,
+                raw: row.clone(),
             });
         }
         if slugs.is_empty() {

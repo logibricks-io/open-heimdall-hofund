@@ -94,7 +94,7 @@ impl Lister<'_> {
                 .iter()
                 .any(|(header, _)| header.eq_ignore_ascii_case(name))
         {
-            call = call.header(name, value);
+            call = call.sensitive_header(name.to_ascii_lowercase(), value);
         }
         call = self.authed(call, configured);
         let mut response = call.open_raw(self.http, 1).await?;
@@ -138,9 +138,10 @@ impl Lister<'_> {
 
     /// Codex catalog rows from `<root>/v1/codex/models`, keyed by model id and slug.
     ///
-    /// A transport error, a non-success status, or a body that is not that
-    /// catalog leaves the map empty. The model list still stands.
-    pub(crate) async fn codex_catalog(&self) -> HashMap<String, String> {
+    /// `None` is a failed request or a body that is not JSON. `Some` is a
+    /// parsed catalog, including an empty one, so a failure can keep entries
+    /// already remembered and a successful catalog can replace them.
+    pub(crate) async fn codex_catalog(&self) -> Option<HashMap<String, String>> {
         let url = codex_catalog_url(&self.url);
         let configured = self
             .headers
@@ -151,23 +152,26 @@ impl Lister<'_> {
             configured,
         );
         let Ok(mut response) = call.open_raw(self.http, 1).await else {
-            return HashMap::new();
+            return None;
         };
         let status = response.status().as_u16();
         let mut body = Vec::new();
         while let Some(chunk) = response.body_mut().next_chunk().await {
             let Ok(chunk) = chunk else {
-                return HashMap::new();
+                return None;
             };
             body.extend_from_slice(&chunk);
             if body.len() > BODY_CAP {
-                return HashMap::new();
+                return None;
             }
         }
         if status != 200 {
-            return HashMap::new();
+            return None;
         }
-        codex_entries(&body)
+        let Ok(value) = hofund_plugin_sdk::json::from_slice::<Value>(&body) else {
+            return None;
+        };
+        Some(codex_entries(&value))
     }
 
     fn authed(&self, mut call: Call, authorization_configured: bool) -> Call {
@@ -361,10 +365,7 @@ fn codex_catalog_url(list_url: &str) -> String {
 }
 
 /// Rows that are Codex catalog entries, keyed by id and by slug.
-fn codex_entries(body: &[u8]) -> HashMap<String, String> {
-    let Ok(value) = hofund_plugin_sdk::json::from_slice::<Value>(body) else {
-        return HashMap::new();
-    };
+fn codex_entries(value: &Value) -> HashMap<String, String> {
     let rows = value
         .get("models")
         .and_then(Value::as_array)

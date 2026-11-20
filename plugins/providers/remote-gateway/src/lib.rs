@@ -170,6 +170,8 @@ impl UpstreamFactory for RemoteGatewayFactory {
         let preferred_field = optional_string(raw, "preferred_field")?;
         let ask_header = optional_string(raw, "preferred_ask_header")?;
         let ask_value = optional_string(raw, "preferred_ask_value")?;
+        reject_line_break(raw, "preferred_ask_header")?;
+        reject_line_break(raw, "preferred_ask_value")?;
         let ask = match (ask_header, ask_value) {
             (None, None) => None,
             (Some(name), Some(value)) => Some((name, value)),
@@ -229,6 +231,18 @@ impl UpstreamFactory for RemoteGatewayFactory {
             listed: Mutex::new(HashMap::new()),
         }))
     }
+}
+
+fn reject_line_break(raw: &RawTable, key: &str) -> Result<(), ConfigError> {
+    let Some(RawValue::String(value)) = raw.get(key) else {
+        return Ok(());
+    };
+    if value.chars().any(|unit| unit == '\n' || unit == '\r') {
+        return Err(
+            ConfigError::new("a header name or value cannot contain a line break").with_path(key),
+        );
+    }
+    Ok(())
 }
 
 fn optional_string(raw: &RawTable, key: &str) -> Result<Option<String>, ConfigError> {
@@ -319,10 +333,27 @@ impl RemoteGateway {
         if let Some(fact) = listed.get(model) {
             return Some(fact.clone());
         }
-        listed
+        let mut matches = listed
             .iter()
-            .find(|(id, _)| id_matches(id, model))
-            .map(|(_, fact)| fact.clone())
+            .filter(|(id, _)| slash_suffix(id, model) || slash_suffix(model, id))
+            .map(|(id, fact)| (id.as_str(), fact))
+            .collect::<Vec<_>>();
+        let longest = matches.iter().map(|(id, _)| id.len()).max()?;
+        matches.retain(|(id, _)| id.len() == longest);
+        if matches.len() == 1 {
+            Some(matches[0].1.clone())
+        } else {
+            None
+        }
+    }
+
+    fn remembered_catalog(&self) -> HashMap<String, Option<String>> {
+        self.listed
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .iter()
+            .map(|(id, fact)| (id.clone(), fact.catalog_entry.clone()))
+            .collect()
     }
 
     fn remember(&self, models: &[ModelSpec]) {
@@ -454,13 +485,20 @@ impl UpstreamProvider for RemoteGateway {
         };
         let list = lister.list().await?;
         let entries = lister.codex_catalog().await;
+        let previous = self.remembered_catalog();
         let models = list
             .models()
             .iter()
             .cloned()
-            .map(|model| match entries.get(model.id()) {
-                Some(entry) => model.with_catalog_entry(entry.clone()),
-                None => model,
+            .map(|model| {
+                let attached = match &entries {
+                    Some(found) => found.get(model.id()).cloned(),
+                    None => previous.get(model.id()).cloned().flatten(),
+                };
+                match attached {
+                    Some(entry) => model.with_catalog_entry(entry),
+                    None => model,
+                }
             })
             .collect::<Vec<_>>();
         self.remember(&models);
@@ -480,6 +518,10 @@ impl UpstreamProvider for RemoteGateway {
 
     fn learned_catalog_entry(&self, model: &str) -> Option<String> {
         self.fact(model).and_then(|fact| fact.catalog_entry)
+    }
+
+    fn remember_listed(&self, models: &[ModelSpec]) {
+        self.remember(models);
     }
 
     async fn probe(&self, query: &ProbeQuery) -> Result<ProbeReport, PluginError> {
@@ -507,13 +549,11 @@ fn endpoint_serves(endpoints: &[String], protocol: ProtocolId) -> bool {
         .any(|endpoint| preferred_api_name(endpoint) == Some(wanted))
 }
 
-fn id_matches(listed: &str, asked: &str) -> bool {
-    asked
-        .strip_suffix(listed)
+/// `shorter` is a slash-bounded suffix of `longer`.
+fn slash_suffix(shorter: &str, longer: &str) -> bool {
+    longer
+        .strip_suffix(shorter)
         .is_some_and(|prefix| prefix.ends_with('/'))
-        || listed
-            .strip_suffix(asked)
-            .is_some_and(|prefix| prefix.ends_with('/'))
 }
 
 #[cfg(test)]

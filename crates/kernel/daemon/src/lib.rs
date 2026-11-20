@@ -58,6 +58,8 @@ mod credits_modes;
 mod d224_service_tiers;
 #[cfg(test)]
 mod d226_import;
+#[cfg(test)]
+mod d241_listed;
 mod events;
 mod log_tail;
 mod measurements;
@@ -914,14 +916,14 @@ pub(crate) struct RouterParts {
 /// retired one is dropped when the last request or snapshot holding it ends.
 #[derive(Clone)]
 pub(crate) struct Instance {
-    provider: hofund_config::Provider,
+    pub(crate) provider: hofund_config::Provider,
     timeouts: (std::time::Duration, std::time::Duration),
     plugin_id: String,
     fingerprint: String,
     pub(crate) adapter: Arc<dyn Provider>,
     pub(crate) upstream: Arc<dyn UpstreamProvider>,
     pub(crate) base_url: String,
-    model_list: bool,
+    pub(crate) model_list: bool,
 }
 
 fn effective_at_once(configured: Option<u64>, declared: u64) -> u64 {
@@ -966,13 +968,7 @@ fn router(
         registry,
     )?;
     if let Some(host) = models_host.as_deref_mut() {
-        for instance in instances.values().filter(|instance| instance.model_list) {
-            host.register_instance(
-                instance.provider.id.clone(),
-                Arc::clone(&instance.upstream),
-                instance.base_url.clone(),
-            );
-        }
+        host.install_upstreams(&instances);
     }
     let fingerprints = built
         .iter()

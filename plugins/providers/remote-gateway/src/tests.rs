@@ -387,6 +387,23 @@ fn config_and_build_refuse_what_they_cannot_use() {
         let mut value_only = raw(ROOT);
         value_only.insert("preferred_ask_value", RawValue::String("yes".to_owned()));
         assert!(UpstreamFactory::validate(&factory, &value_only).is_err());
+        let mut broken_name = raw(ROOT);
+        broken_name.insert(
+            "preferred_ask_header",
+            RawValue::String("X-Upstream\nDrawers".to_owned()),
+        );
+        broken_name.insert("preferred_ask_value", RawValue::String("yes".to_owned()));
+        assert!(UpstreamFactory::validate(&factory, &broken_name).is_err());
+        let mut broken_value = raw(ROOT);
+        broken_value.insert(
+            "preferred_ask_header",
+            RawValue::String("X-Upstream-Drawers".to_owned()),
+        );
+        broken_value.insert(
+            "preferred_ask_value",
+            RawValue::String("yes\r\n".to_owned()),
+        );
+        assert!(UpstreamFactory::validate(&factory, &broken_value).is_err());
         assert!(UpstreamFactory::validate(&factory, &RawTable::new()).is_ok());
         for (config, protocol) in [
             (raw(ROOT), ProtocolId::GENERATIVE_LANGUAGE),
@@ -589,7 +606,100 @@ fn d241_a_configured_field_and_ask_header_are_read_from_config() {
         assert_eq!(list.models()[0].preferred_api(), Some("responses"));
         assert_eq!(list.models()[1].preferred_api(), Some("chat"));
         let calls = host.http().calls();
-        assert_eq!(calls[0].header("x-upstream-drawers"), Some("yes"));
-        assert!(calls[1].header("x-upstream-drawers").is_none());
+        assert!(calls[0].header("x-upstream-drawers").is_none());
+        assert!(has(calls[0].sensitive_headers(), "x-upstream-drawers"));
+        assert!(!has(calls[1].sensitive_headers(), "x-upstream-drawers"));
+    });
+}
+
+#[test]
+fn d241_id_match_is_exact_then_the_longest_suffix() {
+    with_host(|host| {
+        let provider = build(host, &raw(ROOT), ProtocolId::OPENAI_CHAT);
+        let body = json!({"data": [
+            {
+                "id": "north/model-a",
+                "preferred_api": "/v1/responses",
+                "native_endpoints": ["/v1/chat/completions"]
+            },
+            {
+                "id": "model-a",
+                "preferred_api": "/v1/chat/completions",
+                "native_endpoints": ["/v1/chat/completions"]
+            },
+            {
+                "id": "aa/one",
+                "preferred_api": "/v1/responses",
+                "native_endpoints": ["/v1/chat/completions"]
+            },
+            {
+                "id": "bb/one",
+                "preferred_api": "/v1/chat/completions",
+                "native_endpoints": ["/v1/chat/completions"]
+            }
+        ]});
+        host.http().enqueue(body.to_string());
+        host.http().enqueue("{}");
+        block_on(provider.list_models(&ListQuery::new())).expect("list");
+        host.http().enqueue(RESPONSES_REPLY);
+        block_on(provider.execute(
+            user_request("office/north/model-a"),
+            ProtocolId::ANTHROPIC_MESSAGES,
+        ))
+        .expect("longest suffix");
+        host.http().enqueue(CHAT_REPLY);
+        block_on(provider.execute(user_request("model-a"), ProtocolId::ANTHROPIC_MESSAGES))
+            .expect("exact id");
+        host.http().enqueue(MESSAGES_REPLY);
+        block_on(provider.execute(user_request("one"), ProtocolId::ANTHROPIC_MESSAGES))
+            .expect("equal-length tie");
+        let calls = host.http().calls();
+        assert!(
+            calls[2].uri().ends_with("/v1/responses"),
+            "{}",
+            calls[2].uri()
+        );
+        assert!(
+            calls[3].uri().ends_with("/v1/chat/completions"),
+            "{}",
+            calls[3].uri()
+        );
+        assert!(
+            calls[4].uri().ends_with("/v1/messages"),
+            "{}",
+            calls[4].uri()
+        );
+    });
+}
+
+#[test]
+fn d241_a_failed_codex_catalog_keeps_the_remembered_entry() {
+    with_host(|host| {
+        let provider = build(host, &raw(ROOT), ProtocolId::OPENAI_CHAT);
+        let listed = json!({"data": [{
+            "id": "north/model-a",
+            "preferred_api": "/v1/responses"
+        }]});
+        let catalog = json!({"models": [{
+            "slug": "north/model-a",
+            "supported_reasoning_levels": [{"effort": "high"}],
+            "shell_type": "unified_exec",
+            "base_instructions": "REMOTE",
+            "experimental_supported_tools": [{"name": "kept-tool"}]
+        }]});
+        host.http().enqueue(listed.to_string());
+        host.http().enqueue(catalog.to_string());
+        let first = block_on(provider.list_models(&ListQuery::new())).expect("list");
+        let kept = first.models()[0].catalog_entry().expect("entry");
+        assert!(kept.contains("kept-tool"), "{kept}");
+        host.http().enqueue(listed.to_string());
+        host.http().enqueue_response(404, &[], "missing");
+        let second = block_on(provider.list_models(&ListQuery::new())).expect("list again");
+        let kept = second.models()[0].catalog_entry().expect("kept entry");
+        assert!(kept.contains("kept-tool"), "{kept}");
+        let remembered = provider
+            .learned_catalog_entry("north/model-a")
+            .expect("remembered");
+        assert!(remembered.contains("kept-tool"), "{remembered}");
     });
 }

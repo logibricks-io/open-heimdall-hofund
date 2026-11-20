@@ -451,7 +451,7 @@ The list kind is per configured instance. `V + A` means one mock for each declar
 | `lmstudio` | Live | V | Chat | None. |
 | `omlx` | Live | V + A | Chat, Responses, Anthropic | Decide listing and probe wait for the Decide PR. |
 | `mlx-serve` | Live | V + A | Chat, Responses, Anthropic | Decide listing and probe wait for the Decide PR. |
-| `remote-gateway` | Live | V + A | Chat, Responses, Anthropic | Since E13, the `remote-gateway` plugin lists `{root}/v1/models` with the Bearer gateway key. D-241 reads `preferred_api`, including a routing group, asks that API when the client spoke another protocol, and writes the path on `/v1/models`. Options `preferred_field`, `preferred_ask_header`, and `preferred_ask_value` cover a remote that uses another field or an ask header. Chat the client sent stays Chat. One `GET /v1/codex/models` hands the remote catalog across. Image, video, decision, and price fields, and the all-rows filter exception, stay follow-ups. |
+| `remote-gateway` | Live | V + A | Chat, Responses, Anthropic | Since E13, the `remote-gateway` plugin lists `{root}/v1/models` with the Bearer gateway key. D-241 reads `preferred_api`, including a routing group, asks that API when the client spoke another protocol, writes the path on `/v1/models`, and stores that fact plus the catalog entry on every key, including after a restart from the saved rows. Options `preferred_field`, `preferred_ask_header`, and `preferred_ask_value` cover a remote that uses another field or an ask header. Chat the client sent stays Chat. One `GET /v1/codex/models` hands the remote catalog across. Image, video, decision, and price fields, and the all-rows filter exception, stay follow-ups. |
 
 ### Testing order
 

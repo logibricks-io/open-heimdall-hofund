@@ -331,31 +331,15 @@ pub(crate) fn entry(
     value
 }
 
-/// Copies a remote catalog row onto `entry` and says ` via hofund` once.
+/// Replaces `entry` with the remote catalog object.
+///
+/// Only `slug` and one trailing ` via hofund` on the description change.
+/// Every other field the remote sent, including tools and modalities, stays.
 fn apply_handed_catalog(entry: &mut Value, handed: &Value, id: &str) {
     let Some(handed) = handed.as_object() else {
         return;
     };
-    let Some(object) = entry.as_object_mut() else {
-        return;
-    };
-    for key in [
-        "base_instructions",
-        "model_messages",
-        "shell_type",
-        "supported_reasoning_levels",
-        "default_reasoning_level",
-        "context_window",
-        "service_tiers",
-        "display_name",
-        "description",
-    ] {
-        if let Some(value) = handed.get(key)
-            && !value.is_null()
-        {
-            object.insert(key.to_owned(), value.clone());
-        }
-    }
+    let mut object = handed.clone();
     let description = object
         .get("description")
         .and_then(Value::as_str)
@@ -371,6 +355,7 @@ fn apply_handed_catalog(entry: &mut Value, handed: &Value, id: &str) {
     };
     object.insert("description".to_owned(), Value::String(via_hofund(source)));
     object.insert("slug".to_owned(), Value::String(id.to_owned()));
+    *entry = Value::Object(object);
 }
 
 /// `text` with one trailing ` via hofund`.

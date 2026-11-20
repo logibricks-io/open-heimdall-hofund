@@ -1370,6 +1370,7 @@ UpstreamProvider::fn attempt_protocol (& self) -> String
 UpstreamProvider::fn close_idle_connections (& self)
 UpstreamProvider::fn learned_catalog_entry (& self , _model : & str) -> Option < String >
 UpstreamProvider::fn learned_preferred (& self , _model : & str) -> Option < String >
+UpstreamProvider::fn remember_listed (& self , models : & [ModelSpec])
 UpstreamSpec
 UpstreamSpec #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 UpstreamSpec::const fn credential (& self) -> CredentialStyle
