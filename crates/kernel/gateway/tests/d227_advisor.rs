@@ -20,6 +20,13 @@ use tower::ServiceExt;
 struct Fake {
     member_id: MemberId,
     hits: Arc<Mutex<Vec<String>>>,
+    advisor_cache_read: u64,
+    hold: Option<Arc<Hold>>,
+}
+
+struct Hold {
+    entered: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    release: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
 }
 
 #[async_trait]
@@ -42,6 +49,15 @@ impl Member for Fake {
         _inbound: &str,
     ) -> Result<Completion, PluginError> {
         self.hits.lock().expect("hits").push(request.model.clone());
+        if let Some(hold) = &self.hold {
+            if let Some(entered) = hold.entered.lock().expect("entered").take() {
+                let _ = entered.send(());
+            }
+            let release = hold.release.lock().expect("hold").take();
+            if let Some(release) = release {
+                let _ = release.await;
+            }
+        }
         let mut message = Message::new(Role::Assistant);
         message.content = vec![hofund_ir::ContentPart::Text(hofund_ir::TextPart {
             text: "look there".to_owned(),
@@ -55,6 +71,7 @@ impl Member for Fake {
                 model: "reviewer-5-5".to_owned(),
                 input_tokens: 823,
                 output_tokens: 1612,
+                cache_read_tokens: self.advisor_cache_read,
                 ..AdvisorCall::default()
             }],
             ..Usage::default()
@@ -95,7 +112,7 @@ fn price(input: f64, output: f64) -> ModelPriceOverride {
     ModelPriceOverride {
         input,
         output,
-        cache_read: 0.0,
+        cache_read: 4.0,
         cache_write: 0.0,
         cache_write_1h: None,
     }
@@ -108,6 +125,10 @@ fn hop(member: Arc<Fake>, wire: &str) -> Hop {
 }
 
 fn fixture() -> Fixture {
+    fixture_with(0, None)
+}
+
+fn fixture_with(advisor_cache_read: u64, hold: Option<Arc<Hold>>) -> Fixture {
     let dir = tempfile::tempdir().expect("dir");
     let store = Arc::new(KeyStore::beside_token(dir.path().join("hofund.token")));
     store.list().expect("migration");
@@ -119,6 +140,8 @@ fn fixture() -> Fixture {
             MemberKey::from_static("row"),
         ),
         hits: Arc::clone(&hits),
+        advisor_cache_read,
+        hold,
     });
     let routes = BTreeMap::from([
         (
@@ -240,4 +263,78 @@ async fn d227_advisor_ask_keeps_the_callers_model_list() {
         fixture.hits.lock().expect("hits").as_slice(),
         ["reviewer-5.5"]
     );
+}
+
+#[tokio::test]
+async fn d227_advisor_cache_read_stays_on_its_own_column() {
+    let fixture = fixture_with(100, None);
+    let secret = fixture.app.clone();
+    let token = std::fs::read_to_string(fixture._dir.path().join("hofund.token")).expect("token");
+    let response = secret
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("authorization", format!("Bearer {}", token.trim()))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"model":"relay/worker-5.5","max_tokens":32,"messages":[{"role":"user","content":"hi"}],"tools":[{"type":"advisor_20260301","name":"advisor","model":"relay/reviewer-5.5"}]}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let rows = fixture.usage.rows().expect("rows");
+    let advisor = rows
+        .iter()
+        .find(|row| row.kind == "advisor")
+        .expect("advisor");
+    assert_eq!(advisor.input_tokens, Some(823));
+    assert_eq!(advisor.cache_read_tokens, Some(100));
+    let cost = advisor.cost_usd.expect("advisor price");
+    let expected = (823.0 * 10.0 + 100.0 * 4.0 + 1612.0 * 20.0) / 1_000_000.0;
+    assert!((cost - expected).abs() < 1e-9, "{cost} != {expected}");
+}
+
+#[tokio::test]
+async fn d227_advisor_ask_holds_a_prompt_estimate() {
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let hold = Arc::new(Hold {
+        entered: Mutex::new(Some(entered_tx)),
+        release: Mutex::new(Some(release_rx)),
+    });
+    let fixture = fixture_with(0, Some(Arc::clone(&hold)));
+    let mut heavy = ModelRequest::new("relay/reviewer-5.5");
+    let mut user = Message::new(Role::User);
+    user.content = vec![hofund_ir::ContentPart::Text(hofund_ir::TextPart {
+        text: "x".repeat(400),
+        extensions: hofund_ir::Extensions::new(),
+    })];
+    heavy.messages = vec![user];
+    let limited = CallerStamp {
+        key_id: "limited".into(),
+        limits: vec![hofund_plugin_api::CallerLimit {
+            period: "day".into(),
+            tokens: 1,
+            ..hofund_plugin_api::CallerLimit::default()
+        }],
+        ..CallerStamp::default()
+    };
+    let ask = Arc::clone(&fixture.ask);
+    let first_request = heavy.clone();
+    let first_caller = limited.clone();
+    let first = tokio::spawn(async move { ask.ask(&first_caller, first_request).await });
+    entered_rx
+        .await
+        .expect("the first ask reached the provider");
+    let second = fixture.ask.ask(&limited, heavy).await;
+    let error = match second {
+        Err(error) => error,
+        Ok(_) => panic!("a second ask was not held to the first prompt"),
+    };
+    assert_eq!(error.status(), Some(429));
+    let _ = release_tx.send(());
+    assert!(first.await.expect("join").is_ok());
 }

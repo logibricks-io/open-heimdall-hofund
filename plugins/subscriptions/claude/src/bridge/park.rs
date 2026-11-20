@@ -66,6 +66,9 @@ struct ParkedRun {
     said_queue: String,
     callback_guard: Option<BridgeCallbackGuard>,
     caller: Option<CallerStamp>,
+    /// The request this reply is answering. The callback reads this, not the
+    /// request that first parked the run.
+    reply: Option<Request>,
     advisor: Option<AdvisorRun>,
 }
 
@@ -150,6 +153,7 @@ impl Bridge {
                     said_queue: String::new(),
                     callback_guard: None,
                     caller: None,
+                    reply: None,
                     advisor: None,
                 },
             );
@@ -166,6 +170,7 @@ impl Bridge {
     }
 
     /// Remembers the gateway key that started the run.
+    #[cfg(test)]
     pub(crate) fn set_caller(&self, run_id: u64, caller: Option<CallerStamp>) {
         if let Some(run) = self
             .inner
@@ -178,7 +183,115 @@ impl Bridge {
         }
     }
 
+    /// Starts one reply on `run_id`.
+    ///
+    /// Uses, text said so far, and the conversation the advisor sees all
+    /// belong to this reply, including a parked continuation. `advisor_model`
+    /// arms the server tool; `None` leaves a client tool of the same name on
+    /// the ordinary park path.
+    pub(crate) fn begin_reply(
+        &self,
+        run_id: u64,
+        request: &Request,
+        advisor_model: Option<String>,
+    ) {
+        let mut runs = self
+            .inner
+            .runs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(run) = runs.get_mut(&run_id) else {
+            return;
+        };
+        run.caller = request.caller.clone();
+        run.reply = Some(request.clone());
+        match advisor_model {
+            Some(model) => {
+                let caller = request.caller.clone().unwrap_or_default();
+                match run.advisor.as_mut() {
+                    Some(advisor) => {
+                        advisor.model = model;
+                        advisor.caller = caller;
+                        advisor.said.clear();
+                        advisor.uses = 0;
+                        advisor.outcomes.clear();
+                    }
+                    None => {
+                        run.advisor = Some(AdvisorRun {
+                            model,
+                            caller,
+                            said: String::new(),
+                            uses: 0,
+                            outcomes: Vec::new(),
+                        });
+                    }
+                }
+            }
+            None => run.advisor = None,
+        }
+    }
+
+    /// Whether this reply is answering the server advisor tool.
+    pub(crate) fn advisor_armed(&self, run_id: u64) -> bool {
+        self.inner
+            .runs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&run_id)
+            .is_some_and(|run| run.advisor.is_some())
+    }
+
+    /// Run ids currently parked. Tests use this to find the one execute created.
+    #[cfg(test)]
+    pub(crate) fn testing_run_ids(&self) -> Vec<u64> {
+        let mut ids: Vec<u64> = self
+            .inner
+            .runs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .keys()
+            .copied()
+            .collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    /// Parks a spent advisor round on `run_id` so a continuation test can see
+    /// the next reply clear it.
+    #[cfg(test)]
+    pub(crate) fn testing_force_advisor(&self, run_id: u64, uses: u32) {
+        if let Some(run) = self
+            .inner
+            .runs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_mut(&run_id)
+        {
+            run.advisor = Some(AdvisorRun {
+                model: "reviewer".to_owned(),
+                caller: CallerStamp {
+                    key_id: "stale".to_owned(),
+                    ..CallerStamp::default()
+                },
+                said: "stale words".to_owned(),
+                uses,
+                outcomes: Vec::new(),
+            });
+        }
+    }
+
+    /// The request the current reply is answering.
+    fn current_reply(&self, run_id: u64) -> Option<Request> {
+        self.inner
+            .runs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&run_id)
+            .and_then(|run| run.reply.clone())
+    }
+
     /// Arms `run_id` so an `advisor` callback asks `model` as `caller`.
+    #[cfg(test)]
     pub(crate) fn arm_advisor(&self, run_id: u64, model: String, caller: Option<CallerStamp>) {
         if let Some(run) = self
             .inner
@@ -257,6 +370,18 @@ impl Bridge {
                     .unwrap_or_default()
             })
             .unwrap_or_default()
+    }
+
+    async fn advise_if_armed(
+        &self,
+        run_id: u64,
+        request: &Request,
+        call_id: &str,
+    ) -> Option<Delivered> {
+        if !self.advisor_armed(run_id) {
+            return None;
+        }
+        Some(self.advise(run_id, request, call_id).await)
     }
 
     async fn advise(&self, run_id: u64, request: &Request, _call_id: &str) -> Delivered {
@@ -684,8 +809,14 @@ impl RunCallback {
                     .to_string(),
             );
         }
-        if super::advisor::is_advisor_name(&name) {
-            return ok_reply(&self.table.advise(self.run_id, &self.request, &id).await);
+        let request = self
+            .table
+            .current_reply(self.run_id)
+            .unwrap_or_else(|| self.request.clone());
+        if super::advisor::is_advisor_name(&name)
+            && let Some(delivered) = self.table.advise_if_armed(self.run_id, &request, &id).await
+        {
+            return ok_reply(&delivered);
         }
         if super::advisor::is_search_name(&name)
             && let Some(searcher) = self.table.searcher()
@@ -705,7 +836,7 @@ impl RunCallback {
                 }),
             };
         }
-        if tool_choice_refuses(&name, &self.request) {
+        if tool_choice_refuses(&name, &request) {
             return ok_reply(&Delivered {
                 content: json!([{"type":"text","text": format!("tool {name} is not allowed by the client tool_choice")}]),
                 is_error: true,

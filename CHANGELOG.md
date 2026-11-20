@@ -20,8 +20,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   55 seconds. A dashed Claude id is sent as the provider spells the same
   model. Relayed Messages replies record each `usage.iterations` advisor call
   as its own usage row, kind `advisor`, priced at the advisor model. The
-  executor row is unchanged. A web search on that run, when one is installed,
-  uses the same original key. Refs D-227.
+  executor row is unchanged. Each reply, including a parked continuation,
+  starts that three-use count again and shows the advisor that reply's
+  conversation. A client tool already named `advisor` stays a client tool.
+  An advisor row stores the iteration's input as uncached input and keeps
+  cache reads on their own column. A web search on that run, when one is
+  installed, uses the same original key. Refs D-227.
 - D-221: Antigravity sign-in, import, and add are refused for new accounts because Google suspends accounts it sees on Code Assist through Antigravity's own client. Saved accounts keep working and show a risk line. The message points at the agy CLI route. Gemini CLI is unchanged.
 - D-225: Generative Language and Vertex model paths escape each slash-separated segment and keep the slashes. An id with an empty, `.`, or `..` segment is escaped as one segment.
 

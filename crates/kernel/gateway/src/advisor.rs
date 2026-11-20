@@ -64,7 +64,13 @@ impl AskBackend for GatewayAsk {
             return Err(PluginError::status_error(status.as_u16(), message));
         }
         let scope = route_scope(&identity);
-        let _held = match app.budget.reserve(&identity, 0, chrono::Local::now()) {
+        let prompt_bytes = serde_json::to_vec(&request)
+            .map(|bytes| bytes.len())
+            .unwrap_or(0);
+        let _held = match app
+            .budget
+            .reserve(&identity, prompt_bytes, chrono::Local::now())
+        {
             Ok(held) => held,
             Err(crate::limits::ReserveFailure::Refused(refusal)) => {
                 return Err(PluginError::status_error(429, refusal.message()));
@@ -304,13 +310,16 @@ fn row_for_call(meta: &UsageMeta, call: &AdvisorCall) -> UsageMeta {
     };
     let counted = |value: u64| (value > 0).then_some(i64::try_from(value).unwrap_or(i64::MAX));
     let input = i64::try_from(call.input_tokens).unwrap_or(i64::MAX);
-    let mut details = hofund_usage::UsageDetails::default();
-    details.cache_read_tokens = counted(call.cache_read_tokens);
-    details.cache_write_tokens = counted(call.cache_write_tokens);
-    details.cache_write_5m_tokens = counted(call.cache_write_5m_tokens);
-    details.cache_write_1h_tokens = counted(call.cache_write_1h_tokens);
-    details.uncached_input_tokens =
-        Some(input.saturating_sub(details.cache_read_tokens.unwrap_or(0)));
+    // Messages `input_tokens` is already the uncached count. Cache read stays
+    // on its own column and is not subtracted again.
+    let details = hofund_usage::UsageDetails {
+        cache_read_tokens: counted(call.cache_read_tokens),
+        cache_write_tokens: counted(call.cache_write_tokens),
+        cache_write_5m_tokens: counted(call.cache_write_5m_tokens),
+        cache_write_1h_tokens: counted(call.cache_write_1h_tokens),
+        uncached_input_tokens: Some(input),
+        ..Default::default()
+    };
     UsageMeta {
         model: model.clone(),
         upstream: meta.upstream.clone(),

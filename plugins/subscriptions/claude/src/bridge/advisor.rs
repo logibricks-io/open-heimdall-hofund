@@ -52,13 +52,16 @@ pub(crate) fn is_search_name(name: &str) -> bool {
 /// Keeps a served advisor's instructions and offers the client tool.
 ///
 /// An advisor model `ask` does not serve is dropped and its instructions are
-/// voided. A client tool already named `advisor` is left as the client wrote it.
+/// voided. A client tool already named `advisor` is left as the client wrote
+/// it, and the server tool is dropped so the client's tool stays on the park
+/// path.
 pub(crate) fn prepare(request: &mut Request, ask: &AskHandle) -> Option<String> {
     if request
         .tools
         .iter()
         .any(|tool| tool.name == "advisor" && !is_server(tool))
     {
+        request.tools.retain(|tool| !is_server(tool));
         return None;
     }
     let model = request.tools.iter().find_map(|tool| {
@@ -532,6 +535,138 @@ mod tests {
         let text = String::from_utf8(reply.body().to_vec()).expect("utf8");
         assert!(text.contains("max_uses_exceeded"));
         assert_eq!(gate.seen.lock().expect("seen").len(), 3);
+    }
+
+    #[test]
+    fn d227_each_reply_resets_uses_said_caller_and_conversation() {
+        let gate = Arc::new(Gate {
+            serves: true,
+            seen: Mutex::new(Vec::new()),
+        });
+        let bridge = Bridge::new();
+        bridge.use_ask(AskHandle::from_backend(
+            Arc::clone(&gate) as Arc<dyn AskBackend>
+        ));
+        let run = bridge.park_run(
+            AccountId::from_static("a-00000000000000aa"),
+            vec!["advisor".into()],
+        );
+        let first = instructed();
+        bridge.begin_reply(run, &first, Some("relay/claude-opus-5-5".into()));
+        bridge.note_said(run, "first words");
+        let handler = bridge.callback_handler(run, first);
+        let body = json!({"tool_call_id":"toolu_1","name":"advisor","arguments":{}}).to_string();
+        for _ in 0..3 {
+            let reply = block_on(handler.handle(bytes::Bytes::from(body.clone())));
+            let text = String::from_utf8(reply.body().to_vec()).expect("utf8");
+            assert!(text.contains("check the boundary"));
+        }
+        let blocked = block_on(handler.handle(bytes::Bytes::from(body.clone())));
+        let blocked = String::from_utf8(blocked.body().to_vec()).expect("utf8");
+        assert!(blocked.contains("max_uses_exceeded"));
+
+        let mut second = Request::new("claude-sonnet");
+        let mut user = Message::new(Role::User);
+        user.content.push(super::text_part("second turn"));
+        second.messages = vec![user];
+        second.caller = Some(CallerStamp {
+            key_id: "other".to_owned(),
+            limits: vec![CallerLimit {
+                period: "day".to_owned(),
+                tokens: 40,
+                ..CallerLimit::default()
+            }],
+            ..CallerStamp::default()
+        });
+        bridge.begin_reply(run, &second, Some("relay/claude-opus-5-5".into()));
+        bridge.note_said(run, "second words");
+        let reply = block_on(handler.handle(bytes::Bytes::from(body)));
+        let text = String::from_utf8(reply.body().to_vec()).expect("utf8");
+        assert!(text.contains("check the boundary"), "{text}");
+        assert!(!text.contains("max_uses_exceeded"));
+        let seen = gate.seen.lock().expect("seen");
+        let (caller, asked) = seen.last().expect("second ask");
+        assert_eq!(caller.key_id, "other");
+        assert_eq!(caller.limits[0].tokens, 40);
+        let asked = advice_text(asked);
+        assert!(asked.contains("second turn"), "{asked}");
+        assert!(asked.contains("second words"), "{asked}");
+        assert!(!asked.contains("first words"), "{asked}");
+        assert!(!asked.contains("ship it"), "{asked}");
+    }
+
+    #[test]
+    fn d227_unarmed_advisor_name_stays_a_client_tool() {
+        let ask = AskHandle::from_backend(Arc::new(Gate {
+            serves: true,
+            seen: Mutex::new(Vec::new()),
+        }));
+        let mut request = instructed();
+        request.tools.insert(
+            0,
+            hofund_plugin_api::Tool {
+                name: "advisor".to_owned(),
+                description: Some("the client's own".to_owned()),
+                input_schema: json!({"type": "object"}),
+                extensions: hofund_plugin_api::Extensions::new(),
+            },
+        );
+        assert!(prepare(&mut request, &ask).is_none());
+        assert!(request.tools.iter().all(|tool| {
+            tool.extensions
+                .get("type")
+                .and_then(|value| value.as_str())
+                .is_none_or(|kind| !kind.starts_with("advisor_"))
+        }));
+        assert_eq!(
+            request
+                .tools
+                .iter()
+                .filter(|tool| tool.name == "advisor")
+                .count(),
+            1
+        );
+        let text = match &request.messages[0].content[0] {
+            hofund_plugin_api::ContentPart::Text(text) => text.text.as_str(),
+            _ => "",
+        };
+        assert!(text.contains(NOTE));
+
+        let bridge = Bridge::new();
+        let owner = AccountId::from_static("a-00000000000000aa");
+        let run = bridge.park_run(owner.clone(), vec!["advisor".into()]);
+        bridge.begin_reply(run, &request, None);
+        assert!(!bridge.advisor_armed(run));
+        let early = serde_json::from_value::<Request>(json!({
+            "model": "claude-sonnet",
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "id": "toolu_client",
+                    "content": [{"type": "text", "text": "from the client"}]
+                }]
+            }]
+        }))
+        .expect("result");
+        assert!(bridge.match_once(&early, &owner).is_none());
+        let handler = bridge.callback_handler(run, request);
+        let reply = block_on(handler.handle(bytes::Bytes::from(
+            json!({"tool_call_id":"toolu_client","name":"advisor","arguments":{}}).to_string(),
+        )));
+        let text = String::from_utf8(reply.body().to_vec()).expect("utf8");
+        assert!(text.contains("from the client"), "{text}");
+        assert!(!text.contains("unavailable"), "{text}");
+
+        let prefixed = block_on(
+            handler.handle(bytes::Bytes::from(
+                json!({"tool_call_id":"toolu_other","name":"mcp__bridge__advisor","arguments":{}})
+                    .to_string(),
+            )),
+        );
+        let prefixed = String::from_utf8(prefixed.body().to_vec()).expect("utf8");
+        assert!(prefixed.contains("not allowed"), "{prefixed}");
+        assert!(!prefixed.contains("unavailable"), "{prefixed}");
     }
 
     #[test]

@@ -219,10 +219,10 @@ impl UpstreamProvider for ClaudeUpstream {
         let mut request = request;
         let advisor_model = crate::bridge::advisor::prepare(&mut request, self.host.ask());
         if let Some(found) = self.try_match(&request) {
-            return self.continue_parked(found, &request).await;
+            return self.continue_parked(found, &request, advisor_model).await;
         }
         if let Some(resume) = self.bridge.resume(&request, &self.account) {
-            return self.continue_resume(resume, &request).await;
+            return self.continue_resume(resume, &request, advisor_model).await;
         }
         // Stage D only on a resume miss.
         crate::bridge::flags::apply_stage_d(&mut request);
@@ -289,10 +289,7 @@ impl UpstreamProvider for ClaudeUpstream {
             self.bridge
                 .set_effort(id, crate::bridge::flags::from_request(&request).effort);
             self.bridge.set_room_guard(id, room);
-            self.bridge.set_caller(id, request.caller.clone());
-            if let Some(model) = advisor_model.clone() {
-                self.bridge.arm_advisor(id, model, request.caller.clone());
-            }
+            self.bridge.begin_reply(id, &request, advisor_model.clone());
             run_id = Some(id);
             let token = park::new_callback_token()?;
             let handler = self.bridge.callback_handler(id, request.clone());
@@ -365,7 +362,10 @@ impl ClaudeUpstream {
         &self,
         found: park::Match,
         request: &Request,
+        advisor_model: Option<String>,
     ) -> Result<Completion, PluginError> {
+        self.bridge
+            .begin_reply(found.run_id, request, advisor_model);
         let said = if found.said.is_empty() {
             self.bridge.take_said(found.run_id)
         } else {
@@ -419,7 +419,10 @@ impl ClaudeUpstream {
         &self,
         resume: crate::bridge::session::Resume,
         request: &Request,
+        advisor_model: Option<String>,
     ) -> Result<Completion, PluginError> {
+        self.bridge
+            .begin_reply(resume.run_id, request, advisor_model);
         let config_dir = account_dir(&self.host, &self.account)?;
         let spec = StartSpec {
             program: self
@@ -497,9 +500,10 @@ impl ClaudeUpstream {
         } else {
             events
         };
+        let armed = run_id.is_some_and(|id| self.bridge.advisor_armed(id));
         let calls: Vec<_> = calls
             .into_iter()
-            .filter(|(_, name)| !crate::bridge::advisor::is_advisor_name(name))
+            .filter(|(_, name)| !(armed && crate::bridge::advisor::is_advisor_name(name)))
             .collect();
         if let Some(run_id) = run_id {
             if let Some(session) = session {
@@ -717,6 +721,62 @@ mod tests {
             .collect();
         assert_eq!(text, "Hello world");
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn d227_continuation_clears_the_previous_advisor_round() {
+        let dir = tempfile::tempdir().expect("dir");
+        let host = TestHost::open_for(
+            PluginKind::Subscription,
+            PluginId::from_static("claude"),
+            dir.path(),
+        );
+        let id = AccountId::from_static("a-00000000000000aa");
+        seed_account(&host, &id);
+        let bridge = crate::bridge::Bridge::new();
+        let provider = ClaudeUpstream::new(
+            id.clone(),
+            host.context().clone(),
+            Some(program()),
+            bridge.clone(),
+            crate::limits::Store::new(),
+        )
+        .with_runner(Arc::new(|_plan| Ok(TOOL_USE.to_string())));
+        let request = serde_json::from_value::<Request>(json!({
+            "model": "claude-sonnet-4-5",
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "list files"}]}],
+            "tools": [{"name": "Bash", "input_schema": {"type": "object"}}]
+        }))
+        .expect("request");
+        block_on(provider.execute(request, ProtocolId::AnthropicMessages)).expect("parked");
+        let run = bridge
+            .testing_run_ids()
+            .into_iter()
+            .next()
+            .expect("parked run");
+        bridge.testing_force_advisor(run, 3);
+        assert!(bridge.advisor_armed(run));
+        let follow = serde_json::from_value::<Request>(json!({
+            "model": "claude-sonnet-4-5",
+            "messages": [
+                {"role": "user", "content": [{"type": "text", "text": "list files"}]},
+                {
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result",
+                        "id": "toolu_1",
+                        "content": [{"type": "text", "text": "ok"}]
+                    }]
+                }
+            ],
+            "tools": [{"name": "Bash", "input_schema": {"type": "object"}}]
+        }))
+        .expect("follow");
+        block_on(provider.execute(follow, ProtocolId::AnthropicMessages)).expect("continuation");
+        assert!(
+            !bridge.advisor_armed(run),
+            "a parked continuation must start a new advisor round"
+        );
     }
 
     #[test]
