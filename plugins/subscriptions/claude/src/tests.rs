@@ -1966,7 +1966,8 @@ mod d226 {
         assert_eq!(env_token(&settings_value(&home)), Some(SETUP_TOKEN));
         let record = record_text(&host);
         assert!(record.contains(&token_hash(SETUP_TOKEN)), "{record}");
-        assert!(record.contains(&home.display().to_string()), "{record}");
+        let home_json = serde_json::to_string(&home.display().to_string()).expect("home json");
+        assert!(record.contains(&home_json), "{record}");
         assert!(!record.contains(SETUP_TOKEN), "{record}");
         let other_settings = other.join("settings.json");
         if other_settings.is_file() {
