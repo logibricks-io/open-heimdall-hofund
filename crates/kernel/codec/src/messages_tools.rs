@@ -112,30 +112,33 @@ fn paired_messages(msgs: &[u8]) -> Option<Vec<u8>> {
                 run.push(next);
                 index += 1;
             }
-            let last = run.len() - 1;
-            for (offset, user) in run.into_iter().enumerate() {
+            let mut drafts = Vec::with_capacity(run.len());
+            for user in run {
                 let (_, user_content) = message_view(user)?;
-                match mend_user(
-                    user,
-                    user_content,
-                    &mut pending,
-                    &mut answered,
-                    offset == last,
-                ) {
+                drafts.push(draft_user(user, user_content, &pending, &mut answered)?);
+            }
+            // Every message in the run has been matched. Synthetics are only
+            // the calls none of them answered, and they go in the first user
+            // message so the message after the assistant still pairs.
+            let missing = missing_results(&pending, &answered);
+            let mut emitted = Vec::with_capacity(drafts.len());
+            for (offset, draft) in drafts.iter().enumerate() {
+                let extra: &[Vec<u8>] = if offset == 0 { &missing } else { &[] };
+                match emit_user(draft, extra) {
                     UserMend::Invalid => return None,
-                    UserMend::Same => out.push(user.to_vec()),
+                    UserMend::Same => emitted.push(draft.element.to_vec()),
                     UserMend::Changed(message) => {
                         changed = true;
-                        out.push(message);
+                        emitted.push(message);
                     }
                 }
             }
-            out.append(&mut held);
+            release_held(&mut out, emitted, &mut held);
             pending.clear();
             answered.clear();
             continue;
         }
-        match mend_user(element, content, &mut pending, &mut answered, true) {
+        match mend_user(element, content, &pending, &mut answered, true) {
             UserMend::Invalid => return None,
             UserMend::Same => out.push(element.to_vec()),
             UserMend::Changed(message) => {
@@ -304,21 +307,26 @@ fn calls_last(blocks: &[Vec<u8>]) -> Option<Vec<Vec<u8>>> {
     Some(head)
 }
 
-fn mend_user(
-    element: &[u8],
-    content: Option<&[u8]>,
-    pending: &mut [Call],
+struct UserDraft<'a> {
+    element: &'a [u8],
+    content: Option<&'a [u8]>,
+    kept: Vec<Vec<u8>>,
+    rest: Vec<Vec<u8>>,
+    touched: bool,
+}
+
+fn draft_user<'a>(
+    element: &'a [u8],
+    content: Option<&'a [u8]>,
+    pending: &[Call],
     answered: &mut HashSet<String>,
-    finish: bool,
-) -> UserMend {
+) -> Option<UserDraft<'a>> {
     let mut kept = Vec::new();
     let mut rest = Vec::new();
     let mut touched = false;
     match content {
         Some(content) if content.first() == Some(&b'[') => {
-            let Some(blocks) = elements(content) else {
-                return UserMend::Invalid;
-            };
+            let blocks = elements(content)?;
             for block in blocks {
                 place_block(block, pending, answered, &mut kept, &mut rest, &mut touched);
             }
@@ -326,31 +334,87 @@ fn mend_user(
         Some(content) if content.first() == Some(&b'"') => rest.push(content.to_vec()),
         _ => {}
     }
-    // A later user message in this run may still answer an open call.
-    // Synthetics wait until the run ends, so an earlier message is not rewritten
-    // for a result that has not been seen yet.
+    Some(UserDraft {
+        element,
+        content,
+        kept,
+        rest,
+        touched,
+    })
+}
+
+fn mend_user(
+    element: &[u8],
+    content: Option<&[u8]>,
+    pending: &[Call],
+    answered: &mut HashSet<String>,
+    finish: bool,
+) -> UserMend {
+    let Some(draft) = draft_user(element, content, pending, answered) else {
+        return UserMend::Invalid;
+    };
     let missing = if finish {
         missing_results(pending, answered)
     } else {
         Vec::new()
     };
-    if !missing.is_empty() {
-        touched = true;
-    }
-    if !touched {
+    emit_user(&draft, &missing)
+}
+
+fn emit_user(draft: &UserDraft<'_>, missing: &[Vec<u8>]) -> UserMend {
+    if !draft.touched && missing.is_empty() {
         return UserMend::Same;
     }
+    let mut rest = draft.rest.clone();
     if rest.len() == 1 && rest[0].first() == Some(&b'"') {
         rest = text_blocks_from_json_string(Some(&rest[0]));
     }
-    let mut blocks = kept;
-    blocks.extend(missing);
+    let mut blocks = draft.kept.clone();
+    blocks.extend(missing.iter().cloned());
     blocks.extend(rest);
-    if content.is_none() {
-        UserMend::Changed(results_message(&blocks))
+    let content = raw_list(&blocks);
+    // A message that arrived without `content` still keeps its other members.
+    let message = if draft.content.is_none() {
+        with_member(draft.element, "content", &content)
     } else {
-        UserMend::Changed(with_top_value(element, "content", &raw_list(&blocks)))
+        with_top_value(draft.element, "content", &content)
+    };
+    UserMend::Changed(message)
+}
+
+fn release_held(out: &mut Vec<Vec<u8>>, run: Vec<Vec<u8>>, held: &mut Vec<Vec<u8>>) {
+    if held.is_empty() {
+        out.extend(run);
+        return;
     }
+    // The steer stood between the call and its results. It follows the last
+    // result, so a later text-only user in this run does not come first.
+    let Some(last) = run
+        .iter()
+        .rposition(|message| message_has_tool_result(message))
+    else {
+        out.extend(run);
+        out.append(held);
+        return;
+    };
+    out.extend(run[..last + 1].iter().cloned());
+    out.append(held);
+    out.extend(run.into_iter().skip(last + 1));
+}
+
+fn message_has_tool_result(message: &[u8]) -> bool {
+    let Some((_, Some(content))) = message_view(message) else {
+        return false;
+    };
+    if content.first() != Some(&b'[') {
+        return false;
+    }
+    let Some(blocks) = elements(content) else {
+        return false;
+    };
+    blocks
+        .iter()
+        .any(|block| block_ids(block).0 == "tool_result")
 }
 
 fn place_block(
@@ -522,6 +586,32 @@ fn to_json(value: &Value) -> Vec<u8> {
 
 fn with_string_member(object: &[u8], key: &str, value: &str) -> Vec<u8> {
     with_top_value(object, key, &to_json(&Value::String(value.to_owned())))
+}
+
+fn with_member(object: &[u8], key: &str, value: &[u8]) -> Vec<u8> {
+    let start = skip_ws(object, 0);
+    let raw = trim(&object[start..]);
+    let Some(members) = members_of(raw) else {
+        return object.to_vec();
+    };
+    if members.iter().any(|member| member.key == key) {
+        return with_top_value(object, key, value);
+    }
+    if raw.last() != Some(&b'}') {
+        return object.to_vec();
+    }
+    let close_at = start + raw.len() - 1;
+    let mut out = Vec::with_capacity(object.len() + key.len() + value.len() + 4);
+    out.extend_from_slice(&object[..close_at]);
+    if !members.is_empty() {
+        out.push(b',');
+    }
+    out.push(b'"');
+    out.extend_from_slice(key.as_bytes());
+    out.extend_from_slice(b"\":");
+    out.extend_from_slice(value);
+    out.extend_from_slice(&object[close_at..]);
+    out
 }
 
 fn with_top_value(object: &[u8], key: &str, value: &[u8]) -> Vec<u8> {
@@ -1253,6 +1343,107 @@ mod tests {
         assert!(text.contains(first), "{text}");
         assert!(text.contains(second), "{text}");
         assert!(!text.contains(INTERRUPTED));
+    }
+
+    #[test]
+    fn d236_unanswered_call_is_synthetic_in_the_first_user_message() {
+        let first = r#"{"role":"user","content":[{"type":"tool_result","tool_use_id":"a","content":"one"},{"type":"text","text":"note"}],"cache_control":{"type":"ephemeral"}}"#;
+        let second = r#"{"role":"user","content":"thanks","name":"ada"}"#;
+        let body = format!(
+            r#"{{"model":"m","messages":[{{"role":"assistant","content":[{{"type":"tool_use","id":"a","name":"n","input":{{}}}},{{"type":"tool_use","id":"b","name":"n","input":{{}}}}]}}, {first}, {second}]}}"#
+        );
+        let out = pair_messages_tool_blocks(body.as_bytes());
+        let value = json(&out);
+        let messages = value["messages"].as_array().expect("messages");
+        assert_eq!(messages.len(), 3);
+        let repaired = messages[1]["content"].as_array().expect("content");
+        assert_eq!(repaired.len(), 3);
+        assert_eq!(repaired[0]["type"], "tool_result");
+        assert_eq!(repaired[0]["tool_use_id"], "a");
+        assert_eq!(repaired[0]["content"], "one");
+        assert!(repaired[0].get("is_error").is_none());
+        assert_eq!(repaired[1]["type"], "tool_result");
+        assert_eq!(repaired[1]["tool_use_id"], "b");
+        assert_eq!(repaired[1]["is_error"], true);
+        assert_eq!(repaired[1]["content"], INTERRUPTED);
+        assert_eq!(repaired[2]["type"], "text");
+        assert_eq!(repaired[2]["text"], "note");
+        assert_eq!(messages[1]["cache_control"]["type"], "ephemeral");
+        assert!(messages[1]["cache_control"].get("ttl").is_none());
+        assert_eq!(messages[2]["content"], "thanks");
+        assert_eq!(messages[2]["name"], "ada");
+        assert!(messages[2].get("tool_use_id").is_none());
+        let text = String::from_utf8_lossy(&out);
+        assert!(text.contains(second), "{text}");
+        assert_eq!(text.matches(INTERRUPTED).count(), 1);
+        assert!(!text[text.find(second).expect("second")..].contains(INTERRUPTED));
+    }
+
+    #[test]
+    fn d236_held_system_is_released_after_the_last_result() {
+        let steer = r#"{"role":"system","content":"steer","name":"held"}"#;
+        let result = r#"{"role":"user","content":[{"type":"tool_result","tool_use_id":"a","content":"one"}],"cache_control":{"type":"ephemeral"}}"#;
+        let thanks = r#"{"role":"user","content":"thanks","name":"ada"}"#;
+        let body = format!(
+            r#"{{"model":"m","messages":[{{"role":"assistant","content":[{{"type":"tool_use","id":"a","name":"n","input":{{}}}},{{"type":"tool_use","id":"b","name":"n","input":{{}}}}]}}, {steer}, {result}, {thanks}]}}"#
+        );
+        let out = pair_messages_tool_blocks(body.as_bytes());
+        let value = json(&out);
+        let messages = value["messages"].as_array().expect("messages");
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[0]["role"], "assistant");
+        let repaired = messages[1]["content"].as_array().expect("content");
+        assert_eq!(repaired[0]["type"], "tool_result");
+        assert_eq!(repaired[0]["tool_use_id"], "a");
+        assert_eq!(repaired[0]["content"], "one");
+        assert_eq!(repaired[1]["type"], "tool_result");
+        assert_eq!(repaired[1]["tool_use_id"], "b");
+        assert_eq!(repaired[1]["content"], INTERRUPTED);
+        assert_eq!(messages[1]["cache_control"]["type"], "ephemeral");
+        assert_eq!(messages[2]["role"], "system");
+        assert_eq!(messages[2]["content"], "steer");
+        assert_eq!(messages[2]["name"], "held");
+        assert_eq!(messages[3]["role"], "user");
+        assert_eq!(messages[3]["content"], "thanks");
+        assert_eq!(messages[3]["name"], "ada");
+        let text = String::from_utf8_lossy(&out);
+        assert!(text.contains(steer), "{text}");
+        assert!(text.contains(thanks), "{text}");
+        assert!(
+            !json(&messages_of(&out)[3])
+                .to_string()
+                .contains(INTERRUPTED)
+        );
+    }
+
+    #[test]
+    fn d236_a_receiving_message_without_content_keeps_its_members() {
+        let user = r#"{"role":"user","cache_control":{"type":"ephemeral"},"output_config":{"effort":"max"}}"#;
+        let body = format!(
+            r#"{{"model":"m","messages":[{{"role":"assistant","content":[{{"type":"tool_use","id":"a","name":"n","input":{{}}}}]}}, {user}]}}"#
+        );
+        let out = pair_messages_tool_blocks(body.as_bytes());
+        let value = json(&out);
+        let messages = value["messages"].as_array().expect("messages");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1]["role"], "user");
+        assert_eq!(messages[1]["cache_control"]["type"], "ephemeral");
+        assert_eq!(messages[1]["output_config"]["effort"], "max");
+        let content = messages[1]["content"].as_array().expect("content");
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "tool_result");
+        assert_eq!(content[0]["tool_use_id"], "a");
+        assert_eq!(content[0]["is_error"], true);
+        assert_eq!(content[0]["content"], INTERRUPTED);
+        let text = String::from_utf8_lossy(&out);
+        assert!(
+            text.contains(r#""cache_control":{"type":"ephemeral"}"#),
+            "{text}"
+        );
+        assert!(
+            text.contains(r#""output_config":{"effort":"max"}"#),
+            "{text}"
+        );
     }
 
     #[test]
