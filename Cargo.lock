@@ -2133,7 +2133,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-agent"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "hofund-config",
  "hofund-plugin-api",
@@ -2151,7 +2151,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-bridge-mcp"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "getrandom 0.2.17",
  "serde",
@@ -2161,7 +2161,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-cli"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "chrono",
  "hofund-bridge-mcp",
@@ -2207,7 +2207,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-codec"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "criterion",
  "hofund-ir",
@@ -2223,7 +2223,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-config"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "regex",
  "serde",
@@ -2234,7 +2234,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-control-client"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "hofund-control-proto",
  "http",
@@ -2250,7 +2250,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-control-proto"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "quote",
  "serde",
@@ -2261,7 +2261,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-daemon"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "async-trait",
  "axum",
@@ -2312,7 +2312,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-daemon-bin"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "hofund-bridge-mcp",
  "hofund-daemon",
@@ -2327,7 +2327,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-desktop"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "hofund-agent",
  "hofund-daemon",
@@ -2340,7 +2340,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-gateway"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "async-trait",
  "axum",
@@ -2377,7 +2377,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-ir"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "regex",
  "serde",
@@ -2386,7 +2386,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-kit-agent"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "hofund-agent",
  "hofund-plugin-api",
@@ -2399,7 +2399,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-kit-subscription"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "bytes",
  "futures-util",
@@ -2412,7 +2412,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-kit-upstream"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "async-trait",
  "hofund-plugin-api",
@@ -2425,7 +2425,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-model-catalog"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "chrono",
  "hofund-config",
@@ -2442,7 +2442,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-plugin-agent-agy"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "hofund-plugin-api",
  "hofund-plugin-sdk",
@@ -2451,7 +2451,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-plugin-agent-alma"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "hofund-plugin-api",
  "hofund-plugin-sdk",
@@ -2460,7 +2460,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-plugin-agent-cindy"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "hofund-plugin-api",
  "hofund-plugin-sdk",
@@ -2469,7 +2469,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-plugin-agent-claude"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "hofund-plugin-api",
  "hofund-plugin-sdk",
@@ -2478,7 +2478,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-plugin-agent-cline"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "hofund-plugin-api",
  "hofund-plugin-sdk",
@@ -2488,7 +2488,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-plugin-agent-codex"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "hofund-plugin-api",
  "hofund-plugin-sdk",
@@ -2497,7 +2497,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-plugin-agent-cursor"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "hofund-plugin-api",
  "hofund-plugin-sdk",
@@ -2507,7 +2507,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-plugin-agent-droid"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "hofund-plugin-api",
  "hofund-plugin-sdk",
@@ -2516,7 +2516,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-plugin-agent-dsh"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "hofund-plugin-api",
  "hofund-plugin-sdk",
@@ -2527,7 +2527,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-plugin-agent-gemini"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "hofund-plugin-api",
  "hofund-plugin-sdk",
@@ -2536,7 +2536,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-plugin-agent-grok"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "hofund-plugin-api",
  "hofund-plugin-sdk",
@@ -2545,7 +2545,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-plugin-agent-hermes"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "hofund-plugin-api",
  "hofund-plugin-sdk",
@@ -2554,7 +2554,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-plugin-agent-kimi"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "hofund-plugin-api",
  "hofund-plugin-sdk",
@@ -2563,7 +2563,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-plugin-agent-minimax-code"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "base64 0.23.1",
  "hofund-plugin-api",
@@ -2573,7 +2573,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-plugin-agent-omp"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "hofund-plugin-api",
  "hofund-plugin-sdk",
@@ -2581,7 +2581,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-plugin-agent-opencode"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "hofund-plugin-api",
  "hofund-plugin-sdk",
@@ -2590,7 +2590,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-plugin-agent-pi"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "hofund-plugin-api",
  "hofund-plugin-sdk",
@@ -2599,7 +2599,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-plugin-agent-qoder"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "hofund-plugin-api",
  "hofund-plugin-sdk",
@@ -2608,7 +2608,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-plugin-agent-raft"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "hofund-plugin-api",
  "hofund-plugin-sdk",
@@ -2617,7 +2617,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-plugin-agent-workbuddy"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "hofund-plugin-api",
  "hofund-plugin-sdk",
@@ -2627,7 +2627,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-plugin-agent-zcode"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "hofund-plugin-api",
  "hofund-plugin-sdk",
@@ -2635,7 +2635,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-plugin-api"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2654,7 +2654,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-plugin-azure"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "hofund-kit-upstream",
  "hofund-plugin-api",
@@ -2664,7 +2664,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-plugin-bedrock"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "hofund-kit-upstream",
  "hofund-plugin-api",
@@ -2674,7 +2674,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-plugin-bedrock-mantle"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "hofund-kit-upstream",
  "hofund-plugin-api",
@@ -2684,7 +2684,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-plugin-codex-catalog"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "hofund-plugin-api",
  "hofund-plugin-sdk",
@@ -2693,7 +2693,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-plugin-echo"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "hofund-plugin-api",
  "hofund-plugin-sdk",
@@ -2701,14 +2701,14 @@ dependencies = [
 
 [[package]]
 name = "hofund-plugin-fixture"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "hofund-plugin-api",
 ]
 
 [[package]]
 name = "hofund-plugin-google-vertex"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "hofund-kit-upstream",
  "hofund-plugin-api",
@@ -2718,7 +2718,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-plugin-host"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2752,7 +2752,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-plugin-muse"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "hofund-plugin-api",
  "hofund-plugin-sdk",
@@ -2760,7 +2760,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-plugin-ollama"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "hofund-plugin-api",
  "hofund-plugin-sdk",
@@ -2768,7 +2768,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-plugin-plan-quota"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "hofund-kit-upstream",
  "hofund-plugin-api",
@@ -2778,7 +2778,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-plugin-registry"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "futures-util",
  "hofund-agent",
@@ -2835,7 +2835,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-plugin-relay"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "hofund-kit-upstream",
  "hofund-plugin-api",
@@ -2845,7 +2845,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-plugin-remote-gateway"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "hofund-kit-upstream",
  "hofund-plugin-api",
@@ -2855,7 +2855,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-plugin-retrieval"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "hofund-plugin-api",
  "hofund-plugin-sdk",
@@ -2863,7 +2863,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-plugin-sdk"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "aes",
  "async-trait",
@@ -2902,7 +2902,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-plugin-subscription-agy-cli"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "hofund-kit-subscription",
  "hofund-plugin-api",
@@ -2912,7 +2912,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-plugin-subscription-antigravity"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "hofund-kit-subscription",
  "hofund-plugin-api",
@@ -2922,7 +2922,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-plugin-subscription-chatgpt-api"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "hofund-kit-subscription",
  "hofund-plugin-api",
@@ -2932,7 +2932,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-plugin-subscription-claude"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "bytes",
  "futures-util",
@@ -2949,7 +2949,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-plugin-subscription-cline"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "hofund-kit-subscription",
  "hofund-plugin-api",
@@ -2959,7 +2959,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-plugin-subscription-codex"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "hofund-kit-subscription",
  "hofund-plugin-api",
@@ -2969,7 +2969,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-plugin-subscription-copilot"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "hofund-kit-subscription",
  "hofund-plugin-api",
@@ -2979,7 +2979,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-plugin-subscription-cursor"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "hofund-kit-subscription",
  "hofund-plugin-api",
@@ -2989,7 +2989,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-plugin-subscription-devin"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "hofund-kit-subscription",
  "hofund-plugin-api",
@@ -2999,7 +2999,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-plugin-subscription-factory"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "hofund-kit-subscription",
  "hofund-plugin-api",
@@ -3009,7 +3009,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-plugin-subscription-gemini"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "hofund-kit-subscription",
  "hofund-plugin-api",
@@ -3019,7 +3019,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-plugin-subscription-grok"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "hofund-kit-subscription",
  "hofund-plugin-api",
@@ -3029,7 +3029,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-plugin-subscription-kiro"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "hofund-kit-subscription",
  "hofund-plugin-api",
@@ -3041,7 +3041,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-plugin-subscription-qoder"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "hofund-kit-subscription",
  "hofund-plugin-api",
@@ -3051,7 +3051,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-plugin-subscription-workbuddy"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "hofund-kit-subscription",
  "hofund-plugin-api",
@@ -3061,7 +3061,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-plugin-subscription-zcode"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "hofund-kit-subscription",
  "hofund-plugin-api",
@@ -3072,7 +3072,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-plugin-subscription-zed"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "hofund-kit-subscription",
  "hofund-plugin-api",
@@ -3082,7 +3082,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-provider"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3106,7 +3106,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-quirks"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "hofund-ir",
  "serde_json",
@@ -3114,7 +3114,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-router"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -3138,7 +3138,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-secrets"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "chrono",
  "getrandom 0.2.17",
@@ -3151,7 +3151,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-sessions"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "chrono",
  "hofund-plugin-agent-omp",
@@ -3170,7 +3170,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-tui"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "crossterm",
  "futures-util",
@@ -3190,7 +3190,7 @@ dependencies = [
 
 [[package]]
 name = "hofund-usage"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "chrono",
  "hofund-config",
@@ -7779,7 +7779,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "proc-macro2",
  "serde_json",
