@@ -209,7 +209,10 @@ it never writes into agent homes through that path.
 transport and `ir` to fold a stream into one response.
 `plugin-host` depends on `plugin-api`. Its tests also depend on
 `plugin-sdk` so the retry contract runs against the pooled client. The pooled
-HTTP client and the outbound WebSocket client live in `plugin-host`. `plugin-registry` depends on `plugin-api`,
+HTTP client and the outbound WebSocket client live in `plugin-host`. The dial
+uses the same proxy and TLS profile as that client. A configured proxy refuses
+the socket instead of connecting directly. `plugin-registry` depends on
+`plugin-api`,
 `plugin-sdk`, the plugin crates it composes, and `provider` and `quirks`
 for the built-in factories. Those factories still call the `provider`
 adapters. `provider` depends on `plugin-sdk` for SigV4 and token parsing.

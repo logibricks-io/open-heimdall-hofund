@@ -1250,6 +1250,15 @@ fn status_failure(
     status_failure_with_reset(status, retry_after, None, body, allocation_quota_rate)
 }
 
+/// Classifies an upstream error body the way [`execute`] does.
+///
+/// The message keeps `error.code` when the words leave it out. Quota, credit,
+/// and a retry delay written in the body are the same as an HTTP error.
+#[must_use]
+pub fn failure_from_body(status: u16, body: &[u8]) -> PluginError {
+    status_failure(status, None, body, false)
+}
+
 fn status_failure_with_reset(
     status: u16,
     retry_after: Option<std::time::Duration>,

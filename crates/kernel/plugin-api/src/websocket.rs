@@ -1,6 +1,7 @@
 //! One outbound WebSocket on the host client. No vendor framing lives here.
 
 use std::fmt;
+use std::time::Duration;
 
 use crate::error::PluginError;
 use crate::kernel::WebSocketIo;
@@ -21,6 +22,8 @@ pub enum WebSocketMessage {
 pub struct WebSocketRequest {
     uri: String,
     headers: Vec<HeaderField>,
+    idle: Option<Duration>,
+    age: Option<Duration>,
 }
 
 #[derive(Clone)]
@@ -43,6 +46,8 @@ impl fmt::Debug for WebSocketRequest {
             .debug_struct("WebSocketRequest")
             .field("uri", &self.uri)
             .field("header_names", &names)
+            .field("idle", &self.idle)
+            .field("age", &self.age)
             .finish()
     }
 }
@@ -64,7 +69,20 @@ impl WebSocketRequest {
         Self {
             uri: uri.into(),
             headers: Vec::new(),
+            idle: None,
+            age: None,
         }
+    }
+
+    /// Closes the socket after `idle` with no send or recv, and `age` after the handshake.
+    ///
+    /// The host clock arms both deadlines. A later send or recv starts `idle`
+    /// again. `age` stays fixed at the handshake.
+    #[must_use]
+    pub fn lifetime(mut self, idle: Duration, age: Duration) -> Self {
+        self.idle = Some(idle);
+        self.age = Some(age);
+        self
     }
 
     /// Adds a header. The value is not sensitive.
@@ -106,6 +124,18 @@ impl WebSocketRequest {
             .iter()
             .map(|field| (field.name.as_str(), field.value.as_str(), field.sensitive))
             .collect()
+    }
+
+    /// Idle budget from the last send or recv. The host reads this.
+    #[must_use]
+    pub fn kernel_idle(&self) -> Option<Duration> {
+        self.idle
+    }
+
+    /// Age budget from the handshake. The host reads this.
+    #[must_use]
+    pub fn kernel_age(&self) -> Option<Duration> {
+        self.age
     }
 }
 

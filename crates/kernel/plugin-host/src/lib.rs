@@ -921,6 +921,8 @@ pub struct RecordingHttp {
     progress: Notify,
     /// Loopback origin a test dials instead of the request URI.
     websocket_origin: Mutex<Option<String>>,
+    /// When set, a WebSocket dial is refused and the turn stays on HTTP.
+    websocket_proxy: Mutex<Option<String>>,
 }
 
 impl RecordingHttp {
@@ -970,6 +972,14 @@ impl RecordingHttp {
         if crate::websocket::loopback_origin(&origin) {
             *self.websocket_origin.lock().expect("websocket origin") = Some(origin);
         }
+    }
+
+    /// Records that this account's HTTP profile uses `proxy`.
+    ///
+    /// A later WebSocket dial is refused, matching the pooled client. The
+    /// scripted HTTP path is unchanged.
+    pub fn use_http_proxy(&self, proxy: impl Into<String>) {
+        *self.websocket_proxy.lock().expect("websocket proxy") = Some(proxy.into());
     }
 
     fn push(&self, scripted: Scripted) {
@@ -1065,7 +1075,21 @@ impl HttpBackend for RecordingHttp {
             ));
         };
         let uri = crate::websocket::loopback_uri(request.kernel_uri(), &origin)?;
-        crate::websocket::connect(&uri, request.kernel_headers()).await
+        let proxy = self
+            .websocket_proxy
+            .lock()
+            .expect("websocket proxy")
+            .clone();
+        crate::websocket::connect(crate::websocket::Dial {
+            uri: &uri,
+            headers: request.kernel_headers(),
+            read: HttpLimits::default().read(),
+            idle: request.kernel_idle(),
+            age: request.kernel_age(),
+            proxy: proxy.as_deref(),
+            insecure: false,
+        })
+        .await
     }
 }
 

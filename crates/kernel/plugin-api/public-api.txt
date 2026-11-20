@@ -1387,8 +1387,11 @@ WebSocketRequest
 WebSocketRequest #[non_exhaustive] derives(Clone)
 WebSocketRequest::fn get (uri : impl Into < String >) -> Self
 WebSocketRequest::fn header (mut self , name : impl Into < String > , value : impl Into < String >) -> Self
+WebSocketRequest::fn kernel_age (& self) -> Option < Duration >
 WebSocketRequest::fn kernel_headers (& self) -> Vec < (& str , & str , bool) >
+WebSocketRequest::fn kernel_idle (& self) -> Option < Duration >
 WebSocketRequest::fn kernel_uri (& self) -> & str
+WebSocketRequest::fn lifetime (mut self , idle : Duration , age : Duration) -> Self
 WebSocketRequest::fn sensitive_header (mut self , name : impl Into < String > , value : impl Into < String >) -> Self
 WebSocketSession
 WebSocketSession #[non_exhaustive]

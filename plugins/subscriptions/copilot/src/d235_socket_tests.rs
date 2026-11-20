@@ -5,11 +5,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use hofund_kit_subscription::{
-    LoopbackSocket, SocketScript, TestHost, advance_time, block_on, block_on_paused,
+    LoopbackSocket, SocketScript, TestHost, advance_time, advance_until, block_on, block_on_paused,
 };
 use hofund_plugin_api::{
-    AccountId, ContentPart, Conversation, Message, PluginId, PluginKind, ProtocolId, Request, Role,
-    SecretString, UpstreamProvider,
+    AccountId, ContentPart, Conversation, Message, PluginError, PluginErrorKind, PluginId,
+    PluginKind, ProtocolId, Request, Role, SecretString, UpstreamProvider,
 };
 use hofund_plugin_sdk::json::{self, Value, json};
 use hofund_plugin_sdk::oauth::{SecretObject, TokenCache};
@@ -440,8 +440,16 @@ fn d235_idle_socket_is_not_reused() {
         let upstream = world.upstream();
         let mut first = request("gpt-5.5", vec![say(Role::User, "ping")]);
         first.conversation = Some(Conversation::new("s1", ""));
-        ask(&upstream, first).await;
+        ask_paused(&upstream, first).await;
+        assert_eq!(server.opened(), 1);
+        assert_eq!(world.book.sockets.held(&world.account), 1);
+        assert_eq!(posts(&world.host), 0);
+        assert!(!server.hits()[0].closed());
         advance_time(Duration::from_secs(11 * 60)).await;
+        wait_until_closed(&server).await;
+        assert!(server.hits()[0].closed());
+        assert_eq!(server.hits()[0].messages().len(), 1);
+        assert_eq!(server.opened(), 1);
         let mut second = request(
             "gpt-5.5",
             vec![
@@ -451,7 +459,7 @@ fn d235_idle_socket_is_not_reused() {
             ],
         );
         second.conversation = Some(Conversation::new("s1", ""));
-        ask(&upstream, second).await;
+        ask_paused(&upstream, second).await;
         assert_eq!(server.opened(), 2);
         let frames: Vec<String> = server
             .hits()
@@ -480,4 +488,254 @@ fn d235_account_socket_cap() {
         assert_eq!(server.opened(), MAX_PER_ACCOUNT + 1);
         assert_eq!(world.book.sockets.held(&world.account), MAX_PER_ACCOUNT);
     });
+}
+
+#[test]
+fn d235_close_before_a_terminal_event_uses_http() {
+    let world = world();
+    block_on(async {
+        let server = LoopbackSocket::start(
+            SocketScript::replies(|_, _| {
+                vec![r#"{"type":"response.output_text.delta","delta":"hi"}"#.to_owned()]
+            })
+            .then_close(),
+        )
+        .await;
+        world.host.http().serve_websockets_at(server.base_url());
+        world.prime("sess");
+        world.host.http().enqueue(http_reply());
+        ask(
+            &world.upstream(),
+            request("gpt-5.5", vec![say(Role::User, "ping")]),
+        )
+        .await;
+        assert_eq!(posts(&world.host), 1);
+        assert_eq!(world.book.sockets.held(&world.account), 0);
+        assert_eq!(server.opened(), 1);
+    });
+}
+
+#[test]
+fn d235_read_budget_falls_back_before_a_terminal_event() {
+    block_on_paused(async {
+        let dir = tempfile::tempdir().expect("dir");
+        let host = TestHost::open_for_with_tokio_monotonic(
+            PluginKind::Subscription,
+            PluginId::from_static("copilot"),
+            dir.path(),
+        );
+        let server = LoopbackSocket::start(SocketScript::replies(|_, _| {
+            vec![r#"{"type":"response.output_text.delta","delta":"hi"}"#.to_owned()]
+        }))
+        .await;
+        let world = world_with(host, dir).await;
+        world.host.http().serve_websockets_at(server.base_url());
+        world.prime("sess");
+        world.host.http().enqueue(http_reply());
+        let started = world.host.context().clock().monotonic();
+        ask(
+            &world.upstream(),
+            request("gpt-5.5", vec![say(Role::User, "ping")]),
+        )
+        .await;
+        let elapsed = world
+            .host
+            .context()
+            .clock()
+            .monotonic()
+            .saturating_sub(started);
+        assert!(
+            elapsed >= Duration::from_secs(60) && elapsed < Duration::from_secs(90),
+            "{elapsed:?}"
+        );
+        assert_eq!(posts(&world.host), 1);
+        assert_eq!(world.book.sockets.held(&world.account), 0);
+    });
+}
+
+#[test]
+fn d235_accumulated_turn_over_the_cap_uses_http() {
+    let world = world();
+    block_on(async {
+        let chunk = "a".repeat(5_000_000);
+        let frame = format!(r#"{{"type":"response.output_text.delta","delta":"{chunk}"}}"#);
+        let server = LoopbackSocket::start(SocketScript::replies(move |_, _| {
+            vec![frame.clone(), frame.clone()]
+        }))
+        .await;
+        world.host.http().serve_websockets_at(server.base_url());
+        world.prime("sess");
+        world.host.http().enqueue(http_reply());
+        ask(
+            &world.upstream(),
+            request("gpt-5.5", vec![say(Role::User, "ping")]),
+        )
+        .await;
+        assert_eq!(posts(&world.host), 1);
+        assert_eq!(world.book.sockets.held(&world.account), 0);
+    });
+}
+
+#[test]
+fn d235_max_age_closes_without_another_turn() {
+    block_on_paused(async {
+        let dir = tempfile::tempdir().expect("dir");
+        let host = TestHost::open_for_with_tokio_monotonic(
+            PluginKind::Subscription,
+            PluginId::from_static("copilot"),
+            dir.path(),
+        );
+        let server = LoopbackSocket::start(replies(|turn| match turn {
+            0 => "resp-0",
+            1 => "resp-1",
+            2 => "resp-2",
+            3 => "resp-3",
+            4 => "resp-4",
+            5 => "resp-5",
+            _ => "resp-6",
+        }))
+        .await;
+        let world = world_with(host, dir).await;
+        world.host.http().serve_websockets_at(server.base_url());
+        world.prime("sess");
+        let upstream = world.upstream();
+        let opened = world.host.context().clock().monotonic();
+        let mut used = opened;
+        let mut messages = vec![say(Role::User, "ping")];
+        let mut turn = request("gpt-5.5", messages.clone());
+        turn.conversation = Some(Conversation::new("age", ""));
+        ask_paused(&upstream, turn).await;
+        assert_eq!(world.book.sockets.held(&world.account), 1);
+        assert_eq!(posts(&world.host), 0);
+        let mut index = 0_u32;
+        loop {
+            let now = world.host.context().clock().monotonic();
+            let age_left = Duration::from_secs(55 * 60).saturating_sub(now.saturating_sub(opened));
+            if age_left <= Duration::from_secs(2 * 60) {
+                break;
+            }
+            let idle_left = Duration::from_secs(10 * 60).saturating_sub(now.saturating_sub(used));
+            let step = idle_left
+                .saturating_sub(Duration::from_secs(90))
+                .min(Duration::from_secs(8 * 60))
+                .min(age_left.saturating_sub(Duration::from_secs(2 * 60)));
+            if step < Duration::from_secs(30) {
+                break;
+            }
+            advance_time(step).await;
+            assert!(!server.hits()[0].closed(), "closed before max age");
+            messages.push(say(Role::Assistant, "pong"));
+            messages.push(say(Role::User, &format!("n{index}")));
+            index += 1;
+            used = world.host.context().clock().monotonic();
+            let mut turn = request("gpt-5.5", messages.clone());
+            turn.conversation = Some(Conversation::new("age", ""));
+            ask_paused(&upstream, turn).await;
+            assert_eq!(server.opened(), 1, "turn {index} opened a new socket");
+        }
+        let now = world.host.context().clock().monotonic();
+        assert!(
+            now.saturating_sub(opened) > Duration::from_secs(10 * 60),
+            "max age was not reached past the idle window"
+        );
+        assert!(!server.hits()[0].closed());
+        let sent = server.hits()[0].messages().len();
+        let age_left = Duration::from_secs(55 * 60).saturating_sub(now.saturating_sub(opened));
+        advance_time(age_left.saturating_add(Duration::from_secs(30))).await;
+        wait_until_closed(&server).await;
+        assert!(server.hits()[0].closed());
+        assert_eq!(server.opened(), 1);
+        assert_eq!(server.hits()[0].messages().len(), sent);
+        assert_eq!(posts(&world.host), 0);
+    });
+}
+
+#[test]
+fn d235_proxied_profile_stays_on_http() {
+    let world = world();
+    block_on(async {
+        let server = LoopbackSocket::start(replies(|_| "resp-1")).await;
+        world.host.http().use_http_proxy("http://127.0.0.1:9");
+        world.host.http().serve_websockets_at(server.base_url());
+        world.prime("sess");
+        world.host.http().enqueue(http_reply());
+        ask(
+            &world.upstream(),
+            request("gpt-5.5", vec![say(Role::User, "ping")]),
+        )
+        .await;
+        assert_eq!(server.opened(), 0);
+        assert_eq!(posts(&world.host), 1);
+        assert_eq!(world.book.sockets.held(&world.account), 0);
+    });
+}
+
+#[test]
+fn d235_status_error_is_classified_like_http() {
+    let world = world();
+    block_on(async {
+        let step = Arc::new(AtomicUsize::new(0));
+        let server = LoopbackSocket::start(SocketScript::replies(move |_, _| {
+            let index = step.fetch_add(1, Ordering::SeqCst);
+            let frame = if index == 0 {
+                r#"{"type":"error","status":429,"error":{"message":"You exceeded your plan's usage limit. Try again in 2h","code":"usage_limit_reached"}}"#
+            } else {
+                r#"{"type":"error","status":402,"error":{"message":"insufficient balance","code":"insufficient_quota"}}"#
+            };
+            vec![frame.to_owned()]
+        }))
+        .await;
+        world.host.http().serve_websockets_at(server.base_url());
+        world.prime("sess");
+        let upstream = world.upstream();
+        let quota = turn_error(&upstream, request("gpt-5.5", vec![say(Role::User, "ping")])).await;
+        assert_eq!(quota.kind(), PluginErrorKind::Quota);
+        assert_eq!(quota.status(), Some(429));
+        assert!(
+            quota.message().contains("usage_limit_reached"),
+            "{}",
+            quota.message()
+        );
+        assert_eq!(quota.retry_after(), Some(Duration::from_secs(2 * 60 * 60)));
+        let credit = turn_error(&upstream, request("gpt-5.5", vec![say(Role::User, "ping")])).await;
+        assert_eq!(credit.kind(), PluginErrorKind::Status);
+        assert!(credit.is_credit());
+        assert_eq!(credit.status(), Some(402));
+        assert!(
+            credit.message().contains("insufficient_quota"),
+            "{}",
+            credit.message()
+        );
+        assert_eq!(posts(&world.host), 0);
+        assert_eq!(world.book.sockets.held(&world.account), 0);
+    });
+}
+
+async fn ask_paused(upstream: &CopilotUpstream, request: Request) {
+    let turned = advance_until(
+        upstream.execute(request, ProtocolId::OPENAI_RESPONSES),
+        Duration::from_millis(1),
+    )
+    .await;
+    assert!(turned.is_ok(), "turn");
+}
+
+async fn wait_until_closed(server: &LoopbackSocket) {
+    for _ in 0..64 {
+        if server.hits().iter().any(|hit| hit.closed()) {
+            return;
+        }
+        hofund_plugin_sdk::sleep(Duration::ZERO).await;
+    }
+    panic!("the socket stayed open");
+}
+
+async fn turn_error(upstream: &CopilotUpstream, request: Request) -> PluginError {
+    match upstream
+        .execute(request, ProtocolId::OPENAI_RESPONSES)
+        .await
+    {
+        Err(error) => error,
+        Ok(_) => panic!("the error frame was treated as a reply"),
+    }
 }

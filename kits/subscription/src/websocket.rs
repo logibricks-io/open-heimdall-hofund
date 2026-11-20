@@ -16,6 +16,7 @@ type Frames = Arc<dyn Fn(usize, &str) -> Vec<String> + Send + Sync>;
 pub struct SocketScript {
     refuse: Option<u16>,
     frames: Frames,
+    then_close: bool,
 }
 
 impl SocketScript {
@@ -26,7 +27,15 @@ impl SocketScript {
         Self {
             refuse: None,
             frames: Arc::new(frames),
+            then_close: false,
         }
+    }
+
+    /// Closes the socket after the frames for a turn have been sent.
+    #[must_use]
+    pub fn then_close(mut self) -> Self {
+        self.then_close = true;
+        self
     }
 
     /// Refuses the handshake with `status` and sends no frames.
@@ -35,6 +44,7 @@ impl SocketScript {
         Self {
             refuse: Some(status),
             frames: Arc::new(|_, _| Vec::new()),
+            then_close: false,
         }
     }
 }
@@ -44,6 +54,7 @@ impl SocketScript {
 pub struct SocketHit {
     headers: Vec<(String, String)>,
     messages: Vec<String>,
+    closed: bool,
 }
 
 impl SocketHit {
@@ -67,11 +78,18 @@ impl SocketHit {
     pub fn messages(&self) -> &[String] {
         &self.messages
     }
+
+    /// Whether the peer closed this connection, or the script closed it.
+    #[must_use]
+    pub fn closed(&self) -> bool {
+        self.closed
+    }
 }
 
 struct SharedHit {
     headers: Vec<(String, String)>,
     messages: Vec<String>,
+    closed: bool,
 }
 
 /// A WebSocket server bound to IPv4 loopback.
@@ -144,6 +162,7 @@ impl LoopbackSocket {
                 SocketHit {
                     headers: hit.headers.clone(),
                     messages: hit.messages.clone(),
+                    closed: hit.closed,
                 }
             })
             .collect()
@@ -177,6 +196,7 @@ async fn serve_connection(
     let hit = Arc::new(Mutex::new(SharedHit {
         headers: Vec::new(),
         messages: Vec::new(),
+        closed: false,
     }));
     let recorded = Arc::clone(&hit);
     let refuse = script.refuse;
@@ -227,10 +247,12 @@ async fn serve_connection(
                 break;
             }
         }
-        if failed {
+        if failed || script.then_close {
+            let _ = socket.close(None).await;
             break;
         }
     }
+    hit.lock().expect("hit").closed = true;
 }
 
 fn error_response(status: u16) -> ErrorResponse {

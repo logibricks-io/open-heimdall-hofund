@@ -3,9 +3,11 @@
 //! A model whose `supported_endpoints` include `ws:/responses` sends
 //! `response.create` on a socket at `<api>/responses`. The next turn of the
 //! same conversation and session token sends `previous_response_id` and only
-//! the new input. A refused handshake, or an error frame that names no HTTP
-//! status, uses the HTTP path instead. Idle sockets close, and each account
-//! keeps a bounded number of them.
+//! the new input. A refused handshake, a clean close before a terminal event,
+//! a read that sits past the host's read budget, or an error frame that names
+//! no HTTP status, uses the HTTP path instead. The host clock closes an idle
+//! socket and one that has reached its age, and each account keeps a bounded
+//! number of them.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
@@ -31,6 +33,8 @@ const IDLE: Duration = Duration::from_secs(10 * 60);
 const MAX_AGE: Duration = Duration::from_secs(55 * 60);
 /// How many sockets one account keeps.
 pub(crate) const MAX_PER_ACCOUNT: usize = 32;
+/// Largest assembled turn. A larger reply goes over HTTP.
+const MAX_TURN: usize = 8 * 1024 * 1024;
 
 /// A turn that should go over HTTP, or a failure whose status must stand.
 pub(crate) enum TurnFail {
@@ -233,8 +237,9 @@ fn encoded(
 }
 
 fn handshake(url: &str, headers: &[(String, String)], bearer: &str) -> WebSocketRequest {
-    let mut request =
-        WebSocketRequest::get(url).sensitive_header("Authorization", format!("Bearer {bearer}"));
+    let mut request = WebSocketRequest::get(url)
+        .lifetime(IDLE, MAX_AGE)
+        .sensitive_header("Authorization", format!("Bearer {bearer}"));
     for (name, value) in headers {
         if skip_handshake(name) || name.eq_ignore_ascii_case("authorization") {
             continue;
@@ -267,6 +272,7 @@ async fn read_turn(session: &mut WebSocketSession) -> Result<Read, TurnFail> {
         track: true,
     };
     let mut saw_content = false;
+    let mut terminal = false;
     loop {
         let message = session.recv().await.map_err(|_| TurnFail::Fallback)?;
         let Some(WebSocketMessage::Text(text)) = message else {
@@ -276,6 +282,9 @@ async fn read_turn(session: &mut WebSocketSession) -> Result<Read, TurnFail> {
             continue;
         };
         let Ok(value) = json::from_str::<Value>(&text) else {
+            if !fits(&read.sse, &text) {
+                return Err(TurnFail::Fallback);
+            }
             push_sse(&mut read.sse, &text);
             continue;
         };
@@ -298,6 +307,9 @@ async fn read_turn(session: &mut WebSocketSession) -> Result<Read, TurnFail> {
         {
             read.reply_id = id.to_owned();
         }
+        if !fits(&read.sse, &text) {
+            return Err(TurnFail::Fallback);
+        }
         push_sse(&mut read.sse, &text);
         if matches!(
             kind,
@@ -307,13 +319,18 @@ async fn read_turn(session: &mut WebSocketSession) -> Result<Read, TurnFail> {
                 | "response.done"
                 | "error"
         ) {
+            terminal = true;
             break;
         }
     }
-    if read.sse.is_empty() {
+    if !terminal {
         return Err(TurnFail::Fallback);
     }
     Ok(read)
+}
+
+fn fits(sse: &[u8], frame: &str) -> bool {
+    sse.len().saturating_add(frame.len()).saturating_add(32) <= MAX_TURN
 }
 
 fn note_item(value: &Value, read: &mut Read) {
@@ -336,10 +353,11 @@ fn classify_error(value: &Value) -> TurnFail {
     {
         return TurnFail::Fallback;
     }
-    match error_status(value) {
-        Some(status) => TurnFail::Failed(PluginError::status_error(status, error_text(value))),
-        None => TurnFail::Fallback,
-    }
+    let Some(status) = error_status(value) else {
+        return TurnFail::Fallback;
+    };
+    let body = json::to_vec(value).unwrap_or_default();
+    TurnFail::Failed(wire::failure_from_body(status, &body))
 }
 
 fn error_status(value: &Value) -> Option<u16> {
@@ -350,16 +368,6 @@ fn error_status(value: &Value) -> Option<u16> {
     u16::try_from(status)
         .ok()
         .filter(|status| (400..=599).contains(status))
-}
-
-fn error_text(value: &Value) -> String {
-    value
-        .pointer("/error/message")
-        .and_then(Value::as_str)
-        .unwrap_or("the websocket reply was an error")
-        .chars()
-        .take(240)
-        .collect()
 }
 
 fn push_sse(out: &mut Vec<u8>, frame: &str) {
