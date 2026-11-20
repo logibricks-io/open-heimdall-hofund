@@ -720,10 +720,15 @@ fn d235_used_is_stamped_when_the_turn_finishes() {
             PluginId::from_static("copilot"),
             dir.path(),
         );
-        let server = LoopbackSocket::start(replies(|turn| match turn {
-            0 => "resp-0",
-            _ => "resp-1",
-        }))
+        // Each reply frame waits on the paused clock, so the first turn always
+        // spans more than a second between its start and its finish.
+        let server = LoopbackSocket::start(
+            replies(|turn| match turn {
+                0 => "resp-0",
+                _ => "resp-1",
+            })
+            .gap(Duration::from_secs(2)),
+        )
         .await;
         let world = world_with(host, dir).await;
         world.host.http().serve_websockets_at(server.base_url());
