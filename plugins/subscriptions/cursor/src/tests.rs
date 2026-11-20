@@ -879,6 +879,24 @@ fn r8b_overlapping_oauth_refresh_posts_once() {
 }
 
 #[test]
+fn d226_setup_token_paste_is_unsupported_and_makes_no_request() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let token = "sk-ant-oat01-abcdefghijklmnopqrstuvwxyz0123456789";
+    for text in [
+        token,
+        &format!("export CLAUDE_CODE_OAUTH_TOKEN='{token}'"),
+        &format!("\"{token}\""),
+    ] {
+        let error = block_on(sub.import_accounts(text, host.context())).expect_err("setup");
+        assert_eq!(error.kind(), PluginErrorKind::Unsupported);
+        assert!(!error.to_string().contains(token), "{error}");
+    }
+    assert!(host.http().calls().is_empty());
+}
+
+#[test]
 fn r8c_import_api_key_stores_key_not_access_token() {
     let _guard = api_key_test();
     let dir = tempfile::tempdir().expect("dir");
