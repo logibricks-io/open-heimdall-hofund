@@ -15,6 +15,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - D-229: A Copilot turn refused with "too many images" learns that model's cap, replaces the oldest images outside the latest user message with a placeholder, and sends the turn once more. Later turns for that account and model are fitted before they are sent. A turn already within the cap is unchanged. When the latest user message alone is over the cap, the refusal is returned unchanged. The cap comes from the refusal, not from the model list.
+- D-228: A Messages body whose `tool_use` and `tool_result` blocks do not pair is
+  mended before it is sent to a Messages upstream. An unanswered call gets a
+  synthetic error result, a result with no call becomes the text it said, a
+  second answer is dropped, and a result after other content moves first. A
+  body that already pairs keeps its bytes.
+- D-236: That same mend moves blocks an assistant wrote after its first
+  `tool_use` to before the call (thinking stays, empty text is dropped), moves
+  a system or developer message that sits between a call and its results to
+  after the results, and keeps two calls that share an id as two ids, each
+  answered. Passthrough, `count_tokens`, and translated Messages builds use
+  this one pass. A body that is already in shape is not serialized again.
 - D-232: GPT-6.2 and later send Codex instructions, the client's instructions,
   and a translated system prompt as leading `developer` input items, with no
   top-level `instructions`. Older models stay unchanged. This applies to the
