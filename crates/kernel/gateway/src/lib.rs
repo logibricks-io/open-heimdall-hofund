@@ -3893,6 +3893,8 @@ fn record_realtime_usage(
         tier_sent: String::new(),
         tier_served: String::new(),
         clear_placeholder_served: false,
+        advisor_model: String::new(),
+        advisor_calls: Vec::new(),
     };
     write_usage_app(app, &meta, Some((uncached, output)), status);
 }
