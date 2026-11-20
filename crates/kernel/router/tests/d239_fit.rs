@@ -1,12 +1,18 @@
 //! Group routing `fit` asks the smallest known context window first (D-239).
 
 use std::collections::BTreeMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use hofund_ir::{ContentPart, Message, Response, Role};
 use hofund_plugin_api::{MemberId, MemberKey, PluginError, PresetId};
-use hofund_router::{Completion, FailoverPolicy, Hop, Member, Route, Router, RouterError};
+use hofund_router::{
+    Completion, CooldownPolicy, Cooldowns, FailoverPolicy, Hop, Member, Route, Router, RouterError,
+    WaitHook,
+};
 
 #[derive(Clone, Copy)]
 enum Script {
@@ -14,13 +20,16 @@ enum Script {
     Status(u16),
     Quota,
     Credit,
+    /// A short rate-limit pause, one second, which still passes.
+    Soon(u16),
 }
 
 struct Fake {
     id: &'static str,
     member_id: MemberId,
     seen: Arc<Mutex<Vec<&'static str>>>,
-    script: Script,
+    /// The last script repeats once the earlier ones have been used.
+    scripts: Mutex<Vec<Script>>,
 }
 
 #[async_trait]
@@ -43,7 +52,7 @@ impl Member for Fake {
         _inbound: &str,
     ) -> Result<Completion, PluginError> {
         self.seen.lock().expect("seen").push(self.id);
-        match self.script {
+        match self.next_script() {
             Script::Ok => {
                 let mut message = Message::new(Role::Assistant);
                 message.content.push(ContentPart::text("ok"));
@@ -52,6 +61,19 @@ impl Member for Fake {
             Script::Status(status) => Err(PluginError::status_error(status, "unavailable")),
             Script::Quota => Err(PluginError::quota_status(429, "quota")),
             Script::Credit => Err(PluginError::credit_status(402, "credit")),
+            Script::Soon(status) => Err(PluginError::status_error(status, "unavailable")
+                .with_retry_after(Duration::from_secs(1))),
+        }
+    }
+}
+
+impl Fake {
+    fn next_script(&self) -> Script {
+        let mut scripts = self.scripts.lock().expect("scripts");
+        if scripts.len() > 1 {
+            scripts.remove(0)
+        } else {
+            scripts.last().copied().unwrap_or(Script::Ok)
         }
     }
 }
@@ -66,15 +88,25 @@ fn scripted(
     seen: &Arc<Mutex<Vec<&'static str>>>,
     script: Script,
 ) -> Hop {
-    let mut hop = Hop::new(Arc::new(Fake {
+    sequenced(id, window, seen, vec![script])
+}
+
+fn sequenced(
+    id: &'static str,
+    window: Option<u64>,
+    seen: &Arc<Mutex<Vec<&'static str>>>,
+    scripts: Vec<Script>,
+) -> Hop {
+    let member = Arc::new(Fake {
         id,
         member_id: MemberId::from_preset(
             PresetId::try_from(id).expect("preset"),
             MemberKey::from_static("row"),
         ),
         seen: Arc::clone(seen),
-        script,
-    }));
+        scripts: Mutex::new(scripts),
+    });
+    let mut hop = Hop::new(member);
     hop.context_window = window;
     hop
 }
@@ -207,4 +239,108 @@ async fn d239_fit_asks_in_order_when_every_window_is_too_small() {
         .await
         .expect("both windows are too small, so both are asked");
     assert_eq!(seen.lock().expect("seen").as_slice(), ["smaller", "larger"]);
+}
+
+struct Recording(Arc<Mutex<Vec<Duration>>>);
+
+impl WaitHook for Recording {
+    fn wait(&self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        self.0.lock().expect("waits").push(duration);
+        Box::pin(std::future::ready(()))
+    }
+}
+
+async fn ask_waiting(
+    hops: Vec<Hop>,
+    patience: Option<Duration>,
+    request: &hofund_router::Request,
+) -> (Result<hofund_router::Routed, RouterError>, Vec<Duration>) {
+    let waits = Arc::new(Mutex::new(Vec::new()));
+    let router = Router::from_routes(
+        BTreeMap::from([(
+            "demo".to_owned(),
+            Route::new(hops).with_routing("fit").with_patience(patience),
+        )]),
+        FailoverPolicy::default(),
+    );
+    let result = router
+        .dispatch_with_wait(
+            request,
+            "test",
+            None,
+            Some(Arc::new(Recording(Arc::clone(&waits)))),
+        )
+        .await;
+    let waits = waits.lock().expect("waits").clone();
+    (result, waits)
+}
+
+#[tokio::test]
+async fn d239_fit_replan_then_allowance_asks_the_left_out_member() {
+    let request = long_request(20_000);
+    for scripts in [
+        vec![Script::Status(500), Script::Quota],
+        vec![Script::Soon(429), Script::Credit],
+    ] {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let hops = vec![
+            sequenced("narrow", Some(4_000), &seen, vec![Script::Ok]),
+            sequenced("wide", Some(1_000_000), &seen, scripts),
+        ];
+        let (result, waits) = ask_waiting(hops, Some(Duration::from_secs(60)), &request).await;
+        result.expect("the left-out member answers after the replan");
+        assert!(!waits.is_empty(), "the passing failure is replanned");
+        assert_eq!(
+            seen.lock().expect("seen").as_slice(),
+            ["wide", "wide", "narrow"]
+        );
+    }
+}
+
+#[tokio::test]
+async fn d239_fit_a_replanned_500_does_not_ask_the_left_out_member() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let hops = vec![
+        sequenced("narrow", Some(4_000), &seen, vec![Script::Ok]),
+        sequenced("wide", Some(1_000_000), &seen, vec![Script::Status(500)]),
+    ];
+    // Three seconds covers the first two-second pause and not the next one.
+    let (result, waits) =
+        ask_waiting(hops, Some(Duration::from_secs(3)), &long_request(20_000)).await;
+    assert!(result.is_err(), "a 500 that keeps passing is the error");
+    assert_eq!(waits.len(), 1, "replanned once");
+    assert_eq!(seen.lock().expect("seen").as_slice(), ["wide", "wide"]);
+}
+
+#[tokio::test]
+async fn d239_fit_a_resting_left_out_member_is_not_asked() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let resting = Arc::new(Fake {
+        id: "narrow",
+        member_id: MemberId::from_preset(
+            PresetId::try_from("narrow").expect("preset"),
+            MemberKey::from_static("row"),
+        ),
+        seen: Arc::clone(&seen),
+        scripts: Mutex::new(vec![Script::Ok]),
+    });
+    let cooldowns = Arc::new(Cooldowns::new(CooldownPolicy::default()));
+    cooldowns.record_failure_for_model(
+        resting.id(),
+        "demo",
+        &PluginError::quota_status(429, "quota"),
+    );
+    let mut narrow = Hop::new(resting);
+    narrow.context_window = Some(1_000);
+    let hops = vec![
+        narrow,
+        sequenced("open", Some(2_000), &seen, vec![Script::Ok]),
+        sequenced("wide", Some(1_000_000), &seen, vec![Script::Quota]),
+    ];
+    let router = router("fit", hops).with_cooldowns(cooldowns);
+    router
+        .dispatch(&long_request(20_000), "test")
+        .await
+        .expect("the left-out member that is not resting answers");
+    assert_eq!(seen.lock().expect("seen").as_slice(), ["wide", "open"]);
 }

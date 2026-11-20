@@ -189,9 +189,12 @@ The measurement strategies work as follows:
   that is not a group. Config also accepts `small-first` and
   `small-context-first` as names for it. A member whose known window is no
   larger than the request estimate is left out of the ask list. It is asked
-  only when every member that may hold the request is out of quota or credit,
-  nothing earlier failed for another reason, and that try was not a refusal,
-  a passing retry, or an overflow. An unknown window stays in the ask list.
+  only when the final try is out of quota or credit, no earlier fitting
+  member failed for another reason, and that try was not a refusal, a passing
+  retry, or an overflow. A passing failure of the member that is currently
+  last is asked again and does not by itself block that resort. A left-out
+  member already resting for quota or credit is not asked. An unknown window
+  stays in the ask list.
   When every member is too small, the order is unchanged and those members
   are asked.
 

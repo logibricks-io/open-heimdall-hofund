@@ -2284,7 +2284,6 @@ impl DispatchState {
                         // member not known to be too small may hold it.
                         // An overflow is not the allowance failure that asks
                         // a member left out for its window.
-                        self.saw_other = true;
                         if error.status() != Some(413) {
                             self.needs_room = Some(self.input_tokens);
                         }
@@ -2298,6 +2297,7 @@ impl DispatchState {
                         self.outgrown.push((upstream_id.clone(), upstream_model));
                         self.last = Some((upstream_id, error));
                         *ending = Ending::Other;
+                        self.note_other_if_another_follows(asking, index);
                         continue;
                     }
                     if error.skips_failover_same_plugin() {
@@ -2360,7 +2360,10 @@ impl DispatchState {
                         PoolMemberPatience::Inherited
                     };
                     if !allowance_failure(&error) {
-                        self.saw_other = true;
+                        // A passing failure of the member that is currently
+                        // last is replanned. It is not an earlier failure;
+                        // the try after that replan is the one that counts.
+                        self.note_other_if_another_follows(asking, index);
                     }
                     if let Some(failure) =
                         patience::busy(&error, index, member_patience, self.now())
@@ -2409,10 +2412,10 @@ impl DispatchState {
         trace.sync_open();
     }
 
-    /// Puts the left-out members on the ask list when the last member that
-    /// may hold the request failed for quota or credit, and nothing earlier
-    /// failed for another reason. A refusal, a passing retry, or an overflow
-    /// does not qualify.
+    /// Puts the left-out members on the ask list when the final try failed
+    /// for quota or credit, and no earlier fitting member failed for another
+    /// reason. A refusal, a passing retry, or an overflow does not qualify.
+    /// A member already resting for quota or credit stays out.
     fn take_over_window(&mut self) -> Option<Vec<usize>> {
         if self.over_window.is_empty() || self.saw_other {
             return None;
@@ -2421,10 +2424,66 @@ impl DispatchState {
         if !allowance_failure(error) {
             return None;
         }
-        let extra = std::mem::take(&mut self.over_window);
+        let extra: Vec<Hop> = std::mem::take(&mut self.over_window)
+            .into_iter()
+            .filter(|hop| !self.resting_allowance(hop))
+            .collect();
+        if extra.is_empty() {
+            return None;
+        }
         let start = self.resolved.hops.len();
         self.resolved.hops.extend(extra);
         Some((start..self.resolved.hops.len()).collect())
+    }
+
+    /// A non-allowance failure counts as earlier only when another fitting
+    /// member is still to be asked.
+    fn note_other_if_another_follows(&mut self, asking: &[usize], index: usize) {
+        if self.another_fitting_follows(asking, index) {
+            self.saw_other = true;
+        }
+    }
+
+    fn another_fitting_follows(&self, asking: &[usize], index: usize) -> bool {
+        let Some(pos) = asking.iter().position(|item| *item == index) else {
+            return false;
+        };
+        asking[pos + 1..].iter().any(|later| {
+            self.resolved
+                .hops
+                .get(*later)
+                .is_some_and(|hop| !self.member_skipped(hop))
+        })
+    }
+
+    fn member_skipped(&self, hop: &Hop) -> bool {
+        let upstream_model = hop.wire_model.as_deref().unwrap_or(&self.resolved.bare);
+        let plugin_id = hop.member.plugin_id();
+        self.refused_providers.contains(hop.member.route_id())
+            || (!plugin_id.is_empty() && self.skipped_plugins.contains(plugin_id))
+            || self.region_closed_for(hop)
+            || self
+                .outgrown
+                .iter()
+                .any(|(route, model)| route == hop.member.route_id() && model == upstream_model)
+            || self.needs_room.is_some_and(|tokens| {
+                hop.context_window
+                    .is_some_and(|window| window > 0 && tokens >= window)
+            })
+    }
+
+    fn resting_allowance(&self, hop: &Hop) -> bool {
+        let model = hop.wire_model.as_deref().unwrap_or(&self.resolved.bare);
+        self.cooldowns.as_ref().is_some_and(|cooldowns| {
+            cooldowns
+                .cooling_for_model(hop.member.id(), model)
+                .is_some_and(|cooling| {
+                    matches!(
+                        cooling.cause(),
+                        CooldownCause::Quota | CooldownCause::Credit
+                    )
+                })
+        })
     }
 
     fn note_skip(&mut self, order: u32, reason: SkipReason) {
