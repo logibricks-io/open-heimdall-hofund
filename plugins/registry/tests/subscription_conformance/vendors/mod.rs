@@ -1,3 +1,4 @@
+mod agy_cli;
 mod antigravity;
 mod claude;
 mod cline;
@@ -25,6 +26,7 @@ pub async fn execute(cell: Cell) -> Result<(), String> {
         "codex" => codex::run(cell).await,
         "copilot" => copilot::run(cell).await,
         "gemini" => gemini::run(cell).await,
+        "agy-cli" => agy_cli::run(cell).await,
         "antigravity" => antigravity::run(cell).await,
         "grok" => grok::run(cell).await,
         "kiro" => kiro::run(cell).await,
