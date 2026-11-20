@@ -99,10 +99,11 @@ impl AskBackend for GatewayAsk {
             protocol: routed.protocol.clone(),
         };
         let (text, usage) = take_text(routed.completion).await;
+        // A provider that answered is charged even when the text is empty.
+        record(&app, &request, &identity, &hop, &usage, started);
         if text.is_empty() {
             return Err(PluginError::status_error(502, "the advisor said nothing"));
         }
-        record(&app, &request, &identity, &hop, &usage, started);
         let mut message = Message::new(Role::Assistant);
         message.content = vec![ContentPart::Text(hofund_ir::TextPart {
             text: text.clone(),
@@ -190,14 +191,7 @@ fn record(
     usage: &Usage,
     started: Instant,
 ) {
-    let mut meta = UsageMeta::new(
-        request,
-        &hop.upstream,
-        &request.model,
-        started,
-        identity,
-        "advisor",
-    );
+    let mut meta = UsageMeta::new(request, &hop.upstream, &hop.served, started, identity, "");
     meta.served_model = hop.served.clone();
     crate::limits::observe_usage(&mut meta, usage, &hop.protocol, false);
     write_usage(
@@ -346,5 +340,9 @@ fn row_for_call(meta: &UsageMeta, call: &AdvisorCall) -> UsageMeta {
         details,
         saw_reasoning: false,
         stream_timing: crate::stream_timing::StreamTiming::new(meta.started),
+        tier_asked: String::new(),
+        tier_sent: String::new(),
+        tier_served: String::new(),
+        clear_placeholder_served: false,
     }
 }

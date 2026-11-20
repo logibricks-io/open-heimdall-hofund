@@ -25,6 +25,8 @@ struct Fake {
     speak: &'static str,
     /// A unary usage whose input already includes cache reads, and no iterations.
     plain: bool,
+    /// The provider answers with usage and no text.
+    quiet: bool,
 }
 
 struct Hold {
@@ -62,8 +64,13 @@ impl Member for Fake {
             }
         }
         let mut message = Message::new(Role::Assistant);
+        let text = if self.quiet {
+            String::new()
+        } else {
+            "look there".to_owned()
+        };
         message.content = vec![hofund_ir::ContentPart::Text(hofund_ir::TextPart {
-            text: "look there".to_owned(),
+            text,
             extensions: hofund_ir::Extensions::new(),
         })];
         let usage = if self.plain {
@@ -150,7 +157,7 @@ fn fixture_member(
     hold: Option<Arc<Hold>>,
     speak: &'static str,
     plain: bool,
-    price_route: bool,
+    quiet: bool,
 ) -> Fixture {
     let dir = tempfile::tempdir().expect("dir");
     let store = Arc::new(KeyStore::beside_token(dir.path().join("hofund.token")));
@@ -167,6 +174,7 @@ fn fixture_member(
         hold,
         speak,
         plain,
+        quiet,
     });
     let routes = BTreeMap::from([
         (
@@ -187,11 +195,6 @@ fn fixture_member(
     settings
         .prices
         .insert("*/reviewer-5.5".into(), price(10.0, 20.0));
-    if price_route {
-        settings
-            .prices
-            .insert("*/relay/reviewer-5.5".into(), price(10.0, 20.0));
-    }
     let pricer = Arc::new(EffectivePricer::new(settings, catalog, Arc::new(List)));
     let token = store.token_file().read().expect("token");
     let gateway = Gateway::new(
@@ -375,7 +378,7 @@ async fn d227_advisor_ask_holds_a_prompt_estimate() {
 #[tokio::test]
 async fn d227_nested_ask_records_usage_with_the_hop_protocol() {
     let speak = hofund_plugin_api::ProtocolId::OPENAI_CHAT.as_str();
-    let fixture = fixture_member(0, None, speak, true, true);
+    let fixture = fixture_member(0, None, speak, true, false);
     let caller = CallerStamp {
         key_id: "open".into(),
         ..CallerStamp::default()
@@ -391,7 +394,39 @@ async fn d227_nested_ask_records_usage_with_the_hop_protocol() {
     assert_eq!(row.input_tokens, Some(100));
     assert_eq!(row.cache_read_tokens, Some(40));
     assert_eq!(row.output_tokens, Some(8));
+    assert_ne!(row.client_agent, "advisor");
     let cost = row.cost_usd.expect("priced");
     let expected = (60.0 * 10.0 + 40.0 * 4.0 + 8.0 * 20.0) / 1_000_000.0;
+    assert!((cost - expected).abs() < 1e-9, "{cost} != {expected}");
+}
+
+#[tokio::test]
+async fn d227_empty_advisor_text_still_records_usage() {
+    let fixture = fixture_member(0, None, "subscription", true, true);
+    let caller = CallerStamp {
+        key_id: "open".into(),
+        ..CallerStamp::default()
+    };
+    let mut request = ModelRequest::new("relay/reviewer-5.5");
+    request.messages = vec![Message::new(Role::User)];
+    let error = match fixture.ask.ask(&caller, request).await {
+        Err(error) => error,
+        Ok(_) => panic!("empty advice was returned"),
+    };
+    assert_eq!(error.status(), Some(502));
+    assert_eq!(
+        fixture.hits.lock().expect("hits").as_slice(),
+        ["reviewer-5.5"]
+    );
+    let rows = fixture.usage.rows().expect("rows");
+    let row = rows
+        .iter()
+        .find(|row| row.kind.is_empty())
+        .expect("charged row");
+    assert_eq!(row.input_tokens, Some(100));
+    assert_eq!(row.output_tokens, Some(8));
+    assert_eq!(row.cache_read_tokens, Some(40));
+    let cost = row.cost_usd.expect("priced");
+    let expected = (100.0 * 10.0 + 40.0 * 4.0 + 8.0 * 20.0) / 1_000_000.0;
     assert!((cost - expected).abs() < 1e-9, "{cost} != {expected}");
 }

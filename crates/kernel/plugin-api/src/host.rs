@@ -857,7 +857,11 @@ impl ObserveHandle {
 #[async_trait]
 #[doc(hidden)]
 pub trait AskBackend: Send + Sync {
-    /// Whether `model` is a model `caller` may use.
+    /// Whether this gateway can route `model`.
+    ///
+    /// The caller's list, accounts, and spend limit are enforced by
+    /// [`AskBackend::ask`], not here. A model the gateway routes stays
+    /// offered when the caller may not use it.
     fn serves(&self, caller: &CallerStamp, model: &str) -> bool;
 
     /// Runs `request` as `caller`.
@@ -935,7 +939,10 @@ impl AskHandle {
         Self { inner }
     }
 
-    /// Whether `model` is a model `caller` may use.
+    /// Whether this gateway can route `model`.
+    ///
+    /// The caller's list, accounts, and spend limit are enforced by
+    /// [`AskHandle::ask`], not here.
     #[must_use]
     pub fn serves(&self, caller: &CallerStamp, model: &str) -> bool {
         self.inner.serves(caller, model)

@@ -32,7 +32,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   when the caller's list would refuse it; that call then fails without asking
   the provider. A dashed id that two providers both spell matches neither.
   The nested ask records usage with the answering hop's protocol, so an input
-  total that already includes cache reads is not billed again. A web search
+  total that already includes cache reads is not billed again. That row is
+  priced as the upstream model, not the route id, and it does not store
+  `advisor` as the client agent. An empty answer is still recorded. A web search
   on that run, when one is installed, uses the same original key. Refs D-227.
 - D-222: Antigravity can be used through the user's own local `agy` CLI (`plugins/subscriptions/agy-cli`). Saved accounts move into per-account homes, a written quota reset rests the requested model, and a verification refusal rests the account for 30 minutes. hofund does not download the CLI. A quota or verification sentence inside a success JSON field, or on standard error, rests the same way. A Code Assist body that names its reset keeps that duration on `reset_after`, a Google sign-in 429 with a model-pool sentence is a quota error, and an import probes each account through that account's proxy.
 - D-221: Antigravity sign-in, import, and add are refused for new accounts because Google suspends accounts it sees on Code Assist through Antigravity's own client. Saved accounts keep working and show a risk line. The message points at the agy CLI route. Gemini CLI is unchanged.
