@@ -27,6 +27,10 @@ struct Fake {
     plain: bool,
     /// The provider answers with usage and no text.
     quiet: bool,
+    /// Fingerprint stored on the usage row. Empty uses the member default.
+    key_id: &'static str,
+    /// Served `service_tier` written on the completion. Empty leaves it unset.
+    served_tier: &'static str,
 }
 
 struct Hold {
@@ -46,6 +50,10 @@ impl Member for Fake {
 
     fn protocol(&self) -> &str {
         self.speak
+    }
+
+    fn provider_key_id(&self) -> &str {
+        self.key_id
     }
 
     async fn execute(
@@ -95,7 +103,13 @@ impl Member for Fake {
                 ..Usage::default()
             }
         };
-        let response = Response::new(message).with_usage(Some(usage));
+        let mut response = Response::new(message).with_usage(Some(usage));
+        if !self.served_tier.is_empty() {
+            response.extensions.insert(
+                "service_tier",
+                serde_json::Value::String(self.served_tier.to_owned()),
+            );
+        }
         Ok(Completion::Unary(Box::new(response)))
     }
 }
@@ -112,12 +126,34 @@ impl CatalogFetcher for Offline {
     }
 }
 
-struct List;
+struct List {
+    /// List price for `reviewer-5.5` when this ask must not use a custom price.
+    reviewer: bool,
+}
 
 impl hofund_model_catalog::ListPriceLookup for List {
-    fn list_price(&self, _provider_id: &str, _model: &str) -> Option<hofund_model_catalog::Price> {
-        None
+    fn list_price(&self, _provider_id: &str, model: &str) -> Option<hofund_model_catalog::Price> {
+        if !self.reviewer || model != "reviewer-5.5" {
+            return None;
+        }
+        Some(hofund_model_catalog::Price {
+            input: 10.0,
+            output: 20.0,
+            cache_read: 4.0,
+            cache_write: 0.0,
+            cache_write_1h: 0.0,
+        })
     }
+}
+
+#[derive(Default)]
+struct Shape {
+    key_id: &'static str,
+    /// Member tier the router writes onto the attempt. `fast` becomes `priority`.
+    member_tier: &'static str,
+    served_tier: &'static str,
+    /// Price from the list, with no custom override for the upstream model.
+    list_price: bool,
 }
 
 struct Fixture {
@@ -149,7 +185,14 @@ fn fixture() -> Fixture {
 }
 
 fn fixture_with(advisor_cache_read: u64, hold: Option<Arc<Hold>>) -> Fixture {
-    fixture_member(advisor_cache_read, hold, "subscription", false, false)
+    fixture_member(
+        advisor_cache_read,
+        hold,
+        "subscription",
+        false,
+        false,
+        Shape::default(),
+    )
 }
 
 fn fixture_member(
@@ -158,6 +201,7 @@ fn fixture_member(
     speak: &'static str,
     plain: bool,
     quiet: bool,
+    shape: Shape,
 ) -> Fixture {
     let dir = tempfile::tempdir().expect("dir");
     let store = Arc::new(KeyStore::beside_token(dir.path().join("hofund.token")));
@@ -175,6 +219,8 @@ fn fixture_member(
         speak,
         plain,
         quiet,
+        key_id: shape.key_id,
+        served_tier: shape.served_tier,
     });
     let routes = BTreeMap::from([
         (
@@ -183,7 +229,11 @@ fn fixture_member(
         ),
         (
             "relay/reviewer-5.5".to_owned(),
-            vec![hop(member, "reviewer-5.5")],
+            vec![{
+                let mut hop = hop(member, "reviewer-5.5");
+                hop.service_tier = shape.member_tier.to_owned();
+                hop
+            }],
         ),
     ]);
     let catalog = ModelCatalog::open(dir.path(), CatalogSettings::default(), Arc::new(Offline))
@@ -192,10 +242,18 @@ fn fixture_member(
     settings
         .prices
         .insert("*/worker-5-5".into(), price(1.0, 2.0));
-    settings
-        .prices
-        .insert("*/reviewer-5.5".into(), price(10.0, 20.0));
-    let pricer = Arc::new(EffectivePricer::new(settings, catalog, Arc::new(List)));
+    if !shape.list_price {
+        settings
+            .prices
+            .insert("*/reviewer-5.5".into(), price(10.0, 20.0));
+    }
+    let pricer = Arc::new(EffectivePricer::new(
+        settings,
+        catalog,
+        Arc::new(List {
+            reviewer: shape.list_price,
+        }),
+    ));
     let token = store.token_file().read().expect("token");
     let gateway = Gateway::new(
         Snapshot::new(Router::from_hops(routes, FailoverPolicy::default())),
@@ -378,7 +436,7 @@ async fn d227_advisor_ask_holds_a_prompt_estimate() {
 #[tokio::test]
 async fn d227_nested_ask_records_usage_with_the_hop_protocol() {
     let speak = hofund_plugin_api::ProtocolId::OPENAI_CHAT.as_str();
-    let fixture = fixture_member(0, None, speak, true, false);
+    let fixture = fixture_member(0, None, speak, true, false, Shape::default());
     let caller = CallerStamp {
         key_id: "open".into(),
         ..CallerStamp::default()
@@ -402,7 +460,7 @@ async fn d227_nested_ask_records_usage_with_the_hop_protocol() {
 
 #[tokio::test]
 async fn d227_empty_advisor_text_still_records_usage() {
-    let fixture = fixture_member(0, None, "subscription", true, true);
+    let fixture = fixture_member(0, None, "subscription", true, true, Shape::default());
     let caller = CallerStamp {
         key_id: "open".into(),
         ..CallerStamp::default()
@@ -423,10 +481,85 @@ async fn d227_empty_advisor_text_still_records_usage() {
         .iter()
         .find(|row| row.kind.is_empty())
         .expect("charged row");
+    assert_eq!(row.status, "502");
     assert_eq!(row.input_tokens, Some(100));
     assert_eq!(row.output_tokens, Some(8));
     assert_eq!(row.cache_read_tokens, Some(40));
     let cost = row.cost_usd.expect("priced");
     let expected = (100.0 * 10.0 + 40.0 * 4.0 + 8.0 * 20.0) / 1_000_000.0;
     assert!((cost - expected).abs() < 1e-9, "{cost} != {expected}");
+}
+
+#[tokio::test]
+async fn d227_nested_ask_charges_the_provider_key() {
+    let fixture = fixture_member(
+        0,
+        None,
+        "subscription",
+        true,
+        false,
+        Shape {
+            key_id: "row-key",
+            ..Shape::default()
+        },
+    );
+    let before = fixture
+        .usage
+        .provider_key_cost("row-key", 0)
+        .expect("before");
+    assert_eq!(before, 0.0);
+    let caller = CallerStamp {
+        key_id: "open".into(),
+        ..CallerStamp::default()
+    };
+    let mut request = ModelRequest::new("relay/reviewer-5.5");
+    request.messages = vec![Message::new(Role::User)];
+    fixture.ask.ask(&caller, request).await.expect("ask");
+    let rows = fixture.usage.rows().expect("rows");
+    let row = rows
+        .iter()
+        .find(|row| row.kind.is_empty())
+        .expect("nested row");
+    assert_eq!(row.provider_key_id, "row-key");
+    let cost = row.cost_usd.expect("priced");
+    let after = fixture
+        .usage
+        .provider_key_cost("row-key", 0)
+        .expect("after");
+    assert!((after - cost).abs() < 1e-9, "{after} != {cost}");
+    assert!(after > before);
+}
+
+#[tokio::test]
+async fn d227_nested_ask_prices_priority_at_double() {
+    let fixture = fixture_member(
+        0,
+        None,
+        "subscription",
+        true,
+        false,
+        Shape {
+            member_tier: "fast",
+            served_tier: "priority",
+            list_price: true,
+            ..Shape::default()
+        },
+    );
+    let caller = CallerStamp {
+        key_id: "open".into(),
+        ..CallerStamp::default()
+    };
+    let mut request = ModelRequest::new("relay/reviewer-5.5");
+    request.messages = vec![Message::new(Role::User)];
+    fixture.ask.ask(&caller, request).await.expect("ask");
+    let rows = fixture.usage.rows().expect("rows");
+    let row = rows
+        .iter()
+        .find(|row| row.kind.is_empty())
+        .expect("nested row");
+    assert_eq!(row.tier_sent, "priority");
+    assert_eq!(row.tier_served, "priority");
+    let cost = row.cost_usd.expect("priced");
+    let list = (100.0 * 10.0 + 40.0 * 4.0 + 8.0 * 20.0) / 1_000_000.0;
+    assert!((cost - list * 2.0).abs() < 1e-9, "{cost} != {}", list * 2.0);
 }

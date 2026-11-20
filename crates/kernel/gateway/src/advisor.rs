@@ -97,22 +97,31 @@ impl AskBackend for GatewayAsk {
             upstream: routed.upstream_id.clone(),
             served: routed.upstream_model.clone(),
             protocol: routed.protocol.clone(),
+            provider_key_id: routed.provider_key_id.clone(),
+            tier_sent: routed.service_tier_sent.clone(),
+            clear_placeholder_served: routed.clear_placeholder_served,
         };
-        let (text, usage) = take_text(routed.completion).await;
+        let taken = take_text(routed.completion).await;
         // A provider that answered is charged even when the text is empty.
-        record(&app, &request, &identity, &hop, &usage, started);
-        if text.is_empty() {
+        // The row keeps the status `ask` returns.
+        let status = if taken.text.is_empty() {
+            StatusCode::BAD_GATEWAY
+        } else {
+            StatusCode::OK
+        };
+        record(&app, &request, &identity, &hop, &taken, started, status);
+        if taken.text.is_empty() {
             return Err(PluginError::status_error(502, "the advisor said nothing"));
         }
         let mut message = Message::new(Role::Assistant);
         message.content = vec![ContentPart::Text(hofund_ir::TextPart {
-            text: text.clone(),
+            text: taken.text.clone(),
             extensions: hofund_ir::Extensions::new(),
         })];
         Ok(Completion::Unary(Box::new(
             hofund_ir::Response::new(message)
                 .with_model(Some(request.model))
-                .with_usage(Some(usage)),
+                .with_usage(Some(taken.usage)),
         )))
     }
 }
@@ -133,19 +142,33 @@ fn plugin_error(error: &hofund_router::RouterError, identity: &Identity) -> Plug
     }
 }
 
-async fn take_text(completion: Completion) -> (String, Usage) {
+struct Taken {
+    text: String,
+    usage: Usage,
+    served_tier: String,
+}
+
+async fn take_text(completion: Completion) -> Taken {
     match completion {
-        Completion::Unary(response) => (
-            text_of(&response.message.content),
-            response.usage.unwrap_or_default(),
-        ),
+        Completion::Unary(response) => Taken {
+            served_tier: hofund_codec::service_tier::extension_tier(&response.extensions),
+            text: text_of(&response.message.content),
+            usage: response.usage.unwrap_or_default(),
+        },
         Completion::Stream(mut stream) => {
             let mut text = String::new();
             let mut usage = Usage::default();
+            let mut served_tier = String::new();
             while let Some(event) = stream.next().await {
                 let Ok(event) = event else {
                     continue;
                 };
+                if let Some(extensions) = event.extensions() {
+                    let next = hofund_codec::service_tier::extension_tier(extensions);
+                    if !next.is_empty() {
+                        served_tier = next;
+                    }
+                }
                 match event {
                     StreamEvent::TextDelta(delta) => text.push_str(&delta.text),
                     StreamEvent::MessageStart(start) => {
@@ -161,9 +184,17 @@ async fn take_text(completion: Completion) -> (String, Usage) {
                     _ => {}
                 }
             }
-            (text, usage)
+            Taken {
+                text,
+                usage,
+                served_tier,
+            }
         }
-        Completion::Raw(_) | _ => (String::new(), Usage::default()),
+        Completion::Raw(_) | _ => Taken {
+            text: String::new(),
+            usage: Usage::default(),
+            served_tier: String::new(),
+        },
     }
 }
 
@@ -181,6 +212,9 @@ struct AnsweredHop {
     upstream: String,
     served: String,
     protocol: String,
+    provider_key_id: String,
+    tier_sent: String,
+    clear_placeholder_served: bool,
 }
 
 fn record(
@@ -188,17 +222,24 @@ fn record(
     request: &ModelRequest,
     identity: &Identity,
     hop: &AnsweredHop,
-    usage: &Usage,
+    taken: &Taken,
     started: Instant,
+    status: StatusCode,
 ) {
     let mut meta = UsageMeta::new(request, &hop.upstream, &hop.served, started, identity, "");
     meta.served_model = hop.served.clone();
-    crate::limits::observe_usage(&mut meta, usage, &hop.protocol, false);
+    meta.provider_key_id = hop.provider_key_id.clone();
+    // The router already rewrote the word that was sent. A served word on the
+    // completion replaces it, except a placeholder the hop told us to drop.
+    meta.tier_sent = hop.tier_sent.clone();
+    meta.clear_placeholder_served = hop.clear_placeholder_served;
+    crate::note_served_word(&taken.served_tier, &mut meta);
+    crate::limits::observe_usage(&mut meta, &taken.usage, &hop.protocol, false);
     write_usage(
         &app.usage,
         &meta,
         Some((meta.input, meta.output)),
-        StatusCode::OK,
+        status,
         app.pricer.as_deref(),
         false,
         "",
