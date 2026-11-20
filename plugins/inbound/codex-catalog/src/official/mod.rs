@@ -77,6 +77,46 @@ fn slug_matches(entry_slug: &str, slug: &str) -> bool {
             .is_some_and(|rest| rest.starts_with('-'))
 }
 
+/// This computer's catalog row for an id that is `codex/<slug>` or ends in `/codex/<slug>`.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct OwnedCatalog {
+    row: Value,
+}
+
+impl OwnedCatalog {
+    /// Replaces `entry` with this computer's cache object.
+    ///
+    /// The slug stays the gateway id. The description stays the cache text.
+    pub(crate) fn write(self, entry: &mut Value) {
+        let slug = entry
+            .get("slug")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+        let Some(mut object) = self.row.as_object().cloned() else {
+            return;
+        };
+        object.insert("slug".to_owned(), Value::String(slug));
+        *entry = Value::Object(object);
+    }
+}
+
+/// The slug after a trailing `codex/` segment, when `id` is that shape.
+pub(crate) fn own_codex_slug(id: &str) -> Option<&str> {
+    let slug = if let Some(rest) = id.strip_prefix("codex/") {
+        rest
+    } else {
+        let marker = "/codex/";
+        let at = id.rfind(marker)?;
+        &id[at + marker.len()..]
+    };
+    if slug.is_empty() || slug.contains('/') {
+        None
+    } else {
+        Some(slug)
+    }
+}
+
 /// Instructions chosen for a catalog model id.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ModelInstructions {
@@ -144,6 +184,12 @@ impl Lookup {
         Self { cache: None }
     }
 
+    /// This computer's cache row when `id` ends in `codex/<slug>` and that slug is cached.
+    pub(crate) fn owned(&self, id: &str) -> Option<OwnedCatalog> {
+        let slug = own_codex_slug(id)?;
+        self.cache.as_ref()?.exact(slug)
+    }
+
     /// The instructions Codex should see for gateway model `id`.
     pub(crate) fn for_id(&self, id: &str) -> ModelInstructions {
         if is_routing_group(id) {
@@ -176,6 +222,7 @@ struct CacheRow {
     slug: String,
     base_instructions: String,
     model_messages: Option<Value>,
+    raw: Value,
 }
 
 impl CacheFile {
@@ -185,6 +232,13 @@ impl CacheFile {
         Some(ModelInstructions::Cached {
             base_instructions: row.base_instructions.clone(),
             model_messages: row.model_messages.clone(),
+        })
+    }
+
+    fn exact(&self, slug: &str) -> Option<OwnedCatalog> {
+        let row = self.slugs.iter().find(|row| row.slug == slug)?;
+        Some(OwnedCatalog {
+            row: row.raw.clone(),
         })
     }
 }
@@ -219,6 +273,7 @@ impl CacheFile {
                 slug: slug.to_owned(),
                 base_instructions: base,
                 model_messages,
+                raw: row.clone(),
             });
         }
         if slugs.is_empty() {

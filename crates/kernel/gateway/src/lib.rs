@@ -66,7 +66,8 @@ use hofund_codec::{
 use hofund_config::VisibleCatalog;
 use hofund_ir::{BlockStart, Request as ModelRequest, StreamEvent, too_long, words_of};
 use hofund_plugin_api::{
-    BodyStream, InboundSurface, Method, PluginError, PluginErrorKind, ProtocolId, StoppedWaiting,
+    BodyStream, CATALOG_ENTRY_FIELD, InboundSurface, Method, PREFERRED_API_FIELD, PluginError,
+    PluginErrorKind, ProtocolId, StoppedWaiting, preferred_api_path,
 };
 use hofund_plugin_host::HttpBackend;
 use hofund_router::{AttemptHook, Completion, RouteScope, Routed, RouterError, Snapshot, WaitHook};
@@ -1750,6 +1751,17 @@ async fn models(State(app): State<Arc<Inner>>, request: Request) -> Response {
             let tiers = router.service_tier_ids(&id);
             if !tiers.is_empty() {
                 value["service_tiers"] = hofund_codec::service_tier::named_tiers(&tiers);
+            }
+            if let Some(name) = router.preferred_api(&id)
+                && let Some(path) = preferred_api_path(&name)
+            {
+                value[PREFERRED_API_FIELD] = serde_json::Value::String(path.to_owned());
+            }
+            if let Some(raw) = router.learned_catalog_entry(&id)
+                && let Ok(entry) = serde_json::from_str::<serde_json::Value>(&raw)
+                && entry.is_object()
+            {
+                value[CATALOG_ENTRY_FIELD] = entry;
             }
             value
         })

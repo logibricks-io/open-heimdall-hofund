@@ -333,6 +333,8 @@ pub struct ModelsHost {
     plan_overrides: HashMap<String, ModelPlan>,
     host_overrides: HashMap<String, String>,
     instances: RwLock<HashMap<String, RegisteredInstance>>,
+    /// Every key instance of a provider, so a list or a saved seed reaches all of them.
+    upstreams: RwLock<HashMap<String, Vec<Arc<dyn UpstreamProvider>>>>,
     registry: Arc<dyn DaemonRegistry>,
     state: Mutex<super::models_state::StateStore>,
     events: OnceLock<Arc<EventBus>>,
@@ -360,6 +362,7 @@ impl ModelsHost {
             plan_overrides: HashMap::new(),
             host_overrides: HashMap::new(),
             instances: RwLock::new(HashMap::new()),
+            upstreams: RwLock::new(HashMap::new()),
             registry: Arc::new(RegistryAdapter),
             state: Mutex::new(super::models_state::StateStore::new(None)),
             events: OnceLock::new(),
@@ -445,31 +448,72 @@ impl ModelsHost {
             );
     }
 
-    /// Replaces every registered instance with the ones a reload published.
-    ///
-    /// Each entry is `(provider id, upstream, built base)`. List and probe
-    /// calls that start afterwards use these instances; calls already running
-    /// keep the instance they cloned.
-    pub(crate) fn replace_instances(
-        &self,
-        instances: impl IntoIterator<Item = (String, Arc<dyn UpstreamProvider>, String)>,
-    ) {
-        let next = instances
-            .into_iter()
-            .map(|(id, upstream, built_base)| {
-                (
-                    id,
+    /// Registers the rank-0 lister and every key instance, then copies saved
+    /// rows onto those instances so a restart does not wait for another fetch.
+    pub(crate) fn install_upstreams(&self, instances: &HashMap<String, super::Instance>) {
+        let mut listing = HashMap::new();
+        let mut groups: HashMap<String, Vec<Arc<dyn UpstreamProvider>>> = HashMap::new();
+        for instance in instances.values() {
+            groups
+                .entry(instance.provider.id.clone())
+                .or_default()
+                .push(Arc::clone(&instance.upstream));
+            if instance.model_list {
+                listing.insert(
+                    instance.provider.id.clone(),
                     RegisteredInstance {
-                        upstream,
-                        built_base,
+                        upstream: Arc::clone(&instance.upstream),
+                        built_base: instance.base_url.clone(),
                     },
-                )
-            })
-            .collect();
+                );
+            }
+        }
+        let providers = groups.keys().cloned().collect::<Vec<_>>();
         *self
             .instances
             .write()
-            .unwrap_or_else(|error| error.into_inner()) = next;
+            .unwrap_or_else(|error| error.into_inner()) = listing;
+        *self
+            .upstreams
+            .write()
+            .unwrap_or_else(|error| error.into_inner()) = groups;
+        for provider in providers {
+            self.seed_saved(&provider);
+        }
+    }
+
+    fn seed_saved(&self, provider: &str) {
+        let models = {
+            let mut store = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            super::models_state::models(&store.get(provider).list)
+        };
+        if !models.is_empty() {
+            self.fanout(provider, &models);
+        }
+    }
+
+    fn fanout(&self, provider: &str, models: &[ModelSpec]) {
+        let grouped = self
+            .upstreams
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(provider)
+            .cloned();
+        if let Some(upstreams) = grouped {
+            for upstream in upstreams {
+                upstream.remember_listed(models);
+            }
+            return;
+        }
+        let one = self
+            .instances
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(provider)
+            .map(|instance| Arc::clone(&instance.upstream));
+        if let Some(upstream) = one {
+            upstream.remember_listed(models);
+        }
     }
 
     #[cfg(test)]
@@ -1176,6 +1220,7 @@ impl ModelsHost {
                     .map(|(base, models)| (base.clone(), super::models_state::rows(models)))
                     .collect();
             });
+        self.fanout(&provider.id, &fetched.models.models);
         Applied {
             models: fetched.models,
             dropped,
@@ -2219,6 +2264,14 @@ fn merge_model(left: &ModelSpec, right: &ModelSpec) -> ModelSpec {
         .with_decides(left.decides() || right.decides())
         .with_efforts(first_slice(left.efforts(), right.efforts()))
         .with_service_tiers(first_slice(left.service_tiers(), right.service_tiers()));
+    let model = match left.preferred_api().or_else(|| right.preferred_api()) {
+        Some(api) => model.with_preferred_api(api),
+        None => model,
+    };
+    let model = match left.catalog_entry().or_else(|| right.catalog_entry()) {
+        Some(entry) => model.with_catalog_entry(entry),
+        None => model,
+    };
     let model = match left.web_search().or_else(|| right.web_search()) {
         Some(search) => model.with_web_search(search),
         None => model,

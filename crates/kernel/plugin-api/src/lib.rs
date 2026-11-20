@@ -48,6 +48,7 @@ mod checkin;
 #[cfg(not(feature = "kernel"))]
 mod kernel;
 mod plan;
+mod preferred;
 mod quota_reset;
 mod records;
 mod redaction;
@@ -103,6 +104,9 @@ pub use id::{
 };
 pub use inbound::{InboundSurface, Method, RouteSpec};
 pub use plan::{PlanCard, PlanQuery, PlanQuota, PlanSupport, PlanWindow};
+pub use preferred::{
+    CATALOG_ENTRY_FIELD, PREFERRED_API_FIELD, preferred_api_name, preferred_api_path,
+};
 pub use quota_reset::{QuotaResetCard, QuotaResetCredits, QuotaResetOutcome};
 pub use records::{
     Account, AccountStatus, AgentActiveProvider, AgentCredential, AgentDescription, AgentFile,

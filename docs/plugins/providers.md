@@ -116,9 +116,9 @@ The daemon probe selector uses route mappings and listed endpoint metadata. `Nam
 | `google-vertex` (plugin) | `base_url`, `project`, `location`, `credentials`, `impersonate`, `token_url`, `iam_root` |
 | `bedrock` (plugin) | `base_url`, `region`, `access_key_id`, `secret_access_key`, `session_token` |
 | `bedrock-mantle` (plugin) | `base_url` |
-| `remote-gateway` (plugin) | `base_url` |
+| `remote-gateway` (plugin) | `base_url`, `preferred_field`, `preferred_ask_header`, `preferred_ask_value` |
 
-`config_schema` lists those option keys so a form can render them. Kernel keys are not options.
+`config_schema` lists those option keys so a form can render them. Kernel keys are not options. For `remote-gateway`, `preferred_ask_header` and `preferred_ask_value` are set together: one without the other is a config error. A line break in that name or value is also a config error, and the value is sent as a sensitive header on `GET /v1/models` only. `preferred_field` is an extra JSON key read when `preferred_api` is absent. With none of those three set, the list reads `preferred_api` and sends no extra header. The preferred API, endpoints, and catalog entry from a successful list are written onto every key of that provider, and a later process seeds them from the saved model rows.
 
 ## Adversarial cases shipped with the change
 
