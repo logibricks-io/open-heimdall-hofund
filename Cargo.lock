@@ -2281,6 +2281,7 @@ dependencies = [
  "hofund-plugin-host",
  "hofund-plugin-registry",
  "hofund-plugin-sdk",
+ "hofund-plugin-subscription-antigravity",
  "hofund-plugin-subscription-qoder",
  "hofund-provider",
  "hofund-quirks",

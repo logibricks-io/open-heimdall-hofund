@@ -8,6 +8,11 @@ pub(crate) async fn import_accounts(
     host: &HostContext,
     text: &str,
 ) -> Result<Vec<AccountId>, PluginError> {
+    if hofund_plugin_sdk::oauth::is_claude_setup_token_paste(text) {
+        return Err(PluginError::unsupported(
+            "a Claude setup-token is imported by the Claude subscription",
+        ));
+    }
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return Err(PluginError::config("nothing to import"));

@@ -165,6 +165,21 @@ fn seed_site_with_expiry(host: &TestHost, expires_at: i64, site: Site) -> Accoun
 }
 
 #[test]
+fn d226_setup_token_paste_is_unsupported() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let token = "sk-ant-oat01-abcdefghijklmnopqrstuvwxyz0123456789";
+    let error =
+        block_on(sub.import_accounts(&format!("CLAUDE_CODE_OAUTH_TOKEN={token}"), host.context()))
+            .expect_err("setup");
+    assert_eq!(error.kind(), PluginErrorKind::Unsupported);
+    assert!(!error.to_string().contains(token), "{error}");
+    let listed = block_on(host.context().accounts().list()).expect("list");
+    assert!(listed.is_empty());
+}
+
+#[test]
 fn a2c_3_import_fixture_credentials() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
