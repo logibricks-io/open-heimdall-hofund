@@ -10,6 +10,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{BuildHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
@@ -29,6 +30,18 @@ use crate::{DaemonError, DaemonRegistry, adapt, beside, effective_at_once, raw_v
 
 /// How often the account list is reread.
 pub(crate) const ACCOUNT_TICK: Duration = Duration::from_secs(5);
+
+static PLUGIN_BUILDS: AtomicU64 = AtomicU64::new(0);
+
+/// How many subscription plugins this process has built.
+///
+/// A menu snapshot must not move this. The count is process-wide so a
+/// desktop test can see a plugin build.
+#[doc(hidden)]
+#[must_use]
+pub fn subscription_plugin_builds() -> u64 {
+    PLUGIN_BUILDS.load(Ordering::SeqCst)
+}
 
 /// Base quota poll interval per member, before jitter.
 pub(crate) const QUOTA_POLL: Duration = Duration::from_secs(5 * 60);
@@ -130,6 +143,7 @@ pub(crate) fn build(
                 )?,
             );
         }
+        PLUGIN_BUILDS.fetch_add(1, Ordering::SeqCst);
         let host = hofund_plugin_host::runtime_host_for(
             PluginKind::Subscription,
             store_plugin.clone(),
@@ -196,6 +210,7 @@ impl SubscriptionState {
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("."));
+        crate::sign_in::note_account_hook();
         if let Err(error) = self
             .instance
             .prepare_accounts(&config_dir, &self.host)
@@ -244,6 +259,7 @@ impl SubscriptionState {
                     continue;
                 }
             }
+            crate::sign_in::note_account_hook();
             match self.instance.account_status(account.id(), &self.host).await {
                 Ok(AccountStatus::Ready) => ready.push(account),
                 Ok(_) => {}
