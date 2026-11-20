@@ -73,6 +73,10 @@ pub struct PluginError {
     status: Option<u16>,
     retry_after: Option<Duration>,
     reset_after: Option<Duration>,
+    /// The rest applies to the requested model, not the whole account.
+    model_scoped: bool,
+    /// The account must be verified before it serves again.
+    verify_rest: bool,
     credit: bool,
     credit_soon: bool,
     cooldown: bool,
@@ -92,6 +96,8 @@ impl PluginError {
             status: None,
             retry_after: None,
             reset_after: None,
+            model_scoped: false,
+            verify_rest: false,
             credit: false,
             credit_soon: false,
             cooldown: true,
@@ -221,6 +227,32 @@ impl PluginError {
     pub fn with_reset_after(mut self, after: Duration) -> Self {
         self.reset_after = Some(after);
         self
+    }
+
+    /// Rests only the model that was requested.
+    #[must_use]
+    pub const fn with_model_scope(mut self) -> Self {
+        self.model_scoped = true;
+        self
+    }
+
+    /// Whether the rest applies to the requested model rather than the account.
+    #[must_use]
+    pub const fn scopes_model(&self) -> bool {
+        self.model_scoped
+    }
+
+    /// Rests the account until the caller verifies it.
+    #[must_use]
+    pub const fn with_verify_rest(mut self) -> Self {
+        self.verify_rest = true;
+        self
+    }
+
+    /// Whether this refusal asks for account verification.
+    #[must_use]
+    pub const fn verifies_account(&self) -> bool {
+        self.verify_rest
     }
 
     /// Marks a credit refusal that can pass soon or for a smaller request.
