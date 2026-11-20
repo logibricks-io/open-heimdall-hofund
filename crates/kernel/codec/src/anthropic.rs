@@ -1,10 +1,12 @@
 //! Anthropic Messages codec.
 //!
 //! The leading run of system and developer messages is hoisted into the
-//! top-level system channel. A later system or developer message stays in
-//! `messages` so a tool exchange can be mended. Tool results stay on user
-//! messages. See `docs/codecs.md` for the field mapping and the conversions
-//! that drop data.
+//! top-level system channel. A Messages client may keep a later system
+//! message in `messages`. A translated request folds a system or developer
+//! message that follows a reply into a user `<system-reminder>`. This codec
+//! never writes `role: "developer"` inside `messages`. Tool results stay on
+//! user messages. See `docs/codecs.md` for the field mapping and the
+//! conversions that drop data.
 
 use std::collections::BTreeSet;
 
@@ -156,6 +158,7 @@ fn decode_request(bytes: &[u8]) -> Result<Request, CodecError> {
         strip_cache_marks(&mut request);
     }
     unsign_calls(&mut request);
+    request.extensions.insert(MESSAGES_WIRE, Value::Bool(true));
     Ok(request)
 }
 
@@ -300,6 +303,18 @@ fn unsigned_id(id: &str) -> Option<&str> {
     None
 }
 
+/// Set on decode so encode can tell a Messages client from a translation.
+///
+/// Cross-protocol encode strips extension bags first, which drops this mark.
+/// A request built without decoding Messages does not have it.
+const MESSAGES_WIRE: &str = "hofund_messages_wire";
+
+/// Set when a message object had no `content` field.
+///
+/// Encode omits `content` again. An explicit empty array is a different
+/// shape and is written back.
+const CONTENT_ABSENT: &str = "hofund_messages_content_absent";
+
 /// Cap used when the client, the route, and the quirk profile all omit one.
 ///
 /// Messages requires `max_tokens`. This is the unknown-model fallback from
@@ -312,15 +327,17 @@ fn encode_request(request: &Request) -> Result<Vec<u8>, CodecError> {
         .params
         .max_tokens
         .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS);
+    let messages_form = request.extensions.get(MESSAGES_WIRE).is_some();
+    let messages = arrange_messages(&request.messages, messages_form);
     let mut object = Object::new();
     object.insert("model".to_owned(), Value::String(request.model.clone()));
     object.insert("max_tokens".to_owned(), Value::from(max_tokens));
-    if let Some(system) = encode_system(&request.messages)? {
+    if let Some(system) = encode_system(&messages)? {
         object.insert("system".to_owned(), system);
     }
     object.insert(
         "messages".to_owned(),
-        Value::Array(encode_messages(&request.messages)?),
+        Value::Array(encode_messages(&messages)?),
     );
     if !request.tools.is_empty() {
         object.insert(
@@ -352,7 +369,7 @@ fn encode_request(request: &Request) -> Result<Vec<u8>, CodecError> {
         object.insert("stream".to_owned(), Value::Bool(true));
     }
     write_messages_effort(&mut object, request);
-    request.extensions.merge_into(&mut object);
+    merge_kept(&request.extensions, &mut object);
     request.params.extensions.merge_into(&mut object);
     let bytes = to_bytes(&Value::Object(object))?;
     Ok(crate::messages_tools::pair_messages_tool_blocks(&bytes))
@@ -477,27 +494,163 @@ fn decode_message(value: Value) -> Result<Message, CodecError> {
         "developer" => Role::Developer,
         other => return Err(CodecError::UnknownRole(other.to_owned())),
     };
+    let had_content = object.contains_key("content");
     let content = match object.remove("content") {
         Some(value) => decode_body(value, "content")?,
         None => Vec::new(),
     };
+    let mut extensions = Extensions::from_map(object);
+    if !had_content {
+        extensions.insert(CONTENT_ABSENT, Value::Bool(true));
+    }
     Ok(Message {
         role,
         content,
-        extensions: Extensions::from_map(object),
+        extensions,
     })
 }
 
 /// How many leading messages belong in the top-level system channel.
-///
-/// A system or developer message after the conversation has started stays in
-/// `messages`. The tool-exchange mend then moves one that sits between a call
-/// and its results to after those results.
 fn leading_channel(messages: &[Message]) -> usize {
     messages
         .iter()
         .take_while(|message| matches!(message.role, Role::System | Role::Developer))
         .count()
+}
+
+/// Places system and developer messages where a Messages upstream can accept them.
+///
+/// A Messages client keeps a later system message in `messages`. Any other
+/// request follows the reference's `responseInstructions` and `mergeTurns`:
+/// text before a reply joins the system channel, and text after a reply
+/// becomes a user `<system-reminder>`. `developer` is never left for
+/// `encode_messages` to write as that role.
+fn arrange_messages(messages: &[Message], messages_form: bool) -> Vec<Message> {
+    if messages_form {
+        arrange_messages_client(messages)
+    } else {
+        arrange_translated(messages)
+    }
+}
+
+fn arrange_messages_client(messages: &[Message]) -> Vec<Message> {
+    let lead = leading_channel(messages);
+    let mut out = messages[..lead].to_vec();
+    let mut rest = Vec::with_capacity(messages.len() - lead);
+    for message in &messages[lead..] {
+        if message.role == Role::Developer {
+            rest.push(fold_developer(message));
+        } else {
+            rest.push(message.clone());
+        }
+    }
+    out.extend(merge_turns(rest));
+    out
+}
+
+fn arrange_translated(messages: &[Message]) -> Vec<Message> {
+    let mut system = Vec::new();
+    let mut rest = Vec::new();
+    let mut replied = false;
+    for message in messages {
+        if sets_replied(message) {
+            replied = true;
+        }
+        if matches!(message.role, Role::System | Role::Developer) {
+            if replied {
+                let text = joined_text(message);
+                if !text.is_empty() {
+                    rest.push(reminder_user(&text));
+                }
+            } else {
+                system.push(message.clone());
+            }
+            continue;
+        }
+        rest.push(message.clone());
+    }
+    system.extend(merge_turns(rest));
+    system
+}
+
+fn fold_developer(message: &Message) -> Message {
+    let text = joined_text(message);
+    if text.is_empty() {
+        let mut kept = message.clone();
+        kept.role = Role::System;
+        return kept;
+    }
+    reminder_user(&text)
+}
+
+fn sets_replied(message: &Message) -> bool {
+    message.role == Role::Assistant
+        || message.content.iter().any(|part| {
+            matches!(
+                part,
+                ContentPart::ToolCall(_) | ContentPart::ToolResult(_) | ContentPart::Thinking(_)
+            )
+        })
+}
+
+fn joined_text(message: &Message) -> String {
+    let mut text = String::new();
+    for part in &message.content {
+        if let ContentPart::Text(part) = part {
+            text.push_str(&part.text);
+        }
+    }
+    text
+}
+
+fn reminder_user(text: &str) -> Message {
+    let mut message = Message::new(Role::User);
+    message.content.push(ContentPart::text(format!(
+        "<system-reminder>\n{text}\n</system-reminder>"
+    )));
+    message
+}
+
+/// Joins consecutive user or assistant turns, and a user turn with an
+/// adjacent tool-result turn, so a reminder does not split a call from its
+/// result.
+fn merge_turns(messages: Vec<Message>) -> Vec<Message> {
+    let mut out: Vec<Message> = Vec::new();
+    for message in messages {
+        if let Some(last) = out.last_mut() {
+            let assistant = last.role == Role::Assistant && message.role == Role::Assistant;
+            let users = last.role == Role::User && message.role == Role::User;
+            let user_tool = (last.role == Role::User && message.role == Role::Tool)
+                || (last.role == Role::Tool && message.role == Role::User);
+            if assistant || users || user_tool {
+                if user_tool {
+                    last.role = Role::User;
+                }
+                last.content.extend(message.content);
+                last.extensions.absorb(&message.extensions);
+                continue;
+            }
+        }
+        out.push(message);
+    }
+    out
+}
+
+fn kept_empty(extensions: &Extensions) -> bool {
+    extensions
+        .iter()
+        .all(|(key, _)| key == MESSAGES_WIRE || key == CONTENT_ABSENT)
+}
+
+fn merge_kept(extensions: &Extensions, object: &mut Object) {
+    if extensions.get(MESSAGES_WIRE).is_none() && extensions.get(CONTENT_ABSENT).is_none() {
+        extensions.merge_into(object);
+        return;
+    }
+    let mut kept = extensions.clone();
+    kept.remove(MESSAGES_WIRE);
+    kept.remove(CONTENT_ABSENT);
+    kept.merge_into(object);
 }
 
 fn encode_system(messages: &[Message]) -> Result<Option<Value>, CodecError> {
@@ -506,14 +659,14 @@ fn encode_system(messages: &[Message]) -> Result<Option<Value>, CodecError> {
         return Ok(None);
     }
     if system.len() == 1
-        && system[0].extensions.is_empty()
+        && kept_empty(&system[0].extensions)
         && system[0].content.len() == 1
         && matches!(&system[0].content[0], ContentPart::Text(part) if part.extensions.is_empty())
         && let ContentPart::Text(part) = &system[0].content[0]
     {
         return Ok(Some(Value::String(part.text.clone())));
     }
-    if system.len() == 1 && system[0].content.is_empty() && system[0].extensions.is_empty() {
+    if system.len() == 1 && system[0].content.is_empty() && kept_empty(&system[0].extensions) {
         return Ok(Some(Value::Array(Vec::new())));
     }
     let mut blocks = Vec::new();
@@ -521,7 +674,7 @@ fn encode_system(messages: &[Message]) -> Result<Option<Value>, CodecError> {
         if message.content.is_empty() {
             let mut encoded = encode_part(&ContentPart::text(""))?;
             if let Value::Object(object) = &mut encoded {
-                message.extensions.merge_into(object);
+                merge_kept(&message.extensions, object);
             }
             blocks.push(encoded);
             continue;
@@ -531,7 +684,7 @@ fn encode_system(messages: &[Message]) -> Result<Option<Value>, CodecError> {
             if index == 0
                 && let Value::Object(object) = &mut encoded
             {
-                message.extensions.merge_into(object);
+                merge_kept(&message.extensions, object);
             }
             blocks.push(encoded);
         }
@@ -549,7 +702,12 @@ fn encode_messages(messages: &[Message]) -> Result<Vec<Value>, CodecError> {
                 index += 1;
             }
             Role::Developer => {
-                encoded.push(encode_role_message(&messages[index], "developer")?);
+                let text = joined_text(&messages[index]);
+                if text.is_empty() {
+                    encoded.push(encode_role_message(&messages[index], "system")?);
+                } else {
+                    encoded.push(encode_chat_message(&reminder_user(&text))?);
+                }
                 index += 1;
             }
             Role::Tool => {
@@ -578,18 +736,20 @@ fn encode_tool_group(messages: &[Message]) -> Result<Value, CodecError> {
     let mut object = Object::new();
     object.insert("role".to_owned(), Value::String("user".to_owned()));
     object.insert("content".to_owned(), Value::Array(content));
-    extensions.merge_into(&mut object);
+    merge_kept(&extensions, &mut object);
     Ok(Value::Object(object))
 }
 
 fn encode_role_message(message: &Message, role: &str) -> Result<Value, CodecError> {
     let mut object = Object::new();
     object.insert("role".to_owned(), Value::String(role.to_owned()));
-    object.insert(
-        "content".to_owned(),
-        Value::Array(encode_parts(&message.content)?),
-    );
-    message.extensions.merge_into(&mut object);
+    if message.extensions.get(CONTENT_ABSENT).is_none() {
+        object.insert(
+            "content".to_owned(),
+            Value::Array(encode_parts(&message.content)?),
+        );
+    }
+    merge_kept(&message.extensions, &mut object);
     Ok(Value::Object(object))
 }
 
@@ -605,7 +765,7 @@ fn encode_chat_message(message: &Message) -> Result<Value, CodecError> {
         "content".to_owned(),
         Value::Array(encode_parts(&message.content)?),
     );
-    message.extensions.merge_into(&mut object);
+    merge_kept(&message.extensions, &mut object);
     Ok(Value::Object(object))
 }
 

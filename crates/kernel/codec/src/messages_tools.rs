@@ -149,10 +149,17 @@ fn mend_assistant(
     let mut owned = Vec::with_capacity(blocks.len());
     let mut changed = false;
     let mut taken = HashSet::new();
+    for block in &blocks {
+        let (kind, id, _) = block_ids(block);
+        if kind == "tool_use" && !id.is_empty() {
+            taken.insert(id);
+        }
+    }
+    let mut seen = HashSet::new();
     for block in blocks {
         let (kind, id, _) = block_ids(block);
         if kind == "tool_use" {
-            let (final_id, rewritten) = unique_call(block, &id, &mut taken);
+            let (final_id, rewritten) = unique_call(block, &id, &mut taken, &mut seen);
             if rewritten.is_some() {
                 changed = true;
             }
@@ -174,8 +181,13 @@ fn mend_assistant(
     AssistantMend::Same
 }
 
-fn unique_call(block: &[u8], id: &str, taken: &mut HashSet<String>) -> (String, Option<Vec<u8>>) {
-    if id.is_empty() || taken.insert(id.to_owned()) {
+fn unique_call(
+    block: &[u8],
+    id: &str,
+    taken: &mut HashSet<String>,
+    seen: &mut HashSet<String>,
+) -> (String, Option<Vec<u8>>) {
+    if id.is_empty() || seen.insert(id.to_owned()) {
         return (id.to_owned(), None);
     }
     let final_id = distinct_id(id, taken);
@@ -183,6 +195,11 @@ fn unique_call(block: &[u8], id: &str, taken: &mut HashSet<String>) -> (String, 
     (final_id, Some(rewritten))
 }
 
+/// Mints `{original}__2`, then `__3`, and so on.
+///
+/// Every id in the message is already in `taken`, so a real `{id}__2` is not
+/// given to an earlier duplicate. `checked_add` is what makes the `__dup`
+/// fallback reachable: `saturating_add` never wraps.
 fn distinct_id(original: &str, taken: &mut HashSet<String>) -> String {
     let mut n = 2u32;
     loop {
@@ -190,11 +207,22 @@ fn distinct_id(original: &str, taken: &mut HashSet<String>) -> String {
         if taken.insert(candidate.clone()) {
             return candidate;
         }
-        n = n.saturating_add(1);
-        if n == 0 {
-            let candidate = format!("{original}__dup");
-            taken.insert(candidate.clone());
-            return candidate;
+        match n.checked_add(1) {
+            Some(next) => n = next,
+            None => {
+                let candidate = format!("{original}__dup");
+                if taken.insert(candidate.clone()) {
+                    return candidate;
+                }
+                let mut extra = 2u32;
+                loop {
+                    let candidate = format!("{original}__dup{extra}");
+                    if taken.insert(candidate.clone()) {
+                        return candidate;
+                    }
+                    extra = extra.checked_add(1).unwrap_or(2);
+                }
+            }
         }
     }
 }
@@ -715,7 +743,7 @@ fn skip_number(data: &[u8], mut index: usize) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::{INTERRUPTED, pair_messages_tool_blocks};
-    use crate::{AnthropicMessages, Codec};
+    use crate::{AnthropicMessages, Codec, OpenAiChat, OpenAiResponses};
     use serde_json::Value;
 
     const HEAD: &str = concat!(
@@ -1031,7 +1059,162 @@ mod tests {
             .expect("decode");
         let value = json(&AnthropicMessages.encode_request(&request).expect("encode"));
         assert_eq!(value["system"], "rules");
+        let messages = value["messages"].as_array().expect("messages");
+        assert!(messages.iter().all(|message| {
+            let role = message["role"].as_str().unwrap_or("");
+            role != "system" && role != "developer"
+        }));
+        assert_eq!(messages[2]["content"][0]["type"], "tool_result");
+        assert_eq!(messages[2]["content"][0]["tool_use_id"], "t");
+        assert_eq!(messages[2]["content"][0]["content"], "ok");
+        assert_eq!(
+            messages[2]["content"][1]["text"],
+            "<system-reminder>\nbetween\n</system-reminder>"
+        );
+    }
+
+    #[test]
+    fn d236_translated_chat_folds_a_mid_system_and_developer_into_reminders() {
+        let body = r#"{"model":"m","messages":[{"role":"user","content":"list"},{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"Bash","arguments":"{}"}}]},{"role":"system","content":"note"},{"role":"tool","tool_call_id":"call_1","content":"a.go"},{"role":"developer","content":"steer"}]}"#;
+        let mut request = OpenAiChat.decode_request(body.as_bytes()).expect("decode");
+        request.strip_extensions();
+        let encoded = AnthropicMessages.encode_request(&request).expect("encode");
+        assert_folded_exchange(&encoded, "call_1", &["note", "steer"]);
+    }
+
+    #[test]
+    fn d236_translated_responses_fold_a_mid_developer_into_a_reminder() {
+        let body = r#"{"model":"m","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"list"}]},{"type":"function_call","call_id":"call_1","name":"Bash","arguments":"{}"},{"type":"message","role":"developer","content":[{"type":"input_text","text":"steer"}]},{"type":"function_call_output","call_id":"call_1","output":"a.go"},{"type":"message","role":"system","content":[{"type":"input_text","text":"note"}]}]}"#;
+        let mut request = OpenAiResponses
+            .decode_request(body.as_bytes())
+            .expect("decode");
+        request.strip_extensions();
+        let encoded = AnthropicMessages.encode_request(&request).expect("encode");
+        assert_folded_exchange(&encoded, "call_1", &["steer", "note"]);
+    }
+
+    #[test]
+    fn d236_duplicate_id_does_not_steal_a_later_real_suffix() {
+        let body = br#"{"model":"m","messages":[{"role":"assistant","content":[{"type":"tool_use","id":"x","name":"n","input":{}},{"type":"tool_use","id":"x","name":"n","input":{}},{"type":"tool_use","id":"x__2","name":"n","input":{}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"x","content":"one"},{"type":"tool_result","tool_use_id":"x__2","content":"real"}]}]}"#;
+        let out = pair_messages_tool_blocks(body);
+        let value = json(&out);
+        let calls: Vec<_> = value["messages"][0]["content"]
+            .as_array()
+            .expect("calls")
+            .iter()
+            .map(|block| block["id"].as_str().unwrap_or("").to_owned())
+            .collect();
+        assert_eq!(calls[0], "x");
+        assert_eq!(calls[2], "x__2");
+        assert_ne!(calls[1], "x");
+        assert_ne!(calls[1], "x__2");
+        let results = value["messages"][1]["content"].as_array().expect("results");
+        assert_eq!(results[0]["tool_use_id"], "x");
+        assert_eq!(results[0]["content"], "one");
+        let real = results
+            .iter()
+            .find(|block| block["content"] == "real")
+            .expect("real result");
+        assert_eq!(real["tool_use_id"], "x__2");
+        assert_eq!(real["type"], "tool_result");
+    }
+
+    #[test]
+    fn d228_orphan_result_with_a_block_array_keeps_its_image() {
+        let image =
+            r#"{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aaa"}}"#;
+        let body = format!(
+            r#"{{"model":"m","messages":[{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"gone","content":[{{"type":"text","text":"said"}},{image}]}}]}}]}}"#
+        );
+        let out = pair_messages_tool_blocks(body.as_bytes());
+        let message = json(&messages_of(&out)[0]);
+        let content = message["content"].as_array().expect("content");
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "said");
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[1]["source"]["data"], "aaa");
+        assert!(
+            !out.windows(b"tool_result".len())
+                .any(|window| window == b"tool_result")
+        );
+        assert!(
+            out.windows(image.len())
+                .any(|window| window == image.as_bytes())
+        );
+    }
+
+    #[test]
+    fn d228_a_changed_message_keeps_its_other_members_and_the_tail() {
+        let assistant = r#"{"role":"assistant","content":[{"type":"tool_use","id":"a","name":"n","input":{}},{"type":"text","text":"after"}],"stop_reason":"tool_use"}"#;
+        let user = r#"{"role":"user","content":[{"type":"tool_result","tool_use_id":"a","content":"ok"}],"cache_control":{"type":"ephemeral"}}"#;
+        let tail = r#","metadata":{"user_id":"abc"}"#;
+        let body = format!(r#"{{"model":"m","messages":[{assistant},{user}]{tail}}}"#);
+        let out = pair_messages_tool_blocks(body.as_bytes());
+        let text = String::from_utf8_lossy(&out);
+        assert!(text.contains(r#""stop_reason":"tool_use""#));
+        assert!(text.contains(user));
+        assert!(out.ends_with(format!("{tail}}}").as_bytes()));
+        let kinds: Vec<_> = json(&messages_of(&out)[0])["content"]
+            .as_array()
+            .expect("content")
+            .iter()
+            .map(|block| block["type"].as_str().unwrap_or("").to_owned())
+            .collect();
+        assert_eq!(kinds.join(","), "text,tool_use");
+    }
+
+    #[test]
+    fn d236_a_messages_system_turn_without_content_omits_content() {
+        let body = r#"{"model":"m","max_tokens":8,"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":[{"type":"tool_use","id":"t","name":"n","input":{}}]},{"role":"system","output_config":{"effort":"max"}},{"role":"user","content":[{"type":"tool_result","tool_use_id":"t","content":"ok"}]}]}"#;
+        let request = AnthropicMessages
+            .decode_request(body.as_bytes())
+            .expect("decode");
+        let value = json(&AnthropicMessages.encode_request(&request).expect("encode"));
         assert_eq!(value["messages"][2]["content"][0]["type"], "tool_result");
-        assert_eq!(value["messages"][3]["role"], "developer");
+        let system = &value["messages"][3];
+        assert_eq!(system["role"], "system");
+        assert!(system.get("content").is_none(), "{system}");
+        assert_eq!(system["output_config"]["effort"], "max");
+    }
+
+    fn assert_folded_exchange(encoded: &[u8], call_id: &str, notes: &[&str]) {
+        let value = json(encoded);
+        let messages = value["messages"].as_array().expect("messages");
+        assert!(
+            messages.iter().all(|message| {
+                let role = message["role"].as_str().unwrap_or("");
+                role != "system" && role != "developer"
+            }),
+            "{value}"
+        );
+        let roles: Vec<_> = messages
+            .iter()
+            .map(|message| message["role"].as_str().unwrap_or("").to_owned())
+            .collect();
+        assert_eq!(roles, ["user", "assistant", "user"]);
+        assert_eq!(messages[1]["content"][0]["type"], "tool_use");
+        assert_eq!(messages[1]["content"][0]["id"], call_id);
+        let result = &messages[2]["content"];
+        let paired = result
+            .as_array()
+            .expect("content")
+            .iter()
+            .find(|block| block["type"] == "tool_result")
+            .expect("result");
+        assert_eq!(paired["tool_use_id"], call_id);
+        assert_eq!(paired["content"], "a.go");
+        let text = result.to_string();
+        for note in notes {
+            assert!(
+                text.contains(&format!("<system-reminder>\\n{note}\\n</system-reminder>")),
+                "{text}"
+            );
+        }
+        assert!(
+            !encoded
+                .windows(INTERRUPTED.len())
+                .any(|window| window == INTERRUPTED.as_bytes())
+        );
     }
 }

@@ -1719,3 +1719,55 @@ async fn d10j_cross_protocol_request_is_untouched() {
     assert_eq!(requests.len(), 1);
     assert!(!d10_has_token_count(&requests[0].body));
 }
+
+#[tokio::test]
+async fn d228_execute_and_count_post_a_mended_body() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "ok"}],
+            "stop_reason": "end_turn"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages/count_tokens"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"input_tokens": 3})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let provider = Anthropic::new(Endpoint::new("primary", server.uri())).expect("provider");
+    let request = AnthropicMessages
+        .decode_request(br#"{"model":"demo","max_tokens":16,"messages":[{"role":"user","content":"go"},{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{}}]}]}"#)
+        .expect("decode");
+    provider
+        .execute(request.clone(), "anthropic-messages")
+        .await
+        .expect("execute");
+    let counted = provider
+        .count_input(request, "anthropic-messages")
+        .await
+        .expect("count");
+    assert!(matches!(counted, CountOutcome::Counted(3)));
+    let seen = server.received_requests().await.expect("requests");
+    assert_eq!(seen.len(), 2);
+    let mut saw_create = false;
+    let mut saw_count = false;
+    for call in &seen {
+        let body: Value = serde_json::from_slice(&call.body).expect("json");
+        assert_eq!(body["messages"][2]["content"][0]["tool_use_id"], "toolu_1");
+        assert_eq!(body["messages"][2]["content"][0]["is_error"], true);
+        if body.get("max_tokens").is_none() {
+            saw_count = true;
+        } else {
+            assert_eq!(body["max_tokens"], 16);
+            saw_create = true;
+        }
+    }
+    assert!(saw_create && saw_count);
+}

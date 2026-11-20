@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rest, not a restricted one. A token count, and a 200 body that is only an
   error object, rest the same way. Extra-usage and Usage Policy refusals are
   unchanged. Refs D-234.
+- D-228: A Chat, Responses, or Generative request encoded for Messages folds a system or developer message that follows a reply into a user `<system-reminder>`, and never writes `developer` inside `messages`. A Messages client's own inline `system` turn stays in `messages`. A message that arrived without `content` is encoded without that field. Duplicate call ids in one assistant message are reserved before a suffix is minted, so a real `{id}__2` is not taken by an earlier copy.
 - D-228: A Messages body whose `tool_use` and `tool_result` blocks do not pair is
   mended before it is sent to a Messages upstream. An unanswered call gets a
   synthetic error result, a result with no call becomes the text it said, a

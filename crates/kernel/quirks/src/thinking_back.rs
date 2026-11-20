@@ -75,6 +75,9 @@ pub fn fill_messages_thinking(body: &[u8]) -> Vec<u8> {
             .get("role")
             .and_then(Value::as_str)
             .unwrap_or_default();
+        if role == "system" || role == "developer" {
+            continue;
+        }
         if role != "assistant" {
             after_tool = message_after_tool(message);
             continue;
@@ -228,6 +231,21 @@ mod tests {
             fill_thinking_back("openai-chat", chat),
             fill_thinking_back("anthropic-messages", chat)
         );
+    }
+
+    #[test]
+    fn d65_7_system_and_developer_between_a_result_and_the_next_turn_keep_thinking() {
+        for role in ["system", "developer"] {
+            let body = format!(
+                r#"{{"model":"demo","messages":[{{"role":"assistant","content":[{{"type":"tool_use","id":"t","name":"n","input":{{}}}}]}},{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"t","content":"ok"}}]}},{{"role":"{role}","content":"note"}},{{"role":"assistant","content":[{{"type":"text","text":"done"}}]}}]}}"#
+            );
+            let filled = fill_messages_thinking(body.as_bytes());
+            let value: serde_json::Value = serde_json::from_slice(&filled).expect("json");
+            assert_eq!(
+                value["messages"][3]["content"][0]["type"], "thinking",
+                "{role}"
+            );
+        }
     }
 
     #[test]

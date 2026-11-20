@@ -129,14 +129,24 @@ The IR keeps every message, including system and developer messages, in order.
 
 Anthropic Messages has one system channel. Decode turns a top-level `system`
 string or block array into a leading `Role::System` message, and accepts a
-`developer` role in `messages`. Encode hoists the leading run of
-`Role::System` and `Role::Developer` messages into that channel, in encounter
-order, and removes that run from `messages`. A system or developer message
-after the conversation has started stays in `messages` with its role. One
-plain text message with an empty bag is a string. Anything else is an array
-of blocks, and message-level fields on that channel are folded onto the first
-block. Developer and system in the leading run become the same channel.
-Several leading messages become one message.
+`developer` role in `messages`. Decode marks the request as Messages form.
+Encode hoists the leading run of `Role::System` and `Role::Developer`
+messages into that channel, in encounter order, and removes that run from
+`messages`. One plain text message with an empty bag is a string. Anything
+else is an array of blocks, and message-level fields on that channel are
+folded onto the first block. Developer and system in the leading run become
+the same channel. Several leading messages become one message.
+
+A request that was not decoded from Messages is translated. A system or
+developer message before any assistant, tool, or thinking turn joins that
+channel. One that follows a reply becomes a user message whose text is
+`<system-reminder>\n...\n</system-reminder>`. Consecutive user turns are
+joined, and a user turn is joined with an adjacent tool-result turn, so the
+reminder does not sit between a call and its result. Encode never writes
+`role: "developer"` inside `messages`. A Messages client's own later `system`
+message stays in `messages` with that role. A later `developer` message from
+that client becomes the reminder, or a `system` message when it has no text.
+A message that arrived with no `content` field is encoded without one.
 
 After encode, `pair_messages_tool_blocks` mends the tool exchange on the
 bytes. A call the next message does not answer gets a synthetic error result
@@ -149,9 +159,12 @@ Blocks an assistant message wrote after its first `tool_use` move before that
 call; thinking stays where it was, and empty text is dropped. A system or
 developer message between a call and its results is placed after the results,
 and the real result stays a result. Two `tool_use` blocks in one message that
-share an id become two ids, and each result is kept with its call. A body
-that is already in shape is not written again. Create, token counting, and a
-translated build share this pass.
+share an id become two ids, and each result is kept with its call. Ids in
+that message are reserved before a duplicate is renamed to `{id}__2`,
+`{id}__3`, and so on. The mend reads the encoded body. When that body is
+already in shape it is not written again; the client's original bytes are
+not what this pass compares. Create, token counting, and a translated build
+share this pass.
 
 Chat Completions keeps `system` and `developer` in the message array.
 
