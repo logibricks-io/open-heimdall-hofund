@@ -4,7 +4,7 @@
 //!
 //! | Event | Cooldown and ladder |
 //! | --- | --- |
-//! | Generic failure | Starts at 1 minute and doubles after an ended generic rest, capped at 10 minutes. A failure during an active generic rest keeps its rung. Connection, timeout, transport, interrupted-body, decode, I/O, and authentication errors use this ladder, as do HTTP 401, 403, 408, and 5xx statuses that are not vendor overload. An unserved model uses this ladder on its own key. Other model failures also count on both keys and move to the model ladder when its count passes the member's, so sibling answers do not restart it. |
+//! | Generic failure | Starts at 1 minute and doubles after an ended generic rest, capped at 10 minutes. A failure during an active generic rest keeps its rung. Connection, timeout, transport, interrupted-body, decode, I/O, and authentication errors use this ladder, as do HTTP 401, 403, 408, and 5xx statuses that are not vendor overload. A plugin-marked suspended subscription is the exception in its own row. An unserved model uses this ladder on its own key. Other model failures also count on both keys and move to the model ladder when its count passes the member's, so sibling answers do not restart it. |
 //! | Vendor overload | Rests only the requested model on that member for 30 seconds, or for `Retry-After` capped at 1 minute when present. Counts no failure and does not climb the generic ladder. |
 //! | HTTP 429 | Uses the larger of the rate ladder and the retry hint, with the hint capped at 1 hour. The rate ladder starts at 1 minute, doubles for a new 429 within 30 minutes after the previous rate rest ended, and is capped at 30 minutes. A 429 during an active rest does not advance the ladder. A refusal saying the requested model's credentials are cooling uses a model-local ladder. |
 //! | Exhausted quota | Uses a body-written reset capped at 8 days, otherwise the header retry hint capped at 1 hour, or 15 minutes without a positive hint. Model-cooling wording, or a model-scope flag set by the plugin, scopes the rest to that model. |
@@ -14,6 +14,7 @@
 //! | Account verification | Rests the whole account for 30 minutes when the error asks for verification. It does not climb the generic ladder. The message is kept, including any link, and is not rewritten. |
 //! | Contained panic | Uses the generic failure ladder with [`CooldownCause::Panic`]. |
 //! | Vendor account restriction | Rests the whole member for 2 hours, flat, and does not climb a ladder or count a generic failure. Unserved-model wording does not narrow it. A background model-list probe is not armed and cannot lift the rest. A plugin sets the mark when it knows the account. The next member, including that provider's other accounts, is still asked. |
+//! | Suspended subscription | A plugin marks a 401 as a subscription the vendor suspended. When this key has answered a request, or is already suspended, the member rests 24 hours flat and a background list probe is armed. The probe lifts the rest when the list answers. A key with no answer on record, a subscription account, or a key whose prior answer was forgotten after the suspension was cleared, takes the generic ladder and is not probed. The mark outlives the rest until a list answer, a real success, or an explicit clear. Replacing the key secret drops the answer and the mark, makes a model success that started before the change stale, and emits a recovery when that change drops an active suspended rest. |
 //! | Ordinary failure mark | A plugin may mark a status the group should leave, including a 400, as an ordinary failure. It takes the generic failure ladder and is not a restricted rest. |
 //!
 //! Cancelled, unsupported, configuration, internal, unknown future, and other
@@ -45,6 +46,7 @@ const RECOVERY_CAPACITY: usize = 1_024;
 const CREDIT_RESET_MAX: Duration = Duration::from_secs(35 * 24 * 60 * 60);
 const WINDOWED_CREDIT_DEFAULT: Duration = Duration::from_secs(5 * 60 * 60);
 const RESTRICTED_REST: Duration = Duration::from_secs(2 * 60 * 60);
+const SUSPENDED_REST: Duration = Duration::from_secs(24 * 60 * 60);
 const CREDIT_LADDER: [Duration; 6] = [
     Duration::from_secs(30 * 60),
     Duration::from_secs(2 * 60 * 60),
@@ -160,11 +162,13 @@ pub enum CooldownCause {
     Verify,
     /// The vendor restricted the account. Flat two-hour rest.
     Restricted,
+    /// A plugin-marked suspended subscription. Flat one-day rest, probed.
+    Suspended,
 }
 
 impl CooldownCause {
     /// Every cooldown cause. A new variant must be added to this list.
-    pub const ALL: [CooldownCause; 9] = [
+    pub const ALL: [CooldownCause; 10] = [
         Self::Failure,
         Self::RateLimit,
         Self::Quota,
@@ -174,6 +178,7 @@ impl CooldownCause {
         Self::Overload,
         Self::Verify,
         Self::Restricted,
+        Self::Suspended,
     ];
 
     /// Stable label used by metrics.
@@ -189,6 +194,7 @@ impl CooldownCause {
             Self::Overload => "overload",
             Self::Verify => "verify",
             Self::Restricted => "restricted",
+            Self::Suspended => "suspended",
         }
     }
 }
@@ -311,6 +317,14 @@ struct Book {
     credit_windows: HashMap<MemberId, CreditWindow>,
     probe_lifted: HashMap<MemberId, Instant>,
     probe_missed: HashSet<MemberId>,
+    /// Keys that have answered a request. An unreadable history notes none.
+    answered: HashSet<MemberId>,
+    /// Keys whose last kept rest was a suspended subscription, including
+    /// after that rest has expired.
+    suspended: HashSet<MemberId>,
+    /// Newest secret-change epoch for a member. A success captured before
+    /// this value does not record an answer. Idle maintenance does not drop it.
+    invalidated: HashMap<MemberId, u64>,
     next_revision: u64,
     recoveries: VecDeque<(CooldownKey, CooldownCause)>,
 }
@@ -351,6 +365,9 @@ impl Cooldowns {
                 credit_windows: HashMap::new(),
                 probe_lifted: HashMap::new(),
                 probe_missed: HashSet::new(),
+                answered: HashSet::new(),
+                suspended: HashSet::new(),
+                invalidated: HashMap::new(),
                 next_revision: 1,
                 recoveries: VecDeque::new(),
             }),
@@ -580,6 +597,7 @@ impl Cooldowns {
         self.maintain_locked(&mut book, now);
         let mut failure = failure?;
         note_probe_failure(&mut book, id, now);
+        failure = qualify_suspension(&book, id, failure);
         let model = model.filter(|model| !model.is_empty());
         if matches!(failure, Failure::Overload) {
             if let Some(model) = model {
@@ -593,7 +611,7 @@ impl Cooldowns {
         // Restricted stays member-wide. `&&` binds tighter than `||`, so the
         // failure-kind guard has to cover `model_unserved` as well.
         let model_only = model.is_some()
-            && !matches!(failure, Failure::Restricted)
+            && !matches!(failure, Failure::Restricted | Failure::Suspended)
             && (matches!(
                 failure,
                 Failure::RateLimit | Failure::Quota | Failure::Credit
@@ -609,10 +627,11 @@ impl Cooldowns {
             return Some(applied);
         }
         let key = CooldownKey::new(id, model_only.then_some(model).flatten());
-        let background_probe = !matches!(failure, Failure::Restricted)
-            && key.model.is_none()
-            && id.subscription().is_none()
-            && probe_error(error);
+        let background_probe = match failure {
+            Failure::Restricted => false,
+            Failure::Suspended => key.model.is_none() && id.subscription().is_none(),
+            _ => key.model.is_none() && id.subscription().is_none() && probe_error(error),
+        };
         let credit = credit_context(&book, id, now);
         let revision = next_revision(&mut book);
         if matches!(failure, Failure::Quota | Failure::Credit) {
@@ -632,6 +651,9 @@ impl Cooldowns {
             ));
         };
         let applied = self.apply_failure(state, failure, now, error, credit, background_probe);
+        if applied.cause == CooldownCause::Suspended {
+            book.suspended.insert(id.clone());
+        }
         note_sink(&mut book, &key, failure);
         drop(book);
         self.emit(&key, &applied, now);
@@ -644,6 +666,8 @@ impl Cooldowns {
         let now = (self.clock)();
         let mut book = self.lock();
         self.maintain_locked(&mut book, now);
+        book.answered.insert(id.clone());
+        book.suspended.remove(id);
         forget_probe_guard(&mut book, id);
         let keys = book
             .states
@@ -684,7 +708,7 @@ impl Cooldowns {
     ///
     /// A later rest with another deadline wins. This is not a real request
     /// success, so it starts the 30-minute miss guard instead of clearing it.
-    /// A restricted rest is never lifted.
+    /// A restricted rest is never lifted. A suspended rest is.
     pub fn lift_probe(&self, id: &MemberId, until: Instant) -> bool {
         let now = (self.clock)();
         let mut book = self.lock();
@@ -705,13 +729,50 @@ impl Cooldowns {
         {
             recover(&mut book, key, cooling.cause);
         }
+        book.suspended.remove(id);
         book.probe_lifted.insert(id.clone(), now);
         true
     }
 
+    /// Records that `id` has answered a request.
+    ///
+    /// A failed read of the answer history notes nothing: unknown is not
+    /// "it worked".
+    pub fn note_answered(&self, id: &MemberId) {
+        self.lock().answered.insert(id.clone());
+    }
+
+    /// Drops the answer record for `id` without clearing a suspension mark.
+    pub fn forget_answered(&self, id: &MemberId) {
+        self.lock().answered.remove(id);
+    }
+
+    /// Clears a suspended-subscription mark and its member-wide rest.
+    ///
+    /// An answer record stays, so a later marked 401 suspends again.
+    pub fn clear_suspension(&self, id: &MemberId) {
+        let now = (self.clock)();
+        let mut book = self.lock();
+        self.maintain_locked(&mut book, now);
+        clear_suspension_locked(&mut book, id, now);
+    }
+
+    /// Drops the answer record and the suspension mark after the key secret
+    /// changes, and makes a model success that started before the change stale.
+    /// An active suspended rest emits a recovery. Other rests stay.
+    pub fn forget_prior_service(&self, id: &MemberId) {
+        let now = (self.clock)();
+        let mut book = self.lock();
+        self.maintain_locked(&mut book, now);
+        book.answered.remove(id);
+        clear_suspension_locked(&mut book, id, now);
+        invalidate_member(&mut book, id);
+    }
+
     /// Clears only one model's cooldown and ladder state after its success.
     /// A sibling answer also restarts the member's generic-failure count, but
-    /// does not lift its active rest or touch its rate and credit ladders.
+    /// does not lift its active generic, rate, or credit rest. A member-wide
+    /// suspended rest is lifted, because the request itself answered.
     pub fn record_success_for_model(&self, id: &MemberId, model: &str) {
         self.clear_scoped(id, Some(model), None);
     }
@@ -720,7 +781,8 @@ impl Cooldowns {
     ///
     /// Pass the returned revision to [`Self::record_success_if_unchanged`] when
     /// the call succeeds so it cannot erase a newer failure, panic, or
-    /// observation. Zero means the member has no member-wide entry.
+    /// observation. Zero means the member has no member-wide entry and no
+    /// secret change has superseded an in-flight call.
     #[must_use]
     pub fn revision(&self, id: &MemberId) -> u64 {
         self.scoped_revision(id, None)
@@ -738,13 +800,14 @@ impl Cooldowns {
         self.maintain_locked(&mut book, now);
         let key = CooldownKey::new(id, model);
         let member = CooldownKey::new(id, None);
-        let revision = if model.is_some() {
-            [&key, &member].into_iter().fold(0, |newest, key| {
-                newest.max(book.states.get(key).map_or(0, |state| state.revision))
-            })
-        } else {
-            book.states.get(&key).map_or(0, |state| state.revision)
-        };
+        let mut revision = book.invalidated.get(id).copied().unwrap_or(0);
+        if model.is_some() {
+            for key in [&key, &member] {
+                revision = revision.max(book.states.get(key).map_or(0, |state| state.revision));
+            }
+        } else if let Some(state) = book.states.get(&key) {
+            revision = revision.max(state.revision);
+        }
         for key in std::iter::once(&key).chain(model.is_some().then_some(&member)) {
             if let Some(state) = book.states.get_mut(key) {
                 state.touched = now;
@@ -767,13 +830,18 @@ impl Cooldowns {
         let now = (self.clock)();
         let mut book = self.lock();
         self.maintain_locked(&mut book, now);
-        forget_probe_guard(&mut book, id);
         let key = CooldownKey::new(id, model);
         let member = CooldownKey::new(id, None);
+        let superseded = revision.is_some_and(|captured| {
+            book.invalidated
+                .get(id)
+                .is_some_and(|epoch| *epoch > captured)
+        });
         let stale = match (model, revision) {
             (_, None) => false,
             (None, Some(revision)) => {
                 revision == 0
+                    || superseded
                     || !book
                         .states
                         .get(&key)
@@ -781,6 +849,7 @@ impl Cooldowns {
             }
             (Some(_), Some(revision)) => {
                 revision == 0
+                    || superseded
                     || [&key, &member].into_iter().any(|key| {
                         book.states
                             .get(key)
@@ -788,19 +857,30 @@ impl Cooldowns {
                     })
             }
         };
+        // Revision 0 records the first answer when no secret change has
+        // superseded it. Rest clearing stays a no-op in that case.
+        let first_answer = matches!(revision, Some(0)) && !superseded;
+        if !stale || first_answer {
+            book.answered.insert(id.clone());
+            forget_probe_guard(&mut book, id);
+        }
         if stale {
             return;
         }
+        book.suspended.remove(id);
         book.spent.remove(&key);
         if let Some(state) = book.states.remove(&key)
             && let Some(cooling) = state.cooling
         {
             recover(&mut book, key, cooling.cause);
         }
-        if model.is_some()
-            && let Some(state) = book.states.get_mut(&member)
-        {
-            state.failures = 0;
+        if model.is_some() {
+            // A real answer lifts a suspended subscription the same way a list
+            // probe does. Other member-wide rests stay.
+            lift_suspended_rest(&mut book, &member);
+            if let Some(state) = book.states.get_mut(&member) {
+                state.failures = 0;
+            }
         }
     }
 
@@ -943,11 +1023,16 @@ impl Cooldowns {
         book.credit_windows.retain(|id, _| members.contains(id));
         book.probe_lifted.retain(|id, _| members.contains(id));
         book.probe_missed.retain(|id| members.contains(id));
+        book.answered.retain(|id| members.contains(id));
+        book.suspended.retain(|id| members.contains(id));
+        book.invalidated.retain(|id, _| members.contains(id));
     }
 
     /// Removes one member after its provider identity changes.
     ///
-    /// The changed identity drops active rests without recovery events.
+    /// The changed identity drops active rests without recovery events. A
+    /// model success that started before the removal does not mark the member
+    /// answered.
     pub fn remove(&self, id: &MemberId) {
         let now = (self.clock)();
         let mut book = self.lock();
@@ -959,6 +1044,9 @@ impl Cooldowns {
         book.credit_windows.remove(id);
         book.probe_lifted.remove(id);
         book.probe_missed.remove(id);
+        book.answered.remove(id);
+        book.suspended.remove(id);
+        invalidate_member(&mut book, id);
     }
 
     /// Moves every rest, ladder, and probe record from one stable member id to
@@ -989,6 +1077,16 @@ impl Cooldowns {
         }
         if book.probe_missed.remove(was) {
             book.probe_missed.insert(now.clone());
+        }
+        if book.answered.remove(was) {
+            book.answered.insert(now.clone());
+        }
+        if book.suspended.remove(was) {
+            book.suspended.insert(now.clone());
+        }
+        if let Some(epoch) = book.invalidated.remove(was) {
+            let kept = book.invalidated.remove(now).unwrap_or(0);
+            book.invalidated.insert(now.clone(), epoch.max(kept));
         }
         for (key, _) in &mut book.recoveries {
             if key.member == *was {
@@ -1151,6 +1249,10 @@ impl Cooldowns {
             }
             Failure::Restricted => (
                 cooling(now, RESTRICTED_REST, CooldownCause::Restricted, 0),
+                false,
+            ),
+            Failure::Suspended => (
+                cooling(now, SUSPENDED_REST, CooldownCause::Suspended, 0),
                 false,
             ),
         };
@@ -1458,6 +1560,7 @@ enum Failure {
     Credit,
     Verify,
     Restricted,
+    Suspended,
 }
 
 fn note_probe_failure(book: &mut Book, id: &MemberId, now: Instant) {
@@ -1503,6 +1606,9 @@ fn failure_kind(error: &PluginError) -> Option<Failure> {
     if error.is_ordinary_failure() {
         return Some(Failure::Generic(CooldownCause::Failure));
     }
+    if error.is_subscription_suspended() {
+        return Some(Failure::Suspended);
+    }
     if !crate::decision::rests(error) {
         return None;
     }
@@ -1540,6 +1646,76 @@ fn failure_kind(error: &PluginError) -> Option<Failure> {
         | PluginErrorKind::Cancelled
         | PluginErrorKind::Internal => None,
         _ => None,
+    }
+}
+
+fn qualify_suspension(book: &Book, id: &MemberId, failure: Failure) -> Failure {
+    if !matches!(failure, Failure::Suspended) {
+        return failure;
+    }
+    if id.subscription().is_some() || !(book.answered.contains(id) || book.suspended.contains(id)) {
+        return Failure::Generic(CooldownCause::Failure);
+    }
+    failure
+}
+
+fn lift_suspended_rest(book: &mut Book, member: &CooldownKey) {
+    let lifted = {
+        let Some(state) = book.states.get_mut(member) else {
+            return;
+        };
+        let suspended = state
+            .cooling
+            .as_ref()
+            .is_some_and(|cooling| cooling.cause == CooldownCause::Suspended);
+        if !suspended {
+            return;
+        }
+        let cooling = state.cooling.take().expect("suspended rest");
+        state.idle_since = Some(cooling.until);
+        if state.last_cause == Some(CooldownCause::Suspended) {
+            state.last_cause = None;
+        }
+        cooling.cause
+    };
+    recover(book, member.clone(), lifted);
+}
+
+fn clear_suspension_locked(book: &mut Book, id: &MemberId, now: Instant) {
+    book.suspended.remove(id);
+    let key = CooldownKey::new(id, None);
+    let recovered = {
+        let Some(state) = book.states.get_mut(&key) else {
+            return;
+        };
+        let cause = if state
+            .cooling
+            .as_ref()
+            .is_some_and(|cooling| cooling.cause == CooldownCause::Suspended)
+        {
+            let cooling = state.cooling.take().expect("suspended rest");
+            state.idle_since = Some(now);
+            Some(cooling.cause)
+        } else {
+            None
+        };
+        if state.last_cause == Some(CooldownCause::Suspended) {
+            state.last_cause = None;
+        }
+        cause
+    };
+    if let Some(cause) = recovered {
+        recover(book, key, cause);
+    }
+}
+
+fn invalidate_member(book: &mut Book, id: &MemberId) {
+    let revision = next_revision(book);
+    book.invalidated.insert(id.clone(), revision);
+    for (key, state) in &mut book.states {
+        if key.member == *id {
+            state.revision = revision;
+        }
     }
 }
 
@@ -1690,6 +1866,7 @@ mod tests {
                 CooldownCause::Overload => 6,
                 CooldownCause::Verify => 7,
                 CooldownCause::Restricted => 8,
+                CooldownCause::Suspended => 9,
             })
             .collect::<Vec<_>>();
         assert_eq!(indices, (0..CooldownCause::ALL.len()).collect::<Vec<_>>());

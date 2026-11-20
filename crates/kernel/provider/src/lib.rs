@@ -171,6 +171,25 @@ pub trait Provider: Send + Sync {
         ))
     }
 
+    /// Whether a background rest probe may list with this key.
+    fn rest_probe(&self) -> bool {
+        false
+    }
+
+    /// The list a background rest probe asks.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`](hofund_plugin_api::PluginError) when the list
+    /// fails or this adapter has no probe list.
+    async fn list_for_probe(
+        &self,
+    ) -> Result<hofund_plugin_api::ModelList, hofund_plugin_api::PluginError> {
+        Err(hofund_plugin_api::PluginError::unsupported(
+            "this upstream has no model list",
+        ))
+    }
+
     /// Sends one minimal request on this adapter's configured wire.
     ///
     /// # Errors

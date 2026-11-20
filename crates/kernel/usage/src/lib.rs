@@ -385,6 +385,33 @@ impl Ledger {
             .map_err(|error| UsageError(error.to_string()))
     }
 
+    /// Each answered request at or after `since`, as `(upstream, provider_key_id)`.
+    ///
+    /// A 2xx status is an answer. The key id is empty when the row did not
+    /// record one. An error from this query is unknown, not an answer.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UsageError`] when the query fails.
+    pub fn answered_keys(&self, since: i64) -> Result<Vec<(String, String)>, UsageError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| UsageError("usage database lock is poisoned".to_owned()))?;
+        let mut statement = connection
+            .prepare(
+                "SELECT DISTINCT upstream, provider_key_id FROM requests
+                 WHERE created_unix >= ?1 AND upstream != '' AND status LIKE '2%'
+                 ORDER BY upstream, provider_key_id",
+            )
+            .map_err(|error| UsageError(error.to_string()))?;
+        let rows = statement
+            .query_map([since], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(|error| UsageError(error.to_string()))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| UsageError(error.to_string()))
+    }
+
     /// Successful rows at or after `since`, including routing speed fields.
     ///
     /// # Errors
@@ -1071,5 +1098,27 @@ mod tests {
         let (rows, totals) = ledger.summary(None, 10).expect("summary");
         assert_eq!(rows[0].outcome, "stopped_waiting");
         assert_eq!(totals.requests, 1);
+    }
+
+    #[test]
+    fn d240_answered_keys_are_successful_rows_inside_the_window() {
+        let dir = tempfile::tempdir().expect("dir");
+        let ledger = Ledger::open(&dir.path().join("usage.sqlite")).expect("ledger");
+        let mut answered = row(50, Some(1), Some(1));
+        answered.upstream = "member-a".to_owned();
+        answered.provider_key_id = "abc".to_owned();
+        answered.status = "200".to_owned();
+        ledger.record(&answered).expect("record");
+        let mut refused = row(60, None, None);
+        refused.upstream = "member-a".to_owned();
+        refused.provider_key_id = "bad".to_owned();
+        refused.status = "401".to_owned();
+        ledger.record(&refused).expect("record");
+        let mut old = row(1, Some(1), Some(1));
+        old.upstream = "member-a".to_owned();
+        old.provider_key_id = "old".to_owned();
+        ledger.record(&old).expect("record");
+        let rows = ledger.answered_keys(10).expect("keys");
+        assert_eq!(rows, vec![("member-a".to_owned(), "abc".to_owned())]);
     }
 }

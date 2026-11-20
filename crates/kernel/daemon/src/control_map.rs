@@ -61,6 +61,7 @@ pub fn cooldown_reason(cause: CooldownCause) -> CooldownReason {
         CooldownCause::Overload => CooldownReason::Overload,
         CooldownCause::Verify => CooldownReason::Verify,
         CooldownCause::Restricted => CooldownReason::Restricted,
+        CooldownCause::Suspended => CooldownReason::Suspended,
         _ => CooldownReason::Unknown,
     }
 }
@@ -179,6 +180,7 @@ mod tests {
             CooldownCause::Overload,
             CooldownCause::Verify,
             CooldownCause::Restricted,
+            CooldownCause::Suspended,
         ];
         for cause in causes {
             assert_eq!(cooldown_reason(cause).as_str(), cause.as_str());

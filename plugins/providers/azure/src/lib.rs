@@ -16,6 +16,10 @@
 //!
 //! reference: `internal/provider/azure.go` at commit
 //! cbbf3163cb3c87ee0c327a56bc5689ddc5eda947.
+//!
+//! A 401 is marked `subscription_suspended`. The router rests a key that
+//! has answered before for a day and probes the deployment list until it
+//! answers. A key with no answer on record keeps the generic failure rest.
 
 #![deny(missing_docs)]
 
@@ -243,6 +247,19 @@ impl Azure {
         Target::new(self.protocol, self.base_url.clone())
             .credential(credential)
             .headers(self.headers.clone())
+            .classify_status(Arc::new(|status, _headers, _body, error| {
+                mark_subscription_suspended(status, error)
+            }))
+    }
+
+    /// The deployment list, which checks the key the same way chat does.
+    fn deployments_url(&self) -> String {
+        let base = self.base_url.trim_end_matches('/');
+        let root = base
+            .strip_suffix("/v1")
+            .unwrap_or(base)
+            .trim_end_matches('/');
+        format!("{root}/deployments?api-version={DEPLOYMENTS_VERSION}")
     }
 
     /// Removes the user's header values from `text`.
@@ -380,6 +397,18 @@ impl Azure {
     }
 }
 
+/// A 401 is the mark a suspended subscription and a bad key share.
+///
+/// Credit wording stays a credit refusal. The router applies the day rest
+/// only when the key has answered before.
+fn mark_subscription_suspended(status: u16, error: PluginError) -> PluginError {
+    if status == 401 && !error.is_credit() {
+        error.subscription_suspended()
+    } else {
+        error
+    }
+}
+
 /// Whether a failed candidate ends the list instead of trying the next one.
 fn stops(error: &PluginError) -> bool {
     error.kind() == PluginErrorKind::Cancelled
@@ -435,6 +464,22 @@ impl UpstreamProvider for Azure {
     async fn list_models(&self, query: &ListQuery) -> Result<ModelList, PluginError> {
         let _ = query;
         self.list().await
+    }
+
+    fn rest_probe(&self) -> bool {
+        true
+    }
+
+    /// The deployment list alone. A later base-model list can answer while
+    /// the key is still refused, and that must not lift the rest.
+    async fn list_for_probe(&self, query: &ListQuery) -> Result<ModelList, PluginError> {
+        let _ = query;
+        let secret = self.secret().await?;
+        let url = self.deployments_url();
+        self.page(&url, secret.as_ref()).await?;
+        Ok(ModelList::new(Vec::new(), None)
+            .with_kind(ListKind::Deployments)
+            .with_source_url(url))
     }
 
     /// Chat is capped with `max_completion_tokens`, which Azure's reasoning
@@ -1034,6 +1079,74 @@ mod tests {
                 host.http().calls().last().map(|call| call.uri().to_owned()),
                 Some("https://mine.openai.azure.com/openai/models".to_owned())
             );
+        });
+    }
+
+    #[test]
+    fn d240_a_401_is_marked_suspended_and_other_statuses_are_not() {
+        block_on(async {
+            for (status, suspended) in [(401, true), (403, false), (429, false), (500, false)] {
+                let root = tempfile::tempdir().expect("scratch");
+                let host = keyed(root.path());
+                host.http().enqueue_response(
+                    status,
+                    &[],
+                    br#"{"error":{"message":"Access denied due to invalid subscription key or wrong API endpoint"}}"#
+                        .to_vec(),
+                );
+                let provider = provider(&host, &options("mine"), ProtocolId::OPENAI_CHAT);
+                let Err(error) = provider
+                    .execute(Request::new("team-gpt"), ProtocolId::OPENAI_CHAT)
+                    .await
+                else {
+                    panic!("status {status} was accepted");
+                };
+                assert_eq!(error.status(), Some(status), "{status}");
+                assert_eq!(error.is_subscription_suspended(), suspended, "{status}");
+            }
+        });
+    }
+
+    #[test]
+    fn d240_credit_401_stays_a_credit_refusal() {
+        let error = super::mark_subscription_suspended(
+            401,
+            hofund_plugin_api::PluginError::credit_status(401, "out of credit"),
+        );
+        assert!(error.is_credit());
+        assert!(!error.is_subscription_suspended());
+    }
+
+    #[test]
+    fn d240_probe_lists_deployments_with_the_key_and_stops_on_401() {
+        block_on(async {
+            let root = tempfile::tempdir().expect("scratch");
+            let host = keyed(root.path());
+            host.http()
+                .enqueue(br#"{"data":[{"id":"team-gpt","object":"deployment"}]}"#.to_vec());
+            let provider = provider(&host, &options("mine"), ProtocolId::OPENAI_CHAT);
+            assert!(provider.rest_probe());
+            provider
+                .list_for_probe(&ListQuery::new())
+                .await
+                .expect("list answered");
+            let calls = host.http().calls();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].uri(), DEPLOYMENTS);
+            assert_eq!(calls[0].sensitive_headers(), ["api-key"]);
+
+            host.http().enqueue_response(
+                401,
+                &[],
+                br#"{"error":{"message":"Access denied due to invalid subscription key"}}"#
+                    .to_vec(),
+            );
+            let error = provider
+                .list_for_probe(&ListQuery::new())
+                .await
+                .expect_err("refused");
+            assert_eq!(error.status(), Some(401));
+            assert_eq!(host.http().calls().len(), 2);
         });
     }
 }
