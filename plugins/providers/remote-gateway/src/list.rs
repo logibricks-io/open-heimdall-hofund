@@ -5,10 +5,10 @@
 //! OpenAI-compatible list read it, keeping the protocols the model is served
 //! on (`native_endpoints`) and the API the remote asks that model on best.
 //!
-//! The ask header and the preferred-API field keep the reference list's
-//! spelling, as string constants. Image, video, decision, and price fields
-//! that carry the same kind of name still wait on a naming ruling and are
-//! not read.
+//! Hofund's own field is always read. A different field name, and an extra
+//! list header, come from provider configuration. With neither set, no extra
+//! header is sent. Image, video, decision, and price fields that wait on a
+//! naming ruling are not read.
 //!
 //! After a non-empty list, one `GET <root>/v1/codex/models` asks for Codex's
 //! own catalog rows. A failure there keeps the model list and adds no entry.
@@ -17,11 +17,11 @@ use std::collections::HashMap;
 
 use hofund_plugin_api::HttpHandle;
 use hofund_plugin_api::{
-    ListKind, ModelList, ModelSpec, PREFERRED_API_ASK, PREFERRED_API_ASK_VALUE,
-    PREFERRED_API_FIELD, PluginError, PluginErrorKind, SecretString, redact_token, safe_url,
+    ListKind, ModelList, ModelSpec, PREFERRED_API_FIELD, PluginError, PluginErrorKind,
+    SecretString, redact_token, safe_url,
 };
 use hofund_plugin_sdk::classify::classify_model;
-use hofund_plugin_sdk::json::Value;
+use hofund_plugin_sdk::json::{Map, Value};
 use hofund_plugin_sdk::oauth::secret_text;
 use hofund_plugin_sdk::probe::status_hint;
 use hofund_plugin_sdk::transport::parse_retry_after_headers;
@@ -33,6 +33,10 @@ pub(crate) struct Lister<'a> {
     pub(crate) url: String,
     pub(crate) headers: &'a [(String, String)],
     pub(crate) secret: Option<&'a SecretString>,
+    /// Extra JSON key read when [`PREFERRED_API_FIELD`] is absent.
+    pub(crate) preferred_field: Option<&'a str>,
+    /// Extra list header, name then value, sent only when both are set.
+    pub(crate) ask: Option<(&'a str, &'a str)>,
 }
 
 /// Codex's `client_version` on the remote catalog request.
@@ -62,7 +66,7 @@ impl Lister<'_> {
         })
         .await
         .map_err(|failure| rebuild(&failure.0, self.redact(failure.0.message())))?;
-        let (models, dropped) = model_specs(&rows)?;
+        let (models, dropped) = model_specs(&rows, self.preferred_field)?;
         if models.is_empty() {
             return Err(PluginError::decode(format!(
                 "{}: no models listed",
@@ -83,12 +87,14 @@ impl Lister<'_> {
             .iter()
             .any(|(header, _)| header.eq_ignore_ascii_case("authorization"));
         let mut call = Call::get(url).header("accept", "application/json");
-        if !self
-            .headers
-            .iter()
-            .any(|(name, _)| name.eq_ignore_ascii_case(PREFERRED_API_ASK))
+        if let Some((name, value)) = self.ask
+            && !name.is_empty()
+            && !self
+                .headers
+                .iter()
+                .any(|(header, _)| header.eq_ignore_ascii_case(name))
         {
-            call = call.header(PREFERRED_API_ASK, PREFERRED_API_ASK_VALUE);
+            call = call.header(name, value);
         }
         call = self.authed(call, configured);
         let mut response = call.open_raw(self.http, 1).await?;
@@ -217,7 +223,10 @@ fn rebuild(error: &PluginError, message: String) -> PluginError {
     clean
 }
 
-fn model_specs(rows: &[Value]) -> Result<(Vec<ModelSpec>, Vec<String>), PluginError> {
+fn model_specs(
+    rows: &[Value],
+    extra_field: Option<&str>,
+) -> Result<(Vec<ModelSpec>, Vec<String>), PluginError> {
     let mut models = Vec::new();
     let mut dropped = Vec::new();
     for row in rows {
@@ -226,7 +235,7 @@ fn model_specs(rows: &[Value]) -> Result<(Vec<ModelSpec>, Vec<String>), PluginEr
                 .and_then(Value::as_str)
                 .or_else(|| row.get("name").and_then(Value::as_str))
         });
-        if let Some(model) = model_spec(row)? {
+        if let Some(model) = model_spec(row, extra_field)? {
             models.push(model);
         } else if let Some(id) = id.filter(|id| !id.is_empty()) {
             dropped.push(id.to_owned());
@@ -236,7 +245,7 @@ fn model_specs(rows: &[Value]) -> Result<(Vec<ModelSpec>, Vec<String>), PluginEr
 }
 
 /// One OpenAI-compatible model row, as the kernel's live list read it.
-fn model_spec(row: &Value) -> Result<Option<ModelSpec>, PluginError> {
+fn model_spec(row: &Value, extra_field: Option<&str>) -> Result<Option<ModelSpec>, PluginError> {
     if let Value::String(id) = row {
         if classify_model(id, "").is_none() {
             return Ok(None);
@@ -304,10 +313,19 @@ fn model_spec(row: &Value) -> Result<Option<ModelSpec>, PluginError> {
     } else {
         string_array(row.get("type_target"))
     };
-    if let Some(raw) = row.get(PREFERRED_API_FIELD).and_then(Value::as_str) {
+    if let Some(raw) = preferred_raw(row, extra_field) {
         model = model.with_preferred_api(raw);
     }
     Ok(Some(model.with_endpoints(endpoints)))
+}
+
+/// Hofund's field wins. The configured name is read only when that field is absent.
+fn preferred_raw<'a>(row: &'a Map<String, Value>, extra_field: Option<&str>) -> Option<&'a str> {
+    if let Some(raw) = row.get(PREFERRED_API_FIELD).and_then(Value::as_str) {
+        return Some(raw);
+    }
+    let extra = extra_field.filter(|name| !name.is_empty() && *name != PREFERRED_API_FIELD)?;
+    row.get(extra).and_then(Value::as_str)
 }
 
 #[allow(

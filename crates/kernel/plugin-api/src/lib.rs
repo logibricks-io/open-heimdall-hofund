@@ -104,8 +104,7 @@ pub use id::{
 pub use inbound::{InboundSurface, Method, RouteSpec};
 pub use plan::{PlanCard, PlanQuery, PlanQuota, PlanSupport, PlanWindow};
 pub use preferred::{
-    CATALOG_ENTRY_FIELD, PREFERRED_API_ASK, PREFERRED_API_ASK_VALUE, PREFERRED_API_FIELD,
-    preferred_api_name, preferred_api_path,
+    CATALOG_ENTRY_FIELD, PREFERRED_API_FIELD, preferred_api_name, preferred_api_path,
 };
 pub use quota_reset::{QuotaResetCard, QuotaResetCredits, QuotaResetOutcome};
 pub use records::{

@@ -593,7 +593,7 @@ impl Router {
         }
     }
 
-    /// `chat`, `responses`, or `anthropic`: the API `/v1/models` should name for `model`.
+    /// Short name of the API `/v1/models` should name for `model`.
     ///
     /// A preference a member learned from a remote list wins. A route whose id
     /// or unit pool starts with `group/` uses Responses only when every member
@@ -1758,15 +1758,7 @@ fn learned_name(name: Option<String>) -> Option<&'static str> {
 }
 
 fn native_preferred(protocol: &str) -> Option<&'static str> {
-    if protocol == hofund_plugin_api::ProtocolId::OPENAI_CHAT.as_str() {
-        Some("chat")
-    } else if protocol == hofund_plugin_api::ProtocolId::OPENAI_RESPONSES.as_str() {
-        Some("responses")
-    } else if protocol == hofund_plugin_api::ProtocolId::ANTHROPIC_MESSAGES.as_str() {
-        Some("anthropic")
-    } else {
-        None
-    }
+    hofund_plugin_api::preferred_api_name(protocol)
 }
 
 fn route_is_group(model: &str, route: &Route) -> bool {

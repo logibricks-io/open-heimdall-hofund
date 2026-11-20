@@ -105,6 +105,10 @@ pub fn root(address: &str) -> String {
 struct RemoteGatewayConfig {
     base_url: String,
     headers: Vec<(String, String)>,
+    /// Extra JSON key read when `preferred_api` is absent on a list row.
+    preferred_field: Option<String>,
+    /// Extra list header, name then value. Absent means no extra header.
+    ask: Option<(String, String)>,
 }
 
 impl ValidConfig for RemoteGatewayConfig {}
@@ -119,13 +123,28 @@ impl UpstreamFactory for RemoteGatewayFactory {
     }
 
     fn config_schema(&self) -> Schema {
-        Schema::object(vec![("base_url".to_owned(), Schema::string())], &[])
-            .expect("remote-gateway schema")
+        Schema::object(
+            vec![
+                ("base_url".to_owned(), Schema::string()),
+                ("preferred_field".to_owned(), Schema::string()),
+                ("preferred_ask_header".to_owned(), Schema::string()),
+                ("preferred_ask_value".to_owned(), Schema::string()),
+            ],
+            &[],
+        )
+        .expect("remote-gateway schema")
     }
 
     fn validate(&self, raw: &RawTable) -> Result<Self::Config, ConfigError> {
         for key in raw.keys() {
-            if key != "base_url" && key != "headers" {
+            if !matches!(
+                key,
+                "base_url"
+                    | "headers"
+                    | "preferred_field"
+                    | "preferred_ask_header"
+                    | "preferred_ask_value"
+            ) {
                 return Err(ConfigError::new("unknown key").with_path(key));
             }
         }
@@ -148,7 +167,31 @@ impl UpstreamFactory for RemoteGatewayFactory {
             }
             Some(_) => return Err(ConfigError::new("headers must be a table").with_path("headers")),
         }
-        Ok(RemoteGatewayConfig { base_url, headers })
+        let preferred_field = optional_string(raw, "preferred_field")?;
+        let ask_header = optional_string(raw, "preferred_ask_header")?;
+        let ask_value = optional_string(raw, "preferred_ask_value")?;
+        let ask = match (ask_header, ask_value) {
+            (None, None) => None,
+            (Some(name), Some(value)) => Some((name, value)),
+            (Some(_), None) => {
+                return Err(ConfigError::new(
+                    "preferred_ask_value is required when preferred_ask_header is set",
+                )
+                .with_path("preferred_ask_value"));
+            }
+            (None, Some(_)) => {
+                return Err(ConfigError::new(
+                    "preferred_ask_header is required when preferred_ask_value is set",
+                )
+                .with_path("preferred_ask_header"));
+            }
+        };
+        Ok(RemoteGatewayConfig {
+            base_url,
+            headers,
+            preferred_field,
+            ask,
+        })
     }
 
     fn build(
@@ -180,9 +223,26 @@ impl UpstreamFactory for RemoteGatewayFactory {
             protocol,
             root,
             headers: cfg.headers.clone(),
+            preferred_field: cfg.preferred_field.clone(),
+            ask: cfg.ask.clone(),
             host: host.clone(),
             listed: Mutex::new(HashMap::new()),
         }))
+    }
+}
+
+fn optional_string(raw: &RawTable, key: &str) -> Result<Option<String>, ConfigError> {
+    match raw.get(key) {
+        None => Ok(None),
+        Some(RawValue::String(value)) => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(trimmed.to_owned()))
+            }
+        }
+        Some(_) => Err(ConfigError::new("must be a string").with_path(key)),
     }
 }
 
@@ -198,6 +258,8 @@ struct RemoteGateway {
     /// The other gateway's root, without `/v1`.
     root: String,
     headers: Vec<(String, String)>,
+    preferred_field: Option<String>,
+    ask: Option<(String, String)>,
     host: HostContext,
     /// Preferred API, endpoints, and a catalog entry learned from the last list.
     listed: Mutex<HashMap<String, ListedFact>>,
@@ -384,6 +446,11 @@ impl UpstreamProvider for RemoteGateway {
             url: format!("{}/v1/models", self.root),
             headers: &self.headers,
             secret: secret.as_ref(),
+            preferred_field: self.preferred_field.as_deref(),
+            ask: self
+                .ask
+                .as_ref()
+                .map(|(name, value)| (name.as_str(), value.as_str())),
         };
         let list = lister.list().await?;
         let entries = lister.codex_catalog().await;

@@ -1,24 +1,13 @@
 //! The API a gateway asks a model on best, and a catalog row learned with it.
 //!
-//! Short names in this crate are `chat`, `responses`, and `anthropic`. The
-//! wire field and the request header that a remote list requires keep the
-//! reference list's spelling, and only as these constants.
+//! Short names in this crate are `chat`, `responses`, and `anthropic`.
+//! Hofund's own `/v1/models` field is [`PREFERRED_API_FIELD`]. A remote that
+//! uses a different field name, or that wants an extra list header, supplies
+//! those strings in provider configuration. They are not constants here.
 
 /// JSON field on a `/v1/models` row naming the API this gateway asks that
 /// model on best.
-///
-/// The spelling is the one a remote that speaks the reference list already
-/// writes. It stays a string so both sides read the same field.
-pub const PREFERRED_API_FIELD: &str = "magpie_prefers";
-
-/// Request header a remote that speaks the reference list requires before it
-/// writes [`PREFERRED_API_FIELD`].
-///
-/// The spelling is that list's. Send [`PREFERRED_API_ASK_VALUE`].
-pub const PREFERRED_API_ASK: &str = "X-Magpie-Drawers";
-
-/// Value sent with [`PREFERRED_API_ASK`]. The remote checks that the header is present.
-pub const PREFERRED_API_ASK_VALUE: &str = "1";
+pub const PREFERRED_API_FIELD: &str = "preferred_api";
 
 /// JSON object on a `/v1/models` row: a coding-agent catalog entry a member learned.
 pub const CATALOG_ENTRY_FIELD: &str = "catalog_entry";

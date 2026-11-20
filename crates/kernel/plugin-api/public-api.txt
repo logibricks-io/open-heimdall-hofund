@@ -736,8 +736,6 @@ OwnerTest::const fn key (& self) -> & 'static str
 OwnerTest::const fn prefix (key : & 'static str , text : & 'static str) -> Self
 OwnerTest::const fn text (& self) -> & 'static str
 OwnerTest::fn matches (& self , value : & str) -> bool
-PREFERRED_API_ASK
-PREFERRED_API_ASK_VALUE
 PREFERRED_API_FIELD
 PROBE_CAP
 PipedChild
@@ -1414,8 +1412,6 @@ const API
 const BRIDGE_CALLBACK_PATH_PREFIX
 const CATALOG_ENTRY_FIELD
 const LOOPBACK_CANCEL_PATH
-const PREFERRED_API_ASK
-const PREFERRED_API_ASK_VALUE
 const PREFERRED_API_FIELD
 const PROBE_CAP
 fn preferred_api_name (raw : & str) -> Option < & 'static str >

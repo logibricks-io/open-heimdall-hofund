@@ -58,7 +58,7 @@ pub trait Member: Send + Sync {
     /// Codec id this member speaks. Compared with the inbound protocol.
     fn protocol(&self) -> &str;
 
-    /// `chat`, `responses`, or `anthropic` when a list named the API `model` is asked on best.
+    /// Short name from a list of the API `model` is asked on best.
     fn learned_preferred(&self, _model: &str) -> Option<String> {
         None
     }

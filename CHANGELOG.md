@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- D-241: a remote gateway reads the preferred API on each `/v1/models` row, including a routing group, and asks that API when the client spoke a protocol the model does not serve. Chat the client itself sent stays Chat. `/v1/models` writes the same path. Codex is given the remote's own catalog from one `GET /v1/codex/models` with Codex's client version and the remote key. A handed catalog description says ` via hofund` once. A remote id ending in `codex/<slug>` uses this computer's catalog entry.
+- D-241: a remote gateway reads the preferred API on each `/v1/models` row, including a routing group, and asks that API when the client spoke a protocol the model does not serve. Chat the client itself sent stays Chat. `/v1/models` writes the same path under `preferred_api`. Options `preferred_field`, `preferred_ask_header`, and `preferred_ask_value` read a remote that uses another field name or wants an extra list header. With those unset, only `preferred_api` is read and no extra header is sent. Codex is given the remote's own catalog from one `GET /v1/codex/models` with Codex's client version and the remote key. A handed catalog description says ` via hofund` once. A remote id ending in `codex/<slug>` uses this computer's catalog entry.
 
 - D-230: `GET /v1/realtime` and `GET /realtime` upgrade to a WebSocket and pass the Realtime session through to a provider that declares a realtime endpoint. The upgrade uses the same front guards as other routes. A gateway key's spending reservation is held until the socket closes. Frame size, idle time, and close are bounded. Verified with a local fake upstream only.
 

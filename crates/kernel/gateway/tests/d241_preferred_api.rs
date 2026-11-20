@@ -10,7 +10,12 @@ use hofund_gateway::Gateway;
 use hofund_ir::{Message, Request as ModelRequest, Response, Role};
 use hofund_plugin_api::{
     CATALOG_ENTRY_FIELD, MemberId, MemberKey, PREFERRED_API_FIELD, PluginError, PresetId,
+    ProtocolId,
 };
+
+const CHAT: &str = ProtocolId::OPENAI_CHAT.as_str();
+const RESPONSES: &str = ProtocolId::OPENAI_RESPONSES.as_str();
+const MESSAGES: &str = ProtocolId::ANTHROPIC_MESSAGES.as_str();
 use hofund_router::{Completion, FailoverPolicy, Hop, Member, Router, Snapshot};
 use hofund_usage::Ledger;
 use tempfile::TempDir;
@@ -75,25 +80,29 @@ async fn d241_models_list_names_the_preferred_api() {
     let usage = Arc::new(Ledger::open(&temp.path().join("usage.sqlite")).expect("ledger"));
     let routes = BTreeMap::from([
         (
-            "openai/gpt-6-astra".to_owned(),
-            vec![Hop::new(member("astra", "openai-responses", None, None))],
+            "north/model-a".to_owned(),
+            vec![Hop::new(member("astra", RESPONSES, None, None))],
         ),
         (
-            "kimi/kimi-k3".to_owned(),
-            vec![Hop::new(member("kimi", "openai-chat", None, None))],
+            "south/model-b".to_owned(),
+            vec![Hop::new(member("south", CHAT, None, None))],
+        ),
+        (
+            "east/model-c".to_owned(),
+            vec![Hop::new(member("east", MESSAGES, None, None))],
         ),
         (
             "group/auto".to_owned(),
             vec![
-                Hop::new(member("g1", "openai-responses", None, None)),
-                Hop::new(member("g2", "openai-responses", None, None)),
+                Hop::new(member("g1", RESPONSES, None, None)),
+                Hop::new(member("g2", RESPONSES, None, None)),
             ],
         ),
         (
             "group/mixed".to_owned(),
             vec![
-                Hop::new(member("m1", "openai-chat", None, None)),
-                Hop::new(member("m2", "openai-responses", None, None)),
+                Hop::new(member("m1", CHAT, None, None)),
+                Hop::new(member("m2", RESPONSES, None, None)),
             ],
         ),
         (
@@ -102,18 +111,13 @@ async fn d241_models_list_names_the_preferred_api() {
         ),
         (
             "learned".to_owned(),
-            vec![Hop::new(member(
-                "learned",
-                "openai-chat",
-                Some("responses"),
-                None,
-            ))],
+            vec![Hop::new(member("learned", CHAT, Some("responses"), None))],
         ),
         (
             "handed".to_owned(),
             vec![Hop::new(member(
                 "handed",
-                "openai-chat",
+                CHAT,
                 None,
                 Some(
                     r#"{"base_instructions":"REMOTE","model_messages":{"instructions_template":"T"}}"#,
@@ -152,14 +156,12 @@ async fn d241_models_list_names_the_preferred_api() {
             .unwrap_or_else(|| panic!("missing {id}"))
             .clone()
     };
+    assert_eq!(row("north/model-a")[PREFERRED_API_FIELD], "/v1/responses");
     assert_eq!(
-        row("openai/gpt-6-astra")[PREFERRED_API_FIELD],
-        "/v1/responses"
-    );
-    assert_eq!(
-        row("kimi/kimi-k3")[PREFERRED_API_FIELD],
+        row("south/model-b")[PREFERRED_API_FIELD],
         "/v1/chat/completions"
     );
+    assert_eq!(row("east/model-c")[PREFERRED_API_FIELD], "/v1/messages");
     assert_eq!(row("group/auto")[PREFERRED_API_FIELD], "/v1/responses");
     assert!(row("group/mixed").get(PREFERRED_API_FIELD).is_none());
     assert!(row("plain-model").get(PREFERRED_API_FIELD).is_none());

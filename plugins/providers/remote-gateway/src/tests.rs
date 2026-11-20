@@ -378,6 +378,15 @@ fn config_and_build_refuse_what_they_cannot_use() {
         table.insert("x-team", RawValue::Integer(1));
         values.insert("headers", RawValue::Table(table));
         assert!(UpstreamFactory::validate(&factory, &values).is_err());
+        let mut ask_only = raw(ROOT);
+        ask_only.insert(
+            "preferred_ask_header",
+            RawValue::String("X-Upstream-Drawers".to_owned()),
+        );
+        assert!(UpstreamFactory::validate(&factory, &ask_only).is_err());
+        let mut value_only = raw(ROOT);
+        value_only.insert("preferred_ask_value", RawValue::String("yes".to_owned()));
+        assert!(UpstreamFactory::validate(&factory, &value_only).is_err());
         assert!(UpstreamFactory::validate(&factory, &RawTable::new()).is_ok());
         for (config, protocol) in [
             (raw(ROOT), ProtocolId::GENERATIVE_LANGUAGE),
@@ -497,8 +506,8 @@ fn d241_preferred_api_is_read_and_codex_entries_are_asked_once() {
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[0].uri(), format!("{ROOT}/v1/models"));
         assert_eq!(
-            calls[0].header(hofund_plugin_api::PREFERRED_API_ASK),
-            Some(hofund_plugin_api::PREFERRED_API_ASK_VALUE)
+            calls[0].headers(),
+            [("accept".to_owned(), "application/json".to_owned())].as_slice()
         );
         assert!(has(calls[0].sensitive_headers(), "authorization"));
         assert!(calls[1].uri().contains("/v1/codex/models?"));
@@ -545,5 +554,42 @@ fn d241_a_codex_catalog_failure_keeps_the_model_list() {
         assert_eq!(list.models()[0].preferred_api(), Some("responses"));
         assert!(list.models()[0].catalog_entry().is_none());
         assert_eq!(host.http().calls().len(), 2);
+    });
+}
+
+#[test]
+fn d241_a_configured_field_and_ask_header_are_read_from_config() {
+    with_host(|host| {
+        let mut config = raw(ROOT);
+        config.insert(
+            "preferred_field",
+            RawValue::String("upstream_prefers".to_owned()),
+        );
+        config.insert(
+            "preferred_ask_header",
+            RawValue::String("X-Upstream-Drawers".to_owned()),
+        );
+        config.insert("preferred_ask_value", RawValue::String("yes".to_owned()));
+        let provider = build(host, &config, ProtocolId::OPENAI_CHAT);
+        let body = json!({"data": [
+            {
+                "id": "north/model-a",
+                "upstream_prefers": "/v1/responses",
+                "native_endpoints": ["/v1/responses"]
+            },
+            {
+                "id": "south/model-b",
+                "preferred_api": "/v1/chat/completions",
+                "upstream_prefers": "/v1/responses"
+            }
+        ]});
+        host.http().enqueue(body.to_string());
+        host.http().enqueue("{}");
+        let list = block_on(provider.list_models(&ListQuery::new())).expect("list");
+        assert_eq!(list.models()[0].preferred_api(), Some("responses"));
+        assert_eq!(list.models()[1].preferred_api(), Some("chat"));
+        let calls = host.http().calls();
+        assert_eq!(calls[0].header("x-upstream-drawers"), Some("yes"));
+        assert!(calls[1].header("x-upstream-drawers").is_none());
     });
 }
