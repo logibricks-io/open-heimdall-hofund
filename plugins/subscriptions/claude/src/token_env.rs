@@ -107,18 +107,23 @@ pub(crate) async fn clear_removed(
 
 fn clear_home(host: &HostContext, home: &Path) -> Result<(), PluginError> {
     let marker = read_marker(host)?;
-    if marker.hash.is_empty() {
+    if marker.hash.is_empty() || !same_home(&marker.dir, home) {
         return Ok(());
     }
     let settings = settings_path(home);
     let parsed = read_settings(&settings)?;
-    if ours(&marker, &parsed) {
-        let target = resolve_target(&settings)?;
-        let mut root = parsed.root;
-        delete_token(&mut root);
-        write_atomic(&target, &render(&root)?, "Claude Code's settings.json")?;
+    if !ours(&marker, &parsed) {
+        return Ok(());
     }
+    let target = resolve_target(&settings)?;
+    let mut root = parsed.root;
+    delete_token(&mut root);
+    write_atomic(&target, &render(&root)?, "Claude Code's settings.json")?;
     remove_marker(host)
+}
+
+fn same_home(recorded: &Path, home: &Path) -> bool {
+    !recorded.as_os_str().is_empty() && recorded == home
 }
 
 fn gate() -> std::sync::MutexGuard<'static, ()> {

@@ -111,6 +111,26 @@ fn d221_production_enrollment_is_withdrawn_and_config_cannot_opt_in() {
 }
 
 #[test]
+fn d226_setup_token_paste_is_unsupported_even_when_new_accounts_are_allowed() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = build(&host, true);
+    let token = "sk-ant-oat01-abcdefghijklmnopqrstuvwxyz0123456789";
+    for text in [
+        token,
+        &format!("CLAUDE_CODE_OAUTH_TOKEN={token}"),
+        &format!("[\"{token}\"]"),
+    ] {
+        let error = block_on(sub.import_accounts(text, host.context())).expect_err("setup");
+        assert_eq!(error.kind(), PluginErrorKind::Unsupported);
+        assert!(!error.to_string().contains(token), "{error}");
+    }
+    assert!(host.http().calls().is_empty());
+    let listed = block_on(host.context().accounts().list()).expect("list");
+    assert!(listed.is_empty());
+}
+
+#[test]
 fn d221_sign_in_import_and_add_are_refused_before_any_request() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);

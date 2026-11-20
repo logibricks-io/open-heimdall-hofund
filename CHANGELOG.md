@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- D-226: Using a Claude setup-token account writes `CLAUDE_CODE_OAUTH_TOKEN` into Claude Code's `settings.json` `env`, records only a hash of that value, and leaves a value it did not write in place. Switching to a signed-in account or removing the setup-token account takes the recorded value out. A pasted setup-token line in the Claude import is stored as a setup-token account. The settings file is mode `0600` and written atomically. The token is not logged.
+- D-226: Using a Claude setup-token account writes `CLAUDE_CODE_OAUTH_TOKEN` into Claude Code's `settings.json` `env`, records only a hash of that value, and leaves a value it did not write in place. Switching to a signed-in account or removing the setup-token account takes the recorded value out. A pasted setup-token line in the Claude import is stored as a setup-token account. The settings file is mode `0600` and written atomically. The token is not logged. Other subscriptions return unsupported for that paste and make no token request; when Claude is not configured, import fails without sending the token. Automatic switching does not select a setup-token account. An explicit Use still writes the env token. Clearing it leaves the hash record in place when the home or the value is not the one recorded. A mixed paste stores the setup-token account and then reports the first other line, because import returns one result.
 - D-232: GPT-6.2 and later send Codex instructions, the client's instructions,
   and a translated system prompt as leading `developer` input items, with no
   top-level `instructions`. Older models stay unchanged. This applies to the

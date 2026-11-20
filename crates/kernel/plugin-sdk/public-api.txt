@@ -184,6 +184,7 @@ oauth::fn parse_access_token (body : & [u8]) -> Result < AccessToken , TokenErro
 oauth::fn parse_iam_access_token (body : & [u8]) -> Result < IamAccessToken , TokenError >
 oauth::fn refresh_form (client_id : & str , client_secret : & str , refresh_token : & str) -> String
 oauth::fn refresh_secret_form (client_id : & str , client_secret : & str , refresh_token : & SecretString ,) -> String
+oauth::is_claude_setup_token_paste
 oauth::new_state
 oauth::new_state_with_random_bytes
 oauth::parse_google_import

@@ -270,6 +270,8 @@ async fn commit_rows(
         }
     }
     if let Some(message) = failure {
+        // The import result is one success or one error. Accounts stored
+        // above stay stored; the caller sees the first row that failed.
         return Err(PluginError::config(message));
     }
     Ok(ids)

@@ -164,6 +164,26 @@ fn r49d_wrong_app_and_bad_entries_fail_before_http_without_token_text() {
     assert!(host.http().calls().is_empty());
 }
 
+#[test]
+fn d226_setup_token_paste_is_unsupported_and_makes_no_request() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let token = "sk-ant-oat01-abcdefghijklmnopqrstuvwxyz0123456789";
+    for text in [
+        token,
+        &format!("export CLAUDE_CODE_OAUTH_TOKEN=\"{token}\""),
+        &format!("\"{token}\""),
+    ] {
+        let error = block_on(sub.import_accounts(text, host.context())).expect_err("setup");
+        assert_eq!(error.kind(), PluginErrorKind::Unsupported);
+        assert!(!error.to_string().contains(token), "{error}");
+    }
+    assert!(host.http().calls().is_empty());
+    let listed = block_on(host.context().accounts().list()).expect("list");
+    assert!(listed.is_empty());
+}
+
 const UNARY_REPLY: &str = r#"{"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"hi"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":1,"totalTokenCount":4}}}"#;
 
 #[test]

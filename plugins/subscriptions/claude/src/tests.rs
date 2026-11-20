@@ -1945,7 +1945,35 @@ mod d226 {
                 .and_then(Value::as_str),
             Some("bar")
         );
-        assert!(!state(&host).join("claude-token-env.json").exists());
+        let record = record_text(&host);
+        assert!(record.contains(&token_hash(SETUP_TOKEN)), "{record}");
+        assert!(!record.contains(SETUP_TOKEN), "{record}");
+        assert!(!record.contains("sk-ant-oat01-users-later"), "{record}");
+    }
+
+    #[test]
+    fn d226_clear_on_another_home_keeps_the_marker() {
+        let dir = tempfile::tempdir().expect("dir");
+        let home = dir.path().join("claude");
+        let other = dir.path().join("other");
+        write_settings(&home, r#"{"env":{"FOO":"bar"}}"#);
+        let host = host(&dir);
+        let sub = subscription(&host);
+        let setup = setup_id(&host, &sub, SETUP_TOKEN);
+        let oauth = oauth_id(&host);
+        block_on(sub.write_agent_sign_in(&setup, &home, host.context())).expect("use");
+        block_on(sub.write_agent_sign_in(&oauth, &other, host.context())).expect("other home");
+        assert_eq!(env_token(&settings_value(&home)), Some(SETUP_TOKEN));
+        let record = record_text(&host);
+        assert!(record.contains(&token_hash(SETUP_TOKEN)), "{record}");
+        assert!(record.contains(&home.display().to_string()), "{record}");
+        assert!(!record.contains(SETUP_TOKEN), "{record}");
+        let other_settings = other.join("settings.json");
+        if other_settings.is_file() {
+            let text = std::fs::read_to_string(&other_settings).expect("other settings");
+            assert!(!text.contains(SETUP_TOKEN), "{text}");
+            assert!(!text.contains(cli::OAUTH_TOKEN_VAR));
+        }
     }
 
     #[test]

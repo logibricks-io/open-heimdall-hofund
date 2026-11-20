@@ -92,7 +92,7 @@ pub async fn accounts_switch(
     let known = sorted_accounts(entry).await?;
     let mut agents = read(state_root)?;
     let mut agent_state = agents.get(&subscription).cloned().unwrap_or_default();
-    let rows = login_rows(&known, &agent_state);
+    let rows = login_rows(&entry.host, &known, &agent_state).await?;
     let aliases: Vec<(String, String)> = agent_state
         .aliases
         .iter()
@@ -168,7 +168,7 @@ pub async fn switch_before_forget(
     let mut agents = read(state_root)?;
     let mut agent_state = agents.get(subscription).cloned().unwrap_or_default();
     let known = sorted_accounts(entry).await?;
-    let rows = login_rows(&known, &agent_state);
+    let rows = login_rows(&entry.host, &known, &agent_state).await?;
     let next = match next_on_forget(&rows, removing) {
         Some(next) => next,
         None => return Ok(()),
@@ -228,17 +228,37 @@ async fn apply_switch(
     Ok(())
 }
 
-fn login_rows(known: &[(AccountId, String)], agent_state: &AgentState) -> Vec<LoginRow> {
-    known
-        .iter()
-        .map(|(id, label)| LoginRow {
+async fn login_rows(
+    host: &hofund_plugin_api::HostContext,
+    known: &[(AccountId, String)],
+    agent_state: &AgentState,
+) -> Result<Vec<LoginRow>, DaemonError> {
+    let mut rows = Vec::with_capacity(known.len());
+    for (id, label) in known {
+        rows.push(LoginRow {
             key: label.to_lowercase(),
             on: true,
             active: agent_state.active.eq_ignore_ascii_case(id.as_str())
                 || agent_state.active.eq_ignore_ascii_case(label),
-            switchable: true,
-        })
-        .collect()
+            switchable: automatic_switch_allowed(host, id).await?,
+        });
+    }
+    Ok(rows)
+}
+
+/// A setup-token account is chosen only by an explicit Use. Automatic
+/// switching, including `keep_login` and sign-out, skips it.
+async fn automatic_switch_allowed(
+    host: &hofund_plugin_api::HostContext,
+    id: &AccountId,
+) -> Result<bool, DaemonError> {
+    let Some(secret) = host.accounts().secret(id).await.map_err(show)? else {
+        return Ok(true);
+    };
+    let Ok(blob) = hofund_plugin_sdk::oauth::SecretObject::parse(&secret) else {
+        return Ok(true);
+    };
+    Ok(blob.text("setupToken").is_none())
 }
 
 async fn quota_peeks(entry: &Opened, known: &[(AccountId, String)]) -> Vec<(String, LoginQuota)> {
@@ -333,7 +353,7 @@ pub async fn tick_one(
         .collect();
     let mut agents = read(state_root)?;
     let mut agent_state = agents.get(subscription).cloned().unwrap_or_default();
-    let rows = login_rows(&known, &agent_state);
+    let rows = login_rows(host, &known, &agent_state).await?;
     let quotas = quota_peeks_instance(instance, host, &known).await;
     let return_key = if agent_state.return_to.is_empty() {
         None
@@ -656,6 +676,217 @@ mod tests {
             .await
             .expect_err("unknown subscription");
         assert_eq!(error.to_string(), "no subscription `other` in the config");
+    }
+
+    fn setup_secret() -> hofund_plugin_api::SecretString {
+        hofund_plugin_sdk::oauth::SecretObject::new()
+            .with_text("setupToken", "sk-ant-oat01-automatic")
+            .to_secret()
+    }
+
+    async fn store_account(host: &TestHost, id: &'static str, label: &str, setup: bool) {
+        let account = host
+            .context()
+            .accounts()
+            .account(AccountId::from_static(id), label)
+            .expect("account");
+        let secret = if setup {
+            setup_secret()
+        } else {
+            hofund_plugin_api::SecretString::from("secret".to_owned())
+        };
+        host.context()
+            .accounts()
+            .upsert(account, secret)
+            .await
+            .expect("store");
+    }
+
+    fn tick_policy(keep_login: bool) -> LoginPolicy {
+        LoginPolicy {
+            routing: "smart".to_owned(),
+            keep_login,
+            switch_only: false,
+            sign_in_spends: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn d226_tick_does_not_switch_to_a_setup_token() {
+        let dir = tempfile::tempdir().expect("dir");
+        let plugin = PluginId::from_static("tick-sub");
+        let host = TestHost::open_for(PluginKind::Subscription, plugin.clone(), dir.path());
+        store_account(&host, "spent", "Spent", false).await;
+        store_account(&host, "setup", "Setup", true).await;
+        let state_root = host.context().dirs().state_dir().expect("state");
+        let mut agents = std::collections::BTreeMap::new();
+        agents.insert(
+            "tick-sub".to_owned(),
+            AgentState {
+                active: "spent".to_owned(),
+                ..AgentState::default()
+            },
+        );
+        write(&state_root, &agents).expect("state");
+        let wrote = Arc::new(Wrote(Mutex::new(Vec::new())));
+        let sub = TickSub {
+            id: plugin,
+            flow: SignInFlow::Pkce,
+            wrote: Arc::clone(&wrote),
+        };
+        let home = dir.path().join("agent-home");
+        let moved = tick_one(
+            "tick-sub",
+            &tick_policy(false),
+            &sub,
+            host.context(),
+            &state_root,
+            &home,
+        )
+        .await
+        .expect("tick");
+        assert!(moved.is_none());
+        assert!(wrote.0.lock().expect("wrote").is_empty());
+    }
+
+    #[tokio::test]
+    async fn d226_keep_login_and_sign_out_skip_a_setup_token() {
+        let dir = tempfile::tempdir().expect("dir");
+        let plugin = PluginId::from_static("tick-sub");
+        let host = TestHost::open_for(PluginKind::Subscription, plugin.clone(), dir.path());
+        store_account(&host, "a-setup", "Setup", true).await;
+        store_account(&host, "b-oauth", "Oauth", false).await;
+        let state_root = host.context().dirs().state_dir().expect("state");
+        let mut agents = std::collections::BTreeMap::new();
+        agents.insert(
+            "tick-sub".to_owned(),
+            AgentState {
+                active: "oauth".to_owned(),
+                ..AgentState::default()
+            },
+        );
+        write(&state_root, &agents).expect("state");
+        let wrote = Arc::new(Wrote(Mutex::new(Vec::new())));
+        let sub = Arc::new(TickSub {
+            id: plugin,
+            flow: SignInFlow::Pkce,
+            wrote: Arc::clone(&wrote),
+        });
+        let home = dir.path().join("agent-home");
+        let moved = tick_one(
+            "tick-sub",
+            &tick_policy(true),
+            sub.as_ref(),
+            host.context(),
+            &state_root,
+            &home,
+        )
+        .await
+        .expect("keep_login");
+        assert!(moved.is_none());
+        assert!(wrote.0.lock().expect("wrote").is_empty());
+
+        let _guard = push_test_agent_homes(std::collections::BTreeMap::from([(
+            "TICK_HOME".to_owned(),
+            home.clone(),
+        )]));
+        let opened = vec![crate::sign_in::Opened {
+            id: "tick-sub".to_owned(),
+            name: "Tick".to_owned(),
+            instance: sub,
+            host: host.context().clone(),
+            config_dir: dir.path().to_path_buf(),
+        }];
+        let registry = Names {
+            id: "tick-sub",
+            sign_in: AgentSignIn::new(&["tick-agent"], "TICK_HOME", "tick-home"),
+        };
+        switch_before_forget(
+            &opened,
+            &registry,
+            &tick_config(),
+            &state_root,
+            "tick-sub",
+            "oauth",
+        )
+        .await
+        .expect("sign-out");
+        assert!(wrote.0.lock().expect("wrote").is_empty());
+    }
+
+    #[tokio::test]
+    async fn d226_explicit_switch_still_selects_a_setup_token() {
+        let dir = tempfile::tempdir().expect("dir");
+        let plugin = PluginId::from_static("tick-sub");
+        let host = TestHost::open_for(PluginKind::Subscription, plugin.clone(), dir.path());
+        store_account(&host, "a-setup", "Setup", true).await;
+        store_account(&host, "b-oauth", "Oauth", false).await;
+        let state_root = host.context().dirs().state_dir().expect("state");
+        let home = dir.path().join("agent-home");
+        let _guard = push_test_agent_homes(std::collections::BTreeMap::from([(
+            "TICK_HOME".to_owned(),
+            home,
+        )]));
+        let wrote = Arc::new(Wrote(Mutex::new(Vec::new())));
+        let sub = Arc::new(TickSub {
+            id: plugin,
+            flow: SignInFlow::Pkce,
+            wrote: Arc::clone(&wrote),
+        });
+        let opened = vec![crate::sign_in::Opened {
+            id: "tick-sub".to_owned(),
+            name: "Tick".to_owned(),
+            instance: sub,
+            host: host.context().clone(),
+            config_dir: dir.path().to_path_buf(),
+        }];
+        let registry = Names {
+            id: "tick-sub",
+            sign_in: AgentSignIn::new(&["tick-agent"], "TICK_HOME", "tick-home"),
+        };
+        let target = accounts_switch(
+            &tick_config(),
+            &registry,
+            &state_root,
+            &opened,
+            "tick-agent",
+            "Setup",
+        )
+        .await
+        .expect("explicit use");
+        assert_eq!(target, "setup");
+        assert_eq!(wrote.0.lock().expect("wrote").as_slice(), ["a-setup"]);
+    }
+
+    fn tick_config() -> hofund_config::Config {
+        use hofund_config::{Accounts, CatalogSettings, Failover, Stays, Subscription};
+        hofund_config::Config {
+            listen: "127.0.0.1:3425".parse().expect("addr"),
+            allow_ips: Vec::new(),
+            trust_proxy: false,
+            token_file: String::new(),
+            usage_file: String::new(),
+            failover: Failover::default(),
+            connect_timeout: std::time::Duration::from_secs(10),
+            read_timeout: std::time::Duration::from_secs(60),
+            providers: Vec::new(),
+            routes: Vec::new(),
+            subscriptions: vec![Subscription {
+                id: "tick-sub".to_owned(),
+                accounts: Accounts::All,
+                account_weights: std::collections::BTreeMap::new(),
+                routing: "smart".to_owned(),
+                at_once: None,
+                stays: Stays::Auto,
+                options: std::collections::BTreeMap::new(),
+            }],
+            warnings: Vec::new(),
+            agents: Default::default(),
+            catalog: CatalogSettings::default(),
+            usage: hofund_config::UsageSettings::default(),
+            discover_agent_accounts: false,
+            lan_allow: Vec::new(),
+        }
     }
 
     #[test]
