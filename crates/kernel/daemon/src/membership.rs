@@ -115,6 +115,7 @@ struct LiveMember {
     subscription: bool,
     patience: Option<Duration>,
     kernel: bool,
+    rest_probe: bool,
     http_profile: hofund_plugin_host::HttpProfile,
     http_limits: hofund_plugin_host::HttpLimits,
     realtime_url: String,
@@ -677,6 +678,7 @@ impl LiveMember {
             subscription,
             patience: built.patience,
             kernel: built.kernel,
+            rest_probe: built.adapter.rest_probe(),
             http_profile: built.http_profile.clone(),
             http_limits: built.http_limits,
             realtime_url: built.realtime_url.clone(),
@@ -731,7 +733,7 @@ impl Member for LiveMember {
     }
 
     fn background_probe(&self) -> bool {
-        self.kernel
+        self.kernel || self.rest_probe
     }
 
     fn close_idle_connections(&self) {
@@ -833,13 +835,17 @@ impl Member for LiveMember {
     }
 
     async fn list_models(&self) -> Result<hofund_router::ModelListAnswer, PluginError> {
-        self.stack
-            .inner
-            .inner
-            .provider
-            .list_models(&ListQuery::new())
-            .await
-            .map(|_| hofund_router::ModelListAnswer)
+        let listed = if self.rest_probe {
+            self.stack.inner.inner.provider.list_for_probe().await
+        } else {
+            self.stack
+                .inner
+                .inner
+                .provider
+                .list_models(&ListQuery::new())
+                .await
+        };
+        listed.map(|_| hofund_router::ModelListAnswer)
     }
 
     async fn forward(&self, path: &str, body: RawBody) -> Result<RawAnswer, PluginError> {
@@ -977,7 +983,10 @@ where
 fn count_cools(error: &PluginError) -> bool {
     use hofund_plugin_api::PluginErrorKind;
 
-    if error.is_account_restricted() || error.is_ordinary_failure() {
+    if error.is_account_restricted()
+        || error.is_ordinary_failure()
+        || error.is_subscription_suspended()
+    {
         return true;
     }
     match error.kind() {
@@ -1293,6 +1302,7 @@ pub(crate) fn into_plugin(error: ProviderError) -> PluginError {
     let cooldown = error.cools();
     let account_restricted = error.is_account_restricted();
     let ordinary_failure = error.is_ordinary_failure();
+    let subscription_suspended = error.is_subscription_suspended();
     let status = error.status;
     let billed = error.billed().cloned();
     let credit_message = credit.then(|| error.message.clone());
@@ -1339,6 +1349,9 @@ pub(crate) fn into_plugin(error: ProviderError) -> PluginError {
     }
     if ordinary_failure {
         converted = converted.ordinary_failure();
+    }
+    if subscription_suspended {
+        converted = converted.subscription_suspended();
     }
     converted
 }
@@ -1401,7 +1414,7 @@ mod tests {
     use std::time::Duration;
 
     use async_trait::async_trait;
-    use hofund_plugin_api::{RawAnswer, RawBody, Request};
+    use hofund_plugin_api::{PluginError, RawAnswer, RawBody, Request};
     use hofund_provider::{Completion, Provider, ProviderError};
     use hofund_router::{CooldownPolicy, Cooldowns, FailoverPolicy, Snapshot};
 
@@ -1479,6 +1492,21 @@ mod tests {
         let restored = crate::adapt::provider_error(plugin);
         assert!(restored.is_ordinary_failure());
         assert!(!restored.is_account_restricted());
+    }
+
+    #[test]
+    fn d240_subscription_suspended_survives_provider_round_trip() {
+        let error = ProviderError::status(401, "denied").subscription_suspended();
+        let plugin = super::into_plugin(error);
+        assert!(plugin.is_subscription_suspended());
+        assert!(plugin.cools());
+        assert_eq!(plugin.status(), Some(401));
+        let restored = crate::adapt::provider_error(plugin);
+        assert!(restored.is_subscription_suspended());
+        assert_eq!(restored.status, Some(401));
+        assert!(super::count_cools(
+            &PluginError::status_error(401, "denied").subscription_suspended()
+        ));
     }
 
     struct Boom {

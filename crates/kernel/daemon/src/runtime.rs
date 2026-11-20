@@ -270,7 +270,15 @@ impl Runtime {
         providers: &[hofund_config::Provider],
     ) {
         self.spend_caps.load();
-        let spent = Arc::new(hofund_usage::KeySpent::new(usage));
+        let configured = self
+            .fingerprints
+            .lock()
+            .expect("provider fingerprints")
+            .keys()
+            .cloned()
+            .collect();
+        crate::served::load(&self.cooldowns, &configured, &usage);
+        let spent = Arc::new(hofund_usage::KeySpent::new(Arc::clone(&usage)));
         let gate = Arc::new(crate::spend_caps::SpendCapGate::new(
             Arc::clone(&self.spend_caps),
             Arc::clone(&spent),
@@ -578,7 +586,14 @@ impl Runtime {
 
         let mut previous = self.fingerprints.lock().expect("provider fingerprints");
         for (was, now) in key_moves {
+            let secret_changed = previous
+                .get(was)
+                .zip(fingerprints.get(now))
+                .is_some_and(|(before, after)| before != after);
             self.cooldowns.move_member(was, now);
+            if secret_changed {
+                self.cooldowns.forget_prior_service(now);
+            }
             if previous.remove(was).is_some()
                 && let Some(fingerprint) = fingerprints.get(now)
             {

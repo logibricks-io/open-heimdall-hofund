@@ -793,6 +793,7 @@ PluginError::const fn credit_soon (& self) -> bool
 PluginError::const fn is_account_restricted (& self) -> bool
 PluginError::const fn is_credit (& self) -> bool
 PluginError::const fn is_ordinary_failure (& self) -> bool
+PluginError::const fn is_subscription_suspended (& self) -> bool
 PluginError::const fn kind (& self) -> PluginErrorKind
 PluginError::const fn ordinary_failure (mut self) -> Self
 PluginError::const fn reset_after (& self) -> Option < Duration >
@@ -801,6 +802,7 @@ PluginError::const fn scopes_model (& self) -> bool
 PluginError::const fn skip_failover_same_plugin (mut self) -> Self
 PluginError::const fn skips_failover_same_plugin (& self) -> bool
 PluginError::const fn status (& self) -> Option < u16 >
+PluginError::const fn subscription_suspended (mut self) -> Self
 PluginError::const fn verifies_account (& self) -> bool
 PluginError::const fn with_credit_soon (mut self) -> Self
 PluginError::const fn with_model_scope (mut self) -> Self
@@ -1338,6 +1340,7 @@ UpstreamProvider::async fn count_input (& self , request : Request , inbound : P
 UpstreamProvider::async fn execute (& self , request : Request , inbound : ProtocolId ,) -> Result < Completion , PluginError >
 UpstreamProvider::async fn forward (& self , path : & str , body : RawBody) -> Result < RawAnswer , PluginError >
 UpstreamProvider::async fn health (& self) -> Result < () , PluginError >
+UpstreamProvider::async fn list_for_probe (& self , query : & ListQuery) -> Result < ModelList , PluginError >
 UpstreamProvider::async fn list_models (& self , query : & ListQuery) -> Result < ModelList , PluginError >
 UpstreamProvider::async fn probe (& self , query : & ProbeQuery) -> Result < ProbeReport , PluginError >
 UpstreamProvider::async fn quota (& self , query : & QuotaQuery) -> Result < Vec < QuotaWindow > , PluginError >
@@ -1345,6 +1348,7 @@ UpstreamProvider::async fn shutdown (& self , deadline : Duration) -> Result < (
 UpstreamProvider::fn attempt_base (& self) -> String
 UpstreamProvider::fn attempt_protocol (& self) -> String
 UpstreamProvider::fn close_idle_connections (& self)
+UpstreamProvider::fn rest_probe (& self) -> bool
 UpstreamSpec
 UpstreamSpec #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 UpstreamSpec::const fn credential (& self) -> CredentialStyle
