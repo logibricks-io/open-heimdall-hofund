@@ -548,6 +548,47 @@ impl Router {
             .collect()
     }
 
+    /// Ids a caller may name, including a dashed spelling of a dotted model id.
+    #[must_use]
+    pub fn served_models(&self) -> Vec<hofund_codec::ServedModel> {
+        let mut out = Vec::new();
+        for (route, definition) in &self.routes {
+            let bare = route
+                .rsplit_once('/')
+                .map(|(_, model)| model.to_owned())
+                .unwrap_or_else(|| route.clone());
+            for hop in &definition.hops {
+                let wire = hop.wire_model.clone().unwrap_or_else(|| bare.clone());
+                let provider = hop.member.route_id().to_owned();
+                let entry = |id: String| hofund_codec::ServedModel {
+                    id,
+                    route: route.clone(),
+                    bare: bare.clone(),
+                    wire: wire.clone(),
+                    provider: provider.clone(),
+                };
+                out.push(entry(route.clone()));
+                let qualified = format!("{provider}/{bare}");
+                if qualified != *route {
+                    out.push(entry(qualified));
+                }
+                if bare != *route {
+                    out.push(entry(bare.clone()));
+                }
+            }
+        }
+        out
+    }
+
+    /// Whether `model` resolves to a hop `scope` allows.
+    #[must_use]
+    pub fn admits(&self, model: &str, scope: Option<&RouteScope>) -> bool {
+        let Ok(resolved) = self.resolve(model) else {
+            return false;
+        };
+        scoped_hops(model, &resolved, scope).is_ok_and(|hops| !hops.is_empty())
+    }
+
     /// Members currently in reserve for `model`, with their at-once limits.
     #[must_use]
     pub fn route_reserves(&self, model: &str) -> Vec<(String, usize)> {
@@ -821,6 +862,7 @@ impl Router {
             cooldowns: self.cooldowns.clone(),
             trace,
             strategies: Arc::clone(&self.strategies),
+            served: self.served_models(),
             drain_moves: ordered.drain_moves,
             walk_started: wait_hook
                 .as_ref()
@@ -878,7 +920,7 @@ impl Router {
         let mut unsupported = false;
         for (index, hop) in resolved.hops.iter().enumerate() {
             let mut attempt = request.clone();
-            apply_wire(&mut attempt, hop, &resolved.bare);
+            apply_wire(&mut attempt, hop, &resolved.bare, &self.served_models());
             let span = member_span(hop, index, inbound_protocol);
             let started = Instant::now();
             let result = hop
@@ -1620,6 +1662,7 @@ struct DispatchState {
     cooldowns: Option<Arc<Cooldowns>>,
     trace: Option<RouteTraceHandle>,
     strategies: Arc<strategy::StrategyState>,
+    served: Vec<hofund_codec::ServedModel>,
     drain_moves: Vec<RoundMove>,
     walk_started: Instant,
     group_walk_budget: Duration,
@@ -1859,7 +1902,7 @@ impl DispatchState {
         for &index in asking {
             let hop = self.resolved.hops[index].clone();
             let mut attempt = self.request.clone();
-            apply_wire(&mut attempt, &hop, &self.resolved.bare);
+            apply_wire(&mut attempt, &hop, &self.resolved.bare, &self.served);
             let upstream_model = attempt.model.clone();
             let plugin_id = hop.member.plugin_id();
             if self.refused_providers.contains(hop.member.route_id())
@@ -2359,11 +2402,19 @@ fn order_hops(hops: Vec<Hop>, cooldowns: &Cooldowns, bare: &str) -> Vec<Hop> {
     ready
 }
 
-fn apply_wire(request: &mut Request, hop: &Hop, bare: &str) {
+fn apply_wire(request: &mut Request, hop: &Hop, bare: &str, served: &[hofund_codec::ServedModel]) {
     request.model = hop.wire_model.clone().unwrap_or_else(|| bare.to_owned());
     if request.params.max_tokens.is_none() {
         request.params.max_tokens = hop.max_output_tokens;
     }
+    let upstream_model = request.model.clone();
+    hofund_codec::prepare_advisor_for_hop(
+        request,
+        hop.member.protocol(),
+        hop.member.route_id(),
+        &upstream_model,
+        served,
+    );
 }
 
 fn candidates(found: &[(String, Hop, affinity::Stays, Option<at_once::AtOnceMember>)]) -> String {

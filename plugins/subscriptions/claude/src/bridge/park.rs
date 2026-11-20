@@ -16,8 +16,8 @@ use std::time::Duration;
 use bytes::Bytes;
 use futures_util::future::BoxFuture;
 use hofund_plugin_api::{
-    AccountId, BridgeCallbackGuard, BridgeCallbackHandler, BridgeCallbackReply, ContentPart,
-    PluginError, Request, SpawnRequest,
+    AccountId, AskHandle, BridgeCallbackGuard, BridgeCallbackHandler, BridgeCallbackReply,
+    CallerStamp, Completion, ContentPart, PluginError, Request, SpawnRequest, StreamEvent,
 };
 use ring::rand::{SecureRandom, SystemRandom};
 use serde_json::{Value, json};
@@ -42,6 +42,8 @@ struct Inner {
     early: Mutex<HashMap<String, Delivered>>,
     runs: Mutex<HashMap<u64, ParkedRun>>,
     next_id: Mutex<u64>,
+    ask: Mutex<Option<AskHandle>>,
+    searcher: Mutex<Option<Arc<dyn super::advisor::CallerSearch>>>,
 }
 
 impl std::fmt::Debug for Inner {
@@ -63,6 +65,16 @@ struct ParkedRun {
     continuation: Option<String>,
     said_queue: String,
     callback_guard: Option<BridgeCallbackGuard>,
+    caller: Option<CallerStamp>,
+    advisor: Option<AdvisorRun>,
+}
+
+struct AdvisorRun {
+    model: String,
+    caller: CallerStamp,
+    said: String,
+    uses: u32,
+    outcomes: Vec<super::advisor::AdviceOutcome>,
 }
 
 /// Result delivered to a waiting MCP callback.
@@ -137,9 +149,185 @@ impl Bridge {
                     continuation: None,
                     said_queue: String::new(),
                     callback_guard: None,
+                    caller: None,
+                    advisor: None,
                 },
             );
         id
+    }
+
+    /// The nested-call backend the advisor uses. A later install is visible.
+    pub(crate) fn use_ask(&self, ask: AskHandle) {
+        *self
+            .inner
+            .ask
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ask);
+    }
+
+    /// Remembers the gateway key that started the run.
+    pub(crate) fn set_caller(&self, run_id: u64, caller: Option<CallerStamp>) {
+        if let Some(run) = self
+            .inner
+            .runs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_mut(&run_id)
+        {
+            run.caller = caller;
+        }
+    }
+
+    /// Arms `run_id` so an `advisor` callback asks `model` as `caller`.
+    pub(crate) fn arm_advisor(&self, run_id: u64, model: String, caller: Option<CallerStamp>) {
+        if let Some(run) = self
+            .inner
+            .runs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_mut(&run_id)
+        {
+            run.advisor = Some(AdvisorRun {
+                model,
+                caller: caller.unwrap_or_default(),
+                said: String::new(),
+                uses: 0,
+                outcomes: Vec::new(),
+            });
+        }
+    }
+
+    /// Appends text the model wrote before it called the advisor.
+    pub(crate) fn note_said(&self, run_id: u64, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        if let Some(run) = self
+            .inner
+            .runs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_mut(&run_id)
+            && let Some(advisor) = run.advisor.as_mut()
+        {
+            advisor.said.push_str(text);
+        }
+    }
+
+    /// Advisor results recorded for this run, in call order.
+    pub(crate) fn take_outcomes(&self, run_id: u64) -> Vec<super::advisor::AdviceOutcome> {
+        self.inner
+            .runs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_mut(&run_id)
+            .and_then(|run| run.advisor.as_mut())
+            .map(|advisor| std::mem::take(&mut advisor.outcomes))
+            .unwrap_or_default()
+    }
+
+    /// Installs a search made as the original caller. Production leaves it unset.
+    #[cfg(test)]
+    pub(crate) fn set_searcher(&self, searcher: Arc<dyn super::advisor::CallerSearch>) {
+        *self
+            .inner
+            .searcher
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(searcher);
+    }
+
+    fn searcher(&self) -> Option<Arc<dyn super::advisor::CallerSearch>> {
+        self.inner
+            .searcher
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn advisor_caller(&self, run_id: u64) -> CallerStamp {
+        self.inner
+            .runs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&run_id)
+            .map(|run| {
+                run.caller
+                    .clone()
+                    .or_else(|| run.advisor.as_ref().map(|advisor| advisor.caller.clone()))
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default()
+    }
+
+    async fn advise(&self, run_id: u64, request: &Request, _call_id: &str) -> Delivered {
+        let prepared = {
+            let mut runs = self
+                .inner
+                .runs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let Some(advisor) = runs.get_mut(&run_id).and_then(|run| run.advisor.as_mut()) else {
+                return text_delivered(&super::advisor::failure_text("unavailable"), true);
+            };
+            advisor.uses += 1;
+            if advisor.uses > super::advisor::max_uses() {
+                let outcome = super::advisor::AdviceOutcome {
+                    text: super::advisor::failure_text("max_uses_exceeded"),
+                    code: "max_uses_exceeded".to_owned(),
+                };
+                let delivered = text_delivered(&outcome.text, true);
+                advisor.outcomes.push(outcome);
+                return delivered;
+            }
+            (
+                advisor.model.clone(),
+                advisor.caller.clone(),
+                advisor.said.clone(),
+            )
+        };
+        let (model, caller, said) = prepared;
+        let handle = self
+            .inner
+            .ask
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let outcome = match handle {
+            Some(handle) => {
+                let body = super::advisor::advice_request(request, &said, &model);
+                match handle.ask(&caller, body).await {
+                    Ok(completion) => {
+                        let text = completion_text(completion).await;
+                        if text.trim().is_empty() {
+                            failed("unavailable")
+                        } else {
+                            super::advisor::AdviceOutcome {
+                                text,
+                                code: String::new(),
+                            }
+                        }
+                    }
+                    Err(error) => failed(super::advisor::error_code(&error)),
+                }
+            }
+            None => failed("unavailable"),
+        };
+        let delivered = if outcome.code.is_empty() {
+            text_delivered(&outcome.text, false)
+        } else {
+            text_delivered(&super::advisor::failure_text(&outcome.code), true)
+        };
+        if let Some(advisor) = self
+            .inner
+            .runs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_mut(&run_id)
+            .and_then(|run| run.advisor.as_mut())
+        {
+            advisor.outcomes.push(outcome);
+        }
+        delivered
     }
 
     /// Keeps the callback registration alive until the run is aborted or dropped.
@@ -496,6 +684,27 @@ impl RunCallback {
                     .to_string(),
             );
         }
+        if super::advisor::is_advisor_name(&name) {
+            return ok_reply(&self.table.advise(self.run_id, &self.request, &id).await);
+        }
+        if super::advisor::is_search_name(&name)
+            && let Some(searcher) = self.table.searcher()
+        {
+            let caller = self.table.advisor_caller(self.run_id);
+            let arguments = parsed.get("arguments").cloned().unwrap_or(Value::Null);
+            return match searcher.search(&caller, &arguments) {
+                Ok(text) => ok_reply(&Delivered {
+                    content: json!([{"type":"text","text": text}]),
+                    is_error: false,
+                    tools: None,
+                }),
+                Err(error) => ok_reply(&Delivered {
+                    content: json!([{"type":"text","text": error.message()}]),
+                    is_error: true,
+                    tools: None,
+                }),
+            };
+        }
         if tool_choice_refuses(&name, &self.request) {
             return ok_reply(&Delivered {
                 content: json!([{"type":"text","text": format!("tool {name} is not allowed by the client tool_choice")}]),
@@ -517,6 +726,49 @@ impl RunCallback {
                 .to_string(),
         )
     }
+}
+
+fn failed(code: &str) -> super::advisor::AdviceOutcome {
+    super::advisor::AdviceOutcome {
+        text: super::advisor::failure_text(code),
+        code: code.to_owned(),
+    }
+}
+
+fn text_delivered(text: &str, is_error: bool) -> Delivered {
+    Delivered {
+        content: json!([{"type":"text","text": text}]),
+        is_error,
+        tools: None,
+    }
+}
+
+async fn completion_text(completion: Completion) -> String {
+    match completion {
+        Completion::Unary(response) => part_text(&response.message.content),
+        Completion::Stream(mut stream) => {
+            use futures_util::StreamExt;
+            let mut text = String::new();
+            while let Some(Ok(event)) = stream.next().await {
+                if let StreamEvent::TextDelta(delta) = event {
+                    text.push_str(&delta.text);
+                }
+            }
+            text
+        }
+        Completion::Raw(_) => String::new(),
+        _ => String::new(),
+    }
+}
+
+fn part_text(parts: &[ContentPart]) -> String {
+    let mut text = String::new();
+    for part in parts {
+        if let ContentPart::Text(part) = part {
+            text.push_str(&part.text);
+        }
+    }
+    text
 }
 
 fn ok_reply(delivered: &Delivered) -> BridgeCallbackReply {

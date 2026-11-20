@@ -78,18 +78,45 @@ impl ClaudeUpstream {
         })
     }
 
-    async fn stdout_for(&self, plan: &SpawnPlan, spec: &StartSpec) -> Result<String, PluginError> {
+    async fn stdout_for(
+        &self,
+        plan: &SpawnPlan,
+        spec: &StartSpec,
+        run_id: Option<u64>,
+    ) -> Result<String, PluginError> {
         #[cfg(test)]
         if let Some(runner) = &self.runner {
-            return runner(plan);
+            let text = runner(plan)?;
+            self.note_stdout(run_id, &text);
+            return Ok(text);
         }
-        self.spawn_and_read(plan, workdir(spec)).await
+        self.spawn_and_read(plan, workdir(spec), run_id).await
+    }
+
+    fn note_stdout(&self, run_id: Option<u64>, stdout: &str) {
+        let Some(run_id) = run_id else {
+            return;
+        };
+        let mut decoder = crate::bridge::decode::Decoder::new();
+        let mut said = String::new();
+        for line in stdout.lines() {
+            let Some(crate::bridge::decode::Step::Events(batch)) = decoder.push_line(line) else {
+                continue;
+            };
+            for event in batch {
+                if let hofund_plugin_api::StreamEvent::TextDelta(delta) = event {
+                    said.push_str(&delta.text);
+                }
+            }
+        }
+        self.bridge.note_said(run_id, &said);
     }
 
     async fn spawn_and_read(
         &self,
         plan: &SpawnPlan,
         cwd: &std::path::Path,
+        run_id: Option<u64>,
     ) -> Result<String, PluginError> {
         let program = plan
             .argv
@@ -115,9 +142,19 @@ impl ClaudeUpstream {
         child.close_stdin().await?;
         let mut stdout = child.stdout_stream()?;
         let mut text = String::new();
+        let mut pending = String::new();
         while let Some(chunk) = stdout.next_chunk().await {
             let chunk = chunk?;
-            text.push_str(&String::from_utf8_lossy(&chunk));
+            let piece = String::from_utf8_lossy(&chunk);
+            text.push_str(&piece);
+            pending.push_str(&piece);
+            while let Some(at) = pending.find('\n') {
+                let line = pending.drain(..=at).collect::<String>();
+                self.note_stdout(run_id, line.trim_end_matches(['\n', '\r']));
+            }
+        }
+        if !pending.is_empty() {
+            self.note_stdout(run_id, &pending);
         }
         let status = child.wait().await.unwrap_or(-1);
         if status != 0 && !crate::bridge::failure::stream_finished(&text) {
@@ -178,6 +215,9 @@ impl UpstreamProvider for ClaudeUpstream {
         _inbound: ProtocolId,
     ) -> Result<Completion, PluginError> {
         reject_non_text(&request)?;
+        self.bridge.use_ask(self.host.ask().clone());
+        let mut request = request;
+        let advisor_model = crate::bridge::advisor::prepare(&mut request, self.host.ask());
         if let Some(found) = self.try_match(&request) {
             return self.continue_parked(found, &request).await;
         }
@@ -185,7 +225,6 @@ impl UpstreamProvider for ClaudeUpstream {
             return self.continue_resume(resume, &request).await;
         }
         // Stage D only on a resume miss.
-        let mut request = request;
         crate::bridge::flags::apply_stage_d(&mut request);
         let unshelved = self.bridge.unshelve(&request, &self.account);
         self.bridge.retire(&self.account, &request);
@@ -250,6 +289,10 @@ impl UpstreamProvider for ClaudeUpstream {
             self.bridge
                 .set_effort(id, crate::bridge::flags::from_request(&request).effort);
             self.bridge.set_room_guard(id, room);
+            self.bridge.set_caller(id, request.caller.clone());
+            if let Some(model) = advisor_model.clone() {
+                self.bridge.arm_advisor(id, model, request.caller.clone());
+            }
             run_id = Some(id);
             let token = park::new_callback_token()?;
             let handler = self.bridge.callback_handler(id, request.clone());
@@ -278,7 +321,7 @@ impl UpstreamProvider for ClaudeUpstream {
         if let Some((_, since)) = unshelved {
             plan.stdin = stdin_from_since(&since);
         }
-        let stdout = self.stdout_for(&plan, &spec).await?;
+        let stdout = self.stdout_for(&plan, &spec, run_id).await?;
         let _ = callback_guard;
         self.finish_stdout(stdout, run_id, has_tools(&request), &request, login_version)
             .await
@@ -361,7 +404,7 @@ impl ClaudeUpstream {
         if !said.is_empty() {
             plan.stdin = stdin_from_said(&said);
         }
-        let stdout = self.stdout_for(&plan, &spec).await?;
+        let stdout = self.stdout_for(&plan, &spec, Some(found.run_id)).await?;
         self.finish_stdout(
             stdout,
             Some(found.run_id),
@@ -405,7 +448,7 @@ impl ClaudeUpstream {
             plan.stdin = format!("{prefix}{}", plan.stdin);
             self.bridge.set_effort(resume.run_id, wanted);
         }
-        let stdout = self.stdout_for(&plan, &spec).await?;
+        let stdout = self.stdout_for(&plan, &spec, Some(resume.run_id)).await?;
         self.finish_stdout(
             stdout,
             Some(resume.run_id),
@@ -444,6 +487,20 @@ impl ClaudeUpstream {
                 return Err(error);
             }
         };
+        let events = if let Some(run_id) = run_id {
+            let outcomes = self.bridge.take_outcomes(run_id);
+            if outcomes.is_empty() {
+                events
+            } else {
+                crate::bridge::advisor::splice(events, &outcomes)
+            }
+        } else {
+            events
+        };
+        let calls: Vec<_> = calls
+            .into_iter()
+            .filter(|(_, name)| !crate::bridge::advisor::is_advisor_name(name))
+            .collect();
         if let Some(run_id) = run_id {
             if let Some(session) = session {
                 self.bridge.set_session(run_id, session, Vec::new());

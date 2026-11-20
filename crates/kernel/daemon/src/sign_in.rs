@@ -182,7 +182,7 @@ fn open(
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
-    let built = subscriptions::build(&config, path, None, registry, None)?;
+    let built = subscriptions::build(&config, path, None, registry, None, None)?;
     let mut opened = Vec::with_capacity(built.len());
     for (id, state) in built {
         let name = registry.subscription(&id).map_or_else(

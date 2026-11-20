@@ -12,6 +12,7 @@ use std::time::{Duration, SystemTime};
 
 use crate::SecretString;
 use crate::body::{Body, BodyStream};
+use crate::completion::Completion;
 use crate::duplex::{DuplexRequest, DuplexSession};
 use crate::error::PluginError;
 use crate::forward::{Forward, RawAnswer};
@@ -26,8 +27,10 @@ use crate::kernel::{
 #[cfg(feature = "kernel")]
 use crate::kernel::{NoBridgeCallback, NoLoopback};
 use crate::records::{Account, QuotaObservation, SignInCtx};
+use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::future::BoxFuture;
+use hofund_ir::{CallerStamp, Request};
 
 pub use crate::kernel::Job;
 
@@ -847,6 +850,131 @@ impl ObserveHandle {
     }
 }
 
+/// Asks another model as the original gateway caller.
+///
+/// The bridge callback has no gateway key. This backend is the gateway's
+/// normal route, scope, and spend check.
+#[async_trait]
+#[doc(hidden)]
+pub trait AskBackend: Send + Sync {
+    /// Whether `model` is a model `caller` may use.
+    fn serves(&self, caller: &CallerStamp, model: &str) -> bool;
+
+    /// Runs `request` as `caller`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when the model is out of scope, a limit refuses
+    /// it, or no upstream answers.
+    async fn ask(&self, caller: &CallerStamp, request: Request) -> Result<Completion, PluginError>;
+}
+
+/// A shared slot filled once the gateway exists.
+///
+/// Subscription hosts are built before the gateway, so the slot starts empty
+/// and the daemon installs the backend later.
+#[doc(hidden)]
+pub struct AskSlot {
+    inner: Mutex<Option<Arc<dyn AskBackend>>>,
+}
+
+impl AskSlot {
+    /// An empty slot.
+    #[must_use]
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            inner: Mutex::new(None),
+        })
+    }
+
+    /// Replaces the backend. Later calls see `backend`.
+    pub fn install(&self, backend: Arc<dyn AskBackend>) {
+        *self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(backend);
+    }
+}
+
+#[async_trait]
+impl AskBackend for AskSlot {
+    fn serves(&self, caller: &CallerStamp, model: &str) -> bool {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .is_some_and(|backend| backend.serves(caller, model))
+    }
+
+    async fn ask(&self, caller: &CallerStamp, request: Request) -> Result<Completion, PluginError> {
+        let backend = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        match backend {
+            Some(backend) => backend.ask(caller, request).await,
+            None => Err(PluginError::unsupported(
+                "no nested model call is installed",
+            )),
+        }
+    }
+}
+
+/// Nested model calls for one plugin.
+#[derive(Clone)]
+pub struct AskHandle {
+    inner: Arc<dyn AskBackend>,
+}
+
+impl AskHandle {
+    /// A handle around `inner`.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn from_backend(inner: Arc<dyn AskBackend>) -> Self {
+        Self { inner }
+    }
+
+    /// Whether `model` is a model `caller` may use.
+    #[must_use]
+    pub fn serves(&self, caller: &CallerStamp, model: &str) -> bool {
+        self.inner.serves(caller, model)
+    }
+
+    /// Runs `request` as `caller`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when the backend refuses or fails the call.
+    pub async fn ask(
+        &self,
+        caller: &CallerStamp,
+        request: Request,
+    ) -> Result<Completion, PluginError> {
+        self.inner.ask(caller, request).await
+    }
+}
+
+#[cfg_attr(not(feature = "kernel"), allow(dead_code))]
+struct NoAsk;
+
+#[async_trait]
+impl AskBackend for NoAsk {
+    fn serves(&self, _caller: &CallerStamp, _model: &str) -> bool {
+        false
+    }
+
+    async fn ask(
+        &self,
+        _caller: &CallerStamp,
+        _request: Request,
+    ) -> Result<Completion, PluginError> {
+        Err(PluginError::unsupported(
+            "no nested model call is installed",
+        ))
+    }
+}
+
 /// What `build` and subscription calls receive.
 ///
 /// Clone the handles. That clones an [`Arc`], not a secret. The only
@@ -866,6 +994,7 @@ pub struct HostContext {
     observe: ObserveHandle,
     loopback: LoopbackHandle,
     bridge_callback: BridgeCallbackHandle,
+    ask: AskHandle,
     bridge_mcp_program: Option<PathBuf>,
     /// When set, one subscription quota poll is a user refresh of that account's card.
     quota_card_refresh: Option<AccountId>,
@@ -953,6 +1082,7 @@ impl HostContext {
                 plugin: key.clone(),
                 inner: Arc::new(NoBridgeCallback),
             },
+            ask: AskHandle::from_backend(Arc::new(NoAsk)),
             bridge_mcp_program: None,
             quota_card_refresh: None,
             key,
@@ -1059,6 +1189,24 @@ impl HostContext {
     #[must_use]
     pub fn bridge_callback(&self) -> &BridgeCallbackHandle {
         &self.bridge_callback
+    }
+
+    /// Nested model calls made as the original gateway caller.
+    #[must_use]
+    pub fn ask(&self) -> &AskHandle {
+        &self.ask
+    }
+
+    /// Kernel-only. Plugins do not call this.
+    ///
+    /// Installs the backend [`Self::ask`] uses. Without one, [`AskHandle::serves`]
+    /// is false and [`AskHandle::ask`] is unsupported.
+    #[cfg(feature = "kernel")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_ask(mut self, ask: Arc<dyn AskBackend>) -> Self {
+        self.ask = AskHandle::from_backend(ask);
+        self
     }
 
     /// Kernel-only. Plugins do not call this.

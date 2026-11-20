@@ -37,7 +37,7 @@ pub use extensions::Extensions;
 pub use message::{Message, Role};
 pub use object_root::fold_object_root;
 pub use params::GenerationParams;
-pub use request::{Conversation, Request};
+pub use request::{CallerLimit, CallerStamp, Conversation, Request};
 pub use response::{Response, Stop, StopReason};
 pub use stream::{
     BlockStart, ContentBlockStart, ContentBlockStop, MessageDelta, MessageStart, MessageStop, Ping,
@@ -45,7 +45,7 @@ pub use stream::{
     UnknownEvent,
 };
 pub use tools::{Tool, ToolChoice, ToolChoiceMode};
-pub use usage::{Usage, normalize_cache_write};
+pub use usage::{AdvisorCall, Usage, normalize_cache_write};
 
 #[cfg(test)]
 mod tests {

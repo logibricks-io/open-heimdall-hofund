@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- D-227: A Claude Code request through the Claude subscription bridge that carries
+  an advisor server tool (`advisor_20260301`) for a model this gateway serves
+  keeps the client's instructions, offers an advisor tool beside the client's
+  tools, and answers a call by asking that model through normal routing as the
+  original gateway key. The client is told `server_tool_use` and
+  `advisor_tool_result`. One reply may ask three times; the next is
+  `max_uses_exceeded` and is not asked. A model this gateway does not serve is
+  left out and those instructions are voided. One advisor call waits at most
+  55 seconds. A dashed Claude id is sent as the provider spells the same
+  model. Relayed Messages replies record each `usage.iterations` advisor call
+  as its own usage row, kind `advisor`, priced at the advisor model. The
+  executor row is unchanged. A web search on that run, when one is installed,
+  uses the same original key. Refs D-227.
 - D-221: Antigravity sign-in, import, and add are refused for new accounts because Google suspends accounts it sees on Code Assist through Antigravity's own client. Saved accounts keep working and show a risk line. The message points at the agy CLI route. Gemini CLI is unchanged.
 - D-225: Generative Language and Vertex model paths escape each slash-separated segment and keep the slashes. An id with an empty, `.`, or `..` segment is escaped as one segment.
 

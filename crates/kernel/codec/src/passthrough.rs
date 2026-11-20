@@ -51,6 +51,11 @@ pub trait RawTap: Send {
     fn supplemental_usage(&self) -> SupplementalUsage {
         SupplementalUsage::default()
     }
+
+    /// Advisor calls seen so far. A later non-empty list replaces the earlier one.
+    fn advisor_calls(&self) -> Vec<hofund_ir::AdvisorCall> {
+        Vec::new()
+    }
 }
 
 /// Cache and reasoning counters a tap accumulated while relaying bytes.
@@ -216,6 +221,7 @@ pub(crate) struct DecoderTap {
     input: Option<i64>,
     output: Option<i64>,
     supplemental: SupplementalUsage,
+    advisor_calls: Vec<hofund_ir::AdvisorCall>,
 }
 
 impl DecoderTap {
@@ -243,6 +249,7 @@ impl DecoderTap {
             input: None,
             output: None,
             supplemental: SupplementalUsage::default(),
+            advisor_calls: Vec::new(),
         }
     }
 
@@ -277,6 +284,9 @@ impl DecoderTap {
                 self.supplemental.cache_write_1h = hour.and_then(|v| i64::try_from(v).ok());
                 if let Some(value) = usage.reasoning_tokens {
                     self.supplemental.reasoning = i64::try_from(value).ok();
+                }
+                if !usage.advisor_calls.is_empty() {
+                    self.advisor_calls.clone_from(&usage.advisor_calls);
                 }
             }
         }
@@ -320,6 +330,10 @@ impl RawTap for DecoderTap {
 
     fn supplemental_usage(&self) -> SupplementalUsage {
         self.supplemental
+    }
+
+    fn advisor_calls(&self) -> Vec<hofund_ir::AdvisorCall> {
+        self.advisor_calls.clone()
     }
 }
 

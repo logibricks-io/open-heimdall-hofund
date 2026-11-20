@@ -80,19 +80,20 @@ pub use duplex::{DuplexReader, DuplexRequest, DuplexSession, DuplexWriter, HttpV
 pub use error::{PluginError, PluginErrorKind};
 pub use forward::{Forward, RawAnswer, RawBody};
 pub use hofund_ir::{
-    BlockStart, ContentBlockStart, ContentBlockStop, ContentPart, Conversation, Effort, Extensions,
-    ImagePart, ImageSource, Message, MessageDelta, MessageStart, MessageStop, Request, Response,
-    Role, SignatureDelta, StillWorking, Stop, StopReason, StreamEvent, TextDelta, TextPart,
-    ThinkingDelta, ThinkingPart, Tool, ToolArguments, ToolArgumentsDelta, ToolCallPart, ToolChoice,
-    ToolChoiceMode, ToolResultPart, Usage, too_long, words_of,
+    AdvisorCall, BlockStart, CallerLimit, CallerStamp, ContentBlockStart, ContentBlockStop,
+    ContentPart, Conversation, Effort, Extensions, ImagePart, ImageSource, Message, MessageDelta,
+    MessageStart, MessageStop, Request, Response, Role, SignatureDelta, StillWorking, Stop,
+    StopReason, StreamEvent, TextDelta, TextPart, ThinkingDelta, ThinkingPart, Tool, ToolArguments,
+    ToolArgumentsDelta, ToolCallPart, ToolChoice, ToolChoiceMode, ToolResultPart, UnknownEvent,
+    Usage, too_long, words_of,
 };
 pub use host::{
-    AccountLease, AccountsHandle, AuthResult, BRIDGE_CALLBACK_PATH_PREFIX, BindBlocked,
-    BridgeCallbackGuard, BridgeCallbackHandle, BridgeCallbackHandler, BridgeCallbackReply,
-    CallerScope, ClockHandle, DirHandle, GatewayHandle, HostContext, HttpHandle, Job, JobId,
-    JobSpec, LOOPBACK_CANCEL_PATH, LongLivedChild, LoopbackBinding, LoopbackHandle, LoopbackSpec,
-    ObserveHandle, PipedChild, ProcessHandle, RedirectHost, SchedulerHandle, SecretsHandle,
-    SpawnRequest, Spawned, SurfaceHost,
+    AccountLease, AccountsHandle, AskBackend, AskHandle, AskSlot, AuthResult,
+    BRIDGE_CALLBACK_PATH_PREFIX, BindBlocked, BridgeCallbackGuard, BridgeCallbackHandle,
+    BridgeCallbackHandler, BridgeCallbackReply, CallerScope, ClockHandle, DirHandle, GatewayHandle,
+    HostContext, HttpHandle, Job, JobId, JobSpec, LOOPBACK_CANCEL_PATH, LongLivedChild,
+    LoopbackBinding, LoopbackHandle, LoopbackSpec, ObserveHandle, PipedChild, ProcessHandle,
+    RedirectHost, SchedulerHandle, SecretsHandle, SpawnRequest, Spawned, SurfaceHost,
 };
 pub use http_budget::{HostReadBudget, read_budget, set_read_budget};
 pub use id::{
@@ -153,6 +154,8 @@ mod tests {
         assert_impl_all!(crate::ObserveHandle: Send, Sync);
         assert_impl_all!(crate::LoopbackHandle: Send, Sync);
         assert_impl_all!(crate::BridgeCallbackHandle: Send, Sync);
+        assert_impl_all!(crate::AskHandle: Send, Sync);
+        assert_impl_all!(crate::AskSlot: Send, Sync);
         assert_impl_all!(crate::BridgeCallbackGuard: Send);
         assert_impl_all!(crate::BridgeCallbackReply: Send, Sync);
         assert_impl_all!(crate::SurfaceHost: Send, Sync);
