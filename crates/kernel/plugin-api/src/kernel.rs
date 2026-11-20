@@ -24,6 +24,7 @@ use crate::error::PluginError;
 use crate::forward::{Forward, RawAnswer};
 use crate::id::{AccountId, PluginKey};
 use crate::records::{Account, QuotaObservation};
+use crate::websocket::{WebSocketMessage, WebSocketRequest, WebSocketSession};
 use secrecy::{ExposeSecret, SecretString};
 
 /// HTTP request type used by [`HttpBackend`]. Re-exported so the host crate
@@ -65,6 +66,18 @@ pub trait HttpBackend: Send + Sync {
         ))
     }
 
+    /// Opens one WebSocket. The default refuses with
+    /// [`PluginErrorKind::Unsupported`](crate::PluginErrorKind::Unsupported).
+    async fn open_websocket(
+        &self,
+        request: WebSocketRequest,
+    ) -> Result<WebSocketSession, PluginError> {
+        let _ = request;
+        Err(PluginError::unsupported(
+            "this HTTP backend has no websocket client",
+        ))
+    }
+
     /// The process-wide `reqwest` client, when this backend is the pool.
     ///
     /// The default is `None`. Streaming adapters downcast the value so they
@@ -85,6 +98,32 @@ pub trait HttpBackend: Send + Sync {
     fn fresh_client(&self) -> Option<Result<Arc<dyn Any + Send + Sync>, PluginError>> {
         None
     }
+}
+
+/// One open WebSocket. The host implements this; a plugin uses [`crate::WebSocketSession`].
+#[async_trait]
+#[doc(hidden)]
+pub trait WebSocketIo: Send {
+    /// Sends one text frame.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when the write fails.
+    async fn send_text(&mut self, text: String) -> Result<(), PluginError>;
+
+    /// The next data frame, or `None` when the peer closes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when the read fails.
+    async fn recv(&mut self) -> Result<Option<WebSocketMessage>, PluginError>;
+
+    /// Closes the connection.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when the close frame cannot be written.
+    async fn close(&mut self) -> Result<(), PluginError>;
 }
 
 /// Reads a secret for one plugin. The handle does not cache the secret itself.

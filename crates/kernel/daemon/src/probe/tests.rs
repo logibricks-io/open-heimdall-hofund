@@ -99,6 +99,14 @@ fn failure() -> Result<ModelListAnswer, PluginError> {
     Err(PluginError::connect("still down"))
 }
 
+fn refused() -> Result<ModelListAnswer, PluginError> {
+    Err(PluginError::status_error(401, "denied"))
+}
+
+fn suspended() -> PluginError {
+    PluginError::status_error(401, "denied").subscription_suspended()
+}
+
 fn members(fake: &Arc<Fake>) -> Vec<Arc<dyn Member>> {
     vec![fake.clone() as Arc<dyn Member>]
 }
@@ -397,4 +405,48 @@ async fn b7e_unsupported_model_list_stops_the_schedule() {
         "a member without a model list is not probed again"
     );
     assert!(book.cooling(fake.id()).is_some());
+}
+
+#[tokio::test(start_paused = true)]
+async fn d240_suspended_rest_is_probed_until_the_list_answers() {
+    let book = make_book(Duration::from_secs(30 * 60));
+    let member = Arc::new(Fake::new(id("member-a"), vec![refused(), answer()]));
+    book.note_answered(member.id());
+    let cooling = book
+        .record_failure(member.id(), &suspended())
+        .expect("suspended");
+    assert_eq!(cooling.cause(), CooldownCause::Suspended);
+    assert!(cooling.background_probe());
+    let now = tokio::time::Instant::now().into_std();
+    assert_eq!(
+        cooling.until().saturating_duration_since(now),
+        Duration::from_secs(24 * 60 * 60)
+    );
+
+    let mut runner = ProbeRunner::default();
+    runner.run_once(&book, &members(&member)).await;
+    assert_eq!(member.hits(), 0);
+    tokio::time::advance(Duration::from_secs(60)).await;
+    runner.run_once(&book, &members(&member)).await;
+    assert_eq!(member.hits(), 1);
+    assert!(book.cooling(member.id()).is_some());
+    tokio::time::advance(Duration::from_secs(120)).await;
+    runner.run_once(&book, &members(&member)).await;
+    assert_eq!(member.hits(), 2);
+    assert!(book.cooling(member.id()).is_none());
+}
+
+#[tokio::test(start_paused = true)]
+async fn d240_unanswered_401_is_not_probed() {
+    let book = make_book(Duration::from_secs(30 * 60));
+    let member = Arc::new(Fake::new(id("new-key"), vec![answer()]));
+    let cooling = book
+        .record_failure(member.id(), &suspended())
+        .expect("bad key");
+    assert_eq!(cooling.cause(), CooldownCause::Failure);
+    assert!(!cooling.background_probe());
+    let mut runner = ProbeRunner::default();
+    tokio::time::advance(Duration::from_secs(60)).await;
+    runner.run_once(&book, &members(&member)).await;
+    assert_eq!(member.hits(), 0);
 }

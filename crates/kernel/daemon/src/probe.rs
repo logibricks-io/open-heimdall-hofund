@@ -1,4 +1,5 @@
-//! Background model-list probes for generic member-wide rests.
+//! Background model-list probes for generic member-wide rests and for a
+//! plugin-marked suspended subscription.
 
 use std::collections::HashMap;
 use std::sync::Arc;

@@ -462,6 +462,26 @@ pub trait UpstreamProvider: Send + Sync + 'static {
         Err(PluginError::unsupported("this upstream has no model list"))
     }
 
+    /// Whether a background rest probe may list with this key.
+    ///
+    /// The default is no. A plugin whose list checks the key overrides this
+    /// and [`Self::list_for_probe`].
+    fn rest_probe(&self) -> bool {
+        false
+    }
+
+    /// The list a background rest probe asks.
+    ///
+    /// The default is [`Self::list_models`]. A plugin overrides this when the
+    /// ordinary list can answer without proving the key still works.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when the list fails or this upstream has none.
+    async fn list_for_probe(&self, query: &ListQuery) -> Result<ModelList, PluginError> {
+        self.list_models(query).await
+    }
+
     /// Sends one minimal request and records a short result.
     ///
     /// # Errors

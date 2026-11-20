@@ -57,6 +57,7 @@ mod session;
 mod subscription;
 mod upstream;
 mod warmup;
+mod websocket;
 
 /// Process-host handshake. A future host compares this string with the plugin
 /// manifest. Stage 1 has no compile-time consumer.
@@ -130,6 +131,7 @@ pub use upstream::{
     UpstreamProvider, UpstreamSpec,
 };
 pub use warmup::{WarmupAccountStatus, WarmupOutcome, WarmupRecord};
+pub use websocket::{WebSocketMessage, WebSocketRequest, WebSocketSession};
 
 #[cfg(test)]
 mod tests {

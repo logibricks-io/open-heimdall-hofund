@@ -82,6 +82,7 @@ mod registry;
 mod remote_quotas;
 mod rests;
 mod runtime;
+mod served;
 mod sign_in;
 #[cfg(all(test, feature = "test-util"))]
 mod spend_cap_live;
