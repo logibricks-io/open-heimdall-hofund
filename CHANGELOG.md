@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from `client_metadata` once it is a header, and that socket keeps the last
   reply's state for the same turn id. A per-account store for pooled turns is
   not implemented.
+- D-233: Claude bridge plans set `CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS=0` and `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT=0` unless the process environment already sets that name, and a WSL plan lists both on `WSLENV`, so a client tool is waited on instead of being moved to the background or aborted at the idle limit. One-off runs are unchanged.
 
 ## [0.2.0-rc.2] - 2026-11-18
 
