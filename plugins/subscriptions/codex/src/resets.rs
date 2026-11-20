@@ -11,6 +11,7 @@ use hofund_plugin_sdk::json::{self, Value};
 
 use crate::tokens::Access;
 use crate::upstream::{account_call, account_post};
+use crate::version::{self, ClientVersion};
 use crate::{Endpoints, usage};
 
 /// Pending `redeem_request_id` values for in-flight explicit consumes.
@@ -30,8 +31,10 @@ pub(crate) async fn read(
     host: &HostContext,
     endpoints: &Endpoints,
     access: &Access,
+    versions: &ClientVersion,
 ) -> Result<Option<QuotaResetCredits>, PluginError> {
-    let reply = account_call(usage::url(endpoints), access)
+    let client_version = version::prepare(host, endpoints, versions).await;
+    let reply = account_call(usage::url(endpoints), access, &client_version)
         .fetch(host.http())
         .await?;
     if reply.status() != 200 {
@@ -44,7 +47,7 @@ pub(crate) async fn read(
         return Ok(None);
     };
     let mut out = QuotaResetCredits::new(count);
-    match account_call(reset_credits_url(endpoints), access)
+    match account_call(reset_credits_url(endpoints), access, &client_version)
         .fetch(host.http())
         .await
     {
@@ -91,10 +94,12 @@ pub(crate) async fn consume(
     access: &Access,
     credit_id: Option<&str>,
     ledger: &RedeemLedger,
+    versions: &ClientVersion,
 ) -> Result<QuotaResetOutcome, PluginError> {
+    let client_version = version::prepare(host, endpoints, versions).await;
     let mut credit = credit_id.unwrap_or_default().trim().to_owned();
     if credit.is_empty() {
-        let list = account_call(reset_credits_url(endpoints), access)
+        let list = account_call(reset_credits_url(endpoints), access, &client_version)
             .fetch(host.http())
             .await?;
         if list.status() != 200 {
@@ -109,7 +114,7 @@ pub(crate) async fn consume(
             return Ok(QuotaResetOutcome::new("no_credit"));
         }
     } else {
-        let list = account_call(reset_credits_url(endpoints), access)
+        let list = account_call(reset_credits_url(endpoints), access, &client_version)
             .fetch(host.http())
             .await?;
         if list.status() != 200 {
@@ -132,7 +137,7 @@ pub(crate) async fn consume(
     }))
     .map_err(|_| PluginError::internal("reset consume body"))?;
     let post = || {
-        account_post(consume_url(endpoints), access)
+        account_post(consume_url(endpoints), access, &client_version)
             .header("content-type", "application/json")
             .bytes(body.clone())
     };
