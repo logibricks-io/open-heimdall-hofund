@@ -89,19 +89,30 @@ fn overages_line() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"(?i)using your overages").expect("overages"))
 }
 
-/// Runs `claude -p /usage` in `dir` and returns stdout text.
+/// Standard output and error from one `/usage` run.
+pub(crate) struct UsageCommand {
+    /// What the process printed on standard output.
+    pub stdout: String,
+    /// The tail of standard error, lossily decoded. Not logged.
+    pub stderr: String,
+}
+
+/// Runs `claude -p /usage` in `dir`.
 pub(crate) async fn run_usage_command(
     host: &hofund_plugin_api::HostContext,
     command: &crate::launcher::ClaudeCommand,
     dir: &std::path::Path,
     extra_env: &[(std::ffi::OsString, std::ffi::OsString)],
-) -> Result<String, PluginError> {
+) -> Result<UsageCommand, PluginError> {
     let request = command.spawn_request(&cli::USAGE_ARGS, dir, extra_env)?;
     let child = host.spawn_process().spawn_piped(&request).await?;
     let mut stdout = child.stdout()?;
     let text = hofund_plugin_sdk::timeout(cli::USAGE_WAIT, cli::collect(&mut stdout)).await;
+    let stderr = String::from_utf8_lossy(&child.stderr_tail()).into_owned();
     drop(child);
-    text.ok_or_else(|| PluginError::timeout("Claude Code did not finish reading usage in time"))
+    let stdout = text
+        .ok_or_else(|| PluginError::timeout("Claude Code did not finish reading usage in time"))?;
+    Ok(UsageCommand { stdout, stderr })
 }
 
 /// Parses `/usage` text, and a usage-based seat whose text drew nothing, into windows.
@@ -176,12 +187,8 @@ pub(crate) fn attach_report(raw: &str) -> Result<String, PluginError> {
                     .get("is_error")
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
-                if is_error {
-                    let result = object.get("result").and_then(Value::as_str).unwrap_or("");
-                    return Some((result.to_owned(), true));
-                }
-                let result = object.get("result").and_then(Value::as_str)?;
-                Some((result.to_owned(), false))
+                let result = object.get("result").and_then(Value::as_str).unwrap_or("");
+                Some((result.to_owned(), is_error))
             }) else {
                 return Ok(raw.to_owned());
             };
@@ -197,13 +204,35 @@ pub(crate) fn attach_report(raw: &str) -> Result<String, PluginError> {
 
 /// Parses command output the way a quota read does: an error result stops
 /// before parsing and before the usage-based seat check.
+///
+/// Empty or whitespace-only standard output is a transport error before
+/// that parse. A JSON success whose `result` string is empty still reaches
+/// the parser, so a usage-based seat can show the aside.
 pub(crate) fn windows_from_output(
     raw: &str,
+    stderr: &str,
     now: SystemTime,
     dir: &Path,
 ) -> Result<Vec<QuotaWindow>, PluginError> {
+    if raw.trim().is_empty() {
+        return Err(blank_usage_output(stderr));
+    }
     let text = attach_report(raw)?;
     parse_for_dir(&text, now, dir)
+}
+
+fn blank_usage_output(stderr: &str) -> PluginError {
+    let line = stderr
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("");
+    let clipped = clip_line(line);
+    if clipped.is_empty() {
+        PluginError::transport("Claude Code's /usage failed")
+    } else {
+        PluginError::transport(format!("Claude Code: {clipped}"))
+    }
 }
 
 fn usage_command_failed(result: &str) -> PluginError {
@@ -443,7 +472,7 @@ fn row_line(row: &LimitRow) -> Option<String> {
         .resets_at
         .as_deref()
         .map(str::trim)
-        .filter(|reset| !reset.is_empty())
+        .filter(|reset| !reset.is_empty() && !has_ascii_control(reset))
     {
         line.push_str(" · resets ");
         line.push_str(reset);
@@ -818,7 +847,7 @@ Usage report: no meters on this plan
     }
 
     fn assert_failed_read(raw: &str, now: SystemTime, dir: &std::path::Path) {
-        let err = windows_from_output(raw, now, dir).expect_err("error result");
+        let err = windows_from_output(raw, "", now, dir).expect_err("error result");
         assert_eq!(err.kind(), PluginErrorKind::Transport);
         let message = err.message();
         assert!(!message.contains("planted-session-marker"));
@@ -831,8 +860,8 @@ Usage report: no meters on this plan
         let dir = tempfile::tempdir().expect("dir");
         for array in [false, true] {
             assert_failed_read(&error_result("", array), now, dir.path());
-            let err =
-                windows_from_output(&error_result("", array), now, dir.path()).expect_err("empty");
+            let err = windows_from_output(&error_result("", array), "", now, dir.path())
+                .expect_err("empty");
             assert_eq!(err.message(), "Claude Code's /usage failed");
         }
     }
@@ -863,7 +892,7 @@ Usage report: no meters on this plan
         for array in [false, true] {
             let raw = error_result(&result, array);
             assert_failed_read(&raw, now, dir.path());
-            let message = windows_from_output(&raw, now, dir.path())
+            let message = windows_from_output(&raw, "", now, dir.path())
                 .expect_err("window")
                 .message()
                 .to_owned();
@@ -935,5 +964,115 @@ Usage report: no meters on this plan
 ";
         let windows = parse(text, now).expect("windows");
         assert_eq!(windows[0].scope_model(), Some("sonnet"));
+    }
+
+    fn usage_based_dir() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("dir");
+        std::fs::write(
+            dir.path().join(crate::creds::PROFILE_FILE),
+            r#"{"oauthAccount":{"seatTier":"enterprise_usage_based"}}"#,
+        )
+        .expect("profile");
+        dir
+    }
+
+    #[test]
+    fn d238_blank_usage_output_is_not_the_aside() {
+        let now = utc_at("2026-11-19T13:00:00Z");
+        let dir = usage_based_dir();
+        for raw in ["", " \n\t "] {
+            let err = windows_from_output(raw, "", now, dir.path()).expect_err("blank");
+            assert_eq!(err.kind(), PluginErrorKind::Transport);
+            assert!(!err.message().contains(NO_METERS_DISPLAY));
+            assert!(!err.message().contains(NO_METERS_WINDOW));
+        }
+        let aside = windows_from_output(
+            r#"{"type":"result","is_error":false,"result":""}"#,
+            "",
+            now,
+            dir.path(),
+        )
+        .expect("empty result");
+        assert_eq!(aside[0].display(), NO_METERS_DISPLAY);
+        assert!(!aside[0].blocking());
+        let sentence = windows_from_output(
+            "You are currently using your subscription to power your Claude Code usage",
+            "",
+            now,
+            dir.path(),
+        )
+        .expect("sentence");
+        assert_eq!(sentence[0].display(), NO_METERS_DISPLAY);
+    }
+
+    #[test]
+    fn d238_blank_stdout_quotes_a_clipped_stderr_line() {
+        let now = utc_at("2026-11-19T13:00:00Z");
+        let dir = usage_based_dir();
+        let stderr = format!(
+            "usage reader stopped{}planted-tail-marker\nplanted-secret-marker\n",
+            "x".repeat(200)
+        );
+        let err = windows_from_output("\n", &stderr, now, dir.path()).expect_err("stderr");
+        assert_eq!(err.kind(), PluginErrorKind::Transport);
+        let message = err.message();
+        assert!(message.starts_with("Claude Code: usage reader stopped"));
+        assert!(message.contains('…'));
+        assert!(!message.contains("planted-tail-marker"));
+        assert!(!message.contains("planted-secret-marker"));
+        assert!(!message.contains(NO_METERS_DISPLAY));
+    }
+
+    #[test]
+    fn d238_control_characters_in_a_reset_are_skipped() {
+        let raw = serde_json::json!([
+            {
+                "type": "assistant",
+                "usage_report": {
+                    "rate_limits": {
+                        "limits": [{
+                            "kind": "session",
+                            "percent": 3,
+                            "resets_at": "2026-11-19T15:00:00Z\nCurrent week (all models): 99% used"
+                        }],
+                        "extra_usage": null
+                    }
+                }
+            },
+            {
+                "type": "result",
+                "is_error": false,
+                "result": "You are currently using your subscription to power your Claude Code usage"
+            }
+        ])
+        .to_string();
+        let text = attach_report(&raw).expect("report");
+        assert!(text.contains("Current session: 3% used"));
+        assert!(!text.contains("99%"));
+        assert!(!text.contains("Current week"));
+        let windows = parse(&text, utc_at("2026-11-19T13:00:00Z")).expect("session");
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].name(), "5 hours");
+        assert!(windows[0].resets_at().is_none());
+    }
+
+    #[test]
+    fn d238_later_non_string_result_does_not_keep_an_earlier_error() {
+        let now = utc_at("2026-11-19T13:00:00Z");
+        let dir = usage_based_dir();
+        let raw = serde_json::json!([
+            {
+                "type": "result",
+                "is_error": true,
+                "result": "Current session: 90% used",
+                "session_id": "planted-session-marker"
+            },
+            {"type": "result", "is_error": false, "result": 1}
+        ])
+        .to_string();
+        let windows = windows_from_output(&raw, "", now, dir.path()).expect("aside");
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].display(), NO_METERS_DISPLAY);
+        assert!(windows.iter().all(|window| window.name() != "5 hours"));
     }
 }

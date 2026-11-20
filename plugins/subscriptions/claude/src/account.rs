@@ -142,8 +142,8 @@ pub(crate) async fn read_usage(
         }
         let proxy = blob.text(crate::proxy::PROXY_KEY);
         let extra = command.proxied_extra(proxy, &run_env(&blob))?;
-        let raw = crate::usage::run_usage_command(host, &command, &dir, &extra).await?;
-        crate::usage::windows_from_output(&raw, now, &dir)
+        let output = crate::usage::run_usage_command(host, &command, &dir, &extra).await?;
+        crate::usage::windows_from_output(&output.stdout, &output.stderr, now, &dir)
     }
     .await;
     let read_back = read_back_credentials(host, &dir).await;

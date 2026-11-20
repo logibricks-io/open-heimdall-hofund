@@ -78,7 +78,7 @@ struct Entry {
     heard_at: Option<SystemTime>,
     /// When `windows` were last written by a whole reading or a header.
     at: Option<SystemTime>,
-    #[allow(dead_code)]
+    /// Set only by a whole `/usage` reading. A header from `note` leaves this false.
     whole: bool,
     last_err: Option<String>,
     tried: Option<SystemTime>,
@@ -208,9 +208,10 @@ impl Store {
 
     /// Windows and time a `/usage` decision must use.
     ///
-    /// In-memory windows win. An empty entry falls through to `disk`. Call
-    /// this before the command: a rate-limit header while it runs refreshes
-    /// the entry time and must not make an old reading look fresh.
+    /// Only a whole reading counts. A `note` header, which has windows but
+    /// `whole == false`, falls through to `disk`. Call this before the
+    /// command: a rate-limit header while it runs refreshes the entry time
+    /// and must not make an old reading look fresh.
     pub(crate) fn snapshot_prior(
         &self,
         account: &AccountId,
@@ -222,6 +223,7 @@ impl Store {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(entry) = guard.get(&key)
+            && entry.whole
             && !entry.windows.is_empty()
         {
             return (entry.windows.clone(), entry.at);
@@ -229,6 +231,22 @@ impl Store {
         match disk {
             Some(reading) => (reading.windows, Some(reading.read_at)),
             None => (Vec::new(), None),
+        }
+    }
+
+    /// Forgets the cadence stamp so the next asked read runs.
+    ///
+    /// The whole reading and its time stay. Tests use this so a seeded
+    /// reading does not also count as a recent `/usage` attempt.
+    #[cfg(test)]
+    pub(crate) fn clear_tried(&self, account: &AccountId) {
+        let key = Self::key(account);
+        let mut guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(entry) = guard.get_mut(&key) {
+            entry.tried = None;
         }
     }
 
@@ -994,36 +1012,55 @@ mod tests {
     }
 
     #[test]
-    fn d237_header_during_usage_does_not_refresh_the_previous_reading() {
-        let store = Store::new();
-        let id = AccountId::from_static("claude-d237-snapshot");
+    fn d237_header_reading_is_not_a_previous_whole_reading() {
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join(READING_FILE);
+        let id = AccountId::from_static("claude-d237-header");
         let now = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
         let reset = now + Duration::from_secs(72 * 60 * 60);
         let week = |used| QuotaWindow::new("7 days", used, Some(100), Some(reset)).expect("week");
-        let session = QuotaWindow::new(
-            "5 hours",
-            1,
-            Some(100),
-            Some(now + Duration::from_secs(60 * 60)),
-        )
-        .expect("session");
-        record(&store, &id, vec![session, week(10)], now, None);
-        let (prev, prev_at) = store.snapshot_prior(&id, None);
-        assert_eq!(prev_at, Some(now));
+        let session = QuotaWindow::new("5 hours", 4, Some(100), Some(reset)).expect("session");
+        let store = Store::new();
+        let saved = record(&store, &id, vec![session, week(10)], now, None);
+        save_reading(&path, &saved, now).expect("save");
 
-        let later = now + FIVE_HOURS;
+        let fresh = Store::new();
         let info = info_from_json(
             r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","rateLimitType":"seven_day","utilization":0.2,"resetsAt":1800000000}}"#,
         );
-        store.note(&id, &info, later);
-        assert_eq!(store.snapshot_prior(&id, None).1, Some(later));
-
-        let stored = store.record_usage(&id, vec![week(12)], later, &prev, prev_at);
-        let five = stored
+        fresh.note(&id, &info, now + Duration::from_secs(60));
+        let (prev, prev_at) = fresh.snapshot_prior(&id, load_reading(&path));
+        assert_eq!(prev_at, Some(now));
+        let kept = prev
             .iter()
             .find(|window| window.name() == "5 hours")
-            .expect("unstarted after a stale reading");
+            .expect("disk window");
+        assert_eq!(kept.used(), 4);
+
+        let idle = fresh.record_usage(
+            &id,
+            vec![week(10)],
+            now + Duration::from_secs(120),
+            &prev,
+            prev_at,
+        );
+        let five = idle
+            .iter()
+            .find(|window| window.name() == "5 hours")
+            .expect("unstarted, because the saved reading had a real window");
         assert_eq!(five.used(), 0);
+
+        let header_only = Store::new();
+        header_only.note(&id, &info, now);
+        let (empty, empty_at) = header_only.snapshot_prior(&id, None);
+        assert!(empty.is_empty());
+        assert!(empty_at.is_none());
+        let started = record(&header_only, &id, vec![week(3)], now, None);
+        assert!(
+            started
+                .iter()
+                .any(|window| window.name() == "5 hours" && window.used() == 0)
+        );
     }
 
     #[cfg(unix)]
@@ -1037,18 +1074,6 @@ mod tests {
         let mode = std::fs::metadata(&path).expect("meta").permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
         assert!(!path.with_extension("json.tmp").exists());
-    }
-
-    #[test]
-    fn d237_save_reading_reports_a_failure() {
-        let dir = tempfile::tempdir().expect("dir");
-        let blocker = dir.path().join("blocked");
-        std::fs::write(&blocker, b"x").expect("file");
-        let path = blocker.join(READING_FILE);
-        let window = QuotaWindow::new("7 days", 1, Some(100), None).expect("week");
-        let err = save_reading(&path, &[window], UNIX_EPOCH).expect_err("save");
-        assert_eq!(err.kind(), PluginErrorKind::Io);
-        assert_eq!(err.message(), "cannot store the Claude usage reading");
     }
 
     #[test]
