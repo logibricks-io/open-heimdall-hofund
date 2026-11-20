@@ -10,12 +10,21 @@ use std::path::PathBuf;
 use hofund_agent::{GatewayTarget, Session, catalog};
 use hofund_daemon::{
     QuotaAlertEvent, Running, StartOptions, agent_descriptions, configured_listen,
-    control_event_bus, ensure_config_file, local_gateway, route_models, start_with_options,
-    subscription_list, usage_report,
+    configured_subscription_risks, control_event_bus, ensure_config_file, local_gateway,
+    route_models, start_with_options, subscription_risk_lines, usage_report,
 };
 use serde::Serialize;
 
 use crate::open::open_config_file;
+
+/// Builds stopped-gateway risk lines off the control mutex.
+///
+/// Plugin builds happen here. Account hooks do not.
+pub(crate) async fn load_stopped_risks(path: PathBuf) -> Vec<String> {
+    tokio::task::spawn_blocking(move || configured_subscription_risks(&path).unwrap_or_default())
+        .await
+        .unwrap_or_default()
+}
 
 /// One row in the agent list.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -43,7 +52,7 @@ pub(crate) struct Snapshot {
     pub today: String,
     /// Retained quota card lines while running, otherwise empty.
     pub quotas: Vec<String>,
-    /// Risk lines for saved accounts whose new enrollment is withdrawn.
+    /// Risk lines for subscriptions whose new enrollment is withdrawn.
     pub risks: Vec<String>,
     /// The latest action error, or empty.
     pub message: String,
@@ -191,6 +200,8 @@ pub(crate) struct Control {
     quota_alerts: tokio::sync::mpsc::UnboundedSender<QuotaAlertEvent>,
     quota_watch: Option<tokio::task::JoinHandle<()>>,
     quota_relay: Option<tokio::task::JoinHandle<()>>,
+    /// Risk lines last computed while the gateway was stopped.
+    stopped_risks: Vec<String>,
 }
 
 impl Control {
@@ -208,6 +219,25 @@ impl Control {
             quota_alerts,
             quota_watch: None,
             quota_relay: None,
+            stopped_risks: Vec::new(),
+        }
+    }
+
+    /// Config path for a stopped-gateway risk refresh.
+    ///
+    /// `None` while the gateway is running. The caller builds the lines
+    /// without holding the control mutex, then [`Self::store_stopped_risks`].
+    pub(crate) fn stopped_risk_path(&self) -> Option<PathBuf> {
+        self.server.is_none().then(|| self.config_path.clone())
+    }
+
+    /// Stores lines built while the gateway was stopped.
+    ///
+    /// A gateway that started during the build keeps the live enrollment
+    /// lines. The cache is left unchanged in that case.
+    pub(crate) fn store_stopped_risks(&mut self, risks: Vec<String>) {
+        if self.server.is_none() {
+            self.stopped_risks = risks;
         }
     }
 
@@ -322,27 +352,6 @@ impl Control {
         self.store(result)
     }
 
-    /// Risk lines for saved accounts. `subscription_list` starts a runtime of
-    /// its own, so a caller that is already driving the app runtime reads the
-    /// list on a fresh thread.
-    fn saved_account_risks(path: &std::path::Path) -> Vec<String> {
-        let path = path.to_path_buf();
-        let load = move || -> Vec<String> {
-            subscription_list(&path)
-                .map(|listings| {
-                    listings
-                        .into_iter()
-                        .filter_map(|listing| listing.notice)
-                        .collect()
-                })
-                .unwrap_or_default()
-        };
-        if tokio::runtime::Handle::try_current().is_err() {
-            return load();
-        }
-        std::thread::scope(|scope| scope.spawn(load).join().unwrap_or_else(|_| Vec::new()))
-    }
-
     /// Creates the config file when it is missing, then opens it.
     pub(crate) fn open_config(&mut self) -> Result<(), String> {
         let result = open_config_file(&self.config_path);
@@ -407,7 +416,11 @@ impl Control {
             } else {
                 Vec::new()
             },
-            risks: Self::saved_account_risks(&self.config_path),
+            risks: if let Some(server) = &self.server {
+                subscription_risk_lines(server)
+            } else {
+                self.stopped_risks.clone()
+            },
             message: self.message.clone(),
             agents,
         }
@@ -446,11 +459,16 @@ mod tests {
     use hofund_agent::{Session, catalog};
     use hofund_daemon::agent_descriptions;
 
-    use super::{Control, Snapshot, menu_entries};
+    use super::{Control, Snapshot, load_stopped_risks, menu_entries};
 
     fn agent_catalog() -> hofund_agent::Catalog {
         catalog(agent_descriptions()).expect("agent catalog")
     }
+
+    /// Serializes tests that start a gateway. Without a Unix socket the
+    /// control listener binds the fixed default TCP address, so two started
+    /// gateways in one test binary would collide.
+    static GATEWAY_START: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     fn scratch() -> tempfile::TempDir {
         tempfile::tempdir().expect("temp dir")
@@ -463,6 +481,7 @@ mod tests {
 
     #[tokio::test]
     async fn start_and_stop_report_the_bound_address() {
+        let _gateway = GATEWAY_START.lock().await;
         let dir = scratch();
         let path = dir.path().join("hofund.toml");
         fs::write(&path, "listen = \"127.0.0.1:0\"\n").expect("config");
@@ -648,5 +667,57 @@ mod tests {
             .set_agent(&session, "not-an-agent", true)
             .expect_err("unknown");
         assert!(error.contains("unknown agent"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn snapshot_does_not_build_plugins_or_run_account_hooks() {
+        let _gateway = GATEWAY_START.lock().await;
+        let dir = scratch();
+        let path = dir.path().join("hofund.toml");
+        fs::write(
+            &path,
+            "listen = \"127.0.0.1:0\"\n\
+             [[subscriptions]]\n\
+             id = \"antigravity\"\n\
+             accounts = \"*\"\n\
+             \n\
+             [subscriptions.options]\n\
+             client_id = \"desktop-test-client\"\n\
+             client_secret = \"desktop-test-secret\"\n",
+        )
+        .expect("config");
+        let mut control = open(&path);
+        let session = Session::new(dir.path());
+        let builds = hofund_daemon::subscription_plugin_builds();
+        let hooks = hofund_daemon::subscription_account_hooks();
+        let stopped = control.snapshot(&session);
+        assert!(!stopped.running);
+        assert!(stopped.risks.is_empty());
+        assert_eq!(hofund_daemon::subscription_plugin_builds(), builds);
+        assert_eq!(hofund_daemon::subscription_account_hooks(), hooks);
+        assert!(!dir.path().join(".hofund").exists());
+
+        let path = control.stopped_risk_path().expect("stopped");
+        let risks = load_stopped_risks(path).await;
+        control.store_stopped_risks(risks);
+        let cached = control.snapshot(&session);
+        assert!(cached.risks.iter().any(|line| line.contains("Antigravity")));
+        assert!(hofund_daemon::subscription_plugin_builds() > builds);
+        assert_eq!(hofund_daemon::subscription_account_hooks(), hooks);
+        let after = hofund_daemon::subscription_plugin_builds();
+        let again = control.snapshot(&session);
+        assert_eq!(again.risks, cached.risks);
+        assert_eq!(hofund_daemon::subscription_plugin_builds(), after);
+        assert_eq!(hofund_daemon::subscription_account_hooks(), hooks);
+
+        control.start().await.expect("start");
+        let running_builds = hofund_daemon::subscription_plugin_builds();
+        let running_hooks = hofund_daemon::subscription_account_hooks();
+        let live = control.snapshot(&session);
+        assert!(live.running);
+        assert!(live.risks.iter().any(|line| line.contains("Antigravity")));
+        assert_eq!(hofund_daemon::subscription_plugin_builds(), running_builds);
+        assert_eq!(hofund_daemon::subscription_account_hooks(), running_hooks);
+        control.stop().await.expect("stop");
     }
 }

@@ -8,7 +8,7 @@ use hofund_plugin_sdk::oauth::{
     token_error,
 };
 
-use crate::{Endpoints, SCOPES, client, project};
+use crate::{Endpoints, SCOPES, client};
 
 pub(crate) fn authorize(
     base: &str,
@@ -45,9 +45,17 @@ pub(crate) fn exchange_form(
 pub(crate) struct SignedIn {
     pub(crate) id: AccountId,
     pub(crate) label: String,
-    pub(crate) secret: SecretString,
+    /// Access token from the exchange. Used only when this account is stored.
+    pub(crate) access: SecretString,
+    /// Account blob before Code Assist setup.
+    pub(crate) blob: SecretObject,
 }
 
+/// Exchanges the code and reads the account id.
+///
+/// This does not call Code Assist. The caller settles a project only after
+/// it has decided the account id is already stored, or that new accounts
+/// are allowed.
 pub(crate) async fn exchange(
     host: &HostContext,
     endpoints: &Endpoints,
@@ -55,7 +63,6 @@ pub(crate) async fn exchange(
     code: &SecretString,
     verifier: &SecretString,
     redirect_uri: &str,
-    wanted: Option<&str>,
 ) -> Result<SignedIn, PluginError> {
     let reply = Call::post(&endpoints.token)
         .header("content-type", "application/x-www-form-urlencoded")
@@ -75,11 +82,11 @@ pub(crate) async fn exchange(
         .with_number("v", 1)
         .with_secret("refresh_token", refresh_token)
         .with_text("email", &email);
-    let blob = project::settle(host, endpoints, set.access(), wanted, blob).await;
     Ok(SignedIn {
         id: account_id_from(&["antigravity", &email.to_ascii_lowercase()]),
         label: email,
-        secret: blob.to_secret(),
+        access: set.access().clone(),
+        blob,
     })
 }
 
